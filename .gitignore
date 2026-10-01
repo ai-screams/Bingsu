@@ -1,21 +1,289 @@
-# Rust build output
+# ==============================================================================
+# bingsu .gitignore
+# Sections: OS, editors/IDEs, Rust, WebAssembly, Node/web, Python tooling,
+# testing/profiling, environment and secrets, build/release, internal notes and
+# local tool state, misc.
+# ==============================================================================
+
+# ==============================================================================
+# OS
+# ==============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Linux
+*~
+.directory
+.Trash-*
+.nfs*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ==============================================================================
+# Editors / IDEs
+# ==============================================================================
+
+# VS Code: ignore personal state, keep shared project settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+*.code-workspace
+.history/
+*.vsix
+
+# JetBrains (RustRover, CLion, WebStorm, IntelliJ, ...)
+.idea/
+*.iml
+*.ipr
+*.iws
+/out/
+.idea_modules/
+
+# Zed
+.zed/
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+Sessionx.vim
+.netrwhist
+tags
+[._]*.un~
+
+# Emacs
+\#*\#
+.\#*
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.projectile
+.dir-locals.el
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# Helix
+.helix/
+
+# ==============================================================================
+# Rust / Cargo
+# ==============================================================================
+
+# Build artifacts
 /target/
+**/target/
+
+# rustfmt backup files
 **/*.rs.bk
 
-# Web Studio (Node) build output
-node_modules/
-dist/
+# Windows debug symbols
+*.pdb
 
-# Environment files and secrets
+# Cargo.lock is committed: bingsu ships binaries, so builds must be reproducible.
+
+# ==============================================================================
+# WebAssembly (core shared with the web Studio)
+# ==============================================================================
+
+# wasm-pack / wasm-bindgen output
+pkg/
+wasm-pack.log
+
+# Precompiled module caches (regenerated per runtime version)
+*.cwasm
+
+# ==============================================================================
+# Node / Web Studio
+# ==============================================================================
+
+# Dependencies (lock files are committed)
+node_modules/
+.pnp
+.pnp.*
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Build output and caches
+dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+.vite/
+vite.config.*.timestamp-*
+.turbo/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==============================================================================
+# Python tooling (benchmarks, scripts)
+# ==============================================================================
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# Testing / coverage / profiling / fuzzing
+# ==============================================================================
+
+# Coverage
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+lcov.info
+*.lcov
+tarpaulin-report.*
+coverage/
+htmlcov/
+.nyc_output/
+
+# Benchmarks
+criterion/
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
+*.trace/
+
+# Mutation testing (cargo-mutants)
+mutants.out/
+mutants.out.old/
+
+# Fuzzing (cargo-fuzz)
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+
+# Snapshot testing (insta): pending snapshots are reviewed, not committed
+*.snap.new
+*.pending-snap
+
+# ==============================================================================
+# Environment and secrets
+# ==============================================================================
+
+# Environment variables
 .env
 .env.*
 !.env.example
 
-# OS and editor files
-.DS_Store
-Thumbs.db
-.idea/
-*.swp
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
 
-# Internal working notes (not part of the repository)
+# Credentials
+credentials.json
+secrets.json
+*.secret
+.secrets/
+secrets/
+
+# ==============================================================================
+# Build / release
+# ==============================================================================
+
+# Release archives and installers
+*.tar.gz
+*.tgz
+*.zip
+*.dmg
+*.pkg
+*.msi
+*.deb
+*.rpm
+*.AppImage
+
+# ==============================================================================
+# Internal notes and local tool state (never committed)
+# ==============================================================================
+
+# Internal working notes
 .docs/
+
+# Local AI/agent tool state and per-machine settings
+.omc/
+.serena/
+.superpowers/
+.claude/settings.local.json
+.claude.local.md
+
+# ==============================================================================
+# Misc
+# ==============================================================================
+
+# Logs
+*.log
+logs/
+
+# Backup and temporary files
+*.bak
+*.backup
+*.orig
+*.tmp
+*.temp
+
+# Merge tool leftovers
+*.BACKUP.*
+*.BASE.*
+*.LOCAL.*
+*.REMOTE.*
+
+# Core dumps (root only)
+/core
+/core.*
