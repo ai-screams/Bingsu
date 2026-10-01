@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Web Studio (Node) build output
+node_modules/
+dist/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Internal working notes (not part of the repository)
+.docs/
