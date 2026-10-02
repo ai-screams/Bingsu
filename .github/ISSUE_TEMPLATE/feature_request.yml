@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest a feature, a segment, a flavor or a style
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Prompt and layout
+        - Segment (information)
+        - Colors and flavors
+        - Icons and fonts
+        - Config and sharing
+        - Studio or wizard
+        - Plugins
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe what you are trying to do and what gets in the way today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work? Config examples and mockups are welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and prior art
+      description: Other approaches you considered, or how other prompt tools handle this.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
