@@ -8,7 +8,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[lints]
-workspace = true
+# Lints are not inherited from the workspace so that the purity lints can be
+# set to forbid here, in the manifest. Keep the first three in sync with the
+# root [workspace.lints] when that changes.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+# Purity rules (clippy.toml) can never be switched off inside the crate:
+# forbid turns any inner allow/expect into a hard error (E0453).
+disallowed_methods = "forbid"
+disallowed_types = "forbid"
+disallowed_macros = "forbid"
 
 [dependencies]

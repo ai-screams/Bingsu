@@ -78,6 +78,17 @@ disallowed-methods = [
   { path = "std::os::unix::net::UnixListener::bind", reason = "core is I/O free", allow-invalid = true },
   { path = "std::os::unix::net::UnixDatagram::bind", reason = "core is I/O free", allow-invalid = true },
   { path = "std::os::unix::process::parent_id", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::path::Path::exists", reason = "core is I/O free" },
+  { path = "std::path::Path::try_exists", reason = "core is I/O free" },
+  { path = "std::path::Path::is_file", reason = "core is I/O free" },
+  { path = "std::path::Path::is_dir", reason = "core is I/O free" },
+  { path = "std::path::Path::is_symlink", reason = "core is I/O free" },
+  { path = "std::path::Path::metadata", reason = "core is I/O free" },
+  { path = "std::path::Path::symlink_metadata", reason = "core is I/O free" },
+  { path = "std::path::Path::read_dir", reason = "core is I/O free" },
+  { path = "std::path::Path::read_link", reason = "core is I/O free" },
+  { path = "std::path::Path::canonicalize", reason = "core is I/O free" },
+  { path = "std::path::absolute", reason = "core is I/O free" },
 ]
 disallowed-types = [
   { path = "std::fs::File", reason = "core is I/O free" },

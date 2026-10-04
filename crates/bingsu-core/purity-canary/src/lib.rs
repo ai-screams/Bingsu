@@ -82,6 +82,17 @@ pub fn c74() { let _ = std::os::unix::net::UnixStream::connect("x"); } // CANARY
 pub fn c75() { let _ = std::os::unix::net::UnixListener::bind("x"); } // CANARY: std::os::unix::net::UnixListener::bind
 pub fn c76() { let _ = std::os::unix::net::UnixDatagram::bind("x"); } // CANARY: std::os::unix::net::UnixDatagram::bind
 pub fn c77() { let _ = std::os::unix::process::parent_id(); } // CANARY: std::os::unix::process::parent_id
+pub fn c78() { let _ = std::path::Path::new("x").exists(); } // CANARY: std::path::Path::exists
+pub fn c79() { let _ = std::path::Path::new("x").try_exists(); } // CANARY: std::path::Path::try_exists
+pub fn c80() { let _ = std::path::Path::new("x").is_file(); } // CANARY: std::path::Path::is_file
+pub fn c81() { let _ = std::path::Path::new("x").is_dir(); } // CANARY: std::path::Path::is_dir
+pub fn c82() { let _ = std::path::Path::new("x").is_symlink(); } // CANARY: std::path::Path::is_symlink
+pub fn c83() { let _ = std::path::Path::new("x").metadata(); } // CANARY: std::path::Path::metadata
+pub fn c84() { let _ = std::path::Path::new("x").symlink_metadata(); } // CANARY: std::path::Path::symlink_metadata
+pub fn c85() { let _ = std::path::Path::new("x").read_dir(); } // CANARY: std::path::Path::read_dir
+pub fn c86() { let _ = std::path::Path::new("x").read_link(); } // CANARY: std::path::Path::read_link
+pub fn c87() { let _ = std::path::Path::new("x").canonicalize(); } // CANARY: std::path::Path::canonicalize
+pub fn c88() { let _ = std::path::absolute("x"); } // CANARY: std::path::absolute
 pub fn t0(_: Option<std::fs::File>) {} // CANARY: std::fs::File
 pub fn t1(_: Option<std::fs::OpenOptions>) {} // CANARY: std::fs::OpenOptions
 pub fn t2(_: Option<std::fs::DirBuilder>) {} // CANARY: std::fs::DirBuilder

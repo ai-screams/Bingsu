@@ -9,9 +9,14 @@ rule without a canary, or a canary without a rule all fail.
 EXPECTED_COUNT pins the number of configured paths. Change it together with
 the config when you add or remove a path, so a rule cannot vanish quietly
 (removing a rule and its canary line together would otherwise still pass).
+
+clippy is pointed at CLIPPY_TOML's own folder (CLIPPY_CONF_DIR), and a
+clippy.toml or .clippy.toml inside the canary fails, so the config this script
+parses is the config clippy applies.
 Usage: check_core_purity.py CANARY_DIR CLIPPY_TOML EXPECTED_COUNT
 """
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -33,11 +38,15 @@ def main():
     if dups:
         print("purity canary FAILED: duplicate configured path: " + ", ".join(dups), file=sys.stderr)
         return 1
+    stray = [str(canary / n) for n in ("clippy.toml", ".clippy.toml") if (canary / n).exists()]
+    if stray:
+        print("purity canary FAILED: stray clippy config in canary: " + ", ".join(stray), file=sys.stderr)
+        return 1
     lib = (canary / "src/lib.rs").resolve()
     src = lib.read_text().splitlines()
     tags = {i + 1: m.group(1) for i, l in enumerate(src) if (m := re.search(r"// CANARY: (\S+)$", l))}
     proc = subprocess.run(["cargo", "clippy", "--quiet", "--message-format=json", "--manifest-path", str(canary / "Cargo.toml")],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env={**os.environ, "CLIPPY_CONF_DIR": str(cfg_path.resolve().parent)})
     if proc.returncode != 0:
         tail = "\n  ".join(proc.stderr.splitlines()[-20:])
         print(f"purity canary FAILED: clippy exited {proc.returncode}\n  {tail}", file=sys.stderr)
