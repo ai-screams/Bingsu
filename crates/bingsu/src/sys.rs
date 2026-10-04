@@ -88,7 +88,7 @@ pub fn passwd_entry(uid: u32) -> Option<Passwd> {
     }
 }
 
-/// More users than this and the enumeration counts as failed (`Unknown`).
+/// More entries than this and the enumeration counts as failed (`Unknown`).
 /// Linux too: a large directory-service setup gets the "could not confirm"
 /// warning rather than a long walk.
 const MAX_USERS: usize = 4096;
@@ -106,8 +106,19 @@ pub struct UserEntry {
 /// Every account `getpwent` returns, read once per init. `None` if the
 /// enumeration ends with an error or passes `MAX_USERS`. init is
 /// single-threaded, so the non-reentrant getpwent walk is acceptable here.
+///
+/// macOS `getpwent` returns each local account twice (265 entries for 133
+/// accounts on the development Mac, all exact repeats), so entries equal in
+/// uid, name and primary gid are kept once; entries that differ in any of
+/// them are all kept, so no check is dropped. The uuid is converted once per
+/// uid. `MAX_USERS` counts entries as returned, repeats included, so an
+/// enumeration that keeps returning the same entries still ends.
 pub fn local_users() -> Option<Vec<UserEntry>> {
     let mut out = Vec::new();
+    let mut returned = 0usize;
+    let mut kept = std::collections::HashSet::<(u32, Vec<u8>, u32)>::new();
+    #[cfg(target_os = "macos")]
+    let mut uuids = std::collections::HashMap::<u32, Option<[u8; 16]>>::new();
     let failed;
     // SAFETY: resets the iterator; no pointers involved.
     unsafe { libc::setpwent() };
@@ -120,19 +131,25 @@ pub fn local_users() -> Option<Vec<UserEntry>> {
             failed = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != 0;
             break;
         }
-        if out.len() == MAX_USERS {
+        if returned == MAX_USERS {
             failed = true;
             break;
         }
+        returned += 1;
         // SAFETY: `pw` is non-null and points to a valid passwd record.
         let rec = unsafe { &*pw };
         // SAFETY: pw_name is a NUL-terminated string owned by the record.
         let name = unsafe { CStr::from_ptr(rec.pw_name) }.to_bytes().to_vec();
+        if !kept.insert((rec.pw_uid, name.clone(), rec.pw_gid)) {
+            continue;
+        }
         out.push(UserEntry {
             name,
             gid: rec.pw_gid,
             #[cfg(target_os = "macos")]
-            uuid: macos_mbr::uid_uuid(rec.pw_uid),
+            uuid: *uuids
+                .entry(rec.pw_uid)
+                .or_insert_with(|| macos_mbr::uid_uuid(rec.pw_uid)),
         });
     }
     // SAFETY: closes the iterator opened above.
@@ -477,6 +494,14 @@ mod tests {
             group_membership(gid, &me, users.as_deref()),
             Group::HasOthers
         );
+        // Exact repeats from getpwent are dropped: on this Mac every account
+        // comes twice, and every kept entry differs in name or primary gid.
+        // 이것을 실패시키는 것: 열거 결과의 중복을 없애지 않는 것(질의가 두 배).
+        let users = users.unwrap();
+        let mut keys: Vec<_> = users.iter().map(|u| (u.name.clone(), u.gid)).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), users.len());
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
