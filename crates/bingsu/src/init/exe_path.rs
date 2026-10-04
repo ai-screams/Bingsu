@@ -35,6 +35,45 @@ pub enum AclFacts {
     Unknown,
 }
 
+/// One extended ACL entry as read on macOS.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug)]
+pub enum AclEntry {
+    /// `writes`: grants write, append, delete, delete-child, attribute,
+    /// extended-attribute, security or ownership change.
+    Allow {
+        writes: bool,
+    },
+    Deny,
+}
+
+/// Folds the entries of one ACL. `Err` marks an ACL call that failed or an
+/// entry of a kind we do not know; the ACL then counts as unread (fail
+/// closed), unless an earlier entry already allowed writing.
+#[cfg(any(target_os = "macos", test))]
+pub fn fold_acl(entries: impl IntoIterator<Item = Result<AclEntry, ()>>) -> AclFacts {
+    let mut facts = AclFacts::None;
+    for e in entries {
+        match e {
+            Err(()) => return AclFacts::Unknown,
+            Ok(AclEntry::Allow { writes: true }) => return AclFacts::AllowsWrite,
+            Ok(AclEntry::Allow { writes: false }) => {}
+            Ok(AclEntry::Deny) => facts = AclFacts::DenyOnly,
+        }
+    }
+    facts
+}
+
+/// The executable must live on a local file system (spec section 4,
+/// macOS executable row: not `MNT_LOCAL` is refused; init only warns).
+pub fn local_verdict(local: Option<bool>) -> Verdict {
+    match local {
+        Some(true) => Verdict::Safe,
+        Some(false) => Verdict::Tamperable,
+        None => Verdict::Unknown,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct EntryFacts {
     pub uid: u32,
@@ -46,7 +85,10 @@ pub struct EntryFacts {
 
 /// The path the user ran, without resolving the last symlink: pinning the
 /// canonical target breaks open shells when a package manager removes the
-/// old version folder.
+/// old version folder. A relative PATH entry (".", or an empty one) met
+/// before the match gives `None`: the shell would have searched it relative
+/// to its own working folder, which init cannot see, so the caller falls
+/// back to the resolved executable and says so.
 pub fn invocation_path(argv0: &OsStr, path_env: Option<&OsStr>, cwd: &Path) -> Option<PathBuf> {
     let p = Path::new(argv0);
     if argv0.as_bytes().contains(&b'/') {
@@ -56,12 +98,16 @@ pub fn invocation_path(argv0: &OsStr, path_env: Option<&OsStr>, cwd: &Path) -> O
             cwd.join(p)
         });
     }
-    std::env::split_paths(path_env?)
-        .filter(|d| d.is_absolute())
-        .map(|d| d.join(p))
-        .find(|c| {
-            std::fs::metadata(c).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+    for d in std::env::split_paths(path_env?) {
+        if !d.is_absolute() {
+            return None;
+        }
+        let c = d.join(p);
+        if std::fs::metadata(&c).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0) {
+            return Some(c);
+        }
+    }
+    None
 }
 
 /// Pure rule for one path entry (table in Task A7).
@@ -112,7 +158,8 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// "the symlink, its target and every ancestor folder" (spec section 4)
 /// for every hop. `None` if a name cannot be inspected, a link cannot be
 /// read, the path is relative, or the chain exceeds `MAX_SYMLINK_HOPS`.
-fn resolution_entries(exe: &Path) -> Option<Vec<PathBuf>> {
+/// The second value is the resolved final file.
+fn resolution_entries(exe: &Path) -> Option<(Vec<PathBuf>, PathBuf)> {
     use std::path::Component;
     if !exe.is_absolute() {
         return None;
@@ -161,20 +208,27 @@ fn resolution_entries(exe: &Path) -> Option<Vec<PathBuf>> {
             cur = next;
         }
     }
-    Some(seen)
+    Some((seen, cur))
 }
 
 /// Worst verdict over every entry on the way to the executable: the path
 /// as run, each symlink hop and its target, and every folder above any of
-/// them. Anything that cannot be inspected is `Unknown` (fail closed).
+/// them, plus the final file's file system. Anything that cannot be
+/// inspected is `Unknown` (fail closed).
+///
+/// The checks go by path (`symlink_metadata`, `acl_get_link_np`), not by an
+/// open descriptor, so a change between this check and a later run is not
+/// caught. init only warns; checking by descriptor and running what was
+/// checked belongs to the command paths of M3 and M6.
 pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
-    let Some(paths) = resolution_entries(exe) else {
+    let Some((paths, target)) = resolution_entries(exe) else {
         return Verdict::Unknown;
     };
     let group = |gid: u32| crate::sys::group_membership(gid, user);
     paths
         .iter()
         .map(|p| facts(p).map_or(Verdict::Unknown, |f| classify(&f, uid, &group)))
+        .chain([local_verdict(crate::sys::fs_is_local(&target))])
         .max()
         .unwrap_or(Verdict::Unknown)
 }
@@ -184,6 +238,64 @@ mod tests {
     use super::*;
 
     const ME: u32 = 501;
+
+    // 이것을 실패시키는 것: ACL 호출 오류나 모르는 항목을 "항목 없음"으로 읽는 것(fail-open).
+    #[test]
+    fn acl_errors_are_unknown() {
+        use AclEntry::{Allow, Deny};
+        let rows: &[(&[Result<AclEntry, ()>], AclFacts)] = &[
+            (&[], AclFacts::None),
+            (&[Ok(Deny)], AclFacts::DenyOnly),
+            (&[Ok(Allow { writes: false })], AclFacts::None),
+            (
+                &[Ok(Deny), Ok(Allow { writes: true })],
+                AclFacts::AllowsWrite,
+            ),
+            (&[Err(())], AclFacts::Unknown),
+            (&[Ok(Deny), Err(())], AclFacts::Unknown),
+            (&[Ok(Allow { writes: false }), Err(())], AclFacts::Unknown),
+        ];
+        for (entries, want) in rows {
+            assert_eq!(fold_acl(entries.iter().copied()), *want, "{entries:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 로컬이 아닌 파일 시스템이나 statfs 실패를 안전으로 보는 것.
+    #[test]
+    fn non_local_file_system_is_not_safe() {
+        assert_eq!(local_verdict(Some(true)), Verdict::Safe);
+        assert_eq!(local_verdict(Some(false)), Verdict::Tamperable);
+        assert_eq!(local_verdict(None), Verdict::Unknown);
+    }
+
+    // /home -> /System/Volumes/Data/home is an autofs mount point: owned by
+    // root, no write bits, no ACL, so only the file system makes it unsafe.
+    // 이것을 실패시키는 것: check_path가 최종 대상의 파일 시스템을 보지 않는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn final_target_on_non_local_file_system_is_tamperable() {
+        let mount = std::process::Command::new("/sbin/mount").output().unwrap();
+        if !String::from_utf8_lossy(&mount.stdout).contains(" on /System/Volumes/Data/home (autofs")
+        {
+            eprintln!("skip: /System/Volumes/Data/home is not an autofs mount here");
+            return;
+        }
+        let me = crate::sys::current_uid();
+        let name = crate::sys::passwd_entry(me).unwrap().name;
+        assert_eq!(
+            check_path(Path::new("/home"), me, &name),
+            Verdict::Tamperable
+        );
+    }
+
+    // 이것을 실패시키는 것: 없는 그룹을 "구성원 없음"으로 보는 것.
+    #[test]
+    fn missing_group_is_unknown() {
+        assert_eq!(
+            crate::sys::group_membership(u32::MAX - 7, b"nobody-here"),
+            Group::Unknown
+        );
+    }
 
     // init only passes absolute paths; a relative one would be walked from
     // "/" and check the wrong entries.

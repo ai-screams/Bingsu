@@ -48,7 +48,10 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         assert f"--runtime-root={st.st_dev}:{st.st_ino}:{run_root}".encode() in argv, (shell, argv)
         # init canonicalizes the existing part of each root (os.path.realpath does the same).
         assert (b"--config-root=" + os.path.realpath(env["XDG_CONFIG_HOME"] + "/bingsu").encode()) in argv
+        assert (b"--state-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu").encode()) in argv
         assert (b"--log-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu/log").encode()) in argv
+        # prompt --ctx 1 --record B1 --width 80 --session S --seq N + four roots
+        assert len(argv) == 15, (shell, argv)
 
 
 def test_init_twice_redefines_runtime_root(tmp_path, shells):
@@ -81,3 +84,31 @@ def test_reader_substitution_matches_golden_runner(tmp_path, shells):
         golden.render_reader(shell, base / "reader")
         want = (base / "reader").read_bytes() + b"\n"
         assert script[: len(want)] == want, shell
+
+
+# _bingsu_seq and _bingsu_session can arrive from the environment. bash
+# evaluates a[$(cmd)] in $(( )); only init's own shapes may survive.
+# 이것을 실패시키는 것: hook이 물려받은 _bingsu_seq를 숫자 검사 없이 산술에 넣는 것,
+# _bingsu_session을 모양 검사 없이 쓰는 것.
+# zsh does not run the command but prints a math error for "$(...)" and
+# reads "08" as 8 (or fails under OCTAL_ZEROES).
+@pytest.mark.parametrize("seq", ["a[$(touch {c})]", "$(touch {c})", "08"])
+def test_inherited_seq_and_session_are_not_trusted(tmp_path, shells, seq):
+    for shell in shells:
+        base = tmp_path / shell
+        inst = Install(base)
+        env = trusted_env(base)
+        script = inst.init(shell, env)
+        inst.use_fake(minimal_record())
+        canary = base / "PWNED"
+        env["_bingsu_seq"] = seq.format(c=canary)
+        env["_bingsu_session"] = f"x$(touch {canary})"
+        (base / "init.sh").write_bytes(script)
+        r = run_shell_script(shell, source(shell, base / "init.sh") + call(shell), env, base)
+        assert r.returncode == 0 and r.stderr == b"", (shell, r.stderr)
+        assert not canary.exists(), shell
+        (argv,) = inst.calls()
+        i = argv.index(b"--seq")
+        assert argv[i + 1] == b"1", (shell, argv)
+        s = argv[argv.index(b"--session") + 1]
+        assert len(s) == 32 and all(c in b"0123456789abcdef" for c in s), (shell, argv)

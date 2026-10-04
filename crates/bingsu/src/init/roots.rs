@@ -4,7 +4,7 @@
 use super::trusted_env::TrustedEnv;
 use std::ffi::OsString;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub struct RuntimeRootPin {
     pub dev: u64,
@@ -33,18 +33,43 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
     }
 }
 
-/// Creates the folder (0700) if missing. A concurrent creator is fine:
-/// recursive creation treats an existing directory as success.
+/// Creates the folder if missing (a concurrent creator is fine: recursive
+/// creation treats an existing directory as success), then opens it without
+/// following a symlink and, through that descriptor, checks the owner, sets
+/// the mode to exactly 0700 (the creation mode is masked by umask, and an
+/// existing folder may be looser) and checks that it is on a local file
+/// system. Any failure means no runtime root. The last folder must belong
+/// to the current user (spec section 4 "runtime root"; ancestor rules are
+/// M3a).
 pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
+    pin_for(candidate, crate::sys::current_uid())
+}
+
+fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(candidate)?;
     let path = std::fs::canonicalize(candidate)?;
-    let md = std::fs::metadata(&path)?;
-    if !md.is_dir() {
-        return Err(std::io::Error::other("runtime root is not a directory"));
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(&path)?;
+    if dir.metadata()?.uid() != uid {
+        return Err(std::io::Error::other(
+            "runtime root is owned by another user",
+        ));
     }
+    if crate::sys::fd_is_local(dir.as_raw_fd()) != Some(true) {
+        return Err(std::io::Error::other(
+            "runtime root is not on a local file system",
+        ));
+    }
+    dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    // O_DIRECTORY made it a directory; fchmod succeeded, so the mode is 0700.
+    let md = dir.metadata()?;
     Ok(RuntimeRootPin {
         dev: md.dev(),
         ino: md.ino(),
@@ -52,26 +77,34 @@ pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
     })
 }
 
-/// Canonical form of a path that may not exist yet: canonicalize the deepest
-/// existing ancestor and append the remaining names unchanged.
+/// Canonical form of a path that may not exist yet: canonicalize the
+/// longest existing prefix, then add the remaining names with "." dropped
+/// and ".." taking off the previous name (lexically: those names do not
+/// exist, so no symlink can sit there). If that brings back a name that
+/// does exist (`a/missing/../link`), the result is canonicalized again the
+/// same way; the second pass has no "..", so it ends.
 pub fn canonical_lenient(p: &Path) -> PathBuf {
-    let mut rest = Vec::new();
-    let mut cur = p;
-    loop {
-        if let Ok(c) = std::fs::canonicalize(cur) {
-            return rest
-                .iter()
-                .rev()
-                .fold(c, |acc: PathBuf, n: &&std::ffi::OsStr| acc.join(n));
-        }
-        match (cur.parent(), cur.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name);
-                cur = parent;
+    let once = |p: &Path| -> PathBuf {
+        let comps: Vec<Component<'_>> = p.components().collect();
+        for k in (1..=comps.len()).rev() {
+            let prefix: PathBuf = comps[..k].iter().collect();
+            if let Ok(mut out) = std::fs::canonicalize(&prefix) {
+                for c in &comps[k..] {
+                    match c {
+                        Component::Normal(n) => out.push(n),
+                        Component::ParentDir => {
+                            out.pop();
+                        }
+                        _ => {}
+                    }
+                }
+                return out;
             }
-            _ => return p.to_path_buf(),
         }
-    }
+        p.to_path_buf()
+    };
+    let first = once(p);
+    if first == p { first } else { once(&first) }
 }
 
 pub fn resolve(env: &TrustedEnv, home: &Path) -> Roots {
@@ -144,6 +177,65 @@ mod tests {
         assert_eq!(roots.log, std::fs::canonicalize(&elsewhere).unwrap());
         assert_eq!(roots.state, std::fs::canonicalize(&state).unwrap());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bingsu-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // 이것을 실패시키는 것: 없는 상위 폴더 뒤의 `..`를 풀지 않거나(`missing/..`가 그대로 박힘),
+    // `..`로 되돌아온 이미 있는 symlink를 풀지 않는 것.
+    #[test]
+    fn canonical_lenient_folds_dotdot_after_missing_names() {
+        let base = scratch("lenient-dotdot");
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let canon = std::fs::canonicalize(&base).unwrap();
+        assert_eq!(
+            canonical_lenient(&base.join("missing/../cfgx")),
+            canon.join("cfgx")
+        );
+        assert_eq!(
+            canonical_lenient(&base.join("missing/./x/../../link/b")),
+            canon.join("real/b")
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 소유자 검사를 빼는 것, 0700으로 맞추지 않는 것(umask 0177이면 0600이 됨).
+    #[test]
+    fn pin_checks_owner_and_forces_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = scratch("pin");
+        let me = crate::sys::current_uid();
+        let loose = base.join("loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let got = pin_for(&loose, me).unwrap();
+        assert_eq!(std::fs::metadata(&got.path).unwrap().mode() & 0o7777, 0o700);
+        assert!(pin_for(&base.join("other"), me.wrapping_add(1)).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // /home is an autofs mount point owned by root. With uid 0 the owner
+    // check passes, so the refusal must come from the file-system check
+    // (without it, fchmod would fail with a permission error instead).
+    // 이것을 실패시키는 것: 런타임 폴더의 로컬 파일 시스템 검사를 빼는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pin_refuses_non_local_file_system() {
+        let mount = std::process::Command::new("/sbin/mount").output().unwrap();
+        if !String::from_utf8_lossy(&mount.stdout).contains(" on /System/Volumes/Data/home (autofs")
+        {
+            eprintln!("skip: /System/Volumes/Data/home is not an autofs mount here");
+            return;
+        }
+        let err = pin_for(Path::new("/home"), 0).err().expect("must refuse");
+        assert!(err.to_string().contains("local file system"), "{err}");
     }
 
     // 이것을 실패시키는 것: 후보 순서를 바꾸거나 상대 경로를 받아 주는 것.

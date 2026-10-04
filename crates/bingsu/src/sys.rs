@@ -43,6 +43,8 @@ pub fn exit_now(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
+#[cfg(target_os = "macos")]
+use crate::init::exe_path::{AclEntry, fold_acl};
 use crate::init::exe_path::{AclFacts, Group};
 use std::ffi::{CStr, OsString};
 use std::os::unix::ffi::OsStringExt;
@@ -86,11 +88,18 @@ pub fn passwd_entry(uid: u32) -> Option<Passwd> {
     }
 }
 
+/// More users than this and the walk stops with `Unknown`.
+const MAX_USERS: usize = 4096;
+
 /// Membership of `gid` for the group-write rule (spec section 2 safety row,
 /// decision 6 review): supplementary members (`gr_mem`) plus every user whose
-/// primary group is `gid`. `Unknown` if the group lookup fails or the user
-/// enumeration ends with an error. init is single-threaded, so the
-/// non-reentrant getpwent walk is acceptable here.
+/// primary group is `gid`. On macOS each enumerated user is also asked of
+/// the system (`mbr_check_membership`), because groups such as `everyone`,
+/// `localaccounts` and `_developer` have their members computed by the
+/// system: `gr_mem` is empty and no user has them as primary group.
+/// `Unknown` if the group lookup fails, the user enumeration ends with an
+/// error or passes `MAX_USERS`, or a membership question fails. init is
+/// single-threaded, so the non-reentrant getpwent walk is acceptable here.
 pub fn group_membership(gid: u32, user: &[u8]) -> Group {
     let ok = |n: &[u8]| n == b"root" || n == user;
     let mut buf = vec![0u8; 4096];
@@ -110,8 +119,11 @@ pub fn group_membership(gid: u32, user: &[u8]) -> Group {
         }
         let mut p = gr.gr_mem;
         loop {
-            // SAFETY: gr_mem is a NULL-terminated array of pointers inside `buf`.
-            let m = unsafe { *p };
+            // SAFETY: gr_mem is a NULL-terminated array of pointers inside
+            // `buf`. libinfo places it at an arbitrary offset right after the
+            // name strings, so alignment is not assumed (aligning `buf` would
+            // not help: libinfo picks the offset).
+            let m = unsafe { p.read_unaligned() };
             if m.is_null() {
                 break;
             }
@@ -124,10 +136,16 @@ pub fn group_membership(gid: u32, user: &[u8]) -> Group {
         }
         break;
     }
-    // Primary-group members: walk the user database.
+    #[cfg(target_os = "macos")]
+    let Some(group_uuid) = macos_mbr::gid_uuid(gid) else {
+        return Group::Unknown;
+    };
+    // Primary-group members (and, on macOS, system-computed members): walk
+    // the user database.
     // SAFETY: resets the iterator; no pointers involved.
     unsafe { libc::setpwent() };
     let mut verdict = Group::OnlyRootAndUser;
+    let mut seen = 0usize;
     loop {
         // SAFETY: clears errno so a NULL return can be told apart from an error.
         unsafe { *errno_location() = 0 };
@@ -143,10 +161,27 @@ pub fn group_membership(gid: u32, user: &[u8]) -> Group {
         let rec = unsafe { &*pw };
         // SAFETY: pw_name is a NUL-terminated string owned by the record.
         let name = unsafe { CStr::from_ptr(rec.pw_name) }.to_bytes().to_vec();
-        let pgid = rec.pw_gid;
-        if pgid == gid && !ok(&name) {
+        seen += 1;
+        if seen > MAX_USERS {
+            verdict = Group::Unknown;
+            break;
+        }
+        if ok(&name) {
+            continue;
+        }
+        if rec.pw_gid == gid {
             verdict = Group::HasOthers;
             break;
+        }
+        #[cfg(target_os = "macos")]
+        match macos_mbr::is_member(rec.pw_uid, &group_uuid) {
+            Some(true) => {
+                verdict = Group::HasOthers;
+                break;
+            }
+            Some(false) => {}
+            // Keep walking: a later member found is worse than unknown.
+            None => verdict = Group::Unknown,
         }
     }
     // SAFETY: closes the iterator opened above.
@@ -164,6 +199,41 @@ fn errno_location() -> *mut libc::c_int {
 fn errno_location() -> *mut libc::c_int {
     // SAFETY: returns this thread's errno slot.
     unsafe { libc::__error() }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_mbr {
+    type Uuid = [u8; 16];
+    unsafe extern "C" {
+        // <membership.h>; uuid_t is unsigned char[16].
+        fn mbr_uid_to_uuid(uid: libc::uid_t, uu: *mut u8) -> libc::c_int;
+        fn mbr_gid_to_uuid(gid: libc::gid_t, uu: *mut u8) -> libc::c_int;
+        fn mbr_check_membership(
+            user: *const u8,
+            group: *const u8,
+            ismember: *mut libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    pub fn gid_uuid(gid: u32) -> Option<Uuid> {
+        let mut u = [0u8; 16];
+        // SAFETY: `u` is the 16-byte uuid_t the function fills.
+        (unsafe { mbr_gid_to_uuid(gid, u.as_mut_ptr()) } == 0).then_some(u)
+    }
+
+    /// The system's answer to "is `uid` a member of the group", including
+    /// computed and nested membership. `None` if either call fails.
+    pub fn is_member(uid: u32, group: &Uuid) -> Option<bool> {
+        let mut u = [0u8; 16];
+        // SAFETY: `u` is the 16-byte uuid_t the function fills.
+        if unsafe { mbr_uid_to_uuid(uid, u.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let mut is = 0;
+        // SAFETY: both uuids are 16 readable bytes; `is` is a writable int.
+        let rc = unsafe { mbr_check_membership(u.as_ptr(), group.as_ptr(), &mut is) };
+        (rc == 0).then_some(is != 0)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -185,6 +255,7 @@ mod macos_acl {
     pub const ACL_FIRST_ENTRY: libc::c_int = 0;
     pub const ACL_NEXT_ENTRY: libc::c_int = -1;
     pub const ACL_EXTENDED_ALLOW: libc::c_int = 1;
+    pub const ACL_EXTENDED_DENY: libc::c_int = 2;
     pub const WRITE_CLASS: [libc::c_int; 8] = [
         1 << 2,
         1 << 4,
@@ -215,12 +286,19 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
             AclFacts::Unknown
         };
     }
-    let mut facts = AclFacts::None;
+    let mut entries: Vec<Result<AclEntry, ()>> = Vec::new();
     let mut id = ACL_FIRST_ENTRY;
     loop {
         let mut entry = std::ptr::null_mut();
+        // SAFETY: clears errno so the -1 at the end can be told from an error.
+        unsafe { *errno_location() = 0 };
         // SAFETY: `acl` is a live ACL; `entry` receives a pointer into it.
         if unsafe { acl_get_entry(acl, id, &mut entry) } != 0 {
+            // EINVAL means "no more entries" (acl_get_entry(3)); any other
+            // error leaves the ACL unread.
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL) {
+                entries.push(Err(()));
+            }
             break;
         }
         id = ACL_NEXT_ENTRY;
@@ -230,23 +308,31 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
         let t = unsafe { acl_get_tag_type(entry, &mut tag) };
         // SAFETY: as above.
         let q = unsafe { acl_get_permset(entry, &mut perms) };
-        if t != 0 || q != 0 {
-            facts = AclFacts::Unknown;
+        let item = if t != 0 || q != 0 {
+            Err(())
+        } else if tag == ACL_EXTENDED_ALLOW {
+            let mut writes = Ok(false);
+            for &w in &WRITE_CLASS {
+                // SAFETY: `perms` belongs to `entry`.
+                match unsafe { acl_get_perm_np(perms, w) } {
+                    1 => writes = writes.map(|_| true),
+                    0 => {}
+                    _ => writes = Err(()),
+                }
+            }
+            writes.map(|writes| AclEntry::Allow { writes })
+        } else if tag == ACL_EXTENDED_DENY {
+            Ok(AclEntry::Deny)
+        } else {
+            Err(())
+        };
+        let failed = item.is_err();
+        entries.push(item);
+        if failed {
             break;
         }
-        if tag == ACL_EXTENDED_ALLOW {
-            let allows = |w| {
-                // SAFETY: `perms` belongs to `entry`.
-                unsafe { acl_get_perm_np(perms, w) == 1 }
-            };
-            if WRITE_CLASS.iter().any(|&w| allows(w)) {
-                facts = AclFacts::AllowsWrite;
-                break;
-            }
-        } else if facts == AclFacts::None {
-            facts = AclFacts::DenyOnly;
-        }
     }
+    let facts = fold_acl(entries);
     // SAFETY: `acl` was returned by acl_get_link_np and is freed once.
     unsafe { acl_free(acl) };
     facts
@@ -292,4 +378,75 @@ pub fn random_bytes16() -> Option<[u8; 16]> {
         .and_then(|mut f| f.read_exact(&mut b))
         .ok()
         .map(|()| b)
+}
+
+/// Whether the file system holding `path` is local (macOS `MNT_LOCAL`).
+/// `None` if statfs fails.
+#[cfg(target_os = "macos")]
+pub fn fs_is_local(path: &std::path::Path) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: an all-zero statfs is a valid out-parameter value.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is NUL-terminated and `st` is a writable statfs.
+    (unsafe { libc::statfs(c.as_ptr(), &mut st) } == 0).then(|| flags_are_local(st.f_flags))
+}
+
+/// As `fs_is_local`, for an open descriptor.
+#[cfg(target_os = "macos")]
+pub fn fd_is_local(fd: std::os::fd::RawFd) -> Option<bool> {
+    // SAFETY: an all-zero statfs is a valid out-parameter value.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `st` is a writable statfs; a bad fd only makes fstatfs fail.
+    (unsafe { libc::fstatfs(fd, &mut st) } == 0).then(|| flags_are_local(st.f_flags))
+}
+
+#[cfg(target_os = "macos")]
+fn flags_are_local(f_flags: u32) -> bool {
+    f_flags & (libc::MNT_LOCAL as u32) != 0
+}
+
+/// Linux: rejecting NFS, CIFS and FUSE by `f_type` is M3; until then every
+/// file system counts as local.
+#[cfg(target_os = "linux")]
+pub fn fs_is_local(_path: &std::path::Path) -> Option<bool> {
+    Some(true)
+}
+
+#[cfg(target_os = "linux")]
+pub fn fd_is_local(_fd: std::os::fd::RawFd) -> Option<bool> {
+    Some(true)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: MNT_LOCAL 비트를 보지 않는 것(네트워크 FS를 로컬로 봄).
+    #[test]
+    fn mnt_local_bit_decides() {
+        assert!(!flags_are_local(0));
+        assert!(!flags_are_local(0x1));
+        assert!(flags_are_local(libc::MNT_LOCAL as u32 | 0x1));
+        assert_eq!(fs_is_local(std::path::Path::new("/")), Some(true));
+    }
+
+    // `everyone` (gid 12) lists no members and is nobody's primary group;
+    // the system computes its members (nobody, daemon, ...). Called with the
+    // gid of a real group-writable folder.
+    // 이것을 실패시키는 것: 시스템 판정(mbr_check_membership)을 빼고 gr_mem·기본 gid만 보는 것,
+    // gr_mem 배열을 정렬된 포인터로 읽는 것(debug에서 misaligned 패닉).
+    #[test]
+    fn computed_group_everyone_has_others() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let d = std::env::temp_dir().join(format!("bingsu-everyone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::os::unix::fs::chown(&d, None, Some(12)).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let gid = std::fs::metadata(&d).unwrap().gid();
+        let me = passwd_entry(current_uid()).unwrap().name;
+        assert_eq!(group_membership(gid, &me), Group::HasOthers);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

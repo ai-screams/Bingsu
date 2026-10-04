@@ -23,6 +23,12 @@ fn hex16(b: [u8; 16]) -> [u8; 32] {
     out
 }
 
+/// An empty or relative `pw_dir` would make every root relative to the
+/// working folder; treat it like a failed lookup.
+fn home_is_usable(home: &std::path::Path) -> bool {
+    home.is_absolute()
+}
+
 pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     let shell = match args {
         [one] => Shell::parse(one.as_bytes()),
@@ -34,7 +40,7 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     };
     let env = trusted_env::TrustedEnv::capture();
     let uid = sys::current_uid();
-    let Some(pw) = sys::passwd_entry(uid) else {
+    let Some(pw) = sys::passwd_entry(uid).filter(|pw| home_is_usable(&pw.home)) else {
         eprintln!("{}", en(MsgId::NoHome));
         return ExitCode::from(1);
     };
@@ -81,5 +87,18 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     match sys::write_fd(1, &out) {
         sys::WriteOutcome::Done => ExitCode::SUCCESS,
         sys::WriteOutcome::Failed => ExitCode::from(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: 빈·상대 pw_dir를 홈으로 받아 뿌리를 cwd 기준으로 만드는 것.
+    #[test]
+    fn home_must_be_absolute() {
+        assert!(!home_is_usable(std::path::Path::new("")));
+        assert!(!home_is_usable(std::path::Path::new("home/u")));
+        assert!(home_is_usable(std::path::Path::new("/home/u")));
     }
 }

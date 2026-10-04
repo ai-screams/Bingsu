@@ -253,6 +253,10 @@ fn chmod(p: &Path, mode: u32) {
 // Fail closed. 이것을 실패시키는 것: 조회 실패를 안전으로 보는 것.
 #[test]
 fn uninspectable_target_warns_unknown() {
+    if is_root() {
+        eprintln!("skip: root reads a 0000 folder, so nothing is uninspectable");
+        return;
+    }
     let base = scratch("unknown");
     let hidden = base.join("hidden");
     std::fs::create_dir_all(&hidden).unwrap();
@@ -430,4 +434,188 @@ fn symlink_chain_over_40_hops_warns_unknown() {
         out.stderr,
         b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Run: bingsu doctor\n"
     );
+}
+
+fn is_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+const TAMPER_LINE: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\n";
+
+// macOS computes the members of `everyone` (nobody, daemon, ...); the group
+// lists none. Also the path that read the member array unaligned.
+// 이것을 실패시키는 것: 시스템 판정을 빼고 gr_mem·기본 gid만 보는 것(경고 없음),
+// gr_mem을 정렬 가정으로 읽는 것(debug 패닉, 종료 코드 101·134).
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_everyone_group_writable_warns() {
+    let base = scratch("group-everyone");
+    let exe = install(&base, b"bin");
+    let dir = exe.parent().unwrap();
+    std::os::unix::fs::chown(dir, None, Some(12)).unwrap();
+    chmod(dir, 0o775);
+    let out = init(&exe, "zsh", &base);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.stderr,
+        TAMPER_LINE,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Every local account the system counts as a member of `group`, asked
+/// through dsmemberutil (independent of the code under test).
+#[cfg(target_os = "macos")]
+fn ds_members(group: &str) -> Vec<String> {
+    let users = Command::new("/usr/bin/dscl")
+        .args([".", "list", "/Users"])
+        .output()
+        .unwrap();
+    String::from_utf8(users.stdout)
+        .unwrap()
+        .lines()
+        .filter(|u| {
+            let r = Command::new("/usr/bin/dsmemberutil")
+                .args(["checkmembership", "-U", u, "-G", group])
+                .output()
+                .unwrap();
+            r.stdout.starts_with(b"user is a member")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+// Homebrew rule: a group-writable folder whose group holds only root and
+// the current user is safe (`admin` on a one-person Mac).
+// 이것을 실패시키는 것: 계산 그룹 판정이 root·현재 사용자도 남으로 세는 것.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_admin_group_with_only_root_and_me_is_safe() {
+    let me = String::from_utf8(
+        Command::new("/usr/bin/id")
+            .arg("-un")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let me = me.trim();
+    let mut members = ds_members("admin");
+    members.sort();
+    let mut want = vec!["root".to_owned(), me.to_owned()];
+    want.sort();
+    if members != want {
+        eprintln!("skip: admin members are {members:?}, not exactly root and {me}");
+        return;
+    }
+    let base = scratch("group-admin");
+    let exe = install(&base, b"bin");
+    let dir = exe.parent().unwrap();
+    std::os::unix::fs::chown(dir, None, Some(80)).unwrap();
+    chmod(dir, 0o775);
+    let out = init(&exe, "zsh", &base);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// The creation mode is masked by umask; init must still end at 0700.
+// 이것을 실패시키는 것: 만든 뒤 0700으로 맞추지 않는 것(umask 0177이면 0600).
+#[test]
+fn runtime_root_is_0700_under_any_umask() {
+    for mask in ["077", "022", "0177"] {
+        let base = scratch(&format!("umask-{mask}"));
+        let exe = install(&base, b"bin");
+        std::fs::create_dir_all(base.join("run")).unwrap();
+        chmod(&base.join("run"), 0o755);
+        let out = Command::new("/bin/sh")
+            .args(["-c", &format!("umask {mask}; exec \"$0\" init zsh")])
+            .arg(&exe)
+            .env_clear()
+            .env("XDG_RUNTIME_DIR", base.join("run"))
+            .env("XDG_STATE_HOME", base.join("state"))
+            .env("XDG_CONFIG_HOME", base.join("cfg"))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "umask {mask}");
+        assert!(
+            out.stderr.is_empty(),
+            "umask {mask}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let md = std::fs::metadata(base.join("run/bingsu")).unwrap();
+        assert_eq!(md.mode() & 0o7777, 0o700, "umask {mask}");
+    }
+}
+
+// `..` after a symlinked folder goes to the link target's parent, not the
+// parent spelled in the path: `bin/bingsu -> ../lnk/../real/bingsu` with
+// `lnk -> deep/a/b` runs `deep/a/real/bingsu`; `real/bingsu` is a decoy.
+// 이것을 실패시키는 것: `..`를 글자 그대로(어휘적으로) 푸는 것(미끼 폴더를 검사함).
+#[test]
+fn dotdot_after_symlinked_folder_follows_the_kernel() {
+    for (row, true_mode, decoy_mode, want) in [
+        ("true dir writable", 0o777, 0o755, TAMPER_LINE),
+        ("decoy dir writable", 0o755, 0o777, &b""[..]),
+    ] {
+        let base = scratch(&format!("dotdot-{}", row.replace(' ', "-")));
+        for d in ["bin", "deep", "deep/a", "deep/a/b", "deep/a/real", "real"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+            chmod(&base.join(d), 0o755);
+        }
+        std::fs::copy(
+            env!("CARGO_BIN_EXE_bingsu"),
+            base.join("deep/a/real/bingsu"),
+        )
+        .unwrap();
+        std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), base.join("real/bingsu")).unwrap();
+        std::os::unix::fs::symlink("deep/a/b", base.join("lnk")).unwrap();
+        std::os::unix::fs::symlink("../lnk/../real/bingsu", base.join("bin/bingsu")).unwrap();
+        chmod(&base.join("deep/a/real"), true_mode);
+        chmod(&base.join("real"), decoy_mode);
+        let out = init(&base.join("bin/bingsu"), "zsh", &base);
+        chmod(&base.join("deep/a/real"), 0o755);
+        chmod(&base.join("real"), 0o755);
+        assert_eq!(out.status.code(), Some(0), "{row}");
+        assert_eq!(
+            out.stderr,
+            want,
+            "{row}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+// A relative PATH entry before the match was searched from the shell's
+// working folder, which init cannot see.
+// 이것을 실패시키는 것: 상대 PATH 항목을 건너뛰고 뒤의 절대 항목에서 찾은 다른 실행 파일을 박는 것.
+#[test]
+fn relative_path_entry_falls_back_to_resolved_executable() {
+    let base = scratch("path-relative");
+    let exe = install(&base, b"bin");
+    let other = install(&base, b"other");
+    let out = Command::new("bingsu")
+        .args(["init", "zsh"])
+        .current_dir(other.parent().unwrap())
+        .env_clear()
+        .env("PATH", format!(".:{}", exe.parent().unwrap().display()))
+        .env("XDG_RUNTIME_DIR", base.join("run"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stderr,
+        b"bingsu: could not find the path you ran bingsu from; using the resolved executable path. Run: bingsu doctor\n"
+    );
+    assert!(!has(&out.stdout, exe.as_os_str().as_bytes()));
 }
