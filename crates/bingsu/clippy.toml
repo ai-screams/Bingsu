@@ -1,0 +1,12 @@
+# The prompt path never derives anything from the environment (spec 4
+# "runtime root" rule 7, F-01). Only init::trusted_env may read it, with an
+# explicit #[expect(clippy::disallowed_methods, reason = ...)].
+disallowed-methods = [
+  { path = "std::env::var", reason = "paths are pinned by init; see init::trusted_env" },
+  { path = "std::env::var_os", reason = "paths are pinned by init; see init::trusted_env" },
+  { path = "std::env::vars", reason = "paths are pinned by init; see init::trusted_env" },
+  { path = "std::env::vars_os", reason = "paths are pinned by init; see init::trusted_env" },
+  { path = "std::env::home_dir", reason = "use getpwuid via sys::passwd_entry" },
+  { path = "std::process::exit", reason = "runs atexit handlers; use sys::exit_now" },
+  { path = "std::io::Write::write_all", reason = "retries EINTR; use sys::write_fd" },
+]
