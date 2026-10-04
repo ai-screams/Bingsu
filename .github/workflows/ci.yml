@@ -107,7 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       - run: scripts/check-core-purity.sh
       - run: cargo deny --config deny.toml check
 
@@ -125,5 +125,7 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build -p bingsu-core --target wasm32-unknown-unknown
+      - run: cargo clippy -p bingsu-core --target wasm32-unknown-unknown -- -D warnings -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros

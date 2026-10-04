@@ -58,6 +58,30 @@ pub fn c50() { print!("x"); } // CANARY: std::print
 pub fn c51() { eprintln!("x"); } // CANARY: std::eprintln
 pub fn c52() { eprint!("x"); } // CANARY: std::eprint
 pub fn c53() { dbg!(1); } // CANARY: std::dbg
+pub fn c54() { let _ = std::fs::exists("x"); } // CANARY: std::fs::exists
+pub fn c55() { #[allow(deprecated)] let _ = std::fs::soft_link("x", "y"); } // CANARY: std::fs::soft_link
+pub fn c56() { let _ = std::time::UNIX_EPOCH.elapsed(); } // CANARY: std::time::SystemTime::elapsed
+pub fn c57() { let _ = |i: &std::time::Instant| i.elapsed(); } // CANARY: std::time::Instant::elapsed
+pub fn c58() { std::thread::scope(|_| ()); } // CANARY: std::thread::scope
+pub fn c59<'s, 'e>(s: &'s std::thread::Scope<'s, 'e>) { s.spawn(|| ()); } // CANARY: std::thread::Scope::spawn
+pub fn c60() { #[allow(deprecated)] std::thread::sleep_ms(0); } // CANARY: std::thread::sleep_ms
+pub fn c61() { std::thread::park(); } // CANARY: std::thread::park
+pub fn c62() { std::thread::park_timeout(core::time::Duration::ZERO); } // CANARY: std::thread::park_timeout
+pub fn c63() { #[allow(deprecated)] std::thread::park_timeout_ms(0); } // CANARY: std::thread::park_timeout_ms
+pub fn c64() { std::thread::yield_now(); } // CANARY: std::thread::yield_now
+pub fn c65() { let _ = std::thread::available_parallelism(); } // CANARY: std::thread::available_parallelism
+pub fn c66() { let _ = std::thread::current(); } // CANARY: std::thread::current
+pub fn c67() { let _ = std::backtrace::Backtrace::capture(); } // CANARY: std::backtrace::Backtrace::capture
+pub fn c68() { let _ = std::backtrace::Backtrace::force_capture(); } // CANARY: std::backtrace::Backtrace::force_capture
+pub fn c69() { let _ = std::os::unix::fs::chown("x", None, None); } // CANARY: std::os::unix::fs::chown
+pub fn c70() { let _ = |f: &std::fs::File| std::os::unix::fs::fchown(f, None, None); } // CANARY: std::os::unix::fs::fchown
+pub fn c71() { let _ = std::os::unix::fs::lchown("x", None, None); } // CANARY: std::os::unix::fs::lchown
+pub fn c72() { let _ = std::os::unix::fs::chroot("x"); } // CANARY: std::os::unix::fs::chroot
+pub fn c73() { use std::net::ToSocketAddrs; let _ = ("x", 1).to_socket_addrs(); } // CANARY: std::net::ToSocketAddrs::to_socket_addrs
+pub fn c74() { let _ = std::os::unix::net::UnixStream::connect("x"); } // CANARY: std::os::unix::net::UnixStream::connect
+pub fn c75() { let _ = std::os::unix::net::UnixListener::bind("x"); } // CANARY: std::os::unix::net::UnixListener::bind
+pub fn c76() { let _ = std::os::unix::net::UnixDatagram::bind("x"); } // CANARY: std::os::unix::net::UnixDatagram::bind
+pub fn c77() { let _ = std::os::unix::process::parent_id(); } // CANARY: std::os::unix::process::parent_id
 pub fn t0(_: Option<std::fs::File>) {} // CANARY: std::fs::File
 pub fn t1(_: Option<std::fs::OpenOptions>) {} // CANARY: std::fs::OpenOptions
 pub fn t2(_: Option<std::fs::DirBuilder>) {} // CANARY: std::fs::DirBuilder
@@ -75,3 +99,20 @@ pub fn t13(_: Option<std::time::SystemTime>) {} // CANARY: std::time::SystemTime
 pub fn t14(_: Option<std::io::Stdin>) {} // CANARY: std::io::Stdin
 pub fn t15(_: Option<std::io::Stdout>) {} // CANARY: std::io::Stdout
 pub fn t16(_: Option<std::io::Stderr>) {} // CANARY: std::io::Stderr
+pub fn t17(_: Option<&std::path::Path>) {} // CANARY: std::path::Path
+pub fn t18(_: Option<std::path::PathBuf>) {} // CANARY: std::path::PathBuf
+pub fn t19(_: Option<&std::thread::Scope<'_, '_>>) {} // CANARY: std::thread::Scope
+pub fn t20(_: Option<std::thread::ScopedJoinHandle<'_, ()>>) {} // CANARY: std::thread::ScopedJoinHandle
+pub fn t21(_: Option<std::thread::Thread>) {} // CANARY: std::thread::Thread
+pub fn t22(_: Option<std::os::unix::net::UnixStream>) {} // CANARY: std::os::unix::net::UnixStream
+pub fn t23(_: Option<std::os::unix::net::UnixListener>) {} // CANARY: std::os::unix::net::UnixListener
+pub fn t24(_: Option<std::os::unix::net::UnixDatagram>) {} // CANARY: std::os::unix::net::UnixDatagram
+pub fn t25(_: Option<std::backtrace::Backtrace>) {} // CANARY: std::backtrace::Backtrace
+pub fn t26(_: Option<std::fs::DirEntry>) {} // CANARY: std::fs::DirEntry
+pub fn t27(_: Option<std::fs::Metadata>) {} // CANARY: std::fs::Metadata
+pub fn t28(_: Option<std::process::ChildStdin>) {} // CANARY: std::process::ChildStdin
+pub fn t29(_: Option<std::process::ChildStdout>) {} // CANARY: std::process::ChildStdout
+pub fn t30(_: Option<std::process::ChildStderr>) {} // CANARY: std::process::ChildStderr
+pub fn t31(_: Option<std::io::StdinLock<'_>>) {} // CANARY: std::io::StdinLock
+pub fn t32(_: Option<std::io::StdoutLock<'_>>) {} // CANARY: std::io::StdoutLock
+pub fn t33(_: Option<std::io::StderrLock<'_>>) {} // CANARY: std::io::StderrLock

@@ -1,6 +1,9 @@
 # bingsu-core is I/O free (spec section 1 crate table, F-05). Every entry
 # has one tagged line in purity-canary/src/lib.rs (checked by
 # scripts/check_core_purity.py).
+# std::os::unix entries carry allow-invalid so the wasm32 lint stays quiet
+# (they do not exist there); the canary, which runs on unix, still proves
+# each of them fires.
 disallowed-methods = [
   { path = "std::fs::read", reason = "core is I/O free" },
   { path = "std::fs::read_to_string", reason = "core is I/O free" },
@@ -22,7 +25,7 @@ disallowed-methods = [
   { path = "std::fs::create_dir_all", reason = "core is I/O free" },
   { path = "std::fs::hard_link", reason = "core is I/O free" },
   { path = "std::fs::set_permissions", reason = "core is I/O free" },
-  { path = "std::os::unix::fs::symlink", reason = "core is I/O free" },
+  { path = "std::os::unix::fs::symlink", reason = "core is I/O free", allow-invalid = true },
   { path = "std::process::Command::new", reason = "core is I/O free" },
   { path = "std::process::exit", reason = "core is I/O free" },
   { path = "std::process::abort", reason = "core is I/O free" },
@@ -51,6 +54,30 @@ disallowed-methods = [
   { path = "std::io::stdout", reason = "core is I/O free" },
   { path = "std::io::stderr", reason = "core is I/O free" },
   { path = "std::io::stdin", reason = "core is I/O free" },
+  { path = "std::fs::exists", reason = "core is I/O free" },
+  { path = "std::fs::soft_link", reason = "core is I/O free" },
+  { path = "std::time::SystemTime::elapsed", reason = "core is I/O free" },
+  { path = "std::time::Instant::elapsed", reason = "core is I/O free" },
+  { path = "std::thread::scope", reason = "core is I/O free" },
+  { path = "std::thread::Scope::spawn", reason = "core is I/O free" },
+  { path = "std::thread::sleep_ms", reason = "core is I/O free" },
+  { path = "std::thread::park", reason = "core is I/O free" },
+  { path = "std::thread::park_timeout", reason = "core is I/O free" },
+  { path = "std::thread::park_timeout_ms", reason = "core is I/O free" },
+  { path = "std::thread::yield_now", reason = "core is I/O free" },
+  { path = "std::thread::available_parallelism", reason = "core is I/O free" },
+  { path = "std::thread::current", reason = "core is I/O free" },
+  { path = "std::backtrace::Backtrace::capture", reason = "core is I/O free" },
+  { path = "std::backtrace::Backtrace::force_capture", reason = "core is I/O free" },
+  { path = "std::os::unix::fs::chown", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::fs::fchown", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::fs::lchown", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::fs::chroot", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "core is I/O free" },
+  { path = "std::os::unix::net::UnixStream::connect", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::net::UnixListener::bind", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::bind", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::process::parent_id", reason = "core is I/O free", allow-invalid = true },
 ]
 disallowed-types = [
   { path = "std::fs::File", reason = "core is I/O free" },
@@ -70,6 +97,23 @@ disallowed-types = [
   { path = "std::io::Stdin", reason = "core is I/O free" },
   { path = "std::io::Stdout", reason = "core is I/O free" },
   { path = "std::io::Stderr", reason = "core is I/O free" },
+  { path = "std::path::Path", reason = "core is I/O free" },
+  { path = "std::path::PathBuf", reason = "core is I/O free" },
+  { path = "std::thread::Scope", reason = "core is I/O free" },
+  { path = "std::thread::ScopedJoinHandle", reason = "core is I/O free" },
+  { path = "std::thread::Thread", reason = "core is I/O free" },
+  { path = "std::os::unix::net::UnixStream", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::net::UnixListener", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram", reason = "core is I/O free", allow-invalid = true },
+  { path = "std::backtrace::Backtrace", reason = "core is I/O free" },
+  { path = "std::fs::DirEntry", reason = "core is I/O free" },
+  { path = "std::fs::Metadata", reason = "core is I/O free" },
+  { path = "std::process::ChildStdin", reason = "core is I/O free" },
+  { path = "std::process::ChildStdout", reason = "core is I/O free" },
+  { path = "std::process::ChildStderr", reason = "core is I/O free" },
+  { path = "std::io::StdinLock", reason = "core is I/O free" },
+  { path = "std::io::StdoutLock", reason = "core is I/O free" },
+  { path = "std::io::StderrLock", reason = "core is I/O free" },
 ]
 disallowed-macros = [
   { path = "std::println", reason = "core is I/O free" },
