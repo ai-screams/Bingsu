@@ -9,9 +9,18 @@
 //! looks at the Rust tokens instead. Every file fails on:
 //!   - source that does not parse (it cannot be checked);
 //!   - an identifier `cfg_attr` anywhere;
-//!   - an identifier `include` followed by `!` (include_str and include_bytes
-//!     are different identifiers and stay allowed);
-//!   - an attribute named `path`;
+//!   - an identifier `include` anywhere, not only before `!`: a renaming
+//!     `use core::include as inc;` or a macro argument `m!(include)` still
+//!     names it (include_str and include_bytes are different identifiers and
+//!     stay allowed);
+//!   - an identifier `macro_rules` anywhere: bingsu-core uses no declarative
+//!     macros, and without them no token substitution can build `#[path]`,
+//!     `include!` or a cfg attribute out of a macro argument;
+//!   - the tokens `#` (or `#!`) followed by a `[...]` group whose first token
+//!     is `path`, wherever they appear (also inside macro bodies, which the
+//!     parser does not look into);
+//!   - an attribute named `path` that the parser sees (overlaps the token
+//!     rule on purpose, reported with its own reason);
 //!   - a `cfg` attribute other than exactly `#[cfg(test)]`;
 //!   - more `cfg` identifier tokens than `#[cfg(test)]` attributes, which
 //!     catches `cfg!()`, cfg inside macro bodies and any other spot.
@@ -22,7 +31,7 @@
 use std::process::ExitCode;
 use std::str::FromStr;
 
-use proc_macro2::{Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::ext::IdentExt;
 use syn::visit::Visit;
 
@@ -40,12 +49,41 @@ fn unraw(ident: &proc_macro2::Ident) -> String {
     ident.unraw().to_string()
 }
 
+fn is_punct(token: Option<&TokenTree>, ch: char) -> bool {
+    matches!(token, Some(TokenTree::Punct(p)) if p.as_char() == ch)
+}
+
+/// True if `token` is a `[...]` group whose first token is the identifier
+/// `path`.
+fn is_path_attr_group(token: Option<&TokenTree>) -> bool {
+    let Some(TokenTree::Group(group)) = token else {
+        return false;
+    };
+    if group.delimiter() != Delimiter::Bracket {
+        return false;
+    }
+    matches!(group.stream().into_iter().next(), Some(TokenTree::Ident(ident)) if unraw(&ident) == "path")
+}
+
 /// Walks every token (into groups) and counts `cfg` identifiers.
 fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding>) {
     let tokens: Vec<TokenTree> = stream.into_iter().collect();
     for (i, token) in tokens.iter().enumerate() {
         match token {
             TokenTree::Group(group) => scan_tokens(group.stream(), cfg_count, out),
+            TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                let next = if is_punct(tokens.get(i + 1), '!') {
+                    i + 2
+                } else {
+                    i + 1
+                };
+                if is_path_attr_group(tokens.get(next)) {
+                    out.push(Finding {
+                        line: line_of(punct.span()),
+                        reason: "#[path] tokens pull in code".to_owned(),
+                    });
+                }
+            }
             TokenTree::Ident(ident) => {
                 let name = unraw(ident);
                 if name == "cfg" {
@@ -55,12 +93,15 @@ fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding
                         line: line_of(ident.span()),
                         reason: "cfg_attr".to_owned(),
                     });
-                } else if name == "include"
-                    && matches!(tokens.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
-                {
+                } else if name == "include" {
                     out.push(Finding {
                         line: line_of(ident.span()),
-                        reason: "include! pulls in code".to_owned(),
+                        reason: "include pulls in code".to_owned(),
+                    });
+                } else if name == "macro_rules" {
+                    out.push(Finding {
+                        line: line_of(ident.span()),
+                        reason: "macro_rules forbidden in core".to_owned(),
                     });
                 }
             }
@@ -82,7 +123,7 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
             if name == "path" {
                 self.out.push(Finding {
                     line: line_of(ident.span()),
-                    reason: "#[path] pulls in code".to_owned(),
+                    reason: "path attribute pulls in code".to_owned(),
                 });
             } else if name == "cfg" {
                 let only_test = matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test");

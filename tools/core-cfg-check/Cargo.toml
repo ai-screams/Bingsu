@@ -1,15 +1,20 @@
 # Build-time checker for the bingsu-core purity gate (scripts/check-core-purity.sh).
-# It runs on the developer machine and in CI, never ships, and is not part of
-# the bingsu workspace, so the root deny.toml and the core dependency allowlist
-# (crates/bingsu-core/deny.toml) do not cover it.
+# It never ships. As a workspace member its tests run in the workspace test
+# jobs, and its dependencies go through the root deny.toml, Dependabot and
+# cargo-audit; the core dependency allowlist (crates/bingsu-core/deny.toml)
+# covers only bingsu-core's own graph.
 [package]
 name = "core-cfg-check"
 version = "0.0.0"
-edition = "2024"
+description = "Token-level cfg, path and include check for bingsu-core"
 publish = false
-license = "MIT OR Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
-[workspace]
+[lints]
+workspace = true
 
 [dependencies]
 # span-locations gives Span::start(), used for file:line in errors.

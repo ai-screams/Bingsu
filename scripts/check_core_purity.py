@@ -12,15 +12,20 @@ the config when you add or remove a path, so a rule cannot vanish quietly
 
 clippy is pointed at CLIPPY_TOML's own folder (CLIPPY_CONF_DIR), and a
 clippy.toml or .clippy.toml inside the canary fails, so the config this script
-parses is the config clippy applies.
+parses is the config clippy applies. Each run uses a fresh, temporary
+CARGO_TARGET_DIR: a cached clippy result does not notice a changed clippy
+config, so a reused target directory could report diagnostics from an older
+config.
 Usage: check_core_purity.py CANARY_DIR CLIPPY_TOML EXPECTED_COUNT
 """
 import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 
@@ -45,8 +50,13 @@ def main():
     lib = (canary / "src/lib.rs").resolve()
     src = lib.read_text().splitlines()
     tags = {i + 1: m.group(1) for i, l in enumerate(src) if (m := re.search(r"// CANARY: (\S+)$", l))}
-    proc = subprocess.run(["cargo", "clippy", "--quiet", "--message-format=json", "--manifest-path", str(canary / "Cargo.toml")],
-                          capture_output=True, text=True, env={**os.environ, "CLIPPY_CONF_DIR": str(cfg_path.resolve().parent)})
+    target_dir = tempfile.mkdtemp(prefix="purity-canary-")
+    try:
+        proc = subprocess.run(["cargo", "clippy", "--quiet", "--message-format=json", "--manifest-path", str(canary / "Cargo.toml")],
+                              capture_output=True, text=True,
+                              env={**os.environ, "CLIPPY_CONF_DIR": str(cfg_path.resolve().parent), "CARGO_TARGET_DIR": target_dir})
+    finally:
+        shutil.rmtree(target_dir, ignore_errors=True)
     if proc.returncode != 0:
         tail = "\n  ".join(proc.stderr.splitlines()[-20:])
         print(f"purity canary FAILED: clippy exited {proc.returncode}\n  {tail}", file=sys.stderr)

@@ -18,6 +18,17 @@ anything). It fails on:
   - a build script (crates/bingsu-core/build.rs or package.build), which could
     emit cargo:rustc-cfg;
   - a [features] table in crates/bingsu-core/Cargo.toml;
+  - a [lib], [[bin]], [[test]], [[bench]] or [[example]] table, or a
+    package.autolib/autobins/autotests/autobenches/autoexamples key, in that
+    manifest: a target path could point outside the checked folders, so
+    targets come only from cargo's automatic discovery;
+  - a `.cargo` directory anywhere in the repository (target/ and .git/
+    excluded): cargo reads `.cargo/config*` from the working directory up,
+    where `[build] rustflags = ["--cap-lints", "warn"]` would turn the forbid
+    lints into warnings and `[alias]` could replace a subcommand;
+  - a `.clippy.toml` anywhere in the repository, or a `clippy.toml` other than
+    crates/bingsu-core/clippy.toml and crates/bingsu/clippy.toml: a stray
+    config can replace the rules clippy applies;
   - anything the checker binary rejects (its exit code is passed through).
 Usage: check_core_cfg.py --checker PATH   (run from the repository root)
 """
@@ -30,6 +41,23 @@ import tomllib
 CORE = "crates/bingsu-core"
 SKIP = {"purity-canary", "target"}
 ALLOWED = {"src", "tests", "benches"}
+TARGET_TABLES = ("lib", "bin", "test", "bench", "example")
+AUTO_KEYS = ("autolib", "autobins", "autotests", "autobenches", "autoexamples")
+CLIPPY_CONFIGS = {"crates/bingsu-core/clippy.toml", "crates/bingsu/clippy.toml"}
+REPO_SKIP = {"target", ".git"}
+
+
+def check_repo_tree(errors):
+    for root, dirs, names in os.walk(".", followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in REPO_SKIP)
+        for entry in dirs + names:
+            path = os.path.normpath(os.path.join(root, entry))
+            if entry == ".cargo":
+                errors.append(f"cargo config directory in the repository: {path}")
+            elif entry == ".clippy.toml":
+                errors.append(f"clippy config not allowed: {path}")
+            elif entry == "clippy.toml" and path not in CLIPPY_CONFIGS:
+                errors.append(f"clippy config not allowed: {path}")
 
 
 def collect(errors):
@@ -72,6 +100,13 @@ def main():
         errors.append(f"{CORE}: build script is not allowed (it can emit cargo:rustc-cfg)")
     if "features" in manifest:
         errors.append(f"{CORE}/Cargo.toml: [features] is not allowed (lint every feature combination first)")
+    for table in TARGET_TABLES:
+        if table in manifest:
+            errors.append(f"{CORE}/Cargo.toml: [{table}] is not allowed (targets come from automatic discovery)")
+    for key in AUTO_KEYS:
+        if key in manifest.get("package", {}):
+            errors.append(f"{CORE}/Cargo.toml: package.{key} is not allowed")
+    check_repo_tree(errors)
     # Run the token checker even when the checks above failed, so one run
     # shows every reason. With no files it fails on its own ("no files").
     result = subprocess.run([args.checker, *files])

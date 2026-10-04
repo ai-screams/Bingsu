@@ -2,9 +2,11 @@
 # Core purity gate (spec section 1, F-05).
 # Fails on: a bingsu-core Cargo.toml that does not forbid clippy::disallowed_*
 # (so no allow/expect can switch the rules off) or whose lint copy drifts from
-# [workspace.lints], conditional compilation, #[path], include! or a symlink in
-# bingsu-core (check_core_cfg.py with the token checker in tools/core-cfg-check),
-# a forbidden call in bingsu-core (clippy), a crate in bingsu-core's dependency
+# [workspace.lints], conditional compilation, #[path], include, macro_rules, a
+# symlink or an explicit target table in bingsu-core, a .cargo directory or a
+# stray clippy config in the repository (check_core_cfg.py with the token
+# checker in tools/core-cfg-check), a forbidden call in bingsu-core (clippy
+# diagnostics counted, not its exit code), a crate in bingsu-core's dependency
 # graph that is not on the allowlist
 # (cargo-deny), or a dead, untested, duplicated or silently removed rule
 # (canary checker with a pinned path count).
@@ -14,6 +16,10 @@
 # code can drop out of the lint run through cfg.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Flags from the environment could add --cap-lints and turn the forbid lints
+# into warnings, so every cargo and clippy run below (including the canary
+# runs in check_core_purity.py) starts without them.
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS
 python3 - <<'EOF'
 import sys, tomllib
 core = tomllib.load(open("crates/bingsu-core/Cargo.toml", "rb")).get("lints", {})
@@ -32,12 +38,15 @@ if drift:
     print(f"purity gate FAILED: core lints drift from workspace: {', '.join(drift)}", file=sys.stderr)
     sys.exit(1)
 EOF
-cargo build --release --quiet --manifest-path tools/core-cfg-check/Cargo.toml
-python3 scripts/check_core_cfg.py --checker tools/core-cfg-check/target/release/core-cfg-check
+cargo build --quiet -p core-cfg-check
+python3 scripts/check_core_cfg.py --checker target/debug/core-cfg-check
 # Change these counts together with the clippy.toml lists.
 python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 123
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7
-cargo clippy --quiet -p bingsu-core --all-targets --all-features -- -D warnings \
-  -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros
+# Count diagnostics instead of trusting the exit code: under --cap-lints warn
+# clippy exits 0 but still reports them.
+cargo clippy --quiet --message-format=json -p bingsu-core --all-targets --all-features -- -D warnings \
+  -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros \
+  | python3 scripts/check_core_clippy_clean.py
 cargo deny --manifest-path crates/bingsu-core/Cargo.toml --config crates/bingsu-core/deny.toml check bans
 echo "core purity gate: ok"

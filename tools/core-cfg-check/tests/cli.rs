@@ -76,34 +76,121 @@ fn raw_cfg_test_passes() {
     passes("#[r#cfg(test)]\nmod tests {}\n");
 }
 
-// What makes this fail: removing the include check in scan_tokens.
+// What makes these fail: removing the include check in scan_tokens.
 #[test]
 fn spaced_include_fails() {
-    fails_with("include ! (\"x.rs\");\n", "include! pulls in code");
+    fails_with("include ! (\"x.rs\");\n", "include pulls in code");
+}
+
+// rustc accepts `use core::include as inc; inc!("x.rs");` and pulls the file
+// in. What also makes this fail: requiring `!` after `include`.
+#[test]
+fn renamed_include_fails() {
+    fails_with(
+        "use core::include as inc;\ninc!(\"x.rs\");\n",
+        "include pulls in code",
+    );
+}
+
+// `m!(include)` hands the name to a macro that calls `$i!(..)`. What also
+// makes this fail: requiring `!` after `include`.
+#[test]
+fn include_as_macro_argument_fails() {
+    fails_with("m!(include);\n", "include pulls in code");
 }
 
 // What makes this fail: removing unraw from the include check.
 #[test]
 fn raw_include_fails() {
-    fails_with("r#include!(\"x.rs\");\n", "include! pulls in code");
+    fails_with("r#include!(\"x.rs\");\n", "include pulls in code");
 }
 
-// What makes these fail: removing the path check in visit_attribute.
+// What makes these fail: removing the macro_rules check in scan_tokens.
+#[test]
+fn macro_rules_fails() {
+    fails_with(
+        "macro_rules! m {\n    () => {};\n}\n",
+        "macro_rules forbidden in core",
+    );
+}
+
+// rustc accepts this and pulls outside.rs in through `#[$i = ..]`; the
+// substituted name never appears next to `#`, so only the macro_rules rule
+// stops it.
+#[test]
+fn path_through_macro_argument_fails() {
+    fails_with(
+        "macro_rules! m { ($i:ident) => { #[$i = \"x.rs\"] mod o; } }\nm!(path);\n",
+        "macro_rules forbidden in core",
+    );
+}
+
+// What makes this fail: removing unraw from the macro_rules check.
+#[test]
+fn raw_macro_rules_fails() {
+    fails_with(
+        "r#macro_rules! m {\n    () => {};\n}\n",
+        "macro_rules forbidden in core",
+    );
+}
+
+// Both path rules report these. What makes them fail: removing the token
+// rule (scan_tokens, "#[path] tokens") or the attribute rule
+// (visit_attribute, "path attribute").
 #[test]
 fn path_attribute_split_across_lines_fails() {
-    fails_with("#\n[path = \"x.rs\"] mod m;\n", "#[path] pulls in code");
+    let source = "#\n[path = \"x.rs\"] mod m;\n";
+    fails_with(source, "#[path] tokens pull in code");
+    fails_with(source, "path attribute pulls in code");
 }
 
 #[test]
 fn path_attribute_with_comment_fails() {
-    fails_with("#/*c*/[path = \"x.rs\"] mod m;\n", "#[path] pulls in code");
+    let source = "#/*c*/[path = \"x.rs\"] mod m;\n";
+    fails_with(source, "#[path] tokens pull in code");
+    fails_with(source, "path attribute pulls in code");
 }
 
-// rustc accepts #[r#path = ..]. What makes this fail: comparing the attribute
-// name without unraw.
+// rustc accepts #[r#path = ..]. What makes this fail: comparing either path
+// rule's name without unraw.
 #[test]
 fn raw_path_attribute_fails() {
-    fails_with("#[r#path = \"x.rs\"] mod m;\n", "#[path] pulls in code");
+    let source = "#[r#path = \"x.rs\"] mod m;\n";
+    fails_with(source, "#[path] tokens pull in code");
+    fails_with(source, "path attribute pulls in code");
+}
+
+// The parser does not look inside macro calls. What makes this fail:
+// removing the token rule, or not descending into groups.
+#[test]
+fn path_tokens_inside_macro_call_fail() {
+    fails_with(
+        "m! { #[path = \"x.rs\"] mod o; }\n",
+        "#[path] tokens pull in code",
+    );
+}
+
+// What makes this fail: not skipping the `!` of an inner attribute.
+#[test]
+fn inner_path_tokens_inside_macro_call_fail() {
+    fails_with(
+        "m! { #![path = \"x.rs\"] }\n",
+        "#[path] tokens pull in code",
+    );
+}
+
+// Only a `[...]` group makes an attribute. What makes this fail: dropping
+// the delimiter check in is_path_attr_group.
+#[test]
+fn path_in_parenthesized_group_after_hash_passes() {
+    passes("m! { # (path) }\n");
+}
+
+// Only the first token of the `[...]` group counts. What makes this fail:
+// treating any `path` identifier as the attribute.
+#[test]
+fn path_as_field_name_passes() {
+    passes("#[derive(Debug)]\npub struct S {\n    pub path: u8,\n}\n");
 }
 
 // What makes this fail: removing the cfg_attr check in scan_tokens.
@@ -141,11 +228,11 @@ fn raw_cfg_other_fails() {
 }
 
 // What makes these fail: removing the cfg_count != allowed_cfg check (the
-// attribute visitor does not enter macro bodies or see cfg!()).
+// attribute visitor does not enter macro calls or see cfg!()).
 #[test]
-fn cfg_inside_macro_body_fails() {
+fn cfg_inside_macro_call_fails() {
     fails_with(
-        "macro_rules! m { () => { #[cfg(not(clippy))] fn f() {} } }\nm!();\n",
+        "m! { #[cfg(not(clippy))] fn f() {} }\n",
         "cfg token outside #[cfg(test)] attribute",
     );
 }
