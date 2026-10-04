@@ -185,6 +185,15 @@ mod tests {
 
     const ME: u32 = 501;
 
+    // init only passes absolute paths; a relative one would be walked from
+    // "/" and check the wrong entries.
+    // 이것을 실패시키는 것: 상대 경로 가드를 빼는 것.
+    #[test]
+    fn relative_path_cannot_be_inspected() {
+        assert_eq!(resolution_entries(Path::new("usr/bin")), None);
+        assert!(resolution_entries(Path::new("/usr/bin")).is_some());
+    }
+
     fn e(uid: u32, mode: u32, is_symlink: bool, acl: AclFacts) -> EntryFacts {
         EntryFacts {
             uid,
