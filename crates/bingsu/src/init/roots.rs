@@ -56,18 +56,18 @@ pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
 /// `openat(O_NOFOLLOW)`. A canonical path holds no symlink, so a name that
 /// is a symlink now (swapped in after canonicalization) fails the walk
 /// instead of redirecting it (the same walk as spec section 4 "runtime
-/// root" 4 at prompt time).
+/// root" 4 at prompt time). Every descriptor is search-only, so an
+/// ancestor with x but not r (`/home` at 0711) does not stop the walk; the
+/// result only serves as the base for `openat` and `mkdirat` below.
 fn open_canonical_dir(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsFd;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut dir = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open("/")?;
+    let mut dir = crate::sys::open_dir_at_search_nofollow(None, std::ffi::OsStr::new("/"))?;
     for c in path.components() {
         match c {
             Component::RootDir => {}
-            Component::Normal(name) => dir = crate::sys::open_dir_at_nofollow(dir.as_fd(), name)?,
+            Component::Normal(name) => {
+                dir = crate::sys::open_dir_at_search_nofollow(Some(dir.as_fd()), name)?
+            }
             _ => return Err(std::io::Error::other("runtime root: not a canonical path")),
         }
     }
@@ -335,6 +335,46 @@ mod tests {
         assert!(base.exists());
         assert!(pin_for(&base.join("x/y/bingsu"), me).is_ok());
         assert!(base.join("x/y/bingsu").is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // Two missing folders are made (`n1`, `n2`), then the last `mkdirat`
+    // fails on a name longer than NAME_MAX (255 on Linux and macOS). Undoing
+    // must go deepest first: removing `n1` while `n2` is still inside fails
+    // with ENOTEMPTY and leaves `n1` behind.
+    // 이것을 실패시키는 것: rollback에서 `.rev()`를 빼는 것(`n1`이 남는다).
+    #[test]
+    fn failed_pin_removes_created_folders_deepest_first() {
+        let base = scratch("rollback-order");
+        let me = crate::sys::current_uid();
+        let too_long = "x".repeat(256);
+        let err = pin_for(&base.join("n1/n2").join(&too_long), me)
+            .err()
+            .expect("a 256-byte name must fail");
+        assert_eq!(err.raw_os_error(), Some(libc::ENAMETOOLONG), "{err}");
+        assert!(!base.join("n1/n2").exists());
+        assert!(!base.join("n1").exists());
+        assert!(base.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // An ancestor with search (x) but no read (r) permission, like a shared
+    // host's `/home` at 0711, must not stop the walk. Not meaningful as
+    // root, which ignores the mode.
+    // 이것을 실패시키는 것: 걷기 fd를 O_RDONLY로 여는 것(0111 조상에서 EACCES).
+    #[test]
+    fn pin_walks_through_search_only_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = scratch("search-only");
+        let me = crate::sys::current_uid();
+        let lk = base.join("lk");
+        std::fs::create_dir_all(lk.join("run")).unwrap();
+        std::fs::set_permissions(lk.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&lk, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let got = pin_for(&lk.join("run"), me);
+        std::fs::set_permissions(&lk, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let got = got.expect("x-only ancestor must not lose the runtime root");
+        assert_eq!(got.path, std::fs::canonicalize(lk.join("run")).unwrap());
         std::fs::remove_dir_all(&base).unwrap();
     }
 

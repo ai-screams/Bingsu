@@ -553,12 +553,54 @@ pub fn open_dir_at_nofollow(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
 ) -> std::io::Result<std::fs::File> {
+    open_at(Some(dir), name, libc::O_RDONLY | libc::O_DIRECTORY)
+}
+
+/// Search-only access for a walk descriptor: it can serve as the folder
+/// that `openat` and `mkdirat` resolve names in, and needs only search (x)
+/// permission, never read (r). An ancestor like `/home` at 0711 is
+/// searchable but not readable. Linux `O_PATH`; macOS `O_SEARCH`
+/// (`O_EXEC | O_DIRECTORY`).
+#[cfg(target_os = "linux")]
+const SEARCH_ONLY: libc::c_int = libc::O_PATH;
+#[cfg(target_os = "macos")]
+const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
+
+/// Like `open_dir_at_nofollow`, but the descriptor is search-only (see
+/// `SEARCH_ONLY`); `dir = None` opens "/" itself. The descriptor is only a
+/// base for further `*at` calls: reading entries, `fchmod` and (on Linux)
+/// `fstatfs` do not work through it.
+pub fn open_dir_at_search_nofollow(
+    dir: Option<std::os::fd::BorrowedFd<'_>>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    open_at(dir, name, SEARCH_ONLY | libc::O_DIRECTORY)
+}
+
+/// `openat(dir, name, access | O_NOFOLLOW | O_CLOEXEC)`; `dir = None` means
+/// `name` must be absolute and is opened as given.
+fn open_at(
+    dir: Option<std::os::fd::BorrowedFd<'_>>,
+    name: &std::ffi::OsStr,
+    access: libc::c_int,
+) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
-    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    // SAFETY: `dir` is an open descriptor and `c` is NUL-terminated.
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), flags) };
+    let base = match dir {
+        Some(d) => d.as_raw_fd(),
+        None if name.as_bytes().starts_with(b"/") => libc::AT_FDCWD,
+        None => {
+            return Err(std::io::Error::other(
+                "open_at: relative name without a folder",
+            ));
+        }
+    };
+    let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `base` is an open descriptor borrowed for this call (or
+    // AT_FDCWD with an absolute name, where it is ignored) and `c` is
+    // NUL-terminated.
+    let fd = unsafe { libc::openat(base, c.as_ptr(), flags) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
