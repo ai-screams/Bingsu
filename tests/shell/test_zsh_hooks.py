@@ -20,10 +20,11 @@ def hostile_record(c1, c2, c3):
     return b"B1\x1f7\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
-def start(tmp_path, rc_before="", rc_after="", record=None):
+def start(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)
     (tmp_path / "init.zsh").write_bytes(inst.init("zsh", env))
+    env.update(inherit or {})
     cdir = short_dir()
     canaries = [cdir / f"c{i}" for i in (1, 2, 3)]
     inst.use_fake(record or hostile_record(*[str(c).encode() for c in canaries]))
@@ -100,38 +101,6 @@ def test_init_twice_registers_hooks_once(tmp_path):
     out = visible(s.close())
     assert b"N=2 P=1" in out
     assert b"another prompt hook" not in out
-
-
-# A hook appended after init turns PROMPT_SUBST on after the install hook
-# looked at the options (spec section 7 "옵션 변경 시점").
-# 이것을 실패시키는 것: 설치 hook이 마지막이 아닐 때 참조형으로 설치하는 조건(`|| ! last`)을 빼는 것(첫 프롬프트에서 실행),
-# 설치 hook이 자기를 맨 끝으로 되돌리는 줄을 지우는 것(LAST가 _evil).
-def test_late_hook_turning_on_prompt_subst_is_contained(tmp_path):
-    rc_after = "_evil() { setopt prompt_subst }\nprecmd_functions+=(_evil)"
-    s, _, canaries = start(tmp_path, rc_before="unsetopt prompt_subst", rc_after=rc_after)
-    for _ in range(3):
-        s.run('print -r -- "LAST=${precmd_functions[-1]}"')
-    out = visible(s.close())
-    assert not any(c.exists() for c in canaries), "data was executed"
-    assert out.count(b"LAST=_bingsu_install") == 3 and b"LAST=_evil" not in out, out
-    assert want_left(canaries) in out
-    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
-
-
-# A hook that puts itself last on every prompt, while PROMPT_SUBST is off
-# whenever the install hook looks: every prompt must go in by reference.
-# 이것을 실패시키는 것: 설치 hook이 마지막이 아닐 때 참조형으로 설치하는 조건(`|| ! last`)을 빼는 것.
-def test_hook_fighting_for_last_is_contained(tmp_path):
-    rc_after = ("_off() { unsetopt prompt_subst }\npreexec_functions+=(_off)\n"
-                "_evil() { setopt prompt_subst; precmd_functions=(${precmd_functions:#_evil} _evil) }\n"
-                "precmd_functions+=(_evil)")
-    s, _, canaries = start(tmp_path, rc_before="unsetopt prompt_subst", rc_after=rc_after)
-    for _ in range(3):
-        s.run("true")
-    out = visible(s.close())
-    assert not any(c.exists() for c in canaries), "data was executed"
-    assert want_left(canaries) in out
-    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
 
 
 # 이것을 실패시키는 것: 경고 조건에서 `-z $_bingsu_warned_last`를 빼는 것(경고가 프롬프트마다 나감).
@@ -251,3 +220,33 @@ def test_inherited_hooked_flag_does_not_block_registration(tmp_path):
     assert r.returncode == 0 and r.stderr == b"", r.stderr
     assert r.stdout == b"PF=[_bingsu_save _bingsu_install] EF=[_bingsu_preexec]\n", r.stdout
     assert len(inst.calls()) == 1
+
+
+# Hook state inherited from the environment is reset by init.
+# 이것을 실패시키는 것: 머리의 `typeset -g … _bingsu_t0= …`에서 `_bingsu_t0=`를 빼는 것(첫 프롬프트에 --duration-ms).
+def test_inherited_t0_is_reset(tmp_path):
+    s, inst, _ = start(tmp_path, record=minimal_record(), inherit={"_bingsu_t0": "999999999999"})
+    s.close()
+    first = inst.calls()[0]
+    assert b"--duration-ms" not in first, first
+
+
+# 이것을 실패시키는 것: 머리의 `typeset -g … _bingsu_warned_last=`에서 초기화를 빼는 것(경고가 사라짐).
+def test_inherited_warned_flag_is_reset(tmp_path):
+    s, _, _ = start(tmp_path, rc_after="_late() { : }\nprecmd_functions+=(_late)",
+                    record=minimal_record(), inherit={"_bingsu_warned_last": "1"})
+    s.run("true")
+    out = visible(s.close())
+    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
+
+
+# The hook chain cannot show the save hook's return value (zsh restores $?
+# per precmd function), so call it directly.
+# 이것을 실패시키는 것: _bingsu_save의 `return $_bingsu_s`를 지우는 것(RC=0).
+def test_save_hook_returns_saved_status(tmp_path):
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    script = inst.init("zsh", env)
+    r = run_shell_script("zsh", script + b'\nfalse; _bingsu_save; print -r -- "RC=$? S=$_bingsu_s"\n', env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    assert r.stdout == b"RC=1 S=1\n", r.stdout

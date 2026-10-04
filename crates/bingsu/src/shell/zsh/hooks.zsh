@@ -24,9 +24,11 @@ _bingsu_call() {
 }
 
 zmodload zsh/datetime 2>/dev/null
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_ps1= _bingsu_rps1=
+# Reset, never inherited: an environment value for _bingsu_t0 would make
+# the first duration negative or huge, one for _bingsu_warned_last would
+# silence the late-hook warning.
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_ps1= _bingsu_rps1= _bingsu_warned_last=
 typeset -ga _bingsu_p
-typeset -g _bingsu_warned_last="${_bingsu_warned_last-}"
 
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost.
@@ -43,20 +45,12 @@ _bingsu_preexec() {
 # right before installing, and before `emulate` makes them local
 # (spec section 3 option table, F-18). Data never reaches PROMPT unescaped:
 # reference when PROMPT_SUBST is on, plain assignment otherwise.
-# A hook running after this one may still change the options, so when
-# this hook is not last the prompt is installed by reference whatever the
-# options say (a reference is expanded once and its value is never
-# expanded again; with PROMPT_SUBST off it shows as literal text, which is
-# ugly but runs nothing), and the hook moves itself back to the end. zsh
-# walks a copy of precmd_functions, so the move takes effect from the next
-# prompt and nothing in the current walk is skipped or run twice.
 _bingsu_install() {
-  local o_subst=0 o_bang=0 o_pct=0 last=1
+  local o_subst=0 o_bang=0 o_pct=0
   [[ -o prompt_subst ]] && o_subst=1
   [[ -o prompt_bang ]] && o_bang=1
   [[ -o prompt_percent ]] && o_pct=1
   emulate -L zsh
-  [[ ${precmd_functions[-1]} == _bingsu_install ]] || last=0
   local -a ctx
   local -i ms
   local pst=${(j:,:)_bingsu_p} ps1 rps1
@@ -72,7 +66,7 @@ _bingsu_install() {
   if (( o_pct )) && _bingsu_frame "$_bingsu_rec"; then
     ps1=$_bingsu_f[3] rps1=$_bingsu_f[4]
     if (( o_bang )); then ps1=${ps1//!/!!} rps1=${rps1//!/!!}; fi
-    if (( o_subst || ! last )); then
+    if (( o_subst )); then
       _bingsu_ps1=$ps1 _bingsu_rps1=$rps1
       PROMPT='${_bingsu_ps1}' RPROMPT='${_bingsu_rps1}'
     else
@@ -85,12 +79,9 @@ _bingsu_install() {
     # a constant instead (option (b), question Q4).
     PROMPT='❯ ' RPROMPT=
   fi
-  if (( ! last )); then
-    precmd_functions=(${precmd_functions:#_bingsu_install} _bingsu_install)
-    if [[ -z $_bingsu_warned_last ]]; then
-      _bingsu_warned_last=1
-      print -u2 -r -- @MSG_LATE_HOOK_ZSH@
-    fi
+  if [[ ${precmd_functions[-1]} != _bingsu_install && -z $_bingsu_warned_last ]]; then
+    _bingsu_warned_last=1
+    print -u2 -r -- @MSG_LATE_HOOK_ZSH@
   fi
   return $_bingsu_s
 }
