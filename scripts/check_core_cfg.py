@@ -2,52 +2,81 @@
 """Conditional-compilation check for bingsu-core (spec section 1, F-05).
 
 Code behind cfg can drop out of the lint run (`#[cfg(not(clippy))]`, a target
-the CI does not lint, a feature that --all-features turns off). bingsu-core is
-platform independent and needs no cfg, so this fails on:
-  - any line in a scanned file with a token starting with `cfg`
-    (cfg, cfg_attr, cfg!) unless the line is exactly `#[cfg(test)]`; comments
-    are not exempt, so do not write the word in comments there;
-  - any *.rs under crates/bingsu-core outside src/, tests/ and benches/
-    (purity-canary/ and target/ excluded): src/ holds the library, tests/ and
-    benches/ hold its test and bench targets, and all three get the same checks;
-  - a path attribute (`#[path = ...]`) or `include!(...)` in any scanned
-    file, since both pull in code from elsewhere; include_str!/include_bytes!
-    are data and stay allowed. Comments are not exempt;
+the CI does not lint, a feature that --all-features turns off), and `#[path]`
+or `include!` can pull in code from outside the checked files. bingsu-core is
+platform independent and needs no cfg. This script owns the policy and the
+file set; the token-level checks live in tools/core-cfg-check (a Rust tool
+that sees tokens, so spacing, line breaks, comments and strings cannot hide
+anything). It fails on:
+  - a symbolic link (file or directory) anywhere under crates/bingsu-core
+    (purity-canary/ and target/ excluded): the compiler follows links, so a
+    linked directory could bring in code from outside the checked set;
+  - any *.rs under crates/bingsu-core outside src/, tests/ and benches/:
+    src/ holds the library, tests/ and benches/ hold its test and bench
+    targets, and all three get the same checks;
+  - a collected file whose real path is not inside crates/bingsu-core;
   - a build script (crates/bingsu-core/build.rs or package.build), which could
     emit cargo:rustc-cfg;
-  - a [features] table in crates/bingsu-core/Cargo.toml.
-Usage: check_core_cfg.py   (run from the repository root)
+  - a [features] table in crates/bingsu-core/Cargo.toml;
+  - anything the checker binary rejects (its exit code is passed through).
+Usage: check_core_cfg.py --checker PATH   (run from the repository root)
 """
-import pathlib
-import re
+import argparse
+import os
+import subprocess
 import sys
 import tomllib
 
-CORE = pathlib.Path("crates/bingsu-core")
-CFG = re.compile(r"\bcfg")
-PULL_IN = re.compile(r"#\s*\[\s*path\s*=|\binclude!\s*\(")
+CORE = "crates/bingsu-core"
 SKIP = {"purity-canary", "target"}
 ALLOWED = {"src", "tests", "benches"}
 
 
-def main():
-    errors = []
-    for rs in sorted(CORE.rglob("*.rs")):
-        rel = rs.relative_to(CORE)
-        if rel.parts[0] in SKIP:
+def collect(errors):
+    core_real = os.path.realpath(CORE)
+    files = []
+    for root, dirs, names in os.walk(CORE, followlinks=False):
+        rel = os.path.relpath(root, CORE)
+        top = rel.split(os.sep)[0]
+        if top in SKIP:
+            dirs[:] = []
             continue
-        if rel.parts[0] not in ALLOWED:
-            errors.append(f"rust source outside src/, tests/, benches/: {rs}")
-        for i, line in enumerate(rs.read_text().splitlines(), 1):
-            if CFG.search(line) and line.strip() != "#[cfg(test)]":
-                errors.append(f"{rs}:{i}: cfg other than #[cfg(test)]: {line.strip()}")
-            if PULL_IN.search(line):
-                errors.append(f"{rs}:{i}: #[path] or include! pulls in code: {line.strip()}")
-    manifest = tomllib.loads((CORE / "Cargo.toml").read_text())
-    if (CORE / "build.rs").exists() or "build" in manifest.get("package", {}):
+        if rel == ".":
+            dirs[:] = [d for d in dirs if d not in SKIP]
+        # os.walk lists a linked directory in dirs, not names: check both.
+        for entry in dirs + names:
+            path = os.path.join(root, entry)
+            if os.path.islink(path):
+                errors.append(f"symlink in core: {path}")
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            if not name.endswith(".rs"):
+                continue
+            if top not in ALLOWED:
+                errors.append(f"rust source outside src/, tests/, benches/: {path}")
+            real = os.path.realpath(path)
+            if os.path.commonpath([real, core_real]) != core_real:
+                errors.append(f"rust source resolves outside {CORE}: {path} -> {real}")
+            files.append(path)
+    return sorted(files)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checker", required=True, help="path to the core-cfg-check binary")
+    args = parser.parse_args()
+    errors = []
+    files = collect(errors)
+    manifest = tomllib.loads(open(os.path.join(CORE, "Cargo.toml")).read())
+    if os.path.exists(os.path.join(CORE, "build.rs")) or "build" in manifest.get("package", {}):
         errors.append(f"{CORE}: build script is not allowed (it can emit cargo:rustc-cfg)")
     if "features" in manifest:
         errors.append(f"{CORE}/Cargo.toml: [features] is not allowed (lint every feature combination first)")
+    # Run the token checker even when the checks above failed, so one run
+    # shows every reason. With no files it fails on its own ("no files").
+    result = subprocess.run([args.checker, *files])
+    if result.returncode != 0:
+        errors.append("core-cfg-check rejected the files above")
     if errors:
         print("core cfg check FAILED:\n  " + "\n  ".join(errors), file=sys.stderr)
         return 1

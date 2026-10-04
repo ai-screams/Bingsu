@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Core purity gate (spec section 1, F-05).
 # Fails on: a bingsu-core Cargo.toml that does not forbid clippy::disallowed_*
-# (so no allow/expect can switch the rules off), conditional compilation in
-# bingsu-core (check_core_cfg.py), a forbidden call in bingsu-core (clippy), a
-# crate in bingsu-core's dependency graph that is not on the allowlist
+# (so no allow/expect can switch the rules off) or whose lint copy drifts from
+# [workspace.lints], conditional compilation, #[path], include! or a symlink in
+# bingsu-core (check_core_cfg.py with the token checker in tools/core-cfg-check),
+# a forbidden call in bingsu-core (clippy), a crate in bingsu-core's dependency
+# graph that is not on the allowlist
 # (cargo-deny), or a dead, untested, duplicated or silently removed rule
 # (canary checker with a pinned path count).
 # The CLI's environment rules (crates/bingsu/clippy.toml) are checked the same
@@ -14,13 +16,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'EOF'
 import sys, tomllib
-lints = tomllib.load(open("crates/bingsu-core/Cargo.toml", "rb")).get("lints", {}).get("clippy", {})
+core = tomllib.load(open("crates/bingsu-core/Cargo.toml", "rb")).get("lints", {})
+lints = core.get("clippy", {})
 bad = [l for l in ("disallowed_methods", "disallowed_types", "disallowed_macros") if lints.get(l) != "forbid"]
 if bad:
     print(f"purity gate FAILED: bingsu-core Cargo.toml must set [lints.clippy] {', '.join(bad)} = \"forbid\"", file=sys.stderr)
     sys.exit(1)
+# bingsu-core cannot inherit [workspace.lints] (it sets the purity lints to
+# forbid in its own table), so it carries a copy; the copy must not drift.
+workspace = tomllib.load(open("Cargo.toml", "rb")).get("workspace", {}).get("lints", {})
+drift = [f"{tool}.{name}" for tool in ("rust", "clippy")
+         for name, value in workspace.get(tool, {}).items()
+         if core.get(tool, {}).get(name) != value]
+if drift:
+    print(f"purity gate FAILED: core lints drift from workspace: {', '.join(drift)}", file=sys.stderr)
+    sys.exit(1)
 EOF
-python3 scripts/check_core_cfg.py
+cargo build --release --quiet --manifest-path tools/core-cfg-check/Cargo.toml
+python3 scripts/check_core_cfg.py --checker tools/core-cfg-check/target/release/core-cfg-check
 # Change these counts together with the clippy.toml lists.
 python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 123
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7

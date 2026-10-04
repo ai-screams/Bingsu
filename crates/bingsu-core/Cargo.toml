@@ -9,8 +9,8 @@ license.workspace = true
 repository.workspace = true
 
 # Lints are not inherited from the workspace so that the purity lints can be
-# set to forbid here, in the manifest. Keep the first three in sync with the
-# root [workspace.lints] when that changes.
+# set to forbid here, in the manifest. Every root [workspace.lints] entry must
+# appear here with the same value (scripts/check-core-purity.sh checks it).
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
