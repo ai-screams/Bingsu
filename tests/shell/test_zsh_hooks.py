@@ -74,11 +74,11 @@ def test_hook_between_save_and_install_changes_options(tmp_path):
     assert want_left(canaries) in out
 
 
-# zsh 5.9 restores $? before each precmd function, so no bingsu mutation
-# turns this red (deleting `return $_bingsu_s` from _bingsu_save stays
-# green). It pins the shell behaviour bingsu relies on, for older zsh.
-# The install hook's own return value is pinned by
-# test_empty_pipestatus_falls_back_to_status.
+# Environment assumption pin, not a mutation target: zsh 5.9 restores $?
+# before each precmd function, so deleting `return $_bingsu_s` from
+# _bingsu_save stays green. The install hook's own return value is pinned
+# by test_empty_pipestatus_falls_back_to_status.
+# 이것을 실패시키는 것: precmd 함수 사이에 $?를 되살리지 않는 zsh(bingsu 변이로는 죽지 않음).
 def test_exit_status_reaches_next_hook_and_is_returned(tmp_path):
     rc_after = ("_probe() { print -r -- \"PROBE:$?\" }\n"
                 "precmd_functions=($precmd_functions[1] _probe $precmd_functions[2,-1])")
