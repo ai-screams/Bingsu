@@ -35,6 +35,12 @@ end
 for v in $argv[2]/*.bin
     _report $v
 end
+# _bingsu_status_ok called on its own must anchor at the true end of string.
+if _bingsu_status_ok (printf 'ok:none\n' | string collect -N)
+    printf 'U\tstatus_ok_lf\taccept\n'
+else
+    printf 'U\tstatus_ok_lf\treject\n'
+end
 while read -l -d '|' old new rest
     string match -q '#*' -- "$old"; and continue
     _trans "$old" "$new"

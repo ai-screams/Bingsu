@@ -7,13 +7,14 @@ set -g _bingsu_note ''
 set -g _bingsu_key ''
 
 function _bingsu_status_ok --argument-names s
-    string match -q -r '^[abcdefghijklmnopqrstuvwxyz]+:[abcdefghijklmnopqrstuvwxyz-]+$' -- "$s"
+    string match -q -r '^[abcdefghijklmnopqrstuvwxyz]+:[abcdefghijklmnopqrstuvwxyz-]+\z' -- "$s"
 end
 
 function _bingsu_frame --argument-names rec
     set -g _bingsu_f
     test (string length -- "$rec") -le 65536; or return 1
-    # \z, not $: $ also matches before a final newline.
+    # \z, not $: $ also matches before a final newline. Double defence with the
+    # count check; a black-box golden cannot tell either layer apart alone.
     string match -q -r '^[^\x1e\n]*\x1e\z' -- "$rec"; or return 1
     set -l f (string split \x1f -- (string replace -r '\x1e\z' '' -- "$rec"))
     test (count $f) -eq 9; or return 1

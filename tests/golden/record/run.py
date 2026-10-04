@@ -125,8 +125,9 @@ def main():
                 fields = data[:-1].split(b"\x1f")
                 if (n, hexs) != (len(fields), ",".join(f.hex() for f in fields)):
                     errors.append(f"{name}: field bytes differ from the input record")
-        if a.shell == "bash" and useen.get("status_ok_upper") != "reject":
-            errors.append(f"standalone _bingsu_status_ok OK:NONE: {useen.get('status_ok_upper')}, want reject")
+        standalone = {"bash": "status_ok_upper", "fish": "status_ok_lf"}.get(a.shell)
+        if standalone and useen.get(standalone) != "reject":
+            errors.append(f"standalone _bingsu_status_ok {standalone}: {useen.get(standalone)}, want reject")
         if a.shell == "bash" and shopt_seen != set(want):
             errors.append(f"nocasematch state not reported for: {sorted(set(want) - shopt_seen)}")
         for line in (HERE / "transitions.tsv").read_text().splitlines():
