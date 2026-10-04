@@ -159,6 +159,14 @@ fn envelope_golden_vectors() {
         &ok,
     );
     check("unknown_arg", with(&["--frobnicate"]), &bad);
+    check(
+        "unknown_flag_before_record",
+        ["--foo", "--record", "B1", "--ctx", "1", "--width", "80"]
+            .iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect(),
+        &bad,
+    );
     check("value_missing_at_end", with(&["--status"]), &bad);
     check(
         "ext_unknown_name_ignored",

@@ -82,15 +82,22 @@ fn ext_name_ok(n: &[u8]) -> bool {
             .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// True for fields written as one word (`--name=value`, `--redraw`); the
-/// pre-scan and the main loop must step over arguments the same way, or a
-/// value that happens to read `--record` would be taken for the flag.
-fn is_one_word(a: &[u8]) -> bool {
-    a.starts_with(RUNTIME_ROOT_PREFIX)
-        || a.starts_with(CONFIG_ROOT_PREFIX)
-        || a.starts_with(STATE_ROOT_PREFIX)
-        || a.starts_with(LOG_ROOT_PREFIX)
-        || a == b"--redraw"
+/// Flags that take the next word as their value (the two-word fields).
+fn is_value_flag(a: &[u8]) -> bool {
+    matches!(
+        a,
+        b"--record"
+            | b"--ctx"
+            | b"--width"
+            | b"--status"
+            | b"--pipestatus"
+            | b"--duration-ms"
+            | b"--jobs"
+            | b"--keymap"
+            | b"--session"
+            | b"--seq"
+            | b"--ctx-ext"
+    )
 }
 
 /// Record version is settled first so every later error knows which
@@ -102,15 +109,14 @@ fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeError> {
     let mut count = 0;
     let mut i = 0;
     while i < args.len() {
-        if is_one_word(args[i]) {
-            i += 1;
-            continue;
-        }
-        if args[i] == b"--record" {
+        let a = args[i];
+        if a == b"--record" {
             count += 1;
             first.get_or_insert_with(|| args.get(i + 1).copied());
         }
-        i += 2;
+        // Only known value flags swallow the next word; an unknown flag
+        // takes nothing, so it cannot hide a `--record` that follows it.
+        i += if is_value_flag(a) { 2 } else { 1 };
     }
     if count > 1 {
         return Err(EnvelopeError::BadArgs("duplicate field"));
@@ -308,6 +314,13 @@ mod tests {
         // The only `--record` is a value: nothing is negotiated, empty output.
         let a = ["--ctx", "1", "--width", "80", "--keymap", "--record", "B1"];
         assert_eq!(parse_strs(&a), Err(EnvelopeError::NoSupportedRecordVersion));
+    }
+
+    // 이것을 실패시키는 것: 모르는 플래그가 다음 낱말을 값으로 먹게 하는 것.
+    #[test]
+    fn unknown_flag_does_not_hide_record_flag() {
+        let a = ["--foo", "--record", "B1", "--ctx", "1", "--width", "80"];
+        assert!(matches!(parse_strs(&a), Err(EnvelopeError::BadArgs(_))));
     }
 
     // 이것을 실패시키는 것: 각 한계 상수를 1 늘리거나 줄이는 것.
