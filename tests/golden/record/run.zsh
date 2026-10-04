@@ -10,6 +10,14 @@ _in_user_opts() {
   for o in ${(s:,:)BINGSU_TEST_OPTS}; do setopt $o; done
   "$@"
 }
+# F line: element count and hex of each element (bytes, via od).
+_emit_f() {
+  emulate -L zsh
+  local name=$1 e
+  local -a hs
+  for e in "${_bingsu_f[@]}"; do hs+=("$(print -rn -- "$e" | od -An -v -tx1 | tr -d ' \n')"); done
+  print -r -- "F"$'\t'"$name"$'\t'"${#_bingsu_f}"$'\t'"${(j:,:)hs}"
+}
 _report() {
   emulate -L zsh
   local v=$1 name=${1:t:r} rec
@@ -20,6 +28,7 @@ _report() {
   else
     print -r -- "R	$name	reject	-	-"
   fi
+  _emit_f "$name"
 }
 _trans() {
   emulate -L zsh

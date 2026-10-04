@@ -17,14 +17,18 @@ _bingsu_status_ok() {
 _bingsu_frame() {
   emulate -L zsh
   local rec=$1
+  local -a f
+  _bingsu_f=()
   (( ${#rec} <= 65536 )) || return 1
   [[ $rec == *$'\x1e' ]] || return 1
   rec=${rec%$'\x1e'}
   [[ $rec == *[$'\x1e\n']* ]] && return 1
-  _bingsu_f=("${(@ps:\x1f:)rec}")
-  (( ${#_bingsu_f} == 9 )) || return 1
-  [[ $_bingsu_f[1] == B1 && $_bingsu_f[2] == 7 ]] || return 1
-  _bingsu_status_ok "$_bingsu_f[9]"
+  f=("${(@ps:\x1f:)rec}")
+  (( ${#f} == 9 )) || return 1
+  [[ $f[1] == B1 && $f[2] == 7 ]] || return 1
+  _bingsu_status_ok "$f[9]" || return 1
+  # Contract: on failure _bingsu_f is empty; it is set only after every check.
+  _bingsu_f=("${f[@]}")
 }
 
 # Call only after _bingsu_status_ok passed. The status string never selects

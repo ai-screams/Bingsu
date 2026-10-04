@@ -80,6 +80,8 @@ def main():
         seen = set()
         stdout = r.stdout.decode("utf-8", "replace")
         shopt_seen = set()
+        fseen = {}
+        useen = {}
         nm_want = "on" if "nocasematch" in a.opts.split(",") else "off"
         for line in stdout.splitlines():
             kind, *cols = line.split("\t")
@@ -93,6 +95,11 @@ def main():
                     print(f"OBSERVE {a.shell} {a.locale} {name}: {frame} {disp} {note}")
                 elif (frame, disp, note) != w:
                     errors.append(f"{name}: got {(frame, disp, note)} want {w}")
+            elif kind == "U":
+                useen[cols[0]] = cols[1]
+            elif kind == "F":
+                name, n, hexs = cols
+                fseen[name] = (int(n), hexs)
             elif kind == "S":
                 name, before, after = cols
                 shopt_seen.add(name)
@@ -101,6 +108,25 @@ def main():
             elif kind == "T":
                 old, new, due, key = cols
                 seen.add(f"T:{old}>{new}")
+        # Contract: a rejected record leaves _bingsu_f empty; an accepted one
+        # leaves the nine input field bytes unchanged (nothing is expanded).
+        for name, w in want.items():
+            if w[0] == "observe":
+                continue
+            if name not in fseen:
+                errors.append(f"{name}: no F line")
+                continue
+            n, hexs = fseen[name]
+            if w[0] == "reject":
+                if n != 0:
+                    errors.append(f"{name}: rejected but _bingsu_f has {n} elements")
+            else:
+                data = (td / "v" / f"{name}.bin").read_bytes()
+                fields = data[:-1].split(b"\x1f")
+                if (n, hexs) != (len(fields), ",".join(f.hex() for f in fields)):
+                    errors.append(f"{name}: field bytes differ from the input record")
+        if a.shell == "bash" and useen.get("status_ok_upper") != "reject":
+            errors.append(f"standalone _bingsu_status_ok OK:NONE: {useen.get('status_ok_upper')}, want reject")
         if a.shell == "bash" and shopt_seen != set(want):
             errors.append(f"nocasematch state not reported for: {sorted(set(want) - shopt_seen)}")
         for line in (HERE / "transitions.tsv").read_text().splitlines():

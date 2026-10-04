@@ -4,7 +4,7 @@
 _bingsu_f=()
 _bingsu_disp= _bingsu_note= _bingsu_key=
 
-_bingsu_status_ok() {
+_bingsu_status_ok_core() {
   local s=$1 cls code
   [[ $s == *:* ]] || return 1
   cls=${s%%:*} code=${s#*:}
@@ -13,28 +13,45 @@ _bingsu_status_ok() {
   [[ $code != *[!abcdefghijklmnopqrstuvwxyz-]* ]]
 }
 
+# nocasematch would make [[ == ]] and the bracket tests below case-insensitive
+# (F-18): save, clear, restore. _bingsu_frame guards too (two layers).
+_bingsu_status_ok() {
+  local nm=0 r=0
+  if shopt -q nocasematch; then nm=1; shopt -u nocasematch; fi
+  _bingsu_status_ok_core "$1" || r=1
+  if (( nm )); then shopt -s nocasematch; fi
+  return "$r"
+}
+
 # Variant R (spec text): read -a on a here-string. Drops a trailing empty
-# field, which is harmless because the status is never empty.
+# field, so _bingsu_frame_core rejects a trailing separator before calling
+# this. Fills the caller's local array _bingsu_t (dynamic scope).
 _bingsu_split() {
   local IFS=$'\x1f'
-  read -r -a _bingsu_f <<<"$1"
+  read -r -a _bingsu_t <<<"$1"
 }
 
 _bingsu_frame_core() {
   local rec=$1
+  local -a _bingsu_t=()
   (( ${#rec} <= 65536 )) || return 1
   [[ $rec == *$'\x1e' ]] || return 1
   rec=${rec%$'\x1e'}
   [[ $rec == *[$'\x1e\n']* ]] && return 1
+  # read -a would drop a trailing empty field and accept 9 + separator.
+  [[ $rec == *$'\x1f' ]] && return 1
   _bingsu_split "$rec"
-  (( ${#_bingsu_f[@]} == 9 )) || return 1
-  [[ ${_bingsu_f[0]} == B1 && ${_bingsu_f[1]} == 7 ]] || return 1
-  _bingsu_status_ok "${_bingsu_f[8]}"
+  (( ${#_bingsu_t[@]} == 9 )) || return 1
+  [[ ${_bingsu_t[0]} == B1 && ${_bingsu_t[1]} == 7 ]] || return 1
+  _bingsu_status_ok "${_bingsu_t[8]}" || return 1
+  # Contract: on failure _bingsu_f is empty; it is set only after every check.
+  _bingsu_f=("${_bingsu_t[@]}")
 }
 
 # nocasematch would make [[ == ]] case-insensitive (F-18): save, clear, restore.
 _bingsu_frame() {
   local nm=0 r=0
+  _bingsu_f=()
   if shopt -q nocasematch; then nm=1; shopt -u nocasematch; fi
   _bingsu_frame_core "$1" || r=1
   if (( nm )); then shopt -s nocasematch; fi

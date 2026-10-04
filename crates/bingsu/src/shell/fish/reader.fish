@@ -11,12 +11,16 @@ function _bingsu_status_ok --argument-names s
 end
 
 function _bingsu_frame --argument-names rec
+    set -g _bingsu_f
     test (string length -- "$rec") -le 65536; or return 1
-    string match -q -r '^[^\x1e\n]*\x1e$' -- "$rec"; or return 1
-    set -g _bingsu_f (string split \x1f -- (string replace -r '\x1e$' '' -- "$rec"))
-    test (count $_bingsu_f) -eq 9; or return 1
-    test "$_bingsu_f[1]" = B1; and test "$_bingsu_f[2]" = 7; or return 1
-    _bingsu_status_ok "$_bingsu_f[9]"
+    # \z, not $: $ also matches before a final newline.
+    string match -q -r '^[^\x1e\n]*\x1e\z' -- "$rec"; or return 1
+    set -l f (string split \x1f -- (string replace -r '\x1e\z' '' -- "$rec"))
+    test (count $f) -eq 9; or return 1
+    test "$f[1]" = B1; and test "$f[2]" = 7; or return 1
+    _bingsu_status_ok "$f[9]"; or return 1
+    # Contract: on failure _bingsu_f is empty; it is set only after every check.
+    set -g _bingsu_f $f
 end
 
 # Call only after _bingsu_status_ok passed. Exact comparisons only.

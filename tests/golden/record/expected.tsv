@@ -39,5 +39,9 @@ st_cmdsub	reject	-	-	-
 st_backtick	reject	-	-	-
 st_semicolon	reject	-	-	-
 st_dollar_code	reject	-	-	-
+trail_us	reject	-	-	-
+disp_cmdsub	accept	ok	-	-
+disp_backtick	accept	ok	-	-
+disp_percent	accept	ok	-	-
 nul_field	observe	-	-	-
 nul_status	observe	-	-	-

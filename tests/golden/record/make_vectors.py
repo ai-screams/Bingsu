@@ -65,6 +65,10 @@ def main():
         "st_backtick": one(b"L", status=b"`touch " + canary + b"`:x"),
         "st_semicolon": one(b"L", status=b"ok:a;touch " + canary),
         "st_dollar_code": one(b"L", status=b"degraded:$(touch " + canary + b")"),
+        "trail_us": one(b"L", status=b"ok:none" + US),
+        "disp_cmdsub": rec([b"$(touch " + canary + b")"] * 6),
+        "disp_backtick": rec([b"`touch " + canary + b"`"] * 6),
+        "disp_percent": rec([b"%n%(?.a.b)%F{red}"] * 6),
         "nul_field": one(b"L\x00x"),
         "nul_status": one(b"L", status=b"ok:no\x00ne"),
     }

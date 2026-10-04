@@ -1,4 +1,12 @@
 source $argv[1]
+# F line: element count and hex of each element (bytes, via od).
+function _emit_f --argument-names name
+    set -l hs
+    for e in $_bingsu_f
+        set -a hs "$(printf %s "$e" | od -An -v -tx1 | tr -d ' \n')"
+    end
+    printf 'F\t%s\t%s\t%s\n' $name (count $_bingsu_f) "$(string join , -- $hs)"
+end
 function _report --argument-names v
     set -l name (string replace -r '\.bin$' '' -- (basename -- $v))
     set -l rec (cat -- $v | string collect -N)
@@ -10,6 +18,7 @@ function _report --argument-names v
     else
         printf 'R\t%s\treject\t-\t-\n' $name
     end
+    _emit_f $name
 end
 function _trans --argument-names old new
     set -l key
