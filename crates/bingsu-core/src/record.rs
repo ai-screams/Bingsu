@@ -128,24 +128,50 @@ fn push_b1(fields: [&[u8]; 6], status: Status, out: &mut Vec<u8>) {
     out.push(RS);
 }
 
+/// Exact encoded length, or `None` on overflow: the frame (`B1`, `US`, `7`,
+/// `US`), each field plus its `US`, the status and the closing `RS`.
+fn encoded_len(parts: &[&[u8]; 6], status: Status) -> Option<usize> {
+    let mut n: usize = 5;
+    for f in parts {
+        n = n.checked_add(f.len())?.checked_add(1)?;
+    }
+    n.checked_add(status.class().as_str().len())?
+        .checked_add(1)?
+        .checked_add(status.code().len())?
+        .checked_add(1)
+}
+
 /// Appends a B1 record to `out`. Records over RECORD_MAX_BYTES are replaced
 /// by the minimal record (spec section 3, size rule; the only formal bound).
+/// The length is computed before anything is copied; `out` keeps its prefix.
 pub fn encode_b1(
     fields: &Fields<'_>,
     status: Status,
     out: &mut Vec<u8>,
 ) -> Result<Encoded, FieldError> {
+    debug_assert!({
+        let mut s = Vec::new();
+        status.write_to(&mut s);
+        is_valid_status(&s)
+    });
     let parts = fields.in_order();
     for (i, f) in parts.iter().enumerate() {
         check_field(i, f)?;
     }
-    let start = out.len();
-    push_b1(parts, status, out);
-    if out.len() - start > RECORD_MAX_BYTES {
-        out.truncate(start);
+    // The precomputed length is the real bound: an oversize field is never
+    // copied, so `out` does not grow to the oversize size first.
+    if encoded_len(&parts, status).is_none_or(|n| n > RECORD_MAX_BYTES) {
         write_minimal_b1(Status::DEGRADED_OVERSIZE, out);
         return Ok(Encoded::ReplacedBySizeLimit);
     }
+    let start = out.len();
+    push_b1(parts, status, out);
+    // Guards `encoded_len` and `push_b1` against drifting apart.
+    debug_assert_eq!(
+        Some(out.len() - start),
+        encoded_len(&parts, status),
+        "encoded_len must match the bytes push_b1 writes"
+    );
     Ok(Encoded::Full)
 }
 
@@ -233,11 +259,12 @@ mod tests {
                 left: bad,
                 ..Fields::default()
             };
-            assert!(
-                matches!(
-                    enc(&f).0,
-                    Err(FieldError::BadSgr { .. }) | Err(FieldError::ForbiddenByte { .. })
-                ),
+            assert_eq!(
+                enc(&f).0,
+                Err(FieldError::BadSgr {
+                    field: 0,
+                    offset: 0
+                }),
                 "{bad:?}"
             );
         }
@@ -290,5 +317,130 @@ mod tests {
         assert_eq!(RecordVersion::parse(b"B2"), None);
         assert_eq!(RecordVersion::parse(b"b1"), None);
         assert_eq!(RecordVersion::B1.as_str(), "B1");
+    }
+
+    // 이것을 실패시키는 것: C1 범위 상한을 U+0085 같은 값으로 줄이는 것.
+    #[test]
+    fn c1_boundaries() {
+        for bad in ["\u{80}", "\u{9b}", "\u{9f}"] {
+            let f = Fields {
+                left: bad.as_bytes(),
+                ..Fields::default()
+            };
+            assert_eq!(
+                enc(&f).0,
+                Err(FieldError::C1Control { field: 0 }),
+                "{bad:?}"
+            );
+        }
+        let f = Fields {
+            left: "\u{a0}".as_bytes(),
+            ..Fields::default()
+        };
+        assert_eq!(enc(&f).0, Ok(Encoded::Full));
+    }
+
+    // 이것을 실패시키는 것: `in_order()`에서 필드 하나를 빼먹는 것, 필드 번호를 어긋나게 보고하는 것.
+    #[test]
+    fn forbidden_byte_reports_each_field_index() {
+        for idx in 0..6 {
+            let mut parts: [&[u8]; 6] = [b""; 6];
+            parts[idx] = b"a\x1fb";
+            let f = Fields {
+                left: parts[0],
+                right: parts[1],
+                transient_left: parts[2],
+                transient_right: parts[3],
+                vi_insert: parts[4],
+                vi_command: parts[5],
+            };
+            assert_eq!(
+                enc(&f).0,
+                Err(FieldError::ForbiddenByte {
+                    field: idx,
+                    offset: 1,
+                    byte: 0x1f
+                })
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: C0 중 SOH·STX·올바른 SGR 외의 바이트(예: BEL)를 허용하는 것.
+    #[test]
+    fn c0_exhaustive() {
+        for b in 0x00u8..=0x1F {
+            let one = [b];
+            let f = Fields {
+                left: &one,
+                ..Fields::default()
+            };
+            let r = enc(&f).0;
+            match b {
+                0x01 | 0x02 => assert_eq!(r, Ok(Encoded::Full), "{b:#x}"),
+                0x1B => assert_eq!(
+                    r,
+                    Err(FieldError::BadSgr {
+                        field: 0,
+                        offset: 0
+                    })
+                ),
+                _ => assert_eq!(
+                    r,
+                    Err(FieldError::ForbiddenByte {
+                        field: 0,
+                        offset: 0,
+                        byte: b
+                    }),
+                    "{b:#x}"
+                ),
+            }
+        }
+        let f = Fields {
+            left: b"\x1b[31m",
+            ..Fields::default()
+        };
+        assert_eq!(enc(&f).0, Ok(Encoded::Full));
+        let f = Fields {
+            left: b"\x1bX",
+            ..Fields::default()
+        };
+        assert!(enc(&f).0.is_err());
+    }
+
+    // 이것을 실패시키는 것: 사전 길이 검사를 없애 큰 필드를 먼저 복사하는 것.
+    #[test]
+    fn oversize_field_is_not_copied_into_out() {
+        let big = vec![b'x'; 70_000];
+        let mut out = Vec::new();
+        let r = encode_b1(
+            &Fields {
+                left: &big,
+                ..Fields::default()
+            },
+            Status::OK_NONE,
+            &mut out,
+        );
+        assert_eq!(r, Ok(Encoded::ReplacedBySizeLimit));
+        assert!(out.capacity() < 1024, "capacity {}", out.capacity());
+    }
+
+    // 이것을 실패시키는 것: 대체 때 `truncate(start)` 대신 `clear()`로 앞선 내용을 지우는 것.
+    #[test]
+    fn oversize_replacement_keeps_existing_prefix() {
+        let overhead = enc(&Fields::default()).1.len();
+        let over = vec![b'x'; RECORD_MAX_BYTES - overhead + 1];
+        let mut out = b"abc".to_vec();
+        let r = encode_b1(
+            &Fields {
+                left: &over,
+                ..Fields::default()
+            },
+            Status::OK_NONE,
+            &mut out,
+        );
+        assert_eq!(r, Ok(Encoded::ReplacedBySizeLimit));
+        let mut minimal = b"abc".to_vec();
+        write_minimal_b1(Status::DEGRADED_OVERSIZE, &mut minimal);
+        assert_eq!(out, minimal);
     }
 }

@@ -21,50 +21,54 @@ impl StatusClass {
     }
 }
 
-/// A status the engine can emit. `code` is `1*( a-z / "-" )`.
+/// A status the engine can emit. `code` is `1*( a-z / "-" )`, checked at
+/// construction: in a `const` a bad code is a compile error, at run time a panic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
-    pub class: StatusClass,
-    pub code: &'static str,
+    class: StatusClass,
+    code: &'static str,
+}
+
+/// `code = 1*( %x61-7A / "-" )`.
+const fn is_valid_code(code: &str) -> bool {
+    let b = code.as_bytes();
+    if b.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < b.len() {
+        if !(b[i].is_ascii_lowercase() || b[i] == b'-') {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 impl Status {
-    pub const OK_NONE: Self = Self {
-        class: StatusClass::Ok,
-        code: "none",
-    };
-    pub const ERROR_BAD_ARGS: Self = Self {
-        class: StatusClass::Error,
-        code: "bad-args",
-    };
-    pub const ERROR_INTERNAL: Self = Self {
-        class: StatusClass::Error,
-        code: "internal",
-    };
-    pub const DEGRADED_RUNTIME_ROOT: Self = Self {
-        class: StatusClass::Degraded,
-        code: "runtime-root",
-    };
-    pub const DEGRADED_OVERSIZE: Self = Self {
-        class: StatusClass::Degraded,
-        code: "oversize",
-    };
-    pub const DEGRADED_TRUST_UNVERIFIED: Self = Self {
-        class: StatusClass::Degraded,
-        code: "trust-unverified",
-    };
-    pub const DEGRADED_TRUST_EXPIRED: Self = Self {
-        class: StatusClass::Degraded,
-        code: "trust-expired",
-    };
-    pub const ERROR_CONFIG_LAST_GOOD: Self = Self {
-        class: StatusClass::Error,
-        code: "config-last-good",
-    };
-    pub const ERROR_CONFIG_DEFAULT: Self = Self {
-        class: StatusClass::Error,
-        code: "config-default",
-    };
+    pub const fn new(class: StatusClass, code: &'static str) -> Self {
+        assert!(is_valid_code(code), "status code must be 1*(a-z / \"-\")");
+        Self { class, code }
+    }
+
+    pub const fn class(self) -> StatusClass {
+        self.class
+    }
+
+    pub const fn code(self) -> &'static str {
+        self.code
+    }
+
+    pub const OK_NONE: Self = Self::new(StatusClass::Ok, "none");
+    pub const ERROR_BAD_ARGS: Self = Self::new(StatusClass::Error, "bad-args");
+    pub const ERROR_INTERNAL: Self = Self::new(StatusClass::Error, "internal");
+    pub const DEGRADED_RUNTIME_ROOT: Self = Self::new(StatusClass::Degraded, "runtime-root");
+    pub const DEGRADED_OVERSIZE: Self = Self::new(StatusClass::Degraded, "oversize");
+    pub const DEGRADED_TRUST_UNVERIFIED: Self =
+        Self::new(StatusClass::Degraded, "trust-unverified");
+    pub const DEGRADED_TRUST_EXPIRED: Self = Self::new(StatusClass::Degraded, "trust-expired");
+    pub const ERROR_CONFIG_LAST_GOOD: Self = Self::new(StatusClass::Error, "config-last-good");
+    pub const ERROR_CONFIG_DEFAULT: Self = Self::new(StatusClass::Error, "config-default");
 
     /// Non-ok statuses that `init` embeds as constants in the shell reader,
     /// so each gets its own fixed message (spec section 5 receive table).
@@ -146,6 +150,18 @@ mod tests {
             assert!(!seen.contains(&b), "duplicate {s:?}");
             seen.push(b);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "status code")]
+    fn new_rejects_uppercase_code() {
+        let _ = Status::new(StatusClass::Ok, "Bad");
+    }
+
+    #[test]
+    #[should_panic(expected = "status code")]
+    fn new_rejects_empty_code() {
+        let _ = Status::new(StatusClass::Ok, "");
     }
 
     #[test]
