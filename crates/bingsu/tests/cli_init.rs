@@ -369,3 +369,65 @@ fn concurrent_init_pins_same_runtime_root() {
         assert_eq!(word(o), first);
     }
 }
+
+// Spec section 4: the symlink, its target and every ancestor folder. An
+// intermediate hop (`bin/bingsu -> ../hop/x -> ../real/bingsu`, the shape of
+// /etc/alternatives) is a target too, and its folder is an ancestor.
+// 이것을 실패시키는 것: 실행 경로와 최종 정규 대상만 보고 사슬 중간 hop과 그 폴더를 건너뛰는 것.
+#[test]
+fn symlink_chain_hops_are_checked() {
+    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\n";
+    for (row, hop_mode, want) in [
+        ("clean chain", 0o755, &b""[..]),
+        ("hop dir other-writable", 0o777, TAMPER),
+    ] {
+        let base = scratch(&format!("chain-{}", row.replace(' ', "-")));
+        for d in ["bin", "hop", "real"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+            chmod(&base.join(d), 0o755);
+        }
+        std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), base.join("real/bingsu")).unwrap();
+        std::os::unix::fs::symlink("../real/bingsu", base.join("hop/x")).unwrap();
+        std::os::unix::fs::symlink("../hop/x", base.join("bin/bingsu")).unwrap();
+        chmod(&base.join("hop"), hop_mode);
+        let out = init(&base.join("bin/bingsu"), "zsh", &base);
+        chmod(&base.join("hop"), 0o755);
+        assert_eq!(out.status.code(), Some(0), "{row}");
+        assert_eq!(
+            out.stderr,
+            want,
+            "{row}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+// A chain longer than 40 hops cannot be confirmed: warn, do not loop.
+// 이것을 실패시키는 것: hop 상한을 없애거나 41보다 크게 잡는 것.
+#[test]
+fn symlink_chain_over_40_hops_warns_unknown() {
+    let base = scratch("chain-long");
+    let chain = base.join("chain");
+    std::fs::create_dir_all(&chain).unwrap();
+    chmod(&chain, 0o755);
+    let real = base.join("bingsu-real");
+    std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, chain.join("l41")).unwrap();
+    for i in (0..41).rev() {
+        std::os::unix::fs::symlink(format!("l{}", i + 1), chain.join(format!("l{i}"))).unwrap();
+    }
+    // The kernel refuses to exec through this many links, so run the real
+    // file with argv0 = the head of the chain.
+    let out = Command::new(&real)
+        .args(["init", "zsh"])
+        .arg0(chain.join("l0").as_os_str())
+        .env_clear()
+        .env("XDG_RUNTIME_DIR", base.join("run"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stderr,
+        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Run: bingsu doctor\n"
+    );
+}

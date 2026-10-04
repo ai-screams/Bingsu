@@ -102,14 +102,75 @@ fn facts(p: &Path) -> Option<EntryFacts> {
     })
 }
 
-/// Worst verdict over the link, its canonical target and every ancestor of
-/// both. Anything that cannot be inspected is `Unknown` (fail closed).
-pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
-    let mut paths: Vec<PathBuf> = exe.ancestors().map(Path::to_path_buf).collect();
-    match std::fs::canonicalize(exe) {
-        Ok(target) => paths.extend(target.ancestors().map(Path::to_path_buf)),
-        Err(_) => return Verdict::Unknown,
+/// The same bound Linux uses for one path lookup (MAXSYMLINKS = 40).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Every entry the kernel passes through to reach `exe`, resolving it one
+/// name at a time: "/", each folder entered, each symlink on the way (any
+/// hop of a chain, in any component) and the final file. Each symlink and
+/// each target sits in a folder that is itself on the list, so this covers
+/// "the symlink, its target and every ancestor folder" (spec section 4)
+/// for every hop. `None` if a name cannot be inspected, a link cannot be
+/// read, the path is relative, or the chain exceeds `MAX_SYMLINK_HOPS`.
+fn resolution_entries(exe: &Path) -> Option<Vec<PathBuf>> {
+    use std::path::Component;
+    if !exe.is_absolute() {
+        return None;
     }
+    let root = PathBuf::from("/");
+    let mut seen = vec![root.clone()];
+    let mut cur = root.clone();
+    // Names still to resolve, last name first so `pop` takes the next one.
+    let mut todo: Vec<std::ffi::OsString> = Vec::new();
+    let push_front = |todo: &mut Vec<std::ffi::OsString>, p: &Path| {
+        let names: Vec<_> = p
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(n.to_os_string()),
+                Component::ParentDir => Some("..".into()),
+                _ => None,
+            })
+            .collect();
+        todo.extend(names.into_iter().rev());
+    };
+    push_front(&mut todo, exe);
+    let mut hops = 0;
+    while let Some(name) = todo.pop() {
+        if name == ".." {
+            // `cur` is always a resolved folder, so its lexical parent is
+            // the physical parent.
+            cur.pop();
+            continue;
+        }
+        let next = cur.join(&name);
+        let md = std::fs::symlink_metadata(&next).ok()?;
+        if !seen.contains(&next) {
+            seen.push(next.clone());
+        }
+        if md.file_type().is_symlink() {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+                return None;
+            }
+            let target = std::fs::read_link(&next).ok()?;
+            if target.is_absolute() {
+                cur = root.clone();
+            }
+            push_front(&mut todo, &target);
+        } else {
+            cur = next;
+        }
+    }
+    Some(seen)
+}
+
+/// Worst verdict over every entry on the way to the executable: the path
+/// as run, each symlink hop and its target, and every folder above any of
+/// them. Anything that cannot be inspected is `Unknown` (fail closed).
+pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
+    let Some(paths) = resolution_entries(exe) else {
+        return Verdict::Unknown;
+    };
     let group = |gid: u32| crate::sys::group_membership(gid, user);
     paths
         .iter()
