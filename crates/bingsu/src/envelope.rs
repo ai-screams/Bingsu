@@ -1,0 +1,260 @@
+//! Shell input envelope, version `--ctx 1` (spec section 5). Hand-written
+//! parser on the prompt fast path (spec section 8 budget table).
+use bingsu_core::record::RecordVersion;
+use bingsu_core::root_arg::{
+    CONFIG_ROOT_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX, parse_abs_path,
+    parse_decimal, parse_runtime_root,
+};
+
+// Fields are parsed and validated now so ctx 1 never changes; M2/M3 read them.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OwnedRuntimeRoot {
+    pub dev: u64,
+    pub ino: u64,
+    pub path: Vec<u8>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Envelope {
+    pub record: Option<RecordVersion>,
+    /// Terminal width in cells; 0 means unknown (value missing from the
+    /// terminal environment, not a malformed argument).
+    pub width: u16,
+    pub status: Option<u8>,
+    pub pipestatus: Option<Vec<u8>>,
+    pub duration_ms: Option<u64>,
+    pub jobs: Option<u32>,
+    pub keymap: Option<Vec<u8>>,
+    pub session: Option<Vec<u8>>,
+    pub seq: Option<u64>,
+    pub redraw: bool,
+    pub runtime_root: Option<OwnedRuntimeRoot>,
+    pub config_root: Option<Vec<u8>>,
+    pub state_root: Option<Vec<u8>>,
+    pub log_root: Option<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnvelopeError {
+    /// `--record` missing or outside the compatibility window: empty output.
+    NoSupportedRecordVersion,
+    /// Record version is valid: minimal record with `error:bad-args`.
+    BadArgs(&'static str),
+}
+
+const MAX_EXT: usize = 16;
+const RESERVED_EXT: [&[u8]; 3] = [b"config-root-id", b"state-root-id", b"log-root-id"];
+
+fn dev_ino_ok(v: &[u8]) -> bool {
+    match v.iter().position(|&b| b == b':') {
+        Some(c) => parse_decimal(&v[..c]).is_some() && parse_decimal(&v[c + 1..]).is_some(),
+        None => false,
+    }
+}
+const MAX_PIPESTATUS: usize = 64;
+
+fn set_once<T>(slot: &mut Option<T>, v: T) -> Result<(), EnvelopeError> {
+    if slot.is_some() {
+        return Err(EnvelopeError::BadArgs("duplicate field"));
+    }
+    *slot = Some(v);
+    Ok(())
+}
+
+fn num<T: TryFrom<u64>>(v: &[u8], what: &'static str) -> Result<T, EnvelopeError> {
+    parse_decimal(v)
+        .and_then(|n| T::try_from(n).ok())
+        .ok_or(EnvelopeError::BadArgs(what))
+}
+
+/// Width comes from the terminal, which bingsu does not control: anything
+/// that is not a `u16` decimal means "width unknown" (0), not a bad argument.
+fn width_or_unknown(v: &[u8]) -> u16 {
+    parse_decimal(v)
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+fn ext_name_ok(n: &[u8]) -> bool {
+    matches!(n.first(), Some(b'a'..=b'z'))
+        && n.len() <= 32
+        && n.iter()
+            .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Record version is settled first so every later error knows which
+/// minimal record to print (spec section 5 envelope rules).
+fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeError> {
+    let mut found = None;
+    let mut count = 0;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == b"--record" {
+            count += 1;
+            match args.get(i + 1).and_then(|v| RecordVersion::parse(v)) {
+                Some(v) => found = Some(v),
+                None => return Err(EnvelopeError::NoSupportedRecordVersion),
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    match (found, count) {
+        (Some(v), 1) => Ok(v),
+        (Some(_), _) => Err(EnvelopeError::BadArgs("duplicate field")),
+        (None, _) => Err(EnvelopeError::NoSupportedRecordVersion),
+    }
+}
+
+fn root_slot<'e, 'a>(
+    e: &'e mut Envelope,
+    a: &'a [u8],
+) -> Option<(&'e mut Option<Vec<u8>>, &'a [u8])> {
+    if let Some(v) = a.strip_prefix(CONFIG_ROOT_PREFIX) {
+        return Some((&mut e.config_root, v));
+    }
+    if let Some(v) = a.strip_prefix(STATE_ROOT_PREFIX) {
+        return Some((&mut e.state_root, v));
+    }
+    a.strip_prefix(LOG_ROOT_PREFIX)
+        .map(|v| (&mut e.log_root, v))
+}
+
+pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
+    let record = record_version(args)?;
+    let mut e = Envelope {
+        record: Some(record),
+        ..Envelope::default()
+    };
+    let (mut ctx, mut width, mut ext) = (None::<()>, None::<u16>, 0usize);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        // One-word fields: `--name=value` (values may hold any byte).
+        if let Some(v) = a.strip_prefix(RUNTIME_ROOT_PREFIX) {
+            let r = parse_runtime_root(v).map_err(|_| EnvelopeError::BadArgs("runtime root"))?;
+            set_once(
+                &mut e.runtime_root,
+                OwnedRuntimeRoot {
+                    dev: r.dev,
+                    ino: r.ino,
+                    path: r.path.to_vec(),
+                },
+            )?;
+            i += 1;
+            continue;
+        }
+        if let Some((slot, v)) = root_slot(&mut e, a) {
+            let p = parse_abs_path(v).map_err(|_| EnvelopeError::BadArgs("root path"))?;
+            set_once(slot, p.to_vec())?;
+            i += 1;
+            continue;
+        }
+        if a == b"--redraw" {
+            if e.redraw {
+                return Err(EnvelopeError::BadArgs("duplicate field"));
+            }
+            e.redraw = true;
+            i += 1;
+            continue;
+        }
+        // Two-word fields: `--name value`.
+        let v = args
+            .get(i + 1)
+            .copied()
+            .ok_or(EnvelopeError::BadArgs("missing value"))?;
+        match a {
+            b"--record" => {} // settled by record_version
+            b"--ctx" => {
+                if v != b"1" {
+                    return Err(EnvelopeError::BadArgs("ctx version"));
+                }
+                set_once(&mut ctx, ())?;
+            }
+            b"--width" => set_once(&mut width, width_or_unknown(v))?,
+            b"--status" => set_once(&mut e.status, num(v, "status")?)?,
+            b"--duration-ms" => set_once(&mut e.duration_ms, num(v, "duration")?)?,
+            b"--jobs" => set_once(&mut e.jobs, num(v, "jobs")?)?,
+            b"--seq" => set_once(&mut e.seq, num(v, "seq")?)?,
+            b"--pipestatus" => {
+                let items: Vec<u8> = v
+                    .split(|&b| b == b',')
+                    .map(|p| num::<u8>(p, "pipestatus"))
+                    .collect::<Result<_, _>>()?;
+                if items.len() > MAX_PIPESTATUS {
+                    return Err(EnvelopeError::BadArgs("pipestatus"));
+                }
+                set_once(&mut e.pipestatus, items)?;
+            }
+            b"--keymap" => {
+                if v.is_empty()
+                    || v.len() > 16
+                    || !v.iter().all(|&b| b.is_ascii_lowercase() || b == b'_')
+                {
+                    return Err(EnvelopeError::BadArgs("keymap"));
+                }
+                set_once(&mut e.keymap, v.to_vec())?;
+            }
+            b"--session" => {
+                if v.len() != 32
+                    || !v
+                        .iter()
+                        .all(|&b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(EnvelopeError::BadArgs("session"));
+                }
+                set_once(&mut e.session, v.to_vec())?;
+            }
+            b"--ctx-ext" => {
+                let eq = v
+                    .iter()
+                    .position(|&b| b == b'=')
+                    .ok_or(EnvelopeError::BadArgs("ctx-ext"))?;
+                ext += 1;
+                if !ext_name_ok(&v[..eq]) || ext > MAX_EXT {
+                    return Err(EnvelopeError::BadArgs("ctx-ext"));
+                }
+                // Reserved for the config/state/log root identity (dev:ino),
+                // validated now so ctx 1 never changes; other names are ignored.
+                let (name, val) = (&v[..eq], &v[eq + 1..]);
+                if RESERVED_EXT.contains(&name) && !dev_ino_ok(val) {
+                    return Err(EnvelopeError::BadArgs("ctx-ext root id"));
+                }
+            }
+            _ => return Err(EnvelopeError::BadArgs("unknown argument")),
+        }
+        i += 2;
+    }
+    ctx.ok_or(EnvelopeError::BadArgs("ctx missing"))?;
+    e.width = width.ok_or(EnvelopeError::BadArgs("width missing"))?;
+    Ok(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_with_width(w: &'static str) -> Vec<&'static [u8]> {
+        vec![b"--ctx", b"1", b"--record", b"B1", b"--width", w.as_bytes()]
+    }
+
+    // 이것을 실패시키는 것: 폭 갈래를 bad-args로 바꾸는 것(width_or_unknown의 unwrap_or(0) 제거).
+    #[test]
+    fn width_out_of_u16_is_unknown_not_bad_args() {
+        let e = parse(&base_with_width("70000")).unwrap();
+        assert_eq!(e.width, 0);
+    }
+
+    #[test]
+    fn width_non_numeric_is_unknown_not_bad_args() {
+        let e = parse(&base_with_width("abc")).unwrap();
+        assert_eq!(e.width, 0);
+    }
+
+    #[test]
+    fn width_valid_is_kept() {
+        assert_eq!(parse(&base_with_width("65535")).unwrap().width, 65535);
+        assert_eq!(parse(&base_with_width("80")).unwrap().width, 80);
+    }
+}
