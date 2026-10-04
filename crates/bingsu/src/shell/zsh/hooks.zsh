@@ -1,7 +1,7 @@
 # bingsu hooks for zsh (spec section 5). init redefines every function on
 # each run; hook registration happens once (F-23). @…@ markers are literal
 # shell words embedded by init.
-: ${_bingsu_session:=@SESSION@}
+: "${_bingsu_session:=@SESSION@}"
 # Both may come from the environment. Only init's own shapes are kept: a
 # 32-digit lowercase hex session and a short decimal counter (a value with
 # a subscript would be evaluated as arithmetic).
