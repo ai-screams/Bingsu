@@ -254,7 +254,7 @@ fn chmod(p: &Path, mode: u32) {
 #[test]
 fn uninspectable_target_warns_unknown() {
     if is_root() {
-        eprintln!("skip: root reads a 0000 folder, so nothing is uninspectable");
+        eprintln!("skipped: a non-root user (root reads a 0000 folder) not present on this host");
         return;
     }
     let base = scratch("unknown");
@@ -517,14 +517,16 @@ fn macos_admin_group_with_only_root_and_me_is_safe() {
     .unwrap();
     let me = me.trim();
     let Some(mut members) = ds_members("admin") else {
-        eprintln!("skip: the dscl/dsmemberutil oracle failed for some account");
+        eprintln!("skipped: a working dscl/dsmemberutil oracle not present on this host");
         return;
     };
     members.sort();
     let mut want = vec!["root".to_owned(), me.to_owned()];
     want.sort();
     if members != want {
-        eprintln!("skip: admin members are {members:?}, not exactly root and {me}");
+        eprintln!(
+            "skipped: an admin group of exactly root and {me} not present on this host (members: {members:?})"
+        );
         return;
     }
     let base = scratch("group-admin");

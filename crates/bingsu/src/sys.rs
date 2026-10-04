@@ -449,8 +449,8 @@ fn flags_are_local(f_flags: u32) -> bool {
     f_flags & (libc::MNT_LOCAL as u32) != 0
 }
 
-/// Linux: rejecting NFS, CIFS and FUSE by `f_type` is M3; until then every
-/// file system counts as local.
+/// Linux: a stub. Rejecting NFS, CIFS and FUSE by `f_type` is M3a; until then
+/// every file system counts as local (always `Some(true)`).
 #[cfg(target_os = "linux")]
 pub fn fs_is_local(_path: &std::path::Path) -> Option<bool> {
     Some(true)

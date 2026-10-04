@@ -288,7 +288,9 @@ mod tests {
         let mount = std::process::Command::new("/sbin/mount").output().unwrap();
         if !String::from_utf8_lossy(&mount.stdout).contains(" on /System/Volumes/Data/home (autofs")
         {
-            eprintln!("skip: /System/Volumes/Data/home is not an autofs mount here");
+            eprintln!(
+                "skipped: an autofs mount on /System/Volumes/Data/home not present on this host"
+            );
             return;
         }
         let me = crate::sys::current_uid();

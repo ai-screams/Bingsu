@@ -1,6 +1,8 @@
-//! Roots pinned by init (spec section 4 "runtime root"). M1 creates the
-//! runtime folder and pins (st_dev, st_ino); ancestor rules, ownership and
-//! the local-filesystem check are M3a.
+//! Roots pinned by init (spec section 4 "runtime root"). M1: a no-follow fd
+//! walk of the canonical parent, owner and 0700 of the final and missing
+//! folders, and the macOS local-file-system check (`MNT_LOCAL`). M3a: the
+//! owner, mode and sticky policy of existing ancestors, and the Linux
+//! `f_type` decision.
 use super::trusted_env::TrustedEnv;
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
@@ -301,7 +303,9 @@ mod tests {
         let mount = std::process::Command::new("/sbin/mount").output().unwrap();
         if !String::from_utf8_lossy(&mount.stdout).contains(" on /System/Volumes/Data/home (autofs")
         {
-            eprintln!("skip: /System/Volumes/Data/home is not an autofs mount here");
+            eprintln!(
+                "skipped: an autofs mount on /System/Volumes/Data/home not present on this host"
+            );
             return;
         }
         let err = pin_for(Path::new("/System/Volumes/Data/home"), 0)
