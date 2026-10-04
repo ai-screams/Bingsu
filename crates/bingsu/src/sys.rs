@@ -607,3 +607,21 @@ fn open_at(
     // SAFETY: openat returned a fresh descriptor that nothing else owns.
     Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
+
+#[cfg(test)]
+mod open_at_tests {
+    use super::*;
+
+    // Without a folder only an absolute name may be opened; a relative one
+    // would otherwise resolve against the current directory.
+    // 이것을 실패시키는 것: `dir = None`의 상대 경로 가드를 빼는 것(AT_FDCWD로 cwd가 열린다).
+    #[test]
+    fn open_at_refuses_relative_name_without_folder() {
+        let got = open_at(
+            None,
+            std::ffi::OsStr::new("."),
+            SEARCH_ONLY | libc::O_DIRECTORY,
+        );
+        assert!(got.is_err());
+    }
+}
