@@ -6,6 +6,8 @@ pub enum WriteOutcome {
     Done,
     /// EPIPE or another error: the shell will see a truncated record and
     /// fall back to its minimal prompt. We stay silent (spec section 6).
+    /// EAGAIN is not retried and ends as `Failed`: on a non-blocking fd the
+    /// record may be cut short and the shell falls back to its minimal prompt.
     Failed,
 }
 
@@ -23,6 +25,12 @@ pub fn write_fd(fd: i32, mut buf: &[u8]) -> WriteOutcome {
             return WriteOutcome::Failed;
         }
         let n = usize::try_from(n).unwrap_or(0);
+        // A zero return on a non-empty buffer means no progress on an
+        // ordinary fd; retrying would spin and the prompt must never block.
+        // Not reproducible from a test, so no mutation was run for this arm.
+        if n == 0 {
+            return WriteOutcome::Failed;
+        }
         buf = &buf[n.min(buf.len())..];
     }
     WriteOutcome::Done

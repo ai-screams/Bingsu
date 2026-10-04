@@ -32,6 +32,8 @@ pub fn run(args: &[OsString]) -> ! {
     let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let mut out = Vec::with_capacity(256);
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&raw, &mut out)));
+    // Panic fallback: untested until M3 injects a panic; a second panic
+    // inside this branch aborts the unwind with rc 101.
     if built.is_err() || PANICKED.load(Ordering::Relaxed) {
         out.clear();
         if raw.windows(2).any(|w| w[0] == b"--record" && w[1] == b"B1") {

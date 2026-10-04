@@ -82,28 +82,42 @@ fn ext_name_ok(n: &[u8]) -> bool {
             .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// True for fields written as one word (`--name=value`, `--redraw`); the
+/// pre-scan and the main loop must step over arguments the same way, or a
+/// value that happens to read `--record` would be taken for the flag.
+fn is_one_word(a: &[u8]) -> bool {
+    a.starts_with(RUNTIME_ROOT_PREFIX)
+        || a.starts_with(CONFIG_ROOT_PREFIX)
+        || a.starts_with(STATE_ROOT_PREFIX)
+        || a.starts_with(LOG_ROOT_PREFIX)
+        || a == b"--redraw"
+}
+
 /// Record version is settled first so every later error knows which
-/// minimal record to print (spec section 5 envelope rules).
+/// minimal record to print (spec section 5 envelope rules). `--record` is
+/// counted in flag position only; two or more is `bad-args` whatever the
+/// values are (duplicate check before version check).
 fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeError> {
-    let mut found = None;
+    let mut first: Option<Option<&[u8]>> = None;
     let mut count = 0;
     let mut i = 0;
     while i < args.len() {
+        if is_one_word(args[i]) {
+            i += 1;
+            continue;
+        }
         if args[i] == b"--record" {
             count += 1;
-            match args.get(i + 1).and_then(|v| RecordVersion::parse(v)) {
-                Some(v) => found = Some(v),
-                None => return Err(EnvelopeError::NoSupportedRecordVersion),
-            }
-            i += 2;
-        } else {
-            i += 1;
+            first.get_or_insert_with(|| args.get(i + 1).copied());
         }
+        i += 2;
     }
-    match (found, count) {
-        (Some(v), 1) => Ok(v),
-        (Some(_), _) => Err(EnvelopeError::BadArgs("duplicate field")),
-        (None, _) => Err(EnvelopeError::NoSupportedRecordVersion),
+    if count > 1 {
+        return Err(EnvelopeError::BadArgs("duplicate field"));
+    }
+    match first.flatten().and_then(RecordVersion::parse) {
+        Some(v) => Ok(v),
+        None => Err(EnvelopeError::NoSupportedRecordVersion),
     }
 }
 
@@ -237,6 +251,116 @@ mod tests {
 
     fn base_with_width(w: &'static str) -> Vec<&'static [u8]> {
         vec![b"--ctx", b"1", b"--record", b"B1", b"--width", w.as_bytes()]
+    }
+
+    fn parse_strs(a: &[&str]) -> Result<Envelope, EnvelopeError> {
+        let v: Vec<&[u8]> = a.iter().map(|x| x.as_bytes()).collect();
+        parse(&v)
+    }
+
+    const BASE: [&str; 6] = ["--ctx", "1", "--record", "B1", "--width", "80"];
+
+    fn with(extra: &[&'static str]) -> Result<Envelope, EnvelopeError> {
+        let mut a: Vec<&'static str> = BASE.to_vec();
+        a.extend_from_slice(extra);
+        parse_strs(&a)
+    }
+
+    // 이것을 실패시키는 것: 앞자리 0을 허용해 80으로 파싱하는 것.
+    #[test]
+    fn width_leading_zero_is_unknown() {
+        assert_eq!(parse(&base_with_width("080")).unwrap().width, 0);
+    }
+
+    // 이것을 실패시키는 것: 중복 검사를 지우거나 버전 검사보다 뒤에 두는 것.
+    #[test]
+    fn duplicate_record_is_bad_args_whatever_the_values() {
+        for pair in [["B1", "B1"], ["B1", "B2"], ["B2", "B1"], ["B2", "B2"]] {
+            let a = [
+                "--ctx", "1", "--record", pair[0], "--record", pair[1], "--width", "80",
+            ];
+            assert!(
+                matches!(parse_strs(&a), Err(EnvelopeError::BadArgs(_))),
+                "{pair:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_unsupported_record_is_empty_output() {
+        let a = ["--ctx", "1", "--record", "B2", "--width", "80"];
+        assert_eq!(parse_strs(&a), Err(EnvelopeError::NoSupportedRecordVersion));
+    }
+
+    // 이것을 실패시키는 것: 사전 스캔을 인자 쌍 구조 없이 raw 문자열 비교로 하는 것.
+    #[test]
+    fn record_in_value_position_is_not_negotiated() {
+        let r = with(&["--keymap", "--record"]);
+        assert!(matches!(r, Err(EnvelopeError::BadArgs(_))), "{r:?}");
+    }
+
+    // 이것을 실패시키는 것: 사전 스캔이 값 자리의 `--record`를 플래그로 세는 것(raw 비교).
+    #[test]
+    fn record_in_value_position_is_not_counted() {
+        // width accepts any value, so the value `--record` is not an error.
+        let a = ["--ctx", "1", "--record", "B1", "--width", "--record"];
+        assert_eq!(parse_strs(&a).unwrap().width, 0);
+        // The only `--record` is a value: nothing is negotiated, empty output.
+        let a = ["--ctx", "1", "--width", "80", "--keymap", "--record", "B1"];
+        assert_eq!(parse_strs(&a), Err(EnvelopeError::NoSupportedRecordVersion));
+    }
+
+    // 이것을 실패시키는 것: 각 한계 상수를 1 늘리거나 줄이는 것.
+    #[test]
+    fn limits_pipestatus_64_ok_65_rejected() {
+        let ok = vec!["0"; 64].join(",");
+        let bad = vec!["0"; 65].join(",");
+        let a = [
+            "--ctx",
+            "1",
+            "--record",
+            "B1",
+            "--width",
+            "80",
+            "--pipestatus",
+            ok.as_str(),
+        ];
+        assert!(parse_strs(&a).is_ok());
+        let a = [
+            "--ctx",
+            "1",
+            "--record",
+            "B1",
+            "--width",
+            "80",
+            "--pipestatus",
+            bad.as_str(),
+        ];
+        assert!(parse_strs(&a).is_err());
+    }
+
+    #[test]
+    fn limits_ctx_ext_16_ok_17_rejected() {
+        let mut a: Vec<&str> = BASE.to_vec();
+        for _ in 0..16 {
+            a.extend(["--ctx-ext", "x=1"]);
+        }
+        assert!(parse_strs(&a).is_ok());
+        a.extend(["--ctx-ext", "x=1"]);
+        assert!(parse_strs(&a).is_err());
+    }
+
+    #[test]
+    fn limits_keymap_16_ok_17_rejected() {
+        assert!(with(&["--keymap", "aaaaaaaaaaaaaaaa"]).is_ok());
+        assert!(with(&["--keymap", "aaaaaaaaaaaaaaaaa"]).is_err());
+    }
+
+    #[test]
+    fn limits_session_32_ok_33_rejected() {
+        assert!(with(&["--session", "0123456789abcdef0123456789abcdef"]).is_ok());
+        assert!(with(&["--session", "0123456789abcdef0123456789abcdef0"]).is_err());
+        assert!(with(&["--session", "0123456789abcdef0123456789abcde"]).is_err());
     }
 
     // 이것을 실패시키는 것: 폭 갈래를 bad-args로 바꾸는 것(width_or_unknown의 unwrap_or(0) 제거).

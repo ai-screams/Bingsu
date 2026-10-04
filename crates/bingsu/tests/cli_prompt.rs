@@ -256,18 +256,25 @@ fn prompt_does_not_change_stdout_flags() {
     unsafe { libc::close(fds[0]) };
 }
 
-// 이것을 실패시키는 것: EPIPE에서 stderr에 쓰거나 0이 아닌 코드로 끝나는 것.
+// 이것을 실패시키는 것: Failed일 때 exit_now(1)로 끝나거나 EPIPE에서 stderr에 쓰는 것.
+// read end를 자식 spawn 전에 닫아 첫 write가 반드시 EPIPE가 된다(경쟁 없음).
 #[test]
 fn closed_stdout_is_silent_and_exits_zero() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bingsu"))
+    use std::os::fd::FromRawFd;
+    let mut fds = [0i32; 2];
+    // SAFETY: fds is a valid two-element array for pipe(2).
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // SAFETY: fds[0] is an open descriptor we own and no longer need.
+    assert_eq!(unsafe { libc::close(fds[0]) }, 0);
+    // SAFETY: fds[1] was just returned by pipe(2) and is not owned elsewhere.
+    let w = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
+    let out = Command::new(env!("CARGO_BIN_EXE_bingsu"))
         .arg("prompt")
         .args(BASE)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(w))
         .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    drop(child.stdout.take());
-    let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stderr.is_empty());
 }
