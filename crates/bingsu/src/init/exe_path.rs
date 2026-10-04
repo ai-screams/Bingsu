@@ -224,7 +224,18 @@ pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
     let Some((paths, target)) = resolution_entries(exe) else {
         return Verdict::Unknown;
     };
-    let group = |gid: u32| crate::sys::group_membership(gid, user);
+    // One verdict per gid for the whole walk: Homebrew paths cross several
+    // group-writable folders of the same group (`bin`, `Cellar`).
+    // The account list is read once, and only if some folder is group
+    // writable.
+    let cache = std::cell::RefCell::new(std::collections::HashMap::<u32, Group>::new());
+    let users = std::cell::OnceCell::new();
+    let group = |gid: u32| {
+        *cache.borrow_mut().entry(gid).or_insert_with(|| {
+            let users = users.get_or_init(crate::sys::local_users);
+            crate::sys::group_membership(gid, user, users.as_deref())
+        })
+    };
     paths
         .iter()
         .map(|p| facts(p).map_or(Verdict::Unknown, |f| classify(&f, uid, &group)))
@@ -291,8 +302,9 @@ mod tests {
     // 이것을 실패시키는 것: 없는 그룹을 "구성원 없음"으로 보는 것.
     #[test]
     fn missing_group_is_unknown() {
+        let users = crate::sys::local_users();
         assert_eq!(
-            crate::sys::group_membership(u32::MAX - 7, b"nobody-here"),
+            crate::sys::group_membership(u32::MAX - 7, b"nobody-here", users.as_deref()),
             Group::Unknown
         );
     }

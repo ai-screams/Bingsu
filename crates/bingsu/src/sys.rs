@@ -88,19 +88,67 @@ pub fn passwd_entry(uid: u32) -> Option<Passwd> {
     }
 }
 
-/// More users than this and the walk stops with `Unknown`.
+/// More users than this and the enumeration counts as failed (`Unknown`).
+/// Linux too: a large directory-service setup gets the "could not confirm"
+/// warning rather than a long walk.
 const MAX_USERS: usize = 4096;
+
+/// One local account, as the group-write rule needs it.
+pub struct UserEntry {
+    name: Vec<u8>,
+    gid: u32,
+    /// macOS: the account's membership uuid (`None` if it could not be
+    /// converted; any question about this user is then unanswered).
+    #[cfg(target_os = "macos")]
+    uuid: Option<[u8; 16]>,
+}
+
+/// Every account `getpwent` returns, read once per init. `None` if the
+/// enumeration ends with an error or passes `MAX_USERS`. init is
+/// single-threaded, so the non-reentrant getpwent walk is acceptable here.
+pub fn local_users() -> Option<Vec<UserEntry>> {
+    let mut out = Vec::new();
+    let failed;
+    // SAFETY: resets the iterator; no pointers involved.
+    unsafe { libc::setpwent() };
+    loop {
+        // SAFETY: clears errno so a NULL return can be told apart from an error.
+        unsafe { *errno_location() = 0 };
+        // SAFETY: getpwent returns NULL or a pointer valid until the next call.
+        let pw = unsafe { libc::getpwent() };
+        if pw.is_null() {
+            failed = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != 0;
+            break;
+        }
+        if out.len() == MAX_USERS {
+            failed = true;
+            break;
+        }
+        // SAFETY: `pw` is non-null and points to a valid passwd record.
+        let rec = unsafe { &*pw };
+        // SAFETY: pw_name is a NUL-terminated string owned by the record.
+        let name = unsafe { CStr::from_ptr(rec.pw_name) }.to_bytes().to_vec();
+        out.push(UserEntry {
+            name,
+            gid: rec.pw_gid,
+            #[cfg(target_os = "macos")]
+            uuid: macos_mbr::uid_uuid(rec.pw_uid),
+        });
+    }
+    // SAFETY: closes the iterator opened above.
+    unsafe { libc::endpwent() };
+    (!failed).then_some(out)
+}
 
 /// Membership of `gid` for the group-write rule (spec section 2 safety row,
 /// decision 6 review): supplementary members (`gr_mem`) plus every user whose
-/// primary group is `gid`. On macOS each enumerated user is also asked of
-/// the system (`mbr_check_membership`), because groups such as `everyone`,
+/// primary group is `gid`. On macOS each user is also asked of the system
+/// (`mbr_check_membership`), because groups such as `everyone`,
 /// `localaccounts` and `_developer` have their members computed by the
 /// system: `gr_mem` is empty and no user has them as primary group.
-/// `Unknown` if the group lookup fails, the user enumeration ends with an
-/// error or passes `MAX_USERS`, or a membership question fails. init is
-/// single-threaded, so the non-reentrant getpwent walk is acceptable here.
-pub fn group_membership(gid: u32, user: &[u8]) -> Group {
+/// `users` is `local_users()`, read once by the caller. `Unknown` if the
+/// group lookup fails, `users` is `None`, or a membership question fails.
+pub fn group_membership(gid: u32, user: &[u8], users: Option<&[UserEntry]>) -> Group {
     let ok = |n: &[u8]| n == b"root" || n == user;
     let mut buf = vec![0u8; 4096];
     loop {
@@ -136,56 +184,33 @@ pub fn group_membership(gid: u32, user: &[u8]) -> Group {
         }
         break;
     }
+    let Some(users) = users else {
+        return Group::Unknown;
+    };
     #[cfg(target_os = "macos")]
     let Some(group_uuid) = macos_mbr::gid_uuid(gid) else {
         return Group::Unknown;
     };
-    // Primary-group members (and, on macOS, system-computed members): walk
-    // the user database.
-    // SAFETY: resets the iterator; no pointers involved.
-    unsafe { libc::setpwent() };
+    // Only the macOS membership question can lower this to `Unknown`.
+    #[cfg(target_os = "macos")]
     let mut verdict = Group::OnlyRootAndUser;
-    let mut seen = 0usize;
-    loop {
-        // SAFETY: clears errno so a NULL return can be told apart from an error.
-        unsafe { *errno_location() = 0 };
-        // SAFETY: getpwent returns NULL or a pointer valid until the next call.
-        let pw = unsafe { libc::getpwent() };
-        if pw.is_null() {
-            if std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != 0 {
-                verdict = Group::Unknown;
-            }
-            break;
-        }
-        // SAFETY: `pw` is non-null and points to a valid passwd record.
-        let rec = unsafe { &*pw };
-        // SAFETY: pw_name is a NUL-terminated string owned by the record.
-        let name = unsafe { CStr::from_ptr(rec.pw_name) }.to_bytes().to_vec();
-        seen += 1;
-        if seen > MAX_USERS {
-            verdict = Group::Unknown;
-            break;
-        }
-        if ok(&name) {
+    #[cfg(not(target_os = "macos"))]
+    let verdict = Group::OnlyRootAndUser;
+    for u in users {
+        if ok(&u.name) {
             continue;
         }
-        if rec.pw_gid == gid {
-            verdict = Group::HasOthers;
-            break;
+        if u.gid == gid {
+            return Group::HasOthers;
         }
         #[cfg(target_os = "macos")]
-        match macos_mbr::is_member(rec.pw_uid, &group_uuid) {
-            Some(true) => {
-                verdict = Group::HasOthers;
-                break;
-            }
+        match u.uuid.and_then(|uu| macos_mbr::is_member(&uu, &group_uuid)) {
+            Some(true) => return Group::HasOthers,
             Some(false) => {}
-            // Keep walking: a later member found is worse than unknown.
+            // Keep looking: a member found later is worse than unknown.
             None => verdict = Group::Unknown,
         }
     }
-    // SAFETY: closes the iterator opened above.
-    unsafe { libc::endpwent() };
     verdict
 }
 
@@ -221,17 +246,18 @@ mod macos_mbr {
         (unsafe { mbr_gid_to_uuid(gid, u.as_mut_ptr()) } == 0).then_some(u)
     }
 
-    /// The system's answer to "is `uid` a member of the group", including
-    /// computed and nested membership. `None` if either call fails.
-    pub fn is_member(uid: u32, group: &Uuid) -> Option<bool> {
+    pub fn uid_uuid(uid: u32) -> Option<Uuid> {
         let mut u = [0u8; 16];
         // SAFETY: `u` is the 16-byte uuid_t the function fills.
-        if unsafe { mbr_uid_to_uuid(uid, u.as_mut_ptr()) } != 0 {
-            return None;
-        }
+        (unsafe { mbr_uid_to_uuid(uid, u.as_mut_ptr()) } == 0).then_some(u)
+    }
+
+    /// The system's answer to "is this user a member of the group",
+    /// including computed and nested membership. `None` if the call fails.
+    pub fn is_member(user: &Uuid, group: &Uuid) -> Option<bool> {
         let mut is = 0;
         // SAFETY: both uuids are 16 readable bytes; `is` is a writable int.
-        let rc = unsafe { mbr_check_membership(u.as_ptr(), group.as_ptr(), &mut is) };
+        let rc = unsafe { mbr_check_membership(user.as_ptr(), group.as_ptr(), &mut is) };
         (rc == 0).then_some(is != 0)
     }
 }
@@ -446,7 +472,54 @@ mod tests {
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o775)).unwrap();
         let gid = std::fs::metadata(&d).unwrap().gid();
         let me = passwd_entry(current_uid()).unwrap().name;
-        assert_eq!(group_membership(gid, &me), Group::HasOthers);
+        let users = local_users();
+        assert_eq!(
+            group_membership(gid, &me, users.as_deref()),
+            Group::HasOthers
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
+}
+
+/// `mkdirat(dir, name, mode)`; an existing entry counts as success (the
+/// caller opens it without following and checks what it is).
+pub fn mkdir_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())?;
+    let mode = libc::mode_t::try_from(mode).map_err(|_| std::io::Error::other("mode"))?;
+    // SAFETY: `dir` is an open descriptor and `c` is NUL-terminated.
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), mode) } == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EEXIST) {
+        Ok(())
+    } else {
+        Err(e)
+    }
+}
+
+/// Opens the folder `name` inside `dir` without following a symlink at that
+/// last name (`O_NOFOLLOW`): a symlink fails with ELOOP, anything other
+/// than a folder with ENOTDIR.
+pub fn open_dir_at_nofollow(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is an open descriptor and `c` is NUL-terminated.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a fresh descriptor that nothing else owns.
+    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }

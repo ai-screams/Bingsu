@@ -3,7 +3,7 @@
 //! the local-filesystem check are M3a.
 use super::trusted_env::TrustedEnv;
 use std::ffi::OsString;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 pub struct RuntimeRootPin {
@@ -12,11 +12,13 @@ pub struct RuntimeRootPin {
     pub path: PathBuf,
 }
 
+/// `None` for config, state or log: the path could not be confirmed (see
+/// `canonical_lenient`); init then leaves that word out and warns.
 pub struct Roots {
     pub runtime: Option<RuntimeRootPin>,
-    pub config: PathBuf,
-    pub state: PathBuf,
-    pub log: PathBuf,
+    pub config: Option<PathBuf>,
+    pub state: Option<PathBuf>,
+    pub log: Option<PathBuf>,
 }
 
 fn abs(v: &Option<OsString>) -> Option<PathBuf> {
@@ -33,43 +35,64 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
     }
 }
 
-/// Creates the folder if missing (a concurrent creator is fine: recursive
-/// creation treats an existing directory as success), then opens it without
-/// following a symlink and, through that descriptor, checks the owner, sets
-/// the mode to exactly 0700 (the creation mode is masked by umask, and an
-/// existing folder may be looser) and checks that it is on a local file
-/// system. Any failure means no runtime root. The last folder must belong
-/// to the current user (spec section 4 "runtime root"; ancestor rules are
-/// M3a).
+/// Pins the runtime folder (spec section 4 "runtime root"; ancestor rules
+/// are M3a). The parent's existing part is canonicalized and opened; every
+/// missing folder below it, and the last folder, is created with `mkdirat`
+/// and opened with `openat(O_NOFOLLOW)` relative to the folder above, so a
+/// symlink in their place is refused, never followed. Through each
+/// descriptor the owner must be the current user and the mode becomes
+/// exactly 0700 (the creation mode is masked by umask, and an existing
+/// last folder may be looser); the last folder must also be on a local file
+/// system, checked before its mode is touched. `dev` and `ino` come from
+/// the last descriptor; `path` is the canonical parent plus the names
+/// opened. Any failure means no runtime root.
 pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
     pin_for(candidate, crate::sys::current_uid())
 }
 
 fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsFd, AsRawFd};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(candidate)?;
-    let path = std::fs::canonicalize(candidate)?;
-    let dir = std::fs::OpenOptions::new()
+    let bad = |what: &str| std::io::Error::other(format!("runtime root: {what}"));
+    let (Some(parent), Some(last)) = (candidate.parent(), candidate.file_name()) else {
+        return Err(bad("no folder name"));
+    };
+    let comps: Vec<Component<'_>> = parent.components().collect();
+    let (mut path, missing) = (1..=comps.len())
+        .rev()
+        .find_map(|k| {
+            let prefix: PathBuf = comps[..k].iter().collect();
+            std::fs::canonicalize(prefix).ok().map(|c| (c, &comps[k..]))
+        })
+        .ok_or_else(|| bad("no existing parent"))?;
+    let mut dir = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_DIRECTORY)
         .open(&path)?;
-    if dir.metadata()?.uid() != uid {
-        return Err(std::io::Error::other(
-            "runtime root is owned by another user",
-        ));
+    let owned_child = |dir: &std::fs::File, name: &std::ffi::OsStr| {
+        crate::sys::mkdir_at(dir.as_fd(), name, 0o700)?;
+        let child = crate::sys::open_dir_at_nofollow(dir.as_fd(), name)?;
+        if child.metadata()?.uid() != uid {
+            return Err(bad("owned by another user"));
+        }
+        Ok(child)
+    };
+    for c in missing {
+        let Component::Normal(name) = c else {
+            return Err(bad("unexpected path component"));
+        };
+        let child = owned_child(&dir, name)?;
+        child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        path.push(name);
+        dir = child;
     }
-    if crate::sys::fd_is_local(dir.as_raw_fd()) != Some(true) {
-        return Err(std::io::Error::other(
-            "runtime root is not on a local file system",
-        ));
+    let root = owned_child(&dir, last)?;
+    if crate::sys::fd_is_local(root.as_raw_fd()) != Some(true) {
+        return Err(bad("not on a local file system"));
     }
-    dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-    // O_DIRECTORY made it a directory; fchmod succeeded, so the mode is 0700.
-    let md = dir.metadata()?;
+    root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    let md = root.metadata()?;
+    path.push(last);
     Ok(RuntimeRootPin {
         dev: md.dev(),
         ino: md.ino(),
@@ -78,33 +101,26 @@ fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
 }
 
 /// Canonical form of a path that may not exist yet: canonicalize the
-/// longest existing prefix, then add the remaining names with "." dropped
-/// and ".." taking off the previous name (lexically: those names do not
-/// exist, so no symlink can sit there). If that brings back a name that
-/// does exist (`a/missing/../link`), the result is canonicalized again the
-/// same way; the second pass has no "..", so it ends.
-pub fn canonical_lenient(p: &Path) -> PathBuf {
-    let once = |p: &Path| -> PathBuf {
-        let comps: Vec<Component<'_>> = p.components().collect();
-        for k in (1..=comps.len()).rev() {
-            let prefix: PathBuf = comps[..k].iter().collect();
-            if let Ok(mut out) = std::fs::canonicalize(&prefix) {
-                for c in &comps[k..] {
-                    match c {
-                        Component::Normal(n) => out.push(n),
-                        Component::ParentDir => {
-                            out.pop();
-                        }
-                        _ => {}
-                    }
+/// longest existing prefix and append the remaining names. Those names do
+/// not exist now, but by the time they do any of them may be a symlink, so
+/// a ".." among them cannot be resolved ahead of the kernel: such a path
+/// gives `None` (not pinned, warned) rather than a guess.
+pub fn canonical_lenient(p: &Path) -> Option<PathBuf> {
+    let comps: Vec<Component<'_>> = p.components().collect();
+    for k in (1..=comps.len()).rev() {
+        let prefix: PathBuf = comps[..k].iter().collect();
+        if let Ok(mut out) = std::fs::canonicalize(&prefix) {
+            for c in &comps[k..] {
+                match c {
+                    Component::Normal(n) => out.push(n),
+                    Component::CurDir => {}
+                    _ => return None,
                 }
-                return out;
             }
+            return Some(out);
         }
-        p.to_path_buf()
-    };
-    let first = once(p);
-    if first == p { first } else { once(&first) }
+    }
+    None
 }
 
 pub fn resolve(env: &TrustedEnv, home: &Path) -> Roots {
@@ -120,7 +136,9 @@ pub fn resolve(env: &TrustedEnv, home: &Path) -> Roots {
                 .unwrap_or_else(|| home.join(".config"))
                 .join("bingsu"),
         ),
-        log: canonical_lenient(&state.join("log")),
+        log: state
+            .as_ref()
+            .and_then(|s| canonical_lenient(&s.join("log"))),
         state,
     }
 }
@@ -148,7 +166,7 @@ mod tests {
         let link = base.join("link");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        let got = canonical_lenient(&link.join("bingsu").join("log"));
+        let got = canonical_lenient(&link.join("bingsu").join("log")).unwrap();
         assert_eq!(
             got,
             std::fs::canonicalize(&real)
@@ -174,8 +192,8 @@ mod tests {
             ..env(None, None)
         };
         let roots = resolve(&e, &base.join("home"));
-        assert_eq!(roots.log, std::fs::canonicalize(&elsewhere).unwrap());
-        assert_eq!(roots.state, std::fs::canonicalize(&state).unwrap());
+        assert_eq!(roots.log, Some(std::fs::canonicalize(&elsewhere).unwrap()));
+        assert_eq!(roots.state, Some(std::fs::canonicalize(&state).unwrap()));
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -186,22 +204,25 @@ mod tests {
         d
     }
 
-    // 이것을 실패시키는 것: 없는 상위 폴더 뒤의 `..`를 풀지 않거나(`missing/..`가 그대로 박힘),
-    // `..`로 되돌아온 이미 있는 symlink를 풀지 않는 것.
+    // A ".." after a missing name: `missing` may later be created as a
+    // symlink, so the kernel's answer is unknown now. Without ".." the
+    // missing names are kept as they are (control row).
+    // 이것을 실패시키는 것: 없는 구간의 `..`를 어휘적으로 접어 추측한 경로를 박는 것.
     #[test]
-    fn canonical_lenient_folds_dotdot_after_missing_names() {
+    fn canonical_lenient_refuses_dotdot_after_missing_names() {
         let base = scratch("lenient-dotdot");
-        let real = base.join("real");
-        std::fs::create_dir_all(&real).unwrap();
-        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        std::fs::create_dir_all(base.join("deep/a/b")).unwrap();
+        std::os::unix::fs::symlink(base.join("deep/a/b"), base.join("lnk")).unwrap();
         let canon = std::fs::canonicalize(&base).unwrap();
+        assert_eq!(canonical_lenient(&base.join("missing/../lnk/../x")), None);
+        assert_eq!(canonical_lenient(&base.join("missing/../cfgx")), None);
         assert_eq!(
-            canonical_lenient(&base.join("missing/../cfgx")),
-            canon.join("cfgx")
+            canonical_lenient(&base.join("missing/x")),
+            Some(canon.join("missing/x"))
         );
         assert_eq!(
-            canonical_lenient(&base.join("missing/./x/../../link/b")),
-            canon.join("real/b")
+            canonical_lenient(&base.join("lnk/../x")),
+            Some(canon.join("deep/a/x"))
         );
         std::fs::remove_dir_all(&base).unwrap();
     }
@@ -221,7 +242,7 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    // /home is an autofs mount point owned by root. With uid 0 the owner
+    // /System/Volumes/Data/home is an autofs mount point owned by root. With uid 0 the owner
     // check passes, so the refusal must come from the file-system check
     // (without it, fchmod would fail with a permission error instead).
     // 이것을 실패시키는 것: 런타임 폴더의 로컬 파일 시스템 검사를 빼는 것.
@@ -234,7 +255,9 @@ mod tests {
             eprintln!("skip: /System/Volumes/Data/home is not an autofs mount here");
             return;
         }
-        let err = pin_for(Path::new("/home"), 0).err().expect("must refuse");
+        let err = pin_for(Path::new("/System/Volumes/Data/home"), 0)
+            .err()
+            .expect("must refuse");
         assert!(err.to_string().contains("local file system"), "{err}");
     }
 

@@ -92,8 +92,15 @@ def test_reader_substitution_matches_golden_runner(tmp_path, shells):
 # _bingsu_session을 모양 검사 없이 쓰는 것.
 # zsh does not run the command but prints a math error for "$(...)" and
 # reads "08" as 8 (or fails under OCTAL_ZEROES).
-@pytest.mark.parametrize("seq", ["a[$(touch {c})]", "$(touch {c})", "08"])
-def test_inherited_seq_and_session_are_not_trusted(tmp_path, shells, seq):
+# "1\n" and a trailing newline on a valid session pass a regex anchored
+# with "$" (fish string match -r is PCRE2); "\z" refuses them.
+@pytest.mark.parametrize("seq,session", [
+    ("a[$(touch {c})]", "x$(touch {c})"),
+    ("$(touch {c})", "x$(touch {c})"),
+    ("08", "x$(touch {c})"),
+    ("1\n", "0123456789abcdef0123456789abcdef\n"),
+])
+def test_inherited_seq_and_session_are_not_trusted(tmp_path, shells, seq, session):
     for shell in shells:
         base = tmp_path / shell
         inst = Install(base)
@@ -102,7 +109,7 @@ def test_inherited_seq_and_session_are_not_trusted(tmp_path, shells, seq):
         inst.use_fake(minimal_record())
         canary = base / "PWNED"
         env["_bingsu_seq"] = seq.format(c=canary)
-        env["_bingsu_session"] = f"x$(touch {canary})"
+        env["_bingsu_session"] = session.format(c=canary)
         (base / "init.sh").write_bytes(script)
         r = run_shell_script(shell, source(shell, base / "init.sh") + call(shell), env, base)
         assert r.returncode == 0 and r.stderr == b"", (shell, r.stderr)
@@ -112,3 +119,26 @@ def test_inherited_seq_and_session_are_not_trusted(tmp_path, shells, seq):
         assert argv[i + 1] == b"1", (shell, argv)
         s = argv[argv.index(b"--session") + 1]
         assert len(s) == 32 and all(c in b"0123456789abcdef" for c in s), (shell, argv)
+        assert s != b"0123456789abcdef0123456789abcdef", (shell, argv)
+
+
+# bash nocasematch makes `case` accept uppercase hex; the binary only takes
+# lowercase, so every prompt would be bad-args. The hook clears it around
+# the check and restores it.
+# 이것을 실패시키는 것: bash hook의 session 검사에서 nocasematch 가드를 빼는 것.
+def test_bash_session_check_ignores_nocasematch(tmp_path, shells):
+    if "bash" not in shells:
+        pytest.skip("bash not in BINGSU_TEST_SHELLS")
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    script = inst.init("bash", env)
+    inst.use_fake(minimal_record())
+    env["_bingsu_session"] = "0123456789ABCDEF0123456789ABCDEF"
+    (tmp_path / "init.sh").write_bytes(script)
+    body = b"shopt -s nocasematch\n" + source("bash", tmp_path / "init.sh") + call("bash")
+    body += b"shopt -q nocasematch || echo lost >&2\n"
+    r = run_shell_script("bash", body, env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    (argv,) = inst.calls()
+    s = argv[argv.index(b"--session") + 1]
+    assert len(s) == 32 and all(c in b"0123456789abcdef" for c in s), argv

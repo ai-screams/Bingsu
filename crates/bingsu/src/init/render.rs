@@ -13,9 +13,10 @@ pub struct ScriptInputs<'a> {
     pub shell: Shell,
     pub exe: &'a [u8],
     pub runtime_root: Option<(u64, u64, &'a [u8])>,
-    pub config_root: &'a [u8],
-    pub state_root: &'a [u8],
-    pub log_root: &'a [u8],
+    /// `None`: the path could not be confirmed; the word is left out.
+    pub config_root: Option<&'a [u8]>,
+    pub state_root: Option<&'a [u8]>,
+    pub log_root: Option<&'a [u8]>,
     pub session_hex: &'a [u8; 32],
 }
 
@@ -56,9 +57,21 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
                 prefixed(sh, RUNTIME_ROOT_PREFIX, &v, out);
             }
         }
-        b"CONFIG_ROOT" => prefixed(sh, CONFIG_ROOT_PREFIX, inp.config_root, out),
-        b"STATE_ROOT" => prefixed(sh, STATE_ROOT_PREFIX, inp.state_root, out),
-        b"LOG_ROOT" => prefixed(sh, LOG_ROOT_PREFIX, inp.log_root, out),
+        b"CONFIG_ROOT" => {
+            if let Some(v) = inp.config_root {
+                prefixed(sh, CONFIG_ROOT_PREFIX, v, out);
+            }
+        }
+        b"STATE_ROOT" => {
+            if let Some(v) = inp.state_root {
+                prefixed(sh, STATE_ROOT_PREFIX, v, out);
+            }
+        }
+        b"LOG_ROOT" => {
+            if let Some(v) = inp.log_root {
+                prefixed(sh, LOG_ROOT_PREFIX, v, out);
+            }
+        }
         b"MSG_BASH_TOO_OLD" => encode_word(sh, en(MsgId::BashTooOld).as_bytes(), out),
         b"MSG_LATE_HOOK_ZSH" => encode_word(sh, en(MsgId::LateHookZsh).as_bytes(), out),
         b"MSG_LATE_HOOK_BASH" => encode_word(sh, en(MsgId::LateHookBash).as_bytes(), out),

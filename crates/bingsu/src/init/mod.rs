@@ -63,6 +63,9 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
         exe_path::Verdict::Tamperable => eprintln!("{}", en(MsgId::Tamperable)),
     }
     let roots = roots::resolve(&env, &pw.home);
+    if roots.config.is_none() || roots.state.is_none() || roots.log.is_none() {
+        eprintln!("{}", en(MsgId::UnconfirmedRoot));
+    }
     if roots.runtime.is_none() {
         eprintln!("{}", en(MsgId::NoRuntimeRoot));
     }
@@ -77,9 +80,9 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
             .runtime
             .as_ref()
             .map(|r| (r.dev, r.ino, r.path.as_os_str().as_bytes())),
-        config_root: roots.config.as_os_str().as_bytes(),
-        state_root: roots.state.as_os_str().as_bytes(),
-        log_root: roots.log.as_os_str().as_bytes(),
+        config_root: roots.config.as_ref().map(|p| p.as_os_str().as_bytes()),
+        state_root: roots.state.as_ref().map(|p| p.as_os_str().as_bytes()),
+        log_root: roots.log.as_ref().map(|p| p.as_os_str().as_bytes()),
         session_hex: &session,
     };
     let mut out = Vec::with_capacity(16 * 1024);

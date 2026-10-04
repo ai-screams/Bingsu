@@ -471,25 +471,34 @@ fn macos_everyone_group_writable_warns() {
 }
 
 /// Every local account the system counts as a member of `group`, asked
-/// through dsmemberutil (independent of the code under test).
+/// through dsmemberutil (independent of the code under test). `None` if any
+/// oracle command fails or answers something else: a partial list would
+/// make the skip decision wrong.
 #[cfg(target_os = "macos")]
-fn ds_members(group: &str) -> Vec<String> {
+fn ds_members(group: &str) -> Option<Vec<String>> {
     let users = Command::new("/usr/bin/dscl")
         .args([".", "list", "/Users"])
         .output()
-        .unwrap();
-    String::from_utf8(users.stdout)
-        .unwrap()
-        .lines()
-        .filter(|u| {
-            let r = Command::new("/usr/bin/dsmemberutil")
-                .args(["checkmembership", "-U", u, "-G", group])
-                .output()
-                .unwrap();
-            r.stdout.starts_with(b"user is a member")
-        })
-        .map(str::to_owned)
-        .collect()
+        .ok()?;
+    if !users.status.success() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for u in String::from_utf8(users.stdout).ok()?.lines() {
+        let r = Command::new("/usr/bin/dsmemberutil")
+            .args(["checkmembership", "-U", u, "-G", group])
+            .output()
+            .ok()?;
+        if !r.status.success() {
+            return None;
+        }
+        if r.stdout.starts_with(b"user is a member") {
+            out.push(u.to_owned());
+        } else if !r.stdout.starts_with(b"user is not a member") {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 // Homebrew rule: a group-writable folder whose group holds only root and
@@ -507,7 +516,10 @@ fn macos_admin_group_with_only_root_and_me_is_safe() {
     )
     .unwrap();
     let me = me.trim();
-    let mut members = ds_members("admin");
+    let Some(mut members) = ds_members("admin") else {
+        eprintln!("skip: the dscl/dsmemberutil oracle failed for some account");
+        return;
+    };
     members.sort();
     let mut want = vec!["root".to_owned(), me.to_owned()];
     want.sort();
@@ -618,4 +630,105 @@ fn relative_path_entry_falls_back_to_resolved_executable() {
         b"bingsu: could not find the path you ran bingsu from; using the resolved executable path. Run: bingsu doctor\n"
     );
     assert!(!has(&out.stdout, exe.as_os_str().as_bytes()));
+}
+
+const NO_RUNTIME: &[u8] =
+    b"bingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor\n";
+
+// The last runtime folder must be opened without following a symlink:
+// `run/bingsu -> victim` is refused, and victim keeps its mode.
+// 이것을 실패시키는 것: 마지막 이름을 따라가 여는 것(victim이 0700이 되고 뿌리로 박힘).
+#[test]
+fn runtime_root_symlink_is_refused_not_followed() {
+    let base = scratch("runtime-symlink");
+    let exe = install(&base, b"bin");
+    for d in ["run", "victim"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+        chmod(&base.join(d), 0o755);
+    }
+    std::os::unix::fs::symlink(base.join("victim"), base.join("run/bingsu")).unwrap();
+    let out = init(&exe, "zsh", &base);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stderr,
+        NO_RUNTIME,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!has(&out.stdout, b"--runtime-root="));
+    let md = std::fs::metadata(base.join("victim")).unwrap();
+    assert_eq!(md.mode() & 0o7777, 0o755);
+}
+
+// Missing folders above the runtime folder are made 0700 too; under umask
+// 0177 a plain mkdir would leave them 0600 and block the next level.
+// 이것을 실패시키는 것: 중간 폴더를 0700으로 맞추지 않는 것(0600 중간 폴더 때문에 뿌리 없음).
+#[test]
+fn missing_parents_of_runtime_root_are_0700_under_umask_0177() {
+    let base = scratch("umask-parents");
+    let exe = install(&base, b"bin");
+    let out = Command::new("/bin/sh")
+        .args(["-c", "umask 0177; exec \"$0\" init zsh"])
+        .arg(&exe)
+        .env_clear()
+        .env("XDG_RUNTIME_DIR", base.join("run"))
+        .env("XDG_STATE_HOME", base.join("state"))
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for d in ["run", "run/bingsu"] {
+        let md = std::fs::metadata(base.join(d)).unwrap();
+        assert_eq!(md.mode() & 0o7777, 0o700, "{d}");
+    }
+}
+
+// A ".." after a name that does not exist yet cannot be resolved ahead of
+// the kernel: the state and log words are left out and init warns. The
+// same path without ".." is pinned as is (control row).
+// 이것을 실패시키는 것: 없는 구간의 `..`를 어휘적으로 접어 추측한 경로를 박는 것.
+#[test]
+fn state_root_with_dotdot_after_missing_name_is_not_pinned() {
+    let base = scratch("state-dotdot");
+    let exe = install(&base, b"bin");
+    std::fs::create_dir_all(base.join("cl/deep/a/b")).unwrap();
+    std::os::unix::fs::symlink(base.join("cl/deep/a/b"), base.join("cl/lnk")).unwrap();
+    let run = |state: &str| {
+        Command::new(&exe)
+            .args(["init", "zsh"])
+            .env_clear()
+            .env("XDG_RUNTIME_DIR", base.join("run"))
+            .env("XDG_CONFIG_HOME", base.join("cfg"))
+            .env("XDG_STATE_HOME", base.join(state))
+            .output()
+            .unwrap()
+    };
+    let out = run("cl/missing/../lnk/../x");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stderr,
+        b"bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor\n"
+    );
+    assert!(!has(&out.stdout, b"--state-root="));
+    assert!(!has(&out.stdout, b"--log-root="));
+    assert!(has(&out.stdout, b"--config-root="));
+    let out = run("cl/missing/x");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = format!(
+        "'--state-root={}'",
+        std::fs::canonicalize(base.join("cl"))
+            .unwrap()
+            .join("missing/x/bingsu")
+            .display()
+    );
+    assert!(has(&out.stdout, want.as_bytes()), "missing {want}");
 }

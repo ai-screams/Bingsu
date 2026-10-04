@@ -4,9 +4,15 @@
 # Both may come from the environment. Only init's own shapes are kept: a
 # 32-digit lowercase hex session and a short decimal counter (the counter
 # goes through $(( )), which evaluates subscripts such as a[$(cmd)]).
+# nocasematch would let `case` accept uppercase hex (F-18): save, clear,
+# restore, as the reader does.
+_bingsu_nm=0
+if shopt -q nocasematch; then _bingsu_nm=1; shopt -u nocasematch; fi
 case $_bingsu_session in
   *[!0-9a-f]*) _bingsu_session=@SESSION@ ;;
 esac
+if (( _bingsu_nm )); then shopt -s nocasematch; fi
+unset _bingsu_nm
 (( ${#_bingsu_session} == 32 )) || _bingsu_session=@SESSION@
 : "${_bingsu_seq:=0}"
 _bingsu_rec=

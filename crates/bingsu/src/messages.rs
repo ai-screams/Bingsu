@@ -12,6 +12,7 @@ pub enum MsgId {
     Tamperable,
     TamperUnknown,
     NoRuntimeRoot,
+    UnconfirmedRoot,
     BashTooOld,
     LateHookZsh,
     LateHookBash,
@@ -24,19 +25,20 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 9] = [
+pub const ALL: [MsgId; 10] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
     MsgId::Tamperable,
     MsgId::TamperUnknown,
     MsgId::NoRuntimeRoot,
+    MsgId::UnconfirmedRoot,
     MsgId::BashTooOld,
     MsgId::LateHookZsh,
     MsgId::LateHookBash,
 ];
 
-const EN: [(MsgId, &str); 9] = [
+const EN: [(MsgId, &str); 10] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -60,6 +62,10 @@ const EN: [(MsgId, &str); 9] = [
     (
         MsgId::NoRuntimeRoot,
         "bingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor",
+    ),
+    (
+        MsgId::UnconfirmedRoot,
+        "bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor",
     ),
     (
         MsgId::BashTooOld,
