@@ -90,7 +90,7 @@ def test_exit_status_reaches_next_hook_and_is_returned(tmp_path):
 
 
 # F-23: init twice redefines functions but registers hooks once.
-# 이것을 실패시키는 것: 등록 블록의 `(( ! ${+_bingsu_hooked} ))` 조건을 지우는 것.
+# 이것을 실패시키는 것: 등록 블록의 `(( ! ${precmd_functions[(Ie)_bingsu_install]:-0} ))` 조건을 지우는 것.
 def test_init_twice_registers_hooks_once(tmp_path):
     s, inst, _ = start(tmp_path, record=minimal_record())
     s.run(f"source {tmp_path / 'init.zsh'}")
@@ -100,6 +100,38 @@ def test_init_twice_registers_hooks_once(tmp_path):
     out = visible(s.close())
     assert b"N=2 P=1" in out
     assert b"another prompt hook" not in out
+
+
+# A hook appended after init turns PROMPT_SUBST on after the install hook
+# looked at the options (spec section 7 "옵션 변경 시점").
+# 이것을 실패시키는 것: 설치 hook이 마지막이 아닐 때 참조형으로 설치하는 조건(`|| ! last`)을 빼는 것(첫 프롬프트에서 실행),
+# 설치 hook이 자기를 맨 끝으로 되돌리는 줄을 지우는 것(LAST가 _evil).
+def test_late_hook_turning_on_prompt_subst_is_contained(tmp_path):
+    rc_after = "_evil() { setopt prompt_subst }\nprecmd_functions+=(_evil)"
+    s, _, canaries = start(tmp_path, rc_before="unsetopt prompt_subst", rc_after=rc_after)
+    for _ in range(3):
+        s.run('print -r -- "LAST=${precmd_functions[-1]}"')
+    out = visible(s.close())
+    assert not any(c.exists() for c in canaries), "data was executed"
+    assert out.count(b"LAST=_bingsu_install") == 3 and b"LAST=_evil" not in out, out
+    assert want_left(canaries) in out
+    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
+
+
+# A hook that puts itself last on every prompt, while PROMPT_SUBST is off
+# whenever the install hook looks: every prompt must go in by reference.
+# 이것을 실패시키는 것: 설치 hook이 마지막이 아닐 때 참조형으로 설치하는 조건(`|| ! last`)을 빼는 것.
+def test_hook_fighting_for_last_is_contained(tmp_path):
+    rc_after = ("_off() { unsetopt prompt_subst }\npreexec_functions+=(_off)\n"
+                "_evil() { setopt prompt_subst; precmd_functions=(${precmd_functions:#_evil} _evil) }\n"
+                "precmd_functions+=(_evil)")
+    s, _, canaries = start(tmp_path, rc_before="unsetopt prompt_subst", rc_after=rc_after)
+    for _ in range(3):
+        s.run("true")
+    out = visible(s.close())
+    assert not any(c.exists() for c in canaries), "data was executed"
+    assert want_left(canaries) in out
+    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
 
 
 # 이것을 실패시키는 것: 경고 조건에서 `-z $_bingsu_warned_last`를 빼는 것(경고가 프롬프트마다 나감).
@@ -203,3 +235,19 @@ def test_save_hook_under_hostile_user_options(tmp_path):
     r, argv = install_once(tmp_path, body)
     assert opt(argv, b"--status") == b"1" and opt(argv, b"--pipestatus") == b"0,1", argv
     assert r.stdout == b"RC=1\n", r.stdout
+
+
+# A registration flag inherited from the environment must not keep the
+# hooks out: registration is decided by the arrays.
+# 이것을 실패시키는 것: 등록 조건을 `(( ! ${+_bingsu_hooked} ))` 같은 플래그 검사로 되돌리는 것.
+def test_inherited_hooked_flag_does_not_block_registration(tmp_path):
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    script = inst.init("zsh", env)
+    inst.use_fake(minimal_record())
+    env["_bingsu_hooked"] = "1"
+    body = b'print -r -- "PF=[$precmd_functions] EF=[$preexec_functions]"\n_bingsu_install\n'
+    r = run_shell_script("zsh", script + b"\n" + body, env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    assert r.stdout == b"PF=[_bingsu_save _bingsu_install] EF=[_bingsu_preexec]\n", r.stdout
+    assert len(inst.calls()) == 1

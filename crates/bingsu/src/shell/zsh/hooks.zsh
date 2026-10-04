@@ -43,12 +43,20 @@ _bingsu_preexec() {
 # right before installing, and before `emulate` makes them local
 # (spec section 3 option table, F-18). Data never reaches PROMPT unescaped:
 # reference when PROMPT_SUBST is on, plain assignment otherwise.
+# A hook running after this one may still change the options, so when
+# this hook is not last the prompt is installed by reference whatever the
+# options say (a reference is expanded once and its value is never
+# expanded again; with PROMPT_SUBST off it shows as literal text, which is
+# ugly but runs nothing), and the hook moves itself back to the end. zsh
+# walks a copy of precmd_functions, so the move takes effect from the next
+# prompt and nothing in the current walk is skipped or run twice.
 _bingsu_install() {
-  local o_subst=0 o_bang=0 o_pct=0
+  local o_subst=0 o_bang=0 o_pct=0 last=1
   [[ -o prompt_subst ]] && o_subst=1
   [[ -o prompt_bang ]] && o_bang=1
   [[ -o prompt_percent ]] && o_pct=1
   emulate -L zsh
+  [[ ${precmd_functions[-1]} == _bingsu_install ]] || last=0
   local -a ctx
   local -i ms
   local pst=${(j:,:)_bingsu_p} ps1 rps1
@@ -64,7 +72,7 @@ _bingsu_install() {
   if (( o_pct )) && _bingsu_frame "$_bingsu_rec"; then
     ps1=$_bingsu_f[3] rps1=$_bingsu_f[4]
     if (( o_bang )); then ps1=${ps1//!/!!} rps1=${rps1//!/!!}; fi
-    if (( o_subst )); then
+    if (( o_subst || ! last )); then
       _bingsu_ps1=$ps1 _bingsu_rps1=$rps1
       PROMPT='${_bingsu_ps1}' RPROMPT='${_bingsu_rps1}'
     else
@@ -77,19 +85,25 @@ _bingsu_install() {
     # a constant instead (option (b), question Q4).
     PROMPT='❯ ' RPROMPT=
   fi
-  if [[ ${precmd_functions[-1]} != _bingsu_install && -z $_bingsu_warned_last ]]; then
-    _bingsu_warned_last=1
-    print -u2 -r -- @MSG_LATE_HOOK_ZSH@
+  if (( ! last )); then
+    precmd_functions=(${precmd_functions:#_bingsu_install} _bingsu_install)
+    if [[ -z $_bingsu_warned_last ]]; then
+      _bingsu_warned_last=1
+      print -u2 -r -- @MSG_LATE_HOOK_ZSH@
+    fi
   fi
   return $_bingsu_s
 }
 
 # Register once (F-23). Function bodies above are redefined on every init.
+# Registration is decided by the arrays themselves, not by a flag: a flag
+# can arrive from the environment and silently switch bingsu off.
 () {
   emulate -L zsh
-  if (( ! ${+_bingsu_hooked} )); then
-    typeset -g _bingsu_hooked=1
-    precmd_functions=(_bingsu_save $precmd_functions _bingsu_install)
+  if (( ! ${precmd_functions[(Ie)_bingsu_install]:-0} )); then
+    precmd_functions=(_bingsu_save ${precmd_functions:#_bingsu_save} _bingsu_install)
+  fi
+  if (( ! ${preexec_functions[(Ie)_bingsu_preexec]:-0} )); then
     preexec_functions+=(_bingsu_preexec)
   fi
 }
