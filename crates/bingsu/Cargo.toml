@@ -1,0 +1,15 @@
+[package]
+name = "bingsu"
+version = "0.0.0"
+description = "Cross-shell prompt engine"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bingsu-core = { path = "../bingsu-core" }

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/bingsu-core", "crates/bingsu"]
+exclude = ["crates/bingsu-core/purity-canary", "bench/size-probe"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ai-screams/Bingsu"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# panic = "abort" is intentionally absent: prompt must catch unwind panics
+# and still print a minimal record (spec section 6).
