@@ -26,7 +26,10 @@ cd "$(dirname "$0")/.."
 # wrapper or a replaced rustc could add --cap-lints allow for bingsu-core
 # alone, which the canaries (separate crates) would not notice. Only the
 # environment is covered here: a wrapper or [env] in $CARGO_HOME/config.toml
-# belongs to the machine running the gate and is out of scope.
+# belongs to the machine running the gate and is out of scope. The checker
+# binary is built in the shared target/ and could come from a cache poisoned
+# by an earlier run; whoever controlled that run's environment could edit this
+# script as well, so that is an accepted residual risk.
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CLIPPY_CONF_DIR \
   CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR \
   RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTC CARGO_BUILD_RUSTC \
@@ -66,10 +69,8 @@ python3 scripts/check_core_cfg.py --phase tokens --checker "$checker"
 # Change these counts together with the clippy.toml lists.
 python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 123
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7
-# Count diagnostics instead of trusting the exit code: under --cap-lints warn
-# clippy exits 0 but still reports them.
-CLIPPY_CONF_DIR="$PWD/crates/bingsu-core" cargo clippy --quiet --message-format=json -p bingsu-core --all-targets --all-features -- -D warnings \
-  -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros \
-  | python3 scripts/check_core_clippy_clean.py
+# clippy on core, in a fresh temporary target directory with its config
+# pinned; diagnostics are counted, not only the exit code.
+python3 scripts/check_core_clippy_clean.py
 cargo deny --manifest-path crates/bingsu-core/Cargo.toml --config crates/bingsu-core/deny.toml check bans
 echo "core purity gate: ok"
