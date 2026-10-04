@@ -732,3 +732,40 @@ fn state_root_with_dotdot_after_missing_name_is_not_pinned() {
     );
     assert!(has(&out.stdout, want.as_bytes()), "missing {want}");
 }
+
+// A candidate the walk refuses must be refused before anything is created:
+// `miss/../r4` used to leave `miss` behind. Creating and then rolling back
+// would also leave no `miss`, so the holding folder's mtime is compared too.
+// 이것을 실패시키는 것: 없는 구간의 성분 검사를 mkdirat 뒤로 미루는 것(`miss`가 생겼다 지워져 mtime이 바뀜).
+#[test]
+fn refused_runtime_candidate_creates_nothing() {
+    let base = scratch("runtime-dotdot");
+    let exe = install(&base, b"bin");
+    let rt = base.join("rt");
+    std::fs::create_dir_all(&rt).unwrap();
+    chmod(&rt, 0o755);
+    let before = std::fs::metadata(&rt).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let out = Command::new(&exe)
+        .args(["init", "zsh"])
+        .env_clear()
+        .env("XDG_RUNTIME_DIR", rt.join("miss/../r4"))
+        .env("XDG_STATE_HOME", base.join("state"))
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.stderr,
+        NO_RUNTIME,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rt.join("miss").exists());
+    assert!(!rt.join("r4").exists());
+    let after = std::fs::metadata(&rt).unwrap();
+    assert_eq!(
+        (after.mtime(), after.mtime_nsec()),
+        (before.mtime(), before.mtime_nsec())
+    );
+}

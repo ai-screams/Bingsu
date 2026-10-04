@@ -36,7 +36,8 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
 }
 
 /// Pins the runtime folder (spec section 4 "runtime root"; ancestor rules
-/// are M3a). The parent's existing part is canonicalized and opened; every
+/// are M3a). The parent's existing part is canonicalized and opened by a
+/// no-follow walk from "/" (`open_canonical_dir`); every
 /// missing folder below it, and the last folder, is created with `mkdirat`
 /// and opened with `openat(O_NOFOLLOW)` relative to the folder above, so a
 /// symlink in their place is refused, never followed. Through each
@@ -45,53 +46,101 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
 /// last folder may be looser); the last folder must also be on a local file
 /// system, checked before its mode is touched. `dev` and `ino` come from
 /// the last descriptor; `path` is the canonical parent plus the names
-/// opened. Any failure means no runtime root.
+/// opened. Any failure means no runtime root, and the folders this call
+/// created are removed again.
 pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
     pin_for(candidate, crate::sys::current_uid())
 }
 
+/// Opens a canonical folder by walking it from "/" one name at a time with
+/// `openat(O_NOFOLLOW)`. A canonical path holds no symlink, so a name that
+/// is a symlink now (swapped in after canonicalization) fails the walk
+/// instead of redirecting it (the same walk as spec section 4 "runtime
+/// root" 4 at prompt time).
+fn open_canonical_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open("/")?;
+    for c in path.components() {
+        match c {
+            Component::RootDir => {}
+            Component::Normal(name) => dir = crate::sys::open_dir_at_nofollow(dir.as_fd(), name)?,
+            _ => return Err(std::io::Error::other("runtime root: not a canonical path")),
+        }
+    }
+    Ok(dir)
+}
+
 fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
     use std::os::fd::{AsFd, AsRawFd};
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     let bad = |what: &str| std::io::Error::other(format!("runtime root: {what}"));
     let (Some(parent), Some(last)) = (candidate.parent(), candidate.file_name()) else {
         return Err(bad("no folder name"));
     };
     let comps: Vec<Component<'_>> = parent.components().collect();
-    let (mut path, missing) = (1..=comps.len())
+    let (base, missing) = (1..=comps.len())
         .rev()
         .find_map(|k| {
             let prefix: PathBuf = comps[..k].iter().collect();
             std::fs::canonicalize(prefix).ok().map(|c| (c, &comps[k..]))
         })
         .ok_or_else(|| bad("no existing parent"))?;
-    let mut dir = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY)
-        .open(&path)?;
-    let owned_child = |dir: &std::fs::File, name: &std::ffi::OsStr| {
-        crate::sys::mkdir_at(dir.as_fd(), name, 0o700)?;
-        let child = crate::sys::open_dir_at_nofollow(dir.as_fd(), name)?;
-        if child.metadata()?.uid() != uid {
-            return Err(bad("owned by another user"));
-        }
-        Ok(child)
-    };
-    for c in missing {
-        let Component::Normal(name) = c else {
-            return Err(bad("unexpected path component"));
+    // Every name to create must be a plain name, checked before creating
+    // anything (`miss/../r4` would otherwise leave `miss` behind).
+    let names: Vec<&std::ffi::OsStr> = missing
+        .iter()
+        .map(|c| match c {
+            Component::Normal(n) => Ok(*n),
+            _ => Err(bad("unexpected path component")),
+        })
+        .collect::<std::io::Result<_>>()?;
+    // `chain[i]` is the folder that holds `chain[i + 1]`; `created` lists
+    // (index of the holding folder, name) for each folder this call made.
+    let mut chain = vec![open_canonical_dir(&base)?];
+    let mut created: Vec<(usize, std::ffi::OsString)> = Vec::new();
+    let result = (|| {
+        let mut owned_child = |chain: &Vec<std::fs::File>, name: &std::ffi::OsStr| {
+            let holder = chain.len() - 1;
+            if crate::sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
+                created.push((holder, name.to_os_string()));
+            }
+            let child = crate::sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
+            if child.metadata()?.uid() != uid {
+                return Err(bad("owned by another user"));
+            }
+            Ok(child)
         };
-        let child = owned_child(&dir, name)?;
-        child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-        path.push(name);
-        dir = child;
-    }
-    let root = owned_child(&dir, last)?;
-    if crate::sys::fd_is_local(root.as_raw_fd()) != Some(true) {
-        return Err(bad("not on a local file system"));
-    }
-    root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        for name in &names {
+            let child = owned_child(&chain, name)?;
+            child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+            chain.push(child);
+        }
+        let root = owned_child(&chain, last)?;
+        if crate::sys::fd_is_local(root.as_raw_fd()) != Some(true) {
+            return Err(bad("not on a local file system"));
+        }
+        root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        Ok(root)
+    })();
+    let root = match result {
+        Ok(root) => root,
+        Err(e) => {
+            // Undo what this call made, deepest first. Folders that already
+            // existed are not touched; a folder another process filled in
+            // the meantime is not empty and stays.
+            for (holder, name) in created.iter().rev() {
+                let _ = crate::sys::remove_dir_at(chain[*holder].as_fd(), name);
+            }
+            return Err(e);
+        }
+    };
     let md = root.metadata()?;
+    let mut path = base;
+    path.extend(&names);
     path.push(last);
     Ok(RuntimeRootPin {
         dev: md.dev(),
@@ -259,6 +308,34 @@ mod tests {
             .err()
             .expect("must refuse");
         assert!(err.to_string().contains("local file system"), "{err}");
+    }
+
+    // The walk must refuse a symlink anywhere in the path: after
+    // canonicalization there is none, so one found now was swapped in.
+    // 이것을 실패시키는 것: 걷기에서 O_NOFOLLOW를 빼는 것(symlink를 따라감).
+    #[test]
+    fn canonical_walk_refuses_symlinked_component() {
+        let base = std::fs::canonicalize(scratch("walk")).unwrap();
+        std::fs::create_dir_all(base.join("real_a/b")).unwrap();
+        std::os::unix::fs::symlink(base.join("real_a"), base.join("a")).unwrap();
+        assert!(open_canonical_dir(&base.join("real_a/b")).is_ok());
+        assert!(open_canonical_dir(&base.join("a/b")).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // A failure after creating folders removes them again; folders that
+    // already existed stay.
+    // 이것을 실패시키는 것: 실패 때 만든 폴더를 되돌리지 않는 것.
+    #[test]
+    fn failed_pin_removes_the_folders_it_created() {
+        let base = scratch("rollback");
+        let me = crate::sys::current_uid();
+        assert!(pin_for(&base.join("x/y/bingsu"), me.wrapping_add(1)).is_err());
+        assert!(!base.join("x").exists());
+        assert!(base.exists());
+        assert!(pin_for(&base.join("x/y/bingsu"), me).is_ok());
+        assert!(base.join("x/y/bingsu").is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     // 이것을 실패시키는 것: 후보 순서를 바꾸거나 상대 경로를 받아 주는 것.

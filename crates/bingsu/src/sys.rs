@@ -481,26 +481,43 @@ mod tests {
     }
 }
 
-/// `mkdirat(dir, name, mode)`; an existing entry counts as success (the
-/// caller opens it without following and checks what it is).
+/// `mkdirat(dir, name, mode)`. `Ok(true)` if this call created it,
+/// `Ok(false)` if the entry already existed (the caller opens it without
+/// following and checks what it is).
 pub fn mkdir_at(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
     mode: u32,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
     let mode = libc::mode_t::try_from(mode).map_err(|_| std::io::Error::other("mode"))?;
     // SAFETY: `dir` is an open descriptor and `c` is NUL-terminated.
     if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), mode) } == 0 {
-        return Ok(());
+        return Ok(true);
     }
     let e = std::io::Error::last_os_error();
     if e.raw_os_error() == Some(libc::EEXIST) {
-        Ok(())
+        Ok(false)
     } else {
         Err(e)
+    }
+}
+
+/// `unlinkat(dir, name, AT_REMOVEDIR)`: removes an empty folder.
+pub fn remove_dir_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: `dir` is an open descriptor and `c` is NUL-terminated.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
