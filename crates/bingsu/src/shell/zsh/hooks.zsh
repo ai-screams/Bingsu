@@ -9,7 +9,7 @@ case $_bingsu_session in
   (*[^0-9a-f]*) _bingsu_session=@SESSION@ ;;
 esac
 (( ${#_bingsu_session} == 32 )) || _bingsu_session=@SESSION@
-case $_bingsu_seq in
+case ${_bingsu_seq-} in
   (''|*[^0-9]*|0?*|????????????????*) _bingsu_seq=0 ;;
 esac
 typeset -gi _bingsu_seq

@@ -71,6 +71,25 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
         assert any(x.startswith(b"--runtime-root=") and x.endswith(b":" + root_b) for x in argv), (shell, argv)
 
 
+# Top-level hook code runs under the user's own shell options (only function
+# bodies are shielded by `emulate -L zsh`), so eval must survive them.
+# 이것을 실패시키는 것: hooks.zsh의 `case ${_bingsu_seq-} in`을 `case $_bingsu_seq in`으로 되돌리는 것(NO_UNSET에서 eval이 끊긴다).
+def test_zsh_eval_survives_hostile_user_options(tmp_path):
+    base = tmp_path / "zsh"
+    inst = Install(base)
+    env = trusted_env(base, "opts")
+    script = inst.init("zsh", env)
+    inst.use_fake(minimal_record())
+    init_file = base / "init.sh"
+    init_file.write_bytes(script)
+    opts = b"setopt NO_UNSET SH_WORD_SPLIT GLOB_SUBST KSH_ARRAYS NOMATCH\n"
+    r = run_shell_script("zsh", opts + source("zsh", init_file) + b"_bingsu_call\n", env, base)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    (argv,) = inst.calls()
+    i = argv.index(b"--seq")
+    assert argv[i + 1] == b"1", argv
+
+
 # The reader text init embeds must be byte-identical to what the golden
 # runner tests, or the golden vectors vouch for a different script.
 # 이것을 실패시키는 것: Rust render의 @KNOWN_CODES@ 치환 문자열을 바꾸는 것(구분자, 따옴표, 순서).
