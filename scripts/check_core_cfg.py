@@ -4,11 +4,12 @@
 Code behind cfg can drop out of the lint run (`#[cfg(not(clippy))]`, a target
 the CI does not lint, a feature that --all-features turns off). bingsu-core is
 platform independent and needs no cfg, so this fails on:
-  - any line in crates/bingsu-core/src/**/*.rs with a token starting with `cfg`
+  - any line in a scanned file with a token starting with `cfg`
     (cfg, cfg_attr, cfg!) unless the line is exactly `#[cfg(test)]`; comments
     are not exempt, so do not write the word in comments there;
-  - any *.rs under crates/bingsu-core outside src/ (purity-canary/ and
-    target/ excluded): core sources live only in src/;
+  - any *.rs under crates/bingsu-core outside src/, tests/ and benches/
+    (purity-canary/ and target/ excluded): src/ holds the library, tests/ and
+    benches/ hold its test and bench targets, and all three get the same checks;
   - a path attribute (`#[path = ...]`) or `include!(...)` in any scanned
     file, since both pull in code from elsewhere; include_str!/include_bytes!
     are data and stay allowed. Comments are not exempt;
@@ -26,6 +27,7 @@ CORE = pathlib.Path("crates/bingsu-core")
 CFG = re.compile(r"\bcfg")
 PULL_IN = re.compile(r"#\s*\[\s*path\s*=|\binclude!\s*\(")
 SKIP = {"purity-canary", "target"}
+ALLOWED = {"src", "tests", "benches"}
 
 
 def main():
@@ -34,8 +36,8 @@ def main():
         rel = rs.relative_to(CORE)
         if rel.parts[0] in SKIP:
             continue
-        if rel.parts[0] != "src":
-            errors.append(f"rust source outside src/: {rs}")
+        if rel.parts[0] not in ALLOWED:
+            errors.append(f"rust source outside src/, tests/, benches/: {rs}")
         for i, line in enumerate(rs.read_text().splitlines(), 1):
             if CFG.search(line) and line.strip() != "#[cfg(test)]":
                 errors.append(f"{rs}:{i}: cfg other than #[cfg(test)]: {line.strip()}")
