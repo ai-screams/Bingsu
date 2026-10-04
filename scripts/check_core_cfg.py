@@ -29,8 +29,21 @@ anything). It fails on:
   - a `.clippy.toml` anywhere in the repository, or a `clippy.toml` other than
     crates/bingsu-core/clippy.toml and crates/bingsu/clippy.toml: a stray
     config can replace the rules clippy applies;
+  - a file under crates/bingsu-core whose extension is `.rs` in another case
+    (`.RS`, `.Rs`): on a case-insensitive file system rustc reads `up.RS`
+    for `mod up;`, and only lower-case `.rs` files are collected;
   - anything the checker binary rejects (its exit code is passed through).
-Usage: check_core_cfg.py --checker PATH   (run from the repository root)
+Names are compared case-insensitively (`.Cargo`, `Clippy.toml`, `Build.rs`),
+since cargo and clippy find them on a case-insensitive file system.
+
+Two phases, so no cargo call runs before the policy that keeps cargo honest
+(a `.cargo/config.toml` could set rustc-wrapper, [env] or [alias] for the
+build of the checker itself):
+  --phase policy                everything above except the checker; no cargo
+  --phase tokens --checker PATH runs the token checker on the collected files
+Usage (from the repository root):
+  check_core_cfg.py --phase policy
+  check_core_cfg.py --phase tokens --checker PATH
 """
 import argparse
 import os
@@ -52,11 +65,13 @@ def check_repo_tree(errors):
         dirs[:] = sorted(d for d in dirs if d not in REPO_SKIP)
         for entry in dirs + names:
             path = os.path.normpath(os.path.join(root, entry))
-            if entry == ".cargo":
+            name = entry.lower()
+            if name == ".cargo":
                 errors.append(f"cargo config directory in the repository: {path}")
-            elif entry == ".clippy.toml":
+            elif name == ".clippy.toml":
                 errors.append(f"clippy config not allowed: {path}")
-            elif entry == "clippy.toml" and path not in CLIPPY_CONFIGS:
+            # The exact path, so `Clippy.toml` next to an allowed config fails.
+            elif name == "clippy.toml" and path not in CLIPPY_CONFIGS:
                 errors.append(f"clippy config not allowed: {path}")
 
 
@@ -78,7 +93,10 @@ def collect(errors):
                 errors.append(f"symlink in core: {path}")
         for name in sorted(names):
             path = os.path.join(root, name)
+            if not name.lower().endswith(".rs"):
+                continue
             if not name.endswith(".rs"):
+                errors.append(f"non-canonical rust extension: {path}")
                 continue
             if top not in ALLOWED:
                 errors.append(f"rust source outside src/, tests/, benches/: {path}")
@@ -89,14 +107,11 @@ def collect(errors):
     return sorted(files)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checker", required=True, help="path to the core-cfg-check binary")
-    args = parser.parse_args()
-    errors = []
-    files = collect(errors)
+def check_policy(errors):
+    collect(errors)
     manifest = tomllib.loads(open(os.path.join(CORE, "Cargo.toml")).read())
-    if os.path.exists(os.path.join(CORE, "build.rs")) or "build" in manifest.get("package", {}):
+    build_scripts = [n for n in os.listdir(CORE) if n.lower() == "build.rs"]
+    if build_scripts or "build" in manifest.get("package", {}):
         errors.append(f"{CORE}: build script is not allowed (it can emit cargo:rustc-cfg)")
     if "features" in manifest:
         errors.append(f"{CORE}/Cargo.toml: [features] is not allowed (lint every feature combination first)")
@@ -107,13 +122,31 @@ def main():
         if key in manifest.get("package", {}):
             errors.append(f"{CORE}/Cargo.toml: package.{key} is not allowed")
     check_repo_tree(errors)
-    # Run the token checker even when the checks above failed, so one run
-    # shows every reason. With no files it fails on its own ("no files").
-    result = subprocess.run([args.checker, *files])
+
+
+def check_tokens(checker, errors):
+    # The policy phase already reported collection errors; here only the
+    # file list matters. With no files the checker fails on its own.
+    files = collect([])
+    result = subprocess.run([checker, *files])
     if result.returncode != 0:
         errors.append("core-cfg-check rejected the files above")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--phase", required=True, choices=("policy", "tokens"))
+    parser.add_argument("--checker", help="path to the core-cfg-check binary (tokens phase)")
+    args = parser.parse_args()
+    if (args.phase == "tokens") != (args.checker is not None):
+        parser.error("--checker goes with --phase tokens, and only with it")
+    errors = []
+    if args.phase == "policy":
+        check_policy(errors)
+    else:
+        check_tokens(args.checker, errors)
     if errors:
-        print("core cfg check FAILED:\n  " + "\n  ".join(errors), file=sys.stderr)
+        print(f"core cfg check FAILED ({args.phase}):\n  " + "\n  ".join(errors), file=sys.stderr)
         return 1
     return 0
 

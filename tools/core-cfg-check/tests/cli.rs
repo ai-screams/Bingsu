@@ -258,6 +258,52 @@ fn unlexable_source_fails() {
     fails_with("fn f( {\n", "unparsable");
 }
 
+// What makes this fail: removing the shebang policy in check.
+#[test]
+fn shebang_fails() {
+    fails_with(
+        "#!/usr/bin/env rust\npub fn f() {}\n",
+        "shebang in core source",
+    );
+}
+
+// rustc drops the first line and compiles the rest. If the lexer got the
+// original text, `/*` would hide everything up to `// */` from the token
+// scan; the parser does not look into the macro. So this checks both rules
+// on their own. What makes the second assertion fail: lexing the original
+// text instead of the text syn parsed (the body/shebang cut in check).
+#[test]
+fn shebang_hiding_macro_rules_fails() {
+    let source = "#!x /*\nmacro_rules! m { ($i:ident) => { #[$i(not(clippy))] pub fn leak() -> Vec<u8> { std::fs::read(\"/etc/hosts\").unwrap() } } } m!(cfg);\n// */\n";
+    fails_with(source, "shebang in core source");
+    fails_with(source, "macro_rules forbidden in core");
+}
+
+// rustc does not treat U+3000 as whitespace, so it drops this first line as
+// a shebang; syn does, so it parses an inner attribute whose raw string
+// hides line 2. Only the literal `#![` rule stops it. What makes this fail:
+// relaxing the policy to skip whitespace before `[`.
+#[test]
+fn ideographic_space_shebang_fails() {
+    fails_with(
+        "#!\u{3000}[doc = r\"\nmacro_rules! m { () => {} }\n// \"]\n",
+        "shebang in core source",
+    );
+}
+
+// What makes this fail: rejecting every first line that starts with `#!`.
+#[test]
+fn inner_attribute_at_start_passes() {
+    passes("#![allow(dead_code)]\npub fn f() {}\n");
+}
+
+// What makes this fail: applying the shebang policy before removing the BOM
+// (or not removing it).
+#[test]
+fn bom_then_shebang_fails() {
+    fails_with("\u{feff}#!x\npub fn f() {}\n", "shebang in core source");
+}
+
 // What makes this fail: removing the empty-argument check in main.
 #[test]
 fn no_files_fails() {

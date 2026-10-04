@@ -7,6 +7,10 @@
 //! `include!` can pull code in from outside the checked file set. A text or
 //! regex check misses spacing, line breaks, comments and strings, so this
 //! looks at the Rust tokens instead. Every file fails on:
+//!   - a first line that starts with `#!` but not `#![` (a shebang): rustc
+//!     drops that line, and its rule for telling a shebang from an inner
+//!     attribute differs from syn's (rustc does not count U+3000 as
+//!     whitespace, syn does), so core allows no shebang at all;
 //!   - source that does not parse (it cannot be checked);
 //!   - an identifier `cfg_attr` anywhere;
 //!   - an identifier `include` anywhere, not only before `!`: a renaming
@@ -27,6 +31,11 @@
 //!
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
+//!
+//! The parser and the lexer see the same text: the shebang line syn strips
+//! is stripped before lexing too. Otherwise a
+//! first line `#!x /*` would open a block comment for the lexer only, and the
+//! code after it would reach rustc unchecked.
 
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -143,7 +152,20 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
 
 fn check(source: &str) -> Vec<Finding> {
     let mut out = Vec::new();
-    let file = match syn::parse_file(source) {
+    // syn::parse_file and the proc-macro2 lexer each drop a leading BOM on
+    // their own; remove it here too, so the shebang policy sees the first
+    // line and the shebang cut below counts bytes in the text syn parsed.
+    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
+    // Policy, independent of how syn detects a shebang. What makes this
+    // fail: removing this check (the tool tests shebang_fails and
+    // ideographic_space_shebang_fails).
+    if text.starts_with("#!") && !text.starts_with("#![") {
+        out.push(Finding {
+            line: 1,
+            reason: "shebang in core source".to_owned(),
+        });
+    }
+    let file = match syn::parse_file(text) {
         Ok(file) => file,
         Err(err) => {
             out.push(Finding {
@@ -153,9 +175,15 @@ fn check(source: &str) -> Vec<Finding> {
             return out;
         }
     };
-    // Lex the original text, not the parsed tree, so nothing the parser
-    // drops escapes the token scan.
-    let stream = match TokenStream::from_str(source) {
+    // Lex exactly the text syn parsed: syn strips the shebang line up to (not
+    // including) its newline and returns it in file.shebang, so cutting that
+    // many bytes keeps line numbers. Comments and the rest of the text are
+    // lexed, so nothing the parser drops escapes the token scan.
+    let body = match &file.shebang {
+        Some(shebang) => &text[shebang.len()..],
+        None => text,
+    };
+    let stream = match TokenStream::from_str(body) {
         Ok(stream) => stream,
         Err(err) => {
             out.push(Finding {
