@@ -28,6 +28,7 @@ impl Shell {
 
 /// bash/zsh: `'...'` with `'` as `'\''`. fish: `'...'` with `\` as `\\`
 /// and `'` as `\'`. Bytes pass through unchanged otherwise.
+/// 입력에 NUL이 없다고 전제한다(argv에서 온 경로는 NUL을 가질 수 없다); NUL은 그대로 통과한다.
 pub fn encode_word(shell: Shell, word: &[u8], out: &mut Vec<u8>) {
     out.push(b'\'');
     for &b in word {
@@ -63,6 +64,7 @@ mod tests {
             assert_eq!(e(sh, "''"), r"''\'''\'''");
             assert_eq!(e(sh, "$(echo pwn)`id`$HOME"), "'$(echo pwn)`id`$HOME'");
             assert_eq!(e(sh, ""), "''");
+            assert_eq!(e(sh, "-leading"), "'-leading'");
         }
     }
 
@@ -73,6 +75,9 @@ mod tests {
         assert_eq!(e(Shell::Fish, "end\\"), r"'end\\'");
         assert_eq!(e(Shell::Fish, "\\'"), r"'\\\''");
         assert_eq!(e(Shell::Fish, "''"), r"'\'\''");
+        assert_eq!(e(Shell::Fish, "new\nline"), "'new\nline'");
+        assert_eq!(e(Shell::Fish, "$(echo pwn)"), "'$(echo pwn)'");
+        assert_eq!(e(Shell::Fish, "-leading"), "'-leading'");
     }
 
     #[test]
@@ -87,5 +92,19 @@ mod tests {
         assert_eq!(Shell::parse(b"zsh"), Some(Shell::Zsh));
         assert_eq!(Shell::parse(b"tcsh"), None);
         assert_eq!(Shell::Fish.as_str(), "fish");
+    }
+
+    // hook 이름·인자로 쓰이는 값이라 고정한다.
+    // 이것을 실패시키는 것: parse의 bash↔fish 교환, as_str의 오타.
+    #[test]
+    fn shell_names_round_trip() {
+        for (s, name) in [
+            (Shell::Zsh, "zsh"),
+            (Shell::Bash, "bash"),
+            (Shell::Fish, "fish"),
+        ] {
+            assert_eq!(s.as_str(), name);
+            assert_eq!(Shell::parse(s.as_str().as_bytes()), Some(s));
+        }
     }
 }

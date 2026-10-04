@@ -100,6 +100,9 @@ mod tests {
             (b"1:2:", EmptyPath),
             (b"1:2:rel/path", NotAbsolute),
             (b"+1:2:/a", BadDev),
+            (b"1_0:2:/a", BadDev),
+            (b" 1:2:/a", BadDev),
+            (b"1 :2:/a", BadDev),
         ];
         for (input, want) in cases {
             assert_eq!(
@@ -108,6 +111,36 @@ mod tests {
                 "{:?}",
                 String::from_utf8_lossy(input)
             );
+        }
+    }
+
+    #[test]
+    fn decimal_edge_vectors() {
+        for bad in [&b"1_0"[..], b" 1", b"1 "] {
+            assert_eq!(
+                parse_decimal(bad),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        assert_eq!(parse_decimal(b"0"), Some(0));
+    }
+
+    // 이것을 실패시키는 것: 접두사 값 변경(`=` 누락 등), 한 접두사가 다른 접두사의 접두사가 되는 것.
+    #[test]
+    fn prefixes_are_pinned_and_disjoint() {
+        let all = [
+            (RUNTIME_ROOT_PREFIX, &b"--runtime-root="[..]),
+            (CONFIG_ROOT_PREFIX, b"--config-root="),
+            (STATE_ROOT_PREFIX, b"--state-root="),
+            (LOG_ROOT_PREFIX, b"--log-root="),
+        ];
+        for (i, (a, want)) in all.iter().enumerate() {
+            assert_eq!(a, want);
+            for (j, (b, _)) in all.iter().enumerate() {
+                assert!(i == j || !a.starts_with(b));
+            }
         }
     }
 
