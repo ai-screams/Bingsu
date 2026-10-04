@@ -9,7 +9,6 @@ For bash it also fails if _bingsu_frame changes the nocasematch state.
 import argparse
 import os
 import pathlib
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,9 +24,11 @@ CMD = {"zsh": ["zsh", "-f"], "bash": ["bash", "--noprofile", "--norc"], "fish": 
 
 
 def quote(shell, word):
+    """Same rule as bingsu_core::shell_word::encode_word, so the reader this
+    runner tests is byte-identical to the one init embeds."""
     if shell == "fish":
         return "'" + word.replace("\\", "\\\\").replace("'", "\\'") + "'"
-    return shlex.quote(word) if word else "''"
+    return "'" + word.replace("'", "'\\''") + "'"
 
 
 def render_reader(shell, dst):
