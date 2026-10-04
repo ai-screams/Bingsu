@@ -1,0 +1,15 @@
+# old_key|new|due|new_key
+|ok:none|no|
+|degraded:runtime-root|yes|degraded:runtime-root
+degraded:runtime-root|degraded:runtime-root|no|degraded:runtime-root
+degraded:trust-expired|error:trust-expired|yes|error:trust-expired
+degraded:trust-unverified|degraded:trust-expired|yes|degraded:trust-expired
+degraded:trust-expired|ok:none|no|
+|degraded:trust-expired|yes|degraded:trust-expired
+degraded:future-x|degraded:future-x|no|degraded:future-x
+degraded:future-x|degraded:future-y|yes|degraded:future-y
+|weird:thing|yes|weird:thing
+|@no-record|yes|no-record
+no-record|@no-record|no|no-record
+|ok:future-code|no|
+|notice:future-code|yes|notice:future-code
