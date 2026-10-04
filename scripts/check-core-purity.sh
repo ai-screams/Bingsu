@@ -22,9 +22,15 @@ cd "$(dirname "$0")/.."
 # runs in check_core_purity.py) starts without them. CLIPPY_CONF_DIR could
 # point clippy at an empty config; the clippy runs below set it explicitly,
 # and unsetting it here keeps any other run from inheriting it. A target
-# directory from the environment could hold a stale checker binary.
+# directory from the environment could hold a stale checker binary. A rustc
+# wrapper or a replaced rustc could add --cap-lints allow for bingsu-core
+# alone, which the canaries (separate crates) would not notice. Only the
+# environment is covered here: a wrapper or [env] in $CARGO_HOME/config.toml
+# belongs to the machine running the gate and is out of scope.
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CLIPPY_CONF_DIR \
-  CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
+  CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR \
+  RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTC CARGO_BUILD_RUSTC \
+  CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
 # Policy first: no cargo call may run before .cargo directories and stray
 # clippy configs are ruled out.
 python3 scripts/check_core_cfg.py --phase policy
