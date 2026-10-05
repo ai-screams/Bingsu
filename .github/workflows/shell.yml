@@ -74,13 +74,23 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/w" -w /w -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
             "bingsu-${{ matrix.image }}" tests/golden/record/run-all.sh
+      # Runs after a golden failure too, so one failure does not hide the other.
+      # The runner's uid owns the checkout and the binary, and the container
+      # runs as root: init would warn that a folder above the binary can be
+      # changed by another user (Install.init fails on any init warning). A
+      # root-owned copy in /usr/local/bin is what an installed bingsu looks
+      # like; --user would need a passwd entry, which init reads for the home.
+      # The test folders live in /root, not in /tmp: init warns about the
+      # world-writable /tmp above an executable symlink there as well.
       - name: PTY tests
+        if: success() || failure()
         run: |
           # While recording (Task A12), -s shows the OBSERVE lines in the job log.
           docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
-            -e BINGSU_BIN=/w/target/x86_64-unknown-linux-musl/debug/bingsu \
+            -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
-            "bingsu-${{ matrix.image }}" python3 -m pytest tests/shell -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}
+            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
+              exec python3 -m pytest tests/shell -q -rf -p no:cacheprovider --basetemp=/root/pytest "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
 
   shell-macos:
     name: Shell PTY (macOS Homebrew)
@@ -97,16 +107,23 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: brew install bash fish
-      - run: 'python3 -m pip install --user --break-system-packages --require-hashes --only-binary=:all: -r tests/shell/requirements.txt'  # quoted: a bare ':all: ' is a YAML mapping
+      # One interpreter for every step: a venv with the hash-pinned test
+      # dependencies, and the Homebrew shells first in PATH.
+      - name: Set up the test environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
       - run: cargo build -p bingsu
       - name: Record shell versions
         run: |
-          PATH="$(brew --prefix)/bin:$PATH"
-          export PATH
-          { echo "### macOS shell versions"; echo; echo '```'; python3 tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - name: Golden and PTY tests
-        run: |
-          PATH="$(brew --prefix)/bin:$PATH"
-          export PATH BINGSU_TEST_LOCALE=en_US.UTF-8
-          SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
-          BINGSU_TEST_SHELLS="zsh bash fish" python3 -m pytest tests/shell -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}
+          { echo "### macOS shell versions"; echo; echo '```'; "$BINGSU_PY" tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record golden vectors
+        run: SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+      - name: PTY tests
+        if: success() || failure()
+        env:
+          BINGSU_TEST_LOCALE: en_US.UTF-8
+          BINGSU_TEST_SHELLS: zsh bash fish
+        run: '"$BINGSU_PY" -m pytest tests/shell -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}'
