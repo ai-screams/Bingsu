@@ -157,15 +157,16 @@ def test_ctx_values_passed_each_prompt(tmp_path):
 
 
 # An empty fish variable expands to no word at all, so a flag would take the
-# next flag as its value. Each guard keeps one value in place.
+# next flag as its value. Each guard keeps one value in place or leaves its
+# flag out.
 # 이것을 실패시키는 것: `test -n "$w"; or set w 0`을 지우는 것(--width 뒤가 --status),
-# `test -n "$km"; or set km default`를 지우는 것, `if test -n "$CMD_DURATION"`을 `if true`로 바꾸는 것.
+# keymap 검사 `if string match …`를 지우는 것(--keymap 뒤가 다음 플래그), `if test -n "$CMD_DURATION"`을 `if true`로 바꾸는 것.
 def test_erased_prompt_variables_keep_every_flag_paired(tmp_path):
     body = b"set -e COLUMNS; set -e fish_bind_mode; set -e CMD_DURATION\nfish_prompt\n"
     _, inst = install_once(tmp_path, body)
     (argv,) = inst.calls()
     assert val(argv, b"--width") == b"0", argv
-    assert val(argv, b"--keymap") == b"default", argv
+    assert b"--keymap" not in argv, argv
     assert b"--duration-ms" not in argv, argv
     flags = [a for a in argv if a.startswith(b"--") and b"=" not in a]
     assert all(not val(argv, f).startswith(b"--") for f in flags), argv
@@ -211,3 +212,29 @@ def test_keymap_is_the_bind_mode(tmp_path):
     _, inst = install_once(tmp_path, b"set -g fish_bind_mode insert\nfish_prompt\n")
     (argv,) = inst.calls()
     assert val(argv, b"--keymap") == b"insert", argv
+
+
+# The envelope refuses a keymap outside 1 to 16 of [a-z_] and with it the
+# whole call (error:bad-args). A user-defined bind mode with another name is
+# left out, so the real binary renders the prompt. A script, not a PTY: a
+# shell switched to a mode without bindings takes no more input.
+# 이것을 실패시키는 것: keymap 검사를 지우고 `--keymap $fish_bind_mode`를 늘 넘기는 것(bad-args),
+# 검사의 `{1,16}`을 `{1,17}`로 바꾸는 것(17자 이름), 집합에 숫자·대문자·`-`를 넣는 것,
+# `\z`를 `$`로 바꾸는 것(`$`는 끝 줄바꿈 앞에서도 맞음). `insert\n`은 fish가 줄바꿈으로 읽는다.
+@pytest.mark.parametrize("mode", ["My-Mode", "mode2", "a" * 17, "insert\\n"])
+def test_bind_mode_outside_the_envelope_is_left_out(tmp_path, mode):
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    script = inst.init("fish", env)
+    body = f"set -g fish_bind_mode {mode}\nfish_prompt >/dev/null\nprintf '%s' $_bingsu_f[9]\n".encode()
+    r = run_shell_script("fish", script + b"\n" + body, env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    assert r.stdout.startswith(b"ok:"), r.stdout
+
+
+# 이것을 실패시키는 것: keymap 집합에서 `_`를 빼는 것(replace_one이 빠짐).
+@pytest.mark.parametrize("mode", ["replace_one", "a" * 16])
+def test_bind_mode_inside_the_envelope_is_passed(tmp_path, mode):
+    _, inst = install_once(tmp_path, f"set -g fish_bind_mode {mode}\nfish_prompt\n".encode())
+    (argv,) = inst.calls()
+    assert val(argv, b"--keymap") == mode.encode(), argv

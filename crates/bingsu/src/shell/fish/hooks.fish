@@ -18,17 +18,22 @@ set -g _bingsu_rps1 ''
 # fish draws through this function, so capture and install are one place.
 # $status and $pipestatus are read by a single command so neither is reset
 # before the other is saved. An empty variable expands to no word in fish,
-# so each value that may be empty gets a default: a missing word would make
-# the flag before it take the next flag as its value.
+# so a value that may be empty gets a default or leaves its flag out: a
+# missing word would make the flag before it take the next flag as its value.
 function fish_prompt
     set -l sp $status $pipestatus
     set -l s $sp[1]
     set -l pst (string join , -- $sp[2..-1])
     set -l w $COLUMNS
     test -n "$w"; or set w 0
-    set -l km $fish_bind_mode
-    test -n "$km"; or set km default
-    set -l ctx --width $w --status $s --pipestatus $pst --jobs (count (jobs -p 2>/dev/null)) --keymap $km
+    set -l ctx --width $w --status $s --pipestatus $pst --jobs (count (jobs -p 2>/dev/null))
+    # The envelope takes a keymap of 1 to 16 bytes from [a-z_] and refuses the
+    # whole call otherwise. A bind mode may be any name (My-Mode, mode2): such
+    # a mode, or none, leaves the flag out instead of guessing one. The set is
+    # spelled out, as in the reader.
+    if string match -qr '^[abcdefghijklmnopqrstuvwxyz_]{1,16}\z' -- "$fish_bind_mode"
+        set -a ctx --keymap $fish_bind_mode
+    end
     if test -n "$CMD_DURATION"
         set -a ctx --duration-ms $CMD_DURATION
     end
