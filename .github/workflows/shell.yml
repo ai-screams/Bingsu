@@ -72,7 +72,7 @@ jobs:
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Record golden vectors
         run: |
-          docker run --rm -v "$PWD:/w" -w /w -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
+          docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
             "bingsu-${{ matrix.image }}" tests/golden/record/run-all.sh
       # Runs after a golden failure too, so one failure does not hide the other.
       # The runner's uid owns the checkout and the binary, and the container
