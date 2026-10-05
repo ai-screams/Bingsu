@@ -645,8 +645,9 @@ def test_set_a_leaks_nothing(tmp_path):
 # F1-2. Compatibility pin (no bingsu mutation): glob and redirection options
 # leave init, both hooks and the options themselves alone. The options are
 # printed back, so a run that never turned them on fails. The stderr of init
-# and of both hooks must be empty, and the wrappers that capture it must pass
-# the status through (`false` reaches bingsu as --status 1).
+# and of both hooks must be empty, and the wrappers that capture it must be
+# transparent: PROMPT_COMMAND keeps its names and order, `false` reaches
+# bingsu as --status 1 and `false | true` as --pipestatus 1,0.
 # 이것을 실패시키는 것(oracle 자기 검사): hooks.bash에 `echo x >&2`를 넣는 것(설치 hook 안이나 최상위).
 OPTS = {"extglob": "shopt -s extglob", "nullglob": "shopt -s nullglob", "failglob": "shopt -s failglob",
         "noclobber": "set -o noclobber"}
@@ -659,13 +660,17 @@ def test_glob_and_noclobber_options(tmp_path, names):
     s, inst, _ = start(tmp_path, rc_before="\n".join(OPTS[n] for n in names), record=minimal_record(left=b"OK> "),
                        err=err)
     s.run("false")
-    s.run("true")
+    s.run("false | true")
     s.run("shopt -p extglob nullglob failglob; set -o | grep noclobber")
+    s.run('echo "PC=[${PROMPT_COMMAND[*]}]"')
     out = visible(s.close())
     assert b"bash:" not in out, out
     assert err.read_bytes() == b"", err.read_bytes()
     assert len(inst.calls()) >= 4 and b"OK> " in out
-    assert any(val(c, b"--status") == b"1" for c in inst.calls()), inst.calls()
+    assert b"PC=[_bingsu_save _bingsu_install]" in out, out
+    calls = inst.calls()
+    assert any(val(c, b"--status") == b"1" for c in calls), calls
+    assert any(val(c, b"--pipestatus") == b"1,0" for c in calls), calls
     for n in names:
         want = b"set -o noclobber" if n == "noclobber" else f"shopt -s {n}".encode()
         if n == "noclobber":
