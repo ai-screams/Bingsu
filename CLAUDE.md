@@ -8,11 +8,22 @@ This file guides Claude Code (claude.ai/code) when working in this repository.
 One set of OKLCH color tokens drives the prompt, the terminal color scheme and CLI tool configs.
 The engine is the "ice"; themes, segments and plugins are "toppings" layered on top.
 
-- **Language**: Rust (no crate yet). Windows is checked in CI; macOS and Linux are first-class.
+- **Language**: Rust, a workspace of two crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: design. There is no code, no release and nothing to install.
-  `README.md` lists features as planned. Keep it that way until they ship.
+- **Stage**: M1 (interfaces and measurement). The record path and the shell hooks exist; there is no release and no
+  user-visible prompt yet. `README.md` lists features as planned. Keep it that way until they ship.
 - **Repository**: `ai-screams/Bingsu`, currently private.
+
+## Layout
+
+| Path | What |
+| -- | -- |
+| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): status grammar, B1 record encoder, shell words, root arguments |
+| `crates/bingsu` | CLI: `init` pins the binary path and four roots, `prompt` turns the envelope into a record, `sys` wraps libc; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
+| `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes |
+| `tests/hostile` | Hostile-value matrix shared by core, golden and PTY tests |
+| `scripts/`, `tools/core-cfg-check` | Purity and prompt-forbid gates |
 
 ## Collaboration rules (MUST FOLLOW)
 
@@ -63,9 +74,10 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 
 | Workflow | Jobs | Notes |
 | -- | -- | -- |
-| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy), Test on ubuntu, macos, windows | Rust jobs run only when `Cargo.toml` exists (detect job) |
+| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build | Rust jobs run only when `Cargo.toml` exists (detect job) |
+| `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew | `workflow_dispatch` input `record_observations` prints unpinned cells |
 | `security.yml` | Secret scan (gitleaks), Dependency advisories (cargo-audit) | gitleaks scans full history; weekly cron; cargo-audit needs `Cargo.lock` |
-| `dependabot.yml` | github-actions and cargo, weekly | The cargo job fails with "Cargo.toml not found" until the first crate lands; expected |
+| `dependabot.yml` | github-actions and cargo, weekly | |
 
 - Pin every action to a full commit SHA with a version comment. Dependabot updates both.
 - Downloaded tool binaries (actionlint, gitleaks) are pinned by version and verified with `sha256sum --check`.
