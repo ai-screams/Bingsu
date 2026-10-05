@@ -106,20 +106,22 @@ class Session:
         except pexpect.TIMEOUT:
             warnings.warn("fish sent no OSC 133;B within 2 s")
 
-    def _mark(self):
+    def _mark(self, timeout=15):
         self._ready()
         self.n += 1
         tok = f"BINGSU_MARK_{self.n}"
         # Typed as BINGSU_""MARK_n, printed as BINGSU_MARK_n: the echoed input
         # never contains the token, so only the command's output matches.
         self.p.sendline(f'echo BINGSU_""MARK_{self.n}')
-        self.expect(tok.encode())
+        self.expect(tok.encode(), timeout=timeout)
         return tok
 
-    def run(self, line):
+    def run(self, line, timeout=15):
+        """Send `line`, then wait up to `timeout` seconds for a marker
+        command typed after it."""
         self._ready()
         self.p.sendline(line)
-        return self._mark()
+        return self._mark(timeout)
 
     def close(self) -> bytes:
         try:

@@ -14,6 +14,12 @@ PROBE = {
     "zsh": ["zsh", "-fc", 'echo "${ZSH_VERSION}"'],
     "fish": ["fish", "--version"],
 }
+# Full version numbers for --record, one form for every shell.
+FULL = {
+    "bash": ["bash", "-c", 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}"'],
+    "zsh": ["zsh", "-fc", 'echo "${ZSH_VERSION}"'],
+    "fish": ["fish", "--no-config", "-c", "echo $version"],
+}
 
 
 def parse(text):
@@ -45,7 +51,7 @@ def main():
         import json
         import shutil
         got = {}
-        for shell, cmd in PROBE.items():
+        for shell, cmd in FULL.items():
             if shutil.which(shell):
                 got[shell] = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
         print(json.dumps(got))
