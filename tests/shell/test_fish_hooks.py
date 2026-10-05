@@ -77,7 +77,7 @@ def test_fish_bad_record_falls_back_to_minimal(tmp_path):
 
 # The brief's two-command capture (`set -l s $status; set -l p $pipestatus`)
 # stays green too: `set` changes neither value on fish 3.6, 4.0 and 4.9.
-# 이것을 실패시키는 것: `set -l sp $status $pipestatus`에서 `$pipestatus`를 `$status`로 바꾸는 것.
+# 이것을 실패시키는 것: `set -l sp $status_generation $status $pipestatus`에서 `$pipestatus`를 `$status`로 바꾸는 것.
 def test_fish_pipestatus_survives(tmp_path):
     s, inst = start(tmp_path, minimal_record())
     s.run("true | false")
@@ -160,7 +160,7 @@ def test_ctx_values_passed_each_prompt(tmp_path):
 # An empty fish variable expands to no word at all, so a flag would take the
 # next flag as its value. Each guard keeps one value in place or leaves its
 # flag out.
-# 이것을 실패시키는 것: `test -n "$w"; or set w 0`을 지우는 것(--width 뒤가 --status),
+# 이것을 실패시키는 것: COLUMNS 모양 검사 줄 `string match … -- "$w"; or set w 0`을 지우는 것(--width 뒤가 --status),
 # keymap 검사 `if string match …`를 지우는 것(--keymap 뒤가 다음 플래그).
 def test_erased_prompt_variables_keep_every_flag_paired(tmp_path):
     body = b"set -e COLUMNS; set -e fish_bind_mode\nfish_prompt\n"
@@ -207,7 +207,7 @@ def test_status_reaches_the_next_command_line(tmp_path):
 # The keymap is fish's bind mode as is. Set directly: switching to vi
 # bindings from a PTY leaves fish 3.6 in normal mode ("default"), so the
 # value would not tell a passed mode from the fallback.
-# 이것을 실패시키는 것: `set -l km $fish_bind_mode`를 상수 `default`로 바꾸는 것.
+# 이것을 실패시키는 것: `set -a ctx --keymap $fish_bind_mode`에 상수 `default`를 넘기는 것.
 def test_keymap_is_the_bind_mode(tmp_path):
     _, inst = install_once(tmp_path, b"set -g fish_bind_mode insert\nfish_prompt\n")
     (argv,) = inst.calls()

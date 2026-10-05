@@ -35,8 +35,9 @@ def test_context_manager_ends_the_child(tmp_path):
 
 
 # fish 4.0.2 never sends OSC 133;B. Waiting for it before every command made
-# each run() take about 4 s (two waits of 2 s). Kills its mutation on fish
-# 4.0.2 only; on fish 3.6 and 4.9 it is green either way.
+# each run() take about 4 s (two waits of 2 s), about 12 s for three. The
+# 7 s budget leaves room for a loaded machine and still catches that. Kills
+# its mutation on fish 4.0.2 only; on fish 3.6 and 4.9 it is green either way.
 # 이것을 실패시키는 것: fish 4.0에서도 _ready가 133;B를 기다리는 것(4.0.2에서 run 세 번이 약 12초).
 @pytest.mark.skipif("fish" not in SHELLS, reason="fish not under test")
 def test_fish_run_does_not_wait_for_a_mark_it_never_sends(tmp_path):
@@ -44,7 +45,7 @@ def test_fish_run_does_not_wait_for_a_mark_it_never_sends(tmp_path):
         t = time.monotonic()
         for _ in range(3):
             s.run("true")
-        assert time.monotonic() - t < 3
+        assert time.monotonic() - t < 7
 
 
 

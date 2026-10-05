@@ -26,8 +26,9 @@ function fish_prompt
     set -l g $sp[1]
     set -l s $sp[2]
     set -l pst (string join , -- $sp[3..-1])
-    # Shapes as zsh and bash pass them: a user may set either variable to
-    # anything. The core checks every value again.
+    # A user may set either variable to anything. Stricter than the zsh and
+    # bash hooks, which pass ${COLUMNS:-0} unchecked; the core checks every
+    # value again.
     set -l w $COLUMNS
     string match -qr '^[0123456789]{1,6}\z' -- "$w"; or set w 0
     set -l ctx --width $w --status $s --pipestatus $pst --jobs (count (jobs -p 2>/dev/null))
