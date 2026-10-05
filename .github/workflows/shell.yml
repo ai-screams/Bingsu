@@ -119,6 +119,7 @@ jobs:
       - name: Record shell versions
         run: |
           { echo "### macOS shell versions"; echo; echo '```'; "$BINGSU_PY" tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # BINGSU_PY (set above through GITHUB_ENV) makes run-all.sh use the venv.
       - name: Record golden vectors
         run: SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
       - name: PTY tests
