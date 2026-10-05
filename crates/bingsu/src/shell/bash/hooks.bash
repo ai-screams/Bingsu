@@ -173,7 +173,9 @@ unset _bingsu_nm _bingsu_reg _bingsu_h _bingsu_e _bingsu_r _bingsu_a
 # Last, after every assignment above: an inherited export flag outlives the
 # resets, and `set -a` marks each assignment and each function definition
 # for export. Without this the rendered prompt, the timings and the hook
-# functions reach the environment of every child.
+# functions reach the environment of every child. The reader unexports its
+# own globals as well (_bingsu_f, _bingsu_disp, _bingsu_note, _bingsu_key),
+# since the golden runner sources it alone; they stay listed here too.
 export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu_note _bingsu_key \
   _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps0 _bingsu_ps0_orig _bingsu_ps0_owned \
   _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last
