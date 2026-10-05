@@ -66,49 +66,92 @@ def test_prompt_time_environment_never_reaches_hook_args(tmp_path, shell):
             assert [a for a in argv if a.startswith(flag)] == [word], (shell, flag, argv)
 
 
-SPAWN = re.compile(r"^(\d+)\s+(?:<\.\.\. (?:clone3?|fork|vfork) resumed>|(?:clone3?|fork|vfork)\().*\)\s+=\s+(\d+)")
-RESUMED = re.compile(r"^\d+\s+<\.\.\. ")
+SPAWN_CALL = re.compile(r"^(\d+)\s+(?:clone3?|fork|vfork)\(")
+RETURN = re.compile(r"\)\s+=\s+(\d+)$")
+RESUMED_SPAWN = re.compile(r"^(\d+)\s+<\.\.\. (?:clone3?|fork|vfork) resumed>.*\)\s+=\s+(\d+)$")
+SYSCALL = re.compile(r"^\d+\s+(\w+)\(")
+QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def is_root(line, exe):
+    """An execve whose pathname (its first quoted string) is the pinned exe;
+    the same string inside argv does not count."""
+    m = SYSCALL.match(line)
+    q = QUOTED.search(line)
+    return bool(m and m.group(1) == "execve" and q and q.group(1) == exe)
 
 
 def tree(lines, exe):
-    """The trace lines of the pinned binary, in trace order: from the
-    execve of `exe` on, the lines of its pid and of every pid or tid it
-    starts after that (clone, clone3, fork, vfork, resumed lines included).
-    Returns (pids, lines). A pid's lines before its execve, and the children
-    it started before, belong to the shell, not to bingsu. Pid reuse inside
-    one prompt is not tracked (environment assumption)."""
-    pids, scoped = set(), []
-    for l in lines:
-        if not l.strip():
+    """The trace lines of the pinned binary. The root is the pid of the
+    execve of `exe`; its lines count from that execve on. A child counts if
+    a pid already counted made the clone, clone3, fork or vfork call after
+    the root execve (the call line, finished or <unfinished ...>, decides;
+    the return may come later). A child's lines count wherever they are in
+    the trace: strace may write a child's first line before the parent's
+    return line. Returns (pids, lines). Pid reuse inside one prompt is not
+    tracked (environment assumption)."""
+    lines = [l for l in lines if l.strip()]
+    start = next((i for i, l in enumerate(lines) if is_root(l, exe)), None)
+    if start is None:
+        return set(), []
+    root = lines[start].split()[0]
+    edges, pending = [], {}
+    for i, l in enumerate(lines):
+        m = SPAWN_CALL.match(l)
+        if m:
+            r = RETURN.search(l)
+            if r:
+                edges.append((m.group(1), r.group(1), i))
+            else:
+                pending[m.group(1)] = i
             continue
-        pid = l.split()[0]
-        if pid not in pids and "execve(" in l and not RESUMED.match(l) and f'"{exe}"' in l:
-            pids.add(pid)
-        if pid not in pids:
-            continue
-        scoped.append(l)
-        m = SPAWN.match(l)
-        if m and int(m.group(2)) > 0:
-            pids.add(m.group(2))
+        m = RESUMED_SPAWN.match(l)
+        if m and m.group(1) in pending:
+            edges.append((m.group(1), m.group(2), pending.pop(m.group(1))))
+    pids, grew = {root}, True
+    while grew:
+        grew = False
+        for parent, child, at in edges:
+            if at > start and parent in pids and child not in pids and int(child) > 0:
+                pids.add(child)
+                grew = True
+    scoped = [l for i, l in enumerate(lines)
+              if (l.split()[0] == root and i >= start) or (l.split()[0] in pids and l.split()[0] != root)]
     return pids, scoped
 
 
-# 이것을 실패시키는 것: 순서를 잊고 execve 전의 edge(셸이 띄운 자식)까지 bingsu에 붙이는 것.
+# 이것을 실패시키는 것: 순서를 잊고 execve 전의 edge(셸이 띄운 자식)나 root pid의 execve 전 줄(셸 몫)까지 bingsu에 붙이는 것,
+# 부모의 반환 줄보다 먼저 찍힌 자식 줄을 빼는 것, argv에 exe 문자열이 든 다른 execve를 root로 보는 것.
 def test_tree_follows_trace_order():
     trace = [
         '100 clone(child_stack=NULL, flags=CLONE_CHILD_SETTID|SIGCHLD) = 101',
         '101 openat(AT_FDCWD, "/repo/x", O_RDONLY) = 3',
+        '100 openat(AT_FDCWD, "/shell/rc", O_RDONLY) = 3',
+        '200 execve("/usr/bin/env", ["/usr/bin/env", "/pinned/bin/bingsu"], 0x1 /* 1 vars */) = 0',
         '100 execve("/pinned/bin/bingsu", ["/pinned/bin/bingsu", "prompt"], 0x1 /* 1 vars */) = 0',
         '100 clone3({flags=CLONE_VM|CLONE_THREAD, exit_signal=0}, 88 <unfinished ...>',
+        '102 openat(AT_FDCWD, "/early", O_RDONLY) = 3',
         '100 <... clone3 resumed>) = 102',
         '102 statx(AT_FDCWD, "/pinned/root/x", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x1) = 0',
     ]
     pids, scoped = tree(trace, "/pinned/bin/bingsu")
     assert pids == {"100", "102"}
-    assert not any('"/repo/x"' in l for l in scoped)
+    assert not any('"/repo/x"' in l or '"/shell/rc"' in l for l in scoped)
+    assert any('"/early"' in l for l in scoped)
 
 
-FIRST_PATH = re.compile(r'^\d+\s+(?!<\.\.\.)\w+\([^"]*"((?:[^"\\]|\\.)*)"')
+def named_paths(line):
+    """The paths a syscall line names: execve its pathname only (argv
+    follows), any other call every quoted string (both paths of linkat,
+    renameat2, symlinkat; a symlink's target text is checked too, which only
+    rejects more). Resumed lines carry results, not arguments, and are skipped."""
+    m = SYSCALL.match(line)
+    if not m:
+        return []
+    found = QUOTED.findall(line)
+    return found[:1] if m.group(1) == "execve" else found
+
+
 # What the dynamic loader and Rust's start-up name (glibc, observed in the
 # three images on 2026-10-05): the loader cache and preload list, the
 # libraries, and /proc/self/maps (main-thread stack guard). The static musl
@@ -151,5 +194,5 @@ def test_prompt_binary_opens_only_system_paths_and_pinned_roots(tmp_path):
     pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
               (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
-    bad = [l for l in scoped if (m := FIRST_PATH.match(l)) and not allowed(m.group(1), l, exe, pinned)]
+    bad = [l for l in scoped if any(not allowed(p, l, exe, pinned) for p in named_paths(l))]
     assert bad == [], bad[:5]
