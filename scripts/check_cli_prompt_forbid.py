@@ -3,7 +3,8 @@
 lints in each of its modules: forbid cannot be switched off by #[expect] or
 #[allow], while the crate-wide clippy.toml rules are only denied (init's
 trusted_env needs its #[expect]). Fails if a listed file's first inner
-attribute is not that forbid, or if a listed file is missing."""
+attribute is not that forbid, if a listed file is missing, or if prompt.rs
+or envelope.rs names a file API (see NO_FILE_API)."""
 import pathlib
 import sys
 
@@ -13,7 +14,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROMPT_PATH = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs", "crates/bingsu/src/sys.rs"]
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
 
+# A second, coarser guard: the forbid above covers only the clippy.toml list,
+# which names no file API. prompt.rs and envelope.rs must not name one either.
+# Plain token search over lines that are not // comments: it misses an alias
+# imported elsewhere and a macro that expands to a file call, and a string
+# holding a token would trip it. At run time the strace process-tree test
+# (tests/shell/test_prompt_env_paths.py) checks what the binary touches.
+NO_FILE_API = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs"]
+FILE_TOKENS = ("std::fs", "fs::", "File", "OpenOptions", "read_dir")
+
 bad = []
+for rel in NO_FILE_API:
+    p = ROOT / rel
+    if not p.is_file():
+        continue  # reported as missing below
+    for n, line in enumerate(p.read_text().splitlines(), 1):
+        if line.lstrip().startswith("//"):
+            continue
+        hit = [tok for tok in FILE_TOKENS if tok in line]
+        if hit:
+            bad.append(f"{rel}:{n}: names a file API ({', '.join(hit)})")
 for rel in PROMPT_PATH:
     p = ROOT / rel
     if not p.is_file():
@@ -28,4 +48,4 @@ for rel in PROMPT_PATH:
 if bad:
     print("prompt forbid gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
     sys.exit(1)
-print(f"prompt forbid gate: ok ({len(PROMPT_PATH)} files)")
+print(f"prompt forbid gate: ok ({len(PROMPT_PATH)} files forbid, {len(NO_FILE_API)} name no file API)")
