@@ -95,9 +95,8 @@ def test_hook_between_save_and_install_changes_options(tmp_path):
 
 
 # Environment assumption pin, not a mutation target: bash 5.1-5.3 restore $?
-# before each PROMPT_COMMAND array element (observed: a hook between that
-# returns 0 or 7 still leaves 1 for the next one), so deleting
-# `return "$_bingsu_s"` from _bingsu_save stays green.
+# before each PROMPT_COMMAND array element, so the save hook's `return 0`
+# does not hide the status from the next hook.
 # 이것을 실패시키는 것: 배열 원소마다 $?를 되살리지 않는 bash(bingsu 변이로는 죽지 않음).
 def test_exit_status_reaches_the_next_hook(tmp_path):
     rc_after = ('_probe() { echo "PROBE:$?"; }\n'
@@ -109,8 +108,8 @@ def test_exit_status_reaches_the_next_hook(tmp_path):
     assert b"PROBE:1" in out and b"PROBE:0" in out
 
 
-# Environment assumption pin, same reason: deleting the install hook's
-# `return "$_bingsu_s"` stays green.
+# Environment assumption pin, same reason: the install hook returns 0 and the
+# hook after it still sees the command's status.
 # 이것을 실패시키는 것: 배열 원소마다 $?를 되살리지 않는 bash(bingsu 변이로는 죽지 않음).
 def test_hook_after_install_sees_command_status(tmp_path):
     rc_after = '_after() { echo "after=$?"; }\nPROMPT_COMMAND+=(_after)'
@@ -118,6 +117,32 @@ def test_hook_after_install_sees_command_status(tmp_path):
     s.run("false")
     out = visible(s.close())
     assert b"after=1" in out
+
+
+# Environment assumption pin: a user hook in the middle that returns 7 does
+# not change what the next hook sees (the reason both bingsu hooks can
+# return 0 without losing anything).
+# 이것을 실패시키는 것: 배열 원소마다 $?를 되살리지 않는 bash(bingsu 변이로는 죽지 않음).
+def test_nonzero_middle_hook_does_not_change_status(tmp_path):
+    rc_after = ('_seven() { return 7; }\n_probe() { echo "PROBE:$?"; }\n'
+                'PROMPT_COMMAND=("${PROMPT_COMMAND[0]}" _seven _probe "${PROMPT_COMMAND[@]:1}")')
+    s, _, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
+    s.run("false")
+    out = visible(s.close())
+    assert b"PROBE:1" in out and b"PROBE:7" not in out, out
+
+
+# errexit: a PROMPT_COMMAND element that returns non-zero ends the
+# interactive shell, so a status left by `false && :` must not come back
+# from a bingsu hook. bingsu still receives the status.
+# 이것을 실패시키는 것: 저장 hook이나 설치 hook의 `return 0`을 `return "$_bingsu_s"`로 되돌리는 것(셸 종료).
+def test_set_e_shell_survives_a_nonzero_status(tmp_path):
+    s, inst, _ = start(tmp_path, rc_before="set -e", record=minimal_record())
+    s.run("false && :")
+    s.run("echo AL\"\"IVE")
+    out = visible(s.close())
+    assert b"\nALIVE" in out, out
+    assert any(val(c, b"--status") == b"1" for c in inst.calls()), inst.calls()
 
 
 CHK = r"""_chk() { local n=0 s=$PS0; while [[ $s == *'_bingsu_t0:0:'* ]]; do n=$((n+1)); s=${s#*'_bingsu_t0:0:'}; done; echo "PREFIX=$n"; }"""
@@ -359,6 +384,19 @@ def test_inherited_ps0_owned_flag_is_ignored(tmp_path):
     assert b"MINE" in out and b"ORIGLEAK" not in out, out
 
 
+# An inherited owned flag with a PS0 from the environment: init saves that
+# PS0 as the original and installs exactly one prefix in front of it.
+# 이것을 실패시키는 것: 머리의 `${_bingsu_ps0_owned@a}` export 검사를 지우는 것(원래 PS0가 저장되지 않음).
+def test_inherited_owned_flag_keeps_inherited_ps0_and_one_prefix(tmp_path):
+    s, _, _ = start(tmp_path, rc_after=CHK, record=minimal_record(),
+                    inherit={"_bingsu_ps0_owned": "1", "PS0": "XPS0"})
+    s.run("_chk")
+    s.run('[[ $_bingsu_ps0_orig == XPS0 && $PS0 == *XPS0 ]] && echo ORIG""_KEPT')
+    out = visible(s.close())
+    # The inherited PS0 prints right before each command's output.
+    assert b"XPS0PREFIX=1" in out and b"XPS0ORIG_KEPT" in out, out
+
+
 # 이것을 실패시키는 것: 머리의 `_bingsu_t0=`를 빼는 것(첫 프롬프트에 --duration-ms).
 def test_inherited_t0_is_reset(tmp_path):
     s, inst, _ = start(tmp_path, record=minimal_record(), inherit={"_bingsu_t0": "1", "_bingsu_t1": "999999999999"})
@@ -435,12 +473,13 @@ def test_ctx_values_passed_each_prompt(tmp_path):
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
-# 이것을 실패시키는 것: `[[ -z $pst ]] && pst=$_bingsu_s` 줄을 지우는 것(빈 --pipestatus).
+# 이것을 실패시키는 것: `[[ -z $pst ]] && pst=$_bingsu_s` 줄을 지우는 것(빈 --pipestatus),
+# 설치 hook이 저장한 상태를 돌려주는 것(RC=3).
 def test_empty_pipestatus_falls_back_to_status(tmp_path):
     r, calls = install_once(tmp_path, b'_bingsu_p=(); _bingsu_s=3; _bingsu_install; echo "RC=$?"\n')
     (argv,) = calls
     assert val(argv, b"--status") == b"3" and val(argv, b"--pipestatus") == b"3", argv
-    assert r.stdout == b"RC=3\n", r.stdout
+    assert r.stdout == b"RC=0\n", r.stdout
 
 
 # Review Focus 3. 이것을 실패시키는 것: `${COLUMNS:-0}` 대신 `$COLUMNS`를 넘기는 것(빈 값).

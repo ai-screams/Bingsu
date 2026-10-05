@@ -64,11 +64,15 @@ export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu
 # assignment, or $? and PIPESTATUS are lost. The end time is read here too,
 # so hooks between this one and the install hook do not count as command
 # time (spec section 5).
+# Both hooks return 0: bash restores $? before each PROMPT_COMMAND element,
+# so a hook's return value reaches no other hook, and a non-zero return only
+# risks errexit (`set -e` would end the interactive shell). bingsu itself
+# uses the saved status in _bingsu_s.
 _bingsu_save() {
   _bingsu_s=$? _bingsu_p=("${PIPESTATUS[@]}")
   local t=${EPOCHREALTIME-}
   _bingsu_t1=${t/[.,]/}
-  return "$_bingsu_s"
+  return 0
 }
 
 # Install hook, last in PROMPT_COMMAND. Options are read right before
@@ -109,7 +113,7 @@ _bingsu_install() {
     printf '%s\n' @MSG_LATE_HOOK_BASH@ >&2
   fi
   if (( nm )); then shopt -s nocasematch; fi
-  return "$_bingsu_s"
+  return 0
 }
 
 # Register once (F-23). Function bodies above are redefined on every init.
