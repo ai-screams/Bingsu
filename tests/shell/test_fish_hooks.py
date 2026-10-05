@@ -297,7 +297,7 @@ def test_inherited_generation_is_replaced_at_init(tmp_path):
 # 이것을 실패시키는 것: duration 조건의 모양 검사를 지우는 것(빈 값: --duration-ms 뒤가 다음 플래그),
 # 모양 검사를 `test -n`으로 바꾸는 것(12abc가 넘어감).
 @pytest.mark.parametrize("change", ["set -e CMD_DURATION", "set -g CMD_DURATION 12abc"])
-def test_erased_duration_after_a_command_leaves_the_flag_out(tmp_path, change):
+def test_invalid_duration_after_a_command_leaves_the_flag_out(tmp_path, change):
     rc_after = f"function _change --on-event fish_postexec; {change}; end"
     s, inst = start(tmp_path, minimal_record(), rc_after=rc_after)
     s.run("true")
