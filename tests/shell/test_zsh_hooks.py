@@ -90,6 +90,19 @@ def test_exit_status_reaches_next_hook_and_is_returned(tmp_path):
     assert b"PROBE:1" in out and b"PROBE:0" in out
 
 
+# A record that carries terminal queries must not get answers typed into the
+# shell: the PTY driver answers queries for fish sessions only.
+# 이것을 실패시키는 것: Session.expect의 질의 응답 조건(`respond_queries`)을 셸과 무관하게 켜는 것(응답 바이트가 stdin으로 들어감).
+def test_terminal_queries_in_record_get_no_answer(tmp_path):
+    left = b"\x1b[6n\x1b[c\x1b]11;?\x07> "
+    s, _, _ = start(tmp_path, record=minimal_record(left=left))
+    s.run("true")
+    s.run("true")
+    out = s.close()
+    assert b"\x1b[6n" in out, "the query never reached the terminal"
+    assert b"1;1R" not in out and b"?62;c" not in out and b"rgb:0000" not in out, out
+
+
 # F-23: init twice redefines functions but registers hooks once.
 # 이것을 실패시키는 것: 등록 블록의 `(( ! ${precmd_functions[(Ie)_bingsu_install]:-0} ))` 조건을 지우는 것.
 def test_init_twice_registers_hooks_once(tmp_path):

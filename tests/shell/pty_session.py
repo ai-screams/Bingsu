@@ -2,8 +2,11 @@
 
 fish 4 asks the terminal questions at startup and before prompts (primary
 device attributes `ESC [ c`, cursor position `ESC [ 6 n`, background colour
-`OSC 11 ; ?`) and waits for the answers; a bare PTY never answers, so every
-expect here answers them (observed with fish 4.9.3 on 2026-10-04)."""
+`OSC 11 ; ?`) and waits for the answers; a bare PTY never answers, so a fish
+session answers them in every expect (observed with fish 4.9.3 on
+2026-10-04). Other shells are never answered: their output may contain the
+same sequences (a hostile record), and an answer would reach the child's
+stdin as typed input."""
 import io
 import re
 import subprocess
@@ -34,8 +37,10 @@ class Session:
 
     live = set()
 
-    def __init__(self, shell, env, cols=80, rows=24):
+    def __init__(self, shell, env, cols=80, rows=24, respond_queries=None):
         self.shell = shell
+        # Explicit only for tests of this driver; sessions answer when fish.
+        self.respond_queries = shell == "fish" if respond_queries is None else respond_queries
         self.fish4 = shell == "fish" and _fish_major(env) >= 4
         self.log = io.BytesIO()
         # Without TERM zsh's line editor treats the terminal as dumb and never
@@ -66,7 +71,7 @@ class Session:
         """Like pexpect.expect, answering terminal queries while waiting.
         `timeout` is one deadline for the whole call: answering a query
         does not restart it."""
-        pats = [pattern] + QUERIES
+        pats = [pattern] + (QUERIES if self.respond_queries else [])
         deadline = time.monotonic() + timeout
         while True:
             left = deadline - time.monotonic()
