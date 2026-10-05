@@ -80,7 +80,7 @@ def test_hook_between_save_and_install_changes_options(tmp_path):
 # _bingsu_save stays green. The install hook's own return value is pinned
 # by test_empty_pipestatus_falls_back_to_status.
 # 이것을 실패시키는 것: precmd 함수 사이에 $?를 되살리지 않는 zsh(bingsu 변이로는 죽지 않음).
-def test_exit_status_reaches_next_hook_and_is_returned(tmp_path):
+def test_exit_status_is_restored_for_next_precmd_hook(tmp_path):
     rc_after = ("_probe() { print -r -- \"PROBE:$?\" }\n"
                 "precmd_functions=($precmd_functions[1] _probe $precmd_functions[2,-1])")
     s, _, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
@@ -240,10 +240,22 @@ def test_inherited_t0_is_reset(tmp_path):
     assert b"--duration-ms" not in first, first
 
 
-# 이것을 실패시키는 것: 머리의 `typeset -g … _bingsu_warned_last=`에서 초기화를 빼는 것(경고가 사라짐).
+# 이것을 실패시키는 것: 등록 블록의 `_bingsu_warned_last=` 초기화를 빼는 것(경고가 사라짐).
 def test_inherited_warned_flag_is_reset(tmp_path):
     s, _, _ = start(tmp_path, rc_after="_late() { : }\nprecmd_functions+=(_late)",
                     record=minimal_record(), inherit={"_bingsu_warned_last": "1"})
+    s.run("true")
+    out = visible(s.close())
+    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
+
+
+# A re-init keeps the shown-once state: the spec says the same order stays quiet.
+# 이것을 실패시키는 것: `_bingsu_warned_last=` 초기화를 등록 블록 밖(머리)으로 되돌리는 것(재-init 뒤 경고가 2회).
+def test_reinit_does_not_repeat_late_hook_warning(tmp_path):
+    s, _, _ = start(tmp_path, rc_after="_late() { : }\nprecmd_functions+=(_late)", record=minimal_record())
+    s.run("true")
+    s.run(f"source {tmp_path / 'init.zsh'}")
+    s.run("true")
     s.run("true")
     out = visible(s.close())
     assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
@@ -297,11 +309,13 @@ def test_duration_excludes_hooks_between_save_and_install(tmp_path):
                 "precmd_functions=($precmd_functions[1] _slow $precmd_functions[2,-1])")
     s, inst, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
     s.run("true")
-    s.run("sleep 0.3")
+    s.run("sleep 0.1")
     s.close()
     ms = [int(opt(c, b"--duration-ms")) for c in inst.calls() if opt(c, b"--duration-ms")]
-    assert ms and max(ms) < 450, ms   # sleep 0.3 is the longest command
-    assert any(m >= 250 for m in ms), ms
+    # The command takes 100 ms, the hook between the two 500 ms: counting the
+    # hook gives 600 or more, 250 ms of slack on a loaded machine.
+    assert ms and max(ms) < 350, ms
+    assert any(m >= 80 for m in ms), ms
 
 
 # Inherited exported names stay in the shell but leave the environment.

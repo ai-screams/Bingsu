@@ -27,9 +27,11 @@ _bingsu_call() {
 # duration is then reported as unknown.
 zmodload zsh/datetime 2>/dev/null || :
 # Reset, never inherited: an environment value for _bingsu_t0 would make
-# the first duration negative or huge, one for _bingsu_warned_last would
-# silence the late-hook warning.
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_warned_last=
+# the first duration negative or huge. _bingsu_warned_last is reset on
+# first registration only (below): a re-init keeps the late-hook warning
+# quiet once it has been shown (spec section 5, same order stays silent).
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1=
+typeset -g _bingsu_warned_last
 typeset -ga _bingsu_p
 # typeset keeps an inherited export flag; without +x the rendered prompt
 # and the timings would reach the environment of every child process.
@@ -102,6 +104,8 @@ _bingsu_install() {
 () {
   emulate -L zsh
   if (( ! ${precmd_functions[(Ie)_bingsu_install]:-0} )); then
+    # First registration: an inherited value would silence the warning.
+    _bingsu_warned_last=
     precmd_functions=(_bingsu_save ${precmd_functions:#_bingsu_save} _bingsu_install)
   fi
   if (( ! ${preexec_functions[(Ie)_bingsu_preexec]:-0} )); then
