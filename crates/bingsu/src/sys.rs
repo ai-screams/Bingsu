@@ -647,12 +647,14 @@ mod open_at_tests {
 mod random_tests {
     use super::*;
 
-    // 이것을 실패시키는 것: random_bytes16이 고정값을 내는 것(예: `return Some([0; 16])`).
+    // 이것을 실패시키는 것: random_bytes16이 고정값을 내는 것(예: `return Some([0; 16])`),
+    // 둘째 호출만 0을 내는 것.
     #[test]
     fn random_bytes16_gives_distinct_nonzero_values() {
         let a = random_bytes16().expect("entropy");
         let b = random_bytes16().expect("entropy");
         assert_ne!(a, [0; 16]);
+        assert_ne!(b, [0; 16]);
         assert_ne!(a, b);
     }
 }
