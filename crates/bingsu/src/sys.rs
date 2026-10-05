@@ -1,5 +1,14 @@
 //! The only module in this crate allowed to use `unsafe` (the allow is on
 //! `mod sys;` in main.rs). Every block carries a SAFETY comment (workspace lint).
+// Prompt path: the clippy.toml rules (environment reads among them, spec 4
+// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
+// be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
+// checks this line.
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteOutcome {

@@ -1,5 +1,14 @@
 //! `bingsu prompt`: envelope -> status -> one record on fd 1, exit 0.
 //! M1 has no renderer (M2), so accepted envelopes yield the minimal record.
+// Prompt path: the clippy.toml rules (environment reads among them, spec 4
+// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
+// be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
+// checks this line.
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 use crate::envelope::{self, EnvelopeError};
 use crate::sys;
 use bingsu_core::record::write_minimal_b1;
