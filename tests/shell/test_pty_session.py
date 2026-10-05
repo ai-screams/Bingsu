@@ -6,7 +6,7 @@ import pexpect
 import pytest
 
 from conftest import trusted_env
-from pty_session import Session
+from pty_session import Session, sends_prompt_end
 
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 zsh_only = pytest.mark.skipif("zsh" not in SHELLS, reason="zsh not under test")
@@ -37,7 +37,7 @@ def test_context_manager_ends_the_child(tmp_path):
 # fish 4.0.2 never sends OSC 133;B. Waiting for it before every command made
 # each run() take about 4 s (two waits of 2 s). Kills its mutation on fish
 # 4.0.2 only; on fish 3.6 and 4.9 it is green either way.
-# 이것을 실패시키는 것: 첫 프롬프트에 133;B가 없어도 _ready가 매번 기다리는 것(fish 4.0.2에서 run 세 번이 약 12초).
+# 이것을 실패시키는 것: fish 4.0에서도 _ready가 133;B를 기다리는 것(4.0.2에서 run 세 번이 약 12초).
 @pytest.mark.skipif("fish" not in SHELLS, reason="fish not under test")
 def test_fish_run_does_not_wait_for_a_mark_it_never_sends(tmp_path):
     with Session("fish", trusted_env(tmp_path)) as s:
@@ -47,15 +47,16 @@ def test_fish_run_does_not_wait_for_a_mark_it_never_sends(tmp_path):
         assert time.monotonic() - t < 3
 
 
-# Only the first prompt decides: on a fish that sends 133;B, a later prompt
-# that comes after the 2 s wait (a slow command) keeps the waits on, or input
-# typed during later query rounds would be dropped. Runs where the first
-# prompt brings 133;B (fish 4.9); skipped elsewhere.
-# 이것을 실패시키는 것: _ready의 `if self.n == 0` 조건을 지우는 것(늦은 프롬프트 하나로 기다림이 꺼짐).
-@pytest.mark.skipif("fish" not in SHELLS, reason="fish not under test")
-def test_fish_slow_command_keeps_the_prompt_mark_wait(tmp_path):
-    with Session("fish", trusted_env(tmp_path)) as s:
-        if not s.prompt_mark:
-            pytest.skip("this fish sends no OSC 133;B")
-        s.run("sleep 2.5")
-        assert s.prompt_mark
+
+# 이것을 실패시키는 것: 판정을 뒤집는 것(4.0이 B를 기대하면 run마다 4초, 4.9가 기대하지 않으면 입력이 버려짐),
+# 비교 기준을 (4, 0)으로 낮추는 것.
+@pytest.mark.parametrize("text,expected", [
+    ("fish, version 3.6.0", False),
+    ("fish, version 4.0.2", False),
+    ("fish, version 4.1.0", True),
+    ("fish, version 4.9.3", True),
+    ("fish, version 5.0.0", True),
+    ("", False),
+])
+def test_prompt_end_mark_is_decided_by_version(text, expected):
+    assert sends_prompt_end(text) is expected

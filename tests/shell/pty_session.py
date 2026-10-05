@@ -11,6 +11,7 @@ import io
 import re
 import subprocess
 import time
+import warnings
 
 import pexpect
 
@@ -25,10 +26,16 @@ def visible(transcript: bytes) -> bytes:
     return ANSI.sub(b"", transcript)
 
 
-def _fish_major(env):
-    out = subprocess.run(["fish", "--version"], capture_output=True, text=True, env=env).stdout
-    m = re.search(r"(\d+)\.", out)
-    return int(m.group(1)) if m else 0
+def sends_prompt_end(version_text):
+    """Whether a fish sends the prompt-end mark (OSC 133;B), from the text of
+    `fish --version`. Observed 2026-10-05: 3.6.0 sends no OSC 133 at all,
+    4.0.2 sends 133;A, C and D but no B (and asks no terminal questions),
+    4.9.3 sends B. 4.1 to 4.8 were not observed: B is expected there, and a
+    missing one only warns (see Session._ready)."""
+    m = re.search(r"(\d+)\.(\d+)", version_text)
+    if not m:
+        return False
+    return (int(m.group(1)), int(m.group(2))) >= (4, 1)
 
 
 class Session:
@@ -41,10 +48,11 @@ class Session:
         self.shell = shell
         # Explicit only for tests of this driver; sessions answer when fish.
         self.respond_queries = shell == "fish" if respond_queries is None else respond_queries
-        self.fish4 = shell == "fish" and _fish_major(env) >= 4
-        # Whether _ready waits for OSC 133;B; dropped when the first prompt
-        # brings none (see _ready).
-        self.prompt_mark = self.fish4
+        version = ""
+        if shell == "fish":
+            version = subprocess.run(["fish", "--version"], capture_output=True, text=True, env=env).stdout
+        # Whether _ready waits for OSC 133;B, decided by the fish version.
+        self.prompt_end = sends_prompt_end(version)
         self.log = io.BytesIO()
         # Without TERM zsh's line editor treats the terminal as dumb and never
         # draws RPROMPT; trusted_env() carries no TERM.
@@ -86,18 +94,17 @@ class Session:
             self.p.send(ANSWERS[i - 1])
 
     def _ready(self):
-        """fish 4 drops input typed while it waits for query answers: wait
-        for its prompt-end mark (OSC 133;B). fish 3.x has neither. fish 4.0.2
-        sends OSC 133;A, C and D but no B, and asks no questions (observed
-        2026-10-05): when the first prompt brings no B, later prompts are not
-        waited for, or every call would run into the timeout."""
-        if not self.prompt_mark:
+        """fish 4.9 drops input typed while it waits for query answers: wait
+        for its prompt-end mark (OSC 133;B). Versions that send no B (3.6,
+        4.0) are never waited for (sends_prompt_end). A missing B on a
+        version that should send one warns and goes on: input typed now may
+        be dropped, which shows up as a timeout in the test itself."""
+        if not self.prompt_end:
             return
         try:
             self.expect(re.compile(rb"\x1b\]133;B"), timeout=2)
         except pexpect.TIMEOUT:
-            if self.n == 0:
-                self.prompt_mark = False
+            warnings.warn("fish sent no OSC 133;B within 2 s")
 
     def _mark(self):
         self._ready()

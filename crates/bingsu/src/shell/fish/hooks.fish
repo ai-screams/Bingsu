@@ -26,8 +26,10 @@ function fish_prompt
     set -l g $sp[1]
     set -l s $sp[2]
     set -l pst (string join , -- $sp[3..-1])
+    # Shapes as zsh and bash pass them: a user may set either variable to
+    # anything. The core checks every value again.
     set -l w $COLUMNS
-    test -n "$w"; or set w 0
+    string match -qr '^[0123456789]{1,6}\z' -- "$w"; or set w 0
     set -l ctx --width $w --status $s --pipestatus $pst --jobs (count (jobs -p 2>/dev/null))
     # The envelope takes a keymap of 1 to 16 bytes from [a-z_] and refuses the
     # whole call otherwise. A bind mode may be any name (My-Mode, mode2): such
@@ -40,8 +42,9 @@ function fish_prompt
     # nothing (empty, blanks, a comment, a lone `;`): only a new status
     # generation says a command ran since the last prompt. A command that
     # sets no status (`set x 1`, `begin; end`) sends no duration, never an
-    # old one. A redraw of the same prompt sends none either.
-    if test "$g" != "$_bingsu_gen"; and test -n "$CMD_DURATION"
+    # old one. A redraw of the same prompt (Ctrl-L) sends none either: fish
+    # gives no signal that tells it from an empty line.
+    if test "$g" != "$_bingsu_gen"; and string match -qr '^[0123456789]{1,9}\z' -- "$CMD_DURATION"
         set -a ctx --duration-ms $CMD_DURATION
     end
     set -g _bingsu_gen $g
@@ -52,8 +55,11 @@ function fish_prompt
         set -g _bingsu_rps1 $_bingsu_f[4]
         printf '%s' $_bingsu_f[3]
     else
+        # A constant, never the directory: fish 3.6 and 4.0 print control
+        # characters of a folder name as they are (prompt_pwd). The renderer
+        # cleans the directory before it goes into a record.
         set -g _bingsu_rps1 ''
-        printf '%s ❯ ' (prompt_pwd)
+        printf '❯ '
     end
 end
 

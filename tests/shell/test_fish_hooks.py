@@ -109,13 +109,13 @@ def test_refused_record_draws_fallback_and_clears_right(tmp_path):
     bad = tmp_path / "bad.bin"
     bad.write_bytes(b"B1\x1f7\x1fD:$(touch x)\x1e")
     rec_file = tmp_path / "bin" / "record.bin"
-    body = (f"cd /\nfish_prompt; fish_right_prompt; printf '%s' '{SEP.decode()}'\n"
+    body = (f"fish_prompt; fish_right_prompt; printf '%s' '{SEP.decode()}'\n"
             f"cat {bad} > {rec_file}\n"
             f"fish_prompt; printf '%s' '{SEP.decode()}'; fish_right_prompt\n").encode()
     r, _ = install_once(tmp_path, body, record=record(b"OLD> ", b"R:OLD"))
     first, second = r.stdout.split(SEP, 1)
     assert first == b"OLD> R:OLD", first
-    assert second == "/ ❯ ".encode() + SEP, second
+    assert second == "❯ ".encode() + SEP, second
 
 
 # fish draws the left prompt before the right one, so fish_right_prompt
@@ -290,12 +290,15 @@ def test_inherited_generation_is_replaced_at_init(tmp_path):
     assert b"--duration-ms" not in argv, argv
 
 
-# CMD_DURATION erased after a command ran (a fish_postexec handler; fish
-# sets it before those run): the generation advanced but there is no value.
-# A PTY, not a script: the generation moves only in an interactive fish.
-# 이것을 실패시키는 것: duration 조건에서 `test -n "$CMD_DURATION"`을 지우는 것(--duration-ms 뒤가 다음 플래그).
-def test_erased_duration_after_a_command_leaves_the_flag_out(tmp_path):
-    rc_after = "function _erase --on-event fish_postexec; set -e CMD_DURATION; end"
+# CMD_DURATION erased or replaced after a command ran (a fish_postexec
+# handler; fish sets it before those run): the generation advanced but there
+# is no number. A PTY, not a script: the generation moves only in an
+# interactive fish.
+# 이것을 실패시키는 것: duration 조건의 모양 검사를 지우는 것(빈 값: --duration-ms 뒤가 다음 플래그),
+# 모양 검사를 `test -n`으로 바꾸는 것(12abc가 넘어감).
+@pytest.mark.parametrize("change", ["set -e CMD_DURATION", "set -g CMD_DURATION 12abc"])
+def test_erased_duration_after_a_command_leaves_the_flag_out(tmp_path, change):
+    rc_after = f"function _change --on-event fish_postexec; {change}; end"
     s, inst = start(tmp_path, minimal_record(), rc_after=rc_after)
     s.run("true")
     s.close()
@@ -304,3 +307,33 @@ def test_erased_duration_after_a_command_leaves_the_flag_out(tmp_path):
     for c in calls:
         flags = [a for a in c if a.startswith(b"--") and b"=" not in a]
         assert all(not val(c, f).startswith(b"--") for f in flags), c
+
+
+# A COLUMNS a user set to something else: the width falls back to 0 (unknown).
+# 이것을 실패시키는 것: COLUMNS 모양 검사를 `test -n`으로 되돌리는 것(abc가 넘어감),
+# `{1,6}`을 `{1,7}`로 바꾸는 것.
+@pytest.mark.parametrize("cols", ["abc", "1234567", "80x"])
+def test_columns_outside_the_shape_send_width_0(tmp_path, cols):
+    _, inst = install_once(tmp_path, f"set -g COLUMNS {cols}\nfish_prompt\n".encode())
+    (argv,) = inst.calls()
+    assert val(argv, b"--width") == b"0", argv
+
+
+# A refused record draws a constant prompt. fish 3.6 and 4.0 print the
+# control characters of a folder name through prompt_pwd as they are; every
+# fish prints U+202E. fish_title is emptied so only the prompt can show the
+# name.
+# 이것을 실패시키는 것: 폴백에 `(prompt_pwd)`를 다시 넣는 것(raw ESC·BEL·U+202E가 터미널로 감).
+def test_refused_record_fallback_never_prints_the_directory(tmp_path):
+    name = "d\x1b]0;PWNED\x07\x1b[2Jx\u202e"
+    folder = short_dir() / name
+    folder.mkdir()
+    # rc.fish is sourced, never echoed: the control characters reach the
+    # terminal only if something prints the directory.
+    rc_after = f"function fish_title; end\ncd '{folder}'"
+    s, _ = start(tmp_path, b"not a record", rc_after=rc_after)
+    s.run("true")
+    out = s.close()
+    assert name.encode() not in out
+    assert b"\x1b]0;PWNED" not in out and "\u202e".encode() not in out, out
+    assert "❯ ".encode() in visible(out)
