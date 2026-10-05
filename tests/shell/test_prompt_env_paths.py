@@ -86,10 +86,27 @@ def tree(lines, roots):
     return seen
 
 
-# 이것을 실패시키는 것: prompt가 환경 변수로 경로를 정해 그 아래를 여는 것(M3a부터 실제로 여는 코드가 생김),
-# 그 접근을 bingsu가 띄운 스레드나 자식 프로세스에서 하는 것.
+FIRST_PATH = re.compile(r'^\d+\s+(?!<\.\.\.)\w+\([^"]*"((?:[^"\\]|\\.)*)"')
+# What the dynamic loader and Rust's start-up read (glibc, observed in the
+# three images on 2026-10-05): the loader cache and preload list, the
+# libraries, and /proc/self/maps (main-thread stack guard).
+SYSTEM_PREFIXES = ("/etc/ld.so.", "/lib/", "/proc/self/")
+
+
+def allowed(path, line, exe_paths, roots):
+    """Spec section 5 (front-end prompt opens no file of the current folder
+    or repository) and X-06 (only the roots pinned by init)."""
+    if path == "" and "AT_EMPTY_PATH" in line:
+        return True  # fstat of an fd already open (glibc 2.35, 2.36): names no path
+    if path in exe_paths or path.startswith(SYSTEM_PREFIXES):
+        return True
+    return any(path == r or path.startswith(r + "/") for r in roots)
+
+
+# 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
+# 상대 경로("x"), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
 @pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
-def test_prompt_binary_touches_nothing_under_repo(tmp_path):
+def test_prompt_binary_opens_only_system_paths_and_pinned_roots(tmp_path):
     inst = Install(tmp_path)
     trusted = trusted_env(tmp_path)
     script = inst.init("bash", trusted)
@@ -99,12 +116,24 @@ def test_prompt_binary_touches_nothing_under_repo(tmp_path):
     f = tmp_path / "s.bash"
     f.write_bytes(script + b"\n" + CALL)
     trace = tmp_path / "trace"
-    r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file,%desc,%process", "-o", str(trace)]
+    # %desc is left out: read and write buffers are quoted strings too.
+    r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file,%process", "-o", str(trace)]
                        + SHELL_CMD["bash"] + [str(f)], env=env, capture_output=True, timeout=60)
     assert r.returncode == 0, r.stderr
     lines = trace.read_text(errors="replace").splitlines()
     roots = {l.split()[0] for l in lines if "execve(" in l and str(inst.exe) in l}
     assert roots, "bingsu was not executed"
     pids = tree(lines, roots)
-    hits = [l for l in lines if l.split()[0] in pids and str(repo) in l]
-    assert hits == [], hits[:5]
+    # execve names the pinned path (the symlink); its target never shows.
+    exe_paths = {str(inst.exe)}
+    pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
+              (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
+               ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
+    bad = []
+    for l in lines:
+        if l.split()[0] not in pids:
+            continue
+        m = FIRST_PATH.match(l)
+        if m and not allowed(m.group(1), l, exe_paths, pinned):
+            bad.append(l)
+    assert bad == [], bad[:5]
