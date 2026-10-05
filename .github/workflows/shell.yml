@@ -98,7 +98,7 @@ jobs:
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
             "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
-              exec python3 -m pytest tests/shell -q -rf -p no:cacheprovider --basetemp=/root/pytest "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+              exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py -q -rf -p no:cacheprovider --basetemp=/root/pytest "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
 
   shell-macos:
     name: Shell PTY (macOS Homebrew)
@@ -135,4 +135,4 @@ jobs:
         env:
           BINGSU_TEST_LOCALE: en_US.UTF-8
           BINGSU_TEST_SHELLS: zsh bash fish
-        run: '"$BINGSU_PY" -m pytest tests/shell -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}'
