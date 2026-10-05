@@ -421,8 +421,16 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
 /// 16 random bytes for the session value (spec section 3 "session").
 pub fn random_bytes16() -> Option<[u8; 16]> {
     let mut b = [0u8; 16];
+    // musl has no getentropy in the libc crate; getrandom never returns a
+    // short read or EINTR for 256 bytes or fewer once the pool is ready
+    // (getrandom(2)), so anything but 16 falls back to /dev/urandom.
+    #[cfg(target_os = "linux")]
+    // SAFETY: `b` is 16 writable bytes and the length passed is its length.
+    let filled = unsafe { libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0) } == 16;
+    #[cfg(not(target_os = "linux"))]
     // SAFETY: `b` is 16 writable bytes; getentropy accepts up to 256.
-    if unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) } == 0 {
+    let filled = unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) } == 0;
+    if filled {
         return Some(b);
     }
     use std::io::Read;
@@ -632,5 +640,19 @@ mod open_at_tests {
             SEARCH_ONLY | libc::O_DIRECTORY,
         );
         assert!(got.is_err());
+    }
+}
+
+#[cfg(test)]
+mod random_tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: random_bytes16이 고정값을 내는 것(예: `return Some([0; 16])`).
+    #[test]
+    fn random_bytes16_gives_distinct_nonzero_values() {
+        let a = random_bytes16().expect("entropy");
+        let b = random_bytes16().expect("entropy");
+        assert_ne!(a, [0; 16]);
+        assert_ne!(a, b);
     }
 }
