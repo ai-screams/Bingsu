@@ -39,7 +39,18 @@ cargo build
 cargo test --workspace --all-features
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+scripts/check-core-purity.sh                       # core purity + CLI prompt-path forbid gate
+cargo check -p bingsu --target x86_64-unknown-linux-musl   # CI builds musl; libc APIs differ (getentropy is not there)
+tests/golden/record/run-all.sh                     # record golden vectors; SHELLS="bash zsh fish", BINGSU_PY=<python>
+BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/record/test_overrides.py -q -rf -p no:cacheprovider
 ```
+
+Shell tests (`tests/shell`):
+- `tests/hostile/classes.tsv` is the one source for core, golden and PTY hostile-value tests; add a row, not a per-shell case.
+- NUL outcomes per shell, version and locale live in `tests/golden/record/nul_expected.tsv` (first match wins; `*` rows generalise beyond what was observed).
+- Minimum shells (bash 5.1, zsh 5.8, fish 3.6) run in `tests/shell/containers/*.Dockerfile`; in a container run tests as root with a root-owned copy of the binary and `--basetemp` outside `/tmp`, because init warns about a folder above the binary that another user can change.
+- `BINGSU_RECORD_OBSERVATIONS=1` prints `OBSERVE` lines only for unpinned cells; pinned cells still assert.
+- The strace test (Linux) allows only loader/library paths, `/proc/self/maps`, the binary and the four pinned roots; a new distro path needs a reason before it joins the list.
 
 Changelog (git-cliff, config in `cliff.toml`):
 
