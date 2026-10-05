@@ -26,7 +26,21 @@ def hostile_record(c1, c2):
     return b"B1\x1f7\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
-def start(tmp_path, rc_before="", rc_after="", record=None, locale=None, cols=200, inherit=None, numeric=None):
+def stderr_capture(err):
+    """rc lines that send the stderr of both bingsu hooks to `err`. An
+    interactive bash writes its prompt and the echoed input to stderr, so the
+    shell's own stderr can never be empty; instead each hook body is renamed
+    and called through a wrapper with the redirection. The wrapper keeps the
+    hook names and their places in PROMPT_COMMAND."""
+    return (f"eval \"$(declare -f _bingsu_save | sed '1s/^_bingsu_save /_t_save /')\"\n"
+            f"eval \"$(declare -f _bingsu_install | sed '1s/^_bingsu_install /_t_install /')\"\n"
+            f"_bingsu_save() {{ _t_save 2>>{err}; }}\n"
+            f"_bingsu_install() {{ _t_install 2>>{err}; }}\n")
+
+
+def start(tmp_path, rc_before="", rc_after="", record=None, locale=None, cols=200, inherit=None, numeric=None,
+          err=None):
+    """err: a file that receives the stderr of sourcing init and of both hooks."""
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)
     if locale:
@@ -41,7 +55,12 @@ def start(tmp_path, rc_before="", rc_after="", record=None, locale=None, cols=20
     cdir = short_dir()
     canaries = [cdir / "c1", cdir / "c2"]
     inst.use_fake(record or hostile_record(*[str(c).encode() for c in canaries]))
-    (tmp_path / "rc.bash").write_text(f"{rc_before}\nsource {tmp_path / 'init.bash'}\n{rc_after}\n")
+    if err is None:
+        source = f"source {tmp_path / 'init.bash'}\n"
+    else:
+        err.write_bytes(b"")
+        source = f"source {tmp_path / 'init.bash'} 2>>{err}\n" + stderr_capture(err)
+    (tmp_path / "rc.bash").write_text(f"{rc_before}\n{source}{rc_after}\n")
     s = Session("bash", env, cols=cols)
     s.run(f"source {tmp_path / 'rc.bash'}")
     return s, inst, canaries
@@ -511,7 +530,8 @@ def test_refused_record_draws_fallback_prompt(tmp_path):
 # pin (no bingsu mutation found that only pipefail exposes).
 @pytest.mark.parametrize("mode", ["set -u", "set -o pipefail", "set -euo pipefail"])
 def test_bash_strict_modes(tmp_path, mode):
-    s, inst, _ = start(tmp_path, rc_before=mode, record=minimal_record())
+    err = tmp_path / "err"
+    s, inst, _ = start(tmp_path, rc_before=mode, record=minimal_record(), err=err)
     s.run("true")
     s.run("true | true")
     s.run("")
@@ -519,6 +539,8 @@ def test_bash_strict_modes(tmp_path, mode):
     assert b"unbound variable" not in out
     assert b"bad substitution" not in out
     assert len(inst.calls()) >= 4
+    # init and both hooks wrote nothing to stderr (stderr_capture).
+    assert err.read_bytes() == b"", err.read_bytes()
 
 
 # Review Focus 2. 이것을 실패시키는 것: _bingsu_call의 `{ …; } 2>/dev/null`을 빼는 것
@@ -622,7 +644,10 @@ def test_set_a_leaks_nothing(tmp_path):
 
 # F1-2. Compatibility pin (no bingsu mutation): glob and redirection options
 # leave init, both hooks and the options themselves alone. The options are
-# printed back, so a run that never turned them on fails.
+# printed back, so a run that never turned them on fails. The stderr of init
+# and of both hooks must be empty, and the wrappers that capture it must pass
+# the status through (`false` reaches bingsu as --status 1).
+# 이것을 실패시키는 것(oracle 자기 검사): hooks.bash에 `echo x >&2`를 넣는 것(설치 hook 안이나 최상위).
 OPTS = {"extglob": "shopt -s extglob", "nullglob": "shopt -s nullglob", "failglob": "shopt -s failglob",
         "noclobber": "set -o noclobber"}
 
@@ -630,13 +655,17 @@ OPTS = {"extglob": "shopt -s extglob", "nullglob": "shopt -s nullglob", "failglo
 @pytest.mark.parametrize("names", [("extglob", "nullglob", "failglob", "noclobber"), ("extglob",), ("nullglob",),
                                    ("failglob",), ("noclobber",)])
 def test_glob_and_noclobber_options(tmp_path, names):
-    s, inst, _ = start(tmp_path, rc_before="\n".join(OPTS[n] for n in names), record=minimal_record(left=b"OK> "))
-    s.run("true")
+    err = tmp_path / "err"
+    s, inst, _ = start(tmp_path, rc_before="\n".join(OPTS[n] for n in names), record=minimal_record(left=b"OK> "),
+                       err=err)
+    s.run("false")
     s.run("true")
     s.run("shopt -p extglob nullglob failglob; set -o | grep noclobber")
     out = visible(s.close())
     assert b"bash:" not in out, out
+    assert err.read_bytes() == b"", err.read_bytes()
     assert len(inst.calls()) >= 4 and b"OK> " in out
+    assert any(val(c, b"--status") == b"1" for c in inst.calls()), inst.calls()
     for n in names:
         want = b"set -o noclobber" if n == "noclobber" else f"shopt -s {n}".encode()
         if n == "noclobber":
