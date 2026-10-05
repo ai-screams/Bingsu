@@ -68,17 +68,19 @@ if [[ -z ${_bingsu_ps0_owned-} ]]; then
   # A PS0 copied from a bingsu shell (an exported PS0, or one set by hand)
   # starts with a bingsu prefix, possibly from another bingsu version whose
   # inner text differs. Every version starts with the same head (the
-  # constant up to its first `=`) and ends at the first `}}` after it: cut
-  # each such prefix, or it doubles in every nested shell. A PS0 that starts
-  # with the head but has no `}}` after it is the user's own text and is
-  # kept whole. The head is quoted, so it is matched literally.
+  # constant up to its first `=`) and ends with the same tail (from its last
+  # `,`: `, 0))}}`): cut each such prefix, or it doubles in every nested
+  # shell. A PS0 that starts with the head but has no bingsu tail after it
+  # is the user's own text and is kept whole. Head and tail are quoted, so
+  # they are matched literally.
   _bingsu_nm=0
   if shopt -q nocasematch; then _bingsu_nm=1; shopt -u nocasematch; fi
   _bingsu_h=${_bingsu_ps0%%=*}=
+  _bingsu_e=,${_bingsu_ps0##*,}
   while [[ $_bingsu_ps0_orig == "$_bingsu_h"* ]]; do
     _bingsu_r=${_bingsu_ps0_orig#"$_bingsu_h"}
-    if [[ $_bingsu_r != *'}}'* ]]; then break; fi
-    _bingsu_ps0_orig=${_bingsu_r#*\}\}}
+    if [[ $_bingsu_r != *"$_bingsu_e"* ]]; then break; fi
+    _bingsu_ps0_orig=${_bingsu_r#*"$_bingsu_e"}
   done
   if (( _bingsu_nm )); then shopt -s nocasematch; fi
   _bingsu_ps0_owned=1
@@ -167,7 +169,7 @@ if (( _bingsu_reg )); then
   PROMPT_COMMAND=("${_bingsu_a[@]}" _bingsu_install)
 fi
 if (( _bingsu_nm )); then shopt -s nocasematch; fi
-unset _bingsu_nm _bingsu_reg _bingsu_h _bingsu_r _bingsu_a
+unset _bingsu_nm _bingsu_reg _bingsu_h _bingsu_e _bingsu_r _bingsu_a
 # Last, after every assignment above: an inherited export flag outlives the
 # resets, and `set -a` marks each assignment and each function definition
 # for export. Without this the rendered prompt, the timings and the hook

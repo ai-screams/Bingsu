@@ -789,9 +789,22 @@ def test_inherited_ps0_with_an_older_prefix_keeps_one(tmp_path):
 NO_CLOSE_PS0 = "${EPOCHREALTIME+${_bingsu_t0:0:$((_bingsu_t0=0, 0))} }"
 
 
-# 이것을 실패시키는 것: 벗겨내기 루프의 `}}` 존재 확인(`[[ $_bingsu_r != *'}}'* ]] && break`)을 지우는 것(머리만 잘림).
+# 이것을 실패시키는 것: 벗겨내기 루프의 꼬리 존재 확인(`[[ $_bingsu_r != *"$_bingsu_e"* ]] && break`)을 지우는 것(머리만 잘림).
 def test_inherited_ps0_that_only_looks_like_a_prefix_is_kept(tmp_path):
     s, _, _ = start(tmp_path, record=minimal_record(), inherit={"PS0": NO_CLOSE_PS0, "_t_want": NO_CLOSE_PS0})
     s.run('[[ $_bingsu_ps0_orig == "$_t_want" && $PS0 == "$_bingsu_ps0$_t_want" ]] && echo KE""PT')
     out = visible(s.close())
     assert b"\nKEPT" in out or b" KEPT" in out, out
+
+
+# A user PS0 with the bingsu head and a `}}` that is not the bingsu tail
+# (`, 0))}}`) is the user's text too: kept whole, one current prefix.
+USER_CLOSE_PS0 = "${EPOCHREALTIME+${_bingsu_t0:0:$((_bingsu_t0=USER))}}TAIL"
+
+
+# 이것을 실패시키는 것: 벗겨내기의 종결자를 bingsu 꼬리 대신 아무 `}}`로 되돌리는 것(TAIL만 남음).
+def test_inherited_ps0_with_a_foreign_close_is_kept(tmp_path):
+    s, _, _ = start(tmp_path, record=minimal_record(), inherit={"PS0": USER_CLOSE_PS0, "_t_want": USER_CLOSE_PS0})
+    s.run('[[ $_bingsu_ps0_orig == "$_t_want" && $PS0 == "$_bingsu_ps0$_t_want" ]] && echo KE""PT')
+    out = visible(s.close())
+    assert b"TAILKEPT" in out, out
