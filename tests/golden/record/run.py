@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run the record golden vectors through one shell reader and compare.
 
-Usage: run.py --shell zsh|bash|fish --locale LOCALE [--opts a,b]
-Fails if any row differs from expected.tsv/transitions.tsv, if the shell
+Usage: run.py --shell zsh|bash|fish --locale LOCALE [--opts a,b] [--record-observations]
+Fails if any row differs from expected.tsv/transitions.tsv/nul_expected.tsv,
+if a NUL vector has no nul_expected.tsv row (unless recording), if the shell
 wrote anything to stderr, or if a hostile vector created the canary.
 For bash it also fails if _bingsu_frame changes the nocasematch state.
 """
@@ -157,7 +158,10 @@ def main():
                 if w is None:
                     errors.append(f"unexpected vector {name}")
                 elif w[0] == "observe":
-                    print(f"OBSERVE {a.shell} {a.locale} {name}: {frame} {disp} {note}")
+                    # Reached only for an unpinned vector: an error by default
+                    # (resolve_observations), printed only while recording.
+                    if a.record_observations:
+                        print(f"OBSERVE {a.shell} {a.locale} {name}: {frame} {disp} {note}")
                 elif (frame, disp, note) != (("accept",) + w[1:] if w[0] == "accept-stripped" else w):
                     errors.append(f"{name}: got {(frame, disp, note)} want {w}")
             elif kind == "U":

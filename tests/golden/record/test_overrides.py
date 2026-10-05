@@ -1,8 +1,10 @@
 """Matcher for nul_expected.tsv: shell x version range x locale group."""
 import pathlib
+import shutil
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import run  # noqa: E402
 from run import nul_override, nul_rows, resolve_observations  # noqa: E402
 from check_versions import parse  # noqa: E402  (tests/shell/, on the path through run)
 
@@ -108,3 +110,25 @@ def test_shadowed_finds_covered_rows_only():
     assert shadowed([("v", "zsh", ">=5.9", "*", "a", "-"), ("v", "zsh", "<5.9", "*", "b", "-")]) == []
     assert shadowed([("v", "zsh", "*", "*", "a", "-"), ("v", "fish", "*", "*", "b", "-")]) == []
     assert shadowed([("v", "zsh", "*", "*", "a", "-"), ("w", "zsh", "*", "*", "b", "-")]) == []
+
+
+def _run_unpinned(monkeypatch, capsys, record):
+    """run.main() for one installed shell with its nul_field row removed."""
+    shell = next(s for s in ("zsh", "bash", "fish") if shutil.which(s))
+    rows = [r for r in nul_rows() if not (r[0] == "nul_field" and r[1] == shell)]
+    monkeypatch.setattr(run, "nul_rows", lambda: rows)
+    monkeypatch.delenv("BINGSU_RECORD_OBSERVATIONS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run.py", "--shell", shell, "--locale", "C"]
+                        + (["--record-observations"] if record else []))
+    code = run.main()
+    return code, capsys.readouterr().out
+
+
+# 이것을 실패시키는 것: 기본 실행이 고정 없는 칸의 OBSERVE 줄을 찍는 것(기록 모드의 출력이 기본 실행에 새어 나감),
+# 또는 기록 모드가 고정 없는 칸을 찍지 않거나 실패시키는 것.
+def test_observe_lines_only_while_recording(monkeypatch, capsys):
+    code, out = _run_unpinned(monkeypatch, capsys, record=False)
+    assert code == 1 and "nul_field: no nul_expected.tsv row" in out
+    assert "OBSERVE" not in out
+    code, out = _run_unpinned(monkeypatch, capsys, record=True)
+    assert code == 0 and "OBSERVE " in out and " nul_field: " in out

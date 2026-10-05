@@ -4,9 +4,10 @@
 # frame: the record reader's outcome (golden run.py): accept, reject, or
 # accept-stripped (bash: accepted after the shell dropped every NUL; the fields
 # equal the input without its NULs). pty: the screen outcome
-# (tests/shell/test_hostile_matrix.py), noexec or minimal; "-" = not pinned,
-# which fails the default run for that cell. nul_field and nul_status have no
-# screen test, so their pty stays "-".
+# (tests/shell/test_hostile_matrix.py), noexec or minimal. "-" = not pinned:
+# it fails the default run only in a column that is looked up. nul_field and
+# nul_status are not in the screen layer, so their pty column is never looked
+# up and stays "-".
 # Observed 2026-10-05, the same in every cell of each shell: zsh 5.8, 5.9;
 # fish 3.6, 4.0, 4.9; bash 5.1, 5.2, 5.3 (macOS arm64 and the three Linux
 # test images). frame: C, C.UTF-8, en_US.UTF-8, ko_KR.UTF-8; pty: C,
