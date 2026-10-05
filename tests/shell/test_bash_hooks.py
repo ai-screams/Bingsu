@@ -82,6 +82,14 @@ def val(argv, k):
     return argv[argv.index(k) + 1] if k in argv else None
 
 
+def wait_calls(inst, n, timeout=15):
+    """Wait until the fake bingsu has logged at least n calls."""
+    deadline = time.monotonic() + timeout
+    while len(inst.calls()) < n:
+        assert time.monotonic() < deadline, f"only {len(inst.calls())} of {n} calls"
+        time.sleep(0.05)
+
+
 def install_once(tmp_path, body, record=None):
     """Source init in a plain (non-interactive) bash script, run `body`,
     return (result, argv of every bingsu call)."""
@@ -281,12 +289,15 @@ def test_pyte_wraps_like_a_vt100():
     assert screen.display[1][0] == "y"
 
 
-def wait_screen(s, cols, done, timeout=10):
+def wait_screen(s, cols, done, timeout=10, stable=False):
     """Feed the transcript to a pyte screen until done(screen) holds (a
-    condition, not a fixed sleep). Returns the screen, or None on timeout."""
+    condition, not a fixed sleep). With stable=True the screen and cursor
+    must also be the same on two polls in a row, so a redraw in progress is
+    not judged. Returns the screen, or None on timeout."""
     screen = pyte.Screen(cols, 24)
     stream = pyte.ByteStream(screen)
     deadline = time.monotonic() + timeout
+    last = None
     while time.monotonic() < deadline:
         try:
             s.p.read_nonblocking(65536, timeout=0.2)
@@ -295,7 +306,12 @@ def wait_screen(s, cols, done, timeout=10):
         screen.reset()
         stream.feed(s.log.getvalue())
         if done(screen):
-            return screen
+            snap = (tuple(screen.display), screen.cursor.x, screen.cursor.y)
+            if not stable or snap == last:
+                return screen
+            last = snap
+        else:
+            last = None
     return None
 
 
@@ -324,7 +340,9 @@ def test_raw_soh_stx_are_zero_width(tmp_path, extra):
     # even when readline miscounts the prompt. Moving to the line start and
     # inserting makes readline place the cursor from its own width count.
     s.p.send("\x01Y")
-    screen = wait_screen(s, cols, lambda sc: any("Y" in r for r in sc.display))
+    # Judged only once readline has finished redrawing: Y visible and the
+    # screen and cursor unchanged across two polls.
+    screen = wait_screen(s, cols, lambda sc: any("Y" in r for r in sc.display), stable=True)
     s.p.sendcontrol("c")
     s.close()
     (tmp_path / "transcript.bin").write_bytes(s.log.getvalue())
@@ -472,13 +490,17 @@ def test_duration_excludes_hooks_between_save_and_install(tmp_path):
     rc_after = ("_slow() { sleep 1.0; }\n"
                 'PROMPT_COMMAND=("${PROMPT_COMMAND[0]}" _slow "${PROMPT_COMMAND[@]:1}")')
     s, inst, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
+    # Every entered line draws one prompt, one bingsu call: `source rc` and
+    # its marker make two. Wait for them so the next call is the target's.
+    wait_calls(inst, 2)
     s.run("sleep 0.1")
+    wait_calls(inst, 3)
+    target = inst.calls()[2]
     s.close()
-    ms = [int(val(c, b"--duration-ms")) for c in inst.calls() if val(c, b"--duration-ms")]
     # The command takes 100 ms, the hook between the two 1000 ms: counting
     # the hook gives 1100 or more. 500 ms of slack for a loaded machine.
-    assert ms and max(ms) < 600, ms
-    assert any(m >= 80 for m in ms), ms
+    ms = int(val(target, b"--duration-ms"))
+    assert 80 <= ms < 600, (ms, target)
 
 
 # 이것을 실패시키는 것: `[[ -o vi ]]` 판정을 지우는 것(vi에서도 emacs), 저장 hook의 PIPESTATUS 저장을
@@ -528,19 +550,25 @@ def test_refused_record_draws_fallback_prompt(tmp_path):
 # 끝나지 않은 파이프의 실패(pipefail)가 셸을 멈추거나 오류를 찍는 것. The set -u cases die when
 # init reads `$PS0` instead of `${PS0-}`; the pipefail case is an environment
 # pin (no bingsu mutation found that only pipefail exposes).
+# The shell options are the same after init and two prompts as right after
+# the user set them ($- and every `set -o` option).
+# 이것을 실패시키는 것(자기 검사): 설치 hook 머리에 `set +o pipefail`이나 `set +u`를 넣는 것.
 @pytest.mark.parametrize("mode", ["set -u", "set -o pipefail", "set -euo pipefail"])
 def test_bash_strict_modes(tmp_path, mode):
     err = tmp_path / "err"
-    s, inst, _ = start(tmp_path, rc_before=mode, record=minimal_record(), err=err)
+    rc_before = f'{mode}\n_t_opts="$-|$(shopt -po)"'
+    s, inst, _ = start(tmp_path, rc_before=rc_before, record=minimal_record(), err=err)
     s.run("true")
     s.run("true | true")
     s.run("")
+    s.run('[[ "$-|$(shopt -po)" == "$_t_opts" ]] && echo OPTS""_SAME')
     out = visible(s.close())
     assert b"unbound variable" not in out
     assert b"bad substitution" not in out
     assert len(inst.calls()) >= 4
     # init and both hooks wrote nothing to stderr (stderr_capture).
     assert err.read_bytes() == b"", err.read_bytes()
+    assert b"\nOPTS_SAME" in out, out
 
 
 # Review Focus 2. 이것을 실패시키는 것: _bingsu_call의 `{ …; } 2>/dev/null`을 빼는 것
@@ -642,41 +670,54 @@ def test_set_a_leaks_nothing(tmp_path):
     assert any(150 <= m < 5000 for m in ms), ms
 
 
-# F1-2. Compatibility pin (no bingsu mutation): glob and redirection options
-# leave init, both hooks and the options themselves alone. The options are
-# printed back, so a run that never turned them on fails. The stderr of init
-# and of both hooks must be empty, and the wrappers that capture it must be
-# transparent: PROMPT_COMMAND keeps its names and order, `false` reaches
-# bingsu as --status 1 and `false | true` as --pipestatus 1,0.
-# 이것을 실패시키는 것(oracle 자기 검사): hooks.bash에 `echo x >&2`를 넣는 것(설치 hook 안이나 최상위).
-OPTS = {"extglob": "shopt -s extglob", "nullglob": "shopt -s nullglob", "failglob": "shopt -s failglob",
-        "noclobber": "set -o noclobber"}
+# F1-2, F-PR-3. Compatibility pin (no bingsu mutation kills it): glob and
+# redirection options leave init, both hooks and the options themselves
+# alone, in both directions. All four options are printed back and compared
+# with the expected on/off state, so a run that never set them, or a hook
+# that turns one on, fails. The stderr of init and of both hooks is empty.
+# 이것을 실패시키는 것(자기 검사): 설치 hook 머리에 `shopt -s extglob`을 넣는 것(꺼져 있어야 할 경우 FAIL),
+# hooks.bash에 `echo x >&2`를 넣는 것(stderr 0바이트 단언).
+GLOB_OPTS = ("extglob", "nullglob", "failglob", "noclobber")
 
 
-@pytest.mark.parametrize("names", [("extglob", "nullglob", "failglob", "noclobber"), ("extglob",), ("nullglob",),
-                                   ("failglob",), ("noclobber",)])
-def test_glob_and_noclobber_options(tmp_path, names):
+def opt_line(name, on):
+    if name == "noclobber":
+        return f"set {'-o' if on else '+o'} noclobber"
+    return f"shopt {'-s' if on else '-u'} {name}"
+
+
+@pytest.mark.parametrize("names", [GLOB_OPTS, ("extglob",), ("nullglob",), ("failglob",), ("noclobber",)])
+def test_glob_and_noclobber_options_are_preserved(tmp_path, names):
     err = tmp_path / "err"
-    s, inst, _ = start(tmp_path, rc_before="\n".join(OPTS[n] for n in names), record=minimal_record(left=b"OK> "),
-                       err=err)
-    s.run("false")
-    s.run("false | true")
-    s.run("shopt -p extglob nullglob failglob; set -o | grep noclobber")
-    s.run('echo "PC=[${PROMPT_COMMAND[*]}]"')
+    rc_before = "\n".join(opt_line(n, n in names) for n in GLOB_OPTS)
+    s, inst, _ = start(tmp_path, rc_before=rc_before, record=minimal_record(left=b"OK> "), err=err)
+    s.run("true")
+    s.run("true")
+    s.run("shopt -p extglob nullglob failglob; shopt -po noclobber")
     out = visible(s.close())
     assert b"bash:" not in out, out
     assert err.read_bytes() == b"", err.read_bytes()
     assert len(inst.calls()) >= 4 and b"OK> " in out
+    for n in GLOB_OPTS:
+        assert f"\n{opt_line(n, n in names)}\n".encode() in out, (n, out)
+
+
+# The stderr capture of the option tests must not change what bingsu sees:
+# PROMPT_COMMAND keeps its names and order, `false` reaches bingsu as
+# --status 1 and `false | true` as --pipestatus 1,0.
+# 이것을 실패시키는 것: 저장 hook의 PIPESTATUS 저장을 `_bingsu_p=("$?")`로 바꾸는 것(M35, 1,0 없음).
+def test_stderr_wrappers_are_transparent(tmp_path):
+    err = tmp_path / "err"
+    s, inst, _ = start(tmp_path, record=minimal_record(left=b"OK> "), err=err)
+    s.run("false")
+    s.run("false | true")
+    s.run('echo "PC=[${PROMPT_COMMAND[*]}]"')
+    out = visible(s.close())
+    assert err.read_bytes() == b"", err.read_bytes()
     assert b"PC=[_bingsu_save _bingsu_install]" in out, out
     calls = inst.calls()
     assert any(val(c, b"--status") == b"1" for c in calls), calls
     assert any(val(c, b"--pipestatus") == b"1,0" for c in calls), calls
-    for n in names:
-        want = b"set -o noclobber" if n == "noclobber" else f"shopt -s {n}".encode()
-        if n == "noclobber":
-            assert re.search(rb"noclobber\s+on", out), out
-        else:
-            assert want in out, out
 
 
 def utf8_locale(lang):
