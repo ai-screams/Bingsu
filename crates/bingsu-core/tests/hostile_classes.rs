@@ -29,7 +29,8 @@ fn payload(spec: &str) -> Vec<u8> {
     replace(&raw, b"CANARY", b"/tmp/x")
 }
 
-// 이것을 실패시키는 것: 행렬의 producer 열과 다르게 받거나 거부하거나 대체하는 인코더.
+// 이것을 실패시키는 것: 행렬의 producer 열과 다르게 받거나 거부하거나 대체하는 인코더,
+// class 이름이 비었거나 형식이 틀리거나 겹치는 행.
 #[test]
 fn producer_column_matches() {
     let text = include_str!("../../../tests/hostile/classes.tsv");
@@ -40,12 +41,22 @@ fn producer_column_matches() {
         .parse()
         .unwrap();
     let mut rows = 0;
+    let mut seen: Vec<&str> = Vec::new();
     for line in text
         .lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
     {
         let c: Vec<&str> = line.split('\t').collect();
         let (class, want) = (c[0], c[3]);
+        // Same rule as tests/hostile/matrix.py: [a-z][a-z0-9_]*, each once.
+        let mut chars = class.bytes();
+        assert!(
+            chars.next().is_some_and(|b| b.is_ascii_lowercase())
+                && chars.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+            "class {class:?} does not match [a-z][a-z0-9_]*"
+        );
+        assert!(!seen.contains(&class), "class {class:?} repeats");
+        seen.push(class);
         let p = payload(c[1]);
         let mut out = Vec::new();
         let got = match encode_b1(

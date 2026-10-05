@@ -39,7 +39,7 @@ def export_line(shell, values):
 # 이것을 실패시키는 것: hook이 프롬프트 때 환경 변수로 뿌리를 만드는 것
 # (예: `@CONFIG_ROOT@` 대신 "--config-root=$XDG_CONFIG_HOME/bingsu", 세 셸 각각).
 @pytest.mark.parametrize("shell", SHELLS)
-def test_prompt_time_environment_never_reaches_hook_args(tmp_path, shell):
+def test_prompt_time_path_environment_does_not_change_pinned_root_args(tmp_path, shell):
     inst = Install(tmp_path)
     trusted = trusted_env(tmp_path)
     init = tmp_path / f"init.{shell}"
@@ -149,8 +149,8 @@ def named_paths(line):
     rejects more). Resumed lines carry results, not arguments, and are skipped.
     A result buffer printed on the call line (the target of readlinkat, for
     one) is checked as a path too, which errs toward a false failure; when
-    M3a reads links under the roots, narrow that syscall to its first
-    argument."""
+    M3a reads links under the roots, narrow that syscall to its pathname
+    (the first quoted string)."""
     m = SYSCALL.match(line)
     if not m:
         return []
@@ -179,7 +179,14 @@ def allowed(path, line, exe, roots):
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
 # 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
 @pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
-def test_prompt_binary_opens_only_system_paths_and_pinned_roots(tmp_path):
+def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path):
+    """Every path argument of every traced call (open, stat, rename, link,
+    ...) of the binary and its threads and children. SYSTEM_PATHS was
+    observed on Debian and Ubuntu glibc (aarch64, the three test images) and
+    takes the loader paths of Fedora (/lib64), Arch (/usr/lib) and Alpine
+    (/lib/ld-musl-*.so.1) by its shape; the CI musl build on x86_64 is
+    expected to name only its execve (UNVERIFIED). NixOS and Guix
+    (/nix/store, /gnu/store) are not covered and fail here."""
     inst = Install(tmp_path)
     trusted = trusted_env(tmp_path)
     script = inst.init("bash", trusted)
@@ -201,4 +208,5 @@ def test_prompt_binary_opens_only_system_paths_and_pinned_roots(tmp_path):
               (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
     bad = [l for l in scoped if any(not allowed(p, l, exe, pinned) for p in named_paths(l))]
-    assert bad == [], bad[:5]
+    assert bad == [], ("paths outside the allowlist (a loader or library path of your distribution: "
+                       "widen SYSTEM_PATHS and write why; anything else bingsu opened is a defect)", bad[:5])
