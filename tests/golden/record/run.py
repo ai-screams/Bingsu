@@ -50,6 +50,10 @@ def expected(shell, locale):
                 if loc == locale and sh == shell:  # exact: "C" must not match "C.UTF-8"
                     frame, disp, note = val, "-", "-"
         rows[name] = (frame, disp, note)
+    sys.path.insert(0, str(HERE.parents[1] / "hostile"))  # tests/hostile/
+    import matrix  # noqa: E402
+    for cls, _, _, _, reader, _ in matrix.rows():
+        rows[f"hostile_{cls}"] = (reader, "ok", "-") if reader == "accept" else (reader, "-", "-")
     return rows
 
 

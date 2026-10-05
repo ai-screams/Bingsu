@@ -72,6 +72,17 @@ def main():
         "nul_field": one(b"L\x00x"),
         "nul_status": one(b"L", status=b"ok:no\x00ne"),
     }
+    # Hostile-value matrix (tests/hostile/classes.tsv), one vector per class.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "hostile"))  # tests/hostile/
+    import matrix  # noqa: E402
+    for row in matrix.rows():
+        cls, spec = row[:2]
+        if spec.startswith("repeat:"):
+            _, byte, n = spec.split(":")
+            data = bytes([int(byte, 16)]) * int(n)
+        else:
+            data = bytes.fromhex(spec).replace(b"CANARY", canary)
+        v[f"hostile_{cls}"] = rec([b"L<" + data + b">L", b"RMARK", b"", b"", b"", b""])
     for name, data in v.items():
         (out / f"{name}.bin").write_bytes(data)
     print(f"wrote {len(v)} vectors")
