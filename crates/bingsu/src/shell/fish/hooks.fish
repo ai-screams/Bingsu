@@ -24,7 +24,6 @@ function fish_prompt
     set -l sp $status $pipestatus
     set -l s $sp[1]
     set -l pst (string join , -- $sp[2..-1])
-    test -n "$pst"; or set pst $s
     set -l w $COLUMNS
     test -n "$w"; or set w 0
     set -l km $fish_bind_mode
