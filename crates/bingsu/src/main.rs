@@ -14,6 +14,14 @@ mod prompt;
 #[allow(unsafe_code)]
 mod sys;
 
+// The prompt dispatch runs here: the clippy.toml rules are forbidden for the
+// body of main only (an item attribute, so init's own #[expect] in
+// trusted_env stays valid). scripts/check_cli_prompt_forbid.py checks it.
+#[forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 fn main() -> ExitCode {
     let mut all = std::env::args_os();
     let argv0 = all.next().unwrap_or_default();

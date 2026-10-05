@@ -10,9 +10,13 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The modules `bingsu prompt` runs: the command, its argument parser and the
-# syscall wrappers it writes and exits through.
+# syscall wrappers it writes and exits through. The `fn main` that picks the
+# prompt branch carries the same forbid as an item attribute (MAIN): a crate
+# root #![forbid] would also forbid init's #[expect] in trusted_env.
 PROMPT_PATH = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs", "crates/bingsu/src/sys.rs"]
+MAIN = "crates/bingsu/src/main.rs"
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
+WANT_MAIN = WANT.replace("#!", "#", 1)
 
 # A second, coarser guard: the forbid above covers only the clippy.toml list,
 # which names no file API. prompt.rs and envelope.rs must not name one either.
@@ -45,7 +49,14 @@ for rel in PROMPT_PATH:
     first = None if start < 0 else "".join(text[start:text.index("]", start) + 1].split())
     if first != "".join(WANT.split()):
         bad.append(f"{rel}: first inner attribute is {first!r}")
+# The attribute right before `fn main`, whitespace and line breaks ignored.
+main_text = "".join((ROOT / MAIN).read_text().split()) if (ROOT / MAIN).is_file() else ""
+at = main_text.find("fnmain(")
+if at < 0:
+    bad.append(f"{MAIN}: no fn main")
+elif not main_text[:at].endswith("".join(WANT_MAIN.split())):
+    bad.append(f"{MAIN}: fn main is not preceded by {WANT_MAIN}")
 if bad:
     print("prompt forbid gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
     sys.exit(1)
-print(f"prompt forbid gate: ok ({len(PROMPT_PATH)} files forbid, {len(NO_FILE_API)} name no file API)")
+print(f"prompt forbid gate: ok ({len(PROMPT_PATH)} files and fn main forbid, {len(NO_FILE_API)} name no file API)")
