@@ -59,3 +59,11 @@ def test_pty_column_is_keyed_and_dash_is_unpinned():
     assert nul_override(PTY, "hostile_nul", "zsh", (5, 9), "C") == "accept"
     assert nul_override(PTY, "hostile_nul", "bash", (5, 1), "ko_KR.UTF-8", column="pty") == "minimal"
     assert nul_override(PTY, "hostile_nul", "fish", (4, 9), "C", column="pty") is None
+
+
+# 이것을 실패시키는 것: accept-stripped 고정을 표시 칸 "ok" 없이(거부처럼) 펼치는 것.
+def test_accept_stripped_keeps_the_display_column():
+    w = {"nul_field": ("observe", "-", "-")}
+    rows = [("nul_field", "bash", "*", "*", "accept-stripped", "noexec")]
+    assert resolve_observations(w, rows, "bash", (5, 1), "C", record=False) == []
+    assert w["nul_field"] == ("accept-stripped", "ok", "-")

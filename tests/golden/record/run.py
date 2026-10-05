@@ -54,6 +54,10 @@ def _version_ok(rule, v):
 
 
 COLUMNS = {"frame": 4, "pty": 5}
+# "accept-stripped" (bash): the reader prints accept, and the fields equal the
+# input with every NUL removed, because bash drops NUL in command substitution
+# before the reader sees the bytes.
+ACCEPTED = ("accept", "accept-stripped")
 
 
 def nul_override(rows, vector, shell, version, locale, column="frame"):
@@ -79,7 +83,7 @@ def resolve_observations(want, nrows, shell, version, locale, record):
             continue
         frame = nul_override(nrows, name, shell, version, locale)
         if frame:
-            want[name] = (frame, "ok", "-") if frame == "accept" else (frame, "-", "-")
+            want[name] = (frame, "ok", "-") if frame in ACCEPTED else (frame, "-", "-")
         elif not record:
             errors.append(f"{name}: no nul_expected.tsv row for {shell} {version[0]}.{version[1]} {locale} "
                           "(run with --record-observations, review the output, add a row)")
@@ -160,7 +164,7 @@ def main():
                     errors.append(f"unexpected vector {name}")
                 elif w[0] == "observe":
                     print(f"OBSERVE {a.shell} {a.locale} {name}: {frame} {disp} {note}")
-                elif (frame, disp, note) != w:
+                elif (frame, disp, note) != (("accept",) + w[1:] if w[0] == "accept-stripped" else w):
                     errors.append(f"{name}: got {(frame, disp, note)} want {w}")
             elif kind == "U":
                 useen[cols[0]] = cols[1]
@@ -176,7 +180,8 @@ def main():
                 old, new, due, key = cols
                 seen.add(f"T:{old}>{new}")
         # Contract: a rejected record leaves _bingsu_f empty; an accepted one
-        # leaves the nine input field bytes unchanged (nothing is expanded).
+        # leaves the nine input field bytes unchanged (nothing is expanded),
+        # except that an accept-stripped one has lost every NUL.
         for name, w in want.items():
             if w[0] == "observe":
                 continue
@@ -189,6 +194,8 @@ def main():
                     errors.append(f"{name}: rejected but _bingsu_f has {n} elements")
             else:
                 data = (td / "v" / f"{name}.bin").read_bytes()
+                if w[0] == "accept-stripped":
+                    data = data.replace(b"\x00", b"")
                 fields = data[:-1].split(b"\x1f")
                 if (n, hexs) != (len(fields), ",".join(f.hex() for f in fields)):
                     errors.append(f"{name}: field bytes differ from the input record")
