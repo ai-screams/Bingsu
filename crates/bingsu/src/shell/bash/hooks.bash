@@ -5,11 +5,13 @@
 # 32-digit lowercase hex session and a short decimal counter (the counter
 # goes through $(( )), which evaluates subscripts such as a[$(cmd)]).
 # nocasematch would let `case` accept uppercase hex (F-18): save, clear,
-# restore, as the reader does.
+# restore, as the reader does. The sets are spelled out, never ranges: with
+# globasciiranges off a range follows the locale's collation ([0-9] takes
+# U+0661 under fa_IR, [a-f] takes é under en_US).
 _bingsu_nm=0
 if shopt -q nocasematch; then _bingsu_nm=1; shopt -u nocasematch; fi
 case $_bingsu_session in
-  *[!0-9a-f]*) _bingsu_session=@SESSION@ ;;
+  *[^0123456789abcdef]*) _bingsu_session=@SESSION@ ;;
 esac
 if (( _bingsu_nm )); then shopt -s nocasematch; fi
 unset _bingsu_nm
@@ -21,7 +23,7 @@ _bingsu_rec=
 # redirect keeps bash's own "ignored null byte" warning off the terminal.
 _bingsu_call() {
   case $_bingsu_seq in
-    ''|*[!0-9]*|0?*|????????????????*) _bingsu_seq=0 ;;
+    ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;
   esac
   _bingsu_seq=$(( _bingsu_seq + 1 ))
   { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@; printf .); } 2>/dev/null

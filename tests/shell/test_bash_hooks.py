@@ -677,3 +677,40 @@ def test_glob_and_noclobber_options(tmp_path, names):
             assert re.search(rb"noclobber\s+on", out), out
         else:
             assert want in out, out
+
+
+def utf8_locale(lang):
+    """The UTF-8 name of `lang` from `locale -a` (UTF-8 or utf8), or None."""
+    for name in subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.split():
+        if name in (f"{lang}.UTF-8", f"{lang}.utf8"):
+            return name
+    return None
+
+
+# F-PR-1. With globasciiranges off, a bracket range follows the locale's
+# collation: under fa_IR `[0-9]` takes ARABIC-INDIC DIGIT ONE, under en_US
+# `[a-f]` takes `é`. An inherited value of that shape would reach $(( ))
+# (seq) or the command line (session). Spec: character classes never lean
+# on the locale.
+# 이것을 실패시키는 것: session·seq 검사를 범위(`[!0-9a-f]`, `[!0-9]`)로 되돌리는 것.
+@pytest.mark.parametrize("name,value,lang", [
+    ("_bingsu_seq", "١", "fa_IR"),
+    ("_bingsu_session", "é" + "0" * 31, "en_US"),
+])
+def test_inherited_shapes_use_explicit_ascii_sets(tmp_path, name, value, lang):
+    loc = utf8_locale(lang)
+    if loc is None:
+        warnings.warn(f"NO {lang} UTF-8 locale here: F-PR-1 {name} is NOT tested on this host")
+        pytest.skip(f"NO {lang} UTF-8 locale: F-PR-1 {name} NOT TESTED")
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    env["LC_ALL"] = loc
+    script = inst.init("bash", env)
+    inst.use_fake(minimal_record())
+    env[name] = value
+    r = run_shell_script("bash", b"shopt -u globasciiranges\n" + script + b"\n_bingsu_install\n", env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    (argv,) = inst.calls()
+    assert val(argv, b"--seq") == b"1", argv
+    session = val(argv, b"--session")
+    assert re.fullmatch(rb"[0-9a-f]{32}", session) and session != value.encode(), argv
