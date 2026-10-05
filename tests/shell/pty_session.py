@@ -42,6 +42,9 @@ class Session:
         # Explicit only for tests of this driver; sessions answer when fish.
         self.respond_queries = shell == "fish" if respond_queries is None else respond_queries
         self.fish4 = shell == "fish" and _fish_major(env) >= 4
+        # Whether _ready waits for OSC 133;B; dropped when the first prompt
+        # brings none (see _ready).
+        self.prompt_mark = self.fish4
         self.log = io.BytesIO()
         # Without TERM zsh's line editor treats the terminal as dumb and never
         # draws RPROMPT; trusted_env() carries no TERM.
@@ -84,13 +87,17 @@ class Session:
 
     def _ready(self):
         """fish 4 drops input typed while it waits for query answers: wait
-        for its prompt-end mark (OSC 133;B). fish 3.x has neither."""
-        if not self.fish4:
+        for its prompt-end mark (OSC 133;B). fish 3.x has neither. fish 4.0.2
+        sends OSC 133;A, C and D but no B, and asks no questions (observed
+        2026-10-05): when the first prompt brings no B, later prompts are not
+        waited for, or every call would run into the timeout."""
+        if not self.prompt_mark:
             return
         try:
             self.expect(re.compile(rb"\x1b\]133;B"), timeout=2)
         except pexpect.TIMEOUT:
-            pass
+            if self.n == 0:
+                self.prompt_mark = False
 
     def _mark(self):
         self._ready()
