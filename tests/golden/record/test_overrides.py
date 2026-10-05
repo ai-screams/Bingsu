@@ -3,7 +3,8 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from run import nul_override, resolve_observations  # noqa: E402
+from run import nul_override, nul_rows, resolve_observations  # noqa: E402
+from check_versions import parse  # noqa: E402  (tests/shell/, on the path through run)
 
 ROWS = [
     ("nul_field", "zsh", ">=5.9", "C.UTF-8,en_US.UTF-8", "accept", "-"),
@@ -67,3 +68,43 @@ def test_accept_stripped_keeps_the_display_column():
     rows = [("nul_field", "bash", "*", "*", "accept-stripped", "noexec")]
     assert resolve_observations(w, rows, "bash", (5, 1), "C", record=False) == []
     assert w["nul_field"] == ("accept-stripped", "ok", "-")
+
+
+def _rule_covers(wide, narrow):
+    """Every version that satisfies `narrow` satisfies `wide`."""
+    if wide == "*":
+        return True
+    if narrow == "*" or wide[0] != narrow[0]:
+        return False
+    w, n = parse(wide.lstrip("<>=")), parse(narrow.lstrip("<>="))
+    return w <= n if wide.startswith(">=") else w >= n
+
+
+def _locales_cover(wide, narrow):
+    if wide == "*":
+        return True
+    return narrow != "*" and set(narrow.split(",")) <= set(wide.split(","))
+
+
+def shadowed(rows):
+    """(earlier, later) pairs where the earlier row matches every lookup the
+    later one could: first match wins, so the later row is never used."""
+    return [(a, b) for i, b in enumerate(rows) for a in rows[:i]
+            if a[0] == b[0] and a[1] == b[1] and _rule_covers(a[2], b[2]) and _locales_cover(a[3], b[3])]
+
+
+# 이것을 실패시키는 것: 넓은 행 뒤에 같은 벡터·셸의 좁은 행을 두는 것(그 행은 결코 쓰이지 않음).
+def test_no_pinned_row_is_shadowed_by_an_earlier_row():
+    assert shadowed(nul_rows()) == []
+
+
+# 이것을 실패시키는 것: 덮음 판정이 버전 범위·로캘 묶음의 포함 관계를 보지 않는 것.
+def test_shadowed_finds_covered_rows_only():
+    wide = ("v", "zsh", ">=5.8", "*", "accept", "-")
+    assert shadowed([wide, ("v", "zsh", ">=5.9", "C", "reject", "-")]) != []
+    assert shadowed([("v", "zsh", ">=5.9", "C", "reject", "-"), wide]) == []
+    assert shadowed([("v", "zsh", "<5.9", "*", "a", "-"), ("v", "zsh", "<5.8", "C,en_US.UTF-8", "b", "-")]) != []
+    assert shadowed([("v", "zsh", "*", "C", "a", "-"), ("v", "zsh", "*", "C,en_US.UTF-8", "b", "-")]) == []
+    assert shadowed([("v", "zsh", ">=5.9", "*", "a", "-"), ("v", "zsh", "<5.9", "*", "b", "-")]) == []
+    assert shadowed([("v", "zsh", "*", "*", "a", "-"), ("v", "fish", "*", "*", "b", "-")]) == []
+    assert shadowed([("v", "zsh", "*", "*", "a", "-"), ("w", "zsh", "*", "*", "b", "-")]) == []

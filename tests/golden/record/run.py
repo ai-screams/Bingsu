@@ -7,9 +7,9 @@ wrote anything to stderr, or if a hostile vector created the canary.
 For bash it also fails if _bingsu_frame changes the nocasematch state.
 """
 import argparse
+import functools
 import os
 import pathlib
-import re
 import subprocess
 import sys
 import tempfile
@@ -22,6 +22,8 @@ READER = {
     "fish": ROOT / "crates/bingsu/src/shell/fish/reader.fish",
 }
 CMD = {"zsh": ["zsh", "-f"], "bash": ["bash", "--noprofile", "--norc"], "fish": ["fish", "--no-config"]}
+sys.path.insert(0, str(HERE.parents[1] / "shell"))  # tests/shell/: the one version probe and rule parser
+from check_versions import rule_matches, version as probe_version  # noqa: E402
 
 
 def quote(shell, word):
@@ -38,19 +40,11 @@ def render_reader(shell, dst):
     dst.write_text(text)
 
 
+@functools.cache
 def shell_version(shell):
-    cmd = {"zsh": ["zsh", "-fc", "echo $ZSH_VERSION"], "bash": ["bash", "-c", 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'],
-           "fish": ["fish", "--version"]}[shell]
-    m = re.search(r"(\d+)\.(\d+)", subprocess.run(cmd, capture_output=True, text=True).stdout)
-    return (int(m.group(1)), int(m.group(2)))
-
-
-def _version_ok(rule, v):
-    if rule == "*":
-        return True
-    m = re.fullmatch(r"(>=|<)(\d+)\.(\d+)", rule)
-    want = (int(m.group(2)), int(m.group(3)))
-    return v >= want if m.group(1) == ">=" else v < want
+    """MAJOR.MINOR of `shell`, probed once per process (every NUL cell and
+    every x01 probe asks)."""
+    return probe_version(shell)
 
 
 COLUMNS = {"frame": 4, "pty": 5}
@@ -67,7 +61,7 @@ def nul_override(rows, vector, shell, version, locale, column="frame"):
     (unpinned)."""
     for row in rows:
         vec, sh, rule, locales = row[:4]
-        if vec == vector and sh == shell and _version_ok(rule, version) and (locales == "*" or locale in locales.split(",")):
+        if vec == vector and sh == shell and rule_matches(rule, version) and (locales == "*" or locale in locales.split(",")):
             value = row[COLUMNS[column]]
             return None if value == "-" else value
     return None

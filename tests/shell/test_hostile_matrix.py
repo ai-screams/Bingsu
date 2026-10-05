@@ -90,12 +90,11 @@ def test_hostile_class(tmp_path, shell, cls, spec, canary_col, pty, locale):
             print(f"OBSERVE-PTY {shell} {env['LC_ALL']} hostile_{cls}: left={b'L<' in out} right={b'RMARK' in out} "
                   f"minimal={MINIMAL in out}")
             return
-        # A NUL value draws differently per shell, so a pinned noexec cell
-        # checks the field marks, not the value bytes.
         if pinned == "noexec":
-            assert b"L<" in out and b">L" in out, f"{cls}: left field lost in {shell}"
-            if shell in ("zsh", "fish"):
-                assert b"RMARK" in out, f"{cls}: right field lost in {shell}"
+            # bash drops every NUL before the reader (accept-stripped); zsh
+            # draws the NUL byte as it is.
+            shown = data.replace(b"\x00", b"") if shell == "bash" else data
+            assert drawn(shell, out, shown), f"{cls}: fields not drawn in order on one line in {shell}"
         else:
             assert b"L<" not in out, f"{cls}: rejected record was drawn in {shell}"
             assert MINIMAL in out, f"{cls}: no minimal prompt in {shell}"
