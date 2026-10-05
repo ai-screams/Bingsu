@@ -315,6 +315,13 @@ def wait_screen(s, cols, done, timeout=10, stable=False):
     return None
 
 
+def screen_now(transcript, cols):
+    """The screen the transcript draws now, with the cursor, for messages."""
+    screen = pyte.Screen(cols, 24)
+    pyte.ByteStream(screen).feed(transcript)
+    return [row.rstrip() for row in screen.display if row.strip()], (screen.cursor.x, screen.cursor.y)
+
+
 def typed_screen(s, cols, k, tmp_path):
     """Type k characters, then wait until the screen shows all of them.
     Returns the pyte screen."""
@@ -340,9 +347,11 @@ def test_raw_soh_stx_are_zero_width(tmp_path, extra):
     # even when readline miscounts the prompt. Moving to the line start and
     # inserting makes readline place the cursor from its own width count.
     s.p.send("\x01Y")
-    # Judged only once readline has finished redrawing: Y visible and the
-    # screen and cursor unchanged across two polls.
-    screen = wait_screen(s, cols, lambda sc: any("Y" in r for r in sc.display), stable=True)
+    # Judged only once readline has finished redrawing: Y visible, the cursor
+    # in column 5 and the screen and cursor unchanged across two polls. On a
+    # timeout the last screen is shown with the failure.
+    screen = wait_screen(s, cols, lambda sc: any("Y" in r for r in sc.display) and sc.cursor.x == 5, stable=True)
+    last = None if screen is not None else screen_now(s.log.getvalue(), cols)
     s.p.sendcontrol("c")
     s.close()
     (tmp_path / "transcript.bin").write_bytes(s.log.getvalue())
@@ -352,7 +361,7 @@ def test_raw_soh_stx_are_zero_width(tmp_path, extra):
     else:
         assert rows[prompt_row] == "AB> " + "x" * (cols - 4), where
         assert rows[prompt_row + 1].rstrip() == "x" * extra, where
-    assert screen is not None, f"Y never shown; {where}"
+    assert screen is not None, f"no stable screen with Y and the cursor in column 5: {last}; {where}"
     assert screen.display[screen.cursor.y].startswith("AB> Yx") and screen.cursor.x == 5, where
 
 
@@ -489,13 +498,15 @@ def test_owned_globals_are_not_exported(tmp_path):
 def test_duration_excludes_hooks_between_save_and_install(tmp_path):
     rc_after = ("_slow() { sleep 1.0; }\n"
                 'PROMPT_COMMAND=("${PROMPT_COMMAND[0]}" _slow "${PROMPT_COMMAND[@]:1}")')
-    s, inst, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
-    # Every entered line draws one prompt, one bingsu call: `source rc` and
-    # its marker make two. Wait for them so the next call is the target's.
-    wait_calls(inst, 2)
+    s, inst, _ = start(tmp_path, rc_after=rc_after, record=minimal_record(left=b"DUR> "))
+    # The prompt text is drawn only after the install hook has called bingsu:
+    # once the prompt after the last marker is on screen, every call so far
+    # is logged and the next one is the target command's.
+    s.expect(b"DUR> ")
+    n = len(inst.calls())
     s.run("sleep 0.1")
-    wait_calls(inst, 3)
-    target = inst.calls()[2]
+    wait_calls(inst, n + 1)
+    target = inst.calls()[n]
     s.close()
     # The command takes 100 ms, the hook between the two 1000 ms: counting
     # the hook gives 1100 or more. 500 ms of slack for a loaded machine.
@@ -771,3 +782,16 @@ def test_inherited_ps0_with_an_older_prefix_keeps_one(tmp_path):
     s.run('[[ $_bingsu_ps0_orig == XPS0 && $PS0 == *"[^0123456789]"* ]] && echo ORIG""_KEPT')
     out = visible(s.close())
     assert b"XPS0PREFIX=1" in out and b"XPS0ORIG_KEPT" in out, out
+
+
+# A user PS0 that starts with the bingsu head but has no `}}` after it is
+# the user's text: kept whole, and the current prefix goes in front once.
+NO_CLOSE_PS0 = "${EPOCHREALTIME+${_bingsu_t0:0:$((_bingsu_t0=0, 0))} }"
+
+
+# 이것을 실패시키는 것: 벗겨내기 루프의 `}}` 존재 확인(`[[ $_bingsu_r != *'}}'* ]] && break`)을 지우는 것(머리만 잘림).
+def test_inherited_ps0_that_only_looks_like_a_prefix_is_kept(tmp_path):
+    s, _, _ = start(tmp_path, record=minimal_record(), inherit={"PS0": NO_CLOSE_PS0, "_t_want": NO_CLOSE_PS0})
+    s.run('[[ $_bingsu_ps0_orig == "$_t_want" && $PS0 == "$_bingsu_ps0$_t_want" ]] && echo KE""PT')
+    out = visible(s.close())
+    assert b"\nKEPT" in out or b" KEPT" in out, out
