@@ -89,7 +89,9 @@ def tree(lines, exe):
     the return may come later). A child's lines count wherever they are in
     the trace: strace may write a child's first line before the parent's
     return line. Returns (pids, lines). Pid reuse inside one prompt is not
-    tracked (environment assumption)."""
+    tracked (environment assumption). One prompt is assumed: only the first
+    execve of `exe` becomes the root; to read several calls from one trace,
+    build a closure per root."""
     lines = [l for l in lines if l.strip()]
     start = next((i for i, l in enumerate(lines) if is_root(l, exe)), None)
     if start is None:
@@ -144,7 +146,11 @@ def named_paths(line):
     """The paths a syscall line names: execve its pathname only (argv
     follows), any other call every quoted string (both paths of linkat,
     renameat2, symlinkat; a symlink's target text is checked too, which only
-    rejects more). Resumed lines carry results, not arguments, and are skipped."""
+    rejects more). Resumed lines carry results, not arguments, and are skipped.
+    A result buffer printed on the call line (the target of readlinkat, for
+    one) is checked as a path too, which errs toward a false failure; when
+    M3a reads links under the roots, narrow that syscall to its first
+    argument."""
     m = SYSCALL.match(line)
     if not m:
         return []
