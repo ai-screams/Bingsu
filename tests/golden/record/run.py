@@ -9,6 +9,7 @@ For bash it also fails if _bingsu_frame changes the nocasematch state.
 import argparse
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,62 @@ def render_reader(shell, dst):
     dst.write_text(text)
 
 
+def shell_version(shell):
+    cmd = {"zsh": ["zsh", "-fc", "echo $ZSH_VERSION"], "bash": ["bash", "-c", 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'],
+           "fish": ["fish", "--version"]}[shell]
+    m = re.search(r"(\d+)\.(\d+)", subprocess.run(cmd, capture_output=True, text=True).stdout)
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _version_ok(rule, v):
+    if rule == "*":
+        return True
+    m = re.fullmatch(r"(>=|<)(\d+)\.(\d+)", rule)
+    want = (int(m.group(2)), int(m.group(3)))
+    return v >= want if m.group(1) == ">=" else v < want
+
+
+COLUMNS = {"frame": 4, "pty": 5}
+
+
+def nul_override(rows, vector, shell, version, locale, column="frame"):
+    """The `column` value ("frame": reader outcome, "pty": screen outcome) of
+    the first row matching vector, shell, version range and locale group.
+    None when no row matches or the matching row leaves that column "-"
+    (unpinned)."""
+    for row in rows:
+        vec, sh, rule, locales = row[:4]
+        if vec == vector and sh == shell and _version_ok(rule, version) and (locales == "*" or locale in locales.split(",")):
+            value = row[COLUMNS[column]]
+            return None if value == "-" else value
+    return None
+
+
+def resolve_observations(want, nrows, shell, version, locale, record):
+    """Pin every `observe` vector from nul_expected.tsv (first matching row
+    wins, so row order matters). Without --record-observations an unmatched
+    vector is an error: a new shell, version or locale cannot pass unpinned."""
+    errors = []
+    for name in list(want):
+        if want[name][0] != "observe":
+            continue
+        frame = nul_override(nrows, name, shell, version, locale)
+        if frame:
+            want[name] = (frame, "ok", "-") if frame == "accept" else (frame, "-", "-")
+        elif not record:
+            errors.append(f"{name}: no nul_expected.tsv row for {shell} {version[0]}.{version[1]} {locale} "
+                          "(run with --record-observations, review the output, add a row)")
+    return errors
+
+
+def nul_rows():
+    rows = []
+    for line in (HERE / "nul_expected.tsv").read_text().splitlines():
+        if line and not line.startswith("#"):
+            rows.append(tuple(line.split("\t")))
+    return rows
+
+
 def expected(shell, locale):
     rows = {}
     for line in (HERE / "expected.tsv").read_text().splitlines():
@@ -62,6 +119,9 @@ def main():
     ap.add_argument("--shell", required=True, choices=sorted(CMD))
     ap.add_argument("--locale", required=True)
     ap.add_argument("--opts", default="")
+    # Opt-in only: print unpinned NUL results instead of failing on them.
+    ap.add_argument("--record-observations", action="store_true",
+                    default=os.environ.get("BINGSU_RECORD_OBSERVATIONS") == "1")
     a = ap.parse_args()
     with tempfile.TemporaryDirectory() as td:
         td = pathlib.Path(td)
@@ -82,6 +142,8 @@ def main():
         if canary.exists():
             errors.append("CANARY CREATED: a status string was executed")
         want = expected(a.shell, a.locale)
+        errors += resolve_observations(want, nul_rows(), a.shell, shell_version(a.shell), a.locale,
+                                      a.record_observations)
         seen = set()
         stdout = r.stdout.decode("utf-8", "replace")
         shopt_seen = set()

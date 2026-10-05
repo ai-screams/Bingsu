@@ -1,0 +1,16 @@
+# vector	shell	version_rule	locales	frame	pty
+# Order matters: the first matching row wins. Every row is an observation
+# recorded with --record-observations and reviewed, never inferred.
+# frame: the record reader's outcome (golden run.py). pty: the screen outcome
+# (tests/shell/test_hostile_matrix.py), noexec or minimal; "-" = not pinned yet,
+# which fails the default run for that cell.
+nul_field	zsh	>=5.9	C,en_US.UTF-8,ko_KR.UTF-8	accept	-
+nul_status	zsh	>=5.9	C,en_US.UTF-8,ko_KR.UTF-8	reject	-
+hostile_nul	zsh	>=5.9	C,en_US.UTF-8,ko_KR.UTF-8	accept	-
+nul_field	fish	>=4.9	C,en_US.UTF-8,ko_KR.UTF-8	reject	-
+nul_status	fish	>=4.9	C,en_US.UTF-8,ko_KR.UTF-8	reject	-
+hostile_nul	fish	>=4.9	C,en_US.UTF-8,ko_KR.UTF-8	reject	-
+hostile_nul_cmdsub	zsh	>=5.9	C,en_US.UTF-8,ko_KR.UTF-8	accept	-
+hostile_nul_backtick	zsh	>=5.9	C,en_US.UTF-8,ko_KR.UTF-8	accept	-
+hostile_nul_cmdsub	fish	>=4.9	C,en_US.UTF-8,ko_KR.UTF-8	reject	-
+hostile_nul_backtick	fish	>=4.9	C,en_US.UTF-8,ko_KR.UTF-8	reject	-

@@ -5,9 +5,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      record_observations:
+        description: Print unpinned NUL observations instead of failing (review, then pin in nul_expected.tsv)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+env:
+  BINGSU_RECORD_OBSERVATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.record_observations && '1' || '' }}
 
 concurrency:
   group: shell-${{ github.workflow }}-${{ github.ref }}
@@ -72,7 +80,7 @@ jobs:
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Record golden vectors
         run: |
-          docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
+          docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 -e BINGSU_RECORD_OBSERVATIONS -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
             "bingsu-${{ matrix.image }}" tests/golden/record/run-all.sh
       # Runs after a golden failure too, so one failure does not hide the other.
       # The runner's uid owns the checkout and the binary, and the container
@@ -85,7 +93,7 @@ jobs:
       - name: PTY tests
         if: success() || failure()
         run: |
-          # While recording (Task A12), -s shows the OBSERVE lines in the job log.
+          # While recording (record_observations), -s shows the OBSERVE-PTY lines in the job log.
           docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \

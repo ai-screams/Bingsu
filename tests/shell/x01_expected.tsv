@@ -1,0 +1,9 @@
+# shell	version_rule	capability	outcome
+zsh	*	resize	supported
+zsh	*	transient	supported
+bash	*	resize	next-prompt
+bash	*	transient	unsupported
+fish	<4.1	resize	next-prompt
+fish	>=4.1	resize	next-prompt
+fish	<4.1	transient	unsupported
+fish	>=4.1	transient	supported
