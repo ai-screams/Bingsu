@@ -81,10 +81,11 @@ def probe(shell, cap, tmp):
             else:
                 s.run("echo X1")
                 outcome = "supported" if b"T> echo X1" in visible(s.log.getvalue()) else "unsupported"
-        transcript = s.close()
+        s.close()
     finally:
         s.kill()
-    (tmp / f"{shell}-{cap}.transcript").write_bytes(transcript)
+        # Written on failure too: the failure message points at this folder.
+        (tmp / f"{shell}-{cap}.transcript").write_bytes(s.log.getvalue())
     return outcome, reflow
 
 
