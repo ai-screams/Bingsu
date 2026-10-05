@@ -1,0 +1,25 @@
+# Bans for bingsu-core's own dependency graph. Used with
+#   cargo deny --manifest-path crates/bingsu-core/Cargo.toml --config crates/bingsu-core/deny.toml check bans
+# `allow` is an allowlist: any crate not listed is rejected (not-allowed).
+# To add a dependency to core, review it first, then list it in `allow`.
+# The `deny` list below stays as documentation of crates that do I/O, spawn
+# or bind the OS; a pure core must not depend on them.
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow = [{ name = "bingsu-core" }]
+deny = [
+  { crate = "libc" },
+  { crate = "rustix" },
+  { crate = "nix" },
+  { crate = "tokio" },
+  { crate = "mio" },
+  { crate = "socket2" },
+  { crate = "getrandom" },
+  { crate = "rand" },
+  { crate = "dirs" },
+  { crate = "home" },
+  { crate = "tempfile" },
+  { crate = "walkdir" },
+  { crate = "gix" },
+]

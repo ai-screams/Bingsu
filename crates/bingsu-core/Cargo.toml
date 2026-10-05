@@ -1,0 +1,26 @@
+[package]
+name = "bingsu-core"
+version = "0.0.0"
+description = "I/O-free core of bingsu: record format, shell encoding, layout"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Lints are not inherited from the workspace so that the purity lints can be
+# set to forbid here, in the manifest. Every root [workspace.lints] entry must
+# appear here with the same value (scripts/check-core-purity.sh checks it).
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+# Purity rules (clippy.toml) can never be switched off inside the crate:
+# forbid turns any inner allow/expect into a hard error (E0453).
+disallowed_methods = "forbid"
+disallowed_types = "forbid"
+disallowed_macros = "forbid"
+
+[dependencies]
