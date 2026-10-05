@@ -7,6 +7,7 @@ machine. What these tests pin instead: record data leaves the functions as
 output only, never as a format string or code."""
 import os
 import re
+import time
 
 import pytest
 
@@ -160,14 +161,13 @@ def test_ctx_values_passed_each_prompt(tmp_path):
 # next flag as its value. Each guard keeps one value in place or leaves its
 # flag out.
 # 이것을 실패시키는 것: `test -n "$w"; or set w 0`을 지우는 것(--width 뒤가 --status),
-# keymap 검사 `if string match …`를 지우는 것(--keymap 뒤가 다음 플래그), `if test -n "$CMD_DURATION"`을 `if true`로 바꾸는 것.
+# keymap 검사 `if string match …`를 지우는 것(--keymap 뒤가 다음 플래그).
 def test_erased_prompt_variables_keep_every_flag_paired(tmp_path):
-    body = b"set -e COLUMNS; set -e fish_bind_mode; set -e CMD_DURATION\nfish_prompt\n"
+    body = b"set -e COLUMNS; set -e fish_bind_mode\nfish_prompt\n"
     _, inst = install_once(tmp_path, body)
     (argv,) = inst.calls()
     assert val(argv, b"--width") == b"0", argv
     assert b"--keymap" not in argv, argv
-    assert b"--duration-ms" not in argv, argv
     flags = [a for a in argv if a.startswith(b"--") and b"=" not in a]
     assert all(not val(argv, f).startswith(b"--") for f in flags), argv
 
@@ -179,7 +179,7 @@ def test_erased_prompt_variables_keep_every_flag_paired(tmp_path):
 # `set -gu _bingsu_session $_bingsu_session`을 값 없는 `set -gu _bingsu_session`으로 바꾸는 것(session이 빔).
 def test_owned_globals_are_not_exported(tmp_path):
     names = ("_bingsu_seq", "_bingsu_rec", "_bingsu_rps1", "_bingsu_f", "_bingsu_disp", "_bingsu_note",
-             "_bingsu_key")
+             "_bingsu_key", "_bingsu_gen")
     inherit = {n: "1" for n in names}
     session = "0123456789abcdef0123456789abcdef"
     inherit["_bingsu_session"] = session
@@ -238,3 +238,69 @@ def test_bind_mode_inside_the_envelope_is_passed(tmp_path, mode):
     _, inst = install_once(tmp_path, f"set -g fish_bind_mode {mode}\nfish_prompt\n".encode())
     (argv,) = inst.calls()
     assert val(argv, b"--keymap") == mode.encode(), argv
+
+
+def wait_call(inst, start, pred, timeout=15):
+    """Index of the first call at or after `start` that matches `pred`."""
+    deadline = time.monotonic() + timeout
+    while True:
+        calls = inst.calls()
+        for k in range(start, len(calls)):
+            if pred(calls[k]):
+                return k
+        assert time.monotonic() < deadline, calls[start:]
+        time.sleep(0.05)
+
+
+def ms_between(lo, hi):
+    return lambda c: lo <= int(val(c, b"--duration-ms") or -1) < hi
+
+
+# A line that runs nothing leaves CMD_DURATION at the last command's value
+# (fish 3.6, 4.0 and 4.9); fish_preexec still runs for blanks, a comment and
+# `;`. The line follows a 300 ms sleep and comes before a 600 ms one: every
+# call in between (its prompt, redraws) carries no duration.
+# 이것을 실패시키는 것: `test "$g" != "$_bingsu_gen"` 비교를 지우는 것(빈 줄 뒤에 sleep의 300이 다시 감),
+# 프롬프트 뒤 `set -g _bingsu_gen $g`를 지우는 것.
+@pytest.mark.parametrize("line", ["", "   ", "# c", ";"])
+def test_line_that_runs_nothing_sends_no_duration(tmp_path, line):
+    s, inst = start(tmp_path, minimal_record())
+    s._ready()
+    n = len(inst.calls())
+    s.p.sendline("sleep 0.3")
+    i = wait_call(inst, n, ms_between(250, 550))
+    s._ready()
+    s.p.sendline(line)
+    s._ready()
+    s.p.sendline("sleep 0.6")
+    j = wait_call(inst, i + 1, ms_between(550, 3000))
+    between = inst.calls()[i + 1:j]
+    s.close()
+    assert between, "no prompt for the line that runs nothing"
+    assert all(b"--duration-ms" not in c for c in between), between
+
+
+# fish runs no command between init and the call here, so the generation is
+# the one init saw. In a script the generation stays 0, hence an inherited 5.
+# 이것을 실패시키는 것: init이 상속된 `_bingsu_gen`을 그대로 두는 것(`set -q _bingsu_gen; or set -g …`).
+def test_inherited_generation_is_replaced_at_init(tmp_path):
+    body = b"set -g CMD_DURATION 1234\nfish_prompt\n"
+    _, inst = install_once(tmp_path, body, inherit={"_bingsu_gen": "5"})
+    (argv,) = inst.calls()
+    assert b"--duration-ms" not in argv, argv
+
+
+# CMD_DURATION erased after a command ran (a fish_postexec handler; fish
+# sets it before those run): the generation advanced but there is no value.
+# A PTY, not a script: the generation moves only in an interactive fish.
+# 이것을 실패시키는 것: duration 조건에서 `test -n "$CMD_DURATION"`을 지우는 것(--duration-ms 뒤가 다음 플래그).
+def test_erased_duration_after_a_command_leaves_the_flag_out(tmp_path):
+    rc_after = "function _erase --on-event fish_postexec; set -e CMD_DURATION; end"
+    s, inst = start(tmp_path, minimal_record(), rc_after=rc_after)
+    s.run("true")
+    s.close()
+    calls = inst.calls()
+    assert calls and all(b"--duration-ms" not in c for c in calls), calls
+    for c in calls:
+        flags = [a for a in c if a.startswith(b"--") and b"=" not in a]
+        assert all(not val(c, f).startswith(b"--") for f in flags), c

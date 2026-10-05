@@ -16,14 +16,16 @@ end
 set -g _bingsu_rps1 ''
 
 # fish draws through this function, so capture and install are one place.
-# $status and $pipestatus are read by a single command so neither is reset
-# before the other is saved. An empty variable expands to no word in fish,
-# so a value that may be empty gets a default or leaves its flag out: a
-# missing word would make the flag before it take the next flag as its value.
+# $status_generation, $status and $pipestatus are read by a single command so
+# none is reset before the others are saved. An empty variable expands to no
+# word in fish, so a value that may be empty gets a default or leaves its
+# flag out: a missing word would make the flag before it take the next flag
+# as its value.
 function fish_prompt
-    set -l sp $status $pipestatus
-    set -l s $sp[1]
-    set -l pst (string join , -- $sp[2..-1])
+    set -l sp $status_generation $status $pipestatus
+    set -l g $sp[1]
+    set -l s $sp[2]
+    set -l pst (string join , -- $sp[3..-1])
     set -l w $COLUMNS
     test -n "$w"; or set w 0
     set -l ctx --width $w --status $s --pipestatus $pst --jobs (count (jobs -p 2>/dev/null))
@@ -34,9 +36,15 @@ function fish_prompt
     if string match -qr '^[abcdefghijklmnopqrstuvwxyz_]{1,16}\z' -- "$fish_bind_mode"
         set -a ctx --keymap $fish_bind_mode
     end
-    if test -n "$CMD_DURATION"
+    # fish leaves CMD_DURATION at the last command's value when the line runs
+    # nothing (empty, blanks, a comment, a lone `;`): only a new status
+    # generation says a command ran since the last prompt. A command that
+    # sets no status (`set x 1`, `begin; end`) sends no duration, never an
+    # old one. A redraw of the same prompt sends none either.
+    if test "$g" != "$_bingsu_gen"; and test -n "$CMD_DURATION"
         set -a ctx --duration-ms $CMD_DURATION
     end
+    set -g _bingsu_gen $g
     _bingsu_call $ctx
     # fish prints the function's output as is; '%s' keeps % and \ in the
     # data from being read as a format.
@@ -55,6 +63,10 @@ function fish_right_prompt
     printf '%s' $_bingsu_rps1
 end
 
+# The generation at init, never an inherited one: a value from the
+# environment would make the first prompt send the last command's duration.
+set -g _bingsu_gen $status_generation
+
 # Last, after every assignment above: a name that came from the environment
 # is an exported global, and set -g keeps that flag, so the raw record and
 # the hook state would reach the environment of every child. set -gu needs
@@ -67,3 +79,4 @@ set -gu _bingsu_f $_bingsu_f
 set -gu _bingsu_disp $_bingsu_disp
 set -gu _bingsu_note $_bingsu_note
 set -gu _bingsu_key $_bingsu_key
+set -gu _bingsu_gen $_bingsu_gen
