@@ -755,3 +755,19 @@ def test_inherited_shapes_use_explicit_ascii_sets(tmp_path, name, value, lang):
     assert val(argv, b"--seq") == b"1", argv
     session = val(argv, b"--session")
     assert re.fullmatch(rb"[0-9a-f]{32}", session) and session != value.encode(), argv
+
+
+# F-PR-6. An inherited PS0 that carries the prefix of an older bingsu (the
+# `[.,]` decimal-point version, twice here) keeps one current prefix and the
+# user's text after init.
+OLD_PS0_PREFIX = "${EPOCHREALTIME+${_bingsu_t0:0:$((_bingsu_t0=${EPOCHREALTIME/[.,]/}, 0))}}"
+
+
+# 이것을 실패시키는 것: 앞붙임 벗겨내기를 현재 상수 `_bingsu_ps0`와의 비교로 되돌리는 것(옛 앞붙임이 남아 PREFIX=3).
+def test_inherited_ps0_with_an_older_prefix_keeps_one(tmp_path):
+    s, _, _ = start(tmp_path, rc_after=CHK, record=minimal_record(),
+                    inherit={"PS0": OLD_PS0_PREFIX * 2 + "XPS0"})
+    s.run("_chk")
+    s.run('[[ $_bingsu_ps0_orig == XPS0 && $PS0 == *"[^0123456789]"* ]] && echo ORIG""_KEPT')
+    out = visible(s.close())
+    assert b"XPS0PREFIX=1" in out and b"XPS0ORIG_KEPT" in out, out

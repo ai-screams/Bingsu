@@ -66,12 +66,17 @@ fi
 if [[ -z ${_bingsu_ps0_owned-} ]]; then
   _bingsu_ps0_orig=${PS0-}
   # A PS0 copied from a bingsu shell (an exported PS0, or one set by hand)
-  # starts with bingsu's constant prefix. Keep only what follows, or the
-  # prefix doubles in every nested shell. Quoted: matched literally.
+  # starts with a bingsu prefix, possibly from another bingsu version whose
+  # inner text differs. Every version starts with the same head (the
+  # constant up to its first `=`) and ends at the first `}}` after it: cut
+  # each such prefix, or it doubles in every nested shell. The head is
+  # quoted, so it is matched literally.
   _bingsu_nm=0
   if shopt -q nocasematch; then _bingsu_nm=1; shopt -u nocasematch; fi
-  while [[ $_bingsu_ps0_orig == "$_bingsu_ps0"* ]]; do
-    _bingsu_ps0_orig=${_bingsu_ps0_orig#"$_bingsu_ps0"}
+  _bingsu_h=${_bingsu_ps0%%=*}=
+  while [[ $_bingsu_ps0_orig == "$_bingsu_h"* ]]; do
+    _bingsu_ps0_orig=${_bingsu_ps0_orig#"$_bingsu_h"}
+    _bingsu_ps0_orig=${_bingsu_ps0_orig#*\}\}}
   done
   if (( _bingsu_nm )); then shopt -s nocasematch; fi
   _bingsu_ps0_owned=1
