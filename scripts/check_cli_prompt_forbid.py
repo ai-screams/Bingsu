@@ -28,7 +28,9 @@ WANT_MAIN = WANT.replace("#!", "#", 1)
 #   - raw libc calls (libc::open, libc::stat): sys.rs makes those and is not
 #     searched here;
 #   - fn main in main.rs, which is not searched either.
-# A string holding a token would trip it. At run time the strace allowlist test
+# It skips a line only when the whole line starts with //, so a token in a
+# string, in a comment after code, or inside a /* */ block trips it: a false
+# alarm, never a miss. At run time the strace allowlist test
 # (tests/shell/test_prompt_env_paths.py) checks every path the binary names.
 NO_FILE_API = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs"]
 FILE_TOKENS = ("std::fs", "fs::", "File", "OpenOptions", "read_dir", "Command")
