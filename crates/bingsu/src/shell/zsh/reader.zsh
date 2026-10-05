@@ -3,6 +3,9 @@
 # replaced with the known non-ok status strings as quoted words.
 typeset -ga _bingsu_f
 typeset -g _bingsu_disp= _bingsu_note= _bingsu_key=
+# typeset keeps an inherited export flag; without +x the fields and the
+# status keys would reach the environment of every child process.
+typeset -g +x _bingsu_f _bingsu_disp _bingsu_note _bingsu_key
 
 _bingsu_status_ok() {
   emulate -L zsh

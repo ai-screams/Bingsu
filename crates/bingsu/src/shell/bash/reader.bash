@@ -3,6 +3,9 @@
 # replaced with the known non-ok status strings as quoted words.
 _bingsu_f=()
 _bingsu_disp= _bingsu_note= _bingsu_key=
+# An inherited export flag outlives the assignments above; without this the
+# status keys would reach the environment of every child process.
+export -n _bingsu_f _bingsu_disp _bingsu_note _bingsu_key
 
 _bingsu_status_ok_core() {
   local s=$1 cls code

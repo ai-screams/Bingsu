@@ -319,10 +319,11 @@ def test_duration_excludes_hooks_between_save_and_install(tmp_path):
 
 
 # Inherited exported names stay in the shell but leave the environment.
-# 이것을 실패시키는 것: 머리의 `typeset -g +x …` 줄을 지우는 것.
+# 이것을 실패시키는 것: hooks.zsh 머리의 `typeset -g +x …` 줄이나 reader.zsh의 `typeset -g +x …` 줄을 지우는 것.
 def test_owned_globals_are_not_exported(tmp_path):
     inherit = {n: "1" for n in ("_bingsu_rec", "_bingsu_s", "_bingsu_p", "_bingsu_t0", "_bingsu_t1",
-                                "_bingsu_ps1", "_bingsu_rps1", "_bingsu_warned_last", "_bingsu_seq")}
+                                "_bingsu_ps1", "_bingsu_rps1", "_bingsu_warned_last", "_bingsu_seq",
+                                "_bingsu_f", "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
     inherit["_bingsu_session"] = "0123456789abcdef0123456789abcdef"
     s, _, _ = start(tmp_path, record=minimal_record(), inherit=inherit)
     s.run('print -r -- "EXPORTED=$(env | grep -c \'^_bingsu_\')"')
