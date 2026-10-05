@@ -3,7 +3,10 @@ rows, section 5 "bash execution start time"). bash 5.1 (container) and
 current bash."""
 import itertools
 import os
+import re
+import subprocess
 import time
+import warnings
 
 import pyte
 import pytest
@@ -23,11 +26,16 @@ def hostile_record(c1, c2):
     return b"B1\x1f7\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
-def start(tmp_path, rc_before="", rc_after="", record=None, locale=None, cols=200, inherit=None):
+def start(tmp_path, rc_before="", rc_after="", record=None, locale=None, cols=200, inherit=None, numeric=None):
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)
     if locale:
         env["LC_ALL"] = locale
+    if numeric:
+        # LC_ALL would override LC_NUMERIC.
+        env.pop("LC_ALL")
+        env["LANG"] = "C.UTF-8"
+        env["LC_NUMERIC"] = numeric
     (tmp_path / "init.bash").write_bytes(inst.init("bash", env))
     env.update(inherit or {})
     cdir = short_dir()
@@ -427,7 +435,7 @@ def test_reinit_does_not_repeat_late_hook_warning(tmp_path):
 
 
 # Inherited exported names stay in the shell but leave the environment.
-# 이것을 실패시키는 것: 머리의 `export -n …` 줄을 지우는 것.
+# 이것을 실패시키는 것: init 끝의 `export -n _bingsu_session …` 줄을 지우는 것.
 def test_owned_globals_are_not_exported(tmp_path):
     names = ("_bingsu_rec", "_bingsu_f", "_bingsu_disp", "_bingsu_note", "_bingsu_key", "_bingsu_s", "_bingsu_p",
              "_bingsu_t0", "_bingsu_t1", "_bingsu_ps0", "_bingsu_ps0_orig", "_bingsu_ps0_owned",
@@ -442,15 +450,15 @@ def test_owned_globals_are_not_exported(tmp_path):
 
 # 이것을 실패시키는 것: 종료 시각을 설치 hook에서 읽는 것(사이 hook의 0.5초가 들어감).
 def test_duration_excludes_hooks_between_save_and_install(tmp_path):
-    rc_after = ("_slow() { sleep 0.5; }\n"
+    rc_after = ("_slow() { sleep 1.0; }\n"
                 'PROMPT_COMMAND=("${PROMPT_COMMAND[0]}" _slow "${PROMPT_COMMAND[@]:1}")')
     s, inst, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
     s.run("sleep 0.1")
     s.close()
     ms = [int(val(c, b"--duration-ms")) for c in inst.calls() if val(c, b"--duration-ms")]
-    # The command takes 100 ms, the hook between the two 500 ms: counting the
-    # hook gives 600 or more, 250 ms of slack on a loaded machine.
-    assert ms and max(ms) < 350, ms
+    # The command takes 100 ms, the hook between the two 1000 ms: counting
+    # the hook gives 1100 or more. 500 ms of slack for a loaded machine.
+    assert ms and max(ms) < 600, ms
     assert any(m >= 80 for m in ms), ms
 
 
@@ -521,3 +529,112 @@ def test_bash_nul_output_is_silent(tmp_path):
     s.run("true")
     out = visible(s.close())
     assert b"null byte" not in out
+
+
+def nonascii_decimal_locale():
+    """A locale whose decimal point is not ASCII (fa_IR, ps_AF: U+066B), as
+    the bash under test reports it in EPOCHREALTIME. None if there is none."""
+    names = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.split()
+    for name in names:
+        if not re.match(r"(fa_IR|ps_AF|ar_)", name):
+            continue
+        r = subprocess.run(["bash", "-c", 'printf %s "$EPOCHREALTIME"'], capture_output=True,
+                           env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "LC_NUMERIC": name})
+        if any(b > 0x7f for b in r.stdout):
+            return name
+    return None
+
+
+# S1-1. A multibyte decimal point in EPOCHREALTIME made the PS0 arithmetic
+# fail, and bash then ran no command line at all (exit included).
+# 이것을 실패시키는 것: PS0나 저장 hook의 `${EPOCHREALTIME//[^0123456789]/}`를 `${EPOCHREALTIME/[.,]/}`로 되돌리는 것.
+def test_nonascii_decimal_point_locale(tmp_path):
+    loc = nonascii_decimal_locale()
+    if loc is None:
+        warnings.warn("NO non-ASCII decimal-point locale here: S1-1 is NOT tested on this host")
+        pytest.skip("NO non-ASCII decimal-point locale (fa_IR, ps_AF, ar_*): S1-1 NOT TESTED")
+    s, inst, _ = start(tmp_path, record=minimal_record(), numeric=loc)
+    s.run("sleep 0.2")
+    s.run('echo R""AN')
+    out = visible(s.close())
+    assert b"\nRAN" in out and b"syntax error" not in out, out
+    ms = [int(val(c, b"--duration-ms")) for c in inst.calls() if val(c, b"--duration-ms")]
+    assert any(150 <= m < 5000 for m in ms), (loc, ms)
+
+
+# S1-2. An exported PS1 holding the value-assigned record (promptvars off)
+# would be expanded by a child bash without bingsu (promptvars on there).
+# 이것을 실패시키는 것: 설치 hook 끝의 `export -n PS1 PS0 …`에서 PS1·PS0를 빼는 것(canary 생성).
+def test_set_a_child_bash_never_runs_the_record(tmp_path):
+    s, _, canaries = start(tmp_path, rc_before="set -a\n" + opts(False, False))
+    s.run("true")
+    s.run("bash --noprofile --norc -i")
+    s.run('echo "CPS1=[$PS1] CPS0=[${PS0-unset}]"')
+    s.run("set -u")
+    s.run('echo CHILD_""OK')
+    s.run("exit")
+    out = visible(s.close())
+    assert not any(c.exists() for c in canaries), "data was executed in the child"
+    assert rb"CPS1=[\s-\v\$ ] CPS0=[unset]" in out, out
+    assert b"\nCHILD_OK" in out, out
+
+
+# F1-1. A PS0 copied from a bingsu shell (here exported on the same line, so
+# the install hook could not un-export it first) keeps one prefix in the
+# child and the grandchild, and the user's PS0 survives.
+# 이것을 실패시키는 것: 원래 PS0 저장 때 bingsu 앞붙임을 벗겨내는 while 루프를 지우는 것(PREFIX=2).
+def test_exported_ps0_keeps_one_prefix_in_nested_shells(tmp_path):
+    s, inst, _ = start(tmp_path, rc_before="PS0=XPS0", record=minimal_record())
+    init = tmp_path / "init.bash"
+    for level in ("child", "grandchild"):
+        s.run("export PS0; bash --noprofile --norc -i")
+        s.run(f"source {init}")
+        s.run(CHK)
+        s.run("_chk")
+        s.run('[[ $_bingsu_ps0_orig == XPS0 ]] && echo ORIG""_KEPT')
+        n = len(inst.calls())
+        s.run("sleep 0.2")
+        assert any(val(c, b"--duration-ms") and int(val(c, b"--duration-ms")) >= 150
+                   for c in inst.calls()[n:]), (level, inst.calls()[n:])
+    s.run("exit")
+    s.run("exit")
+    out = visible(s.close())
+    assert out.count(b"XPS0PREFIX=1") == 2 and b"PREFIX=2" not in out, out
+    assert out.count(b"XPS0ORIG_KEPT") == 2, out
+
+
+# S1-3. Under `set -a` every assignment and function definition is marked
+# for export; none of bingsu's names may reach a child's environment.
+# 이것을 실패시키는 것: init 끝의 `export -n -f …` 줄이나 hook 끝의 `export -n`을 지우는 것.
+def test_set_a_leaks_nothing(tmp_path):
+    s, _, _ = start(tmp_path, rc_before="set -a", record=minimal_record())
+    s.run("sleep 0.1")
+    s.run("true")
+    s.run('echo "LEAKED=$(env | grep -c _bingsu_)"')
+    out = visible(s.close())
+    assert b"LEAKED=0" in out, out
+
+
+# F1-2. Compatibility pin (no bingsu mutation): glob and redirection options
+# leave init, both hooks and the options themselves alone. The options are
+# printed back, so a run that never turned them on fails.
+OPTS = {"extglob": "shopt -s extglob", "nullglob": "shopt -s nullglob", "failglob": "shopt -s failglob",
+        "noclobber": "set -o noclobber"}
+
+
+@pytest.mark.parametrize("names", [("extglob", "nullglob", "failglob", "noclobber"), ("extglob",), ("nullglob",),
+                                   ("failglob",), ("noclobber",)])
+def test_glob_and_noclobber_options(tmp_path, names):
+    s, inst, _ = start(tmp_path, rc_before="\n".join(OPTS[n] for n in names), record=minimal_record(left=b"OK> "))
+    s.run("true")
+    s.run("true")
+    s.run("shopt -p extglob nullglob failglob; set -o | grep noclobber")
+    out = visible(s.close())
+    assert b"bash:" not in out, out
+    assert len(inst.calls()) >= 4 and b"OK> " in out
+    for n in names:
+        want = b"set -o noclobber" if n == "noclobber" else f"shopt -s {n}".encode()
+        if n == "noclobber":
+            assert re.search(rb"noclobber\s+on", out), out
+        else:
+            assert want in out, out

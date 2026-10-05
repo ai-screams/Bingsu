@@ -31,8 +31,14 @@ _bingsu_call() {
 # Hook state is reset on every init, never inherited: an environment value
 # for _bingsu_t0 or _bingsu_t1 would make the first duration wrong, and
 # either one goes through $(( )) (spec section 5).
-_bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1=
+_bingsu_s=0 _bingsu_t1= _bingsu_ps1=
 _bingsu_p=()
+# _bingsu_t0 is a one-element array: PS0 assigns it inside $(( )), and under
+# `set -a` that assignment marks it for export before any hook can undo it.
+# bash never puts an array in the environment. Element 0 is set (empty), as
+# an unset one would make PS0 skip the assignment.
+unset _bingsu_t0
+_bingsu_t0=('')
 # Does PS0 expand in POSIX mode with promptvars off? Fixed by the M1 probe
 # tests/shell/probes/bash_ps0_posix.py (1 = expanded, 0 = literal): expanded
 # on bash 5.1.16, 5.2.37 and 5.3.20.
@@ -42,8 +48,12 @@ _bingsu_ps0_posix=1
 # unset one skips the assignment), so it is emptied above, never unset.
 # With EPOCHREALTIME unset the arithmetic would fail and bash would skip
 # every command line (bash 5.1 and 5.3), so the outer ${…+…} drops the
-# whole prefix then; the duration is unknown.
-_bingsu_ps0='${EPOCHREALTIME+${_bingsu_t0:0:$((_bingsu_t0=${EPOCHREALTIME/[.,]/}, 0))}}'
+# whole prefix then; the duration is unknown. Every non-digit is removed: a
+# locale's decimal point may be a multibyte character (fa_IR, ps_AF: U+066B),
+# and any leftover byte is an arithmetic error that stops every command.
+# The bracket negation is ^, not !: POSIX mode replaces ! in PS0 with the
+# history number (bash 5.1, 5.2, 5.3).
+_bingsu_ps0='${EPOCHREALTIME+${_bingsu_t0:0:$((_bingsu_t0=${EPOCHREALTIME//[^0123456789]/}, 0))}}'
 # The owned flag says the original PS0 is already saved. A shell sets it
 # without export, so an exported one came from the environment and is not
 # ours: drop it, or a parent's _bingsu_ps0_orig would replace the user's PS0.
@@ -52,13 +62,17 @@ if [[ -n ${_bingsu_ps0_owned+1} && ${_bingsu_ps0_owned@a} == *x* ]]; then
 fi
 if [[ -z ${_bingsu_ps0_owned-} ]]; then
   _bingsu_ps0_orig=${PS0-}
+  # A PS0 copied from a bingsu shell (an exported PS0, or one set by hand)
+  # starts with bingsu's constant prefix. Keep only what follows, or the
+  # prefix doubles in every nested shell. Quoted: matched literally.
+  _bingsu_nm=0
+  if shopt -q nocasematch; then _bingsu_nm=1; shopt -u nocasematch; fi
+  while [[ $_bingsu_ps0_orig == "$_bingsu_ps0"* ]]; do
+    _bingsu_ps0_orig=${_bingsu_ps0_orig#"$_bingsu_ps0"}
+  done
+  if (( _bingsu_nm )); then shopt -s nocasematch; fi
   _bingsu_ps0_owned=1
 fi
-# An inherited export flag outlives the reset above; without this the
-# rendered prompt and the timings reach the environment of every child.
-export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu_note _bingsu_key \
-  _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps0 _bingsu_ps0_orig _bingsu_ps0_owned \
-  _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last
 
 # Capture hook, first in PROMPT_COMMAND. Nothing may run before the first
 # assignment, or $? and PIPESTATUS are lost. The end time is read here too,
@@ -71,7 +85,9 @@ export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu
 _bingsu_save() {
   _bingsu_s=$? _bingsu_p=("${PIPESTATUS[@]}")
   local t=${EPOCHREALTIME-}
-  _bingsu_t1=${t/[.,]/}
+  _bingsu_t1=${t//[^0123456789]/}
+  # Under `set -a` every assignment above is marked for export.
+  export -n _bingsu_s _bingsu_t1
   return 0
 }
 
@@ -113,6 +129,11 @@ _bingsu_install() {
     printf '%s\n' @MSG_LATE_HOOK_BASH@ >&2
   fi
   if (( nm )); then shopt -s nocasematch; fi
+  # PS1 and PS0 now hold bingsu's rendered strings, not the user's prompt: an
+  # exported copy would be expanded by a child bash without bingsu (data run
+  # as code with promptvars on, a PS0 prefix that fails under set -u). The
+  # globals assigned here would be exported by `set -a`.
+  export -n PS1 PS0 _bingsu_rec _bingsu_seq _bingsu_ps1 _bingsu_t1 _bingsu_warned_last
   return 0
 }
 
@@ -137,3 +158,12 @@ if (( _bingsu_reg )); then
 fi
 if (( _bingsu_nm )); then shopt -s nocasematch; fi
 unset _bingsu_nm _bingsu_reg _bingsu_h _bingsu_a
+# Last, after every assignment above: an inherited export flag outlives the
+# resets, and `set -a` marks each assignment and each function definition
+# for export. Without this the rendered prompt, the timings and the hook
+# functions reach the environment of every child.
+export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu_note _bingsu_key \
+  _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps0 _bingsu_ps0_orig _bingsu_ps0_owned \
+  _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last
+export -n -f _bingsu_status_ok_core _bingsu_status_ok _bingsu_split _bingsu_frame_core _bingsu_frame \
+  _bingsu_classify _bingsu_notice_due _bingsu_call _bingsu_save _bingsu_install
