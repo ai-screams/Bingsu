@@ -19,13 +19,19 @@ WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::
 WANT_MAIN = WANT.replace("#!", "#", 1)
 
 # A second, coarser guard: the forbid above covers only the clippy.toml list,
-# which names no file API. prompt.rs and envelope.rs must not name one either.
-# Plain token search over lines that are not // comments: it misses an alias
-# imported elsewhere and a macro that expands to a file call, and a string
-# holding a token would trip it. At run time the strace process-tree test
-# (tests/shell/test_prompt_env_paths.py) checks what the binary touches.
+# which names no file API. prompt.rs and envelope.rs must not name one either,
+# nor start a process (Command). Plain token search over lines that are not //
+# comments, so it misses:
+#   - std::path::Path methods that touch the file system (exists, metadata,
+#     is_file, canonicalize): Path::new("x").exists() passes this guard;
+#   - an alias imported elsewhere and a macro that expands to a file call;
+#   - raw libc calls (libc::open, libc::stat): sys.rs makes those and is not
+#     searched here;
+#   - fn main in main.rs, which is not searched either.
+# A string holding a token would trip it. At run time the strace allowlist test
+# (tests/shell/test_prompt_env_paths.py) checks every path the binary names.
 NO_FILE_API = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs"]
-FILE_TOKENS = ("std::fs", "fs::", "File", "OpenOptions", "read_dir")
+FILE_TOKENS = ("std::fs", "fs::", "File", "OpenOptions", "read_dir", "Command")
 
 bad = []
 for rel in NO_FILE_API:
@@ -37,7 +43,7 @@ for rel in NO_FILE_API:
             continue
         hit = [tok for tok in FILE_TOKENS if tok in line]
         if hit:
-            bad.append(f"{rel}:{n}: names a file API ({', '.join(hit)})")
+            bad.append(f"{rel}:{n}: names a file or process API ({', '.join(hit)})")
 for rel in PROMPT_PATH:
     p = ROOT / rel
     if not p.is_file():
