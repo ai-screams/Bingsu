@@ -36,7 +36,8 @@ _bingsu_p=()
 # _bingsu_t0 is a one-element array: PS0 assigns it inside $(( )), and under
 # `set -a` that assignment marks it for export before any hook can undo it.
 # bash never puts an array in the environment. Element 0 is set (empty), as
-# an unset one would make PS0 skip the assignment.
+# an unset one would make PS0 skip the assignment. A bare $_bingsu_t0, the
+# ${_bingsu_t0:0:…} in PS0 and _bingsu_t0= all refer to element 0.
 unset _bingsu_t0
 _bingsu_t0=('')
 # Does PS0 expand in POSIX mode with promptvars off? Fixed by the M1 probe

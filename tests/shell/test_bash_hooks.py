@@ -604,15 +604,20 @@ def test_exported_ps0_keeps_one_prefix_in_nested_shells(tmp_path):
 
 
 # S1-3. Under `set -a` every assignment and function definition is marked
-# for export; none of bingsu's names may reach a child's environment.
-# 이것을 실패시키는 것: init 끝의 `export -n -f …` 줄이나 hook 끝의 `export -n`을 지우는 것.
+# for export; none of bingsu's names may reach a child's environment, and
+# timing still works under set -u.
+# 이것을 실패시키는 것: init 끝의 `export -n -f …` 줄이나 hook 끝의 `export -n`을 지우는 것,
+# _bingsu_t0을 배열에서 스칼라로 되돌리는 것(PS0 산술 대입이 export됨).
 def test_set_a_leaks_nothing(tmp_path):
-    s, _, _ = start(tmp_path, rc_before="set -a", record=minimal_record())
-    s.run("sleep 0.1")
+    s, inst, _ = start(tmp_path, rc_before="set -a\nset -u", record=minimal_record())
+    s.run("sleep 0.2")
     s.run("true")
     s.run('echo "LEAKED=$(env | grep -c _bingsu_)"')
     out = visible(s.close())
     assert b"LEAKED=0" in out, out
+    assert b"unbound variable" not in out, out
+    ms = [int(val(c, b"--duration-ms")) for c in inst.calls() if val(c, b"--duration-ms")]
+    assert any(150 <= m < 5000 for m in ms), ms
 
 
 # F1-2. Compatibility pin (no bingsu mutation): glob and redirection options
