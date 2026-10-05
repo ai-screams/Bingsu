@@ -179,11 +179,11 @@ def test_no_duration_without_preexec(tmp_path):
     assert opt(argv, b"--duration-ms") is None, argv
 
 
-# zsh/datetime gone between preexec and precmd: no duration rather than a
-# negative one.
-# 이것을 실패시키는 것: `[[ … && -n $EPOCHREALTIME ]]`에서 `-n $EPOCHREALTIME`를 빼는 것.
+# zsh/datetime gone between preexec and precmd: the save hook reads no end
+# time, so no duration rather than a negative one.
+# 이것을 실패시키는 것: `[[ -n $_bingsu_t0 && -n $_bingsu_t1 ]]`에서 `-n $_bingsu_t1`를 빼는 것(-1500).
 def test_no_duration_without_datetime_module(tmp_path):
-    _, argv = install_once(tmp_path, b"_bingsu_t0=1.5; zmodload -u zsh/datetime; _bingsu_install\n")
+    _, argv = install_once(tmp_path, b"_bingsu_t0=1.5; zmodload -u zsh/datetime; _bingsu_save; _bingsu_install\n")
     assert opt(argv, b"--duration-ms") is None, argv
 
 
@@ -207,19 +207,15 @@ def test_save_hook_under_hostile_user_options(tmp_path):
 
 
 # A registration flag inherited from the environment must not keep the
-# hooks out: registration is decided by the arrays.
+# hooks out: registration is decided by the arrays. From init to a drawn
+# prompt in one interactive shell.
 # 이것을 실패시키는 것: 등록 조건을 `(( ! ${+_bingsu_hooked} ))` 같은 플래그 검사로 되돌리는 것.
 def test_inherited_hooked_flag_does_not_block_registration(tmp_path):
-    inst = Install(tmp_path)
-    env = trusted_env(tmp_path)
-    script = inst.init("zsh", env)
-    inst.use_fake(minimal_record())
-    env["_bingsu_hooked"] = "1"
-    body = b'print -r -- "PF=[$precmd_functions] EF=[$preexec_functions]"\n_bingsu_install\n'
-    r = run_shell_script("zsh", script + b"\n" + body, env, tmp_path)
-    assert r.returncode == 0 and r.stderr == b"", r.stderr
-    assert r.stdout == b"PF=[_bingsu_save _bingsu_install] EF=[_bingsu_preexec]\n", r.stdout
-    assert len(inst.calls()) == 1
+    s, inst, _ = start(tmp_path, record=minimal_record(left=b"HOOKED> "), inherit={"_bingsu_hooked": "1"})
+    s.run('print -r -- "PF=[$precmd_functions] EF=[$preexec_functions]"')
+    out = visible(s.close())
+    assert b"PF=[_bingsu_save _bingsu_install] EF=[_bingsu_preexec]" in out
+    assert b"HOOKED> " in out and inst.calls()
 
 
 # Hook state inherited from the environment is reset by init.
@@ -250,3 +246,115 @@ def test_save_hook_returns_saved_status(tmp_path):
     r = run_shell_script("zsh", script + b'\nfalse; _bingsu_save; print -r -- "RC=$? S=$_bingsu_s"\n', env, tmp_path)
     assert r.returncode == 0 and r.stderr == b"", r.stderr
     assert r.stdout == b"RC=1 S=1\n", r.stdout
+
+
+# preexec runs under the user's options; with the module gone and NO_UNSET
+# a bare $EPOCHREALTIME is an error on every command.
+# 이것을 실패시키는 것: _bingsu_preexec에서 `emulate -L zsh`와 `${EPOCHREALTIME-}`를 둘 다 빼는 것.
+def test_preexec_without_datetime_under_no_unset(tmp_path):
+    s, inst, _ = start(tmp_path, record=minimal_record(left=b"OK> "),
+                       rc_after="zmodload -u zsh/datetime\nsetopt NO_UNSET")
+    s.run("true")
+    s.run("true")
+    out = visible(s.close())
+    assert b"parameter not set" not in out, out
+    assert b"OK> " in out
+    assert all(opt(c, b"--duration-ms") is None for c in inst.calls()), inst.calls()
+
+
+# The module cannot be loaded at all, under options that stop init on the
+# first failing command.
+# 이것을 실패시키는 것: `zmodload zsh/datetime 2>/dev/null || :`에서 `|| :`를 빼는 것(ERR_EXIT로 셸이 끝남).
+def test_init_survives_missing_datetime_module(tmp_path):
+    s, inst, _ = start(tmp_path, record=minimal_record(left=b"OK> "),
+                       rc_before="module_path=(/nonexistent)\nsetopt ERR_RETURN ERR_EXIT NO_UNSET")
+    s.run('print -r -- "N=${#${(@M)precmd_functions:#_bingsu_*}} P=${#${(@M)preexec_functions:#_bingsu_*}} M=${+EPOCHREALTIME}"')
+    s.run("true")
+    out = visible(s.close())
+    assert b"N=2 P=1 M=0" in out, out
+    assert b"parameter not set" not in out and b"OK> " in out
+    assert all(opt(c, b"--duration-ms") is None for c in inst.calls()), inst.calls()
+
+
+# Hooks between the save hook and the install hook do not count as command
+# time (spec section 5: the save hook records the end time).
+# 이것을 실패시키는 것: 종료 시각을 설치 hook에서 읽는 것(사이 hook의 0.5초가 들어감).
+def test_duration_excludes_hooks_between_save_and_install(tmp_path):
+    rc_after = ("_slow() { sleep 0.5 }\n"
+                "precmd_functions=($precmd_functions[1] _slow $precmd_functions[2,-1])")
+    s, inst, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
+    s.run("true")
+    s.run("sleep 0.3")
+    s.close()
+    ms = [int(opt(c, b"--duration-ms")) for c in inst.calls() if opt(c, b"--duration-ms")]
+    assert ms and max(ms) < 450, ms   # sleep 0.3 is the longest command
+    assert any(m >= 250 for m in ms), ms
+
+
+# Inherited exported names stay in the shell but leave the environment.
+# 이것을 실패시키는 것: 머리의 `typeset -g +x …` 줄을 지우는 것.
+def test_owned_globals_are_not_exported(tmp_path):
+    inherit = {n: "1" for n in ("_bingsu_rec", "_bingsu_s", "_bingsu_p", "_bingsu_t0", "_bingsu_t1",
+                                "_bingsu_ps1", "_bingsu_rps1", "_bingsu_warned_last", "_bingsu_seq")}
+    inherit["_bingsu_session"] = "0123456789abcdef0123456789abcdef"
+    s, _, _ = start(tmp_path, record=minimal_record(), inherit=inherit)
+    s.run('print -r -- "EXPORTED=$(env | grep -c \'^_bingsu_\')"')
+    out = visible(s.close())
+    assert b"EXPORTED=0" in out, out
+
+
+# A hook between the save and install hooks flips one prompt option either
+# way; the install hook reads the state right before installing.
+# 이것을 실패시키는 것: 값 대입/참조 선택을 뒤집는 것(`(( o_subst ))` → `(( ! o_subst ))`).
+@pytest.mark.parametrize("name", ["prompt_subst", "prompt_bang", "prompt_percent"])
+@pytest.mark.parametrize("before", [True, False])
+def test_middle_hook_flips_an_option(tmp_path, name, before):
+    after = not before
+    rc_before = opt_lines(**{name: before})
+    rc_after = (f"_mid() {{ {'setopt' if after else 'unsetopt'} {name} }}\n"
+                "precmd_functions=($precmd_functions[1] _mid $precmd_functions[2,-1])")
+    s, _, canaries = start(tmp_path, rc_before, rc_after)
+    s.run("true")
+    out = visible(s.close())
+    assert not any(c.exists() for c in canaries), "data was executed"
+    if name == "prompt_percent" and not after:
+        assert "❯ ".encode() in out and b"D:$(touch" not in out
+    else:
+        assert want_left(canaries) in out
+
+
+# A hook after the install hook sees the status of the user's command.
+# Environment assumption pin, not a mutation target: zsh restores $? before
+# each precmd function, so the install hook's `return` is not observable here.
+# 이것을 실패시키는 것: precmd 함수 사이에 $?를 되살리지 않는 zsh(bingsu 변이로는 죽지 않음).
+def test_hook_after_install_sees_command_status(tmp_path):
+    rc_after = '_after() { print -u2 -r -- "after=$?" }\nprecmd_functions+=(_after)'
+    s, _, _ = start(tmp_path, rc_after=rc_after, record=minimal_record())
+    s.run("false")
+    out = visible(s.close())
+    assert b"after=1" in out
+
+
+# A plain precmd() function and bingsu's precmd_functions both run.
+# 이것을 실패시키는 것: init이 precmd 함수를 정의하는 것(사용자 함수를 덮음).
+def test_coexists_with_a_precmd_function(tmp_path):
+    rc_before = "precmd() { print -u2 -r -- USER_PRECMD }"
+    s, _, canaries = start(tmp_path, rc_before=rc_before)
+    s.run("true")
+    out = visible(s.close())
+    assert b"USER_PRECMD" in out and want_left(canaries) in out
+    assert not any(c.exists() for c in canaries)
+
+
+# add-zsh-hook after init: the user hook runs, bingsu warns once.
+# 이것을 실패시키는 것: 경고 조건을 지우는 것(늘 경고 또는 경고 없음).
+def test_coexists_with_add_zsh_hook_after_init(tmp_path):
+    rc_after = ("autoload -Uz add-zsh-hook\nuser_hook() { print -u2 -r -- USER_HOOK }\n"
+                "add-zsh-hook precmd user_hook")
+    s, _, canaries = start(tmp_path, rc_after=rc_after)
+    for _ in range(3):
+        s.run("true")
+    out = visible(s.close())
+    assert b"USER_HOOK" in out and want_left(canaries) in out
+    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
+    assert not any(c.exists() for c in canaries)

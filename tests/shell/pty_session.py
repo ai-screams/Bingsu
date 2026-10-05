@@ -7,6 +7,7 @@ expect here answers them (observed with fish 4.9.3 on 2026-10-04)."""
 import io
 import re
 import subprocess
+import time
 
 import pexpect
 
@@ -28,6 +29,11 @@ def _fish_major(env):
 
 
 class Session:
+    """An interactive shell in a PTY. Use as a context manager, or rely on
+    the conftest finalizer that ends every Session a test left running."""
+
+    live = set()
+
     def __init__(self, shell, env, cols=80, rows=24):
         self.shell = shell
         self.fish4 = shell == "fish" and _fish_major(env) >= 4
@@ -37,14 +43,36 @@ class Session:
         env = {"TERM": "xterm-256color", **env}
         self.p = pexpect.spawn(shell, ARGV[shell], env=env, dimensions=(rows, cols), timeout=15)
         self.p.logfile_read = self.log
+        Session.live.add(self)
         self.n = 0
         self._mark()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.kill()
+        return False
+
+    def kill(self):
+        """End the child whatever state it is in."""
+        Session.live.discard(self)
+        if self.p.isalive():
+            self.p.terminate(force=True)
+        if not self.p.closed:
+            self.p.close(force=True)
+
     def expect(self, pattern, timeout=15):
-        """Like pexpect.expect, answering terminal queries while waiting."""
+        """Like pexpect.expect, answering terminal queries while waiting.
+        `timeout` is one deadline for the whole call: answering a query
+        does not restart it."""
         pats = [pattern] + QUERIES
+        deadline = time.monotonic() + timeout
         while True:
-            i = self.p.expect(pats, timeout=timeout)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise pexpect.TIMEOUT(f"no match for {pattern!r} within {timeout}s")
+            i = self.p.expect(pats, timeout=left)
             if i == 0:
                 return
             self.p.send(ANSWERS[i - 1])
@@ -75,9 +103,11 @@ class Session:
         return self._mark()
 
     def close(self) -> bytes:
-        self.p.sendline("exit")
         try:
+            self.p.sendline("exit")
             self.expect(pexpect.EOF)
         except pexpect.EOF:
             pass
+        finally:
+            self.kill()
         return self.log.getvalue()

@@ -2,7 +2,9 @@
 environment: containers for minimum versions, Homebrew on macOS."""
 import os
 import pathlib
+import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -66,11 +68,30 @@ def run_shell_script(shell, script: bytes, env, tmp: pathlib.Path):
     return subprocess.run(SHELL_CMD[shell] + [str(f)], env=env, capture_output=True, timeout=60)
 
 
+_SHORT_DIRS = []
+
+
 def short_dir():
     """A short directory for canary files: pytest tmp paths are long enough
-    that a prompt embedding two of them exceeds 80 columns."""
-    import tempfile
-    return pathlib.Path(tempfile.mkdtemp(prefix="bc", dir="/tmp"))
+    that a prompt embedding two of them exceeds 80 columns. Removed after
+    the test by _cleanup()."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="bc", dir="/tmp"))
+    _SHORT_DIRS.append(d)
+    return d
+
+
+@pytest.fixture(autouse=True)
+def _cleanup():
+    """After each test: end PTY sessions a failing test left running and
+    remove the short canary folders."""
+    yield
+    import sys
+    pty = sys.modules.get("pty_session")
+    if pty is not None:
+        for s in list(pty.Session.live):
+            s.kill()
+    while _SHORT_DIRS:
+        shutil.rmtree(_SHORT_DIRS.pop(), ignore_errors=True)
 
 
 def minimal_record(status=b"ok:none", left=b"> "):

@@ -23,22 +23,32 @@ _bingsu_call() {
   _bingsu_rec=${_bingsu_rec%.}
 }
 
-zmodload zsh/datetime 2>/dev/null
+# A missing module must not stop init under ERR_EXIT or ERR_RETURN; the
+# duration is then reported as unknown.
+zmodload zsh/datetime 2>/dev/null || :
 # Reset, never inherited: an environment value for _bingsu_t0 would make
 # the first duration negative or huge, one for _bingsu_warned_last would
 # silence the late-hook warning.
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_ps1= _bingsu_rps1= _bingsu_warned_last=
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_warned_last=
 typeset -ga _bingsu_p
+# typeset keeps an inherited export flag; without +x the rendered prompt
+# and the timings would reach the environment of every child process.
+typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last
 
 # Capture hook, first in precmd_functions. Nothing may run before these
-# assignments, or $? and $pipestatus are lost.
+# assignments, or $? and $pipestatus are lost (emulate itself sets $? to
+# 0). The end time is read here too, so hooks running between this one and
+# the install hook do not count as command time (spec section 5).
 _bingsu_save() {
   _bingsu_s=$? _bingsu_p=("${pipestatus[@]}")
+  emulate -L zsh
+  _bingsu_t1=${EPOCHREALTIME-}
   return $_bingsu_s
 }
 
 _bingsu_preexec() {
-  _bingsu_t0=$EPOCHREALTIME
+  emulate -L zsh
+  _bingsu_t0=${EPOCHREALTIME-}
 }
 
 # Install hook, last in precmd_functions. Prompt options are read here,
@@ -57,11 +67,11 @@ _bingsu_install() {
   [[ -n $pst ]] || pst=$_bingsu_s
   ctx=(--width "${COLUMNS:-0}" --status "$_bingsu_s" --pipestatus "$pst"
        --jobs "${(%):-%j}" --keymap "${KEYMAP:-main}")
-  if [[ -n $_bingsu_t0 && -n $EPOCHREALTIME ]]; then
-    (( ms = (EPOCHREALTIME - _bingsu_t0) * 1000 ))
+  if [[ -n $_bingsu_t0 && -n $_bingsu_t1 ]]; then
+    (( ms = (_bingsu_t1 - _bingsu_t0) * 1000 ))
     ctx+=(--duration-ms "$ms")
   fi
-  _bingsu_t0=
+  _bingsu_t0= _bingsu_t1=
   _bingsu_call "${ctx[@]}"
   if (( o_pct )) && _bingsu_frame "$_bingsu_rec"; then
     ps1=$_bingsu_f[3] rps1=$_bingsu_f[4]
