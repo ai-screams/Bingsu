@@ -1,7 +1,7 @@
 import pytest
 
-from fsbudget.classify import kind
-from fsbudget.strace_parse import parse
+from fsbudget.classify import kind, split_args
+from fsbudget.strace_parse import EXIT_EVENT, StructureError, parse, scan
 
 TRACE = """\
 100 execve("/x/fsb-synthetic", ["/x/fsb-synthetic", "--role", "front"], 0x7ffd /* 3 vars */) = 0
@@ -42,6 +42,21 @@ BROKEN = {
     "second unfinished": ('100 read(3</x> <unfinished ...>\n100 openat(AT_FDCWD</>, "/y" <unfinished ...>\n'
                           "100 <... openat resumed>) = 4</y>\n", "second unfinished call"),
     "unfinished at end": ("100 read(3</x>, <unfinished ...>\n", "still unfinished at the end"),
+    "extra closing parenthesis": ('100 openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY)) = 3</etc/ld.so.cache>\n',
+                                  "unparsed record"),
+    "unterminated string": ('100 openat(AT_FDCWD</>, "/x, O_RDONLY) = 3</x>\n', "unparsed record"),
+    "mismatched brackets": ('100 newfstatat(3</x>, "", {st_mode=S_IFREG|0644, ...], 0) = 0\n', "unparsed record"),
+    "fd name not after an fd": ('100 openat(AT_FDCWD</>, "/x"</y>, O_RDONLY) = 3</x>\n', "unparsed record"),
+    "stray >": ('100 read(3</x>>, "a", 1) = 1\n', "unparsed record"),
+    "unterminated fd name": ('100 read(3</x, "a", 1) = 1\n', "unparsed record"),
+    "no result": ('100 read(3</x>, "a", 1)\n', "unparsed record"),
+    "unbalanced merged call": ('100 read(3</x>, <unfinished ...>\n100 <... read resumed> "a", 1)) = 1\n',
+                               "unparsed record"),
+    "unbalanced call cut short": ('100 read(3</x>, ("a" <unfinished ...>\n100 +++ killed by SIGKILL +++\n',
+                                  "unparsed record"),
+    "unterminated string cut short": ('100 read(3</x>, "ab <unfinished ...>\n100 +++ killed by SIGKILL +++\n',
+                                      "unparsed record"),
+    "fd name holding <": ('100 read(3</x<y>, "a", 1) = 1\n', "unparsed record"),
 }
 
 
@@ -61,13 +76,52 @@ def test_killed_process_may_leave_a_call_unfinished():
 # strace 5.16 and 6.13 close a call cut short by death (SIGKILL, or another
 # thread's exit_group) with a resumed record that carries no result, then
 # write the exit record.
+# strace -y escapes < and > in an fd name (\74, \76) but not ")", "," or " = ",
+# and a quoted argument may hold any of them (observed, strace 5.16 and 6.13).
+WELL_FORMED = [
+    ('openat(AT_FDCWD</tmp>, "a>b) = 3", O_RDONLY|O_CLOEXEC) = 3</tmp/a\\76b) = 3>',
+     ["AT_FDCWD</tmp>", '"a>b) = 3"', "O_RDONLY|O_CLOEXEC"], "3</tmp/a\\76b) = 3>"),
+    ('read(7</tmp/sp ace,>, "", 1) = 0', ["7</tmp/sp ace,>", '""', "1"], "0"),
+    ('read(3</x>, "q\\"),\\n(", 6) = 6', ["3</x>", '"q\\"),\\n("', "6"], "6"),
+    ('read(3</x>, "abc"..., 4096) = 4096', ["3</x>", '"abc"...', "4096"], "4096"),
+    ('execve("/s", ["/s", "--role"], 0x7ffd /* 3 vars */) = 0', ['"/s"', '["/s", "--role"]', "0x7ffd /* 3 vars */"], "0"),
+    ('ppoll([{fd=0</dev/null>, events=0}], 1, {tv_sec=0, tv_nsec=0}, NULL, 0) = 0 (Timeout)',
+     ["[{fd=0</dev/null>, events=0}]", "1", "{tv_sec=0, tv_nsec=0}", "NULL", "0"], "0 (Timeout)"),
+    ('setsid() = 31', [], "31"),
+]
+
+
+# 이것을 실패시키는 것: 인자를 탐욕 정규식으로 자르는 것(fd 이름 안의 ") = "에서 끊김), fd 이름 안의 ","에서 나누는 것.
+@pytest.mark.parametrize(("line", "args", "ret"), WELL_FORMED)
+def test_well_formed_records_split_exactly(line, args, ret):
+    trace = parse("40 " + line + "\n")
+    assert trace.errors == []
+    (c,) = trace
+    assert split_args(c.args) == args
+    assert c.ret == ret
+
+
+# 이것을 실패시키는 것: 닫는 괄호 없이 끝난 호출 본문을 받아들이는 것.
+def test_scan_requires_the_closing_parenthesis():
+    with pytest.raises(StructureError):
+        scan('3</x>, "a"', until_close=True)
+    assert scan('3</x>, "a") = 1', until_close=True) == (["3</x>", '"a"'], 11)
+
+
+# 이것을 실패시키는 것: 끝나지 않은 채 종료한 호출을 기록도 오류도 없이 버리는 것.
+def test_call_unfinished_at_exit_still_counts():
+    trace = parse('100 openat(AT_FDCWD</>, "/x", O_RDONLY <unfinished ...>\n100 +++ exited with 0 +++\n')
+    assert trace.errors == []
+    assert [(c.name, c.ret, kind(c)) for c in trace] == [("openat", "?", "openat"), (EXIT_EVENT, "", None)]
+
+
 # 이것을 실패시키는 것: 결과 없는 resumed(`<... read resumed> <unfinished ...>) = ?`)를 알아보지 못하는 것.
 def test_call_cut_short_by_death_parses():
     text = ("11 read(3<pipe:[24017]>,  <unfinished ...>\n11 <... read resumed> <unfinished ...>) = ?\n"
             "11 +++ killed by SIGKILL +++\n")
     calls = parse(text)
     assert calls.errors == []
-    assert [(c.name, c.ret) for c in calls] == [("read", "?")]
+    assert [(c.name, c.ret) for c in calls] == [("read", "?"), (EXIT_EVENT, "")]
 
 
 # 이것을 실패시키는 것: 파이프·/dev/null 읽기를 파일 읽기로 세거나, close를 세거나, ACL이 아닌 xattr을 ACL로 세는 것,
@@ -106,6 +160,33 @@ FD_CASES = [
     ('write(1<pipe:[77]>, "a", 1) = 1', None),
     ('read(4<socket:[88]>, "a", 1) = 1', None),
     ('read(5<weird:[1]>, "a", 1) = 1', "read"),                               # an unknown kind counts
+    ('fstat(0</dev/null>, {st_mode=S_IFCHR|0666, ...}) = 0', None),             # fd-only fstat on a non-file
+    # ACL names are compared whole.
+    ('fgetxattr(4</r>, "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)', "acl"),
+    ('fgetxattr(4</r>, "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)', "acl"),
+    ('fgetxattr(4</r>, "system.posix_acl_access.evil", NULL, 0) = -1 ENODATA (No data available)', "unknown-fs"),
+    ('fgetxattr(4</r>, "user.posix_acl_x", NULL, 0) = -1 ENODATA (No data available)', "unknown-fs"),
+    ('getxattr("x", "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)', "unknown-fs"),
+    # A path must be absolute or relative to a dirfd -y names as a file.
+    ('openat(AT_FDCWD</repo>, ".git/config", O_RDONLY) = 3</repo/.git/config>', "unknown-fs"),
+    ('openat(AT_FDCWD</>, "/", O_RDONLY) = 3</>', "openat"),
+    ('openat(4</tmp>, "fx", O_RDONLY) = 3</tmp/fx>', "openat"),
+    ('openat(7, "fx", O_RDONLY) = 3', "unknown-fs"),                            # unnamed dirfd
+    ('newfstatat(AT_FDCWD</r>, "", {st_mode=S_IFDIR|0755, ...}, AT_EMPTY_PATH) = 0', "unknown-fs"),
+    ('newfstatat(3</r>, "", {st_mode=S_IFDIR|0755, ...}, AT_EMPTY_PATH) = 0', "fstat"),
+    ('renameat(4</r>, "a", AT_FDCWD</r>, "b") = 0', "unknown-fs"),
+    ('renameat(4</r>, "a", 4</r>, "b") = 0', "renameat"),
+    ('readlink("x", "y", 256) = 1', "unknown-fs"),
+    ('unlinkat(4</r>, "x", 0) = 0', "unlinkat"),
+    # Aliases outside the formula's name list.
+    ('open("/x", O_RDONLY) = 3</x>', "unknown-fs"),
+    ('stat("/x", {st_mode=S_IFREG|0644, ...}) = 0', "unknown-fs"),
+    ('statx(AT_FDCWD</>, "/x", 0, STATX_ALL, {stx_mask=STATX_BASIC_STATS, ...}) = 0', "unknown-fs"),
+    # An anonymous mapping is decided by its flag, not by the fd.
+    ('mmap(NULL, 4096, PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, 3</r/x>, 0) = 0x7f00', None),
+    ('mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, -1, 0) = 0x7f00', "unknown-fs"),
+    ('readlink(NULL, "y", 256) = -1 EFAULT (Bad address)', "unknown-fs"),        # no path string
+    ('openat(4</tmp>, NULL, O_RDONLY) = -1 EFAULT (Bad address)', "unknown-fs"),  # no path string
 ]
 
 

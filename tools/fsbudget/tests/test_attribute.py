@@ -3,7 +3,8 @@ import pytest
 from fsbudget.attribute import attribute, prologue_allowed
 from fsbudget.strace_parse import parse
 
-RULES = [["helper", r'"--role", "helper"'], ["writer", r'"--role", "writer"'], ["worker", r'"--role", "worker"']]
+RULES = [["helper", r'"--role", "helper"'], ["writer", r'"--role", "writer"'], ["worker", r'"--role", "worker"'],
+         ["command", r'^"/bin/true"']]
 
 TRACE = """\
 10 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0
@@ -54,7 +55,109 @@ def test_late_vfork_return_keeps_child_role():
     assert "openat" not in got.counts.get("front", {})
 
 
+# A child's first lines can come before its parent's clone return (seen on
+# Debian 13): the child takes its parent's role, not the root's.
+EARLY_CHILD = """\
+40 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0
+40 prctl(PR_SET_NAME, "fsb:begin") = 0
+40 clone(child_stack=NULL, flags=SIGCHLD) = 41
+41 execve("/s", ["/s", "--role", "helper"], 0x0 /* 0 vars */) = 0
+41 clone(child_stack=NULL, flags=CLONE_VM|CLONE_THREAD <unfinished ...>
+42 prctl(PR_SET_NAME, "fsb:begin") = 0
+42 openat(AT_FDCWD</>, "/h2", O_RDONLY) = 3</h2>
+42 prctl(PR_SET_NAME, "fsb:end") = 0
+41 <... clone resumed>) = 42
+40 prctl(PR_SET_NAME, "fsb:end") = 0
+"""
+
+
+# 이것을 실패시키는 것: 부모의 clone 반환보다 먼저 나온 자식에게 뿌리(front) 역할을 주는 것.
+def test_child_seen_before_its_parents_return_takes_the_parents_role():
+    got = attribute(parse(EARLY_CHILD), RULES, markers=True)
+    assert got.errors == []
+    assert got.counts == {"helper": {"openat": 1}}
+
+
+# A TID number reused after an exit starts fresh: no role, window or
+# start-up state from the task that had it before.
+REUSED_TID = """\
+50 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0
+50 prctl(PR_SET_NAME, "fsb:begin") = 0
+50 clone(child_stack=NULL, flags=SIGCHLD) = 51
+51 execve("/s", ["/s", "--role", "helper"], 0x0 /* 0 vars */) = 0
+51 prctl(PR_SET_NAME, "fsb:begin") = 0
+51 prctl(PR_SET_NAME, "fsb:end") = 0
+51 +++ exited with 0 +++
+50 clone(child_stack=NULL, flags=CLONE_VM|CLONE_THREAD <unfinished ...>
+51 prctl(PR_SET_NAME, "fsb:begin") = 0
+51 openat(AT_FDCWD</>, "/t", O_RDONLY) = 3</t>
+51 prctl(PR_SET_NAME, "fsb:end") = 0
+50 <... clone resumed>) = 51
+50 prctl(PR_SET_NAME, "fsb:end") = 0
+"""
+
+
+# 이것을 실패시키는 것: 종료 기록에서 그 TID의 역할을 지우지 않는 것(재사용한 번호가 helper로 셈).
+def test_reused_tid_does_not_inherit_the_old_role():
+    got = attribute(parse(REUSED_TID), RULES, markers=True)
+    assert got.errors == []
+    assert got.counts == {"front": {"openat": 1}}
+
+
+# The helper exits after exec and before its first fsb:begin (start-up
+# state still on); the number comes back as a front thread, which has no
+# start-up section, so its loader-like call is outside the window.
+REUSED_AFTER_STARTUP = """\
+70 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0
+70 prctl(PR_SET_NAME, "fsb:begin") = 0
+70 clone(child_stack=NULL, flags=SIGCHLD) = 71
+71 execve("/s", ["/s", "--role", "helper"], 0x0 /* 0 vars */) = 0
+71 +++ killed by SIGKILL +++
+70 clone(child_stack=NULL, flags=CLONE_VM|CLONE_THREAD) = 71
+71 openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY) = 3</etc/ld.so.cache>
+70 prctl(PR_SET_NAME, "fsb:end") = 0
+"""
+
+
+# 이것을 실패시키는 것: 종료 기록에서 그 TID의 시작 구간 상태를 지우지 않는 것(재사용한 번호의 호출이 시작 구간으로 면제됨).
+def test_reused_tid_has_no_startup_section():
+    got = attribute(parse(REUSED_AFTER_STARTUP), RULES, markers=True)
+    assert any("pid 71 (front): openat outside window" in e for e in got.errors), got.errors
+
+
+# 이것을 실패시키는 것: 창을 연 채 끝난 TID를 오류로 보지 않는 것, 또는 종료 뒤에도 그 창을 열린 채로 두는 것
+# (끝에서 같은 창을 또 보고함).
+def test_exit_with_an_open_window_is_one_error():
+    trace = ('80 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0\n'
+             '80 prctl(PR_SET_NAME, "fsb:begin") = 0\n80 clone(child_stack=NULL, flags=SIGCHLD) = 81\n'
+             '81 execve("/s", ["/s", "--role", "helper"], 0x0 /* 0 vars */) = 0\n'
+             '81 prctl(PR_SET_NAME, "fsb:begin") = 0\n81 +++ exited with 0 +++\n'
+             '80 prctl(PR_SET_NAME, "fsb:end") = 0\n')
+    assert attribute(parse(trace), RULES, markers=True).errors == ["pid 81: exited with 0 with its fsb window open"]
+
+
+# A command's own children may exec anything: only gated roles must match a rule.
+COMMAND_CHILD = """\
+60 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0
+60 prctl(PR_SET_NAME, "fsb:begin") = 0
+60 clone(child_stack=NULL, flags=SIGCHLD) = 61
+61 execve("/bin/true", ["/bin/true"], 0x0 /* 0 vars */) = 0
+61 clone(child_stack=NULL, flags=SIGCHLD) = 62
+62 execve("/usr/bin/anything", ["/usr/bin/anything"], 0x0 /* 0 vars */) = 0
+62 openat(AT_FDCWD</>, "/etc/passwd", O_RDONLY) = 3</etc/passwd>
+60 prctl(PR_SET_NAME, "fsb:end") = 0
+"""
+
+
+# 이것을 실패시키는 것: 명령 프로세스의 자손이 규칙 밖 exec을 할 때도 role escape로 보는 것.
+def test_command_descendants_stay_commands():
+    got = attribute(parse(COMMAND_CHILD), RULES, markers=True)
+    assert got.errors == []
+    assert got.counts == {"command": {"openat": 1}}
+
+
 HEAD = '30 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0\n'
+WIN = '30 prctl(PR_SET_NAME, "fsb:begin") = 0\n30 prctl(PR_SET_NAME, "fsb:end") = 0\n'
 BAD = {
     "outside window": '30 prctl(PR_SET_NAME, "fsb:begin") = 0\n30 prctl(PR_SET_NAME, "fsb:end") = 0\n'
                       '30 openat(AT_FDCWD</>, "/late", O_RDONLY) = 3</late>\n',
@@ -93,6 +196,25 @@ BAD = {
                           '30 prctl(PR_SET_NAME, "fsb:begin") = 0\n30 prctl(PR_SET_NAME, "fsb:end") = 0\n',
     "untrusted .so in prologue": '30 openat(AT_FDCWD</>, "/tmp/evil.so", O_RDONLY) = 3</tmp/evil.so>\n'
                                  '30 prctl(PR_SET_NAME, "fsb:begin") = 0\n30 prctl(PR_SET_NAME, "fsb:end") = 0\n',
+    # Near misses of the start-up pairs: each one passes if its rule is widened.
+    "another process's maps": '30 openat(AT_FDCWD</>, "/proc/1/maps", O_RDONLY) = 3</proc/1/maps>\n' + WIN,
+    "maps under /proc/self/root": '30 openat(AT_FDCWD</>, "/proc/self/root/proc/self/maps", O_RDONLY) = 3</proc/30/maps>\n' + WIN,
+    "ld.so.cache prefix": '30 openat(AT_FDCWD</>, "/etc/ld.so.cache.d/x", O_RDONLY) = 3</etc/ld.so.cache.d/x>\n' + WIN,
+    "ld.so prefix for preload": '30 access("/etc/ld.so.conf", R_OK) = 0\n' + WIN,
+    "hwcaps escape": '30 openat(AT_FDCWD</>, "/lib/glibc-hwcaps/../../home/u/libx.so", O_RDONLY) = 3</home/u/libx.so>\n' + WIN,
+    "start-up openat for writing": '30 openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDWR) = 3</etc/ld.so.cache>\n' + WIN,
+    "start-up openat that creates": ('30 openat(AT_FDCWD</>, "/lib/libc.so.6", O_WRONLY|O_CREAT|O_TRUNC, 0644)'
+                                     ' = 3</lib/libc.so.6>\n' + WIN),
+    "role escape": ('30 prctl(PR_SET_NAME, "fsb:begin") = 0\n30 clone(child_stack=NULL, flags=SIGCHLD) = 31\n'
+                    '31 execve("/usr/bin/evil", ["/usr/bin/evil"], 0x0 /* 0 vars */) = 0\n'
+                    '30 prctl(PR_SET_NAME, "fsb:end") = 0\n'),
+    "exit with an open window": ('30 prctl(PR_SET_NAME, "fsb:begin") = 0\n30 clone(child_stack=NULL, flags=SIGCHLD) = 31\n'
+                                 '31 execve("/s", ["/s", "--role", "helper"], 0x0 /* 0 vars */) = 0\n'
+                                 '31 prctl(PR_SET_NAME, "fsb:begin") = 0\n31 +++ exited with 0 +++\n'
+                                 '30 clone(child_stack=NULL, flags=SIGCHLD) = 31\n'
+                                 '31 execve("/s", ["/s", "--role", "worker"], 0x0 /* 0 vars */) = 0\n'
+                                 '31 prctl(PR_SET_NAME, "fsb:end") = 0\n30 prctl(PR_SET_NAME, "fsb:end") = 0\n'),
+    "task without a spawn call": '30 prctl(PR_SET_NAME, "fsb:begin") = 0\n44 getpid() = 44\n30 prctl(PR_SET_NAME, "fsb:end") = 0\n',
 }
 
 

@@ -17,7 +17,8 @@ from fsbudget.gate import check
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 BIN = pathlib.Path(os.environ.get("FSB_SYNTHETIC", ROOT / "target/debug/fsb-synthetic"))
-RULES = [["helper", r'"--role", "helper"'], ["writer", r'"--role", "writer"'], ["worker", r'"--role", "worker"']]
+RULES = [["helper", r'"--role", "helper"'], ["writer", r'"--role", "writer"'], ["worker", r'"--role", "worker"'],
+         ["command", r'^"/bin/true"']]
 WRITER = {"openat": 2, "fstat": 1, "flock": 1, "write": 1, "renameat": 1}
 WORKER = {"openat": 1, "fstat": 1, "read": 1}
 NAMES = "config.toml,local.toml"
@@ -82,8 +83,10 @@ def test_gate_catches_an_unreported_call(tmp_path):
     assert any(b.startswith("helper.fstat") for b in bad), bad
 
 
-# 이것을 실패시키는 것: 역할을 실행 경로가 아닌 다른 것으로 정해 도우미 호출이 다른 역할로 새는 것.
+# 이것을 실패시키는 것: 역할을 argv가 아닌 다른 것으로 정해 도우미 호출이 다른 역할로 새는 것,
+# 규칙에 없는 argv로 exec한 예산 역할을 command로 조용히 넘기는 것, le 모드가 빈 역할을 통과시키는 것.
 def test_gate_catches_misattribution(tmp_path):
     got, expected = run(tmp_path, {"FSB_MUTATE": "misattr"})
-    bad = check(got["counts"], expected, "exact", ["helper"])
-    assert bad, "helper calls landed in another role but the gate passed"
+    assert any("role escape" in e for e in got["errors"]), got["errors"]
+    for mode in ("exact", "le"):
+        assert check(got["counts"], expected, mode, ["helper"]), f"helper calls left the role but {mode} passed"
