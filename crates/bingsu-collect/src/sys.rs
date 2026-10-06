@@ -175,7 +175,7 @@ pub fn probe_clone3() -> io::Result<()> {
 /// failed with EPERM. Without the rules they succeed: the child leaves at
 /// once with `_exit` (after a raw vfork it shares this stack, so a missing
 /// rule may also crash the parent; either way the probe does not print F).
-/// Not part of the cost rows.
+/// stub_main allows it in sandbox mode only. Not part of the cost rows.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn probe_fork() -> io::Result<()> {
     let mut denied = 0;
@@ -202,6 +202,23 @@ pub fn probe_fork() -> io::Result<()> {
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub fn probe_fork() -> io::Result<()> {
+    Ok(())
+}
+
+/// x86_64 Linux: an x32 ABI `getpid` (nr | `__X32_SYSCALL_BIT`). With the
+/// sandbox's x32 filter installed the process dies with SIGSYS; without it
+/// the call returns (ENOSYS on a kernel without x32) and nothing is printed.
+/// Not part of the cost rows: it shows the x32 filter is installed.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn probe_x32() -> io::Result<()> {
+    let nr = libc::c_long::from(X32_SYSCALL_BIT) | libc::SYS_getpid;
+    // SAFETY: getpid takes no arguments; the x32 bit only changes the ABI.
+    unsafe { libc::syscall(nr) };
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub fn probe_x32() -> io::Result<()> {
     Ok(())
 }
 

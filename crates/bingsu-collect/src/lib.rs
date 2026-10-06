@@ -16,6 +16,7 @@ struct Opts<'a> {
     probe_exec: bool,
     probe_clone3: bool,
     probe_fork: bool,
+    probe_x32: bool,
     report_vm: bool,
 }
 
@@ -35,6 +36,7 @@ fn parse(args: &[OsString]) -> Option<Opts<'_>> {
             "--probe-exec" => &mut o.probe_exec,
             "--probe-clone3" => &mut o.probe_clone3,
             "--probe-fork" => &mut o.probe_fork,
+            "--probe-x32" => &mut o.probe_x32,
             "--report-vm" => &mut o.report_vm,
             _ => return None,
         };
@@ -46,9 +48,13 @@ fn parse(args: &[OsString]) -> Option<Opts<'_>> {
 }
 
 /// Exit codes: 0 ready, 2 bad arguments, 3 limits failed, 4 sandbox failed
-/// or unsupported, 5 writing to stdout failed.
+/// or unsupported, 5 writing to stdout failed. `--probe-fork` is accepted in
+/// sandbox mode only: unfiltered, its raw `vfork` would share this stack.
 pub fn stub_main(args: &[OsString]) -> i32 {
     let Some(o) = parse(args) else { return 2 };
+    if o.probe_fork && o.mode != Some("sandbox") {
+        return 2;
+    }
     #[cfg(not(unix))]
     {
         let _ = o;
@@ -76,6 +82,7 @@ pub fn stub_main(args: &[OsString]) -> i32 {
             (o.probe_exec, sys::probe_exec as fn() -> std::io::Result<()>),
             (o.probe_clone3, sys::probe_clone3),
             (o.probe_fork, sys::probe_fork),
+            (o.probe_x32, sys::probe_x32),
             (o.report_vm, sys::report_vm),
         ] {
             if on {
@@ -108,6 +115,7 @@ mod tests {
             probe_exec: true,
             probe_clone3: true,
             probe_fork: true,
+            probe_x32: true,
             report_vm: true,
         };
         let full = [
@@ -117,6 +125,7 @@ mod tests {
             "--report-vm",
             "--probe-exec",
             "--probe-clone3",
+            "--probe-x32",
         ];
         assert_eq!(p(&full), Some(all));
         assert_eq!(p(&["--mode"]), None);

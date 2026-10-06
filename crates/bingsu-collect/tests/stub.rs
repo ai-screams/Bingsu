@@ -102,6 +102,30 @@ fn sandbox_blocks_exec() {
     assert_eq!(run(&["--mode", "sandbox", "--probe-exec"]), b"PR");
 }
 
+// An unfiltered raw vfork would share the stub's stack, so the fork probe
+// runs under the sandbox only.
+// 이것을 실패시키는 것: sandbox가 아닌 모드에서 --probe-fork를 받아들이는 것.
+#[test]
+fn fork_probe_needs_sandbox() {
+    assert_eq!(code(&["--probe-fork"]), Some(2));
+    assert_eq!(code(&["--mode", "bare", "--probe-fork"]), Some(2));
+    assert_eq!(code(&["--mode", "limits", "--probe-fork"]), Some(2));
+}
+
+// 이것을 실패시키는 것: x86_64에서 x32 필터 설치 줄을 지우는 것(프로브가 살아남아 R을 냄).
+// 대조: 필터 없는 bare에서는 같은 프로브가 살아남는다.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn sandbox_kills_x32_calls() {
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(run(&["--mode", "bare", "--probe-x32"]), b"R");
+    let st = stub(&["--mode", "sandbox", "--probe-x32"])
+        .output()
+        .unwrap()
+        .status;
+    assert_eq!(st.signal(), Some(libc::SIGSYS), "{st:?}");
+}
+
 // 이것을 실패시키는 것: x86_64의 fork·vfork 거부 규칙 중 하나를 빼는 것.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
