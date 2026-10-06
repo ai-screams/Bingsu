@@ -1,8 +1,10 @@
 //! Synthetic program with known filesystem calls for the budget scaffold
 //! (spec section 9 M1 row, change (6)). Inside its fsb window each role makes
-//! exactly the calls of its formula with every coefficient = 1. Nothing
-//! outside the window touches the filesystem: names come from FSB_NAMES, the
-//! runtime-root fd is inherited as fd 10, axes go to stdout (a pipe).
+//! exactly the calls of its formula with every coefficient = 1. Apart from
+//! the start-up prologue (the dynamic loader and std before main), every
+//! filesystem call this program makes itself is inside the window: names
+//! come from FSB_NAMES, the runtime-root fd is inherited as fd 10, axes go
+//! to stdout (a pipe).
 //! FSB_ACL=1 makes the helper probe the POSIX ACL of every walked component
 //! and every source file (the c12·(F + P) term).
 #![deny(unsafe_code)] // FFI lives in bingsu_bench::sys only

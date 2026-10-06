@@ -22,3 +22,10 @@ def test_le_mode():
     assert check({"helper": {"openat": 1, "fstat": 2}}, WANT, "le", ["helper"]) == []
     assert check({"helper": {"openat": 3, "fstat": 2}}, WANT, "le", ["helper"]) == ["helper.openat: measured 3, formula 2 (le)"]
     assert check({"helper": {"openat": 1, "fstat": 2}}, WANT, "exact", ["helper"]) == ["helper.openat: measured 1, formula 2 (exact)"]
+
+
+# 이것을 실패시키는 것: 역할을 정하지 못한 task의 호출(unresolved)을 gated_roles에 없다는 이유로 통과시키는 것.
+@pytest.mark.parametrize("mode", ["exact", "le"])
+def test_unresolved_calls_are_a_violation(mode):
+    got = {"helper": {"openat": 2, "fstat": 2}, "unresolved": {"openat": 1}}
+    assert check(got, WANT, mode, ["helper"]) == ["unresolved: {'openat': 1} (calls of a task with no known role)"]
