@@ -12,19 +12,20 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in the design stage.** There is no release and nothing to install yet.
+> **bingsu is in early development (M1).** The record path and the bash, zsh and fish hooks exist,
+> but there is no release, nothing to install and no user-visible prompt yet. Performance has not been measured.
 > This README describes what is being built. Features listed below are planned, not shipped.
 
 ## What is bingsu?
 
 Bingsu (빙수) is a Korean shaved-ice dessert: a bowl of fine ice with toppings piled on top.
-The project follows the same shape. A small, fast **engine** is the ice, and everything you see is a **topping** you choose:
+The project follows the same shape. A small **engine** is the ice, and everything you see will be a **topping** you choose:
 color flavors, prompt layouts, information segments and plugins.
 
 Most setups today split the look of a terminal across many tools.
 The terminal emulator has one palette, the prompt has another, and `ls`, `bat`, `delta` and `fzf` each have their own.
 Change one and the rest no longer match.
-bingsu starts from a single set of color tokens and generates all of them, so the prompt, the terminal colors and your CLI tools stay in step.
+bingsu is designed to start from a single set of color tokens and generate all of them, so the prompt, the terminal colors and your CLI tools can stay in step.
 
 ## Goals
 
@@ -77,7 +78,10 @@ bingsu starts from a single set of color tokens and generates all of them, so th
 | Color system (palette, dark and light, contrast rules) | Designed |
 | Prompt layout and block styles | Designed |
 | Implementation language | Rust |
-| Engine, generators, Studio | Not started |
+| Engine core (M1: record path and shell hooks) | In progress |
+| Performance measurement (M1 Part B) | Not started |
+| User-visible prompt, themes, segments and colors | Not started |
+| Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
 Windows is checked in CI. First-class support targets macOS and Linux.
