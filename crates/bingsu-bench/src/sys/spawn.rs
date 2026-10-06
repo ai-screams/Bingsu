@@ -88,7 +88,8 @@ fn set_cloexec_pair(p: [libc::c_int; 2]) -> io::Result<()> {
 }
 
 /// A duplicate without FD_CLOEXEC (used by the fd-inventory test to prove
-/// the child-side close works).
+/// the child-side close works). Test-only.
+#[doc(hidden)]
 pub fn dup_inheritable(fd: &OwnedFd) -> io::Result<OwnedFd> {
     // SAFETY: dup takes an fd and returns a new one without FD_CLOEXEC.
     let n = unsafe { libc::dup(fd.as_raw_fd()) };
@@ -97,15 +98,6 @@ pub fn dup_inheritable(fd: &OwnedFd) -> io::Result<OwnedFd> {
     }
     // SAFETY: `n` is a new descriptor owned by nobody else.
     Ok(unsafe { OwnedFd::from_raw_fd(n) })
-}
-
-/// dup2(fd, 1) for the writer-child probe.
-pub fn dup_onto_stdout(fd: &OwnedFd) -> io::Result<()> {
-    // SAFETY: dup2 takes two integers; fd 1 is replaced atomically.
-    if unsafe { libc::dup2(fd.as_raw_fd(), 1) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 // Linux without glibc's posix_spawn closefrom (musl, the static user-run
@@ -118,6 +110,13 @@ pub fn spawn(_spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
     ))
 }
 
+/// Spawns `spec.program` with stdin and stderr on /dev/null, stdout on a
+/// pipe or /dev/null, and every fd from 3 up closed in the child.
+///
+/// Caller contract on macOS: the pipe is made close-on-exec in two steps
+/// (`pipe`, then `fcntl`), which is atomic only if no other thread spawns or
+/// forks without POSIX_SPAWN_CLOEXEC_DEFAULT in between. The measurement
+/// harness is single-threaded; product code with threads is M3a.
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
     let pipe = if spec.capture_stdout {
@@ -218,38 +217,84 @@ fn spawn_with(
     Ok(pid)
 }
 
-/// Blocks until one byte arrives (the child's "ready" byte).
-pub fn read_byte(fd: &OwnedFd) -> io::Result<u8> {
-    let mut b = [0u8; 1];
+/// Calls `f` again while it fails with EINTR; any other result returns.
+fn retry_eintr<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     loop {
-        // SAFETY: `b` is one writable byte.
-        let n = unsafe { libc::read(fd.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
-        match n {
-            1 => return Ok(b[0]),
-            0 => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
-            _ if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
-            _ => return Err(io::Error::last_os_error()),
+        match f() {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            r => return r,
         }
     }
 }
 
+/// Blocks until one byte arrives (the child's "ready" byte).
+pub fn read_byte(fd: &OwnedFd) -> io::Result<u8> {
+    let mut b = [0u8; 1];
+    retry_eintr(|| {
+        // SAFETY: `b` is one writable byte.
+        match unsafe { libc::read(fd.as_raw_fd(), b.as_mut_ptr().cast(), 1) } {
+            1 => Ok(b[0]),
+            0 => Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            _ => Err(io::Error::last_os_error()),
+        }
+    })
+}
+
+/// waitpid for `pid`, retried on EINTR; returns the raw status.
 pub fn reap(pid: libc::pid_t) -> io::Result<libc::c_int> {
     let mut status = 0;
-    // SAFETY: `status` is a valid out-parameter; pid is our child.
-    if unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(status)
+    retry_eintr(|| {
+        // SAFETY: `status` is a valid out-parameter; pid is our child.
+        if unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(status)
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // The tests that open or close fds run one at a time: a closed fd number
+    // checked below could otherwise be reused by a parallel test's pipe.
+    static FD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // 이것을 실패시키는 것: EINTR을 다른 오류처럼 돌려주는 것(재시도 갈래 삭제), 또는 다른 오류까지 재시도하는 것.
+    #[test]
+    fn retry_eintr_retries_only_interrupted() {
+        let mut calls = 0;
+        let r = retry_eintr(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::ErrorKind::Interrupted.into())
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!((r.unwrap(), calls), (7, 3));
+        let mut calls = 0;
+        let r = retry_eintr(|| {
+            calls += 1;
+            // A second call would succeed: retrying other errors shows up.
+            if calls == 1 {
+                Err(io::ErrorKind::BrokenPipe.into())
+            } else {
+                Ok(9)
+            }
+        });
+        assert_eq!(
+            (r.unwrap_err().kind(), calls),
+            (io::ErrorKind::BrokenPipe, 1)
+        );
+    }
+
     // 이것을 실패시키는 것: Linux에서 pipe2의 O_CLOEXEC를 빼거나, macOS에서 set_cloexec_pair 호출을 빼는 것.
     // (자식 쪽 closefrom·CLOEXEC_DEFAULT가 이 누락을 가리므로 spawn_fds 시험으로는 잡히지 않는다.)
     #[test]
     fn pipe_ends_are_cloexec() {
+        let _serial = FD_TESTS.lock().unwrap();
         let (r, w) = pipe_cloexec().unwrap();
         for fd in [r.as_raw_fd(), w.as_raw_fd()] {
             // SAFETY: querying the flags of a descriptor we own.
@@ -266,6 +311,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn cloexec_failure_closes_both_and_errors() {
+        let _serial = FD_TESTS.lock().unwrap();
         let mut p = [-1 as libc::c_int; 2];
         // SAFETY: `p` is a two-element array for pipe(2).
         assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
