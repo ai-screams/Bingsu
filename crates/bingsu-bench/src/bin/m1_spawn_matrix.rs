@@ -116,7 +116,18 @@ mod imp {
         let bytes = std::fs::metadata(bin)
             .unwrap_or_else(|e| panic!("{bin}: {e}"))
             .len();
-        let mut extra = vec![("binary_bytes", bytes.to_string())];
+        // posix_spawn rows vs clone3 rows: clone3 here runs without CLONE_VM
+        // (a fork-style copy of this process), while glibc's and macOS's
+        // posix_spawn avoid that copy. A difference in definition, not noise.
+        let method = match &kind {
+            Kind::Spawn { .. } => r#""posix_spawn""#,
+            #[cfg(target_os = "linux")]
+            Kind::Cgroup { .. } => r#""clone3-no-vm""#,
+        };
+        let mut extra = vec![
+            ("binary_bytes", bytes.to_string()),
+            ("spawn_method", method.into()),
+        ];
         if mode == "sandbox" {
             extra.push((LOWER_BOUND.0, LOWER_BOUND.1.into()));
         }
@@ -239,7 +250,7 @@ mod imp {
 
         for round in 0..a.warmup + a.rounds {
             for r in rows.iter_mut().filter(|r| r.failure.is_none()) {
-                let ns = match &r.kind {
+                let ns: Result<u64, String> = match &r.kind {
                     Kind::Spawn {
                         env,
                         new_session,
@@ -254,7 +265,7 @@ mod imp {
                 match ns {
                     Ok(ns) if round >= a.warmup => r.samples.push(ns),
                     Ok(_) => {}
-                    Err(e) => r.failure = Some(e),
+                    Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
                 }
             }
         }
