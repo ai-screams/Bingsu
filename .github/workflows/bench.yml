@@ -25,7 +25,8 @@ jobs:
           toolchain: stable
       - run: cargo build --release -p bingsu --features bench-stubs
       - run: cargo build --release -p bingsu-collect -p bingsu-bench
-      # No delegated cgroup on the runner: the cgroup rows are recorded as na.
+      # Runs without --cgroup-dir, as the plan records the CI matrix: the cgroup
+      # rows are na here; the delegated-cgroup rows are measured on the Linux host.
       - name: Run the matrix
         run: |
           printf '{"meta":{"host":"github-actions","runner":"ubuntu-24.04","arch":"%s","kernel":"%s","nproc":%s,"commit":"%s"}}\n' \
