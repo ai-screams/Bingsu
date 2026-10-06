@@ -285,6 +285,43 @@ pub fn report_vm() -> io::Result<()> {
     write1(b"VM unsupported\n")
 }
 
+/// `L cpu=<soft>/<hard> nofile=… fsize=…\n` as getrlimit reports them
+/// (`inf` for RLIM_INFINITY). Not part of the cost rows: it shows which
+/// startup limits are in place.
+pub fn report_limits() -> io::Result<()> {
+    use std::fmt::Write;
+    let show = |v: libc::rlim_t| {
+        if v == libc::RLIM_INFINITY {
+            "inf".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+    let mut line = String::from("L");
+    for (name, res) in [
+        ("cpu", libc::RLIMIT_CPU),
+        ("nofile", libc::RLIMIT_NOFILE),
+        ("fsize", libc::RLIMIT_FSIZE),
+    ] {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `lim` is a valid out-parameter for getrlimit.
+        if unsafe { libc::getrlimit(res, &mut lim) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _ = write!(
+            line,
+            " {name}={}/{}",
+            show(lim.rlim_cur),
+            show(lim.rlim_max)
+        );
+    }
+    line.push('\n');
+    write1(line.as_bytes())
+}
+
 pub fn ready() -> io::Result<()> {
     write1(b"R")
 }

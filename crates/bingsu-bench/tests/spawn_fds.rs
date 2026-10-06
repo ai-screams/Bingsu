@@ -40,8 +40,12 @@ fn child_sees_only_stdio() {
             break;
         }
     }
-    reap(child.pid).unwrap();
+    let status = reap(child.pid).unwrap();
     drop(leak);
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        "status {status:#x}"
+    );
     assert_eq!(
         got,
         b"R",

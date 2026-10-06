@@ -18,6 +18,7 @@ struct Opts<'a> {
     probe_fork: bool,
     probe_x32: bool,
     report_vm: bool,
+    report_limits: bool,
 }
 
 /// Fails closed: a missing or non-UTF-8 `--mode` value, a repeated option
@@ -38,6 +39,7 @@ fn parse(args: &[OsString]) -> Option<Opts<'_>> {
             "--probe-fork" => &mut o.probe_fork,
             "--probe-x32" => &mut o.probe_x32,
             "--report-vm" => &mut o.report_vm,
+            "--report-limits" => &mut o.report_limits,
             _ => return None,
         };
         if std::mem::replace(flag, true) {
@@ -97,6 +99,7 @@ pub fn stub_main(args: &[OsString]) -> i32 {
             (o.probe_fork, sys::probe_fork),
             (o.probe_x32, sys::probe_x32),
             (o.report_vm, sys::report_vm),
+            (o.report_limits, sys::report_limits),
         ] {
             if on {
                 out = out.and_then(|()| probe());
@@ -130,6 +133,7 @@ mod tests {
             probe_fork: true,
             probe_x32: true,
             report_vm: true,
+            report_limits: true,
         };
         let full = [
             "--probe-fork",
@@ -139,6 +143,7 @@ mod tests {
             "--probe-exec",
             "--probe-clone3",
             "--probe-x32",
+            "--report-limits",
         ];
         assert_eq!(p(&full), Some(all));
         assert_eq!(p(&["--mode"]), None);

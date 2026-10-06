@@ -153,18 +153,20 @@ fn fork_probe_needs_sandbox() {
 }
 
 // A probe that cannot run here exits 2 instead of passing as a no-op.
-// 이것을 실패시키는 것: 지원하지 않는 플랫폼의 프로브를 no-op로 받아들이는 것(probes_supported 검사 삭제).
+// 이것을 실패시키는 것: 지원하지 않는 플랫폼의 프로브를 no-op로 받아들이는 것(probes_supported의 x86_64 조건 삭제).
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[test]
-fn unsupported_probes_exit_2() {
-    let x86_64_linux = cfg!(all(target_os = "linux", target_arch = "x86_64"));
-    if !x86_64_linux {
-        assert_eq!(code(&["--mode", "sandbox", "--probe-x32"]), Some(2));
-        assert_eq!(code(&["--probe-x32"]), Some(2));
-        assert_eq!(code(&["--mode", "sandbox", "--probe-fork"]), Some(2));
-    }
-    if !cfg!(target_os = "linux") {
-        assert_eq!(code(&["--probe-clone3"]), Some(2));
-    }
+fn x86_64_probes_exit_2_elsewhere() {
+    assert_eq!(code(&["--mode", "sandbox", "--probe-x32"]), Some(2));
+    assert_eq!(code(&["--probe-x32"]), Some(2));
+    assert_eq!(code(&["--mode", "sandbox", "--probe-fork"]), Some(2));
+}
+
+// 이것을 실패시키는 것: Linux 밖에서 --probe-clone3를 no-op로 받아들이는 것(probes_supported의 Linux 조건 삭제).
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn clone3_probe_exits_2_off_linux() {
+    assert_eq!(code(&["--probe-clone3"]), Some(2));
 }
 
 // 이것을 실패시키는 것: x86_64에서 x32 필터 설치 줄을 지우는 것(프로브가 살아남아 R을 냄).
@@ -208,6 +210,17 @@ fn sandbox_blocks_clone3() {
         let _ = writeln!(std::io::stderr().lock(), "NOTE: {msg}");
     }
     assert_eq!(run(&["--mode", "sandbox", "--probe-clone3"]), b"CR");
+}
+
+// Every startup limit, soft and hard, as the stub sees it after
+// set_limits (the FSIZE test above shows only one of them takes effect).
+// 이것을 실패시키는 것: set_limits에서 RLIMIT_CPU·RLIMIT_NOFILE·RLIMIT_FSIZE 중 하나를 빼거나 값을 바꾸는 것.
+#[test]
+fn limits_mode_sets_all_three_limits() {
+    assert_eq!(
+        run(&["--mode", "limits", "--report-limits"]),
+        b"L cpu=1/1 nofile=64/64 fsize=0/0\nR"
+    );
 }
 
 // 이것을 실패시키는 것: --report-vm 갈래를 지우거나, VmSize 줄을 찾지 못해 "unknown"을 내는 것.

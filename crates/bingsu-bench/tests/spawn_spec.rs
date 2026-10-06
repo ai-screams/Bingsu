@@ -19,8 +19,12 @@ fn new_session_makes_child_a_session_leader() {
     let sid = unsafe { libc::getsid(child.pid) };
     // SAFETY: kill takes a pid and a signal; the child is ours and not yet reaped.
     unsafe { libc::kill(child.pid, libc::SIGKILL) };
-    reap(child.pid).unwrap();
+    let status = reap(child.pid).unwrap();
     assert_eq!(sid, child.pid, "child is not a session leader");
+    assert!(
+        libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL,
+        "status {status:#x}"
+    );
 }
 
 // 이것을 실패시키는 것: env가 주어졌을 때 그 목록 대신 부모의 environ을 넘기는 것.
@@ -45,6 +49,10 @@ fn explicit_env_replaces_the_parent_environment() {
     while let Ok(b) = read_byte(out) {
         got.push(b);
     }
-    reap(child.pid).unwrap();
+    let status = reap(child.pid).unwrap();
     assert_eq!(got, b"eR", "{:?}", String::from_utf8_lossy(&got));
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        "status {status:#x}"
+    );
 }

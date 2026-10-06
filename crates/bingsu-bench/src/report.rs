@@ -1,4 +1,5 @@
-//! One JSON object per line; bench/summarize.py reads them.
+//! One JSON object per line, for the summary script Task B3 adds
+//! (bench/summarize.py).
 use crate::stats::Summary;
 
 /// JSON string contents for `s`: quote, backslash and control characters
