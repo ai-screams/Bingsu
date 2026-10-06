@@ -1,5 +1,5 @@
-//! One JSON object per line, for the summary script Task B3 adds
-//! (bench/summarize.py).
+//! One JSON object per line (one row of a cost matrix each); the M1
+//! results document reads them.
 use crate::stats::Summary;
 
 /// JSON string contents for `s`: quote, backslash and control characters

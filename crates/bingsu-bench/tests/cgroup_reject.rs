@@ -1,5 +1,5 @@
-//! `spawn_in_cgroup` refuses before any child exists: an empty argv, and an
-//! fd that is not a cgroup.
+//! `spawn_in_cgroup` refuses before any child exists: an empty argv, stdio
+//! fd numbers for the pipe or /dev/null, and an fd that is not a cgroup.
 //!
 //! Neither test makes a child, so `waitpid(-1, WNOHANG)` failing with ECHILD
 //! proves no process was started; that is why they share this binary only
@@ -41,6 +41,18 @@ fn empty_argv_is_refused() {
     no_child_was_made();
 }
 
+// 이것을 실패시키는 것: stdout_w·devnull이 0–2일 때의 검사를 빼는 것(그러면 오류가 InvalidInput이 아니다).
+#[test]
+fn stdio_fd_numbers_are_refused() {
+    let cg = dir_fd("/");
+    let devnull = std::fs::File::open("/dev/null").unwrap();
+    for (w, n) in [(1, devnull.as_raw_fd()), (devnull.as_raw_fd(), 0), (2, 2)] {
+        let e = spawn_in_cgroup(&cg, c"/bin/sh", &[c"/bin/sh"], &[], w, n).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "({w}, {n}): {e}");
+    }
+    no_child_was_made();
+}
+
 // 이것을 실패시키는 것: flags에서 CLONE_INTO_CGROUP을 빼는 것(cgroup이 아닌 fd로도 자식이 생긴다).
 #[test]
 fn non_cgroup_fd_is_refused() {
@@ -57,6 +69,11 @@ fn non_cgroup_fd_is_refused() {
         devnull.as_raw_fd(),
         devnull.as_raw_fd(),
     );
-    assert!(r.is_err(), "spawned into a directory that is not a cgroup");
+    // EBADF: the fd is open but not a cgroup directory.
+    assert_eq!(
+        r.err().and_then(|e| e.raw_os_error()),
+        Some(libc::EBADF),
+        "not refused with EBADF"
+    );
     no_child_was_made();
 }

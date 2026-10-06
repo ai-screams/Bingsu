@@ -22,6 +22,12 @@ fn script(name: &str) -> PathBuf {
                 "fail-in-matrix-cgroup.sh",
                 "#!/bin/sh\nprintf R\ngrep -q bingsu-m1 /proc/self/cgroup && exit 3\nexit 0\n",
             ),
+            // Leaves a sleeper in the fixed cgroup, so its final rmdir fails (EBUSY).
+            (
+                "occupy-fixed-cgroup.sh",
+                "#!/bin/sh\nprintf R\nif grep -q bingsu-m1-fixed- /proc/self/cgroup; then \
+                 setsid sleep 2 </dev/null >/dev/null 2>&1 & fi\nexit 0\n",
+            ),
         ] {
             let p = dir.join(name);
             std::fs::write(&p, body).unwrap();
@@ -124,6 +130,53 @@ fn bad_arguments_exit_2() {
     }
 }
 
+/// The delegated area from BINGSU_TEST_CGROUP_DIR (see tests/cgroup_spawn.rs).
+/// None skips the test with a NOTE, unless BINGSU_REQUIRE_CGROUP_TESTS=1
+/// makes that a failure.
+#[cfg(target_os = "linux")]
+fn cgroup_area(test: &str) -> Option<PathBuf> {
+    let Some(area) = std::env::var_os("BINGSU_TEST_CGROUP_DIR") else {
+        assert!(
+            std::env::var_os("BINGSU_REQUIRE_CGROUP_TESTS").is_none_or(|v| v != "1"),
+            "BINGSU_REQUIRE_CGROUP_TESTS=1 but BINGSU_TEST_CGROUP_DIR is not set"
+        );
+        eprintln!("NOTE: {test} needs BINGSU_TEST_CGROUP_DIR; skipped");
+        return None;
+    };
+    Some(PathBuf::from(area))
+}
+
+/// Runs the matrix with the same stub for both binaries; returns its pid
+/// (the cgroup names carry it) and output.
+#[cfg(target_os = "linux")]
+fn run_matrix(stub: &Path, cgroup_dir: &Path) -> (u32, std::process::Output) {
+    let child = Command::new(env!("CARGO_BIN_EXE_m1-spawn-matrix"))
+        .args(["--rounds", "2", "--warmup", "0", "--dedicated"])
+        .arg(stub)
+        .arg("--same")
+        .arg(stub)
+        .arg("--cgroup-dir")
+        .arg(cgroup_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    (pid, child.wait_with_output().unwrap())
+}
+
+/// The matrix's cgroups (fixed and unique) still in `area` for run `pid`.
+#[cfg(target_os = "linux")]
+fn left_behind(area: &Path, pid: u32) -> Vec<String> {
+    std::fs::read_dir(area)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            n == &format!("bingsu-m1-fixed-{pid}") || n.starts_with(&format!("bingsu-m1-{pid}-"))
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 fn cgroup_rows(text: &str) -> Vec<&str> {
     text.lines()
@@ -166,20 +219,12 @@ fn cgroup_failures_are_na_and_cleaned_up() {
     std::fs::remove_dir(&dir).unwrap();
 }
 
-// Needs BINGSU_TEST_CGROUP_DIR (see tests/cgroup_spawn.rs); skipped with a NOTE
-// otherwise, unless BINGSU_REQUIRE_CGROUP_TESTS=1 makes that a failure.
+// Needs a delegated area (cgroup_area).
 // 이것을 실패시키는 것: cgroup 행에서 자식 종료 상태를 보지 않는 것.
 #[cfg(target_os = "linux")]
 #[test]
 fn cgroup_child_exit_status_is_checked() {
-    let Some(area) = std::env::var_os("BINGSU_TEST_CGROUP_DIR") else {
-        assert!(
-            std::env::var_os("BINGSU_REQUIRE_CGROUP_TESTS").is_none_or(|v| v != "1"),
-            "BINGSU_REQUIRE_CGROUP_TESTS=1 but BINGSU_TEST_CGROUP_DIR is not set"
-        );
-        eprintln!(
-            "NOTE: cgroup_child_exit_status_is_checked needs BINGSU_TEST_CGROUP_DIR; skipped"
-        );
+    let Some(area) = cgroup_area("cgroup_child_exit_status_is_checked") else {
         return;
     };
     let stub = script("fail-in-matrix-cgroup.sh");
@@ -213,14 +258,7 @@ fn cgroup_child_exit_status_is_checked() {
 #[cfg(target_os = "linux")]
 #[test]
 fn cgroup_rows_are_measured_and_marked() {
-    let Some(area) = std::env::var_os("BINGSU_TEST_CGROUP_DIR") else {
-        assert!(
-            std::env::var_os("BINGSU_REQUIRE_CGROUP_TESTS").is_none_or(|v| v != "1"),
-            "BINGSU_REQUIRE_CGROUP_TESTS=1 but BINGSU_TEST_CGROUP_DIR is not set"
-        );
-        eprintln!(
-            "NOTE: cgroup_rows_are_measured_and_marked needs BINGSU_TEST_CGROUP_DIR; skipped"
-        );
+    let Some(area) = cgroup_area("cgroup_rows_are_measured_and_marked") else {
         return;
     };
     let stub = script("stub.sh");
@@ -250,4 +288,75 @@ fn cgroup_rows_are_measured_and_marked() {
             assert!(l.contains(want), "{want} missing: {l}");
         }
     }
+}
+
+// No mkdir possible: the setup failure is na at each row's first attempt.
+// 이것을 실패시키는 것: setup 실패를 회차 번호 없이 미리 적어 두는 것(round 전 기록).
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_failure_is_na_with_its_round() {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-cgroup-area");
+    let (_, out) = run_matrix(&script("stub.sh"), &missing);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows = cgroup_rows(&text);
+    assert_eq!(rows.len(), 4, "{text}");
+    for l in rows {
+        assert!(l.contains(r#""na":"fixed cgroup mkdir: "#), "{l}");
+        assert!(l.ends_with(r#" (round 1)"}"#), "{l}");
+    }
+}
+
+// Needs a delegated area. 이것을 실패시키는 것: 고정 cgroup의 마지막 rmdir 실패를 행에 반영하지 않는 것.
+#[cfg(target_os = "linux")]
+#[test]
+fn fixed_cgroup_cleanup_failure_is_na() {
+    let Some(area) = cgroup_area("fixed_cgroup_cleanup_failure_is_na") else {
+        return;
+    };
+    let (pid, out) = run_matrix(&script("occupy-fixed-cgroup.sh"), &area);
+    // The sleepers end after 2 s; then the fixed cgroup can go.
+    let fixed = area.join(format!("bingsu-m1-fixed-{pid}"));
+    let gone = (0..100).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::remove_dir(&fixed).is_ok() || !fixed.exists()
+    });
+    assert!(gone, "{} still busy", fixed.display());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    for l in cgroup_rows(&text) {
+        if l.contains(r#""row":"cgroup-clone3/"#) {
+            assert!(
+                l.contains(r#""na":"rmdir "#) && l.ends_with(r#" (cleanup)"}"#),
+                "{l}"
+            );
+        } else {
+            assert!(l.contains(r#""n":2"#), "{l}");
+        }
+    }
+}
+
+// Needs a delegated area. A posix row panics (ready byte, then exit 3) after the
+// fixed cgroup exists. 이것을 실패시키는 것: Area의 Drop을 빼는 것(패닉 뒤 고정 cgroup이 남는다).
+#[cfg(target_os = "linux")]
+#[test]
+fn panic_leaves_no_cgroup_behind() {
+    let Some(area) = cgroup_area("panic_leaves_no_cgroup_behind") else {
+        return;
+    };
+    let (pid, out) = run_matrix(&script("ready-then-fail.sh"), &area);
+    assert!(!out.status.success(), "accepted a failing child");
+    let left = left_behind(&area, pid);
+    for n in &left {
+        let _ = std::fs::remove_dir(area.join(n));
+    }
+    assert!(left.is_empty(), "left behind: {left:?}");
 }

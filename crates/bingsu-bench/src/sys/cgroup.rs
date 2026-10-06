@@ -26,12 +26,13 @@ struct CloneArgs {
 
 const _: () = assert!(std::mem::size_of::<CloneArgs>() == 88);
 
-/// `argv` must not be empty (`InvalidInput` before any process exists);
-/// the NULL-terminated arrays execve needs are built here, before the clone.
+/// `argv` must not be empty and `stdout_w`/`devnull` must be 3 or above
+/// (dup2 onto 0..=2 would otherwise overwrite one with the other); either
+/// is `InvalidInput` before any process exists. The NULL-terminated arrays
+/// execve needs are built here, before the clone.
 ///
-/// The child is a copy of this process (no CLONE_VM), so it runs only
-/// async-signal-safe calls before execve; callers must be single-threaded
-/// (this bench is). It puts `devnull` on fds 0 and 2 and `stdout_w` on 1,
+/// The child is a copy of this process (no CLONE_VM) and makes only
+/// async-signal-safe calls before execve. It puts `devnull` on fds 0 and 2 and `stdout_w` on 1,
 /// starts a new session, closes every fd >= 3 with close_range (Linux 5.9),
 /// and exits 126 if any of those steps fails, 127 if execve fails.
 pub fn spawn_in_cgroup(
@@ -44,6 +45,12 @@ pub fn spawn_in_cgroup(
 ) -> io::Result<(libc::pid_t, OwnedFd)> {
     if argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
+    }
+    if stdout_w < 3 || devnull < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "stdout_w and devnull must not be stdio fds",
+        ));
     }
     let nul_ended = |v: &[&CStr]| -> Vec<*const c_char> {
         v.iter()

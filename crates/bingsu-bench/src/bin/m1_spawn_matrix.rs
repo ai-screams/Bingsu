@@ -117,8 +117,9 @@ mod imp {
             .unwrap_or_else(|e| panic!("{bin}: {e}"))
             .len();
         // posix_spawn rows vs clone3 rows: clone3 here runs without CLONE_VM
-        // (a fork-style copy of this process), while glibc's and macOS's
-        // posix_spawn avoid that copy. A difference in definition, not noise.
+        // (a fork-style copy of this process), while glibc's posix_spawn
+        // shares the memory (clone3 with CLONE_VM | CLONE_VFORK, seen with
+        // strace on glibc 2.41). A difference in definition, not noise.
         let method = match &kind {
             Kind::Spawn { .. } => r#""posix_spawn""#,
             #[cfg(target_os = "linux")]
@@ -234,9 +235,7 @@ mod imp {
             ("cgroup-mkdir-clone3/dedicated", ded, false, true),
             ("cgroup-mkdir-clone3/same", same, true, true),
         ] {
-            let mut r = row(name, bin, is_same, "sandbox", Kind::Cgroup { unique });
-            r.failure = area.as_ref().err().cloned();
-            rows.push(r);
+            rows.push(row(name, bin, is_same, "sandbox", Kind::Cgroup { unique }));
         }
         #[cfg(not(target_os = "linux"))]
         let _ = &a.cgroup_dir;
@@ -248,29 +247,41 @@ mod imp {
             posix(true, true, false),
         ));
 
-        for round in 0..a.warmup + a.rounds {
+        drive(rows.len(), a.warmup + a.rounds, |round, i| {
+            let r = &mut rows[i];
+            if r.failure.is_some() {
+                return;
+            }
+            let ns: Result<u64, String> = match &r.kind {
+                Kind::Spawn {
+                    env,
+                    new_session,
+                    wait_ready,
+                } => Ok(spawn_once(r, env.as_deref(), *new_session, *wait_ready)),
+                // A setup failure surfaces here, at the row's first attempt.
+                #[cfg(target_os = "linux")]
+                Kind::Cgroup { unique } => match &mut area {
+                    Ok(area) => area.once(r, *unique),
+                    Err(e) => Err(e.clone()),
+                },
+            };
+            match ns {
+                Ok(ns) if round >= a.warmup => r.samples.push(ns),
+                Ok(_) => {}
+                Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
+            }
+        });
+        // The fixed cgroup is removed before printing: if that fails, the
+        // rows that used it become na instead of clean-looking numbers.
+        #[cfg(target_os = "linux")]
+        if let Err(e) = area.map_or(Ok(()), linux::Area::close) {
+            eprintln!("m1-spawn-matrix: {e}");
             for r in rows.iter_mut().filter(|r| r.failure.is_none()) {
-                let ns: Result<u64, String> = match &r.kind {
-                    Kind::Spawn {
-                        env,
-                        new_session,
-                        wait_ready,
-                    } => Ok(spawn_once(r, env.as_deref(), *new_session, *wait_ready)),
-                    #[cfg(target_os = "linux")]
-                    Kind::Cgroup { unique } => match &mut area {
-                        Ok(area) => area.once(r, *unique),
-                        Err(e) => Err(e.clone()),
-                    },
-                };
-                match ns {
-                    Ok(ns) if round >= a.warmup => r.samples.push(ns),
-                    Ok(_) => {}
-                    Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
+                if let Kind::Cgroup { unique: false } = r.kind {
+                    r.failure = Some(format!("{e} (cleanup)"));
                 }
             }
         }
-        #[cfg(target_os = "linux")]
-        let cleanup = area.map_or(Ok(()), linux::Area::close);
         for r in &mut rows {
             match &r.failure {
                 Some(why) => println!("{}", json_na("spawn", r.name, why)),
@@ -280,10 +291,45 @@ mod imp {
                 ),
             }
         }
-        #[cfg(target_os = "linux")]
-        if let Err(e) = cleanup {
-            eprintln!("m1-spawn-matrix: {e}");
-            std::process::exit(1);
+    }
+
+    /// Calls `step(round, row)` for every row in every round. Even rounds go
+    /// forward and odd rounds backward, so no row keeps a fixed position
+    /// (order effect; the reference harness does the same).
+    fn drive(rows: usize, rounds: usize, mut step: impl FnMut(usize, usize)) {
+        for round in 0..rounds {
+            if round % 2 == 0 {
+                (0..rows).for_each(|i| step(round, i));
+            } else {
+                (0..rows).rev().for_each(|i| step(round, i));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        // 이것을 실패시키는 것: 홀수 회차의 역순을 빼는 것, 회차나 행을 빠뜨리는 것.
+        #[test]
+        fn rounds_alternate_direction_and_cover_every_row() {
+            let mut calls = Vec::new();
+            super::drive(3, 4, |round, i| calls.push((round, i)));
+            assert_eq!(
+                calls,
+                [
+                    (0, 0),
+                    (0, 1),
+                    (0, 2),
+                    (1, 2),
+                    (1, 1),
+                    (1, 0),
+                    (2, 0),
+                    (2, 1),
+                    (2, 2),
+                    (3, 2),
+                    (3, 1),
+                    (3, 0)
+                ]
+            );
         }
     }
 
@@ -302,11 +348,26 @@ mod imp {
         /// clone3 rows, a counter for the unique ones, and /dev/null.
         pub struct Area {
             dir: PathBuf,
-            fixed_path: PathBuf,
+            // Declared before `fixed_dir`, so the fd closes before the rmdir.
             fixed: OwnedFd,
+            fixed_dir: FixedDir,
             devnull: File,
             envp: Vec<CString>,
             seq: u64,
+        }
+
+        /// The fixed cgroup folder from its mkdir on. Dropping it removes the
+        /// folder (best effort), so an early return in `Area::open` or a panic
+        /// in another row unwinding through `Area` leaves nothing behind;
+        /// `Area::close` takes the path and reports the rmdir result instead.
+        struct FixedDir(Option<PathBuf>);
+
+        impl Drop for FixedDir {
+            fn drop(&mut self) {
+                if let Some(p) = self.0.take() {
+                    let _ = std::fs::remove_dir(p);
+                }
+            }
         }
 
         impl Area {
@@ -314,20 +375,17 @@ mod imp {
             pub fn open(dir: Option<&str>) -> Result<Area, String> {
                 let dir =
                     PathBuf::from(dir.ok_or("no --cgroup-dir (no delegated cgroup v2 area)")?);
+                let devnull = File::open("/dev/null").map_err(|e| format!("/dev/null: {e}"))?;
                 let fixed_path = dir.join(format!("bingsu-m1-fixed-{}", std::process::id()));
                 std::fs::create_dir(&fixed_path).map_err(|e| format!("fixed cgroup mkdir: {e}"))?;
-                let fixed = match File::open(&fixed_path) {
-                    Ok(f) => f.into(),
-                    Err(e) => {
-                        let _ = std::fs::remove_dir(&fixed_path);
-                        return Err(format!("fixed cgroup open: {e}"));
-                    }
-                };
-                let devnull = File::open("/dev/null").map_err(|e| format!("/dev/null: {e}"))?;
+                let fixed_dir = FixedDir(Some(fixed_path));
+                let fixed = File::open(fixed_dir.0.as_ref().expect("just made"))
+                    .map_err(|e| format!("fixed cgroup open: {e}"))?
+                    .into();
                 Ok(Area {
                     dir,
-                    fixed_path,
                     fixed,
+                    fixed_dir,
                     devnull,
                     envp: super::sanitized_env(),
                     seq: 0,
@@ -335,10 +393,10 @@ mod imp {
             }
 
             /// Removes the fixed cgroup; Err if it cannot (left behind).
-            pub fn close(self) -> Result<(), String> {
-                drop(self.fixed);
-                std::fs::remove_dir(&self.fixed_path)
-                    .map_err(|e| format!("rmdir {}: {e}", self.fixed_path.display()))
+            pub fn close(mut self) -> Result<(), String> {
+                let p = self.fixed_dir.0.take().expect("closed once");
+                drop(self);
+                std::fs::remove_dir(&p).map_err(|e| format!("rmdir {}: {e}", p.display()))
             }
 
             /// One spawn: pipe, optional unique mkdir + open, clone3 into the
