@@ -132,11 +132,14 @@ class Call:
 
 
 class Trace(list):
-    """The parsed calls (a list) plus the structural errors."""
+    """The parsed calls (a list) plus the structural errors and the pid of
+    the first record (the traced command), which may be an unfinished call
+    that completes after its children's calls."""
 
     def __init__(self):
         super().__init__()
         self.errors: list[str] = []
+        self.first_pid: int | None = None
 
 
 def parse(text: str) -> Trace:
@@ -163,6 +166,8 @@ def parse(text: str) -> Trace:
             calls.errors.append(f"line {n}: no PID prefix: {raw[:80]}")
             continue
         pid, rest = int(m.group(1)), m.group(2)
+        if calls.first_pid is None:
+            calls.first_pid = pid
         if SIGNAL.match(rest):
             continue
         if e := EXIT.match(rest):

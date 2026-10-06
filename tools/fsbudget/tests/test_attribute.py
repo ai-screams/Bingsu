@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from fsbudget.attribute import attribute, prologue_allowed
@@ -76,6 +78,60 @@ def test_child_seen_before_its_parents_return_takes_the_parents_role():
     got = attribute(parse(EARLY_CHILD), RULES, markers=True)
     assert got.errors == []
     assert got.counts == {"helper": {"openat": 1}}
+
+
+# A grandchild whose parent's only record so far is an unfinished clone:
+# both returns come after the grandchild's calls. The role comes from the
+# nearest ancestor that has one (the root), never a default `command`.
+EARLY_GRANDCHILD = """\
+30 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>
+31 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>
+32 openat(AT_FDCWD</>, "/home/u/repo/secret", O_RDONLY) = 3</home/u/repo/secret>
+32 read(3</home/u/repo/secret>, "s", 1) = 1
+31 <... clone resumed>) = 32
+30 <... clone resumed>) = 31
+"""
+
+
+# 이것을 실패시키는 것: 부모도 역할이 없을 때 기본값 command를 주는 것, 조상을 한 단계만 보는 것,
+# 뿌리를 첫 기록(끝나지 않은 clone)이 아니라 첫 완료 호출의 pid로 잡는 것.
+def test_early_grandchild_takes_the_ancestors_role():
+    got = attribute(parse(EARLY_GRANDCHILD), RULES, markers=True)
+    assert "command" not in got.counts
+    assert not any("no spawn call" in e for e in got.errors), got.errors
+    assert any(e.startswith("pid 32 (front): openat outside window") for e in got.errors), got.errors
+    assert any(e.startswith("pid 32 (front): read outside window") for e in got.errors), got.errors
+
+
+# 이것을 실패시키는 것: 어떤 spawn도 설명하지 않는 task를 오류 없이 넘기거나 command로 빼는 것.
+def test_task_with_no_spawn_chain_fails_and_stays_gated():
+    trace = ('30 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0\n'
+             '44 openat(AT_FDCWD</>, "/x", O_RDONLY) = 3</x>\n')
+    got = attribute(parse(trace), RULES, markers=True)
+    assert "pid 44: no spawn call leads to a task with a role" in got.errors
+    assert any(e.startswith("pid 44 (unresolved): openat outside window") for e in got.errors), got.errors
+    assert "command" not in got.counts
+
+
+# Two tasks that name each other as the spawned child (only possible in a
+# broken or crafted trace): the walk up must stop, not loop.
+SPAWN_CYCLE = """\
+30 execve("/s", ["/s", "--role", "front"], 0x0 /* 0 vars */) = 0
+31 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>
+32 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>
+31 <... clone resumed>) = 32
+32 <... clone resumed>) = 31
+"""
+
+
+# 이것을 실패시키는 것: 조상 풀기에서 순환을 막지 않는 것(끝나지 않음).
+def test_spawn_cycle_fails_instead_of_looping():
+    result = []
+    t = threading.Thread(target=lambda: result.append(attribute(parse(SPAWN_CYCLE), RULES, markers=True)), daemon=True)
+    t.start()
+    t.join(5)
+    assert result, "attribute() did not finish on a spawn cycle"
+    assert "pid 31: no spawn call leads to a task with a role" in result[0].errors
 
 
 # A TID number reused after an exit starts fresh: no role, window or

@@ -49,6 +49,9 @@ PROLOGUE_RULES = [
 ]
 # A start-up openat only reads.
 WRITE_FLAGS = {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"}
+# The role of a task no spawn chain explains. Not `command`: it stays gated,
+# so its filesystem calls are errors too.
+UNRESOLVED = "unresolved"
 
 
 def _trusted_lib(path: str) -> bool:
@@ -118,11 +121,39 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
     # parent at the front of their spawn queue, and that return line only
     # consumes the entry.
     early: set[int] = set()
-    root = calls[0].pid if calls else 0
+    root = getattr(calls, "first_pid", None)
+    if root is None:
+        root = calls[0].pid if calls else 0
     role[root] = "front"
     seen_root_exec = False
     counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    def resolve(pid: int) -> str | None:
+        """The role `pid` inherits from its nearest ancestor that has one,
+        assigned (as an early task) to every task on the way; None if the
+        chain ends without a role. Never a default: only a rule makes a
+        command."""
+        chain = []
+        while pid not in role:
+            if not spawns[pid] or pid in chain:
+                return None
+            chain.append(pid)
+            pid = spawns[pid][0]
+        for t in chain:
+            role[t] = role[pid]
+            early.add(t)
+        return role[pid]
+
     for c in calls:
+        # Every record, a spawn return included, needs its task's role first.
+        if c.pid not in role:
+            # Its parent's return line has not come yet. The parent may be in
+            # the same state (its only record so far an unfinished clone), so
+            # walk up the spawn queues to the nearest task with a role.
+            found = resolve(c.pid)
+            if found is None:
+                errors.append(f"pid {c.pid}: no spawn call leads to a task with a role")
+                role[c.pid] = UNRESOLVED
         if c.name in SPAWN and c.ret.split()[0].isdigit():
             child = int(c.ret.split()[0])
             spawns[child].popleft()
@@ -131,16 +162,8 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
             if child in early:
                 early.discard(child)
             else:
-                role[child] = role.get(c.pid, "front")
+                role[child] = role[c.pid]
             continue
-        if c.pid not in role:
-            if not spawns[c.pid]:
-                errors.append(f"pid {c.pid}: no spawn call names this task")
-                role[c.pid] = "command"
-            else:
-                # Its parent's return line has not come yet: same parent.
-                role[c.pid] = role.get(spawns[c.pid][0], "command")
-                early.add(c.pid)
         if c.name == EXIT_EVENT:
             if markers and window[c.pid]:
                 errors.append(f"pid {c.pid}: {c.args} with its fsb window open")
