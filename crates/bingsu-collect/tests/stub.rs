@@ -40,14 +40,29 @@ fn unknown_mode_exits_2() {
 // 이것을 실패시키는 것: limits 모드에서 set_limits를 부르지 않거나 RLIMIT_FSIZE를 목록에서 빼는 것.
 #[test]
 fn limits_mode_applies_fsize_zero() {
-    use std::os::unix::process::ExitStatusExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     let path = std::env::temp_dir().join(format!("bingsu-collect-fsize-{}", std::process::id()));
     let file = std::fs::File::create(&path).unwrap();
-    let st = Command::new(env!("CARGO_BIN_EXE_bingsu-collect"))
-        .args(["--mode", "limits"])
-        .stdout(file)
-        .status()
-        .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bingsu-collect"));
+    cmd.args(["--mode", "limits"]).stdout(file);
+    // SIGXFSZ dumps core by default; with core_pattern "core" (Linux
+    // containers) that leaves an empty `core` in the crate directory.
+    let no_core = || {
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `zero` is a valid rlimit value for setrlimit.
+        if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+    // SAFETY: the hook runs in the forked child and calls only setrlimit,
+    // which is async-signal-safe.
+    unsafe { cmd.pre_exec(no_core) };
+    let st = cmd.status().unwrap();
     let len = std::fs::metadata(&path).unwrap().len();
     std::fs::remove_file(&path).unwrap();
     assert_eq!((st.signal(), len), (Some(libc::SIGXFSZ), 0), "{st:?}");
