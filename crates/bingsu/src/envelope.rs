@@ -1,5 +1,14 @@
 //! Shell input envelope, version `--ctx 1` (spec section 5). Hand-written
 //! parser on the prompt fast path (spec section 8 budget table).
+// Prompt path: the clippy.toml rules (environment reads among them, spec 4
+// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
+// be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
+// checks this line.
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 use bingsu_core::record::RecordVersion;
 use bingsu_core::root_arg::{
     CONFIG_ROOT_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX, parse_abs_path,

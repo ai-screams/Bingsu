@@ -5,6 +5,13 @@ set -g _bingsu_f
 set -g _bingsu_disp ''
 set -g _bingsu_note ''
 set -g _bingsu_key ''
+# A name that came from the environment is an exported global, and set -g
+# keeps that flag. set -gu needs the value repeated: without one it empties
+# the variable.
+set -gu _bingsu_f $_bingsu_f
+set -gu _bingsu_disp $_bingsu_disp
+set -gu _bingsu_note $_bingsu_note
+set -gu _bingsu_key $_bingsu_key
 
 function _bingsu_status_ok --argument-names s
     string match -q -r '^[abcdefghijklmnopqrstuvwxyz]+:[abcdefghijklmnopqrstuvwxyz-]+\z' -- "$s"

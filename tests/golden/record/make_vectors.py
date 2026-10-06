@@ -71,7 +71,18 @@ def main():
         "disp_percent": rec([b"%n%(?.a.b)%F{red}"] * 6),
         "nul_field": one(b"L\x00x"),
         "nul_status": one(b"L", status=b"ok:no\x00ne"),
+        # A field after the status, and an LF in the last field: bash's
+        # read -a and the element count would each pass one of them alone.
+        "st_lf_last": one(b"L", status=b"ok:none\nzz"),
+        "st_then_field": one(b"L", status=b"ok:none" + US + b"EXTRA"),
     }
+    # Hostile-value matrix (tests/hostile/classes.tsv), one vector per class.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "hostile"))  # tests/hostile/
+    import matrix  # noqa: E402
+    for row in matrix.rows():
+        cls, spec = row[:2]
+        data = matrix.payload(spec, canary)
+        v[f"hostile_{cls}"] = rec([b"L<" + data + b">L", b"RMARK", b"", b"", b"", b""])
     for name, data in v.items():
         (out / f"{name}.bin").write_bytes(data)
     print(f"wrote {len(v)} vectors")

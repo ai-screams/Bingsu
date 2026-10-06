@@ -29,7 +29,10 @@ class Install:
 
     def init(self, shell, env):
         r = subprocess.run([str(self.exe), "init", shell], env=env, capture_output=True)
-        assert r.returncode == 0, r.stderr
+        # A warning here (an executable another user can change, a root that
+        # could not be pinned) means the test runs in an arrangement it was
+        # not written for, such as a CI binary owned by another uid.
+        assert r.returncode == 0 and r.stderr == b"", r.stderr
         return r.stdout
 
     def use_fake(self, record: bytes):

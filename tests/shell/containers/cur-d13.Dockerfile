@@ -5,5 +5,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends bash zsh fish python3 python3-pexpect python3-pyte python3-pytest \
       strace locales ca-certificates \
  && sed -i 's/^# *\(ko_KR.UTF-8\)/\1/; s/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen \
+ && printf '%s\n' 'fa_IR.UTF-8 UTF-8' 'ps_AF.UTF-8 UTF-8' >> /etc/locale.gen \
  && locale-gen \
  && rm -rf /var/lib/apt/lists/*

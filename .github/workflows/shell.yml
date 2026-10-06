@@ -14,10 +14,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  golden-linux:
-    name: Shell golden (${{ matrix.image }})
+  # The PTY tests need the bingsu binary; without a Cargo workspace there is
+  # nothing to test (same detect step as ci.yml).
+  detect:
+    name: Detect project
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.check.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        run: |
+          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+
+  shell-linux:
+    name: Shell PTY (${{ matrix.image }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -35,27 +53,78 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Static musl binary: the runner's glibc is newer than the images'.
+      - run: cargo build -p bingsu --target x86_64-unknown-linux-musl
       - run: tests/shell/containers/check-digests.sh
       - run: docker build -f "tests/shell/containers/${{ matrix.image }}.Dockerfile" -t "bingsu-${{ matrix.image }}" tests/shell/containers
-      - name: Assert shell versions
+      - name: Assert minimum versions
         if: matrix.versions != ''
         run: docker run --rm -v "$PWD:/w" -w /w "bingsu-${{ matrix.image }}" python3 tests/shell/check_versions.py ${{ matrix.versions }}
+      - name: Record shell versions
+        run: |
+          { echo "### ${{ matrix.image }} shell versions"; echo; echo '```'
+            docker run --rm -v "$PWD:/w" -w /w "bingsu-${{ matrix.image }}" python3 tests/shell/check_versions.py --record
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Record golden vectors
         run: |
-          docker run --rm -v "$PWD:/w" -w /w -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
+          docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
             "bingsu-${{ matrix.image }}" tests/golden/record/run-all.sh
+      # Runs after a golden failure too, so one failure does not hide the other.
+      # The runner's uid owns the checkout and the binary, and the container
+      # runs as root: init would warn that a folder above the binary can be
+      # changed by another user (Install.init fails on any init warning). A
+      # root-owned copy in /usr/local/bin is what an installed bingsu looks
+      # like; --user would need a passwd entry, which init reads for the home.
+      # The test folders live in /root, not in /tmp: init warns about the
+      # world-writable /tmp above an executable symlink there as well.
+      - name: PTY tests
+        if: success() || failure()
+        run: |
+          # While recording (Task A12), -s shows the OBSERVE lines in the job log.
+          docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
+            -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
+            -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
+            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
+              exec python3 -m pytest tests/shell -q -rf -p no:cacheprovider --basetemp=/root/pytest "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
 
-  golden-macos:
-    name: Shell golden (macOS Homebrew)
+  shell-macos:
+    name: Shell PTY (macOS Homebrew)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: brew install bash fish
-      - name: Record golden vectors
+      # One interpreter for every step: a venv with the hash-pinned test
+      # dependencies, and the Homebrew shells first in PATH.
+      - name: Set up the test environment
         run: |
-          PATH="$(brew --prefix)/bin:$PATH"
-          export PATH
-          SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
+      - run: cargo build -p bingsu
+      - name: Record shell versions
+        run: |
+          { echo "### macOS shell versions"; echo; echo '```'; "$BINGSU_PY" tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # BINGSU_PY (set above through GITHUB_ENV) makes run-all.sh use the venv.
+      - name: Record golden vectors
+        run: SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+      - name: PTY tests
+        if: success() || failure()
+        env:
+          BINGSU_TEST_LOCALE: en_US.UTF-8
+          BINGSU_TEST_SHELLS: zsh bash fish
+        run: '"$BINGSU_PY" -m pytest tests/shell -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}'

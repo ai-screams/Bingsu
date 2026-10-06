@@ -1,0 +1,23 @@
+# rows	21
+# class	payload (hex, or repeat:<byte>:<count>; CANARY is replaced by the canary path)	canary (yes: the payload holds CANARY)	producer	reader	pty
+osc_title	1b5d303b43414e41525907	yes	reject	accept	noexec
+del	617f62	no	reject	accept	noexec
+bidi_override	61e280ae62	no	accept	accept	noexec
+invisible_format	61e2808be281a662	no	accept	accept	noexec
+one_mib	repeat:61:1048576	no	replaced	reject	minimal
+cmdsub	2428746f7563682043414e41525929	yes	accept	accept	noexec
+backtick	60746f7563682043414e41525960	yes	accept	accept	noexec
+semicolon	3b746f7563682043414e4152593b	yes	accept	accept	noexec
+nul	610062	no	reject	observe	observe
+nul_cmdsub	2428746f750063682043414e41525929	yes	reject	observe	observe
+nul_backtick	60746f750063682043414e41525960	yes	reject	observe	observe
+soh_stx	6101620263	no	accept	accept	noexec
+newline	610a62	no	reject	reject	minimal
+unit_separator	611f62	no	reject	reject	minimal
+dollar_brace	247b484f4d457d	no	accept	accept	noexec
+dollar_bracket	245b312b315d	no	accept	accept	noexec
+percent_color	25467b7265647d	no	accept	accept	noexec
+percent_ternary	25283f2e2e29	no	accept	accept	noexec
+backslash_u	5c75	no	accept	accept	noexec
+bang_bang	2121	no	accept	accept	noexec
+bad_utf8	fffe	no	reject	accept	noexec

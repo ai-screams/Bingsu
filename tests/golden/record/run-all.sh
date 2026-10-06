@@ -2,12 +2,14 @@
 # Run the record golden vectors for every shell, locale and option set.
 # Usage: SHELLS="bash zsh fish" LOCALES="C.UTF-8 C ko_KR.UTF-8" run-all.sh
 # Used by the Linux container job and the macOS job in shell.yml.
+# BINGSU_PY picks the interpreter (the macOS job's venv); default python3.
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
+py=${BINGSU_PY:-python3}
 shells=${SHELLS:-bash zsh fish}
 locales=${LOCALES:-C.UTF-8 C ko_KR.UTF-8}
 fail=0
-run() { python3 tests/golden/record/run.py "$@" || fail=1; }
+run() { "$py" tests/golden/record/run.py "$@" || fail=1; }
 for sh in $shells; do
   for loc in $locales; do
     case $sh in

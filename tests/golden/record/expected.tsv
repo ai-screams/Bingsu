@@ -45,3 +45,5 @@ disp_backtick	accept	ok	-	-
 disp_percent	accept	ok	-	-
 nul_field	observe	-	-	-
 nul_status	observe	-	-	-
+st_lf_last	reject	-	-	-
+st_then_field	reject	-	-	-

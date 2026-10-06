@@ -66,9 +66,13 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The shell workflow tests a static musl build; check it compiles here
+      # too, for pull requests where that workflow does not get that far.
+      - run: cargo check -p bingsu --target x86_64-unknown-linux-musl
 
   test:
     name: Test (${{ matrix.os }})

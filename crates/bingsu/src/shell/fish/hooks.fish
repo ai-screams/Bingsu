@@ -77,7 +77,9 @@ set -g _bingsu_gen $status_generation
 # Last, after every assignment above: a name that came from the environment
 # is an exported global, and set -g keeps that flag, so the raw record and
 # the hook state would reach the environment of every child. set -gu needs
-# the value repeated: without one it empties the variable.
+# the value repeated: without one it empties the variable. The reader
+# unexports its own globals as well (_bingsu_f, _bingsu_disp, _bingsu_note,
+# _bingsu_key), since the golden runner sources it alone; they stay here too.
 set -gu _bingsu_session $_bingsu_session
 set -gu _bingsu_seq $_bingsu_seq
 set -gu _bingsu_rec $_bingsu_rec

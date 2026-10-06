@@ -2,6 +2,7 @@
 """Fail fast if an image ships a different shell version than the plan needs.
 
 Usage: check_versions.py bash=5.1 zsh=5.8   (exact MAJOR.MINOR match)
+       check_versions.py --record          (one JSON line of the shells present)
 Also provides version() and rule_matches() for other test tools.
 """
 import re
@@ -12,6 +13,12 @@ PROBE = {
     "bash": ["bash", "-c", 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'],
     "zsh": ["zsh", "-fc", 'echo "${ZSH_VERSION}"'],
     "fish": ["fish", "--version"],
+}
+# Full version numbers for --record, one form for every shell.
+FULL = {
+    "bash": ["bash", "-c", 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}"'],
+    "zsh": ["zsh", "-fc", 'echo "${ZSH_VERSION}"'],
+    "fish": ["fish", "--no-config", "-c", "echo $version"],
 }
 
 
@@ -40,6 +47,15 @@ def rule_matches(rule, v):
 
 
 def main():
+    if sys.argv[1:] == ["--record"]:
+        import json
+        import shutil
+        got = {}
+        for shell, cmd in FULL.items():
+            if shutil.which(shell):
+                got[shell] = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+        print(json.dumps(got))
+        return
     bad = []
     for spec in sys.argv[1:]:
         shell, want = spec.split("=")
