@@ -4,3 +4,8 @@
 
 /// Crate version, used by `bingsu --version` later.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod record;
+pub mod root_arg;
+pub mod shell_word;
+pub mod status;

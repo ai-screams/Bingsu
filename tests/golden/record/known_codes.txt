@@ -1,0 +1,8 @@
+error:bad-args
+error:internal
+degraded:runtime-root
+degraded:oversize
+degraded:trust-unverified
+degraded:trust-expired
+error:config-last-good
+error:config-default
