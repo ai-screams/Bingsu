@@ -103,13 +103,31 @@ fn sandbox_blocks_exec() {
 }
 
 // An unfiltered raw vfork would share the stub's stack, so the fork probe
-// runs under the sandbox only.
+// runs under the sandbox only. Elsewhere than x86_64 Linux the probe is
+// refused anyway (below), which would hide this rule, so it is checked there.
 // 이것을 실패시키는 것: sandbox가 아닌 모드에서 --probe-fork를 받아들이는 것.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn fork_probe_needs_sandbox() {
     assert_eq!(code(&["--probe-fork"]), Some(2));
     assert_eq!(code(&["--mode", "bare", "--probe-fork"]), Some(2));
     assert_eq!(code(&["--mode", "limits", "--probe-fork"]), Some(2));
+    assert_eq!(code(&["--mode", "exit", "--probe-fork"]), Some(2));
+}
+
+// A probe that cannot run here exits 2 instead of passing as a no-op.
+// 이것을 실패시키는 것: 지원하지 않는 플랫폼의 프로브를 no-op로 받아들이는 것(probes_supported 검사 삭제).
+#[test]
+fn unsupported_probes_exit_2() {
+    let x86_64_linux = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+    if !x86_64_linux {
+        assert_eq!(code(&["--mode", "sandbox", "--probe-x32"]), Some(2));
+        assert_eq!(code(&["--probe-x32"]), Some(2));
+        assert_eq!(code(&["--mode", "sandbox", "--probe-fork"]), Some(2));
+    }
+    if !cfg!(target_os = "linux") {
+        assert_eq!(code(&["--probe-clone3"]), Some(2));
+    }
 }
 
 // 이것을 실패시키는 것: x86_64에서 x32 필터 설치 줄을 지우는 것(프로브가 살아남아 R을 냄).

@@ -166,6 +166,7 @@ pub fn probe_clone3() -> io::Result<()> {
     Ok(())
 }
 
+/// Not reached: stub_main refuses `--probe-clone3` off Linux.
 #[cfg(not(target_os = "linux"))]
 pub fn probe_clone3() -> io::Result<()> {
     Ok(())
@@ -200,6 +201,7 @@ pub fn probe_fork() -> io::Result<()> {
     Ok(())
 }
 
+/// Not reached: stub_main refuses `--probe-fork` off x86_64 Linux.
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub fn probe_fork() -> io::Result<()> {
     Ok(())
@@ -217,6 +219,7 @@ pub fn probe_x32() -> io::Result<()> {
     Ok(())
 }
 
+/// Not reached: stub_main refuses `--probe-x32` off x86_64 Linux.
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub fn probe_x32() -> io::Result<()> {
     Ok(())

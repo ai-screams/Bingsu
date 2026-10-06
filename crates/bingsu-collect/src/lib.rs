@@ -47,12 +47,22 @@ fn parse(args: &[OsString]) -> Option<Opts<'_>> {
     Some(o)
 }
 
+/// Probes that only mean something on some platforms are refused elsewhere
+/// rather than run as a no-op, so a harness that asks for one there sees
+/// exit 2 instead of a plain `R`: clone3 on Linux; the legacy fork/vfork
+/// and x32 calls on x86_64 Linux.
+fn probes_supported(o: &Opts<'_>) -> bool {
+    let linux = cfg!(target_os = "linux");
+    let x86_64_linux = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+    (!o.probe_clone3 || linux) && (!(o.probe_fork || o.probe_x32) || x86_64_linux)
+}
+
 /// Exit codes: 0 ready, 2 bad arguments, 3 limits failed, 4 sandbox failed
 /// or unsupported, 5 writing to stdout failed. `--probe-fork` is accepted in
 /// sandbox mode only: unfiltered, its raw `vfork` would share this stack.
 pub fn stub_main(args: &[OsString]) -> i32 {
     let Some(o) = parse(args) else { return 2 };
-    if o.probe_fork && o.mode != Some("sandbox") {
+    if !probes_supported(&o) || (o.probe_fork && o.mode != Some("sandbox")) {
         return 2;
     }
     #[cfg(not(unix))]
