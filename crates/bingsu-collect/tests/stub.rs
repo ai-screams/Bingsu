@@ -67,6 +67,43 @@ fn unwritable_stdout_exits_nonzero() {
     assert_eq!(st.code(), Some(5));
 }
 
+// A hard RLIMIT_NOFILE below 64 makes the stub's setrlimit fail with EPERM
+// (an unprivileged process cannot raise a hard limit; root can, so the
+// check needs a non-root user). Limits fail with 3 in both modes that set
+// them; 4 is kept for the sandbox step itself.
+// 이것을 실패시키는 것: sandbox 모드에서 set_limits 실패를 sandbox 실패(4)와 합치는 것.
+#[test]
+fn limits_failure_exits_3() {
+    use std::io::Write;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "NOTE: limits_failure_exits_3 needs a non-root user; skipped as root"
+        );
+        return;
+    }
+    for mode in ["limits", "sandbox"] {
+        let mut cmd = stub(&["--mode", mode]);
+        let low_nofile = || {
+            let low = libc::rlimit {
+                rlim_cur: 32,
+                rlim_max: 32,
+            };
+            // SAFETY: `low` is a valid rlimit value for setrlimit.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &low) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        };
+        // SAFETY: the hook runs in the forked child and makes a single system
+        // call, with no allocation or locks.
+        unsafe { cmd.pre_exec(low_nofile) };
+        assert_eq!(cmd.output().unwrap().status.code(), Some(3), "{mode}");
+    }
+}
+
 // RLIMIT_FSIZE 0 is observable: writing the ready byte to a regular file
 // raises SIGXFSZ. (The cost harness reads stdout through a pipe, which the
 // limit does not cover.) RLIMIT_CPU and RLIMIT_NOFILE are not observed here.

@@ -187,11 +187,18 @@ pub fn probe_fork() -> io::Result<()> {
             // SAFETY: _exit is async-signal-safe and does not return.
             unsafe { libc::_exit(0) };
         }
-        if rc > 0 {
+        let err = io::Error::last_os_error();
+        let wait = |pid: libc::pid_t| {
             let mut st = 0;
-            // SAFETY: `rc` is our child's pid; `st` is a valid out-parameter.
-            unsafe { libc::waitpid(rc as libc::pid_t, &mut st, 0) };
-        } else if io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+            // SAFETY: `pid` is our child; `st` is a valid out-parameter.
+            let got = unsafe { libc::waitpid(pid, &mut st, 0) };
+            if got < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok((got, st))
+            }
+        };
+        if fork_outcome(rc, err, wait)? {
             denied += 1;
         }
     }
@@ -199,6 +206,43 @@ pub fn probe_fork() -> io::Result<()> {
         write1(b"F")?;
     }
     Ok(())
+}
+
+/// One call of the fork probe, after the child (rc 0) has left: Ok(true)
+/// if the call was refused with EPERM; Ok(false) if it made a child that
+/// `wait` reaped (EINTR retried) with exit status 0. Any other errno, a
+/// wait error, another pid or another status is an error, so the stub
+/// exits nonzero instead of printing R.
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+fn fork_outcome(
+    rc: libc::c_long,
+    err: io::Error,
+    mut wait: impl FnMut(libc::pid_t) -> io::Result<(libc::pid_t, libc::c_int)>,
+) -> io::Result<bool> {
+    if rc < 0 {
+        return if err.raw_os_error() == Some(libc::EPERM) {
+            Ok(true)
+        } else {
+            Err(err)
+        };
+    }
+    let pid = libc::pid_t::try_from(rc).map_err(io::Error::other)?;
+    let (got, st) = loop {
+        match wait(pid) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            r => break r?,
+        }
+    };
+    if got == pid && libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0 {
+        Ok(false)
+    } else {
+        Err(io::Error::other(format!(
+            "fork probe child {got}: status {st:#x}"
+        )))
+    }
 }
 
 /// Not reached: stub_main refuses `--probe-fork` off x86_64 Linux.
@@ -248,6 +292,32 @@ pub fn ready() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: EPERM 밖의 오류를 삼키는 것, waitpid의 EINTR을 재시도하지 않는 것,
+    // 다른 pid나 0이 아닌 종료·신호 종료를 정상으로 받는 것, wait 오류를 삼키는 것.
+    #[test]
+    fn fork_outcome_is_closed() {
+        let errno = io::Error::from_raw_os_error;
+        let no_wait =
+            |_| -> io::Result<(libc::pid_t, libc::c_int)> { panic!("no child to wait for") };
+        assert!(fork_outcome(-1, errno(libc::EPERM), no_wait).unwrap());
+        assert!(fork_outcome(-1, errno(libc::ENOSYS), no_wait).is_err());
+        let mut calls = 0;
+        let eintr_then_ok = |pid| {
+            calls += 1;
+            if calls == 1 {
+                Err(io::ErrorKind::Interrupted.into())
+            } else {
+                Ok((pid, 0))
+            }
+        };
+        assert!(!fork_outcome(42, errno(0), eintr_then_ok).unwrap());
+        assert_eq!(calls, 2);
+        assert!(fork_outcome(42, errno(0), |_| Ok((41, 0))).is_err());
+        assert!(fork_outcome(42, errno(0), |pid| Ok((pid, 1 << 8))).is_err()); // exit 1
+        assert!(fork_outcome(42, errno(0), |pid| Ok((pid, libc::SIGKILL))).is_err());
+        assert!(fork_outcome(42, errno(0), |_| Err(errno(libc::ECHILD))).is_err());
+    }
 
     // 이것을 실패시키는 것: short write에서 남은 바이트를 버리는 것, EINTR을 오류로 돌려주는 것,
     // 0바이트 쓰기에서 멈추지 않는 것(무한 루프), 다른 오류를 삼키는 것.

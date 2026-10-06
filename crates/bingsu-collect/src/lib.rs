@@ -81,7 +81,10 @@ pub fn stub_main(args: &[OsString]) -> i32 {
                 }
             }
             "sandbox" => {
-                if sys::set_limits().is_err() || sys::sandbox().is_err() {
+                if sys::set_limits().is_err() {
+                    return 3;
+                }
+                if sys::sandbox().is_err() {
                     return 4;
                 }
             }
