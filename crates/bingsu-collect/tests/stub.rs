@@ -70,13 +70,19 @@ fn unwritable_stdout_exits_nonzero() {
 // A hard RLIMIT_NOFILE below 64 makes the stub's setrlimit fail with EPERM
 // (an unprivileged process cannot raise a hard limit; root can, so the
 // check needs a non-root user). Limits fail with 3 in both modes that set
-// them; 4 is kept for the sandbox step itself.
+// them; 4 is kept for the sandbox step itself. As root the test is skipped
+// with a NOTE, unless BINGSU_REQUIRE_NONROOT_TESTS=1 (CI) makes that a failure.
 // 이것을 실패시키는 것: sandbox 모드에서 set_limits 실패를 sandbox 실패(4)와 합치는 것.
+// 이것을 실패시키는 것(root): 변수가 켜진 채 root로 돌 때 건너뛰고 통과하는 것.
 #[test]
 fn limits_failure_exits_3() {
     use std::io::Write;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
+        assert!(
+            std::env::var_os("BINGSU_REQUIRE_NONROOT_TESTS").is_none_or(|v| v != "1"),
+            "limits_failure_exits_3 runs as root, but BINGSU_REQUIRE_NONROOT_TESTS=1 requires a non-root run"
+        );
         let _ = writeln!(
             std::io::stderr().lock(),
             "NOTE: limits_failure_exits_3 needs a non-root user; skipped as root"

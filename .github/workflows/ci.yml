@@ -96,9 +96,12 @@ jobs:
         run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
       # The runners are not in a container, so clone3 must reach the kernel
       # (EINVAL) without the stub's filter; the clone3 test fails otherwise.
+      # They also run as a non-root user, so the tests that skip as root must
+      # run here; a runner that turns root fails them instead.
       - run: cargo test --workspace --all-features
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
+          BINGSU_REQUIRE_NONROOT_TESTS: "1"
 
   purity:
     name: Core purity gate
