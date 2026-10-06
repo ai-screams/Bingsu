@@ -281,7 +281,7 @@ mod imp {
         use super::Row;
         use bingsu_bench::sys::cgroup::spawn_in_cgroup;
         use bingsu_bench::sys::spawn::{pipe_cloexec, read_byte, reap};
-        use std::ffi::{CString, c_char};
+        use std::ffi::{CStr, CString};
         use std::fs::File;
         use std::os::fd::{AsRawFd, OwnedFd};
         use std::path::PathBuf;
@@ -334,18 +334,8 @@ mod imp {
             /// cgroup, the ready byte (clock stops), reap, rmdir. Any failure,
             /// a non-zero exit or a failed rmdir is returned, never a panic.
             pub fn once(&mut self, r: &Row, unique: bool) -> Result<u64, String> {
-                let argv: Vec<*const c_char> = r
-                    .argv
-                    .iter()
-                    .map(|s| s.as_ptr())
-                    .chain([std::ptr::null()])
-                    .collect();
-                let envp: Vec<*const c_char> = self
-                    .envp
-                    .iter()
-                    .map(|s| s.as_ptr())
-                    .chain([std::ptr::null()])
-                    .collect();
+                let argv: Vec<&CStr> = r.argv.iter().map(CString::as_c_str).collect();
+                let envp: Vec<&CStr> = self.envp.iter().map(CString::as_c_str).collect();
                 let path = unique.then(|| {
                     self.seq += 1;
                     self.dir

@@ -26,9 +26,8 @@ struct CloneArgs {
 
 const _: () = assert!(std::mem::size_of::<CloneArgs>() == 88);
 
-/// `argv` and `envp` must be NULL-terminated; otherwise this returns
-/// `InvalidInput` before any process exists. Every pointer before the NULL
-/// must point to a NUL-terminated string that outlives the call.
+/// `argv` must not be empty (`InvalidInput` before any process exists);
+/// the NULL-terminated arrays execve needs are built here, before the clone.
 ///
 /// The child is a copy of this process (no CLONE_VM), so it runs only
 /// async-signal-safe calls before execve; callers must be single-threaded
@@ -38,17 +37,21 @@ const _: () = assert!(std::mem::size_of::<CloneArgs>() == 88);
 pub fn spawn_in_cgroup(
     cgroup: &OwnedFd,
     program: &CStr,
-    argv: &[*const c_char],
-    envp: &[*const c_char],
+    argv: &[&CStr],
+    envp: &[&CStr],
     stdout_w: RawFd,
     devnull: RawFd,
 ) -> io::Result<(libc::pid_t, OwnedFd)> {
-    if !argv.last().is_some_and(|p| p.is_null()) || !envp.last().is_some_and(|p| p.is_null()) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "argv and envp must end with NULL",
-        ));
+    if argv.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
     }
+    let nul_ended = |v: &[&CStr]| -> Vec<*const c_char> {
+        v.iter()
+            .map(|s| s.as_ptr())
+            .chain([std::ptr::null()])
+            .collect()
+    };
+    let (argv, envp) = (nul_ended(argv), nul_ended(envp));
     let mut pidfd: libc::c_int = -1;
     let args = CloneArgs {
         flags: CLONE_INTO_CGROUP | libc::CLONE_PIDFD as u64,
@@ -71,7 +74,7 @@ pub fn spawn_in_cgroup(
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
-        child(program, argv, envp, stdout_w, devnull);
+        child(program, &argv, &envp, stdout_w, devnull);
     }
     // SAFETY: on success the kernel stored a new pidfd (O_CLOEXEC) that
     // nobody else owns.
@@ -102,8 +105,8 @@ fn child(
         // SAFETY: as above.
         unsafe { libc::_exit(126) };
     }
-    // SAFETY: argv/envp are NULL-terminated arrays of NUL-terminated strings
-    // (checked and documented in spawn_in_cgroup).
+    // SAFETY: argv/envp are NULL-terminated arrays (built in
+    // spawn_in_cgroup) of pointers into `&CStr`s that outlive the call.
     unsafe { libc::execve(program.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
     // SAFETY: as above.
     unsafe { libc::_exit(127) }

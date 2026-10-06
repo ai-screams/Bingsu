@@ -35,13 +35,8 @@ fn child_starts_inside_the_cgroup() {
     let script = c"cat /proc/self/cgroup; \
         set -- $(cut -d' ' -f6 /proc/$$/stat); echo sid=$1 pid=$$; \
         ls /proc/$$/fd | sort -n | tr '\\n' ' '";
-    let argv = [
-        sh.as_ptr(),
-        c"-c".as_ptr(),
-        script.as_ptr(),
-        std::ptr::null(),
-    ];
-    let envp = [c"PATH=/usr/bin:/bin".as_ptr(), std::ptr::null()];
+    let argv = [sh, c"-c", script];
+    let envp = [c"PATH=/usr/bin:/bin"];
     let (pid, pidfd) =
         spawn_in_cgroup(&cg, sh, &argv, &envp, w.as_raw_fd(), devnull.as_raw_fd()).unwrap();
     drop(w);
@@ -105,13 +100,8 @@ fn failed_stdio_setup_exits_126() {
     let cg: OwnedFd = std::fs::File::open(&path).unwrap().into();
     let devnull = std::fs::File::open("/dev/null").unwrap();
     let sh = c"/bin/sh";
-    let argv = [
-        sh.as_ptr(),
-        c"-c".as_ptr(),
-        c"exit 0".as_ptr(),
-        std::ptr::null(),
-    ];
-    let envp = [std::ptr::null()];
+    let argv = [sh, c"-c", c"exit 0"];
+    let envp: [&std::ffi::CStr; 0] = [];
     // Not an open fd: dup2 onto fd 1 fails with EBADF.
     let (pid, _pidfd) =
         spawn_in_cgroup(&cg, sh, &argv, &envp, 1_000_000, devnull.as_raw_fd()).unwrap();
