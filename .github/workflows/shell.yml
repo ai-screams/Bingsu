@@ -1,0 +1,61 @@
+name: Shell
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden-linux:
+    name: Shell golden (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: min-u22
+            versions: bash=5.1 zsh=5.8
+            shells: bash zsh
+          - image: min-d12
+            versions: fish=3.6
+            shells: fish
+          - image: cur-d13
+            versions: ""
+            shells: bash zsh fish
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tests/shell/containers/check-digests.sh
+      - run: docker build -f "tests/shell/containers/${{ matrix.image }}.Dockerfile" -t "bingsu-${{ matrix.image }}" tests/shell/containers
+      - name: Assert shell versions
+        if: matrix.versions != ''
+        run: docker run --rm -v "$PWD:/w" -w /w "bingsu-${{ matrix.image }}" python3 tests/shell/check_versions.py ${{ matrix.versions }}
+      - name: Record golden vectors
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e SHELLS="${{ matrix.shells }}" -e LOCALES="C.UTF-8 C ko_KR.UTF-8" \
+            "bingsu-${{ matrix.image }}" tests/golden/record/run-all.sh
+
+  golden-macos:
+    name: Shell golden (macOS Homebrew)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: brew install bash fish
+      - name: Record golden vectors
+        run: |
+          PATH="$(brew --prefix)/bin:$PATH"
+          export PATH
+          SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
