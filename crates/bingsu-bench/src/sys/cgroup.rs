@@ -32,9 +32,10 @@ const _: () = assert!(std::mem::size_of::<CloneArgs>() == 88);
 /// execve needs are built here, before the clone.
 ///
 /// The child is a copy of this process (no CLONE_VM) and makes only
-/// async-signal-safe calls before execve. It puts `devnull` on fds 0 and 2 and `stdout_w` on 1,
-/// starts a new session, closes every fd >= 3 with close_range (Linux 5.9),
-/// and exits 126 if any of those steps fails, 127 if execve fails.
+/// async-signal-safe calls before execve. It puts `devnull` on fds 0 and 2
+/// and `stdout_w` on 1, starts a new session, closes every fd >= 3 with
+/// close_range (Linux 5.9), and exits 126 if any of those steps fails, 127
+/// if execve fails.
 pub fn spawn_in_cgroup(
     cgroup: &OwnedFd,
     program: &CStr,

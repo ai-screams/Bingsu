@@ -1,8 +1,9 @@
 //! Collector cost matrix (spec section 9 M1 row). Prints one JSON line per
 //! row: measured rows carry `median_ns`/`p95_ns`, rows that cannot be
-//! measured carry `na` and the reason. Rows take turns within each round
-//! (no order effect). Single-threaded on purpose: `spawn` and
-//! `spawn_in_cgroup` both require it of their caller.
+//! measured carry `na` and the reason. Rows take turns within each round,
+//! in alternating direction (see `drive`). Single-threaded on purpose:
+//! `spawn` requires it on macOS (its pipe becomes close-on-exec in two
+//! steps); the `spawn_in_cgroup` child makes only async-signal-safe calls.
 #![deny(unsafe_code)] // FFI lives in bingsu_bench::sys only
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -294,8 +295,10 @@ mod imp {
     }
 
     /// Calls `step(round, row)` for every row in every round. Even rounds go
-    /// forward and odd rounds backward, so no row keeps a fixed position
-    /// (order effect; the reference harness does the same).
+    /// forward and odd rounds backward, so each pair of rounds puts a row at
+    /// mirrored positions and the position bias cancels out in pairs (the
+    /// middle row of an odd count stays in place; the reference harness
+    /// alternates the same way).
     fn drive(rows: usize, rounds: usize, mut step: impl FnMut(usize, usize)) {
         for round in 0..rounds {
             if round % 2 == 0 {
