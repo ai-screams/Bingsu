@@ -43,6 +43,19 @@ pub fn json_line(matrix: &str, row: &str, s: &Summary, extra: &[(&str, String)])
     out
 }
 
+/// A row that could not be measured: `na` carries the reason. All three
+/// strings are escaped like `json_line`'s.
+pub fn json_na(matrix: &str, row: &str, why: &str) -> String {
+    format!(
+        r#"{{"matrix":"{}","row":"{}","os":"{}","arch":"{}","na":"{}"}}"#,
+        escape(matrix),
+        escape(row),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        escape(why)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +96,19 @@ mod tests {
         let l = json_line("m\"", "r\n", &s, &[("k\\", "1".into())]);
         assert!(l.starts_with(r#"{"matrix":"m\"","row":"r\n","#), "{l}");
         assert!(l.ends_with(r#","k\\":1}"#), "{l}");
+    }
+
+    // 이것을 실패시키는 것: na 이유(또는 matrix·row)를 escape하지 않는 것, os·arch를 빼는 것.
+    #[test]
+    fn na_line_is_escaped() {
+        let l = json_na("spawn", "r\"", "clone3: \"x\"\\y\nz");
+        assert_eq!(
+            l,
+            format!(
+                r#"{{"matrix":"spawn","row":"r\"","os":"{}","arch":"{}","na":"clone3: \"x\"\\y\nz"}}"#,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )
+        );
     }
 }
