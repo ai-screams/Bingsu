@@ -3,6 +3,8 @@
 //! exactly the calls of its formula with every coefficient = 1. Nothing
 //! outside the window touches the filesystem: names come from FSB_NAMES, the
 //! runtime-root fd is inherited as fd 10, axes go to stdout (a pipe).
+//! FSB_ACL=1 makes the helper probe the POSIX ACL of every walked component
+//! and every source file (the c12·(F + P) term).
 #![deny(unsafe_code)] // FFI lives in bingsu_bench::sys only
 
 #[cfg(not(target_os = "linux"))]
@@ -54,19 +56,55 @@ mod imp {
         marker(c"fsb:end").expect("fsb:end");
     }
 
-    /// openat + fstat for "/" and every component: the P (helper) or C
-    /// (front) axis. Returns the last fd and the number of components.
-    fn walk(path: &Path) -> (OwnedFd, usize) {
+    /// openat + fstat (+ an ACL probe when `acl`) for "/" and every
+    /// component: the P (helper) or C (front) axis. Returns the last fd and
+    /// the number of components.
+    fn walk(path: &Path, acl: bool) -> (OwnedFd, usize) {
         let mut fd = openat(libc::AT_FDCWD, c"/", DIR).unwrap();
         fstat(&fd).unwrap();
+        if acl {
+            acl_probe(&fd);
+        }
         let mut n = 1;
         for comp in path.components().skip(1) {
             let next = openat(fd.as_raw_fd(), &c(comp.as_os_str().as_bytes()), DIR).unwrap();
             fstat(&next).unwrap();
+            if acl {
+                acl_probe(&next);
+            }
             fd = next;
             n += 1;
         }
         (fd, n)
+    }
+
+    /// The runtime-root fd the front placed at RT_FD.
+    #[allow(unsafe_code)]
+    fn runtime_root() -> OwnedFd {
+        // SAFETY: the front dup'ed the runtime-root fd onto RT_FD before
+        // spawning this role; nothing else in this process opens or owns
+        // that number, and each role calls this once.
+        unsafe { inherited(RT_FD) }
+    }
+
+    /// Hands the runtime-root fd to the roles the front spawns.
+    #[allow(unsafe_code)]
+    fn reserve_runtime_root(rt: &OwnedFd) {
+        // SAFETY: nothing in this process owns RT_FD: std opens no fd before
+        // main and the walk holds at most two fds at a time, all below 10.
+        unsafe { dup_to_reserved(rt, RT_FD) }.unwrap();
+    }
+
+    /// linux_dirent64 records in a getdents64 result (d_reclen at offset 16).
+    fn entries(buf: &[u8]) -> usize {
+        let (mut at, mut n) = (0, 0);
+        while at + 18 <= buf.len() {
+            let reclen = usize::from(u16::from_ne_bytes([buf[at + 16], buf[at + 17]]));
+            assert!(reclen > 0, "linux_dirent64 with d_reclen 0");
+            at += reclen;
+            n += 1;
+        }
+        n
     }
 
     /// openat + fstat + ceil(size / BUF) reads, no end-check read. Returns
@@ -109,7 +147,7 @@ mod imp {
     fn front(fx: &Path) {
         let mut buf = vec![0u8; BUF];
         begin();
-        let (rt, comps) = walk(&fx.join("run"));
+        let (rt, comps) = walk(&fx.join("run"), false);
         // Snapshot: fstat gives the size; one 64-byte header read, then the section.
         let snap = openat(rt.as_raw_fd(), c"snapshot", RO).unwrap();
         let total = fstat(&snap).unwrap().st_size as usize;
@@ -121,7 +159,7 @@ mod imp {
         }
         open_read_exact(&rt, b"marker", &mut buf);
         let session = open_read_exact(&rt, b"session", &mut buf);
-        dup_to_reserved(&rt, RT_FD).unwrap();
+        reserve_runtime_root(&rt);
         let mut kids = vec![
             spawn("helper", fx),
             spawn("writer", fx),
@@ -135,30 +173,36 @@ mod imp {
         println!(r#"AXES front {{"C":{comps},"section":{section},"session":{session}}}"#);
     }
 
-    fn helper(fx: &Path, changed: bool) {
+    fn helper(fx: &Path, changed: bool, acl: bool) {
         let mut buf = vec![0u8; BUF];
         let names: Vec<Vec<u8>> = std::env::var("FSB_NAMES")
             .expect("FSB_NAMES")
             .split(',')
             .map(|n| n.as_bytes().to_vec())
             .collect();
-        let rt = inherited(RT_FD);
+        let rt = runtime_root();
         begin();
-        let (cfg_fd, p) = walk(&fx.join("cfg")); // P
+        let (cfg_fd, p) = walk(&fx.join("cfg"), acl); // P (+ P ACL probes)
         let files: Vec<OwnedFd> = names
             .iter()
             .map(|n| {
                 let fd = openat(cfg_fd.as_raw_fd(), &c(n), RO).unwrap(); // R
                 fstat(&fd).unwrap();
+                if acl {
+                    acl_probe(&fd); // F ACL probes
+                }
                 fd
             })
             .collect();
         let confd = openat(cfg_fd.as_raw_fd(), c"conf.d", DIR).unwrap(); // D
-        let mut eb = 0;
+        let (mut eb, mut en) = (0, 0);
         loop {
             match getdents64(&confd, &mut buf).unwrap() {
                 0 => break,
-                n => eb += n,
+                n => {
+                    eb += n;
+                    en += entries(&buf[..n]);
+                }
             }
         }
         let mut lbuf = [0u8; 256];
@@ -200,12 +244,12 @@ mod imp {
         end();
         let f = names.len();
         println!(
-            r#"AXES helper {{"F":{f},"P":{p},"L":1,"R":{f},"D":1,"E_b":[{eb}],"M":1,"B":{sizes:?},"acl":false,"lock_fd_inherited":false,"snapshot_bytes":{SNAPSHOT_BYTES}}}"#
+            r#"AXES helper {{"F":{f},"P":{p},"L":1,"R":{f},"D":1,"E_n":[{en}],"E_b":[{eb}],"M":1,"B":{sizes:?},"acl":{acl},"lock_fd_inherited":false,"snapshot_bytes":{SNAPSHOT_BYTES}}}"#
         );
     }
 
     fn writer() {
-        let rt = inherited(RT_FD);
+        let rt = runtime_root();
         begin();
         // Per-session writer lock, separate from the helper's per-user
         // snapshot lock (spec section 4), so the two never race.
@@ -225,7 +269,7 @@ mod imp {
 
     fn worker() {
         let mut buf = vec![0u8; BUF];
-        let rt = inherited(RT_FD);
+        let rt = runtime_root();
         begin();
         open_read_exact(&rt, b"worker-input", &mut buf);
         end();
@@ -236,9 +280,11 @@ mod imp {
         // Children inherit the environment, so the test sets FSB_CHANGED for the helper.
         let changed =
             std::env::args().any(|a| a == "--changed") || std::env::var_os("FSB_CHANGED").is_some();
+        // FSB_ACL makes the helper probe ACLs (children inherit it too).
+        let acl = std::env::var_os("FSB_ACL").is_some();
         match arg("--role").as_deref() {
             Some("front") => front(&fx),
-            Some("helper" | "helper-renamed") => helper(&fx, changed),
+            Some("helper" | "helper-renamed") => helper(&fx, changed, acl),
             Some("writer") => writer(),
             Some("worker") => worker(),
             _ => std::process::exit(2),

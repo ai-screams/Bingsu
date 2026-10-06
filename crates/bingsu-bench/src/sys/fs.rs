@@ -8,7 +8,9 @@ fn cvt(r: libc::c_long) -> io::Result<usize> {
     if r < 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(usize::try_from(r).unwrap_or(0))
+        // A non-negative c_long always fits in usize on the 64-bit Linux
+        // targets this runs on; anything else is a broken invariant.
+        Ok(usize::try_from(r).expect("non-negative syscall result fits in usize"))
     }
 }
 
@@ -107,14 +109,24 @@ pub fn marker(name: &CStr) -> io::Result<()> {
 /// Duplicates `fd` onto `target` without FD_CLOEXEC, so spawned roles
 /// inherit the runtime-root fd (the reserved-fd hand-over of spec section 4
 /// "fd inheritance").
-pub fn dup_to_reserved(fd: &OwnedFd, target: RawFd) -> io::Result<()> {
-    // SAFETY: dup2 takes two integers; `target` is a free reserved number.
+///
+/// # Safety
+///
+/// `target` must not be owned by anything in this process (no `OwnedFd`,
+/// `File` or library holds it): dup2 closes whatever is open there, which
+/// would break that owner's I/O safety.
+pub unsafe fn dup_to_reserved(fd: &OwnedFd, target: RawFd) -> io::Result<()> {
+    // SAFETY: dup2 takes two integers; the caller guarantees nothing owns `target`.
     cvt(unsafe { libc::dup2(fd.as_raw_fd(), target) }.into()).map(|_| ())
 }
 
 /// The inherited runtime-root fd as an owned fd.
-pub fn inherited(fd: RawFd) -> OwnedFd {
-    // SAFETY: the parent placed an open directory fd at this reserved number
-    // and nothing else in this process owns it.
+///
+/// # Safety
+///
+/// `fd` must be open and owned by nobody else in this process, and this
+/// must be called at most once per fd.
+pub unsafe fn inherited(fd: RawFd) -> OwnedFd {
+    // SAFETY: the caller guarantees `fd` is open and has no other owner.
     unsafe { OwnedFd::from_raw_fd(fd) }
 }

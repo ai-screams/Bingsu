@@ -44,7 +44,7 @@ def fixture(tmp: pathlib.Path):
     return tmp
 
 
-def run(tmp, env_extra=None, changed=False):
+def run(tmp, env_extra=None, changed=False, acl=False):
     fx = fixture(tmp)
     rules = tmp / "rules.json"
     rules.write_text(json.dumps(RULES))
@@ -52,6 +52,8 @@ def run(tmp, env_extra=None, changed=False):
     env = dict(os.environ, FSB_NAMES=NAMES, **(env_extra or {}))
     if changed:
         env["FSB_CHANGED"] = "1"
+    if acl:
+        env["FSB_ACL"] = "1"
     out = subprocess.run([sys.executable, "-m", "fsbudget", "run", "--rules", str(rules), "--markers", "-o", str(report),
                           "--", str(BIN), "--role", "front", "--fixture", str(fx)],
                          env=env, cwd=ROOT / "tools/fsbudget", capture_output=True, text=True)
@@ -65,20 +67,25 @@ def run(tmp, env_extra=None, changed=False):
         "writer": WRITER,
         "worker": WORKER,
     }
-    return got, expected
+    return got, expected, out, ha
 
 
-@pytest.mark.parametrize("changed", [False, True])
-def test_synthetic_matches_formula_exactly(tmp_path, changed):
-    got, expected = run(tmp_path, changed=changed)
+# 이것을 실패시키는 것: 공식의 어느 항(ACL 항 포함)이든 빠지거나 더해지는 것, 합성 프로그램이 실패로 끝나는 것,
+# E_n을 세지 않는 것(conf.d의 ".", "..", "10-x.toml" = 3).
+@pytest.mark.parametrize(("changed", "acl"), [(False, False), (True, False), (False, True), (True, True)])
+def test_synthetic_matches_formula_exactly(tmp_path, changed, acl):
+    got, expected, out, axes = run(tmp_path, changed=changed, acl=acl)
+    assert out.returncode == 0 and got["exit"] == 0, out.stderr
     assert got["errors"] == [], got["errors"]
     assert check(got["counts"], expected, "exact", ["front", "helper", "writer", "worker"]) == []
+    assert ("acl" in got["counts"]["helper"]) == acl
+    assert axes["E_n"] == [3]
     assert "command" in got["counts"]  # /bin/true is counted, not budgeted
 
 
 # 이것을 실패시키는 것: 분류나 공식이 호출 하나를 놓치는 것(같은 호출을 공식에 알리지 않고 하나 더 함).
 def test_gate_catches_an_unreported_call(tmp_path):
-    got, expected = run(tmp_path, {"FSB_MUTATE": "extra-fstat"})
+    got, expected, _, _ = run(tmp_path, {"FSB_MUTATE": "extra-fstat"})
     bad = check(got["counts"], expected, "exact", ["helper"])
     assert any(b.startswith("helper.fstat") for b in bad), bad
 
@@ -86,7 +93,7 @@ def test_gate_catches_an_unreported_call(tmp_path):
 # 이것을 실패시키는 것: 역할을 argv가 아닌 다른 것으로 정해 도우미 호출이 다른 역할로 새는 것,
 # 규칙에 없는 argv로 exec한 예산 역할을 command로 조용히 넘기는 것, le 모드가 빈 역할을 통과시키는 것.
 def test_gate_catches_misattribution(tmp_path):
-    got, expected = run(tmp_path, {"FSB_MUTATE": "misattr"})
+    got, expected, _, _ = run(tmp_path, {"FSB_MUTATE": "misattr"})
     assert any("role escape" in e for e in got["errors"]), got["errors"]
     for mode in ("exact", "le"):
         assert check(got["counts"], expected, mode, ["helper"]), f"helper calls left the role but {mode} passed"

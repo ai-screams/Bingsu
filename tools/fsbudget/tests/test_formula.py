@@ -24,3 +24,9 @@ def test_helper_unchanged_and_changed():
 def test_front_normal():
     assert front_expected(C=4, section_bytes=5000, session_bytes=100, buf=4096) == {
         "openat": 7, "fstat": 7, "read": 2 + 1 + 1 + 1}
+
+
+# 이것을 실패시키는 것: ACL 항 c12·(F + P)를 빼거나 F·P 중 하나만 더하는 것.
+def test_helper_acl_term():
+    ax = HelperAxes(F=2, P=5, L=1, R=3, D=1, E_n=[3], E_b=[100], M=1, B=[], acl=True, lock_fd_inherited=False)
+    assert helper_expected(ax, Coeffs(), changed=False, buf=4096, snapshot_bytes=0)["acl"] == 2 + 5

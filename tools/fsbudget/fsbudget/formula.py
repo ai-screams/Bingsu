@@ -16,6 +16,9 @@ class HelperAxes:
     L: int  # symlinks walked
     R: int  # references and candidates tried
     D: int  # source folders listed (conf.d)
+    # Directory entries per folder. An axis with its own cap (M3) but no term
+    # in any call formula: recorded per fixture (spec 9 M1 row, change (6)).
+    E_n: list[int] = field(default_factory=list)
     E_b: list[int] = field(default_factory=list)  # directory bytes per folder
     M: int = 0  # unique mounts (statfs)
     B: list[int] = field(default_factory=list)  # bytes per source file (changed)
