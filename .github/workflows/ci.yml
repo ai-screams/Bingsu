@@ -94,7 +94,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - if: runner.os == 'Linux'
         run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+      # The runners are not in a container, so clone3 must reach the kernel
+      # (EINVAL) without the stub's filter; the clone3 test fails otherwise.
       - run: cargo test --workspace --all-features
+        env:
+          BINGSU_REQUIRE_CLONE3_CONTROL: "1"
 
   purity:
     name: Core purity gate
