@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Run the record golden vectors through one shell reader and compare.
 
-Usage: run.py --shell zsh|bash|fish --locale LOCALE [--opts a,b]
-Fails if any row differs from expected.tsv/transitions.tsv, if the shell
+Usage: run.py --shell zsh|bash|fish --locale LOCALE [--opts a,b] [--record-observations]
+Fails if any row differs from expected.tsv/transitions.tsv/nul_expected.tsv,
+if a NUL vector has no nul_expected.tsv row (unless recording), if the shell
 wrote anything to stderr, or if a hostile vector created the canary.
 For bash it also fails if _bingsu_frame changes the nocasematch state.
 """
 import argparse
+import functools
 import os
 import pathlib
 import subprocess
@@ -21,6 +23,8 @@ READER = {
     "fish": ROOT / "crates/bingsu/src/shell/fish/reader.fish",
 }
 CMD = {"zsh": ["zsh", "-f"], "bash": ["bash", "--noprofile", "--norc"], "fish": ["fish", "--no-config"]}
+sys.path.insert(0, str(HERE.parents[1] / "shell"))  # tests/shell/: the one version probe and rule parser
+from check_versions import rule_matches, version as probe_version  # noqa: E402
 
 
 def quote(shell, word):
@@ -35,6 +39,58 @@ def render_reader(shell, dst):
     codes = (HERE / "known_codes.txt").read_text().split()
     text = READER[shell].read_text().replace("@KNOWN_CODES@", " ".join(quote(shell, c) for c in codes))
     dst.write_text(text)
+
+
+@functools.cache
+def shell_version(shell):
+    """MAJOR.MINOR of `shell`, probed once per process (every NUL cell and
+    every x01 probe asks)."""
+    return probe_version(shell)
+
+
+COLUMNS = {"frame": 4, "pty": 5}
+# "accept-stripped" (bash): the reader prints accept, and the fields equal the
+# input with every NUL removed, because bash drops NUL in command substitution
+# before the reader sees the bytes.
+ACCEPTED = ("accept", "accept-stripped")
+
+
+def nul_override(rows, vector, shell, version, locale, column="frame"):
+    """The `column` value ("frame": reader outcome, "pty": screen outcome) of
+    the first row matching vector, shell, version range and locale group.
+    None when no row matches or the matching row leaves that column "-"
+    (unpinned)."""
+    for row in rows:
+        vec, sh, rule, locales = row[:4]
+        if vec == vector and sh == shell and rule_matches(rule, version) and (locales == "*" or locale in locales.split(",")):
+            value = row[COLUMNS[column]]
+            return None if value == "-" else value
+    return None
+
+
+def resolve_observations(want, nrows, shell, version, locale, record):
+    """Pin every `observe` vector from nul_expected.tsv (first matching row
+    wins, so row order matters). Without --record-observations an unmatched
+    vector is an error: a new shell, version or locale cannot pass unpinned."""
+    errors = []
+    for name in list(want):
+        if want[name][0] != "observe":
+            continue
+        frame = nul_override(nrows, name, shell, version, locale)
+        if frame:
+            want[name] = (frame, "ok", "-") if frame in ACCEPTED else (frame, "-", "-")
+        elif not record:
+            errors.append(f"{name}: no nul_expected.tsv row for {shell} {version[0]}.{version[1]} {locale} "
+                          "(run with --record-observations, review the output, add a row)")
+    return errors
+
+
+def nul_rows():
+    rows = []
+    for line in (HERE / "nul_expected.tsv").read_text().splitlines():
+        if line and not line.startswith("#"):
+            rows.append(tuple(line.split("\t")))
+    return rows
 
 
 def expected(shell, locale):
@@ -62,6 +118,9 @@ def main():
     ap.add_argument("--shell", required=True, choices=sorted(CMD))
     ap.add_argument("--locale", required=True)
     ap.add_argument("--opts", default="")
+    # Opt-in only: print unpinned NUL results instead of failing on them.
+    ap.add_argument("--record-observations", action="store_true",
+                    default=os.environ.get("BINGSU_RECORD_OBSERVATIONS") == "1")
     a = ap.parse_args()
     with tempfile.TemporaryDirectory() as td:
         td = pathlib.Path(td)
@@ -82,6 +141,8 @@ def main():
         if canary.exists():
             errors.append("CANARY CREATED: a status string was executed")
         want = expected(a.shell, a.locale)
+        errors += resolve_observations(want, nul_rows(), a.shell, shell_version(a.shell), a.locale,
+                                      a.record_observations)
         seen = set()
         stdout = r.stdout.decode("utf-8", "replace")
         shopt_seen = set()
@@ -97,8 +158,11 @@ def main():
                 if w is None:
                     errors.append(f"unexpected vector {name}")
                 elif w[0] == "observe":
-                    print(f"OBSERVE {a.shell} {a.locale} {name}: {frame} {disp} {note}")
-                elif (frame, disp, note) != w:
+                    # Reached only for an unpinned vector: an error by default
+                    # (resolve_observations), printed only while recording.
+                    if a.record_observations:
+                        print(f"OBSERVE {a.shell} {a.locale} {name}: {frame} {disp} {note}")
+                elif (frame, disp, note) != (("accept",) + w[1:] if w[0] == "accept-stripped" else w):
                     errors.append(f"{name}: got {(frame, disp, note)} want {w}")
             elif kind == "U":
                 useen[cols[0]] = cols[1]
@@ -114,7 +178,8 @@ def main():
                 old, new, due, key = cols
                 seen.add(f"T:{old}>{new}")
         # Contract: a rejected record leaves _bingsu_f empty; an accepted one
-        # leaves the nine input field bytes unchanged (nothing is expanded).
+        # leaves the nine input field bytes unchanged (nothing is expanded),
+        # except that an accept-stripped one has lost every NUL.
         for name, w in want.items():
             if w[0] == "observe":
                 continue
@@ -127,6 +192,8 @@ def main():
                     errors.append(f"{name}: rejected but _bingsu_f has {n} elements")
             else:
                 data = (td / "v" / f"{name}.bin").read_bytes()
+                if w[0] == "accept-stripped":
+                    data = data.replace(b"\x00", b"")
                 fields = data[:-1].split(b"\x1f")
                 if (n, hexs) != (len(fields), ",".join(f.hex() for f in fields)):
                     errors.append(f"{name}: field bytes differ from the input record")

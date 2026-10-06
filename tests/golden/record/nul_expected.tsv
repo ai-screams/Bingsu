@@ -1,0 +1,29 @@
+# vector	shell	version_rule	locales	frame	pty
+# Order matters: the first matching row wins. Every row is an observation
+# recorded with --record-observations and reviewed, never inferred.
+# frame: the record reader's outcome (golden run.py): accept, reject, or
+# accept-stripped (bash: accepted after the shell dropped every NUL; the fields
+# equal the input without its NULs). pty: the screen outcome
+# (tests/shell/test_hostile_matrix.py), noexec or minimal. "-" = not pinned:
+# it fails the default run only in a column that is looked up. nul_field and
+# nul_status are not in the screen layer, so their pty column is never looked
+# up and stays "-".
+# Observed 2026-10-05, the same in every cell of each shell: zsh 5.8, 5.9;
+# fish 3.6, 4.0, 4.9; bash 5.1, 5.2, 5.3 (macOS arm64 and the three Linux
+# test images). frame: C, C.UTF-8, en_US.UTF-8, ko_KR.UTF-8; pty: C,
+# en_US.UTF-8, ko_KR.UTF-8 (the screen test's locales).
+nul_field	zsh	*	*	accept	-
+nul_status	zsh	*	*	reject	-
+hostile_nul	zsh	*	*	accept	noexec
+hostile_nul_cmdsub	zsh	*	*	accept	noexec
+hostile_nul_backtick	zsh	*	*	accept	noexec
+nul_field	fish	*	*	reject	-
+nul_status	fish	*	*	reject	-
+hostile_nul	fish	*	*	reject	minimal
+hostile_nul_cmdsub	fish	*	*	reject	minimal
+hostile_nul_backtick	fish	*	*	reject	minimal
+nul_field	bash	*	*	accept-stripped	-
+nul_status	bash	*	*	accept-stripped	-
+hostile_nul	bash	*	*	accept-stripped	noexec
+hostile_nul_cmdsub	bash	*	*	accept-stripped	noexec
+hostile_nul_backtick	bash	*	*	accept-stripped	noexec
