@@ -3,6 +3,7 @@
 new runtime root (F-23 golden)."""
 import importlib.util
 import os
+import re
 import shlex
 
 import pytest
@@ -74,7 +75,9 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
 # Top-level hook code runs under the user's own shell options (only function
 # bodies are shielded by `emulate -L zsh`), so eval must survive them.
 # 이것을 실패시키는 것: hooks.zsh의 `case ${_bingsu_seq-} in`을 `case $_bingsu_seq in`으로 되돌리는 것(NO_UNSET에서 eval이 끊긴다).
-def test_zsh_eval_survives_hostile_user_options(tmp_path):
+def test_zsh_eval_survives_hostile_user_options(tmp_path, shells):
+    if "zsh" not in shells:
+        pytest.skip("zsh not in BINGSU_TEST_SHELLS")
     base = tmp_path / "zsh"
     inst = Install(base)
     env = trusted_env(base, "opts")
@@ -88,6 +91,29 @@ def test_zsh_eval_survives_hostile_user_options(tmp_path):
     (argv,) = inst.calls()
     i = argv.index(b"--seq")
     assert argv[i + 1] == b"1", argv
+
+
+# An inherited session value is expanded at top level, under the user's
+# options. With GLOB_SUBST the unquoted expansion is a pattern, and with
+# NOMATCH a pattern that matches nothing aborts the eval.
+# 이것을 실패시키는 것: hooks.zsh의 `: "${_bingsu_session:=@SESSION@}"`에서 따옴표를 빼는 것.
+def test_zsh_inherited_session_glob_survives_glob_subst(tmp_path, shells):
+    if "zsh" not in shells:
+        pytest.skip("zsh not in BINGSU_TEST_SHELLS")
+    base = tmp_path / "zsh"
+    inst = Install(base)
+    env = trusted_env(base, "glob")
+    script = inst.init("zsh", env)
+    session = re.search(rb"_bingsu_session='([0-9a-f]{32})'", script).group(1)
+    inst.use_fake(minimal_record())
+    init_file = base / "init.sh"
+    init_file.write_bytes(script)
+    env["_bingsu_session"] = "*[a]"
+    opts = b"setopt GLOB_SUBST NOMATCH\n"
+    r = run_shell_script("zsh", opts + source("zsh", init_file) + b"_bingsu_call\n", env, base)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+    (argv,) = inst.calls()
+    assert argv[argv.index(b"--session") + 1] == session, argv
 
 
 # The reader text init embeds must be byte-identical to what the golden
