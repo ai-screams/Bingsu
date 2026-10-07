@@ -300,9 +300,7 @@ pub fn reap(pid: libc::pid_t) -> io::Result<libc::c_int> {
 mod tests {
     use super::*;
 
-    // The tests that open or close fds run one at a time: a closed fd number
-    // checked below could otherwise be reused by a parallel test's pipe.
-    static FD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::sys::FD_TESTS;
 
     // 이것을 실패시키는 것: EINTR을 다른 오류처럼 돌려주는 것(재시도 갈래 삭제), 또는 다른 오류까지 재시도하는 것.
     #[test]

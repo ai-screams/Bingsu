@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# X-05 boot identity probe. Append one line per run:
+#   before-logout, after-login, after-reboot
+# Usage: x05-boot-id.sh LABEL >> x05.log
+# Columns (tab-separated): UTC time, label, boot identity, boot time.
+set -euo pipefail
+label=${1:?label}
+# The label is a TSV column: letters, digits, dot, underscore, dash only.
+[[ $label =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad label: $label" >&2; exit 2; }
+case "$(uname -s)" in
+  Darwin) id=$(sysctl -n kern.bootsessionuuid); boot=$(sysctl -n kern.boottime | tr -d '{}' | tr ',' ' ' | sed 's/^ *//') ;;
+  Linux) id=$(cat /proc/sys/kernel/random/boot_id); boot=$(cut -d' ' -f1 /proc/uptime) ;;
+  *) echo "unsupported" >&2; exit 2 ;;
+esac
+[[ -n $id ]] || { echo "empty boot identity" >&2; exit 1; }
+printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$label" "$id" "$boot"

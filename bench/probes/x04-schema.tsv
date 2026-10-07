@@ -1,0 +1,16 @@
+# X-04 probe line schema: key, JSON type. m1-cgroup-probe prints exactly
+# these keys (probe_shapes.rs) and ingest.py accepts exactly these.
+x	str
+label	str
+kernel	str
+cgroup	str
+controllers	str
+subtree_control	str
+mkdir_child	bool
+child_has_kill	bool
+move_ok	bool
+readback_ok	bool
+kill_ok	bool
+rmdir_ok	bool
+delegated	bool
+atomic	bool

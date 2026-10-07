@@ -4,7 +4,7 @@ use crate::stats::Summary;
 
 /// JSON string contents for `s`: quote, backslash and control characters
 /// escaped (RFC 8259 section 7); everything else passes through.
-fn escape(s: &str) -> String {
+pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
