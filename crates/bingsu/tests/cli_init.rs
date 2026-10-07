@@ -8,6 +8,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "support/exec_file.rs"]
+mod exec_file;
+
 fn scratch(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("cli_init")
@@ -226,7 +229,7 @@ fn tamper_rows_warn_on_stderr_only() {
         std::fs::create_dir_all(&target_dir).unwrap();
         chmod(&target_dir, 0o755);
         let target = target_dir.join("bingsu-real");
-        std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), &target).unwrap();
+        exec_file::copy_exe(Path::new(env!("CARGO_BIN_EXE_bingsu")), &target);
         let dir = base.join("bin");
         std::fs::create_dir_all(&dir).unwrap();
         chmod(&dir, 0o755);
@@ -271,7 +274,7 @@ fn uninspectable_target_warns_unknown() {
     let hidden = base.join("hidden");
     std::fs::create_dir_all(&hidden).unwrap();
     let target = hidden.join("bingsu-real");
-    std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), &target).unwrap();
+    exec_file::copy_exe(Path::new(env!("CARGO_BIN_EXE_bingsu")), &target);
     let exe_dir = base.join("bin");
     std::fs::create_dir_all(&exe_dir).unwrap();
     chmod(&exe_dir, 0o755);
@@ -280,7 +283,7 @@ fn uninspectable_target_warns_unknown() {
     // Run a copy outside `hidden`, with argv0 = the link, then make the
     // link's target folder unreadable so canonicalize() fails.
     let copy = base.join("bingsu-copy");
-    std::fs::copy(&target, &copy).unwrap();
+    exec_file::copy_exe(&target, &copy);
     chmod(&hidden, 0o000);
     let out = Command::new(&copy)
         .args(["init", "zsh"])
@@ -400,7 +403,10 @@ fn symlink_chain_hops_are_checked() {
             std::fs::create_dir_all(base.join(d)).unwrap();
             chmod(&base.join(d), 0o755);
         }
-        std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), base.join("real/bingsu")).unwrap();
+        exec_file::copy_exe(
+            Path::new(env!("CARGO_BIN_EXE_bingsu")),
+            &base.join("real/bingsu"),
+        );
         std::os::unix::fs::symlink("../real/bingsu", base.join("hop/x")).unwrap();
         std::os::unix::fs::symlink("../hop/x", base.join("bin/bingsu")).unwrap();
         chmod(&base.join("hop"), hop_mode);
@@ -425,7 +431,7 @@ fn symlink_chain_over_40_hops_warns_unknown() {
     std::fs::create_dir_all(&chain).unwrap();
     chmod(&chain, 0o755);
     let real = base.join("bingsu-real");
-    std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), &real).unwrap();
+    exec_file::copy_exe(Path::new(env!("CARGO_BIN_EXE_bingsu")), &real);
     std::os::unix::fs::symlink(&real, chain.join("l41")).unwrap();
     for i in (0..41).rev() {
         std::os::unix::fs::symlink(format!("l{}", i + 1), chain.join(format!("l{i}"))).unwrap();
@@ -597,12 +603,14 @@ fn dotdot_after_symlinked_folder_follows_the_kernel() {
             std::fs::create_dir_all(base.join(d)).unwrap();
             chmod(&base.join(d), 0o755);
         }
-        std::fs::copy(
-            env!("CARGO_BIN_EXE_bingsu"),
-            base.join("deep/a/real/bingsu"),
-        )
-        .unwrap();
-        std::fs::copy(env!("CARGO_BIN_EXE_bingsu"), base.join("real/bingsu")).unwrap();
+        exec_file::copy_exe(
+            Path::new(env!("CARGO_BIN_EXE_bingsu")),
+            &base.join("deep/a/real/bingsu"),
+        );
+        exec_file::copy_exe(
+            Path::new(env!("CARGO_BIN_EXE_bingsu")),
+            &base.join("real/bingsu"),
+        );
         std::os::unix::fs::symlink("deep/a/b", base.join("lnk")).unwrap();
         std::os::unix::fs::symlink("../lnk/../real/bingsu", base.join("bin/bingsu")).unwrap();
         chmod(&base.join("deep/a/real"), true_mode);
@@ -780,4 +788,86 @@ fn refused_runtime_candidate_creates_nothing() {
         (after.mtime(), after.mtime_nsec()),
         (before.mtime(), before.mtime_nsec())
     );
+}
+
+// The helper that makes executables for these tests (see support/exec_file.rs).
+// 이것을 실패시키는 것: cp의 종료 상태를 버리는 것(복사 실패를 성공으로), 복사가 바이트나 실행 모드를
+// 잃는 것, write_exe가 0755를 주지 않거나 staging 파일을 남기는 것.
+#[test]
+fn exec_file_helpers() {
+    let base = scratch("exec-file");
+    let src = Path::new(env!("CARGO_BIN_EXE_bingsu"));
+    let copy = base.join("copy");
+    exec_file::copy_exe(src, &copy);
+    assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(src).unwrap());
+    assert_ne!(std::fs::metadata(&copy).unwrap().mode() & 0o111, 0);
+    let script = base.join("s.sh");
+    exec_file::write_exe(&script, b"#!/bin/sh\nexit 7\n");
+    assert_eq!(std::fs::metadata(&script).unwrap().mode() & 0o777, 0o755);
+    assert_eq!(Command::new(&script).status().unwrap().code(), Some(7));
+    assert_eq!(
+        std::fs::read_dir(&base).unwrap().count(),
+        2,
+        "only copy and s.sh"
+    );
+    let missing = base.join("no/such/dir/x");
+    assert!(std::panic::catch_unwind(|| exec_file::copy_exe(src, &missing)).is_err());
+}
+
+// Not strictly deterministic, but close: copy-then-exec while four threads
+// spawn children. In a Linux container (unprivileged user), this test with
+// `std::fs::copy` in place of the helper's `cp` hit ETXTBSY in 69, 75 and
+// 79 of 300 rounds (three runs); with the helper it passes. The two sides
+// are not alike: the helper cannot fail here by construction (this process
+// never holds a write fd on the copy), while a helper that writes in this
+// process escapes only with a tiny chance, about 0.77^300 if rounds are
+// independent.
+// 이것을 실패시키는 것: copy_exe가 이 프로세스에서 쓰는 것(std::fs::copy 등). 그러면 다른 스레드의 fork가
+// 쓰기 fd를 물려 가 exec가 ETXTBSY로 실패한다.
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_file_copy_survives_forking_threads() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// Stops the spawner threads on drop, also when an assertion fails.
+    struct Stop(Arc<AtomicBool>, Vec<std::thread::JoinHandle<()>>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            for t in self.1.drain(..) {
+                let _ = t.join();
+            }
+        }
+    }
+    let base = scratch("exec-file-stress");
+    let flag = Arc::new(AtomicBool::new(false));
+    let spawners = (0..4)
+        .map(|_| {
+            let f = flag.clone();
+            std::thread::spawn(move || {
+                while !f.load(Ordering::Relaxed) {
+                    let _ = Command::new("/bin/true").status();
+                }
+            })
+        })
+        .collect();
+    let _stop = Stop(flag, spawners);
+    let mut busy = 0;
+    for i in 0..300 {
+        let dst = base.join(format!("t{i}"));
+        // The bingsu binary (megabytes, not /bin/true's kilobytes): a longer
+        // write gives a fork more time to land inside it.
+        exec_file::copy_exe(Path::new(env!("CARGO_BIN_EXE_bingsu")), &dst);
+        match Command::new(&dst)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(_) => {}
+            Err(e) if e.raw_os_error() == Some(26) => busy += 1, // ETXTBSY
+            Err(e) => panic!("exec {}: {e}", dst.display()),
+        }
+        std::fs::remove_file(&dst).unwrap();
+    }
+    assert_eq!(busy, 0, "ETXTBSY in {busy} of 300 rounds");
 }

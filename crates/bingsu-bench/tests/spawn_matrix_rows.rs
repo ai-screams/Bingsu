@@ -1,14 +1,16 @@
 //! The matrix prints every row of the Task B3 table, measured or `na`.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The stub scripts, written once before any test spawns: a script still
-/// open for writing in this process while another test thread forks would
-/// fail to exec with ETXTBSY on Linux.
+#[path = "../../bingsu/tests/support/exec_file.rs"]
+mod exec_file;
+
+/// The stub scripts, made once. `exec_file::write_exe` writes them in a
+/// separate `cp` process: a script open for writing in this process while
+/// another test thread forks would fail to exec with ETXTBSY on Linux.
 fn script(name: &str) -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -29,9 +31,7 @@ fn script(name: &str) -> PathBuf {
                  setsid sleep 2 </dev/null >/dev/null 2>&1 & fi\nexit 0\n",
             ),
         ] {
-            let p = dir.join(name);
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            exec_file::write_exe(&dir.join(name), body.as_bytes());
         }
         dir
     })
