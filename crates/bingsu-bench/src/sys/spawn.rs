@@ -5,7 +5,7 @@ use std::ffi::CStr;
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use std::ffi::c_char;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 const SETSID: libc::c_short = libc::POSIX_SPAWN_SETSID; // glibc <spawn.h> 0x80
@@ -30,7 +30,7 @@ pub struct Spawned {
 }
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-fn check(rc: libc::c_int) -> io::Result<()> {
+pub(crate) fn check(rc: libc::c_int) -> io::Result<()> {
     if rc == 0 {
         Ok(())
     } else {
@@ -87,17 +87,36 @@ fn set_cloexec_pair(p: [libc::c_int; 2]) -> io::Result<()> {
     Ok(())
 }
 
-/// A duplicate without FD_CLOEXEC (used by the fd-inventory test to prove
-/// the child-side close works). Test-only.
-#[doc(hidden)]
+/// A duplicate without FD_CLOEXEC at the lowest free fd (like dup(2)):
+/// the planted leak of the fd-inventory tests.
 pub fn dup_inheritable(fd: &OwnedFd) -> io::Result<OwnedFd> {
-    // SAFETY: dup takes an fd and returns a new one without FD_CLOEXEC.
-    let n = unsafe { libc::dup(fd.as_raw_fd()) };
+    dup_inheritable_at(fd, 0)
+}
+
+/// A duplicate without FD_CLOEXEC at the lowest free fd >= `min`: the
+/// planted leak of the fd-inventory tests and of `m1-writer-child
+/// --probe-child`, which puts it at 100 or above so a report that looks only
+/// at low fds would miss it.
+pub fn dup_inheritable_at(fd: &OwnedFd, min: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: F_DUPFD returns a new fd >= min without FD_CLOEXEC, or -1 and errno.
+    let n = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, min) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `n` is a new descriptor owned by nobody else.
     Ok(unsafe { OwnedFd::from_raw_fd(n) })
+}
+
+/// dup2(fd, 1): points fd 1 at `fd` in one step (fd 1 is never left
+/// closed). For the writer-child probe, which reads what a child writes to
+/// the stdout it inherits. Single-threaded callers only, as for `spawn`.
+pub fn dup_onto_stdout(fd: &OwnedFd) -> io::Result<()> {
+    // SAFETY: dup2 takes two integers; fd 1 is replaced atomically and the
+    // borrowed `fd` stays open.
+    if unsafe { libc::dup2(fd.as_raw_fd(), 1) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 // Linux without glibc's posix_spawn closefrom (musl, the static user-run
@@ -124,6 +143,26 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
     } else {
         None
     };
+    let stdout = pipe.as_ref().map(|(_, w)| w);
+    let pid = spawn_with_objects(spec, |fa| stdio_actions(fa, stdout))?;
+    // The parent's write end drops here; the child holds its own copy on fd 1.
+    Ok(Spawned {
+        pid,
+        stdout: pipe.map(|(r, _w)| r),
+    })
+}
+
+/// The one posix_spawn path of this crate: initializes the file actions
+/// and attributes, lets `actions` add the caller's file actions, then closes
+/// every other fd in the child (Linux closefrom 3 after the caller's
+/// actions, macOS POSIX_SPAWN_CLOEXEC_DEFAULT), starts a new session when
+/// `spec.new_session`, and spawns with `spec`'s argv and env (the parent's
+/// environ when `None`). Both objects are destroyed on every path.
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+pub(crate) fn spawn_with_objects(
+    spec: &SpawnSpec<'_>,
+    actions: impl FnOnce(&mut libc::posix_spawn_file_actions_t) -> io::Result<()>,
+) -> io::Result<libc::pid_t> {
     // SAFETY: zeroed storage is what posix_spawn_file_actions_init initializes.
     let mut fa: libc::posix_spawn_file_actions_t = unsafe { std::mem::zeroed() };
     // SAFETY: zeroed storage is what posix_spawnattr_init initializes.
@@ -137,27 +176,20 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> io::Result<Spawned> {
         return Err(e);
     }
     // Every exit after both inits passes through the two destroys below.
-    let rc = spawn_with(spec, &mut fa, &mut attr, pipe.as_ref().map(|(_, w)| w));
+    let rc = spawn_with(spec, &mut fa, &mut attr, actions);
     // SAFETY: both objects were initialized above and are not used again.
     unsafe { libc::posix_spawn_file_actions_destroy(&mut fa) };
     // SAFETY: as above.
     unsafe { libc::posix_spawnattr_destroy(&mut attr) };
-    let pid = rc?;
-    // The parent's write end drops here; the child holds its own copy on fd 1.
-    Ok(Spawned {
-        pid,
-        stdout: pipe.map(|(r, _w)| r),
-    })
+    rc
 }
 
-/// Fills the initialized `fa` and `attr` and spawns; the caller destroys them.
+/// stdin and stderr on /dev/null, stdout on the pipe's write end or /dev/null.
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-fn spawn_with(
-    spec: &SpawnSpec<'_>,
+fn stdio_actions(
     fa: &mut libc::posix_spawn_file_actions_t,
-    attr: &mut libc::posix_spawnattr_t,
     stdout: Option<&OwnedFd>,
-) -> io::Result<libc::pid_t> {
+) -> io::Result<()> {
     let null = c"/dev/null";
     // SAFETY: `fa` was initialized; the path is NUL-terminated and outlives the call.
     check(unsafe {
@@ -174,7 +206,18 @@ fn spawn_with(
     // SAFETY: as above.
     check(unsafe {
         libc::posix_spawn_file_actions_addopen(fa, 2, null.as_ptr(), libc::O_WRONLY, 0)
-    })?;
+    })
+}
+
+/// Fills the initialized `fa` and `attr` and spawns; the caller destroys them.
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+fn spawn_with(
+    spec: &SpawnSpec<'_>,
+    fa: &mut libc::posix_spawn_file_actions_t,
+    attr: &mut libc::posix_spawnattr_t,
+    actions: impl FnOnce(&mut libc::posix_spawn_file_actions_t) -> io::Result<()>,
+) -> io::Result<libc::pid_t> {
+    actions(fa)?;
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         // SAFETY: `fa` was initialized; closes every fd >= 3 in the child (glibc 2.34+).

@@ -24,9 +24,32 @@ pub fn summarize(samples: &mut [u64]) -> Summary {
     }
 }
 
+/// The smallest nonzero step `Instant` reports between back-to-back reads,
+/// in ns: the clock's resolution as the timed rows see it. Takes a few ms;
+/// runners call it once, outside every timed call.
+pub fn timer_tick_ns() -> u64 {
+    let mut min = u64::MAX;
+    for _ in 0..1000 {
+        let a = std::time::Instant::now();
+        let mut b = std::time::Instant::now();
+        while b == a {
+            b = std::time::Instant::now();
+        }
+        min = min.min((b - a).as_nanos() as u64);
+    }
+    min
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 바뀌기를 기다리지 않고 같은 시각 두 번의 차(0)를 분해능으로 내는 것.
+    #[test]
+    fn timer_tick_is_positive_and_small() {
+        let t = timer_tick_ns();
+        assert!(t > 0 && t < 1_000_000, "{t}");
+    }
 
     // 이것을 실패시키는 것: 0부터 센 순위(off-by-one)나 정렬하지 않은 입력.
     #[test]

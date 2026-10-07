@@ -28,7 +28,7 @@ mod imp {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    const BUF: usize = 4096;
+    use bingsu_bench::BUF;
     const RT_FD: i32 = 10;
     const RO: libc::c_int = libc::O_RDONLY | libc::O_NOFOLLOW;
     const DIR: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
