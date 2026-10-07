@@ -4,7 +4,8 @@
 # Usage: x05-boot-id.sh LABEL >> x05.log
 # Columns (tab-separated): UTC time, label, boot identity, boot time.
 set -euo pipefail
-label=${1:?label}
+[[ $# -eq 1 ]] || { echo "usage: x05-boot-id.sh LABEL" >&2; exit 2; }
+label=$1
 # The label is a TSV column: letters, digits, dot, underscore, dash only.
 [[ $label =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad label: $label" >&2; exit 2; }
 case "$(uname -s)" in

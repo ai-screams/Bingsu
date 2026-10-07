@@ -29,13 +29,14 @@ fn classify(success: bool, out: &str) -> &'static str {
     let Some(rc) = rc else {
         return "error"; // the child died before it could try
     };
-    if !(success && out.lines().any(|l| l.starts_with("alloc-done "))) {
-        "limited"
-    } else if rc != 0 {
-        // A refused setrlimit also lets the allocation succeed.
+    if rc != 0 {
+        // Refused before any allocation: what the allocation did afterwards
+        // (done, or killed by unrelated memory pressure) is not about the limit.
         "refused"
-    } else {
+    } else if success && out.lines().any(|l| l.starts_with("alloc-done ")) {
         "not-limited"
+    } else {
+        "limited"
     }
 }
 
@@ -141,7 +142,8 @@ mod imp {
 mod tests {
     use super::classify;
 
-    // 이것을 실패시키는 것: refused와 not-limited 갈래의 순서를 바꾸는 것(거부된 경우가 not-limited가 됨),
+    // 이것을 실패시키는 것: rc를 할당 결과보다 늦게 보는 것(거부된 뒤 신호·비정상 종료로 끝난 자식이 limited가 됨),
+    // refused와 not-limited 갈래의 순서를 바꾸는 것(거부된 경우가 not-limited가 됨),
     // rc를 문자열 포함으로 읽어 rc=-10 같은 값이나 setrlimit 줄이 없는 자식을 잘못 분류하는 것.
     #[test]
     fn verdicts() {
@@ -158,6 +160,11 @@ mod tests {
             classify(true, "setrlimit rc=0 errno=0 after_cur=1\n"),
             "limited"
         );
+        // rc=-1 with every exit and output combination is refused.
+        for (ok, tail) in [(true, ""), (false, ""), (false, "alloc-done 1\n")] {
+            let out = format!("setrlimit rc=-1 errno=22 after_cur=9\n{tail}");
+            assert_eq!(classify(ok, &out), "refused", "{ok} {out:?}");
+        }
         assert_eq!(classify(false, ""), "error");
         assert_eq!(classify(true, "setrlimit rc=x\nalloc-done 1\n"), "error");
         assert_eq!(classify(true, "note rc=-1\nalloc-done 1\n"), "error");

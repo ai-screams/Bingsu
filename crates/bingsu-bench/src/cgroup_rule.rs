@@ -28,6 +28,21 @@ pub fn parse_kernel(release: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// The cgroup v2 path of the `0::` line of `/proc/self/cgroup`. Refuses a
+/// path that is not absolute or has a `.` or `..` component (inside a
+/// cgroup namespace the line can read `/../..`): joined under
+/// /sys/fs/cgroup it would name a folder outside this process's cgroup.
+pub fn cgroup_v2_path(proc_self_cgroup: &str) -> Result<&str, String> {
+    let path = proc_self_cgroup
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .ok_or("no cgroup v2 entry")?;
+    if !path.starts_with('/') || path.split('/').any(|c| c == ".." || c == ".") {
+        return Err(format!("refused cgroup path {path:?}"));
+    }
+    Ok(path)
+}
+
 /// What the X-04 probe saw. Strings are the raw file contents (or an error
 /// text); `line` escapes them.
 #[derive(Clone, Debug, Default)]
@@ -103,6 +118,29 @@ mod tests {
         assert_eq!(parse_kernel("6."), None);
         assert_eq!(parse_kernel(""), None);
         assert_eq!(parse_kernel("x.y"), None);
+    }
+
+    // 이것을 실패시키는 것: cgroupns의 `..`·`.` 구성요소나 상대 경로를 받아 /sys/fs/cgroup 밖을 가리키는 것,
+    // 0:: 줄이 없을 때 빈 경로(= 루트)로 넘어가는 것.
+    #[test]
+    fn cgroup_path() {
+        assert_eq!(
+            cgroup_v2_path("0::/user.slice/a.scope\n"),
+            Ok("/user.slice/a.scope")
+        );
+        assert_eq!(cgroup_v2_path("1:name=systemd:/x\n0::/\n"), Ok("/"));
+        assert_eq!(cgroup_v2_path("0::/a..b/c\n"), Ok("/a..b/c"));
+        for bad in [
+            "0::/../..\n",
+            "0::/a/../b\n",
+            "0::/a/./b\n",
+            "0::a/b\n",
+            "0::\n",
+            "1:cpu:/x\n",
+            "",
+        ] {
+            assert!(cgroup_v2_path(bad).is_err(), "{bad:?}");
+        }
     }
 
     fn full() -> X04 {

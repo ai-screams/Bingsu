@@ -6,22 +6,36 @@
 //! `bench/probes/x04-schema.tsv`; what it cannot do is `false`.
 #![deny(unsafe_code)]
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    println!(r#"{{"x":"X-04","na":"not linux"}}"#);
+const USAGE: &str = "usage: m1-cgroup-probe LABEL (for example ssh or desktop)";
+
+/// Exactly one non-empty LABEL: a run without its environment label would
+/// look like data from an unknown session.
+fn parse(args: &[String]) -> Result<String, String> {
+    match args {
+        [label] if !label.is_empty() => Ok(label.clone()),
+        [_] => Err("LABEL is empty".into()),
+        _ => Err(format!("expected one LABEL, got {} arguments", args.len())),
+    }
 }
 
-#[cfg(target_os = "linux")]
 fn main() {
-    let label = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "unlabeled".into());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let label = parse(&args).unwrap_or_else(|e| {
+        eprintln!("{e}\n{USAGE}");
+        std::process::exit(2);
+    });
+    #[cfg(target_os = "linux")]
     println!("{}", imp::probe(label).line());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = label;
+        println!(r#"{{"x":"X-04","na":"not linux"}}"#);
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use bingsu_bench::cgroup_rule::X04;
+    use bingsu_bench::cgroup_rule::{X04, cgroup_v2_path};
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -76,9 +90,12 @@ mod imp {
             ..X04::default()
         };
         let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        let Some(path) = own.lines().find_map(|l| l.strip_prefix("0::")) else {
-            x.cgroup = "<no cgroup v2 entry>".into();
-            return x;
+        let path = match cgroup_v2_path(&own) {
+            Ok(p) => p,
+            Err(why) => {
+                x.cgroup = format!("<{why}>");
+                return x;
+            }
         };
         x.cgroup = path.to_string();
         let dir = PathBuf::from(format!("/sys/fs/cgroup{path}"));
@@ -138,5 +155,20 @@ mod imp {
         }
         x.rmdir_ok = cg.remove();
         x
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    // 이것을 실패시키는 것: LABEL이 없을 때 기본값("unlabeled")을 쓰는 것, 빈 LABEL이나 추가 인자를 받는 것.
+    #[test]
+    fn label_fails_closed() {
+        let p = |a: &[&str]| parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(p(&["ssh"]), Ok("ssh".into()));
+        assert!(p(&[]).is_err());
+        assert!(p(&[""]).is_err());
+        assert!(p(&["ssh", "x"]).is_err());
     }
 }

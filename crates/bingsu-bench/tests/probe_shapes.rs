@@ -587,3 +587,24 @@ fn pack_fixture_ignores_git_env() {
         pack.display()
     );
 }
+
+// 이것을 실패시키는 것: X-04가 LABEL 없이·빈 LABEL로·추가 인자와 함께 줄을 내는 것(환경 표식이 빠진 자료),
+// X-05가 인자 개수를 확인하지 않는 것.
+#[test]
+fn probe_args_fail_closed() {
+    let x04 = env!("CARGO_BIN_EXE_m1-cgroup-probe");
+    for args in [&[][..], &[""], &["ssh", "extra"]] {
+        let out = output_within(Command::new(x04).args(args), Duration::from_secs(120));
+        assert_eq!(out.status.code(), Some(2), "x04 {args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "x04 {args:?}: {out:?}");
+    }
+    let x05 = repo().join("bench/probes/x05-boot-id.sh");
+    for args in [&[][..], &["a", "b"]] {
+        let out = output_within(
+            Command::new("bash").arg(&x05).args(args),
+            Duration::from_secs(120),
+        );
+        assert_eq!(out.status.code(), Some(2), "x05 {args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "x05 {args:?}: {out:?}");
+    }
+}
