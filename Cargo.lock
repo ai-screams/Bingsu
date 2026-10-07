@@ -6,6 +6,7 @@ version = 4
 name = "bingsu"
 version = "0.0.0"
 dependencies = [
+ "bingsu-collect",
  "bingsu-core",
  "libc",
 ]
@@ -15,6 +16,14 @@ name = "bingsu-bench"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "bingsu-collect"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "seccompiler",
 ]
 
 [[package]]
@@ -51,6 +60,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

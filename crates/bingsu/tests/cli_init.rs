@@ -251,9 +251,19 @@ fn chmod(p: &Path, mode: u32) {
 }
 
 // Fail closed. 이것을 실패시키는 것: 조회 실패를 안전으로 보는 것.
+// As root the test is skipped, unless BINGSU_REQUIRE_NONROOT_TESTS=1 (CI)
+// makes that a failure. 이것을 실패시키는 것(root): 변수가 켜진 채 root로 돌 때 건너뛰는 것.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test harness switch, not the prompt path"
+)]
 fn uninspectable_target_warns_unknown() {
     if is_root() {
+        assert!(
+            std::env::var_os("BINGSU_REQUIRE_NONROOT_TESTS").is_none_or(|v| v != "1"),
+            "uninspectable_target_warns_unknown runs as root, but BINGSU_REQUIRE_NONROOT_TESTS=1 requires a non-root run"
+        );
         eprintln!("skipped: a non-root user (root reads a 0000 folder) not present on this host");
         return;
     }

@@ -33,6 +33,10 @@ fn main() -> ExitCode {
         Some("prompt") => prompt::run(&args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&argv0, &args[1..]),
+        #[cfg(feature = "bench-stubs")]
+        Some("__collect-stub") => {
+            ExitCode::from(u8::try_from(bingsu_collect::stub_main(&args[1..])).unwrap_or(1))
+        }
         _ => {
             eprintln!("usage: bingsu <init|prompt> ...");
             ExitCode::from(2)

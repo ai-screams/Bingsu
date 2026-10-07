@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -92,7 +92,16 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - if: runner.os == 'Linux'
+        run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+      # The runners are not in a container, so clone3 must reach the kernel
+      # (EINVAL) without the stub's filter; the clone3 test fails otherwise.
+      # They also run as a non-root user, so the tests that skip as root must
+      # run here; a runner that turns root fails them instead.
       - run: cargo test --workspace --all-features
+        env:
+          BINGSU_REQUIRE_CLONE3_CONTROL: "1"
+          BINGSU_REQUIRE_NONROOT_TESTS: "1"
 
   purity:
     name: Core purity gate

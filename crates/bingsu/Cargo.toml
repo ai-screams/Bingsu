@@ -11,8 +11,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Measurement-only hidden subcommand `__collect-stub` (M1 cost matrix).
+bench-stubs = ["dep:bingsu-collect"]
+
 [dependencies]
 bingsu-core = { path = "../bingsu-core" }
+bingsu-collect = { path = "../bingsu-collect", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

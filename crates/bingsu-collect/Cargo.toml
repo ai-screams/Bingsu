@@ -1,0 +1,22 @@
+[package]
+name = "bingsu-collect"
+version = "0.0.0"
+description = "M1 measurement stub of the small dedicated collector binary candidate"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bingsu-collect"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"

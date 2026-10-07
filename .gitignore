@@ -284,6 +284,8 @@ logs/
 *.LOCAL.*
 *.REMOTE.*
 
-# Core dumps (root only)
-/core
-/core.*
+# Core dumps anywhere (a test child killed by a signal dumps into its cwd
+# when core_pattern is "core"); directories named core stay tracked.
+core
+core.[0-9]*
+!core/
