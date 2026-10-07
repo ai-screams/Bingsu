@@ -24,3 +24,15 @@ path = "src/bin/fsb_synthetic.rs"
 [[bin]]
 name = "m1-spawn-matrix"
 path = "src/bin/m1_spawn_matrix.rs"
+
+[[bin]]
+name = "m1-file-costs"
+path = "src/bin/m1_file_costs.rs"
+
+[[bin]]
+name = "m1-writer-child"
+path = "src/bin/m1_writer_child.rs"
+
+[[bin]]
+name = "m1-fd-report"
+path = "src/bin/m1_fd_report.rs"
