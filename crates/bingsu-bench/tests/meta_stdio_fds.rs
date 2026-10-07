@@ -5,60 +5,46 @@
 //! numbers.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 use bingsu_bench::sys::meta::{
-    acl_probe_path, lock_and_read_generation, lstat_path, open_fstat_read_close, stat_path,
-    statfs_path,
+    acl_probe_path, lock_and_read_generation, lstat_path, open_dir, open_fstat_read_close,
+    stat_path, statfs_path,
 };
+use common::TempDir;
 use std::io;
+use std::os::fd::AsFd;
 
 mod common;
-
-/// A fresh folder under the temp dir, removed on drop (also on a failed
-/// assertion).
-struct TempDir(std::path::PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let p = std::env::temp_dir().join(format!("bingsu-meta-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 // 이것을 실패시키는 것: 머리 파일이 없거나, 디렉터리거나, 16바이트보다 짧은데 "세대 다름"(false)으로
 // 넘기는 것, 잠금 파일이 symlink인데 따라가는 것. 실제 파일 시스템에서 `lock_and_read_generation`을 부른다.
 #[test]
 fn lock_check_header_faults_are_errors() {
     let dir = TempDir::new("lockhdr");
-    let lock = dir.0.join("lock");
+    let fd = open_dir(&dir.0).unwrap();
+    let check = |lock: &std::ffi::CStr, generation| {
+        lock_and_read_generation(fd.as_fd(), lock, c"header", generation)
+    };
+    let (lock, header) = (dir.0.join("lock"), dir.0.join("header"));
     std::fs::write(&lock, b"").unwrap();
-    let header = dir.0.join("header");
     let mut good = [0u8; 16];
     good[8..].copy_from_slice(&7u64.to_le_bytes());
     std::fs::write(&header, good).unwrap();
-    assert!(lock_and_read_generation(&lock, &header, 7).unwrap());
-    assert!(!lock_and_read_generation(&lock, &header, 8).unwrap());
-    let link = dir.0.join("lock-link");
-    std::os::unix::fs::symlink(&lock, &link).unwrap();
-    assert!(
-        lock_and_read_generation(&link, &header, 7).is_err(),
-        "followed a symlinked lock"
-    );
+    assert!(check(c"lock", 7).unwrap());
+    assert!(!check(c"lock", 8).unwrap());
+    std::os::unix::fs::symlink(&lock, dir.0.join("lock-link")).unwrap();
+    assert!(check(c"lock-link", 7).is_err(), "followed a symlinked lock");
     std::fs::write(&header, &good[..12]).unwrap();
-    let e = lock_and_read_generation(&lock, &header, 7).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    assert_eq!(
+        check(c"lock", 7).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
     std::fs::remove_file(&header).unwrap();
-    let e = lock_and_read_generation(&lock, &header, 7).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    assert_eq!(
+        check(c"lock", 7).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
     std::fs::create_dir(&header).unwrap();
     assert!(
-        lock_and_read_generation(&lock, &header, 7).is_err(),
+        check(c"lock", 7).is_err(),
         "a directory header must be an error"
     );
 }
@@ -85,7 +71,8 @@ fn unreadable_header_is_an_error() {
     good[8..].copy_from_slice(&7u64.to_le_bytes());
     std::fs::write(&header, good).unwrap();
     std::fs::set_permissions(&header, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let e = lock_and_read_generation(&lock, &header, 7).unwrap_err();
+    let fd = open_dir(&dir.0).unwrap();
+    let e = lock_and_read_generation(fd.as_fd(), c"lock", c"header", 7).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
 }
 
@@ -93,17 +80,24 @@ fn unreadable_header_is_an_error() {
 #[test]
 fn short_file_is_unexpected_eof() {
     let dir = TempDir::new("short");
+    let fd = open_dir(&dir.0).unwrap();
     std::fs::write(dir.0.join("header"), [0u8; 10]).unwrap();
     let mut buf = [0u8; 4096];
-    let e = open_fstat_read_close(&dir.0, "header", 64, &mut buf).unwrap_err();
+    let e = open_fstat_read_close(fd.as_fd(), c"header", 64, &mut buf).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
     std::fs::write(dir.0.join("header"), [0u8; 64]).unwrap();
     assert_eq!(
-        open_fstat_read_close(&dir.0, "header", 64, &mut buf).unwrap(),
+        open_fstat_read_close(fd.as_fd(), c"header", 64, &mut buf).unwrap(),
         1
     );
     std::os::unix::fs::symlink(dir.0.join("header"), dir.0.join("link")).unwrap();
-    assert!(open_fstat_read_close(&dir.0, "link", 64, &mut buf).is_err());
+    assert!(open_fstat_read_close(fd.as_fd(), c"link", 64, &mut buf).is_err());
+    // Relative to the folder fd, not the working directory.
+    assert_eq!(
+        open_fstat_read_close(fd.as_fd(), c"header", 64, &mut buf).unwrap(),
+        1
+    );
+    assert_ne!(std::env::current_dir().unwrap(), dir.0);
 }
 
 // 이것을 실패시키는 것: 메타데이터·ACL 조회의 실패를 삼키는 것(ENOTDIR을 성공이나 "ACL 없음"으로 보는 것),
@@ -157,7 +151,8 @@ fn metadata_calls_report_failures() {
 // 유출용 복제에 close-on-exec를 붙이거나 min보다 낮은 번호를 쓰는 것.
 #[test]
 fn saved_copies_are_cloexec_and_leak_is_not() {
-    use bingsu_bench::sys::stdio::{dup_inheritable_at, save_stdout_stderr};
+    use bingsu_bench::sys::spawn::dup_inheritable_at;
+    use bingsu_bench::sys::stdio::save_stdout_stderr;
     use std::os::fd::{AsRawFd, OwnedFd, RawFd};
     let flags = |fd: RawFd| {
         // SAFETY: querying the flags of a descriptor this test owns.

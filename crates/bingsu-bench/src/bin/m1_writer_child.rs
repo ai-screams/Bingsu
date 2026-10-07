@@ -21,11 +21,13 @@ fn main() {
 mod imp {
     use bingsu_bench::report::{json_line, json_na};
     use bingsu_bench::rounds::drive;
-    use bingsu_bench::stats::summarize;
-    use bingsu_bench::sys::spawn::{SpawnSpec, dup_onto_stdout, pipe_cloexec, reap};
+    use bingsu_bench::stats::{summarize, timer_tick_ns};
+    use bingsu_bench::sys::spawn::{
+        SpawnSpec, dup_inheritable_at, dup_onto_stdout, pipe_cloexec, reap,
+    };
     use bingsu_bench::sys::stdio::{
-        Saved, dup_inheritable_at, open_fds_and_sid, redirect_stdout_stderr_to_null,
-        restore_stdout_stderr, save_stdout_stderr, spawn_writer_child,
+        Saved, open_fds_and_sid, redirect_stdout_stderr_to_null, restore_stdout_stderr,
+        save_stdout_stderr, spawn_writer_child,
     };
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
@@ -131,12 +133,7 @@ mod imp {
     /// stderr copy.
     fn restore_or_exit(saved: &Saved) {
         if let Err(e) = restore_stdout_stderr(saved) {
-            if let Ok(fd) = saved.stderr().try_clone_to_owned() {
-                let _ = writeln!(
-                    std::fs::File::from(fd),
-                    "m1-writer-child: restore fds 1/2: {e}"
-                );
-            }
+            let _ = to_saved_stderr(saved, &format!("m1-writer-child: restore fds 1/2: {e}"));
             std::process::exit(1);
         }
     }
@@ -211,6 +208,8 @@ mod imp {
                 return;
             }
         };
+        // Measured before the rounds, outside every clock; recorded on each row.
+        let tick = timer_tick_ns();
         let mut samples: [Vec<u64>; 2] = [Vec::with_capacity(rounds), Vec::with_capacity(rounds)];
         let mut failure: [Option<String>; 2] = [None, None];
         drive(ORDERS.len(), warmup + rounds, |round, i| {
@@ -229,14 +228,28 @@ mod imp {
                 Some(why) => println!("{}", json_na("writer", row, why)),
                 None => println!(
                     "{}",
-                    json_line("writer", row, &summarize(&mut samples[i]), &[])
+                    json_line(
+                        "writer",
+                        row,
+                        &summarize(&mut samples[i]),
+                        &[("timer_tick_ns", tick.to_string())]
+                    )
                 ),
             }
         }
     }
 
+    /// Writes `line` to the saved copy of fd 2, which still reaches the
+    /// caller while fd 2 points at /dev/null.
+    fn to_saved_stderr(saved: &Saved, line: &str) -> std::io::Result<()> {
+        let fd = saved.stderr().try_clone_to_owned()?;
+        writeln!(std::fs::File::from(fd), "{line}")
+    }
+
     /// The front printed its record; now it hands off to a child that sleeps
-    /// 1 s and exits without waiting for it. Any failure exits non-zero.
+    /// 1 s and exits without waiting for it. The child's pid goes to the
+    /// saved stderr (`CHILD_PID n`) so a test can see that the child still
+    /// runs when the shell returns. Any failure exits non-zero.
     fn demo(order: &str) {
         print!("record");
         // Must reach the shell pipe before fd 1 is replaced.
@@ -244,14 +257,16 @@ mod imp {
         let (sleep, one) = (c"/bin/sleep", c"1");
         let argv = [sleep, one];
         let saved = save_stdout_stderr().expect("save fds 1/2");
-        if order == "release-first" {
+        let pid = if order == "release-first" {
             redirect_stdout_stderr_to_null(&saved).expect("release fds 1/2");
-            spawn_writer_child(&spec(sleep, &argv)).expect("spawn the writer child");
+            spawn_writer_child(&spec(sleep, &argv)).expect("spawn the writer child")
         } else {
             // The child inherits the shell pipe.
-            spawn_writer_child(&spec(sleep, &argv)).expect("spawn the writer child");
+            let pid = spawn_writer_child(&spec(sleep, &argv)).expect("spawn the writer child");
             redirect_stdout_stderr_to_null(&saved).expect("release fds 1/2");
-        }
+            pid
+        };
+        to_saved_stderr(&saved, &format!("CHILD_PID {pid}")).expect("report the child pid");
     }
 
     /// Same spawn path as the timed loop, with a leaked non-CLOEXEC fd at

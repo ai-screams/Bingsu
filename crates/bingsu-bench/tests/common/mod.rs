@@ -1,4 +1,40 @@
 //! Helpers shared by the integration tests.
+#![allow(dead_code)] // each test binary uses its own subset
+
+use std::path::PathBuf;
+
+/// A new folder under the temp dir, removed on drop (also on a failed
+/// assertion). The name carries the pid, the time and an attempt number,
+/// and `create_dir` refuses one that already exists, so nothing planted
+/// there in advance is used.
+pub struct TempDir(pub PathBuf);
+
+impl TempDir {
+    pub fn new(tag: &str) -> TempDir {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        for attempt in 0..100 {
+            let p = std::env::temp_dir().join(format!(
+                "bingsu-{tag}-{}-{nanos}-{attempt}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&p) {
+                Ok(()) => return TempDir(p),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("{}: {e}", p.display()),
+            }
+        }
+        panic!("no free temp folder name for {tag}");
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Gives `p` an extended POSIX ACL under `name` (the access ACL, or a
 /// folder's default ACL that new files inherit): owner, one named user,

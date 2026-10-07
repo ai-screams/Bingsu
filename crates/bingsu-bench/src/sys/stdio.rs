@@ -49,14 +49,6 @@ fn dup_cloexec(fd: RawFd) -> io::Result<OwnedFd> {
     owned(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) })
 }
 
-/// An inheritable (no FD_CLOEXEC) duplicate at the lowest free fd >= `min`,
-/// for the fd-inventory probe's planted leak. Test-only.
-#[doc(hidden)]
-pub fn dup_inheritable_at(fd: &OwnedFd, min: RawFd) -> io::Result<OwnedFd> {
-    // SAFETY: F_DUPFD returns a new fd >= min without FD_CLOEXEC, or -1 and errno.
-    owned(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, min) })
-}
-
 pub fn save_stdout_stderr() -> io::Result<Saved> {
     Ok(Saved(dup_cloexec(1)?, dup_cloexec(2)?))
 }
@@ -72,8 +64,9 @@ fn dup2(from: RawFd, to: RawFd) -> io::Result<()> {
 }
 
 /// Points fd 1 at `out` and fd 2 at `err`, checking each dup2. If the second
-/// fails after the first succeeded, fd 1 is put back to `undo_1` so the
-/// process is never left half-redirected. `dup2` is a parameter so the
+/// fails after the first succeeded, fd 1 is put back to `undo_1`; if that
+/// undo fails as well, its error is returned and fd 1 stays at `out` (the
+/// caller sees the failure either way). `dup2` is a parameter so the
 /// rollback can be tested without breaking real descriptors.
 fn point_1_and_2(
     out: RawFd,
@@ -96,8 +89,9 @@ pub fn restore_stdout_stderr(s: &Saved) -> io::Result<()> {
 }
 
 /// Spec section 4: release the shell's pipe before spawning. Every step is
-/// checked; on failure fds 1/2 are what they were (`saved`) and the caller
-/// must not spawn.
+/// checked and any failure is returned; the caller must not spawn then. fds
+/// 1/2 are what they were unless the undo of fd 1 failed too (see
+/// `point_1_and_2`).
 pub fn redirect_stdout_stderr_to_null(saved: &Saved) -> io::Result<()> {
     redirect_with(open_dev_null, saved.0.as_raw_fd(), dup2)
 }

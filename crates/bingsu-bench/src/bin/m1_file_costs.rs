@@ -22,11 +22,13 @@ mod imp {
     use bingsu_bench::BUF;
     use bingsu_bench::report::{json_line, json_na};
     use bingsu_bench::rounds::drive;
-    use bingsu_bench::stats::summarize;
+    use bingsu_bench::stats::{summarize, timer_tick_ns};
     use bingsu_bench::sys::meta::{
-        acl_probe_path, lock_and_read_generation, lstat_path, open_fstat_read_close, stat_path,
-        statfs_path,
+        acl_probe_path, lock_and_read_generation, lstat_path, open_dir, open_fstat_read_close,
+        stat_path, statfs_path,
     };
+    use std::ffi::{CStr, CString};
+    use std::os::fd::{AsFd, BorrowedFd};
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
@@ -94,10 +96,10 @@ mod imp {
     struct Fixture(PathBuf);
 
     impl Fixture {
+        /// A new folder named by pid, time and attempt; `create_dir` refuses
+        /// one that already exists, so nothing planted in advance is used.
         fn create(parent: &Path) -> Result<Fixture, String> {
-            let dir = parent.join(format!("bingsu-m1-file-{}", std::process::id()));
-            std::fs::create_dir(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-            let fx = Fixture(dir);
+            let fx = Fixture(new_dir(parent, "bingsu-m1-file")?);
             let write = |name: &str, bytes: &[u8]| {
                 std::fs::write(fx.0.join(name), bytes).map_err(|e| format!("write {name}: {e}"))
             };
@@ -115,45 +117,77 @@ mod imp {
         }
     }
 
+    fn new_dir(parent: &Path, tag: &str) -> Result<PathBuf, String> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        for attempt in 0..100 {
+            let dir = parent.join(format!("{tag}-{}-{nanos}-{attempt}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("mkdir {}: {e}", dir.display())),
+            }
+        }
+        Err(format!("no free folder name under {}", parent.display()))
+    }
+
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
-    /// One read of `name` (ceil(size / BUF) read calls; the strace test
-    /// counts them), or an error naming the file.
-    fn read_file(dir: &Path, name: &str, size: usize, buf: &mut [u8]) -> Result<(), String> {
+    /// One read of `name` relative to the folder fd (ceil(size / BUF) read
+    /// calls; the strace test counts them), or an error naming the file.
+    fn read_file(
+        dir: BorrowedFd<'_>,
+        name: &CStr,
+        size: usize,
+        buf: &mut [u8],
+    ) -> Result<(), String> {
         open_fstat_read_close(dir, name, size, buf)
             .map(drop)
-            .map_err(|e| format!("{name}: {e}"))
+            .map_err(|e| format!("{}: {e}", name.to_string_lossy()))
+    }
+
+    fn sweep_name(n: usize) -> CString {
+        CString::new(format!("sweep-{n}")).expect("no NUL")
     }
 
     #[cfg(target_os = "linux")]
-    fn marker(name: &std::ffi::CStr) {
+    fn marker(name: &CStr) {
         bingsu_bench::sys::fs::marker(name).expect("fsb marker");
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn marker(_: &std::ffi::CStr) {}
+    fn marker(_: &CStr) {}
 
-    /// Inside the fsb window: header, marker and the sweep files, which the
-    /// caller made in `dir`. Nothing touches the filesystem outside the
-    /// window (closed-window rule, Task B1); a failure exits non-zero.
+    fn fail(e: impl std::fmt::Display) -> ! {
+        eprintln!("m1-file-costs: {e}");
+        std::process::exit(1);
+    }
+
+    /// Inside the fsb window: the folder open, then header, marker and the
+    /// sweep files, which the caller made in `dir`. Nothing touches the
+    /// filesystem outside the window (closed-window rule, Task B1), so the
+    /// folder open is counted too; a failure exits non-zero.
     fn once(dir: &Path) {
         let mut buf = vec![0u8; BUF];
-        marker(c"fsb:begin");
         let mut files = vec![
-            ("header".to_string(), HEADER),
-            ("marker".to_string(), MARKER),
+            (c"header".to_owned(), HEADER),
+            (c"marker".to_owned(), MARKER),
         ];
-        files.extend(SWEEP.map(|n| (format!("sweep-{n}"), n)));
+        files.extend(SWEEP.map(|n| (sweep_name(n), n)));
+        marker(c"fsb:begin");
+        let fd = open_dir(dir).unwrap_or_else(|e| fail(format!("open {}: {e}", dir.display())));
         for (name, size) in &files {
-            if let Err(e) = read_file(dir, name, *size, &mut buf) {
-                eprintln!("m1-file-costs: {e}");
-                std::process::exit(1);
+            if let Err(e) = read_file(fd.as_fd(), name, *size, &mut buf) {
+                fail(e);
             }
         }
+        drop(fd);
         marker(c"fsb:end");
     }
 
@@ -179,37 +213,46 @@ mod imp {
 
     /// The `lock+generation` operation: only a free lock on our own file with
     /// the expected generation counts as a measured success.
-    fn lock_row(lock: &Path, header: &Path) -> Result<(), String> {
-        match lock_and_read_generation(lock, header, GENERATION) {
+    fn lock_row(dir: BorrowedFd<'_>) -> Result<(), String> {
+        match lock_and_read_generation(dir, c"lock", c"snapshot-header", GENERATION) {
             Ok(true) => Ok(()),
             Ok(false) => Err("not ours, locked or another generation".into()),
             Err(e) => Err(e.to_string()),
         }
     }
 
-    fn rows(dir: &Path) -> Vec<Row<'_>> {
+    /// macOS reports "no ACL" for a missing file too (`acl_probe_path`), so
+    /// once the rounds are done the probed file must still be there; checked
+    /// outside the timed calls.
+    fn acl_probe_still_there(probe: &Path) -> Result<(), String> {
+        lstat_path(probe)
+            .map_err(|e| format!("ACL probe {}: {e} (after the rounds)", probe.display()))
+    }
+
+    /// Rows over the fixture folder `fx` (its fd is `fd`) and the runtime
+    /// root `root` (the `statfs` row: `init` asks it of the runtime root).
+    fn rows<'a>(fx: &Path, fd: BorrowedFd<'a>, root: &'a Path) -> Vec<Row<'a>> {
         let buf_extra = || ("buf", BUF.to_string());
         let mut rows = vec![row(
             "header64+marker128".into(),
             vec![buf_extra()],
             Box::new(move |buf| {
-                read_file(dir, "header", HEADER, buf)?;
-                read_file(dir, "marker", MARKER, buf)
+                read_file(fd, c"header", HEADER, buf)?;
+                read_file(fd, c"marker", MARKER, buf)
             }),
         )];
         for n in SWEEP {
-            let name = format!("sweep-{n}");
+            let name = sweep_name(n);
             rows.push(row(
                 format!("sweep/{n}"),
                 vec![buf_extra(), ("reads", n.div_ceil(BUF).to_string())],
-                Box::new(move |buf| read_file(dir, &name, n, buf)),
+                Box::new(move |buf| read_file(fd, &name, n, buf)),
             ));
         }
-        let probe = dir.join("header");
+        let probe = fx.join("header");
         for (name, f) in [
             ("meta/stat", stat_path as fn(&Path) -> std::io::Result<()>),
             ("meta/lstat", lstat_path),
-            ("meta/statfs", statfs_path),
         ] {
             let p = probe.clone();
             rows.push(row(
@@ -218,6 +261,11 @@ mod imp {
                 Box::new(move |_| f(&p).map_err(|e| e.to_string())),
             ));
         }
+        rows.push(row(
+            "meta/statfs".into(),
+            vec![("target", r#""runtime-root""#.into())],
+            Box::new(move |_| statfs_path(root).map_err(|e| e.to_string())),
+        ));
         // The common case is a file without an ACL; one with an ACL (say,
         // inherited from the folder) takes another path, so it fails the row.
         rows.push(row(
@@ -229,11 +277,10 @@ mod imp {
                 Err(e) => Err(e.to_string()),
             }),
         ));
-        let (lock, header) = (dir.join("lock"), dir.join("snapshot-header"));
         rows.push(row(
             "lock+generation".into(),
             vec![],
-            Box::new(move |_| lock_row(&lock, &header)),
+            Box::new(move |_| lock_row(fd)),
         ));
         rows
     }
@@ -250,14 +297,11 @@ mod imp {
         if a.once {
             return once(&a.dir);
         }
-        let fx = match Fixture::create(&a.dir) {
-            Ok(fx) => fx,
-            Err(e) => {
-                eprintln!("m1-file-costs: fixture: {e}");
-                std::process::exit(1);
-            }
-        };
-        let mut rows = rows(&fx.0);
+        let fx = Fixture::create(&a.dir).unwrap_or_else(|e| fail(format!("fixture: {e}")));
+        let fd = open_dir(&fx.0).unwrap_or_else(|e| fail(format!("open the fixture folder: {e}")));
+        // Measured before the rounds, outside every clock; recorded on each row.
+        let tick = timer_tick_ns();
+        let mut rows = rows(&fx.0, fd.as_fd(), &a.dir);
         let mut buf = vec![0u8; BUF];
         drive(rows.len(), a.warmup + a.rounds, |round, i| {
             let r = &mut rows[i];
@@ -273,7 +317,13 @@ mod imp {
                 Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
             }
         });
+        if let Some(r) = rows.iter_mut().find(|r| r.name == "meta/acl") {
+            if let (None, Err(e)) = (&r.failure, acl_probe_still_there(&fx.0.join("header"))) {
+                r.failure = Some(e);
+            }
+        }
         for r in &mut rows {
+            r.extra.push(("timer_tick_ns", tick.to_string()));
             match &r.failure {
                 Some(why) => println!("{}", json_na("file", &r.name, why)),
                 None => println!(
@@ -286,34 +336,54 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{Args, GENERATION, lock_row, parse};
+        use super::{
+            Args, Fixture, GENERATION, acl_probe_still_there, lock_row, new_dir, open_dir, parse,
+        };
+        use std::os::fd::AsFd;
 
         // 이것을 실패시키는 것: 잠금이 다른 곳에 잡혀 있거나 세대가 다른데 lock+generation을 잰 값으로 세는 것.
         #[test]
         fn held_lock_or_other_generation_is_a_failure() {
-            let dir = std::env::temp_dir().join(format!("bingsu-lockrow-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let (lock, header) = (dir.join("lock"), dir.join("snapshot-header"));
+            let fx = Fixture(new_dir(&std::env::temp_dir(), "bingsu-lockrow").unwrap());
+            let fd = open_dir(&fx.0).unwrap();
+            let (lock, header) = (fx.0.join("lock"), fx.0.join("snapshot-header"));
             std::fs::write(&lock, b"").unwrap();
             let mut h = [0u8; 16];
             h[8..].copy_from_slice(&GENERATION.to_le_bytes());
             std::fs::write(&header, h).unwrap();
-            let free = lock_row(&lock, &header);
+            assert_eq!(lock_row(fd.as_fd()), Ok(()));
             // flock locks belong to the open file description: a second open
             // in this process conflicts like another process would.
             let holder = std::fs::File::open(&lock).unwrap();
             holder.lock().unwrap();
-            let held = lock_row(&lock, &header);
+            let no = Err("not ours, locked or another generation".to_string());
+            assert_eq!(lock_row(fd.as_fd()), no);
             drop(holder);
             h[8..].copy_from_slice(&(GENERATION + 1).to_le_bytes());
             std::fs::write(&header, h).unwrap();
-            let other = lock_row(&lock, &header);
-            std::fs::remove_dir_all(&dir).unwrap();
-            assert_eq!(free, Ok(()));
-            let no = Err("not ours, locked or another generation".to_string());
-            assert_eq!(held, no);
-            assert_eq!(other, no);
+            assert_eq!(lock_row(fd.as_fd()), no);
+        }
+
+        // 이것을 실패시키는 것: 라운드 뒤 ACL 조회 파일이 없어도 meta/acl을 잰 값으로 두는 것(macOS는 없는 파일도 "ACL 없음").
+        #[test]
+        fn missing_acl_probe_is_a_failure() {
+            let fx = Fixture(new_dir(&std::env::temp_dir(), "bingsu-aclprobe").unwrap());
+            let probe = fx.0.join("header");
+            std::fs::write(&probe, b"x").unwrap();
+            assert_eq!(acl_probe_still_there(&probe), Ok(()));
+            std::fs::remove_file(&probe).unwrap();
+            let e = acl_probe_still_there(&probe).unwrap_err();
+            assert!(e.contains("(after the rounds)"), "{e}");
+        }
+
+        // 이것을 실패시키는 것: 이미 있는 폴더 이름을 그대로 쓰는 것(create_dir_all처럼).
+        #[test]
+        fn new_dir_never_reuses_a_folder() {
+            let parent = Fixture(new_dir(&std::env::temp_dir(), "bingsu-newdir").unwrap());
+            let a = new_dir(&parent.0, "x").unwrap();
+            let b = new_dir(&parent.0, "x").unwrap();
+            assert_ne!(a, b);
+            assert!(std::fs::read_dir(&a).unwrap().next().is_none());
         }
 
         fn p(args: &[&str]) -> Result<Args, String> {

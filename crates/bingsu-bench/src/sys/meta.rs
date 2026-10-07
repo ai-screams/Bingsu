@@ -1,9 +1,16 @@
 //! Per-call filesystem costs (spec section 9 M1 row (7), "lock and
 //! generation check" and the `statfs` of `init`). Every failed system call
-//! is returned: a failure timed as a success would be a wrong number.
-use std::ffi::CString;
+//! is returned: a failure timed as a success would be a wrong number. The
+//! one exception is macOS `acl_probe_path`, whose "no ACL" answer cannot be
+//! told from a missing file (see there).
+//!
+//! The file reads open names relative to an fd of the runtime folder
+//! (`openat`), as the front does with the runtime-root fd it validated
+//! (spec section 4 "fd inheritance"); the folder is opened once, outside
+//! any timed call.
+use std::ffi::{CStr, CString};
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -20,16 +27,36 @@ fn ok(r: libc::c_int) -> io::Result<()> {
     }
 }
 
-/// open(2) with O_NOFOLLOW | O_CLOEXEC added to `flags`.
-fn open_nofollow(p: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
-    let c = cpath(p)?;
-    // SAFETY: the path is NUL-terminated; no O_CREAT, so no mode argument.
-    let raw = unsafe { libc::open(c.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+fn owned(raw: libc::c_int) -> io::Result<OwnedFd> {
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `raw` is a new descriptor owned by nobody else; dropping closes it once.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// The runtime folder as an fd for the `openat` calls (O_DIRECTORY, close-on-exec).
+pub fn open_dir(p: &Path) -> io::Result<OwnedFd> {
+    let c = cpath(p)?;
+    // SAFETY: the path is NUL-terminated; no O_CREAT, so no mode argument.
+    owned(unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    })
+}
+
+/// openat(2) relative to `dir`, with O_NOFOLLOW | O_CLOEXEC added to `flags`.
+fn open_at(dir: BorrowedFd<'_>, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+    // SAFETY: `dir` is open for the call; the name is NUL-terminated; no O_CREAT, so no mode.
+    owned(unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
 }
 
 fn fstat_uid(fd: &OwnedFd) -> io::Result<libc::uid_t> {
@@ -67,8 +94,9 @@ pub fn statfs_path(p: &Path) -> io::Result<()> {
 /// ACL lookup by path, not following a final symlink, the way the product
 /// asks (`bingsu::sys::acl_facts`): Linux POSIX access ACL xattr, macOS
 /// extended ACL. `Ok(false)` is "no ACL" (Linux ENODATA or ENOTSUP, macOS
-/// a NULL result with ENOENT, which a missing file also gives); any other
-/// failure is an error.
+/// a NULL result with ENOENT); any other failure is an error. On macOS a
+/// missing file also gives ENOENT, so a caller that must know the file
+/// exists checks it once outside the timed calls (`lstat_path`).
 pub fn acl_probe_path(p: &Path) -> io::Result<bool> {
     let c = cpath(p)?;
     #[cfg(target_os = "linux")]
@@ -116,17 +144,17 @@ pub fn acl_probe_path(p: &Path) -> io::Result<bool> {
     }
 }
 
-/// openat + fstat + ceil(size / buf.len()) reads (no end check) + close.
-/// Returns the number of read calls made. An fstat or read failure is
+/// openat(`dir`, `name`) + fstat + ceil(size / buf.len()) reads (no end
+/// check) + close. Returns the number of read calls made. An fstat or read failure is
 /// returned, and a file that ends before `size` bytes is `UnexpectedEof`
 /// (a short fixture would otherwise be timed as a valid read).
 pub fn open_fstat_read_close(
-    dir: &Path,
-    name: &str,
+    dir: BorrowedFd<'_>,
+    name: &CStr,
     size: usize,
     buf: &mut [u8],
 ) -> io::Result<usize> {
-    let fd = open_nofollow(&dir.join(name), libc::O_RDONLY)?;
+    let fd = open_at(dir, name, libc::O_RDONLY)?;
     let read = |b: &mut [u8]| {
         // SAFETY: `b` is writable for `b.len()` bytes.
         let n = unsafe { libc::read(fd.as_raw_fd(), b.as_mut_ptr().cast(), b.len()) };
@@ -170,13 +198,18 @@ fn read_counted(
     Ok(reads)
 }
 
-/// O_NOFOLLOW open + fstat owner check + non-blocking flock + 8-byte
+/// O_NOFOLLOW openat in `dir` + fstat owner check + non-blocking flock + 8-byte
 /// generation read (bytes 8..16 of the header) + unlock (spec section 4
 /// helper "concurrency" row). `Ok(true)` only when the lock file is ours,
 /// the lock is free and the generation matches; every failed system call is
 /// an error, and the lock is released even when reading the generation fails.
-pub fn lock_and_read_generation(lock: &Path, header: &Path, expect_gen: u64) -> io::Result<bool> {
-    let fd = open_nofollow(lock, libc::O_RDWR)?;
+pub fn lock_and_read_generation(
+    dir: BorrowedFd<'_>,
+    lock: &CStr,
+    header: &CStr,
+    expect_gen: u64,
+) -> io::Result<bool> {
+    let fd = open_at(dir, lock, libc::O_RDWR)?;
     let try_lock = || {
         // SAFETY: flock takes an fd and flags only.
         if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -190,7 +223,7 @@ pub fn lock_and_read_generation(lock: &Path, header: &Path, expect_gen: u64) -> 
         }
     };
     let read_gen = || {
-        let h = open_nofollow(header, libc::O_RDONLY)?;
+        let h = open_at(dir, header, libc::O_RDONLY)?;
         let mut g = [0u8; 8];
         // SAFETY: `g` is 8 writable bytes.
         let n = unsafe { libc::pread(h.as_raw_fd(), g.as_mut_ptr().cast(), 8, 8) };

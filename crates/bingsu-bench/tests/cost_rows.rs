@@ -2,7 +2,8 @@
 //! carry `"n"`, a row that cannot be measured carries `na` with the reason,
 //! and the file fixture is gone afterwards.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
-use std::path::{Path, PathBuf};
+use common::TempDir;
+use std::path::Path;
 use std::process::Command;
 
 mod common;
@@ -19,24 +20,6 @@ const FILE_ROWS: [&str; 10] = [
     "meta/acl",
     "lock+generation",
 ];
-
-/// A fresh folder under the temp dir, removed on drop.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let p = std::env::temp_dir().join(format!("bingsu-rows-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn run(bin: &str, args: &[&str]) -> (bool, Vec<String>, String) {
     let out = Command::new(bin).args(args).output().unwrap();
@@ -75,7 +58,7 @@ fn row_of<'a>(lines: &'a [String], name: &str) -> &'a str {
 }
 
 // 이것을 실패시키는 것: 행을 빠뜨리거나 순서를 바꾸는 것, warmup을 표본에 넣는 것(n이 3이 아님),
-// buf·reads 기록을 빼는 것, fixture 폴더를 남기는 것.
+// buf·reads·timer_tick_ns·statfs 대상 기록을 빼는 것, fixture 폴더를 남기는 것.
 #[test]
 fn file_costs_prints_every_row_and_cleans_up() {
     let dir = TempDir::new("file");
@@ -98,9 +81,16 @@ fn file_costs_prints_every_row_and_cleans_up() {
             l.starts_with(r#"{"matrix":"file""#) && l.contains(r#""n":3,"#),
             "{l}"
         );
+        let tick = l
+            .split(r#""timer_tick_ns":"#)
+            .nth(1)
+            .expect("no timer_tick_ns");
+        let tick: u64 = tick.trim_end_matches('}').parse().unwrap();
+        assert!(tick > 0, "{l}");
     }
-    assert!(row_of(&lines, "sweep/1024").ends_with(r#""buf":4096,"reads":1}"#));
-    assert!(row_of(&lines, "header64+marker128").ends_with(r#""buf":4096}"#));
+    assert!(row_of(&lines, "sweep/1024").contains(r#""buf":4096,"reads":1,"#));
+    assert!(row_of(&lines, "header64+marker128").contains(r#""buf":4096,"#));
+    assert!(row_of(&lines, "meta/statfs").contains(r#""target":"runtime-root","#));
     let left: Vec<_> = std::fs::read_dir(&dir.0).unwrap().collect();
     assert!(left.is_empty(), "fixture left behind: {left:?}");
 }

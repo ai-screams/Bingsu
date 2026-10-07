@@ -5,7 +5,7 @@ use std::ffi::CStr;
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use std::ffi::c_char;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 const SETSID: libc::c_short = libc::POSIX_SPAWN_SETSID; // glibc <spawn.h> 0x80
@@ -87,12 +87,19 @@ fn set_cloexec_pair(p: [libc::c_int; 2]) -> io::Result<()> {
     Ok(())
 }
 
-/// A duplicate without FD_CLOEXEC (used by the fd-inventory test to prove
-/// the child-side close works). Test-only.
-#[doc(hidden)]
+/// A duplicate without FD_CLOEXEC at the lowest free fd (like dup(2)):
+/// the planted leak of the fd-inventory tests.
 pub fn dup_inheritable(fd: &OwnedFd) -> io::Result<OwnedFd> {
-    // SAFETY: dup takes an fd and returns a new one without FD_CLOEXEC.
-    let n = unsafe { libc::dup(fd.as_raw_fd()) };
+    dup_inheritable_at(fd, 0)
+}
+
+/// A duplicate without FD_CLOEXEC at the lowest free fd >= `min`: the
+/// planted leak of the fd-inventory tests and of `m1-writer-child
+/// --probe-child`, which puts it at 100 or above so a report that looks only
+/// at low fds would miss it.
+pub fn dup_inheritable_at(fd: &OwnedFd, min: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: F_DUPFD returns a new fd >= min without FD_CLOEXEC, or -1 and errno.
+    let n = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, min) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
