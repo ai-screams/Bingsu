@@ -36,3 +36,19 @@ path = "src/bin/m1_writer_child.rs"
 [[bin]]
 name = "m1-fd-report"
 path = "src/bin/m1_fd_report.rs"
+
+[[bin]]
+name = "m1-cgroup-probe"
+path = "src/bin/m1_cgroup_probe.rs"
+
+[[bin]]
+name = "m1-macos-watchdog"
+path = "src/bin/m1_macos_watchdog.rs"
+
+[[bin]]
+name = "m1-macos-rlimit-as"
+path = "src/bin/m1_macos_rlimit_as.rs"
+
+[[bin]]
+name = "m1-rlimit-as-start"
+path = "src/bin/m1_rlimit_as_start.rs"

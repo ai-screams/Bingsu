@@ -300,10 +300,6 @@ pub fn reap(pid: libc::pid_t) -> io::Result<libc::c_int> {
 mod tests {
     use super::*;
 
-    // The tests that open or close fds run one at a time: a closed fd number
-    // checked below could otherwise be reused by a parallel test's pipe.
-    static FD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     // 이것을 실패시키는 것: EINTR을 다른 오류처럼 돌려주는 것(재시도 갈래 삭제), 또는 다른 오류까지 재시도하는 것.
     #[test]
     fn retry_eintr_retries_only_interrupted() {
@@ -337,7 +333,7 @@ mod tests {
     // (자식 쪽 closefrom·CLOEXEC_DEFAULT가 이 누락을 가리므로 spawn_fds 시험으로는 잡히지 않는다.)
     #[test]
     fn pipe_ends_are_cloexec() {
-        let _serial = FD_TESTS.lock().unwrap();
+        let _serial = crate::sys::fd_tests_lock();
         let (r, w) = pipe_cloexec().unwrap();
         for fd in [r.as_raw_fd(), w.as_raw_fd()] {
             // SAFETY: querying the flags of a descriptor we own.
@@ -354,7 +350,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn cloexec_failure_closes_both_and_errors() {
-        let _serial = FD_TESTS.lock().unwrap();
+        let _serial = crate::sys::fd_tests_lock();
         let mut p = [-1 as libc::c_int; 2];
         // SAFETY: `p` is a two-element array for pipe(2).
         assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
