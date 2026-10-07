@@ -61,3 +61,16 @@ def test_files_open_relative_to_the_folder_fd(tmp_path):
     for name in NAMES:
         hits = [l for l in lines if f'"{name}"' in l or f"/{name}\"" in l]
         assert len(hits) == 1 and hits[0].startswith(f'openat({fd}, "{name}", '), (name, hits)
+
+
+# 이것을 실패시키는 것: meta/statfs를 런타임 루트(--dir)가 아닌 경로(fixture 파일 등)에 부르는 것.
+def test_statfs_asks_the_runtime_root(tmp_path):
+    d = tmp_path / "root"
+    d.mkdir()
+    trace = tmp_path / "trace"
+    run = subprocess.run(["strace", "-qq", "-e", "trace=statfs,statfs64", "-o", str(trace), "--",
+                          str(BIN), "--dir", str(d), "--rounds", "2", "--warmup", "0"], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    lines = [l for l in trace.read_text().splitlines() if l.startswith("statfs")]
+    # Two rounds of the meta/statfs row; any other statfs would show here too.
+    assert len(lines) == 2 and all(l.split(", ", 1)[0].split("(", 1)[1] == f'"{d}"' for l in lines), lines

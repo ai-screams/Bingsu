@@ -317,28 +317,32 @@ mod imp {
                 Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
             }
         });
-        if let Some(r) = rows.iter_mut().find(|r| r.name == "meta/acl") {
-            if let (None, Err(e)) = (&r.failure, acl_probe_still_there(&fx.0.join("header"))) {
-                r.failure = Some(e);
-            }
+        for line in finish(rows, &fx.0.join("header"), tick) {
+            println!("{line}");
         }
-        for r in &mut rows {
-            r.extra.push(("timer_tick_ns", tick.to_string()));
-            match &r.failure {
-                Some(why) => println!("{}", json_na("file", &r.name, why)),
-                None => println!(
-                    "{}",
-                    json_line("file", &r.name, &summarize(&mut r.samples), &r.extra)
-                ),
-            }
-        }
+    }
+
+    /// The output lines, after the rounds and outside every clock: a failed
+    /// row is `na`, and so is `meta/acl` when its probe file is gone (macOS
+    /// reports a missing file as "no ACL"). Every row records the timer tick.
+    fn finish(rows: Vec<Row<'_>>, acl_probe: &Path, tick: u64) -> Vec<String> {
+        rows.into_iter()
+            .map(|mut r| {
+                if r.name == "meta/acl" && r.failure.is_none() {
+                    r.failure = acl_probe_still_there(acl_probe).err();
+                }
+                r.extra.push(("timer_tick_ns", tick.to_string()));
+                match &r.failure {
+                    Some(why) => json_na("file", &r.name, why),
+                    None => json_line("file", &r.name, &summarize(&mut r.samples), &r.extra),
+                }
+            })
+            .collect()
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{
-            Args, Fixture, GENERATION, acl_probe_still_there, lock_row, new_dir, open_dir, parse,
-        };
+        use super::{Args, Fixture, GENERATION, finish, lock_row, new_dir, open_dir, parse, row};
         use std::os::fd::AsFd;
 
         // 이것을 실패시키는 것: 잠금이 다른 곳에 잡혀 있거나 세대가 다른데 lock+generation을 잰 값으로 세는 것.
@@ -364,16 +368,34 @@ mod imp {
             assert_eq!(lock_row(fd.as_fd()), no);
         }
 
-        // 이것을 실패시키는 것: 라운드 뒤 ACL 조회 파일이 없어도 meta/acl을 잰 값으로 두는 것(macOS는 없는 파일도 "ACL 없음").
+        // 이것을 실패시키는 것: 라운드 뒤 ACL 조회 파일이 없어도 meta/acl을 잰 값으로 내는 것(macOS는 없는 파일도
+        // "ACL 없음"), 그 확인을 다른 행에 하는 것, 출력 줄에 결과를 반영하지 않는 것.
         #[test]
-        fn missing_acl_probe_is_a_failure() {
+        fn missing_acl_probe_makes_the_acl_row_na() {
             let fx = Fixture(new_dir(&std::env::temp_dir(), "bingsu-aclprobe").unwrap());
             let probe = fx.0.join("header");
+            let measured = |name: &str| {
+                let mut r = row(name.into(), vec![], Box::new(|_| Ok(())));
+                r.samples = vec![5, 7];
+                r
+            };
             std::fs::write(&probe, b"x").unwrap();
-            assert_eq!(acl_probe_still_there(&probe), Ok(()));
+            let lines = finish(vec![measured("meta/acl")], &probe, 41);
+            assert!(
+                lines[0].contains(r#""n":2,"#) && lines[0].ends_with(r#""timer_tick_ns":41}"#),
+                "{lines:?}"
+            );
             std::fs::remove_file(&probe).unwrap();
-            let e = acl_probe_still_there(&probe).unwrap_err();
-            assert!(e.contains("(after the rounds)"), "{e}");
+            let lines = finish(
+                vec![measured("meta/stat"), measured("meta/acl")],
+                &probe,
+                41,
+            );
+            assert!(lines[0].contains(r#""n":2,"#), "{lines:?}");
+            assert!(
+                lines[1].contains(r#""na":"ACL probe "#) && lines[1].contains("(after the rounds)"),
+                "{lines:?}"
+            );
         }
 
         // 이것을 실패시키는 것: 이미 있는 폴더 이름을 그대로 쓰는 것(create_dir_all처럼).
