@@ -190,6 +190,13 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
       - run: cargo build -p bingsu-bench --bin fsb-synthetic
+      # bench/tests: the strace read-count test needs the release file-cost
+      # runner, and the writer-order demo runs in all three shells.
+      - run: cargo build --release -p bingsu-bench
+      - name: Install zsh and fish for the writer-order demo
+        run: |
+          sudo apt-get install -y --no-install-recommends zsh fish
+          { bash --version | head -n 1; zsh --version; fish --version; } | tee -a "$GITHUB_STEP_SUMMARY"
       # FSB_REQUIRE_STRACE turns the Linux-only skips into failures, so a
       # missing strace or binary cannot pass this job by skipping.
       - name: Scaffold tests
@@ -197,3 +204,12 @@ jobs:
           FSB_REQUIRE_STRACE: "1"
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest tools/fsbudget -q -rs -p no:cacheprovider
+      # FSB_REQUIRE_STRACE fails the read-count test instead of skipping it;
+      # BINGSU_TEST_SHELLS (as in tests/shell) fails a listed shell that is
+      # missing, so neither test can pass here by not running.
+      - name: Bench tests
+        env:
+          FSB_REQUIRE_STRACE: "1"
+          BINGSU_TEST_SHELLS: bash zsh fish
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest bench/tests -q -rs -p no:cacheprovider
