@@ -54,8 +54,12 @@ fn stdio_fd_numbers_are_refused() {
 }
 
 // 이것을 실패시키는 것: flags에서 CLONE_INTO_CGROUP을 빼는 것(cgroup이 아닌 fd로도 자식이 생긴다).
+// host가 clone3 자체를 ENOSYS로 막으면(docker 기본 seccomp 프로필) 이 거부를 판별할 수 없다. 그때는
+// 캡처되지 않는 stderr에 알리고 건너뛰며, BINGSU_REQUIRE_CLONE3_CONTROL=1(CI)이면 실패한다.
+// 이것을 실패시키는 것(대조): 변수가 켜진 채 판별 불가인 곳에서 통과하는 것, ENOSYS가 아닌 오류를 건너뛰는 것.
 #[test]
 fn non_cgroup_fd_is_refused() {
+    use std::io::Write;
     let not_cgroup = dir_fd("/");
     let sh = c"/bin/sh";
     let argv = [sh, c"-c", c"exit 0"];
@@ -69,11 +73,18 @@ fn non_cgroup_fd_is_refused() {
         devnull.as_raw_fd(),
         devnull.as_raw_fd(),
     );
-    // EBADF: the fd is open but not a cgroup directory.
-    assert_eq!(
-        r.err().and_then(|e| e.raw_os_error()),
-        Some(libc::EBADF),
-        "not refused with EBADF"
-    );
+    let errno = r.err().and_then(|e| e.raw_os_error());
     no_child_was_made();
+    if errno == Some(libc::ENOSYS) {
+        let msg = "clone3 is ENOSYS on this host (docker's default seccomp profile?): non_cgroup_fd_is_refused cannot tell a refused cgroup fd apart";
+        assert!(
+            std::env::var_os("BINGSU_REQUIRE_CLONE3_CONTROL").is_none_or(|v| v != "1"),
+            "{msg}"
+        );
+        // Bypasses the test harness capture so a passing run still shows it.
+        let _ = writeln!(std::io::stderr().lock(), "NOTE: {msg}");
+        return;
+    }
+    // EBADF: the fd is open but not a cgroup directory.
+    assert_eq!(errno, Some(libc::EBADF), "not refused with EBADF");
 }

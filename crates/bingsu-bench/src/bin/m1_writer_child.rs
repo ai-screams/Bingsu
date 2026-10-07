@@ -141,15 +141,29 @@ mod imp {
         }
     }
 
-    /// One timed hand-off: both orders do the same two steps (release fds
-    /// 1/2 to /dev/null, spawn the child); only their order differs, so the
-    /// clock covers the same work in both rows. fds 1/2 are put back and the
-    /// child is reaped outside the clock.
+    /// One timed hand-off with the real fd steps.
     fn once(saved: &Saved, release_first: bool, prog: &CStr) -> Result<u64, String> {
         let argv = [prog];
-        let release =
-            || redirect_stdout_stderr_to_null(saved).map_err(|e| format!("release fds 1/2: {e}"));
-        let spawn = || spawn_writer_child(&spec(prog, &argv)).map_err(|e| format!("spawn: {e}"));
+        timed_handoff(
+            release_first,
+            || redirect_stdout_stderr_to_null(saved).map_err(|e| format!("release fds 1/2: {e}")),
+            || spawn_writer_child(&spec(prog, &argv)).map_err(|e| format!("spawn: {e}")),
+            || restore_or_exit(saved),
+        )
+    }
+
+    /// Both orders do the same two steps (release fds 1/2 to /dev/null,
+    /// spawn the child); only their order differs, so the clock covers the
+    /// same work in both rows. fds 1/2 are put back and the child is reaped
+    /// outside the clock; a child spawned before a failed release is reaped
+    /// too. The steps are parameters (monomorphized, nothing added to the
+    /// timed path) so a failing release can be tested.
+    fn timed_handoff(
+        release_first: bool,
+        release: impl Fn() -> Result<(), String>,
+        spawn: impl Fn() -> Result<libc::pid_t, String>,
+        restore: impl FnOnce(),
+    ) -> Result<u64, String> {
         let t = Instant::now();
         let pid = if release_first {
             // A failed release leaves fds 1/2 as they were and spawns nothing.
@@ -162,7 +176,7 @@ mod imp {
             })
         };
         let ns = t.elapsed().as_nanos() as u64;
-        restore_or_exit(saved);
+        restore();
         reap_ok(pid?)?;
         Ok(ns)
     }
@@ -313,7 +327,47 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{Mode, parse};
+        use super::{Mode, parse, spec, timed_handoff};
+        use bingsu_bench::sys::spawn::reap;
+        use bingsu_bench::sys::stdio::spawn_writer_child;
+        use std::cell::Cell;
+
+        // 이것을 실패시키는 것: spawn-first에서 fd 놓기가 실패했을 때 만든 자식을 reap하지 않는 것(좀비가 남음),
+        // release-first에서 fd 놓기가 실패했는데 자식을 만드는 것, 실패 뒤 fd 1·2를 되돌리지 않는 것.
+        #[test]
+        fn failed_release_leaves_no_child() {
+            let prog = c"/usr/bin/true";
+            let argv = [prog];
+            let pid = Cell::new(0);
+            let restored = Cell::new(0);
+            let r = timed_handoff(
+                false,
+                || Err("injected release failure".into()),
+                || {
+                    let p = spawn_writer_child(&spec(prog, &argv)).map_err(|e| e.to_string())?;
+                    pid.set(p);
+                    Ok(p)
+                },
+                || restored.set(restored.get() + 1),
+            );
+            assert_eq!(r, Err("injected release failure".into()));
+            assert!(pid.get() > 0, "spawn-first did not spawn");
+            // Already reaped: waiting again finds no such child.
+            let again = reap(pid.get()).unwrap_err();
+            assert_eq!(
+                again.raw_os_error(),
+                Some(libc::ECHILD),
+                "child left unreaped"
+            );
+            let r = timed_handoff(
+                true,
+                || Err("injected release failure".into()),
+                || panic!("spawned after a failed release"),
+                || restored.set(restored.get() + 1),
+            );
+            assert_eq!(r, Err("injected release failure".into()));
+            assert_eq!(restored.get(), 2);
+        }
 
         fn p(args: &[&str]) -> Result<Mode, String> {
             parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())

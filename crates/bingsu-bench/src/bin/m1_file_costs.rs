@@ -177,6 +177,16 @@ mod imp {
         }
     }
 
+    /// The `lock+generation` operation: only a free lock on our own file with
+    /// the expected generation counts as a measured success.
+    fn lock_row(lock: &Path, header: &Path) -> Result<(), String> {
+        match lock_and_read_generation(lock, header, GENERATION) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("not ours, locked or another generation".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn rows(dir: &Path) -> Vec<Row<'_>> {
         let buf_extra = || ("buf", BUF.to_string());
         let mut rows = vec![row(
@@ -223,13 +233,7 @@ mod imp {
         rows.push(row(
             "lock+generation".into(),
             vec![],
-            Box::new(
-                move |_| match lock_and_read_generation(&lock, &header, GENERATION) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err("not ours, locked or another generation".into()),
-                    Err(e) => Err(e.to_string()),
-                },
-            ),
+            Box::new(move |_| lock_row(&lock, &header)),
         ));
         rows
     }
@@ -282,7 +286,35 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{Args, parse};
+        use super::{Args, GENERATION, lock_row, parse};
+
+        // 이것을 실패시키는 것: 잠금이 다른 곳에 잡혀 있거나 세대가 다른데 lock+generation을 잰 값으로 세는 것.
+        #[test]
+        fn held_lock_or_other_generation_is_a_failure() {
+            let dir = std::env::temp_dir().join(format!("bingsu-lockrow-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let (lock, header) = (dir.join("lock"), dir.join("snapshot-header"));
+            std::fs::write(&lock, b"").unwrap();
+            let mut h = [0u8; 16];
+            h[8..].copy_from_slice(&GENERATION.to_le_bytes());
+            std::fs::write(&header, h).unwrap();
+            let free = lock_row(&lock, &header);
+            // flock locks belong to the open file description: a second open
+            // in this process conflicts like another process would.
+            let holder = std::fs::File::open(&lock).unwrap();
+            holder.lock().unwrap();
+            let held = lock_row(&lock, &header);
+            drop(holder);
+            h[8..].copy_from_slice(&(GENERATION + 1).to_le_bytes());
+            std::fs::write(&header, h).unwrap();
+            let other = lock_row(&lock, &header);
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert_eq!(free, Ok(()));
+            let no = Err("not ours, locked or another generation".to_string());
+            assert_eq!(held, no);
+            assert_eq!(other, no);
+        }
 
         fn p(args: &[&str]) -> Result<Args, String> {
             parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
