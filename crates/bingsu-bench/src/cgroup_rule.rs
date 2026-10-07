@@ -28,6 +28,12 @@ pub fn parse_kernel(release: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Whether `pid` is one of the lines of a `cgroup.procs` read (one pid per
+/// line): `12` is not in `123`.
+pub fn procs_has(procs: &str, pid: &str) -> bool {
+    procs.lines().any(|l| l == pid)
+}
+
 /// The cgroup v2 path of the `0::` line of `/proc/self/cgroup`. Refuses a
 /// path that is not absolute or has a `.` or `..` component (inside a
 /// cgroup namespace the line can read `/../..`): joined under
@@ -141,6 +147,16 @@ mod tests {
         ] {
             assert!(cgroup_v2_path(bad).is_err(), "{bad:?}");
         }
+    }
+
+    // 이것을 실패시키는 것: 줄 단위가 아니라 부분 문자열로 찾는 것(`contains`이면 12가 123에 맞는다).
+    #[test]
+    fn procs_lines() {
+        assert!(procs_has("12\n", "12"));
+        assert!(procs_has("1\n12\n", "12"));
+        assert!(!procs_has("123\n", "12"));
+        assert!(!procs_has("412\n", "12"));
+        assert!(!procs_has("", "12"));
     }
 
     fn full() -> X04 {

@@ -74,7 +74,9 @@ pub fn touch_mapped_file(path: &Path) -> io::Result<u64> {
     let len = usize::try_from(f.metadata()?.len()).map_err(io::Error::other)?;
     // SAFETY: a new private read-only mapping of `len` bytes of an open
     // regular file; no existing memory is affected. An empty file fails
-    // here with EINVAL.
+    // here with EINVAL. If another process truncates the file while it is
+    // mapped, touching a page past the new end raises SIGBUS and ends this
+    // process: the pack fixture is a private file nobody else writes.
     let p = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -150,7 +152,7 @@ mod tests {
     // 이것을 실패시키는 것: rc·반환 길이를 확인하지 않아 끝난 프로세스의 조회를 0 값으로 내는 것.
     #[test]
     fn reaped_child_is_an_error() {
-        let _serial = crate::sys::FD_TESTS.lock().unwrap();
+        let _serial = crate::sys::fd_tests_lock();
         let mut c = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         let pid = c.id() as libc::pid_t;
         c.wait().unwrap();
@@ -162,7 +164,7 @@ mod tests {
     // 이것을 실패시키는 것: 페이지마다가 아니라 첫 바이트만 읽거나, 빈 파일을 Ok(0)으로 넘기는 것.
     #[test]
     fn touch_reads_one_byte_per_page() {
-        let _serial = crate::sys::FD_TESTS.lock().unwrap();
+        let _serial = crate::sys::fd_tests_lock();
         let dir = std::env::temp_dir().join(format!("bingsu-touch-{}", std::process::id()));
         let _ = std::fs::create_dir(&dir);
         let f = dir.join("f");

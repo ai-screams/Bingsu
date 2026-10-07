@@ -182,7 +182,8 @@ fn x04_leftovers(dir: &Path) -> Vec<String> {
 // 건너뛰며, BINGSU_REQUIRE_CGROUP_TESTS=1이면 실패한다.
 // 이것을 실패시키는 것: 6.x 위임 영역에서 원자 경로를 끄는 것(atomic·kill_ok가 false면 함의가 공허하게
 // 참이 되므로 둘 다 true를 직접 단언한다), cgroup.kill 쓰기를 빼는 것, 끝나거나 패닉한 뒤 자식 폴더를
-// 남기는 것(guard 없이 rmdir하는 것), 패닉 때 sleeper를 죽이지 않고 기다리는 것(30초 sleep).
+// 남기는 것(guard 없이 rmdir하는 것), 패닉 때 sleeper를 죽이지 않고 기다리는 것(30초 sleep),
+// 다시 읽기를 하지 않고 옮기기 성공만으로 readback을 참으로 두는 것(형제 cgroup seam), 형제 폴더를 남기는 것.
 #[cfg(target_os = "linux")]
 #[test]
 fn x04_delegated() {
@@ -234,6 +235,33 @@ fn x04_delegated() {
         "{p:?}"
     );
     assert_eq!(x04_leftovers(&dir), Vec::<String>::new(), "after a panic");
+    // The sleeper leaves for a sibling cgroup before the readback: the
+    // readback, and everything that rests on it, must be false.
+    let o = output_within(
+        Command::new(bin)
+            .arg("sibling")
+            .env("BINGSU_X04_SIBLING_BEFORE_READBACK", "1"),
+        Duration::from_secs(120),
+    );
+    assert!(o.status.success(), "{o:?}");
+    let o = String::from_utf8(o.stdout).unwrap();
+    check_x04_schema(&o);
+    for (k, v) in [
+        ("mkdir_child", true),
+        ("move_ok", true),
+        ("readback_ok", false),
+        ("delegated", false),
+        ("atomic", false),
+        ("kill_ok", false),
+        ("rmdir_ok", true),
+    ] {
+        assert!(o.contains(&format!(r#""{k}":{v}"#)), "{k} in {o}");
+    }
+    assert_eq!(
+        x04_leftovers(&dir),
+        Vec::<String>::new(),
+        "after the sibling run"
+    );
 }
 
 // 이것을 실패시키는 것: 시도 줄을 빼는 것, 자식이 setrlimit 결과를 보고하지 않는 것,
@@ -461,7 +489,8 @@ fn rlimit_start_rows_and_na() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// 이것을 실패시키는 것: 열 수가 달라지거나, 부팅 정체가 OS 값과 다르거나, 탭·공백이 든 label을 받아 TSV를 깨는 것.
+// 이것을 실패시키는 것: 열 수가 달라지거나, 부팅 정체가 OS 값과 다르거나, 넷째 열이 부팅 시각(Unix 초)이 아니거나
+// (Linux 가동 시간, macOS kern.boottime 원문), 탭·공백이 든 label을 받아 TSV를 깨는 것.
 #[test]
 fn x05_line() {
     let script = repo().join("bench/probes/x05-boot-id.sh");
@@ -475,6 +504,25 @@ fn x05_line() {
         std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap()
     };
     assert_eq!(cols[2], want.trim(), "{o:?}");
+    // Boot time in Unix seconds on both OSes, read here independently.
+    let boot = if cfg!(target_os = "macos") {
+        let raw = run("sysctl", &["-n", "kern.boottime"]);
+        raw.split("sec = ")
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap()
+            .to_string()
+    } else {
+        let stat = std::fs::read_to_string("/proc/stat").unwrap();
+        stat.lines()
+            .find_map(|l| l.strip_prefix("btime "))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(cols[3], boot, "{o:?}");
     let bad = output_within(
         Command::new("bash").arg(&script).arg("a\tb"),
         Duration::from_secs(120),

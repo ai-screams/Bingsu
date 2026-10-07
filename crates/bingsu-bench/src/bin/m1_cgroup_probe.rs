@@ -35,7 +35,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use bingsu_bench::cgroup_rule::{X04, cgroup_v2_path};
+    use bingsu_bench::cgroup_rule::{X04, cgroup_v2_path, procs_has};
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -118,6 +118,19 @@ mod imp {
             removed: false,
         };
         x.child_has_kill = cg.path.join("cgroup.kill").exists();
+        // Test seam (probe_shapes `x04_delegated`): a sibling cgroup made by
+        // this probe, which the sleeper is moved into between the move and
+        // the readback, so the readback must see it gone. Never the parent
+        // or the delegation root: the probe has no path upward.
+        let sibling = if std::env::var_os("BINGSU_X04_SIBLING_BEFORE_READBACK").is_some() {
+            let path = dir.join(format!("bingsu-x04-{}-sibling", std::process::id()));
+            std::fs::create_dir(&path).ok().map(|()| CgDir {
+                path,
+                removed: false,
+            })
+        } else {
+            None
+        };
         if let Ok(child) = Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
@@ -128,10 +141,12 @@ mod imp {
             let mut sleeper = Sleeper(child);
             let pid = sleeper.0.id().to_string();
             x.move_ok = std::fs::write(cg.path.join("cgroup.procs"), &pid).is_ok();
+            if let (true, Some(sib)) = (x.move_ok, &sibling) {
+                let _ = std::fs::write(sib.path.join("cgroup.procs"), &pid);
+            }
             x.readback_ok = x.move_ok
-                && read(&cg.path.join("cgroup.procs"))
-                    .split_whitespace()
-                    .any(|p| p == pid);
+                && std::fs::read_to_string(cg.path.join("cgroup.procs"))
+                    .is_ok_and(|procs| procs_has(&procs, &pid));
             // Test seam (probe_shapes `x04_delegated`): panic while the
             // sleeper sits in the child cgroup, so the test sees what the
             // guards clean up on unwind.
