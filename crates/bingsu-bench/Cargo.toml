@@ -1,0 +1,22 @@
+[package]
+name = "bingsu-bench"
+version = "0.0.0"
+description = "M1 measurement code: cost matrix runners and the synthetic strace program"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Binaries are named explicitly: cargo would otherwise name them after the
+# file stem (fsb_synthetic), and the plan's commands use hyphenated names.
+# Later tasks append their own [[bin]] entries here.
+[[bin]]
+name = "fsb-synthetic"
+path = "src/bin/fsb_synthetic.rs"

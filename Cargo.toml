@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bingsu-core", "crates/bingsu", "tools/core-cfg-check"]
+members = ["crates/bingsu-core", "crates/bingsu", "crates/bingsu-bench", "tools/core-cfg-check"]
 exclude = ["crates/bingsu-core/purity-canary", "crates/bingsu/purity-canary", "bench/size-probe"]
 
 [workspace.package]
@@ -15,6 +15,12 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
+
+# std's debug build checks that an fd is open (fcntl F_GETFD) on every
+# OwnedFd drop; switched off so the synthetic strace program makes only its
+# known calls. overflow-checks stay on. bingsu-bench only.
+[profile.dev.package.bingsu-bench]
+debug-assertions = false
 
 [profile.release]
 opt-level = 3

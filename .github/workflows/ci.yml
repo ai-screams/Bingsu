@@ -133,3 +133,37 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build -p bingsu-core --target wasm32-unknown-unknown
       - run: cargo clippy -p bingsu-core --target wasm32-unknown-unknown -- -D warnings -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros
+
+  # Spec section 8 filesystem-call budget scaffold: a synthetic program with
+  # known calls runs under strace -f and the counts per role and call kind
+  # must match the formulas exactly. Linux only (strace).
+  fsbudget:
+    name: Filesystem budget scaffold (strace)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: sudo apt-get update && sudo apt-get install -y strace
+      # A venv with the hash-pinned test dependencies: the system python
+      # refuses pip installs (PEP 668).
+      - name: Set up the test environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      - run: cargo build -p bingsu-bench --bin fsb-synthetic
+      # FSB_REQUIRE_STRACE turns the Linux-only skips into failures, so a
+      # missing strace or binary cannot pass this job by skipping.
+      - name: Scaffold tests
+        env:
+          FSB_REQUIRE_STRACE: "1"
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tools/fsbudget -q -rs -p no:cacheprovider
