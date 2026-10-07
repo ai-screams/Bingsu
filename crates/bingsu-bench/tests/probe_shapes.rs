@@ -275,14 +275,28 @@ fn field(l: &str, key: &str) -> u64 {
         .unwrap_or_else(|e| panic!("{key} in {l}: {e}"))
 }
 
+/// The fixture script with `cwd` as its folder and a minimal environment:
+/// no inherited `GIT_*`, OLDPWD and HOME are `cwd`, and git discovery stops
+/// at `cwd`'s parent. A broken script (a regression or a mutation) then
+/// stays inside the test's temp folder instead of reaching this repository
+/// (a `cd -` to an inherited OLDPWD once committed a fixture here).
+fn fixture_cmd(cwd: &Path) -> Command {
+    let mut c = Command::new(repo().join("bench/probes/make-pack-fixture.sh"));
+    c.current_dir(cwd)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", cwd)
+        .env("OLDPWD", cwd)
+        .env("GIT_CEILING_DIRECTORIES", cwd.parent().unwrap());
+    c
+}
+
 #[cfg(target_os = "macos")]
 fn make_pack(blobs: &str) -> (PathBuf, PathBuf) {
     let dir = new_dir("pack");
     let fixture = dir.join("repo");
     let out = output_within(
-        Command::new(repo().join("bench/probes/make-pack-fixture.sh"))
-            .arg(&fixture)
-            .arg(blobs),
+        fixture_cmd(&dir).arg(&fixture).arg(blobs),
         Duration::from_secs(120),
     );
     assert!(
@@ -474,12 +488,102 @@ fn pack_fixture_refuses_existing_dir() {
     let dir = new_dir("pack-exists");
     std::fs::write(dir.join("keep"), b"x").unwrap();
     let out = output_within(
-        Command::new(repo().join("bench/probes/make-pack-fixture.sh"))
-            .arg(&dir)
-            .arg("1"),
+        fixture_cmd(&dir).arg(&dir).arg("1"),
         Duration::from_secs(120),
     );
     let kept = dir.join("keep").exists();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!((out.status.code(), kept), (Some(2), true));
+}
+
+// 이것을 실패시키는 것: 절대 경로 검사를 빼는 것(`-`가 OLDPWD로, 상대 경로가 현재 폴더로 감),
+// 빈 BLOBS를 기본값으로 바꾸는 것, 인자 개수를 확인하지 않는 것.
+#[test]
+fn pack_fixture_refuses_bad_args() {
+    let cwd = new_dir("pack-args");
+    let fresh = cwd.join("fresh");
+    let f = fresh.to_str().unwrap();
+    for args in [
+        &[][..],
+        &[""],
+        &["-"],
+        &["rel"],
+        &[f, ""],
+        &[f, "0"],
+        &[f, "1", "extra"],
+    ] {
+        let out = output_within(fixture_cmd(&cwd).args(args), Duration::from_secs(120));
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
+    let left: Vec<_> = std::fs::read_dir(&cwd).unwrap().collect();
+    let _ = std::fs::remove_dir_all(&cwd);
+    assert!(left.is_empty(), "{left:?}");
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = output_within(
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1"),
+        Duration::from_secs(120),
+    );
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+// 이것을 실패시키는 것: 지역 git 환경 변수(GIT_DIR·GIT_WORK_TREE·GIT_INDEX_FILE·GIT_OBJECT_DIRECTORY)를
+// 지우는 줄을 빼는 것. 그러면 fixture 커밋·repack이 sentinel 저장소에서 돈다.
+#[test]
+fn pack_fixture_ignores_git_env() {
+    let root = new_dir("pack-git-env");
+    let sentinel = root.join("sentinel");
+    std::fs::create_dir(&sentinel).unwrap();
+    git(&sentinel, &["init", "-q", "--template="]);
+    std::fs::write(sentinel.join("a"), b"a").unwrap();
+    git(&sentinel, &["add", "a"]);
+    git(
+        &sentinel,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-qm",
+            "s",
+        ],
+    );
+    let state = |d: &Path| {
+        (
+            git(d, &["rev-parse", "HEAD"]),
+            git(d, &["status", "--porcelain", "--untracked-files=all"]),
+            git(d, &["count-objects", "-v"]),
+        )
+    };
+    let before = state(&sentinel);
+    let fixture = root.join("fixture");
+    let gd = sentinel.join(".git");
+    let out = output_within(
+        fixture_cmd(&sentinel)
+            .arg(&fixture)
+            .arg("1")
+            .env("GIT_DIR", &gd)
+            .env("GIT_WORK_TREE", &sentinel)
+            .env("GIT_INDEX_FILE", gd.join("index"))
+            .env("GIT_OBJECT_DIRECTORY", gd.join("objects")),
+        Duration::from_secs(120),
+    );
+    let after = state(&sentinel);
+    let pack = String::from_utf8(out.stdout.clone()).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(before, after);
+    let pack = Path::new(pack.trim_end());
+    assert!(
+        pack.starts_with(fixture.join(".git/objects/pack")),
+        "{}",
+        pack.display()
+    );
 }
