@@ -582,7 +582,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 // 이것을 실패시키는 것: 지역 git 환경 변수(GIT_DIR·GIT_WORK_TREE·GIT_INDEX_FILE·GIT_OBJECT_DIRECTORY)를
-// 지우는 줄을 빼는 것. 그러면 fixture 커밋·repack이 sentinel 저장소에서 돈다.
+// 지우는 줄을 빼는 것(fixture 커밋·repack이 sentinel 저장소에서 돈다), `git init`의 `--template=`을 빼는 것
+// (GIT_TEMPLATE_DIR의 post-commit 훅이 fixture 커밋에서 돈다).
 #[test]
 fn pack_fixture_ignores_git_env() {
     let root = new_dir("pack-git-env");
@@ -611,6 +612,14 @@ fn pack_fixture_ignores_git_env() {
         )
     };
     let before = state(&sentinel);
+    // GIT_TEMPLATE_DIR is not a local-env var, so the unset above keeps it:
+    // a template hook must still not reach the fixture (`--template=`).
+    let tpl = root.join("tpl");
+    let marker = root.join("hook-ran");
+    std::fs::create_dir_all(tpl.join("hooks")).unwrap();
+    let hook = tpl.join("hooks/post-commit");
+    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let fixture = root.join("fixture");
     let gd = sentinel.join(".git");
     let out = output_within(
@@ -620,14 +629,21 @@ fn pack_fixture_ignores_git_env() {
             .env("GIT_DIR", &gd)
             .env("GIT_WORK_TREE", &sentinel)
             .env("GIT_INDEX_FILE", gd.join("index"))
-            .env("GIT_OBJECT_DIRECTORY", gd.join("objects")),
+            .env("GIT_OBJECT_DIRECTORY", gd.join("objects"))
+            .env("GIT_TEMPLATE_DIR", &tpl),
         Duration::from_secs(120),
     );
     let after = state(&sentinel);
+    let hook_ran = marker.exists();
+    let hooks_dir = fixture.join(".git/hooks").exists();
     let pack = String::from_utf8(out.stdout.clone()).unwrap();
     let _ = std::fs::remove_dir_all(&root);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(before, after);
+    assert!(
+        !hook_ran && !hooks_dir,
+        "template used: hook ran {hook_ran}, hooks dir {hooks_dir}"
+    );
     let pack = Path::new(pack.trim_end());
     assert!(
         pack.starts_with(fixture.join(".git/objects/pack")),
@@ -654,5 +670,50 @@ fn probe_args_fail_closed() {
         );
         assert_eq!(out.status.code(), Some(2), "x05 {args:?}: {out:?}");
         assert!(out.stdout.is_empty(), "x05 {args:?}: {out:?}");
+    }
+}
+
+// macOS에서 PATH 맨 앞의 가짜 sysctl로 값을 바꾼다(Linux의 /proc 쪽은 shim을 둘 수 없다).
+// 이것을 실패시키는 것: 빈 부팅 정체를 거르는 `[[ -n $id ]]`를 지우는 것, 숫자가 아닌 부팅 시각을 거르는
+// 검사를 지우는 것. 둘 다 빈 열이나 원문이 든 줄을 정상 자료처럼 낸다.
+#[cfg(target_os = "macos")]
+#[test]
+fn x05_refuses_empty_or_odd_values() {
+    let dir = new_dir("x05-shim");
+    let shim = dir.join("sysctl");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\ncase $2 in kern.bootsessionuuid) printf '%s\\n' \"$SHIM_ID\" ;; \
+         kern.boottime) printf '%s\\n' \"$SHIM_BT\" ;; *) exit 9 ;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
+    let script = repo().join("bench/probes/x05-boot-id.sh");
+    let x05 = |id: &str, bt: &str| {
+        output_within(
+            Command::new("bash")
+                .arg(&script)
+                .arg("t")
+                .env("PATH", &path)
+                .env("SHIM_ID", id)
+                .env("SHIM_BT", bt),
+            Duration::from_secs(120),
+        )
+    };
+    let good_bt = "{ sec = 5, usec = 0 } Thu Jan  1 09:00:05 1970";
+    let ok = x05("ID-1", good_bt);
+    let empty_id = x05("", good_bt);
+    let weird_bt = x05("ID-1", "weird");
+    let _ = std::fs::remove_dir_all(&dir);
+    // The shim is what the script read: id and boot time come from it.
+    assert!(ok.status.success(), "{ok:?}");
+    assert!(
+        String::from_utf8_lossy(&ok.stdout).ends_with("\tt\tID-1\t5\n"),
+        "{ok:?}"
+    );
+    for (what, out) in [("empty id", &empty_id), ("weird boottime", &weird_bt)] {
+        assert_ne!(out.status.code(), Some(0), "{what}: {out:?}");
+        assert!(out.stdout.is_empty(), "{what}: {out:?}");
     }
 }
