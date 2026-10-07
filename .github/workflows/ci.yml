@@ -102,6 +102,27 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+      # The cgroup spawn tests skip without a delegated cgroup v2 area. Here
+      # they must run: a lingering user manager gives this user a scope with
+      # Delegate=yes (the same path a desktop session uses), and
+      # BINGSU_REQUIRE_CGROUP_TESTS=1 turns a skip into a failure.
+      - if: runner.os == 'Linux'
+        name: Cgroup spawn tests in a delegated cgroup
+        env:
+          BINGSU_REQUIRE_CGROUP_TESTS: "1"
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          uid=$(id -u)
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 0.2; done
+          cargo test -p bingsu-bench --no-run --message-format=json > "$RUNNER_TEMP/build.json"
+          for t in cgroup_spawn spawn_matrix_rows; do
+            bin=$(jq -r --arg t "$t" 'select(.reason == "compiler-artifact" and .target.name == $t and .profile.test) | .executable' "$RUNNER_TEMP/build.json")
+            [ -x "$bin" ] || { echo "no test binary for $t" >&2; exit 1; }
+            # shellcheck disable=SC2016 # expanded by the inner sh, inside the scope
+            systemd-run --user --scope --quiet -p Delegate=yes \
+              sh -c 'BINGSU_TEST_CGROUP_DIR="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)" exec "$0"' "$bin"
+          done
 
   purity:
     name: Core purity gate

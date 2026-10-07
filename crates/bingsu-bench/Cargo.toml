@@ -20,3 +20,7 @@ libc = "0.2"
 [[bin]]
 name = "fsb-synthetic"
 path = "src/bin/fsb_synthetic.rs"
+
+[[bin]]
+name = "m1-spawn-matrix"
+path = "src/bin/m1_spawn_matrix.rs"

@@ -1,0 +1,40 @@
+name: Bench
+
+# Measurement only, never a gate: the runners are shared machines, so the
+# numbers are recorded as an artifact and read next to the dedicated hosts.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  spawn-matrix:
+    name: Collector spawn cost matrix (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - run: cargo build --release -p bingsu --features bench-stubs
+      - run: cargo build --release -p bingsu-collect -p bingsu-bench
+      # Runs without --cgroup-dir, as the plan records the CI matrix: the cgroup
+      # rows are na here; the delegated-cgroup rows are measured on the Linux host.
+      - name: Run the matrix
+        run: |
+          printf '{"meta":{"host":"github-actions","runner":"ubuntu-24.04","arch":"%s","kernel":"%s","nproc":%s,"commit":"%s"}}\n' \
+            "$(uname -m)" "$(uname -r)" "$(nproc)" "$GITHUB_SHA" > m1-spawn-ci-linux.jsonl
+          target/release/m1-spawn-matrix --dedicated target/release/bingsu-collect --same target/release/bingsu >> m1-spawn-ci-linux.jsonl
+          cat m1-spawn-ci-linux.jsonl
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: m1-spawn-ci-linux
+          path: m1-spawn-ci-linux.jsonl
+          if-no-files-found: error
