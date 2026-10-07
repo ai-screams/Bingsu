@@ -817,8 +817,11 @@ fn exec_file_helpers() {
 // Not strictly deterministic, but close: copy-then-exec while four threads
 // spawn children. In a Linux container (unprivileged user), this test with
 // `std::fs::copy` in place of the helper's `cp` hit ETXTBSY in 69, 75 and
-// 79 of 300 rounds (three runs); with the helper it passes. A helper that
-// writes in this process fails here with overwhelming odds.
+// 79 of 300 rounds (three runs); with the helper it passes. The two sides
+// are not alike: the helper cannot fail here by construction (this process
+// never holds a write fd on the copy), while a helper that writes in this
+// process escapes only with a tiny chance, about 0.77^300 if rounds are
+// independent.
 // 이것을 실패시키는 것: copy_exe가 이 프로세스에서 쓰는 것(std::fs::copy 등). 그러면 다른 스레드의 fork가
 // 쓰기 fd를 물려 가 exec가 ETXTBSY로 실패한다.
 #[cfg(target_os = "linux")]

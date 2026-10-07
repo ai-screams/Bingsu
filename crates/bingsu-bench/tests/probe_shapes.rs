@@ -1,13 +1,12 @@
 //! Every probe prints its JSON keys even when the platform cannot do the
 //! thing it probes (unsupported is data, not a crash).
 #![cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 #[path = "../../bingsu/tests/support/exec_file.rs"]
 mod exec_file;
-use std::time::{Duration, Instant};
 
 /// Runs `cmd` to completion, but kills it (and fails the test) after
 /// `limit`: a probe that never returns is a failure, not a stuck test run.
@@ -619,9 +618,10 @@ fn pack_fixture_ignores_git_env() {
     let tpl = root.join("tpl");
     let marker = root.join("hook-ran");
     std::fs::create_dir_all(tpl.join("hooks")).unwrap();
-    let hook = tpl.join("hooks/post-commit");
-    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec_file::write_exe(
+        &tpl.join("hooks/post-commit"),
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()).as_bytes(),
+    );
     let fixture = root.join("fixture");
     let gd = sentinel.join(".git");
     let out = output_within(
