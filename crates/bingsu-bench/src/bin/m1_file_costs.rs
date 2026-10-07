@@ -4,6 +4,9 @@
 //! each round, in alternating direction (`bingsu_bench::rounds::drive`).
 //! `--once` makes one pass of the reads inside the fsb marker window for the
 //! strace read-count test and touches nothing else.
+//! `--snapshot-present` times one row, `snapshot-present-read`: the three
+//! files of `bench/fixtures/make-snapshot-present.sh` read in one go (the
+//! file share of the redraw estimate, Task B6).
 #![deny(unsafe_code)] // FFI lives in bingsu_bench::sys only
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -32,11 +35,18 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
-    const USAGE: &str = "usage: m1-file-costs --dir RUNTIME_DIR [--rounds N] [--warmup N]\n       m1-file-costs --dir DIR --once";
+    const USAGE: &str = "usage: m1-file-costs --dir RUNTIME_DIR [--rounds N] [--warmup N]\n       m1-file-costs --dir FIXTURE_DIR --snapshot-present [--rounds N] [--warmup N]\n       m1-file-costs --dir DIR --once";
     const HEADER: usize = 64;
     const MARKER: usize = 128;
     const SWEEP: [usize; 4] = [64, 256, 1024, 4096];
     const GENERATION: u64 = 7;
+    /// The snapshot-present fixture: header 64 + section 16,384, marker,
+    /// session (sizes assumed until M3a; see the fixture script).
+    const SNAPSHOT_PRESENT: [(&CStr, usize); 3] = [
+        (c"snapshot", 64 + 16_384),
+        (c"marker", 128),
+        (c"session", 2_048),
+    ];
 
     #[derive(Debug, PartialEq)]
     struct Args {
@@ -44,14 +54,16 @@ mod imp {
         rounds: usize,
         warmup: usize,
         once: bool,
+        snapshot_present: bool,
     }
 
     /// Fails closed: an unknown or repeated option, a missing value, a
-    /// non-number, zero rounds or timing options with `--once` is an error,
-    /// never a default.
+    /// non-number, zero rounds, timing options with `--once` or `--once` with
+    /// `--snapshot-present` is an error, never a default.
     fn parse(args: &[String]) -> Result<Args, String> {
         let mut seen: Vec<&str> = Vec::new();
-        let (mut dir, mut rounds, mut warmup, mut once) = (None, None, None, false);
+        let (mut dir, mut rounds, mut warmup) = (None, None, None);
+        let (mut once, mut snapshot_present) = (false, false);
         let mut it = args.iter();
         while let Some(k) = it.next() {
             if seen.contains(&k.as_str()) {
@@ -60,6 +72,11 @@ mod imp {
             let slot = match k.as_str() {
                 "--once" => {
                     once = true;
+                    seen.push(k);
+                    continue;
+                }
+                "--snapshot-present" => {
+                    snapshot_present = true;
                     seen.push(k);
                     continue;
                 }
@@ -73,6 +90,9 @@ mod imp {
         }
         if once && (rounds.is_some() || warmup.is_some()) {
             return Err("--once makes one untimed pass; --rounds and --warmup do not apply".into());
+        }
+        if once && snapshot_present {
+            return Err("--once and --snapshot-present are different runs".into());
         }
         let num = |v: Option<String>, name: &str, default: usize| {
             v.map_or(Ok(default), |s| {
@@ -88,6 +108,7 @@ mod imp {
             rounds,
             warmup: num(warmup, "--warmup", 100)?,
             once,
+            snapshot_present,
         })
     }
 
@@ -291,6 +312,75 @@ mod imp {
         rows
     }
 
+    /// Before the rounds, outside every clock: each fixture file is a regular
+    /// file (not a link) of exactly its size, so a wrong or partial folder is
+    /// `na`, not a timing of other bytes.
+    fn check_snapshot_present(dir: &Path) -> Result<(), String> {
+        for (name, size) in SNAPSHOT_PRESENT {
+            let name = name.to_string_lossy();
+            let m = std::fs::symlink_metadata(dir.join(&*name))
+                .map_err(|e| format!("fixture {name}: {e}"))?;
+            if !m.file_type().is_file() || m.len() != size as u64 {
+                return Err(format!(
+                    "fixture {name}: want a regular file of {size} bytes, found {:?} of {}",
+                    m.file_type(),
+                    m.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `--snapshot-present`: one row over the fixture folder the script made
+    /// (no fixture of our own), the same rounds and output as the other rows.
+    fn snapshot_present(a: &Args) {
+        let tick = timer_tick_ns();
+        let line = |r: Row<'_>| finish(vec![r], &a.dir, tick).remove(0);
+        if let Err(e) = check_snapshot_present(&a.dir) {
+            let mut r = row("snapshot-present-read".into(), vec![], Box::new(|_| Ok(())));
+            r.failure = Some(e);
+            println!("{}", line(r));
+            return;
+        }
+        let fd = match open_dir(&a.dir) {
+            Ok(fd) => fd,
+            Err(e) => fail(format!("open {}: {e}", a.dir.display())),
+        };
+        let dir = fd.as_fd();
+        let mut rows = vec![row(
+            "snapshot-present-read".into(),
+            vec![("buf", BUF.to_string())],
+            Box::new(move |buf| {
+                for (name, size) in SNAPSHOT_PRESENT {
+                    read_file(dir, name, size, buf)?;
+                }
+                Ok(())
+            }),
+        )];
+        let mut buf = vec![0u8; BUF];
+        run_rounds(&mut rows, a, &mut buf);
+        println!("{}", line(rows.pop().expect("one row")));
+    }
+
+    /// Rows take turns within each round; a failed row stops and keeps the
+    /// reason with its round; warm-up rounds are not kept.
+    fn run_rounds(rows: &mut [Row<'_>], a: &Args, buf: &mut [u8]) {
+        drive(rows.len(), a.warmup + a.rounds, |round, i| {
+            let r = &mut rows[i];
+            if r.failure.is_some() {
+                return;
+            }
+            let t = Instant::now();
+            let result = (r.op)(buf);
+            let ns = t.elapsed().as_nanos() as u64;
+            match result {
+                Ok(()) if round >= a.warmup => r.samples.push(ns),
+                Ok(()) => {}
+                Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
+            }
+        });
+    }
+
     pub fn main() {
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let a = match parse(&argv) {
@@ -303,26 +393,16 @@ mod imp {
         if a.once {
             return once(&a.dir);
         }
+        if a.snapshot_present {
+            return snapshot_present(&a);
+        }
         let fx = Fixture::create(&a.dir).unwrap_or_else(|e| fail(format!("fixture: {e}")));
         let fd = open_dir(&fx.0).unwrap_or_else(|e| fail(format!("open the fixture folder: {e}")));
         // Measured before the rounds, outside every clock; recorded on each row.
         let tick = timer_tick_ns();
         let mut rows = rows(&fx.0, fd.as_fd(), &a.dir);
         let mut buf = vec![0u8; BUF];
-        drive(rows.len(), a.warmup + a.rounds, |round, i| {
-            let r = &mut rows[i];
-            if r.failure.is_some() {
-                return;
-            }
-            let t = Instant::now();
-            let result = (r.op)(&mut buf);
-            let ns = t.elapsed().as_nanos() as u64;
-            match result {
-                Ok(()) if round >= a.warmup => r.samples.push(ns),
-                Ok(()) => {}
-                Err(e) => r.failure = Some(format!("{e} (round {})", round + 1)),
-            }
-        });
+        run_rounds(&mut rows, &a, &mut buf);
         for line in finish(rows, &fx.0.join("header"), tick) {
             println!("{line}");
         }
@@ -349,7 +429,8 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::{
-            Args, Fixture, GENERATION, finish, lock_row, new_dir, new_dir_at, open_dir, parse, row,
+            Args, Fixture, GENERATION, SNAPSHOT_PRESENT, check_snapshot_present, finish, lock_row,
+            new_dir, new_dir_at, open_dir, parse, row,
         };
         use std::os::fd::AsFd;
 
@@ -420,17 +501,65 @@ mod imp {
             assert_eq!(std::fs::read(planted.join("planted")).unwrap(), b"p");
         }
 
+        // 이것을 실패시키는 것: fixture 파일의 크기를 보지 않거나(다른 크기의 바이트를 잼), 없는 파일·링크·폴더를
+        // 받아들이는 것, 세 파일 중 하나만 보는 것.
+        #[test]
+        fn snapshot_present_fixture_is_checked() {
+            let fx = Fixture(new_dir(&std::env::temp_dir(), "bingsu-snapfx").unwrap());
+            let write =
+                |name: &str, n: usize| std::fs::write(fx.0.join(name), vec![0u8; n]).unwrap();
+            for (name, size) in SNAPSHOT_PRESENT {
+                write(name.to_str().unwrap(), size);
+            }
+            assert_eq!(check_snapshot_present(&fx.0), Ok(()));
+            for (name, size) in SNAPSHOT_PRESENT {
+                let name = name.to_str().unwrap();
+                write(name, size + 1);
+                assert!(check_snapshot_present(&fx.0).is_err(), "{name} +1 accepted");
+                std::fs::remove_file(fx.0.join(name)).unwrap();
+                let err = check_snapshot_present(&fx.0).unwrap_err();
+                assert!(err.starts_with(&format!("fixture {name}: ")), "{err}");
+                std::fs::create_dir(fx.0.join(name)).unwrap();
+                assert!(
+                    check_snapshot_present(&fx.0).is_err(),
+                    "{name} folder accepted"
+                );
+                std::fs::remove_dir(fx.0.join(name)).unwrap();
+                // A link whose own length is the file size where the target
+                // allows it (marker: 128), so only the file-type check refuses it.
+                let target = if size < 1000 {
+                    "x".repeat(size)
+                } else {
+                    fx.0.join("real").display().to_string()
+                };
+                std::os::unix::fs::symlink(&target, fx.0.join(name)).unwrap();
+                assert!(
+                    check_snapshot_present(&fx.0).is_err(),
+                    "{name} link accepted"
+                );
+                std::fs::remove_file(fx.0.join(name)).unwrap();
+                write(name, size);
+                assert_eq!(check_snapshot_present(&fx.0), Ok(()));
+            }
+        }
+
         fn p(args: &[&str]) -> Result<Args, String> {
             parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
         }
 
-        // 이것을 실패시키는 것: 모르는 인자·중복(--once 포함)·값 없음·숫자 아님·0 rounds·--dir 없음·
-        // --once와 시간 인자 섞기를 기본값으로 넘기는 것.
+        // 이것을 실패시키는 것: 모르는 인자·중복(--once·--snapshot-present 포함)·값 없음·숫자 아님·0 rounds·
+        // --dir 없음·--once와 시간 인자 섞기·--once와 --snapshot-present 섞기를 기본값으로 넘기는 것,
+        // --snapshot-present를 받지 않거나 시간 인자와 함께 받지 않는 것.
         #[test]
         fn parse_fails_closed() {
             let a = p(&["--dir", "/d"]).unwrap();
-            assert_eq!((a.rounds, a.warmup, a.once), (1000, 100, false));
+            assert_eq!(
+                (a.rounds, a.warmup, a.once, a.snapshot_present),
+                (1000, 100, false, false)
+            );
             assert!(p(&["--dir", "/d", "--once"]).unwrap().once);
+            let sp = p(&["--dir", "/d", "--snapshot-present", "--rounds", "5"]).unwrap();
+            assert!(sp.snapshot_present && !sp.once && sp.rounds == 5);
             for bad in [
                 &["--dir", "/d", "--bogus"][..],
                 &["--dir", "/d", "--dir", "/e"],
@@ -440,6 +569,8 @@ mod imp {
                 &["--dir", "/d", "--rounds", "0"],
                 &["--rounds", "3"],
                 &["--dir", "/d", "--once", "--rounds", "3"],
+                &["--dir", "/d", "--snapshot-present", "--snapshot-present"],
+                &["--dir", "/d", "--snapshot-present", "--once"],
             ] {
                 assert!(p(bad).is_err(), "{bad:?} accepted");
             }
