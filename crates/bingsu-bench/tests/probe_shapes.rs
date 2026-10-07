@@ -4,6 +4,9 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+#[path = "../../bingsu/tests/support/exec_file.rs"]
+mod exec_file;
 use std::time::{Duration, Instant};
 
 /// Runs `cmd` to completion, but kills it (and fails the test) after
@@ -430,8 +433,7 @@ fn watchdog_failures_are_na() {
 /// A stand-in stub that ignores its arguments.
 fn stub(dir: &Path, name: &str, body: &str) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec_file::write_exe(&p, format!("#!/bin/sh\n{body}\n").as_bytes());
     p
 }
 
@@ -681,13 +683,11 @@ fn probe_args_fail_closed() {
 fn x05_refuses_empty_or_odd_values() {
     let dir = new_dir("x05-shim");
     let shim = dir.join("sysctl");
-    std::fs::write(
+    exec_file::write_exe(
         &shim,
-        "#!/bin/sh\ncase $2 in kern.bootsessionuuid) printf '%s\\n' \"$SHIM_ID\" ;; \
+        b"#!/bin/sh\ncase $2 in kern.bootsessionuuid) printf '%s\\n' \"$SHIM_ID\" ;; \
          kern.boottime) printf '%s\\n' \"$SHIM_BT\" ;; *) exit 9 ;; esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
     let script = repo().join("bench/probes/x05-boot-id.sh");
     let x05 = |id: &str, bt: &str| {
