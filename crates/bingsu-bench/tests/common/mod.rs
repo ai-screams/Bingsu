@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 /// A new folder under the temp dir, removed on drop (also on a failed
 /// assertion). The name carries the pid, the time and an attempt number,
-/// and `create_dir` refuses one that already exists, so nothing planted
-/// there in advance is used.
+/// and `create_dir` refuses one that already exists (the next attempt is
+/// tried), so a folder planted there in advance is not used. Test-only:
+/// unlike the runner's `new_dir`, no test pins this behaviour.
 pub struct TempDir(pub PathBuf);
 
 impl TempDir {

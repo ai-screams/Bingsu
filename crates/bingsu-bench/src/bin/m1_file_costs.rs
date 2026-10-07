@@ -122,6 +122,12 @@ mod imp {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_nanos();
+        new_dir_at(parent, tag, nanos)
+    }
+
+    /// `new_dir` with the time part given, so a test can plant the first
+    /// name in advance.
+    fn new_dir_at(parent: &Path, tag: &str, nanos: u128) -> Result<PathBuf, String> {
         for attempt in 0..100 {
             let dir = parent.join(format!("{tag}-{}-{nanos}-{attempt}", std::process::id()));
             match std::fs::create_dir(&dir) {
@@ -342,7 +348,9 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{Args, Fixture, GENERATION, finish, lock_row, new_dir, open_dir, parse, row};
+        use super::{
+            Args, Fixture, GENERATION, finish, lock_row, new_dir, new_dir_at, open_dir, parse, row,
+        };
         use std::os::fd::AsFd;
 
         // 이것을 실패시키는 것: 잠금이 다른 곳에 잡혀 있거나 세대가 다른데 lock+generation을 잰 값으로 세는 것.
@@ -398,14 +406,18 @@ mod imp {
             );
         }
 
-        // 이것을 실패시키는 것: 이미 있는 폴더 이름을 그대로 쓰는 것(create_dir_all처럼).
+        // 이것을 실패시키는 것: 이미 있는 폴더 이름을 그대로 쓰는 것(create_dir_all처럼). 미리 만든 attempt-0 폴더와
+        // 그 안의 표식을 두고, 결과가 attempt-1이고 미리 만든 것이 그대로인지 본다.
         #[test]
         fn new_dir_never_reuses_a_folder() {
             let parent = Fixture(new_dir(&std::env::temp_dir(), "bingsu-newdir").unwrap());
-            let a = new_dir(&parent.0, "x").unwrap();
-            let b = new_dir(&parent.0, "x").unwrap();
-            assert_ne!(a, b);
-            assert!(std::fs::read_dir(&a).unwrap().next().is_none());
+            let planted = parent.0.join(format!("x-{}-42-0", std::process::id()));
+            std::fs::create_dir(&planted).unwrap();
+            std::fs::write(planted.join("planted"), b"p").unwrap();
+            let got = new_dir_at(&parent.0, "x", 42).unwrap();
+            assert_eq!(got, parent.0.join(format!("x-{}-42-1", std::process::id())));
+            assert!(std::fs::read_dir(&got).unwrap().next().is_none());
+            assert_eq!(std::fs::read(planted.join("planted")).unwrap(), b"p");
         }
 
         fn p(args: &[&str]) -> Result<Args, String> {

@@ -52,6 +52,7 @@ def test_release_first_does_not_hold_the_shell(shell):
     # The shell is back while the 1 s child still runs: it did not wait for
     # it. Looked at 0.3 s later, so a child that exits at once (and lingers
     # briefly as a zombie) does not pass for the sleeping one.
+    assert fast < 0.5, fast
     pid = child_pid(out)
     time.sleep(0.3)
     assert alive(pid), f"no writer child running after the shell returned: {pid}"
@@ -59,5 +60,4 @@ def test_release_first_does_not_hold_the_shell(shell):
     assert out.returncode == 0 and slow_out.returncode == 0, (out, slow_out)
     assert out.stdout == b"record" and slow_out.stdout == b"record", (out.stdout, slow_out.stdout)
     child_pid(slow_out)
-    assert fast < 0.5, fast
     assert slow > 0.8, slow
