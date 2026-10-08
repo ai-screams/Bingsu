@@ -51,7 +51,7 @@ jobs:
         run: |
           if [ -f Cargo.lock ]; then echo "lock=true" >> "$GITHUB_OUTPUT"; else echo "lock=false" >> "$GITHUB_OUTPUT"; fi
       - if: steps.check.outputs.lock == 'true'
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
         with:
           tool: cargo-audit
       - if: steps.check.outputs.lock == 'true'
