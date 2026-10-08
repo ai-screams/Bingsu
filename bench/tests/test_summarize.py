@@ -204,6 +204,18 @@ BAD = {
     "size-twice": ("s.jsonl", GOOD + "".join(json.dumps({"matrix": "size", "row": "regex-yaml-json", "os": "macos",
                                                          "bytes": b}) + "\n" for b in (9_000_000, 1000)),
                    "row ('macos', 'regex-yaml-json') twice: s.jsonl:2 and s.jsonl:3"),
+    # Structure that is JSON but not the expected shape: exit 2, never a traceback.
+    "results-not-list": ("redraw.json", '{"results":5}', "results is not a list"),
+    "result-not-object": ("redraw.json", '{"results":[1]}', "a result that is not an object with a command string: 1"),
+    "no-command": ("redraw.json", '{"results":[{"times":[0.1]}]}', "a result that is not an object with a command string"),
+    "times-not-list": ("redraw.json", '{"results":[{"command":"c","times":5}]}', "'c': times is not a list"),
+    "exit-code-string": ("redraw.json", '{"results":[{"command":"c","times":[0.1],"exit_codes":["0"]}]}',
+                         "'c': exit_codes holds a non-integer"),
+    "row-list": ("a.jsonl", GOOD + _row(row=[1], median_ns=1, p95_ns=1) + "\n", "a.jsonl:2: row [1] is not a string"),
+    "os-list": ("a.jsonl", GOOD + json.dumps({"row": "x", "os": [1], "median_ns": 1, "p95_ns": 1}) + "\n",
+                "a.jsonl:2: os [1] is not a string"),
+    "na-not-string": ("a.jsonl", GOOD + _row(row="x", na=None) + "\n", "a.jsonl:2: na None is not a string"),
+    "meta-os-list": ("a.jsonl", GOOD + '{"meta":{"os":[1]}}\n', "a.jsonl:2: meta os [1] is not a string"),
     "command-twice": ("init-gen.json", json.dumps({"results": [{"command": "c", "times": [0.1]}] * 2}), "'c' twice"),
 }
 

@@ -100,12 +100,21 @@ def hyperfine_rows(path):
         results = parse_json(path.read_text())["results"]
     except (ValueError, KeyError, TypeError) as e:
         raise InputError(f"{path}: not a hyperfine export ({e!r})") from None
+    if not isinstance(results, list):
+        raise InputError(f"{path}: results is not a list")
     rows = {}
     for r in results:
-        if r.get("command") in rows:
+        if not isinstance(r, dict) or not isinstance(r.get("command"), str):
+            raise InputError(f"{path}: a result that is not an object with a command string: {r!r}")
+        if r["command"] in rows:
             raise InputError(f"{path}: {r['command']!r} twice")
         if not r.get("times"):
             raise InputError(f"{path}: {r.get('command')!r} has no times")
+        for field in ("times", "exit_codes"):
+            if not isinstance(r.get(field, []), list):
+                raise InputError(f"{path}: {r['command']!r}: {field} is not a list")
+        if any(not isinstance(c, int) or isinstance(c, bool) for c in r.get("exit_codes", [])):
+            raise InputError(f"{path}: {r['command']!r}: exit_codes holds a non-integer")
         if r.get("exit_codes") and any(c != 0 for c in r["exit_codes"]):
             rows[r["command"]] = {"na": f"non-zero exit codes {sorted(set(r['exit_codes']))}"}
             continue
@@ -271,13 +280,19 @@ def load(*paths):
             if not isinstance(r, dict):
                 raise InputError(f"{where}: not a JSON object")
             if "meta" in r:
-                if isinstance(r["meta"], dict) and r["meta"].get("os"):
-                    oses.add(r["meta"]["os"])
+                meta_os = r["meta"].get("os") if isinstance(r["meta"], dict) else None
+                if meta_os is not None and not isinstance(meta_os, str):
+                    raise InputError(f"{where}: meta os {meta_os!r} is not a string")
+                if meta_os:
+                    oses.add(meta_os)
                 continue
             if r.get("x") == "X-24":
                 continue  # the X-24 model is recorded, not judged
             if "row" not in r or "os" not in r:
                 raise InputError(f"{where}: no row or os")
+            for field in ("row", "os") + (("na",) if "na" in r else ()):
+                if not isinstance(r[field], str):
+                    raise InputError(f"{where}: {field} {r[field]!r} is not a string")
             oses.add(r["os"])
             ns = lambda field: number(r[field], where, field) / 1e6  # noqa: E731
             if r.get("matrix") == "size":

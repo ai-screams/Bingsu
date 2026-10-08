@@ -60,15 +60,16 @@ def test_cold_then_warm_then_nothing(shell, tmp_path):
                                                                     f"first.tsv.{boot_id()}.warm"]
 
 
-# 이것을 실패시키는 것: init이 실패한 셸도 줄을 남기는 것(그 시간은 측정이 아님), 실패한 셸이 예약한 phase를
-# 돌려주지 않아 다음 셸이 cold를 다시 재지 못하는 것.
+# 이것을 실패시키는 것: init이 실패한 셸이 줄을 남기지 않는 것(그 부팅의 cold가 무효라는 사실이 사라짐), 예약을
+# 돌려주는 것(다음 셸이 이미 페이지가 올라온 뒤의 실행을 cold로 기록함), 줄에 실패 상태를 적지 않는 것.
 @pytest.mark.parametrize("shell", LOGGER_SHELLS)
-def test_failed_init_logs_nothing(shell, tmp_path):
+def test_failed_init_keeps_its_phase_on_record(shell, tmp_path):
     env = setup(tmp_path)
     assert source(shell, dict(env, FAKE_RC="3"), tmp_path).returncode == 0
-    assert rows(tmp_path) == [] and list(tmp_path.glob("first.tsv.*")) == []
+    assert [g[3:5] for g in rows(tmp_path)] == [["phase=cold", "status=3"]]
+    assert [p.name for p in tmp_path.glob("first.tsv.*")] == [f"first.tsv.{boot_id()}.cold"]
     source(shell, env, tmp_path)
-    assert [g[3] for g in rows(tmp_path)] == ["phase=cold"]
+    assert [g[3:5] for g in rows(tmp_path)] == [["phase=cold", "status=3"], ["phase=warm", "status=0"]]
 
 
 # 이것을 실패시키는 것: phase를 원자적으로 예약하지 않고 행 수로 고르는 것. 두 셸이 같이 시작하면 둘 다 0행을 보고
