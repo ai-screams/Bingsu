@@ -20,6 +20,13 @@ LOOP = {
 # fish has no sub-millisecond clock without an external command (BSD date
 # has no %N), so fish is timed from outside: (T(220 runs) - T(20 runs)) / 200.
 FISH_LOOP = "for i in (seq {n}); fish_prompt >/dev/null; end\n"
+# The in-shell clock the loops read. Without it (bash before 5, or a sh
+# standing in for bash) both reads are empty and every sample is 0 ns, which
+# would pass for a measurement.
+CLOCK = {
+    "zsh": "zmodload zsh/datetime && [[ $EPOCHREALTIME == <->[.,]<-> ]]",
+    "bash": '(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501 )) && [[ $EPOCHREALTIME =~ ^[0-9]+[.,][0-9]+$ ]]',
+}
 
 
 OS = {"Darwin": "macos", "Linux": "linux"}[platform.system()]
@@ -38,6 +45,15 @@ def run(shell, f, env):
     return r.stdout
 
 
+def check_clock(shell, env):
+    """RuntimeError unless `shell` (as SHELL_CMD runs it) has the clock."""
+    if shell not in CLOCK:
+        return
+    r = subprocess.run(SHELL_CMD[shell] + ["-c", CLOCK[shell]], env=env, capture_output=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"{shell} has no EPOCHREALTIME clock (zsh/datetime, or bash 5.1+)")
+
+
 def fish_mean_ns(script_head, env, base):
     times = {}
     for n in (20, 220):
@@ -54,8 +70,9 @@ def nearest_rank(sorted_vals, p):
 
 
 def measure(shell, base):
-    inst = Install(base)
     env = trusted_env(base)
+    check_clock(shell, env)
+    inst = Install(base)
     script = inst.init(shell, env)
     inst.use_fake(minimal_record())
     if shell == "fish":

@@ -56,16 +56,42 @@ def test_cold_then_warm_then_nothing(shell, tmp_path):
     assert {g[1] for g in got} == {boot_id()}
     assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", g[0]) and re.fullmatch(r"\d+us", g[5]) for g in got)
     assert (tmp_path / "argv").read_text() == f"init {shell}\n" * 2
+    assert sorted(p.name for p in tmp_path.glob("first.tsv.*")) == [f"first.tsv.{boot_id()}.cold",
+                                                                    f"first.tsv.{boot_id()}.warm"]
 
 
-# 이것을 실패시키는 것: init이 실패한 셸도 줄을 남기는 것(그 시간은 측정이 아님), 그래서 다음 셸이 cold를 다시 재지 못하는 것.
+# 이것을 실패시키는 것: init이 실패한 셸도 줄을 남기는 것(그 시간은 측정이 아님), 실패한 셸이 예약한 phase를
+# 돌려주지 않아 다음 셸이 cold를 다시 재지 못하는 것.
 @pytest.mark.parametrize("shell", LOGGER_SHELLS)
 def test_failed_init_logs_nothing(shell, tmp_path):
     env = setup(tmp_path)
     assert source(shell, dict(env, FAKE_RC="3"), tmp_path).returncode == 0
-    assert rows(tmp_path) == []
+    assert rows(tmp_path) == [] and list(tmp_path.glob("first.tsv.*")) == []
     source(shell, env, tmp_path)
     assert [g[3] for g in rows(tmp_path)] == ["phase=cold"]
+
+
+# 이것을 실패시키는 것: phase를 원자적으로 예약하지 않고 행 수로 고르는 것. 두 셸이 같이 시작하면 둘 다 0행을 보고
+# cold를 두 번 쓰고, 그 뒤로 warm은 영영 남지 않는다. 가짜 init이 0.3초 자므로 두 셸의 고르는 시점이 겹친다.
+@pytest.mark.parametrize("shell", LOGGER_SHELLS)
+def test_two_shells_at_once_take_cold_and_warm(shell, tmp_path):
+    env = dict(setup(tmp_path), FAKE_SLEEP="0.3")
+    for _ in range(3):
+        for f in tmp_path.glob("first.tsv*"):
+            f.rmdir() if f.is_dir() else f.unlink()
+        procs = [subprocess.Popen([shell, *FLAGS[shell], "-c", f'source "{LOGGER}"'], env=env, cwd=tmp_path,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
+        assert all(p.wait(timeout=30) == 0 for p in procs)
+        assert sorted(g[3] for g in rows(tmp_path)) == ["phase=cold", "phase=warm"], rows(tmp_path)
+
+
+# 이것을 실패시키는 것: 기록 폴더가 없을 때 이유 없이 아무것도 남기지 않는 것(조용한 건너뜀), 그때 init을 재는 것.
+@pytest.mark.parametrize("shell", LOGGER_SHELLS)
+def test_missing_log_folder_says_so(shell, tmp_path):
+    env = dict(setup(tmp_path), BINGSU_M1_FIRST_SHELL_LOG=str(tmp_path / "absent/first.tsv"))
+    r = source(shell, env, tmp_path)
+    assert r.returncode == 0 and f"no folder {tmp_path / 'absent'}" in r.stderr, r
+    assert not (tmp_path / "absent").exists() and not (tmp_path / "argv").exists()
 
 
 # 이것을 실패시키는 것: 빼는 방향이나 단위가 틀린 것(0.2초 잠드는 init이 0.2초 이상 2초 미만으로 남지 않음).
