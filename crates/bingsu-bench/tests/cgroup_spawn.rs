@@ -13,6 +13,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 // 이것을 실패시키는 것: flags에서 CLONE_INTO_CGROUP을 빼는 것(자식이 부모 cgroup에서 시작),
 // setsid를 빼는 것, close_range를 빼는 것(물려받은 fd가 보임), CLONE_PIDFD를 빼는 것.
+// 자식은 셸이 아니라 m1-fd-report다. 셸이 `ls /proc/$$/fd | …`로 자기 fd를 나열하면 ls가 읽는 순간 셸이
+// 아직 파이프라인의 파이프 fd를 쥐고 있을 수 있어(CI에서 `0 1 2 3 4 5`로 실패), 관측이 경쟁한다.
 // 이것을 실패시키는 것(변수 없음): BINGSU_REQUIRE_CGROUP_TESTS=1인데 건너뛰는 것.
 #[test]
 fn child_starts_inside_the_cgroup() {
@@ -31,14 +33,18 @@ fn child_starts_inside_the_cgroup() {
     let leak = bingsu_bench::sys::spawn::dup_inheritable(&cg).unwrap();
     let (r, w) = pipe_cloexec().unwrap();
     let devnull = std::fs::File::open("/dev/null").unwrap();
-    let sh = c"/bin/sh";
-    let script = c"cat /proc/self/cgroup; \
-        set -- $(cut -d' ' -f6 /proc/$$/stat); echo sid=$1 pid=$$; \
-        ls /proc/$$/fd | sort -n | tr '\\n' ' '";
-    let argv = [sh, c"-c", script];
-    let envp = [c"PATH=/usr/bin:/bin"];
-    let (pid, pidfd) =
-        spawn_in_cgroup(&cg, sh, &argv, &envp, w.as_raw_fd(), devnull.as_raw_fd()).unwrap();
+    let report = std::ffi::CString::new(env!("CARGO_BIN_EXE_m1-fd-report")).unwrap();
+    let argv = [report.as_c_str(), c"--cgroup"];
+    let envp: [&std::ffi::CStr; 0] = [];
+    let (pid, pidfd) = spawn_in_cgroup(
+        &cg,
+        &report,
+        &argv,
+        &envp,
+        w.as_raw_fd(),
+        devnull.as_raw_fd(),
+    )
+    .unwrap();
     drop(w);
     drop(leak);
     let mut out = String::new();
@@ -68,18 +74,12 @@ fn child_starts_inside_the_cgroup() {
         .unwrap()
         .display()
         .to_string();
-    assert!(out.starts_with(&format!("0::/{want}\n")), "cgroup: {out}");
-    let line = out.lines().nth(1).unwrap();
-    let ids: Vec<&str> = line
-        .split(' ')
-        .map(|f| f.split('=').nth(1).unwrap())
-        .collect();
-    assert_eq!(ids[0], ids[1], "not a session leader: {line}");
-    // The shell's own fds ($$, not ls): only stdio is left.
+    // The child's own fds >= 3 ("-": none, only stdio is left), its session
+    // (a leader: its sid is its pid) and its cgroup.
     assert_eq!(
-        out.lines().nth(2).unwrap().trim_end(),
-        "0 1 2",
-        "fds: {out}"
+        out,
+        format!("FDS -\nSID {pid}\nCGROUP 0::/{want}\n"),
+        "child report"
     );
 }
 
