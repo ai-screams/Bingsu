@@ -79,7 +79,7 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Prompt layout and block styles | Designed |
 | Implementation language | Rust |
 | Engine core (M1: record path and shell hooks) | In progress |
-| Performance measurement (M1 Part B) | Not started |
+| Performance measurement (M1 Part B) | Measurement tools in progress, no published numbers yet |
 | User-visible prompt, themes, segments and colors | Not started |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |

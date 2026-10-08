@@ -12,7 +12,7 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 - **Stage**: M1 (interfaces and measurement). The record path and the shell hooks exist; there is no release and no
   user-visible prompt yet. `README.md` lists features as planned. Keep it that way until they ship.
-- **Repository**: `ai-screams/Bingsu`, currently private.
+- **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout
 
@@ -28,7 +28,8 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 ## Collaboration rules (MUST FOLLOW)
 
 - **Every change goes through a pull request.** Never commit to `main` directly.
-  A local `pre-push` hook blocks pushes to `main` because branch protection is not available while the repository is private.
+  A ruleset on `main` requires a pull request, squash merges and the CI checks, and blocks force-pushes and deletion.
+  A local `pre-push` hook also refuses pushes to `main`.
 - **Ask before anything outward-facing.** Pushing a branch, creating a pull request and merging each need an explicit go-ahead
   for that specific item. "Fix this" or "finish it" does not authorize a push, a PR or a merge.
 - **Squash merge only.** The PR title becomes the commit on `main`, so it must follow Conventional Commits.
