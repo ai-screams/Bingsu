@@ -145,6 +145,9 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: scripts/check-core-purity.sh
       - run: cargo deny --config deny.toml check
+      # The size probe is outside the workspace with its own lock; the same
+      # policy covers it.
+      - run: cargo deny --locked --manifest-path bench/size-probe/Cargo.toml --config deny.toml check
 
   wasm:
     name: Core wasm32 build
@@ -194,6 +197,9 @@ jobs:
       # bench/tests: the strace read-count test needs the release file-cost
       # runner, and the writer-order demo runs in all three shells.
       - run: cargo build --release -p bingsu-bench
+      # bench/tests/test_run_e2e.py runs run-e2e.sh against the debug binary
+      # (a stand-in replaces the timing tool); a missing binary fails it.
+      - run: cargo build -p bingsu
       - name: Install zsh and fish for the writer-order demo
         run: |
           sudo apt-get install -y --no-install-recommends zsh fish
@@ -207,10 +213,12 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest tools/fsbudget -q -rs -p no:cacheprovider
       # FSB_REQUIRE_STRACE fails the read-count test instead of skipping it;
       # BINGSU_TEST_SHELLS (as in tests/shell) fails a listed shell that is
-      # missing, so neither test can pass here by not running.
+      # missing; BINGSU_REQUIRE_NONROOT_TESTS fails the tests that skip as
+      # root. None of them can pass here by not running.
       - name: Bench tests
         env:
           FSB_REQUIRE_STRACE: "1"
           BINGSU_TEST_SHELLS: bash zsh fish
+          BINGSU_REQUIRE_NONROOT_TESTS: "1"
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest bench/tests -q -rs -p no:cacheprovider

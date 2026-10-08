@@ -16,3 +16,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+
+  # The size probe keeps its own lock outside the workspace.
+  - package-ecosystem: cargo
+    directory: /bench/size-probe
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"

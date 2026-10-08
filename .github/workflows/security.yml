@@ -56,3 +56,6 @@ jobs:
           tool: cargo-audit
       - if: steps.check.outputs.lock == 'true'
         run: cargo audit
+      # The size probe's own lock (outside the workspace).
+      - if: steps.check.outputs.lock == 'true'
+        run: cargo audit --file bench/size-probe/Cargo.lock
