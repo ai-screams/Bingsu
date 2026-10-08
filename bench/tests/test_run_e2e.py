@@ -23,7 +23,7 @@ a = sys.argv[1:]
 if a == ["--version"]:
     print("hyperfine 0.0.0-stand-in"); sys.exit(0)
 log = open(os.environ["FAKE_HF_LOG"], "a")
-log.write(json.dumps({{"argv": a}}) + "\\n")
+log.write(json.dumps({{"argv": a, "git_env": sorted(k for k in os.environ if k.startswith("GIT_"))}}) + "\\n")
 out = a[a.index("--export-json") + 1]
 cmds = [x for x in a[a.index("--export-json") + 2:]]
 res = []
@@ -41,8 +41,14 @@ open(out, "w").write(json.dumps({{"results": res}}))
 """
 
 
+# Planted GIT_* values: run-e2e.sh must drop them before it runs anything
+# (they would point git at another repository or config).
+CANARY = {"GIT_DIR": "/nonexistent-canary", "GIT_CONFIG_GLOBAL": "/nonexistent-canary", "GIT_CANARY": "1"}
+
+
 def env_for(tmp):
-    """Isolated: HOME, OLDPWD and cwd in tmp; no GIT_*; the stand-in first on PATH."""
+    """Isolated: HOME, OLDPWD and cwd in tmp; the caller's GIT_* replaced by
+    canaries; the stand-in first on PATH."""
     fake_dir = tmp / "fakebin"
     fake_dir.mkdir()
     (fake_dir / "hyperfine").write_text(FAKE)
@@ -51,7 +57,7 @@ def env_for(tmp):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(PATH=f"{fake_dir}:{os.environ['PATH']}", HOME=str(tmp / "home"), OLDPWD=str(tmp),
                GIT_CEILING_DIRECTORIES=str(tmp.parent), FAKE_HF_LOG=str(tmp / "hf.log"),
-               BINGSU_BIN=str(BIN))
+               BINGSU_BIN=str(BIN), **CANARY)
     return env
 
 
@@ -88,8 +94,15 @@ def test_warm_run_shape(tmp_path):
     homes = {e["home"] for e in ran}
     assert len(homes) == 1 and str(tmp_path / "home") not in homes and os.environ.get("HOME") not in homes, homes
     assert not pathlib.Path(homes.pop()).exists()  # removed on exit
+    assert all(e["git_env"] == [] for e in entries if "argv" in e), entries
     meta = json.loads((out / "e2e-meta.jsonl").read_text())["meta"]
-    commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    # Outside a git checkout (or without git) the meta line says "unknown".
+    try:
+        git = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                             env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+        commit = git.stdout.strip() if git.returncode == 0 else "unknown"
+    except FileNotFoundError:
+        commit = "unknown"
     assert meta["os"] in ("macos", "linux") and meta["commit"] == commit and len(meta["bingsu_sha256"]) == 64
     text = summarize_out(out)
     for shell in ("zsh", "fish"):
@@ -116,14 +129,25 @@ def test_cold_once_shape(tmp_path):
     assert all(n.endswith("-cold.json") or n == "e2e-meta-cold.jsonl" for n in names), names
 
 
-# 이것을 실패시키는 것: 상대 OUT_DIR·모르는 둘째 인자·이미 있는 결과 파일을 받아들이는 것(덮어쓰거나 300회로 돌며 -cold를 붙임).
+# 이것을 실패시키는 것: 상대 OUT_DIR·모르는 둘째 인자를 받아들이는 것(300회로 돌며 -cold를 붙임), 이미 있는 폴더를
+# 받아들이는 것(결과가 든 폴더, 다른 결과가 든 폴더, 빈 폴더, 폴더를 가리키는 링크, 끊긴 링크: 요약기가 폴더의 결과를
+# 모두 읽으므로 측정이 섞임), --cold-once도 같음.
 @pytest.mark.parametrize("args,code", [(["rel/out"], 2), (["{tmp}/o", "--cold"], 2), (["{tmp}/o", "--cold-once", "x"], 2),
-                                       ([], 2), (["{tmp}/taken"], 1)])
+                                       ([], 2), (["{tmp}/taken"], 1), (["{tmp}/other"], 1), (["{tmp}/empty"], 1),
+                                       (["{tmp}/empty", "--cold-once"], 1), (["{tmp}/link"], 1),
+                                       (["{tmp}/dangling"], 1)])
 def test_refuses(tmp_path, args, code):
-    taken = tmp_path / "taken"
-    taken.mkdir()
+    taken, other, empty = tmp_path / "taken", tmp_path / "other", tmp_path / "empty"
+    for d in (taken, other, empty):
+        d.mkdir()
     (taken / "prompt.json").write_text("keep")
+    (other / "m1-spawn-macos.jsonl").write_text("keep")
+    (tmp_path / "link").symlink_to(empty)
+    (tmp_path / "dangling").symlink_to(tmp_path / "absent")
     r = run(tmp_path, *[a.format(tmp=tmp_path) for a in args])
     assert r.returncode == code, r.stderr
-    assert (taken / "prompt.json").read_text() == "keep"
-    assert not (tmp_path / "hf.log").exists()
+    if code == 1:
+        assert b"OUT_DIR must be a new folder" in r.stderr, r.stderr
+    assert (taken / "prompt.json").read_text() == "keep" and list(empty.iterdir()) == []
+    assert sorted(p.name for p in other.iterdir()) == ["m1-spawn-macos.jsonl"]
+    assert not (tmp_path / "absent").exists() and not (tmp_path / "hf.log").exists()

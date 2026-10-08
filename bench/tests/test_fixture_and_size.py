@@ -52,6 +52,7 @@ CARGO = f"""#!{sys.executable}
 import json, os, sys
 a = sys.argv[1:]
 open(os.environ["FAKE_CARGO_LOG"], "a").write(json.dumps(a) + "\\n")
+open(os.environ["FAKE_CARGO_LOG"] + ".env", "a").write(json.dumps(sorted(k for k in os.environ if k.startswith("GIT_"))) + "\\n")
 tgt = a[a.index("--target-dir") + 1]
 feats = a[a.index("--features") + 1] if "--features" in a else ""
 os.makedirs(tgt + "/release", exist_ok=True)
@@ -64,12 +65,15 @@ def size(tmp, *args, **env):
     fake.mkdir(exist_ok=True)
     (fake / "cargo").write_text(CARGO)
     (fake / "cargo").chmod(0o755)
-    e = isolated_env(tmp, PATH=f"{fake}:{os.environ['PATH']}", FAKE_CARGO_LOG=str(tmp / "cargo.log"), **env)
+    # Planted GIT_* values that size.sh must drop before cargo runs.
+    e = isolated_env(tmp, PATH=f"{fake}:{os.environ['PATH']}", FAKE_CARGO_LOG=str(tmp / "cargo.log"),
+                     GIT_DIR="/nonexistent-canary", GIT_CANARY="1", **env)
     return subprocess.run(["bash", str(SIZE), *args], env=e, cwd=tmp, capture_output=True, text=True, timeout=30)
 
 
 # 이것을 실패시키는 것: 세 조합의 기능을 바꿔 넘기거나, --release·--locked·probe의 manifest를 쓰지 않는 것,
-# 바깥 CARGO_TARGET_DIR나 예전 빌드의 파일 크기를 읽는 것, 요약기가 읽는 os 이름을 쓰지 않는 것.
+# 바깥 CARGO_TARGET_DIR나 예전 빌드의 파일 크기를 읽는 것, 요약기가 읽는 os 이름을 쓰지 않는 것,
+# 호출자의 GIT_*를 cargo에 넘기는 것.
 def test_size_rows(tmp_path):
     stale = tmp_path / "stale"
     (stale / "release").mkdir(parents=True)
@@ -84,18 +88,26 @@ def test_size_rows(tmp_path):
     manifest = str((ROOT / "bench/size-probe/Cargo.toml").resolve())
     assert all(c[:3] == ["build", "--quiet", "--release"] and "--locked" in c
                and c[c.index("--manifest-path") + 1] == manifest for c in calls), calls
+    assert (tmp_path / "cargo.log.env").read_text().splitlines() == ["[]"] * 3
     tgt = {c[c.index("--target-dir") + 1] for c in calls}
     assert len(tgt) == 1 and str(stale) not in tgt and not pathlib.Path(tgt.pop()).exists()
 
 
-# 이것을 실패시키는 것: 상대 OUT_DIR(스크립트 폴더 기준으로 풀림)이나 이미 있는 결과 파일을 받아들이는 것.
-@pytest.mark.parametrize("arg,code", [("rel", 2), ("{tmp}/taken", 1), (None, 2)])
+# 이것을 실패시키는 것: 상대 OUT_DIR(스크립트 폴더 기준으로 풀림)이나 이미 있는 폴더(결과가 든 폴더, 다른 결과가 든
+# 폴더, 빈 폴더)를 받아들이는 것.
+@pytest.mark.parametrize("arg,code", [("rel", 2), ("{tmp}/taken", 1), ("{tmp}/other", 1), ("{tmp}/empty", 1), (None, 2)])
 def test_size_refuses(tmp_path, arg, code):
-    (tmp_path / "taken").mkdir()
+    for d in ("taken", "other", "empty"):
+        (tmp_path / d).mkdir()
     (tmp_path / f"taken/size-{OS}.jsonl").write_text("keep")
+    (tmp_path / "other/m1-file-macos.jsonl").write_text("keep")
     r = size(tmp_path, *([] if arg is None else [arg.format(tmp=tmp_path)]))
     assert r.returncode == code, r.stderr
+    if code == 1:
+        assert "OUT_DIR must be a new folder" in r.stderr, r.stderr
     assert (tmp_path / f"taken/size-{OS}.jsonl").read_text() == "keep"
+    assert [p.name for p in (tmp_path / "other").iterdir()] == ["m1-file-macos.jsonl"]
+    assert list((tmp_path / "empty").iterdir()) == []
     assert not (tmp_path / "cargo.log").exists()
 
 
@@ -124,9 +136,11 @@ def test_snapshot_present_row(tmp_path):
 
 
 # 이것을 실패시키는 것: 잰 연산이 세 파일을 다 읽지 않는 것(읽을 수 없는 파일이 있어도 잰 값이 나옴).
-# root는 chmod 0으로도 읽으므로 root로 돌리면 실패한다(bench/tests를 돌리는 CI job은 root가 아님).
+# root는 chmod 0으로도 읽으므로 root에서는 skip하고, BINGSU_REQUIRE_NONROOT_TESTS=1이면 그 skip이 실패가 된다.
+@pytest.mark.skipif(os.geteuid() == 0 and os.environ.get("BINGSU_REQUIRE_NONROOT_TESTS") != "1",
+                    reason="chmod 0 does not stop root from reading")
 def test_snapshot_present_reads_every_file(tmp_path):
-    assert os.geteuid() != 0, "run as a non-root user: chmod 0 does not stop root from reading"
+    assert os.geteuid() != 0, "BINGSU_REQUIRE_NONROOT_TESTS=1 but running as root"
     fx = tmp_path / "run"
     assert fixture(tmp_path, str(fx)).returncode == 0
     for name in ("snapshot", "marker", "session"):

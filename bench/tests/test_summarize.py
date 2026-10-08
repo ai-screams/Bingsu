@@ -175,11 +175,42 @@ BAD = {
     "unknown-shape": ("a.jsonl", GOOD + _row(row="x", n=1) + "\n", "a.jsonl:2: neither measured nor na"),
     "no-times": ("init-gen.json", json.dumps({"results": [{"command": "c", "times": []}]}), "'c' has no times"),
     "not-hyperfine": ("redraw.json", json.dumps({"x": 1}), "not a hyperfine export"),
+    # A value that would otherwise judge `ok`: NaN > limit and -1 > limit are both False.
+    "nan-median": ("a.jsonl", GOOD + '{"matrix":"file","row":"x","os":"macos","median_ns":NaN,"p95_ns":1}\n',
+                   "a.jsonl:2: not JSON"),
+    "infinity": ("a.jsonl", GOOD + '{"matrix":"file","row":"x","os":"macos","median_ns":1,"p95_ns":Infinity}\n',
+                 "a.jsonl:2: not JSON"),
+    "nan-time": ("init-gen.json", '{"results":[{"command":"c","times":[NaN],"exit_codes":[0]}]}',
+                 "not a hyperfine export"),
+    # 1e999 is valid JSON and parses to inf.
+    "overflow": ("a.jsonl", GOOD + '{"matrix":"file","row":"x","os":"macos","median_ns":1e999,"p95_ns":1}\n',
+                 "a.jsonl:2: median_ns inf is not a finite number >= 0"),
+    "negative-median": ("a.jsonl", GOOD + _row(row="x", median_ns=-5, p95_ns=1) + "\n",
+                        "a.jsonl:2: median_ns -5 is not a finite number >= 0"),
+    "negative-time": ("init-gen.json", json.dumps({"results": [{"command": "c", "times": [-0.1]}]}),
+                      "'c': time -0.1 is not a finite number >= 0"),
+    "string-median": ("a.jsonl", GOOD + _row(row="x", median_ns="1", p95_ns=1) + "\n",
+                      "a.jsonl:2: median_ns '1' is not a finite number >= 0"),
+    "null-p95": ("a.jsonl", GOOD + _row(row="x", median_ns=1, p95_ns=None) + "\n",
+                 "a.jsonl:2: p95_ns None is not a finite number >= 0"),
+    "bool-mean": ("a.jsonl", GOOD + _row(row="fish", mean_ns=True) + "\n",
+                  "a.jsonl:2: mean_ns True is not a finite number >= 0"),
+    "bool-bytes": ("s.jsonl", GOOD + json.dumps({"matrix": "size", "row": "base", "os": "macos", "bytes": True}) + "\n",
+                   "s.jsonl:2: bytes True is not a finite integer >= 0"),
+    "float-bytes": ("s.jsonl", GOOD + json.dumps({"matrix": "size", "row": "base", "os": "macos", "bytes": 1.5}) + "\n",
+                    "s.jsonl:2: bytes 1.5 is not a finite integer >= 0"),
+    "no-bytes": ("s.jsonl", GOOD + json.dumps({"matrix": "size", "row": "base", "os": "macos"}) + "\n",
+                 "s.jsonl:2: size row without bytes"),
+    "size-twice": ("s.jsonl", GOOD + "".join(json.dumps({"matrix": "size", "row": "regex-yaml-json", "os": "macos",
+                                                         "bytes": b}) + "\n" for b in (9_000_000, 1000)),
+                   "row ('macos', 'regex-yaml-json') twice: s.jsonl:2 and s.jsonl:3"),
+    "command-twice": ("init-gen.json", json.dumps({"results": [{"command": "c", "times": [0.1]}] * 2}), "'c' twice"),
 }
 
 
-# 이것을 실패시키는 것: 읽을 수 없는 입력(형식이 틀린 JSON, 모르는 행, times 없는 hyperfine 결과)을 건너뛰거나
-# 0으로 채우는 것, 종료 코드 2로 끝내지 않는 것. 읽을 수 있는 행을 함께 두어 "결과 없음"이 대신 걸리지 않게 한다.
+# 이것을 실패시키는 것: 읽을 수 없는 입력(형식이 틀린 JSON, NaN·Infinity, 모르는 행, times 없는 hyperfine 결과,
+# 음수·문자열·null·bool 값, 정수가 아닌 크기, 같은 크기 행·같은 명령 둘)을 건너뛰거나 0·ok로 넘기는 것,
+# traceback(rc 1)이나 종료 0으로 끝내는 것. 읽을 수 있는 행을 함께 두어 "결과 없음"이 대신 걸리지 않게 한다.
 @pytest.mark.parametrize("case", sorted(BAD))
 def test_bad_input_fails(tmp_path, case, capsys):
     name, text, why = BAD[case]
@@ -202,9 +233,30 @@ def test_duplicate_mixed_missing_empty_fail(tmp_path):
     (tmp_path / "b.jsonl").write_text(r.replace('"macos"', '"linux"').replace("header64", "other") + "\n")
     with pytest.raises(summarize.InputError, match="more than one OS"):
         summarize.load(tmp_path)
-    with pytest.raises(summarize.InputError, match="not a folder"):
+    with pytest.raises(summarize.InputError, match="not a folder, a .jsonl or a .json file"):
         summarize.load(tmp_path / "absent")
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(summarize.InputError, match="no results"):
         summarize.load(empty)
+
+
+# 이것을 실패시키는 것: 여러 경로(따뜻한 폴더, --cold-once 폴더, 행 파일)를 합치지 않는 것, 같은 파일을 두 번 받거나
+# 폴더와 그 안의 파일을 함께 받아 행을 겹치는 것, 다른 종류의 파일을 받는 것.
+def test_load_merges_given_paths(tmp_path):
+    warm, cold = tmp_path / "warm", tmp_path / "cold"
+    warm.mkdir()
+    cold.mkdir()
+    _hf(warm / "prompt.json", ("/b/bingsu prompt --ctx 1", [0.002]))
+    _hf(cold / "init-zsh-cold.json", ("env ZDOTDIR=/t/zsh-init zsh -i -c exit", [0.09]))
+    rowfile = tmp_path / "m1-file-macos.jsonl"
+    rowfile.write_text(_row(row="header64+marker128", n=1, median_ns=20000, p95_ns=30000) + "\n")
+    rows, os, _ = summarize.load(warm, cold, rowfile)
+    assert os == "macos" and sorted(rows) == ["header64+marker128", "init-zsh-cold:env ZDOTDIR=/t/zsh-init zsh -i -c exit",
+                                               "prompt-empty"]
+    for twice in ([rowfile, rowfile], [warm, warm / "prompt.json"]):
+        with pytest.raises(summarize.InputError, match="the same file given twice"):
+            summarize.load(*twice)
+    (tmp_path / "notes.txt").write_text("x")
+    with pytest.raises(summarize.InputError, match="not a folder, a .jsonl or a .json file"):
+        summarize.load(warm, tmp_path / "notes.txt")

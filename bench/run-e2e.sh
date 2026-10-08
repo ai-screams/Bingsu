@@ -5,7 +5,10 @@
 # only when the bash on PATH is 5.1 or later (otherwise the meta line says
 # why it was not).
 # Usage: bench/run-e2e.sh OUT_DIR [--cold-once]
-#   OUT_DIR  absolute path; created if missing; no output file may exist yet
+#   OUT_DIR  absolute path of a new folder (its parent must exist; an
+#            existing folder, even an empty one, is refused). A --cold-once
+#            run takes its own new folder too; summarize.py merges the
+#            folders it is given (summarize.py WARM_DIR COLD_DIR ...).
 #   BINGSU_BIN  the binary to time (default: target/release/bingsu)
 # The timed shells and `bingsu init` run with HOME and the XDG folders in a
 # new temporary folder, so they read and write nothing of the user's.
@@ -27,12 +30,9 @@ for t in hyperfine zsh fish; do
 done
 
 suffix=${cold:+-cold}
-files=(e2e-meta$suffix.jsonl init-zsh$suffix.json init-fish$suffix.json init-bash$suffix.json)
-[ -n "$cold" ] || files+=(prompt.json redraw.json init-gen.json)
-mkdir -p -- "$out"
-for f in "${files[@]}"; do
-  [ ! -e "$out/$f" ] || { echo "run-e2e.sh: $out/$f exists; give a new OUT_DIR" >&2; exit 1; }
-done
+# mkdir without -p refuses a folder (or a link) that already exists, so no
+# earlier result can end up next to this run's.
+mkdir -- "$out" || { echo "run-e2e.sh: OUT_DIR must be a new folder: $out" >&2; exit 1; }
 
 runs=(--warmup 20 --runs 300)
 [ -n "$cold" ] && runs=(--warmup 0 --runs 1)
@@ -73,8 +73,10 @@ if [ -z "$cold" ]; then
   "${H[@]}" --export-json "$out/init-gen.json" "$bin init zsh" "$bin init bash" "$bin init fish"
 fi
 
+# The rc lines keep $(...) for the timed shell to expand, not this one (SC2016).
 mkdir -p "$tmp/zsh-empty" "$tmp/zsh-init" "$tmp/fish-empty/fish" "$tmp/fish-init/fish"
 : > "$tmp/zsh-empty/.zshrc"
+# shellcheck disable=SC2016
 printf 'eval "$(%q init zsh)"\n' "$bin" > "$tmp/zsh-init/.zshrc"
 : > "$tmp/fish-empty/fish/config.fish"
 printf '%q init fish | source\n' "$bin" > "$tmp/fish-init/fish/config.fish"
@@ -84,6 +86,7 @@ printf '%q init fish | source\n' "$bin" > "$tmp/fish-init/fish/config.fish"
   "env XDG_CONFIG_HOME=$tmp/fish-empty fish -i -c exit" "env XDG_CONFIG_HOME=$tmp/fish-init fish -i -c exit"
 if [ "$bash_ok" = yes ]; then
   : > "$tmp/bash-empty.rc"
+  # shellcheck disable=SC2016
   printf 'eval "$(%q init bash)"\n' "$bin" > "$tmp/bash-init.rc"
   "${H[@]}" --export-json "$out/init-bash$suffix.json" \
     "bash --noprofile --rcfile $tmp/bash-empty.rc -i -c exit" "bash --noprofile --rcfile $tmp/bash-init.rc -i -c exit"

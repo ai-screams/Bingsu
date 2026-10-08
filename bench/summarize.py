@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Summarize M1 measurements against the spec's hypotheses (spec section 8).
 
-Usage: summarize.py RAW_DIR   (reads *.jsonl rows and hyperfine *.json)
+Usage: summarize.py PATH...   (each a folder of *.jsonl rows and hyperfine
+*.json, or one such file). Several paths are how results from different runs
+(a warm and a --cold-once folder, the B3/B4 row files) are put together; the
+merge is explicit, never "whatever is in the folder".
 Never changes a target: an overrun prints OVER and goes to the user
 (spec section 8 "gate reinforcement", last rule).
 
 Input that cannot be read is an error (exit 2), never a zero: a missing
-folder, a line that is not JSON, a row of an unknown shape, the same row in
-two files, rows from two operating systems, a hyperfine result without
-times. A row that was not measured (`na`) stays in the table as
-`unavailable` and every line that needs it says so.
+path, a line that is not JSON (NaN and Infinity included), a row of an
+unknown shape, a value that is not a finite number >= 0 (a bool is not a
+number), the same row in two places, rows from two operating systems, a
+hyperfine result without times. A row that was not measured (`na`) stays in
+the table as `unavailable` and every line that needs it says so.
 """
 import json
+import math
 import pathlib
 import sys
 
@@ -72,19 +77,39 @@ def get(rows, key):
     return measured(rows[key], key)
 
 
+def _no_constant(name):
+    raise ValueError(f"{name} is not JSON")
+
+
+def parse_json(text):
+    """`json.loads` without the NaN/Infinity extension Python accepts."""
+    return json.loads(text, parse_constant=_no_constant)
+
+
+def number(v, where, field, integer=False):
+    """`v` when it is a finite number >= 0 (an int when `integer`); a bool,
+    a string, null, NaN or a negative value is an `InputError`."""
+    kinds = (int,) if integer else (int, float)
+    if isinstance(v, bool) or not isinstance(v, kinds) or not math.isfinite(v) or v < 0:
+        raise InputError(f"{where}: {field} {v!r} is not a finite {'integer' if integer else 'number'} >= 0")
+    return v
+
+
 def hyperfine_rows(path):
     try:
-        results = json.loads(path.read_text())["results"]
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        results = parse_json(path.read_text())["results"]
+    except (ValueError, KeyError, TypeError) as e:
         raise InputError(f"{path}: not a hyperfine export ({e!r})") from None
     rows = {}
     for r in results:
+        if r.get("command") in rows:
+            raise InputError(f"{path}: {r['command']!r} twice")
         if not r.get("times"):
             raise InputError(f"{path}: {r.get('command')!r} has no times")
         if r.get("exit_codes") and any(c != 0 for c in r["exit_codes"]):
             rows[r["command"]] = {"na": f"non-zero exit codes {sorted(set(r['exit_codes']))}"}
             continue
-        t = sorted(x * 1000 for x in r["times"])
+        t = sorted(number(x, f"{path}: {r['command']!r}", "time") * 1000 for x in r["times"])
         rows[r["command"]] = {"median_ms": nearest_rank(t, 50), "p95_ms": nearest_rank(t, 95)}
     return rows
 
@@ -208,21 +233,40 @@ def _put(rows, origin, key, value, where):
     rows[key], origin[key] = value, where
 
 
-def load(raw):
-    """(rows, os, sizes). Rows from both kinds of file share one namespace;
-    a hyperfine row is `<file stem>:<command>`, except the prompt run in
-    prompt.json, which is `prompt-empty`."""
-    if not raw.is_dir():
-        raise InputError(f"{raw}: not a folder")
-    rows, origin, oses, sizes = {}, {}, set(), {}
-    for f in sorted(raw.glob("*.jsonl")):
+def _files(paths):
+    """The *.jsonl and *.json files named by `paths` (a folder gives its own
+    files of both kinds, sorted); a missing path or another kind of file is
+    an `InputError`, and so is the same file given twice."""
+    jsonl, js = [], []
+    for p in paths:
+        if p.is_dir():
+            jsonl += sorted(p.glob("*.jsonl"))
+            js += sorted(p.glob("*.json"))
+        elif p.is_file() and p.suffix in (".jsonl", ".json"):
+            (jsonl if p.suffix == ".jsonl" else js).append(p)
+        else:
+            raise InputError(f"{p}: not a folder, a .jsonl or a .json file")
+    real = [f.resolve() for f in jsonl + js]
+    if len(set(real)) != len(real):
+        raise InputError("the same file given twice")
+    return jsonl, js
+
+
+def load(*paths):
+    """(rows, os, sizes) from one or more folders or files. Rows from both
+    kinds of file share one namespace; a hyperfine row is `<file
+    stem>:<command>`, except the prompt run in prompt.json, which is
+    `prompt-empty`."""
+    jsonl, js = _files(paths)
+    rows, origin, oses, sizes, size_origin = {}, {}, set(), {}, {}
+    for f in jsonl:
         for i, line in enumerate(f.read_text().splitlines(), 1):
             where = f"{f.name}:{i}"
             if not line.strip():
                 continue
             try:
-                r = json.loads(line)
-            except json.JSONDecodeError as e:
+                r = parse_json(line)
+            except ValueError as e:
                 raise InputError(f"{where}: not JSON ({e})") from None
             if not isinstance(r, dict):
                 raise InputError(f"{where}: not a JSON object")
@@ -235,25 +279,26 @@ def load(raw):
             if "row" not in r or "os" not in r:
                 raise InputError(f"{where}: no row or os")
             oses.add(r["os"])
+            ns = lambda field: number(r[field], where, field) / 1e6  # noqa: E731
             if r.get("matrix") == "size":
-                if not isinstance(r.get("bytes"), int):
+                if "bytes" not in r:
                     raise InputError(f"{where}: size row without bytes")
-                sizes[(r["os"], r["row"])] = r["bytes"]
+                _put(sizes, size_origin, (r["os"], r["row"]), number(r["bytes"], where, "bytes", integer=True), where)
             elif "na" in r:
                 _put(rows, origin, r["row"], {"na": r["na"]}, where)
             elif "median_ns" in r and "p95_ns" in r:
-                _put(rows, origin, r["row"], {"median_ms": r["median_ns"] / 1e6, "p95_ms": r["p95_ns"] / 1e6}, where)
+                _put(rows, origin, r["row"], {"median_ms": ns("median_ns"), "p95_ms": ns("p95_ns")}, where)
             elif "mean_ns" in r:
                 # fish hook cost: a mean timed from outside, not a median.
-                _put(rows, origin, f"{r['row']} (mean)", {"mean_ms": r["mean_ns"] / 1e6}, where)
+                _put(rows, origin, f"{r['row']} (mean)", {"mean_ms": ns("mean_ns")}, where)
             else:
                 raise InputError(f"{where}: neither measured nor na")
-    for f in sorted(raw.glob("*.json")):
+    for f in js:
         for cmd, v in hyperfine_rows(f).items():
             key = "prompt-empty" if f.stem == "prompt" and " prompt " in cmd else f"{f.stem}:{cmd}"
             _put(rows, origin, key, v, f.name)
     if not rows and not sizes:
-        raise InputError(f"{raw}: no results (*.jsonl rows or hyperfine *.json)")
+        raise InputError(f"{' '.join(map(str, paths))}: no results (*.jsonl rows or hyperfine *.json)")
     if len(oses) > 1:
         raise InputError(f"rows from more than one OS: {sorted(oses)}")
     return rows, (oses.pop() if oses else None), sizes
@@ -272,11 +317,11 @@ def table(rows):
 
 
 def main(argv):
-    if len(argv) != 1:
-        print("usage: summarize.py RAW_DIR", file=sys.stderr)
+    if not argv:
+        print("usage: summarize.py PATH...", file=sys.stderr)
         return 2
     try:
-        rows, os, sizes = load(pathlib.Path(argv[0]))
+        rows, os, sizes = load(*map(pathlib.Path, argv))
     except (InputError, OSError) as e:
         print(f"summarize.py: {e}", file=sys.stderr)
         return 2
