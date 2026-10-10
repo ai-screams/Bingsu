@@ -42,7 +42,14 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
     }
 }
 
+/// Returns `input` as a new `String` without removed code points (see
+/// [`is_removed`]). `input` is raw bytes in any encoding; invalid UTF-8
+/// becomes U+FFFD, one per maximal invalid subsequence, so the result is
+/// always valid UTF-8 free of C0, DEL and C1 controls.
 pub fn sanitize(input: &[u8]) -> String {
+    // The output is at most 3 times the input (one invalid byte becomes the
+    // 3-byte U+FFFD); a reallocation is therefore bounded, and the cap on the
+    // value's byte length is Task A6.
     let mut out = String::with_capacity(input.len());
     sanitize_into(input, &mut out);
     out
@@ -84,6 +91,38 @@ mod tests {
         assert_eq!(sanitize(b"a\xff\xfeb"), "a\u{FFFD}\u{FFFD}b");
         assert_eq!(sanitize(b"a\xe2\x82b"), "a\u{FFFD}b");
         assert_eq!(sanitize(b"\xf0\x9f\x98"), "\u{FFFD}");
+    }
+
+    // 이것을 실패시키는 것: sanitize_into가 out을 비우거나 덮어쓰는 것(덧붙이기 계약).
+    #[test]
+    fn sanitize_into_appends_to_existing_out() {
+        let mut out = String::from("pre");
+        sanitize_into(b"a\x1bb\xffc", &mut out);
+        assert_eq!(out, "preab\u{FFFD}c");
+        sanitize_into("\u{202E}x".as_bytes(), &mut out);
+        assert_eq!(out, "preab\u{FFFD}cx");
+    }
+
+    // 이것을 실패시키는 것: overlong·서로게이트·범위 밖·맨 8비트 C1 바이트가 제어 문자나
+    // 다른 개수의 U+FFFD로 살아나는 것.
+    #[test]
+    fn malformed_encodings_never_yield_controls() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"a\xc0\x9bb", "a\u{FFFD}\u{FFFD}b"),
+            (b"a\xc0\x80b", "a\u{FFFD}\u{FFFD}b"),
+            (b"a\xed\xa0\x80b", "a\u{FFFD}\u{FFFD}\u{FFFD}b"),
+            (b"a\xf4\x90\x80\x80b", "a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}b"),
+            (b"a\xf5b", "a\u{FFFD}b"),
+            (b"a\x9b31mb", "a\u{FFFD}31mb"),
+        ];
+        for (input, want) in cases {
+            let got = sanitize(input);
+            assert_eq!(got, *want, "{input:?}");
+            assert!(
+                !got.chars()
+                    .any(|c| (c as u32) < 0x20 || (0x7F..=0x9F).contains(&(c as u32)))
+            );
+        }
     }
 
     // 이것을 실패시키는 것: 표 탐색이 범위 끝 값을 놓치는 것(이진 탐색 경계).
