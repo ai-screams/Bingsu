@@ -24,3 +24,12 @@ disallowed_types = "forbid"
 disallowed_macros = "forbid"
 
 [dependencies]
+# Pure Rust math so native and wasm32 give the same bits (spec section 1,
+# F-06). default-features = false drops the `arch` feature, which swaps in
+# hardware sqrt and fma; those are exact anyway, but one code path is
+# simpler to reason about.
+libm = { version = "=0.2.16", default-features = false }
+# Extended grapheme clusters for widths, Unicode 17.0.0
+# (unicode_segmentation::UNICODE_VERSION); src/ucd.rs will be generated for
+# the same version in Task A2 (test ucd_version_matches_segmentation).
+unicode-segmentation = { version = "=1.13.3", default-features = false }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bingsu-core", "crates/bingsu", "crates/bingsu-bench", "crates/bingsu-collect", "tools/core-cfg-check"]
+members = ["crates/bingsu-core", "crates/bingsu", "crates/bingsu-bench", "crates/bingsu-collect", "crates/bingsu-core-tests", "tools/core-cfg-check"]
 exclude = ["crates/bingsu-core/purity-canary", "crates/bingsu/purity-canary", "bench/size-probe"]
 
 [workspace.package]

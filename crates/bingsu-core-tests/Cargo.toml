@@ -1,0 +1,18 @@
+[package]
+name = "bingsu-core-tests"
+version = "0.0.0"
+description = "Property (layer 1) and byte-golden snapshot (layer 2) tests of bingsu-core; kept out of core's dependency graph"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bingsu-core = { path = "../bingsu-core" }
+
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }

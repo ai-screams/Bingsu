@@ -7,7 +7,7 @@
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
-allow = [{ name = "bingsu-core" }]
+allow = [{ name = "bingsu-core" }, { name = "libm" }, { name = "unicode-segmentation" }]
 deny = [
   { crate = "libc" },
   { crate = "rustix" },

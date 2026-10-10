@@ -193,6 +193,19 @@ fn path_as_field_name_passes() {
     passes("#[derive(Debug)]\npub struct S {\n    pub path: u8,\n}\n");
 }
 
+// What makes this fail: removing the `feature` branch in AttrCheck.
+#[test]
+fn feature_attribute_fails() {
+    fails_with("#![feature(f16)]\npub fn f() {}\n", "feature attribute");
+}
+
+// What makes this fail: matching the word `feature` anywhere instead of the
+// attribute name.
+#[test]
+fn feature_as_identifier_passes() {
+    passes("pub fn f() -> u8 {\n    let feature = 1;\n    feature\n}\n");
+}
+
 // What makes this fail: removing the cfg_attr check in scan_tokens.
 #[test]
 fn cfg_attr_fails() {

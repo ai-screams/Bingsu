@@ -25,6 +25,8 @@
 //!     parser does not look into);
 //!   - an attribute named `path` that the parser sees (overlaps the token
 //!     rule on purpose, reported with its own reason);
+//!   - an attribute named `feature` (`#![feature(..)]`): stable rustc rejects
+//!     it, but `RUSTC_BOOTSTRAP=1` turns it on, so the gate also refuses it;
 //!   - a `cfg` attribute other than exactly `#[cfg(test)]`;
 //!   - more `cfg` identifier tokens than `#[cfg(test)]` attributes, which
 //!     catches `cfg!()`, cfg inside macro bodies and any other spot.
@@ -133,6 +135,11 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
                 self.out.push(Finding {
                     line: line_of(ident.span()),
                     reason: "path attribute pulls in code".to_owned(),
+                });
+            } else if name == "feature" {
+                self.out.push(Finding {
+                    line: line_of(ident.span()),
+                    reason: "feature attribute enables unstable language items".to_owned(),
                 });
             } else if name == "cfg" {
                 let only_test = matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test");
