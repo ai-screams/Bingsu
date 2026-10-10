@@ -118,9 +118,25 @@ mod tests {
         for (input, want) in cases {
             let got = sanitize(input);
             assert_eq!(got, *want, "{input:?}");
+        }
+    }
+
+    // 독립 술어(is_removed를 쓰지 않음)로, 한 바이트 전부와 두 바이트 전부의 출력에
+    // C0·DEL·C1이 하나도 없음을 확인한다. 두 바이트 입력은 U+0080–07FF의 C1을 덮는다.
+    // 이것을 실패시키는 것: is_removed의 C0·DEL·C1 범위가 줄어드는 것(예: 0x7F..=0x9E).
+    #[test]
+    fn no_control_survives_any_one_or_two_byte_input() {
+        let is_control = |c: char| (c as u32) < 0x20 || (0x7F..=0x9F).contains(&(c as u32));
+        for b in 0..=0xFFu8 {
+            let got = sanitize(&[b]);
+            assert!(!got.chars().any(is_control), "input [{b:#04x}] -> {got:?}");
+        }
+        for v in 0..=0xFFFFu16 {
+            let input = v.to_be_bytes();
+            let got = sanitize(&input);
             assert!(
-                !got.chars()
-                    .any(|c| (c as u32) < 0x20 || (0x7F..=0x9F).contains(&(c as u32)))
+                !got.chars().any(is_control),
+                "input {input:02x?} -> {got:?}"
             );
         }
     }
