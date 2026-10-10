@@ -43,9 +43,10 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
 }
 
 /// Returns `input` as a new `String` without removed code points (see
-/// [`is_removed`]). `input` is raw bytes in any encoding; invalid UTF-8
-/// becomes U+FFFD, one per maximal invalid subsequence, so the result is
-/// always valid UTF-8 free of C0, DEL and C1 controls.
+/// [`is_removed`]). `input` is bytes that may not be valid UTF-8; it is
+/// decoded as UTF-8 only. Invalid UTF-8 becomes U+FFFD, one per maximal
+/// invalid subsequence, so the result is always valid UTF-8 free of C0, DEL
+/// and C1 controls.
 pub fn sanitize(input: &[u8]) -> String {
     // The output is at most 3 times the input (one invalid byte becomes the
     // 3-byte U+FFFD); a reallocation is therefore bounded, and the cap on the
