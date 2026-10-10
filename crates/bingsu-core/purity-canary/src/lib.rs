@@ -127,3 +127,18 @@ pub fn t30(_: Option<std::process::ChildStderr>) {} // CANARY: std::process::Chi
 pub fn t31(_: Option<std::io::StdinLock<'_>>) {} // CANARY: std::io::StdinLock
 pub fn t32(_: Option<std::io::StdoutLock<'_>>) {} // CANARY: std::io::StdoutLock
 pub fn t33(_: Option<std::io::StderrLock<'_>>) {} // CANARY: std::io::StderrLock
+pub fn c89(x: f64) -> f64 { x.powf(2.0) } // CANARY: f64::powf
+pub fn c90(x: f64) -> f64 { x.powi(2) } // CANARY: f64::powi
+pub fn c91(x: f64) -> f64 { x.cbrt() } // CANARY: f64::cbrt
+pub fn c92(x: f64) -> f64 { x.atan2(1.0) } // CANARY: f64::atan2
+pub fn c93(x: f64) -> f64 { x.sin() } // CANARY: f64::sin
+pub fn c94(x: f64) -> f64 { x.cos() } // CANARY: f64::cos
+pub fn c95(x: f64) -> f64 { x.tan() } // CANARY: f64::tan
+pub fn c96(x: f64) -> f64 { x.exp() } // CANARY: f64::exp
+pub fn c97(x: f64) -> f64 { x.ln() } // CANARY: f64::ln
+pub fn c98(x: f64) -> f64 { x.log10() } // CANARY: f64::log10
+pub fn c99(x: f64) -> f64 { x.hypot(1.0) } // CANARY: f64::hypot
+pub fn c100(x: f64) -> f64 { x.mul_add(1.0, 1.0) } // CANARY: f64::mul_add
+pub fn t34(_: Option<std::collections::HashMap<u8, u8>>) {} // CANARY: std::collections::HashMap
+pub fn t35(_: Option<std::collections::HashSet<u8>>) {} // CANARY: std::collections::HashSet
+pub fn t36(_: Option<std::hash::RandomState>) {} // CANARY: std::hash::RandomState

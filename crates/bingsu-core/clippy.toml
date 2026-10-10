@@ -89,6 +89,21 @@ disallowed-methods = [
   { path = "std::path::Path::read_link", reason = "core is I/O free" },
   { path = "std::path::Path::canonicalize", reason = "core is I/O free" },
   { path = "std::path::absolute", reason = "core is I/O free" },
+  # Float math goes through the pure Rust libm so native and wasm32 give the
+  # same bits (spec section 1, F-06). sqrt, abs, floor, ceil, round, trunc,
+  # min, max and clamp are exact everywhere and stay allowed.
+  { path = "f64::powf", reason = "use libm::pow (determinism, F-06)" },
+  { path = "f64::powi", reason = "use libm::pow (determinism, F-06)" },
+  { path = "f64::cbrt", reason = "use libm::cbrt (determinism, F-06)" },
+  { path = "f64::atan2", reason = "use libm::atan2 (determinism, F-06)" },
+  { path = "f64::sin", reason = "use libm::sin (determinism, F-06)" },
+  { path = "f64::cos", reason = "use libm::cos (determinism, F-06)" },
+  { path = "f64::tan", reason = "use libm::tan (determinism, F-06)" },
+  { path = "f64::exp", reason = "use libm::exp (determinism, F-06)" },
+  { path = "f64::ln", reason = "use libm::log (determinism, F-06)" },
+  { path = "f64::log10", reason = "use libm::log10 (determinism, F-06)" },
+  { path = "f64::hypot", reason = "use libm::hypot (determinism, F-06)" },
+  { path = "f64::mul_add", reason = "use libm::fma (determinism, F-06)" },
 ]
 disallowed-types = [
   { path = "std::fs::File", reason = "core is I/O free" },
@@ -125,6 +140,10 @@ disallowed-types = [
   { path = "std::io::StdinLock", reason = "core is I/O free" },
   { path = "std::io::StdoutLock", reason = "core is I/O free" },
   { path = "std::io::StderrLock", reason = "core is I/O free" },
+  # Same input, same output: no hash order and no OS randomness in core.
+  { path = "std::collections::HashMap", reason = "iteration order varies; use BTreeMap or a sorted Vec" },
+  { path = "std::collections::HashSet", reason = "iteration order varies; use BTreeSet or a sorted Vec" },
+  { path = "std::hash::RandomState", reason = "seeded from OS randomness" },
 ]
 disallowed-macros = [
   { path = "std::println", reason = "core is I/O free" },
