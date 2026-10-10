@@ -168,8 +168,10 @@ jobs:
       - run: cargo build -p bingsu-core --target wasm32-unknown-unknown
       - run: cargo clippy -p bingsu-core --target wasm32-unknown-unknown -- -D warnings -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros
 
-  # src/ucd.rs must be exactly what the generator makes from the pinned
-  # Unicode 17.0.0 files (sha256 checked inside gen.py).
+  # src/ucd.rs must be exactly what the generator makes from the Unicode
+  # 17.0.0 files committed under tools/gen-ucd-tables/data (sha256 checked
+  # inside gen.py). No network: unicode.org is only used by fetch.sh when the
+  # version is raised.
   ucd:
     name: Unicode tables match the generator
     needs: detect
@@ -180,8 +182,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: tools/gen-ucd-tables/fetch.sh "$RUNNER_TEMP/ucd"
-      - run: python3 -B tools/gen-ucd-tables/gen.py --ucd "$RUNNER_TEMP/ucd" --check crates/bingsu-core/src/ucd.rs
+      - run: python3 -B tools/gen-ucd-tables/test_gen.py
+      - run: python3 -B tools/gen-ucd-tables/gen.py --check crates/bingsu-core/src/ucd.rs
 
   # Spec section 8 filesystem-call budget scaffold: a synthetic program with
   # known calls runs under strace -f and the counts per role and call kind

@@ -6,8 +6,9 @@ ucd_version_matches_segmentation). Inputs are verified by sha256 before use;
 a mismatch stops the run. Usage:
   gen.py --ucd DIR --out crates/bingsu-core/src/ucd.rs     write the table
   gen.py --ucd DIR --check crates/bingsu-core/src/ucd.rs   exit 1 if it differs
-DIR holds EastAsianWidth.txt, DerivedGeneralCategory.txt and emoji-data.txt
-(fetch.sh downloads them)."""
+DIR (default data/17.0.0 beside this file, committed with its Unicode
+license) holds EastAsianWidth.txt, DerivedGeneralCategory.txt and
+emoji-data.txt. fetch.sh downloads them when the Unicode version is raised."""
 import argparse
 import hashlib
 import pathlib
@@ -24,6 +25,9 @@ NARROW, WIDE, AMBIGUOUS, ZERO, UNASSIGNED = 0, 1, 2, 3, 4
 # Format characters (gc=Cf) that sanitize keeps: ZWJ, which emoji sequences
 # need (spec section 3 step 1). Every other Cf is removed.
 KEEP_CF = {0x200D}
+MAX_CP = 0x10FFFF
+# Verified inputs live in the repository; fetch.sh only serves a version bump.
+DATA = pathlib.Path(__file__).resolve().parent / "data" / "17.0.0"
 
 
 def load(dirpath, name):
@@ -34,15 +38,34 @@ def load(dirpath, name):
     return data.decode("utf-8")
 
 
-def ranges(text):
-    """Yield (lo, hi, value) from 'XXXX..YYYY ; value # ...' lines."""
+def ranges(text, overlap_key=None):
+    """Return [(lo, hi, value)] from 'XXXX..YYYY ; value # ...' lines.
+
+    Rejects lo > hi and code points above U+10FFFF. When overlap_key is
+    given (a function of the value, e.g. lambda v: v), two lines with the
+    same key must not share a code point; the @missing defaults, which
+    overlap by design, pass None."""
+    out = []
     for line in text.splitlines():
         body = line.split("#", 1)[0].strip()
         if not body:
             continue
         cps, value = (s.strip() for s in body.split(";")[:2])
         lo, _, hi = cps.partition("..")
-        yield int(lo, 16), int(hi or lo, 16), value
+        lo, hi = int(lo, 16), int(hi or lo, 16)
+        if lo > hi:
+            sys.exit(f"bad range {cps}: low above high")
+        if hi > MAX_CP:
+            sys.exit(f"bad range {cps}: above U+10FFFF")
+        out.append((lo, hi, value))
+    if overlap_key:
+        last = {}
+        for lo, hi, v in sorted(out):
+            k = overlap_key(v)
+            if k in last and last[k] >= lo:
+                sys.exit(f"overlapping lines at U+{lo:04X} ({v})")
+            last[k] = hi
+    return out
 
 
 def merged(pairs):
@@ -59,7 +82,7 @@ def merged(pairs):
 def build(dirpath):
     cls = [UNASSIGNED] * 0x110000
     gc = ["Cn"] * 0x110000
-    for lo, hi, v in ranges(load(dirpath, "DerivedGeneralCategory.txt")):
+    for lo, hi, v in ranges(load(dirpath, "DerivedGeneralCategory.txt"), lambda v: 0):
         for cp in range(lo, hi + 1):
             gc[cp] = v
     eaw = ["N"] * 0x110000
@@ -70,7 +93,7 @@ def build(dirpath):
                if line.startswith("# @missing:")]
     if not missing:
         sys.exit("EastAsianWidth.txt: no @missing lines")
-    for lo, hi, v in [*ranges("\n".join(missing)), *ranges(text)]:
+    for lo, hi, v in [*ranges("\n".join(missing)), *ranges(text, lambda v: 0)]:
         for cp in range(lo, hi + 1):
             eaw[cp] = v
     for cp in range(0x110000):
@@ -86,8 +109,8 @@ def build(dirpath):
             cls[cp] = NARROW
     width = merged((cp, cp, c) for cp, c in enumerate(cls) if c != NARROW)
     emoji = load(dirpath, "emoji-data.txt")
-    pres = merged((lo, hi, 0) for lo, hi, v in ranges(emoji) if v == "Emoji_Presentation")
-    pict = merged((lo, hi, 0) for lo, hi, v in ranges(emoji) if v == "Extended_Pictographic")
+    pres = merged((lo, hi, 0) for lo, hi, v in ranges(emoji, lambda v: v) if v == "Emoji_Presentation")
+    pict = merged((lo, hi, 0) for lo, hi, v in ranges(emoji, lambda v: v) if v == "Extended_Pictographic")
     removed = merged((cp, cp, 0) for cp in range(0x110000)
                      if gc[cp] in ("Cf", "Zl", "Zp") and cp not in KEEP_CF)
     return width, pres, pict, removed
@@ -119,7 +142,8 @@ def render(width, pres, pict, removed):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ucd", required=True, type=pathlib.Path)
+    ap.add_argument("--ucd", type=pathlib.Path, default=DATA,
+                    help="input directory (default: the committed data/17.0.0)")
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--out", type=pathlib.Path)
     group.add_argument("--check", type=pathlib.Path)

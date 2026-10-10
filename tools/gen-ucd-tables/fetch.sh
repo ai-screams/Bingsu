@@ -7,6 +7,6 @@ dir=${1:-target/ucd-17.0.0}
 mkdir -p "$dir"
 base=https://www.unicode.org/Public/17.0.0/ucd
 for f in EastAsianWidth.txt extracted/DerivedGeneralCategory.txt emoji/emoji-data.txt; do
-  curl -fsSL --retry 3 -o "$dir/$(basename "$f")" "$base/$f"
+  curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$dir/$(basename "$f")" "$base/$f"
 done
 echo "$dir"
