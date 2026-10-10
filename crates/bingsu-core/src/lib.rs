@@ -15,3 +15,7 @@ pub mod record;
 pub mod root_arg;
 pub mod shell_word;
 pub mod status;
+// The tables get readers in sanitize (Task A3) and width (Task A4); drop this
+// attribute when the last one lands.
+#[expect(dead_code, reason = "readers land in later M2 tasks")]
+mod ucd;
