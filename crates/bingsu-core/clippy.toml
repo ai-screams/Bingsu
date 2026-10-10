@@ -149,6 +149,18 @@ disallowed-methods = [
   { path = "f32::log2", reason = "use libm::log2f (determinism, F-06)" },
   { path = "f32::log", reason = "use libm::logf (determinism, F-06)" },
   { path = "f32::sin_cos", reason = "use libm::sinf and libm::cosf (determinism, F-06)" },
+  # Fast-math style operations: the compiler may reassociate or fuse them, so
+  # the result is not fixed by the source (stable since 1.98.0).
+  { path = "f64::algebraic_add", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f64::algebraic_sub", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f64::algebraic_mul", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f64::algebraic_div", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f64::algebraic_rem", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f32::algebraic_add", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f32::algebraic_sub", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f32::algebraic_mul", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f32::algebraic_div", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
+  { path = "f32::algebraic_rem", reason = "result not fixed by IEEE semantics (determinism, F-06)" },
 ]
 disallowed-types = [
   { path = "std::fs::File", reason = "core is I/O free" },

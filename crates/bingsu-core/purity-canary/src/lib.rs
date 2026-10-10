@@ -184,3 +184,13 @@ pub fn c139(x: f32) -> f32 { x.ln_1p() } // CANARY: f32::ln_1p
 pub fn c140(x: f32) -> f32 { x.log2() } // CANARY: f32::log2
 pub fn c141(x: f32) -> f32 { x.log(2.0) } // CANARY: f32::log
 pub fn c142(x: f32) -> f32 { x.sin_cos().0 } // CANARY: f32::sin_cos
+pub fn c143(x: f64) -> f64 { x.algebraic_add(1.0) } // CANARY: f64::algebraic_add
+pub fn c144(x: f64) -> f64 { x.algebraic_sub(1.0) } // CANARY: f64::algebraic_sub
+pub fn c145(x: f64) -> f64 { x.algebraic_mul(1.0) } // CANARY: f64::algebraic_mul
+pub fn c146(x: f64) -> f64 { x.algebraic_div(1.0) } // CANARY: f64::algebraic_div
+pub fn c147(x: f64) -> f64 { x.algebraic_rem(1.0) } // CANARY: f64::algebraic_rem
+pub fn c148(x: f32) -> f32 { x.algebraic_add(1.0) } // CANARY: f32::algebraic_add
+pub fn c149(x: f32) -> f32 { x.algebraic_sub(1.0) } // CANARY: f32::algebraic_sub
+pub fn c150(x: f32) -> f32 { x.algebraic_mul(1.0) } // CANARY: f32::algebraic_mul
+pub fn c151(x: f32) -> f32 { x.algebraic_div(1.0) } // CANARY: f32::algebraic_div
+pub fn c152(x: f32) -> f32 { x.algebraic_rem(1.0) } // CANARY: f32::algebraic_rem

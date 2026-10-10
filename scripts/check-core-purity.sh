@@ -34,7 +34,8 @@ cd "$(dirname "$0")/.."
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CLIPPY_CONF_DIR \
   CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR \
   RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTC CARGO_BUILD_RUSTC \
-  CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
+  CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER \
+  RUSTC_BOOTSTRAP
 # Policy first: no cargo call may run before .cargo directories and stray
 # clippy configs are ruled out.
 python3 scripts/check_core_cfg.py --phase policy
@@ -68,7 +69,7 @@ print(paths[0])
 ')
 python3 scripts/check_core_cfg.py --phase tokens --checker "$checker"
 # Change these counts together with the clippy.toml lists.
-python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 180
+python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 190
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7
 # The CLI prompt path forbids the same rules per module (deny elsewhere).
 python3 scripts/check_cli_prompt_forbid.py

@@ -3,6 +3,9 @@
 name = "bingsu-purity-canary"
 version = "0.0.0"
 edition = "2024"
+# algebraic_* are stable since 1.98.0; without this clippy::incompatible_msrv
+# would be the lint that fires, not disallowed_methods.
+rust-version = "1.98"
 publish = false
 
 [workspace]
