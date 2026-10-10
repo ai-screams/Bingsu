@@ -30,6 +30,6 @@ disallowed_macros = "forbid"
 # simpler to reason about.
 libm = { version = "=0.2.16", default-features = false }
 # Extended grapheme clusters for widths, Unicode 17.0.0
-# (unicode_segmentation::UNICODE_VERSION); src/ucd.rs is generated for the
-# same version (test ucd_version_matches_segmentation).
+# (unicode_segmentation::UNICODE_VERSION); src/ucd.rs will be generated for
+# the same version in Task A2 (test ucd_version_matches_segmentation).
 unicode-segmentation = { version = "=1.13.3", default-features = false }

@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 
 // New modules name alloc paths (alloc::string::String, alloc::vec::Vec) so a
-// later `#![no_std]` switch (decided with the M3 parser) only touches this file and the M1
-// modules record, shell_word and status.
+// later `#![no_std]` switch (decided with the M3 parser) only touches this file, the M1
+// modules record, shell_word and status, and the unqualified `String` in the
+// root_arg tests.
 extern crate alloc;
 
 /// Crate version, used by `bingsu --version` later.

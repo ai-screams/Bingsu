@@ -142,3 +142,45 @@ pub fn c100(x: f64) -> f64 { x.mul_add(1.0, 1.0) } // CANARY: f64::mul_add
 pub fn t34(_: Option<std::collections::HashMap<u8, u8>>) {} // CANARY: std::collections::HashMap
 pub fn t35(_: Option<std::collections::HashSet<u8>>) {} // CANARY: std::collections::HashSet
 pub fn t36(_: Option<std::hash::RandomState>) {} // CANARY: std::hash::RandomState
+pub fn c101(x: f64) -> f64 { x.asin() } // CANARY: f64::asin
+pub fn c102(x: f64) -> f64 { x.acos() } // CANARY: f64::acos
+pub fn c103(x: f64) -> f64 { x.atan() } // CANARY: f64::atan
+pub fn c104(x: f64) -> f64 { x.sinh() } // CANARY: f64::sinh
+pub fn c105(x: f64) -> f64 { x.cosh() } // CANARY: f64::cosh
+pub fn c106(x: f64) -> f64 { x.tanh() } // CANARY: f64::tanh
+pub fn c107(x: f64) -> f64 { x.asinh() } // CANARY: f64::asinh
+pub fn c108(x: f64) -> f64 { x.acosh() } // CANARY: f64::acosh
+pub fn c109(x: f64) -> f64 { x.atanh() } // CANARY: f64::atanh
+pub fn c110(x: f64) -> f64 { x.exp2() } // CANARY: f64::exp2
+pub fn c111(x: f64) -> f64 { x.exp_m1() } // CANARY: f64::exp_m1
+pub fn c112(x: f64) -> f64 { x.ln_1p() } // CANARY: f64::ln_1p
+pub fn c113(x: f64) -> f64 { x.log2() } // CANARY: f64::log2
+pub fn c114(x: f64) -> f64 { x.log(2.0) } // CANARY: f64::log
+pub fn c115(x: f64) -> f64 { x.sin_cos().0 } // CANARY: f64::sin_cos
+pub fn c116(x: f32) -> f32 { x.powf(2.0) } // CANARY: f32::powf
+pub fn c117(x: f32) -> f32 { x.powi(2) } // CANARY: f32::powi
+pub fn c118(x: f32) -> f32 { x.cbrt() } // CANARY: f32::cbrt
+pub fn c119(x: f32) -> f32 { x.atan2(1.0) } // CANARY: f32::atan2
+pub fn c120(x: f32) -> f32 { x.sin() } // CANARY: f32::sin
+pub fn c121(x: f32) -> f32 { x.cos() } // CANARY: f32::cos
+pub fn c122(x: f32) -> f32 { x.tan() } // CANARY: f32::tan
+pub fn c123(x: f32) -> f32 { x.exp() } // CANARY: f32::exp
+pub fn c124(x: f32) -> f32 { x.ln() } // CANARY: f32::ln
+pub fn c125(x: f32) -> f32 { x.log10() } // CANARY: f32::log10
+pub fn c126(x: f32) -> f32 { x.hypot(1.0) } // CANARY: f32::hypot
+pub fn c127(x: f32) -> f32 { x.mul_add(1.0, 1.0) } // CANARY: f32::mul_add
+pub fn c128(x: f32) -> f32 { x.asin() } // CANARY: f32::asin
+pub fn c129(x: f32) -> f32 { x.acos() } // CANARY: f32::acos
+pub fn c130(x: f32) -> f32 { x.atan() } // CANARY: f32::atan
+pub fn c131(x: f32) -> f32 { x.sinh() } // CANARY: f32::sinh
+pub fn c132(x: f32) -> f32 { x.cosh() } // CANARY: f32::cosh
+pub fn c133(x: f32) -> f32 { x.tanh() } // CANARY: f32::tanh
+pub fn c134(x: f32) -> f32 { x.asinh() } // CANARY: f32::asinh
+pub fn c135(x: f32) -> f32 { x.acosh() } // CANARY: f32::acosh
+pub fn c136(x: f32) -> f32 { x.atanh() } // CANARY: f32::atanh
+pub fn c137(x: f32) -> f32 { x.exp2() } // CANARY: f32::exp2
+pub fn c138(x: f32) -> f32 { x.exp_m1() } // CANARY: f32::exp_m1
+pub fn c139(x: f32) -> f32 { x.ln_1p() } // CANARY: f32::ln_1p
+pub fn c140(x: f32) -> f32 { x.log2() } // CANARY: f32::log2
+pub fn c141(x: f32) -> f32 { x.log(2.0) } // CANARY: f32::log
+pub fn c142(x: f32) -> f32 { x.sin_cos().0 } // CANARY: f32::sin_cos

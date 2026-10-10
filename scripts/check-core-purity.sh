@@ -68,7 +68,7 @@ print(paths[0])
 ')
 python3 scripts/check_core_cfg.py --phase tokens --checker "$checker"
 # Change these counts together with the clippy.toml lists.
-python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 138
+python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 180
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7
 # The CLI prompt path forbids the same rules per module (deny elsewhere).
 python3 scripts/check_cli_prompt_forbid.py
