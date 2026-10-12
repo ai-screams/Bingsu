@@ -54,8 +54,10 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
 }
 
 /// Bytes `sanitize_into_capped` decodes at a time, so it reads at most this
-/// much past the point where it stops.
-const WINDOW: usize = 256;
+/// much past the point where it stops. Smaller windows cost more per byte on
+/// input it keeps reading (1 MiB of ESC: 256 bytes took about 17% longer
+/// than one pass, 4,096 bytes about the same).
+const WINDOW: usize = 4096;
 
 /// `sanitize_into` that stops reading `input` once it has appended more than
 /// `limit` bytes to `out`. Returns how many bytes of `input` it read (up to
@@ -64,6 +66,12 @@ const WINDOW: usize = 256;
 /// when it appended the whole result. Removed code points add nothing, so input
 /// that is all removed (1 MiB of ESC) is still read to the end.
 pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> Option<usize> {
+    capped_in_windows(input, out, limit, WINDOW)
+}
+
+/// `sanitize_into_capped` with the window as an argument (at least 4), so
+/// tests can put window edges anywhere.
+fn capped_in_windows(input: &[u8], out: &mut String, limit: usize, window: usize) -> Option<usize> {
     let start = out.len();
     let mut rest = input;
     while !rest.is_empty() {
@@ -73,15 +81,15 @@ pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize)
         // continuation bytes in a row (no lead byte is close enough): either
         // way no sequence, valid or not, crosses it, so each window decodes
         // as it would inside the whole input.
-        let mut cut = rest.len().min(WINDOW);
+        let mut cut = rest.len().min(window);
         if cut < rest.len() {
             if let Some(at) = (cut - 3..=cut).rev().find(|&i| rest[i] & 0xC0 != 0x80) {
                 cut = at;
             }
         }
-        let (window, tail) = rest.split_at(cut);
+        let (head, tail) = rest.split_at(cut);
         rest = tail;
-        for chunk in window.utf8_chunks() {
+        for chunk in head.utf8_chunks() {
             for c in chunk.valid().chars().filter(|&c| !is_removed(c)) {
                 out.push(c);
                 if out.len() - start > limit {
@@ -218,21 +226,35 @@ mod tests {
             b"\xe0\x80\xaf",
             b"\x1b[0m",
         ];
-        let check = |input: &[u8]| {
+        let check = |input: &[u8], window: usize| {
             let mut out = String::new();
-            assert_eq!(sanitize_into_capped(input, &mut out, usize::MAX), None);
-            assert_eq!(out, sanitize(input), "{input:02x?}");
+            assert_eq!(capped_in_windows(input, &mut out, usize::MAX, window), None);
+            assert_eq!(out, sanitize(input), "{window} {input:02x?}");
         };
-        for off in WINDOW - 6..=WINDOW + 1 {
-            let pre = alloc::vec![b'a'; off];
-            for z in zoo {
-                check(&[&pre[..], z, b"z"].concat());
-                check(&[&pre[..], z].concat());
+        for window in [4, 5, 7, 8, 64, WINDOW] {
+            for off in window.saturating_sub(6)..=window + 1 {
+                let pre = alloc::vec![b'a'; off];
+                for z in zoo {
+                    check(&[&pre[..], z, b"z"].concat(), window);
+                    check(&[&pre[..], z].concat(), window);
+                }
+                check(&[&pre[..], &zoo.concat(), &zoo.concat()].concat(), window);
             }
-            check(&[&pre[..], &zoo.concat(), &zoo.concat()].concat());
         }
-        for v in 0..=0xFFFFu16 {
-            check(&[&[b'a'; WINDOW - 1][..], &v.to_be_bytes(), b"\xbf\xbf"].concat());
+        // Every two bytes and lead-led three bytes across each edge of a
+        // 4-byte window.
+        for off in 1..=3 {
+            let pre = &b"aaa"[..off];
+            for v in 0..=0xFFFFu16 {
+                check(&[pre, &v.to_be_bytes(), b"\xbf\xbf"].concat(), 4);
+            }
+            for lead in 0xC0..=0xFFu8 {
+                for second in 0x80..=0xBFu8 {
+                    for third in [0x80, 0xBF, b'a', 0xC2] {
+                        check(&[pre, &[lead, second, third], b"\x80"].concat(), 4);
+                    }
+                }
+            }
         }
     }
 
