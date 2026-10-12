@@ -16,9 +16,16 @@ pub fn is_removed(c: char) -> bool {
     cp < 0x20 || (0x7F..=0x9F).contains(&cp) || in_ranges(REMOVED_FORMAT, cp)
 }
 
-pub(crate) fn in_ranges(table: &[(u32, u32)], cp: u32) -> bool {
+/// Index of the sorted, non-overlapping range in `table` that holds `cp`;
+/// `bounds` reads `(lo, hi)` (inclusive) from a row.
+pub(crate) fn range_index<T>(
+    table: &[T],
+    cp: u32,
+    bounds: impl Fn(&T) -> (u32, u32),
+) -> Option<usize> {
     table
-        .binary_search_by(|&(lo, hi)| {
+        .binary_search_by(|row| {
+            let (lo, hi) = bounds(row);
             if hi < cp {
                 core::cmp::Ordering::Less
             } else if lo > cp {
@@ -27,7 +34,11 @@ pub(crate) fn in_ranges(table: &[(u32, u32)], cp: u32) -> bool {
                 core::cmp::Ordering::Equal
             }
         })
-        .is_ok()
+        .ok()
+}
+
+pub(crate) fn in_ranges(table: &[(u32, u32)], cp: u32) -> bool {
+    range_index(table, cp, |&r| r).is_some()
 }
 
 /// Appends `input` to `out` without removed code points. Invalid UTF-8

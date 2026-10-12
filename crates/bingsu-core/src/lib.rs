@@ -11,12 +11,11 @@ extern crate alloc;
 /// Crate version, used by `bingsu --version` later.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod icons;
 pub mod record;
 pub mod root_arg;
 pub mod sanitize;
 pub mod shell_word;
 pub mod status;
-// sanitize reads REMOVED_FORMAT (Task A3); width (Task A4) reads the rest. Drop
-// this attribute when the last reader lands.
-#[expect(dead_code, reason = "readers land in later M2 tasks")]
 mod ucd;
+pub mod width;
