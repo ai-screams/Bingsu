@@ -1,4 +1,4 @@
-//! Color: math (src/color/math.rs), notations, tokens and palette
-//! resolution, and SGR output (src/color/sgr.rs).
+//! Color: `math` converts OKLCH, OKLab and sRGB and quantizes the results;
+//! `notation` parses the color notations accepted for overrides.
 pub mod math;
 pub mod notation;
