@@ -20,6 +20,7 @@ pub mod sanitize;
 pub mod shell_word;
 pub mod shorten;
 pub mod status;
+pub mod style;
 pub mod template;
 mod ucd;
 pub mod width;
