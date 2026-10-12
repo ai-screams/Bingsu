@@ -91,7 +91,8 @@ pub fn grapheme_width(
         }
     }
     if !vs15 {
-        let pictographic = in_ranges(EXTENDED_PICTOGRAPHIC, cp);
+        // Only VS16 and ZWJ clusters need the table; plain text skips the search.
+        let pictographic = (vs16 || zwj) && in_ranges(EXTENDED_PICTOGRAPHIC, cp);
         // VS16 only turns an emoji or a keycap base (#, *, 0-9) into emoji
         // presentation; after any other base it is ignored.
         let vs16_applies = vs16 && (pictographic || matches!(first, '#' | '*' | '0'..='9'));
