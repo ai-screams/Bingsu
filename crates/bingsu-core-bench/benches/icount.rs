@@ -40,8 +40,12 @@ fn width_of_text(input: String) -> (String, u32) {
     (input, w)
 }
 
-fn fields(_: u32) -> Vec<Field> {
-    vec![
+// The output buffer is reserved here, so the counted code formats without
+// growing a String: the growth path (`RawVec::finish_grow`) is shared with
+// every other bench in this binary and its inlining changes when a bench is
+// added, which moved this count by 3.5% with no change in core.
+fn fields(_: u32) -> (Vec<Field>, String) {
+    let fields = vec![
         Field::known(FieldValue::Count {
             n: 1234,
             saturated: true,
@@ -49,13 +53,13 @@ fn fields(_: u32) -> Vec<Field> {
         Field::known(FieldValue::Duration { ms: 3_723_000 }),
         Field::known(FieldValue::Int(-130)),
         Field::text(b"feature/very-long-branch-name", 24, WidthProfile::DEFAULT),
-    ]
+    ];
+    (fields, String::with_capacity(256))
 }
 
 #[library_benchmark]
 #[bench::four(args = [4], setup = fields)]
-fn field_format(input: Vec<Field>) -> (Vec<Field>, String) {
-    let mut s = String::new();
+fn field_format((input, mut s): (Vec<Field>, String)) -> (Vec<Field>, String) {
     for f in black_box(&input) {
         f.write_to(&mut s);
     }
