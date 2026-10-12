@@ -135,6 +135,9 @@ pub enum CompileErrorKind {
     GroupWithoutReference,
     TooManyLines,
     NewlineInBlock,
+    /// The catalog is not sorted by id (fields by name) or has more entries
+    /// than a `u16` index holds.
+    BadCatalog,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +160,20 @@ fn err(kind: CompileErrorKind, span: Span) -> CompileError {
 
 fn seg_index(catalog: &[SegmentDecl], id: &str) -> Option<usize> {
     catalog.binary_search_by(|d| d.id.cmp(id)).ok()
+}
+
+/// Narrows a catalog position to the `u16` a node stores; no silent wrap.
+fn index16(i: usize, sp: Span) -> Result<u16, CompileError> {
+    u16::try_from(i).map_err(|_| err(CompileErrorKind::BadCatalog, sp))
+}
+
+/// Lookups are binary searches, so ids and field names must be strictly
+/// ascending. The catalog is outside input (M3 installs declarations).
+fn catalog_sorted(catalog: &[SegmentDecl]) -> bool {
+    catalog.windows(2).all(|w| w[0].id < w[1].id)
+        && catalog
+            .iter()
+            .all(|d| d.fields.windows(2).all(|w| w[0].name < w[1].name))
 }
 
 fn one_arg(args: &[String], sp: Span) -> Result<&str, CompileError> {
@@ -201,31 +218,30 @@ fn style_spec(args: &[String], sp: Span) -> Result<StyleSpec, CompileError> {
 
 /// Appends `items` to the current line. Returns whether any segment or
 /// field reference was emitted (for the group rule).
-fn emit(cx: &mut Ctx<'_>, items: &[(Syntax, Span)], depth: usize) -> Result<bool, CompileError> {
+fn emit(cx: &mut Ctx<'_>, items: Vec<(Syntax, Span)>, depth: usize) -> Result<bool, CompileError> {
     let mut referenced = false;
     for (node, sp) in items {
-        let sp = *sp;
         let n = match node {
-            Syntax::Text(t) => Node::Text(t.clone()),
+            Syntax::Text(t) => Node::Text(t),
             Syntax::Segment { id, mode } => {
                 let seg =
-                    seg_index(cx.catalog, id).ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
+                    seg_index(cx.catalog, &id).ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
                 referenced = true;
                 Node::Segment {
-                    seg: seg as u16,
-                    mode: *mode,
+                    seg: index16(seg, sp)?,
+                    mode,
                 }
             }
             Syntax::Field { segment, field } => {
-                let seg = seg_index(cx.catalog, segment)
+                let seg = seg_index(cx.catalog, &segment)
                     .ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
                 let f = cx.catalog[seg]
-                    .field_index(field)
+                    .field_index(&field)
                     .ok_or(err(CompileErrorKind::UnknownField, sp))?;
                 referenced = true;
                 Node::Field {
-                    seg: seg as u16,
-                    field: f as u16,
+                    seg: index16(seg, sp)?,
+                    field: index16(f, sp)?,
                 }
             }
             Syntax::Group(body) => {
@@ -245,7 +261,7 @@ fn emit(cx: &mut Ctx<'_>, items: &[(Syntax, Span)], depth: usize) -> Result<bool
                 continue;
             }
             Syntax::Style { args, body } => {
-                let spec = style_spec(args, sp)?;
+                let spec = style_spec(&args, sp)?;
                 let line = cx.lines.len() - 1;
                 push(cx, Node::Style(spec), sp);
                 referenced |= emit(cx, body, depth + 1)?;
@@ -257,7 +273,7 @@ fn emit(cx: &mut Ctx<'_>, items: &[(Syntax, Span)], depth: usize) -> Result<bool
             }
             Syntax::Helper { name, args } => match name.as_str() {
                 "sep" | "head" | "tail" => {
-                    let shape = Shape::parse(one_arg(args, sp)?)
+                    let shape = Shape::parse(one_arg(&args, sp)?)
                         .ok_or(err(CompileErrorKind::BadHelperArg, sp))?;
                     match name.as_str() {
                         "sep" => Node::Sep(shape),
@@ -284,7 +300,7 @@ fn emit(cx: &mut Ctx<'_>, items: &[(Syntax, Span)], depth: usize) -> Result<bool
                     Node::Fill(kind)
                 }
                 "icon" => {
-                    let name = one_arg(args, sp)?;
+                    let name = one_arg(&args, sp)?;
                     let i = icons::ICONS
                         .binary_search_by(|ic| ic.name().cmp(name))
                         .map_err(|_| err(CompileErrorKind::UnknownIcon, sp))?;
@@ -320,12 +336,15 @@ fn push(cx: &mut Ctx<'_>, n: Node, sp: Span) {
 /// Compiles `src` against the segment catalog (sorted by id), one
 /// CompiledLine per template line.
 pub fn compile(src: &str, catalog: &[SegmentDecl]) -> Result<Vec<CompiledLine>, CompileError> {
+    if !catalog_sorted(catalog) {
+        return Err(err(CompileErrorKind::BadCatalog, Span { start: 0, end: 0 }));
+    }
     let tree = parse(src).map_err(|e| err(CompileErrorKind::Syntax(e.kind), e.span))?;
     let mut cx = Ctx {
         catalog,
         lines: alloc::vec![CompiledLine::default()],
     };
-    emit(&mut cx, &tree, 0)?;
+    emit(&mut cx, tree, 0)?;
     Ok(cx.lines)
 }
 
@@ -447,5 +466,52 @@ mod tests {
             kind(&"x".repeat(MAX_TEMPLATE_BYTES + 1)),
             Syntax(SyntaxErrorKind::TooLong)
         );
+    }
+
+    // 이것을 실패시키는 것: 인덱스를 `as u16`으로 자르는 것(65536이 0이 됨).
+    #[test]
+    fn index16_stops_at_the_u16_edge() {
+        let sp = Span { start: 0, end: 0 };
+        assert_eq!(index16(65535, sp), Ok(65535));
+        assert_eq!(index16(65536, sp).unwrap_err().kind, BadCatalog);
+    }
+
+    // 이것을 실패시키는 것: compile 진입의 카탈로그 정렬 검사(필드 순서·id 순서·중복 id).
+    #[test]
+    fn unsorted_catalog_is_an_error_not_a_wrong_lookup() {
+        use crate::field::{FieldDecl, FieldType, SegmentDecl};
+        const ZA: &[FieldDecl] = &[
+            FieldDecl {
+                name: "z",
+                ty: FieldType::Bool,
+            },
+            FieldDecl {
+                name: "a",
+                ty: FieldType::Bool,
+            },
+        ];
+        const AZ: &[FieldDecl] = &[
+            FieldDecl {
+                name: "a",
+                ty: FieldType::Bool,
+            },
+            FieldDecl {
+                name: "z",
+                ty: FieldType::Bool,
+            },
+        ];
+        let d = |id, fields| SegmentDecl {
+            id,
+            role: "path",
+            fields,
+        };
+        let bad_fields = [d("x", ZA)];
+        assert_eq!(compile("{x.a}", &bad_fields).unwrap_err().kind, BadCatalog);
+        let bad_ids = [d("y", AZ), d("x", AZ)];
+        assert_eq!(compile("{x.a}", &bad_ids).unwrap_err().kind, BadCatalog);
+        let dup_ids = [d("x", AZ), d("x", AZ)];
+        assert_eq!(compile("{x.a}", &dup_ids).unwrap_err().kind, BadCatalog);
+        let good = [d("x", AZ), d("y", AZ)];
+        assert!(compile("{y.z}", &good).is_ok());
     }
 }

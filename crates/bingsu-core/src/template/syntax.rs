@@ -392,6 +392,18 @@ mod tests {
         assert!(parse(&"a".repeat(MAX_TEMPLATE_BYTES)).is_ok());
     }
 
+    // The cap counts bytes, not characters: 1365 three-byte characters plus
+    // one ASCII byte is exactly 4096 bytes; one more byte is too long.
+    // 이것을 실패시키는 것: `src.len()`을 `chars().count()`로 바꾸는 것.
+    #[test]
+    fn cap_counts_bytes_not_chars() {
+        let ok = "한".repeat(1365) + "a";
+        assert_eq!(ok.len(), MAX_TEMPLATE_BYTES);
+        assert!(parse(&ok).is_ok());
+        let long = ok + "b";
+        assert_eq!(err(&long).0, TooLong);
+    }
+
     // Hostile input: every prefix of tricky strings returns Ok or Err, never panics
     // (multi-byte characters next to braces, lone braces, unterminated blocks).
     // 이것을 실패시키는 것: 바이트 인덱스가 글자 경계를 넘는 슬라이스(`src[i..i + 1]` 같은 것).
