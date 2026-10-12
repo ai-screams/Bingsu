@@ -3,3 +3,4 @@
 pub mod math;
 pub mod notation;
 pub mod palette;
+pub mod sgr;
