@@ -8,9 +8,9 @@ This file guides Claude Code (claude.ai/code) when working in this repository.
 One set of OKLCH color tokens drives the prompt, the terminal color scheme and CLI tool configs.
 The engine is the "ice"; themes, segments and plugins are "toppings" layered on top.
 
-- **Language**: Rust, a workspace of two crates. Windows is checked in CI; macOS and Linux are first-class.
+- **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: M1 (interfaces and measurement). The record path and the shell hooks exist; there is no release and no
+- **Stage**: M2 (core renderer). The record path and the shell hooks exist, and core modules land one PR at a time; there is no release and no
   user-visible prompt yet. `README.md` lists features as planned. Keep it that way until they ship.
 - **Repository**: `ai-screams/Bingsu`, public.
 
@@ -18,8 +18,11 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 | Path | What |
 | -- | -- |
-| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): status grammar, B1 record encoder, shell words, root arguments |
+| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): status grammar, B1 record encoder, shell words, root arguments, sanitize, width, icons, field types, color |
 | `crates/bingsu` | CLI: `init` pins the binary path and four roots, `prompt` turns the envelope into a record, `sys` wraps libc; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
+| `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
+| `crates/bingsu-bench`, `crates/bingsu-collect` | M1 measurement code and collector stub |
 | `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
 | `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes |
 | `tests/hostile` | Hostile-value matrix shared by core, golden and PTY tests |
@@ -75,7 +78,7 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 
 | Workflow | Jobs | Notes |
 | -- | -- | -- |
-| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build | Rust jobs run only when `Cargo.toml` exists (detect job) |
+| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build, Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace) | Rust jobs run only when `Cargo.toml` exists (detect job) |
 | `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew | `workflow_dispatch` input `record_observations` prints unpinned cells |
 | `security.yml` | Secret scan (gitleaks), Dependency advisories (cargo-audit) | gitleaks scans full history; weekly cron; cargo-audit needs `Cargo.lock` |
 | `dependabot.yml` | github-actions and cargo, weekly | |
@@ -85,6 +88,11 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
   Dependabot does not track them; bump the version variables by hand.
 - gitleaks runs as the CLI, not `gitleaks-action`, because the action needs a license key for organization repositories.
 - Keep `permissions: contents: read` and `persist-credentials: false` unless a job truly needs more.
+- `icount` measures the base tip (`HEAD^1` of the PR merge commit) and the merge result in one job and fails when
+  instructions grow past `crates/bingsu-core-bench/limits.txt` (`ir=1%`); raise it in the same PR with the reason.
+  Callgrind runs only on Linux; locally check `cargo build -p bingsu-core-bench --benches`.
+- gungraun: keep `main!` at top level (inside `fn main` it measures nothing and exits 0), and keep `[profile.bench]`
+  `strip = false` (a stripped bench counts 0 instructions). The runner version must equal the locked library version.
 
 ## Design rules
 
