@@ -269,7 +269,7 @@ jobs:
             exit 1
           fi
           if [ -f "$RUNNER_TEMP/no-base" ]; then
-            cargo bench -p "$BENCH_PACKAGE" --bench icount
+            cargo bench -p "$BENCH_PACKAGE" --bench icount -- --save-summary=json
           else
             # A bench with no entry in the base list has nothing to compare
             # with; name it in the summary instead of passing it silently.
@@ -285,7 +285,23 @@ jobs:
               echo "::warning::benchmarks of the base tip are missing in the pull request and no longer gated"
               { echo "Benchmarks removed since the base tip (no longer gated):"; echo "$removed"; } | tee -a "$GITHUB_STEP_SUMMARY"
             fi
-            cargo bench -p "$BENCH_PACKAGE" --bench icount -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)"
+            cargo bench -p "$BENCH_PACKAGE" --bench icount -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)" --save-summary=json
+          fi
+          # A binary the runner cannot find symbols in (a stripped bench
+          # profile) counts 0 everywhere and passes; against a baseline 0
+          # reads as an improvement. Every listed bench needs one summary
+          # (schema 7, gungraun 0.20.0) with a positive Callgrind Ir. Only
+          # this run saves summaries, so a stray one fails the count.
+          mapfile -t summaries < <(find "$GUNGRAUN_HOME" -name summary.json)
+          listed=$(wc -l < "$RUNNER_TEMP/pr.list")
+          if [ "${#summaries[@]}" -ne "$listed" ]; then
+            echo "::error::${#summaries[@]} benchmark summaries for $listed listed benchmarks"
+            exit 1
+          fi
+          bad=$(jq -r 'select(.version != "7" or ([.profiles[]? | select(.tool == "Callgrind") | .data.total.metrics.Ir.values.new | numbers | select(. > 0)] | length) != 1) | "\(.module_path).\(.id)"' "${summaries[@]}")
+          if [ -n "$bad" ]; then
+            echo "::error::benchmarks without a schema 7 summary with a positive instruction count: $(tr '\n' ' ' <<<"$bad")"
+            exit 1
           fi
 
   # Spec section 8 filesystem-call budget scaffold: a synthetic program with
