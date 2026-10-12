@@ -1,7 +1,7 @@
 //! Width profile (spec section 3 "폭 프로필"). Widths are counted per
 //! extended grapheme cluster in terminal cells; alignment is guaranteed only
 //! when the terminal draws the same way as the profile.
-use crate::sanitize::in_ranges;
+use crate::sanitize::{in_ranges, range_index};
 use crate::ucd::{EMOJI_PRESENTATION, EXTENDED_PICTOGRAPHIC, WIDTH_CLASS};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -50,18 +50,7 @@ pub enum WidthSource {
 }
 
 fn class(cp: u32) -> u8 {
-    match WIDTH_CLASS.binary_search_by(|&(lo, hi, _)| {
-        if hi < cp {
-            core::cmp::Ordering::Less
-        } else if lo > cp {
-            core::cmp::Ordering::Greater
-        } else {
-            core::cmp::Ordering::Equal
-        }
-    }) {
-        Ok(i) => WIDTH_CLASS[i].2,
-        Err(_) => 0,
-    }
+    range_index(WIDTH_CLASS, cp, |&(lo, hi, _)| (lo, hi)).map_or(0, |i| WIDTH_CLASS[i].2)
 }
 
 fn is_private_use(cp: u32) -> bool {
@@ -72,7 +61,8 @@ fn is_private_use(cp: u32) -> bool {
 
 /// Cells of one extended grapheme cluster `g` (non-empty, already
 /// sanitized). The width is that of its first code point, except:
-/// emoji presentation (Emoji_Presentation=Yes without VS15, any VS16, a ZWJ
+/// emoji presentation (Emoji_Presentation=Yes without VS15, VS16 after an
+/// Extended_Pictographic or a keycap base, a ZWJ
 /// sequence that starts with an Extended_Pictographic; regional indicators
 /// are Emoji_Presentation, so a flag pair and a lone one both) takes
 /// `emoji` cells; a cluster whose first code point is a
@@ -91,14 +81,23 @@ pub fn grapheme_width(
         // A cluster that starts with ZWJ draws nothing.
         return (0, WidthSource::Table);
     }
-    let rest = &g[first.len_utf8()..];
-    if rest.contains('\u{FE0E}') {
-        // Text presentation: fall through to the table.
-    } else if rest.contains('\u{FE0F}')
-        || in_ranges(EMOJI_PRESENTATION, cp)
-        || (rest.contains('\u{200D}') && in_ranges(EXTENDED_PICTOGRAPHIC, cp))
-    {
-        return (p.emoji, WidthSource::Emoji);
+    let (mut vs15, mut vs16, mut zwj) = (false, false, false);
+    for c in chars {
+        match c {
+            '\u{FE0E}' => vs15 = true,
+            '\u{FE0F}' => vs16 = true,
+            '\u{200D}' => zwj = true,
+            _ => {}
+        }
+    }
+    if !vs15 {
+        let pictographic = in_ranges(EXTENDED_PICTOGRAPHIC, cp);
+        // VS16 only turns an emoji or a keycap base (#, *, 0-9) into emoji
+        // presentation; after any other base it is ignored.
+        let vs16_applies = vs16 && (pictographic || matches!(first, '#' | '*' | '0'..='9'));
+        if vs16_applies || in_ranges(EMOJI_PRESENTATION, cp) || (zwj && pictographic) {
+            return (p.emoji, WidthSource::Emoji);
+        }
     }
     if is_private_use(cp) {
         return (pua_width(first).unwrap_or(1), WidthSource::PrivateUse);
@@ -207,6 +206,18 @@ mod tests {
             // 이것을 실패시키는 것: 맨 앞 ZWJ 분기 제거(표에서 NARROW라 1칸이 됨).
             ("\u{200D}", D, 0),
             ("\u{200D}a", D, 1),
+            // 이것을 실패시키는 것: VS16 갈래에서 바탕 검사(Extended_Pictographic 또는 키캡 바탕) 삭제.
+            // 이것을 실패시키는 것: ZWJ 플래그 무시(VS16 없는 Extended_Pictographic ZWJ 시퀀스).
+            ("\u{2764}\u{200D}\u{1F525}", D, 2),
+            ("a\u{FE0F}", D, 1),
+            ("1\u{FE0F}\u{20E3}", D, 2),
+            ("#\u{FE0F}", D, 2),
+            // 프로필 값이다. 터미널은 0으로 그릴 수 있다. 정제 범위를 넓히면 바뀐다.
+            ("\u{115F}", D, 2),
+            ("\u{1160}", D, 1),
+            ("\u{3164}", D, 2),
+            ("\u{FFA0}", D, 1),
+            ("\u{2065}", D, 1),
             // 이것을 실패시키는 것: ZWJ 조건에서 Extended_Pictographic 검사 제거.
             ("a\u{200D}", D, 1),
             ("\u{2026}", D, 1),
@@ -263,6 +274,92 @@ mod tests {
                 "{cp:?}"
             );
         }
+    }
+
+    // 이것을 실패시키는 것: Emoji 또는 Unknown 갈래가 Table을 돌려주는 것, 맨 앞 ZWJ의 source 변경.
+    #[test]
+    fn width_source_is_pinned() {
+        let w = |g: &str| grapheme_width(g, D, |_| Some(2));
+        assert_eq!(w("a"), (1, WidthSource::Table));
+        assert_eq!(w("\u{AC00}"), (2, WidthSource::Table));
+        assert_eq!(w("\u{0301}"), (0, WidthSource::Table));
+        assert_eq!(w("\u{1F600}"), (2, WidthSource::Emoji));
+        assert_eq!(w("\u{2764}\u{FE0F}"), (2, WidthSource::Emoji));
+        assert_eq!(w("\u{E0B0}"), (2, WidthSource::PrivateUse));
+        assert_eq!(w("\u{2065}"), (1, WidthSource::Unknown));
+        assert_eq!(w("\u{200D}"), (0, WidthSource::Table));
+    }
+
+    // 이것을 실패시키는 것: pua_width에 실제 첫 글자가 아닌 값을 넘기는 것.
+    #[test]
+    fn private_use_callback_gets_the_glyph() {
+        let f = |c: char| match c {
+            '\u{E0B0}' => Some(2),
+            '\u{E0B1}' => Some(1),
+            _ => None,
+        };
+        assert_eq!(
+            grapheme_width("\u{E0B0}", D, f),
+            (2, WidthSource::PrivateUse)
+        );
+        assert_eq!(
+            grapheme_width("\u{E0B1}", D, f),
+            (1, WidthSource::PrivateUse)
+        );
+        assert_eq!(
+            grapheme_width("\u{E0B2}", D, f),
+            (1, WidthSource::PrivateUse)
+        );
+        assert_eq!(
+            grapheme_width("\u{E0B0}\u{0301}", D, f),
+            (2, WidthSource::PrivateUse)
+        );
+    }
+
+    // 이것을 실패시키는 것: fit_prefix/fit_suffix를 상수로 바꾸는 것, 가장 긴 접두/접미를 고르지 않는 것.
+    // "ab한c": 바이트 a0 b1 한2..5 c5, len 6, 칸 1 1 2 1.
+    #[test]
+    fn fit_picks_the_longest() {
+        let s = "ab\u{D55C}c";
+        let prefix = [
+            (0, (0, 0)),
+            (1, (1, 1)),
+            (2, (2, 2)),
+            (3, (2, 2)),
+            (4, (5, 4)),
+            (5, (6, 5)),
+            (9, (6, 5)),
+        ];
+        for (max, want) in prefix {
+            assert_eq!(fit_prefix(s, max, D), want, "prefix {max}");
+        }
+        let suffix = [
+            (0, (6, 0)),
+            (1, (5, 1)),
+            (2, (5, 1)),
+            (3, (2, 3)),
+            (4, (1, 4)),
+            (5, (0, 5)),
+            (9, (0, 5)),
+        ];
+        for (max, want) in suffix {
+            assert_eq!(fit_suffix(s, max, D), want, "suffix {max}");
+        }
+        assert_eq!(fit_prefix("", 3, D), (0, 0));
+        assert_eq!(fit_suffix("", 3, D), (0, 0));
+    }
+
+    // 이것을 실패시키는 것: 공개 함수의 반환값을 상수로 바꾸는 것(str_width 0, ellipsis "", ambiguous()/emoji() 고정).
+    #[test]
+    fn accessors_and_str_width_are_not_constants() {
+        assert_eq!(str_width("abc", D), 3);
+        assert_eq!(str_width("", D), 0);
+        assert_eq!(
+            (A2.ambiguous(), A2.emoji(), E1.ambiguous(), E1.emoji()),
+            (2, 2, 1, 1)
+        );
+        assert_eq!(WidthProfile::DEFAULT, WidthProfile::new(1, 2).unwrap());
+        assert_eq!(WidthProfile::new(1, 1), Some(E1));
     }
 
     // 이것을 실패시키는 것: 잘라 낸 결과가 칸 상한을 넘거나 grapheme 가운데를 자르는 것.
