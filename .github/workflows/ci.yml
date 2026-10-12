@@ -277,6 +277,14 @@ jobs:
             if [ -n "$new" ]; then
               { echo "Benchmarks without a baseline (not compared):"; echo "$new"; } | tee -a "$GITHUB_STEP_SUMMARY"
             fi
+            # The reverse: a bench of the base that the pull request drops
+            # is no longer gated. Renaming or deleting is allowed, so only
+            # report it; the diff shows it to the reviewer.
+            removed=$(sort "$RUNNER_TEMP/base.list" | comm -23 - <(sort "$RUNNER_TEMP/pr.list"))
+            if [ -n "$removed" ]; then
+              echo "::warning::benchmarks of the base tip are missing in the pull request and no longer gated"
+              { echo "Benchmarks removed since the base tip (no longer gated):"; echo "$removed"; } | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
             cargo bench -p "$BENCH_PACKAGE" --bench icount -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)"
           fi
 
