@@ -2,6 +2,10 @@
 //! "측정과 게이트", section 9 M2 row). This file starts with sanitize, width
 //! and field formatting; the color, shortener, layout and render tasks add
 //! their benches to the same group.
+use bingsu_core::color::notation::parse_color;
+use bingsu_core::color::palette::{
+    Knobs, Mode, PaletteError, PaletteInput, ResolvedPalette, resolve_palette,
+};
 use bingsu_core::field::{Field, FieldValue};
 use bingsu_core::sanitize::sanitize;
 use bingsu_core::width::{WidthProfile, str_width};
@@ -58,9 +62,40 @@ fn field_format(input: Vec<Field>) -> (Vec<Field>, String) {
     (input, black_box(s))
 }
 
+#[library_benchmark]
+#[bench::four(args = [4])]
+fn color_notation(n: usize) -> usize {
+    let specs = ["oklch(0.78 0.12 60)", "#8fb8f0", "208", "term.ansi.12"];
+    black_box(
+        specs
+            .iter()
+            .take(n)
+            .filter(|s| parse_color(black_box(s)).is_ok())
+            .count(),
+    )
+}
+
+#[library_benchmark]
+#[bench::dark(args = [0])]
+fn palette_resolve(_: u32) -> Result<ResolvedPalette, PaletteError> {
+    // Returned, so the free happens outside the counted code.
+    black_box(resolve_palette(&PaletteInput {
+        mode: Mode::Dark,
+        knobs: Knobs::default(),
+        overrides: &[],
+        roles: &[],
+    }))
+}
+
 library_benchmark_group!(
     name = core_m2,
-    benchmarks = [sanitize_bytes, width_of_text, field_format]
+    benchmarks = [
+        sanitize_bytes,
+        width_of_text,
+        field_format,
+        color_notation,
+        palette_resolve
+    ]
 );
 
 // main! defines `fn main` itself: wrapped in a fn of ours the bench would

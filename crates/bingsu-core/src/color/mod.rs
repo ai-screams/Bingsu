@@ -2,3 +2,4 @@
 //! `notation` parses the color notations accepted for overrides.
 pub mod math;
 pub mod notation;
+pub mod palette;
