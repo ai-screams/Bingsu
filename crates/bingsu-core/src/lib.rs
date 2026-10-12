@@ -19,5 +19,6 @@ pub mod root_arg;
 pub mod sanitize;
 pub mod shell_word;
 pub mod status;
+pub mod template;
 mod ucd;
 pub mod width;
