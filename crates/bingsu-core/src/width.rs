@@ -53,7 +53,7 @@ fn class(cp: u32) -> u8 {
     range_index(WIDTH_CLASS, cp, |&(lo, hi, _)| (lo, hi)).map_or(0, |i| WIDTH_CLASS[i].2)
 }
 
-fn is_private_use(cp: u32) -> bool {
+pub(crate) fn is_private_use(cp: u32) -> bool {
     (0xE000..=0xF8FF).contains(&cp)
         || (0xF0000..=0xFFFFD).contains(&cp)
         || (0x100000..=0x10FFFD).contains(&cp)

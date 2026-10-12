@@ -4,7 +4,7 @@
 //! cells a terminal advances, which for a Nerd Font glyph is 1 whatever the
 //! font draws (UNVERIFIED per terminal; `doctor` measures with CPR in M7).
 //! Glyph choices are provisional until the M7 preset review.
-use crate::width::{WidthProfile, str_width};
+use crate::width::{WidthProfile, is_private_use, str_width};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IconSet {
@@ -44,12 +44,26 @@ pub enum IconKind {
     Glyph,
 }
 
+/// Fields are private so an `Icon` only comes from the built-in `ICONS`
+/// table, whose invariants the tests pin.
 #[derive(Debug)]
 pub struct Icon {
-    pub name: &'static str,
-    pub kind: IconKind,
+    name: &'static str,
+    kind: IconKind,
     /// Glyph per set, in IconSet order: nerd, light, unicode, ascii.
-    pub glyphs: [&'static str; 4],
+    glyphs: [&'static str; 4],
+}
+
+impl Icon {
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+    pub const fn kind(&self) -> IconKind {
+        self.kind
+    }
+    pub const fn glyph(&self, set: IconSet) -> &'static str {
+        self.glyphs[set as usize]
+    }
 }
 
 const fn i(name: &'static str, kind: IconKind, glyphs: [&'static str; 4]) -> Icon {
@@ -94,7 +108,8 @@ pub fn lookup(name: &str) -> Option<&'static Icon> {
 }
 
 /// Cells for a private use code point that the icon table uses (1), or
-/// None for one it does not know (1 cell plus a warning, src/width.rs).
+/// None for one it does not know and for any char outside the private use
+/// areas (1 cell plus a warning, src/width.rs).
 /// Every set is searched: a set may carry a PUA glyph that the others lack.
 pub fn pua_width(c: char) -> Option<u8> {
     pua_width_in(ICONS, c)
@@ -103,6 +118,9 @@ pub fn pua_width(c: char) -> Option<u8> {
 /// `pua_width` over an explicit table, so a test can build a table whose PUA
 /// glyph sits in one set only. Only single code point glyphs match.
 fn pua_width_in(table: &[Icon], c: char) -> Option<u8> {
+    if !is_private_use(c as u32) {
+        return None;
+    }
     let mut buf = [0u8; 4];
     let s: &str = c.encode_utf8(&mut buf);
     table.iter().any(|ic| ic.glyphs.contains(&s)).then_some(1)
@@ -137,10 +155,12 @@ pub fn resolve(icon: &Icon, set: IconSet, p: WidthProfile) -> Resolved {
         match s.next() {
             Some(n) => s = n,
             None => {
+                // Not reached for the built-in table: every ASCII one-cell
+                // glyph is 1 cell (test `one_cell_icons_are_one_cell_everywhere`).
                 return Resolved {
                     text,
                     width: u8::try_from(width).unwrap_or(u8::MAX),
-                    fell_back_to: Some(s),
+                    fell_back_to: (s != set).then_some(s),
                 };
             }
         }
@@ -165,7 +185,11 @@ mod tests {
         assert!(ICONS.windows(2).all(|w| w[0].name < w[1].name));
         for ic in ICONS {
             let a = ic.glyphs[IconSet::Ascii as usize];
-            assert!(a.is_ascii(), "{}", ic.name);
+            assert!(a.bytes().all(|b| (0x20..=0x7E).contains(&b)), "{}", ic.name);
+            assert!(!ic.glyphs[IconSet::Nerd as usize].is_empty(), "{}", ic.name);
+            for g in ic.glyphs {
+                assert!(!g.chars().any(crate::sanitize::is_removed), "{}", ic.name);
+            }
             if ic.kind == IconKind::OneCell {
                 assert_eq!(a.len(), 1, "{}", ic.name);
                 for g in ic.glyphs {
@@ -176,6 +200,30 @@ mod tests {
         }
         assert!(lookup("sep.nope").is_none());
         assert!(lookup("").is_none());
+    }
+
+    // 이것을 실패시키는 것: 사슬 매핑 하나를 바꾸는 것(역행은 무한 루프가 아니라 여기서 FAILED).
+    #[test]
+    fn next_maps_each_set_to_the_following_one() {
+        assert_eq!(IconSet::Nerd.next(), Some(IconSet::Light));
+        assert_eq!(IconSet::Light.next(), Some(IconSet::Unicode));
+        assert_eq!(IconSet::Unicode.next(), Some(IconSet::Ascii));
+        assert_eq!(IconSet::Ascii.next(), None);
+    }
+
+    // 이것을 실패시키는 것: 사슬 끝 분기가 요청 세트가 Ascii일 때도 fell_back_to를 채우는 것.
+    #[test]
+    fn chain_end_reports_no_fallback_when_ascii_was_asked() {
+        let a2 = WidthProfile::new(2, 2).unwrap();
+        let bad = Icon {
+            name: "probe",
+            kind: IconKind::OneCell,
+            glyphs: ["\u{2500}"; 4],
+        };
+        let r = resolve(&bad, IconSet::Ascii, a2);
+        assert_eq!((r.text, r.width, r.fell_back_to), ("\u{2500}", 2, None));
+        let r = resolve(&bad, IconSet::Unicode, a2);
+        assert_eq!(r.fell_back_to, Some(IconSet::Ascii));
     }
 
     // 이것을 실패시키는 것: 이름을 잘못 해석하는 parse, 세트 순서(사슬 색인)를 바꾸는 enum 순서.
@@ -252,7 +300,7 @@ mod tests {
     // 이것을 실패시키는 것: 어떤 세트·프로필에서든 한 칸 아이콘이 1칸이 아닌 채로 나오는 것,
     // 기본 프로필에서 폴백하는 것.
     #[test]
-    fn every_one_cell_icon_resolves_to_one_cell() {
+    fn one_cell_icons_are_one_cell_everywhere() {
         let a2 = WidthProfile::new(2, 2).unwrap();
         for ic in ICONS.iter().filter(|ic| ic.kind == IconKind::OneCell) {
             for set in ALL {
@@ -273,6 +321,9 @@ mod tests {
         assert_eq!(pua_width('\u{E0C0}'), None);
         // Multi code point glyphs are not PUA entries.
         assert_eq!(pua_width('\u{2570}'), None);
+        // Table glyphs outside the private use areas are not PUA entries.
+        assert_eq!(pua_width('!'), None);
+        assert_eq!(pua_width('\u{2500}'), None);
     }
 
     // 이것을 실패시키는 것: glyphs[0](nerd)만 보는 판독. light·unicode·ascii 칸에만 있는 PUA도 안다.
