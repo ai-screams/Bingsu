@@ -107,9 +107,11 @@ pub fn lookup(name: &str) -> Option<&'static Icon> {
         .map(|i| &ICONS[i])
 }
 
-/// Cells for a private use code point that the icon table uses (1), or
-/// None for one it does not know and for any char outside the private use
-/// areas (1 cell plus a warning, src/width.rs).
+/// Cells for a private use code point that the icon table uses (1). None
+/// means one of two things: a private use code point the table does not
+/// know (1 cell plus a warning, src/width.rs), or a char that is not private
+/// use at all, which is not this function's business (width calls this
+/// callback for private use code points only).
 /// Every set is searched: a set may carry a PUA glyph that the others lack.
 pub fn pua_width(c: char) -> Option<u8> {
     pua_width_in(ICONS, c)
@@ -184,19 +186,23 @@ mod tests {
     fn icons_sorted_and_ascii_complete() {
         assert!(ICONS.windows(2).all(|w| w[0].name < w[1].name));
         for ic in ICONS {
-            let a = ic.glyphs[IconSet::Ascii as usize];
-            assert!(a.bytes().all(|b| (0x20..=0x7E).contains(&b)), "{}", ic.name);
-            assert!(!ic.glyphs[IconSet::Nerd as usize].is_empty(), "{}", ic.name);
-            for g in ic.glyphs {
-                assert!(!g.chars().any(crate::sanitize::is_removed), "{}", ic.name);
+            let a = ic.glyph(IconSet::Ascii);
+            assert!(
+                a.bytes().all(|b| (0x20..=0x7E).contains(&b)),
+                "{}",
+                ic.name()
+            );
+            assert!(!ic.glyph(IconSet::Nerd).is_empty(), "{}", ic.name());
+            for g in ALL.map(|set| ic.glyph(set)) {
+                assert!(!g.chars().any(crate::sanitize::is_removed), "{}", ic.name());
             }
-            if ic.kind == IconKind::OneCell {
-                assert_eq!(a.len(), 1, "{}", ic.name);
-                for g in ic.glyphs {
-                    assert!(!g.is_empty(), "{}", ic.name);
+            if ic.kind() == IconKind::OneCell {
+                assert_eq!(a.len(), 1, "{}", ic.name());
+                for g in ALL.map(|set| ic.glyph(set)) {
+                    assert!(!g.is_empty(), "{}", ic.name());
                 }
             }
-            assert_eq!(lookup(ic.name).map(|f| f.name), Some(ic.name));
+            assert_eq!(lookup(ic.name()).map(|f| f.name()), Some(ic.name()));
         }
         assert!(lookup("sep.nope").is_none());
         assert!(lookup("").is_none());
@@ -224,6 +230,25 @@ mod tests {
         assert_eq!((r.text, r.width, r.fell_back_to), ("\u{2500}", 2, None));
         let r = resolve(&bad, IconSet::Unicode, a2);
         assert_eq!(r.fell_back_to, Some(IconSet::Ascii));
+    }
+
+    // 이것을 실패시키는 것: 상수를 돌려주는 name()·kind(), 늘 Nerd 칸을 돌려주는 glyph().
+    #[test]
+    fn accessors_read_the_row() {
+        let ok = lookup("char.ok").unwrap();
+        assert_eq!((ok.name(), ok.kind()), ("char.ok", IconKind::OneCell));
+        assert_eq!(
+            ALL.map(|s| ok.glyph(s)),
+            ["\u{276F}", "\u{276F}", "\u{276F}", ">"]
+        );
+        let sep = lookup("sep.round.r").unwrap();
+        assert_eq!(
+            ALL.map(|s| sep.glyph(s)),
+            ["\u{E0B4}", "\u{E0B4}", "\u{25B6}", ">"]
+        );
+        let br = lookup("git.branch").unwrap();
+        assert_eq!((br.name(), br.kind()), ("git.branch", IconKind::Glyph));
+        assert_eq!(ALL.map(|s| br.glyph(s)), ["\u{E0A0}", "", "", ""]);
     }
 
     // 이것을 실패시키는 것: 이름을 잘못 해석하는 parse, 세트 순서(사슬 색인)를 바꾸는 enum 순서.
@@ -302,13 +327,18 @@ mod tests {
     #[test]
     fn one_cell_icons_are_one_cell_everywhere() {
         let a2 = WidthProfile::new(2, 2).unwrap();
-        for ic in ICONS.iter().filter(|ic| ic.kind == IconKind::OneCell) {
+        for ic in ICONS.iter().filter(|ic| ic.kind() == IconKind::OneCell) {
             for set in ALL {
                 let d = resolve(ic, set, WidthProfile::DEFAULT);
-                assert_eq!((d.width, d.fell_back_to), (1, None), "{} {set:?}", ic.name);
-                assert_eq!(d.text, ic.glyphs[set as usize]);
+                assert_eq!(
+                    (d.width, d.fell_back_to),
+                    (1, None),
+                    "{} {set:?}",
+                    ic.name()
+                );
+                assert_eq!(d.text, ic.glyph(set));
                 let r = resolve(ic, set, a2);
-                assert_eq!(r.width, 1, "{} {set:?}", ic.name);
+                assert_eq!(r.width, 1, "{} {set:?}", ic.name());
             }
         }
     }
