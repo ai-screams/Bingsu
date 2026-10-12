@@ -27,7 +27,13 @@ pub struct OklabQ {
     pub b: i64,
 }
 
-const GAMUT_EPS: f64 = 1e-7;
+/// Slack on the sRGB cube edges. Colors that sit on a face or edge (a channel
+/// at 0 or 255) land a few 1e-7 outside after the 1e-6 OKLab quantization;
+/// near the blue cusp, lowering chroma at the same L and H moves further out
+/// instead of in, so a strict test would send the bisection to a far point.
+/// 1e-5 is about 4% of one 8-bit step even in the darkest range (12.92 * 255
+/// steps per unit), and `encode` clamps to 0..=1.
+const GAMUT_EPS: f64 = 1e-5;
 
 pub fn oklch_to_linear(c: Oklch) -> [f64; 3] {
     let h = c.h * core::f64::consts::PI / 180.0;
@@ -175,8 +181,8 @@ pub fn nearest_256(s: Srgb8) -> u8 {
 mod tests {
     use super::*;
 
-    const BISECT_BITS: u64 = 4_598_487_577_005_436_111;
-    const BISECT_BITS_2: u64 = 4_597_837_827_942_064_128;
+    const BISECT_BITS: u64 = 4_598_487_660_535_209_985;
+    const BISECT_BITS_2: u64 = 4_597_201_628_773_374_360;
 
     // 이것을 실패시키는 것: 변환 행렬·감마 오류. 기준값은 CSS Color 4의 OKLCH 예와 같은 계산이다.
     #[test]
@@ -349,15 +355,15 @@ mod tests {
         assert!(in_gamut([1.0 + GAMUT_EPS, 0.0, 0.0]) && in_gamut([0.0, -GAMUT_EPS, 0.0]));
         for i in 0..3 {
             let mut hi = [0.5; 3];
-            hi[i] = 1.0 + 1e-6;
+            hi[i] = 1.0 + 1e-4;
             let mut lo = [0.5; 3];
-            lo[i] = -1e-6;
+            lo[i] = -1e-4;
             assert!(!in_gamut(hi) && !in_gamut(lo), "channel {i}");
         }
     }
 
     // 이것을 실패시키는 것: 이분 탐색 횟수(40)·방향, 색역 안 색을 깎는 것, 반환 플래그.
-    // 기준값 0.2673393222091364는 따로 쓴 Python 이분 탐색(40회)이 낸 값이다.
+    // 기준값 0.26734395904304625는 따로 쓴 Python 이분 탐색(40회)이 낸 값이다.
     #[test]
     fn clamp_chroma_bisection() {
         let (c, clipped) = clamp_chroma(Oklch {
@@ -366,7 +372,7 @@ mod tests {
             h: 145.0,
         });
         assert!(clipped);
-        assert!((c.c - 0.267_339_322_209_136_4).abs() < 1e-9, "{}", c.c);
+        assert!((c.c - 0.267_343_959_043_046_25).abs() < 1e-9, "{}", c.c);
         assert_eq!((c.l, c.h), (0.85, 145.0));
         assert!(in_gamut(oklch_to_linear(c)));
         // 경계에서 1e-11 위는 색역 밖이다: 탐색 횟수가 모자라면 틈이 이보다 크다.
@@ -377,13 +383,13 @@ mod tests {
         // 40회 결과의 비트까지 고정한다(native와 wasm32가 같아야 한다).
         assert_eq!(c.c.to_bits(), BISECT_BITS);
         // 첫 입력은 41회째가 값을 바꾸지 않으므로(탐색이 이미 수렴), 41회에서 값이 달라지는 입력을 하나 더 고정한다.
-        // 기준값 0.240635501844963도 따로 쓴 Python 이분 탐색이 낸 값이다.
+        // 기준값 0.222977427711794도 따로 쓴 Python 이분 탐색이 낸 값이다.
         let (c2, _) = clamp_chroma(Oklch {
-            l: 0.6,
-            c: 0.25,
-            h: 30.0,
+            l: 0.55,
+            c: 0.35,
+            h: 0.0,
         });
-        assert!((c2.c - 0.240_635_501_844_963).abs() < 1e-9, "{}", c2.c);
+        assert!((c2.c - 0.222_977_427_711_794).abs() < 1e-9, "{}", c2.c);
         assert_eq!(c2.c.to_bits(), BISECT_BITS_2);
         // 색역 안이면 그대로, 같은 값이다.
         let inside = Oklch {
@@ -423,6 +429,27 @@ mod tests {
                 (rgb(r, g, b), clipped),
                 "{l} {c} {h}"
             );
+        }
+    }
+
+    // 이것을 실패시키는 것: GAMUT_EPS 를 1e-7 로 되돌리는 것((0,0,153)이 색역 밖으로 읽혀 (0,25,137)이 된다).
+    #[test]
+    fn roundtrip_cube_edges() {
+        let v = [0u8, 1, 2, 127, 128, 153, 254, 255];
+        for r in v {
+            for g in v {
+                for b in v {
+                    let o = oklab_q(rgb(r, g, b));
+                    let (a, bb) = (o.a as f64 / 1e6, o.b as f64 / 1e6);
+                    let h = libm::atan2(bb, a) * 180.0 / core::f64::consts::PI;
+                    let c = Oklch {
+                        l: o.l as f64 / 1e6,
+                        c: libm::sqrt(a * a + bb * bb),
+                        h: if h < 0.0 { h + 360.0 } else { h },
+                    };
+                    assert_eq!(oklch_to_srgb8(c), (rgb(r, g, b), false), "{r},{g},{b}");
+                }
+            }
         }
     }
 
