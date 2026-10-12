@@ -4,7 +4,9 @@ version = "0.0.0"
 description = "Instruction-count benchmarks of bingsu-core (Callgrind via gungraun, Linux CI gate)"
 publish = false
 edition.workspace = true
-rust-version.workspace = true
+# gungraun 0.20.0 needs Rust 1.88; the workspace stays at 1.85. This crate
+# only runs in CI job icount, which pins 1.98.1.
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 

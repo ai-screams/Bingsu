@@ -201,6 +201,9 @@ jobs:
       # Pinned so the base and the PR, and runs on different days, compare
       # like with like. Bump by hand together with the stable toolchain.
       ICOUNT_RUST: 1.98.1
+      # One path for the base check and the PR check: a typo must fail the
+      # job, not turn the gate into record-only.
+      BENCH_MANIFEST: crates/bingsu-core-bench/Cargo.toml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -222,12 +225,17 @@ jobs:
         run: |
           echo "GUNGRAUN_HOME=$RUNNER_TEMP/gungraun" >> "$GITHUB_ENV"
           export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
+          if [ ! -f "$BENCH_MANIFEST" ]; then
+            echo "::error::$BENCH_MANIFEST is missing in the pull request"
+            exit 1
+          fi
           base=$(git merge-base "origin/$BASE_REF" HEAD)
           git worktree add "$RUNNER_TEMP/base" "$base"
-          if [ -f "$RUNNER_TEMP/base/crates/bingsu-core-bench/Cargo.toml" ]; then
+          if [ -f "$RUNNER_TEMP/base/$BENCH_MANIFEST" ]; then
             (cd "$RUNNER_TEMP/base" && cargo bench -p bingsu-core-bench --bench icount -- --save-baseline=base)
           else
-            echo "merge base has no icount bench: this run records only" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::warning::merge base has no icount bench: this run records only"
+            echo "merge base has no icount bench: this run records only" >> "$GITHUB_STEP_SUMMARY"
             touch "$RUNNER_TEMP/no-base"
           fi
       - name: Pull request against the baseline
