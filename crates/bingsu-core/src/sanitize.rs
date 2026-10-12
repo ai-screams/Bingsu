@@ -53,28 +53,50 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
     }
 }
 
+/// Bytes `sanitize_into_capped` decodes at a time, so it reads at most this
+/// much past the point where it stops.
+const WINDOW: usize = 256;
+
 /// `sanitize_into` that stops reading `input` once it has appended more than
-/// `limit` bytes to `out`. Returns true when it stopped that way, so `out`
-/// holds only a prefix of the full result (longer than `limit`); false when
-/// it appended the whole result. Removed code points add nothing, so input
+/// `limit` bytes to `out`. Returns how many bytes of `input` it read (up to
+/// the end of the window where it stopped) when it stopped that way, so
+/// `out` holds only a prefix of the full result (longer than `limit`); None
+/// when it appended the whole result. Removed code points add nothing, so input
 /// that is all removed (1 MiB of ESC) is still read to the end.
-pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> bool {
+pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> Option<usize> {
     let start = out.len();
-    for chunk in input.utf8_chunks() {
-        for c in chunk.valid().chars().filter(|&c| !is_removed(c)) {
-            out.push(c);
-            if out.len() - start > limit {
-                return true;
+    let mut rest = input;
+    while !rest.is_empty() {
+        // Decoding one window at a time keeps `utf8_chunks` from checking
+        // the whole input before the first chunk. The cut goes before a
+        // byte that is not a continuation byte (0x80-0xBF), or after three
+        // continuation bytes in a row (no lead byte is close enough): either
+        // way no sequence, valid or not, crosses it, so each window decodes
+        // as it would inside the whole input.
+        let mut cut = rest.len().min(WINDOW);
+        if cut < rest.len() {
+            if let Some(at) = (cut - 3..=cut).rev().find(|&i| rest[i] & 0xC0 != 0x80) {
+                cut = at;
             }
         }
-        if !chunk.invalid().is_empty() {
-            out.push('\u{FFFD}');
-            if out.len() - start > limit {
-                return true;
+        let (window, tail) = rest.split_at(cut);
+        rest = tail;
+        for chunk in window.utf8_chunks() {
+            for c in chunk.valid().chars().filter(|&c| !is_removed(c)) {
+                out.push(c);
+                if out.len() - start > limit {
+                    return Some(input.len() - rest.len());
+                }
+            }
+            if !chunk.invalid().is_empty() {
+                out.push('\u{FFFD}');
+                if out.len() - start > limit {
+                    return Some(input.len() - rest.len());
+                }
             }
         }
     }
-    false
+    None
 }
 
 /// Returns `input` as a new `String` without removed code points (see
@@ -139,24 +161,19 @@ mod tests {
         assert_eq!(out, "preab\u{FFFD}cx");
     }
 
-    // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제), 상한을 넘기 전에 멈추는 것,
+    // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제하거나 끝까지 UTF-8 검사), 상한을 넘기 전에 멈추는 것,
     // 멈춘 결과가 전체 결과의 앞부분이 아닌 것, 멈췄는지를 잘못 알리는 것.
     #[test]
     fn capped_sanitize_stops_past_the_limit() {
         let mut out = String::from("pre");
-        assert!(sanitize_into_capped(
-            &alloc::vec![b'a'; 1 << 20],
-            &mut out,
-            1040
-        ));
-        // ASCII keeps one byte per input byte: it stopped after 1,041 of 1 MiB.
+        let read = sanitize_into_capped(&alloc::vec![b'a'; 1 << 20], &mut out, 1040);
+        // ASCII keeps one byte per input byte: it kept 1,041 bytes and read
+        // only to the end of that window, not the whole 1 MiB.
         assert_eq!(out.len(), 3 + 1041);
+        assert_eq!(read, Some(1041usize.next_multiple_of(WINDOW)));
         let mut out = String::new();
-        assert!(!sanitize_into_capped(
-            &alloc::vec![0x1b; 1 << 20],
-            &mut out,
-            16
-        ));
+        let read = sanitize_into_capped(&alloc::vec![0x1b; 1 << 20], &mut out, 16);
+        assert_eq!(read, None);
         assert_eq!(out, "");
         let inputs: [&[u8]; 3] = [
             b"ab\x1bc\xffd",
@@ -169,7 +186,7 @@ mod tests {
                 let mut out = String::new();
                 let stopped = sanitize_into_capped(input, &mut out, limit);
                 assert!(full.starts_with(&out), "{input:?} {limit}");
-                if stopped {
+                if stopped.is_some() {
                     let last = out.chars().last().unwrap().len_utf8();
                     assert!(
                         out.len() > limit && out.len() - last <= limit,
@@ -180,6 +197,42 @@ mod tests {
                     assert!(out.len() <= limit, "{input:?} {limit}");
                 }
             }
+        }
+    }
+
+    // 이것을 실패시키는 것: 창(WINDOW) 경계에서 UTF-8 sequence를 가르는 것(경계에 걸친 글자가 U+FFFD 둘이 되거나,
+    // 잘못된 부분열의 U+FFFD 개수가 달라지는 것), 경계를 고르는 조건을 빼는 것.
+    #[test]
+    fn capped_sanitize_decodes_across_windows_like_the_whole() {
+        let zoo: [&[u8]; 12] = [
+            b"\xf0\x9f\x98\x80",
+            b"\xe2\x82\xac",
+            b"\xc3\xa9",
+            b"\xf0\x9f\x98",
+            b"\xe2\x82",
+            b"\x80\x80\x80\x80\x80",
+            b"\xed\xa0\x80",
+            b"\xf4\x90\x80\x80",
+            b"\xff",
+            b"\xc0\x80",
+            b"\xe0\x80\xaf",
+            b"\x1b[0m",
+        ];
+        let check = |input: &[u8]| {
+            let mut out = String::new();
+            assert_eq!(sanitize_into_capped(input, &mut out, usize::MAX), None);
+            assert_eq!(out, sanitize(input), "{input:02x?}");
+        };
+        for off in WINDOW - 6..=WINDOW + 1 {
+            let pre = alloc::vec![b'a'; off];
+            for z in zoo {
+                check(&[&pre[..], z, b"z"].concat());
+                check(&[&pre[..], z].concat());
+            }
+            check(&[&pre[..], &zoo.concat(), &zoo.concat()].concat());
+        }
+        for v in 0..=0xFFFFu16 {
+            check(&[&[b'a'; WINDOW - 1][..], &v.to_be_bytes(), b"\xbf\xbf"].concat());
         }
     }
 
