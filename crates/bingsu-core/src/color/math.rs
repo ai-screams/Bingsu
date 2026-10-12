@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(nearest_256(rgb(8, 8, 8)), 232);
         assert_eq!(nearest_256(rgb(7, 68, 99)), 237);
         assert_eq!(nearest_256(rgb(119, 134, 145)), 102);
-        // 15 간격 격자 표본(4,096색)에서 0..=15를 고르지 않는다.
+        // 15 간격 격자 표본(5,832색(18^3))에서 0..=15를 고르지 않는다.
         for r in (0..=255u8).step_by(15) {
             for g in (0..=255u8).step_by(15) {
                 for b in (0..=255u8).step_by(15) {
