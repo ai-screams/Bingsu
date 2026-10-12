@@ -2,7 +2,10 @@
 //! section 2 "색 token과 색 표기", ADR-0004, ADR-0005, ADR-0006, ADR-0007,
 //! ADR-0016). `resolve_palette` is the one function the prompt and the
 //! generators (sub-project 5) share.
-use super::math::{Oklch, Srgb8, contrast_milli, nearest_256, oklch_to_srgb8, xterm};
+use super::math::{
+    Oklch, OklchQ, Srgb8, clamp_chroma, contrast_milli, nearest_256, oklch_q, oklch_to_linear,
+    srgb8_to_oklch_q, to_srgb8, xterm,
+};
 use super::notation::ColorSpec;
 use alloc::vec::Vec;
 
@@ -104,6 +107,10 @@ pub struct ResolvedToken {
     pub fg: Srgb8,
     /// Block background (display tier).
     pub bg: Srgb8,
+    /// The colors actually shown (after gamut limiting) as OKLCH; colors
+    /// given as hex, 256 or ANSI are converted back from their sRGB.
+    pub fg_oklch: OklchQ,
+    pub bg_oklch: OklchQ,
     /// 256-color approximations of `fg` and `bg`, computed here once.
     pub fg256: u8,
     pub bg256: u8,
@@ -127,6 +134,14 @@ pub enum PaletteWarning {
     Clipped {
         token: usize,
     },
+    /// A token's block background on the terminal background below 3:1
+    /// (non-text marks, CLAUDE.md design rule 2).
+    MarkContrast {
+        token: usize,
+        milli: u32,
+    },
+    /// The terminal background (`neutral.base`) was lowered to fit sRGB.
+    BackgroundClipped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,15 +271,27 @@ pub fn ansi_color(slot: u8, mode: Mode, k: Knobs) -> Srgb8 {
         c: 0.0,
         h: 0.0,
     });
-    oklch_to_srgb8(c).0
+    from_oklch(c).0
 }
 
-fn spec_to_srgb(s: ColorSpec, mode: Mode, k: Knobs) -> (Srgb8, bool) {
+/// A color as shown: sRGB, its OKLCH and whether chroma was lowered.
+type Shown = (Srgb8, OklchQ, bool);
+
+fn from_oklch(c: Oklch) -> Shown {
+    let (c, clipped) = clamp_chroma(c);
+    (to_srgb8(oklch_to_linear(c)), oklch_q(c), clipped)
+}
+
+fn from_srgb(s: Srgb8) -> Shown {
+    (s, srgb8_to_oklch_q(s), false)
+}
+
+fn spec_to_shown(s: ColorSpec, mode: Mode, k: Knobs) -> Shown {
     match s {
-        ColorSpec::Oklch(c) => oklch_to_srgb8(c),
-        ColorSpec::Rgb(c) => (c, false),
-        ColorSpec::Index256(i) => (xterm(i), false),
-        ColorSpec::Ansi(i) => (ansi_color(i, mode, k), false),
+        ColorSpec::Oklch(c) => from_oklch(c),
+        ColorSpec::Rgb(c) => from_srgb(c),
+        ColorSpec::Index256(i) => from_srgb(xterm(i)),
+        ColorSpec::Ansi(i) => from_srgb(ansi_color(i, mode, k)),
     }
 }
 
@@ -291,60 +318,55 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
             return Err(PaletteError::UnknownName);
         }
     }
-    let color_of = |name: &str, read: bool| -> (Srgb8, bool) {
+    let color_of = |name: &str, read: bool| -> Shown {
         // Last override of a palette color wins.
         if let Some((_, s)) = input.overrides.iter().rev().find(|(n, _)| *n == name) {
-            return spec_to_srgb(*s, input.mode, input.knobs);
+            return spec_to_shown(*s, input.mode, input.knobs);
         }
-        let c = flavor_a(name, input.mode, input.knobs, read).unwrap_or(Oklch {
-            l: 0.5,
-            c: 0.0,
-            h: 0.0,
-        });
-        oklch_to_srgb8(c)
+        from_oklch(
+            flavor_a(name, input.mode, input.knobs, read).unwrap_or(Oklch {
+                l: 0.5,
+                c: 0.0,
+                h: 0.0,
+            }),
+        )
     };
-    let background = color_of("neutral.base", false).0;
+    let (background, _, bg_clipped) = color_of("neutral.base", false);
     let mut tokens = Vec::with_capacity(TOKENS.len());
     let mut warnings = Vec::new();
+    if bg_clipped {
+        warnings.push(PaletteWarning::BackgroundClipped);
+    }
     for (i, t) in TOKENS.iter().enumerate() {
         let ansi = t.ansi[input.mode as usize];
+        // ADR-0016: a role reassignment (step 4) beats a color override of
+        // the token itself (step 3); palette-name overrides apply to the
+        // color the role picks.
+        let role = input.roles.iter().rev().find(|(n, _)| *n == t.name);
         let token_override = input.overrides.iter().rev().find(|(n, _)| *n == t.name);
-        let r = if let Some((_, s)) = token_override {
-            let (c, clipped) = spec_to_srgb(*s, input.mode, input.knobs);
-            ResolvedToken {
-                fg: c,
-                bg: c,
-                fg256: 0,
-                bg256: 0,
-                ansi,
-                clipped,
+        let ((fg, fo, c1), (bg, bo, c2)) = match (role, token_override) {
+            (None, Some((_, s))) => {
+                let c = spec_to_shown(*s, input.mode, input.knobs);
+                (c, c)
             }
-        } else {
-            let base = match input.mode {
-                Mode::Dark => t.dark,
-                Mode::Light => t.light,
-            };
-            let name = input
-                .roles
-                .iter()
-                .rev()
-                .find(|(n, _)| *n == t.name)
-                .map_or(base, |r| r.1);
-            let (fg, c1) = color_of(name, true);
-            let (bg, c2) = color_of(name, false);
-            ResolvedToken {
-                fg,
-                bg,
-                fg256: 0,
-                bg256: 0,
-                ansi,
-                clipped: c1 || c2,
+            _ => {
+                let base = match input.mode {
+                    Mode::Dark => t.dark,
+                    Mode::Light => t.light,
+                };
+                let name = role.map_or(base, |r| r.1);
+                (color_of(name, true), color_of(name, false))
             }
         };
         let r = ResolvedToken {
-            fg256: nearest_256(r.fg),
-            bg256: nearest_256(r.bg),
-            ..r
+            fg,
+            bg,
+            fg_oklch: fo,
+            bg_oklch: bo,
+            fg256: nearest_256(fg),
+            bg256: nearest_256(bg),
+            ansi,
+            clipped: c1 || c2,
         };
         if r.clipped {
             warnings.push(PaletteWarning::Clipped { token: i });
@@ -363,6 +385,10 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
         let m = contrast_milli(block_text, t.bg);
         if m < 4_500 {
             warnings.push(PaletteWarning::BlockContrast { token: i, milli: m });
+        }
+        let m = contrast_milli(t.bg, background);
+        if m < 3_000 {
+            warnings.push(PaletteWarning::MarkContrast { token: i, milli: m });
         }
     }
     Ok(ResolvedPalette {
@@ -513,5 +539,236 @@ mod tests {
         let path = p.get("path").unwrap();
         assert_ne!(path.fg, path.bg);
         assert!(contrast_milli(path.fg, p.background) >= 4_500);
+    }
+
+    // Expected values were computed apart from this code (a Python script that
+    // applies the palette study's flavor A formulas and the ANSI map, with
+    // ADR-0007's light 0, 7, 8 and 15), not copied from this code's output.
+    fn hex(v: u32) -> Srgb8 {
+        Srgb8 {
+            r: (v >> 16) as u8,
+            g: (v >> 8) as u8,
+            b: v as u8,
+        }
+    }
+
+    fn pin(mode: Mode, table: &[(&str, u32, u32, AnsiSlot)]) {
+        let p = resolve_palette(&input(mode)).unwrap();
+        assert_eq!(table.len(), TOKENS.len());
+        for (t, r) in table.iter().zip(&p.tokens) {
+            assert_eq!(p.get(t.0), Some(r), "table order is TOKENS order");
+            assert_eq!(
+                (r.fg, r.bg, r.ansi),
+                (hex(t.1), hex(t.2), t.3),
+                "{:?} {}",
+                mode,
+                t.0
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: flavor A dark 의 어느 token 의 fg·bg·ANSI 슬롯이든 바뀌는 것(L·C·H, 지도, 슬롯).
+    #[test]
+    fn flavor_a_dark_table() {
+        pin(
+            Mode::Dark,
+            &[
+                ("block.text", 0x111221, 0x111221, S(0)),
+                ("duration", 0xccae4e, 0xccae4e, S(3)),
+                ("fg", 0xdee0ed, 0xdee0ed, Df),
+                ("git.ahead", 0x3bcabb, 0x3bcabb, S(6)),
+                ("git.behind", 0x3bcabb, 0x3bcabb, S(6)),
+                ("git.branch", 0xc39dee, 0xc39dee, S(5)),
+                ("git.conflicted", 0xf39098, 0xf39098, S(1)),
+                ("git.dirty", 0xec9c63, 0xec9c63, S(3)),
+                ("git.staged", 0x7fc581, 0x7fc581, S(2)),
+                ("host", 0xea91bc, 0xea91bc, S(5)),
+                ("jobs", 0x3bcabb, 0x3bcabb, S(6)),
+                ("muted", 0x717383, 0x717383, S(8)),
+                ("path", 0x7cb4fc, 0x7cb4fc, S(4)),
+                ("prompt.err", 0xf39098, 0xf39098, S(1)),
+                ("prompt.ok", 0x7fc581, 0x7fc581, S(2)),
+                ("readonly", 0xf39098, 0xf39098, S(1)),
+                ("status", 0xf39098, 0xf39098, S(1)),
+                ("venv", 0xccae4e, 0xccae4e, S(3)),
+            ],
+        );
+    }
+
+    // 이것을 실패시키는 것: flavor A light 의 읽기용(fg)·표시용(bg) 단계나 슬롯이 바뀌는 것.
+    #[test]
+    fn flavor_a_light_table() {
+        pin(
+            Mode::Light,
+            &[
+                ("block.text", 0xf2f3fc, 0xf2f3fc, S(15)),
+                ("duration", 0x7c6722, 0xa08318, S(3)),
+                ("fg", 0x323445, 0x323445, Df),
+                ("git.ahead", 0x087970, 0x009b8f, S(6)),
+                ("git.behind", 0x087970, 0x009b8f, S(6)),
+                ("git.branch", 0x755b93, 0x9772c0, S(5)),
+                ("git.conflicted", 0x965258, 0xc3656f, S(1)),
+                ("git.dirty", 0x905a33, 0xbd7138, S(3)),
+                ("git.staged", 0x467748, 0x549957, S(2)),
+                ("host", 0x8f5270, 0xbb6690, S(5)),
+                ("jobs", 0x087970, 0x009b8f, S(6)),
+                ("muted", 0x76798c, 0x76798c, S(8)),
+                ("path", 0x446b9c, 0x5188cd, S(4)),
+                ("prompt.err", 0x965258, 0xc3656f, S(1)),
+                ("prompt.ok", 0x467748, 0x549957, S(2)),
+                ("readonly", 0x965258, 0xc3656f, S(1)),
+                ("status", 0x965258, 0xc3656f, S(1)),
+                ("venv", 0x7c6722, 0xa08318, S(3)),
+            ],
+        );
+    }
+
+    // 이것을 실패시키는 것: 16색 표의 어느 칸이든 바뀌는 것(light 0·7·8·15 포함).
+    #[test]
+    fn ansi_tables() {
+        let dark = [
+            0x363849, 0xf39098, 0x7fc581, 0xccae4e, 0x7cb4fc, 0xea91bc, 0x3bcabb, 0xaeb0be,
+            0x838595, 0xf8a8ad, 0x9ad29b, 0xd7bf78, 0x97c4fe, 0xf0a8ca, 0x73d5c9, 0xdee0ed,
+        ];
+        let light = [
+            0x525466, 0xc3656f, 0x549957, 0xa08318, 0x5188cd, 0xbb6690, 0x009b8f, 0xcfd0dc,
+            0x65677a, 0xaa5d64, 0x4f8751, 0x8d7526, 0x4d79b1, 0xa35e80, 0x038a7f, 0xdddfe9,
+        ];
+        for (k, (d, l)) in dark.iter().zip(&light).enumerate() {
+            assert_eq!(
+                ansi_color(k as u8, Mode::Dark, Knobs::default()),
+                hex(*d),
+                "dark {k}"
+            );
+            assert_eq!(
+                ansi_color(k as u8, Mode::Light, Knobs::default()),
+                hex(*l),
+                "light {k}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: 역할 재배정이 같은 token 의 덮어쓰기에 지는 것(ADR-0016 4단계가 3단계보다 뒤).
+    // 역할이 고른 팔레트 색에 걸린 이름 덮어쓰기는 그대로 적용된다.
+    #[test]
+    fn role_beats_token_override() {
+        let ov = [
+            ("git.dirty", parse_color("#ff0000").unwrap()),
+            ("accent.blue", parse_color("#8fb8f0").unwrap()),
+        ];
+        let roles = [("git.dirty", "accent.blue")];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ov,
+            roles: &roles,
+            ..input(Mode::Dark)
+        })
+        .unwrap();
+        let d = p.get("git.dirty").unwrap();
+        assert_eq!((d.fg, d.bg), (hex(0x8fb8f0), hex(0x8fb8f0)));
+    }
+
+    // 이것을 실패시키는 것: OKLCH 가 색역 제한 전 값이거나 ×1e6 반올림이 아닌 것, 역산의 회색 규칙(h = 0).
+    // 기대값: Python 으로 OKLab 을 1e-6 으로 반올림한 뒤 L, C, H 로 옮긴 값(#8fb8f0 은 773909 92052 256325914).
+    #[test]
+    fn oklch_of_shown_colors() {
+        let p = resolve_palette(&input(Mode::Dark)).unwrap();
+        let path = p.get("path").unwrap();
+        assert_eq!(
+            path.fg_oklch,
+            OklchQ {
+                l: 760_000,
+                c: 120_000,
+                h: 255_000_000
+            }
+        );
+        // Light teal display tier is outside sRGB: the shown chroma is lower.
+        let p = resolve_palette(&input(Mode::Light)).unwrap();
+        assert_eq!(
+            p.get("jobs").unwrap().bg_oklch,
+            OklchQ {
+                l: 620_000,
+                c: 109_263,
+                h: 185_000_000
+            }
+        );
+        let ov = [
+            ("path", parse_color("#8fb8f0").unwrap()),
+            ("host", parse_color("244").unwrap()),
+        ];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ov,
+            ..input(Mode::Dark)
+        })
+        .unwrap();
+        let path = p.get("path").unwrap();
+        assert_eq!(
+            path.fg_oklch,
+            OklchQ {
+                l: 773_909,
+                c: 92_052,
+                h: 256_325_914
+            }
+        );
+        assert_eq!(path.bg_oklch, path.fg_oklch);
+        // 244 is #808080 (gray): chroma 0 and hue 0.
+        assert_eq!(
+            p.get("host").unwrap().fg_oklch,
+            OklchQ {
+                l: 599_871,
+                c: 0,
+                h: 0
+            }
+        );
+    }
+
+    fn marks(p: &ResolvedPalette) -> Vec<(usize, u32)> {
+        p.warnings
+            .iter()
+            .filter_map(|w| match w {
+                PaletteWarning::MarkContrast { token, milli } => Some((*token, *milli)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // 이것을 실패시키는 것: 비글자 3:1 검사의 경계(2994 는 경고, 3039 는 경고 아님)·검사 대상 token.
+    // 3,000 을 2,900 이나 3,100 으로 바꾸면 한쪽이 틀린다. 기본 flavor A 는 dark·light 모두 경고가 없다.
+    #[test]
+    fn mark_contrast_boundary() {
+        assert!(marks(&resolve_palette(&input(Mode::Dark)).unwrap()).is_empty());
+        assert!(marks(&resolve_palette(&input(Mode::Light)).unwrap()).is_empty());
+        let path = token_index("path").unwrap();
+        let dim = [("path", parse_color("#686868").unwrap())];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &dim,
+            ..input(Mode::Dark)
+        })
+        .unwrap();
+        assert_eq!(marks(&p), [(path, 2_994)]);
+        let ok = [("path", parse_color("#696969").unwrap())];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ok,
+            ..input(Mode::Dark)
+        })
+        .unwrap();
+        assert!(marks(&p).is_empty());
+    }
+
+    // 이것을 실패시키는 것: neutral.base 덮어쓰기의 색역 제한을 알리지 않는 것, 제한이 없는데 알리는 것.
+    #[test]
+    fn background_clipped_warning() {
+        assert!(
+            !resolve_palette(&input(Mode::Dark))
+                .unwrap()
+                .warnings
+                .contains(&PaletteWarning::BackgroundClipped)
+        );
+        let ov = [("neutral.base", parse_color("oklch(0.7 0.35 150)").unwrap())];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ov,
+            ..input(Mode::Dark)
+        })
+        .unwrap();
+        assert!(p.warnings.contains(&PaletteWarning::BackgroundClipped));
     }
 }

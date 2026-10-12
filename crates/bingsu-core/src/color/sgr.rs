@@ -170,4 +170,86 @@ mod tests {
             );
         }
     }
+
+    fn sgr_in(mode: Mode, style: Style, depth: ColorDepth) -> Vec<u8> {
+        let p = resolve_palette(&PaletteInput {
+            mode,
+            knobs: Knobs::default(),
+            overrides: &[],
+            roles: &[],
+        })
+        .unwrap();
+        let mut v = Vec::new();
+        write_sgr(style, &p, depth, &mut v);
+        v
+    }
+
+    // 이것을 실패시키는 것: 배경 코드(48;2·48;5)가 38 로 나가거나 fg256 과 bg256 이 바뀌는 것, 배경이 표시용 대신 읽기용을 쓰는 것.
+    // 기대 RGB 는 palette 시험이 따로 고정한 flavor A light 의 path(읽기용 446b9c, 표시용 5188cd).
+    #[test]
+    fn background_bytes() {
+        let path = token_index("path").unwrap() as u16;
+        let bg = Style {
+            fg: Color::Default,
+            bg: Color::Block(path),
+            attrs: 0,
+        };
+        assert_eq!(
+            sgr_in(Mode::Light, bg, ColorDepth::TrueColor),
+            b"\x1b[0;48;2;81;136;205m"
+        );
+        let p = resolve_palette(&PaletteInput {
+            mode: Mode::Light,
+            knobs: Knobs::default(),
+            overrides: &[],
+            roles: &[],
+        })
+        .unwrap();
+        let t = p.tokens[usize::from(path)];
+        assert_ne!(t.fg256, t.bg256);
+        assert_eq!(
+            sgr_in(Mode::Light, bg, ColorDepth::Ansi256),
+            alloc::format!("\x1b[0;48;5;{}m", t.bg256).into_bytes()
+        );
+        let both = Style {
+            fg: Color::Text(path),
+            bg: Color::Block(path),
+            attrs: 0,
+        };
+        assert_eq!(
+            sgr_in(Mode::Light, both, ColorDepth::TrueColor),
+            b"\x1b[0;38;2;68;107;156;48;2;81;136;205m"
+        );
+    }
+
+    // 이것을 실패시키는 것: 밝은 슬롯 8..=15 의 접두(90–97 글자, 100–107 배경) 어긋남과 0..=7 의 30–37·40–47.
+    // light 의 block.text 는 슬롯 15, dark 의 block.text 는 슬롯 0, muted 는 슬롯 8.
+    #[test]
+    fn ansi16_bright_background() {
+        let bt = token_index("block.text").unwrap() as u16;
+        let muted = token_index("muted").unwrap() as u16;
+        let s = Style {
+            fg: Color::Text(bt),
+            bg: Color::Block(bt),
+            attrs: 0,
+        };
+        assert_eq!(
+            sgr_in(Mode::Light, s, ColorDepth::Ansi16),
+            b"\x1b[0;97;107m"
+        );
+        assert_eq!(sgr_in(Mode::Dark, s, ColorDepth::Ansi16), b"\x1b[0;30;40m");
+        let s = Style {
+            fg: Color::Text(muted),
+            bg: Color::Block(muted),
+            attrs: 0,
+        };
+        assert_eq!(sgr_in(Mode::Dark, s, ColorDepth::Ansi16), b"\x1b[0;90;100m");
+    }
+
+    // 이것을 실패시키는 것: RESET 바이트가 바뀌는 것, 빈 Style 의 SGR 이 RESET 과 달라지는 것.
+    #[test]
+    fn reset_bytes() {
+        assert_eq!(RESET, b"\x1b[0m");
+        assert_eq!(sgr(Style::default(), ColorDepth::TrueColor), RESET);
+    }
 }

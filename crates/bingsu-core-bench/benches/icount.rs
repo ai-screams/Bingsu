@@ -62,29 +62,37 @@ fn field_format(input: Vec<Field>) -> (Vec<Field>, String) {
     (input, black_box(s))
 }
 
-#[library_benchmark]
-#[bench::four(args = [4])]
-fn color_notation(n: usize) -> usize {
-    let specs = ["oklch(0.78 0.12 60)", "#8fb8f0", "208", "term.ansi.12"];
-    black_box(
-        specs
-            .iter()
-            .take(n)
-            .filter(|s| parse_color(black_box(s)).is_ok())
-            .count(),
-    )
+fn specs(_: u32) -> Vec<String> {
+    ["oklch(0.78 0.12 60)", "#8fb8f0", "208", "term.ansi.12"]
+        .map(String::from)
+        .to_vec()
 }
 
 #[library_benchmark]
-#[bench::dark(args = [0])]
-fn palette_resolve(_: u32) -> Result<ResolvedPalette, PaletteError> {
-    // Returned, so the free happens outside the counted code.
-    black_box(resolve_palette(&PaletteInput {
-        mode: Mode::Dark,
-        knobs: Knobs::default(),
+#[bench::four(args = [4], setup = specs)]
+fn color_notation(input: Vec<String>) -> (Vec<String>, usize) {
+    let ok = black_box(&input)
+        .iter()
+        .filter(|s| parse_color(black_box(s)).is_ok())
+        .count();
+    (input, black_box(ok))
+}
+
+fn palette_input(_: u32) -> (Mode, Knobs) {
+    (Mode::Dark, Knobs::default())
+}
+
+#[library_benchmark]
+#[bench::dark(args = [0], setup = palette_input)]
+fn palette_resolve(input: (Mode, Knobs)) -> ((Mode, Knobs), Result<ResolvedPalette, PaletteError>) {
+    let p = black_box(resolve_palette(&PaletteInput {
+        mode: input.0,
+        knobs: input.1,
         overrides: &[],
         roles: &[],
-    }))
+    }));
+    // Returned, so the palette is freed outside the counted code.
+    (input, p)
 }
 
 library_benchmark_group!(
