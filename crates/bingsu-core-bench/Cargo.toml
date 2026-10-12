@@ -1,0 +1,34 @@
+[package]
+name = "bingsu-core-bench"
+version = "0.0.0"
+description = "Instruction-count benchmarks of bingsu-core (Callgrind via gungraun, Linux CI gate)"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# `cargo test --workspace` must not build gungraun (it does not run on
+# Windows): no lib tests, so the dev-dependencies are only built for the
+# bench target.
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+bingsu-core = { path = "../bingsu-core" }
+
+# The runner binary must have the same version (job icount installs
+# gungraun-runner 0.20.0).
+[target.'cfg(unix)'.dev-dependencies]
+gungraun = "=0.20.0"
+
+# test = false: `cargo test --workspace` never builds this bench in test
+# mode on macOS or Windows.
+[[bench]]
+name = "icount"
+harness = false
+test = false

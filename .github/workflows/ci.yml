@@ -185,6 +185,59 @@ jobs:
       - run: python3 -B tools/gen-ucd-tables/test_gen.py
       - run: python3 -B tools/gen-ucd-tables/gen.py --check crates/bingsu-core/src/ucd.rs
 
+  # Instruction counts of core paths (spec section 8 "측정과 게이트", M2).
+  # Callgrind counts do not drift for one binary and one Valgrind, so the
+  # merge base and the PR are measured in this job on this runner and
+  # compared. Linux only (Valgrind). A base without the bench records only.
+  icount:
+    name: Core instruction counts
+    needs: detect
+    if: needs.detect.outputs.rust == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GUNGRAUN_VERSION: 0.20.0
+      CARGO_BUILD_JOBS: 2
+      # Pinned so the base and the PR, and runs on different days, compare
+      # like with like. Bump by hand together with the stable toolchain.
+      ICOUNT_RUST: 1.98.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ env.ICOUNT_RUST }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install Valgrind and the matching gungraun-runner
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q valgrind
+          cargo install -j 2 gungraun-runner --version "$GUNGRAUN_VERSION" --locked
+          { rustc -V; valgrind --version; cargo install --list | grep "^gungraun-runner"; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Baseline at the merge base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          echo "GUNGRAUN_HOME=$RUNNER_TEMP/gungraun" >> "$GITHUB_ENV"
+          export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          git worktree add "$RUNNER_TEMP/base" "$base"
+          if [ -f "$RUNNER_TEMP/base/crates/bingsu-core-bench/Cargo.toml" ]; then
+            (cd "$RUNNER_TEMP/base" && cargo bench -p bingsu-core-bench --bench icount -- --save-baseline=base)
+          else
+            echo "merge base has no icount bench: this run records only" | tee -a "$GITHUB_STEP_SUMMARY"
+            touch "$RUNNER_TEMP/no-base"
+          fi
+      - name: Pull request against the baseline
+        run: |
+          if [ -f "$RUNNER_TEMP/no-base" ]; then
+            cargo bench -p bingsu-core-bench --bench icount
+          else
+            cargo bench -p bingsu-core-bench --bench icount -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)"
+          fi
+
   # Spec section 8 filesystem-call budget scaffold: a synthetic program with
   # known calls runs under strace -f and the counts per role and call kind
   # must match the formulas exactly. Linux only (strace).
