@@ -249,6 +249,10 @@ jobs:
           if grep -qx "$BENCH_PACKAGE" <<<"$base_pkgs"; then
             (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench icount -- --save-baseline=base)
             (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench icount -- --list --format terse) > "$RUNNER_TEMP/base.list"
+            if [ ! -s "$RUNNER_TEMP/base.list" ]; then
+              echo "::warning::base tip lists no benchmarks: every benchmark of the pull request has no baseline"
+              echo "base tip lists no benchmarks: every benchmark of the pull request has no baseline" >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "::warning::base tip has no icount bench: this run records only"
             echo "base tip has no icount bench: this run records only" >> "$GITHUB_STEP_SUMMARY"
@@ -257,12 +261,18 @@ jobs:
       - name: Pull request against the baseline
         run: |
           export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
+          # A bench binary that lists nothing (for example main! wrapped in a
+          # fn) exits 0 without measuring: that must fail, not pass.
+          cargo bench -p "$BENCH_PACKAGE" --bench icount -- --list --format terse > "$RUNNER_TEMP/pr.list"
+          if [ ! -s "$RUNNER_TEMP/pr.list" ]; then
+            echo "::error::the benchmark binary lists no benchmarks"
+            exit 1
+          fi
           if [ -f "$RUNNER_TEMP/no-base" ]; then
             cargo bench -p "$BENCH_PACKAGE" --bench icount
           else
             # A bench with no entry in the base list has nothing to compare
             # with; name it in the summary instead of passing it silently.
-            cargo bench -p "$BENCH_PACKAGE" --bench icount -- --list --format terse > "$RUNNER_TEMP/pr.list"
             new=$(sort "$RUNNER_TEMP/base.list" | comm -13 - <(sort "$RUNNER_TEMP/pr.list"))
             if [ -n "$new" ]; then
               { echo "Benchmarks without a baseline (not compared):"; echo "$new"; } | tee -a "$GITHUB_STEP_SUMMARY"
