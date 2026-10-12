@@ -8,6 +8,7 @@ use bingsu_core::color::palette::{
 };
 use bingsu_core::field::{Field, FieldValue};
 use bingsu_core::sanitize::sanitize;
+use bingsu_core::shorten::{Anchor, Method, PathFacts, ShortenResult, Source, shorten};
 use bingsu_core::width::{WidthProfile, str_width};
 use gungraun::prelude::*;
 use std::hint::black_box;
@@ -99,6 +100,28 @@ fn palette_resolve(input: (Mode, Knobs)) -> ((Mode, Knobs), Result<ResolvedPalet
     (input, p)
 }
 
+fn deep_path(steps: usize) -> PathFacts {
+    let names: Vec<String> = (0..steps).map(|i| format!("folder-{i}")).collect();
+    let raw: Vec<&[u8]> = names.iter().map(|s| s.as_bytes()).collect();
+    PathFacts::new(Anchor::Home, &raw, Some(steps / 2), &[])
+}
+
+// Validation cost of shortener results (M2 row): every built-in result is
+// checked by `validate` inside `shorten`. Input and result are returned so
+// they drop outside the counted code.
+#[library_benchmark]
+#[bench::steps_32(args = [32], setup = deep_path)]
+fn shorten_validate(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usize, u32)>) {
+    let m = [Method::Repo, Method::Abbrev(1), Method::Depth(2)];
+    let r = black_box(shorten(
+        Source::Path(black_box(&facts)),
+        &m,
+        40,
+        WidthProfile::DEFAULT,
+    ));
+    (facts, r)
+}
+
 library_benchmark_group!(
     name = core_m2,
     benchmarks = [
@@ -106,7 +129,8 @@ library_benchmark_group!(
         width_of_text,
         field_format,
         color_notation,
-        palette_resolve
+        palette_resolve,
+        shorten_validate
     ]
 );
 

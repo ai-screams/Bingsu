@@ -18,6 +18,7 @@ pub mod record;
 pub mod root_arg;
 pub mod sanitize;
 pub mod shell_word;
+pub mod shorten;
 pub mod status;
 mod ucd;
 pub mod width;
