@@ -1,7 +1,7 @@
 //! Field types and value states (spec section 4 "필드 타입과 값 상태", M2
 //! types; the versioned schema is M3) and the provisional public field names
 //! of the built-in segments (spec section 4 "세그먼트 선언", confirmed in M3).
-use crate::sanitize::sanitize_into;
+use crate::sanitize::sanitize_into_capped;
 use crate::width::{WidthProfile, ellipsis, grapheme_width, str_width};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,11 +26,11 @@ pub enum FieldType {
 }
 
 /// Text that went through sanitize and the length caps. The fields are
-/// private: `Clean::new` (and so `Field::text`) is the only way to make one,
-/// so no unsanitized text can reach a Text field, a segment value or the
-/// shell (the single entry the security table relies on). `cap` is the
-/// `max_cells` it was cut to, so a value cut to 256 cells does not pass as a
-/// 16-cell field (`Field::fits`).
+/// private: `Clean::new` (and so `Field::text`) is the only entry that makes
+/// non-empty text (`Default` is the empty text), so no unsanitized text can
+/// reach a Text field, a segment value or the shell (the single entry the
+/// security table relies on). `cap` is the `max_cells` it was cut to, so a
+/// value cut to 256 cells does not pass as a 16-cell field (`Field::fits`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Clean {
     text: String,
@@ -43,30 +43,23 @@ impl Clean {
     /// boundary where the kept part plus the ellipsis that fits stays within
     /// both caps. The byte cap matters for a grapheme of many combining
     /// marks: one cell wide, any number of bytes.
+    ///
+    /// Work is bounded by the caps, not by `raw`: sanitize stops once it has
+    /// kept `max_cells * 4 + 16` bytes, and the cut stops at the first
+    /// grapheme past a cap. Input that sanitize removes entirely (1 MiB of
+    /// ESC) keeps nothing, so it is still read to the end.
     pub fn new(raw: &[u8], max_cells: u16, p: WidthProfile) -> Self {
-        let mut text = String::new();
-        sanitize_into(raw, &mut text);
-        let max = u32::from(max_cells);
-        let max_bytes = usize::from(max_cells) * 4;
-        let e = ellipsis(p, max);
-        // The ellipsis fits both caps: it is chosen to fit `max` cells, and
-        // it is at most 3 bytes, while any non-empty one needs `max >= 1`.
-        let (room, room_bytes) = (max - str_width(e, p), max_bytes - e.len());
-        let (mut used, mut keep) = (0u32, 0usize);
-        // One pass that stops at the first grapheme over either cap, so the
-        // cut reads a 1 MiB value only up to one grapheme past the byte cap.
-        for (i, g) in text.grapheme_indices(true) {
-            let end = i + g.len();
-            used += u32::from(grapheme_width(g, p, |_| None).0);
-            if used > max || end > max_bytes {
-                text.truncate(keep);
-                text.push_str(e);
-                break;
-            }
-            if used <= room && end <= room_bytes {
-                keep = end;
-            }
-        }
+        // Stopping early gives the same result as sanitizing everything:
+        // whether a grapheme boundary falls at byte i depends only on the
+        // text before i and the code point at i (UAX #29 looks back, never
+        // further ahead), so every boundary up to `max_cells * 4` is the same
+        // in the prefix as in the full text, and the grapheme that crosses
+        // that byte, read whole or not, ends past it and is cut. The 16 bytes
+        // are a margin over the one code point the rule needs.
+        let limit = usize::from(max_cells) * 4 + 16;
+        let mut text = String::with_capacity(raw.len().min(limit + 4));
+        sanitize_into_capped(raw, &mut text, limit);
+        cut(&mut text, max_cells, p);
         Self {
             text,
             cap: max_cells,
@@ -75,6 +68,31 @@ impl Clean {
 
     pub fn as_str(&self) -> &str {
         &self.text
+    }
+}
+
+/// Cuts sanitized `text` as `Clean::new` describes, in one pass that stops at
+/// the first grapheme over either cap.
+fn cut(text: &mut String, max_cells: u16, p: WidthProfile) {
+    let max = u32::from(max_cells);
+    let max_bytes = usize::from(max_cells) * 4;
+    let e = ellipsis(p, max);
+    // The ellipsis fits both caps: it is chosen to fit `max` cells, and it
+    // is at most 3 bytes, while any non-empty one needs `max >= 1` (the
+    // ambiguous width is 1 or 2, `WidthProfile::new`).
+    let (room, room_bytes) = (max - str_width(e, p), max_bytes - e.len());
+    let (mut used, mut keep) = (0u32, 0usize);
+    for (i, g) in text.grapheme_indices(true) {
+        let end = i + g.len();
+        used += u32::from(grapheme_width(g, p, |_| None).0);
+        if used > max || end > max_bytes {
+            text.truncate(keep);
+            text.push_str(e);
+            return;
+        }
+        if used <= room && end <= room_bytes {
+            keep = end;
+        }
     }
 }
 
@@ -561,6 +579,46 @@ mod tests {
             Field::text("가나".as_bytes(), 4, p2).value,
             clean("가나", 4)
         );
+    }
+
+    // 이것을 실패시키는 것: 정제를 멈추는 자리가 너무 일러 앞부분만 정제한 결과가 전체를 정제하고 자른 결과와 달라지는 것
+    // (멈춘 뒤 남은 글자가 상한 근처 grapheme 경계를 바꾸는 경우).
+    #[test]
+    fn capped_sanitize_cuts_like_the_full_text() {
+        let p2 = WidthProfile::new(2, 2).unwrap();
+        let units: [&[u8]; 10] = [
+            b"a",
+            "\u{AC00}".as_bytes(),
+            "e\u{301}".as_bytes(),
+            "\u{1F1F0}\u{1F1F7}".as_bytes(),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".as_bytes(),
+            "\u{1112}\u{1161}\u{11AB}".as_bytes(),
+            "\u{2764}\u{FE0F}".as_bytes(),
+            b"a\x1b[31m",
+            b"\xff\xe2\x82",
+            "\u{915}\u{94D}\u{937}".as_bytes(),
+        ];
+        let mut inputs: Vec<Vec<u8>> = Vec::new();
+        for k in 0..4 {
+            for u in units {
+                inputs.push([&b"aaa"[..k], &u.repeat(60)].concat());
+            }
+            inputs.push([&b"aaa"[..k], &units.concat().repeat(8)].concat());
+            // Regional indicators after an odd number of them: pairing looks back.
+            inputs.push([&b"aaa"[..k], &"\u{1F1F0}".repeat(61).into_bytes()].concat());
+        }
+        for p in [WidthProfile::DEFAULT, p2] {
+            for max in (0..=12u16).chain([16, 64]) {
+                for raw in &inputs {
+                    let mut full = crate::sanitize::sanitize(raw);
+                    cut(&mut full, max, p);
+                    let FieldValue::Text(s) = Field::text(raw, max, p).value else {
+                        panic!()
+                    };
+                    assert_eq!(s.as_str(), full, "{max} {raw:02x?}");
+                }
+            }
+        }
     }
 
     // 이것을 실패시키는 것: 선언된 칸 상한을 보지 않고 Text면 받는 것(256칸으로 자른 값이 16칸 필드에 들어감).

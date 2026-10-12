@@ -53,6 +53,30 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
     }
 }
 
+/// `sanitize_into` that stops reading `input` once it has appended more than
+/// `limit` bytes to `out`. Returns true when it stopped that way, so `out`
+/// holds only a prefix of the full result (longer than `limit`); false when
+/// it appended the whole result. Removed code points add nothing, so input
+/// that is all removed (1 MiB of ESC) is still read to the end.
+pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> bool {
+    let start = out.len();
+    for chunk in input.utf8_chunks() {
+        for c in chunk.valid().chars().filter(|&c| !is_removed(c)) {
+            out.push(c);
+            if out.len() - start > limit {
+                return true;
+            }
+        }
+        if !chunk.invalid().is_empty() {
+            out.push('\u{FFFD}');
+            if out.len() - start > limit {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns `input` as a new `String` without removed code points (see
 /// [`is_removed`]). `input` is bytes that may not be valid UTF-8; it is
 /// decoded as UTF-8 only. Invalid UTF-8 becomes U+FFFD, one per maximal
@@ -113,6 +137,50 @@ mod tests {
         assert_eq!(out, "preab\u{FFFD}c");
         sanitize_into("\u{202E}x".as_bytes(), &mut out);
         assert_eq!(out, "preab\u{FFFD}cx");
+    }
+
+    // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제), 상한을 넘기 전에 멈추는 것,
+    // 멈춘 결과가 전체 결과의 앞부분이 아닌 것, 멈췄는지를 잘못 알리는 것.
+    #[test]
+    fn capped_sanitize_stops_past_the_limit() {
+        let mut out = String::from("pre");
+        assert!(sanitize_into_capped(
+            &alloc::vec![b'a'; 1 << 20],
+            &mut out,
+            1040
+        ));
+        // ASCII keeps one byte per input byte: it stopped after 1,041 of 1 MiB.
+        assert_eq!(out.len(), 3 + 1041);
+        let mut out = String::new();
+        assert!(!sanitize_into_capped(
+            &alloc::vec![0x1b; 1 << 20],
+            &mut out,
+            16
+        ));
+        assert_eq!(out, "");
+        let inputs: [&[u8]; 3] = [
+            b"ab\x1bc\xffd",
+            "\u{AC00}x\u{202E}y\u{1F600}".as_bytes(),
+            b"",
+        ];
+        for input in inputs {
+            let full = sanitize(input);
+            for limit in 0..=full.len() + 1 {
+                let mut out = String::new();
+                let stopped = sanitize_into_capped(input, &mut out, limit);
+                assert!(full.starts_with(&out), "{input:?} {limit}");
+                if stopped {
+                    let last = out.chars().last().unwrap().len_utf8();
+                    assert!(
+                        out.len() > limit && out.len() - last <= limit,
+                        "{input:?} {limit}"
+                    );
+                } else {
+                    assert_eq!(out, full, "{input:?} {limit}");
+                    assert!(out.len() <= limit, "{input:?} {limit}");
+                }
+            }
+        }
     }
 
     // 이것을 실패시키는 것: overlong·서로게이트·범위 밖·맨 8비트 C1 바이트가 제어 문자나
