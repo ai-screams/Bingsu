@@ -53,6 +53,62 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
     }
 }
 
+/// Bytes `sanitize_into_capped` decodes at a time, so it reads at most this
+/// much past the point where it stops. Smaller windows cost more per byte on
+/// input it keeps reading (1 MiB of ESC: 256 bytes took about 17% longer
+/// than one pass, 4,096 bytes about the same).
+const WINDOW: usize = 4096;
+
+/// `sanitize_into` that stops reading `input` once it has appended more than
+/// `limit` bytes to `out`. Returns how many bytes of `input` it read (up to
+/// the end of the window where it stopped) when it stopped that way, so
+/// `out` holds only a prefix of the full result (longer than `limit`); None
+/// when it appended the whole result. Removed code points add nothing, so it
+/// reads to the end any input whose result stays within `limit`: all of it
+/// removed (1 MiB of ESC), or `limit` bytes of text followed by a long run
+/// of removed code points.
+pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> Option<usize> {
+    capped_in_windows(input, out, limit, WINDOW)
+}
+
+/// `sanitize_into_capped` with the window as an argument (at least 4), so
+/// tests can put window edges anywhere.
+fn capped_in_windows(input: &[u8], out: &mut String, limit: usize, window: usize) -> Option<usize> {
+    let start = out.len();
+    let mut rest = input;
+    while !rest.is_empty() {
+        // Decoding one window at a time keeps `utf8_chunks` from checking
+        // the whole input before the first chunk. The cut goes before a
+        // byte that is not a continuation byte (0x80-0xBF), or after three
+        // continuation bytes in a row (no lead byte is close enough): either
+        // way no sequence, valid or not, crosses it, so each window decodes
+        // as it would inside the whole input.
+        let mut cut = rest.len().min(window);
+        if cut < rest.len() {
+            if let Some(at) = (cut - 3..=cut).rev().find(|&i| rest[i] & 0xC0 != 0x80) {
+                cut = at;
+            }
+        }
+        let (head, tail) = rest.split_at(cut);
+        rest = tail;
+        for chunk in head.utf8_chunks() {
+            for c in chunk.valid().chars().filter(|&c| !is_removed(c)) {
+                out.push(c);
+                if out.len() - start > limit {
+                    return Some(input.len() - rest.len());
+                }
+            }
+            if !chunk.invalid().is_empty() {
+                out.push('\u{FFFD}');
+                if out.len() - start > limit {
+                    return Some(input.len() - rest.len());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Returns `input` as a new `String` without removed code points (see
 /// [`is_removed`]). `input` is bytes that may not be valid UTF-8; it is
 /// decoded as UTF-8 only. Invalid UTF-8 becomes U+FFFD, one per maximal
@@ -113,6 +169,96 @@ mod tests {
         assert_eq!(out, "preab\u{FFFD}c");
         sanitize_into("\u{202E}x".as_bytes(), &mut out);
         assert_eq!(out, "preab\u{FFFD}cx");
+    }
+
+    // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제하거나, 창을 키워 끝까지 UTF-8 검사), 상한을 넘기 전에 멈추는 것,
+    // 멈춘 결과가 전체 결과의 앞부분이 아닌 것, 멈췄는지를 잘못 알리는 것.
+    #[test]
+    fn capped_sanitize_stops_past_the_limit() {
+        let mut out = String::from("pre");
+        let read = sanitize_into_capped(&alloc::vec![b'a'; 1 << 20], &mut out, 1040);
+        // ASCII keeps one byte per input byte: it kept 1,041 bytes and read
+        // only to the end of that window.
+        assert_eq!(out.len(), 3 + 1041);
+        // A bound that does not come from WINDOW: one 4 KiB window, not 1 MiB.
+        assert_eq!(read, Some(4096));
+        let mut out = String::new();
+        let read = sanitize_into_capped(&alloc::vec![0x1b; 1 << 20], &mut out, 16);
+        assert_eq!(read, None);
+        assert_eq!(out, "");
+        let inputs: [&[u8]; 3] = [
+            b"ab\x1bc\xffd",
+            "\u{AC00}x\u{202E}y\u{1F600}".as_bytes(),
+            b"",
+        ];
+        for input in inputs {
+            let full = sanitize(input);
+            for limit in 0..=full.len() + 1 {
+                let mut out = String::new();
+                let stopped = sanitize_into_capped(input, &mut out, limit);
+                assert!(full.starts_with(&out), "{input:?} {limit}");
+                if stopped.is_some() {
+                    let last = out.chars().last().unwrap().len_utf8();
+                    assert!(
+                        out.len() > limit && out.len() - last <= limit,
+                        "{input:?} {limit}"
+                    );
+                } else {
+                    assert_eq!(out, full, "{input:?} {limit}");
+                    assert!(out.len() <= limit, "{input:?} {limit}");
+                }
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: 창(WINDOW) 경계에서 UTF-8 sequence를 가르는 것(경계에 걸친 글자가 U+FFFD 둘이 되거나,
+    // 잘못된 부분열의 U+FFFD 개수가 달라지는 것), 경계를 고르는 조건을 빼는 것.
+    #[test]
+    fn capped_sanitize_decodes_across_windows_like_the_whole() {
+        let zoo: [&[u8]; 12] = [
+            b"\xf0\x9f\x98\x80",
+            b"\xe2\x82\xac",
+            b"\xc3\xa9",
+            b"\xf0\x9f\x98",
+            b"\xe2\x82",
+            b"\x80\x80\x80\x80\x80",
+            b"\xed\xa0\x80",
+            b"\xf4\x90\x80\x80",
+            b"\xff",
+            b"\xc0\x80",
+            b"\xe0\x80\xaf",
+            b"\x1b[0m",
+        ];
+        let check = |input: &[u8], window: usize| {
+            let mut out = String::new();
+            assert_eq!(capped_in_windows(input, &mut out, usize::MAX, window), None);
+            assert_eq!(out, sanitize(input), "{window} {input:02x?}");
+        };
+        for window in [4, 5, 7, 8, 64, WINDOW] {
+            for off in window.saturating_sub(6)..=window + 1 {
+                let pre = alloc::vec![b'a'; off];
+                for z in zoo {
+                    check(&[&pre[..], z, b"z"].concat(), window);
+                    check(&[&pre[..], z].concat(), window);
+                }
+                check(&[&pre[..], &zoo.concat(), &zoo.concat()].concat(), window);
+            }
+        }
+        // Every two bytes and lead-led three bytes across each edge of a
+        // 4-byte window.
+        for off in 1..=3 {
+            let pre = &b"aaa"[..off];
+            for v in 0..=0xFFFFu16 {
+                check(&[pre, &v.to_be_bytes(), b"\xbf\xbf"].concat(), 4);
+            }
+            for lead in 0xC0..=0xFFu8 {
+                for second in 0x80..=0xBFu8 {
+                    for third in [0x80, 0xBF, b'a', 0xC2] {
+                        check(&[pre, &[lead, second, third], b"\x80"].concat(), 4);
+                    }
+                }
+            }
+        }
     }
 
     // 이것을 실패시키는 것: overlong·서로게이트·범위 밖·맨 8비트 C1 바이트가 제어 문자나
