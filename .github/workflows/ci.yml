@@ -187,8 +187,10 @@ jobs:
 
   # Instruction counts of core paths (spec section 8 "측정과 게이트", M2).
   # Callgrind counts do not drift for one binary and one Valgrind, so the
-  # merge base and the PR are measured in this job on this runner and
-  # compared. Linux only (Valgrind). A base without the bench records only.
+  # base tip and the PR are measured in this job on this runner and
+  # compared. The checkout is the merge commit of the base tip and the PR
+  # head, so HEAD^1 is the base tip and HEAD is the code that main becomes.
+  # Linux only (Valgrind). A base without the bench package records only.
   icount:
     name: Core instruction counts
     needs: detect
@@ -201,9 +203,9 @@ jobs:
       # Pinned so the base and the PR, and runs on different days, compare
       # like with like. Bump by hand together with the stable toolchain.
       ICOUNT_RUST: 1.98.1
-      # One path for the base check and the PR check: a typo must fail the
-      # job, not turn the gate into record-only.
-      BENCH_MANIFEST: crates/bingsu-core-bench/Cargo.toml
+      # Decided by package, not by path: a moved manifest must not turn the
+      # gate into record-only.
+      BENCH_PACKAGE: bingsu-core-bench
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,37 +215,59 @@ jobs:
         with:
           toolchain: ${{ env.ICOUNT_RUST }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check the bench package and the runner version
+        run: |
+          pkgs=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          if ! grep -qx "$BENCH_PACKAGE" <<<"$pkgs"; then
+            echo "::error::package $BENCH_PACKAGE is missing in the pull request"
+            exit 1
+          fi
+          # The runner must match the library in Cargo.lock (a dependency
+          # bump of gungraun alone would leave them apart).
+          locked=$(awk '$0 == "name = \"gungraun\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          if [ "$locked" != "$GUNGRAUN_VERSION" ]; then
+            echo "::error::Cargo.lock has gungraun '$locked' but GUNGRAUN_VERSION is $GUNGRAUN_VERSION"
+            exit 1
+          fi
       - name: Install Valgrind and the matching gungraun-runner
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q valgrind
           cargo install -j 2 gungraun-runner --version "$GUNGRAUN_VERSION" --locked
           { rustc -V; valgrind --version; cargo install --list | grep "^gungraun-runner"; } | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Baseline at the merge base
-        env:
-          BASE_REF: ${{ github.base_ref }}
+      - name: Baseline at the base tip
         run: |
           echo "GUNGRAUN_HOME=$RUNNER_TEMP/gungraun" >> "$GITHUB_ENV"
           export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
-          if [ ! -f "$BENCH_MANIFEST" ]; then
-            echo "::error::$BENCH_MANIFEST is missing in the pull request"
+          # base tip + PR head: three words (the commit and two parents)
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error::HEAD is not a merge commit of the base tip and the PR head"
             exit 1
           fi
-          base=$(git merge-base "origin/$BASE_REF" HEAD)
-          git worktree add "$RUNNER_TEMP/base" "$base"
-          if [ -f "$RUNNER_TEMP/base/$BENCH_MANIFEST" ]; then
-            (cd "$RUNNER_TEMP/base" && cargo bench -p bingsu-core-bench --bench icount -- --save-baseline=base)
+          git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
+          base_pkgs=$(cd "$RUNNER_TEMP/base" && cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          if grep -qx "$BENCH_PACKAGE" <<<"$base_pkgs"; then
+            (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench icount -- --save-baseline=base)
+            (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench icount -- --list --format terse) > "$RUNNER_TEMP/base.list"
           else
-            echo "::warning::merge base has no icount bench: this run records only"
-            echo "merge base has no icount bench: this run records only" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::base tip has no icount bench: this run records only"
+            echo "base tip has no icount bench: this run records only" >> "$GITHUB_STEP_SUMMARY"
             touch "$RUNNER_TEMP/no-base"
           fi
       - name: Pull request against the baseline
         run: |
+          export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
           if [ -f "$RUNNER_TEMP/no-base" ]; then
-            cargo bench -p bingsu-core-bench --bench icount
+            cargo bench -p "$BENCH_PACKAGE" --bench icount
           else
-            cargo bench -p bingsu-core-bench --bench icount -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)"
+            # A bench with no entry in the base list has nothing to compare
+            # with; name it in the summary instead of passing it silently.
+            cargo bench -p "$BENCH_PACKAGE" --bench icount -- --list --format terse > "$RUNNER_TEMP/pr.list"
+            new=$(sort "$RUNNER_TEMP/base.list" | comm -13 - <(sort "$RUNNER_TEMP/pr.list"))
+            if [ -n "$new" ]; then
+              { echo "Benchmarks without a baseline (not compared):"; echo "$new"; } | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            cargo bench -p "$BENCH_PACKAGE" --bench icount -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)"
           fi
 
   # Spec section 8 filesystem-call budget scaffold: a synthetic program with

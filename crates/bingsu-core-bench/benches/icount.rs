@@ -18,16 +18,22 @@ fn mixed_text(len: usize) -> String {
     sanitize(&mixed(len))
 }
 
+// Only the code inside the benchmark function is counted (the runner
+// collects within `__gungraun_wrapper_mod::*`). An owned input would be
+// dropped, and freed, at the end of that function, so each bench returns
+// its input: the caller drops the returned value outside the counted code.
 #[library_benchmark]
 #[bench::kib(args = [1024], setup = mixed)]
-fn sanitize_bytes(input: Vec<u8>) -> String {
-    black_box(sanitize(black_box(&input)))
+fn sanitize_bytes(input: Vec<u8>) -> (Vec<u8>, String) {
+    let out = black_box(sanitize(black_box(&input)));
+    (input, out)
 }
 
 #[library_benchmark]
 #[bench::kib(args = [1024], setup = mixed_text)]
-fn width_of_text(input: String) -> u32 {
-    black_box(str_width(black_box(&input), WidthProfile::DEFAULT))
+fn width_of_text(input: String) -> (String, u32) {
+    let w = black_box(str_width(black_box(&input), WidthProfile::DEFAULT));
+    (input, w)
 }
 
 fn fields(_: u32) -> Vec<Field> {
@@ -44,12 +50,12 @@ fn fields(_: u32) -> Vec<Field> {
 
 #[library_benchmark]
 #[bench::four(args = [4], setup = fields)]
-fn field_format(input: Vec<Field>) -> String {
+fn field_format(input: Vec<Field>) -> (Vec<Field>, String) {
     let mut s = String::new();
     for f in black_box(&input) {
         f.write_to(&mut s);
     }
-    black_box(s)
+    (input, black_box(s))
 }
 
 library_benchmark_group!(
@@ -57,6 +63,6 @@ library_benchmark_group!(
     benchmarks = [sanitize_bytes, width_of_text, field_format]
 );
 
-fn main() {
-    main!(library_benchmark_groups = core_m2);
-}
+// main! defines `fn main` itself: wrapped in a fn of ours the bench would
+// build, exit 0 and measure nothing.
+main!(library_benchmark_groups = core_m2);
