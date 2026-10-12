@@ -44,10 +44,12 @@ impl Clean {
     /// both caps. The byte cap matters for a grapheme of many combining
     /// marks: one cell wide, any number of bytes.
     ///
-    /// Work is bounded by the caps, not by `raw`: sanitize stops once it has
-    /// kept `max_cells * 4 + 16` bytes, and the cut stops at the first
-    /// grapheme past a cap. Input that sanitize removes entirely (1 MiB of
-    /// ESC) keeps nothing, so it is still read to the end.
+    /// Sanitize stops only when what it keeps passes `max_cells * 4 + 16`
+    /// bytes, so the work is bounded by the caps only for input that keeps
+    /// that much. Input that keeps less is read to the end: all of it
+    /// removed (1 MiB of ESC), or a short text followed by a long run of
+    /// removed code points. The cut then stops at the first grapheme past a
+    /// cap.
     pub fn new(raw: &[u8], max_cells: u16, p: WidthProfile) -> Self {
         // Stopping early gives the same result as sanitizing everything:
         // whether a grapheme boundary falls at byte i depends only on the

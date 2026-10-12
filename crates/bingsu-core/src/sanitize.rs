@@ -63,8 +63,10 @@ const WINDOW: usize = 4096;
 /// `limit` bytes to `out`. Returns how many bytes of `input` it read (up to
 /// the end of the window where it stopped) when it stopped that way, so
 /// `out` holds only a prefix of the full result (longer than `limit`); None
-/// when it appended the whole result. Removed code points add nothing, so input
-/// that is all removed (1 MiB of ESC) is still read to the end.
+/// when it appended the whole result. Removed code points add nothing, so it
+/// reads to the end any input whose result stays within `limit`: all of it
+/// removed (1 MiB of ESC), or `limit` bytes of text followed by a long run
+/// of removed code points.
 pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> Option<usize> {
     capped_in_windows(input, out, limit, WINDOW)
 }
@@ -169,16 +171,17 @@ mod tests {
         assert_eq!(out, "preab\u{FFFD}cx");
     }
 
-    // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제하거나 끝까지 UTF-8 검사), 상한을 넘기 전에 멈추는 것,
+    // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제하거나, 창을 키워 끝까지 UTF-8 검사), 상한을 넘기 전에 멈추는 것,
     // 멈춘 결과가 전체 결과의 앞부분이 아닌 것, 멈췄는지를 잘못 알리는 것.
     #[test]
     fn capped_sanitize_stops_past_the_limit() {
         let mut out = String::from("pre");
         let read = sanitize_into_capped(&alloc::vec![b'a'; 1 << 20], &mut out, 1040);
         // ASCII keeps one byte per input byte: it kept 1,041 bytes and read
-        // only to the end of that window, not the whole 1 MiB.
+        // only to the end of that window.
         assert_eq!(out.len(), 3 + 1041);
-        assert_eq!(read, Some(1041usize.next_multiple_of(WINDOW)));
+        // A bound that does not come from WINDOW: one 4 KiB window, not 1 MiB.
+        assert_eq!(read, Some(4096));
         let mut out = String::new();
         let read = sanitize_into_capped(&alloc::vec![0x1b; 1 << 20], &mut out, 16);
         assert_eq!(read, None);
