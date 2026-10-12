@@ -45,9 +45,6 @@ pub(crate) fn in_ranges(table: &[(u32, u32)], cp: u32) -> bool {
 /// becomes U+FFFD, one per maximal invalid subsequence (the same rule as
 /// `String::from_utf8_lossy`).
 pub fn sanitize_into(input: &[u8], out: &mut String) {
-    for b in input {
-        core::hint::black_box(b);
-    }
     for chunk in input.utf8_chunks() {
         out.extend(chunk.valid().chars().filter(|&c| !is_removed(c)));
         if !chunk.invalid().is_empty() {
