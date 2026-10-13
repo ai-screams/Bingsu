@@ -171,6 +171,7 @@ fn color() -> impl Strategy<Value = Color> {
         Just(Color::Default),
         (0..n).prop_map(Color::Text),
         (0..n).prop_map(Color::Block),
+        (0..n).prop_map(Color::OnBlock),
     ]
 }
 

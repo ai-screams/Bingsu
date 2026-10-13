@@ -54,7 +54,11 @@ use AnsiSlot::{Default as Df, Slot as S};
 /// brief) plus the ones the built-in segments need; provisional until the
 /// M3 schema and the M7 preset review.
 pub const TOKENS: &[TokenDef] = &[
-    tk("block.text", "neutral.crust", "neutral.base", S(0), S(15)),
+    // Light 16 colors: the terminal's default foreground. No slot of flavor
+    // A light reaches 4.5:1 on slots 1–6 (the default text color comes
+    // closest, about 3.2–3.6:1), and in 16-color mode the colors come from
+    // the terminal's own scheme, so the contrast depends on it.
+    tk("block.text", "neutral.crust", "neutral.ink", S(0), Df),
     tk("duration", "accent.yellow", "accent.yellow", S(3), S(3)),
     tk("fg", "neutral.text", "neutral.text", Df, Df),
     tk("git.ahead", "accent.teal", "accent.teal", S(6), S(6)),
@@ -115,6 +119,13 @@ pub struct ResolvedToken {
     pub fg256: u8,
     pub bg256: u8,
     pub ansi: AnsiSlot,
+    /// Text color on this token's block, picked once here: `block.text`,
+    /// or in light mode, when `block.text` is not set by the user, the
+    /// terminal background color if it contrasts more with `bg`.
+    pub on_block: Srgb8,
+    pub on_block256: u8,
+    /// Always `block.text`'s slot: 16-color mode does not pick.
+    pub on_block_ansi: AnsiSlot,
     /// Chroma was lowered to fit sRGB.
     pub clipped: bool,
 }
@@ -126,7 +137,7 @@ pub enum PaletteWarning {
         token: usize,
         milli: u32,
     },
-    /// `block.text` on a token's block background below 4.5:1.
+    /// A token's block text (`on_block`) on its block background below 4.5:1.
     BlockContrast {
         token: usize,
         milli: u32,
@@ -184,6 +195,13 @@ fn flavor_a(name: &str, mode: Mode, k: Knobs, read: bool) -> Option<Oklch> {
     let nh = k.hue.unwrap_or(280.0);
     let (group, item) = name.split_once('.')?;
     match group {
+        // Dark text on light blocks (2026-10-13): light `block.text`. The
+        // same in both modes, so it can be overridden in either.
+        "neutral" if item == "ink" => Some(Oklch {
+            l: 0.15,
+            c: 0.03,
+            h: nh,
+        }),
         "neutral" => {
             let i = NEUTRALS.iter().position(|n| *n == item)?;
             let (l, c) = match mode {
@@ -202,7 +220,15 @@ fn flavor_a(name: &str, mode: Mode, k: Knobs, read: bool) -> Option<Oklch> {
             let h = ACCENTS.iter().find(|a| a.0 == item)?.1;
             let (l, c) = match (mode, read) {
                 (Mode::Dark, _) => (k.accent_l.unwrap_or(0.76), k.accent_c.unwrap_or(0.12)),
-                (Mode::Light, false) => (k.accent_l.unwrap_or(0.62), k.accent_c.unwrap_or(0.12)),
+                // Teal's display tier is C 0.1092, the most sRGB holds at L
+                // 0.62 H 185 (shown #009b8f either way), so the default
+                // palette reports no clipping; the exception to ADR-0004
+                // item 3 is recorded there (2026-10-13).
+                (Mode::Light, false) => (
+                    k.accent_l.unwrap_or(0.62),
+                    k.accent_c
+                        .unwrap_or(if item == "teal" { 0.1092 } else { 0.12 }),
+                ),
                 (Mode::Light, true) => (0.52, 0.09),
             };
             Some(Oklch { l, c, h })
@@ -367,22 +393,43 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
             bg256: nearest_256(bg),
             ansi,
             clipped: c1 || c2,
+            on_block: fg,
+            on_block256: 0,
+            on_block_ansi: ansi,
         };
         if r.clipped {
             warnings.push(PaletteWarning::Clipped { token: i });
         }
         tokens.push(r);
     }
-    let block_text = tokens[token_index("block.text").unwrap_or(0)].fg;
-    for (i, t) in tokens.iter().enumerate() {
+    let bt = tokens[token_index("block.text").unwrap_or(0)];
+    // Light blocks (display tier, L 0.62) take the dark ink of `block.text`
+    // and a dark block (such as `fg`) the background color, whichever
+    // contrasts more. A `block.text` the user set is used as is, and dark
+    // keeps its one block text.
+    let user_set = input.roles.iter().any(|r| r.0 == "block.text")
+        || input.overrides.iter().any(|o| o.0 == "block.text");
+    let light =
+        (input.mode == Mode::Light && !user_set).then(|| (background, nearest_256(background)));
+    for (i, t) in tokens.iter_mut().enumerate() {
+        (t.on_block, t.on_block256, t.on_block_ansi) = (bt.fg, bt.fg256, bt.ansi);
         if TOKENS[i].name == "block.text" {
             continue;
         }
-        let m = contrast_milli(t.fg, background);
-        if m < 4_500 {
-            warnings.push(PaletteWarning::TextContrast { token: i, milli: m });
+        let mut m = contrast_milli(bt.fg, t.bg);
+        if let Some((c, c256)) = light {
+            let lm = contrast_milli(c, t.bg);
+            if lm > m {
+                (m, t.on_block, t.on_block256) = (lm, c, c256);
+            }
         }
-        let m = contrast_milli(block_text, t.bg);
+        let tm = contrast_milli(t.fg, background);
+        if tm < 4_500 {
+            warnings.push(PaletteWarning::TextContrast {
+                token: i,
+                milli: tm,
+            });
+        }
         if m < 4_500 {
             warnings.push(PaletteWarning::BlockContrast { token: i, milli: m });
         }
@@ -601,7 +648,7 @@ mod tests {
         pin(
             Mode::Light,
             &[
-                ("block.text", 0xf2f3fc, 0xf2f3fc, S(15)),
+                ("block.text", 0x090917, 0x090917, Df),
                 ("duration", 0x7c6722, 0xa08318, S(3)),
                 ("fg", 0x323445, 0x323445, Df),
                 ("git.ahead", 0x087970, 0x009b8f, S(6)),
@@ -681,13 +728,14 @@ mod tests {
                 h: 255_000_000
             }
         );
-        // Light teal display tier is outside sRGB: the shown chroma is lower.
+        // Light teal display tier is C 0.1092, inside sRGB (C 0.12 was cut to
+        // 0.109263, the same #009b8f).
         let p = resolve_palette(&input(Mode::Light)).unwrap();
         assert_eq!(
             p.get("jobs").unwrap().bg_oklch,
             OklchQ {
                 l: 620_000,
-                c: 109_263,
+                c: 109_200,
                 h: 185_000_000
             }
         );
@@ -752,6 +800,150 @@ mod tests {
         })
         .unwrap();
         assert!(marks(&p).is_empty());
+    }
+
+    fn on_block(p: &ResolvedPalette, name: &str) -> Srgb8 {
+        p.get(name).unwrap().on_block
+    }
+
+    // 이것을 실패시키는 것: light 블록 글자를 자동으로 고르지 않는 것(BlockContrast 16건), 대비가 작은 쪽을
+    // 고르는 것(`fg` 블록에 잉크), teal 표시 단계를 C 0.12로 되돌리는 것(Clipped 3건).
+    // 남는 경고는 muted 글자 하나다(2026-10-08 결정, 3890).
+    #[test]
+    fn light_default_warns_only_muted_text() {
+        let p = resolve_palette(&input(Mode::Light)).unwrap();
+        let muted = token_index("muted").unwrap();
+        assert_eq!(
+            p.warnings,
+            [PaletteWarning::TextContrast {
+                token: muted,
+                milli: 3_890
+            }]
+        );
+        assert_eq!(on_block(&p, "path"), hex(0x090917));
+        assert_eq!(on_block(&p, "fg"), p.background);
+        for (t, r) in TOKENS.iter().zip(&p.tokens) {
+            if t.name != "block.text" {
+                assert!(contrast_milli(r.on_block, r.bg) >= 4_500, "{}", t.name);
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: 사용자가 바꾼 블록 색에 처음 고른 잉크를 그대로 두는 것(대비 비교를 빼는 것).
+    // 어두운 #202060 블록은 밝은 글자, 밝은 #c0d0ff 블록은 잉크를 받는다.
+    #[test]
+    fn light_pick_follows_a_changed_block() {
+        let ov = [
+            ("path", parse_color("#202060").unwrap()),
+            ("host", parse_color("#c0d0ff").unwrap()),
+        ];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ov,
+            ..input(Mode::Light)
+        })
+        .unwrap();
+        assert_eq!(on_block(&p, "path"), p.background);
+        assert_eq!(on_block(&p, "host"), hex(0x090917));
+        for name in ["path", "host"] {
+            let r = p.get(name).unwrap();
+            assert!(contrast_milli(r.on_block, r.bg) >= 4_500, "{name}");
+        }
+        assert!(
+            !p.warnings
+                .iter()
+                .any(|w| matches!(w, PaletteWarning::BlockContrast { .. }))
+        );
+    }
+
+    // 이것을 실패시키는 것: 사용자가 정한 `block.text`(token 덮어쓰기 또는 역할 재배정)를 자동 선택으로
+    // 덮는 것. 고른 색은 path 블록에서 자동 선택이라면 지는 중간 회색이고, 낮은 대비 경고가 그대로 나간다.
+    #[test]
+    fn light_explicit_block_text_is_kept() {
+        let ov = [("block.text", parse_color("#606060").unwrap())];
+        let roles = [("block.text", "neutral.subtext")];
+        let path = token_index("path").unwrap();
+        for (ov, roles) in [(&ov[..], &[][..]), (&[][..], &roles[..])] {
+            let p = resolve_palette(&PaletteInput {
+                overrides: ov,
+                roles,
+                ..input(Mode::Light)
+            })
+            .unwrap();
+            let set = p.get("block.text").unwrap().fg;
+            assert_ne!(set, p.background);
+            for name in ["path", "fg", "host"] {
+                assert_eq!(on_block(&p, name), set, "{name}");
+            }
+            assert!(p.warnings.iter().any(
+                |w| matches!(w, PaletteWarning::BlockContrast { token, .. } if *token == path)
+            ));
+        }
+    }
+
+    // 이것을 실패시키는 것: dark에도 자동 선택을 거는 것. dark에서 다른 후보는 어두운 터미널 바탕이라,
+    // 거의 검은 #000000 블록에서만 갈린다. dark 기본 출력이 바뀌지 않는다는 것은 flavor_a_dark_table과
+    // sgr 시험이 바이트로 고정한다.
+    #[test]
+    fn dark_keeps_one_block_text() {
+        let ov = [("path", parse_color("#000000").unwrap())];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ov,
+            ..input(Mode::Dark)
+        })
+        .unwrap();
+        let bt = p.get("block.text").unwrap();
+        assert!(
+            contrast_milli(p.background, hex(0)) > contrast_milli(bt.fg, hex(0)),
+            "the mutant would pick the background here"
+        );
+        for r in &p.tokens {
+            assert_eq!(
+                (r.on_block, r.on_block256, r.on_block_ansi),
+                (bt.fg, bt.fg256, bt.ansi)
+            );
+        }
+        let d = resolve_palette(&input(Mode::Dark)).unwrap();
+        let muted = token_index("muted").unwrap();
+        assert_eq!(
+            d.warnings,
+            [
+                PaletteWarning::TextContrast {
+                    token: muted,
+                    milli: 3_560
+                },
+                PaletteWarning::BlockContrast {
+                    token: muted,
+                    milli: 3_958
+                }
+            ]
+        );
+    }
+
+    // 이것을 실패시키는 것: 256색 블록 글자를 고른 색이 아닌 `block.text`의 근사로 두는 것, 16색 슬롯을
+    // 고른 색에서 가져오는 것(light `fg` 블록에 슬롯 15 → 밝은 바탕에 밝은 글자).
+    #[test]
+    fn light_pick_256_and_16() {
+        let p = resolve_palette(&input(Mode::Light)).unwrap();
+        let fg = p.get("fg").unwrap();
+        assert_eq!(fg.on_block256, nearest_256(p.background));
+        assert_ne!(fg.on_block256, p.get("block.text").unwrap().fg256);
+        assert_eq!(fg.on_block_ansi, Df);
+        assert_eq!(p.get("path").unwrap().on_block_ansi, Df);
+    }
+
+    // 이것을 실패시키는 것: teal의 C 0.1092가 사용자 knob(accent_c)을 이기는 것. knob 0.12면 다시 잘린다.
+    #[test]
+    fn teal_exception_yields_to_the_knob() {
+        let p = resolve_palette(&PaletteInput {
+            knobs: Knobs {
+                accent_c: Some(0.12),
+                ..Knobs::default()
+            },
+            ..input(Mode::Light)
+        })
+        .unwrap();
+        assert!(p.get("jobs").unwrap().clipped);
+        assert_eq!(p.get("jobs").unwrap().bg_oklch.c, 109_263);
     }
 
     // 이것을 실패시키는 것: neutral.base 덮어쓰기의 색역 제한을 알리지 않는 것, 제한이 없는데 알리는 것.

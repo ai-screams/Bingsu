@@ -15,13 +15,15 @@ pub enum ColorDepth {
 }
 
 /// A color reference: the terminal default, a token's text color (read
-/// tier) or a token's block color (display tier). Token = index in TOKENS.
+/// tier), a token's block color (display tier) or the text color picked
+/// for that block (`ResolvedToken::on_block`). Token = index in TOKENS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Color {
     #[default]
     Default,
     Text(u16),
     Block(u16),
+    OnBlock(u16),
 }
 
 pub const BOLD: u8 = 1;
@@ -45,27 +47,23 @@ impl core::fmt::Write for Buf<'_> {
 }
 
 fn color(c: Color, bg: bool, p: &ResolvedPalette, depth: ColorDepth, w: &mut Buf<'_>) {
-    let (i, block) = match c {
+    let i = match c {
         Color::Default => return,
-        Color::Text(i) => (i, false),
-        Color::Block(i) => (i, true),
+        Color::Text(i) | Color::Block(i) | Color::OnBlock(i) => i,
     };
     let Some(t) = p.tokens.get(usize::from(i)) else {
         return;
     };
+    let (s, s256, ansi) = match c {
+        Color::Block(_) => (t.bg, t.bg256, t.ansi),
+        Color::OnBlock(_) => (t.on_block, t.on_block256, t.on_block_ansi),
+        _ => (t.fg, t.fg256, t.ansi),
+    };
     let base = if bg { 40 } else { 30 };
     let _ = match depth {
-        ColorDepth::TrueColor => {
-            let s = if block { t.bg } else { t.fg };
-            write!(w, ";{};2;{};{};{}", base + 8, s.r, s.g, s.b)
-        }
-        ColorDepth::Ansi256 => write!(
-            w,
-            ";{};5;{}",
-            base + 8,
-            if block { t.bg256 } else { t.fg256 }
-        ),
-        ColorDepth::Ansi16 => match t.ansi {
+        ColorDepth::TrueColor => write!(w, ";{};2;{};{};{}", base + 8, s.r, s.g, s.b),
+        ColorDepth::Ansi256 => write!(w, ";{};5;{}", base + 8, s256),
+        ColorDepth::Ansi16 => match ansi {
             AnsiSlot::Default => Ok(()),
             AnsiSlot::Slot(n) if n < 8 => write!(w, ";{}", base + u32::from(n)),
             AnsiSlot::Slot(n) => write!(w, ";{}", base + 60 + u32::from(n - 8)),
@@ -223,7 +221,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 밝은 슬롯 8..=15 의 접두(90–97 글자, 100–107 배경) 어긋남과 0..=7 의 30–37·40–47.
-    // light 의 block.text 는 슬롯 15, dark 의 block.text 는 슬롯 0, muted 는 슬롯 8.
+    // dark 의 block.text 는 슬롯 0, muted 는 슬롯 8. light 의 block.text 는 터미널 기본 글자색이라(2026-10-13)
+    // 코드가 없다. 슬롯 15를 쓰는 token은 이제 없다.
     #[test]
     fn ansi16_bright_background() {
         let bt = token_index("block.text").unwrap() as u16;
@@ -233,10 +232,7 @@ mod tests {
             bg: Color::Block(bt),
             attrs: 0,
         };
-        assert_eq!(
-            sgr_in(Mode::Light, s, ColorDepth::Ansi16),
-            b"\x1b[0;97;107m"
-        );
+        assert_eq!(sgr_in(Mode::Light, s, ColorDepth::Ansi16), b"\x1b[0m");
         assert_eq!(sgr_in(Mode::Dark, s, ColorDepth::Ansi16), b"\x1b[0;30;40m");
         let s = Style {
             fg: Color::Text(muted),
@@ -244,6 +240,64 @@ mod tests {
             attrs: 0,
         };
         assert_eq!(sgr_in(Mode::Dark, s, ColorDepth::Ansi16), b"\x1b[0;90;100m");
+    }
+
+    // 이것을 실패시키는 것: OnBlock 을 깊이마다 고른 색(on_block·on_block256·on_block_ansi)이 아닌 값으로 쓰는 것.
+    // light `fg` 블록은 밝은 글자(#f2f3fc), path 블록은 잉크(#090917), 16색은 둘 다 기본 글자색.
+    #[test]
+    fn on_block_bytes() {
+        let fg = token_index("fg").unwrap() as u16;
+        let path = token_index("path").unwrap() as u16;
+        let on = |i| Style {
+            fg: Color::OnBlock(i),
+            bg: Color::Default,
+            attrs: 0,
+        };
+        assert_eq!(
+            sgr_in(Mode::Light, on(fg), ColorDepth::TrueColor),
+            b"\x1b[0;38;2;242;243;252m"
+        );
+        assert_eq!(
+            sgr_in(Mode::Light, on(path), ColorDepth::TrueColor),
+            b"\x1b[0;38;2;9;9;23m"
+        );
+        assert_eq!(
+            sgr_in(Mode::Light, on(fg), ColorDepth::Ansi256),
+            b"\x1b[0;38;5;255m"
+        );
+        assert_eq!(
+            sgr_in(Mode::Light, on(path), ColorDepth::Ansi16),
+            b"\x1b[0m"
+        );
+    }
+
+    // 이것을 실패시키는 것: dark 블록 글자 바이트가 바뀌는 것. 모든 token·깊이에서 OnBlock 이 예전의
+    // `Text(block.text)`와 같은 바이트를 쓴다.
+    #[test]
+    fn dark_block_text_bytes_unchanged() {
+        let bt = token_index("block.text").unwrap() as u16;
+        for i in 0..crate::color::palette::TOKENS.len() as u16 {
+            for depth in [
+                ColorDepth::TrueColor,
+                ColorDepth::Ansi256,
+                ColorDepth::Ansi16,
+            ] {
+                let new = Style {
+                    fg: Color::OnBlock(i),
+                    bg: Color::Block(i),
+                    attrs: 0,
+                };
+                let old = Style {
+                    fg: Color::Text(bt),
+                    ..new
+                };
+                assert_eq!(
+                    sgr_in(Mode::Dark, new, depth),
+                    sgr_in(Mode::Dark, old, depth),
+                    "{i} {depth:?}"
+                );
+            }
+        }
     }
 
     // 이것을 실패시키는 것: RESET 바이트가 바뀌는 것, 빈 Style 의 SGR 이 RESET 과 달라지는 것.

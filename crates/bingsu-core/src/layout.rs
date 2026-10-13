@@ -923,7 +923,9 @@ impl<'l, 'i> Lay<'l, 'i> {
         let slot = &self.slots[s];
         let base = if block {
             Style {
-                fg: Color::Text(self.block_text),
+                fg: slot
+                    .role
+                    .map_or(Color::Text(self.block_text), Color::OnBlock),
                 bg: slot.role.map_or(Color::Default, Color::Block),
                 attrs: 0,
             }
@@ -2545,6 +2547,27 @@ mod tests {
         assert_eq!(text(&one(t, &f, 80)[0].left), "\u{E0B2} ~/Works \u{E0B0} ");
         let t = "{dir:block}{@head:round}{git:block}{@tail:triangle}{@nl}{char}";
         assert_eq!(text(&one(t, &f, 80)[0].left), " ~/Works ");
+    }
+
+    // 이것을 실패시키는 것: 역할이 있는 블록 글자를 `block.text` 하나로 그리는 것(해석기가 블록마다 고른
+    // 글자색 `OnBlock`을 쓰지 않음, 2026-10-13).
+    #[test]
+    fn role_block_text_is_picked_per_block() {
+        let f = fixture(&["Works"], "main");
+        let out = one("{dir:block}{@nl}{char}", &f, 80);
+        let r = out[0]
+            .left
+            .iter()
+            .find(|r| r.text.contains("Works"))
+            .unwrap();
+        assert_eq!(
+            r.style,
+            Style {
+                fg: Color::OnBlock(tok("path")),
+                bg: Color::Block(tok("path")),
+                attrs: 0
+            }
+        );
     }
 
     // 판정 C(2026-10-13). 이것을 실패시키는 것: 단계 6에서 사용자 `{@style:bg=…}` 배경을 남기거나,
