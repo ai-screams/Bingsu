@@ -15,6 +15,7 @@ pub mod bands;
 pub mod color;
 pub mod field;
 pub mod icons;
+pub mod layout;
 pub mod record;
 pub mod root_arg;
 pub mod sanitize;
