@@ -322,9 +322,16 @@ def screen_now(transcript, cols):
     return [row.rstrip() for row in screen.display if row.strip()], (screen.cursor.x, screen.cursor.y)
 
 
-def typed_screen(s, cols, k, tmp_path):
-    """Type k characters, then wait until the screen shows all of them.
-    Returns the pyte screen."""
+def typed_screen(s, cols, k, tmp_path, prompt="AB> "):
+    """Wait until `prompt` is drawn with the cursor right after it, type k
+    characters, then wait until the screen shows all of them. Characters
+    typed before readline draws the prompt are echoed by the terminal on
+    their own row and already count toward k, so the prompt row is never
+    found. Returns the pyte screen."""
+    drawn = wait_screen(s, cols, lambda sc: sc.display[sc.cursor.y].rstrip() == prompt.rstrip() and sc.cursor.x == len(prompt), stable=True)
+    if drawn is None:
+        (tmp_path / "transcript.bin").write_bytes(s.log.getvalue())
+        raise AssertionError(f"prompt {prompt!r} never drawn; transcript: {tmp_path / 'transcript.bin'}")
     s.p.send("x" * k)
     screen = wait_screen(s, cols, lambda sc: sum(row.count("x") for row in sc.display) >= k)
     if screen is None:
@@ -363,6 +370,20 @@ def test_raw_soh_stx_are_zero_width(tmp_path, extra):
         assert rows[prompt_row + 1].rstrip() == "x" * extra, where
     assert screen is not None, f"no stable screen with Y and the cursor in column 5: {last}; {where}"
     assert screen.display[screen.cursor.y].startswith("AB> Yx") and screen.cursor.x == 5, where
+
+
+# typed_screen must wait for a prompt that is drawn late (a 0.5 s hook before
+# it): characters typed earlier are echoed by the terminal on their own row.
+# 이것을 실패시키는 것: typed_screen의 프롬프트 대기(`drawn = wait_screen(...)`와 그 검사)를 지우는 것.
+def test_typed_screen_waits_for_a_late_prompt(tmp_path):
+    cols, k = 40, 36
+    late = "PROMPT_COMMAND=(\"${PROMPT_COMMAND[0]}\" 'sleep 0.5' \"${PROMPT_COMMAND[@]:1}\")"
+    s, _, _ = start(tmp_path, rc_after=late, record=minimal_record(), cols=cols)
+    screen = typed_screen(s, cols, k, tmp_path, prompt="> ")
+    s.p.sendcontrol("c")
+    s.close()
+    rows = [r.rstrip() for r in screen.display if r.strip()]
+    assert any(r.startswith("> " + "x" * k) for r in rows), rows
 
 
 # 이것을 실패시키는 것: 경고 조건에서 `-z ${_bingsu_warned_last-}`를 빼는 것(경고가 프롬프트마다 나감).
