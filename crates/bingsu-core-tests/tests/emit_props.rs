@@ -203,22 +203,16 @@ proptest! {
         prop_assert_eq!(check_all_shells(&runs, d), Ok(()));
     }
 
-    // 이것을 실패시키는 것: readline 문자열의 마지막 방어를 빼는 것, `"`·`\`를 이스케이프하지 않는 것,
-    // SOH·STX를 짧은 `\1`·`\2`로 쓰는 것(되읽기에서 다음 숫자와 합쳐짐).
+    // 이것을 실패시키는 것: readline 쪽 글자의 마지막 방어를 빼는 것, `"`·`\`를 이스케이프하지 않는 것,
+    // SOH·STX를 짧은 `\1`·`\2`로 쓰는 것(되읽기에서 다음 숫자와 합쳐짐), ESC 자리를 `e`로 바꾸지
+    // 않는 것. 되읽은 바이트는 같은 run의 bash 필드와 같아야 한다.
     #[test]
-    fn readline_mode_string_reads_back(raw in prop::collection::vec(
-        prop_oneof![3 => prop::sample::select(vec![0u8, 1, 2, 0x1b, b'\\', b'"', b'0', b'1', b'7', b'\n', 0x1e, 0x1f, 0x7f, 0xc2, 0x85, 0xff]), 1 => any::<u8>()],
-        0..32,
-    )) {
+    fn readline_mode_string_reads_back(runs in prop::collection::vec(run(), 0..6), d in depth()) {
         let mut out = Vec::new();
-        readline_mode_string(&raw, &mut out);
-        let back = parse_readline(&out);
-        let want: Vec<u8> = String::from_utf8_lossy(&raw)
-            .chars()
-            .filter(|&c| matches!(c, '\x01' | '\x02' | '\x1b') || !is_removed(c))
-            .collect::<String>()
-            .into_bytes();
-        prop_assert_eq!(back, Ok(want));
+        readline_mode_string(&runs, pal(), d, &mut out);
+        let mut bash = Vec::new();
+        emit(Shell::Bash, &runs, pal(), d, &mut bash);
+        prop_assert_eq!(parse_readline(&out), Ok(bash));
         prop_assert!(accepted_by_b1(&out));
     }
 }

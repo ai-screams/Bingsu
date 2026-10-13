@@ -41,7 +41,7 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 
 // 이것을 실패시키는 것: emit 안에서 SGR용 임시 Vec을 만드는 것(계획 초안의 `Vec::with_capacity(32)`),
-// 또는 readline 문자열을 만들며 임시 String을 만드는 것.
+// 또는 readline 문자열을 만들며 임시 버퍼를 만드는 것.
 #[test]
 fn emit_does_not_allocate() {
     let p = resolve_palette(&PaletteInput {
@@ -73,6 +73,11 @@ fn emit_does_not_allocate() {
             },
         },
     ];
+    // Every readline text path: escaped `\\` and `"`, removed characters.
+    let marks = [Run {
+        text: "\\ \" \u{1}\u{2}\u{1b}[0m\n\u{202E} \u{276F}".into(),
+        style: runs[2].style,
+    }];
     let mut out = Vec::with_capacity(4096);
     let mut rl = Vec::with_capacity(4096);
     ARMED.store(true, Ordering::Relaxed);
@@ -86,8 +91,7 @@ fn emit_does_not_allocate() {
             emit(shell, &runs, &p, depth, &mut out);
         }
     }
-    // The last field is bash's, the input the vi mode string is made from.
-    readline_mode_string(&out, &mut rl);
+    readline_mode_string(&marks, &p, ColorDepth::TrueColor, &mut rl);
     ARMED.store(false, Ordering::Relaxed);
     assert!(!out.is_empty() && rl.len() > 2);
     assert_eq!(CALLS.load(Ordering::Relaxed), 0);
