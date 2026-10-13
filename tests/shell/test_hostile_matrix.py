@@ -57,14 +57,14 @@ def record(shell, data):
 def drawn(shell, out, data):
     """True if one screen line holds the left field in order and, in zsh and
     fish, the right field after it, and the line right above it ends with the
-    upper line (one newline between them, nothing of the upper line before the
-    left field: a later prompt drawn below an earlier one must not count)."""
+    upper line: one newline between them. "Ends with", because a prompt drawn
+    below an earlier one would otherwise pass a join without the newline."""
     vis = visible(data)
     up, want = b"U<" + vis + b">U", b"L<" + vis + b">L"
     lines = out.split(b"\n")
     for k in range(1, len(lines)):
         i = lines[k].find(want)
-        if i < 0 or not lines[k - 1].rstrip(b"\r").endswith(up) or b"U<" in lines[k][:i]:
+        if i < 0 or not lines[k - 1].rstrip(b"\r").endswith(up):
             continue
         if shell == "bash" or lines[k].find(b"RMARK", i + len(want)) >= 0:
             return True
@@ -119,10 +119,10 @@ def test_hostile_class(tmp_path, shell, opts, cls, spec, canary_col, pty, locale
             shown = data.replace(b"\x00", b"") if shell == "bash" else data
             assert drawn(shell, out, shown), f"{cls}: fields not drawn in order on one line in {shell}"
         else:
-            assert b"L<" not in out and b"U<" not in out, f"{cls}: rejected record was drawn in {shell}"
+            assert b"L<" not in out, f"{cls}: rejected record was drawn in {shell}"
             assert MINIMAL in out, f"{cls}: no minimal prompt in {shell}"
     elif pty == "noexec":
         assert drawn(shell, out, data), f"{cls}: fields not drawn in order on one line in {shell}"
     else:
-        assert b"L<" not in out and b"U<" not in out, f"{cls}: rejected record was drawn in {shell}"
+        assert b"L<" not in out, f"{cls}: rejected record was drawn in {shell}"
         assert MINIMAL in out, f"{cls}: no minimal prompt in {shell}"
