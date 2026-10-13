@@ -65,3 +65,8 @@ test = false
 name = "emit"
 harness = false
 test = false
+
+[[bench]]
+name = "render"
+harness = false
+test = false
