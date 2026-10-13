@@ -417,10 +417,12 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
             },
             false,
         );
-        (c, nearest_256(c), luminance(c))
+        let c256 = nearest_256(c);
+        (c, luminance(c), c256, luminance(xterm(c256)))
     });
     // Luminance once per color: each contrast below reuses it.
     let (bt_lum, bg_lum) = (luminance(bt.fg), luminance(background));
+    let bt_lum256 = luminance(xterm(bt.fg256));
     for (i, t) in tokens.iter_mut().enumerate() {
         (t.on_block, t.on_block256, t.on_block_ansi) = (bt.fg, bt.fg256, bt.ansi);
         if TOKENS[i].name == "block.text" {
@@ -428,10 +430,17 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
         }
         let b_lum = luminance(t.bg);
         let mut m = contrast_milli_lum(bt_lum, b_lum);
-        if let Some((c, c256, l)) = light {
+        if let Some((c, l, c256, l256)) = light {
             let lm = contrast_milli_lum(l, b_lum);
             if lm > m {
-                (m, t.on_block, t.on_block256) = (lm, c, c256);
+                (m, t.on_block) = (lm, c);
+            }
+            // 256 colors pick again among the colors actually drawn: the
+            // approximations can reverse the order (light #007878: light
+            // text wins in truecolor, ink in 256).
+            let b256 = luminance(xterm(t.bg256));
+            if contrast_milli_lum(l256, b256) > contrast_milli_lum(bt_lum256, b256) {
+                t.on_block256 = c256;
             }
         }
         let tm = contrast_milli_lum(luminance(t.fg), bg_lum);
@@ -940,6 +949,31 @@ mod tests {
         assert_ne!(fg.on_block256, p.get("block.text").unwrap().fg256);
         assert_eq!(fg.on_block_ansi, Df);
         assert_eq!(p.get("path").unwrap().on_block_ansi, Df);
+    }
+
+    // 이것을 실패시키는 것: 256색 블록 글자를 truecolor에서 이긴 색의 근사로 두는 것. #007878 블록은
+    // truecolor에서 밝은 글자(4800)가 이기지만, 실제로 그리는 256색에서는 바탕 30에 255가 3758,
+    // 잉크 232가 4592라 잉크를 골라야 한다.
+    #[test]
+    fn light_256_pick_uses_the_drawn_colors() {
+        let ov = [("path", parse_color("#007878").unwrap())];
+        let p = resolve_palette(&PaletteInput {
+            overrides: &ov,
+            ..input(Mode::Light)
+        })
+        .unwrap();
+        let path = p.get("path").unwrap();
+        let ink = p.get("block.text").unwrap();
+        assert_eq!(path.on_block, p.background);
+        assert_eq!(contrast_milli(path.on_block, path.bg), 4_800);
+        assert_eq!(path.bg256, 30);
+        assert_eq!(path.on_block256, ink.fg256);
+        assert_eq!(ink.fg256, 232);
+        assert_eq!(contrast_milli(xterm(232), xterm(30)), 4_592);
+        assert_eq!(
+            contrast_milli(xterm(nearest_256(p.background)), xterm(30)),
+            3_758
+        );
     }
 
     // 이것을 실패시키는 것: teal의 C 0.1092가 사용자 knob(accent_c)을 이기는 것. knob 0.12면 다시 잘린다.
