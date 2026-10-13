@@ -22,6 +22,7 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 | `crates/bingsu` | CLI: `init` pins the binary path and four roots, `prompt` turns the envelope into a record, `sys` wraps libc; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
 | `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
 | `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
+| `crates/bingsu-golden` | Prints render output for fixed inputs; native (its test) and wasm32-wasip1 (CI) must equal `tests/golden/render/render.tsv` byte for byte; regenerate with `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv` and review the diff |
 | `crates/bingsu-bench`, `crates/bingsu-collect` | M1 measurement code and collector stub |
 | `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
 | `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes |
@@ -78,13 +79,13 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 
 | Workflow | Jobs | Notes |
 | -- | -- | -- |
-| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build, Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace) | Rust jobs run only when `Cargo.toml` exists (detect job) |
+| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build (also runs the render golden under wasmtime as wasm32-wasip1), Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace) | Rust jobs run only when `Cargo.toml` exists (detect job) |
 | `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew | `workflow_dispatch` input `record_observations` prints unpinned cells |
 | `security.yml` | Secret scan (gitleaks), Dependency advisories (cargo-audit) | gitleaks scans full history; weekly cron; cargo-audit needs `Cargo.lock` |
 | `dependabot.yml` | github-actions and cargo, weekly | |
 
 - Pin every action to a full commit SHA with a version comment. Dependabot updates both.
-- Downloaded tool binaries (actionlint, gitleaks) are pinned by version and verified with `sha256sum --check`.
+- Downloaded tool binaries (actionlint, gitleaks, wasmtime) are pinned by version and verified with `sha256sum --check`.
   Dependabot does not track them; bump the version variables by hand.
 - gitleaks runs as the CLI, not `gitleaks-action`, because the action needs a license key for organization repositories.
 - Keep `permissions: contents: read` and `persist-credentials: false` unless a job truly needs more.
