@@ -3,7 +3,7 @@
 //! are disallowed in clippy.toml), and results are quantized at three fixed
 //! points: 8-bit sRGB, OKLab in millionths, contrast in thousandths. Nothing
 //! after those points uses floats, so native and wasm32 give the same bytes.
-use libm::{cbrt, cos, pow, sin};
+use libm::{atan2, cbrt, cos, floor, pow, sin, sqrt};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Oklch {
@@ -25,6 +25,15 @@ pub struct OklabQ {
     pub l: i64,
     pub a: i64,
     pub b: i64,
+}
+
+/// Quantization point 2 in polar form: OKLCH with each of L, C and H (degrees,
+/// 0..360) scaled by 1e6 and rounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OklchQ {
+    pub l: i64,
+    pub c: i64,
+    pub h: i64,
 }
 
 /// Slack on the sRGB cube edges. Colors that sit on a face or edge (a channel
@@ -103,6 +112,31 @@ pub fn to_srgb8(lin: [f64; 3]) -> Srgb8 {
 pub fn oklch_to_srgb8(c: Oklch) -> (Srgb8, bool) {
     let (c, clipped) = clamp_chroma(c);
     (to_srgb8(oklch_to_linear(c)), clipped)
+}
+
+/// Quantizes an OKLCH color as it is (hue wrapped into 0..360).
+pub fn oklch_q(c: Oklch) -> OklchQ {
+    let h = c.h - 360.0 * floor(c.h / 360.0);
+    OklchQ {
+        l: q(c.l),
+        c: q(c.c),
+        h: q(h),
+    }
+}
+
+/// The OKLCH of a visible sRGB color, from its quantized OKLab. A gray
+/// (chroma under 1e-4) has no hue; its hue is 0.
+pub fn srgb8_to_oklch_q(s: Srgb8) -> OklchQ {
+    let k = oklab_q(s);
+    let (a, b) = (k.a as f64 / 1e6, k.b as f64 / 1e6);
+    let c = q(sqrt(a * a + b * b));
+    let h = if c < 100 {
+        0
+    } else {
+        let d = atan2(b, a) * 180.0 / core::f64::consts::PI;
+        q(if d < 0.0 { d + 360.0 } else { d })
+    };
+    OklchQ { l: k.l, c, h }
 }
 
 fn decode(v: u8) -> f64 {

@@ -2,6 +2,10 @@
 //! "측정과 게이트", section 9 M2 row). This file starts with sanitize, width
 //! and field formatting; the color, shortener, layout and render tasks add
 //! their benches to the same group.
+use bingsu_core::color::notation::parse_color;
+use bingsu_core::color::palette::{
+    Knobs, Mode, PaletteError, PaletteInput, ResolvedPalette, resolve_palette,
+};
 use bingsu_core::field::{Field, FieldValue};
 use bingsu_core::sanitize::sanitize;
 use bingsu_core::width::{WidthProfile, str_width};
@@ -36,8 +40,12 @@ fn width_of_text(input: String) -> (String, u32) {
     (input, w)
 }
 
-fn fields(_: u32) -> Vec<Field> {
-    vec![
+// The output buffer is reserved here, so the counted code formats without
+// growing a String: the growth path (`RawVec::finish_grow`) is shared with
+// every other bench in this binary and its inlining changes when a bench is
+// added, which moved this count by 3.5% with no change in core.
+fn fields(_: u32) -> (Vec<Field>, String) {
+    let fields = vec![
         Field::known(FieldValue::Count {
             n: 1234,
             saturated: true,
@@ -45,22 +53,61 @@ fn fields(_: u32) -> Vec<Field> {
         Field::known(FieldValue::Duration { ms: 3_723_000 }),
         Field::known(FieldValue::Int(-130)),
         Field::text(b"feature/very-long-branch-name", 24, WidthProfile::DEFAULT),
-    ]
+    ];
+    (fields, String::with_capacity(256))
 }
 
 #[library_benchmark]
 #[bench::four(args = [4], setup = fields)]
-fn field_format(input: Vec<Field>) -> (Vec<Field>, String) {
-    let mut s = String::new();
+fn field_format((input, mut s): (Vec<Field>, String)) -> (Vec<Field>, String) {
     for f in black_box(&input) {
         f.write_to(&mut s);
     }
     (input, black_box(s))
 }
 
+fn specs(_: u32) -> Vec<String> {
+    ["oklch(0.78 0.12 60)", "#8fb8f0", "208", "term.ansi.12"]
+        .map(String::from)
+        .to_vec()
+}
+
+#[library_benchmark]
+#[bench::four(args = [4], setup = specs)]
+fn color_notation(input: Vec<String>) -> (Vec<String>, usize) {
+    let ok = black_box(&input)
+        .iter()
+        .filter(|s| parse_color(black_box(s)).is_ok())
+        .count();
+    (input, black_box(ok))
+}
+
+fn palette_input(_: u32) -> (Mode, Knobs) {
+    (Mode::Dark, Knobs::default())
+}
+
+#[library_benchmark]
+#[bench::dark(args = [0], setup = palette_input)]
+fn palette_resolve(input: (Mode, Knobs)) -> ((Mode, Knobs), Result<ResolvedPalette, PaletteError>) {
+    let p = black_box(resolve_palette(&PaletteInput {
+        mode: input.0,
+        knobs: input.1,
+        overrides: &[],
+        roles: &[],
+    }));
+    // Returned, so the palette is freed outside the counted code.
+    (input, p)
+}
+
 library_benchmark_group!(
     name = core_m2,
-    benchmarks = [sanitize_bytes, width_of_text, field_format]
+    benchmarks = [
+        sanitize_bytes,
+        width_of_text,
+        field_format,
+        color_notation,
+        palette_resolve
+    ]
 );
 
 // main! defines `fn main` itself: wrapped in a fn of ours the bench would
