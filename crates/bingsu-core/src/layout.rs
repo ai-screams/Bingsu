@@ -18,10 +18,12 @@
 //! input: a shortened text has at most `SEG_PIECES_MAX` pieces (a method
 //! with more is skipped, like an invalid one), and a line with more than
 //! `LINE_BYTES_MAX` bytes of text does not fit, so the steps go on, down to
-//! the minimal prompt if need be. The largest input the limits allow (a
-//! path of `shorten::MAX_STEPS` folders drawn 819 times) peaks near 1 MB,
-//! nearly all of it the shortener's own results (test
-//! `the_largest_input_stays_small`).
+//! the minimal prompt if need be. Before it runs, a shortening method sure
+//! to break those caps is skipped (`too_big`), only the first
+//! `METHODS_MAX` methods run, and a path over `PATH_BYTES_MAX` is never
+//! read. The largest inputs the limits allow (`shorten::MAX_STEPS` folders
+//! drawn 819 times, folder names of 3 KB, a fill 65535 columns wide) peak
+//! under 1 MB (test `the_largest_inputs_stay_small`).
 use crate::bands::{Band, select};
 use crate::color::palette::token_index;
 use crate::color::sgr::{Color, DIM, Style};
@@ -74,6 +76,17 @@ pub const SEG_PIECES_MAX: usize = 1024;
 /// minimal prompt is a few bytes. Two lines and their SGR stay well inside
 /// a record (`record::RECORD_MAX_BYTES`, 64 KiB).
 pub const LINE_BYTES_MAX: usize = 16 * 1024;
+
+/// Most methods of a segment's chain that run, in order; the rest are
+/// ignored (there are six kinds, so a real chain is shorter).
+pub const METHODS_MAX: usize = 8;
+
+/// Most bytes of path text layout reads. Every path method checks its
+/// result against the whole path text, and drawing it unshortened needs it
+/// too, so a longer path is never read: it is drawn as a lone dim ellipsis
+/// and step 4 can only keep that. A path of `shorten::MAX_STEPS` ordinary
+/// folder names (about 50 KiB) stays under it.
+pub const PATH_BYTES_MAX: usize = 64 * 1024;
 
 /// Per catalog entry (same index as `catalog`). A slice shorter than the
 /// catalog leaves the missing entries without a value, path or setup.
@@ -429,6 +442,9 @@ struct Lay<'l, 'i> {
     target: u32,
     /// Index of the fill node.
     fill: Option<usize>,
+    /// Its glyph (one cell, test `fill_glyphs_are_one_cell`) and kind.
+    fill_glyph: &'static str,
+    fill_kind: FillKind,
     info: Vec<Info>,
     fields: String,
     slots: Vec<Slot>,
@@ -451,6 +467,12 @@ impl<'l, 'i> Lay<'l, 'i> {
         let p = o.profile;
         let nodes = line.nodes();
         let fill = line.fill();
+        let fill_kind = fill
+            .and_then(|i| match nodes.get(i) {
+                Some(Node::Fill(f)) => Some(*f),
+                _ => None,
+            })
+            .unwrap_or(FillKind::Space);
         let cat = inp.catalog;
         let char_seg = cat.iter().position(|d| d.id == "char");
         let mut slots: Vec<Slot> = Vec::with_capacity(cat.len());
@@ -527,6 +549,15 @@ impl<'l, 'i> Lay<'l, 'i> {
                     slot.role = role_tok("prompt.err");
                 }
             } else if let Some(Some(f)) = inp.facts.get(s) {
+                if f.display_len() > PATH_BYTES_MAX {
+                    let e = ellipsis(p, 1);
+                    slot.short = Some(Short {
+                        text: e.into(),
+                        ends: alloc::vec![(e.len(), true)],
+                    });
+                    slot.m = text_m(e, join, p);
+                    continue;
+                }
                 slot.base = Base::Owned(f.display());
             } else {
                 slot.base = Base::Value;
@@ -585,6 +616,8 @@ impl<'l, 'i> Lay<'l, 'i> {
             upper,
             target: target(o),
             fill,
+            fill_glyph: icon_glyph(fill_kind.icon(), o).text,
+            fill_kind,
             info,
             fields,
             slots,
@@ -646,10 +679,19 @@ impl<'l, 'i> Lay<'l, 'i> {
     }
 
     /// The methods' first result that fits `budget`, else the narrowest, as
-    /// `shorten` picks; results over `SEG_PIECES_MAX` pieces are skipped.
+    /// `shorten` picks, over the first `METHODS_MAX` methods. A method sure
+    /// to give more than `SEG_PIECES_MAX` pieces or `LINE_BYTES_MAX` bytes
+    /// is not run (`too_big`); a result over the piece cap is dropped too.
+    /// A path over `PATH_BYTES_MAX` is not shortened at all.
     fn shorten_capped(&self, s: usize, methods: &[Method], budget: u32) -> Option<Vec<Piece>> {
+        if matches!(self.inp.facts.get(s), Some(Some(f)) if f.display_len() > PATH_BYTES_MAX) {
+            return None;
+        }
         let mut best: Option<(Vec<Piece>, u32)> = None;
-        for m in methods {
+        for m in methods.iter().take(METHODS_MAX) {
+            if too_big(*m, self.source(s)) {
+                continue;
+            }
             let Some((r, _, w)) = shorten(
                 self.source(s),
                 core::slice::from_ref(m),
@@ -976,7 +1018,36 @@ impl<'l, 'i> Lay<'l, 'i> {
         } else {
             l.saturating_add(r)
         };
+        // The fill's glyphs are text too (`{@fill:line}` at 65535 columns
+        // would be about 192 KiB).
+        let bytes = bytes.saturating_add(
+            self.fill_count(&b.left, &b.right, l, r, &mut b.join)
+                .saturating_mul(self.fill_glyph.len()),
+        );
         Fit { l, r, cells, bytes }
+    }
+
+    /// Glyphs an upper line's fill draws between cleaned sides `left` and
+    /// `right` measuring `l` and `r` cells: what is left of the target once
+    /// the joins at both ends of the fill are counted. None without a right
+    /// side, and none when the sides already reach the target.
+    fn fill_count(
+        &self,
+        left: &[Item],
+        right: &[Item],
+        l: u32,
+        r: u32,
+        join: &mut String,
+    ) -> usize {
+        let Some(c) = right.first().filter(|_| self.upper) else {
+            return 0;
+        };
+        let (g, p) = (self.fill_glyph, self.o.profile);
+        let d1 = left
+            .last()
+            .map_or(0, |a| join_delta(self.edges(a).1, g, join, p));
+        let d2 = join_delta(g, self.edges(c).0, join, p);
+        usize::try_from(i64::from(self.target) - i64::from(l) - i64::from(r) - d1 - d2).unwrap_or(0)
     }
 
     fn fits(&self, f: &Fit) -> bool {
@@ -1080,6 +1151,32 @@ impl<'l, 'i> Lay<'l, 'i> {
         }
         n
     }
+}
+
+/// Is method `m` on `src` sure to give a result over `SEG_PIECES_MAX`
+/// pieces or `LINE_BYTES_MAX` bytes? Piece counts are lower bounds known
+/// from the step count alone: a path method draws `/` and a name for each
+/// step it keeps (`depth n` keeps n of them after an ellipsis). `none`
+/// gives the whole text.
+fn too_big(m: Method, src: Source<'_>) -> bool {
+    let (pieces, bytes) = match (m, src) {
+        (Method::None, Source::Path(f)) => (1, f.display_len()),
+        (Method::None, Source::Text(t)) => (1, t.len()),
+        (Method::Depth(n), Source::Path(f)) => {
+            let n = usize::from(n.max(1));
+            (
+                if f.steps() > n {
+                    1 + 2 * n
+                } else {
+                    2 * f.steps()
+                },
+                0,
+            )
+        }
+        (Method::Abbrev(_) | Method::Unique, Source::Path(f)) => (2 * f.steps(), 0),
+        _ => (0, 0),
+    };
+    pieces > SEG_PIECES_MAX || bytes > LINE_BYTES_MAX
 }
 
 fn field_of<'a>(inp: &Inputs<'a>, seg: usize, field: usize) -> Option<&'a FieldValue> {
@@ -1503,38 +1600,18 @@ pub fn layout_line_into(
         // left + fill + right = target: the fill takes what is left once
         // the joins at both of its ends are counted, and is left out when
         // that is no cell (the sides then touch, as `check` measured).
-        let fill = (nr > 0)
-            .then(|| {
-                let kind = line
-                    .fill()
-                    .and_then(|i| match line.nodes().get(i) {
-                        Some(Node::Fill(f)) => Some(*f),
-                        _ => None,
-                    })
-                    .unwrap_or(FillKind::Space);
-                // Fill glyphs are one-cell icons, so `n` glyphs draw `n`
-                // cells (test `fill_glyphs_are_one_cell`).
-                let glyph = icon_glyph(kind.icon(), o).text;
-                let d1 = b
-                    .left
-                    .last()
-                    .map_or(0, |a| join_delta(lay.edges(a).1, glyph, &mut b.join, p));
-                let d2 = b
-                    .right
-                    .first()
-                    .map_or(0, |c| join_delta(glyph, lay.edges(c).0, &mut b.join, p));
-                let n = i64::from(target) - i64::from(fit.l) - i64::from(fit.r) - d1 - d2;
-                let style = if kind == FillKind::Space {
-                    Style::default()
-                } else {
-                    Style {
-                        fg: Color::Text(tok("muted")),
-                        ..Style::default()
-                    }
-                };
-                (glyph, usize::try_from(n).unwrap_or(0), style)
-            })
-            .filter(|f| f.1 > 0);
+        let n = lay.fill_count(&b.left, &b.right, fit.l, fit.r, &mut b.join);
+        let fill = (n > 0).then(|| {
+            let style = if lay.fill_kind == FillKind::Space {
+                Style::default()
+            } else {
+                Style {
+                    fg: Color::Text(tok("muted")),
+                    ..Style::default()
+                }
+            };
+            (lay.fill_glyph, n, style)
+        });
         let mut sink = Sink::new(&mut out.left, nl + usize::from(fill.is_some()) + nr);
         lay.runs(&b.left, false, Some(&mut sink));
         if let Some((glyph, n, style)) = fill {
@@ -2439,7 +2516,8 @@ mod tests {
         );
     }
 
-    // 이것을 실패시키는 것: `SEG_PIECES_MAX`보다 조각이 많은 줄이기 결과를 받는 것(600단계 경로의 `abbrev`가 남는다).
+    // 이것을 실패시키는 것: `SEG_PIECES_MAX`보다 조각이 많은 줄이기 결과를 받는 것(600단계 경로의 `abbrev`가 미리
+    // 걸러지지 않거나, 저장소 루트에 따라 조각 수가 정해지는 `repo` 결과가 실행 뒤에 버려지지 않는 것).
     #[test]
     fn results_over_the_piece_cap_are_skipped() {
         let names: Vec<String> = (0..600).map(|n| alloc::format!("folder-{n:03}")).collect();
@@ -2449,6 +2527,18 @@ mod tests {
         f.setup[idx("dir")].methods = &[Method::Abbrev(1)];
         let s = text(&one("{dir}{@nl}{char}", &f, 40)[0].left);
         assert!(s.ends_with("/folder-599") && !s.contains("f/f/"), "{s:?}");
+        // `repo`'s piece count depends on the repository root, so it runs and
+        // its result (1,199 pieces) is dropped afterwards. At 6,600 columns
+        // that result (6,599 cells) would fit where the whole path (6,601)
+        // does not; dropped, the path is cut instead.
+        f.facts[idx("dir")] = Some(PathFacts::new(Anchor::Home, &raw, Some(0), &[]));
+        f.setup[idx("dir")].methods = &[Method::Repo];
+        let s = text(&one("{dir}{@nl}{char}", &f, 6600)[0].left);
+        assert!(
+            s.starts_with('\u{2026}') && s.ends_with("/folder-599"),
+            "{}",
+            &s[..20]
+        );
     }
 
     // 이것을 실패시키는 것: 폭은 맞아도 `LINE_BYTES_MAX`를 넘는 줄을 맞는 것으로 보는 것.
@@ -2465,5 +2555,61 @@ mod tests {
             "{bytes} {:?}",
             text(&out[0].left)
         );
+    }
+
+    // 이것을 실패시키는 것: 방식 사슬을 `METHODS_MAX`(8) 너머까지 돌리는 것(아홉째 `depth 1`이 `…/themes`를 만든다).
+    #[test]
+    fn only_the_first_methods_run() {
+        const NINE: &[Method] = &[
+            Method::None,
+            Method::None,
+            Method::None,
+            Method::None,
+            Method::None,
+            Method::None,
+            Method::None,
+            Method::None,
+            Method::Depth(1),
+        ];
+        let mut f = fixture(&["Works", "AiScream", "themes"], "main");
+        f.setup[idx("dir")].methods = NINE;
+        let s = text(&one("{dir}{@nl}{char}", &f, 15)[0].left);
+        assert!(
+            s.ends_with("Scream/themes") && s.starts_with('\u{2026}'),
+            "{s:?}"
+        );
+        f.setup[idx("dir")].methods = &NINE[1..];
+        assert_eq!(
+            text(&one("{dir}{@nl}{char}", &f, 15)[0].left),
+            "\u{2026}/themes"
+        );
+    }
+
+    // 이것을 실패시키는 것: `PATH_BYTES_MAX`를 넘는 경로를 읽어 그리거나 줄이는 것(흐린 생략 기호 하나로 그린다).
+    #[test]
+    fn a_path_too_long_to_read_is_an_ellipsis() {
+        let name = alloc::format!("e{}", "\u{0301}".repeat(300));
+        let raw: Vec<&[u8]> = (0..120).map(|_| name.as_bytes()).collect();
+        let mut f = fixture(&["Works"], "main");
+        f.facts[idx("dir")] = Some(PathFacts::new(Anchor::Home, &raw, None, &[]));
+        assert!(f.facts[idx("dir")].as_ref().unwrap().display_len() > PATH_BYTES_MAX);
+        let out = one("{dir}{@nl}{char}", &f, 80);
+        assert_eq!(text(&out[0].left), "\u{2026}");
+        assert_ne!(out[0].left[0].style.attrs & DIM, 0);
+    }
+
+    // 이것을 실패시키는 것: 채움 글리프 바이트를 `LINE_BYTES_MAX`에 넣지 않는 것(폭 65535의 `─`는 약 192 KB), 채움이
+    // 없는 입력 줄에서도 채움 바이트를 세는 것.
+    #[test]
+    fn fill_bytes_count_toward_the_byte_cap() {
+        let f = fixture(&["Works"], "main");
+        let out = one("{dir}{@fill:line}{time}{@nl}{char}", &f, u16::MAX);
+        let bytes: usize = out[0].left.iter().map(|r| r.text.len()).sum();
+        assert!(bytes <= LINE_BYTES_MAX, "{bytes}");
+        let out = one("{dir}{@fill:line}{time}{@nl}{char}", &f, 5000);
+        assert!(text(&out[0].left).ends_with("12:34"));
+        // An input line draws no fill: its right side is the right prompt.
+        let out = one("{dir}{@fill:line}{time}", &f, u16::MAX);
+        assert_eq!(text(&out[0].right), "12:34");
     }
 }
