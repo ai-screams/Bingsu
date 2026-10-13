@@ -178,7 +178,7 @@ def main():
                 old, new, due, key = cols
                 seen.add(f"T:{old}>{new}")
         # Contract: a rejected record leaves _bingsu_f empty; an accepted one
-        # leaves the nine input field bytes unchanged (nothing is expanded),
+        # leaves the ten input field bytes unchanged (nothing is expanded),
         # except that an accept-stripped one has lost every NUL.
         for name, w in want.items():
             if w[0] == "observe":

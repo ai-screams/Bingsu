@@ -11,12 +11,12 @@ import sys
 US, RS = b"\x1f", b"\x1e"
 
 
-def rec(fields, status=b"ok:none", header=b"B1", count=b"7", tail=RS):
+def rec(fields, status=b"ok:none", header=b"B1", count=b"8", tail=RS):
     return header + US + count + US + US.join(fields) + US + status + tail
 
 
 def one(left, **kw):
-    return rec([left] + [b""] * 5, **kw)
+    return rec([left] + [b""] * 6, **kw)
 
 
 def main():
@@ -25,9 +25,16 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     overhead = len(one(b""))
     v = {
-        "good": rec([b"\x1b[31m\x01L\x02", b"R", b"tL", b"tR", b">", b"<"]),
+        "good": rec([b"\x1b[31m\x01L\x02", b"R", b"tL", b"tR", b">", b"<", b"U"]),
         "good_utf8": one("한글 *[\\%!".encode()),
-        "six_empty": rec([b""] * 6),
+        "seven_empty": rec([b""] * 7),
+        # Change plan 12 (R-07): the upper line alone, a status-shaped upper
+        # line (pins the field the runners classify as the status), a newline
+        # in it, and the old B1 shape (count 7).
+        "upper_only": rec([b""] * 6 + [b"U"]),
+        "st_after_upper": rec([b"L"] + [b""] * 5 + [b"ok:none"], status=b"error:x"),
+        "upper_lf": rec([b"L", b"", b"", b"", b"", b"", b"U\nx"]),
+        "old_b1": rec([b"L"] + [b""] * 5, count=b"7"),
         "lit_dot": one(b"a.b"),
         "cr": one(b"a\rb"),
         "bad_utf8": one(b"\xff\xfe"),
@@ -40,10 +47,10 @@ def main():
         "rs_lf": one(b"L") + b"\n",
         "rs_lflf": one(b"L") + b"\n\n",
         "no_rs": one(b"L", tail=b""),
-        "eight": rec([b"L"] + [b""] * 4),
-        "ten": rec([b"L"] + [b""] * 6),
+        "nine": rec([b"L"] + [b""] * 5),
+        "eleven": rec([b"L"] + [b""] * 7),
         "bad_hdr": one(b"L", header=b"B2"),
-        "bad_count": one(b"L", count=b"8"),
+        "bad_count": one(b"L", count=b"7"),
         "empty": b"",
         "huge": one(b"x" * 70000),
         "len_65536": one(b"x" * (65536 - overhead)),
@@ -66,9 +73,9 @@ def main():
         "st_semicolon": one(b"L", status=b"ok:a;touch " + canary),
         "st_dollar_code": one(b"L", status=b"degraded:$(touch " + canary + b")"),
         "trail_us": one(b"L", status=b"ok:none" + US),
-        "disp_cmdsub": rec([b"$(touch " + canary + b")"] * 6),
-        "disp_backtick": rec([b"`touch " + canary + b"`"] * 6),
-        "disp_percent": rec([b"%n%(?.a.b)%F{red}"] * 6),
+        "disp_cmdsub": rec([b"$(touch " + canary + b")"] * 7),
+        "disp_backtick": rec([b"`touch " + canary + b"`"] * 7),
+        "disp_percent": rec([b"%n%(?.a.b)%F{red}"] * 7),
         "nul_field": one(b"L\x00x"),
         "nul_status": one(b"L", status=b"ok:no\x00ne"),
         # A field after the status, and an LF in the last field: bash's
@@ -82,7 +89,7 @@ def main():
     for row in matrix.rows():
         cls, spec = row[:2]
         data = matrix.payload(spec, canary)
-        v[f"hostile_{cls}"] = rec([b"L<" + data + b">L", b"RMARK", b"", b"", b"", b""])
+        v[f"hostile_{cls}"] = rec([b"L<" + data + b">L", b"RMARK", b"", b"", b"", b"", b"U<" + data + b">U"])
     for name, data in v.items():
         (out / f"{name}.bin").write_bytes(data)
     print(f"wrote {len(v)} vectors")

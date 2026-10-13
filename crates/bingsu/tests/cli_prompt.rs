@@ -30,7 +30,7 @@ fn run(args: &[&[u8]]) -> std::process::Output {
 }
 
 fn minimal(status: &str) -> Vec<u8> {
-    let mut v = b"B1\x1f7\x1f> \x1f\x1f\x1f\x1f\x1f\x1f".to_vec();
+    let mut v = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f".to_vec();
     v.extend_from_slice(status.as_bytes());
     v.push(0x1e);
     v

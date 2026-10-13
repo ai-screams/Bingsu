@@ -123,13 +123,18 @@ _bingsu_install() {
   _bingsu_t0= _bingsu_t1=
   _bingsu_call "${ctx[@]}"
   if _bingsu_frame "$_bingsu_rec"; then
+    # Upper line (record change plan 12, R-04): joined by a constant newline, only
+    # when it is not empty, before the escaping below so it covers both. The
+    # local has a bingsu name: `local` fails on a name the user made readonly.
+    local _bingsu_ps1_out=${_bingsu_f[2]}
+    if [[ -n ${_bingsu_f[8]} ]]; then _bingsu_ps1_out=${_bingsu_f[8]}$'\n'$_bingsu_ps1_out; fi
     if (( exp )); then
       # Expansion on: a reference, so the data is never expanded.
-      _bingsu_ps1=${_bingsu_f[2]}
+      _bingsu_ps1=$_bingsu_ps1_out
       PS1='${_bingsu_ps1}'
     else
       # Expansion off: only backslash escapes are decoded.
-      PS1=${_bingsu_f[2]//\\/\\\\}
+      PS1=${_bingsu_ps1_out//\\/\\\\}
     fi
   else
     PS1='\w ❯ '

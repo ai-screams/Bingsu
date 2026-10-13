@@ -17,7 +17,7 @@ _report() {
   if shopt -q nocasematch; then nm_before=on; fi
   if _bingsu_frame "$rec"; then
     if shopt -q nocasematch; then nm_after=on; fi
-    _bingsu_classify "${_bingsu_f[8]}"
+    _bingsu_classify "${_bingsu_f[9]}"
     printf 'R\t%s\taccept\t%s\t%s\n' "$name" "$_bingsu_disp" "${_bingsu_note:--}"
   else
     if shopt -q nocasematch; then nm_after=on; fi

@@ -57,7 +57,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 scripts/check-core-purity.sh                       # core purity + CLI prompt-path forbid gate
 cargo check -p bingsu --target x86_64-unknown-linux-musl   # CI builds musl; libc APIs differ (getentropy is not there)
 tests/golden/record/run-all.sh                     # record golden vectors; SHELLS="bash zsh fish", BINGSU_PY=<python>
-BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/record/test_overrides.py -q -rf -p no:cacheprovider
+BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider
 ```
 
 Shell tests (`tests/shell`):

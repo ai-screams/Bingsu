@@ -23,7 +23,7 @@ LATE = b"bingsu: another prompt hook runs after bingsu"
 def hostile_record(c1, c2):
     """What a correct core emits for bash: raw SOH/STX around SGR, data as is."""
     left = (b"\x01\x1b[31m\x02D:$(touch " + c1 + b");`touch " + c2 + b"`;${HOME};$[1+1];\\u;\\w;!\x01\x1b[0m\x02> ")
-    return b"B1\x1f7\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    return b"B1\x1f8\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def stderr_capture(err):
@@ -344,7 +344,7 @@ def typed_screen(s, cols, k, tmp_path, prompt="AB> "):
 @pytest.mark.parametrize("extra", [-1, 0, 1])
 def test_raw_soh_stx_are_zero_width(tmp_path, extra):
     cols = 40
-    rec = b"B1\x1f7\x1f\x01\x1b[31m\x02AB\x01\x1b[0m\x02> \x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    rec = b"B1\x1f8\x1f\x01\x1b[31m\x02AB\x01\x1b[0m\x02> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
     s, _, _ = start(tmp_path, record=rec, cols=cols)
     k = cols - 4 + extra  # "AB> " is 4 visible cells
     screen = typed_screen(s, cols, k, tmp_path)
@@ -606,7 +606,7 @@ def test_bash_strict_modes(tmp_path, mode):
 # Review Focus 2. 이것을 실패시키는 것: _bingsu_call의 `{ …; } 2>/dev/null`을 빼는 것
 # (bash 4.4+는 명령 치환의 NUL마다 stderr에 경고를 쓴다).
 def test_bash_nul_output_is_silent(tmp_path):
-    rec = b"B1\x1f7\x1fL\x00x\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    rec = b"B1\x1f8\x1fL\x00x\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
     s, _, _ = start(tmp_path, record=rec)
     s.run("true")
     out = visible(s.close())

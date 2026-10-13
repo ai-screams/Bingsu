@@ -11,7 +11,7 @@ function _report --argument-names v
     set -l name (string replace -r '\.bin$' '' -- (basename -- $v))
     set -l rec (cat -- $v | string collect -N)
     if _bingsu_frame "$rec"
-        _bingsu_classify "$_bingsu_f[9]"
+        _bingsu_classify "$_bingsu_f[10]"
         set -l note $_bingsu_note
         test -n "$note"; or set note -
         printf 'R\t%s\taccept\t%s\t%s\n' $name $_bingsu_disp $note

@@ -54,7 +54,12 @@ function fish_prompt
     # data from being read as a format.
     if _bingsu_frame "$_bingsu_rec"
         set -g _bingsu_rps1 $_bingsu_f[4]
-        printf '%s' $_bingsu_f[3]
+        # Upper line (record change plan 12, R-04): a newline only when it is not empty.
+        if test -n "$_bingsu_f[9]"
+            printf '%s\n%s' "$_bingsu_f[9]" "$_bingsu_f[3]"
+        else
+            printf '%s' "$_bingsu_f[3]"
+        end
     else
         # A constant, never the directory: fish 3.6 and 4.0 print control
         # characters of a folder name as they are (prompt_pwd). The renderer

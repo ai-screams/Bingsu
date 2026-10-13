@@ -21,7 +21,7 @@ SEP = b"<<SEP>>"
 
 
 def record(left, right=b""):
-    return b"B1\x1f7\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    return b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def start(tmp_path, record, rc_after=""):
@@ -58,7 +58,7 @@ def test_fish_prints_fields_without_interpreting(tmp_path):
     c1, c2 = cdir / "c1", cdir / "c2"
     left = f"D:$(touch {c1});(touch {c2});{{a,b}};$HOME;%s;\\n> ".encode()
     right = b"R:%d"
-    rec = b"B1\x1f7\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    rec = b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
     s, _ = start(tmp_path, rec)
     s.run("true")
     out = visible(s.close())
@@ -226,7 +226,7 @@ def test_bind_mode_outside_the_envelope_is_left_out(tmp_path, mode):
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)
     script = inst.init("fish", env)
-    body = f"set -g fish_bind_mode {mode}\nfish_prompt >/dev/null\nprintf '%s' $_bingsu_f[9]\n".encode()
+    body = f"set -g fish_bind_mode {mode}\nfish_prompt >/dev/null\nprintf '%s' $_bingsu_f[10]\n".encode()
     r = run_shell_script("fish", script + b"\n" + body, env, tmp_path)
     assert r.returncode == 0 and r.stderr == b"", r.stderr
     assert r.stdout.startswith(b"ok:"), r.stdout

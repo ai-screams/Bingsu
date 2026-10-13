@@ -21,6 +21,18 @@ ROWS = matrix.rows()
 # Every fallback prompt (all three hooks) ends with this mark.
 MINIMAL = "❯ ".encode()
 LOCALES = ("en_US.UTF-8", "C", "ko_KR.UTF-8")
+# The hook paths that escape data (spec section 3 option table): bash with
+# promptvars off doubles `\`, zsh with PROMPT_BANG doubles `!`. Without these
+# bash takes the reference path and zsh (-f) the plain assignment; fish has
+# one path.
+ESCAPING = {"bash": "shopt -u promptvars", "zsh": "setopt prompt_bang"}
+
+
+def shell_modes():
+    for sh in SHELLS:
+        yield pytest.param(sh, "", id=sh)
+        if sh in ESCAPING:
+            yield pytest.param(sh, ESCAPING[sh], id=f"{sh}-escaping")
 
 
 def cases():
@@ -32,32 +44,41 @@ def cases():
 
 
 def record(shell, data):
+    # The same value in the left field and in the upper line, which the hook
+    # joins to the left field before escaping (record change plan 12, R-04).
     left = b"L<" + data + b">L "
+    upper = b"U<" + data + b">U"
     if shell == "zsh":
-        left = left.replace(b"%", b"%%")  # what a correct core emits for zsh data
-    return b"B1\x1f7\x1f" + left + b"\x1fRMARK\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+        # what a correct core emits for zsh data
+        left, upper = left.replace(b"%", b"%%"), upper.replace(b"%", b"%%")
+    return b"B1\x1f8\x1f" + left + b"\x1fRMARK\x1f\x1f\x1f\x1f\x1f" + upper + b"\x1fok:none\x1e"
 
 
 def drawn(shell, out, data):
     """True if one screen line holds the left field in order and, in zsh and
-    fish, the right field after it."""
-    want = b"L<" + visible(data) + b">L"
-    for line in out.split(b"\n"):
-        i = line.find(want)
-        if i < 0:
+    fish, the right field after it, and the line right above it ends with the
+    upper line: one newline between them. "Ends with", because a prompt drawn
+    below an earlier one would otherwise pass a join without the newline."""
+    vis = visible(data)
+    up, want = b"U<" + vis + b">U", b"L<" + vis + b">L"
+    lines = out.split(b"\n")
+    for k in range(1, len(lines)):
+        i = lines[k].find(want)
+        if i < 0 or not lines[k - 1].rstrip(b"\r").endswith(up):
             continue
-        if shell == "bash" or line.find(b"RMARK", i + len(want)) >= 0:
+        if shell == "bash" or lines[k].find(b"RMARK", i + len(want)) >= 0:
             return True
     return False
 
 
 # 이것을 실패시키는 것: 어느 셸이든 값의 일부를 명령으로 실행하거나 필드 경계를 바꾸는 것
 # (왼쪽 필드가 한 줄에 순서대로 그려지지 않음, 오른쪽 필드가 그 뒤에 없음),
+# hook이 윗줄을 버리거나 줄바꿈 하나 없이 붙이는 것, 윗줄에 이스케이프(bash `\` 두 겹, zsh `!` 두 겹)를 빠뜨리는 것,
 # 거부해야 할 레코드를 그리는 것, NUL을 지울 때 셸 경고를 화면에 내는 것,
 # NUL 행의 화면 결과를 셸·버전·로캘 칸마다 고정한 값과 맞춰 보지 않는 것(한 값으로 합치거나 고정 없는 칸을 통과시킴).
-@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("shell,opts", list(shell_modes()))
 @pytest.mark.parametrize("cls,spec,canary_col,pty,locale", list(cases()))
-def test_hostile_class(tmp_path, shell, cls, spec, canary_col, pty, locale):
+def test_hostile_class(tmp_path, shell, opts, cls, spec, canary_col, pty, locale):
     canary = short_dir() / "c"
     data = matrix.payload(spec, str(canary).encode())
     inst = Install(tmp_path)
@@ -72,6 +93,8 @@ def test_hostile_class(tmp_path, shell, cls, spec, canary_col, pty, locale):
     # accepted the 1 MiB value would draw it and time out here instead.
     limit = 3 if pty == "minimal" else 15
     try:
+        if opts:
+            s.run(opts, timeout=limit)
         s.run(f"source {init}", timeout=limit)
         s.run("true", timeout=limit)
     except pexpect.TIMEOUT:

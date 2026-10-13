@@ -24,9 +24,9 @@ function _bingsu_frame --argument-names rec
     # count check; a black-box golden cannot tell either layer apart alone.
     string match -q -r '^[^\x1e\n]*\x1e\z' -- "$rec"; or return 1
     set -l f (string split \x1f -- (string replace -r '\x1e\z' '' -- "$rec"))
-    test (count $f) -eq 9; or return 1
-    test "$f[1]" = B1; and test "$f[2]" = 7; or return 1
-    _bingsu_status_ok "$f[9]"; or return 1
+    test (count $f) -eq 10; or return 1
+    test "$f[1]" = B1; and test "$f[2]" = 8; or return 1
+    _bingsu_status_ok "$f[10]"; or return 1
     # Contract: on failure _bingsu_f is empty; it is set only after every check.
     set -g _bingsu_f $f
 end

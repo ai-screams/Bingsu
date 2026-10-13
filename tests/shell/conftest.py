@@ -100,7 +100,7 @@ def _cleanup():
 
 
 def minimal_record(status=b"ok:none", left=b"> "):
-    return b"B1\x1f7\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f" + status + b"\x1e"
+    return b"B1\x1f8\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f" + status + b"\x1e"
 
 
 @pytest.fixture

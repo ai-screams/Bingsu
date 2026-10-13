@@ -23,7 +23,7 @@ _report() {
   local v=$1 name=${1:t:r} rec
   rec=$(cat -- "$v"; print -n .); rec=${rec%.}
   if _in_user_opts _bingsu_frame "$rec"; then
-    _in_user_opts _bingsu_classify "$_bingsu_f[9]"
+    _in_user_opts _bingsu_classify "$_bingsu_f[10]"
     print -r -- "R	$name	accept	$_bingsu_disp	${_bingsu_note:--}"
   else
     print -r -- "R	$name	reject	-	-"
