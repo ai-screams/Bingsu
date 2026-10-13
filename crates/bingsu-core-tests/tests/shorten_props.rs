@@ -91,3 +91,54 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+
+    // `unique` with siblings: sanitize twins, an entry equal to the step,
+    // 255/256/257 raw entries and names of 4,095/4,096/4,097 cells. The
+    // result validates, and when every step has 257 raw entries (past the
+    // reader's stop) it equals `abbrev 1`.
+    // 이것을 실패시키는 것: 형제 상한(256) 경계를 틀리게 두는 것, 정제 충돌·긴 이름에서 검증을 통과하지 못하는 결과를 내는 것.
+    #[test]
+    fn unique_with_siblings_validates(
+        steps in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..40), 1..5),
+        name_len in prop::sample::select(vec![0usize, 4095, 4096, 4097]),
+        total in prop::sample::select(vec![1usize, 2, 255, 256, 257]),
+    ) {
+        let mut steps = steps;
+        if name_len > 0 {
+            let at = steps.len() - 1;
+            steps.insert(at, vec![b'a'; name_len]);
+        }
+        let raw: Vec<&[u8]> = steps.iter().map(Vec::as_slice).collect();
+        let lists: Vec<Vec<Vec<u8>>> = steps
+            .iter()
+            .map(|me| {
+                let mut v = vec![me.clone()];
+                let mut twin = me.clone();
+                twin.push(0x1b);
+                v.push(twin);
+                let mut i = 0u32;
+                while v.len() < total {
+                    let mut o = me.clone();
+                    o.extend_from_slice(&i.to_le_bytes());
+                    v.push(o);
+                    i += 1;
+                }
+                v.truncate(total.max(1));
+                v
+            })
+            .collect();
+        let refs: Vec<Vec<&[u8]>> = lists.iter().map(|l| l.iter().map(Vec::as_slice).collect()).collect();
+        let sibs: Vec<Option<&[&[u8]]>> = refs.iter().map(|r| Some(r.as_slice())).collect();
+        let f = PathFacts::new(Anchor::Root, &raw, None, &sibs);
+        let req = ShortenRequest { source: Source::Path(&f), budget: u32::MAX, profile: WidthProfile::DEFAULT, method: Method::Unique };
+        let r = run_builtin(&req).unwrap();
+        prop_assert!(validate(&req, &r).is_ok(), "{:?}", r);
+        if total == 257 {
+            let ab = ShortenRequest { method: Method::Abbrev(1), ..req };
+            prop_assert_eq!(r, run_builtin(&ab).unwrap());
+        }
+    }
+}

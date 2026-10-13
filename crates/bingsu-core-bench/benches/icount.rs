@@ -122,6 +122,33 @@ fn shorten_validate(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usiz
     (facts, r)
 }
 
+// Near worst case for `unique`: a 4,096-cell name whose 255 siblings share
+// all but the last grapheme, so each comparison walks the whole name.
+fn unique_path(_: u32) -> PathFacts {
+    let me = "a".repeat(4096);
+    let other = format!("{}b", "a".repeat(4095));
+    let mut sibs: Vec<&[u8]> = vec![me.as_bytes()];
+    sibs.extend((0..255).map(|_| other.as_bytes()));
+    PathFacts::new(
+        Anchor::Home,
+        &[me.as_bytes(), b"last"],
+        None,
+        &[Some(&sibs), None],
+    )
+}
+
+#[library_benchmark]
+#[bench::siblings_256(args = [0], setup = unique_path)]
+fn shorten_unique(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usize, u32)>) {
+    let r = black_box(shorten(
+        Source::Path(black_box(&facts)),
+        &[Method::Unique],
+        4200,
+        WidthProfile::DEFAULT,
+    ));
+    (facts, r)
+}
+
 library_benchmark_group!(
     name = core_m2,
     benchmarks = [
@@ -130,7 +157,8 @@ library_benchmark_group!(
         field_format,
         color_notation,
         palette_resolve,
-        shorten_validate
+        shorten_validate,
+        shorten_unique
     ]
 );
 

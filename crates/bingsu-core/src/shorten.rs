@@ -12,6 +12,13 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Most path steps kept (PATH_MAX 4096 allows about 2048).
 pub const MAX_STEPS: usize = 4096;
 
+/// Most raw entries of a folder `unique` looks at (spec section 4).
+pub const MAX_SIBLINGS: usize = 256;
+
+/// Most sanitized sibling bytes kept for one path, so `unique` does at most
+/// this many grapheme comparisons however many steps and long names come in.
+pub const MAX_SIBLING_BYTES: usize = 1 << 20;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
     Root,
@@ -36,6 +43,14 @@ impl PathFacts {
     /// VALUE_MAX_CELLS each; a name that sanitizing empties becomes U+FFFD
     /// (an empty step would draw `//`); at most MAX_STEPS steps are kept
     /// (the last ones). A `repo_root` past the last step is dropped.
+    ///
+    /// Siblings are taken only for kept steps. A step whose raw sibling list
+    /// has more than MAX_SIBLINGS entries (spec section 4: the reader stops
+    /// at 256 raw entries; more means "too many"), or whose sanitized names
+    /// would push the path past MAX_SIBLING_BYTES in total, gets `None` and
+    /// shortens like `abbrev 1`. The one entry whose raw bytes equal the
+    /// step itself is dropped; any other entry, even one that sanitizes to
+    /// the same text, stays and counts as a collision.
     pub fn new(
         anchor: Anchor,
         steps: &[&[u8]],
@@ -47,14 +62,34 @@ impl PathFacts {
             _ => String::from("\u{FFFD}"),
         };
         let skip = steps.len().saturating_sub(MAX_STEPS);
-        let steps: Vec<String> = steps[skip..].iter().map(|s| name(s)).collect();
+        let raw_steps = &steps[skip..];
         let repo_root = repo_root.and_then(|r| r.checked_sub(skip));
-        let repo_root = repo_root.filter(|&r| r < steps.len());
-        let siblings = siblings
+        let repo_root = repo_root.filter(|&r| r < raw_steps.len());
+        let mut room = MAX_SIBLING_BYTES;
+        let siblings = raw_steps
             .iter()
-            .skip(skip)
-            .map(|o| o.map(|v| v.iter().map(|s| name(s)).collect()))
+            .enumerate()
+            .map(|(i, me)| {
+                let raw = siblings.get(skip + i).copied().flatten()?;
+                if raw.len() > MAX_SIBLINGS {
+                    return None;
+                }
+                let (mut left, mut dropped) = (room, false);
+                let mut out = Vec::with_capacity(raw.len());
+                for o in raw {
+                    if !dropped && o == me {
+                        dropped = true;
+                        continue;
+                    }
+                    let n = name(o);
+                    left = left.checked_sub(n.len())?;
+                    out.push(n);
+                }
+                room = left;
+                Some(out)
+            })
             .collect();
+        let steps: Vec<String> = raw_steps.iter().map(|s| name(s)).collect();
         Self {
             anchor,
             steps,
@@ -159,6 +194,14 @@ fn first_graphemes(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
+/// Number of leading graphemes `a` and `b` share.
+fn common_graphemes(a: &str, b: &str) -> usize {
+    a.graphemes(true)
+        .zip(b.graphemes(true))
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
 fn path_pieces(p: &PathFacts, step: impl Fn(usize, &str) -> (String, bool)) -> Vec<Piece> {
     let mut out = Vec::new();
     match p.anchor {
@@ -205,14 +248,15 @@ pub fn run_builtin(req: &ShortenRequest<'_>) -> Option<ShortenResult> {
             if i == last(p) {
                 return (s.into(), false);
             }
-            let total = s.graphemes(true).count();
+            // One more grapheme than the longest prefix shared with any
+            // sibling tells this folder apart; with a sibling that sanitized
+            // to the same name, the whole name is the answer.
             let k = match p.siblings.get(i).and_then(Option::as_ref) {
-                Some(sib) => (1..=total)
-                    .find(|&k| {
-                        let pre = first_graphemes(s, k);
-                        !sib.iter().any(|o| o != s && o.starts_with(pre))
-                    })
-                    .unwrap_or(total),
+                Some(sib) => sib
+                    .iter()
+                    .map(|o| common_graphemes(s, o))
+                    .max()
+                    .map_or(1, |m| m + 1),
                 None => 1,
             };
             let t = first_graphemes(s, k);
@@ -510,5 +554,87 @@ mod tests {
         let (r, i, w) = shorten(Source::Path(&f), &m, 40, D).unwrap();
         assert_eq!(i, 2);
         assert!(w <= 40 && r.text().ends_with("xxxx"));
+    }
+    fn unique_text(f: &PathFacts) -> String {
+        run_builtin(&ShortenRequest {
+            source: Source::Path(f),
+            budget: u32::MAX,
+            profile: D,
+            method: Method::Unique,
+        })
+        .unwrap()
+        .text()
+    }
+
+    // 이것을 실패시키는 것: 정제 뒤 같아진 형제를 자기 자신으로 빼는 것(구별 접두사가 없는데 `a`를 내는 것).
+    #[test]
+    fn sanitized_twin_is_a_collision() {
+        let sibs: [&[u8]; 2] = [b"abc\x1b", b"abc\x7f"];
+        let f = PathFacts::new(
+            Anchor::Root,
+            &[b"abc\x1b", b"z"],
+            None,
+            &[Some(&sibs), None],
+        );
+        assert_eq!(unique_text(&f), "/abc/z");
+        // Only the entry equal to the step is dropped: without a twin, one grapheme tells it apart.
+        let alone: [&[u8]; 1] = [b"abc\x1b"];
+        let f = PathFacts::new(
+            Anchor::Root,
+            &[b"abc\x1b", b"z"],
+            None,
+            &[Some(&alone), None],
+        );
+        assert_eq!(unique_text(&f), "/a/z");
+    }
+
+    // 이것을 실패시키는 것: 접두사 길이 off-by-one(공통 grapheme 수 + 1이 아닌 값), 형제 없는 단계를 한 글자로 두지 않는 것.
+    #[test]
+    fn unique_needs_one_past_the_common_prefix() {
+        let sibs: [&[u8]; 3] = [b"abcdef", b"abcdxx", b"ab"];
+        let f = PathFacts::new(Anchor::Root, &[b"abcdef", b"z"], None, &[Some(&sibs), None]);
+        assert_eq!(unique_text(&f), "/abcde/z");
+        let f = PathFacts::new(Anchor::Root, &[b"abcdef", b"z"], None, &[Some(&[]), None]);
+        assert_eq!(unique_text(&f), "/a/z");
+    }
+
+    fn crowd(total: usize) -> PathFacts {
+        let mut sibs: Vec<Vec<u8>> = vec![b"abcdef".to_vec(), b"abcdxx".to_vec()];
+        while sibs.len() < total {
+            sibs.push(alloc::format!("q{}", sibs.len()).into_bytes());
+        }
+        let refs: Vec<&[u8]> = sibs.iter().map(Vec::as_slice).collect();
+        PathFacts::new(Anchor::Root, &[b"abcdef", b"z"], None, &[Some(&refs), None])
+    }
+
+    // 이것을 실패시키는 것: 상한을 256이 아닌 값(255 또는 257)으로 두는 것.
+    #[test]
+    fn more_than_256_raw_siblings_fall_back_to_abbrev() {
+        assert_eq!(unique_text(&crowd(255)), "/abcde/z");
+        assert_eq!(unique_text(&crowd(256)), "/abcde/z");
+        assert_eq!(unique_text(&crowd(257)), "/a/z");
+    }
+
+    // 이것을 실패시키는 것: 경로 전체 형제 바이트 상한이 없거나 커지는 것, 보존하지 않은 단계의 형제를 받는 것.
+    #[test]
+    fn sibling_bytes_are_capped_per_path() {
+        let me = "a".repeat(4096);
+        let other = alloc::format!("{}{}", "a".repeat(100), "b".repeat(3996));
+        let mut sibs: Vec<&[u8]> = vec![me.as_bytes()];
+        sibs.extend((0..255).map(|_| other.as_bytes()));
+        let f = PathFacts::new(
+            Anchor::Root,
+            &[me.as_bytes(), me.as_bytes(), b"end"],
+            None,
+            &[Some(&sibs), Some(&sibs), None],
+        );
+        let t = unique_text(&f);
+        let parts: Vec<&str> = t.split('/').collect();
+        // The first step keeps its siblings (101 graphemes); the second is over the path total.
+        assert_eq!((parts[1].len(), parts[2].len()), (101, 1));
+        // Siblings beyond the kept steps are not taken at all.
+        let many: Vec<Option<&[&[u8]]>> = (0..10).map(|_| Some(&sibs[..2])).collect();
+        let g = PathFacts::new(Anchor::Root, &[b"x"], None, &many);
+        assert_eq!(g.siblings.len(), 1);
     }
 }
