@@ -107,9 +107,14 @@ pub fn order_bands(bands: &[Band]) -> Result<Vec<usize>, BandError> {
 }
 
 /// The band used at `width` (the shell's width, before the last column is
-/// left empty), or None for the default layout.
+/// left empty), or None for the default layout. An index in `order` with
+/// no band is passed over, so an order that does not match `bands` (it
+/// comes from `order_bands`, but the arguments are public) never panics.
 pub fn select(order: &[usize], bands: &[Band], width: u16) -> Option<usize> {
-    order.iter().copied().find(|&i| bands[i].contains(width))
+    order
+        .iter()
+        .copied()
+        .find(|&i| bands.get(i).is_some_and(|b| b.contains(width)))
 }
 
 /// The choice for every width, as runs `(from, to, band)`. Widths are a
@@ -246,5 +251,15 @@ mod tests {
         assert_eq!(order_bands(&touch), Err(BandError::NeedsOrder(0, 1)));
         let apart = [b(Some(0), Some(49), None), b(Some(50), Some(100), None)];
         assert!(order_bands(&apart).is_ok());
+    }
+
+    // 리뷰 #5. 이것을 실패시키는 것: `order`의 색인을 `bands[i]`로 읽어 길이가 어긋난 입력에서 패닉하는 것.
+    #[test]
+    fn mismatched_order_never_panics() {
+        let all = [b(None, None, None)];
+        assert_eq!(select(&[1], &[], 80), None);
+        assert_eq!(select(&[5, 0], &all, 80), Some(0));
+        assert_eq!(selection_table(&[3], &[]), alloc::vec![(0, u16::MAX, None)]);
+        assert_eq!(unreachable(&[7], &all), alloc::vec![0]);
     }
 }

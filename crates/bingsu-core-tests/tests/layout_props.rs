@@ -79,8 +79,9 @@ fn bump(c: &Cell<usize>, yes: bool) {
     c.set(c.get() + usize::from(yes));
 }
 
-// 이것을 실패시키는 것: 넘칠 때 7단계 중 어느 단계든 목표 폭을 넘는 줄을 남기는 것, 또는 이어 붙인 글자가
-// 조각별로 잰 폭보다 넓어지는 것(이름이 U+FE0F·ZWJ로 시작할 때). 경계 도달은 끝에서 센다.
+// 이것을 실패시키는 것: 넘칠 때 7단계 중 어느 단계든 목표 폭을 넘는 줄을 남기는 것, 이어 붙인 글자가
+// 조각별로 잰 폭보다 넓어지는 것(이름이 U+FE0F·U+FE0E로 시작할 때), 결합하지 않는 곳에 칸을 더해 오른쪽 끝이
+// 목표 칸에 닿지 않는 것. 경계 도달은 끝에서 센다.
 #[test]
 fn no_line_overflows() {
     let reached = Reached::default();
@@ -168,13 +169,22 @@ fn no_line_overflows() {
                     icons: SETS[set],
                     use_last_column: false,
                 };
-                for l in layout(std::slice::from_ref(&lines), &[], &[], &inputs, &o) {
+                for (n, l) in layout(std::slice::from_ref(&lines), &[], &[], &inputs, &o)
+                    .into_iter()
+                    .enumerate()
+                {
                     let lw = runs_width(&l.left, profile);
                     prop_assert!(
                         lw + runs_width(&l.right, profile) <= target(&o),
                         "w={w} {l:?}"
                     );
                     let s: String = l.left.iter().map(|r| r.text.as_str()).collect();
+                    // An upper line that still shows its right part (the
+                    // time; names have no digits) ends on the target cell:
+                    // no join is counted that the terminal does not draw.
+                    if n == 0 && !l.minimal && s.contains("12:34:56") {
+                        prop_assert_eq!(lw, target(&o), "w={} {:?}", w, s);
+                    }
                     bump(&reached.minimal, l.minimal && w >= 2);
                     bump(&reached.dot, amb == 2 && s.contains('.'));
                     bump(&reached.tight, w >= 2 && lw == target(&o));

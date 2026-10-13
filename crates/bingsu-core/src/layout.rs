@@ -3,14 +3,25 @@
 //! line overflows the steps apply in order and stop as soon as it fits, so a
 //! line never overflows at any width from 0 up.
 //!
-//! Cost: values, path text, fields and glyphs are read and measured once per
-//! line. Each fit check then walks the line's nodes once without growing a
-//! buffer (O(M) for M nodes; an item buffer is replaced at its new exact size
-//! only when shortening adds pieces), and the steps make at most a few checks
-//! per segment, so a line costs O(N·M) for N distinct segments (N is at most
-//! the catalog size). Past setup, a line that fits allocates only its output
-//! runs, at their exact size; overflow steps add the shortened pieces (steps
-//! 1 and 4) and one priority list each (steps 2 and 5).
+//! Widths are those of the joined text, as a terminal reads it (a `#` then
+//! U+FE0F is one 2-cell keycap emoji). Each drawn item is measured once.
+//! Where no border between items may join (`may_join`, decided on the two
+//! code points at the border) the widths add up; a side with a border that
+//! may join is measured on its joined text instead.
+//!
+//! Bounds. A segment's text is read, shortened and measured once per line,
+//! however often the template repeats it. One check walks the line's M
+//! nodes once and makes at most one item per node, into buffers allocated
+//! once per line at the size of each side; the steps make O(N) checks for
+//! N segment references (one per segment and side of the fill, so at most
+//! twice the catalog size). Two caps keep the overflow steps finite for any
+//! input: a shortened text has at most `SEG_PIECES_MAX` pieces (a method
+//! with more is skipped, like an invalid one), and a line with more than
+//! `LINE_BYTES_MAX` bytes of text does not fit, so the steps go on, down to
+//! the minimal prompt if need be. The largest input the limits allow (a
+//! path of `shorten::MAX_STEPS` folders drawn 819 times) peaks near 1 MB,
+//! nearly all of it the shortener's own results (test
+//! `the_largest_input_stays_small`).
 use crate::bands::{Band, select};
 use crate::color::palette::token_index;
 use crate::color::sgr::{Color, DIM, Style};
@@ -52,6 +63,17 @@ const NO_SETUP: SegmentSetup<'static> = SegmentSetup {
     methods: &[],
     when: When::Needed,
 };
+
+/// Most pieces a shortened text may have. A method whose result has more
+/// (`abbrev` or `unique` on a path deeper than 511 steps) is skipped like an
+/// invalid result; step 4 adds at most one piece to a text it cuts.
+pub const SEG_PIECES_MAX: usize = 1024;
+
+/// Most bytes of text one laid line may hold, fill included. A line over it
+/// does not fit, whatever its width, so the overflow steps go on; the
+/// minimal prompt is a few bytes. Two lines and their SGR stay well inside
+/// a record (`record::RECORD_MAX_BYTES`, 64 KiB).
+pub const LINE_BYTES_MAX: usize = 16 * 1024;
 
 /// Per catalog entry (same index as `catalog`). A slice shorter than the
 /// catalog leaves the missing entries without a value, path or setup.
@@ -101,8 +123,7 @@ pub struct LaidLine {
 }
 
 /// Cells of `runs` printed one after another, measured on the joined text
-/// as a terminal reads it: a run that starts with U+FE0F or a ZWJ can widen
-/// the grapheme that the run before it ends with.
+/// as a terminal reads it.
 pub fn runs_width(runs: &[Run], p: WidthProfile) -> u32 {
     match runs {
         [] => 0,
@@ -114,55 +135,129 @@ pub fn runs_width(runs: &[Run], p: WidthProfile) -> u32 {
     }
 }
 
-/// 1 when `s` starts with a grapheme that joins the one before it (it
-/// starts with an extending character) and holds a variation selector
-/// (U+FE0F, U+FE0E) or a ZWJ. Joined, U+FE0F or a ZWJ can turn a 1-cell
-/// base (`#`, a text-style pictograph such as `▶`) into a 2-cell emoji, and
-/// U+FE0E can turn a 1-cell emoji (`emoji = 1`) back into its 2-cell text
-/// form (`⌚`). Counting that one cell keeps the measured width at or above
-/// what the terminal draws, wherever the text ends up next to other text: a
-/// search over every scalar value before these selectors, in all four
-/// profiles, found no join that widens by more (2026-10-13, report E3).
-fn join_risk(s: &str) -> u32 {
-    let Some(g) = s.graphemes(true).next() else {
+/// Byte length of the first grapheme of `s`.
+fn head_len(s: &str) -> usize {
+    s.graphemes(true).next().map_or(0, str::len)
+}
+
+/// Byte offset where the last grapheme of `s` starts.
+fn tail_at(s: &str) -> usize {
+    s.grapheme_indices(true).next_back().map_or(0, |(i, _)| i)
+}
+
+/// `buf` cleared and at least `n` bytes long, allocated anew (never grown)
+/// when it is shorter.
+fn scratch(buf: &mut String, n: usize) {
+    buf.clear();
+    if buf.capacity() < n {
+        *buf = String::with_capacity(n);
+    }
+}
+
+/// Do `x` then `y` make one grapheme on their own?
+fn pair_joins(x: char, y: char) -> bool {
+    let mut buf = [0u8; 8];
+    let n = x.encode_utf8(&mut buf).len();
+    let m = y.encode_utf8(&mut buf[n..]).len();
+    core::str::from_utf8(&buf[..n + m]).is_ok_and(|s| s.graphemes(true).nth(1).is_none())
+}
+
+/// Can a grapheme ending in `a` join one starting with `b`? When false,
+/// any `t` ending in `a` and `h` starting with `b` measure w(t) + w(h).
+/// Below U+0300 no code point joins anything (CR and LF never reach a
+/// line). Otherwise the pair decides, except for two rules that look
+/// further back, an emoji ZWJ sequence (GB11) and an Indic conjunct (GB9c):
+/// both need an `a` that extends any base (a ZWJ, a linker, another mark),
+/// as `A` then `a` tells. A "may" that does not join only costs a
+/// measurement. A search over every code point on either side of the
+/// border found no width change where this says no (report E3, round 1).
+fn may_join(a: char, b: char) -> bool {
+    if u32::from(a) < 0x300 && u32::from(b) < 0x300 {
+        return false;
+    }
+    if pair_joins(a, b) {
+        return true;
+    }
+    pair_joins('A', a)
+}
+
+/// Cells gained (or lost) where `t`, the last grapheme drawn, meets `h`, the
+/// first one after it: w(t + h) − w(t) − w(h); zero when they stay two
+/// graphemes.
+fn join_delta(t: &str, h: &str, buf: &mut String, p: WidthProfile) -> i64 {
+    let (Some(a), Some(b)) = (t.chars().next_back(), h.chars().next()) else {
         return 0;
     };
-    let Some(c) = g.chars().next() else {
-        return 0;
-    };
-    if !g.contains(['\u{FE0F}', '\u{FE0E}', '\u{200D}']) {
+    if !may_join(a, b) {
         return 0;
     }
-    // `A` then `c` is one grapheme exactly when `c` extends any base.
-    let mut buf = [0u8; 5];
-    buf[0] = b'A';
-    let n = c.encode_utf8(&mut buf[1..]).len();
-    let joins =
-        core::str::from_utf8(&buf[..=n]).is_ok_and(|ab| ab.graphemes(true).nth(1).is_none());
-    u32::from(joins)
+    measure_join(t, h, buf, p)
 }
 
-/// Width of a piece of text in the measure: its cells plus the join risk.
-fn measured(s: &str, p: WidthProfile) -> u32 {
-    str_width(s, p).saturating_add(join_risk(s))
+fn measure_join(t: &str, h: &str, buf: &mut String, p: WidthProfile) -> i64 {
+    scratch(buf, t.len() + h.len());
+    buf.push_str(t);
+    buf.push_str(h);
+    let (wj, wt, wh) = (str_width(buf, p), str_width(t, p), str_width(h, p));
+    i64::from(wj) - i64::from(wt) - i64::from(wh)
 }
 
-/// Sum that stops at `u32::MAX`: a template can repeat a 16-million-cell
-/// path many times, and a wrapped sum would pass the fit check.
-fn total(widths: impl Iterator<Item = u32>) -> u32 {
-    widths.fold(0, u32::saturating_add)
+/// `may_join` for the few code point pairs a line repeats at its borders
+/// (a separator glyph and a padding space), remembered per line.
+struct PairMemo([(char, char, bool); 32]);
+
+impl PairMemo {
+    fn may_join(&mut self, a: char, b: char) -> bool {
+        // Multiplicative hashing: a pair and its reverse (space then glyph,
+        // glyph then space) land in different slots.
+        let h = (u32::from(a).wrapping_mul(0x9E37_79B9) ^ u32::from(b)).wrapping_mul(0x85EB_CA6B);
+        let slot = &mut self.0[(h >> 27) as usize];
+        if slot.0 != a || slot.1 != b {
+            *slot = (a, b, may_join(a, b));
+        }
+        slot.2
+    }
 }
 
-/// A segment role's token; a name that is not a token (a declaration from
-/// outside) gets the default color rather than an arbitrary token.
-fn role_tok(name: &str) -> Option<u16> {
-    token_index(name).and_then(|i| u16::try_from(i).ok())
+/// Adds a signed join delta to a width (never below 0).
+fn add(w: u32, d: i64) -> u32 {
+    u32::try_from((i64::from(w) + d).max(0)).unwrap_or(u32::MAX)
+}
+
+/// A segment's text measured alone and padded for a block.
+#[derive(Clone, Copy, Default)]
+struct TextM {
+    width: u32,
+    /// Width of `" " + text + " "`.
+    padded: u32,
+    /// First grapheme's length and last grapheme's start.
+    head: usize,
+    tail: usize,
+}
+
+fn text_m(t: &str, buf: &mut String, p: WidthProfile) -> TextM {
+    let width = str_width(t, p);
+    let (head, tail) = (head_len(t), tail_at(t));
+    let dh = join_delta(" ", &t[..head], buf, p);
+    let dt = join_delta(&t[tail..], " ", buf, p);
+    TextM {
+        width,
+        padded: add(width.saturating_add(2), dh + dt),
+        head,
+        tail,
+    }
 }
 
 fn tok(name: &str) -> u16 {
     token_index(name)
         .and_then(|i| u16::try_from(i).ok())
         .unwrap_or(0)
+}
+
+/// A segment role's token; a name that is not a token (a declaration from
+/// outside) gets the default color rather than an arbitrary token.
+fn role_tok(name: &str) -> Option<u16> {
+    token_index(name).and_then(|i| u16::try_from(i).ok())
 }
 
 fn icon_glyph(name: &str, o: &Options) -> icons::Resolved {
@@ -200,39 +295,29 @@ enum Kind {
 enum Src {
     /// A template `Text` node, by node index.
     Text(usize),
-    /// A field, as a byte range of `Lay::fields`.
-    Field(usize, usize),
+    /// A field node, by node index (its text is in `Lay::fields`).
+    Field(usize),
     /// An icon or a separator glyph.
     Glyph(&'static str),
-    /// A segment's text before any shortening.
-    Base(usize),
-    /// Piece `.1` of segment `.0`'s shortened text.
-    Cut(usize, usize),
+    /// Segment `.0`'s current text, padded for a block when `.1`.
+    Seg(usize, bool),
 }
 
-/// One drawn thing in a line side. Separators keep their place until
-/// cleanup decides on them; content is never dropped by cleanup.
+/// One drawn thing in a line side: one per template node at most. Content
+/// with no text is never made, so it never counts as content.
 #[derive(Clone, Copy)]
 struct Item {
     kind: Kind,
     /// Head and separator: a block follows before the next head or tail.
     ok: bool,
-    /// Block padding: one space before and after the segment's text.
-    pad_l: bool,
-    pad_r: bool,
-    /// Measured cells, padding included.
+    /// Cells of its text alone.
     width: u32,
+    bytes: u32,
     /// Background of the block this content draws on (`Color::Default`
     /// for a role that names no token).
     block: Option<Color>,
     style: Style,
     src: Src,
-}
-
-/// A shortened piece and its measured width.
-struct Cut {
-    piece: Piece,
-    width: u32,
 }
 
 /// A segment's text before shortening.
@@ -245,31 +330,42 @@ enum Base {
     Glyph(&'static str),
 }
 
+/// A shortened text: the pieces joined, and where each ends.
+struct Short {
+    text: String,
+    /// End byte of each piece and whether it was shortened (drawn dim).
+    ends: Vec<(usize, bool)>,
+}
+
 /// Per catalog entry, for one line.
 struct Slot {
     /// Has a value (and an index within `Inputs::values`).
     present: bool,
-    hidden: bool,
-    /// Appears in this line as a segment.
+    /// Hidden on the left side, on the right side.
+    hidden: [bool; 2],
+    /// Appears in this line as a segment (not only as fields).
     in_line: bool,
     /// Step 4 cannot cut it further.
     exhausted: bool,
     base: Base,
-    base_w: u32,
-    short: Option<Vec<Cut>>,
+    short: Option<Short>,
+    m: TextM,
     /// Color token of its text (plain) or background (block); None for a
     /// role that names no token, drawn in the default color.
     role: Option<u16>,
-    /// Segment nodes for it in this line, for the item capacity.
-    nodes: u32,
+    /// Its step entry on each side, if it is referenced there.
+    entry: [Option<usize>; 2],
 }
 
-/// A segment of this line in order of first appearance.
+/// A segment referenced on one side of the fill (by a segment or a field
+/// node), at its first reference there. A segment on both sides has two.
 #[derive(Clone, Copy)]
-struct Seg {
+struct Entry {
     seg: usize,
     right: bool,
     pos: u32,
+    /// A segment node (not only fields) on this side: steps 1 and 4 apply.
+    text: bool,
 }
 
 /// Measured facts of a template node, read once per line.
@@ -283,6 +379,9 @@ struct Info {
     filled: bool,
     /// Icon glyph.
     glyph: &'static str,
+    /// Text or field: first grapheme's length, last grapheme's start.
+    head: usize,
+    tail: usize,
 }
 
 /// Separator glyphs and widths: `[shape][pointing right]`.
@@ -297,14 +396,28 @@ fn shape_ix(s: Shape) -> usize {
     }
 }
 
-/// Reused buffers of the fit checks. Each is allocated at a size that the
-/// walk cannot exceed, so no check grows a buffer.
+/// Buffers of the fit checks, allocated once per line at the most a walk
+/// can need: one item per node of each side.
 struct Bufs {
     left: Vec<Item>,
     right: Vec<Item>,
     /// `refs[k]`: visible segment and field references in `nodes[..k]`.
     refs: Vec<u32>,
     styles: Vec<Style>,
+    /// Joined edge graphemes being measured.
+    join: String,
+    pairs: PairMemo,
+}
+
+/// A check's result.
+#[derive(Clone, Copy, Default)]
+struct Fit {
+    /// Cells of the left and right side, each joined within itself.
+    l: u32,
+    r: u32,
+    /// Cells of the whole line (upper lines: left and right touching).
+    cells: u32,
+    bytes: usize,
 }
 
 /// One line being laid out.
@@ -312,76 +425,92 @@ struct Lay<'l, 'i> {
     nodes: &'l [Node],
     inp: &'l Inputs<'i>,
     o: &'l Options,
+    upper: bool,
+    target: u32,
+    /// Index of the fill node.
+    fill: Option<usize>,
     info: Vec<Info>,
     fields: String,
     slots: Vec<Slot>,
-    segs: Vec<Seg>,
+    entries: Vec<Entry>,
     seps: SepTable,
     block_text: u16,
     char_seg: Option<usize>,
-    /// Step 6: no blocks, separators, heads or tails.
+    /// Step 6: no backgrounds, separators, heads or tails.
     plain: bool,
 }
 
 impl<'l, 'i> Lay<'l, 'i> {
-    fn new(line: &'l CompiledLine, inp: &'l Inputs<'i>, o: &'l Options) -> Self {
+    fn new(
+        line: &'l CompiledLine,
+        upper: bool,
+        inp: &'l Inputs<'i>,
+        o: &'l Options,
+        join: &mut String,
+    ) -> Self {
         let p = o.profile;
         let nodes = line.nodes();
+        let fill = line.fill();
         let cat = inp.catalog;
         let char_seg = cat.iter().position(|d| d.id == "char");
         let mut slots: Vec<Slot> = Vec::with_capacity(cat.len());
         for (i, d) in cat.iter().enumerate() {
             slots.push(Slot {
                 present: matches!(inp.values.get(i), Some(Some(_))),
-                hidden: false,
+                hidden: [false; 2],
                 in_line: false,
                 exhausted: false,
                 base: Base::Glyph(""),
-                base_w: 0,
                 short: None,
+                m: TextM::default(),
                 role: role_tok(d.role),
-                nodes: 0,
+                entry: [None; 2],
             });
         }
-        // Segment order, and the exact size of the field text.
-        let mut segs: Vec<Seg> = Vec::with_capacity(cat.len());
+        // Step entries, and the exact size of the field text.
+        let mut entries: Vec<Entry> = Vec::with_capacity(nodes.len().min(2 * cat.len()));
         let mut field_bytes = 0usize;
-        let mut right = false;
         for (k, n) in nodes.iter().enumerate() {
-            match *n {
-                Node::Fill(_) => right = true,
-                Node::Segment { seg, .. } => {
-                    let s = usize::from(seg);
-                    if let Some(slot) = slots.get_mut(s) {
-                        slot.nodes += 1;
-                        if !slot.in_line {
-                            slot.in_line = true;
-                            segs.push(Seg {
-                                seg: s,
-                                right,
-                                pos: u32::try_from(k).unwrap_or(u32::MAX),
-                            });
-                        }
-                    }
-                }
+            let right = fill.is_some_and(|f| k > f);
+            let (seg, text) = match *n {
+                Node::Segment { seg, .. } => (usize::from(seg), true),
                 Node::Field { seg, field } => {
                     // Every drawn form is at most 24 bytes but text.
                     field_bytes += match field_of(inp, usize::from(seg), usize::from(field)) {
                         Some(FieldValue::Text(t)) => t.as_str().len(),
                         _ => 24,
                     };
+                    (usize::from(seg), false)
                 }
-                _ => {}
+                _ => continue,
+            };
+            let Some(slot) = slots.get_mut(seg) else {
+                continue;
+            };
+            slot.in_line |= text;
+            let side = usize::from(right);
+            match slot.entry[side] {
+                Some(e) => entries[e].text |= text,
+                None => {
+                    slot.entry[side] = Some(entries.len());
+                    entries.push(Entry {
+                        seg,
+                        right,
+                        pos: u32::try_from(k).unwrap_or(u32::MAX),
+                        text,
+                    });
+                }
             }
         }
-        // Base text of each segment in the line.
-        for g in &segs {
-            let s = g.seg;
+        // Base text of each segment drawn in the line, measured once.
+        for (s, slot) in slots.iter_mut().enumerate() {
             let Some(Some(v)) = inp.values.get(s) else {
                 continue;
             };
+            if !slot.in_line {
+                continue;
+            }
             let decl = &cat[s];
-            let slot = &mut slots[s];
             if Some(s) == char_seg {
                 let failed = bool_field(decl, v, "failed");
                 let name = if bool_field(decl, v, "vicmd") {
@@ -402,7 +531,7 @@ impl<'l, 'i> Lay<'l, 'i> {
             } else {
                 slot.base = Base::Value;
             }
-            slot.base_w = measured(base_text(slot, v), p);
+            slot.m = text_m(base_text(slot, v), join, p);
         }
         // Node widths and field text, once.
         let mut fields = String::with_capacity(field_bytes);
@@ -410,14 +539,17 @@ impl<'l, 'i> Lay<'l, 'i> {
         for n in nodes {
             let mut x = Info::default();
             match *n {
-                Node::Text(ref t) => x.width = measured(t, p),
+                Node::Text(ref t) => {
+                    x.width = str_width(t, p);
+                    (x.head, x.tail) = (head_len(t), tail_at(t));
+                }
                 Node::Icon(i) => {
                     // `compile` stores only indices into ICONS.
                     let r = icons::ICONS
                         .get(usize::from(i))
                         .map(|ic| icons::resolve(ic, o.icons, p));
                     x.glyph = r.map_or("", |r| r.text);
-                    x.width = measured(x.glyph, p);
+                    x.width = str_width(x.glyph, p);
                 }
                 Node::Field { seg, field } => {
                     if let Some(f) = inp
@@ -430,7 +562,9 @@ impl<'l, 'i> Lay<'l, 'i> {
                         f.write_to(&mut fields);
                         x.b = fields.len();
                         x.filled = !f.is_empty_for_group();
-                        x.width = measured(&fields[x.a..x.b], p);
+                        let t = &fields[x.a..x.b];
+                        x.width = str_width(t, p);
+                        (x.head, x.tail) = (head_len(t), tail_at(t));
                     }
                 }
                 _ => {}
@@ -448,10 +582,13 @@ impl<'l, 'i> Lay<'l, 'i> {
             nodes,
             inp,
             o,
+            upper,
+            target: target(o),
+            fill,
             info,
             fields,
             slots,
-            segs,
+            entries,
             seps,
             block_text: tok("block.text"),
             char_seg,
@@ -459,12 +596,27 @@ impl<'l, 'i> Lay<'l, 'i> {
         }
     }
 
+    fn new_bufs(&self, join: String) -> Bufs {
+        let left = self.fill.unwrap_or(self.nodes.len());
+        Bufs {
+            left: Vec::with_capacity(left),
+            right: Vec::with_capacity(self.nodes.len() - left),
+            refs: Vec::with_capacity(self.nodes.len() + 1),
+            styles: Vec::with_capacity(MAX_DEPTH + 1),
+            join,
+            // NUL never reaches a line, so the empty slots never match.
+            pairs: PairMemo([('\0', '\0', false); 32]),
+        }
+    }
+
     fn setup(&self, s: usize) -> SegmentSetup<'i> {
         self.inp.setup.get(s).copied().unwrap_or(NO_SETUP)
     }
 
-    fn visible(&self, s: usize) -> bool {
-        self.slots.get(s).is_some_and(|x| x.present && !x.hidden)
+    fn visible(&self, s: usize, right: bool) -> bool {
+        self.slots
+            .get(s)
+            .is_some_and(|x| x.present && !x.hidden[usize::from(right)])
     }
 
     fn value(&self, s: usize) -> Option<&'i Value> {
@@ -478,12 +630,11 @@ impl<'l, 'i> Lay<'l, 'i> {
         }
     }
 
-    /// Measured width of segment `s`'s text (padding excluded).
-    fn seg_width(&self, s: usize) -> u32 {
-        let slot = &self.slots[s];
-        match &slot.short {
-            Some(c) => total(c.iter().map(|c| c.width)),
-            None => slot.base_w,
+    /// Segment `s`'s current text (shortened or not).
+    fn seg_text(&self, s: usize) -> &str {
+        match &self.slots[s].short {
+            Some(sh) => &sh.text,
+            None => self.base_str(s),
         }
     }
 
@@ -494,40 +645,54 @@ impl<'l, 'i> Lay<'l, 'i> {
         }
     }
 
-    fn set_short(&mut self, s: usize, pieces: Vec<Piece>) {
-        let p = self.o.profile;
-        let cuts: Vec<Cut> = pieces
-            .into_iter()
-            .map(|piece| {
-                let width = measured(&piece.text, p);
-                Cut { piece, width }
-            })
-            .collect();
-        self.slots[s].short = Some(cuts);
-    }
-
-    /// Most items one walk can make: one per node, plus one per extra
-    /// shortened piece of every segment node.
-    fn item_bound(&self) -> usize {
-        let extra: usize = self
-            .slots
-            .iter()
-            .filter_map(|x| {
-                x.short
-                    .as_ref()
-                    .map(|c| c.len().saturating_sub(1) * x.nodes as usize)
-            })
-            .sum();
-        self.nodes.len() + extra
-    }
-
-    fn new_bufs(&self) -> Bufs {
-        Bufs {
-            left: Vec::new(),
-            right: Vec::new(),
-            refs: Vec::with_capacity(self.nodes.len() + 1),
-            styles: Vec::with_capacity(MAX_DEPTH + 1),
+    /// The methods' first result that fits `budget`, else the narrowest, as
+    /// `shorten` picks; results over `SEG_PIECES_MAX` pieces are skipped.
+    fn shorten_capped(&self, s: usize, methods: &[Method], budget: u32) -> Option<Vec<Piece>> {
+        let mut best: Option<(Vec<Piece>, u32)> = None;
+        for m in methods {
+            let Some((r, _, w)) = shorten(
+                self.source(s),
+                core::slice::from_ref(m),
+                budget,
+                self.o.profile,
+            ) else {
+                continue;
+            };
+            if r.pieces.len() > SEG_PIECES_MAX {
+                continue;
+            }
+            if w <= budget {
+                return Some(r.pieces);
+            }
+            if best.as_ref().is_none_or(|b| w < b.1) {
+                best = Some((r.pieces, w));
+            }
         }
+        best.map(|b| b.0)
+    }
+
+    /// Segment `s`'s current text as pieces (one, unshortened, before any
+    /// shortening).
+    fn pieces(&self, s: usize) -> Vec<(&str, bool)> {
+        match &self.slots[s].short {
+            Some(sh) => {
+                let mut start = 0;
+                sh.ends
+                    .iter()
+                    .map(|&(end, d)| {
+                        let piece = (&sh.text[start..end], d);
+                        start = end;
+                        piece
+                    })
+                    .collect()
+            }
+            None => alloc::vec![(self.base_str(s), false)],
+        }
+    }
+
+    fn put_short(&mut self, s: usize, short: Short, join: &mut String) {
+        self.slots[s].m = text_m(&short.text, join, self.o.profile);
+        self.slots[s].short = Some(short);
     }
 
     /// Items of both sides for the current state, cleaned up.
@@ -537,21 +702,20 @@ impl<'l, 'i> Lay<'l, 'i> {
             right,
             refs,
             styles,
+            ..
         } = b;
-        let bound = self.item_bound();
-        for side in [&mut *left, &mut *right] {
-            side.clear();
-            if side.capacity() < bound {
-                *side = Vec::with_capacity(bound);
-            }
-        }
+        left.clear();
+        right.clear();
         refs.clear();
         let mut acc = 0u32;
         refs.push(0);
         for (k, n) in self.nodes.iter().enumerate() {
+            let on_right = self.fill.is_some_and(|f| k > f);
             acc += u32::from(match *n {
-                Node::Segment { seg, .. } => self.visible(usize::from(seg)),
-                Node::Field { seg, .. } => self.visible(usize::from(seg)) && self.info[k].filled,
+                Node::Segment { seg, .. } => self.visible(usize::from(seg), on_right),
+                Node::Field { seg, .. } => {
+                    self.visible(usize::from(seg), on_right) && self.info[k].filled
+                }
                 _ => false,
             });
             refs.push(acc);
@@ -560,14 +724,14 @@ impl<'l, 'i> Lay<'l, 'i> {
         let mut on_right = false;
         let mut k = 0;
         while k < self.nodes.len() {
+            // Pushes stay within capacity: one item per node of this side.
             let side: &mut Vec<Item> = if on_right { &mut *right } else { &mut *left };
             let plain_style = self.unblock(with(styles, Style::default()));
-            let content = |width, src| Item {
+            let content = |width, bytes: usize, src| Item {
                 kind: Kind::Content,
                 ok: false,
-                pad_l: false,
-                pad_r: false,
                 width,
+                bytes: u32::try_from(bytes).unwrap_or(u32::MAX),
                 block: None,
                 style: plain_style,
                 src,
@@ -594,19 +758,22 @@ impl<'l, 'i> Lay<'l, 'i> {
                 Node::StyleEnd => {
                     styles.pop();
                 }
-                Node::Text(_) => side.push(content(self.info[k].width, Src::Text(k))),
+                Node::Text(t) => side.push(content(self.info[k].width, t.len(), Src::Text(k))),
                 Node::Icon(_) => {
-                    side.push(content(self.info[k].width, Src::Glyph(self.info[k].glyph)))
+                    let g = self.info[k].glyph;
+                    if !g.is_empty() {
+                        side.push(content(self.info[k].width, g.len(), Src::Glyph(g)));
+                    }
                 }
                 Node::Field { seg, .. } => {
-                    if self.visible(usize::from(*seg)) {
-                        let x = self.info[k];
-                        side.push(content(x.width, Src::Field(x.a, x.b)));
+                    let x = self.info[k];
+                    if self.visible(usize::from(*seg), on_right) && x.b > x.a {
+                        side.push(content(x.width, x.b - x.a, Src::Field(k)));
                     }
                 }
                 Node::Segment { seg, mode } => {
                     let s = usize::from(*seg);
-                    if self.visible(s) {
+                    if self.visible(s, on_right) {
                         self.push_segment(side, styles, s, *mode == Mode::Block && !self.plain);
                     }
                 }
@@ -627,8 +794,7 @@ impl<'l, 'i> Lay<'l, 'i> {
                         let (glyph, width) = self.seps[shape_ix(*shape)][usize::from(to_right)];
                         side.push(Item {
                             kind: Kind::Sep(kind, *shape),
-                            width,
-                            ..content(width, Src::Glyph(glyph))
+                            ..content(width, glyph.len(), Src::Glyph(glyph))
                         });
                     }
                 }
@@ -664,41 +830,19 @@ impl<'l, 'i> Lay<'l, 'i> {
                 attrs: 0,
             }
         };
-        let style = self.unblock(with(styles, base));
-        let pad = u32::from(block);
-        let item = |width: u32, style, src, first: bool, last: bool| Item {
+        let bytes = self.seg_text(s).len() + 2 * usize::from(block);
+        if bytes == 0 {
+            return;
+        }
+        side.push(Item {
             kind: Kind::Content,
             ok: false,
-            pad_l: block && first,
-            pad_r: block && last,
-            width: width.saturating_add(if first { pad } else { 0 } + if last { pad } else { 0 }),
+            width: if block { slot.m.padded } else { slot.m.width },
+            bytes: u32::try_from(bytes).unwrap_or(u32::MAX),
             block: block.then(|| slot.role.map_or(Color::Default, Color::Block)),
-            style,
-            src,
-        };
-        match &slot.short {
-            None => side.push(item(slot.base_w, style, Src::Base(s), true, true)),
-            Some(cuts) => {
-                let n = cuts.len();
-                for (j, c) in cuts.iter().enumerate() {
-                    let st = if c.piece.shortened {
-                        Style {
-                            attrs: style.attrs | DIM,
-                            ..style
-                        }
-                    } else {
-                        style
-                    };
-                    side.push(item(c.width, st, Src::Cut(s, j), j == 0, j + 1 == n));
-                }
-            }
-        }
-    }
-
-    /// Measured width of the line in its current state.
-    fn measure(&self, b: &mut Bufs) -> u32 {
-        self.walk(b);
-        total(b.left.iter().chain(&b.right).map(|x| x.width))
+            style: self.unblock(with(styles, base)),
+            src: Src::Seg(s, block),
+        });
     }
 
     fn text(&self, it: &Item) -> &str {
@@ -707,66 +851,232 @@ impl<'l, 'i> Lay<'l, 'i> {
                 Node::Text(t) => t,
                 _ => "",
             },
-            Src::Field(a, b) => &self.fields[a..b],
+            Src::Field(k) => &self.fields[self.info[k].a..self.info[k].b],
             Src::Glyph(g) => g,
-            Src::Base(s) => self.base_str(s),
-            Src::Cut(s, j) => self.slots[s]
-                .short
-                .as_ref()
-                .map_or("", |c| c[j].piece.text.as_str()),
+            Src::Seg(s, _) => self.seg_text(s),
         }
     }
 
-    /// Bytes of an item's text, padding included.
-    fn bytes(&self, it: &Item) -> usize {
-        self.text(it).len() + usize::from(it.pad_l) + usize::from(it.pad_r)
+    /// First and last grapheme of an item's drawn text. A block's edges are
+    /// its padding spaces: a grapheme the space joins with only extends it
+    /// (a mark after it, a prepended letter before it), which changes no
+    /// width at the item's border beyond what `TextM::padded` counts.
+    fn edges(&self, it: &Item) -> (&str, &str) {
+        let t = self.text(it);
+        let (head, tail) = match it.src {
+            Src::Text(k) | Src::Field(k) => (self.info[k].head, self.info[k].tail),
+            Src::Glyph(g) => (head_len(g), tail_at(g)),
+            Src::Seg(_, true) => return (" ", " "),
+            Src::Seg(s, false) => (self.slots[s].m.head, self.slots[s].m.tail),
+        };
+        (&t[..head], &t[tail..])
     }
 
-    /// Writes the runs of cleaned items `items` to `out`, merging neighbors
-    /// of one style; empty items are skipped (`run_count` counts the same).
-    fn write_runs(&self, items: &[Item], right_side: bool, out: &mut Sink<'_>) {
-        let mut i = 0;
-        while i < items.len() {
-            let style = item_style(items, i, right_side);
-            if self.bytes(&items[i]) == 0 {
-                i += 1;
-                continue;
-            }
-            // One run: this item and the following ones of the same style.
-            let mut end = i + 1;
-            let mut len = self.bytes(&items[i]);
-            while end < items.len()
-                && (self.bytes(&items[end]) == 0 || item_style(items, end, right_side) == style)
-            {
-                len += self.bytes(&items[end]);
-                end += 1;
-            }
-            let text = out.start(style, len);
-            for it in &items[i..end] {
-                if it.pad_l {
-                    text.push(' ');
-                }
-                text.push_str(self.text(it));
-                if it.pad_r {
-                    text.push(' ');
-                }
-            }
-            i = end;
-        }
-    }
-
-    fn run_count(&self, items: &[Item], right_side: bool) -> usize {
-        let mut n = 0;
-        let mut last: Option<Style> = None;
+    /// Sum of the items' widths, and whether any border between them may
+    /// join (then the sum is not their drawn width).
+    fn sum_and_joins(&self, items: &[Item], pairs: &mut PairMemo) -> (u32, bool) {
+        let mut w = 0u32;
+        let mut joins = false;
         for (i, it) in items.iter().enumerate() {
-            if self.bytes(it) == 0 {
+            w = w.saturating_add(it.width);
+            if let Some(prev) = i.checked_sub(1).map(|j| &items[j]) {
+                joins |= self.may_join_at(prev, it, pairs);
+            }
+        }
+        (w, joins)
+    }
+
+    fn may_join_at(&self, a: &Item, c: &Item, pairs: &mut PairMemo) -> bool {
+        match (self.last_char(a), self.first_char(c)) {
+            (Some(x), Some(y)) => pairs.may_join(x, y),
+            _ => false,
+        }
+    }
+
+    /// Drawn width of items in a row, measured on their joined text.
+    fn joined_width<'a>(
+        &self,
+        items: impl Iterator<Item = &'a Item> + Clone,
+        join: &mut String,
+    ) -> u32 {
+        scratch(join, items.clone().map(|x| x.bytes as usize).sum());
+        for it in items {
+            let pad = if matches!(it.src, Src::Seg(_, true)) {
+                " "
+            } else {
+                ""
+            };
+            join.push_str(pad);
+            join.push_str(self.text(it));
+            join.push_str(pad);
+        }
+        str_width(join, self.o.profile)
+    }
+
+    fn first_char(&self, it: &Item) -> Option<char> {
+        match it.src {
+            Src::Seg(_, true) => Some(' '),
+            _ => self.text(it).chars().next(),
+        }
+    }
+
+    fn last_char(&self, it: &Item) -> Option<char> {
+        match it.src {
+            Src::Seg(_, true) => Some(' '),
+            _ => self.text(it).chars().next_back(),
+        }
+    }
+
+    /// Walks the current state and measures it.
+    fn check(&self, b: &mut Bufs) -> Fit {
+        self.walk(b);
+        let bytes: usize = b
+            .left
+            .iter()
+            .chain(&b.right)
+            .map(|x| x.bytes as usize)
+            .sum();
+        if bytes > LINE_BYTES_MAX {
+            // Does not fit whatever the width. The cells are summed without
+            // measuring joins over the oversized text, so step 4 sees the
+            // cell overflow (often none) rather than a made-up one.
+            let cells = b
+                .left
+                .iter()
+                .chain(&b.right)
+                .fold(0u32, |w, x| w.saturating_add(x.width));
+            return Fit {
+                l: 0,
+                r: 0,
+                cells,
+                bytes,
+            };
+        }
+        // Where no border may join, the widths add up; where one may, the
+        // side (or, on an upper line whose sides touch there, the whole
+        // line) is measured on its joined text, at most LINE_BYTES_MAX.
+        let (wl, jl) = self.sum_and_joins(&b.left, &mut b.pairs);
+        let (wr, jr) = self.sum_and_joins(&b.right, &mut b.pairs);
+        let l = if jl {
+            self.joined_width(b.left.iter(), &mut b.join)
+        } else {
+            wl
+        };
+        let r = if jr {
+            self.joined_width(b.right.iter(), &mut b.join)
+        } else {
+            wr
+        };
+        let touch = match (self.upper, b.left.last(), b.right.first()) {
+            (true, Some(a), Some(c)) => self.may_join_at(a, c, &mut b.pairs),
+            _ => false,
+        };
+        let cells = if touch {
+            self.joined_width(b.left.iter().chain(&b.right), &mut b.join)
+        } else {
+            l.saturating_add(r)
+        };
+        Fit { l, r, cells, bytes }
+    }
+
+    fn fits(&self, f: &Fit) -> bool {
+        f.cells <= self.target && f.bytes <= LINE_BYTES_MAX
+    }
+
+    /// Number of pieces item `it` is drawn in.
+    fn parts(&self, it: &Item) -> usize {
+        match it.src {
+            Src::Seg(s, _) => self.slots[s].short.as_ref().map_or(1, |sh| sh.ends.len()),
+            _ => 1,
+        }
+    }
+
+    /// Piece `j` of item `items[i]`: style and text as (before, text, after).
+    fn part(&self, items: &[Item], i: usize, j: usize, right_side: bool) -> (Style, [&str; 3]) {
+        let it = &items[i];
+        match it.src {
+            Src::Seg(s, padded) => {
+                let t = self.seg_text(s);
+                let (start, end, sh) = match &self.slots[s].short {
+                    Some(short) => {
+                        let start = j.checked_sub(1).map_or(0, |p| short.ends[p].0);
+                        (start, short.ends[j].0, short.ends[j].1)
+                    }
+                    None => (0, t.len(), false),
+                };
+                let last = j + 1 == self.parts(it);
+                let style = if sh {
+                    Style {
+                        attrs: it.style.attrs | DIM,
+                        ..it.style
+                    }
+                } else {
+                    it.style
+                };
+                let pad = |on| if padded && on { " " } else { "" };
+                (style, [pad(j == 0), &t[start..end], pad(last)])
+            }
+            _ => (item_style(items, i, right_side), ["", self.text(it), ""]),
+        }
+    }
+
+    /// The first non-empty piece at or after piece `j` of item `i`.
+    fn next_part(
+        &self,
+        items: &[Item],
+        mut i: usize,
+        mut j: usize,
+        right_side: bool,
+    ) -> Option<(usize, usize)> {
+        while i < items.len() {
+            if j >= self.parts(&items[i]) {
+                (i, j) = (i + 1, 0);
                 continue;
             }
-            let style = item_style(items, i, right_side);
-            if last != Some(style) {
-                n += 1;
-                last = Some(style);
+            if self
+                .part(items, i, j, right_side)
+                .1
+                .iter()
+                .any(|x| !x.is_empty())
+            {
+                return Some((i, j));
             }
+            j += 1;
+        }
+        None
+    }
+
+    /// Writes the runs of cleaned items to `out` (or only counts them when
+    /// `out` is None): neighbors of one style merge, and each run's String
+    /// is opened at its exact size. Returns the run count.
+    fn runs(&self, items: &[Item], right_side: bool, mut out: Option<&mut Sink<'_>>) -> usize {
+        let mut n = 0;
+        let mut at = self.next_part(items, 0, 0, right_side);
+        while let Some((i, j)) = at {
+            let style = self.part(items, i, j, right_side).0;
+            // The run ends at the first piece of another style.
+            let (mut len, mut end) = (0usize, Some((i, j)));
+            while let Some((a, c)) = end {
+                let (st, t) = self.part(items, a, c, right_side);
+                if st != style {
+                    break;
+                }
+                len += t.iter().map(|x| x.len()).sum::<usize>();
+                end = self.next_part(items, a, c + 1, right_side);
+            }
+            if let Some(sink) = out.as_deref_mut() {
+                let text = sink.start(style, len);
+                let mut q = Some((i, j));
+                while q != end {
+                    let Some((a, c)) = q else { break };
+                    for x in self.part(items, a, c, right_side).1 {
+                        text.push_str(x);
+                    }
+                    q = self.next_part(items, a, c + 1, right_side);
+                }
+            }
+            n += 1;
+            at = end;
         }
         n
     }
@@ -807,8 +1117,8 @@ fn with(spec_stack: &[Style], mut s: Style) -> Style {
 /// needs a block before it since the last head or tail (rulings A and B,
 /// 2026-10-13), a separator with no content before it goes, a separator
 /// right after a head goes, and separators with no content between them
-/// become one (the first stays). Linear: one pass from the end marks
-/// heads and separators, one pass from the start compacts.
+/// become one (the first stays). Linear: one pass from the end marks heads
+/// and separators, one pass from the start compacts.
 fn clean(items: &mut Vec<Item>) {
     let mut block_ahead = false;
     for it in items.iter_mut().rev() {
@@ -848,14 +1158,11 @@ fn clean(items: &mut Vec<Item>) {
                 {
                     false
                 } else {
-                    match w.checked_sub(1).map(|l| items[l].kind) {
-                        Some(Kind::Sep(SepKind::Head, _)) => false,
-                        // A separator right after a separator or a tail goes. A tail never
-                        // gets here: a kept separator has a block before the next tail, and a
-                        // tail resets the block seen (rulings A and B).
-                        Some(Kind::Sep(..)) => false,
-                        _ => true,
-                    }
+                    // A separator right after a head, a separator or a tail
+                    // goes. A tail never follows a kept separator or tail: a
+                    // kept separator has a block before the next tail, and a
+                    // tail resets the block seen (rulings A and B).
+                    !matches!(w.checked_sub(1).map(|l| items[l].kind), Some(Kind::Sep(..)))
                 }
             }
         };
@@ -905,29 +1212,32 @@ fn item_style(items: &[Item], i: usize, right_side: bool) -> Style {
     }
 }
 
+fn short_of<'a>(pieces: impl Iterator<Item = (&'a str, bool)> + Clone) -> Short {
+    let mut text = String::with_capacity(pieces.clone().map(|x| x.0.len()).sum());
+    let mut ends = Vec::with_capacity(pieces.clone().count());
+    for (t, sh) in pieces {
+        text.push_str(t);
+        ends.push((text.len(), sh));
+    }
+    Short { text, ends }
+}
+
 /// `src` (pieces and their "shortened" marks) cut to at most `cut` cells
 /// with an ellipsis that fits the profile, keeping the start or the end.
 /// Pieces stay whole where they fit, so earlier dim marks stay; a cut piece
-/// is cut between graphemes.
-fn truncate<T>(
-    src: &[T],
-    get: impl Fn(&T) -> (&str, bool),
-    cut: u32,
-    keep: Keep,
-    p: WidthProfile,
-) -> Vec<Cut> {
+/// is cut between graphemes. The result has at most one piece more.
+fn truncate(src: &[(&str, bool)], cut: u32, keep: Keep, p: WidthProfile) -> Short {
     let e = ellipsis(p, cut);
     let room = cut.saturating_sub(str_width(e, p));
     // Whole pieces kept from the kept end, then the one cut inside.
     let mut used = 0u32;
     let mut whole = 0usize;
     let mut part: Option<(usize, usize)> = None;
-    let order: &mut dyn Iterator<Item = (usize, &T)> = match keep {
+    let order: &mut dyn Iterator<Item = (usize, &(&str, bool))> = match keep {
         Keep::End => &mut src.iter().enumerate().rev(),
         Keep::Start => &mut src.iter().enumerate(),
     };
-    for (i, t) in order {
-        let (text, _) = get(t);
+    for (i, &(text, _)) in order {
         let w = str_width(text, p);
         if used.saturating_add(w) <= room {
             used += w;
@@ -941,43 +1251,41 @@ fn truncate<T>(
         part = Some((i, at));
         break;
     }
-    let mut out: Vec<Cut> = Vec::with_capacity(whole + 2);
-    let mut add = |text: &str, shortened: bool| {
-        if !text.is_empty() {
-            out.push(Cut {
-                width: measured(text, p),
-                piece: Piece {
-                    text: text.into(),
-                    shortened,
-                },
-            });
+    let cut_piece = part.map(|(i, at)| {
+        let (t, sh) = src[i];
+        (
+            if keep == Keep::End {
+                &t[at..]
+            } else {
+                &t[..at]
+            },
+            sh,
+        )
+    });
+    let mark = [(e, true)];
+    let kept = if keep == Keep::End {
+        &src[src.len() - whole..]
+    } else {
+        &src[..whole]
+    };
+    let pieces = match keep {
+        Keep::End => mark
+            .iter()
+            .copied()
+            .chain(cut_piece)
+            .chain(kept.iter().copied())
+            .filter(|x| !x.0.is_empty()),
+        Keep::Start => {
+            return short_of(
+                kept.iter()
+                    .copied()
+                    .chain(cut_piece)
+                    .chain(mark.iter().copied())
+                    .filter(|x| !x.0.is_empty()),
+            );
         }
     };
-    match keep {
-        Keep::End => {
-            add(e, true);
-            if let Some((i, at)) = part {
-                let (text, sh) = get(&src[i]);
-                add(&text[at..], sh);
-            }
-            for t in &src[src.len() - whole..] {
-                let (text, sh) = get(t);
-                add(text, sh);
-            }
-        }
-        Keep::Start => {
-            for t in &src[..whole] {
-                let (text, sh) = get(t);
-                add(text, sh);
-            }
-            if let Some((i, at)) = part {
-                let (text, sh) = get(&src[i]);
-                add(&text[..at], sh);
-            }
-            add(e, true);
-        }
-    }
-    out
+    short_of(pieces)
 }
 
 /// Output runs written in place: an existing run's String is reused when
@@ -1061,178 +1369,201 @@ pub fn layout_line_into(
         clear_line(out, true);
         return;
     }
-    let mut lay = Lay::new(line, inp, o);
-    let mut b = lay.new_bufs();
-    for i in 0..lay.segs.len() {
-        let g = lay.segs[i];
-        let su = lay.setup(g.seg);
-        if su.when == When::Always && lay.visible(g.seg) {
+    // Join measuring rarely needs more than a few graphemes; a longer pair
+    // gets a new buffer of its size (`scratch`).
+    let mut join = String::with_capacity(64);
+    let mut lay = Lay::new(line, upper, inp, o, &mut join);
+    let mut b = lay.new_bufs(join);
+    // `when = always`: the first method, once per segment however often
+    // the line draws it.
+    for s in 0..lay.slots.len() {
+        let su = lay.setup(s);
+        if su.when == When::Always && lay.slots[s].in_line {
             if let Some(first) = su.methods.get(..1) {
-                if let Some((res, _, _)) = shorten(lay.source(g.seg), first, u32::MAX, p) {
-                    lay.set_short(g.seg, res.pieces);
+                if let Some(pieces) = lay.shorten_capped(s, first, u32::MAX) {
+                    let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
+                    lay.put_short(s, short, &mut b.join);
                 }
             }
         }
     }
-    let mut over = lay.measure(&mut b).saturating_sub(target);
+    let mut fit = lay.check(&mut b);
     'steps: {
-        if over == 0 {
+        if lay.fits(&fit) {
             break 'steps;
         }
         // Step 1: left before right (the path before right-side information,
-        // user decision 2026-10-02), each to "its width - overflow".
+        // user decision 2026-10-02), each to "its width - overflow". A
+        // segment on both sides is shortened again from its original text
+        // with the same methods, which gives the same result.
         for right in [false, true] {
-            for i in 0..lay.segs.len() {
-                let g = lay.segs[i];
-                let su = lay.setup(g.seg);
-                if g.right != right || su.methods.is_empty() || !lay.visible(g.seg) {
+            for i in 0..lay.entries.len() {
+                let e = lay.entries[i];
+                let su = lay.setup(e.seg);
+                if e.right != right
+                    || !e.text
+                    || su.methods.is_empty()
+                    || !lay.visible(e.seg, right)
+                {
                     continue;
                 }
-                let budget = lay.seg_width(g.seg).saturating_sub(over);
-                if let Some((res, _, _)) = shorten(lay.source(g.seg), su.methods, budget, p) {
-                    lay.set_short(g.seg, res.pieces);
+                let over = fit.cells.saturating_sub(target);
+                let budget = lay.slots[e.seg].m.width.saturating_sub(over);
+                if let Some(pieces) = lay.shorten_capped(e.seg, su.methods, budget) {
+                    let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
+                    lay.put_short(e.seg, short, &mut b.join);
                 }
-                over = lay.measure(&mut b).saturating_sub(target);
-                if over == 0 {
+                fit = lay.check(&mut b);
+                if lay.fits(&fit) {
                     break 'steps;
                 }
             }
         }
-        // Step 2: optional right segments, lowest priority (then rightmost)
-        // first.
+        // Step 2: optional right references, lowest priority (then
+        // rightmost) first.
         for (_, _, s) in by_priority(&lay, true) {
-            if lay.visible(s) {
-                lay.slots[s].hidden = true;
-                over = lay.measure(&mut b).saturating_sub(target);
-                if over == 0 {
+            if lay.visible(s, true) {
+                lay.slots[s].hidden[1] = true;
+                fit = lay.check(&mut b);
+                if lay.fits(&fit) {
                     break 'steps;
                 }
             }
         }
         // Step 3: the whole right side, `required` included (ruling E,
         // 2026-10-13: `required` only stops the hiding by choice).
-        for i in 0..lay.segs.len() {
-            let g = lay.segs[i];
-            if g.right {
-                lay.slots[g.seg].hidden = true;
+        for i in 0..lay.entries.len() {
+            let e = lay.entries[i];
+            if e.right {
+                lay.slots[e.seg].hidden[1] = true;
             }
         }
-        over = lay.measure(&mut b).saturating_sub(target);
-        if over == 0 {
+        fit = lay.check(&mut b);
+        if lay.fits(&fit) {
             break 'steps;
         }
-        // Step 4: cut left values by the overflow, widest first (leftmost on
-        // a tie), down to the ellipsis. A one-cell value (the `char` glyph)
-        // cannot get narrower, so it is only ever marked exhausted.
+        // Step 4: cut left texts by the overflow, widest first (leftmost on
+        // a tie), down to the ellipsis. A one-cell text (the `char` glyph)
+        // cannot get narrower, so it is only ever marked exhausted; so is
+        // any text when the line is over `LINE_BYTES_MAX` but not too wide.
         loop {
             let pick = lay
-                .segs
+                .entries
                 .iter()
-                .filter(|g| !g.right && lay.visible(g.seg) && !lay.slots[g.seg].exhausted)
-                .max_by_key(|g| (lay.seg_width(g.seg), Reverse(g.pos)));
-            let Some(&g) = pick else { break };
-            let s = g.seg;
-            let w = lay.seg_width(s);
+                .filter(|e| !e.right && lay.visible(e.seg, false) && !lay.slots[e.seg].exhausted)
+                .max_by_key(|e| (lay.slots[e.seg].m.width, Reverse(e.pos)));
+            let Some(&e) = pick else { break };
+            let s = e.seg;
+            let w = lay.slots[s].m.width;
             let keep = if matches!(inp.facts.get(s), Some(Some(_))) {
                 Keep::End
             } else {
                 Keep::Start
             };
-            let cut = w.saturating_sub(over).max(1);
-            let cuts = match &lay.slots[s].short {
-                Some(c) => truncate(
-                    c,
-                    |c| (c.piece.text.as_str(), c.piece.shortened),
-                    cut,
-                    keep,
-                    p,
-                ),
-                None => truncate(&[lay.base_str(s)], |t| (*t, false), cut, keep, p),
-            };
-            if total(cuts.iter().map(|c| c.width)) >= w {
+            let cut = w.saturating_sub(fit.cells.saturating_sub(target)).max(1);
+            let short = truncate(&lay.pieces(s), cut, keep, p);
+            if str_width(&short.text, p) >= w {
                 lay.slots[s].exhausted = true;
                 continue;
             }
-            lay.slots[s].short = Some(cuts);
-            over = lay.measure(&mut b).saturating_sub(target);
-            if over == 0 {
+            lay.put_short(s, short, &mut b.join);
+            fit = lay.check(&mut b);
+            if lay.fits(&fit) {
                 break 'steps;
             }
         }
-        // Step 5: optional left segments, lowest priority (then rightmost)
-        // first.
+        // Step 5: optional left references, lowest priority (then
+        // rightmost) first.
         for (_, _, s) in by_priority(&lay, false) {
-            if lay.visible(s) {
-                lay.slots[s].hidden = true;
-                over = lay.measure(&mut b).saturating_sub(target);
-                if over == 0 {
+            if lay.visible(s, false) {
+                lay.slots[s].hidden[0] = true;
+                fit = lay.check(&mut b);
+                if lay.fits(&fit) {
                     break 'steps;
                 }
             }
         }
         // Step 6: plain text, no backgrounds, separators, heads or tails.
         lay.plain = true;
-        over = lay.measure(&mut b).saturating_sub(target);
-        if over == 0 {
+        fit = lay.check(&mut b);
+        if lay.fits(&fit) {
             break 'steps;
         }
         // Step 7.
         return minimal(&lay, upper, target, out);
     }
     // Every way out of the steps follows a check, so `b` holds the items of
-    // the final state.
+    // the final state and `fit` its measure.
     out.minimal = false;
-    let width = |items: &[Item]| total(items.iter().map(|x| x.width));
-    let (nl, nr) = (lay.run_count(&b.left, false), lay.run_count(&b.right, true));
+    let (nl, nr) = (
+        lay.runs(&b.left, false, None),
+        lay.runs(&b.right, true, None),
+    );
     if upper {
-        let gap = target.saturating_sub(width(&b.left) + width(&b.right));
-        let fill = (nr > 0 && gap > 0).then(|| {
-            let kind = line.fill().and_then(|i| match line.nodes().get(i) {
-                Some(Node::Fill(f)) => Some(*f),
-                _ => None,
-            });
-            let kind = kind.unwrap_or(FillKind::Space);
-            // Fill glyphs are one-cell icons, so `gap` glyphs fill `gap`
-            // cells (test `fill_glyphs_are_one_cell`).
-            let style = if kind == FillKind::Space {
-                Style::default()
-            } else {
-                Style {
-                    fg: Color::Text(tok("muted")),
-                    ..Style::default()
-                }
-            };
-            (icon_glyph(kind.icon(), o).text, style)
-        });
+        // left + fill + right = target: the fill takes what is left once
+        // the joins at both of its ends are counted, and is left out when
+        // that is no cell (the sides then touch, as `check` measured).
+        let fill = (nr > 0)
+            .then(|| {
+                let kind = line
+                    .fill()
+                    .and_then(|i| match line.nodes().get(i) {
+                        Some(Node::Fill(f)) => Some(*f),
+                        _ => None,
+                    })
+                    .unwrap_or(FillKind::Space);
+                // Fill glyphs are one-cell icons, so `n` glyphs draw `n`
+                // cells (test `fill_glyphs_are_one_cell`).
+                let glyph = icon_glyph(kind.icon(), o).text;
+                let d1 = b
+                    .left
+                    .last()
+                    .map_or(0, |a| join_delta(lay.edges(a).1, glyph, &mut b.join, p));
+                let d2 = b
+                    .right
+                    .first()
+                    .map_or(0, |c| join_delta(glyph, lay.edges(c).0, &mut b.join, p));
+                let n = i64::from(target) - i64::from(fit.l) - i64::from(fit.r) - d1 - d2;
+                let style = if kind == FillKind::Space {
+                    Style::default()
+                } else {
+                    Style {
+                        fg: Color::Text(tok("muted")),
+                        ..Style::default()
+                    }
+                };
+                (glyph, usize::try_from(n).unwrap_or(0), style)
+            })
+            .filter(|f| f.1 > 0);
         let mut sink = Sink::new(&mut out.left, nl + usize::from(fill.is_some()) + nr);
-        lay.write_runs(&b.left, false, &mut sink);
-        if let Some((glyph, style)) = fill {
-            let text = sink.start(style, glyph.len() * gap as usize);
-            for _ in 0..gap {
+        lay.runs(&b.left, false, Some(&mut sink));
+        if let Some((glyph, n, style)) = fill {
+            let text = sink.start(style, glyph.len() * n);
+            for _ in 0..n {
                 text.push_str(glyph);
             }
         }
-        lay.write_runs(&b.right, true, &mut sink);
+        lay.runs(&b.right, true, Some(&mut sink));
         sink.finish();
         out.right.clear();
     } else {
         let mut sink = Sink::new(&mut out.left, nl);
-        lay.write_runs(&b.left, false, &mut sink);
+        lay.runs(&b.left, false, Some(&mut sink));
         sink.finish();
         let mut sink = Sink::new(&mut out.right, nr);
-        lay.write_runs(&b.right, true, &mut sink);
+        lay.runs(&b.right, true, Some(&mut sink));
         sink.finish();
     }
 }
 
-/// Optional segments of one side as `(priority, Reverse(position), seg)`,
+/// Optional references of one side as `(priority, Reverse(position), seg)`,
 /// lowest priority first and the rightmost first on a tie.
 fn by_priority(lay: &Lay<'_, '_>, right: bool) -> Vec<(u16, Reverse<u32>, usize)> {
-    let mut v: Vec<(u16, Reverse<u32>, usize)> = Vec::with_capacity(lay.segs.len());
-    for g in &lay.segs {
-        let su = lay.setup(g.seg);
-        if g.right == right && !su.required {
-            v.push((su.priority, Reverse(g.pos), g.seg));
+    let mut v: Vec<(u16, Reverse<u32>, usize)> = Vec::with_capacity(lay.entries.len());
+    for e in &lay.entries {
+        let su = lay.setup(e.seg);
+        if e.right == right && !su.required {
+            v.push((su.priority, Reverse(e.pos), e.seg));
         }
     }
     v.sort_unstable();
@@ -1265,7 +1596,7 @@ fn minimal(lay: &Lay<'_, '_>, upper: bool, target: u32, out: &mut LaidLine) {
         }
         None => (">", Style::default()),
     };
-    let gw = measured(glyph, lay.o.profile);
+    let gw = str_width(glyph, lay.o.profile);
     // The `char` glyph is a one-cell icon and the target is at least 1
     // here, so the spec's later fallbacks (ASCII `>`, then nothing) are
     // reached only as the `>` drawn when the line has no `char`. A glyph
@@ -1295,9 +1626,9 @@ pub fn layout(
     out
 }
 
-/// `layout` into `out`, reusing its lines and run buffers. A band order
-/// with an index outside `bands`, or a band with no variant, falls back to
-/// the default layout; no variants at all give no lines.
+/// `layout` into `out`, reusing its lines and run buffers. A band with no
+/// variant falls back to the default layout; no variants at all give no
+/// lines.
 pub fn layout_into(
     variants: &[Vec<CompiledLine>],
     bands: &[Band],
@@ -1306,11 +1637,7 @@ pub fn layout_into(
     o: &Options,
     out: &mut Vec<LaidLine>,
 ) {
-    let band = if band_order.iter().all(|&i| i < bands.len()) {
-        select(band_order, bands, o.width)
-    } else {
-        None
-    };
+    let band = select(band_order, bands, o.width);
     let lines = band
         .and_then(|b| variants.get(b + 1))
         .or(variants.first())
@@ -1327,7 +1654,6 @@ pub fn layout_into(
         layout_line_into(l, n < last, inp, o, dst);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1633,11 +1959,16 @@ mod tests {
                 assert_fits(&lay(&lines, &f, &o), &o, t);
             }
         }
-        assert_eq!(join_risk("\u{FE0F}abc"), 1);
-        assert_eq!(join_risk("\u{FE0E}"), 1);
-        assert_eq!(join_risk("\u{0301}\u{200D}x"), 1);
-        assert_eq!(join_risk("\u{1F3F3}\u{FE0F}"), 0);
-        assert_eq!(join_risk("abc"), 0);
+        let mut buf = String::new();
+        let d = |t, h, e| join_delta(t, h, &mut String::new(), WidthProfile::new(1, e).unwrap());
+        assert_eq!(d("#", "\u{FE0F}", 2), 1);
+        assert_eq!(d("\u{231A}", "\u{FE0E}", 1), 1);
+        assert_eq!(d("a", "\u{FE0F}", 2), 0);
+        assert_eq!(d("\u{1F468}", "\u{200D}", 2), 0);
+        assert_eq!(d("e", "\u{0301}", 2), 0);
+        assert_eq!(join_delta("a", "b", &mut buf, WidthProfile::DEFAULT), 0);
+        // Below U+0300 the measure is skipped and the buffer stays unused.
+        assert_eq!(buf.capacity(), 0);
     }
 
     // 이것을 실패시키는 것: 공개 필드로 만든 어긋난 입력에서 색인 패닉이 나는 것. `values`·`facts`·`setup`이
@@ -1991,6 +2322,148 @@ mod tests {
         assert_eq!(
             text(&one("{dir}{@fill}{time}{@nl}{char}", &f, 12)[0].left),
             "~/Works"
+        );
+    }
+
+    // 리뷰 #2. 이것을 실패시키는 것: 필드만 참조하는 세그먼트를 단계 대상에서 빼는 것, 같은 세그먼트를 첫 출현 쪽으로만
+    // 분류해 단계 3이 오른쪽 출현을 남기는 것.
+    #[test]
+    fn steps_see_fields_and_both_sides() {
+        let f = fixture(&["Works"], "main");
+        let out = one("abcdefg{@fill}{git.ahead}{@nl}{char}", &f, 8);
+        assert_eq!(
+            (text(&out[0].left).as_str(), out[0].minimal),
+            ("abcdefg", false)
+        );
+        let out = one("{time}{@fill}{time}{@nl}{char}", &f, 10);
+        assert_eq!(
+            (text(&out[0].left).as_str(), out[0].minimal),
+            ("12:34", false)
+        );
+    }
+
+    // 리뷰 #3. 이것을 실패시키는 것: 앞 grapheme을 보지 않고 결합 가능 접미사마다 칸을 더하는 것(`a`+U+FE0F는 1칸으로
+    // 남으므로, 윗줄이 목표 폭보다 짧게 끝난다), 또는 결합으로 넓어지는 칸을 세지 않는 것(`#`+U+FE0F).
+    #[test]
+    fn joins_count_exactly() {
+        let mut f = fixture(&["Works"], "main");
+        f.setup[idx("git")].methods = &[];
+        for (t, v, emoji) in [
+            ("a{git}{@fill}{time}{@nl}{char}", "\u{FE0F}b", 2),
+            ("#{git}{@fill}{time}{@nl}{char}", "\u{FE0F}b", 2),
+            ("\u{231A}{git}{@fill}{time}{@nl}{char}", "\u{FE0E}b", 1),
+            // A prepended mark takes the block's trailing pad into its
+            // grapheme; a spacing mark joins the fill space before it.
+            ("{git:block}{@fill}{time}{@nl}{char}", "\u{0D4E}", 2),
+            ("{dir}{@fill}{git}{@nl}{char}", "\u{0903}b", 2),
+            // A spacing mark joins the block's leading pad; a prepended
+            // letter takes in the first fill glyph.
+            ("{git:block}{@fill}{time}{@nl}{char}", "\u{0903}b", 2),
+            ("{git}{@fill}{time}{@nl}{char}", "a\u{0D4E}", 2),
+            // Joins that reach past the first grapheme: a ZWJ sequence takes
+            // in the emoji after it, a virama joins the next consonant.
+            (
+                "~ \u{231A}{git}{@fill}{time}{@nl}{char}",
+                "\u{FE0E}\u{200D}\u{1F600}",
+                1,
+            ),
+            (
+                "\u{0915}\u{094D}{git}{@fill}{time}{@nl}{char}",
+                "\u{0937}x",
+                2,
+            ),
+            (
+                "\u{1F468}\u{200D}{git}{@fill}{time}{@nl}{char}",
+                "\u{1F469}x",
+                2,
+            ),
+            // A join inside the right side.
+            ("{dir}{@fill}#{git}{@nl}{char}", "\u{FE0F}b", 2),
+        ] {
+            f.values[idx("git")] = value("git", v, &[]);
+            let o = Options {
+                profile: WidthProfile::new(1, emoji).unwrap(),
+                ..opts(80)
+            };
+            assert_eq!(
+                runs_width(
+                    &lay(&compile(t, BUILTIN).unwrap(), &f, &o)[0].left,
+                    o.profile
+                ),
+                79,
+                "{t}"
+            );
+        }
+        // With no room for a fill, the two sides touch: `#` and U+FE0F join.
+        f.values[idx("git")] = value("git", "\u{FE0F}b", &[]);
+        let lines = compile("#{@fill}{git}{@nl}{char}", BUILTIN).unwrap();
+        for w in 0..=10 {
+            assert_fits(&lay(&lines, &f, &opts(w)), &opts(w), "touch");
+        }
+    }
+
+    // 리뷰 #4. 이것을 실패시키는 것: 빈 필드를 내용으로 세어 줄 맨 앞 구분자를 남기거나, 자동색의 이전 블록을 놓치는 것.
+    #[test]
+    fn empty_fields_are_not_content() {
+        let mut f = fixture(&["Works"], "main");
+        // An icon with no glyph in the set and a plain segment with no text
+        // draw nothing either.
+        let o = Options {
+            icons: IconSet::Unicode,
+            ..opts(80)
+        };
+        let lines = compile(
+            "{@icon:git.branch}{@sep:triangle}{dir:block}{@nl}{char}",
+            BUILTIN,
+        )
+        .unwrap();
+        assert_eq!(text(&lay(&lines, &f, &o)[0].left), " ~/Works ");
+        f.values[idx("venv")] = value("venv", "", &[]);
+        let out = one("{venv}{@sep:triangle}{dir:block}{@nl}{char}", &f, 80);
+        assert_eq!(text(&out[0].left), " ~/Works ");
+        let out = one(
+            "{status.signal}{@sep:triangle}{dir:block}{@nl}{char}",
+            &f,
+            80,
+        );
+        assert_eq!(text(&out[0].left), " ~/Works ");
+        let out = one(
+            "{dir:block}{status.signal}{@sep:triangle}{status:block}{@nl}{char}",
+            &f,
+            80,
+        );
+        let sep = out[0].left.iter().find(|r| r.text == "\u{E0B0}").unwrap();
+        assert_eq!(
+            (sep.style.fg, sep.style.bg),
+            (Color::Block(tok("path")), Color::Block(tok("status")))
+        );
+    }
+
+    // 이것을 실패시키는 것: `SEG_PIECES_MAX`보다 조각이 많은 줄이기 결과를 받는 것(600단계 경로의 `abbrev`가 남는다).
+    #[test]
+    fn results_over_the_piece_cap_are_skipped() {
+        let names: Vec<String> = (0..600).map(|n| alloc::format!("folder-{n:03}")).collect();
+        let raw: Vec<&[u8]> = names.iter().map(|s| s.as_bytes()).collect();
+        let mut f = fixture(&["Works"], "main");
+        f.facts[idx("dir")] = Some(PathFacts::new(Anchor::Home, &raw, None, &[]));
+        f.setup[idx("dir")].methods = &[Method::Abbrev(1)];
+        let s = text(&one("{dir}{@nl}{char}", &f, 40)[0].left);
+        assert!(s.ends_with("/folder-599") && !s.contains("f/f/"), "{s:?}");
+    }
+
+    // 이것을 실패시키는 것: 폭은 맞아도 `LINE_BYTES_MAX`를 넘는 줄을 맞는 것으로 보는 것.
+    #[test]
+    fn a_line_over_the_byte_cap_does_not_fit() {
+        let mut f = fixture(&["Works"], "main");
+        let heavy = alloc::format!("e{}", "\u{0301}".repeat(4000));
+        f.values[idx("git")] = value("git", &heavy, &[]);
+        f.setup[idx("git")].methods = &[];
+        let out = one("{git}{git}{git}{dir}{@nl}{char}", &f, 80);
+        let bytes: usize = out[0].left.iter().map(|r| r.text.len()).sum();
+        assert!(
+            bytes <= LINE_BYTES_MAX && text(&out[0].left).starts_with('~'),
+            "{bytes} {:?}",
+            text(&out[0].left)
         );
     }
 }
