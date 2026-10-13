@@ -1,0 +1,114 @@
+name: PTY stall
+
+# Repeats the PTY session-stall probe (tests/shell/probes/session_stall.py)
+# on hosted runners. Manual only: one run takes hours of macOS minutes, and
+# shell.yml stays the per-PR PTY gate. No retry anywhere: a stall is the
+# result being measured.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: investigate (causal A/B matrix) or accept (acceptance counts)
+        type: choice
+        options: [investigate, accept]
+        default: investigate
+      seed:
+        description: Seed for the order of cases and rounds
+        default: "1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  # Per-wait timeout of the probe, the same 15 s as the PTY tests.
+  STALL_TIMEOUT: 15
+  # Passed through the environment, never spliced into a command line;
+  # stall-host.sh and session_stall.py accept 1 to 9 digits only.
+  SEED: ${{ inputs.seed }}
+
+jobs:
+  investigate:
+    if: inputs.mode == 'investigate'
+    name: Investigate (${{ matrix.host }}, ${{ matrix.load }}, ${{ matrix.product }}, ${{ matrix.driver }})
+    runs-on: ${{ matrix.host == 'macos' && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [macos, linux]
+        load: [none, cargo]
+        product: [real, function, stub, none]
+        driver: [session, drain]
+        trace: [""]
+        include:
+          # strace changes timing, so it runs as one extra job only.
+          - host: linux
+            load: cargo
+            product: real
+            driver: session
+            trace: strace
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - name: Prepare the host
+        run: tests/shell/probes/stall-host.sh prepare "${{ matrix.host }}"
+      - name: Start load
+        if: matrix.load == 'cargo'
+        run: tests/shell/probes/stall-host.sh load-start
+      - name: Probe
+        run: >-
+          tests/shell/probes/stall-host.sh probe "${{ matrix.host }}"
+          --case all --rounds-bash 1000 --rounds-fish-group 100 --rounds-fish-nul 200
+          --product "${{ matrix.product }}" --driver "${{ matrix.driver }}"
+          --trace "${{ matrix.trace }}" --seed "$SEED"
+          --timeout "$STALL_TIMEOUT" --out "$RUNNER_TEMP/stall"
+      - name: Stop load
+        if: always() && matrix.load == 'cargo'
+        run: tests/shell/probes/stall-host.sh load-stop
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: stall-${{ matrix.host }}-${{ matrix.load }}-${{ matrix.product }}-${{ matrix.driver }}${{ matrix.trace && '-' || '' }}${{ matrix.trace }}
+          path: ${{ runner.temp }}/stall
+          retention-days: 30
+
+  accept:
+    if: inputs.mode == 'accept'
+    name: Accept (${{ matrix.host }}, ${{ matrix.load }})
+    runs-on: ${{ matrix.host == 'macos' && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [macos, linux]
+        load: [none, cargo]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - name: Prepare the host
+        run: tests/shell/probes/stall-host.sh prepare "${{ matrix.host }}"
+      - name: Start load
+        if: matrix.load == 'cargo'
+        run: tests/shell/probes/stall-host.sh load-start
+      - name: Accept
+        run: tests/shell/probes/stall-host.sh accept "${{ matrix.host }}" --seed "$SEED" --out "$RUNNER_TEMP/stall"
+      - name: Stop load
+        if: always() && matrix.load == 'cargo'
+        run: tests/shell/probes/stall-host.sh load-stop
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: accept-${{ matrix.host }}-${{ matrix.load }}
+          path: ${{ runner.temp }}/stall
+          retention-days: 30
