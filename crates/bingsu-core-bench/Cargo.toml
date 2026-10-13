@@ -60,3 +60,8 @@ test = false
 name = "layout"
 harness = false
 test = false
+
+[[bench]]
+name = "emit"
+harness = false
+test = false
