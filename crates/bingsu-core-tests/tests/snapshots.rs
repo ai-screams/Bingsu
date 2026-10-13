@@ -245,7 +245,7 @@ fn shell_outputs() {
 }
 
 // 이것을 실패시키는 것: 셸 출력에 Target의 색 깊이를 넘기지 않는 것(필드 하나라도, bash vi의 readline
-// 문자열 포함). 256색은 `38;5;`만, 16색은 둘 다 없이 쓴다.
+// 문자열 포함), 필드를 비우는 것(구간 사례의 윗줄만 빈다). 256색은 `38;5;`만, 16색은 둘 다 없이 쓴다.
 #[test]
 fn color_depth_reaches_every_field() {
     for shell in SHELLS {
@@ -254,7 +254,7 @@ fn color_depth_reaches_every_field() {
             // The banded case draws no upper line at 40 columns.
             for (name, b) in all(&r)
                 .into_iter()
-                .filter(|(n, b)| !b.is_empty() || *n != "upper")
+                .filter(|(n, _)| !(c.banded && *n == "upper"))
             {
                 // bash vi fields are readline strings (ESC written `\\e`).
                 let b = if shell == Shell::Bash && name.starts_with("vi_") {
