@@ -67,6 +67,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingsu-golden"
+version = "0.0.0"
+dependencies = [
+ "bingsu-core",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
