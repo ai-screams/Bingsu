@@ -4,6 +4,7 @@
 use bingsu_core::field::{BUILTIN, Field, Value, segment};
 use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, LaidLine, Options, SegmentSetup, When, layout_into};
+use bingsu_core::recorder::NoopRecorder;
 use bingsu_core::shorten::{Anchor, Method, PathFacts};
 use bingsu_core::style::{LineLayout, StyleOptions, generate, preset};
 use bingsu_core::template::compile::{CompiledLine, compile};
@@ -97,6 +98,7 @@ fn layout_case(width: u32) -> (LayoutCase, Vec<LaidLine>) {
         &[],
         &layout_inputs(&case),
         &layout_options(width),
+        &mut NoopRecorder,
         &mut out,
     );
     (case, out)
@@ -113,6 +115,7 @@ fn layout_call(case: &LayoutCase, width: u16, out: &mut Vec<LaidLine>) {
         &[],
         &layout_inputs(case),
         &layout_options(width),
+        &mut NoopRecorder,
         out,
     );
 }

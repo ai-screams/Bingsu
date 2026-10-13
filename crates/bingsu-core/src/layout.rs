@@ -29,6 +29,7 @@ use crate::color::palette::token_index;
 use crate::color::sgr::{Color, DIM, Style};
 use crate::field::{FieldValue, SegmentDecl, Value};
 use crate::icons::{self, IconSet};
+use crate::recorder::{HideReason, Recorder, Step};
 use crate::shorten::{Keep, Method, PathFacts, Piece, Source, shorten};
 use crate::template::compile::{CompiledLine, FillKind, Node, Shape};
 use crate::template::syntax::{MAX_DEPTH, Mode};
@@ -682,17 +683,25 @@ impl<'l, 'i> Lay<'l, 'i> {
     /// `shorten` picks, over the first `METHODS_MAX` methods. A method sure
     /// to give more than `SEG_PIECES_MAX` pieces or `LINE_BYTES_MAX` bytes
     /// is not run (`too_big`); a result over the piece cap is dropped too.
-    /// A path over `PATH_BYTES_MAX` is not shortened at all.
-    fn shorten_capped(&self, s: usize, methods: &[Method], budget: u32) -> Option<Vec<Piece>> {
+    /// A path over `PATH_BYTES_MAX` is not shortened at all. The method
+    /// picked is recorded for line `n`.
+    fn shorten_capped<R: Recorder>(
+        &self,
+        s: usize,
+        methods: &[Method],
+        budget: u32,
+        n: usize,
+        rec: &mut R,
+    ) -> Option<Vec<Piece>> {
         if matches!(self.inp.facts.get(s), Some(Some(f)) if f.display_len() > PATH_BYTES_MAX) {
             return None;
         }
-        let mut best: Option<(Vec<Piece>, u32)> = None;
-        for m in methods.iter().take(METHODS_MAX) {
+        let mut best: Option<(Vec<Piece>, u32, usize)> = None;
+        for (i, m) in methods.iter().take(METHODS_MAX).enumerate() {
             if too_big(*m, self.source(s)) {
                 continue;
             }
-            let Some((r, _, w)) = shorten(
+            let Some((res, _, w)) = shorten(
                 self.source(s),
                 core::slice::from_ref(m),
                 budget,
@@ -700,17 +709,24 @@ impl<'l, 'i> Lay<'l, 'i> {
             ) else {
                 continue;
             };
-            if r.pieces.len() > SEG_PIECES_MAX {
+            if res.pieces.len() > SEG_PIECES_MAX {
                 continue;
             }
             if w <= budget {
-                return Some(r.pieces);
+                if R::ENABLED {
+                    rec.shortened(n, s, i);
+                }
+                return Some(res.pieces);
             }
             if best.as_ref().is_none_or(|b| w < b.1) {
-                best = Some((r.pieces, w));
+                best = Some((res.pieces, w, i));
             }
         }
-        best.map(|b| b.0)
+        let (pieces, _, i) = best?;
+        if R::ENABLED {
+            rec.shortened(n, s, i);
+        }
+        Some(pieces)
     }
 
     /// Segment `s`'s current text as pieces (one, unshortened, before any
@@ -1437,19 +1453,29 @@ fn clear_line(out: &mut LaidLine, minimal: bool) {
     out.minimal = minimal;
 }
 
-/// Lays out one line. `upper` lines get the fill and lose step 7's output.
-pub fn layout_line(line: &CompiledLine, upper: bool, inp: &Inputs<'_>, o: &Options) -> LaidLine {
-    let mut out = LaidLine::default();
-    layout_line_into(line, upper, inp, o, &mut out);
-    out
-}
-
-/// `layout_line` into `out`, reusing its run buffers.
-pub fn layout_line_into(
+/// Lays out line `n`. `upper` lines get the fill and lose step 7's output.
+/// Decisions go to `r` (`NoopRecorder` records nothing, at no cost).
+pub fn layout_line<R: Recorder>(
+    n: usize,
     line: &CompiledLine,
     upper: bool,
     inp: &Inputs<'_>,
     o: &Options,
+    r: &mut R,
+) -> LaidLine {
+    let mut out = LaidLine::default();
+    layout_line_into(n, line, upper, inp, o, r, &mut out);
+    out
+}
+
+/// `layout_line` into `out`, reusing its run buffers.
+pub fn layout_line_into<R: Recorder>(
+    n: usize,
+    line: &CompiledLine,
+    upper: bool,
+    inp: &Inputs<'_>,
+    o: &Options,
+    r: &mut R,
     out: &mut LaidLine,
 ) {
     let target = target(o);
@@ -1471,13 +1497,20 @@ pub fn layout_line_into(
     let mut join = String::with_capacity(64);
     let mut lay = Lay::new(line, upper, inp, o, &mut join);
     let mut b = lay.new_bufs(join);
+    if R::ENABLED {
+        for (s, slot) in lay.slots.iter().enumerate() {
+            if slot.entry.iter().any(Option::is_some) && !slot.present {
+                r.hidden(n, s, HideReason::NoValue);
+            }
+        }
+    }
     // `when = always`: the first method, once per segment however often
     // the line draws it.
     for s in 0..lay.slots.len() {
         let su = lay.setup(s);
         if su.when == When::Always && lay.slots[s].in_line {
             if let Some(first) = su.methods.get(..1) {
-                if let Some(pieces) = lay.shorten_capped(s, first, u32::MAX) {
+                if let Some(pieces) = lay.shorten_capped(s, first, u32::MAX, n, r) {
                     let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
                     lay.put_short(s, short, &mut b.join);
                 }
@@ -1488,6 +1521,9 @@ pub fn layout_line_into(
     'steps: {
         if lay.fits(&fit) {
             break 'steps;
+        }
+        if R::ENABLED {
+            r.step(n, Step::ShortenNames);
         }
         // Step 1: left before right (the path before right-side information,
         // user decision 2026-10-02), each to "its width - overflow". A
@@ -1506,7 +1542,7 @@ pub fn layout_line_into(
                 }
                 let over = fit.cells.saturating_sub(target);
                 let budget = lay.slots[e.seg].m.width.saturating_sub(over);
-                if let Some(pieces) = lay.shorten_capped(e.seg, su.methods, budget) {
+                if let Some(pieces) = lay.shorten_capped(e.seg, su.methods, budget, n, r) {
                     let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
                     lay.put_short(e.seg, short, &mut b.join);
                 }
@@ -1518,9 +1554,15 @@ pub fn layout_line_into(
         }
         // Step 2: optional right references, lowest priority (then
         // rightmost) first.
+        if R::ENABLED {
+            r.step(n, Step::HideRightByPriority);
+        }
         for (_, _, s) in by_priority(&lay, true) {
             if lay.visible(s, true) {
                 lay.slots[s].hidden[1] = true;
+                if R::ENABLED {
+                    r.hidden(n, s, HideReason::Priority);
+                }
                 fit = lay.check(&mut b);
                 if lay.fits(&fit) {
                     break 'steps;
@@ -1529,9 +1571,15 @@ pub fn layout_line_into(
         }
         // Step 3: the whole right side, `required` included (ruling E,
         // 2026-10-13: `required` only stops the hiding by choice).
+        if R::ENABLED {
+            r.step(n, Step::HideRight);
+        }
         for i in 0..lay.entries.len() {
             let e = lay.entries[i];
             if e.right {
+                if R::ENABLED && lay.visible(e.seg, true) {
+                    r.hidden(n, e.seg, HideReason::RightHidden);
+                }
                 lay.slots[e.seg].hidden[1] = true;
             }
         }
@@ -1543,6 +1591,9 @@ pub fn layout_line_into(
         // a tie), down to the ellipsis. A one-cell text (the `char` glyph)
         // cannot get narrower, so it is only ever marked exhausted; so is
         // any text when the line is over `LINE_BYTES_MAX` but not too wide.
+        if R::ENABLED {
+            r.step(n, Step::TruncateLeft);
+        }
         loop {
             let pick = lay
                 .entries
@@ -1571,9 +1622,15 @@ pub fn layout_line_into(
         }
         // Step 5: optional left references, lowest priority (then
         // rightmost) first.
+        if R::ENABLED {
+            r.step(n, Step::HideLeftOptional);
+        }
         for (_, _, s) in by_priority(&lay, false) {
             if lay.visible(s, false) {
                 lay.slots[s].hidden[0] = true;
+                if R::ENABLED {
+                    r.hidden(n, s, HideReason::LeftOptional);
+                }
                 fit = lay.check(&mut b);
                 if lay.fits(&fit) {
                     break 'steps;
@@ -1581,13 +1638,19 @@ pub fn layout_line_into(
             }
         }
         // Step 6: plain text, no backgrounds, separators, heads or tails.
+        if R::ENABLED {
+            r.step(n, Step::DropDecoration);
+        }
         lay.plain = true;
         fit = lay.check(&mut b);
         if lay.fits(&fit) {
             break 'steps;
         }
         // Step 7.
-        return minimal(&lay, upper, target, out);
+        if R::ENABLED {
+            r.step(n, Step::Minimal);
+        }
+        return minimal(n, &lay, upper, target, r, out);
     }
     // Every way out of the steps follows a check, so `b` holds the items of
     // the final state and `fit` its measure.
@@ -1649,8 +1712,25 @@ fn by_priority(lay: &Lay<'_, '_>, right: bool) -> Vec<(u16, Reverse<u32>, usize)
 
 /// Step 7: `char` and a space, then `char` alone, then ASCII `>`, then
 /// nothing. An upper line collapses to nothing.
-fn minimal(lay: &Lay<'_, '_>, upper: bool, target: u32, out: &mut LaidLine) {
+fn minimal<R: Recorder>(
+    n: usize,
+    lay: &Lay<'_, '_>,
+    upper: bool,
+    target: u32,
+    r: &mut R,
+    out: &mut LaidLine,
+) {
     clear_line(out, true);
+    if R::ENABLED {
+        // Everything still drawn but the prompt character goes.
+        for (s, slot) in lay.slots.iter().enumerate() {
+            // Still drawn: visible on a side that references it.
+            let drawn = (0..2).any(|side| slot.entry[side].is_some() && lay.visible(s, side == 1));
+            if Some(s) != lay.char_seg && drawn {
+                r.hidden(n, s, HideReason::Minimal);
+            }
+        }
+    }
     if upper {
         return;
     }
@@ -1691,30 +1771,35 @@ fn minimal(lay: &Lay<'_, '_>, upper: bool, target: u32, out: &mut LaidLine) {
 
 /// Picks the band for the shell's width and lays out every line of it.
 /// `variants[0]` is the default layout, `variants[i + 1]` band `i`.
-pub fn layout(
+pub fn layout<R: Recorder>(
     variants: &[Vec<CompiledLine>],
     bands: &[Band],
     band_order: &[usize],
     inp: &Inputs<'_>,
     o: &Options,
+    r: &mut R,
 ) -> Vec<LaidLine> {
     let mut out = Vec::new();
-    layout_into(variants, bands, band_order, inp, o, &mut out);
+    layout_into(variants, bands, band_order, inp, o, r, &mut out);
     out
 }
 
 /// `layout` into `out`, reusing its lines and run buffers. A band with no
 /// variant falls back to the default layout; no variants at all give no
 /// lines.
-pub fn layout_into(
+pub fn layout_into<R: Recorder>(
     variants: &[Vec<CompiledLine>],
     bands: &[Band],
     band_order: &[usize],
     inp: &Inputs<'_>,
     o: &Options,
+    r: &mut R,
     out: &mut Vec<LaidLine>,
 ) {
     let band = select(band_order, bands, o.width);
+    if R::ENABLED {
+        r.band(band);
+    }
     let lines = band
         .and_then(|b| variants.get(b + 1))
         .or(variants.first())
@@ -1728,13 +1813,14 @@ pub fn layout_into(
     }
     let last = lines.len().saturating_sub(1);
     for (n, (l, dst)) in lines.iter().zip(out.iter_mut()).enumerate() {
-        layout_line_into(l, n < last, inp, o, dst);
+        layout_line_into(n, l, n < last, inp, o, r, dst);
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::field::{BUILTIN, Field, FieldValue, segment};
+    use crate::recorder::{DecisionLog, HideReason, NoopRecorder, Step};
     use crate::shorten::Anchor;
     use crate::style::{LineLayout, StyleOptions, generate, preset};
     use crate::template::compile::compile;
@@ -1854,7 +1940,14 @@ mod tests {
     }
 
     fn lay(lines: &[CompiledLine], f: &Fixture, o: &Options) -> Vec<LaidLine> {
-        layout(&[lines.to_vec()], &[], &[], &f.inputs(), o)
+        layout(
+            &[lines.to_vec()],
+            &[],
+            &[],
+            &f.inputs(),
+            o,
+            &mut NoopRecorder,
+        )
     }
 
     /// Every line's joined width is within the target.
@@ -2081,7 +2174,14 @@ mod tests {
             for w in 0..=40 {
                 let o = opts(w);
                 assert_fits(
-                    &layout(core::slice::from_ref(&lines), &[], &[], &inp, &o),
+                    &layout(
+                        core::slice::from_ref(&lines),
+                        &[],
+                        &[],
+                        &inp,
+                        &o,
+                        &mut NoopRecorder,
+                    ),
                     &o,
                     "ragged",
                 );
@@ -2096,6 +2196,7 @@ mod tests {
                         &[3],
                         &inp,
                         &o,
+                        &mut NoopRecorder,
                     ),
                     &o,
                     "band",
@@ -2111,10 +2212,11 @@ mod tests {
                     &[0],
                     &inp,
                     &o,
+                    &mut NoopRecorder,
                 );
                 assert_eq!(out.len(), 2);
                 assert_fits(&out, &o, "variant");
-                assert!(layout(&[], &[], &[], &inp, &o).is_empty());
+                assert!(layout(&[], &[], &[], &inp, &o, &mut NoopRecorder).is_empty());
             }
         }
     }
@@ -2293,13 +2395,29 @@ mod tests {
         let f = fixture(&["Works"], "main");
         let lines = [two_lines("triangle")];
         let mut out = Vec::new();
-        layout_into(&lines, &[], &[], &f.inputs(), &opts(80), &mut out);
+        layout_into(
+            &lines,
+            &[],
+            &[],
+            &f.inputs(),
+            &opts(80),
+            &mut NoopRecorder,
+            &mut out,
+        );
         let before = (
             out.as_ptr(),
             out[0].left.as_ptr(),
             out[0].left[0].text.as_ptr(),
         );
-        layout_into(&lines, &[], &[], &f.inputs(), &opts(80), &mut out);
+        layout_into(
+            &lines,
+            &[],
+            &[],
+            &f.inputs(),
+            &opts(80),
+            &mut NoopRecorder,
+            &mut out,
+        );
         assert_eq!(
             before,
             (
@@ -2377,7 +2495,14 @@ mod tests {
             facts: &[],
             setup: &[],
         };
-        let out = layout(core::slice::from_ref(&lines), &[], &[], &inp, &opts(80));
+        let out = layout(
+            core::slice::from_ref(&lines),
+            &[],
+            &[],
+            &inp,
+            &opts(80),
+            &mut NoopRecorder,
+        );
         let styles: Vec<Style> = out[0].left.iter().map(|r| r.style).collect();
         assert_eq!(
             styles[0],
@@ -2621,5 +2746,152 @@ mod tests {
         // An input line draws no fill: its right side is the right prompt.
         let out = one("{dir}{@fill:line}{time}", &f, u16::MAX);
         assert_eq!(text(&out[0].right), "12:34");
+    }
+
+    fn logged(t: &str, f: &Fixture, w: u16) -> (Vec<LaidLine>, DecisionLog) {
+        let mut log = DecisionLog::default();
+        let out = layout(
+            &[compile(t, BUILTIN).unwrap()],
+            &[],
+            &[],
+            &f.inputs(),
+            &opts(w),
+            &mut log,
+        );
+        (out, log)
+    }
+
+    // 이것을 실패시키는 것: 기록하는 단계·줄인 방식·숨긴 이유가 실제 단계와 어긋나는 것(경로를 오른쪽보다 먼저 줄이고,
+    // 그다음 우선순위 낮은 `time`을 숨긴다), `DecisionLog::step`이 기록하지 않는 것.
+    #[test]
+    fn steps_in_order() {
+        let f = fixture(&["Works", "AiScream", "themes", "src", "render"], "main");
+        let t = "{dir} {git}{@fill}{status} {time}{@nl}{char}";
+        let (out, log) = logged(t, &f, 40);
+        assert!(
+            text(&out[0].left).starts_with("themes/src/render"),
+            "{out:?}"
+        );
+        assert_eq!(log.steps, vec![(0, Step::ShortenNames)]);
+        assert_eq!(log.shortened, vec![(0, idx("dir"), 0)]);
+        let (_, log) = logged(t, &f, 16);
+        assert_eq!(
+            log.steps[..2],
+            [(0, Step::ShortenNames), (0, Step::HideRightByPriority)]
+        );
+        assert_eq!(
+            log.hidden.first(),
+            Some(&(0, idx("time"), HideReason::Priority))
+        );
+        assert_eq!(log.band, None);
+    }
+
+    // 이것을 실패시키는 것: 단계와 숨김(값 없음, 2·3·5·7단계)이 기록되지 않거나, 다른 이유로·두 번·줄에 없는 세그먼트까지
+    // 기록되는 것, 맞는 방식이 없을 때 고른 방식 번호가 틀리는 것, 7단계가 `char`를 숨긴 것으로 기록하는 것.
+    #[test]
+    fn every_step_and_reason_is_recorded() {
+        let mut f = fixture(&["Works"], "main");
+        f.values[idx("venv")] = None;
+        // Present but not in the line: never recorded.
+        f.values[idx("host")] = value("host", "me@host", &[]);
+        f.setup[idx("time")].required = true;
+        // Literal text cannot be cut, so the line ends at step 7.
+        let t = "{venv}abcd{dir} {git}{@fill}{status} {time}{@nl}{char}";
+        let (out, log) = logged(t, &f, 4);
+        assert!(out[0].minimal);
+        let steps: Vec<Step> = log.steps.iter().map(|s| s.1).collect();
+        use HideReason::{LeftOptional, NoValue, Priority, RightHidden};
+        use Step::*;
+        assert_eq!(
+            steps,
+            [
+                ShortenNames,
+                HideRightByPriority,
+                HideRight,
+                TruncateLeft,
+                HideLeftOptional,
+                DropDecoration,
+                Minimal
+            ]
+        );
+        // No method fits 3 cells: the narrowest, `abbrev 1` (index 1; `repo`
+        // does not apply), is recorded; then the branch's `truncate`.
+        assert_eq!(log.shortened, vec![(0, idx("dir"), 1), (0, idx("git"), 0)]);
+        let line0: Vec<(usize, HideReason)> = log
+            .hidden
+            .iter()
+            .filter(|h| h.0 == 0)
+            .map(|h| (h.1, h.2))
+            .collect();
+        // Once each, in order: no value, step 2, step 3, step 5, step 7.
+        assert_eq!(
+            line0,
+            [
+                (idx("venv"), NoValue),
+                (idx("status"), Priority),
+                (idx("time"), RightHidden),
+                (idx("git"), LeftOptional),
+                (idx("dir"), HideReason::Minimal)
+            ]
+        );
+        // The input line keeps `char` and records nothing.
+        assert!(!log.hidden.iter().any(|h| h.0 == 1));
+        // An input line at step 7 keeps `char`: only `dir` is recorded.
+        let (out, log) = logged("abcd{dir}{char}", &f, 3);
+        assert!(out[0].minimal);
+        assert_eq!(log.hidden, [(0, idx("dir"), HideReason::Minimal)]);
+    }
+
+    // 이것을 실패시키는 것: 고른 폭 구간을 기록하지 않는 것.
+    #[test]
+    fn the_band_is_recorded() {
+        let f = fixture(&["Works"], "main");
+        let lines = compile("{dir}{@nl}{char}", BUILTIN).unwrap();
+        let band = Band {
+            min_cols: None,
+            max_cols: Some(60),
+            order: None,
+        };
+        let mut log = DecisionLog::default();
+        layout(
+            &[lines.clone(), lines],
+            &[band],
+            &[0],
+            &f.inputs(),
+            &opts(40),
+            &mut log,
+        );
+        assert_eq!(log.band, Some(0));
+    }
+
+    // 이것을 실패시키는 것: 기록기를 켜면 결과가 바뀌는 것(결정 기록은 관찰만 한다).
+    #[test]
+    fn recorder_does_not_change_output() {
+        let f = fixture(
+            &["Works", "AiScream", "themes", "src", "render"],
+            "feature/very-long-branch-name",
+        );
+        for name in ["lean", "triangle"] {
+            let lines = two_lines(name);
+            for w in 0..=120u16 {
+                let a = layout(
+                    core::slice::from_ref(&lines),
+                    &[],
+                    &[],
+                    &f.inputs(),
+                    &opts(w),
+                    &mut NoopRecorder,
+                );
+                let b = layout(
+                    core::slice::from_ref(&lines),
+                    &[],
+                    &[],
+                    &f.inputs(),
+                    &opts(w),
+                    &mut DecisionLog::default(),
+                );
+                assert_eq!(a, b, "{name} {w}");
+            }
+        }
     }
 }

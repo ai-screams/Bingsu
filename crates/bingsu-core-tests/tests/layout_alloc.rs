@@ -8,6 +8,7 @@ use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{
     Inputs, LINE_BYTES_MAX, LaidLine, Options, SegmentSetup, When, layout_into, runs_width, target,
 };
+use bingsu_core::recorder::NoopRecorder;
 use bingsu_core::shorten::{Anchor, Keep, MAX_STEPS, Method, PathFacts};
 use bingsu_core::template::compile::compile;
 use bingsu_core::template::syntax::MAX_TEMPLATE_BYTES;
@@ -164,6 +165,7 @@ fn a_fitting_line_never_grows_a_buffer() {
         &[],
         &inputs,
         &o,
+        &mut NoopRecorder,
         &mut out,
     );
     let (allocs, reallocs, _) = counted(|| {
@@ -173,6 +175,7 @@ fn a_fitting_line_never_grows_a_buffer() {
             &[],
             &inputs,
             &o,
+            &mut NoopRecorder,
             &mut out,
         )
     });
@@ -233,7 +236,8 @@ fn largest(
         use_last_column: false,
     };
     let mut out: Vec<LaidLine> = Vec::new();
-    let (allocs, _, peak) = counted(|| layout_into(&lines, &[], &[], &inputs, &o, &mut out));
+    let (allocs, _, peak) =
+        counted(|| layout_into(&lines, &[], &[], &inputs, &o, &mut NoopRecorder, &mut out));
     for l in &out {
         assert!(runs_width(&l.left, o.profile) <= target(&o));
         assert!(l.left.iter().map(|r| r.text.len()).sum::<usize>() <= LINE_BYTES_MAX);

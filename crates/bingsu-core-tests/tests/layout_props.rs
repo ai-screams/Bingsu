@@ -4,6 +4,7 @@
 use bingsu_core::field::{BUILTIN, Field, FieldValue, Value, segment};
 use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, Options, SegmentSetup, When, layout, runs_width, target};
+use bingsu_core::recorder::NoopRecorder;
 use bingsu_core::shorten::{Anchor, Keep, Method, PathFacts};
 use bingsu_core::style::{LineLayout, StyleOptions, generate, preset};
 use bingsu_core::template::compile::compile;
@@ -169,9 +170,16 @@ fn no_line_overflows() {
                     icons: SETS[set],
                     use_last_column: false,
                 };
-                for (n, l) in layout(std::slice::from_ref(&lines), &[], &[], &inputs, &o)
-                    .into_iter()
-                    .enumerate()
+                for (n, l) in layout(
+                    std::slice::from_ref(&lines),
+                    &[],
+                    &[],
+                    &inputs,
+                    &o,
+                    &mut NoopRecorder,
+                )
+                .into_iter()
+                .enumerate()
                 {
                     let lw = runs_width(&l.left, profile);
                     prop_assert!(
