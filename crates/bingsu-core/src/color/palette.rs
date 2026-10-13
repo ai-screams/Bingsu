@@ -3,8 +3,8 @@
 //! ADR-0016). `resolve_palette` is the one function the prompt and the
 //! generators (sub-project 5) share.
 use super::math::{
-    Oklch, OklchQ, Srgb8, clamp_chroma, contrast_milli, nearest_256, oklch_q, oklch_to_linear,
-    srgb8_to_oklch_q, to_srgb8, xterm,
+    Oklch, OklchQ, Srgb8, clamp_chroma, contrast_milli_lum, luminance, nearest_256, oklch_q,
+    oklch_to_linear, srgb8_to_oklch_q, to_srgb8, xterm,
 };
 use super::notation::ColorSpec;
 use alloc::vec::Vec;
@@ -119,9 +119,9 @@ pub struct ResolvedToken {
     pub fg256: u8,
     pub bg256: u8,
     pub ansi: AnsiSlot,
-    /// Text color on this token's block, picked once here: `block.text`,
-    /// or in light mode, when `block.text` is not set by the user, the
-    /// terminal background color if it contrasts more with `bg`.
+    /// Text color on this token's block, picked once here: `block.text`
+    /// (a dark ink), or when the user has not set `block.text`, the mode's
+    /// light text color if it contrasts more with `bg`.
     pub on_block: Srgb8,
     pub on_block256: u8,
     /// Always `block.text`'s slot: 16-color mode does not pick.
@@ -403,27 +403,38 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
         tokens.push(r);
     }
     let bt = tokens[token_index("block.text").unwrap_or(0)];
-    // Light blocks (display tier, L 0.62) take the dark ink of `block.text`
-    // and a dark block (such as `fg`) the background color, whichever
-    // contrasts more. A `block.text` the user set is used as is, and dark
-    // keeps its one block text.
+    // Each block takes the dark ink of `block.text` or the mode's light
+    // text color, whichever contrasts more: light (display tier) blocks get
+    // ink, and a dark block (light `fg`, or a dark color the user gave a
+    // block) gets light text. A `block.text` the user set is used as is.
     let user_set = input.roles.iter().any(|r| r.0 == "block.text")
         || input.overrides.iter().any(|o| o.0 == "block.text");
-    let light =
-        (input.mode == Mode::Light && !user_set).then(|| (background, nearest_256(background)));
+    let light = (!user_set).then(|| {
+        let (c, _, _) = color_of(
+            match input.mode {
+                Mode::Dark => "neutral.text",
+                Mode::Light => "neutral.base",
+            },
+            false,
+        );
+        (c, nearest_256(c), luminance(c))
+    });
+    // Luminance once per color: each contrast below reuses it.
+    let (bt_lum, bg_lum) = (luminance(bt.fg), luminance(background));
     for (i, t) in tokens.iter_mut().enumerate() {
         (t.on_block, t.on_block256, t.on_block_ansi) = (bt.fg, bt.fg256, bt.ansi);
         if TOKENS[i].name == "block.text" {
             continue;
         }
-        let mut m = contrast_milli(bt.fg, t.bg);
-        if let Some((c, c256)) = light {
-            let lm = contrast_milli(c, t.bg);
+        let b_lum = luminance(t.bg);
+        let mut m = contrast_milli_lum(bt_lum, b_lum);
+        if let Some((c, c256, l)) = light {
+            let lm = contrast_milli_lum(l, b_lum);
             if lm > m {
                 (m, t.on_block, t.on_block256) = (lm, c, c256);
             }
         }
-        let tm = contrast_milli(t.fg, background);
+        let tm = contrast_milli_lum(luminance(t.fg), bg_lum);
         if tm < 4_500 {
             warnings.push(PaletteWarning::TextContrast {
                 token: i,
@@ -433,7 +444,7 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
         if m < 4_500 {
             warnings.push(PaletteWarning::BlockContrast { token: i, milli: m });
         }
-        let m = contrast_milli(t.bg, background);
+        let m = contrast_milli_lum(b_lum, bg_lum);
         if m < 3_000 {
             warnings.push(PaletteWarning::MarkContrast { token: i, milli: m });
         }
@@ -448,6 +459,7 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::math::contrast_milli;
     use crate::color::notation::parse_color;
 
     fn input(mode: Mode) -> PaletteInput<'static> {
@@ -880,28 +892,27 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: dark에도 자동 선택을 거는 것. dark에서 다른 후보는 어두운 터미널 바탕이라,
-    // 거의 검은 #000000 블록에서만 갈린다. dark 기본 출력이 바뀌지 않는다는 것은 flavor_a_dark_table과
-    // sgr 시험이 바이트로 고정한다.
+    // 이것을 실패시키는 것: dark에서 자동 선택을 하지 않는 것(어두운 블록에 crust가 남음), dark의 밝은 후보를
+    // 터미널 바탕(#1b1d2c, 어두움)으로 두는 것. 밝게 바꾼 블록은 잉크(crust)를 받는다. dark 기본 출력이
+    // 바뀌지 않는다는 것은 flavor_a_dark_table, 아래 경고 목록, sgr 시험이 바이트로 고정한다.
     #[test]
-    fn dark_keeps_one_block_text() {
-        let ov = [("path", parse_color("#000000").unwrap())];
+    fn dark_pick_follows_a_changed_block() {
+        let ov = [
+            ("path", parse_color("#202060").unwrap()),
+            ("host", parse_color("#e0e0ff").unwrap()),
+        ];
         let p = resolve_palette(&PaletteInput {
             overrides: &ov,
             ..input(Mode::Dark)
         })
         .unwrap();
-        let bt = p.get("block.text").unwrap();
-        assert!(
-            contrast_milli(p.background, hex(0)) > contrast_milli(bt.fg, hex(0)),
-            "the mutant would pick the background here"
-        );
-        for r in &p.tokens {
-            assert_eq!(
-                (r.on_block, r.on_block256, r.on_block_ansi),
-                (bt.fg, bt.fg256, bt.ansi)
-            );
+        assert_eq!(on_block(&p, "path"), hex(0xdee0ed));
+        assert_eq!(on_block(&p, "host"), hex(0x111221));
+        for name in ["path", "host"] {
+            let r = p.get(name).unwrap();
+            assert!(contrast_milli(r.on_block, r.bg) >= 4_500, "{name}");
         }
+        assert_eq!(p.get("path").unwrap().on_block_ansi, S(0));
         let d = resolve_palette(&input(Mode::Dark)).unwrap();
         let muted = token_index("muted").unwrap();
         assert_eq!(

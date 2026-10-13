@@ -2570,6 +2570,34 @@ mod tests {
         );
     }
 
+    // 판정(2026-10-13, 대비 구현 중). 이것을 실패시키는 것: 단계 6이 배경을 빼고도 블록 글자색
+    // `OnBlock`을 남기는 것(단계 6에서 `push_segment`에 블록으로 넘기는 것). light `fg` 블록(time)의
+    // 글자는 밝은 색으로 골라져 있어, 남으면 밝은 터미널 바탕 위에서 보이지 않는다. 단계 6에서는 역할의
+    // 일반 글자색이어야 한다. 폭 3은 블록(" … ")이 들어가지 않아 단계 6까지 간다.
+    #[test]
+    fn plain_step_uses_the_role_text_color() {
+        use crate::color::math::contrast_milli;
+        use crate::color::palette::{Knobs, Mode, PaletteInput, resolve_palette};
+        let mut f = fixture(&["Works"], "main");
+        f.setup[idx("time")].required = true;
+        let t = "{time:block}{@nl}{char}";
+        let first = |w| one(t, &f, w)[0].left[0].style;
+        assert_eq!(first(80).fg, Color::OnBlock(tok("fg")));
+        let plain = first(3);
+        assert_eq!(plain.bg, Color::Default);
+        assert_eq!(plain.fg, Color::Text(tok("fg")));
+        let p = resolve_palette(&PaletteInput {
+            mode: Mode::Light,
+            knobs: Knobs::default(),
+            overrides: &[],
+            roles: &[],
+        })
+        .unwrap();
+        let fg = p.get("fg").unwrap();
+        assert!(contrast_milli(fg.fg, p.background) >= 4_500);
+        assert_eq!(fg.on_block, p.background, "the color step 6 must not keep");
+    }
+
     // 판정 C(2026-10-13). 이것을 실패시키는 것: 단계 6에서 사용자 `{@style:bg=…}` 배경을 남기거나,
     // 글자색·속성까지 지우는 것.
     #[test]
