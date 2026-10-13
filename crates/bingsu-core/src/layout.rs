@@ -2857,7 +2857,7 @@ mod tests {
         (out, log)
     }
 
-    // 이것을 실패시키는 것: 기록하는 단계·줄인 방식·숨긴 이유가 실제 단계와 어긋나는 것(경로를 오른쪽보다 먼저 줄이고,
+    // 이것을 실패시키는 것: 맞는 방식의 번호를 0으로 기록하는 것, 기록하는 단계·줄인 방식·숨긴 이유가 실제 단계와 어긋나는 것(경로를 오른쪽보다 먼저 줄이고,
     // 그다음 우선순위 낮은 `time`을 숨긴다), `DecisionLog::step`이 기록하지 않는 것.
     #[test]
     fn steps_in_order() {
@@ -2870,6 +2870,16 @@ mod tests {
         );
         assert_eq!(log.steps, vec![(0, Step::ShortenNames)]);
         assert_eq!(log.shortened, vec![(0, idx("dir"), 0)]);
+        // The first method does not fit, the second does: index 1.
+        let mut g = fixture(&["Works", "AiScream", "themes", "src", "render"], "main");
+        g.setup[idx("dir")].methods = &[
+            Method::Truncate {
+                max: 60,
+                keep: Keep::End,
+            },
+            Method::Repo,
+        ];
+        assert_eq!(logged(t, &g, 40).1.shortened, vec![(0, idx("dir"), 1)]);
         let (_, log) = logged(t, &f, 16);
         assert_eq!(
             log.steps[..2],
