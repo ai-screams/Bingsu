@@ -42,15 +42,21 @@ def test_zsh_upper_line(tmp_path, subst, bang, upper):
 
 # 이것을 실패시키는 것: bash에서 윗줄을 버리거나, 윗줄이 비었는데 줄바꿈을 넣는 것,
 # 값 대입 경로의 `\` 이스케이프가 윗줄을 빠뜨리는 것,
-# POSIX 모드(promptvars 끔이어도 확장됨)에서 참조 방식을 쓰지 않는 것.
+# POSIX 모드(promptvars 끔이어도 확장됨)에서 참조 방식을 쓰지 않는 것,
+# hook의 지역 변수가 사용자의 readonly 전역(`ps1`)과 이름이 겹치는 것(local이 실패해 사용자 값을 그림).
 @pytest.mark.skipif("bash" not in SHELLS, reason="bash not under test")
+@pytest.mark.parametrize("readonly", [False, True], ids=["", "user-readonly"])
 @pytest.mark.parametrize("mode", ["promptvars", "nopromptvars", "posix"])
 @pytest.mark.parametrize("upper", [b"UP\\LINE", b""])
-def test_bash_upper_line(tmp_path, mode, upper):
+def test_bash_upper_line(tmp_path, mode, upper, readonly):
     rc = {"promptvars": "", "nopromptvars": "shopt -u promptvars", "posix": "shopt -u promptvars; set -o posix"}[mode]
+    if readonly:
+        rc = "readonly ps1=USERVAL; " + rc
     s, _, _ = bash_start(tmp_path, rc_before=rc, record=upper_record(upper))
     s.run("printf '<P=%q|V=%q>\\n' \"$PS1\" \"${_bingsu_ps1-}\"")
-    got = last_line_with(visible(s.close()), b"<P=")
+    out = visible(s.close())
+    assert b"readonly variable" not in out, out[-400:]
+    got = last_line_with(out, b"<P=")
     if mode != "nopromptvars":
         want_v = b"$'UP\\\\LINE\\n> '" if upper else b"\\>\\ "
         assert got == b"<P=\\$\\{_bingsu_ps1\\}|V=" + want_v + b">", got
