@@ -2598,7 +2598,8 @@ mod tests {
         assert_ne!(out[0].left[0].style.attrs & DIM, 0);
     }
 
-    // 이것을 실패시키는 것: 채움 글리프 바이트를 `LINE_BYTES_MAX`에 넣지 않는 것(폭 65535의 `─`는 약 192 KB), 채움이
+    // 이것을 실패시키는 것: 채움 글리프 바이트를 `LINE_BYTES_MAX`에 넣지 않거나 글리프당 1바이트로 세는 것(폭 6000의 `─`는
+    // 약 18 KB, 1바이트로 세면 약 6 KB), 채움이
     // 없는 입력 줄에서도 채움 바이트를 세는 것.
     #[test]
     fn fill_bytes_count_toward_the_byte_cap() {
@@ -2608,6 +2609,15 @@ mod tests {
         assert!(bytes <= LINE_BYTES_MAX, "{bytes}");
         let out = one("{dir}{@fill:line}{time}{@nl}{char}", &f, 5000);
         assert!(text(&out[0].left).ends_with("12:34"));
+        // At 6000 columns about 5,980 fill cells are 3 bytes each (about
+        // 18 KiB, over the cap) but would be under it at 1 byte each: the
+        // right side goes and the line stays within the cap.
+        let out = one("{dir}{@fill:line}{time}{@nl}{char}", &f, 6000);
+        let bytes: usize = out[0].left.iter().map(|r| r.text.len()).sum();
+        assert!(
+            bytes <= LINE_BYTES_MAX && !text(&out[0].left).contains("12:34"),
+            "{bytes}"
+        );
         // An input line draws no fill: its right side is the right prompt.
         let out = one("{dir}{@fill:line}{time}", &f, u16::MAX);
         assert_eq!(text(&out[0].right), "12:34");
