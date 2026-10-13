@@ -1,7 +1,8 @@
-//! Layer 2 render snapshots (spec section 7): a fixed input drawn for each
-//! shell and compared byte for byte with tests/golden/render/snapshots/
+//! Layer 2 render snapshots (spec section 7): fixed inputs (presets, color
+//! depths, a width band) drawn for each shell and compared byte for byte with tests/golden/render/snapshots/
 //! (BINGSU_UPDATE_GOLDEN=1 rewrites them; review the diff), and the visible
 //! text equal across the three shells, the vi fields included.
+use bingsu_core::bands::{Band, order_bands};
 use bingsu_core::color::palette::{Knobs, Mode, PaletteInput, resolve_palette};
 use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::field::{BUILTIN, Field, FieldValue, Value, segment};
@@ -16,7 +17,64 @@ use bingsu_core::template::compile::compile;
 use bingsu_core::width::WidthProfile;
 use bingsu_core_tests::{parse_field, parse_readline};
 
-fn render(shell: Shell, preset_name: &str, width: u16) -> RenderedPrompt {
+/// One snapshot input: a preset at a color depth, optionally with a band
+/// (at most 50 columns) that switches to a one-line lean layout.
+#[derive(Clone, Copy, Debug)]
+struct Case {
+    name: &'static str,
+    preset: &'static str,
+    depth: ColorDepth,
+    banded: bool,
+}
+
+const CASES: [Case; 5] = [
+    Case {
+        name: "lean",
+        preset: "lean",
+        depth: ColorDepth::TrueColor,
+        banded: false,
+    },
+    Case {
+        name: "triangle",
+        preset: "triangle",
+        depth: ColorDepth::TrueColor,
+        banded: false,
+    },
+    Case {
+        name: "triangle_256",
+        preset: "triangle",
+        depth: ColorDepth::Ansi256,
+        banded: false,
+    },
+    Case {
+        name: "lean_16",
+        preset: "lean",
+        depth: ColorDepth::Ansi16,
+        banded: false,
+    },
+    Case {
+        name: "banded",
+        preset: "triangle",
+        depth: ColorDepth::TrueColor,
+        banded: true,
+    },
+];
+
+/// The band of the banded case and the width each case is snapshotted at
+/// (40 is inside the band, 60 outside).
+const BAND: Band = Band {
+    min_cols: None,
+    max_cols: Some(50),
+    order: None,
+};
+
+fn snapshot_width(c: &Case) -> u16 {
+    if c.banded { 40 } else { 60 }
+}
+
+const SHELLS: [Shell; 3] = [Shell::Zsh, Shell::Bash, Shell::Fish];
+
+fn render(shell: Shell, c: &Case, width: u16) -> RenderedPrompt {
     let i = |id| BUILTIN.iter().position(|d| d.id == id).unwrap();
     let v = |id: &str, text: &[u8], set: &[(&str, FieldValue)]| {
         let d = segment(id).unwrap();
@@ -58,9 +116,14 @@ fn render(shell: Shell, preset_name: &str, width: u16) -> RenderedPrompt {
         facts: &facts,
         setup: &setup,
     };
-    let t = generate(
-        preset(preset_name).unwrap(),
-        &StyleOptions::default(),
+    let style = |name: &str, lines: &[LineLayout<'_>]| {
+        let t = generate(preset(name).unwrap(), &StyleOptions::default(), lines).unwrap();
+        compile(&t, BUILTIN).unwrap()
+    };
+    // The input line has a right side too (`status`, also on the line
+    // above), so the right field is not empty.
+    let mut variants = vec![style(
+        c.preset,
         &[
             LineLayout {
                 left: &["dir", "git"],
@@ -68,13 +131,25 @@ fn render(shell: Shell, preset_name: &str, width: u16) -> RenderedPrompt {
             },
             LineLayout {
                 left: &["char"],
-                right: &[],
+                right: &["status"],
             },
         ],
-    )
-    .unwrap();
-    let lines = compile(&t, BUILTIN).unwrap();
-    let tr = compile("{char}", BUILTIN).unwrap().remove(0);
+    )];
+    let bands: &[Band] = if c.banded {
+        variants.push(style(
+            "lean",
+            &[LineLayout {
+                left: &["dir", "char"],
+                right: &["time"],
+            }],
+        ));
+        &[BAND]
+    } else {
+        &[]
+    };
+    let band_order = order_bands(bands).unwrap();
+    let tr = compile("{char}{@fill}{status}", BUILTIN).unwrap().remove(0);
+    let vi = compile("{char}", BUILTIN).unwrap().remove(0);
     let pal = resolve_palette(&PaletteInput {
         mode: Mode::Dark,
         knobs: Knobs::default(),
@@ -83,11 +158,11 @@ fn render(shell: Shell, preset_name: &str, width: u16) -> RenderedPrompt {
     })
     .unwrap();
     let theme = Theme {
-        variants: &[lines],
-        bands: &[],
-        band_order: &[],
+        variants: &variants,
+        bands,
+        band_order: &band_order,
         transient: &tr,
-        vi: &tr,
+        vi: &vi,
         palette: &pal,
     };
     let o = Options {
@@ -101,7 +176,7 @@ fn render(shell: Shell, preset_name: &str, width: u16) -> RenderedPrompt {
         &inputs,
         &Target {
             shell,
-            depth: ColorDepth::TrueColor,
+            depth: c.depth,
             options: o,
         },
         &mut NoopRecorder,
@@ -154,9 +229,9 @@ fn visible(shell: Shell, name: &str, b: &[u8]) -> String {
 // 이것을 실패시키는 것: 셸별 출력 바이트가 바뀌는 것(리뷰가 스냅샷 차이를 본다), golden 파일이 없는 것.
 #[test]
 fn shell_outputs() {
-    for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
-        for p in ["lean", "triangle"] {
-            let r = render(shell, p, 60);
+    for shell in SHELLS {
+        for c in &CASES {
+            let r = render(shell, c, snapshot_width(c));
             let mut bytes = Vec::new();
             for (n, b) in all(&r) {
                 bytes.extend_from_slice(n.as_bytes());
@@ -164,8 +239,62 @@ fn shell_outputs() {
                 bytes.extend_from_slice(b);
                 bytes.push(b'\n');
             }
-            check_golden(&format!("{}_{p}.bin", shell.as_str()), &bytes);
+            check_golden(&format!("{}_{}.bin", shell.as_str(), c.name), &bytes);
         }
+    }
+}
+
+// 이것을 실패시키는 것: 셸 출력에 Target의 색 깊이를 넘기지 않는 것(필드 하나라도, bash vi의 readline
+// 문자열 포함). 256색은 `38;5;`만, 16색은 둘 다 없이 쓴다.
+#[test]
+fn color_depth_reaches_every_field() {
+    for shell in SHELLS {
+        for c in &CASES {
+            let r = render(shell, c, snapshot_width(c));
+            // The banded case draws no upper line at 40 columns.
+            for (name, b) in all(&r)
+                .into_iter()
+                .filter(|(n, b)| !b.is_empty() || *n != "upper")
+            {
+                // bash vi fields are readline strings (ESC written `\\e`).
+                let b = if shell == Shell::Bash && name.starts_with("vi_") {
+                    parse_readline(b).unwrap()
+                } else {
+                    b.to_vec()
+                };
+                let has = |pat: &[u8]| b.windows(pat.len()).any(|w| w == pat);
+                let (rgb, x256) = (has(b"38;2;"), has(b"38;5;"));
+                let ok = match c.depth {
+                    ColorDepth::TrueColor => rgb && !x256,
+                    ColorDepth::Ansi256 => x256 && !rgb,
+                    ColorDepth::Ansi16 => !rgb && !x256 && has(b"\x1b[0;"),
+                };
+                assert!(
+                    ok,
+                    "{shell:?} {} {name}: {:?}",
+                    c.name,
+                    String::from_utf8_lossy(&b)
+                );
+            }
+        }
+    }
+}
+
+// 이것을 실패시키는 것: 렌더가 폭 구간을 layout에 넘기지 않는 것(구간 안의 폭에서도 두 줄 기본 레이아웃을
+// 그림). 구간(50칸 이하) 안에서는 한 줄 lean 변형, 밖에서는 두 줄 기본 레이아웃이다.
+#[test]
+fn band_picks_the_variant() {
+    let banded = &CASES[4];
+    assert!(banded.banded);
+    for shell in SHELLS {
+        let inside = render(shell, banded, 40);
+        assert!(inside.upper.is_empty(), "{shell:?}");
+        let left = visible(shell, "left", &inside.left);
+        assert!(left.contains("50% done"), "{shell:?}: {left:?}");
+        let outside = render(shell, banded, 60);
+        let plain = render(shell, &CASES[1], 60);
+        assert!(!outside.upper.is_empty(), "{shell:?}");
+        assert_eq!(outside, plain, "{shell:?}");
     }
 }
 
@@ -173,21 +302,23 @@ fn shell_outputs() {
 // 포함(bash는 readline 문자열을 되돌려 비교), vi 입력·명령 기호가 같아지는 것.
 #[test]
 fn same_visible_text_in_every_shell() {
-    for p in ["lean", "triangle"] {
+    for c in &CASES {
         for w in [20u16, 40, 60, 80, 120] {
-            let rs = [Shell::Zsh, Shell::Bash, Shell::Fish].map(|s| (s, render(s, p, w)));
+            let rs = SHELLS.map(|s| (s, render(s, c, w)));
             let fish = &rs[2].1;
             assert_ne!(
                 visible(Shell::Fish, "vi_insert", &fish.vi_insert),
                 visible(Shell::Fish, "vi_command", &fish.vi_command),
-                "{p} {w}"
+                "{} {w}",
+                c.name
             );
             for (shell, r) in &rs[..2] {
                 for ((name, b), (_, fb)) in all(r).into_iter().zip(all(fish)) {
                     assert_eq!(
                         visible(*shell, name, b),
                         visible(Shell::Fish, name, fb),
-                        "{p} {w} {shell:?} {name}"
+                        "{} {w} {shell:?} {name}",
+                        c.name
                     );
                 }
             }

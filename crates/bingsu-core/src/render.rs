@@ -61,35 +61,37 @@ fn field(t: &Target, p: &ResolvedPalette, runs: &[Run]) -> Vec<u8> {
     v
 }
 
-/// The vi line with `char`'s `vicmd` field set to `vicmd`. Only the `char`
-/// value is copied: the line draws nothing else that changes with it.
-fn vi_symbol(theme: &Theme<'_>, inp: &Inputs<'_>, t: &Target, vicmd: bool) -> Vec<u8> {
+/// The vi line drawn twice, with `char`'s `vicmd` field false (insert) and
+/// true (command). Only the `char` value is copied, once: the line draws
+/// nothing else that changes with it.
+fn vi_symbols(theme: &Theme<'_>, inp: &Inputs<'_>, t: &Target) -> (Vec<u8>, Vec<u8>) {
     let Some(ci) = inp.catalog.iter().position(|d| d.id == "char") else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut values: Vec<Option<Value>> = vec![None; inp.values.len()];
-    if let Some(v) = inp.values.get(ci).cloned().flatten() {
-        let mut v = v;
-        if let Some(f) = inp.catalog[ci]
-            .field_index("vicmd")
-            .and_then(|k| v.fields.get_mut(k))
+    values[ci] = inp.values.get(ci).cloned().flatten();
+    let k = inp.catalog[ci].field_index("vicmd");
+    let mut draw = |vicmd: bool| {
+        if let Some(f) = values[ci]
+            .as_mut()
+            .and_then(|v| k.and_then(|k| v.fields.get_mut(k)))
         {
             *f = Field::known(FieldValue::Bool(vicmd));
         }
-        values[ci] = Some(v);
-    }
-    let vi_inp = Inputs {
-        values: &values,
-        ..*inp
+        let vi_inp = Inputs {
+            values: &values,
+            ..*inp
+        };
+        let line = layout_line(0, theme.vi, false, &vi_inp, &t.options, &mut NoopRecorder);
+        if t.shell == Shell::Bash {
+            let mut s = Vec::with_capacity(capacity(&line.left) + 32);
+            readline_mode_string(&line.left, theme.palette, t.depth, &mut s);
+            s
+        } else {
+            field(t, theme.palette, &line.left)
+        }
     };
-    let line = layout_line(0, theme.vi, false, &vi_inp, &t.options, &mut NoopRecorder);
-    if t.shell == Shell::Bash {
-        let mut s = Vec::with_capacity(capacity(&line.left) + 32);
-        readline_mode_string(&line.left, theme.palette, t.depth, &mut s);
-        s
-    } else {
-        field(t, theme.palette, &line.left)
-    }
+    (draw(false), draw(true))
 }
 
 /// Lays out the prompt and writes every display field for `t.shell`.
@@ -125,14 +127,15 @@ pub fn render_prompt<R: Recorder>(
         &t.options,
         &mut NoopRecorder,
     );
+    let (vi_insert, vi_command) = vi_symbols(theme, inp, t);
     RenderedPrompt {
         upper: upper.map(|l| field(t, p, &l.left)).unwrap_or_default(),
         left: input.map(|l| field(t, p, &l.left)).unwrap_or_default(),
         right: input.map(|l| field(t, p, &l.right)).unwrap_or_default(),
         transient_left: field(t, p, &tr.left),
         transient_right: field(t, p, &tr.right),
-        vi_insert: vi_symbol(theme, inp, t, false),
-        vi_command: vi_symbol(theme, inp, t, true),
+        vi_insert,
+        vi_command,
     }
 }
 
@@ -185,18 +188,39 @@ mod tests {
         render_prompt(&theme, &f.inputs(), &t, &mut NoopRecorder)
     }
 
-    // 이것을 실패시키는 것: 윗줄을 B1 필드에 싣지 않거나 다른 필드에 섞는 것.
+    // 이것을 실패시키는 것: 일곱 필드 중 어느 둘을 바꿔 싣는 것(예: vi_insert·vi_command,
+    // right·transient_right), 윗줄을 B1 필드에 싣지 않는 것. 필드마다 바이트가 달라 어느 맞바꿈도 갈린다.
     #[test]
-    fn upper_line_goes_to_its_own_field() {
+    fn b1_fields_map_one_to_one() {
         let r = RenderedPrompt {
-            left: b"x".to_vec(),
-            upper: b"line 1".to_vec(),
-            ..RenderedPrompt::default()
+            upper: b"upper".to_vec(),
+            left: b"left".to_vec(),
+            right: b"right".to_vec(),
+            transient_left: b"tleft".to_vec(),
+            transient_right: b"tright".to_vec(),
+            vi_insert: b"vins".to_vec(),
+            vi_command: b"vcmd".to_vec(),
         };
         let f = to_b1_fields(&r);
         assert_eq!(
-            (f.left, f.upper, f.right),
-            (&b"x"[..], &b"line 1"[..], &b""[..])
+            [
+                f.upper,
+                f.left,
+                f.right,
+                f.transient_left,
+                f.transient_right,
+                f.vi_insert,
+                f.vi_command
+            ],
+            [
+                &b"upper"[..],
+                b"left",
+                b"right",
+                b"tleft",
+                b"tright",
+                b"vins",
+                b"vcmd"
+            ]
         );
     }
 
