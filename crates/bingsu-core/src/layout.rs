@@ -696,8 +696,18 @@ impl<'l, 'i> Lay<'l, 'i> {
         if matches!(self.inp.facts.get(s), Some(Some(f)) if f.display_len() > PATH_BYTES_MAX) {
             return None;
         }
-        let mut best: Option<(Vec<Piece>, u32, usize)> = None;
-        for (i, m) in methods.iter().take(METHODS_MAX).enumerate() {
+        let mut best: Option<(Vec<Piece>, u32)> = None;
+        // The method's index exists only for the record: found from the
+        // method's place in the slice, under `R::ENABLED` (an index carried
+        // through the loop cost 12 instructions with `NoopRecorder`).
+        let at = |m: &Method| {
+            methods
+                .iter()
+                .position(|x| core::ptr::eq(x, m))
+                .unwrap_or(0)
+        };
+        let mut best_at = 0;
+        for m in methods.iter().take(METHODS_MAX) {
             if too_big(*m, self.source(s)) {
                 continue;
             }
@@ -714,17 +724,20 @@ impl<'l, 'i> Lay<'l, 'i> {
             }
             if w <= budget {
                 if R::ENABLED {
-                    rec.shortened(n, s, i);
+                    rec.shortened(n, s, at(m));
                 }
                 return Some(res.pieces);
             }
             if best.as_ref().is_none_or(|b| w < b.1) {
-                best = Some((res.pieces, w, i));
+                if R::ENABLED {
+                    best_at = at(m);
+                }
+                best = Some((res.pieces, w));
             }
         }
-        let (pieces, _, i) = best?;
+        let (pieces, _) = best?;
         if R::ENABLED {
-            rec.shortened(n, s, i);
+            rec.shortened(n, s, best_at);
         }
         Some(pieces)
     }
@@ -862,6 +875,39 @@ impl<'l, 'i> Lay<'l, 'i> {
         }
         clean(left);
         clean(right);
+    }
+
+    /// Records the conditional groups of the final state that vanished
+    /// because fields of visible segments in them are empty (`refs` from the
+    /// last walk). Each segment once per group; nested groups go with the
+    /// outer one.
+    fn record_empty_groups<R: Recorder>(&self, n: usize, refs: &[u32], r: &mut R) {
+        let mut k = 0;
+        while k < self.nodes.len() {
+            let Node::Group { len } = self.nodes[k] else {
+                k += 1;
+                continue;
+            };
+            let end = (k + 1).saturating_add(len as usize).min(self.nodes.len());
+            if refs[end] != refs[k + 1] {
+                k += 1;
+                continue;
+            }
+            let right = self.fill.is_some_and(|f| k > f);
+            for j in k + 1..end {
+                let Node::Field { seg, .. } = self.nodes[j] else {
+                    continue;
+                };
+                let s = usize::from(seg);
+                let again = self.nodes[k + 1..j]
+                    .iter()
+                    .any(|x| matches!(*x, Node::Field { seg: o, .. } if o == seg));
+                if self.visible(s, right) && !again {
+                    r.hidden(n, s, HideReason::EmptyGroup);
+                }
+            }
+            k = end;
+        }
     }
 
     /// Step 6 draws no background at all, a `{@style:bg=…}` one included;
@@ -1480,6 +1526,9 @@ pub fn layout_line_into<R: Recorder>(
 ) {
     let target = target(o);
     let p = o.profile;
+    if o.width <= 1 && R::ENABLED {
+        record_tiny(n, line, inp, r);
+    }
     if o.width == 1 {
         // Spec section 3 table: width 1 is one ASCII `>`.
         clear_line(out, true);
@@ -1533,8 +1582,16 @@ pub fn layout_line_into<R: Recorder>(
             for i in 0..lay.entries.len() {
                 let e = lay.entries[i];
                 let su = lay.setup(e.seg);
+                // `!e.text` is a performance-only shortcut that no output
+                // or record can show: a segment referenced only by fields
+                // has no text built, so shortening it gives an empty result
+                // that validation drops. A segment drawn on both sides is
+                // shortened once, from its left entry.
+                let left_done =
+                    right && lay.slots[e.seg].entry[0].is_some_and(|l| lay.entries[l].text);
                 if e.right != right
                     || !e.text
+                    || left_done
                     || su.methods.is_empty()
                     || !lay.visible(e.seg, right)
                 {
@@ -1654,6 +1711,9 @@ pub fn layout_line_into<R: Recorder>(
     }
     // Every way out of the steps follows a check, so `b` holds the items of
     // the final state and `fit` its measure.
+    if R::ENABLED {
+        lay.record_empty_groups(n, &b.refs, r);
+    }
     out.minimal = false;
     let (nl, nr) = (
         lay.runs(&b.left, false, None),
@@ -1693,6 +1753,32 @@ pub fn layout_line_into<R: Recorder>(
         let mut sink = Sink::new(&mut out.right, nr);
         lay.runs(&b.right, true, Some(&mut sink));
         sink.finish();
+    }
+}
+
+/// Step 7 at widths 0 and 1, which return before the line is measured:
+/// the step, and every segment the line references (its value missing, or
+/// dropped like at step 7; the prompt character is kept on the input line
+/// and, as at step 7, never recorded).
+fn record_tiny<R: Recorder>(n: usize, line: &CompiledLine, inp: &Inputs<'_>, r: &mut R) {
+    r.step(n, Step::Minimal);
+    let char_seg = inp.catalog.iter().position(|d| d.id == "char");
+    let mut seen = alloc::vec![false; inp.catalog.len()];
+    for node in line.nodes() {
+        let (Node::Segment { seg, .. } | Node::Field { seg, .. }) = *node else {
+            continue;
+        };
+        let s = usize::from(seg);
+        if s >= seen.len() || seen[s] || Some(s) == char_seg {
+            continue;
+        }
+        seen[s] = true;
+        let reason = if matches!(inp.values.get(s), Some(Some(_))) {
+            HideReason::Minimal
+        } else {
+            HideReason::NoValue
+        };
+        r.hidden(n, s, reason);
     }
 }
 
@@ -1798,6 +1884,7 @@ pub fn layout_into<R: Recorder>(
 ) {
     let band = select(band_order, bands, o.width);
     if R::ENABLED {
+        r.begin();
         r.band(band);
     }
     let lines = band
@@ -2173,6 +2260,15 @@ mod tests {
             };
             for w in 0..=40 {
                 let o = opts(w);
+                // A recording log reads the same ragged inputs.
+                let _ = layout(
+                    core::slice::from_ref(&lines),
+                    &[],
+                    &[],
+                    &inp,
+                    &o,
+                    &mut DecisionLog::default(),
+                );
                 assert_fits(
                     &layout(
                         core::slice::from_ref(&lines),
@@ -2893,5 +2989,119 @@ mod tests {
                 assert_eq!(a, b, "{name} {w}");
             }
         }
+    }
+
+    // 리뷰 #1. 이것을 실패시키는 것: 비어서 사라진 조건 묶음을 기록하지 않는 것, 한 묶음의 같은 세그먼트를 두 번
+    // 기록하는 것, 값이 없어서(NoValue) 또는 오른쪽에서 숨어서(Priority) 사라진 묶음까지 EmptyGroup으로 기록하는 것.
+    #[test]
+    fn empty_groups_are_recorded() {
+        let mut f = fixture(&["Works"], "main");
+        let t = "{dir}{@group} +{git.ahead}/{git.behind}{@end}{@nl}{char}";
+        f.values[idx("git")] = value(
+            "git",
+            "main",
+            &[(
+                "ahead",
+                FieldValue::Count {
+                    n: 0,
+                    saturated: false,
+                },
+            )],
+        );
+        let (out, log) = logged(t, &f, 80);
+        assert_eq!(text(&out[0].left), "~/Works");
+        assert_eq!(log.hidden, [(0, idx("git"), HideReason::EmptyGroup)]);
+        f.values[idx("git")] = value(
+            "git",
+            "main",
+            &[(
+                "ahead",
+                FieldValue::Count {
+                    n: 2,
+                    saturated: false,
+                },
+            )],
+        );
+        assert!(logged(t, &f, 80).1.hidden.is_empty());
+        f.values[idx("git")] = None;
+        assert_eq!(
+            logged(t, &f, 80).1.hidden,
+            [(0, idx("git"), HideReason::NoValue)]
+        );
+        // On the right, step 2 hides git's group: "main" + "+2 12:34" is 12
+        // cells, target 11. Still drawn on the left, it is no empty group.
+        f.values[idx("git")] = value(
+            "git",
+            "main",
+            &[(
+                "ahead",
+                FieldValue::Count {
+                    n: 2,
+                    saturated: false,
+                },
+            )],
+        );
+        f.setup[idx("git")].priority = 0;
+        let (out, log) = logged(
+            "{git}{@fill}{@group}+{git.ahead}{@end} {time}{@nl}{char}",
+            &f,
+            12,
+        );
+        assert!(text(&out[0].left).ends_with(" 12:34"), "{out:?}");
+        assert_eq!(log.hidden, [(0, idx("git"), HideReason::Priority)]);
+    }
+
+    // 리뷰 #2. 이것을 실패시키는 것: fill 양쪽에 있는 세그먼트를 단계 1이 쪽마다 줄여 같은 기록을 두 번 남기는 것.
+    #[test]
+    fn a_segment_on_both_sides_is_shortened_once() {
+        let f = fixture(&["Works", "AiScream", "themes"], "main");
+        let (out, log) = logged("{dir}{@fill}{dir}{@nl}{char}", &f, 30);
+        assert_eq!(log.shortened, [(0, idx("dir"), 0)]);
+        // Both occurrences draw the one shortened text.
+        assert_eq!(text(&out[0].left).matches("themes").count(), 2, "{out:?}");
+        // Still too wide after the left entry: the right entry is skipped,
+        // not shortened (and recorded) again.
+        let (_, log) = logged("{dir}{@fill}{dir}{@nl}{char}", &f, 12);
+        assert_eq!(log.shortened, [(0, idx("dir"), 0)]);
+        // Referenced only by a field on the left, the segment is shortened
+        // from its right entry.
+        let (out, log) = logged("{dir.in_repo}x{@fill}{dir}{@nl}{char}", &f, 12);
+        assert_eq!(log.shortened, [(0, idx("dir"), 0)]);
+        assert!(text(&out[0].left).ends_with("themes"), "{out:?}");
+    }
+
+    // 리뷰 #3. 이것을 실패시키는 것: 폭 0·1의 최소 프롬프트가 단계 7과 숨긴 세그먼트를 기록하지 않는 것.
+    #[test]
+    fn tiny_widths_are_recorded() {
+        let mut f = fixture(&["Works"], "main");
+        f.values[idx("venv")] = None;
+        for w in [0, 1] {
+            // `dir` twice: recorded once.
+            let (out, log) = logged("{venv}{dir} {git} {dir}{@nl}{char}", &f, w);
+            assert!(out.iter().all(|l| l.minimal));
+            assert_eq!(log.steps, [(0, Step::Minimal), (1, Step::Minimal)], "{w}");
+            assert_eq!(
+                log.hidden,
+                [
+                    (0, idx("venv"), HideReason::NoValue),
+                    (0, idx("dir"), HideReason::Minimal),
+                    (0, idx("git"), HideReason::Minimal)
+                ],
+                "{w}"
+            );
+        }
+    }
+
+    // 리뷰 #5. 이것을 실패시키는 것: `layout`이 기록기를 비우지 않고 이어 쌓는 것.
+    #[test]
+    fn each_layout_starts_a_new_log() {
+        let f = fixture(&["Works", "AiScream", "themes", "src", "render"], "main");
+        let lines = [two_lines("triangle")];
+        let mut log = DecisionLog::default();
+        layout(&lines, &[], &[], &f.inputs(), &opts(30), &mut log);
+        let once = log.clone();
+        assert!(!once.steps.is_empty());
+        layout(&lines, &[], &[], &f.inputs(), &opts(30), &mut log);
+        assert_eq!(log, once);
     }
 }

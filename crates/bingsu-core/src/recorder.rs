@@ -33,10 +33,23 @@ pub enum HideReason {
     LeftOptional,
     /// Step 7 dropped everything but the prompt character.
     Minimal,
+    /// A conditional group vanished because the segment's fields in it are
+    /// all empty (Absent, an empty text, a zero count, `false`). A group
+    /// that vanished because its segments are hidden or have no value is
+    /// recorded under those reasons instead.
+    EmptyGroup,
 }
 
+/// Records of one `layout` call. Per line there are at most 7 steps, two
+/// `shortened` per segment of the catalog (`when = always`, then step 1),
+/// and at most 5 `hidden` per segment (no value, step 2 or 3, step 5, step
+/// 7: a segment is hidden once per side) plus one `EmptyGroup` per field
+/// node of the line. `layout` calls `begin` first, so a reused log holds one
+/// call's records.
 pub trait Recorder {
     const ENABLED: bool;
+    /// Starts a new call: forget earlier records (keeping their memory).
+    fn begin(&mut self);
     fn band(&mut self, band: Option<usize>);
     fn step(&mut self, line: usize, step: Step);
     fn hidden(&mut self, line: usize, segment: usize, reason: HideReason);
@@ -50,6 +63,8 @@ pub struct NoopRecorder;
 
 impl Recorder for NoopRecorder {
     const ENABLED: bool = false;
+    #[inline(always)]
+    fn begin(&mut self) {}
     #[inline(always)]
     fn band(&mut self, _: Option<usize>) {}
     #[inline(always)]
@@ -70,6 +85,12 @@ pub struct DecisionLog {
 
 impl Recorder for DecisionLog {
     const ENABLED: bool = true;
+    fn begin(&mut self) {
+        self.band = None;
+        self.steps.clear();
+        self.hidden.clear();
+        self.shortened.clear();
+    }
     fn band(&mut self, band: Option<usize>) {
         self.band = band;
     }
@@ -95,5 +116,17 @@ mod tests {
         assert_eq!(core::mem::size_of::<NoopRecorder>(), 0);
         const { assert!(!NoopRecorder::ENABLED) };
         const { assert!(DecisionLog::ENABLED) };
+    }
+
+    // 이것을 실패시키는 것: `begin`이 폭 구간이나 기록 하나라도 남기는 것.
+    #[test]
+    fn begin_forgets_everything() {
+        let mut log = DecisionLog::default();
+        log.band(Some(3));
+        log.step(0, Step::Minimal);
+        log.hidden(0, 1, HideReason::Minimal);
+        log.shortened(0, 1, 0);
+        log.begin();
+        assert_eq!(log, DecisionLog::default());
     }
 }

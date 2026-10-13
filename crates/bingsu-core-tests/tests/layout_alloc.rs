@@ -8,7 +8,7 @@ use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{
     Inputs, LINE_BYTES_MAX, LaidLine, Options, SegmentSetup, When, layout_into, runs_width, target,
 };
-use bingsu_core::recorder::NoopRecorder;
+use bingsu_core::recorder::{DecisionLog, NoopRecorder};
 use bingsu_core::shorten::{Anchor, Keep, MAX_STEPS, Method, PathFacts};
 use bingsu_core::template::compile::compile;
 use bingsu_core::template::syntax::MAX_TEMPLATE_BYTES;
@@ -307,4 +307,97 @@ fn the_largest_inputs_stay_small() {
     assert!(long.0 <= 110_000 && long.1 <= 25, "long {long:?}");
     assert!(fill.0 <= 2_100 && fill.1 <= 25, "fill {fill:?}");
     assert!(none.0 <= 110_000 && none.1 <= 30, "none {none:?}");
+}
+
+// A decision log reused across `layout_into` calls holds one call's records
+// and keeps its memory: the second call allocates exactly what a call
+// without a log does. The worst case: every catalog segment on both sides
+// of an upper line and in emptied groups, at a width where every step runs.
+// 이것을 실패시키는 것: `begin`이 기록을 비우지 않는 것(두 번째 호출의 기록이 두 배), 용량을 버리고 새로 잡는 것
+// (두 번째 호출의 할당이 기록 없는 호출보다 많다), 줄당 기록 수가 `Recorder` 문서의 상한을 넘는 것.
+#[test]
+fn a_reused_log_keeps_one_call_and_its_memory() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let i = |id| BUILTIN.iter().position(|d| d.id == id).unwrap();
+    let mut values: Vec<Option<Value>> = BUILTIN
+        .iter()
+        .map(|d| value(d.id, d.id.as_bytes()))
+        .collect();
+    values[i("venv")] = None;
+    let mut facts = vec![None; BUILTIN.len()];
+    let steps: [&[u8]; 4] = [b"Works", b"AiScream", b"themes", b"src"];
+    facts[i("dir")] = Some(PathFacts::new(Anchor::Home, &steps, Some(2), &[]));
+    let mut setup = vec![
+        SegmentSetup {
+            priority: 10,
+            required: false,
+            methods: &[Method::Truncate {
+                max: 3,
+                keep: Keep::Start
+            }],
+            when: When::Always
+        };
+        BUILTIN.len()
+    ];
+    setup[i("dir")] = SegmentSetup {
+        priority: 100,
+        required: true,
+        methods: &[Method::Repo, Method::Depth(1)],
+        when: When::Needed,
+    };
+    let inputs = Inputs {
+        catalog: BUILTIN,
+        values: &values,
+        facts: &facts,
+        setup: &setup,
+    };
+    // Every segment on both sides, and every field of git in a group whose
+    // fields are all empty (the git value has absent fields only).
+    let ids: Vec<&str> = BUILTIN.iter().map(|d| d.id).collect();
+    let side: String = ids.iter().map(|id| format!("{{{id}}} ")).collect();
+    let group: String = BUILTIN[i("git")]
+        .fields
+        .iter()
+        .map(|f| format!("{{git.{}}}", f.name))
+        .collect();
+    let t = format!("abcd{side}{{@group}}+{group}{{@end}}{{@fill}}{side}{{@nl}}{{char}}");
+    let lines = vec![compile(&t, BUILTIN).unwrap()];
+    let o = Options {
+        width: 4,
+        profile: WidthProfile::DEFAULT,
+        icons: IconSet::Nerd,
+        use_last_column: false,
+    };
+    let mut out = Vec::new();
+    let mut log = DecisionLog::default();
+    layout_into(&lines, &[], &[], &inputs, &o, &mut log, &mut out);
+    let once = log.clone();
+    let (allocs_log, reallocs_log, _) =
+        counted(|| layout_into(&lines, &[], &[], &inputs, &o, &mut log, &mut out));
+    let (allocs_noop, reallocs_noop, _) =
+        counted(|| layout_into(&lines, &[], &[], &inputs, &o, &mut NoopRecorder, &mut out));
+    assert_eq!(log, once);
+    // The shortener grows its own results in both runs.
+    assert_eq!((allocs_log, reallocs_log), (allocs_noop, reallocs_noop));
+    // Per line: 7 steps, 2 shortened per catalog segment, 5 hidden per
+    // catalog segment plus one per field node.
+    let c = BUILTIN.len();
+    let fields = BUILTIN[i("git")].fields.len();
+    for n in 0..2 {
+        let steps = log.steps.iter().filter(|x| x.0 == n).count();
+        let short = log.shortened.iter().filter(|x| x.0 == n).count();
+        let hidden = log.hidden.iter().filter(|x| x.0 == n).count();
+        assert!(
+            steps <= 7 && short <= 2 * c && hidden <= 5 * c + fields,
+            "line {n}: {steps} {short} {hidden}"
+        );
+    }
+    // Measured: line 0 reaches step 7 (all 7 steps); 16 shortened, 2 for
+    // each of the 8 segments with a value (`always`, then step 1); 17 hidden.
+    assert_eq!(
+        (log.steps.len(), log.shortened.len(), log.hidden.len()),
+        (7, 16, 17)
+    );
 }
