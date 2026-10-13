@@ -19,6 +19,7 @@ pub mod icons;
 pub mod layout;
 pub mod record;
 pub mod recorder;
+pub mod render;
 pub mod root_arg;
 pub mod sanitize;
 pub mod shell_word;

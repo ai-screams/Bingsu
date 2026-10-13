@@ -8,12 +8,13 @@ import re
 
 MATRIX = pathlib.Path(__file__).resolve().parent / "classes.tsv"
 CLASS = re.compile(r"[a-z][a-z0-9_]*")
-COLUMNS = ("class", "payload", "canary", "producer", "reader", "pty")
+COLUMNS = ("class", "payload", "canary", "producer", "reader", "pty", "render")
 ALLOWED = {
     "canary": {"yes", "no"},
     "producer": {"accept", "reject", "replaced"},
     "reader": {"accept", "reject", "observe"},
     "pty": {"noexec", "minimal", "observe"},
+    "render": {"same", "strip", "fffd", "zsh-escape", "truncate"},
 }
 
 

@@ -108,7 +108,7 @@ def expected(shell, locale):
         rows[name] = (frame, disp, note)
     sys.path.insert(0, str(HERE.parents[1] / "hostile"))  # tests/hostile/
     import matrix  # noqa: E402
-    for cls, _, _, _, reader, _ in matrix.rows():
+    for cls, _, _, _, reader, *_ in matrix.rows():
         rows[f"hostile_{cls}"] = (reader, "ok", "-") if reader == "accept" else (reader, "-", "-")
     return rows
 

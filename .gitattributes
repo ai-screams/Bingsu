@@ -1,0 +1,2 @@
+# Committed byte goldens: a checkout must not change line endings.
+tests/golden/render/snapshots/*.bin -text

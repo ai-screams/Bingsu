@@ -1906,7 +1906,7 @@ pub fn layout_into<R: Recorder>(
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::field::{BUILTIN, Field, FieldValue, segment};
     use crate::recorder::{DecisionLog, HideReason, NoopRecorder, Step};
