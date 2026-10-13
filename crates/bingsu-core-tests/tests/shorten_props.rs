@@ -142,3 +142,76 @@ proptest! {
         }
     }
 }
+
+/// Like `name` without "/" (a step is one path component) and with the
+/// sequences where byte and grapheme prefixes differ.
+fn seg() -> impl Strategy<Value = Vec<u8>> {
+    let atoms = prop::sample::select(vec![
+        "a",
+        "b",
+        "e",
+        "e\u{0301}",
+        "\u{0301}",
+        "\u{1F1F0}",
+        "\u{1F1F0}\u{1F1F7}",
+        "\u{1F468}",
+        "\u{1F468}\u{200D}\u{1F469}",
+        "\u{1112}\u{1161}\u{11AB}",
+        "\u{1b}",
+        "\u{7f}",
+        "\u{FFFD}",
+        "%",
+    ]);
+    prop::collection::vec(atoms, 1..6).prop_map(|v| v.concat().into_bytes())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    // The unique prefix is a byte-exact property: unless the whole name is
+    // returned, no other sibling (after sanitizing) starts with it.
+    // 이것을 실패시키는 것: grapheme 문자열 단위 LCP, LCP 경계 off-by-one(반환한 접두사로 시작하는 형제가 남음).
+    #[test]
+    fn unique_prefix_matches_no_sibling(
+        steps in prop::collection::vec(seg(), 2..5),
+        others in prop::collection::vec(seg(), 0..5),
+        cuts in prop::collection::vec(0usize..8, 0..4),
+    ) {
+        let lists: Vec<Vec<Vec<u8>>> = steps
+            .iter()
+            .map(|me| {
+                let mut v = vec![me.clone()];
+                v.extend(others.iter().cloned());
+                for &c in &cuts {
+                    // A byte prefix of the step (may cut inside a grapheme or a code point).
+                    v.push(me[..c.min(me.len())].to_vec());
+                    let mut ext = me.clone();
+                    ext.extend_from_slice(&others.first().cloned().unwrap_or_default());
+                    v.push(ext);
+                }
+                v
+            })
+            .collect();
+        let refs: Vec<Vec<&[u8]>> = lists.iter().map(|l| l.iter().map(Vec::as_slice).collect()).collect();
+        let mut sibs: Vec<Option<&[&[u8]]>> = refs.iter().map(|r| Some(r.as_slice())).collect();
+        let raw: Vec<&[u8]> = steps.iter().map(Vec::as_slice).collect();
+        sibs[0] = Some(refs[0].as_slice());
+        let f = PathFacts::new(Anchor::Root, &raw, None, &sibs);
+        let req = ShortenRequest { source: Source::Path(&f), budget: u32::MAX, profile: WidthProfile::DEFAULT, method: Method::Unique };
+        let r = run_builtin(&req).unwrap();
+        prop_assert!(validate(&req, &r).is_ok());
+        let clean = |b: &[u8]| { let s = bingsu_core::sanitize::sanitize(b); if s.is_empty() { "\u{FFFD}".to_string() } else { s } };
+        let text = r.text();
+        let parts: Vec<&str> = text.split('/').skip(1).collect();
+        prop_assert_eq!(parts.len(), steps.len());
+        for (i, me) in steps.iter().enumerate().take(steps.len() - 1) {
+            let full = clean(me);
+            if parts[i] == full { continue; }
+            let mut dropped = false;
+            for o in &lists[i] {
+                if !dropped && o == me { dropped = true; continue; }
+                prop_assert!(!clean(o).starts_with(parts[i]), "step {} piece {:?} sibling {:?}", i, parts[i], clean(o));
+            }
+        }
+    }
+}

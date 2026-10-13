@@ -15,9 +15,16 @@ pub const MAX_STEPS: usize = 4096;
 /// Most raw entries of a folder `unique` looks at (spec section 4).
 pub const MAX_SIBLINGS: usize = 256;
 
-/// Most sanitized sibling bytes kept for one path, so `unique` does at most
-/// this many grapheme comparisons however many steps and long names come in.
-pub const MAX_SIBLING_BYTES: usize = 1 << 20;
+// Raw sibling bytes `unique` may scan (decision "E1 `unique` cost caps",
+// 2026-10-13): at 16 KiB the measured worst input cost about 1.1 ms, inside
+// the 1 ms (Linux) to 3 ms (macOS) start budget. Counted on the raw bytes
+// actually read, so names that sanitizing removes still count.
+/// Most raw bytes of one sibling name; a longer one sends the step to `abbrev 1`.
+pub const SIBLING_NAME_MAX: usize = 1024;
+/// Most raw sibling bytes scanned for one step.
+pub const SIBLING_STEP_MAX: usize = 8 * 1024;
+/// Most raw sibling bytes scanned for the whole path; once spent, later steps are not scanned.
+pub const SIBLING_PATH_MAX: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
@@ -33,9 +40,11 @@ pub struct PathFacts {
     steps: Vec<String>,
     /// Index of the repository root folder in `steps`.
     repo_root: Option<usize>,
-    /// Sibling names per step for `unique`; None when not collected or when
-    /// the folder had more than 256 raw entries.
-    siblings: Vec<Option<Vec<String>>>,
+    /// Byte length of the shortest prefix of each step that no sibling
+    /// shares (`unique`); the first grapheme when siblings were not
+    /// collected or a cap was hit (`abbrev 1`); the whole name when a
+    /// sibling sanitizes to the same text.
+    unique: Vec<usize>,
 }
 
 impl PathFacts {
@@ -44,13 +53,14 @@ impl PathFacts {
     /// (an empty step would draw `//`); at most MAX_STEPS steps are kept
     /// (the last ones). A `repo_root` past the last step is dropped.
     ///
-    /// Siblings are taken only for kept steps. A step whose raw sibling list
-    /// has more than MAX_SIBLINGS entries (spec section 4: the reader stops
-    /// at 256 raw entries; more means "too many"), or whose sanitized names
-    /// would push the path past MAX_SIBLING_BYTES in total, gets `None` and
-    /// shortens like `abbrev 1`. The one entry whose raw bytes equal the
-    /// step itself is dropped; any other entry, even one that sanitizes to
-    /// the same text, stays and counts as a collision.
+    /// Siblings are read only for kept steps and only to find, per step, the
+    /// prefix that tells it apart (the sanitized sibling strings are dropped
+    /// at once). A step whose raw sibling list has more than MAX_SIBLINGS
+    /// entries (spec section 4), a sibling name over SIBLING_NAME_MAX raw
+    /// bytes, more than SIBLING_STEP_MAX raw bytes for the step or
+    /// SIBLING_PATH_MAX for the path gets the first grapheme (`abbrev 1`).
+    /// The one entry whose raw bytes equal the step is dropped; any other
+    /// entry, even one that sanitizes to the same text, counts as a collision.
     pub fn new(
         anchor: Anchor,
         steps: &[&[u8]],
@@ -65,36 +75,25 @@ impl PathFacts {
         let raw_steps = &steps[skip..];
         let repo_root = repo_root.and_then(|r| r.checked_sub(skip));
         let repo_root = repo_root.filter(|&r| r < raw_steps.len());
-        let mut room = MAX_SIBLING_BYTES;
-        let siblings = raw_steps
-            .iter()
-            .enumerate()
-            .map(|(i, me)| {
-                let raw = siblings.get(skip + i).copied().flatten()?;
-                if raw.len() > MAX_SIBLINGS {
-                    return None;
-                }
-                let (mut left, mut dropped) = (room, false);
-                let mut out = Vec::with_capacity(raw.len());
-                for o in raw {
-                    if !dropped && o == me {
-                        dropped = true;
-                        continue;
-                    }
-                    let n = name(o);
-                    left = left.checked_sub(n.len())?;
-                    out.push(n);
-                }
-                room = left;
-                Some(out)
-            })
-            .collect();
-        let steps: Vec<String> = raw_steps.iter().map(|s| name(s)).collect();
+        let mut path_left = SIBLING_PATH_MAX;
+        let mut kept = Vec::with_capacity(raw_steps.len());
+        let mut unique = Vec::with_capacity(raw_steps.len());
+        for (i, me) in raw_steps.iter().enumerate() {
+            let s = name(me);
+            let cut = siblings
+                .get(skip + i)
+                .copied()
+                .flatten()
+                .and_then(|raw| distinct_len(&s, me, raw, &mut path_left, &name))
+                .unwrap_or_else(|| s.graphemes(true).next().map_or(0, str::len));
+            unique.push(cut);
+            kept.push(s);
+        }
         Self {
             anchor,
-            steps,
+            steps: kept,
             repo_root,
-            siblings,
+            unique,
         }
     }
 
@@ -194,12 +193,43 @@ fn first_graphemes(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
-/// Number of leading graphemes `a` and `b` share.
-fn common_graphemes(a: &str, b: &str) -> usize {
-    a.graphemes(true)
-        .zip(b.graphemes(true))
-        .take_while(|(x, y)| x == y)
-        .count()
+/// Byte length of the prefix of `s` that tells it apart from the sibling
+/// names in `raw`: the first grapheme end past the longest byte prefix `s`
+/// shares with any of them (the whole name when a sibling is equal). None
+/// when a cap stops the scan. `path_left` is charged for the raw bytes read.
+fn distinct_len(
+    s: &str,
+    me: &[u8],
+    raw: &[&[u8]],
+    path_left: &mut usize,
+    name: &impl Fn(&[u8]) -> String,
+) -> Option<usize> {
+    if raw.len() > MAX_SIBLINGS {
+        return None;
+    }
+    let (mut step_used, mut lcp, mut dropped) = (0usize, 0usize, false);
+    for o in raw {
+        if !dropped && *o == me {
+            dropped = true;
+            continue;
+        }
+        step_used += o.len();
+        if o.len() > SIBLING_NAME_MAX || step_used > SIBLING_STEP_MAX {
+            return None;
+        }
+        if o.len() > *path_left {
+            *path_left = 0;
+            return None;
+        }
+        *path_left -= o.len();
+        let n = name(o);
+        lcp = lcp.max(s.bytes().zip(n.bytes()).take_while(|(x, y)| x == y).count());
+    }
+    let end = s
+        .grapheme_indices(true)
+        .map(|(i, g)| i + g.len())
+        .find(|&e| e > lcp);
+    Some(end.unwrap_or(s.len()))
 }
 
 fn path_pieces(p: &PathFacts, step: impl Fn(usize, &str) -> (String, bool)) -> Vec<Piece> {
@@ -248,18 +278,7 @@ pub fn run_builtin(req: &ShortenRequest<'_>) -> Option<ShortenResult> {
             if i == last(p) {
                 return (s.into(), false);
             }
-            // One more grapheme than the longest prefix shared with any
-            // sibling tells this folder apart; with a sibling that sanitized
-            // to the same name, the whole name is the answer.
-            let k = match p.siblings.get(i).and_then(Option::as_ref) {
-                Some(sib) => sib
-                    .iter()
-                    .map(|o| common_graphemes(s, o))
-                    .max()
-                    .map_or(1, |m| m + 1),
-                None => 1,
-            };
-            let t = first_graphemes(s, k);
+            let t = &s[..p.unique[i]];
             (t.into(), t.len() != s.len())
         }),
         (Method::Repo, Source::Path(p)) => {
@@ -615,26 +634,96 @@ mod tests {
         assert_eq!(unique_text(&crowd(257)), "/a/z");
     }
 
-    // 이것을 실패시키는 것: 경로 전체 형제 바이트 상한이 없거나 커지는 것, 보존하지 않은 단계의 형제를 받는 것.
+    // Step "mq" next to a sibling of `n` raw bytes that shares only "m".
+    // Scanned: the whole name "mq"; capped: the first grapheme "m".
+    fn sib(n: usize) -> Vec<u8> {
+        let mut v = vec![b'x'; n];
+        v[0] = b'm';
+        v
+    }
+    fn step_with(lens: &[usize]) -> Vec<Vec<u8>> {
+        lens.iter().map(|&n| sib(n)).collect()
+    }
+    fn caps_text(per_step: &[&[usize]]) -> Vec<String> {
+        let lists: Vec<Vec<Vec<u8>>> = per_step.iter().map(|l| step_with(l)).collect();
+        let refs: Vec<Vec<&[u8]>> = lists
+            .iter()
+            .map(|l| l.iter().map(Vec::as_slice).collect())
+            .collect();
+        let sibs: Vec<Option<&[&[u8]]>> = refs.iter().map(|r| Some(r.as_slice())).collect();
+        let mut steps: Vec<&[u8]> = per_step.iter().map(|_| &b"mq"[..]).collect();
+        steps.push(b"end");
+        let mut sibs = sibs;
+        sibs.push(None);
+        let f = PathFacts::new(Anchor::Root, &steps, None, &sibs);
+        let mut out: Vec<String> = unique_text(&f)
+            .split('/')
+            .skip(1)
+            .map(String::from)
+            .collect();
+        out.pop();
+        out
+    }
+
+    // 이것을 실패시키는 것: 형제 이름 상한(1,024)을 틀리게 두는 것.
     #[test]
-    fn sibling_bytes_are_capped_per_path() {
-        let me = "a".repeat(4096);
-        let other = alloc::format!("{}{}", "a".repeat(100), "b".repeat(3996));
-        let mut sibs: Vec<&[u8]> = vec![me.as_bytes()];
-        sibs.extend((0..255).map(|_| other.as_bytes()));
-        let f = PathFacts::new(
-            Anchor::Root,
-            &[me.as_bytes(), me.as_bytes(), b"end"],
-            None,
-            &[Some(&sibs), Some(&sibs), None],
+    fn sibling_name_cap() {
+        assert_eq!(caps_text(&[&[1024]])[0], "mq");
+        assert_eq!(caps_text(&[&[1025]])[0], "m");
+    }
+
+    // 이것을 실패시키는 것: 단계당 상한(8,192)을 틀리게 두는 것.
+    #[test]
+    fn sibling_step_cap() {
+        assert_eq!(caps_text(&[&[1024; 8]])[0], "mq");
+        let mut over = vec![1024; 7];
+        over.push(1024);
+        over.push(1);
+        assert_eq!(caps_text(&[&over])[0], "m");
+    }
+
+    // 이것을 실패시키는 것: 경로 전체 상한(16,384)을 틀리게 두는 것, 단계를 넘어 쓴 양을 빼지 않는 것, 소진 뒤 단계를 검사하는 것.
+    #[test]
+    fn sibling_path_cap() {
+        let full: &[usize] = &[1024; 8];
+        let seven: &[usize] = &[1024, 1024, 1024, 1024, 1024, 1024, 1024, 1023];
+        assert_eq!(caps_text(&[full, seven, &[1]]), ["mq", "mq", "mq"]);
+        assert_eq!(caps_text(&[full, seven, &[2]]), ["mq", "mq", "m"]);
+        // Spent: later steps are not scanned even when they would fit.
+        assert_eq!(caps_text(&[full, full, &[1]]), ["mq", "mq", "m"]);
+        // Bytes a failing step read stay charged.
+        let over: &[usize] = &[1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1];
+        assert_eq!(caps_text(&[over, full, &[1]]), ["m", "mq", "m"]);
+        // A name that does not fit the bytes left spends the rest of the path.
+        let seven_and_one: &[usize] = &[1024, 1024, 1024, 1024, 1024, 1024, 1024, 1];
+        assert_eq!(
+            caps_text(&[full, seven_and_one, &[1024], &[1]]),
+            ["mq", "mq", "m", "m"]
         );
-        let t = unique_text(&f);
-        let parts: Vec<&str> = t.split('/').collect();
-        // The first step keeps its siblings (101 graphemes); the second is over the path total.
-        assert_eq!((parts[1].len(), parts[2].len()), (101, 1));
-        // Siblings beyond the kept steps are not taken at all.
-        let many: Vec<Option<&[&[u8]]>> = (0..10).map(|_| Some(&sibs[..2])).collect();
-        let g = PathFacts::new(Anchor::Root, &[b"x"], None, &many);
-        assert_eq!(g.siblings.len(), 1);
+    }
+
+    fn uniq(step: &[u8], sib: &[u8]) -> String {
+        let l: [&[u8]; 1] = [sib];
+        let f = PathFacts::new(Anchor::Root, &[step, b"z"], None, &[Some(&l), None]);
+        unique_text(&f).split('/').nth(1).unwrap().into()
+    }
+
+    // 이것을 실패시키는 것: grapheme 문자열끼리 비교하는 LCP(바이트 접두사가 같은 형제를 놓침), 경계를 LCP 바로 위(>)가 아닌 곳에 두는 것.
+    #[test]
+    fn prefix_is_byte_exact() {
+        // Sibling "á" starts with the bytes of "a": "a" does not tell them apart.
+        assert_eq!(uniq(b"a", "a\u{301}".as_bytes()), "a");
+        // Reverse: step "á" vs sibling "a": the bytes of "a" are a prefix of the step, the whole grapheme is needed.
+        assert_eq!(uniq("a\u{301}b".as_bytes(), b"a"), "a\u{301}");
+        // Regional indicators: the flag KR vs a sibling with one indicator.
+        let kr = "\u{1F1F0}\u{1F1F7}";
+        assert_eq!(uniq(kr.as_bytes(), "\u{1F1F0}".as_bytes()), kr);
+        // ZWJ sequence vs its first emoji.
+        let fam = "\u{1F468}\u{200D}\u{1F469}";
+        assert_eq!(uniq(fam.as_bytes(), "\u{1F468}".as_bytes()), fam);
+        // Plain prefix: end exactly at the LCP is not enough.
+        assert_eq!(uniq(b"abc", b"abd"), "abc");
+        assert_eq!(uniq(b"abc", b"ab"), "abc");
+        assert_eq!(uniq(b"abc", b"x"), "a");
     }
 }

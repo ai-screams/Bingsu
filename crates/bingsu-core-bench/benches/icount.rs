@@ -122,31 +122,56 @@ fn shorten_validate(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usiz
     (facts, r)
 }
 
-// Near worst case for `unique`: a 4,096-cell name whose 255 siblings share
-// all but the last grapheme, so each comparison walks the whole name.
-fn unique_path(_: u32) -> PathFacts {
-    let me = "a".repeat(4096);
-    let other = format!("{}b", "a".repeat(4095));
-    let mut sibs: Vec<&[u8]> = vec![me.as_bytes()];
-    sibs.extend((0..255).map(|_| other.as_bytes()));
-    PathFacts::new(
-        Anchor::Home,
-        &[me.as_bytes(), b"last"],
-        None,
-        &[Some(&sibs), None],
-    )
+// Near worst case for `PathFacts::new` with `unique`: sibling lists at the
+// raw caps (1 KiB names, 8 KiB per step, 16 KiB per path), names that
+// sanitizing removes entirely, names sharing a long prefix with the step, a
+// spent path budget with 256 more entries, and a name over the 1 KiB cap.
+// The input is raw bytes made in setup; `new` runs inside the counted code.
+struct FactsInput {
+    steps: Vec<Vec<u8>>,
+    siblings: Vec<Vec<Vec<u8>>>,
+}
+
+fn facts_input(_: u32) -> FactsInput {
+    let shared = |n: usize| {
+        let mut v = vec![b'a'; n];
+        v[n - 1] = b'b';
+        v
+    };
+    let steps: Vec<Vec<u8>> = vec![
+        vec![b'a'; 1024],
+        vec![b'a'; 1024],
+        vec![b'a'; 1024],
+        vec![b'a'; 64],
+        b"last".to_vec(),
+    ];
+    let siblings = vec![
+        (0..8).map(|_| vec![0x1b; 1024]).collect(),
+        (0..8).map(|_| shared(1024)).collect(),
+        (0..256).map(|_| shared(8)).collect(),
+        vec![shared(1025)],
+        Vec::new(),
+    ];
+    FactsInput { steps, siblings }
 }
 
 #[library_benchmark]
-#[bench::siblings_256(args = [0], setup = unique_path)]
-fn shorten_unique(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usize, u32)>) {
-    let r = black_box(shorten(
-        Source::Path(black_box(&facts)),
-        &[Method::Unique],
-        4200,
-        WidthProfile::DEFAULT,
+#[bench::capped(args = [0], setup = facts_input)]
+fn path_facts_new(input: FactsInput) -> (FactsInput, PathFacts) {
+    let steps: Vec<&[u8]> = input.steps.iter().map(Vec::as_slice).collect();
+    let lists: Vec<Vec<&[u8]>> = input
+        .siblings
+        .iter()
+        .map(|l| l.iter().map(Vec::as_slice).collect())
+        .collect();
+    let siblings: Vec<Option<&[&[u8]]>> = lists.iter().map(|l| Some(l.as_slice())).collect();
+    let f = black_box(PathFacts::new(
+        Anchor::Home,
+        black_box(&steps),
+        Some(1),
+        black_box(&siblings),
     ));
-    (facts, r)
+    (input, f)
 }
 
 library_benchmark_group!(
@@ -158,7 +183,7 @@ library_benchmark_group!(
         color_notation,
         palette_resolve,
         shorten_validate,
-        shorten_unique
+        path_facts_new
     ]
 );
 
