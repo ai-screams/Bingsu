@@ -111,6 +111,25 @@ impl PathFacts {
         }
         s
     }
+
+    /// Number of folder steps kept.
+    pub fn steps(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Byte length of `display()`, found without building it, so a caller
+    /// can refuse a path too long to read.
+    pub fn display_len(&self) -> usize {
+        let anchor = match self.anchor {
+            Anchor::Root => 0,
+            Anchor::Home => 1,
+        };
+        let n = self
+            .steps
+            .iter()
+            .fold(anchor, |n: usize, s| n.saturating_add(1 + s.len()));
+        n.max(1)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -725,5 +744,27 @@ mod tests {
         assert_eq!(uniq(b"abc", b"abd"), "abc");
         assert_eq!(uniq(b"abc", b"ab"), "abc");
         assert_eq!(uniq(b"abc", b"x"), "a");
+    }
+
+    // 이것을 실패시키는 것: `display_len`이 `display()`의 바이트 길이와 어긋나는 것(앵커, 빈 경로의 `/`, 단계마다의
+    // `/`), `steps`가 남긴 단계 수와 다른 것.
+    #[test]
+    fn display_len_matches_display() {
+        let empty: [&[u8]; 0] = [];
+        for anchor in [Anchor::Root, Anchor::Home] {
+            for steps in [
+                &empty[..],
+                &[b"a".as_slice()],
+                &STEPS[..],
+                &[b"\xff".as_slice(), "한".as_bytes()],
+            ] {
+                let f = PathFacts::new(anchor, steps, None, &[]);
+                assert_eq!(
+                    (f.display_len(), f.steps()),
+                    (f.display().len(), steps.len()),
+                    "{anchor:?} {steps:?}"
+                );
+            }
+        }
     }
 }

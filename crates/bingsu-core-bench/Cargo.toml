@@ -55,3 +55,8 @@ test = false
 name = "shorten"
 harness = false
 test = false
+
+[[bench]]
+name = "layout"
+harness = false
+test = false
