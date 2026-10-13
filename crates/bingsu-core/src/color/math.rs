@@ -177,11 +177,18 @@ pub fn oklab_q(s: Srgb8) -> OklabQ {
 /// WCAG 2 contrast ratio in thousandths, rounded down (quantization point
 /// 3). Text needs 4500, non-text marks 3000 (CLAUDE.md design rule 2).
 pub fn contrast_milli(x: Srgb8, y: Srgb8) -> u32 {
-    let lum = |s: Srgb8| {
-        let [r, g, b] = linear(s);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
-    };
-    let (a, b) = (lum(x), lum(y));
+    contrast_milli_lum(luminance(x), luminance(y))
+}
+
+/// WCAG 2 relative luminance. Three `pow` calls: a caller comparing one
+/// color with several keeps it instead of calling `contrast_milli` again.
+pub fn luminance(s: Srgb8) -> f64 {
+    let [r, g, b] = linear(s);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// `contrast_milli` of two `luminance` values; the same result bit for bit.
+pub fn contrast_milli_lum(a: f64, b: f64) -> u32 {
     let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
     ((hi + 0.05) / (lo + 0.05) * 1000.0) as u32
 }
