@@ -37,7 +37,8 @@ pub enum When {
 pub struct SegmentSetup<'a> {
     /// Higher stays longer (steps 2 and 5).
     pub priority: u16,
-    /// Never hidden by steps 2, 3 and 5 (`dir`, `char`).
+    /// Never hidden by steps 2 and 5 (`dir`, `char`); step 3 hides the
+    /// whole right side regardless.
     pub required: bool,
     pub methods: &'a [Method],
     pub when: When,
@@ -152,6 +153,12 @@ fn total(widths: impl Iterator<Item = u32>) -> u32 {
     widths.fold(0, u32::saturating_add)
 }
 
+/// A segment role's token; a name that is not a token (a declaration from
+/// outside) gets the default color rather than an arbitrary token.
+fn role_tok(name: &str) -> Option<u16> {
+    token_index(name).and_then(|i| u16::try_from(i).ok())
+}
+
 fn tok(name: &str) -> u16 {
     token_index(name)
         .and_then(|i| u16::try_from(i).ok())
@@ -208,15 +215,16 @@ enum Src {
 #[derive(Clone, Copy)]
 struct Item {
     kind: Kind,
-    /// Head only: a block follows before the next head or tail.
-    head_ok: bool,
+    /// Head and separator: a block follows before the next head or tail.
+    ok: bool,
     /// Block padding: one space before and after the segment's text.
     pad_l: bool,
     pad_r: bool,
     /// Measured cells, padding included.
     width: u32,
-    /// Token of the block this content draws on.
-    block: Option<u16>,
+    /// Background of the block this content draws on (`Color::Default`
+    /// for a role that names no token).
+    block: Option<Color>,
     style: Style,
     src: Src,
 }
@@ -249,8 +257,9 @@ struct Slot {
     base: Base,
     base_w: u32,
     short: Option<Vec<Cut>>,
-    /// Color token of its text (plain) or background (block).
-    role: u16,
+    /// Color token of its text (plain) or background (block); None for a
+    /// role that names no token, drawn in the default color.
+    role: Option<u16>,
     /// Segment nodes for it in this line, for the item capacity.
     nodes: u32,
 }
@@ -330,7 +339,7 @@ impl<'l, 'i> Lay<'l, 'i> {
                 base: Base::Glyph(""),
                 base_w: 0,
                 short: None,
-                role: tok(d.role),
+                role: role_tok(d.role),
                 nodes: 0,
             });
         }
@@ -386,7 +395,7 @@ impl<'l, 'i> Lay<'l, 'i> {
                 if failed {
                     // Failure changes both the color and the glyph (spec
                     // section 4 "필수 세그먼트").
-                    slot.role = tok("prompt.err");
+                    slot.role = role_tok("prompt.err");
                 }
             } else if let Some(Some(f)) = inp.facts.get(s) {
                 slot.base = Base::Owned(f.display());
@@ -552,10 +561,10 @@ impl<'l, 'i> Lay<'l, 'i> {
         let mut k = 0;
         while k < self.nodes.len() {
             let side: &mut Vec<Item> = if on_right { &mut *right } else { &mut *left };
-            let plain_style = with(styles, Style::default());
+            let plain_style = self.unblock(with(styles, Style::default()));
             let content = |width, src| Item {
                 kind: Kind::Content,
-                head_ok: false,
+                ok: false,
                 pad_l: false,
                 pad_r: false,
                 width,
@@ -631,30 +640,39 @@ impl<'l, 'i> Lay<'l, 'i> {
         clean(right);
     }
 
+    /// Step 6 draws no background at all, a `{@style:bg=…}` one included;
+    /// text color and attributes stay (ruling C, 2026-10-13).
+    fn unblock(&self, mut s: Style) -> Style {
+        if self.plain {
+            s.bg = Color::Default;
+        }
+        s
+    }
+
     fn push_segment(&self, side: &mut Vec<Item>, styles: &[Style], s: usize, block: bool) {
         let slot = &self.slots[s];
         let base = if block {
             Style {
                 fg: Color::Text(self.block_text),
-                bg: Color::Block(slot.role),
+                bg: slot.role.map_or(Color::Default, Color::Block),
                 attrs: 0,
             }
         } else {
             Style {
-                fg: Color::Text(slot.role),
+                fg: slot.role.map_or(Color::Default, Color::Text),
                 bg: Color::Default,
                 attrs: 0,
             }
         };
-        let style = with(styles, base);
+        let style = self.unblock(with(styles, base));
         let pad = u32::from(block);
         let item = |width: u32, style, src, first: bool, last: bool| Item {
             kind: Kind::Content,
-            head_ok: false,
+            ok: false,
             pad_l: block && first,
             pad_r: block && last,
             width: width.saturating_add(if first { pad } else { 0 } + if last { pad } else { 0 }),
-            block: block.then_some(slot.role),
+            block: block.then(|| slot.role.map_or(Color::Default, Color::Block)),
             style,
             src,
         };
@@ -784,47 +802,58 @@ fn with(spec_stack: &[Style], mut s: Style) -> Style {
     s
 }
 
-/// Separator cleanup (spec section 3 "템플릿 중간 표현"): a head needs a
-/// block after it before the next head or tail, a separator with no content
-/// before it goes, a separator right after a head goes, and separators with
-/// no content between them become one (a tail among them wins). Linear: one
-/// pass from the end marks the heads, one pass from the start compacts.
+/// Separator cleanup (spec section 3 "템플릿 중간 표현"): a head or a
+/// separator needs a block after it before the next head or tail, a tail
+/// needs a block before it since the last head or tail (rulings A and B,
+/// 2026-10-13), a separator with no content before it goes, a separator
+/// right after a head goes, and separators with no content between them
+/// become one (the first stays). Linear: one pass from the end marks
+/// heads and separators, one pass from the start compacts.
 fn clean(items: &mut Vec<Item>) {
     let mut block_ahead = false;
     for it in items.iter_mut().rev() {
         match it.kind {
             Kind::Content => block_ahead |= it.block.is_some(),
             Kind::Sep(SepKind::Head, _) => {
-                it.head_ok = block_ahead;
+                it.ok = block_ahead;
                 block_ahead = false;
             }
             Kind::Sep(SepKind::Tail, _) => block_ahead = false,
-            Kind::Sep(SepKind::Sep, _) => {}
+            Kind::Sep(SepKind::Sep, _) => it.ok = block_ahead,
         }
     }
     let mut w = 0usize;
     let mut any_content = false;
+    let mut block_behind = false;
     for r in 0..items.len() {
         let it = items[r];
         let keep = match it.kind {
             Kind::Content => {
                 any_content = true;
+                block_behind |= it.block.is_some();
                 true
             }
-            Kind::Sep(SepKind::Head, _) => it.head_ok,
+            Kind::Sep(SepKind::Head, _) => {
+                block_behind = false;
+                it.ok
+            }
             Kind::Sep(kind, _) => {
-                if !any_content {
+                let behind = block_behind;
+                if kind == SepKind::Tail {
+                    block_behind = false;
+                }
+                if !any_content
+                    || (kind == SepKind::Sep && !it.ok)
+                    || (kind == SepKind::Tail && !behind)
+                {
                     false
                 } else {
                     match w.checked_sub(1).map(|l| items[l].kind) {
                         Some(Kind::Sep(SepKind::Head, _)) => false,
-                        Some(Kind::Sep(..)) => {
-                            if kind == SepKind::Tail {
-                                // The run becomes this tail, glyph included.
-                                items[w - 1] = it;
-                            }
-                            false
-                        }
+                        // A separator right after a separator or a tail goes. A tail never
+                        // gets here: a kept separator has a block before the next tail, and a
+                        // tail resets the block seen (rulings A and B).
+                        Some(Kind::Sep(..)) => false,
                         _ => true,
                     }
                 }
@@ -854,7 +883,7 @@ fn item_style(items: &[Item], i: usize, right_side: bool) -> Style {
             kind: Kind::Content,
             block: Some(b),
             ..
-        }) => Some(Color::Block(*b)),
+        }) => Some(*b),
         _ => None,
     };
     let (prev, next) = (block_at(i.checked_sub(1)), block_at(Some(i + 1)));
@@ -1069,8 +1098,8 @@ pub fn layout_line_into(
                 }
             }
         }
-        // Steps 2 and 3: right side, lowest priority (then rightmost) first;
-        // hiding the last one is step 3.
+        // Step 2: optional right segments, lowest priority (then rightmost)
+        // first.
         for (_, _, s) in by_priority(&lay, true) {
             if lay.visible(s) {
                 lay.slots[s].hidden = true;
@@ -1079,6 +1108,18 @@ pub fn layout_line_into(
                     break 'steps;
                 }
             }
+        }
+        // Step 3: the whole right side, `required` included (ruling E,
+        // 2026-10-13: `required` only stops the hiding by choice).
+        for i in 0..lay.segs.len() {
+            let g = lay.segs[i];
+            if g.right {
+                lay.slots[g.seg].hidden = true;
+            }
+        }
+        over = lay.measure(&mut b).saturating_sub(target);
+        if over == 0 {
+            break 'steps;
         }
         // Step 4: cut left values by the overflow, widest first (leftmost on
         // a tie), down to the ellipsis. A one-cell value (the `char` glyph)
@@ -1701,12 +1742,14 @@ mod tests {
         lay(&compile(t, BUILTIN).unwrap(), f, &opts(w))
     }
 
-    // 이것을 실패시키는 것: 구분자가 꼬리로 합쳐질 때 종류만 꼬리로 바꾸고 글리프는 구분자의 것을 남기는 것,
-    // 블록이 하나도 남지 않은 머리를 남기는 것, 앞 내용 없는 구분자나 머리 바로 뒤 구분자를 남기는 것.
+    // 이것을 실패시키는 것: 숨은 블록 뒤 꼬리를 앞 구분자의 글리프로 그리는 것, 블록이 하나도 남지 않은 머리를
+    // 남기는 것, 앞 내용 없는 구분자나 머리 바로 뒤 구분자를 남기는 것, 숨은 블록 양쪽의 구분자를 둘 다 남기는 것.
     #[test]
     fn merged_separator_draws_the_tail() {
         let mut f = fixture(&["Works"], "main");
         f.values[idx("git")] = None;
+        let t = "{dir:block}{@sep:triangle}{git:block}{@sep:triangle}{status:block}{@nl}{char}";
+        assert_eq!(text(&one(t, &f, 80)[0].left), " ~/Works \u{E0B0} 1 ");
         let t = "{dir:block}{@tail:triangle} {@head:round}{git:block}{@sep:triangle}{status:block}{@nl}{char}";
         let s = text(&one(t, &f, 80)[0].left);
         assert_eq!(s, " ~/Works \u{E0B0} \u{E0B6} 1 ", "{s:?}");
@@ -1856,6 +1899,98 @@ mod tests {
                 out[0].left.as_ptr(),
                 out[0].left[0].text.as_ptr()
             )
+        );
+    }
+
+    // 판정 A(2026-10-13). 이것을 실패시키는 것: 뒤에 블록이 없는 구분자를 남기는 것(구분자의 `ok` 판정을 끄면 실패).
+    #[test]
+    fn ruling_a_drops_a_separator_with_no_block_after() {
+        let mut f = fixture(&["Works"], "main");
+        f.values[idx("time")] = None;
+        let t = "{dir}{@fill}{@head:triangle}{status:block}{@sep:triangle}{time:block}{@nl}{char}";
+        let s = text(&one(t, &f, 80)[0].left);
+        assert!(s.ends_with("\u{E0B2} 1 "), "{s:?}");
+        assert_eq!(s.matches('\u{E0B2}').count(), 1, "{s:?}");
+    }
+
+    // 판정 B(2026-10-13). 이것을 실패시키는 것: 앞에 블록이 없는 구역의 꼬리를 남기는 것, 머리가 구역을
+    // 새로 열지 않아 그 앞 블록을 꼬리의 블록으로 세는 것.
+    #[test]
+    fn ruling_b_drops_a_tail_with_no_block_before() {
+        let mut f = fixture(&["Works"], "main");
+        f.values[idx("git")] = None;
+        let t = "{@head:triangle}{dir:block}{@tail:triangle} {@head:triangle}{git:block}{@tail:triangle}{@nl}{char}";
+        assert_eq!(text(&one(t, &f, 80)[0].left), "\u{E0B2} ~/Works \u{E0B0} ");
+        let t = "{dir:block}{@head:round}{git:block}{@tail:triangle}{@nl}{char}";
+        assert_eq!(text(&one(t, &f, 80)[0].left), " ~/Works ");
+    }
+
+    // 판정 C(2026-10-13). 이것을 실패시키는 것: 단계 6에서 사용자 `{@style:bg=…}` 배경을 남기거나,
+    // 글자색·속성까지 지우는 것.
+    #[test]
+    fn ruling_c_plain_step_drops_user_backgrounds() {
+        let f = fixture(&["Works"], "main");
+        let t = "{@style:bg=path,fg=git.branch,bold}abcdefgh{@end}{dir:block}{@nl}{char}";
+        let run = |w| {
+            one(t, &f, w)[0]
+                .left
+                .iter()
+                .find(|r| r.text.starts_with("abc"))
+                .unwrap()
+                .style
+        };
+        let wide = run(80);
+        assert_eq!(wide.bg, Color::Block(tok("path")));
+        // "abcdefgh" + " … " is 11 cells; target 10 needs step 6.
+        let plain = run(11);
+        assert_eq!(
+            plain,
+            Style {
+                fg: Color::Text(tok("git.branch")),
+                bg: Color::Default,
+                attrs: crate::color::sgr::BOLD
+            }
+        );
+    }
+
+    // 판정 D(2026-10-13). 이것을 실패시키는 것: token이 아닌 역할을 색 0번으로 그리는 것.
+    #[test]
+    fn ruling_d_unknown_role_is_the_default_color() {
+        const CAT: &[SegmentDecl] = &[SegmentDecl {
+            id: "x",
+            role: "no.such.role",
+            fields: &[],
+        }];
+        let lines = compile("{x:block} {x}", CAT).unwrap();
+        let values = vec![Some(Value::new(b"v", Vec::new()))];
+        let inp = Inputs {
+            catalog: CAT,
+            values: &values,
+            facts: &[],
+            setup: &[],
+        };
+        let out = layout(core::slice::from_ref(&lines), &[], &[], &inp, &opts(80));
+        let styles: Vec<Style> = out[0].left.iter().map(|r| r.style).collect();
+        assert_eq!(
+            styles[0],
+            Style {
+                fg: Color::Text(tok("block.text")),
+                bg: Color::Default,
+                attrs: 0
+            }
+        );
+        assert_eq!(styles.last().unwrap().fg, Color::Default);
+    }
+
+    // 판정 E(2026-10-13). 이것을 실패시키는 것: 단계 3이 `required`인 오른쪽 세그먼트를 남기는 것.
+    #[test]
+    fn ruling_e_step3_hides_required_right_segments() {
+        let mut f = fixture(&["Works"], "main");
+        f.setup[idx("time")].required = true;
+        // "~/Works" 7 + "12:34" 5 = 12 cells, target 11.
+        assert_eq!(
+            text(&one("{dir}{@fill}{time}{@nl}{char}", &f, 12)[0].left),
+            "~/Works"
         );
     }
 }
