@@ -15,10 +15,13 @@ workspace = true
 
 # `cargo test --workspace` must not build gungraun (it does not run on
 # Windows): no lib tests, so the dev-dependencies are only built for the
-# bench target.
+# bench targets.
 [lib]
 test = false
 doctest = false
+# Kept out of `cargo bench --benches`: CI job icount counts summaries
+# against that list, which must hold only the bench targets.
+bench = false
 
 [dependencies]
 bingsu-core = { path = "../bingsu-core" }
@@ -28,9 +31,27 @@ bingsu-core = { path = "../bingsu-core" }
 [target.'cfg(unix)'.dev-dependencies]
 gungraun = "=0.20.0"
 
-# test = false: `cargo test --workspace` never builds this bench in test
+# One bench target (binary) per module group: in one binary, adding a bench
+# changed how shared generic code was inlined and moved the counts of the
+# others. CI job icount runs every bench target of this package.
+# test = false: `cargo test --workspace` never builds these benches in test
 # mode on macOS or Windows.
 [[bench]]
-name = "icount"
+name = "text"
+harness = false
+test = false
+
+[[bench]]
+name = "field"
+harness = false
+test = false
+
+[[bench]]
+name = "color"
+harness = false
+test = false
+
+[[bench]]
+name = "shorten"
 harness = false
 test = false
