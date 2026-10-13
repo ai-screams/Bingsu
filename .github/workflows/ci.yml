@@ -268,11 +268,11 @@ jobs:
           # that reads stdin would take the rest of the list.
           mapfile -t targets < "$RUNNER_TEMP/base.targets"
           for t in "${targets[@]}"; do
-            (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench "$t" -- --list --format terse) > "$RUNNER_TEMP/base-lists/$t.list"
+            (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --list --format terse) > "$RUNNER_TEMP/base-lists/$t.list"
             # A target the pull request drops is only listed, for the
             # warning in the next step.
-            if grep -qx "$t" "$RUNNER_TEMP/pr.targets"; then
-              (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench "$t" -- --save-baseline=base)
+            if grep -Fqx -- "$t" "$RUNNER_TEMP/pr.targets"; then
+              (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --save-baseline=base)
               if [ ! -s "$RUNNER_TEMP/base-lists/$t.list" ]; then
                 echo "::warning::bench target $t of the base tip lists no benchmarks: its benchmarks in the pull request have no baseline"
                 echo "bench target $t of the base tip lists no benchmarks: its benchmarks in the pull request have no baseline" >> "$GITHUB_STEP_SUMMARY"
@@ -288,14 +288,14 @@ jobs:
           for t in "${targets[@]}"; do
             # A bench binary that lists nothing (for example main! wrapped
             # in a fn) exits 0 without measuring: that must fail, not pass.
-            cargo bench -p "$BENCH_PACKAGE" --bench "$t" -- --list --format terse > "$RUNNER_TEMP/pr-lists/$t.list"
+            cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --list --format terse > "$RUNNER_TEMP/pr-lists/$t.list"
             if [ ! -s "$RUNNER_TEMP/pr-lists/$t.list" ]; then
               echo "::error::bench target $t lists no benchmarks"
               exit 1
             fi
-            if ! grep -qx "$t" "$RUNNER_TEMP/base.targets"; then
+            if ! grep -Fqx -- "$t" "$RUNNER_TEMP/base.targets"; then
               { echo "Bench target $t is new since the base tip: recorded only, not compared:"; cat "$RUNNER_TEMP/pr-lists/$t.list"; } | tee -a "$GITHUB_STEP_SUMMARY"
-              cargo bench -p "$BENCH_PACKAGE" --bench "$t" -- --save-summary=json
+              cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --save-summary=json
               continue
             fi
             # A bench with no entry in the base list has nothing to compare
@@ -312,7 +312,7 @@ jobs:
               echo "::warning::benchmarks of $t at the base tip are missing in the pull request and no longer gated"
               { echo "Benchmarks of $t removed since the base tip (no longer gated):"; echo "$removed"; } | tee -a "$GITHUB_STEP_SUMMARY"
             fi
-            cargo bench -p "$BENCH_PACKAGE" --bench "$t" -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)" --save-summary=json
+            cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)" --save-summary=json
           done
           # A whole bench target of the base that the pull request drops (or
           # renames) is no longer gated either: report it the same way.
