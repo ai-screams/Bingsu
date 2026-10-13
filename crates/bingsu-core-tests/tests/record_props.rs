@@ -13,7 +13,7 @@ proptest! {
         let mut out = Vec::new();
         let f = Fields { left: left.as_bytes(), right: right.as_bytes(), ..Fields::default() };
         prop_assert_eq!(encode_b1(&f, Status::OK_NONE, &mut out), Ok(Encoded::Full));
-        prop_assert_eq!(out.iter().filter(|b| **b == US).count(), 8);
+        prop_assert_eq!(out.iter().filter(|b| **b == US).count(), 9);
         prop_assert_eq!(out.last(), Some(&RS));
     }
 

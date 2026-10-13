@@ -30,7 +30,7 @@ fn payload(spec: &str) -> Vec<u8> {
 }
 
 // 이것을 실패시키는 것: 행렬의 producer 열과 다르게 받거나 거부하거나 대체하는 인코더,
-// class 이름이 비었거나 형식이 틀리거나 겹치는 행.
+// class 이름이 비었거나 형식이 틀리거나 겹치는 행, 윗줄(일곱째 필드)을 검사하지 않는 인코더.
 #[test]
 fn producer_column_matches() {
     let text = include_str!("../../../tests/hostile/classes.tsv");
@@ -58,20 +58,27 @@ fn producer_column_matches() {
         assert!(!seen.contains(&class), "class {class:?} repeats");
         seen.push(class);
         let p = payload(c[1]);
-        let mut out = Vec::new();
-        let got = match encode_b1(
-            &Fields {
-                left: &p,
-                ..Fields::default()
-            },
-            Status::OK_NONE,
-            &mut out,
-        ) {
-            Ok(Encoded::Full) => "accept",
-            Ok(Encoded::ReplacedBySizeLimit) => "replaced",
-            Err(_) => "reject",
-        };
-        assert_eq!(got, want, "{class}");
+        // Every display field, the upper line (record change plan 12) included.
+        for field in 0..7 {
+            let mut parts: [&[u8]; 7] = [b""; 7];
+            parts[field] = &p;
+            let f = Fields {
+                left: parts[0],
+                right: parts[1],
+                transient_left: parts[2],
+                transient_right: parts[3],
+                vi_insert: parts[4],
+                vi_command: parts[5],
+                upper: parts[6],
+            };
+            let mut out = Vec::new();
+            let got = match encode_b1(&f, Status::OK_NONE, &mut out) {
+                Ok(Encoded::Full) => "accept",
+                Ok(Encoded::ReplacedBySizeLimit) => "replaced",
+                Err(_) => "reject",
+            };
+            assert_eq!(got, want, "{class} field {field}");
+        }
         rows += 1;
     }
     assert_eq!(rows, declared, "classes.tsv declares {declared} rows");

@@ -41,12 +41,12 @@ _bingsu_frame_core() {
   [[ $rec == *$'\x1e' ]] || return 1
   rec=${rec%$'\x1e'}
   [[ $rec == *[$'\x1e\n']* ]] && return 1
-  # read -a would drop a trailing empty field and accept 9 + separator.
+  # read -a would drop a trailing empty field and accept 10 + separator.
   [[ $rec == *$'\x1f' ]] && return 1
   _bingsu_split "$rec"
-  (( ${#_bingsu_t[@]} == 9 )) || return 1
-  [[ ${_bingsu_t[0]} == B1 && ${_bingsu_t[1]} == 7 ]] || return 1
-  _bingsu_status_ok "${_bingsu_t[8]}" || return 1
+  (( ${#_bingsu_t[@]} == 10 )) || return 1
+  [[ ${_bingsu_t[0]} == B1 && ${_bingsu_t[1]} == 8 ]] || return 1
+  _bingsu_status_ok "${_bingsu_t[9]}" || return 1
   # Contract: on failure _bingsu_f is empty; it is set only after every check.
   _bingsu_f=("${_bingsu_t[@]}")
 }

@@ -27,9 +27,9 @@ _bingsu_frame() {
   rec=${rec%$'\x1e'}
   [[ $rec == *[$'\x1e\n']* ]] && return 1
   f=("${(@ps:\x1f:)rec}")
-  (( ${#f} == 9 )) || return 1
-  [[ $f[1] == B1 && $f[2] == 7 ]] || return 1
-  _bingsu_status_ok "$f[9]" || return 1
+  (( ${#f} == 10 )) || return 1
+  [[ $f[1] == B1 && $f[2] == 8 ]] || return 1
+  _bingsu_status_ok "$f[10]" || return 1
   # Contract: on failure _bingsu_f is empty; it is set only after every check.
   _bingsu_f=("${f[@]}")
 }

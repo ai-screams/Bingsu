@@ -17,7 +17,7 @@ def hostile_record(c1, c2, c3):
     """What a correct core emits for zsh: data % doubled, SGR in %{ %}."""
     left = (b"%{\x1b[31m%}D:$(touch " + c1 + b");`touch " + c2 + b"`;${HOME};$[1+1];%%F{red};!;\\u%{\x1b[0m%}> ")
     right = b"R:$(touch " + c3 + b")%%"
-    return b"B1\x1f7\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    return b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def start(tmp_path, rc_before="", rc_after="", record=None, inherit=None):

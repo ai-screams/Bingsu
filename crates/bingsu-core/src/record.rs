@@ -25,7 +25,9 @@ impl RecordVersion {
     }
 }
 
-/// The six display fields, in record order.
+/// The seven display fields, in record order. `upper` is the line above the
+/// input line (record change plan 12, R-01); it is last so the other fields keep
+/// their places, and an empty `upper` means a one-line prompt.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Fields<'a> {
     pub left: &'a [u8],
@@ -34,10 +36,11 @@ pub struct Fields<'a> {
     pub transient_right: &'a [u8],
     pub vi_insert: &'a [u8],
     pub vi_command: &'a [u8],
+    pub upper: &'a [u8],
 }
 
 impl<'a> Fields<'a> {
-    fn in_order(&self) -> [&'a [u8]; 6] {
+    fn in_order(&self) -> [&'a [u8]; 7] {
         [
             self.left,
             self.right,
@@ -45,6 +48,7 @@ impl<'a> Fields<'a> {
             self.transient_right,
             self.vi_insert,
             self.vi_command,
+            self.upper,
         ]
     }
 }
@@ -115,10 +119,10 @@ fn check_field(field: usize, bytes: &[u8]) -> Result<(), FieldError> {
     Ok(())
 }
 
-fn push_b1(fields: [&[u8]; 6], status: Status, out: &mut Vec<u8>) {
+fn push_b1(fields: [&[u8]; 7], status: Status, out: &mut Vec<u8>) {
     out.extend_from_slice(b"B1");
     out.push(US);
-    out.push(b'7');
+    out.push(b'8');
     out.push(US);
     for f in fields {
         out.extend_from_slice(f);
@@ -128,9 +132,9 @@ fn push_b1(fields: [&[u8]; 6], status: Status, out: &mut Vec<u8>) {
     out.push(RS);
 }
 
-/// Exact encoded length, or `None` on overflow: the frame (`B1`, `US`, `7`,
+/// Exact encoded length, or `None` on overflow: the frame (`B1`, `US`, `8`,
 /// `US`), each field plus its `US`, the status and the closing `RS`.
-fn encoded_len(parts: &[&[u8]; 6], status: Status) -> Option<usize> {
+fn encoded_len(parts: &[&[u8]; 7], status: Status) -> Option<usize> {
     let mut n: usize = 5;
     for f in parts {
         n = n.checked_add(f.len())?.checked_add(1)?;
@@ -175,14 +179,15 @@ pub fn encode_b1(
     Ok(Encoded::Full)
 }
 
-/// Appends the minimal record: left = MINIMAL_LEFT, other fields empty.
+/// Appends the minimal record: left = MINIMAL_LEFT, other fields (the upper
+/// line included, so the minimal prompt is one line) empty.
 pub fn write_minimal_b1(status: Status, out: &mut Vec<u8>) {
     debug_assert!({
         let mut s = Vec::new();
         status.write_to(&mut s);
         is_valid_status(&s)
     });
-    push_b1([MINIMAL_LEFT, b"", b"", b"", b"", b""], status, out);
+    push_b1([MINIMAL_LEFT, b"", b"", b"", b"", b"", b""], status, out);
 }
 
 #[cfg(test)]
@@ -200,7 +205,7 @@ mod tests {
     fn empty_fields_layout_is_exact() {
         let (r, out) = enc(&Fields::default());
         assert_eq!(r, Ok(Encoded::Full));
-        assert_eq!(out, b"B1\x1f7\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e");
+        assert_eq!(out, b"B1\x1f8\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e");
     }
 
     #[test]
@@ -209,7 +214,7 @@ mod tests {
         write_minimal_b1(Status::ERROR_BAD_ARGS, &mut out);
         assert_eq!(
             out,
-            b"B1\x1f7\x1f> \x1f\x1f\x1f\x1f\x1f\x1ferror:bad-args\x1e"
+            b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:bad-args\x1e"
         );
     }
 
@@ -343,8 +348,8 @@ mod tests {
     // 이것을 실패시키는 것: `in_order()`에서 필드 하나를 빼먹는 것, 필드 번호를 어긋나게 보고하는 것.
     #[test]
     fn forbidden_byte_reports_each_field_index() {
-        for idx in 0..6 {
-            let mut parts: [&[u8]; 6] = [b""; 6];
+        for idx in 0..7 {
+            let mut parts: [&[u8]; 7] = [b""; 7];
             parts[idx] = b"a\x1fb";
             let f = Fields {
                 left: parts[0],
@@ -353,6 +358,7 @@ mod tests {
                 transient_right: parts[3],
                 vi_insert: parts[4],
                 vi_command: parts[5],
+                upper: parts[6],
             };
             assert_eq!(
                 enc(&f).0,
@@ -363,6 +369,34 @@ mod tests {
                 })
             );
         }
+    }
+
+    // 이것을 실패시키는 것: 윗줄을 상태 앞 일곱째 자리가 아닌 곳에 두거나, 윗줄의 줄바꿈을 받는 것
+    // (변경안 12판 R-01·R-03).
+    #[test]
+    fn upper_line_is_the_seventh_field_without_newlines() {
+        let (r, out) = enc(&Fields {
+            upper: b"line 1",
+            left: b"> ",
+            ..Fields::default()
+        });
+        assert_eq!(r, Ok(Encoded::Full));
+        assert_eq!(
+            out,
+            b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1fline 1\x1fok:none\x1e"
+        );
+        let (r, _) = enc(&Fields {
+            upper: b"line\n1",
+            ..Fields::default()
+        });
+        assert_eq!(
+            r,
+            Err(FieldError::ForbiddenByte {
+                field: 6,
+                offset: 4,
+                byte: b'\n'
+            })
+        );
     }
 
     // 이것을 실패시키는 것: C0 중 SOH·STX·올바른 SGR 외의 바이트(예: BEL)를 허용하는 것.

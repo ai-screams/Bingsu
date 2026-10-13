@@ -77,6 +77,9 @@ _bingsu_install() {
   _bingsu_call "${ctx[@]}"
   if (( o_pct )) && _bingsu_frame "$_bingsu_rec"; then
     ps1=$_bingsu_f[3] rps1=$_bingsu_f[4]
+    # Upper line (record change plan 12, R-04): joined by a constant newline, only
+    # when it is not empty, before any escaping so the escaping covers it.
+    if [[ -n $_bingsu_f[9] ]]; then ps1=$_bingsu_f[9]$'\n'$ps1; fi
     if (( o_bang )); then ps1=${ps1//!/!!} rps1=${rps1//!/!!}; fi
     if (( o_subst )); then
       _bingsu_ps1=$ps1 _bingsu_rps1=$rps1
