@@ -9,9 +9,11 @@
 //! `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv`
 //! and review the diff.
 use bingsu_core::color::math::{
-    Oklch, contrast_milli, nearest_256, oklab_q, oklch_to_srgb8, xterm,
+    Oklch, OklchQ, Srgb8, contrast_milli, nearest_256, oklab_q, oklch_to_srgb8, xterm,
 };
-use bingsu_core::color::palette::{Knobs, Mode, PaletteInput, resolve_palette};
+use bingsu_core::color::palette::{
+    AnsiSlot, Knobs, Mode, PaletteInput, PaletteWarning, ResolvedToken, resolve_palette,
+};
 use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::field::{BUILTIN, Field, FieldValue, Value, segment};
 use bingsu_core::icons::IconSet;
@@ -32,6 +34,73 @@ fn hex(b: &[u8]) -> String {
             let _ = write!(s, "{x:02x}");
             s
         })
+}
+
+// The committed file must not depend on `Debug` output, which Rust does not
+// keep stable across toolchains: every value below has a fixed format.
+fn mode_name(m: Mode) -> &'static str {
+    match m {
+        Mode::Dark => "dark",
+        Mode::Light => "light",
+    }
+}
+
+fn depth_name(d: ColorDepth) -> &'static str {
+    match d {
+        ColorDepth::TrueColor => "truecolor",
+        ColorDepth::Ansi256 => "ansi256",
+        ColorDepth::Ansi16 => "ansi16",
+    }
+}
+
+fn opt(v: Option<f64>) -> String {
+    v.map_or_else(|| "-".to_owned(), |x| x.to_string())
+}
+
+fn knobs_text(k: &Knobs) -> String {
+    format!("{} {} {}", opt(k.hue), opt(k.accent_l), opt(k.accent_c))
+}
+
+fn rgb(s: Srgb8) -> String {
+    format!("{:02x}{:02x}{:02x}", s.r, s.g, s.b)
+}
+
+fn lch(q: OklchQ) -> String {
+    format!("{}/{}/{}", q.l, q.c, q.h)
+}
+
+fn slot(a: AnsiSlot) -> String {
+    match a {
+        AnsiSlot::Default => "default".to_owned(),
+        AnsiSlot::Slot(n) => format!("slot{n}"),
+    }
+}
+
+fn token_text(t: &ResolvedToken) -> String {
+    format!(
+        "fg={} bg={} fg_lch={} bg_lch={} fg256={} bg256={} ansi={} on_block={} on_block256={} on_block_ansi={} clipped={}",
+        rgb(t.fg),
+        rgb(t.bg),
+        lch(t.fg_oklch),
+        lch(t.bg_oklch),
+        t.fg256,
+        t.bg256,
+        slot(t.ansi),
+        rgb(t.on_block),
+        t.on_block256,
+        slot(t.on_block_ansi),
+        t.clipped
+    )
+}
+
+fn warning_text(w: &PaletteWarning) -> String {
+    match *w {
+        PaletteWarning::TextContrast { token, milli } => format!("text:{token}:{milli}"),
+        PaletteWarning::BlockContrast { token, milli } => format!("block:{token}:{milli}"),
+        PaletteWarning::Clipped { token } => format!("clipped:{token}"),
+        PaletteWarning::MarkContrast { token, milli } => format!("mark:{token}:{milli}"),
+        PaletteWarning::BackgroundClipped => "background".to_owned(),
+    }
 }
 
 fn color_cases(out: &mut String) {
@@ -72,12 +141,22 @@ fn color_cases(out: &mut String) {
             })
             .expect("built-in palette");
             for (i, t) in p.tokens.iter().enumerate() {
-                let _ = writeln!(out, "token {mode:?} {knobs:?} {i}\t{t:?}");
+                let _ = writeln!(
+                    out,
+                    "token {} {} {i}\t{}",
+                    mode_name(mode),
+                    knobs_text(&knobs),
+                    token_text(t)
+                );
             }
+            let warnings: Vec<String> = p.warnings.iter().map(warning_text).collect();
             let _ = writeln!(
                 out,
-                "palette {mode:?} {knobs:?}\t{:?} {:?}",
-                p.background, p.warnings
+                "palette {} {}\t{} [{}]",
+                mode_name(mode),
+                knobs_text(&knobs),
+                rgb(p.background),
+                warnings.join(" ")
             );
         }
     }
@@ -208,7 +287,9 @@ fn render_cases(out: &mut String) {
                             );
                             let _ = write!(
                                 out,
-                                "render {preset_name} {mode:?} {amb} {depth:?} {} {width}\t",
+                                "render {preset_name} {} {amb} {} {} {width}\t",
+                                mode_name(mode),
+                                depth_name(depth),
                                 shell.as_str()
                             );
                             for f in [
