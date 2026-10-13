@@ -12,6 +12,16 @@ fn deep_path(steps: usize) -> PathFacts {
     PathFacts::new(Anchor::Home, &raw, Some(steps / 2), &[])
 }
 
+// The measured call sits behind an `#[inline(never)]` boundary. Inlined
+// into the bench wrapper (fat LTO), Callgrind on aarch64 left part of the
+// work out of the count (path_facts_new read 1,296 instead of about 6
+// million); x86_64 counted it either way.
+#[inline(never)]
+fn shorten_call(facts: &PathFacts) -> Option<(ShortenResult, usize, u32)> {
+    let m = [Method::Repo, Method::Abbrev(1), Method::Depth(2)];
+    shorten(Source::Path(facts), &m, 40, WidthProfile::DEFAULT)
+}
+
 // Validation cost of shortener results (M2 row): every built-in result is
 // checked by `validate` inside `shorten`. Input and result are returned so
 // they drop outside the counted code (the runner collects within
@@ -19,13 +29,7 @@ fn deep_path(steps: usize) -> PathFacts {
 #[library_benchmark]
 #[bench::steps_32(args = [32], setup = deep_path)]
 fn shorten_validate(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usize, u32)>) {
-    let m = [Method::Repo, Method::Abbrev(1), Method::Depth(2)];
-    let r = black_box(shorten(
-        Source::Path(black_box(&facts)),
-        &m,
-        40,
-        WidthProfile::DEFAULT,
-    ));
+    let r = black_box(shorten_call(black_box(&facts)));
     (facts, r)
 }
 
@@ -62,9 +66,8 @@ fn facts_input(_: u32) -> FactsInput {
     FactsInput { steps, siblings }
 }
 
-#[library_benchmark]
-#[bench::capped(args = [0], setup = facts_input)]
-fn path_facts_new(input: FactsInput) -> (FactsInput, PathFacts) {
+#[inline(never)]
+fn facts_call(input: &FactsInput) -> PathFacts {
     let steps: Vec<&[u8]> = input.steps.iter().map(Vec::as_slice).collect();
     let lists: Vec<Vec<&[u8]>> = input
         .siblings
@@ -72,12 +75,18 @@ fn path_facts_new(input: FactsInput) -> (FactsInput, PathFacts) {
         .map(|l| l.iter().map(Vec::as_slice).collect())
         .collect();
     let siblings: Vec<Option<&[&[u8]]>> = lists.iter().map(|l| Some(l.as_slice())).collect();
-    let f = black_box(PathFacts::new(
+    PathFacts::new(
         Anchor::Home,
         black_box(&steps),
         Some(1),
         black_box(&siblings),
-    ));
+    )
+}
+
+#[library_benchmark]
+#[bench::capped(args = [0], setup = facts_input)]
+fn path_facts_new(input: FactsInput) -> (FactsInput, PathFacts) {
+    let f = black_box(facts_call(black_box(&input)));
     (input, f)
 }
 

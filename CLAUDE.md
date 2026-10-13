@@ -93,6 +93,7 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
   Callgrind runs only on Linux; locally check `cargo build -p bingsu-core-bench --benches`.
 - Each bench group is its own bench target (`benches/<group>.rs`, `harness = false`), because benches in one binary
   changed each other's inlining and counts. CI runs every bench target of the package; a target new since the base tip records only.
+  Put the measured work in an `#[inline(never)]` helper: inlined into the bench wrapper, Callgrind on aarch64 undercounts it.
 - gungraun: keep `main!` at top level (inside `fn main` it measures nothing and exits 0), and keep `[profile.bench]`
   `strip = false` (a stripped bench counts 0 instructions). The runner version must equal the locked library version.
 

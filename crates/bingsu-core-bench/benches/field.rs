@@ -28,12 +28,21 @@ fn fields(_: u32) -> (Vec<Field>, String) {
     (fields, String::with_capacity(256))
 }
 
+// The measured call sits behind an `#[inline(never)]` boundary. Inlined
+// into the bench wrapper (fat LTO), Callgrind on aarch64 left part of the
+// work out of the count (path_facts_new read 1,296 instead of about 6
+// million); x86_64 counted it either way.
+#[inline(never)]
+fn format_fields(input: &[Field], s: &mut String) {
+    for f in input {
+        f.write_to(s);
+    }
+}
+
 #[library_benchmark]
 #[bench::four(args = [4], setup = fields)]
 fn field_format((input, mut s): (Vec<Field>, String)) -> (Vec<Field>, String) {
-    for f in black_box(&input) {
-        f.write_to(&mut s);
-    }
+    format_fields(black_box(&input), &mut s);
     (input, black_box(s))
 }
 

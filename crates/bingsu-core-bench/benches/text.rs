@@ -20,17 +20,31 @@ fn mixed_text(len: usize) -> String {
 // collects within `__gungraun_wrapper_mod::*`). An owned input would be
 // dropped, and freed, at the end of that function, so each bench returns
 // its input: the caller drops the returned value outside the counted code.
+// The measured call sits behind an `#[inline(never)]` boundary. Inlined
+// into the bench wrapper (fat LTO), Callgrind on aarch64 left part of the
+// work out of the count (path_facts_new read 1,296 instead of about 6
+// million); x86_64 counted it either way.
+#[inline(never)]
+fn sanitize_call(input: &[u8]) -> String {
+    sanitize(input)
+}
+
+#[inline(never)]
+fn width_call(input: &str) -> u32 {
+    str_width(input, WidthProfile::DEFAULT)
+}
+
 #[library_benchmark]
 #[bench::kib(args = [1024], setup = mixed)]
 fn sanitize_bytes(input: Vec<u8>) -> (Vec<u8>, String) {
-    let out = black_box(sanitize(black_box(&input)));
+    let out = black_box(sanitize_call(black_box(&input)));
     (input, out)
 }
 
 #[library_benchmark]
 #[bench::kib(args = [1024], setup = mixed_text)]
 fn width_of_text(input: String) -> (String, u32) {
-    let w = black_box(str_width(black_box(&input), WidthProfile::DEFAULT));
+    let w = black_box(width_call(black_box(&input)));
     (input, w)
 }
 
