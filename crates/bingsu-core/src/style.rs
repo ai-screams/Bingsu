@@ -4,6 +4,7 @@
 //! M3). Presets and options only produce template text: the renderer knows
 //! templates alone.
 use crate::template::compile::{FillKind, Shape};
+use crate::template::syntax::MAX_TEMPLATE_BYTES;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -94,6 +95,12 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name == name)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleError {
+    /// The generated template is longer than `MAX_TEMPLATE_BYTES`.
+    TooLong,
+}
+
 /// One line of `[layout.lineN]`: segment ids left and right.
 #[derive(Clone, Copy, Debug)]
 pub struct LineLayout<'a> {
@@ -172,7 +179,11 @@ fn run(out: &mut String, ids: &[&str], o: &StyleOptions, right: bool) {
 }
 
 /// Template text from preset and options for `lines`.
-pub fn generate(preset: &Preset, options: &StyleOptions, lines: &[LineLayout<'_>]) -> String {
+pub fn generate(
+    preset: &Preset,
+    options: &StyleOptions,
+    lines: &[LineLayout<'_>],
+) -> Result<String, StyleError> {
     let o = options.over(preset.options);
     let mut out = String::new();
     for (n, line) in lines.iter().enumerate() {
@@ -194,7 +205,11 @@ pub fn generate(preset: &Preset, options: &StyleOptions, lines: &[LineLayout<'_>
             run(&mut out, line.right, &o, true);
         }
     }
-    out
+    // The compiler refuses longer sources; fail here with a clear cause.
+    if out.len() > MAX_TEMPLATE_BYTES {
+        return Err(StyleError::TooLong);
+    }
+    Ok(out)
 }
 
 /// The template the renderer uses, and notices for `config check`.
@@ -203,15 +218,15 @@ pub fn resolve(
     options: &StyleOptions,
     template: Option<&str>,
     lines: &[LineLayout<'_>],
-) -> (String, Vec<StyleNotice>) {
+) -> Result<(String, Vec<StyleNotice>), StyleError> {
     match template {
-        Some(t) => (
+        Some(t) => Ok((
             t.into(),
             alloc::vec![StyleNotice::TemplateReplaces {
                 options: !options.is_empty()
             }],
-        ),
-        None => (generate(preset, options, lines), Vec::new()),
+        )),
+        None => Ok((generate(preset, options, lines)?, Vec::new())),
     }
 }
 
@@ -235,12 +250,12 @@ mod tests {
     // 이것을 실패시키는 것: 프리셋이 만든 템플릿이 바뀌는 것(머리·꼬리·구분자·채움 자리).
     #[test]
     fn presets_generate_templates() {
-        let tri = generate(preset("triangle").unwrap(), &StyleOptions::default(), &TWO);
+        let tri = generate(preset("triangle").unwrap(), &StyleOptions::default(), &TWO).unwrap();
         assert_eq!(
             tri,
             "{dir:block}{@sep:triangle}{git:block}{@tail:triangle}{@fill:space}{@head:triangle}{status:block}{@sep:triangle}{time:block}{@nl}{char:block}{@tail:triangle}"
         );
-        let lean = generate(preset("lean").unwrap(), &StyleOptions::default(), &TWO);
+        let lean = generate(preset("lean").unwrap(), &StyleOptions::default(), &TWO).unwrap();
         assert_eq!(lean, "{dir} {git}{@fill:space}{status} {time}{@nl}{char}");
         for t in [tri, lean] {
             assert!(compile(&t, BUILTIN).is_ok(), "{t}");
@@ -255,11 +270,11 @@ mod tests {
             frame: Some(true),
             ..StyleOptions::default()
         };
-        let (t, n) = resolve(preset("triangle").unwrap(), &o, None, &TWO);
+        let (t, n) = resolve(preset("triangle").unwrap(), &o, None, &TWO).unwrap();
         assert!(t.starts_with("{@icon:frame.top}{dir:block}{@sep:round}"));
         assert!(t.contains("{@nl}{@icon:frame.bottom}{char:block}"));
         assert!(n.is_empty());
-        let (t, n) = resolve(preset("triangle").unwrap(), &o, Some("{dir}"), &TWO);
+        let (t, n) = resolve(preset("triangle").unwrap(), &o, Some("{dir}"), &TWO).unwrap();
         assert_eq!(
             (t.as_str(), n.as_slice()),
             (
@@ -272,7 +287,8 @@ mod tests {
             &StyleOptions::default(),
             Some("{dir}"),
             &TWO,
-        );
+        )
+        .unwrap();
         assert_eq!(n, [StyleNotice::TemplateReplaces { options: false }]);
     }
 
@@ -293,7 +309,8 @@ mod tests {
                 left: &["dir", "git"],
                 right: &[],
             }],
-        );
+        )
+        .unwrap();
         assert_eq!(
             t,
             "{@head:round}{dir:block}{@tail:round} {@head:round}{git:block}{@tail:round}"
@@ -314,7 +331,7 @@ mod tests {
             ..StyleOptions::default()
         };
         assert_eq!(
-            generate(preset("lean").unwrap(), &adj, &one),
+            generate(preset("lean").unwrap(), &adj, &one).unwrap(),
             "{dir:block}{git:block}{@fill:space}{time:block}"
         );
         let plain = StyleOptions {
@@ -324,7 +341,7 @@ mod tests {
             ..StyleOptions::default()
         };
         assert_eq!(
-            generate(preset("lean").unwrap(), &plain, &one),
+            generate(preset("lean").unwrap(), &plain, &one).unwrap(),
             "{dir} {git}{@fill:dot}{time}"
         );
         let base = StyleOptions {
@@ -341,5 +358,40 @@ mod tests {
             (m.separator, m.fill, m.frame),
             (Some(Shape::Round), Some(FillKind::Line), Some(true))
         );
+    }
+
+    // The generated text must stay within the compiler's source cap. With the
+    // lean preset a left run costs 6 bytes per `dir` (5 + a space) and 7 per
+    // `time`, minus one for the last space.
+    // 이것을 실패시키는 것: `>`를 `>=`로 바꾸는 것(정확히 4096바이트가 거부됨), 상한을 하나 늘리거나
+    // 검사를 빼는 것(4097바이트가 통과함), `resolve`가 오류를 삼키는 것.
+    #[test]
+    fn generated_template_respects_the_source_cap() {
+        let lean = preset("lean").unwrap();
+        let none = StyleOptions::default();
+        let fit = |ids: &[&str]| {
+            let line = [LineLayout {
+                left: ids,
+                right: &[],
+            }];
+            generate(lean, &none, &line)
+        };
+        let mut exact: Vec<&str> = alloc::vec!["dir"; 677];
+        exact.extend(["time"; 5]);
+        let t = fit(&exact).unwrap();
+        assert_eq!(t.len(), MAX_TEMPLATE_BYTES);
+        assert!(compile(&t, BUILTIN).is_ok());
+        let t = fit(&alloc::vec!["dir"; 682]).unwrap();
+        assert_eq!(t.len(), MAX_TEMPLATE_BYTES - 5);
+        assert!(compile(&t, BUILTIN).is_ok());
+        let over = alloc::vec!["dir"; 683];
+        assert_eq!(fit(&over), Err(StyleError::TooLong));
+        let line = [LineLayout {
+            left: &over,
+            right: &[],
+        }];
+        assert_eq!(resolve(lean, &none, None, &line), Err(StyleError::TooLong));
+        // A user template is passed through; the compiler enforces its own cap.
+        assert!(resolve(lean, &none, Some("{dir}"), &line).is_ok());
     }
 }
