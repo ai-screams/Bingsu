@@ -33,9 +33,17 @@ fn grow(n: usize) {
 
 fn shrink(n: usize) {
     // Memory allocated before arming may be freed while armed.
-    let _ = LIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |l| {
-        Some(l.saturating_sub(n))
-    });
+    // A plain compare-exchange loop: `fetch_update` is deprecated on newer
+    // toolchains and its replacement is missing on older ones.
+    let mut live = LIVE.load(Ordering::Relaxed);
+    while let Err(now) = LIVE.compare_exchange_weak(
+        live,
+        live.saturating_sub(n),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        live = now;
+    }
 }
 
 // SAFETY: every method forwards to `System` with the caller's arguments
