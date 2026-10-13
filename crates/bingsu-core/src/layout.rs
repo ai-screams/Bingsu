@@ -4,11 +4,13 @@
 //! line never overflows at any width from 0 up.
 //!
 //! Cost: values, path text, fields and glyphs are read and measured once per
-//! line. Each fit check then walks the line's nodes once with no allocation
-//! (O(M) for M nodes) and the steps make at most a few checks per segment, so
-//! a line costs O(N·M) for N distinct segments (N is at most the catalog
-//! size). The only allocations after setup are the shortener's own results
-//! and the output runs, each at its exact size.
+//! line. Each fit check then walks the line's nodes once without growing a
+//! buffer (O(M) for M nodes; an item buffer is replaced at its new exact size
+//! only when shortening adds pieces), and the steps make at most a few checks
+//! per segment, so a line costs O(N·M) for N distinct segments (N is at most
+//! the catalog size). Past setup, a line that fits allocates only its output
+//! runs, at their exact size; overflow steps add the shortened pieces (steps
+//! 1 and 4) and one priority list each (steps 2 and 5).
 use crate::bands::{Band, select};
 use crate::color::palette::token_index;
 use crate::color::sgr::{Color, DIM, Style};
@@ -112,11 +114,14 @@ pub fn runs_width(runs: &[Run], p: WidthProfile) -> u32 {
 }
 
 /// 1 when `s` starts with a grapheme that joins the one before it (it
-/// starts with an extending character) and holds U+FE0F or a ZWJ. Joined,
-/// that can turn a 1-cell base before it (`#`, a text-style pictograph such
-/// as `▶`) into a 2-cell emoji; joining never widens anything by more than
-/// that one cell. Counting the cell keeps every measured width at or above
-/// what the terminal draws, wherever the text ends up next to other text.
+/// starts with an extending character) and holds a variation selector
+/// (U+FE0F, U+FE0E) or a ZWJ. Joined, U+FE0F or a ZWJ can turn a 1-cell
+/// base (`#`, a text-style pictograph such as `▶`) into a 2-cell emoji, and
+/// U+FE0E can turn a 1-cell emoji (`emoji = 1`) back into its 2-cell text
+/// form (`⌚`). Counting that one cell keeps the measured width at or above
+/// what the terminal draws, wherever the text ends up next to other text: a
+/// search over every scalar value before these selectors, in all four
+/// profiles, found no join that widens by more (2026-10-13, report E3).
 fn join_risk(s: &str) -> u32 {
     let Some(g) = s.graphemes(true).next() else {
         return 0;
@@ -124,7 +129,7 @@ fn join_risk(s: &str) -> u32 {
     let Some(c) = g.chars().next() else {
         return 0;
     };
-    if !g.contains(['\u{FE0F}', '\u{200D}']) {
+    if !g.contains(['\u{FE0F}', '\u{FE0E}', '\u{200D}']) {
         return 0;
     }
     // `A` then `c` is one grapheme exactly when `c` extends any base.
@@ -1567,17 +1572,28 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 조각마다 잰 폭만 믿는 것. `#` 뒤에 U+FE0F로 시작하는 값이 오면 터미널은 둘을
-    // 2칸 이모지 하나로 읽으므로, 이어 붙인 폭이 목표 폭을 넘는다(`join_risk`가 0을 돌려주면 폭 5에서 실패).
+    // 2칸 이모지 하나로 읽고, `emoji = 1`에서 `⌚` 뒤에 U+FE0E가 오면 2칸 글자 꼴로 읽으므로, 이어 붙인 폭이
+    // 목표 폭을 넘는다(`join_risk`가 0을 돌려주거나 U+FE0E를 빼면 실패).
     #[test]
     fn a_joining_value_never_widens_the_line() {
         let mut f = fixture(&["Works"], "main");
-        f.values[idx("git")] = value("git", "\u{FE0F}abc", &[]);
         f.setup[idx("git")].methods = &[];
-        let lines = compile("#{git}{@nl}{char}", BUILTIN).unwrap();
-        for w in 0..=12 {
-            assert_fits(&lay(&lines, &f, &opts(w)), &opts(w), "joined");
+        for (t, v, emoji) in [
+            ("#{git}{@nl}{char}", "\u{FE0F}abc", 2),
+            ("\u{231A}{git}{@nl}{char}", "\u{FE0E}abc", 1),
+        ] {
+            f.values[idx("git")] = value("git", v, &[]);
+            let lines = compile(t, BUILTIN).unwrap();
+            for w in 0..=12 {
+                let o = Options {
+                    profile: WidthProfile::new(1, emoji).unwrap(),
+                    ..opts(w)
+                };
+                assert_fits(&lay(&lines, &f, &o), &o, t);
+            }
         }
         assert_eq!(join_risk("\u{FE0F}abc"), 1);
+        assert_eq!(join_risk("\u{FE0E}"), 1);
         assert_eq!(join_risk("\u{0301}\u{200D}x"), 1);
         assert_eq!(join_risk("\u{1F3F3}\u{FE0F}"), 0);
         assert_eq!(join_risk("abc"), 0);

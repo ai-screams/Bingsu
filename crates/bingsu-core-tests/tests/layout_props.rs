@@ -89,7 +89,7 @@ fn no_line_overflows() {
         name(),
         1u8..=2,
         1u8..=2,
-        0usize..3,
+        0usize..4,
         0usize..4,
     );
     let mut runner = TestRunner::new(Config {
@@ -114,11 +114,12 @@ fn no_line_overflows() {
             values[i("dir")] = value("dir", b"");
             let raw: Vec<&[u8]> = steps.iter().map(Vec::as_slice).collect();
             facts[i("dir")] = Some(PathFacts::new(Anchor::Home, &raw, Some(1), &[]));
-            // The `#` template always gets a branch that starts with U+FE0F.
-            let branch = if style == 2 {
-                ["\u{FE0F}".as_bytes(), &branch].concat()
-            } else {
-                branch
+            // The `#` and `⌚` templates get a branch that starts with the
+            // selector that widens what is drawn before it.
+            let branch = match style {
+                2 => ["\u{FE0F}".as_bytes(), &branch].concat(),
+                3 => ["\u{FE0E}".as_bytes(), &branch].concat(),
+                _ => branch,
             };
             values[i("git")] = value("git", &branch);
             values[i("time")] = value("time", b"12:34:56");
@@ -136,9 +137,9 @@ fn no_line_overflows() {
                 facts: &facts,
                 setup: &setup,
             };
-            // Two presets, and a template that puts the branch right after
-            // `#`, where a name starting with U+FE0F makes a keycap emoji
-            // (2 cells when `emoji = 2`).
+            // Two presets, and templates that put the branch right after `#`
+            // (U+FE0F makes a keycap emoji, 2 cells when `emoji = 2`) or `⌚`
+            // (U+FE0E makes it the 2-cell text form when `emoji = 1`).
             let t = match style {
                 0 | 1 => generate(
                     preset(if style == 0 { "lean" } else { "triangle" }).unwrap(),
@@ -155,7 +156,8 @@ fn no_line_overflows() {
                     ],
                 )
                 .unwrap(),
-                _ => String::from("{dir} #{git}{@fill}{time}{@nl}{char}"),
+                2 => String::from("{dir} #{git}{@fill}{time}{@nl}{char}"),
+                _ => String::from("{dir} \u{231A}{git}{@fill}{time}{@nl}{char}"),
             };
             let lines = compile(&t, BUILTIN).unwrap();
             let profile = WidthProfile::new(amb, emoji).unwrap();
