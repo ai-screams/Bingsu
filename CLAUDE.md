@@ -91,6 +91,8 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 - `icount` measures the base tip (`HEAD^1` of the PR merge commit) and the merge result in one job and fails when
   instructions grow past `crates/bingsu-core-bench/limits.txt` (`ir=1%`); raise it in the same PR with the reason.
   Callgrind runs only on Linux; locally check `cargo build -p bingsu-core-bench --benches`.
+- Each bench group is its own bench target (`benches/<group>.rs`, `harness = false`), because benches in one binary
+  changed each other's inlining and counts. CI runs every bench target of the package; a target new since the base tip records only.
 - gungraun: keep `main!` at top level (inside `fn main` it measures nothing and exits 0), and keep `[profile.bench]`
   `strip = false` (a stripped bench counts 0 instructions). The runner version must equal the locked library version.
 
