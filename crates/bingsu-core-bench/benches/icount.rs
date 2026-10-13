@@ -8,6 +8,7 @@ use bingsu_core::color::palette::{
 };
 use bingsu_core::field::{Field, FieldValue};
 use bingsu_core::sanitize::sanitize;
+use bingsu_core::shorten::{Anchor, Method, PathFacts, ShortenResult, Source, shorten};
 use bingsu_core::width::{WidthProfile, str_width};
 use gungraun::prelude::*;
 use std::hint::black_box;
@@ -99,6 +100,80 @@ fn palette_resolve(input: (Mode, Knobs)) -> ((Mode, Knobs), Result<ResolvedPalet
     (input, p)
 }
 
+fn deep_path(steps: usize) -> PathFacts {
+    let names: Vec<String> = (0..steps).map(|i| format!("folder-{i}")).collect();
+    let raw: Vec<&[u8]> = names.iter().map(|s| s.as_bytes()).collect();
+    PathFacts::new(Anchor::Home, &raw, Some(steps / 2), &[])
+}
+
+// Validation cost of shortener results (M2 row): every built-in result is
+// checked by `validate` inside `shorten`. Input and result are returned so
+// they drop outside the counted code.
+#[library_benchmark]
+#[bench::steps_32(args = [32], setup = deep_path)]
+fn shorten_validate(facts: PathFacts) -> (PathFacts, Option<(ShortenResult, usize, u32)>) {
+    let m = [Method::Repo, Method::Abbrev(1), Method::Depth(2)];
+    let r = black_box(shorten(
+        Source::Path(black_box(&facts)),
+        &m,
+        40,
+        WidthProfile::DEFAULT,
+    ));
+    (facts, r)
+}
+
+// Near worst case for `PathFacts::new` with `unique`: sibling lists at the
+// raw caps (1 KiB names, 8 KiB per step, 16 KiB per path), names that
+// sanitizing removes entirely, names sharing a long prefix with the step, a
+// spent path budget with 256 more entries, and a name over the 1 KiB cap.
+// The input is raw bytes made in setup; `new` runs inside the counted code.
+struct FactsInput {
+    steps: Vec<Vec<u8>>,
+    siblings: Vec<Vec<Vec<u8>>>,
+}
+
+fn facts_input(_: u32) -> FactsInput {
+    let shared = |n: usize| {
+        let mut v = vec![b'a'; n];
+        v[n - 1] = b'b';
+        v
+    };
+    let steps: Vec<Vec<u8>> = vec![
+        vec![b'a'; 1024],
+        vec![b'a'; 1024],
+        vec![b'a'; 1024],
+        vec![b'a'; 64],
+        b"last".to_vec(),
+    ];
+    let siblings = vec![
+        (0..8).map(|_| vec![0x1b; 1024]).collect(),
+        (0..8).map(|_| shared(1024)).collect(),
+        (0..256).map(|_| shared(8)).collect(),
+        vec![shared(1025)],
+        Vec::new(),
+    ];
+    FactsInput { steps, siblings }
+}
+
+#[library_benchmark]
+#[bench::capped(args = [0], setup = facts_input)]
+fn path_facts_new(input: FactsInput) -> (FactsInput, PathFacts) {
+    let steps: Vec<&[u8]> = input.steps.iter().map(Vec::as_slice).collect();
+    let lists: Vec<Vec<&[u8]>> = input
+        .siblings
+        .iter()
+        .map(|l| l.iter().map(Vec::as_slice).collect())
+        .collect();
+    let siblings: Vec<Option<&[&[u8]]>> = lists.iter().map(|l| Some(l.as_slice())).collect();
+    let f = black_box(PathFacts::new(
+        Anchor::Home,
+        black_box(&steps),
+        Some(1),
+        black_box(&siblings),
+    ));
+    (input, f)
+}
+
 library_benchmark_group!(
     name = core_m2,
     benchmarks = [
@@ -106,7 +181,9 @@ library_benchmark_group!(
         width_of_text,
         field_format,
         color_notation,
-        palette_resolve
+        palette_resolve,
+        shorten_validate,
+        path_facts_new
     ]
 );
 
