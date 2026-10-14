@@ -3,8 +3,8 @@
 Thanks for your interest in bingsu! 🍧
 This guide explains how changes get into the repository and what the checks expect.
 
-> bingsu is in the design stage. There is no Rust code yet, so the build and test steps below
-> describe the setup that switches on once the first crate lands.
+> bingsu is in early development. The Rust workspace builds and tests today, but there is no release
+> and no user-visible prompt yet.
 
 ## Table of contents
 
@@ -101,13 +101,19 @@ Before you open one:
 
 ## CI checks
 
-| Check | What it does | Runs when |
-| -- | -- | -- |
-| Lint workflows (actionlint) | Checks GitHub Actions workflows, including their shell scripts | Always |
-| Secret scan (gitleaks) | Scans the full git history for leaked secrets | Every push and pull request, and weekly |
-| Lint (rustfmt, clippy) | `cargo fmt --check` and `cargo clippy -D warnings` | Once `Cargo.toml` exists |
-| Test | `cargo test` on Linux, macOS and Windows | Once `Cargo.toml` exists |
-| Dependency advisories (cargo-audit) | Checks `Cargo.lock` against the RustSec database | Once `Cargo.lock` exists |
+| Check | Workflow | What it does | Runs when |
+| -- | -- | -- | -- |
+| Lint workflows (actionlint) | CI | Checks GitHub Actions workflows, including their shell scripts | Always |
+| Lint (rustfmt, clippy) | CI | `cargo fmt --check`, `cargo clippy -D warnings` and a musl `cargo check` | Once `Cargo.toml` exists |
+| Test (ubuntu, macos, windows) | CI | `cargo test` on each OS | Once `Cargo.toml` exists |
+| Core purity gate | CI | Keeps `bingsu-core` free of I/O and the CLI prompt path free of forbidden calls, and runs `cargo deny` | Once `Cargo.toml` exists |
+| Core wasm32 build | CI | Renders the golden prompts under wasmtime and compares them byte for byte with the committed golden file, which the native Test job also checks | Once `Cargo.toml` exists |
+| Unicode tables match the generator | CI | Checks that the committed Unicode tables are exactly what the generator makes | Once `Cargo.toml` exists |
+| Core instruction counts | CI | Compares Callgrind instruction counts with the base tip and fails past the limit | Pull requests only, on Linux |
+| Filesystem budget scaffold (strace) | CI | Runs the binary under strace and checks the files it opens against the budget | Once `Cargo.toml` exists; Linux only |
+| Shell PTY (min-u22, min-d12, cur-d13 containers; macOS Homebrew) | Shell | Golden record vectors and PTY tests in bash, zsh and fish | Once `Cargo.toml` exists |
+| Secret scan (gitleaks) | Security | Scans the full git history for leaked secrets | Every push and pull request, and weekly |
+| Dependency advisories (cargo-audit) | Security | Checks `Cargo.lock` against the RustSec database | Once `Cargo.lock` exists |
 
 All actions are pinned to a commit SHA, and downloaded tools are verified against their published checksums.
 Dependabot proposes updates weekly.
@@ -129,9 +135,14 @@ cargo build
 cargo test --workspace --all-features
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+scripts/check-core-purity.sh                       # core purity and CLI prompt-path gate
+cargo check -p bingsu --target x86_64-unknown-linux-musl   # CI builds musl; libc APIs differ
+tests/golden/record/run-all.sh                     # record golden vectors; SHELLS="bash zsh fish"
+BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -p no:cacheprovider
 ```
 
-Run the same checks as CI before you push.
+Run the same checks as CI before you push. The instruction-count check (`icount`) needs Callgrind, so it runs only
+on Linux CI; locally, `cargo build -p bingsu-core-bench --benches` checks that the benches compile.
 
 ## Design rules
 

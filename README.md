@@ -12,8 +12,8 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in early development (M1).** The record path and the bash, zsh and fish hooks exist,
-> but there is no release, nothing to install and no user-visible prompt yet. Performance has not been measured.
+> **bingsu is in early development (M2 done).** The record path, the bash, zsh and fish hooks and the core renderer exist,
+> but there is no release, nothing to install and no user-visible prompt yet. Published performance numbers do not exist yet.
 > This README describes what is being built. Features listed below are planned, not shipped.
 
 ## What is bingsu?
@@ -78,7 +78,9 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Color system (palette, dark and light, contrast rules) | Designed |
 | Prompt layout and block styles | Designed |
 | Implementation language | Rust |
-| Engine core (M1: record path and shell hooks) | In progress |
+| Record path and shell hooks (M1) | Done |
+| Core renderer (M2: layout, width, colors, per-shell output) | Done, not yet shown in a shell |
+| Config, refresh helper and git reads (M3) | Next |
 | Performance measurement (M1 Part B) | Measurement tools in progress, no published numbers yet |
 | User-visible prompt, themes, segments and colors | Not started |
 | Terminal and CLI generators, Studio | Not started |
