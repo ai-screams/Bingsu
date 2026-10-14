@@ -10,8 +10,9 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: M2 (core renderer). The record path and the shell hooks exist, and core modules land one PR at a time; there is no release and no
-  user-visible prompt yet. `README.md` lists features as planned. Keep it that way until they ship.
+- **Stage**: M2 (core renderer) is done; M3 (config, refresh helper, git reads, gates) is next. The record path and the shell hooks exist, and the
+  core renders a prompt, but `bingsu prompt` does not call the renderer yet; there is no release and no
+  user-visible prompt. `README.md` lists features as planned. Keep it that way until they ship.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout
