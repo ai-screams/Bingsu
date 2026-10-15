@@ -12,9 +12,10 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in early development (M2 done).** The record path, the bash, zsh and fish hooks and the core renderer exist,
-> but there is no release, nothing to install and no user-visible prompt yet. Published performance numbers do not exist yet.
-> This README describes what is being built. Features listed below are planned, not shipped.
+> **bingsu is in early development (M3a in progress).** `bingsu prompt` now draws a built-in default prompt in bash,
+> zsh and fish (folder, exit status, command duration, jobs), with Unicode icons by default.
+> There is no release, no config file support and no git segment yet. Published performance numbers do not exist yet.
+> This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
 
 ## What is bingsu?
 
@@ -79,14 +80,20 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Prompt layout and block styles | Designed |
 | Implementation language | Rust |
 | Record path and shell hooks (M1) | Done |
-| Core renderer (M2: layout, width, colors, per-shell output) | Done, not yet shown in a shell |
-| Config, refresh helper and git reads (M3) | Next |
+| Core renderer (M2: layout, width, colors, per-shell output) | Done, used by `bingsu prompt` |
+| Config, snapshot and refresh helper (M3a) | In progress; config files are not supported yet |
+| Git segment | Planned; git data is not collected yet |
 | Performance measurement (M1 Part B) | Measurement tools in progress, no published numbers yet |
-| User-visible prompt, themes, segments and colors | Not started |
+| User-visible prompt | Built-in default theme in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width |
+| Theme selection and customization | Planned |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
 Windows is checked in CI. First-class support targets macOS and Linux.
+
+On Linux, the prompt installs a seccomp system call filter before rendering. A kernel without seccomp support still renders
+the prompt; a failed filter check or installation gives a minimal prompt with `degraded:sandbox` and a shell notice once per session.
+Without a usable runtime folder, the prompt still renders with `degraded:runtime-root`; `init` warns that saved state is unavailable.
 
 ## How bingsu compares
 
