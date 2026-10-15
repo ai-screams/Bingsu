@@ -325,3 +325,61 @@ fn same_visible_text_in_every_shell() {
         }
     }
 }
+
+// 이것을 실패시키는 것: 기본 테마(M3a의 첫 보이는 프롬프트)의 바이트가 바뀌는 것(프리셋·레이아웃·narrow 구간·우선순위·색),
+// golden 파일이 없는 것. 100칸은 두 줄 기본, 50칸은 narrow 구간이다.
+#[test]
+fn default_theme_outputs() {
+    use bingsu_core::default_theme::DefaultTheme;
+    let d = DefaultTheme::new(Mode::Dark).unwrap();
+    let i = |id| BUILTIN.iter().position(|x| x.id == id).unwrap();
+    let v = |id: &str, text: &[u8], set: &[(&str, FieldValue)]| {
+        let s = segment(id).unwrap();
+        let mut f = vec![Field::ABSENT; s.fields.len()];
+        for (n, x) in set {
+            f[s.field_index(n).unwrap()] = Field::known(x.clone());
+        }
+        Some(Value::new(text, f))
+    };
+    let mut values = vec![None; BUILTIN.len()];
+    let mut facts = vec![None; BUILTIN.len()];
+    values[i("char")] = v("char", b"", &[("failed", FieldValue::Bool(true))]);
+    values[i("dir")] = v("dir", b"", &[]);
+    let steps: [&[u8]; 3] = [b"Works", b"AiScream", b"50% done"];
+    facts[i("dir")] = Some(PathFacts::new(Anchor::Home, &steps, None, &[]));
+    values[i("status")] = v("status", b"1", &[("code", FieldValue::Int(1))]);
+    values[i("duration")] = v(
+        "duration",
+        b"3.2s",
+        &[("ms", FieldValue::Duration { ms: 3200 })],
+    );
+    let inputs = Inputs {
+        catalog: BUILTIN,
+        values: &values,
+        facts: &facts,
+        setup: d.setup(),
+    };
+    for shell in SHELLS {
+        for width in [100u16, 50] {
+            let t = Target {
+                shell,
+                depth: ColorDepth::Ansi256,
+                options: Options {
+                    width,
+                    profile: WidthProfile::DEFAULT,
+                    icons: bingsu_core::default_theme::ICONS,
+                    use_last_column: false,
+                },
+            };
+            let r = render_prompt(&d.theme(), &inputs, &t, &mut NoopRecorder);
+            let mut bytes = Vec::new();
+            for (n, b) in all(&r) {
+                bytes.extend_from_slice(n.as_bytes());
+                bytes.extend_from_slice(b": ");
+                bytes.extend_from_slice(b);
+                bytes.push(b'\n');
+            }
+            check_golden(&format!("{}_default_{width}.bin", shell.as_str()), &bytes);
+        }
+    }
+}

@@ -12,6 +12,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod bands;
 pub mod color;
+pub mod default_theme;
 pub mod emit;
 pub mod field;
 pub mod icons;

@@ -92,12 +92,12 @@ pub const ICONS: &[Icon] = &[
     i("git.untracked", Glyph, ["?", "?", "?", "?"]),
     i("readonly", Glyph, ["\u{F023}", "", "", ""]),
     i("sep.flat", OneCell, [" ", " ", " ", " "]),
-    i("sep.round.l", OneCell, ["\u{E0B6}", "\u{E0B6}", "\u{25C0}", "<"]),
-    i("sep.round.r", OneCell, ["\u{E0B4}", "\u{E0B4}", "\u{25B6}", ">"]),
-    i("sep.slant.l", OneCell, ["\u{E0BA}", "\u{E0BA}", "\u{25C0}", "<"]),
-    i("sep.slant.r", OneCell, ["\u{E0BC}", "\u{E0BC}", "\u{25B6}", ">"]),
-    i("sep.triangle.l", OneCell, ["\u{E0B2}", "\u{E0B2}", "\u{25C0}", "<"]),
-    i("sep.triangle.r", OneCell, ["\u{E0B0}", "\u{E0B0}", "\u{25B6}", ">"]),
+    i("sep.round.l", OneCell, ["\u{E0B6}", "\u{E0B6}", "\u{25C2}", "<"]),
+    i("sep.round.r", OneCell, ["\u{E0B4}", "\u{E0B4}", "\u{25B8}", ">"]),
+    i("sep.slant.l", OneCell, ["\u{E0BA}", "\u{E0BA}", "\u{25C2}", "<"]),
+    i("sep.slant.r", OneCell, ["\u{E0BC}", "\u{E0BC}", "\u{25B8}", ">"]),
+    i("sep.triangle.l", OneCell, ["\u{E0B2}", "\u{E0B2}", "\u{25C2}", "<"]),
+    i("sep.triangle.r", OneCell, ["\u{E0B0}", "\u{E0B0}", "\u{25B8}", ">"]),
 ];
 
 pub fn lookup(name: &str) -> Option<&'static Icon> {
@@ -244,7 +244,7 @@ mod tests {
         let sep = lookup("sep.round.r").unwrap();
         assert_eq!(
             ALL.map(|s| sep.glyph(s)),
-            ["\u{E0B4}", "\u{E0B4}", "\u{25B6}", ">"]
+            ["\u{E0B4}", "\u{E0B4}", "\u{25B8}", ">"]
         );
         let br = lookup("git.branch").unwrap();
         assert_eq!((br.name(), br.kind()), ("git.branch", IconKind::Glyph));
@@ -292,7 +292,12 @@ mod tests {
         );
         let tri = lookup("sep.triangle.r").unwrap();
         assert_eq!(resolve(tri, IconSet::Nerd, a2).fell_back_to, None);
-        assert_eq!(resolve(tri, IconSet::Unicode, a2).text, ">");
+        // The unicode separators are East Asian Width N (decision 2026-10-15):
+        // one cell under either profile, no fallback. An ambiguous unicode
+        // glyph still falls back.
+        assert_eq!(resolve(tri, IconSet::Unicode, a2).text, "\u{25B8}");
+        let dot = lookup("fill.dot").unwrap();
+        assert_eq!(resolve(dot, IconSet::Unicode, a2).text, ".");
         let frame = lookup("frame.top").unwrap();
         assert_eq!(resolve(frame, IconSet::Nerd, a2).width, 4);
     }
