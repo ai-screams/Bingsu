@@ -17,12 +17,13 @@ end
 
 # Runs the pinned binary once; the raw record goes to _bingsu_rec. A call
 # that a signal ended (status 128 or more: a crash, or on Linux the seccomp
-# filter) is not repeated until the next command: fish_prompt sets
-# _bingsu_gen to the status generation, and a dead call keeps it in
-# _bingsu_dead_gen. Without this fish 3.6 reports the signal, redraws, calls
-# again and loops (same rule as hooks.zsh).
+# filter) is not repeated until the next command: a dead call sets
+# _bingsu_dead and fish_postexec clears it (the status generation does not
+# move for a command that sets no status, such as `set x 1`). Without this
+# fish 3.6 reports the signal, redraws, calls again and loops (same rule as
+# hooks.zsh).
 function _bingsu_call
-    if test "$_bingsu_dead_gen" = "$_bingsu_gen"
+    if test -n "$_bingsu_dead"
         set -g _bingsu_rec ''
         return 0
     end
@@ -37,8 +38,12 @@ function _bingsu_call
     end
     set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ | string collect -N)
     if test $pipestatus[1] -ge 128
-        set -g _bingsu_dead_gen $_bingsu_gen
+        set -g _bingsu_dead 1
     end
+end
+
+function _bingsu_postexec --on-event fish_postexec
+    set -g _bingsu_dead ''
 end
 set -g _bingsu_rps1 ''
 
@@ -105,7 +110,7 @@ end
 # The generation at init, never an inherited one: a value from the
 # environment would make the first prompt send the last command's duration.
 set -g _bingsu_gen $status_generation
-set -g _bingsu_dead_gen ''
+set -g _bingsu_dead ''
 
 # Last, after every assignment above: a name that came from the environment
 # is an exported global, and set -g keeps that flag, so the raw record and
@@ -122,4 +127,4 @@ set -gu _bingsu_disp $_bingsu_disp
 set -gu _bingsu_note $_bingsu_note
 set -gu _bingsu_key $_bingsu_key
 set -gu _bingsu_gen $_bingsu_gen
-set -gu _bingsu_dead_gen $_bingsu_dead_gen
+set -gu _bingsu_dead $_bingsu_dead

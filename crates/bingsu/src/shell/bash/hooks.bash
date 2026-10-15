@@ -33,7 +33,10 @@ _bingsu_bytes() {
 # redirect keeps bash's own "ignored null byte" warning off the terminal.
 # A call that a signal ended (status 128 or more) is not repeated until the
 # next command: bash numbers commands (\#), and the number a dead call saw
-# is kept in _bingsu_dead_cn (same rule as hooks.zsh).
+# is kept in _bingsu_dead_cn (same rule as hooks.zsh). The assignment runs
+# before ||, a context that also covers the substitution's subshell: a failed
+# call keeps its status but neither ends a `set -e` shell nor fires the
+# user's ERR trap.
 _bingsu_call() {
   local _bingsu_cn='\#'
   _bingsu_cn=${_bingsu_cn@P}
@@ -47,11 +50,13 @@ _bingsu_call() {
   _bingsu_seq=$(( _bingsu_seq + 1 ))
   # Over 64 KiB (bytes): passed empty (see hooks.zsh). ${PWD-}: set -u after
   # unset PWD. _bingsu_bytes counts bytes under a local LC_ALL=C.
-  local _bingsu_pwd=${PWD-} _bingsu_n=0
-  _bingsu_bytes "$_bingsu_pwd"
+  local _bingsu_pwd=${PWD-} _bingsu_n=0 _bingsu_st=0
+  # 2>/dev/null: restoring an LC_ALL naming a locale that is not installed
+  # makes bash warn when _bingsu_bytes returns.
+  _bingsu_bytes "$_bingsu_pwd" 2>/dev/null
   (( _bingsu_n <= 65536 )) || _bingsu_pwd=
-  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r); } 2>/dev/null
-  (( $? < 128 )) || _bingsu_dead_cn=$_bingsu_cn
+  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null
+  (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn
   _bingsu_rec=${_bingsu_rec%.}
 }
 

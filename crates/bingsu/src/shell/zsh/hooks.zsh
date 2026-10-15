@@ -19,7 +19,9 @@ typeset -g _bingsu_rec=
 # that a signal ended (status 128 or more: a crash, or on Linux the seccomp
 # filter) is not repeated until the next command runs (_bingsu_preexec
 # clears _bingsu_dead): the prompt is the fallback until then. Same rule in
-# every hook; fish 3.6 would otherwise redraw and call again forever.
+# every hook; fish 3.6 would otherwise redraw and call again forever. The
+# assignment runs before ||, a context that also covers the substitution's
+# subshell: a failed call keeps its status but fires no ZERR trap of the user.
 _bingsu_call() {
   emulate -L zsh
   if [[ -n $_bingsu_dead ]]; then
@@ -32,11 +34,11 @@ _bingsu_call() {
   # and can hit ARG_MAX. no_multibyte (local, emulate -L) makes ${#} count
   # bytes. An exported PWD over MAX_ARG_STRLEN (32 pages, about 128 KiB with
   # 4 KiB pages) cannot reach any exec on Linux, whatever this hook passes.
-  local _bingsu_pwd=$PWD
+  local _bingsu_pwd=$PWD _bingsu_st=0
   setopt no_multibyte
   (( ${#_bingsu_pwd} <= 65536 )) || _bingsu_pwd=
-  _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell zsh --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; print -n .; exit $_bingsu_r)
-  (( $? < 128 )) || _bingsu_dead=1
+  _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell zsh --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; print -n .; exit $_bingsu_r) || _bingsu_st=$?
+  (( _bingsu_st < 128 )) || _bingsu_dead=1
   _bingsu_rec=${_bingsu_rec%.}
 }
 

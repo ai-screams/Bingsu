@@ -141,3 +141,22 @@ def test_fish_long_cwd_is_passed_empty(tmp_path, shells):
     (argv,) = inst.calls()
     assert value_after(argv, b"--pwd") == b"", argv[:8]
     shutil.rmtree(tmp_path / "deep")
+
+
+
+# An LC_ALL that names a locale that is not installed (an image with only
+# ENV LC_ALL set, a value sent over ssh): bash itself warns once at start;
+# restoring the local LC_ALL of _bingsu_bytes would warn again at every call.
+# 이것을 실패시키는 것: bash에서 `_bingsu_bytes` 호출의 `2>/dev/null`을 빼는 것(프롬프트마다 setlocale 경고).
+def test_bash_unknown_lc_all_stays_quiet(tmp_path, shells):
+    if "bash" not in shells:
+        pytest.skip("bash not in BINGSU_TEST_SHELLS")
+    inst = Install(tmp_path)
+    env = dict(trusted_env(tmp_path), LC_ALL="xx_XX.UTF-8")
+    (tmp_path / "init.sh").write_bytes(inst.init("bash", env))
+    inst.use_fake(minimal_record())
+    r = run_shell_script("bash", source("bash", tmp_path / "init.sh") + b"cd /\n" + b"_bingsu_call --width 80\n" * 3,
+                         env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr.count(b"setlocale") <= 1 and b"line " not in r.stderr, r.stderr
+    assert len(inst.calls()) == 3 and all(value_after(a, b"--pwd") == b"/" for a in inst.calls())
