@@ -4,22 +4,23 @@ lints in each of its modules: forbid cannot be switched off by #[expect] or
 #[allow], while the crate-wide clippy.toml rules are only denied (init's
 trusted_env needs its #[expect]). Fails if a listed file's first inner
 attribute is not that forbid, if a listed file is missing, or if prompt.rs
-or envelope.rs names a file API (see NO_FILE_API)."""
+names a file API (see NO_FILE_API)."""
 import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# The modules `bingsu prompt` runs: the command, its argument parser and the
-# syscall wrappers it writes and exits through. The `fn main` that picks the
+# The modules `bingsu prompt` runs: the command and the syscall wrappers it
+# writes and exits through (the envelope parser is in bingsu-core, which the
+# core purity gate checks). The `fn main` that picks the
 # prompt branch carries the same forbid as an item attribute (MAIN): a crate
 # root #![forbid] would also forbid init's #[expect] in trusted_env.
-PROMPT_PATH = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs", "crates/bingsu/src/sys.rs"]
+PROMPT_PATH = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/sys.rs"]
 MAIN = "crates/bingsu/src/main.rs"
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
 WANT_MAIN = WANT.replace("#!", "#", 1)
 
 # A second, coarser guard: the forbid above covers only the clippy.toml list,
-# which names no file API. prompt.rs and envelope.rs must not name one either,
+# which names no file API. prompt.rs must not name one either,
 # nor start a process (Command). Plain token search over lines that are not //
 # comments, so it misses:
 #   - std::path::Path methods that touch the file system (exists, metadata,
@@ -32,7 +33,7 @@ WANT_MAIN = WANT.replace("#!", "#", 1)
 # string, in a comment after code, or inside a /* */ block trips it: a false
 # alarm, never a miss. At run time the strace allowlist test
 # (tests/shell/test_prompt_env_paths.py) checks every path the binary names.
-NO_FILE_API = ["crates/bingsu/src/prompt.rs", "crates/bingsu/src/envelope.rs"]
+NO_FILE_API = ["crates/bingsu/src/prompt.rs"]
 FILE_TOKENS = ("std::fs", "fs::", "File", "OpenOptions", "read_dir", "Command")
 
 bad = []

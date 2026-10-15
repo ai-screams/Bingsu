@@ -84,6 +84,7 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
         state_root: roots.state.as_ref().map(|p| p.as_os_str().as_bytes()),
         log_root: roots.log.as_ref().map(|p| p.as_os_str().as_bytes()),
         session_hex: &session,
+        home: pw.home.as_os_str().as_bytes(),
     };
     let mut out = Vec::with_capacity(16 * 1024);
     render::render(&inputs, &mut out);

@@ -35,10 +35,10 @@ class Install:
         assert r.returncode == 0 and r.stderr == b"", r.stderr
         return r.stdout
 
-    def use_fake(self, record: bytes):
+    def use_fake(self, record: bytes, script=FAKE):
         (self.dir / "record.bin").write_bytes(record)
         self.exe.unlink()
-        os.symlink(FAKE, self.exe)
+        os.symlink(script, self.exe)
 
     def calls(self):
         log = self.dir / "argv.log"

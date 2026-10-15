@@ -15,11 +15,30 @@ esac
 typeset -gi _bingsu_seq
 typeset -g _bingsu_rec=
 
-# Runs the pinned binary once; the raw record goes to _bingsu_rec.
+# Runs the pinned binary once; the raw record goes to _bingsu_rec. A call
+# that a signal ended (status 128 or more: a crash, or on Linux the seccomp
+# filter) is not repeated until the next command runs (_bingsu_preexec
+# clears _bingsu_dead): the prompt is the fallback until then. Same rule in
+# every hook; fish 3.6 would otherwise redraw and call again forever. The
+# assignment runs before ||, a context that also covers the substitution's
+# subshell: a failed call keeps its status but fires no ZERR trap of the user.
 _bingsu_call() {
   emulate -L zsh
+  if [[ -n $_bingsu_dead ]]; then
+    _bingsu_rec=
+    return 0
+  fi
   (( ++_bingsu_seq ))
-  _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@; print -n .)
+  # A $PWD over 64 KiB (bytes) is drawn as unknown anyway (envelope rule);
+  # passing it would put it in argv a second time next to the environment
+  # and can hit ARG_MAX. no_multibyte (local, emulate -L) makes ${#} count
+  # bytes. An exported PWD over MAX_ARG_STRLEN (32 pages, about 128 KiB with
+  # 4 KiB pages) cannot reach any exec on Linux, whatever this hook passes.
+  local _bingsu_pwd=$PWD _bingsu_st=0
+  setopt no_multibyte
+  (( ${#_bingsu_pwd} <= 65536 )) || _bingsu_pwd=
+  _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell zsh --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; print -n .; exit $_bingsu_r) || _bingsu_st=$?
+  (( _bingsu_st < 128 )) || _bingsu_dead=1
   _bingsu_rec=${_bingsu_rec%.}
 }
 
@@ -30,12 +49,12 @@ zmodload zsh/datetime 2>/dev/null || :
 # the first duration negative or huge. _bingsu_warned_last is reset on
 # first registration only (below): a re-init keeps the late-hook warning
 # quiet once it has been shown (spec section 5, same order stays silent).
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1=
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead=
 typeset -g _bingsu_warned_last
 typeset -ga _bingsu_p
 # typeset keeps an inherited export flag; without +x the rendered prompt
 # and the timings would reach the environment of every child process.
-typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last
+typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead
 
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost (emulate itself sets $? to
@@ -50,7 +69,7 @@ _bingsu_save() {
 
 _bingsu_preexec() {
   emulate -L zsh
-  _bingsu_t0=${EPOCHREALTIME-}
+  _bingsu_t0=${EPOCHREALTIME-} _bingsu_dead=
 }
 
 # Install hook, last in precmd_functions. Prompt options are read here,

@@ -3,6 +3,7 @@
 new runtime root (F-23 golden)."""
 import importlib.util
 import os
+import pwd
 import re
 import shlex
 
@@ -30,6 +31,8 @@ def call(shell):
             "fish": b"_bingsu_call --width 80\n"}[shell]
 
 
+# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
+# 따옴표를 빼는 것(빈 단어가 사라짐).
 @pytest.mark.parametrize("idx,case", list(enumerate(CASES)))
 def test_words_arrive_intact(tmp_path, shells, idx, case):
     for shell in shells:
@@ -51,8 +54,15 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         assert (b"--config-root=" + os.path.realpath(env["XDG_CONFIG_HOME"] + "/bingsu").encode()) in argv
         assert (b"--state-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu").encode()) in argv
         assert (b"--log-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu/log").encode()) in argv
-        # prompt --ctx 1 --record B1 --width 80 --session S --seq N + four roots
-        assert len(argv) == 15, (shell, argv)
+        # The display words of M3a: the hook's shell, $PWD, $COLORTERM, and
+        # the home folder init found with getpwuid.
+        i = argv.index(b"--shell")
+        assert argv[i:i + 6] == [b"--shell", shell.encode(), b"--pwd", os.getcwd().encode(),
+                                 b"--colorterm", b""], (shell, argv)
+        assert (b"--home=" + pwd.getpwuid(os.getuid()).pw_dir.encode()) in argv, (shell, argv)
+        # prompt --ctx 1 --record B1 --width 80, shell, pwd, colorterm,
+        # --session S --seq N, four roots and home
+        assert len(argv) == 22, (shell, argv)
 
 
 def test_init_twice_redefines_runtime_root(tmp_path, shells):

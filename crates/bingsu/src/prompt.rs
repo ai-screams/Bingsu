@@ -9,8 +9,8 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
-use crate::envelope::{self, EnvelopeError};
 use crate::sys;
+use bingsu_core::envelope::{self, EnvelopeError};
 use bingsu_core::record::write_minimal_b1;
 use bingsu_core::status::Status;
 use std::ffi::OsString;
