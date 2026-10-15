@@ -1,9 +1,10 @@
-//! The only module in this crate allowed to use `unsafe` (the allow is on
-//! `mod sys;` in main.rs). Every block carries a SAFETY comment (workspace lint).
-// Prompt path: the clippy.toml rules (environment reads among them, spec 4
-// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
-// be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
-// checks this line.
+//! System calls of the commands other than `prompt` (the allow for
+//! `unsafe` is on `mod sys;` in commands/mod.rs; the prompt makes its own
+//! in crate::prompt and crate::sandbox and cannot name this module). Every
+//! block carries a SAFETY comment (workspace lint).
+// The clippy.toml rules (environment reads among them, spec 4 rule 7, F-01)
+// are forbidden here. Unlike the crate-wide deny, forbid cannot
+// be switched off with #[expect] or #[allow].
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -45,16 +46,9 @@ pub fn write_fd(fd: i32, mut buf: &[u8]) -> WriteOutcome {
     WriteOutcome::Done
 }
 
-/// `_exit` without atexit handlers (spec section 4, `std::process::exit`
-/// is rejected).
-pub fn exit_now(code: i32) -> ! {
-    // SAFETY: _exit never returns and takes no pointers.
-    unsafe { libc::_exit(code) }
-}
-
 #[cfg(target_os = "macos")]
-use crate::init::exe_path::{AclEntry, fold_acl};
-use crate::init::exe_path::{AclFacts, Group};
+use crate::commands::init::exe_path::{AclEntry, fold_acl};
+use crate::commands::init::exe_path::{AclFacts, Group};
 use std::ffi::{CStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Conditional-compilation check for bingsu-core (spec section 1, F-05).
+"""Conditional-compilation check for bingsu-core (spec section 1, F-05),
+and for the prompt adapter crates/bingsu/src/prompt.rs (the token rules
+below, so its code is the code that is linted and reviewed). The `bingsu`
+binary crate may have no build script either: it could link code that runs
+before main.
 
 Code behind cfg can drop out of the lint run (`#[cfg(not(clippy))]`, a target
 the CI does not lint, a feature that --all-features turns off), and `#[path]`
@@ -42,7 +46,9 @@ anything). It fails on:
     for `mod up;`, and only lower-case `.rs` files are collected;
   - anything the checker binary rejects (its exit code is passed through).
     Files under src/ go to it as library files; tests/ and benches/ follow
-    `--test-targets`, where include_str may read shared tables.
+    `--test-targets`, where include_str may read shared tables; the prompt
+    adapter follows `--tcb` (every rule but the library-only, address and
+    crate-root ones: it hands buffers to write(2)).
 Names are compared case-insensitively (`.Cargo`, `Clippy.toml`, `Build.rs`),
 since cargo and clippy find them on a case-insensitive file system.
 
@@ -63,6 +69,8 @@ import tempfile
 import tomllib
 
 CORE = "crates/bingsu-core"
+ADAPTER = "crates/bingsu/src/prompt.rs"
+BINARY = "crates/bingsu"
 SKIP = {"purity-canary", "target"}
 ALLOWED = {"src", "tests", "benches"}
 TARGET_TABLES = ("lib", "bin", "test", "bench", "example")
@@ -160,6 +168,9 @@ def check_policy(errors):
     for key in AUTO_KEYS:
         if key in manifest.get("package", {}):
             errors.append(f"{CORE}/Cargo.toml: package.{key} is not allowed")
+    binary = tomllib.loads(open(os.path.join(BINARY, "Cargo.toml")).read())
+    if [n for n in os.listdir(BINARY) if n.lower() == "build.rs"] or "build" in binary.get("package", {}):
+        errors.append(f"{BINARY}: build script is not allowed (it could link code that runs before main)")
     check_repo_tree(errors)
 
 
@@ -194,7 +205,7 @@ def check_split_canary(checker, errors):
 def check_tokens(checker, errors):
     # The policy phase already reported collection errors; here only the
     # file list matters. With no files the checker fails on its own.
-    result = subprocess.run([checker, *checker_args(collect([]))])
+    result = subprocess.run([checker, *checker_args(collect([])), "--tcb", ADAPTER])
     if result.returncode != 0:
         errors.append("core-cfg-check rejected the files above")
     check_split_canary(checker, errors)

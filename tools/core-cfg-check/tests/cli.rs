@@ -819,3 +819,245 @@ fn debug_and_hash_stay_out_of_production() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success() && stderr.is_empty(), "{stderr}");
 }
+
+const MAIN: &str = "fn main() -> std::process::ExitCode {\n    commands::run(prompt::dispatch(sandbox::enter))\n}\n";
+
+/// Writes `files` (name, source) into a fresh folder and runs --binary on
+/// all of them.
+fn run_binary_files(files: &[(&str, &str)]) -> (bool, String) {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("core-cfg-check-{}-bin{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"));
+    c.arg("--binary");
+    for (name, source) in files {
+        let path = dir.join(name);
+        std::fs::write(&path, source).unwrap();
+        c.arg(path);
+    }
+    let output = c.output().unwrap();
+    (
+        output.status.success(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+fn run_binary(extra: &str) -> (bool, String) {
+    run_binary_files(&[("main.rs", &format!("{extra}{MAIN}"))])
+}
+
+// 이것을 실패시키는 것: --binary가 전역 allocator·링커 constructor·global_asm 식별자를 놓치는 것, cfg를 쓰는 바이너리 코드를 거부하는 것.
+#[test]
+fn binary_mode() {
+    let (ok, err) = run_binary("#[cfg(unix)]\nmod m {}\n");
+    assert!(ok, "{err}");
+    for bad in [
+        "#[global_allocator]\nstatic A: std::alloc::System = std::alloc::System;\n",
+        "#[unsafe(link_section = \".init_array\")]\nstatic F: fn() = f;\nfn f() {}\n",
+        "#[ctor::ctor]\nfn f() {}\n",
+        "#[unsafe(no_mangle)]\npub extern \"C\" fn f() {}\n",
+        "std::arch::global_asm!(\"\");\n",
+    ] {
+        let (ok, err) = run_binary(bad);
+        assert!(
+            !ok && err.contains("runs code outside main"),
+            "{bad}: {err}"
+        );
+    }
+}
+
+// 이것을 실패시키는 것: main이 dispatch 앞에서 다른 일을 하는 것, main이 둘(decoy)인 것, main.rs 밖이나 모듈 안의 main을 받는 것.
+#[test]
+fn main_only_dispatches() {
+    for files in [
+        vec![(
+            "main.rs",
+            "fn main() -> std::process::ExitCode {\n    let _ = std::fs::read(\"x\");\n    commands::run(prompt::dispatch(sandbox::enter))\n}\n",
+        )],
+        vec![(
+            "main.rs",
+            "fn main() -> std::process::ExitCode {\n    commands::run(prompt::dispatch(other::enter))\n}\n",
+        )],
+        vec![
+            ("main.rs", MAIN),
+            ("other.rs", "mod m {\n    fn main() {}\n}\n"),
+        ],
+        vec![(
+            "main.rs",
+            "const DECOY: &str = \"commands::run(prompt::dispatch(sandbox::enter))\";\nfn main() {\n    commands::run(x())\n}\n",
+        )],
+        vec![("main.rs", &format!("#[inline(never)]\n{MAIN}"))],
+        vec![("lib.rs", MAIN)],
+        vec![(
+            "main.rs",
+            "mod m {\n    fn main() -> std::process::ExitCode {\n        commands::run(prompt::dispatch(sandbox::enter))\n    }\n}\n",
+        )],
+    ] {
+        let (ok, err) = run_binary_files(&files);
+        assert!(!ok && err.contains("fn main"), "{files:?}: {err}");
+    }
+}
+
+const TSV: &str =
+    "# c\nsyscall\tlibc\twhy\nwrite\twrite\tx\nexit_group\t_exit\tx\n-\tEINTR\tx\nbrk\t-\tx\n";
+const ADAPTER_OK: &str = "use bingsu_core::front;\nuse std::ffi::OsString;\n\nfn w(b: &[u8]) {\n    let n = unsafe { libc::write(1, b.as_ptr().cast(), b.len()) };\n    if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}\n}\n\nfn e() -> ! {\n    unsafe { libc::_exit(0) }\n}\n\npub fn run(a: &[OsString]) -> ! {\n    let _ = front::respond(&[]);\n    let _ = a;\n    w(b\"\");\n    e()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn t() {\n        let _ = std::fs::read(\"x\");\n        assert!(true);\n    }\n}\n";
+
+fn run_adapter(source: &str) -> (bool, String) {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("core-cfg-check-{}-ad{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("t.tsv"), TSV).unwrap();
+    std::fs::write(dir.join("p.rs"), source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg("--adapter")
+        .arg(dir.join("t.tsv"))
+        .arg(dir.join("p.rs"))
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+// 이것을 실패시키는 것: 어댑터 검사가 경로를 철자로만 보는 것(별칭·group·super·중간 cfg(test)·extern 주석·asm 별칭·global_asm),
+// 목록과 사용이 같지 않은데 통과하는 것.
+#[test]
+fn adapter_mode() {
+    let (ok, err) = run_adapter(ADAPTER_OK);
+    assert!(ok, "{err}");
+    let add = |item: &str| ADAPTER_OK.replace("pub fn run", &format!("{item}\n\npub fn run"));
+    for (bad, why) in [
+        (
+            add("fn g() {\n    use libc::{getenv as g};\n    unsafe { g(c\"H\".as_ptr()) };\n}"),
+            "group use",
+        ),
+        (add("use libc::getenv as g;"), "renaming use"),
+        (
+            add("fn g() {\n    unsafe { libc::getenv(c\"H\".as_ptr()) };\n}"),
+            "not a row",
+        ),
+        (
+            add("fn g() {\n    let _ = super::sys::current_uid();\n}"),
+            "another module",
+        ),
+        (
+            add("fn g() {\n    let _ = crate::commands::run;\n}"),
+            "another module",
+        ),
+        (
+            add("#[cfg(test)]\nfn t() {}\n\nfn g() {\n    let _ = std::fs::read(\"x\");\n}"),
+            "cfg outside",
+        ),
+        (
+            add("fn g() {\n    let _ = std::fs::read(\"x\");\n}"),
+            "not in STD_ALLOWED",
+        ),
+        (
+            add("unsafe extern/**/\"C\" {\n    fn getenv(n: *const i8) -> *const i8;\n}"),
+            "other than use",
+        ),
+        (
+            add("fn g() {\n    use std::arch::asm as a;\n    unsafe { a!(\"nop\") };\n}"),
+            "renaming use",
+        ),
+        (
+            add("fn g() {\n    unsafe { std::arch::asm!(\"nop\") };\n}"),
+            "a macro call",
+        ),
+        (add("std::arch::global_asm!(\"\");"), "other than use"),
+        (add("static N: u8 = 0;"), "other than use"),
+        (add("mod m;"), "other than use"),
+        (add("use std as s;"), "renaming use"),
+        (add("use std::*;"), "glob use"),
+        (add("extern \"C\" fn g() {}"), "extern fn"),
+        (
+            add("fn g() {\n    let _ = bingsu_core::record::write_minimal_b1;\n}"),
+            "only bingsu_core::front",
+        ),
+        (
+            ADAPTER_OK.replace("unsafe { libc::_exit(0) }", "loop {}"),
+            "listed but unused",
+        ),
+    ] {
+        let (ok, err) = run_adapter(&bad);
+        assert!(!ok && err.contains(why), "{why}: {bad}\n{err}");
+    }
+}
+
+// 이것을 실패시키는 것: 바이너리에서 예약 루트 이름(libc·std·core·alloc·front)을 로컬로 선언하는 것,
+// 어댑터 타입에 impl을 더하는 것, #[path]·include!로 검사 밖 코드를 들이는 것을 놓치는 것.
+#[test]
+fn binary_keeps_reserved_roots_and_files() {
+    for (bad, why) in [
+        (
+            "#[allow(non_camel_case_types)]\npub struct libc;\n",
+            "shadows a reserved root",
+        ),
+        ("mod std {}\n", "shadows a reserved root"),
+        ("fn f<front>() {}\n", "shadows a reserved root"),
+        ("use other::thing as libc;\n", "shadows a reserved root"),
+        ("use crate::fake::libc;\n", "shadows a reserved root"),
+        (
+            "impl prompt::NonPromptArgs {\n    fn f() {}\n}\n",
+            "impl for a type of the prompt adapter",
+        ),
+        ("#[path = \"../outside.rs\"]\nmod pre;\n", "#[path]"),
+        ("include!(\"../outside.rs\");\n", "include"),
+    ] {
+        let (ok, err) = run_binary(bad);
+        assert!(!ok && err.contains(why), "{bad}: {err}");
+    }
+    let (ok, err) = run_binary("use bingsu_core::front;\nconst S: &str = include_str!(\"x\");\n");
+    assert!(ok, "{err}");
+}
+
+// 이것을 실패시키는 것: 어댑터가 NonPromptArgs 밖의 struct(예: libc 위장)를 두거나 닫힌 목록 밖의 경로 뿌리를 쓰는 것을 놓치는 것.
+#[test]
+fn adapter_closed_roots() {
+    let add = |item: &str| ADAPTER_OK.replace("pub fn run", &format!("{item}\n\npub fn run"));
+    for (bad, why) in [
+        (
+            add("#[allow(non_camel_case_types)]\npub struct libc;"),
+            "only NonPromptArgs",
+        ),
+        (
+            add("fn g() {\n    let _ = other::thing();\n}"),
+            "not in PATH_ROOTS",
+        ),
+    ] {
+        let (ok, err) = run_adapter(&bad);
+        assert!(!ok && err.contains(why), "{why}: {bad}\n{err}");
+    }
+}
+
+// 이것을 실패시키는 것: --tcb 뒤 파일에 주소·라이브러리 규칙(as_ptr, 함수 포인터, std::env)을 거는 것, 그 파일에서
+// 모든 파일 공통 규칙(static, cfg)을 빼는 것, 같은 파일을 라이브러리로 넘겨도 통과시키는 것.
+#[test]
+fn tcb_files_skip_only_the_address_and_library_rules() {
+    let ok = "fn w(b: &[u8], f: fn() -> u8) -> usize {\n    let _ = std::env::args_os();\n    let _ = f;\n    b.as_ptr() as usize\n}\n";
+    let run_tcb = |source: &str| {
+        let core = fixture("pub fn f() {}\n");
+        let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+            .arg(core)
+            .arg("--tcb")
+            .arg(fixture(source))
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (pass, err) = run_tcb(ok);
+    assert!(pass, "{err}");
+    let (pass, err) = run(ok);
+    assert!(!pass && err.contains("as_ptr exposes an address"), "{err}");
+    for (bad, why) in [
+        ("static N: u8 = 0;\n", "static"),
+        ("#[cfg(unix)]\nfn f() {}\n", "cfg"),
+    ] {
+        let (pass, err) = run_tcb(bad);
+        assert!(!pass && err.contains(why), "{bad}: {err}");
+    }
+}

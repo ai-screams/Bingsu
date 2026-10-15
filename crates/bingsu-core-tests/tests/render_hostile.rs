@@ -53,7 +53,7 @@ fn rows() -> Vec<(String, Vec<u8>, String)> {
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|l| {
             let c: Vec<&str> = l.split('\t').collect();
-            assert_eq!(c.len(), 7, "{l}");
+            assert_eq!(c.len(), 8, "{l}");
             (c[0].to_owned(), payload(c[1]), c[6].to_owned())
         })
         .collect()

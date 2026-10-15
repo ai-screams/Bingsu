@@ -51,7 +51,7 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
 /// opened. Any failure means no runtime root, and the folders this call
 /// created are removed again.
 pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
-    pin_for(candidate, crate::sys::current_uid())
+    pin_for(candidate, crate::commands::sys::current_uid())
 }
 
 /// Opens a canonical folder by walking it from "/" one name at a time with
@@ -63,12 +63,13 @@ pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
 /// result only serves as the base for `openat` and `mkdirat` below.
 fn open_canonical_dir(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsFd;
-    let mut dir = crate::sys::open_dir_at_search_nofollow(None, std::ffi::OsStr::new("/"))?;
+    let mut dir =
+        crate::commands::sys::open_dir_at_search_nofollow(None, std::ffi::OsStr::new("/"))?;
     for c in path.components() {
         match c {
             Component::RootDir => {}
             Component::Normal(name) => {
-                dir = crate::sys::open_dir_at_search_nofollow(Some(dir.as_fd()), name)?
+                dir = crate::commands::sys::open_dir_at_search_nofollow(Some(dir.as_fd()), name)?
             }
             _ => return Err(std::io::Error::other("runtime root: not a canonical path")),
         }
@@ -107,10 +108,10 @@ fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
     let result = (|| {
         let mut owned_child = |chain: &Vec<std::fs::File>, name: &std::ffi::OsStr| {
             let holder = chain.len() - 1;
-            if crate::sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
+            if crate::commands::sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
                 created.push((holder, name.to_os_string()));
             }
-            let child = crate::sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
+            let child = crate::commands::sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
             if child.metadata()?.uid() != uid {
                 return Err(bad("owned by another user"));
             }
@@ -122,7 +123,7 @@ fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
             chain.push(child);
         }
         let root = owned_child(&chain, last)?;
-        if crate::sys::fd_is_local(root.as_raw_fd()) != Some(true) {
+        if crate::commands::sys::fd_is_local(root.as_raw_fd()) != Some(true) {
             return Err(bad("not on a local file system"));
         }
         root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
@@ -135,7 +136,7 @@ fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
             // existed are not touched; a folder another process filled in
             // the meantime is not empty and stays.
             for (holder, name) in created.iter().rev() {
-                let _ = crate::sys::remove_dir_at(chain[*holder].as_fd(), name);
+                let _ = crate::commands::sys::remove_dir_at(chain[*holder].as_fd(), name);
             }
             return Err(e);
         }
@@ -283,7 +284,7 @@ mod tests {
     fn pin_checks_owner_and_forces_0700() {
         use std::os::unix::fs::PermissionsExt;
         let base = scratch("pin");
-        let me = crate::sys::current_uid();
+        let me = crate::commands::sys::current_uid();
         let loose = base.join("loose");
         std::fs::create_dir_all(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -333,7 +334,7 @@ mod tests {
     #[test]
     fn failed_pin_removes_the_folders_it_created() {
         let base = scratch("rollback");
-        let me = crate::sys::current_uid();
+        let me = crate::commands::sys::current_uid();
         assert!(pin_for(&base.join("x/y/bingsu"), me.wrapping_add(1)).is_err());
         assert!(!base.join("x").exists());
         assert!(base.exists());
@@ -350,7 +351,7 @@ mod tests {
     #[test]
     fn failed_pin_removes_created_folders_deepest_first() {
         let base = scratch("rollback-order");
-        let me = crate::sys::current_uid();
+        let me = crate::commands::sys::current_uid();
         let too_long = "x".repeat(256);
         let err = pin_for(&base.join("n1/n2").join(&too_long), me)
             .err()
@@ -370,7 +371,7 @@ mod tests {
     fn pin_walks_through_search_only_ancestor() {
         use std::os::unix::fs::PermissionsExt;
         let base = scratch("search-only");
-        let me = crate::sys::current_uid();
+        let me = crate::commands::sys::current_uid();
         let lk = base.join("lk");
         std::fs::create_dir_all(lk.join("run")).unwrap();
         std::fs::set_permissions(lk.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();

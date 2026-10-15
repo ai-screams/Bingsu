@@ -5,13 +5,13 @@ mod render;
 mod roots;
 mod trusted_env;
 
-use crate::sys;
+use crate::commands::sys;
 use bingsu_core::shell_word::Shell;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
-use crate::messages::{MsgId, en};
+use crate::commands::messages::{MsgId, en};
 
 fn hex16(b: [u8; 16]) -> [u8; 32] {
     const H: &[u8; 16] = b"0123456789abcdef";

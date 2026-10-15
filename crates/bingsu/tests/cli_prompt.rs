@@ -1,7 +1,8 @@
 //! Golden vectors for the shell input envelope and version negotiation
 //! (spec section 5 "shell input envelope", section 3 "record version
-//! negotiation"). M1 has no renderer, so every accepted envelope yields the
-//! minimal record with a status.
+//! negotiation"). An envelope without `--shell` (every vector below but
+//! `rendered_*`) yields the minimal record with a status; with `--shell` the
+//! built-in default theme is rendered.
 #![cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
@@ -264,7 +265,7 @@ fn prompt_does_not_change_stdout_flags() {
     unsafe { libc::close(fds[0]) };
 }
 
-// 이것을 실패시키는 것: Failed일 때 exit_now(1)로 끝나거나 EPIPE에서 stderr에 쓰는 것.
+// 이것을 실패시키는 것: 쓰기가 실패했을 때 0이 아닌 코드로 끝나거나 EPIPE에서 stderr에 쓰는 것.
 // read end를 자식 spawn 전에 닫아 첫 write가 반드시 EPIPE가 된다(경쟁 없음).
 #[test]
 fn closed_stdout_is_silent_and_exits_zero() {
@@ -285,4 +286,84 @@ fn closed_stdout_is_silent_and_exits_zero() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stderr.is_empty());
+}
+
+// 이것을 실패시키는 것: `--shell`이 있는 봉투에 최소 레코드를 내는 것, 레코드 틀(머리·필드 수·끝)이나 상태를 바꾸는 것,
+// 프롬프트 중 stderr에 쓰는 것.
+#[test]
+fn rendered_record_for_each_shell() {
+    for shell in ["zsh", "bash", "fish"] {
+        let args = with(&[
+            "--shell",
+            shell,
+            "--pwd",
+            "/srv/vis-prompt",
+            "--status",
+            "1",
+        ]);
+        let refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+        let out = run(&refs);
+        assert_eq!(out.status.code(), Some(0), "{shell}");
+        assert!(out.stderr.is_empty(), "{shell}");
+        let rec = out.stdout;
+        assert!(
+            rec.starts_with(b"B1\x1f8\x1f") && rec.ends_with(b"\x1fok:none\x1e"),
+            "{shell}"
+        );
+        assert_eq!(rec.iter().filter(|&&b| b == 0x1f).count(), 9, "{shell}");
+        let text = String::from_utf8_lossy(&rec);
+        assert!(
+            text.contains("vis-prompt") && text.contains('\u{2717}'),
+            "{shell}: {text:?}"
+        );
+    }
+}
+
+// The prompt path reads no environment variable (spec section 4 "runtime
+// root" 7): the same arguments give the same bytes with an empty
+// environment and with a hostile one. strace cannot see environment reads
+// (they are memory reads) or vDSO clock reads; this behavior test can.
+// 이것을 실패시키는 것: 앞단(어댑터나 core)이 환경 변수나 시계로 출력을 바꾸는 것.
+#[test]
+fn output_does_not_depend_on_the_environment() {
+    let hostile: [(&str, &str); 12] = [
+        ("HOME", "/repo/evil"),
+        ("PWD", "/repo/evil/$(touch x)"),
+        ("BINGSU_LOG", "trace"),
+        ("BINGSU_CONFIG", "/repo/evil/c.toml"),
+        ("COLORTERM", "truecolor"),
+        ("LC_ALL", "ko_KR.UTF-8"),
+        ("LANG", "tr_TR.UTF-8"),
+        ("TZ", "Asia/Seoul"),
+        ("XDG_RUNTIME_DIR", "/repo/evil/run"),
+        ("XDG_CONFIG_HOME", "/repo/evil/cfg"),
+        ("COLUMNS", "3"),
+        ("NO_COLOR", "1"),
+    ];
+    let cases: [&[&str]; 3] = [
+        &[],
+        &["--shell", "zsh", "--pwd", "/srv/p", "--status", "1"],
+        &["--shell", "bash", "--width", "9"],
+    ];
+    for extra in cases {
+        let args = with(extra);
+        let run = |envs: &[(&str, &str)]| {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_bingsu"));
+            c.arg("prompt").env_clear().envs(envs.iter().copied());
+            for a in &args {
+                c.arg(std::ffi::OsStr::from_bytes(a));
+            }
+            c.stdin(Stdio::null()).output().unwrap()
+        };
+        let clean = run(&[]);
+        let dirty = run(&hostile);
+        assert_eq!(clean.status.code(), Some(0));
+        assert!(!clean.stdout.is_empty(), "{extra:?}");
+        assert_eq!(clean.stdout, dirty.stdout, "{extra:?}");
+        assert_eq!(
+            (clean.stderr.len(), dirty.stderr.len()),
+            (0, 0),
+            "{extra:?}"
+        );
+    }
 }

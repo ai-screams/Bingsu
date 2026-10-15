@@ -144,7 +144,7 @@ fn facts(p: &Path) -> Option<EntryFacts> {
         gid: m.gid(),
         mode: m.mode(),
         is_symlink: m.file_type().is_symlink(),
-        acl: crate::sys::acl_facts(p),
+        acl: crate::commands::sys::acl_facts(p),
     })
 }
 
@@ -232,14 +232,14 @@ pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
     let users = std::cell::OnceCell::new();
     let group = |gid: u32| {
         *cache.borrow_mut().entry(gid).or_insert_with(|| {
-            let users = users.get_or_init(crate::sys::local_users);
-            crate::sys::group_membership(gid, user, users.as_deref())
+            let users = users.get_or_init(crate::commands::sys::local_users);
+            crate::commands::sys::group_membership(gid, user, users.as_deref())
         })
     };
     paths
         .iter()
         .map(|p| facts(p).map_or(Verdict::Unknown, |f| classify(&f, uid, &group)))
-        .chain([local_verdict(crate::sys::fs_is_local(&target))])
+        .chain([local_verdict(crate::commands::sys::fs_is_local(&target))])
         .max()
         .unwrap_or(Verdict::Unknown)
 }
@@ -293,8 +293,8 @@ mod tests {
             );
             return;
         }
-        let me = crate::sys::current_uid();
-        let name = crate::sys::passwd_entry(me).unwrap().name;
+        let me = crate::commands::sys::current_uid();
+        let name = crate::commands::sys::passwd_entry(me).unwrap().name;
         assert_eq!(
             check_path(Path::new("/home"), me, &name),
             Verdict::Tamperable
@@ -304,9 +304,9 @@ mod tests {
     // 이것을 실패시키는 것: 없는 그룹을 "구성원 없음"으로 보는 것.
     #[test]
     fn missing_group_is_unknown() {
-        let users = crate::sys::local_users();
+        let users = crate::commands::sys::local_users();
         assert_eq!(
-            crate::sys::group_membership(u32::MAX - 7, b"nobody-here", users.as_deref()),
+            crate::commands::sys::group_membership(u32::MAX - 7, b"nobody-here", users.as_deref()),
             Group::Unknown
         );
     }
