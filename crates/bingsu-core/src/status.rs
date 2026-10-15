@@ -68,6 +68,9 @@ impl Status {
     pub const DEGRADED_TRUST_UNVERIFIED: Self =
         Self::new(StatusClass::Degraded, "trust-unverified");
     pub const DEGRADED_TRUST_EXPIRED: Self = Self::new(StatusClass::Degraded, "trust-expired");
+    /// Linux: the prompt's seccomp filter could not be installed, so the
+    /// core did not run (spec revision S-5, decision P18).
+    pub const DEGRADED_SANDBOX: Self = Self::new(StatusClass::Degraded, "sandbox");
     pub const ERROR_CONFIG_LAST_GOOD: Self = Self::new(StatusClass::Error, "config-last-good");
     pub const ERROR_CONFIG_DEFAULT: Self = Self::new(StatusClass::Error, "config-default");
 
@@ -80,6 +83,7 @@ impl Status {
         Self::DEGRADED_OVERSIZE,
         Self::DEGRADED_TRUST_UNVERIFIED,
         Self::DEGRADED_TRUST_EXPIRED,
+        Self::DEGRADED_SANDBOX,
         Self::ERROR_CONFIG_LAST_GOOD,
         Self::ERROR_CONFIG_DEFAULT,
     ];
