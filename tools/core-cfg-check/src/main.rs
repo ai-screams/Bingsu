@@ -57,6 +57,11 @@
 //!     each brings in a string from outside the source, which could be a
 //!     format string with a pointer placeholder. Test targets read shared
 //!     tables with include_str and never reach the prompt;
+//!   - in library files, outside `#[cfg(test)]` items (found by the parser,
+//!     at any depth), a Debug placeholder (`{:?}`, `{:#?}`, `{:x?}`) and a
+//!     name in DEBUG_AND_HASH: Debug and Hash implementations may write an
+//!     address (a Waker's vtable, a function pointer). `#[derive(Debug)]`
+//!     stays allowed, since nothing in production code can call it;
 //!   - in a library file named `lib.rs` (the crate root), a missing inner
 //!     attribute `#![no_std]` or `#![forbid(unsafe_code)]`, read by the
 //!     parser so a commented-out or quoted copy does not count.
@@ -111,10 +116,12 @@ fn is_ident(token: Option<&TokenTree>, name: &str) -> bool {
 }
 
 /// Names that keep state between calls without an atomic or a static:
-/// leaked allocations stay in the allocator, `Arc` counts are atomics.
-const HIDDEN_STATE: [&str; 5] = [
+/// leaked allocations stay in the allocator (`forget`, `ManuallyDrop`,
+/// `MaybeUninit` never drops what it holds), `Arc` counts are atomics.
+const HIDDEN_STATE: [&str; 6] = [
     "forget",
     "ManuallyDrop",
+    "MaybeUninit",
     "Arc",
     "strong_count",
     "weak_count",
@@ -324,6 +331,18 @@ fn macro_addresses(stream: TokenStream, fns: &[String], out: &mut Vec<Finding>) 
 /// one. A fill character comes before an alignment and may itself be `{` or
 /// `}`; `{{` is a literal brace.
 fn formats_pointer(text: &str) -> bool {
+    formats_type(text, |t| t == "p")
+}
+
+/// True if `text`, read as a format string, has a Debug placeholder
+/// (`{:?}`, `{v:#?}`, `{:x?}`: a type that ends in `?`), with the same
+/// grammar as formats_pointer.
+fn formats_debug(text: &str) -> bool {
+    formats_type(text, |t| t.ends_with('?'))
+}
+
+/// True if a placeholder of `text` has a type for which `wanted` holds.
+fn formats_type(text: &str, wanted: fn(&str) -> bool) -> bool {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -355,7 +374,7 @@ fn formats_pointer(text: &str) -> bool {
         let arg_ok = arg.is_empty()
             || arg.chars().all(|c| c.is_ascii_digit())
             || ident_len(&arg.chars().collect::<Vec<_>>(), 0) == arg.chars().count();
-        if arg_ok && spec_type(&chars[j + 1..k.min(chars.len())]) == "p" {
+        if arg_ok && wanted(&spec_type(&chars[j + 1..k.min(chars.len())])) {
             return true;
         }
         i = k + 1;
@@ -571,6 +590,140 @@ impl<'ast> Visit<'ast> for VersionEnv {
     }
 }
 
+/// Names through which a value's Debug output or hash reaches the program:
+/// a Debug or Hash implementation may write an address (a Waker's vtable,
+/// a function pointer), so production code may not call them.
+/// `#[derive(Debug)]` stays allowed: with no Debug format, no `Debug` name
+/// and no debug builder outside it, nothing can call the derived impl.
+const DEBUG_AND_HASH: [&str; 10] = [
+    "Debug",
+    "debug_struct",
+    "debug_tuple",
+    "debug_list",
+    "debug_map",
+    "debug_set",
+    "Hash",
+    "Hasher",
+    "BuildHasher",
+    "hash",
+];
+
+/// Start and end of every item, impl item and trait item marked
+/// `#[cfg(test)]`, at any depth: the production code is everything else.
+struct TestSpans(Vec<(proc_macro2::LineColumn, proc_macro2::LineColumn)>);
+
+impl TestSpans {
+    fn push(&mut self, attrs: &[syn::Attribute], node: &dyn syn::spanned::Spanned) -> bool {
+        if is_test_item(attrs) {
+            let span = node.span();
+            self.0.push((span.start(), span.end()));
+            return true;
+        }
+        false
+    }
+    fn contains(&self, span: Span) -> bool {
+        let at = span.start();
+        let key = |l: proc_macro2::LineColumn| (l.line, l.column);
+        self.0
+            .iter()
+            .any(|(s, e)| key(*s) <= key(at) && key(at) <= key(*e))
+    }
+}
+
+impl<'ast> Visit<'ast> for TestSpans {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Const(i) => &i.attrs,
+            syn::Item::Enum(i) => &i.attrs,
+            syn::Item::ExternCrate(i) => &i.attrs,
+            syn::Item::Fn(i) => &i.attrs,
+            syn::Item::ForeignMod(i) => &i.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Macro(i) => &i.attrs,
+            syn::Item::Mod(i) => &i.attrs,
+            syn::Item::Struct(i) => &i.attrs,
+            syn::Item::Trait(i) => &i.attrs,
+            syn::Item::TraitAlias(i) => &i.attrs,
+            syn::Item::Type(i) => &i.attrs,
+            syn::Item::Union(i) => &i.attrs,
+            syn::Item::Use(i) => &i.attrs,
+            _ => &[],
+        };
+        if !self.push(attrs, item) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            syn::ImplItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        if !self.push(attrs, item) {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            syn::TraitItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        if !self.push(attrs, item) {
+            syn::visit::visit_trait_item(self, item);
+        }
+    }
+}
+
+/// Production tokens of a library file (outside TestSpans): DEBUG_AND_HASH
+/// names (`Debug` allowed inside `#[derive(..)]`) and Debug placeholders.
+fn scan_debug_and_hash(
+    stream: TokenStream,
+    tests: &TestSpans,
+    in_derive: bool,
+    out: &mut Vec<Finding>,
+) {
+    let tokens: Vec<TokenTree> = stream.into_iter().collect();
+    for (i, token) in tokens.iter().enumerate() {
+        if tests.contains(token.span()) {
+            continue;
+        }
+        match token {
+            TokenTree::Group(group) => {
+                let derive = i >= 1
+                    && is_punct(tokens.get(i - 1), '#')
+                    && is_ident(group.stream().into_iter().next().as_ref(), "derive");
+                scan_debug_and_hash(group.stream(), tests, in_derive || derive, out);
+            }
+            TokenTree::Ident(ident) => {
+                let name = unraw(ident);
+                if DEBUG_AND_HASH.contains(&name.as_str()) && !(in_derive && name == "Debug") {
+                    out.push(Finding {
+                        line: line_of(ident.span()),
+                        reason: format!("{name} may write an address (Debug and Hash stay out of production code)"),
+                    });
+                }
+            }
+            TokenTree::Literal(lit) => {
+                if matches!(syn::Lit::new(lit.clone()), syn::Lit::Str(s) if formats_debug(&s.value()))
+                {
+                    out.push(Finding {
+                        line: line_of(lit.span()),
+                        reason:
+                            "{:?} may write an address (Debug and Hash stay out of production code)"
+                                .to_owned(),
+                    });
+                }
+            }
+            TokenTree::Punct(_) => {}
+        }
+    }
+}
+
 /// The crate root must keep `#![no_std]` and `#![forbid(unsafe_code)]` as
 /// real inner attributes.
 fn check_crate_root(attrs: &[syn::Attribute], out: &mut Vec<Finding>) {
@@ -636,6 +789,9 @@ fn check(source: &str, library: bool, crate_root: bool) -> Vec<Finding> {
         }
     };
     if library {
+        let mut tests = TestSpans(Vec::new());
+        tests.visit_file(&file);
+        scan_debug_and_hash(stream.clone(), &tests, false, &mut out);
         let mut env_count = 0;
         scan_format_sources(stream.clone(), &mut env_count, &mut out);
         let mut version = VersionEnv { allowed: 0 };

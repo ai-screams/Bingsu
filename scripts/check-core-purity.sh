@@ -41,7 +41,13 @@ unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CLIPPY_CONF_DIR \
   CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR \
   RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTC CARGO_BUILD_RUSTC \
   CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER \
-  RUSTC_BOOTSTRAP
+  RUSTC_BOOTSTRAP RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS CARGO_BUILD_RUSTDOCFLAGS
+# Per-target flags (CARGO_TARGET_<TRIPLE>_RUSTFLAGS, …_RUSTDOCFLAGS) reach
+# rustc as well: --sysroot or --extern std=<rlib> there would undo the
+# wasm32v1-none build below, so every such variable goes too.
+while read -r name; do
+  unset "$name"
+done < <(compgen -e | grep -E '^CARGO_TARGET_[A-Z0-9_]+_RUST(DOC)?FLAGS$' || true)
 # Policy first: no cargo call may run before .cargo directories, toolchain
 # files, manifest rustflags and stray clippy configs are ruled out.
 python3 scripts/check_core_cfg.py --phase policy
@@ -52,8 +58,10 @@ if ! [[ "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 # The compiler's own proof that core needs no std: wasm32v1-none ships only
-# core and alloc, so any std path (or a flag that adds the std crate) fails
-# to compile there. wasm32-unknown-unknown is not enough: it has a std whose
+# core and alloc, so any std path (or --extern std) fails to compile there.
+# This holds for the flags the repository and CI control (the unset above,
+# the policy phase); a rustc or sysroot replaced on the machine is out of
+# scope, as above. wasm32-unknown-unknown is not enough: it has a std whose
 # I/O returns errors at run time.
 cargo build --quiet -p bingsu-core --target wasm32v1-none
 python3 - <<'EOF'

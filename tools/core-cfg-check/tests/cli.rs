@@ -506,10 +506,10 @@ fn core_exposes_no_address() {
         "fn f(a: &u8, b: &u8) -> bool {\n    core::ptr::eq(a, b)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
     );
     passes("#[cfg(test)]\nfn t() {\n    let _ = [1u8].as_ptr();\n}\n");
-    // fill p (`{:p<5}` is Display), an escaped brace, Debug in hex, a fill `}`, a width argument named pw,
+    // fill p (`{:p<5}` is Display), an escaped brace, hex, a fill `}`, a width argument named pw,
     // and template text that is not a std::fmt placeholder (style.rs).
     passes(
-        "fn f(v: u8, pw: usize) -> alloc::string::String {\n    alloc::format!(\"{v:p<5}|{{:p}}|{v:x?}|{v:}<5}|{v:pw$}\")\n}\n\nconst T: &str = \"{@icon:frame.top}|{@x:p}|{x:frame.top}\";\n",
+        "fn f(v: u8, pw: usize) -> alloc::string::String {\n    alloc::format!(\"{v:p<5}|{{:p}}|{v:x}|{v:}<5}|{v:pw$}\")\n}\n\nconst T: &str = \"{@icon:frame.top}|{@x:p}|{x:frame.top}\";\n",
     );
     passes(
         "struct S;\n\n#[cfg(test)]\nimpl S {\n    fn t() {\n        let _ = [1u8].as_ptr();\n    }\n}\n",
@@ -708,7 +708,7 @@ fn function_and_macro_addresses_fail() {
     );
 }
 
-// 이것을 실패시키는 것: atomic이나 static 없이 호출 사이 상태를 두는 이름(forget, ManuallyDrop, Arc, strong_count, weak_count)을
+// 이것을 실패시키는 것: atomic이나 static 없이 호출 사이 상태를 두는 이름(forget, ManuallyDrop, MaybeUninit, Arc, strong_count, weak_count)을
 // 놓치는 것, 주석 속 낱말을 막는 것.
 #[test]
 fn hidden_state_fails() {
@@ -723,6 +723,10 @@ fn hidden_state_fails() {
         ),
         ("use alloc::sync::Arc;\n", "Arc"),
         (
+            "pub fn leak() {\n    let _leak = core::mem::MaybeUninit::new(alloc::boxed::Box::new(1u8));\n}\n",
+            "MaybeUninit",
+        ),
+        (
             "pub fn f(r: &alloc::rc::Rc<u8>) -> usize {\n    alloc::rc::Rc::strong_count(r)\n}\n",
             "strong_count",
         ),
@@ -734,4 +738,84 @@ fn hidden_state_fails() {
         fails_with(bad, &format!("{name} keeps state between calls"));
     }
     passes("/// Starts a new call: forget earlier records.\npub fn f() {}\n");
+}
+
+// 이것을 실패시키는 것: production 코드의 Debug 서식(`{:?}`, `{:#?}`, `{:x?}`)과 Debug·Hash 이름(trait, derive(Hash), 메서드 hash,
+// debug 빌더)을 놓치는 것(Waker·Context의 vtable, 함수 포인터의 주소가 나감), `#[derive(Debug)]`를 막는 것,
+// `#[cfg(test)]` 항목을 production으로 세거나 첫 시험 항목 뒤를 모두 시험으로 보는 것, 시험 target 파일에 이 규칙을 거는 것.
+#[test]
+fn debug_and_hash_stay_out_of_production() {
+    let hasher = "struct H(u64);\nimpl core::hash::Hasher for H {\n    fn finish(&self) -> u64 {\n        self.0\n    }\n    fn write(&mut self, _: &[u8]) {}\n    fn write_usize(&mut self, n: usize) {\n        self.0 = n as u64;\n    }\n}\nfn a() {}\nfn b() {}\npub fn f() -> u64 {\n    let fs = [a, b];\n    let mut h = H(0);\n    core::hash::Hash::hash(&fs, &mut h);\n    h.0\n}\n";
+    for (bad, why) in [
+        (
+            "pub fn address() -> alloc::string::String {\n    alloc::format!(\"{:?}\", core::task::Waker::noop())\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "pub fn f(c: &core::task::Context<'_>) -> alloc::string::String {\n    alloc::format!(\"{c:#?}\")\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "pub fn f(v: u8) -> alloc::string::String {\n    alloc::format!(\"{v:x?}\")\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "fn a() {}\nfn b() {}\npub fn f() -> alloc::string::String {\n    let fs = [a, b];\n    alloc::format!(\"{fs:?}\")\n}\n",
+            "{:?} may write",
+        ),
+        (hasher, "Hasher may write"),
+        ("#[derive(Clone, Hash)]\npub struct S;\n", "Hash may write"),
+        ("#[derive(Debug, Hash)]\npub struct S;\n", "Hash may write"),
+        (
+            "pub struct S;\nimpl core::fmt::Debug for S {\n    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {\n        f.write_str(\"S\")\n    }\n}\n",
+            "Debug may write",
+        ),
+        ("#[allow(Debug)]\npub fn f() {}\n", "Debug may write"),
+        ("m!(derive(Debug));\n", "Debug may write"),
+        (
+            "#[cfg(test)]\nfn t() {}\n\npub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", 1)\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "#[cfg(test)]\nmod tests {}\n\npub struct S;\nimpl S {\n    #[cfg(test)]\n    fn t() {}\n    pub fn f() -> alloc::string::String {\n        alloc::format!(\"{:?}\", 1)\n    }\n}\n",
+            "{:?} may write",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    for name in [
+        "Debug",
+        "debug_struct",
+        "debug_tuple",
+        "debug_list",
+        "debug_map",
+        "debug_set",
+        "Hash",
+        "Hasher",
+        "BuildHasher",
+        "hash",
+    ] {
+        fails_with(
+            &format!("pub fn f() {{\n    {name}();\n}}\n"),
+            &format!("{name} may write"),
+        );
+    }
+    passes(
+        "#[derive(Debug, Clone)]\npub struct S;\n\npub fn f(v: u8) -> alloc::string::String {\n    alloc::format!(\"{v} {v:x} {{:?}}\")\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = alloc::format!(\"{:?}\", 1);\n    }\n}\n\npub struct T;\nimpl T {\n    #[cfg(test)]\n    fn t() -> alloc::string::String {\n        alloc::format!(\"{:#?}\", 1)\n    }\n}\n\npub trait U {\n    #[cfg(test)]\n    fn u() -> alloc::string::String {\n        alloc::format!(\"{:?}\", 1)\n    }\n}\n\n#[cfg(test)]\nconst C: &str = \"{:?}\";\n\n#[cfg(test)]\nfn tf() -> alloc::string::String {\n    alloc::format!(\"{:?}\", 1)\n}\n",
+    );
+    // Every kind of item, impl item and trait item under #[cfg(test)] (static items are refused anywhere).
+    passes(
+        "#[cfg(test)]\n#[derive(Debug, Hash)]\nenum E {}\n#[cfg(test)]\n#[derive(Hash)]\nstruct S;\n#[cfg(test)]\n#[derive(Hash)]\nunion U {\n    a: u8,\n}\n#[cfg(test)]\nuse core::hash::Hash;\n#[cfg(test)]\nextern crate hash;\n#[cfg(test)]\ntype T = dyn core::hash::Hasher;\n#[cfg(test)]\ntrait Tr: core::fmt::Debug {}\n#[cfg(test)]\ntrait Ta = core::hash::Hash;\n#[cfg(test)]\nimpl core::fmt::Debug for X {}\n#[cfg(test)]\nm!(Debug);\n#[cfg(test)]\nunsafe extern \"C\" {\n    fn hash();\n}\npub struct X;\nimpl X {\n    #[cfg(test)]\n    const C: &str = \"{:?}\";\n    #[cfg(test)]\n    type T = dyn core::hash::Hasher;\n    #[cfg(test)]\n    m!(Debug);\n}\npub trait Y {\n    #[cfg(test)]\n    const C: &str = \"{:?}\";\n    #[cfg(test)]\n    type T: core::hash::Hash;\n    #[cfg(test)]\n    m!(Debug);\n}\n",
+    );
+    let lib = fixture("pub fn f() {}\n");
+    let test =
+        fixture("pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", 1)\n}\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&lib)
+        .arg("--test-targets")
+        .arg(&test)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success() && stderr.is_empty(), "{stderr}");
 }

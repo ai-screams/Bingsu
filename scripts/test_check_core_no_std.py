@@ -139,6 +139,16 @@ class Judge(unittest.TestCase):
         add_dep(m, "bingsu-core", "devonly", ["lib"], edge="dev")
         self.assertEqual(self.judged(m), [])
 
+    # 이것을 실패시키는 것: 간선을 package id가 아니라 이름으로 따라가는 것(같은 이름의 다른 package, 예를 들어
+    # 꺼진 선택 의존이나 다른 버전이 그래프에 섞임). 이름이 같은 proc-macro가 resolve에는 있지만 간선이 없다.
+    def test_edges_follow_package_ids(self):
+        m = clean()
+        twin, twin_node = package(("libm", "9.9.9", gate.CRATES_IO), (), ("proc-macro",))
+        twin["id"] = twin_node["id"] = "libm-twin"
+        m["packages"].append(twin)
+        m["resolve"]["nodes"].append(twin_node)
+        self.assertEqual(self.judged(m), [])
+
     # 이것을 실패시키는 것: [patch]·[replace] 검사를 지우는 것(둘 각각).
     def test_patch_and_replace(self):
         for table in ("patch", "replace"):
