@@ -163,6 +163,7 @@ pub fn ellipsis(p: WidthProfile, room: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     const A2: WidthProfile = match WidthProfile::new(2, 2) {
         Some(p) => p,
         None => panic!(),

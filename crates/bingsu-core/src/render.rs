@@ -160,6 +160,7 @@ mod tests {
     use crate::field::BUILTIN;
     use crate::layout::tests::{fixture, opts};
     use crate::template::compile::compile;
+    use alloc::string::String;
 
     fn draw(shell: Shell, template: &str, width: u16) -> RenderedPrompt {
         let f = fixture(&["Works"], "main");

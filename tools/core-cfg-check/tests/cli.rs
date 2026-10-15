@@ -344,3 +344,64 @@ fn failure_in_any_file_fails() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+// 이것을 실패시키는 것: `extern crate std`를 놓치는 것(no_std core에 std가 돌아옴), 이름 바꾼 것(`as`)을 놓치는 것.
+#[test]
+fn extern_crate_std_fails() {
+    for bad in [
+        "extern crate std;\n",
+        "extern crate std as s;\n",
+        "extern crate r#std;\n",
+    ] {
+        let (ok, err) = run(bad);
+        assert!(!ok && err.contains("extern crate std"), "{bad}: {err}");
+    }
+    passes("extern crate alloc;\n");
+}
+
+// 이것을 실패시키는 것: core에 호출 사이 상태를 둘 static·atomic을 놓치는 것, `'static` 수명을 static 항목으로 잘못 세는 것.
+#[test]
+fn core_keeps_no_state() {
+    fails_with("static N: u8 = 0;\n", "static item");
+    fails_with("fn f() {\n    static N: u8 = 0;\n}\n", "static item");
+    fails_with("use core::sync::atomic::AtomicU8;\n", "atomics");
+    fails_with("fn f(x: &core::sync::atomic::AtomicBool) {}\n", "atomics");
+    passes("fn f(x: &'static str) -> &'static str {\n    x\n}\nconst C: u8 = 1;\n");
+}
+
+// 이것을 실패시키는 것: core가 주소를 값으로 바꾸는 길(Box::into_raw, as_ptr, 원시 포인터 타입, ptr 모듈, {:p})을 놓치는 것,
+// ptr::eq와 시험 안의 as_ptr를 막는 것.
+#[test]
+fn core_exposes_no_address() {
+    for (bad, why) in [
+        (
+            "fn f() -> usize {\n    alloc::boxed::Box::into_raw(alloc::boxed::Box::new(1u8)) as usize\n}\n",
+            "into_raw",
+        ),
+        (
+            "fn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
+            "as_ptr",
+        ),
+        (
+            "fn f(v: &u8) -> usize {\n    v as *const u8 as usize\n}\n",
+            "raw pointer",
+        ),
+        (
+            "fn f(v: &u8) -> usize {\n    core::ptr::from_ref(v).addr()\n}\n",
+            "core::ptr",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: alloc::boxed::Box<u8>) -> &'static u8 {\n    alloc::boxed::Box::leak(v)\n}\n",
+            "leak",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    passes(
+        "fn f(a: &u8, b: &u8) -> bool {\n    core::ptr::eq(a, b)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
+    );
+}

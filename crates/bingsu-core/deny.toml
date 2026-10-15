@@ -23,3 +23,11 @@ deny = [
   { crate = "walkdir" },
   { crate = "gix" },
 ]
+
+# Every crate of core's graph comes from crates.io; a git source or another
+# registry is refused. Path crates are not sources to cargo-deny, so
+# scripts/check_core_no_std.py pins the graph by version, source and
+# feature set as well.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

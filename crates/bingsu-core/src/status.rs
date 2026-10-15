@@ -1,5 +1,6 @@
 //! Status value `class ":" code` carried in the last record field
 //! (spec section 3 record ABNF, decision 19).
+use alloc::vec::Vec;
 
 /// Known classes. Shells treat any other class as `degraded`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -13,7 +13,8 @@
 # (canary checker with a pinned path count).
 # The CLI's environment rules (crates/bingsu/clippy.toml) are checked the same
 # way with their own canary, and the CLI prompt-path modules must forbid them
-# (check_cli_prompt_forbid.py).
+# (check_cli_prompt_forbid.py). bingsu-core is no_std and its graph is pinned
+# (check_core_no_std.py).
 # bingsu-core uses no conditional compilation other than #[cfg(test)], so no
 # code can drop out of the lint run through cfg.
 set -euo pipefail
@@ -71,10 +72,11 @@ python3 scripts/check_core_cfg.py --phase tokens --checker "$checker"
 # Change these counts together with the clippy.toml lists.
 python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 190
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7
+python3 scripts/check_core_no_std.py
 # The CLI prompt path forbids the same rules per module (deny elsewhere).
 python3 scripts/check_cli_prompt_forbid.py
 # clippy on core, in a fresh temporary target directory with its config
 # pinned; diagnostics are counted, not only the exit code.
 python3 scripts/check_core_clippy_clean.py
-cargo deny --manifest-path crates/bingsu-core/Cargo.toml --config crates/bingsu-core/deny.toml check bans
+cargo deny --manifest-path crates/bingsu-core/Cargo.toml --config crates/bingsu-core/deny.toml check bans sources
 echo "core purity gate: ok"

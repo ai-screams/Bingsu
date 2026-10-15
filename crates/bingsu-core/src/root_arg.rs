@@ -63,6 +63,7 @@ pub fn parse_abs_path(v: &[u8]) -> Result<&[u8], RootArgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
 
     // Decomposition vector fixed by the spec (section 9, M1 row).
     #[test]

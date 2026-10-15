@@ -29,7 +29,16 @@
 //!     it, but `RUSTC_BOOTSTRAP=1` turns it on, so the gate also refuses it;
 //!   - a `cfg` attribute other than exactly `#[cfg(test)]`;
 //!   - more `cfg` identifier tokens than `#[cfg(test)]` attributes, which
-//!     catches `cfg!()`, cfg inside macro bodies and any other spot.
+//!     catches `cfg!()`, cfg inside macro bodies and any other spot;
+//!   - the identifiers `extern crate std` in a row: bingsu-core is `no_std`,
+//!     and this is the one way to bring std back;
+//!   - an item `static` anywhere (core keeps no state between calls; with no
+//!     static there is nowhere to keep it), and an identifier `atomic` or
+//!     one starting with `Atomic`;
+//!   - outside `#[cfg(test)]` items, anything that turns an address into a
+//!     value (a leaked allocation's address would make the output depend on
+//!     the allocator): a raw pointer type, a call or path named in
+//!     ADDRESS_APIS, and a `{:p}` format.
 //!
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
@@ -76,10 +85,23 @@ fn is_path_attr_group(token: Option<&TokenTree>) -> bool {
     matches!(group.stream().into_iter().next(), Some(TokenTree::Ident(ident)) if unraw(&ident) == "path")
 }
 
+fn is_ident(token: Option<&TokenTree>, name: &str) -> bool {
+    matches!(token, Some(TokenTree::Ident(ident)) if unraw(ident) == name)
+}
+
 /// Walks every token (into groups) and counts `cfg` identifiers.
 fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding>) {
     let tokens: Vec<TokenTree> = stream.into_iter().collect();
     for (i, token) in tokens.iter().enumerate() {
+        if is_ident(Some(token), "extern")
+            && is_ident(tokens.get(i + 1), "crate")
+            && is_ident(tokens.get(i + 2), "std")
+        {
+            out.push(Finding {
+                line: line_of(token.span()),
+                reason: "extern crate std brings std back into no_std core".to_owned(),
+            });
+        }
         match token {
             TokenTree::Group(group) => scan_tokens(group.stream(), cfg_count, out),
             TokenTree::Punct(punct) if punct.as_char() == '#' => {
@@ -97,6 +119,12 @@ fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding
             }
             TokenTree::Ident(ident) => {
                 let name = unraw(ident);
+                if name == "atomic" || name.starts_with("Atomic") {
+                    out.push(Finding {
+                        line: line_of(ident.span()),
+                        reason: "atomics keep state between calls".to_owned(),
+                    });
+                }
                 if name == "cfg" {
                     *cfg_count += 1;
                 } else if name == "cfg_attr" {
@@ -155,6 +183,114 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
         }
         syn::visit::visit_attribute(self, attr);
     }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        self.out.push(Finding {
+            line: line_of(item.ident.span()),
+            reason: "static item keeps state between calls".to_owned(),
+        });
+        syn::visit::visit_item_static(self, item);
+    }
+}
+
+/// Names whose call or path exposes an address or leaks an allocation.
+const ADDRESS_APIS: [&str; 12] = [
+    "into_raw",
+    "into_raw_parts",
+    "leak",
+    "as_ptr",
+    "as_mut_ptr",
+    "addr",
+    "expose_provenance",
+    "expose_addr",
+    "addr_of",
+    "addr_of_mut",
+    "NonNull",
+    "Pointer",
+];
+
+/// Address-to-value checks, outside `#[cfg(test)]` items.
+struct Addresses<'a> {
+    out: &'a mut Vec<Finding>,
+}
+
+fn is_test_item(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        matches!(&a.meta, syn::Meta::List(l)
+        if l.path.is_ident("cfg") && l.tokens.to_string() == "test")
+    })
+}
+
+impl<'ast> Visit<'ast> for Addresses<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        let attrs = match item {
+            syn::Item::Mod(m) => &m.attrs,
+            syn::Item::Fn(f) => &f.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            _ => return syn::visit::visit_item(self, item),
+        };
+        if !is_test_item(attrs) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+    fn visit_type_ptr(&mut self, t: &'ast syn::TypePtr) {
+        self.out.push(Finding {
+            line: line_of(t.star_token.span),
+            reason: "raw pointer type exposes an address".to_owned(),
+        });
+        syn::visit::visit_type_ptr(self, t);
+    }
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        let name = unraw(&m.method);
+        if ADDRESS_APIS.contains(&name.as_str()) {
+            self.out.push(Finding {
+                line: line_of(m.method.span()),
+                reason: format!("{name} exposes an address"),
+            });
+        }
+        syn::visit::visit_expr_method_call(self, m);
+    }
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        // core::ptr: only ptr::eq (compares two addresses, exposes neither).
+        let segs: Vec<String> = path.segments.iter().map(|s| unraw(&s.ident)).collect();
+        if let Some(at) = segs.iter().position(|s| s == "ptr")
+            && segs.get(at + 1).map(String::as_str) != Some("eq")
+        {
+            self.out.push(Finding {
+                line: line_of(path.segments[at].ident.span()),
+                reason: "core::ptr other than ptr::eq exposes an address".to_owned(),
+            });
+        }
+        syn::visit::visit_path(self, path);
+    }
+    fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+        let name = unraw(&seg.ident);
+        if ADDRESS_APIS.contains(&name.as_str()) {
+            self.out.push(Finding {
+                line: line_of(seg.ident.span()),
+                reason: format!("{name} exposes an address"),
+            });
+        }
+        syn::visit::visit_path_segment(self, seg);
+    }
+    fn visit_lit_str(&mut self, l: &'ast syn::LitStr) {
+        if l.value().contains(":p}") {
+            self.out.push(Finding {
+                line: line_of(l.span()),
+                reason: "{:p} formats an address".to_owned(),
+            });
+        }
+    }
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        // Format strings sit in macro tokens, which syn does not parse.
+        if m.tokens.to_string().contains(":p}") {
+            self.out.push(Finding {
+                line: line_of(syn::spanned::Spanned::span(&m.path)),
+                reason: "{:p} formats an address".to_owned(),
+            });
+        }
+        syn::visit::visit_macro(self, m);
+    }
 }
 
 fn check(source: &str) -> Vec<Finding> {
@@ -208,6 +344,7 @@ fn check(source: &str) -> Vec<Finding> {
     };
     attrs.visit_file(&file);
     let allowed_cfg = attrs.allowed_cfg;
+    Addresses { out: &mut out }.visit_file(&file);
     if cfg_count != allowed_cfg {
         out.push(Finding {
             line: 0,
