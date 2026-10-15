@@ -1,7 +1,9 @@
 //! Token-level conditional-compilation and pull-in check for bingsu-core.
 //!
-//! Usage: `core-cfg-check FILE.rs...` (scripts/check_core_cfg.py collects the
-//! files and passes them here).
+//! Usage: `core-cfg-check FILE.rs... [--test-targets FILE.rs...]`
+//! (scripts/check_core_cfg.py collects the files and passes them here; the
+//! files after `--test-targets`, core's tests/ and benches/, skip only the
+//! format-source rule below).
 //!
 //! Code behind `cfg` can drop out of the lint run, and `#[path]` or
 //! `include!` can pull code in from outside the checked file set. A text or
@@ -43,7 +45,13 @@
 //!     `{:p}`, `{v:#p}`, `{:>20p}`, `{:}>20p}`);
 //!   - an identifier `concat` or `stringify` anywhere except right after `.`
 //!     (the slice method `.concat()`): both macros build a format string
-//!     out of pieces, so no single literal shows the placeholder.
+//!     out of pieces, so no single literal shows the placeholder;
+//!   - in library files (not after `--test-targets`), an identifier
+//!     `include_str`, `include_bytes` or `option_env`, and an identifier
+//!     `env` other than in `const VERSION: &str = env!("CARGO_PKG_VERSION")`:
+//!     each brings in a string from outside the source, which could be a
+//!     format string with a pointer placeholder. Test targets read shared
+//!     tables with include_str and never reach the prompt.
 //!
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
@@ -425,7 +433,50 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
     }
 }
 
-fn check(source: &str) -> Vec<Finding> {
+/// Identifiers that bring a string in from outside the library source.
+const FORMAT_SOURCES: [&str; 3] = ["include_str", "include_bytes", "option_env"];
+
+/// Walks every token (into groups): reports FORMAT_SOURCES and counts `env`.
+fn scan_format_sources(stream: TokenStream, env_count: &mut usize, out: &mut Vec<Finding>) {
+    for token in stream {
+        match token {
+            TokenTree::Group(group) => scan_format_sources(group.stream(), env_count, out),
+            TokenTree::Ident(ident) => {
+                let name = unraw(&ident);
+                if FORMAT_SOURCES.contains(&name.as_str()) {
+                    out.push(Finding {
+                        line: line_of(ident.span()),
+                        reason: format!("{name} brings a string in from outside the source"),
+                    });
+                } else if name == "env" {
+                    *env_count += 1;
+                }
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+/// Counts the one allowed use of `env`:
+/// `const VERSION: &str = env!("CARGO_PKG_VERSION");`.
+struct VersionEnv {
+    allowed: usize,
+}
+
+impl<'ast> Visit<'ast> for VersionEnv {
+    fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        if let syn::Expr::Macro(m) = &*item.expr
+            && item.ident == "VERSION"
+            && m.mac.path.is_ident("env")
+            && m.mac.tokens.to_string() == "\"CARGO_PKG_VERSION\""
+        {
+            self.allowed += 1;
+        }
+        syn::visit::visit_item_const(self, item);
+    }
+}
+
+fn check(source: &str, library: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     // syn::parse_file and the proc-macro2 lexer each drop a leading BOM on
     // their own; remove it here too, so the shebang policy sees the first
@@ -468,6 +519,21 @@ fn check(source: &str) -> Vec<Finding> {
             return out;
         }
     };
+    if library {
+        let mut env_count = 0;
+        scan_format_sources(stream.clone(), &mut env_count, &mut out);
+        let mut version = VersionEnv { allowed: 0 };
+        version.visit_file(&file);
+        if env_count != version.allowed {
+            out.push(Finding {
+                line: 0,
+                reason: format!(
+                    "env other than const VERSION: &str = env!(\"CARGO_PKG_VERSION\") ({env_count} env tokens, {} allowed)",
+                    version.allowed
+                ),
+            });
+        }
+    }
     let mut cfg_count = 0;
     scan_tokens(stream, &mut cfg_count, &mut out);
     let mut attrs = AttrCheck {
@@ -489,13 +555,21 @@ fn check(source: &str) -> Vec<Finding> {
 }
 
 fn main() -> ExitCode {
-    let files: Vec<String> = std::env::args().skip(1).collect();
-    if files.is_empty() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (library, tests) = match args.iter().position(|a| a == "--test-targets") {
+        Some(at) => (&args[..at], &args[at + 1..]),
+        None => (&args[..], &args[..0]),
+    };
+    if library.is_empty() {
         eprintln!("core-cfg-check: no files");
         return ExitCode::FAILURE;
     }
     let mut failed = false;
-    for path in &files {
+    let files = library
+        .iter()
+        .map(|p| (p, true))
+        .chain(tests.iter().map(|p| (p, false)));
+    for (path, is_library) in files {
         let source = match std::fs::read_to_string(path) {
             Ok(source) => source,
             Err(err) => {
@@ -504,7 +578,7 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        for finding in check(&source) {
+        for finding in check(&source, is_library) {
             eprintln!("{path}:{}: {}", finding.line, finding.reason);
             failed = true;
         }

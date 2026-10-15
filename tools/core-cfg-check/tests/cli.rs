@@ -50,10 +50,24 @@ fn cfg_test_module_passes() {
     passes("#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n");
 }
 
-// What makes this fail: matching any identifier starting with include.
+// include_str no longer passes in library files: it brings in a string from
+// outside the source, which could be a format string with a pointer
+// placeholder. Test targets (after --test-targets) still read shared tables
+// with it. What makes this fail: matching any identifier starting with
+// include in the include rule, or applying the format-source rule to test
+// targets.
 #[test]
-fn include_str_passes() {
-    passes("pub const X: &str = include_str!(\"x.txt\");\n");
+fn include_str_passes_in_test_targets() {
+    let lib = fixture("pub fn f() {}\n");
+    let test = fixture("pub const X: &str = include_str!(\"x.txt\");\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&lib)
+        .arg("--test-targets")
+        .arg(&test)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success() && stderr.is_empty(), "{stderr}");
 }
 
 // What makes this fail: scanning comment text instead of tokens.
@@ -516,4 +530,48 @@ fn format_strings_are_not_assembled() {
     );
     fails_with("use core::concat as c;\n", "concat builds a format string");
     passes("fn f(a: &[&[u8]]) -> alloc::vec::Vec<u8> {\n    a.concat()\n}\n");
+}
+
+// 이것을 실패시키는 것: 라이브러리에서 소스 밖 문자열을 들여오는 include_str!·include_bytes!·option_env!·env!를 놓치는 것
+// (include_str!로 읽은 "{:p}"나 빌드 환경 변수가 서식 문자열이 됨), `const VERSION = env!("CARGO_PKG_VERSION")`를 막는 것,
+// 그 한 자리 밖(다른 이름, 다른 변수, 서식 인자)의 env!를 허용하는 것.
+#[test]
+fn library_takes_no_string_from_outside() {
+    for (bad, why) in [
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(include_str!(\"fmt.txt\"), v)\n}\n",
+            "include_str brings a string in",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(env!(\"FMTX\"), v)\n}\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const B: &[u8] = include_bytes!(\"x.bin\");\n",
+            "include_bytes brings a string in",
+        ),
+        (
+            "pub const O: Option<&str> = option_env!(\"X\");\n",
+            "option_env brings a string in",
+        ),
+        (
+            "pub const V: &str = env!(\"CARGO_PKG_VERSION\");\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const VERSION: &str = env!(\"HOME\");\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const VERSION: &str = env!(\"CARGO_PKG_VERSION\");\nuse core::env as e;\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const VERSION: &str = m!(\"CARGO_PKG_VERSION\");\nuse core::env as e;\n",
+            "env other than const VERSION",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    passes("pub const VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n");
 }

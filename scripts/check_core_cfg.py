@@ -33,6 +33,8 @@ anything). It fails on:
     (`.RS`, `.Rs`): on a case-insensitive file system rustc reads `up.RS`
     for `mod up;`, and only lower-case `.rs` files are collected;
   - anything the checker binary rejects (its exit code is passed through).
+    Files under src/ go to it as library files; tests/ and benches/ follow
+    `--test-targets`, where include_str may read shared tables.
 Names are compared case-insensitively (`.Cargo`, `Clippy.toml`, `Build.rs`),
 since cargo and clippy find them on a case-insensitive file system.
 
@@ -128,7 +130,11 @@ def check_tokens(checker, errors):
     # The policy phase already reported collection errors; here only the
     # file list matters. With no files the checker fails on its own.
     files = collect([])
-    result = subprocess.run([checker, *files])
+    # Library files first; tests/ and benches/ after --test-targets, where
+    # include_str may read shared tables (they never reach the prompt).
+    library = [f for f in files if f.startswith(f"{CORE}/src/")]
+    targets = [f for f in files if not f.startswith(f"{CORE}/src/")]
+    result = subprocess.run([checker, *library, "--test-targets", *targets])
     if result.returncode != 0:
         errors.append("core-cfg-check rejected the files above")
 
