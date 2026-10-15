@@ -51,6 +51,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 CORE = "crates/bingsu-core"
@@ -126,17 +127,41 @@ def check_policy(errors):
     check_repo_tree(errors)
 
 
+def checker_args(files):
+    """Library files first; tests/ and benches/ after --test-targets, where
+    include_str may read shared tables (they never reach the prompt)."""
+    library = [f for f in files if f.startswith(f"{CORE}/src/")]
+    targets = [f for f in files if not f.startswith(f"{CORE}/src/")]
+    return [*library, "--test-targets", *targets]
+
+
+def check_split_canary(checker, errors):
+    """The split above decides which files get the format-source rule, and a
+    clean tree passes whichever way it goes. So this runs it the same way on
+    a throwaway tree with include_str in src/ and in tests/: the checker must
+    reject the src/ file and only it. What makes this fail: sending src/
+    files after --test-targets, or tests/ files before it."""
+    line = 'pub const X: &str = include_str!("x.txt");\n'
+    with tempfile.TemporaryDirectory() as tmp:
+        files = [f"{CORE}/src/lib.rs", f"{CORE}/tests/t.rs"]
+        for rel in files:
+            os.makedirs(os.path.join(tmp, os.path.dirname(rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "w") as f:
+                f.write(line)
+        result = subprocess.run([os.path.abspath(checker), *checker_args(files)], cwd=tmp,
+                                capture_output=True, text=True)
+    flagged = sorted({l.split(":")[0] for l in result.stderr.splitlines() if "include_str" in l})
+    if flagged != [f"{CORE}/src/lib.rs"]:
+        errors.append(f"split canary: include_str flagged in {flagged}, expected only {CORE}/src/lib.rs")
+
+
 def check_tokens(checker, errors):
     # The policy phase already reported collection errors; here only the
     # file list matters. With no files the checker fails on its own.
-    files = collect([])
-    # Library files first; tests/ and benches/ after --test-targets, where
-    # include_str may read shared tables (they never reach the prompt).
-    library = [f for f in files if f.startswith(f"{CORE}/src/")]
-    targets = [f for f in files if not f.startswith(f"{CORE}/src/")]
-    result = subprocess.run([checker, *library, "--test-targets", *targets])
+    result = subprocess.run([checker, *checker_args(collect([]))])
     if result.returncode != 0:
         errors.append("core-cfg-check rejected the files above")
+    check_split_canary(checker, errors)
 
 
 def main():
