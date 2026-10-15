@@ -866,6 +866,29 @@ fn binary_mode() {
     }
 }
 
+// Native fixture paths use backslashes on Windows. Both line endings must
+// pass, while a different basename or dispatch target must still fail.
+#[test]
+fn binary_main_paths_and_line_endings() {
+    let main = MAIN.replace(
+        "commands::run(prompt::dispatch(sandbox::enter))",
+        "commands::run(\n        prompt::dispatch(sandbox::enter)\n    )",
+    );
+    for source in [&main, &main.replace('\n', "\r\n")] {
+        let (ok, err) = run_binary_files(&[("main.rs", source)]);
+        assert!(ok && err.is_empty(), "{source:?}: {err}");
+
+        for name in ["not-main.rs", "main.rs.bak"] {
+            let (ok, err) = run_binary_files(&[(name, source)]);
+            assert!(!ok && err.contains("fn main"), "{name}: {err}");
+        }
+
+        let bad = source.replace("sandbox::enter", "other::enter");
+        let (ok, err) = run_binary_files(&[("main.rs", &bad)]);
+        assert!(!ok && err.contains("fn main"), "{bad:?}: {err}");
+    }
+}
+
 // 이것을 실패시키는 것: main이 dispatch 앞에서 다른 일을 하는 것, main이 둘(decoy)인 것, main.rs 밖이나 모듈 안의 main을 받는 것.
 #[test]
 fn main_only_dispatches() {

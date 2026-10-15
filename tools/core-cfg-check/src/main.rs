@@ -938,7 +938,7 @@ fn check_main(files: &[(String, String)]) -> Vec<(String, Finding)> {
     }
     match all.as_slice() {
         [(path, (line, top, attrs, body))] => {
-            if !(path == "main.rs" || path.ends_with("/main.rs"))
+            if std::path::Path::new(path).file_name() != Some(std::ffi::OsStr::new("main.rs"))
                 || !*top
                 || *attrs != 0
                 || body != MAIN_BODY
