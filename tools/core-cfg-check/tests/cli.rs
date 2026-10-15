@@ -345,7 +345,8 @@ fn failure_in_any_file_fails() {
     assert!(!output.status.success());
 }
 
-// 이것을 실패시키는 것: `extern crate std`를 놓치는 것(no_std core에 std가 돌아옴), 이름 바꾼 것(`as`)을 놓치는 것.
+// 이것을 실패시키는 것: `extern crate std`를 놓치는 것(no_std core에 std가 돌아옴), 이름 바꾼 것(`as`)을 놓치는 것,
+// 세 낱말 가운데 `extern`이나 `crate`를 보지 않아 다른 자리의 `std`를 막는 것.
 #[test]
 fn extern_crate_std_fails() {
     for bad in [
@@ -357,20 +358,28 @@ fn extern_crate_std_fails() {
         assert!(!ok && err.contains("extern crate std"), "{bad}: {err}");
     }
     passes("extern crate alloc;\n");
+    passes("extern fn std() {}\n");
+    passes("m!(a crate std);\n");
 }
 
-// 이것을 실패시키는 것: core에 호출 사이 상태를 둘 static·atomic을 놓치는 것, `'static` 수명을 static 항목으로 잘못 세는 것.
+// 이것을 실패시키는 것: core에 호출 사이 상태를 둘 static·atomic을 놓치는 것(`atomic` 모듈 이름과 `Atomic…` 타입 이름 각각),
+// `'static` 수명을 static 항목으로 잘못 세는 것, `atomic`으로 시작하는 다른 이름을 막는 것.
 #[test]
 fn core_keeps_no_state() {
     fails_with("static N: u8 = 0;\n", "static item");
     fails_with("fn f() {\n    static N: u8 = 0;\n}\n", "static item");
     fails_with("use core::sync::atomic::AtomicU8;\n", "atomics");
     fails_with("fn f(x: &core::sync::atomic::AtomicBool) {}\n", "atomics");
-    passes("fn f(x: &'static str) -> &'static str {\n    x\n}\nconst C: u8 = 1;\n");
+    fails_with("use core::sync::atomic;\n", "atomics");
+    fails_with("fn f(x: &AtomicBool) {}\n", "atomics");
+    passes(
+        "fn f(x: &'static str) -> &'static str {\n    x\n}\nconst C: u8 = 1;\nfn atomically() {}\n",
+    );
 }
 
-// 이것을 실패시키는 것: core가 주소를 값으로 바꾸는 길(Box::into_raw, as_ptr, 원시 포인터 타입, ptr 모듈, {:p})을 놓치는 것,
-// ptr::eq와 시험 안의 as_ptr를 막는 것.
+// 이것을 실패시키는 것: core가 주소를 값으로 바꾸는 길(Box::into_raw, as_ptr, 원시 포인터 타입, ptr 모듈, 매크로 안팎의 {:p})을
+// 놓치는 것, `cfg(test)`가 아닌 속성이나 `cfg(test)`가 아닌 cfg를 시험 항목으로 보는 것,
+// ptr::eq와 시험 안(모듈·함수·impl)의 as_ptr를 막는 것.
 #[test]
 fn core_exposes_no_address() {
     for (bad, why) in [
@@ -398,10 +407,23 @@ fn core_exposes_no_address() {
             "fn f(v: alloc::boxed::Box<u8>) -> &'static u8 {\n    alloc::boxed::Box::leak(v)\n}\n",
             "leak",
         ),
+        ("const F: &str = \"{:p}\";\n", "{:p}"),
+        (
+            "#[allow(test)]\nfn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
+            "as_ptr",
+        ),
+        (
+            "#[cfg(not(test))]\nfn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
+            "as_ptr",
+        ),
     ] {
         fails_with(bad, why);
     }
     passes(
         "fn f(a: &u8, b: &u8) -> bool {\n    core::ptr::eq(a, b)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
+    );
+    passes("#[cfg(test)]\nfn t() {\n    let _ = [1u8].as_ptr();\n}\n");
+    passes(
+        "struct S;\n\n#[cfg(test)]\nimpl S {\n    fn t() {\n        let _ = [1u8].as_ptr();\n    }\n}\n",
     );
 }
