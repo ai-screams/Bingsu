@@ -26,6 +26,14 @@ anything). It fails on:
     excluded): cargo reads `.cargo/config*` from the working directory up,
     where `[build] rustflags = ["--cap-lints", "warn"]` would turn the forbid
     lints into warnings and `[alias]` could replace a subcommand;
+  - a `rust-toolchain` or `rust-toolchain.toml` file anywhere in the
+    repository: rustup takes the toolchain from it ahead of the default, and
+    a nightly toolchain accepts `cargo-features` that add rustc flags;
+  - a `Cargo.toml` anywhere in the repository with a `cargo-features` key
+    or a `rustflags` key in any `[profile...]` table: profile rustflags
+    reach rustc for one package only (`--extern std` brings std back into
+    a no_std crate, `--cap-lints allow` silences the forbid lints there)
+    and the canaries, separate crates, would not notice;
   - a `.clippy.toml` anywhere in the repository, or a `clippy.toml` other than
     crates/bingsu-core/clippy.toml and crates/bingsu/clippy.toml: a stray
     config can replace the rules clippy applies;
@@ -33,6 +41,8 @@ anything). It fails on:
     (`.RS`, `.Rs`): on a case-insensitive file system rustc reads `up.RS`
     for `mod up;`, and only lower-case `.rs` files are collected;
   - anything the checker binary rejects (its exit code is passed through).
+    Files under src/ go to it as library files; tests/ and benches/ follow
+    `--test-targets`, where include_str may read shared tables.
 Names are compared case-insensitively (`.Cargo`, `Clippy.toml`, `Build.rs`),
 since cargo and clippy find them on a case-insensitive file system.
 
@@ -49,6 +59,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 CORE = "crates/bingsu-core"
@@ -73,6 +84,34 @@ def check_repo_tree(errors):
             # The exact path, so `Clippy.toml` next to an allowed config fails.
             elif name == "clippy.toml" and path not in CLIPPY_CONFIGS:
                 errors.append(f"clippy config not allowed: {path}")
+            elif name in ("rust-toolchain", "rust-toolchain.toml"):
+                errors.append(f"toolchain file not allowed: {path}")
+            elif name == "cargo.toml" and os.path.isfile(path):
+                check_manifest(path, errors)
+
+
+def profile_rustflags(table, where):
+    """Paths of every `rustflags` key under a [profile...] table."""
+    found = []
+    for key, value in table.items():
+        if key == "rustflags":
+            found.append(where)
+        elif isinstance(value, dict):
+            found.extend(profile_rustflags(value, f"{where}.{key}"))
+    return found
+
+
+def check_manifest(path, errors):
+    try:
+        with open(path, "rb") as f:
+            manifest = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as err:
+        errors.append(f"{path}: unreadable manifest: {err}")
+        return
+    if "cargo-features" in manifest:
+        errors.append(f"{path}: cargo-features is not allowed")
+    for where in profile_rustflags(manifest.get("profile", {}), "profile"):
+        errors.append(f"{path}: rustflags in [{where}] is not allowed")
 
 
 def collect(errors):
@@ -124,13 +163,41 @@ def check_policy(errors):
     check_repo_tree(errors)
 
 
+def checker_args(files):
+    """Library files first; tests/ and benches/ after --test-targets, where
+    include_str may read shared tables (they never reach the prompt)."""
+    library = [f for f in files if f.startswith(f"{CORE}/src/")]
+    targets = [f for f in files if not f.startswith(f"{CORE}/src/")]
+    return [*library, "--test-targets", *targets]
+
+
+def check_split_canary(checker, errors):
+    """The split above decides which files get the format-source rule, and a
+    clean tree passes whichever way it goes. So this runs it the same way on
+    a throwaway tree with include_str in src/ and in tests/: the checker must
+    reject the src/ file and only it. What makes this fail: sending src/
+    files after --test-targets, or tests/ files before it."""
+    line = 'pub const X: &str = include_str!("x.txt");\n'
+    with tempfile.TemporaryDirectory() as tmp:
+        files = [f"{CORE}/src/lib.rs", f"{CORE}/tests/t.rs"]
+        for rel in files:
+            os.makedirs(os.path.join(tmp, os.path.dirname(rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "w") as f:
+                f.write(line)
+        result = subprocess.run([os.path.abspath(checker), *checker_args(files)], cwd=tmp,
+                                capture_output=True, text=True)
+    flagged = sorted({l.split(":")[0] for l in result.stderr.splitlines() if "include_str" in l})
+    if flagged != [f"{CORE}/src/lib.rs"]:
+        errors.append(f"split canary: include_str flagged in {flagged}, expected only {CORE}/src/lib.rs")
+
+
 def check_tokens(checker, errors):
     # The policy phase already reported collection errors; here only the
     # file list matters. With no files the checker fails on its own.
-    files = collect([])
-    result = subprocess.run([checker, *files])
+    result = subprocess.run([checker, *checker_args(collect([]))])
     if result.returncode != 0:
         errors.append("core-cfg-check rejected the files above")
+    check_split_canary(checker, errors)
 
 
 def main():

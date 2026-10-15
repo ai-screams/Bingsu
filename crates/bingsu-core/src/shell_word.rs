@@ -1,5 +1,6 @@
 //! One shell word, single-quoted, for embedding literals in init output
 //! (spec section 4 "runtime root" 3, section 5 "connection").
+use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shell {
@@ -45,6 +46,7 @@ pub fn encode_word(shell: Shell, word: &[u8], out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
 
     fn e(sh: Shell, w: &str) -> String {
         let mut out = Vec::new();

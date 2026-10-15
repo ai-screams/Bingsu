@@ -1,11 +1,10 @@
 //! I/O-free core of bingsu. No files, processes, clocks, environment,
-//! network or threads (enforced by `clippy.toml` and `deny.toml` here).
+//! network or threads: the crate is `no_std` (only `core` and `alloc`), so
+//! std's I/O APIs do not exist here, and `clippy.toml` and `deny.toml` keep
+//! the rules for anything std brings back (scripts/check-core-purity.sh).
+#![no_std]
 #![forbid(unsafe_code)]
 
-// New modules name alloc paths (alloc::string::String, alloc::vec::Vec) so a
-// later `#![no_std]` switch (decided with the M3 parser) only touches this file, the M1
-// modules record, shell_word and status, and the unqualified `String` in the
-// root_arg tests.
 extern crate alloc;
 
 /// Crate version, used by `bingsu --version` later.

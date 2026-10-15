@@ -1,6 +1,7 @@
 //! B1 record encoder (spec section 3). The shell side checks only the frame;
 //! field content grammar is this producer's promise.
 use crate::status::{Status, is_valid_status};
+use alloc::vec::Vec;
 
 pub const RECORD_MAX_BYTES: usize = 65_536;
 pub const US: u8 = 0x1F;
@@ -194,6 +195,7 @@ pub fn write_minimal_b1(status: Status, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use crate::status::Status;
+    use alloc::vec;
 
     fn enc(f: &Fields<'_>) -> (Result<Encoded, FieldError>, Vec<u8>) {
         let mut out = Vec::new();

@@ -50,10 +50,24 @@ fn cfg_test_module_passes() {
     passes("#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n");
 }
 
-// What makes this fail: matching any identifier starting with include.
+// include_str no longer passes in library files: it brings in a string from
+// outside the source, which could be a format string with a pointer
+// placeholder. Test targets (after --test-targets) still read shared tables
+// with it. What makes this fail: matching any identifier starting with
+// include in the include rule, or applying the format-source rule to test
+// targets.
 #[test]
-fn include_str_passes() {
-    passes("pub const X: &str = include_str!(\"x.txt\");\n");
+fn include_str_passes_in_test_targets() {
+    let lib = fixture("pub fn f() {}\n");
+    let test = fixture("pub const X: &str = include_str!(\"x.txt\");\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&lib)
+        .arg("--test-targets")
+        .arg(&test)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success() && stderr.is_empty(), "{stderr}");
 }
 
 // What makes this fail: scanning comment text instead of tokens.
@@ -343,4 +357,465 @@ fn failure_in_any_file_fails() {
         .output()
         .unwrap();
     assert!(!output.status.success());
+}
+
+// 이것을 실패시키는 것: `extern crate std`를 놓치는 것(no_std core에 std가 돌아옴), 이름 바꾼 것(`as`)을 놓치는 것,
+// 세 낱말 가운데 `extern`이나 `crate`를 보지 않아 다른 자리의 `std`를 막는 것.
+#[test]
+fn extern_crate_std_fails() {
+    for bad in [
+        "extern crate std;\n",
+        "extern crate std as s;\n",
+        "extern crate r#std;\n",
+    ] {
+        let (ok, err) = run(bad);
+        assert!(!ok && err.contains("extern crate std"), "{bad}: {err}");
+    }
+    passes("extern crate alloc;\n");
+    passes("extern fn std() {}\n");
+    passes("m!(a crate std);\n");
+}
+
+// 이것을 실패시키는 것: core에 호출 사이 상태를 둘 static·atomic을 놓치는 것(`atomic` 모듈 이름과 `Atomic…` 타입 이름 각각),
+// `'static` 수명을 static 항목으로 잘못 세는 것, `atomic`으로 시작하는 다른 이름을 막는 것.
+#[test]
+fn core_keeps_no_state() {
+    fails_with("static N: u8 = 0;\n", "static item");
+    fails_with("fn f() {\n    static N: u8 = 0;\n}\n", "static item");
+    fails_with("use core::sync::atomic::AtomicU8;\n", "atomics");
+    fails_with("fn f(x: &core::sync::atomic::AtomicBool) {}\n", "atomics");
+    fails_with("use core::sync::atomic;\n", "atomics");
+    fails_with("fn f(x: &AtomicBool) {}\n", "atomics");
+    passes(
+        "fn f(x: &'static str) -> &'static str {\n    x\n}\nconst C: u8 = 1;\nfn atomically() {}\n",
+    );
+}
+
+// 이것을 실패시키는 것: core가 주소를 값으로 바꾸는 길(Box::into_raw, as_ptr, 원시 포인터 타입, ptr 모듈, 매크로 안팎의 {:p},
+// fill·정렬·플래그·폭·정밀도가 붙은 p 지정자, `{`·`}`를 fill로 쓴 지정자)을
+// 놓치는 것, `cfg(test)`가 아닌 속성이나 `cfg(test)`가 아닌 cfg를 시험 항목으로 보는 것,
+// ptr::eq와 시험 안(모듈·함수·impl)의 as_ptr를 막는 것.
+#[test]
+fn core_exposes_no_address() {
+    for (bad, why) in [
+        (
+            "fn f() -> usize {\n    alloc::boxed::Box::into_raw(alloc::boxed::Box::new(1u8)) as usize\n}\n",
+            "into_raw",
+        ),
+        (
+            "fn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
+            "as_ptr",
+        ),
+        (
+            "fn f(v: &u8) -> usize {\n    v as *const u8 as usize\n}\n",
+            "raw pointer",
+        ),
+        (
+            "fn f(v: &u8) -> usize {\n    core::ptr::from_ref(v).addr()\n}\n",
+            "core::ptr",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: alloc::boxed::Box<u8>) -> &'static u8 {\n    alloc::boxed::Box::leak(v)\n}\n",
+            "leak",
+        ),
+        ("const F: &str = \"{:p}\";\n", "{:p}"),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:#p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:20p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:}>20p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:<p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:>20p }\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(r\"{:.*p}\", 1, v)\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", alloc::format!(\"{v:#p}\"))\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{0:+#020p}\", v)\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:w$.w$p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:-p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:.3p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v :p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:p }\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:0w$p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{1:0$p}\", w, v)\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:.p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{{{v:p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "#[allow(test)]\nfn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
+            "as_ptr",
+        ),
+        (
+            "#[cfg(not(test))]\nfn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
+            "as_ptr",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    passes(
+        "fn f(a: &u8, b: &u8) -> bool {\n    core::ptr::eq(a, b)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
+    );
+    passes("#[cfg(test)]\nfn t() {\n    let _ = [1u8].as_ptr();\n}\n");
+    // fill p (`{:p<5}` is Display), an escaped brace, hex, a fill `}`, a width argument named pw,
+    // and template text that is not a std::fmt placeholder (style.rs).
+    passes(
+        "fn f(v: u8, pw: usize) -> alloc::string::String {\n    alloc::format!(\"{v:p<5}|{{:p}}|{v:x}|{v:}<5}|{v:pw$}\")\n}\n\nconst T: &str = \"{@icon:frame.top}|{@x:p}|{x:frame.top}\";\n",
+    );
+    passes(
+        "struct S;\n\n#[cfg(test)]\nimpl S {\n    fn t() {\n        let _ = [1u8].as_ptr();\n    }\n}\n",
+    );
+}
+
+// 이것을 실패시키는 것: concat!·stringify!로 서식 문자열을 조각에서 만드는 길(이름 바꾼 use 포함)을 놓치는 것,
+// 슬라이스 메서드 `.concat()`을 막는 것.
+#[test]
+fn format_strings_are_not_assembled() {
+    fails_with(
+        "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(concat!(\"{:\", \"p}\"), v)\n}\n",
+        "concat builds a format string",
+    );
+    fails_with(
+        "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(stringify!({:p}), v)\n}\n",
+        "stringify builds a format string",
+    );
+    fails_with("use core::concat as c;\n", "concat builds a format string");
+    passes("fn f(a: &[&[u8]]) -> alloc::vec::Vec<u8> {\n    a.concat()\n}\n");
+}
+
+// 이것을 실패시키는 것: 라이브러리에서 소스 밖 문자열을 들여오는 include_str!·include_bytes!·option_env!·env!를 놓치는 것
+// (include_str!로 읽은 "{:p}"나 빌드 환경 변수가 서식 문자열이 됨), `const VERSION = env!("CARGO_PKG_VERSION")`를 막는 것,
+// 그 한 자리 밖(다른 이름, 다른 변수, 서식 인자)의 env!를 허용하는 것.
+#[test]
+fn library_takes_no_string_from_outside() {
+    for (bad, why) in [
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(include_str!(\"fmt.txt\"), v)\n}\n",
+            "include_str brings a string in",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(env!(\"FMTX\"), v)\n}\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const B: &[u8] = include_bytes!(\"x.bin\");\n",
+            "include_bytes brings a string in",
+        ),
+        (
+            "pub const O: Option<&str> = option_env!(\"X\");\n",
+            "option_env brings a string in",
+        ),
+        (
+            "pub const V: &str = env!(\"CARGO_PKG_VERSION\");\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const VERSION: &str = env!(\"HOME\");\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const VERSION: &str = env!(\"CARGO_PKG_VERSION\");\nuse core::env as e;\n",
+            "env other than const VERSION",
+        ),
+        (
+            "pub const VERSION: &str = m!(\"CARGO_PKG_VERSION\");\nuse core::env as e;\n",
+            "env other than const VERSION",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    passes("pub const VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n");
+}
+
+/// Runs the checker on `source` saved as a crate root (`lib.rs`).
+fn run_root(source: &str) -> (bool, String) {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("core-cfg-check-{}-root{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lib.rs");
+    std::fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&path)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+// 이것을 실패시키는 것: crate root의 `#![no_std]`·`#![forbid(unsafe_code)]`를 글자로만 찾는 것(주석·문자열·모듈 안 속성이 통과),
+// 둘 가운데 하나를 보지 않는 것, crate root가 아닌 파일에 요구하는 것.
+#[test]
+fn crate_root_keeps_no_std_and_forbid_unsafe() {
+    let both = "#![no_std]\n#![forbid(unsafe_code)]\n";
+    for (bad, why) in [
+        (
+            "/*\n#![no_std]\n*/\n#![forbid(unsafe_code)]\n",
+            "lacks #![no_std]",
+        ),
+        (
+            "#![forbid(unsafe_code)]\npub const S: &str = r\"\n#![no_std]\n\";\n",
+            "lacks #![no_std]",
+        ),
+        (
+            "#![forbid(unsafe_code)]\nmod m {\n    #![no_std]\n}\n",
+            "lacks #![no_std]",
+        ),
+        ("#![no_std]\n", "lacks #![forbid(unsafe_code)]"),
+        (
+            "#![no_std]\n// #![forbid(unsafe_code)]\n",
+            "lacks #![forbid(unsafe_code)]",
+        ),
+        (
+            "#![no_std]\n#![forbid(unused)]\n",
+            "lacks #![forbid(unsafe_code)]",
+        ),
+        (
+            "#![no_std]\n#![deny(unsafe_code)]\n",
+            "lacks #![forbid(unsafe_code)]",
+        ),
+    ] {
+        let (ok, err) = run_root(bad);
+        assert!(!ok && err.contains(why), "{bad}: {err}");
+    }
+    let (ok, err) = run_root(both);
+    assert!(ok && err.is_empty(), "{err}");
+    passes("pub fn f() {}\n");
+}
+
+// 이것을 실패시키는 것: 함수 주소를 값으로 바꾸는 길(같은 파일 함수의 정수 cast, 함수 포인터 타입)과 매크로 본문 안의
+// 주소 API(into_raw, as_ptr_range, UnsafeCell, *const, ptr::, fn() 타입)를 놓치는 것, 시험 항목 안의 매크로까지 막는 것,
+// 함수 이름이 아닌 값의 정수 cast를 막는 것.
+#[test]
+fn function_and_macro_addresses_fail() {
+    for (bad, why) in [
+        (
+            "fn marker() {}\npub fn address() -> usize {\n    marker as usize\n}\n",
+            "casting function marker",
+        ),
+        (
+            "fn marker() {}\npub fn address() -> usize {\n    (marker) as usize\n}\n",
+            "casting function marker",
+        ),
+        (
+            "fn marker() {}\npub fn s() -> alloc::string::String {\n    alloc::format!(\"{:x}\", marker as usize)\n}\n",
+            "casting function marker",
+        ),
+        (
+            "pub fn f(v: &[u8]) -> usize {\n    v.as_ptr_range().start as usize\n}\n",
+            "as_ptr_range exposes",
+        ),
+        (
+            "pub fn f(v: &[u8]) -> alloc::string::String {\n    alloc::format!(\"{:?}\", v.as_ptr_range())\n}\n",
+            "as_ptr_range exposes",
+        ),
+        (
+            "pub fn f(v: &mut [u8]) -> usize {\n    v.as_mut_ptr_range().start as usize\n}\n",
+            "as_mut_ptr_range exposes",
+        ),
+        (
+            "fn fn_address() -> usize {\n    0\n}\npub fn f() -> usize {\n    fn_address as fn() -> usize as usize\n}\n",
+            "function pointer type",
+        ),
+        (
+            "pub fn f() -> alloc::string::String {\n    let f: fn() -> usize = || 0;\n    alloc::format!(\"{f:?}\")\n}\n",
+            "function pointer type",
+        ),
+        (
+            "pub fn f(b: alloc::boxed::Box<u8>) -> alloc::string::String {\n    alloc::format!(\"{}\", alloc::boxed::Box::into_raw(b) as usize)\n}\n",
+            "into_raw exposes",
+        ),
+        (
+            "pub fn f() -> usize {\n    core::cell::UnsafeCell::new(0u8).get() as usize\n}\n",
+            "UnsafeCell exposes",
+        ),
+        (
+            "pub fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", v as *const u8 as usize)\n}\n",
+            "raw pointer type",
+        ),
+        (
+            "pub fn f(v: &mut u8) -> alloc::string::String {\n    alloc::format!(\"{}\", v as *mut u8 as usize)\n}\n",
+            "raw pointer type",
+        ),
+        (
+            "pub fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", core::ptr::from_ref(v).addr())\n}\n",
+            "core::ptr other than ptr::eq",
+        ),
+        ("m!(use core::ptr);\n", "core::ptr other than ptr::eq"),
+        (
+            "pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", ptr::null::<u8>())\n}\n",
+            "core::ptr other than ptr::eq",
+        ),
+        (
+            "pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", (|| 0) as fn() -> u8)\n}\n",
+            "function pointer type",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    passes(
+        "fn marker() -> u8 {\n    1\n}\npub fn f(a: &u8, b: &u8, n: u8, ptr: u8) -> alloc::string::String {\n    alloc::format!(\"{} {} {} {}\", core::ptr::eq(a, b), n as usize, ptr, marker())\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = alloc::format!(\"{:?}\", [1u8].as_ptr_range());\n    }\n}\n",
+    );
+}
+
+// 이것을 실패시키는 것: atomic이나 static 없이 호출 사이 상태를 두는 이름(forget, ManuallyDrop, MaybeUninit, Arc, strong_count, weak_count)을
+// 놓치는 것, 주석 속 낱말을 막는 것.
+#[test]
+fn hidden_state_fails() {
+    for (bad, name) in [
+        (
+            "pub fn f() {\n    core::mem::forget(alloc::boxed::Box::new(1u8));\n}\n",
+            "forget",
+        ),
+        (
+            "pub fn f() -> core::mem::ManuallyDrop<u8> {\n    core::mem::ManuallyDrop::new(1)\n}\n",
+            "ManuallyDrop",
+        ),
+        ("use alloc::sync::Arc;\n", "Arc"),
+        (
+            "pub fn leak() {\n    let _leak = core::mem::MaybeUninit::new(alloc::boxed::Box::new(1u8));\n}\n",
+            "MaybeUninit",
+        ),
+        (
+            "pub fn f(r: &alloc::rc::Rc<u8>) -> usize {\n    alloc::rc::Rc::strong_count(r)\n}\n",
+            "strong_count",
+        ),
+        (
+            "pub fn f(r: &alloc::rc::Rc<u8>) -> usize {\n    alloc::rc::Rc::weak_count(r)\n}\n",
+            "weak_count",
+        ),
+    ] {
+        fails_with(bad, &format!("{name} keeps state between calls"));
+    }
+    passes("/// Starts a new call: forget earlier records.\npub fn f() {}\n");
+}
+
+// 이것을 실패시키는 것: production 코드의 Debug 서식(`{:?}`, `{:#?}`, `{:x?}`)과 Debug·Hash 이름(trait, derive(Hash), 메서드 hash,
+// debug 빌더)을 놓치는 것(Waker·Context의 vtable, 함수 포인터의 주소가 나감), `#[derive(Debug)]`를 막는 것,
+// `#[cfg(test)]` 항목을 production으로 세거나 첫 시험 항목 뒤를 모두 시험으로 보는 것, 시험 target 파일에 이 규칙을 거는 것.
+#[test]
+fn debug_and_hash_stay_out_of_production() {
+    let hasher = "struct H(u64);\nimpl core::hash::Hasher for H {\n    fn finish(&self) -> u64 {\n        self.0\n    }\n    fn write(&mut self, _: &[u8]) {}\n    fn write_usize(&mut self, n: usize) {\n        self.0 = n as u64;\n    }\n}\nfn a() {}\nfn b() {}\npub fn f() -> u64 {\n    let fs = [a, b];\n    let mut h = H(0);\n    core::hash::Hash::hash(&fs, &mut h);\n    h.0\n}\n";
+    for (bad, why) in [
+        (
+            "pub fn address() -> alloc::string::String {\n    alloc::format!(\"{:?}\", core::task::Waker::noop())\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "pub fn f(c: &core::task::Context<'_>) -> alloc::string::String {\n    alloc::format!(\"{c:#?}\")\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "pub fn f(v: u8) -> alloc::string::String {\n    alloc::format!(\"{v:x?}\")\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "fn a() {}\nfn b() {}\npub fn f() -> alloc::string::String {\n    let fs = [a, b];\n    alloc::format!(\"{fs:?}\")\n}\n",
+            "{:?} may write",
+        ),
+        (hasher, "Hasher may write"),
+        ("#[derive(Clone, Hash)]\npub struct S;\n", "Hash may write"),
+        ("#[derive(Debug, Hash)]\npub struct S;\n", "Hash may write"),
+        (
+            "pub struct S;\nimpl core::fmt::Debug for S {\n    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {\n        f.write_str(\"S\")\n    }\n}\n",
+            "Debug may write",
+        ),
+        ("#[allow(Debug)]\npub fn f() {}\n", "Debug may write"),
+        ("m!(derive(Debug));\n", "Debug may write"),
+        (
+            "#[cfg(test)]\nfn t() {}\n\npub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", 1)\n}\n",
+            "{:?} may write",
+        ),
+        (
+            "#[cfg(test)]\nmod tests {}\n\npub struct S;\nimpl S {\n    #[cfg(test)]\n    fn t() {}\n    pub fn f() -> alloc::string::String {\n        alloc::format!(\"{:?}\", 1)\n    }\n}\n",
+            "{:?} may write",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    for name in [
+        "Debug",
+        "debug_struct",
+        "debug_tuple",
+        "debug_list",
+        "debug_map",
+        "debug_set",
+        "Hash",
+        "Hasher",
+        "BuildHasher",
+        "hash",
+    ] {
+        fails_with(
+            &format!("pub fn f() {{\n    {name}();\n}}\n"),
+            &format!("{name} may write"),
+        );
+    }
+    passes(
+        "#[derive(Debug, Clone)]\npub struct S;\n\npub fn f(v: u8) -> alloc::string::String {\n    alloc::format!(\"{v} {v:x} {{:?}}\")\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = alloc::format!(\"{:?}\", 1);\n    }\n}\n\npub struct T;\nimpl T {\n    #[cfg(test)]\n    fn t() -> alloc::string::String {\n        alloc::format!(\"{:#?}\", 1)\n    }\n}\n\npub trait U {\n    #[cfg(test)]\n    fn u() -> alloc::string::String {\n        alloc::format!(\"{:?}\", 1)\n    }\n}\n\n#[cfg(test)]\nconst C: &str = \"{:?}\";\n\n#[cfg(test)]\nfn tf() -> alloc::string::String {\n    alloc::format!(\"{:?}\", 1)\n}\n",
+    );
+    // Every kind of item, impl item and trait item under #[cfg(test)] (static items are refused anywhere).
+    passes(
+        "#[cfg(test)]\n#[derive(Debug, Hash)]\nenum E {}\n#[cfg(test)]\n#[derive(Hash)]\nstruct S;\n#[cfg(test)]\n#[derive(Hash)]\nunion U {\n    a: u8,\n}\n#[cfg(test)]\nuse core::hash::Hash;\n#[cfg(test)]\nextern crate hash;\n#[cfg(test)]\ntype T = dyn core::hash::Hasher;\n#[cfg(test)]\ntrait Tr: core::fmt::Debug {}\n#[cfg(test)]\ntrait Ta = core::hash::Hash;\n#[cfg(test)]\nimpl core::fmt::Debug for X {}\n#[cfg(test)]\nm!(Debug);\n#[cfg(test)]\nunsafe extern \"C\" {\n    fn hash();\n}\npub struct X;\nimpl X {\n    #[cfg(test)]\n    const C: &str = \"{:?}\";\n    #[cfg(test)]\n    type T = dyn core::hash::Hasher;\n    #[cfg(test)]\n    m!(Debug);\n}\npub trait Y {\n    #[cfg(test)]\n    const C: &str = \"{:?}\";\n    #[cfg(test)]\n    type T: core::hash::Hash;\n    #[cfg(test)]\n    m!(Debug);\n}\n",
+    );
+    let lib = fixture("pub fn f() {}\n");
+    let test =
+        fixture("pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", 1)\n}\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&lib)
+        .arg("--test-targets")
+        .arg(&test)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success() && stderr.is_empty(), "{stderr}");
 }
