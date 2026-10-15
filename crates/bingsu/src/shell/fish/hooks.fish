@@ -15,8 +15,17 @@ function _bingsu_bytes
     math (string length -- "$e") - 2 \* (string replace -ar '[^%]' '' -- "$e" | string length)
 end
 
-# Runs the pinned binary once; the raw record goes to _bingsu_rec.
+# Runs the pinned binary once; the raw record goes to _bingsu_rec. A call
+# that a signal ended (status 128 or more: a crash, or on Linux the seccomp
+# filter) is not repeated until the next command: fish_prompt sets
+# _bingsu_gen to the status generation, and a dead call keeps it in
+# _bingsu_dead_gen. Without this fish 3.6 reports the signal, redraws, calls
+# again and loops (same rule as hooks.zsh).
 function _bingsu_call
+    if test "$_bingsu_dead_gen" = "$_bingsu_gen"
+        set -g _bingsu_rec ''
+        return 0
+    end
     string match -qr '^(0|[1-9][0-9]{0,14})\z' -- "$_bingsu_seq"; or set -g _bingsu_seq 0
     set -g _bingsu_seq (math $_bingsu_seq + 1)
     # Over 64 KiB (bytes): passed empty (see hooks.zsh). fish's $PWD can be
@@ -27,6 +36,9 @@ function _bingsu_call
         set _bingsu_pwd
     end
     set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ | string collect -N)
+    if test $pipestatus[1] -ge 128
+        set -g _bingsu_dead_gen $_bingsu_gen
+    end
 end
 set -g _bingsu_rps1 ''
 
@@ -93,6 +105,7 @@ end
 # The generation at init, never an inherited one: a value from the
 # environment would make the first prompt send the last command's duration.
 set -g _bingsu_gen $status_generation
+set -g _bingsu_dead_gen ''
 
 # Last, after every assignment above: a name that came from the environment
 # is an exported global, and set -g keeps that flag, so the raw record and
@@ -109,3 +122,4 @@ set -gu _bingsu_disp $_bingsu_disp
 set -gu _bingsu_note $_bingsu_note
 set -gu _bingsu_key $_bingsu_key
 set -gu _bingsu_gen $_bingsu_gen
+set -gu _bingsu_dead_gen $_bingsu_dead_gen

@@ -31,7 +31,16 @@ _bingsu_bytes() {
 
 # Runs the pinned binary once; the raw record goes to _bingsu_rec. The group
 # redirect keeps bash's own "ignored null byte" warning off the terminal.
+# A call that a signal ended (status 128 or more) is not repeated until the
+# next command: bash numbers commands (\#), and the number a dead call saw
+# is kept in _bingsu_dead_cn (same rule as hooks.zsh).
 _bingsu_call() {
+  local _bingsu_cn='\#'
+  _bingsu_cn=${_bingsu_cn@P}
+  if [[ ${_bingsu_dead_cn-} == "$_bingsu_cn" ]]; then
+    _bingsu_rec=
+    return 0
+  fi
   case $_bingsu_seq in
     ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;
   esac
@@ -41,14 +50,15 @@ _bingsu_call() {
   local _bingsu_pwd=${PWD-} _bingsu_n=0
   _bingsu_bytes "$_bingsu_pwd"
   (( _bingsu_n <= 65536 )) || _bingsu_pwd=
-  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; printf .); } 2>/dev/null
+  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r); } 2>/dev/null
+  (( $? < 128 )) || _bingsu_dead_cn=$_bingsu_cn
   _bingsu_rec=${_bingsu_rec%.}
 }
 
 # Hook state is reset on every init, never inherited: an environment value
 # for _bingsu_t0 or _bingsu_t1 would make the first duration wrong, and
 # either one goes through $(( )) (spec section 5).
-_bingsu_s=0 _bingsu_t1= _bingsu_ps1=
+_bingsu_s=0 _bingsu_t1= _bingsu_ps1= _bingsu_dead_cn=
 _bingsu_p=()
 # _bingsu_t0 is a one-element array: PS0 assigns it inside $(( )), and under
 # `set -a` that assignment marks it for export before any hook can undo it.
@@ -165,7 +175,7 @@ _bingsu_install() {
   # exported copy would be expanded by a child bash without bingsu (data run
   # as code with promptvars on, a PS0 prefix that fails under set -u). The
   # globals assigned here would be exported by `set -a`.
-  export -n PS1 PS0 _bingsu_rec _bingsu_seq _bingsu_ps1 _bingsu_t1 _bingsu_warned_last
+  export -n PS1 PS0 _bingsu_rec _bingsu_seq _bingsu_ps1 _bingsu_t1 _bingsu_warned_last _bingsu_dead_cn
   return 0
 }
 
@@ -198,6 +208,6 @@ unset _bingsu_nm _bingsu_reg _bingsu_h _bingsu_e _bingsu_r _bingsu_a
 # since the golden runner sources it alone; they stay listed here too.
 export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu_note _bingsu_key \
   _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps0 _bingsu_ps0_orig _bingsu_ps0_owned \
-  _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last
+  _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last _bingsu_dead_cn
 export -n -f _bingsu_status_ok_core _bingsu_status_ok _bingsu_split _bingsu_frame_core _bingsu_frame \
   _bingsu_classify _bingsu_notice_due _bingsu_bytes _bingsu_call _bingsu_save _bingsu_install
