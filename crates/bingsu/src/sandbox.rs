@@ -472,7 +472,9 @@ mod tests {
                 0,
             )
         };
-        if m != libc::MAP_FAILED || errno() != libc::EPERM {
+        // No mapping is the effect checked here, not the errno: musl's mmap
+        // reports the refused call as ENOMEM, glibc's as EPERM.
+        if m != libc::MAP_FAILED {
             fail(b"<executable mmap>");
         }
         // SAFETY: anonymous private read-write mapping, allowed.

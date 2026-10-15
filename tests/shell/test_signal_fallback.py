@@ -144,3 +144,23 @@ def test_sandbox_notice_once(tmp_path, shell):
         s.run("true")
     text = s.close().decode("utf-8", "replace")
     assert text.count("could not start its system call filter") == 1, text
+
+
+# zsh with NO_PROMPT_PERCENT draws a constant prompt, but the record is still
+# checked, so the notice still comes.
+# 이것을 실패시키는 것: 레코드 검증을 PROMPT_PERCENT 조건 안에 두어 이 옵션에서 알림이 나오지 않는 것.
+def test_sandbox_notice_without_prompt_percent(tmp_path):
+    if "zsh" not in SHELLS:
+        pytest.skip("zsh not in BINGSU_TEST_SHELLS")
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    init = tmp_path / "init.zsh"
+    init.write_bytes(inst.init("zsh", env))
+    inst.use_fake(minimal_record(status=b"degraded:sandbox"), script=ROOT / "tests/shell/fake_bingsu.sh")
+    s = Session("zsh", env, cols=100, rows=30)
+    # Set before the first bingsu prompt, so every call sees the option.
+    s.run("setopt no_prompt_percent; " + source("zsh", init).decode().rstrip("\n"))
+    for _ in range(2):
+        s.run("true")
+    text = s.close().decode("utf-8", "replace")
+    assert text.count("could not start its system call filter") == 1, text

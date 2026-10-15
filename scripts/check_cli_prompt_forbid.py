@@ -51,7 +51,7 @@ MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 TCB_SHA256 = {
     "crates/bingsu/src/prompt.rs": "557da8e7b0f321794b2ac6504727ec6af12e1d52bc0a866970de797594df4a52",
     "crates/bingsu/src/main.rs": "fbcd4caadb92553a4da548c9fd3aa81f31e45098001f4321bf3b52056cf82767",
-    "crates/bingsu/src/sandbox.rs": "72851f47705686ab336150fde88b99947222d034920d098b656e9e43e2a692cb",
+    "crates/bingsu/src/sandbox.rs": "18f2d176111e3d57215071227ea3e6d7dc022156e2a4510a6e6fcf2e300c676c",
     "crates/bingsu/Cargo.toml": "15cbd7be07d65f0c9f246353e149889863917eda45a1a08d447613841d5d6719",
     "crates/bingsu/prompt-syscalls.tsv": "763649aa03810886aaac2ebbcd1e5d9ab570392139ebe3191a0247f3ca0c66f6",
 }

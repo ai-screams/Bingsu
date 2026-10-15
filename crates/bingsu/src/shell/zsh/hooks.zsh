@@ -94,7 +94,11 @@ _bingsu_install() {
   fi
   _bingsu_t0= _bingsu_t1=
   _bingsu_call "${ctx[@]}"
-  if (( o_pct )) && _bingsu_frame "$_bingsu_rec"; then
+  # The record is checked whatever the options are, so the status notices
+  # below see it; only installing it on screen depends on PROMPT_PERCENT.
+  local framed=0
+  _bingsu_frame "$_bingsu_rec" && framed=1
+  if (( framed && o_pct )); then
     ps1=$_bingsu_f[3] rps1=$_bingsu_f[4]
     # Upper line (record change plan 12, R-04): joined by a constant newline, only
     # when it is not empty, before any escaping so the escaping covers it.
