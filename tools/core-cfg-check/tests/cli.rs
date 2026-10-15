@@ -377,7 +377,8 @@ fn core_keeps_no_state() {
     );
 }
 
-// 이것을 실패시키는 것: core가 주소를 값으로 바꾸는 길(Box::into_raw, as_ptr, 원시 포인터 타입, ptr 모듈, 매크로 안팎의 {:p})을
+// 이것을 실패시키는 것: core가 주소를 값으로 바꾸는 길(Box::into_raw, as_ptr, 원시 포인터 타입, ptr 모듈, 매크로 안팎의 {:p},
+// fill·정렬·플래그·폭·정밀도가 붙은 p 지정자, `{`·`}`를 fill로 쓴 지정자)을
 // 놓치는 것, `cfg(test)`가 아닌 속성이나 `cfg(test)`가 아닌 cfg를 시험 항목으로 보는 것,
 // ptr::eq와 시험 안(모듈·함수·impl)의 as_ptr를 막는 것.
 #[test]
@@ -409,6 +410,74 @@ fn core_exposes_no_address() {
         ),
         ("const F: &str = \"{:p}\";\n", "{:p}"),
         (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:#p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:20p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:}>20p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:<p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{v:>20p }\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(r\"{:.*p}\", 1, v)\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", alloc::format!(\"{v:#p}\"))\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{0:+#020p}\", v)\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:w$.w$p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:-p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:.3p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v :p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:p }\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:0w$p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{1:0$p}\", w, v)\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8, w: usize) -> alloc::string::String {\n    alloc::format!(\"{v:.p}\")\n}\n",
+            "{:p}",
+        ),
+        (
+            "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{{{v:p}\")\n}\n",
+            "{:p}",
+        ),
+        (
             "#[allow(test)]\nfn f(v: &[u8]) -> usize {\n    v.as_ptr() as usize\n}\n",
             "as_ptr",
         ),
@@ -423,7 +492,28 @@ fn core_exposes_no_address() {
         "fn f(a: &u8, b: &u8) -> bool {\n    core::ptr::eq(a, b)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
     );
     passes("#[cfg(test)]\nfn t() {\n    let _ = [1u8].as_ptr();\n}\n");
+    // fill p (`{:p<5}` is Display), an escaped brace, Debug in hex, a fill `}`, a width argument named pw,
+    // and template text that is not a std::fmt placeholder (style.rs).
+    passes(
+        "fn f(v: u8, pw: usize) -> alloc::string::String {\n    alloc::format!(\"{v:p<5}|{{:p}}|{v:x?}|{v:}<5}|{v:pw$}\")\n}\n\nconst T: &str = \"{@icon:frame.top}|{@x:p}|{x:frame.top}\";\n",
+    );
     passes(
         "struct S;\n\n#[cfg(test)]\nimpl S {\n    fn t() {\n        let _ = [1u8].as_ptr();\n    }\n}\n",
     );
+}
+
+// 이것을 실패시키는 것: concat!·stringify!로 서식 문자열을 조각에서 만드는 길(이름 바꾼 use 포함)을 놓치는 것,
+// 슬라이스 메서드 `.concat()`을 막는 것.
+#[test]
+fn format_strings_are_not_assembled() {
+    fails_with(
+        "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(concat!(\"{:\", \"p}\"), v)\n}\n",
+        "concat builds a format string",
+    );
+    fails_with(
+        "fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(stringify!({:p}), v)\n}\n",
+        "stringify builds a format string",
+    );
+    fails_with("use core::concat as c;\n", "concat builds a format string");
+    passes("fn f(a: &[&[u8]]) -> alloc::vec::Vec<u8> {\n    a.concat()\n}\n");
 }

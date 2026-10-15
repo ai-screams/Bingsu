@@ -38,7 +38,12 @@
 //!   - outside `#[cfg(test)]` items, anything that turns an address into a
 //!     value (a leaked allocation's address would make the output depend on
 //!     the allocator): a raw pointer type, a call or path named in
-//!     ADDRESS_APIS, and a `{:p}` format.
+//!     ADDRESS_APIS, and a string that formats a pointer (a placeholder whose
+//!     type is `p`, with any fill, alignment, flags, width or precision:
+//!     `{:p}`, `{v:#p}`, `{:>20p}`, `{:}>20p}`);
+//!   - an identifier `concat` or `stringify` anywhere except right after `.`
+//!     (the slice method `.concat()`): both macros build a format string
+//!     out of pieces, so no single literal shows the placeholder.
 //!
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
@@ -142,6 +147,13 @@ fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding
                         line: line_of(ident.span()),
                         reason: "macro_rules forbidden in core".to_owned(),
                     });
+                } else if (name == "concat" || name == "stringify")
+                    && !(i > 0 && is_punct(tokens.get(i - 1), '.'))
+                {
+                    out.push(Finding {
+                        line: line_of(ident.span()),
+                        reason: format!("{name} builds a format string out of pieces"),
+                    });
                 }
             }
             TokenTree::Punct(_) | TokenTree::Literal(_) => {}
@@ -209,6 +221,126 @@ const ADDRESS_APIS: [&str; 12] = [
     "Pointer",
 ];
 
+/// True if `text`, read as a format string, has a placeholder whose type is
+/// `p`, with any fill, alignment, sign, `#`, `0`, width or precision
+/// (`{:p}`, `{v:#p}`, `{:>20p}`, `{0:w$.*p}`). A placeholder counts only when
+/// its argument (empty, an integer or an identifier) and its spec follow
+/// the std::fmt grammar, so template text such as `{@icon:frame.top}` is not
+/// one. A fill character comes before an alignment and may itself be `{` or
+/// `}`; `{{` is a literal brace.
+fn formats_pointer(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '{' {
+            i += 1;
+            continue;
+        }
+        if chars.get(i + 1) == Some(&'{') {
+            i += 2;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && chars[j] != ':' && chars[j] != '}' {
+            j += 1;
+        }
+        if chars.get(j) != Some(&':') {
+            i = j + 1;
+            continue;
+        }
+        let mut k = j + 1;
+        if matches!(chars.get(k + 1), Some('<' | '^' | '>')) {
+            k += 2;
+        }
+        while k < chars.len() && chars[k] != '}' {
+            k += 1;
+        }
+        let arg: String = chars[i + 1..j].iter().collect();
+        let arg = arg.trim_end();
+        let arg_ok = arg.is_empty()
+            || arg.chars().all(|c| c.is_ascii_digit())
+            || ident_len(&arg.chars().collect::<Vec<_>>(), 0) == arg.chars().count();
+        if arg_ok && spec_type(&chars[j + 1..k.min(chars.len())]) == "p" {
+            return true;
+        }
+        i = k + 1;
+    }
+    false
+}
+
+/// Length of the identifier that starts at `at` (0 if none).
+fn ident_len(s: &[char], at: usize) -> usize {
+    match s.get(at) {
+        Some(c) if c.is_alphabetic() || *c == '_' => {
+            1 + s[at + 1..]
+                .iter()
+                .take_while(|c| c.is_alphanumeric() || **c == '_')
+                .count()
+        }
+        _ => 0,
+    }
+}
+
+/// A count at `at`: an integer, or an integer or identifier followed by `$`.
+/// Returns the position after it (`at` itself when there is none).
+fn count_end(s: &[char], at: usize) -> usize {
+    let digits = s[at.min(s.len())..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    if digits > 0 {
+        return at + digits + usize::from(s.get(at + digits) == Some(&'$'));
+    }
+    let ident = ident_len(s, at);
+    if ident > 0 && s.get(at + ident) == Some(&'$') {
+        return at + ident + 1;
+    }
+    at
+}
+
+/// The type of a std::fmt spec (the text after `:`): what is left after
+/// `[[fill]align][sign]['#']['0'][width]['.' [precision]]`. Only a type of
+/// exactly `p` matters to the caller, so other leftovers need no checking.
+fn spec_type(s: &[char]) -> String {
+    let mut k = if matches!(s.get(1), Some('<' | '^' | '>')) {
+        2
+    } else {
+        usize::from(matches!(s.first(), Some('<' | '^' | '>')))
+    };
+    if matches!(s.get(k), Some('+' | '-')) {
+        k += 1;
+    }
+    if s.get(k) == Some(&'#') {
+        k += 1;
+    }
+    if s.get(k) == Some(&'0') && s.get(k + 1) != Some(&'$') {
+        k += 1;
+    }
+    k = count_end(s, k);
+    if s.get(k) == Some(&'.') {
+        k += 1;
+        // rustc also takes `.` with no precision (`{x:.p}` formats a pointer).
+        if s.get(k) == Some(&'*') {
+            k += 1;
+        } else {
+            k = count_end(s, k);
+        }
+    }
+    let rest: String = s[k.min(s.len())..].iter().collect();
+    rest.trim_end().to_owned()
+}
+
+/// True if any string literal in `stream` (into groups) formats a pointer.
+fn tokens_format_pointer(stream: TokenStream) -> bool {
+    stream.into_iter().any(|token| match token {
+        TokenTree::Group(group) => tokens_format_pointer(group.stream()),
+        TokenTree::Literal(lit) => {
+            matches!(syn::Lit::new(lit), syn::Lit::Str(s) if formats_pointer(&s.value()))
+        }
+        TokenTree::Ident(_) | TokenTree::Punct(_) => false,
+    })
+}
+
 /// Address-to-value checks, outside `#[cfg(test)]` items.
 struct Addresses<'a> {
     out: &'a mut Vec<Finding>,
@@ -274,7 +406,7 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
         syn::visit::visit_path_segment(self, seg);
     }
     fn visit_lit_str(&mut self, l: &'ast syn::LitStr) {
-        if l.value().contains(":p}") {
+        if formats_pointer(&l.value()) {
             self.out.push(Finding {
                 line: line_of(l.span()),
                 reason: "{:p} formats an address".to_owned(),
@@ -283,7 +415,7 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
         // Format strings sit in macro tokens, which syn does not parse.
-        if m.tokens.to_string().contains(":p}") {
+        if tokens_format_pointer(m.tokens.clone()) {
             self.out.push(Finding {
                 line: line_of(syn::spanned::Spanned::span(&m.path)),
                 reason: "{:p} formats an address".to_owned(),
