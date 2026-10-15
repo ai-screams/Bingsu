@@ -19,7 +19,15 @@ typeset -g _bingsu_rec=
 _bingsu_call() {
   emulate -L zsh
   (( ++_bingsu_seq ))
-  _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@; print -n .)
+  # A $PWD over 64 KiB (bytes) is drawn as unknown anyway (envelope rule);
+  # passing it would put it in argv a second time next to the environment
+  # and can hit ARG_MAX. no_multibyte (local, emulate -L) makes ${#} count
+  # bytes. An exported PWD over MAX_ARG_STRLEN (32 pages, about 128 KiB with
+  # 4 KiB pages) cannot reach any exec on Linux, whatever this hook passes.
+  local _bingsu_pwd=$PWD
+  setopt no_multibyte
+  (( ${#_bingsu_pwd} <= 65536 )) || _bingsu_pwd=
+  _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell zsh --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; print -n .)
   _bingsu_rec=${_bingsu_rec%.}
 }
 

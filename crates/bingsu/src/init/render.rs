@@ -4,7 +4,7 @@
 use crate::messages::{MsgId, en};
 use bingsu_core::record::RecordVersion;
 use bingsu_core::root_arg::{
-    CONFIG_ROOT_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
+    CONFIG_ROOT_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
 };
 use bingsu_core::shell_word::{Shell, encode_word};
 use bingsu_core::status::Status;
@@ -18,6 +18,8 @@ pub struct ScriptInputs<'a> {
     pub state_root: Option<&'a [u8]>,
     pub log_root: Option<&'a [u8]>,
     pub session_hex: &'a [u8; 32],
+    /// `pw_dir` from getpwuid, for the `~` of the dir segment.
+    pub home: &'a [u8],
 }
 
 const ZSH: [&str; 2] = [
@@ -72,6 +74,7 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
                 prefixed(sh, LOG_ROOT_PREFIX, v, out);
             }
         }
+        b"HOME" => prefixed(sh, HOME_PREFIX, inp.home, out),
         b"MSG_BASH_TOO_OLD" => encode_word(sh, en(MsgId::BashTooOld).as_bytes(), out),
         b"MSG_LATE_HOOK_ZSH" => encode_word(sh, en(MsgId::LateHookZsh).as_bytes(), out),
         b"MSG_LATE_HOOK_BASH" => encode_word(sh, en(MsgId::LateHookBash).as_bytes(), out),
@@ -124,5 +127,66 @@ pub fn render(inp: &ScriptInputs<'_>, out: &mut Vec<u8>) {
     }
     if inp.shell == Shell::Bash {
         substitute(inp, BASH_EPILOGUE.as_bytes(), out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bingsu_core::layout::PATH_BYTES_MAX;
+
+    fn script(shell: Shell, home: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        render(
+            &ScriptInputs {
+                shell,
+                exe: b"/bin/bingsu",
+                runtime_root: Some((1, 2, b"/r")),
+                config_root: Some(b"/c"),
+                state_root: Some(b"/s"),
+                log_root: Some(b"/l"),
+                session_hex: &[b'0'; 32],
+                home,
+            },
+            &mut out,
+        );
+        out
+    }
+
+    fn count(hay: &[u8], needle: &[u8]) -> usize {
+        hay.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    // 이것을 실패시키는 것: 홈을 `prefixed`(셸 단어 인코딩) 없이 그대로 잇는 것, `@HOME@`을 남기는 것.
+    // 이 인코딩의 셸 왕복은 test_init_words.py가 같은 함수(뿌리 단어)로 고정한다.
+    #[test]
+    fn home_is_one_encoded_word() {
+        let home = b"/h/it's \"q\" $(x) `y` a\nb\\c -d";
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            let s = script(shell, home);
+            let mut want = Vec::new();
+            prefixed(shell, HOME_PREFIX, home, &mut want);
+            assert_eq!(count(&s, &want), 1, "{shell:?}");
+            assert_eq!(count(&s, b"@HOME@"), 0, "{shell:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 어느 셸이든 hook의 `$PWD` 상한(바이트)을 봉투의 PATH_BYTES_MAX와 다르게 두는 것.
+    #[test]
+    fn hook_pwd_cap_is_the_envelope_cap() {
+        for (shell, cap) in [
+            (
+                Shell::Zsh,
+                format!("${{#_bingsu_pwd}} <= {PATH_BYTES_MAX} ))"),
+            ),
+            (Shell::Bash, format!("(( _bingsu_n <= {PATH_BYTES_MAX} ))")),
+            (
+                Shell::Fish,
+                format!("(_bingsu_bytes $PWD) -gt {PATH_BYTES_MAX}"),
+            ),
+        ] {
+            let s = script(shell, b"/h");
+            assert_eq!(count(&s, cap.as_bytes()), 1, "{shell:?}");
+        }
     }
 }

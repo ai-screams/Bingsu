@@ -5,6 +5,9 @@ pub const RUNTIME_ROOT_PREFIX: &[u8] = b"--runtime-root=";
 pub const CONFIG_ROOT_PREFIX: &[u8] = b"--config-root=";
 pub const STATE_ROOT_PREFIX: &[u8] = b"--state-root=";
 pub const LOG_ROOT_PREFIX: &[u8] = b"--log-root=";
+/// Home folder from `getpwuid`, pinned by init like the roots (spec section
+/// 4 "runtime root" 7: `~` is never `$HOME` at prompt time). Display only.
+pub const HOME_PREFIX: &[u8] = b"--home=";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeRoot<'a> {
@@ -136,6 +139,7 @@ mod tests {
             (CONFIG_ROOT_PREFIX, b"--config-root="),
             (STATE_ROOT_PREFIX, b"--state-root="),
             (LOG_ROOT_PREFIX, b"--log-root="),
+            (HOME_PREFIX, b"--home="),
         ];
         for (i, (a, want)) in all.iter().enumerate() {
             assert_eq!(a, want);

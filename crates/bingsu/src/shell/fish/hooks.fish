@@ -7,11 +7,26 @@ set -q _bingsu_seq; or set -g _bingsu_seq 0
 string match -qr '^[0-9a-f]{32}\z' -- "$_bingsu_session"; or set -g _bingsu_session @SESSION@
 set -g _bingsu_rec ''
 
+# Byte length of $argv[1]: string length counts characters; the URL escape
+# writes every byte it changes as %XX, so the bytes are its length minus two
+# per %.
+function _bingsu_bytes
+    set -l e (string escape --style=url -- "$argv[1]")
+    math (string length -- "$e") - 2 \* (string replace -ar '[^%]' '' -- "$e" | string length)
+end
+
 # Runs the pinned binary once; the raw record goes to _bingsu_rec.
 function _bingsu_call
     string match -qr '^(0|[1-9][0-9]{0,14})\z' -- "$_bingsu_seq"; or set -g _bingsu_seq 0
     set -g _bingsu_seq (math $_bingsu_seq + 1)
-    set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ | string collect -N)
+    # Over 64 KiB (bytes): passed empty (see hooks.zsh). fish's $PWD can be
+    # that long when fish starts in a deep folder (test_fish_long_cwd).
+    set -l _bingsu_pwd $PWD
+    if test (_bingsu_bytes $PWD) -gt 65536
+        # An empty list: the quotes below make it one empty word.
+        set _bingsu_pwd
+    end
+    set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ | string collect -N)
 end
 set -g _bingsu_rps1 ''
 

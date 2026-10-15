@@ -3,8 +3,6 @@
 use std::process::ExitCode;
 
 #[cfg(unix)]
-mod envelope;
-#[cfg(unix)]
 mod init;
 #[cfg(unix)]
 mod messages;

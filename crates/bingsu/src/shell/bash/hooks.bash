@@ -19,6 +19,16 @@ unset _bingsu_nm
 : "${_bingsu_seq:=0}"
 _bingsu_rec=
 
+# Byte length of $1 into the caller's local _bingsu_n: ${#} counts
+# characters in a UTF-8 locale; the local LC_ALL ends with the function.
+# A readonly LC_ALL refuses the local one: then the length stays over the
+# cap, so $PWD is not passed (silently, the error goes to /dev/null).
+_bingsu_bytes() {
+  _bingsu_n=65537
+  local LC_ALL=C 2>/dev/null || return 0
+  _bingsu_n=${#1}
+}
+
 # Runs the pinned binary once; the raw record goes to _bingsu_rec. The group
 # redirect keeps bash's own "ignored null byte" warning off the terminal.
 _bingsu_call() {
@@ -26,7 +36,12 @@ _bingsu_call() {
     ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;
   esac
   _bingsu_seq=$(( _bingsu_seq + 1 ))
-  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@; printf .); } 2>/dev/null
+  # Over 64 KiB (bytes): passed empty (see hooks.zsh). ${PWD-}: set -u after
+  # unset PWD. _bingsu_bytes counts bytes under a local LC_ALL=C.
+  local _bingsu_pwd=${PWD-} _bingsu_n=0
+  _bingsu_bytes "$_bingsu_pwd"
+  (( _bingsu_n <= 65536 )) || _bingsu_pwd=
+  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; printf .); } 2>/dev/null
   _bingsu_rec=${_bingsu_rec%.}
 }
 
@@ -185,4 +200,4 @@ export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu
   _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps0 _bingsu_ps0_orig _bingsu_ps0_owned \
   _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last
 export -n -f _bingsu_status_ok_core _bingsu_status_ok _bingsu_split _bingsu_frame_core _bingsu_frame \
-  _bingsu_classify _bingsu_notice_due _bingsu_call _bingsu_save _bingsu_install
+  _bingsu_classify _bingsu_notice_due _bingsu_bytes _bingsu_call _bingsu_save _bingsu_install

@@ -1,19 +1,13 @@
 //! Shell input envelope, version `--ctx 1` (spec section 5). Hand-written
 //! parser on the prompt fast path (spec section 8 budget table).
-// Prompt path: the clippy.toml rules (environment reads among them, spec 4
-// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
-// be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
-// checks this line.
-#![forbid(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
-use bingsu_core::record::RecordVersion;
-use bingsu_core::root_arg::{
-    CONFIG_ROOT_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX, parse_abs_path,
-    parse_decimal, parse_runtime_root,
+use crate::layout::PATH_BYTES_MAX;
+use crate::record::RecordVersion;
+use crate::root_arg::{
+    CONFIG_ROOT_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
+    parse_abs_path, parse_decimal, parse_runtime_root,
 };
+use crate::shell_word::Shell;
+use alloc::vec::Vec;
 
 // Fields are parsed and validated now so ctx 1 never changes; M2/M3 read them.
 #[derive(Debug, PartialEq, Eq)]
@@ -41,6 +35,17 @@ pub struct Envelope {
     pub config_root: Option<Vec<u8>>,
     pub state_root: Option<Vec<u8>>,
     pub log_root: Option<Vec<u8>>,
+    /// `--shell`, a constant word of each shell's hook. `None`: the hook is
+    /// older than the renderer, so only the shell-neutral minimal record.
+    pub shell: Option<Shell>,
+    /// `--pwd "$PWD"`: display only, never opened or stat'ed (spec section
+    /// 4 front end). Not absolute or over PATH_BYTES_MAX: unknown (`None`).
+    pub pwd: Option<Vec<u8>>,
+    /// `--colorterm "$COLORTERM"`: `truecolor` or `24bit` (spec section 3
+    /// "색 출력"). Absent or anything else: 256 colors.
+    pub truecolor: bool,
+    /// `--home=<path>`, pinned by init from getpwuid.
+    pub home: Option<Vec<u8>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,6 +81,12 @@ fn num<T: TryFrom<u64>>(v: &[u8], what: &'static str) -> Result<T, EnvelopeError
         .ok_or(EnvelopeError::BadArgs(what))
 }
 
+/// `$PWD` comes from the shell, which bingsu does not control: a value that
+/// is not an absolute path or is too long to draw means "folder unknown".
+fn pwd_or_unknown(v: &[u8]) -> Option<Vec<u8>> {
+    (v.first() == Some(&b'/') && v.len() <= PATH_BYTES_MAX).then(|| v.to_vec())
+}
+
 /// Width comes from the terminal, which bingsu does not control: anything
 /// that is not a `u16` decimal means "width unknown" (0), not a bad argument.
 fn width_or_unknown(v: &[u8]) -> u16 {
@@ -106,6 +117,9 @@ fn is_value_flag(a: &[u8]) -> bool {
             | b"--session"
             | b"--seq"
             | b"--ctx-ext"
+            | b"--shell"
+            | b"--pwd"
+            | b"--colorterm"
     )
 }
 
@@ -113,7 +127,7 @@ fn is_value_flag(a: &[u8]) -> bool {
 /// minimal record to print (spec section 5 envelope rules). `--record` is
 /// counted in flag position only; two or more is `bad-args` whatever the
 /// values are (duplicate check before version check).
-fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeError> {
+pub(crate) fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeError> {
     let mut first: Option<Option<&[u8]>> = None;
     let mut count = 0;
     let mut i = 0;
@@ -146,6 +160,9 @@ fn root_slot<'e, 'a>(
     if let Some(v) = a.strip_prefix(STATE_ROOT_PREFIX) {
         return Some((&mut e.state_root, v));
     }
+    if let Some(v) = a.strip_prefix(HOME_PREFIX) {
+        return Some((&mut e.home, v));
+    }
     a.strip_prefix(LOG_ROOT_PREFIX)
         .map(|v| (&mut e.log_root, v))
 }
@@ -157,6 +174,7 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
         ..Envelope::default()
     };
     let (mut ctx, mut width, mut ext) = (None::<()>, None::<u16>, 0usize);
+    let (mut pwd, mut colorterm) = (None::<Option<Vec<u8>>>, None::<bool>);
     let mut i = 0;
     while i < args.len() {
         let a = args[i];
@@ -206,6 +224,12 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
             b"--duration-ms" => set_once(&mut e.duration_ms, num(v, "duration")?)?,
             b"--jobs" => set_once(&mut e.jobs, num(v, "jobs")?)?,
             b"--seq" => set_once(&mut e.seq, num(v, "seq")?)?,
+            b"--shell" => {
+                let sh = Shell::parse(v).ok_or(EnvelopeError::BadArgs("shell"))?;
+                set_once(&mut e.shell, sh)?;
+            }
+            b"--pwd" => set_once(&mut pwd, pwd_or_unknown(v))?,
+            b"--colorterm" => set_once(&mut colorterm, v == b"truecolor" || v == b"24bit")?,
             b"--pipestatus" => {
                 let items: Vec<u8> = v
                     .split(|&b| b == b',')
@@ -257,12 +281,16 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
     }
     ctx.ok_or(EnvelopeError::BadArgs("ctx missing"))?;
     e.width = width.ok_or(EnvelopeError::BadArgs("width missing"))?;
+    e.pwd = pwd.flatten();
+    e.truecolor = colorterm.unwrap_or(false);
     Ok(e)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::vec;
 
     fn base_with_width(w: &'static str) -> Vec<&'static [u8]> {
         vec![b"--ctx", b"1", b"--record", b"B1", b"--width", w.as_bytes()]
@@ -396,6 +424,84 @@ mod tests {
     fn width_non_numeric_is_unknown_not_bad_args() {
         let e = parse(&base_with_width("abc")).unwrap();
         assert_eq!(e.width, 0);
+    }
+
+    // 이것을 실패시키는 것: 새 값 플래그를 is_value_flag에 넣지 않는 것(값 자리의 `--record`가 협상으로 세어짐).
+    #[test]
+    fn record_after_new_value_flags_is_a_value() {
+        for flag in ["--shell", "--pwd", "--colorterm"] {
+            let a = ["--ctx", "1", "--width", "80", flag, "--record", "B1"];
+            assert_eq!(
+                parse_strs(&a),
+                Err(EnvelopeError::NoSupportedRecordVersion),
+                "{flag}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: 셸 이름 검사를 빼는 것, 중복을 받는 것, `--shell` 없는 봉투를 거부하는 것(옛 hook).
+    #[test]
+    fn shell_field() {
+        assert_eq!(with(&["--shell", "zsh"]).unwrap().shell, Some(Shell::Zsh));
+        assert_eq!(with(&[]).unwrap().shell, None);
+        assert!(matches!(
+            with(&["--shell", "sh"]),
+            Err(EnvelopeError::BadArgs(_))
+        ));
+        assert!(matches!(
+            with(&["--shell", "zsh", "--shell", "zsh"]),
+            Err(EnvelopeError::BadArgs(_))
+        ));
+    }
+
+    // 이것을 실패시키는 것: 상대 경로·빈 값·너무 긴 값을 받는 것, 그것을 bad-args로 만드는 것, 중복을 받는 것.
+    #[test]
+    fn pwd_is_display_only_and_unknown_when_odd() {
+        assert_eq!(
+            with(&["--pwd", "/a b/$(x)"]).unwrap().pwd,
+            Some(b"/a b/$(x)".to_vec())
+        );
+        for odd in ["", "rel/x", "~/x"] {
+            assert_eq!(with(&["--pwd", odd]).unwrap().pwd, None, "{odd:?}");
+        }
+        let pwd = |v: &str| {
+            let mut a: Vec<&str> = BASE.to_vec();
+            a.extend(["--pwd", v]);
+            parse_strs(&a).unwrap().pwd
+        };
+        assert_eq!(pwd(&format!("/{}", "a".repeat(PATH_BYTES_MAX))), None);
+        assert!(pwd(&format!("/{}", "a".repeat(PATH_BYTES_MAX - 1))).is_some());
+        assert!(matches!(
+            with(&["--pwd", "/a", "--pwd", "/b"]),
+            Err(EnvelopeError::BadArgs(_))
+        ));
+    }
+
+    // 이것을 실패시키는 것: truecolor·24bit 말고 다른 값을 truecolor로 받는 것, 없는 경우를 truecolor로 두는 것.
+    #[test]
+    fn colorterm_field() {
+        assert!(with(&["--colorterm", "truecolor"]).unwrap().truecolor);
+        assert!(with(&["--colorterm", "24bit"]).unwrap().truecolor);
+        assert!(!with(&["--colorterm", "TrueColor"]).unwrap().truecolor);
+        assert!(!with(&["--colorterm", ""]).unwrap().truecolor);
+        assert!(!with(&[]).unwrap().truecolor);
+    }
+
+    // 이것을 실패시키는 것: `--home=`을 상대 경로로 받는 것, 중복을 받는 것.
+    #[test]
+    fn home_is_pinned_absolute() {
+        assert_eq!(
+            with(&["--home=/Users/u"]).unwrap().home,
+            Some(b"/Users/u".to_vec())
+        );
+        assert!(matches!(
+            with(&["--home=u"]),
+            Err(EnvelopeError::BadArgs(_))
+        ));
+        assert!(matches!(
+            with(&["--home=/a", "--home=/b"]),
+            Err(EnvelopeError::BadArgs(_))
+        ));
     }
 
     #[test]
