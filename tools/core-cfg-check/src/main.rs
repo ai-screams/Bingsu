@@ -1179,7 +1179,7 @@ fn main() -> ExitCode {
         None => Vec::new(),
     };
     let library = args;
-    if library.is_empty() && !binary {
+    if library.is_empty() {
         eprintln!("core-cfg-check: no files");
         return ExitCode::FAILURE;
     }
