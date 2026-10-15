@@ -13,6 +13,8 @@ repository.workspace = true
 # appear here with the same value (scripts/check-core-purity.sh checks it).
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# Also #![forbid(unsafe_code)] in lib.rs; both are checked by the purity gate.
+unsafe_code = "forbid"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
@@ -22,6 +24,8 @@ multiple_unsafe_ops_per_block = "deny"
 disallowed_methods = "forbid"
 disallowed_types = "forbid"
 disallowed_macros = "forbid"
+# A function's address cast to a number differs from run to run (ASLR).
+fn_to_numeric_cast_any = "forbid"
 
 [dependencies]
 # Pure Rust math so native and wasm32 give the same bits (spec section 1,

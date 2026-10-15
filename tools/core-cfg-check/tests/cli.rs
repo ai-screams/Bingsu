@@ -575,3 +575,163 @@ fn library_takes_no_string_from_outside() {
     }
     passes("pub const VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n");
 }
+
+/// Runs the checker on `source` saved as a crate root (`lib.rs`).
+fn run_root(source: &str) -> (bool, String) {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("core-cfg-check-{}-root{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lib.rs");
+    std::fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&path)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+// 이것을 실패시키는 것: crate root의 `#![no_std]`·`#![forbid(unsafe_code)]`를 글자로만 찾는 것(주석·문자열·모듈 안 속성이 통과),
+// 둘 가운데 하나를 보지 않는 것, crate root가 아닌 파일에 요구하는 것.
+#[test]
+fn crate_root_keeps_no_std_and_forbid_unsafe() {
+    let both = "#![no_std]\n#![forbid(unsafe_code)]\n";
+    for (bad, why) in [
+        (
+            "/*\n#![no_std]\n*/\n#![forbid(unsafe_code)]\n",
+            "lacks #![no_std]",
+        ),
+        (
+            "#![forbid(unsafe_code)]\npub const S: &str = r\"\n#![no_std]\n\";\n",
+            "lacks #![no_std]",
+        ),
+        (
+            "#![forbid(unsafe_code)]\nmod m {\n    #![no_std]\n}\n",
+            "lacks #![no_std]",
+        ),
+        ("#![no_std]\n", "lacks #![forbid(unsafe_code)]"),
+        (
+            "#![no_std]\n// #![forbid(unsafe_code)]\n",
+            "lacks #![forbid(unsafe_code)]",
+        ),
+        (
+            "#![no_std]\n#![forbid(unused)]\n",
+            "lacks #![forbid(unsafe_code)]",
+        ),
+        (
+            "#![no_std]\n#![deny(unsafe_code)]\n",
+            "lacks #![forbid(unsafe_code)]",
+        ),
+    ] {
+        let (ok, err) = run_root(bad);
+        assert!(!ok && err.contains(why), "{bad}: {err}");
+    }
+    let (ok, err) = run_root(both);
+    assert!(ok && err.is_empty(), "{err}");
+    passes("pub fn f() {}\n");
+}
+
+// 이것을 실패시키는 것: 함수 주소를 값으로 바꾸는 길(같은 파일 함수의 정수 cast, 함수 포인터 타입)과 매크로 본문 안의
+// 주소 API(into_raw, as_ptr_range, UnsafeCell, *const, ptr::, fn() 타입)를 놓치는 것, 시험 항목 안의 매크로까지 막는 것,
+// 함수 이름이 아닌 값의 정수 cast를 막는 것.
+#[test]
+fn function_and_macro_addresses_fail() {
+    for (bad, why) in [
+        (
+            "fn marker() {}\npub fn address() -> usize {\n    marker as usize\n}\n",
+            "casting function marker",
+        ),
+        (
+            "fn marker() {}\npub fn address() -> usize {\n    (marker) as usize\n}\n",
+            "casting function marker",
+        ),
+        (
+            "fn marker() {}\npub fn s() -> alloc::string::String {\n    alloc::format!(\"{:x}\", marker as usize)\n}\n",
+            "casting function marker",
+        ),
+        (
+            "pub fn f(v: &[u8]) -> usize {\n    v.as_ptr_range().start as usize\n}\n",
+            "as_ptr_range exposes",
+        ),
+        (
+            "pub fn f(v: &[u8]) -> alloc::string::String {\n    alloc::format!(\"{:?}\", v.as_ptr_range())\n}\n",
+            "as_ptr_range exposes",
+        ),
+        (
+            "pub fn f(v: &mut [u8]) -> usize {\n    v.as_mut_ptr_range().start as usize\n}\n",
+            "as_mut_ptr_range exposes",
+        ),
+        (
+            "fn fn_address() -> usize {\n    0\n}\npub fn f() -> usize {\n    fn_address as fn() -> usize as usize\n}\n",
+            "function pointer type",
+        ),
+        (
+            "pub fn f() -> alloc::string::String {\n    let f: fn() -> usize = || 0;\n    alloc::format!(\"{f:?}\")\n}\n",
+            "function pointer type",
+        ),
+        (
+            "pub fn f(b: alloc::boxed::Box<u8>) -> alloc::string::String {\n    alloc::format!(\"{}\", alloc::boxed::Box::into_raw(b) as usize)\n}\n",
+            "into_raw exposes",
+        ),
+        (
+            "pub fn f() -> usize {\n    core::cell::UnsafeCell::new(0u8).get() as usize\n}\n",
+            "UnsafeCell exposes",
+        ),
+        (
+            "pub fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", v as *const u8 as usize)\n}\n",
+            "raw pointer type",
+        ),
+        (
+            "pub fn f(v: &mut u8) -> alloc::string::String {\n    alloc::format!(\"{}\", v as *mut u8 as usize)\n}\n",
+            "raw pointer type",
+        ),
+        (
+            "pub fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", core::ptr::from_ref(v).addr())\n}\n",
+            "core::ptr other than ptr::eq",
+        ),
+        ("m!(use core::ptr);\n", "core::ptr other than ptr::eq"),
+        (
+            "pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", ptr::null::<u8>())\n}\n",
+            "core::ptr other than ptr::eq",
+        ),
+        (
+            "pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", (|| 0) as fn() -> u8)\n}\n",
+            "function pointer type",
+        ),
+    ] {
+        fails_with(bad, why);
+    }
+    passes(
+        "fn marker() -> u8 {\n    1\n}\npub fn f(a: &u8, b: &u8, n: u8, ptr: u8) -> alloc::string::String {\n    alloc::format!(\"{} {} {} {}\", core::ptr::eq(a, b), n as usize, ptr, marker())\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = alloc::format!(\"{:?}\", [1u8].as_ptr_range());\n    }\n}\n",
+    );
+}
+
+// 이것을 실패시키는 것: atomic이나 static 없이 호출 사이 상태를 두는 이름(forget, ManuallyDrop, Arc, strong_count, weak_count)을
+// 놓치는 것, 주석 속 낱말을 막는 것.
+#[test]
+fn hidden_state_fails() {
+    for (bad, name) in [
+        (
+            "pub fn f() {\n    core::mem::forget(alloc::boxed::Box::new(1u8));\n}\n",
+            "forget",
+        ),
+        (
+            "pub fn f() -> core::mem::ManuallyDrop<u8> {\n    core::mem::ManuallyDrop::new(1)\n}\n",
+            "ManuallyDrop",
+        ),
+        ("use alloc::sync::Arc;\n", "Arc"),
+        (
+            "pub fn f(r: &alloc::rc::Rc<u8>) -> usize {\n    alloc::rc::Rc::strong_count(r)\n}\n",
+            "strong_count",
+        ),
+        (
+            "pub fn f(r: &alloc::rc::Rc<u8>) -> usize {\n    alloc::rc::Rc::weak_count(r)\n}\n",
+            "weak_count",
+        ),
+    ] {
+        fails_with(bad, &format!("{name} keeps state between calls"));
+    }
+    passes("/// Starts a new call: forget earlier records.\npub fn f() {}\n");
+}

@@ -5,8 +5,11 @@ Runs `cargo clippy --message-format=json` on bingsu-core and fails if clippy
 exits non-zero or if any compiler message has level warning or error. The
 exit code alone is not enough: `--cap-lints warn` (from RUSTFLAGS or a cargo
 config) turns the forbid and deny lints into warnings and clippy then exits
-0, but the diagnostics are still emitted. (`--cap-lints allow` emits nothing;
-the purity canary catches that as dead rules.)
+0, but the diagnostics are still emitted. (`--cap-lints allow` emits nothing.
+From the environment it never gets here: check-core-purity.sh unsets
+RUSTFLAGS and the wrappers before any cargo run, and the policy phase
+refuses .cargo, toolchain files and manifest rustflags. The purity canary,
+a separate crate, would not see a flag aimed at bingsu-core alone.)
 
 clippy reads the rules from crates/bingsu-core (CLIPPY_CONF_DIR set here, not
 inherited). Each run uses a fresh, temporary CARGO_TARGET_DIR: cargo replays

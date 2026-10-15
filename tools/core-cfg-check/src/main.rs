@@ -17,8 +17,8 @@
 //!   - an identifier `cfg_attr` anywhere;
 //!   - an identifier `include` anywhere, not only before `!`: a renaming
 //!     `use core::include as inc;` or a macro argument `m!(include)` still
-//!     names it (include_str and include_bytes are different identifiers and
-//!     stay allowed);
+//!     names it (include_str and include_bytes are different identifiers,
+//!     handled by the format-source rule below);
 //!   - an identifier `macro_rules` anywhere: bingsu-core uses no declarative
 //!     macros, and without them no token substitution can build `#[path]`,
 //!     `include!` or a cfg attribute out of a macro argument;
@@ -35,14 +35,19 @@
 //!   - the identifiers `extern crate std` in a row: bingsu-core is `no_std`,
 //!     and this is the one way to bring std back;
 //!   - an item `static` anywhere (core keeps no state between calls; with no
-//!     static there is nowhere to keep it), and an identifier `atomic` or
-//!     one starting with `Atomic`;
+//!     static there is nowhere to keep it), an identifier `atomic` or one
+//!     starting with `Atomic`, and an identifier in HIDDEN_STATE (`forget`
+//!     and `ManuallyDrop` leak allocations, `Arc` counts are atomics);
 //!   - outside `#[cfg(test)]` items, anything that turns an address into a
-//!     value (a leaked allocation's address would make the output depend on
-//!     the allocator): a raw pointer type, a call or path named in
-//!     ADDRESS_APIS, and a string that formats a pointer (a placeholder whose
-//!     type is `p`, with any fill, alignment, flags, width or precision:
-//!     `{:p}`, `{v:#p}`, `{:>20p}`, `{:}>20p}`);
+//!     value (a leaked allocation's or a function's address would make the
+//!     output depend on the allocator or on ASLR): a raw pointer type, a
+//!     function pointer type, a cast of a function of the same file (`f as
+//!     usize`; clippy's fn_to_numeric_cast_any covers the rest), a name in
+//!     ADDRESS_APIS, `core::ptr` other than `ptr::eq`,
+//!     and a string that formats a pointer (a placeholder whose type is `p`,
+//!     with any fill, alignment, flags, width or precision: `{:p}`, `{v:#p}`,
+//!     `{:>20p}`, `{:}>20p}`). Macro bodies, which syn does not parse, get
+//!     the same checks on their tokens;
 //!   - an identifier `concat` or `stringify` anywhere except right after `.`
 //!     (the slice method `.concat()`): both macros build a format string
 //!     out of pieces, so no single literal shows the placeholder;
@@ -51,7 +56,10 @@
 //!     `env` other than in `const VERSION: &str = env!("CARGO_PKG_VERSION")`:
 //!     each brings in a string from outside the source, which could be a
 //!     format string with a pointer placeholder. Test targets read shared
-//!     tables with include_str and never reach the prompt.
+//!     tables with include_str and never reach the prompt;
+//!   - in a library file named `lib.rs` (the crate root), a missing inner
+//!     attribute `#![no_std]` or `#![forbid(unsafe_code)]`, read by the
+//!     parser so a commented-out or quoted copy does not count.
 //!
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
@@ -102,6 +110,16 @@ fn is_ident(token: Option<&TokenTree>, name: &str) -> bool {
     matches!(token, Some(TokenTree::Ident(ident)) if unraw(ident) == name)
 }
 
+/// Names that keep state between calls without an atomic or a static:
+/// leaked allocations stay in the allocator, `Arc` counts are atomics.
+const HIDDEN_STATE: [&str; 5] = [
+    "forget",
+    "ManuallyDrop",
+    "Arc",
+    "strong_count",
+    "weak_count",
+];
+
 /// Walks every token (into groups) and counts `cfg` identifiers.
 fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding>) {
     let tokens: Vec<TokenTree> = stream.into_iter().collect();
@@ -136,6 +154,12 @@ fn scan_tokens(stream: TokenStream, cfg_count: &mut usize, out: &mut Vec<Finding
                     out.push(Finding {
                         line: line_of(ident.span()),
                         reason: "atomics keep state between calls".to_owned(),
+                    });
+                }
+                if HIDDEN_STATE.contains(&name.as_str()) {
+                    out.push(Finding {
+                        line: line_of(ident.span()),
+                        reason: format!("{name} keeps state between calls"),
                     });
                 }
                 if name == "cfg" {
@@ -214,7 +238,7 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
 }
 
 /// Names whose call or path exposes an address or leaks an allocation.
-const ADDRESS_APIS: [&str; 12] = [
+const ADDRESS_APIS: [&str; 15] = [
     "into_raw",
     "into_raw_parts",
     "leak",
@@ -227,7 +251,70 @@ const ADDRESS_APIS: [&str; 12] = [
     "addr_of_mut",
     "NonNull",
     "Pointer",
+    "as_ptr_range",
+    "as_mut_ptr_range",
+    "UnsafeCell",
 ];
+
+/// Names of every function and method defined in the file.
+struct FnNames(Vec<String>);
+
+impl<'ast> Visit<'ast> for FnNames {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        self.0.push(unraw(&f.sig.ident));
+        syn::visit::visit_item_fn(self, f);
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        self.0.push(unraw(&f.sig.ident));
+        syn::visit::visit_impl_item_fn(self, f);
+    }
+}
+
+/// The address checks on tokens, for macro bodies: names in ADDRESS_APIS,
+/// `*const`/`*mut`, a `fn(` type, `ptr` as a path segment other than
+/// `ptr::eq`, `name as` for a function of the file, and string literals
+/// that format a pointer.
+fn macro_addresses(stream: TokenStream, fns: &[String], out: &mut Vec<Finding>) {
+    let tokens: Vec<TokenTree> = stream.into_iter().collect();
+    for (i, token) in tokens.iter().enumerate() {
+        let reason = match token {
+            TokenTree::Group(group) => {
+                macro_addresses(group.stream(), fns, out);
+                None
+            }
+            TokenTree::Literal(lit) => {
+                matches!(syn::Lit::new(lit.clone()), syn::Lit::Str(s) if formats_pointer(&s.value()))
+                    .then(|| "{:p} formats an address".to_owned())
+            }
+            TokenTree::Punct(p) if p.as_char() == '*' => (is_ident(tokens.get(i + 1), "const")
+                || is_ident(tokens.get(i + 1), "mut"))
+            .then(|| "raw pointer type exposes an address".to_owned()),
+            TokenTree::Punct(_) => None,
+            TokenTree::Ident(ident) => {
+                let name = unraw(ident);
+                let in_path = (i >= 1 && is_punct(tokens.get(i - 1), ':'))
+                    || is_punct(tokens.get(i + 1), ':');
+                if ADDRESS_APIS.contains(&name.as_str()) {
+                    Some(format!("{name} exposes an address"))
+                } else if name == "fn" && matches!(tokens.get(i + 1), Some(TokenTree::Group(_))) {
+                    Some("function pointer type exposes an address".to_owned())
+                } else if name == "ptr" && in_path && !is_ident(tokens.get(i + 3), "eq") {
+                    Some("core::ptr other than ptr::eq exposes an address".to_owned())
+                } else if fns.contains(&name) && is_ident(tokens.get(i + 1), "as") {
+                    Some(format!("casting function {name} exposes its address"))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(reason) = reason {
+            out.push(Finding {
+                line: line_of(token.span()),
+                reason,
+            });
+        }
+    }
+}
 
 /// True if `text`, read as a format string, has a placeholder whose type is
 /// `p`, with any fill, alignment, sign, `#`, `0`, width or precision
@@ -338,19 +425,9 @@ fn spec_type(s: &[char]) -> String {
     rest.trim_end().to_owned()
 }
 
-/// True if any string literal in `stream` (into groups) formats a pointer.
-fn tokens_format_pointer(stream: TokenStream) -> bool {
-    stream.into_iter().any(|token| match token {
-        TokenTree::Group(group) => tokens_format_pointer(group.stream()),
-        TokenTree::Literal(lit) => {
-            matches!(syn::Lit::new(lit), syn::Lit::Str(s) if formats_pointer(&s.value()))
-        }
-        TokenTree::Ident(_) | TokenTree::Punct(_) => false,
-    })
-}
-
 /// Address-to-value checks, outside `#[cfg(test)]` items.
 struct Addresses<'a> {
+    fns: Vec<String>,
     out: &'a mut Vec<Finding>,
 }
 
@@ -372,6 +449,29 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
         if !is_test_item(attrs) {
             syn::visit::visit_item(self, item);
         }
+    }
+    fn visit_type_fn_ptr(&mut self, t: &'ast syn::TypeFnPtr) {
+        self.out.push(Finding {
+            line: line_of(t.fn_token.span),
+            reason: "function pointer type exposes an address".to_owned(),
+        });
+        syn::visit::visit_type_fn_ptr(self, t);
+    }
+    fn visit_expr_cast(&mut self, c: &'ast syn::ExprCast) {
+        let mut inner = &*c.expr;
+        while let syn::Expr::Paren(p) = inner {
+            inner = &p.expr;
+        }
+        if let syn::Expr::Path(e) = inner
+            && let Some(f) = e.path.get_ident()
+            && self.fns.contains(&unraw(f))
+        {
+            self.out.push(Finding {
+                line: line_of(f.span()),
+                reason: format!("casting function {} exposes its address", unraw(f)),
+            });
+        }
+        syn::visit::visit_expr_cast(self, c);
     }
     fn visit_type_ptr(&mut self, t: &'ast syn::TypePtr) {
         self.out.push(Finding {
@@ -422,13 +522,8 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
         }
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
-        // Format strings sit in macro tokens, which syn does not parse.
-        if tokens_format_pointer(m.tokens.clone()) {
-            self.out.push(Finding {
-                line: line_of(syn::spanned::Spanned::span(&m.path)),
-                reason: "{:p} formats an address".to_owned(),
-            });
-        }
+        // Macro bodies are tokens, which syn does not parse.
+        macro_addresses(m.tokens.clone(), &self.fns, self.out);
         syn::visit::visit_macro(self, m);
     }
 }
@@ -476,7 +571,28 @@ impl<'ast> Visit<'ast> for VersionEnv {
     }
 }
 
-fn check(source: &str, library: bool) -> Vec<Finding> {
+/// The crate root must keep `#![no_std]` and `#![forbid(unsafe_code)]` as
+/// real inner attributes.
+fn check_crate_root(attrs: &[syn::Attribute], out: &mut Vec<Finding>) {
+    // syn::File::attrs holds the crate's inner attributes only.
+    let no_std = attrs
+        .iter()
+        .any(|a| matches!(&a.meta, syn::Meta::Path(p) if p.is_ident("no_std")));
+    let forbid = attrs.iter().any(|a| {
+        matches!(&a.meta, syn::Meta::List(l)
+            if l.path.is_ident("forbid") && l.tokens.to_string() == "unsafe_code")
+    });
+    for (ok, what) in [(no_std, "#![no_std]"), (forbid, "#![forbid(unsafe_code)]")] {
+        if !ok {
+            out.push(Finding {
+                line: 1,
+                reason: format!("crate root lacks {what}"),
+            });
+        }
+    }
+}
+
+fn check(source: &str, library: bool, crate_root: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     // syn::parse_file and the proc-macro2 lexer each drop a leading BOM on
     // their own; remove it here too, so the shebang policy sees the first
@@ -542,7 +658,16 @@ fn check(source: &str, library: bool) -> Vec<Finding> {
     };
     attrs.visit_file(&file);
     let allowed_cfg = attrs.allowed_cfg;
-    Addresses { out: &mut out }.visit_file(&file);
+    let mut fns = FnNames(Vec::new());
+    fns.visit_file(&file);
+    Addresses {
+        fns: fns.0,
+        out: &mut out,
+    }
+    .visit_file(&file);
+    if crate_root {
+        check_crate_root(&file.attrs, &mut out);
+    }
     if cfg_count != allowed_cfg {
         out.push(Finding {
             line: 0,
@@ -578,7 +703,9 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        for finding in check(&source, is_library) {
+        let crate_root = is_library
+            && std::path::Path::new(path).file_name() == Some(std::ffi::OsStr::new("lib.rs"));
+        for finding in check(&source, is_library, crate_root) {
             eprintln!("{path}:{}: {}", finding.line, finding.reason);
             failed = true;
         }

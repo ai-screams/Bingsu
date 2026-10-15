@@ -13,8 +13,10 @@
 # (canary checker with a pinned path count).
 # The CLI's environment rules (crates/bingsu/clippy.toml) are checked the same
 # way with their own canary, and the CLI prompt-path modules must forbid them
-# (check_cli_prompt_forbid.py). bingsu-core is no_std and its graph is pinned
-# (check_core_no_std.py).
+# (check_cli_prompt_forbid.py). bingsu-core is no_std (core-cfg-check reads
+# the crate attributes, and core builds for wasm32v1-none, which has no std)
+# and its graph is pinned (check_core_no_std.py, with its rules tested on
+# synthetic metadata). The toolchain must be a stable release.
 # bingsu-core uses no conditional compilation other than #[cfg(test)], so no
 # code can drop out of the lint run through cfg.
 set -euo pipefail
@@ -26,9 +28,12 @@ cd "$(dirname "$0")/.."
 # and unsetting it here keeps any other run from inheriting it. A target
 # directory from the environment could hold a stale checker binary. A rustc
 # wrapper or a replaced rustc could add --cap-lints allow for bingsu-core
-# alone, which the canaries (separate crates) would not notice. Only the
-# environment is covered here: a wrapper or [env] in $CARGO_HOME/config.toml
-# belongs to the machine running the gate and is out of scope. The checker
+# alone, which the canaries (separate crates) would not notice. This unset
+# covers the environment; the repository's own ways to add flags (.cargo,
+# a toolchain file, cargo-features and profile rustflags in a manifest) are
+# refused by the policy phase below. A wrapper or [env] in
+# $CARGO_HOME/config.toml belongs to the machine running the gate and is out
+# of scope. The checker
 # binary is built in the shared target/ and could come from a cache poisoned
 # by an earlier run; whoever controlled that run's environment could edit this
 # script as well, so that is an accepted residual risk.
@@ -37,16 +42,30 @@ unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CLIPPY_CONF_DIR \
   RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTC CARGO_BUILD_RUSTC \
   CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER \
   RUSTC_BOOTSTRAP
-# Policy first: no cargo call may run before .cargo directories and stray
-# clippy configs are ruled out.
+# Policy first: no cargo call may run before .cargo directories, toolchain
+# files, manifest rustflags and stray clippy configs are ruled out.
 python3 scripts/check_core_cfg.py --phase policy
+# A stable rustc: nightly and beta take cargo-features and -Z flags.
+release=$(rustc -vV | sed -n 's/^release: //p')
+if ! [[ "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "purity gate FAILED: rustc release '$release' is not a stable release" >&2
+  exit 1
+fi
+# The compiler's own proof that core needs no std: wasm32v1-none ships only
+# core and alloc, so any std path (or a flag that adds the std crate) fails
+# to compile there. wasm32-unknown-unknown is not enough: it has a std whose
+# I/O returns errors at run time.
+cargo build --quiet -p bingsu-core --target wasm32v1-none
 python3 - <<'EOF'
 import sys, tomllib
 core = tomllib.load(open("crates/bingsu-core/Cargo.toml", "rb")).get("lints", {})
 lints = core.get("clippy", {})
-bad = [l for l in ("disallowed_methods", "disallowed_types", "disallowed_macros") if lints.get(l) != "forbid"]
+bad = [l for l in ("disallowed_methods", "disallowed_types", "disallowed_macros", "fn_to_numeric_cast_any") if lints.get(l) != "forbid"]
 if bad:
     print(f"purity gate FAILED: bingsu-core Cargo.toml must set [lints.clippy] {', '.join(bad)} = \"forbid\"", file=sys.stderr)
+    sys.exit(1)
+if core.get("rust", {}).get("unsafe_code") != "forbid":
+    print("purity gate FAILED: bingsu-core Cargo.toml must set [lints.rust] unsafe_code = \"forbid\"", file=sys.stderr)
     sys.exit(1)
 # bingsu-core cannot inherit [workspace.lints] (it sets the purity lints to
 # forbid in its own table), so it carries a copy; the copy must not drift.
@@ -72,6 +91,8 @@ python3 scripts/check_core_cfg.py --phase tokens --checker "$checker"
 # Change these counts together with the clippy.toml lists.
 python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 190
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7
+# The graph rules on synthetic metadata (the real graph is clean), then the graph.
+python3 -B scripts/test_check_core_no_std.py
 python3 scripts/check_core_no_std.py
 # The CLI prompt path forbids the same rules per module (deny elsewhere).
 python3 scripts/check_cli_prompt_forbid.py

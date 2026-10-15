@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""bingsu-core is `no_std` and its graph and the shipped `bingsu` graph are
-pinned (spec section 1, F-05; decisions 2026-10-14).
+"""The graphs of bingsu-core (which is `no_std`) and of the shipped `bingsu`
+are pinned (spec section 1, F-05; decisions 2026-10-14).
 
 `no_std` keeps std's file, environment, process, clock, network and thread
 APIs out of core's own source, but a dependency may still use std and hand
@@ -18,9 +18,13 @@ The shipped `bingsu` package's non-test targets are pinned too (name, kind,
 crate types, source path, required features): one bin, src/main.rs, so a
 second bin or another entry file cannot replace the one the gates read.
 
-Also fails on a crates/bingsu-core/src/lib.rs without a line that is
-exactly `#![no_std]` (core-cfg-check already rejects cfg_attr and
-`extern crate std`), and on a [patch] or [replace] table.
+Also fails on a [patch] or [replace] table. The `#![no_std]` attribute
+itself is checked by core-cfg-check (parsed, so a commented-out copy does
+not count) and by the wasm32v1-none build in check-core-purity.sh.
+
+The decision is the pure function `judge` over the metadata and the root
+manifest; scripts/test_check_core_no_std.py runs it on synthetic metadata,
+one case per rule, in the same purity gate.
 Usage: check_core_no_std.py   (from the repository root)
 """
 import json
@@ -67,64 +71,72 @@ def closure(nodes, root):
     return seen
 
 
-def key_of(p):
+def key_of(p, root):
     if p["source"] is None:
         manifest = pathlib.Path(p["manifest_path"])
         try:
-            where = str(manifest.relative_to(ROOT))
+            where = str(manifest.relative_to(root))
         except ValueError:
             where = str(manifest)
         return (p["name"], p["version"], where)
     return (p["name"], p["version"], p["source"])
 
 
+def manifest_rules(root_manifest):
+    """Rules on the root manifest alone (they hold even when cargo metadata
+    fails, as it does under --locked when [patch] changes the graph)."""
+    if "patch" in root_manifest or "replace" in root_manifest:
+        return ["Cargo.toml: [patch] and [replace] are not allowed"]
+    return []
+
+
+def judge(meta, root_manifest, root):
+    """Every rule broken by `meta` (cargo metadata) and the root manifest."""
+    bad = manifest_rules(root_manifest)
+    pkgs = {p["id"]: p for p in meta["packages"]}
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    for p in pkgs.values():
+        if p["name"] == "bingsu" and p["source"] is None:
+            got = [{"name": t["name"], "kind": t["kind"], "crate_types": t["crate_types"],
+                    "src_path": str(pathlib.Path(t["src_path"]).relative_to(root)),
+                    "required-features": t.get("required-features", [])}
+                   for t in p["targets"] if not set(t["kind"]) & SKIP_KINDS]
+            if got != BINGSU_TARGETS:
+                bad.append(f"bingsu targets {got}, pinned {BINGSU_TARGETS}")
+    for name, pins in PINS.items():
+        roots = [i for i, p in pkgs.items() if p["name"] == name and p["source"] is None]
+        if len(roots) != 1:
+            bad.append(f"{name}: expected one workspace package, got {len(roots)}")
+            continue
+        got = {}
+        for nid in closure(nodes, roots[0]):
+            p = pkgs[nid]
+            kinds = tuple(sorted({k for t in p["targets"] for k in t["kind"]} - SKIP_KINDS))
+            got[key_of(p, root)] = (tuple(sorted(nodes[nid]["features"])), kinds)
+            if p.get("links"):
+                bad.append(f"{name} graph: {p['name']} links native library {p['links']!r}")
+            if "proc-macro" in kinds:
+                bad.append(f"{name} graph: {p['name']} is a proc-macro")
+            if "custom-build" in kinds and (p["name"], p["version"]) not in REVIEWED_BUILD:
+                bad.append(f"{name} graph: build script of {p['name']} {p['version']} is not reviewed")
+        for k in sorted(set(got) | set(pins)):
+            if got.get(k) != pins.get(k):
+                bad.append(f"{name} graph: {k} is {got.get(k)}, pinned {pins.get(k)}")
+    return bad
+
+
 def main():
-    bad = []
-    lib = (ROOT / "crates/bingsu-core/src/lib.rs").read_text().splitlines()
-    if "#![no_std]" not in (line.strip() for line in lib):
-        bad.append("crates/bingsu-core/src/lib.rs: `#![no_std]` (unconditional) is missing")
-    root = tomllib.load(open(ROOT / "Cargo.toml", "rb"))
-    if "patch" in root or "replace" in root:
-        bad.append("Cargo.toml: [patch] and [replace] are not allowed")
+    root_manifest = tomllib.load(open(ROOT / "Cargo.toml", "rb"))
     out = subprocess.run(["cargo", "metadata", "--format-version", "1", "--locked"],
                          capture_output=True, text=True, cwd=ROOT)
     if out.returncode != 0:
-        bad.append(f"cargo metadata failed: {out.stderr.strip()[-300:]}")
+        bad = manifest_rules(root_manifest) + [f"cargo metadata failed: {out.stderr.strip()[-300:]}"]
     else:
-        meta = json.loads(out.stdout)
-        pkgs = {p["id"]: p for p in meta["packages"]}
-        nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-        for p in pkgs.values():
-            if p["name"] == "bingsu" and p["source"] is None:
-                got = [{"name": t["name"], "kind": t["kind"], "crate_types": t["crate_types"],
-                        "src_path": str(pathlib.Path(t["src_path"]).relative_to(ROOT)),
-                        "required-features": t.get("required-features", [])}
-                       for t in p["targets"] if not set(t["kind"]) & SKIP_KINDS]
-                if got != BINGSU_TARGETS:
-                    bad.append(f"bingsu targets {got}, pinned {BINGSU_TARGETS}")
-        for name, pins in PINS.items():
-            roots = [i for i, p in pkgs.items() if p["name"] == name and p["source"] is None]
-            if len(roots) != 1:
-                bad.append(f"{name}: expected one workspace package, got {len(roots)}")
-                continue
-            got = {}
-            for nid in closure(nodes, roots[0]):
-                p = pkgs[nid]
-                kinds = tuple(sorted({k for t in p["targets"] for k in t["kind"]} - SKIP_KINDS))
-                got[key_of(p)] = (tuple(sorted(nodes[nid]["features"])), kinds)
-                if p.get("links"):
-                    bad.append(f"{name} graph: {p['name']} links native library {p['links']!r}")
-                if "proc-macro" in kinds:
-                    bad.append(f"{name} graph: {p['name']} is a proc-macro")
-                if "custom-build" in kinds and (p["name"], p["version"]) not in REVIEWED_BUILD:
-                    bad.append(f"{name} graph: build script of {p['name']} {p['version']} is not reviewed")
-            for k in sorted(set(got) | set(pins)):
-                if got.get(k) != pins.get(k):
-                    bad.append(f"{name} graph: {k} is {got.get(k)}, pinned {pins.get(k)}")
+        bad = judge(json.loads(out.stdout), root_manifest, ROOT)
     if bad:
-        print("core no_std and graph gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
+        print("core graph gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
         return 1
-    print(f"core no_std and graph gate: ok (#![no_std], {len(CORE_GRAPH)} core packages and "
+    print(f"core graph gate: ok ({len(CORE_GRAPH)} core packages and "
           f"{len(BINGSU_GRAPH)} bingsu packages pinned, no [patch])")
     return 0
 

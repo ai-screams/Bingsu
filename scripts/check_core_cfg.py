@@ -26,6 +26,14 @@ anything). It fails on:
     excluded): cargo reads `.cargo/config*` from the working directory up,
     where `[build] rustflags = ["--cap-lints", "warn"]` would turn the forbid
     lints into warnings and `[alias]` could replace a subcommand;
+  - a `rust-toolchain` or `rust-toolchain.toml` file anywhere in the
+    repository: rustup takes the toolchain from it ahead of the default, and
+    a nightly toolchain accepts `cargo-features` that add rustc flags;
+  - a `Cargo.toml` anywhere in the repository with a `cargo-features` key
+    or a `rustflags` key in any `[profile...]` table: profile rustflags
+    reach rustc for one package only (`--extern std` brings std back into
+    a no_std crate, `--cap-lints allow` silences the forbid lints there)
+    and the canaries, separate crates, would not notice;
   - a `.clippy.toml` anywhere in the repository, or a `clippy.toml` other than
     crates/bingsu-core/clippy.toml and crates/bingsu/clippy.toml: a stray
     config can replace the rules clippy applies;
@@ -76,6 +84,34 @@ def check_repo_tree(errors):
             # The exact path, so `Clippy.toml` next to an allowed config fails.
             elif name == "clippy.toml" and path not in CLIPPY_CONFIGS:
                 errors.append(f"clippy config not allowed: {path}")
+            elif name in ("rust-toolchain", "rust-toolchain.toml"):
+                errors.append(f"toolchain file not allowed: {path}")
+            elif name == "cargo.toml" and os.path.isfile(path):
+                check_manifest(path, errors)
+
+
+def profile_rustflags(table, where):
+    """Paths of every `rustflags` key under a [profile...] table."""
+    found = []
+    for key, value in table.items():
+        if key == "rustflags":
+            found.append(where)
+        elif isinstance(value, dict):
+            found.extend(profile_rustflags(value, f"{where}.{key}"))
+    return found
+
+
+def check_manifest(path, errors):
+    try:
+        with open(path, "rb") as f:
+            manifest = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as err:
+        errors.append(f"{path}: unreadable manifest: {err}")
+        return
+    if "cargo-features" in manifest:
+        errors.append(f"{path}: cargo-features is not allowed")
+    for where in profile_rustflags(manifest.get("profile", {}), "profile"):
+        errors.append(f"{path}: rustflags in [{where}] is not allowed")
 
 
 def collect(errors):
