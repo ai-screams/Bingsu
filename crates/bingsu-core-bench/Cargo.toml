@@ -70,3 +70,8 @@ test = false
 name = "render"
 harness = false
 test = false
+
+[[bench]]
+name = "default_theme"
+harness = false
+test = false

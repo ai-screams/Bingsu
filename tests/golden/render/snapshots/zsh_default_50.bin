@@ -1,0 +1,7 @@
+upper: %{[0m%} %{[0;38;5;111m%}~/Works/AiScream/50%% done%{[0m%} 
+left: %{[0;38;5;179m%}3.2s%{[0m%} %{[0;38;5;210m%}✗%{[0m%}
+right: 
+transient_left: %{[0;38;5;210m%}✗%{[0m%}
+transient_right: 
+vi_insert: %{[0;38;5;210m%}✗%{[0m%}
+vi_command: %{[0;38;5;210m%}❮%{[0m%}
