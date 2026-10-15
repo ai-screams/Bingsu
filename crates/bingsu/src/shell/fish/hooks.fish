@@ -86,6 +86,12 @@ function fish_prompt
     # data from being read as a format.
     if _bingsu_frame "$_bingsu_rec"
         set -g _bingsu_rps1 $_bingsu_f[4]
+        # The prompt ran without its system call filter (decision P18): said
+        # once per session, with a constant from init.
+        if test "$_bingsu_f[10]" = @STATUS_SANDBOX@; and not set -q _bingsu_warned_sandbox[1]
+            set -g _bingsu_warned_sandbox 1
+            printf '%s\n' @MSG_NO_SANDBOX@ >&2
+        end
         # Upper line (record change plan 12, R-04): a newline only when it is not empty.
         if test -n "$_bingsu_f[9]"
             printf '%s\n%s' "$_bingsu_f[9]" "$_bingsu_f[3]"
@@ -111,6 +117,8 @@ end
 # environment would make the first prompt send the last command's duration.
 set -g _bingsu_gen $status_generation
 set -g _bingsu_dead ''
+# An exported value came from the environment: it would silence the notice.
+set -qx _bingsu_warned_sandbox; and set -e _bingsu_warned_sandbox
 
 # Last, after every assignment above: a name that came from the environment
 # is an exported global, and set -g keeps that flag, so the raw record and

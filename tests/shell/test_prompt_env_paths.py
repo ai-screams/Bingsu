@@ -66,10 +66,25 @@ def test_prompt_time_path_environment_does_not_change_pinned_root_args(tmp_path,
             assert [a for a in argv if a.startswith(flag)] == [word], (shell, flag, argv)
 
 
+# strace's %network and %process calls other than the root's execve and its
+# exit (exit_group): sockets, signals to other processes, spawning, waiting.
+NETWORK_OR_PROCESS = {
+    "socket", "socketpair", "connect", "bind", "listen", "accept", "accept4", "sendto", "sendmsg",
+    "sendmmsg", "recvfrom", "recvmsg", "recvmmsg", "shutdown", "getsockopt", "setsockopt",
+    "getsockname", "getpeername", "clone", "clone3", "fork", "vfork", "execve", "execveat",
+    "kill", "tkill", "tgkill", "wait4", "waitid", "pidfd_open", "pidfd_send_signal",
+}
 SPAWN_CALL = re.compile(r"^(\d+)\s+(?:clone3?|fork|vfork)\(")
 RETURN = re.compile(r"\)\s+=\s+(\d+)$")
 RESUMED_SPAWN = re.compile(r"^(\d+)\s+<\.\.\. (?:clone3?|fork|vfork) resumed>.*\)\s+=\s+(\d+)$")
 SYSCALL = re.compile(r"^\d+\s+(\w+)\(")
+# The calls the adapter makes itself: rows of crates/bingsu/prompt-syscalls.tsv
+# with both a syscall and a libc name (core-cfg-check --adapter holds the
+# `libc` column to the code; the seccomp filter allows the whole `syscall`
+# column, which adds the allocator's and the kernel's calls).
+TABLE = os.path.join(os.path.dirname(__file__), "..", "..", "crates", "bingsu", "prompt-syscalls.tsv")
+_ROWS = [r.split("\t") for r in open(TABLE).read().splitlines() if r and not r.startswith("#")][1:]
+ADAPTER_CALLS = {r[0] for r in _ROWS if r[0] != "-" and r[1] != "-"}
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 
@@ -154,6 +169,8 @@ def named_paths(line):
     m = SYSCALL.match(line)
     if not m:
         return []
+    if m.group(1) == "write":
+        return []  # traced for the syscall table; its quoted text is the record
     found = QUOTED.findall(line)
     return found[:1] if m.group(1) == "execve" else found
 
@@ -197,16 +214,61 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     f.write_bytes(script + b"\n" + CALL)
     trace = tmp_path / "trace"
     # %desc is left out: read and write buffers are quoted strings too.
-    r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file,%process", "-o", str(trace)]
+    r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file,%process,%network,write", "-o", str(trace)]
                        + SHELL_CMD["bash"] + [str(f)], env=env, capture_output=True, timeout=60)
     assert r.returncode == 0, r.stderr
     # execve names the pinned path (the symlink); its target never shows.
     exe = str(inst.exe)
     pids, scoped = tree(trace.read_text(errors="replace").splitlines(), exe)
     assert pids, "bingsu was not executed"
+    # The front end is single-threaded and starts no process before the
+    # refresh helper exists (P6, spec section 8 design rules): no clone,
+    # clone3, fork or vfork of the root. 이것을 실패시키는 것: prompt 경로에서 스레드나 자식을 만드는 것.
+    assert len(pids) == 1, ("the prompt started a thread or a process", [l for l in scoped if SPAWN_CALL.match(l)][:5])
+    # No network call and no process call at all, beyond its own execve and
+    # exit: the prompt path reaches the system only through write and _exit.
+    # 이것을 실패시키는 것: prompt 경로에서 소켓을 열거나, 신호를 보내거나, 자식을 기다리는 것.
+    stray = [l for l in scoped if (m := SYSCALL.match(l)) and m.group(1) in NETWORK_OR_PROCESS and not is_root(l, exe)]
+    assert stray == [], ("network or process calls", stray[:5])
+    # The traced write, process and network calls of the root are exactly
+    # the adapter's syscall table (its execve aside): nothing more, and no
+    # listed call left unused. 이것을 실패시키는 것: 표에 없는 호출을 하거나 표의 호출을 하지 않는 것.
+    seen = {m.group(1) for l in scoped if (m := SYSCALL.match(l)) and not is_root(l, exe)
+            and m.group(1) in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}}
+    assert seen == ADAPTER_CALLS, ("calls differ from crates/bingsu/prompt-syscalls.tsv", sorted(seen), sorted(ADAPTER_CALLS))
     pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
               (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
     bad = [l for l in scoped if any(not allowed(p, l, exe, pinned) for p in named_paths(l))]
     assert bad == [], ("paths outside the allowlist (a loader or library path of your distribution: "
                        "widen SYSTEM_PATHS and write why; anything else bingsu opened is a defect)", bad[:5])
+
+
+TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}
+
+
+# 이것을 실패시키는 것: 필터 뒤에 표에 없는 호출이 필요한 것(이 환경의 할당자·unwind가 부르는 호출을 표에서 빠뜨림),
+# 정상 프롬프트에서 호출이 EPERM으로 거부되는 것.
+@pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
+@pytest.mark.parametrize("pwd", ["/srv/p", "/" + "a/" * 32767])
+def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
+    """Every call the prompt makes after its seccomp filter is installed
+    (strace -e trace=all, from the PR_SET_SECCOMP line on) is a row of the
+    table, and none is refused: the table is complete for this libc and
+    allocator. LD_PRELOAD in the environment (an allocator under test) is
+    passed through."""
+    exe = str(Install(tmp_path).exe)
+    trace = tmp_path / "trace"
+    args = [exe, "prompt", "--ctx", "1", "--record", "B1", "--width", "100", "--runtime-root=1:2:/r",
+            "--shell", "bash", "--pwd", pwd, "--status", "1"]
+    env = {"PATH": os.environ["PATH"], **({"LD_PRELOAD": os.environ["LD_PRELOAD"]} if "LD_PRELOAD" in os.environ else {})}
+    r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=all", "-o", str(trace)] + args,
+                       env=env, capture_output=True, timeout=60)
+    assert r.returncode == 0 and r.stdout.endswith(b"\x1e") and b"degraded:sandbox" not in r.stdout, r
+    lines = trace.read_text(errors="replace").splitlines()
+    at = next(i for i, l in enumerate(lines) if "PR_SET_SECCOMP" in l)
+    after = [l for l in lines[at + 1:] if SYSCALL.match(l)]
+    names = {SYSCALL.match(l).group(1) for l in after}
+    assert names <= TABLE_SYSCALLS, sorted(names - TABLE_SYSCALLS)
+    refused = [l for l in after if "= -1 EPERM" in l]
+    assert refused == [], refused[:5]

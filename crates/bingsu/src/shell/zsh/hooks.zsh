@@ -50,11 +50,11 @@ zmodload zsh/datetime 2>/dev/null || :
 # first registration only (below): a re-init keeps the late-hook warning
 # quiet once it has been shown (spec section 5, same order stays silent).
 typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead=
-typeset -g _bingsu_warned_last
+typeset -g _bingsu_warned_last _bingsu_warned_sandbox
 typeset -ga _bingsu_p
 # typeset keeps an inherited export flag; without +x the rendered prompt
 # and the timings would reach the environment of every child process.
-typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead
+typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_warned_sandbox
 
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost (emulate itself sets $? to
@@ -94,7 +94,11 @@ _bingsu_install() {
   fi
   _bingsu_t0= _bingsu_t1=
   _bingsu_call "${ctx[@]}"
-  if (( o_pct )) && _bingsu_frame "$_bingsu_rec"; then
+  # The record is checked whatever the options are, so the status notices
+  # below see it; only installing it on screen depends on PROMPT_PERCENT.
+  local framed=0
+  _bingsu_frame "$_bingsu_rec" && framed=1
+  if (( framed && o_pct )); then
     ps1=$_bingsu_f[3] rps1=$_bingsu_f[4]
     # Upper line (record change plan 12, R-04): joined by a constant newline, only
     # when it is not empty, before any escaping so the escaping covers it.
@@ -113,6 +117,12 @@ _bingsu_install() {
     # a constant instead (option (b), question Q4).
     PROMPT='❯ ' RPROMPT=
   fi
+  # The prompt ran without its system call filter (decision P18): said once
+  # per session, with a constant from init.
+  if [[ ${_bingsu_f[10]-} == @STATUS_SANDBOX@ && -z $_bingsu_warned_sandbox ]]; then
+    _bingsu_warned_sandbox=1
+    print -u2 -r -- @MSG_NO_SANDBOX@
+  fi
   if [[ ${precmd_functions[-1]} != _bingsu_install && -z $_bingsu_warned_last ]]; then
     _bingsu_warned_last=1
     print -u2 -r -- @MSG_LATE_HOOK_ZSH@
@@ -127,7 +137,7 @@ _bingsu_install() {
   emulate -L zsh
   if (( ! ${precmd_functions[(Ie)_bingsu_install]:-0} )); then
     # First registration: an inherited value would silence the warning.
-    _bingsu_warned_last=
+    _bingsu_warned_last= _bingsu_warned_sandbox=
     precmd_functions=(_bingsu_save ${precmd_functions:#_bingsu_save} _bingsu_install)
   fi
   if (( ! ${preexec_functions[(Ie)_bingsu_preexec]:-0} )); then

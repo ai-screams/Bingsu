@@ -75,3 +75,8 @@ test = false
 name = "default_theme"
 harness = false
 test = false
+
+[[bench]]
+name = "pwd64"
+harness = false
+test = false

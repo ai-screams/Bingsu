@@ -16,6 +16,7 @@ pub enum MsgId {
     BashTooOld,
     LateHookZsh,
     LateHookBash,
+    NoSandbox,
 }
 
 #[cfg_attr(
@@ -25,7 +26,7 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 10] = [
+pub const ALL: [MsgId; 11] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
@@ -36,9 +37,10 @@ pub const ALL: [MsgId; 10] = [
     MsgId::BashTooOld,
     MsgId::LateHookZsh,
     MsgId::LateHookBash,
+    MsgId::NoSandbox,
 ];
 
-const EN: [(MsgId, &str); 10] = [
+const EN: [(MsgId, &str); 11] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -78,6 +80,10 @@ const EN: [(MsgId, &str); 10] = [
     (
         MsgId::LateHookBash,
         "bingsu: another prompt hook runs after bingsu; put the bingsu init line last in your .bashrc",
+    ),
+    (
+        MsgId::NoSandbox,
+        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor",
     ),
 ];
 

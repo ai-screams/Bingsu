@@ -171,6 +171,12 @@ _bingsu_install() {
   fi
   # Exactly one bingsu prefix while PS0 expands, none otherwise.
   if (( exp0 )); then PS0=$_bingsu_ps0$_bingsu_ps0_orig; else PS0=$_bingsu_ps0_orig; fi
+  # The prompt ran without its system call filter (decision P18): said once
+  # per session, with a constant from init.
+  if [[ ${_bingsu_f[9]-} == @STATUS_SANDBOX@ && -z ${_bingsu_warned_sandbox-} ]]; then
+    _bingsu_warned_sandbox=1
+    printf '%s\n' @MSG_NO_SANDBOX@ >&2
+  fi
   if [[ ${PROMPT_COMMAND[-1]} != _bingsu_install && -z ${_bingsu_warned_last-} ]]; then
     _bingsu_warned_last=1
     printf '%s\n' @MSG_LATE_HOOK_BASH@ >&2
@@ -180,7 +186,7 @@ _bingsu_install() {
   # exported copy would be expanded by a child bash without bingsu (data run
   # as code with promptvars on, a PS0 prefix that fails under set -u). The
   # globals assigned here would be exported by `set -a`.
-  export -n PS1 PS0 _bingsu_rec _bingsu_seq _bingsu_ps1 _bingsu_t1 _bingsu_warned_last _bingsu_dead_cn
+  export -n PS1 PS0 _bingsu_rec _bingsu_seq _bingsu_ps1 _bingsu_t1 _bingsu_warned_last _bingsu_warned_sandbox _bingsu_dead_cn
   return 0
 }
 
@@ -196,7 +202,7 @@ for _bingsu_h in ${PROMPT_COMMAND[@]+"${PROMPT_COMMAND[@]}"}; do
 done
 if (( _bingsu_reg )); then
   # First registration: an inherited value would silence the warning.
-  _bingsu_warned_last=
+  _bingsu_warned_last= _bingsu_warned_sandbox=
   _bingsu_a=(_bingsu_save)
   for _bingsu_h in ${PROMPT_COMMAND[@]+"${PROMPT_COMMAND[@]}"}; do
     if [[ $_bingsu_h != _bingsu_save ]]; then _bingsu_a+=("$_bingsu_h"); fi
@@ -213,6 +219,6 @@ unset _bingsu_nm _bingsu_reg _bingsu_h _bingsu_e _bingsu_r _bingsu_a
 # since the golden runner sources it alone; they stay listed here too.
 export -n _bingsu_session _bingsu_seq _bingsu_rec _bingsu_f _bingsu_disp _bingsu_note _bingsu_key \
   _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps0 _bingsu_ps0_orig _bingsu_ps0_owned \
-  _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last _bingsu_dead_cn
+  _bingsu_ps0_posix _bingsu_ps1 _bingsu_warned_last _bingsu_warned_sandbox _bingsu_dead_cn
 export -n -f _bingsu_status_ok_core _bingsu_status_ok _bingsu_split _bingsu_frame_core _bingsu_frame \
   _bingsu_classify _bingsu_notice_due _bingsu_bytes _bingsu_call _bingsu_save _bingsu_install

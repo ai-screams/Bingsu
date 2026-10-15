@@ -1,43 +1,48 @@
-//! `bingsu` binary. `prompt` is dispatched before anything else (fast path).
+//! `bingsu` binary. The first and only thing `main` does is
+//! `prompt::dispatch(sandbox::enter)`: for `bingsu prompt` it never returns (fast path,
+//! the adapter is the whole prompt process); any other command gets the
+//! arguments back for `commands::run`. core-cfg-check --binary checks this
+//! shape (one `fn main`, this body).
 #![deny(unsafe_code)]
 use std::process::ExitCode;
 
-#[cfg(unix)]
-mod init;
-#[cfg(unix)]
-mod messages;
-#[cfg(unix)]
-mod prompt;
+mod commands;
+// The prompt adapter: the trusted computing base of `bingsu prompt`. Its
+// system calls are crates/bingsu/prompt-syscalls.tsv; every decision is
+// bingsu_core::front.
 #[cfg(unix)]
 #[allow(unsafe_code)]
-mod sys;
+mod prompt;
+// Linux: the prompt's seccomp filter. Elsewhere there is no filter.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod sandbox;
+#[cfg(not(target_os = "linux"))]
+mod sandbox {
+    pub fn enter() -> bingsu_core::front::Sandbox {
+        bingsu_core::front::Sandbox::Absent
+    }
+}
+// Without a prompt path (Windows), the arguments go straight to commands.
+#[cfg(not(unix))]
+mod prompt {
+    use std::ffi::OsString;
 
-// The prompt dispatch runs here: the clippy.toml rules are forbidden for the
-// body of main only (an item attribute, so init's own #[expect] in
-// trusted_env stays valid). scripts/check_cli_prompt_forbid.py checks it.
-#[forbid(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
-fn main() -> ExitCode {
-    let mut all = std::env::args_os();
-    let argv0 = all.next().unwrap_or_default();
-    let args: Vec<std::ffi::OsString> = all.collect();
-    #[cfg(not(unix))]
-    let _ = &argv0;
-    match args.first().and_then(|a| a.to_str()) {
-        #[cfg(unix)]
-        Some("prompt") => prompt::run(&args[1..]),
-        #[cfg(unix)]
-        Some("init") => init::run(&argv0, &args[1..]),
-        #[cfg(feature = "bench-stubs")]
-        Some("__collect-stub") => {
-            ExitCode::from(u8::try_from(bingsu_collect::stub_main(&args[1..])).unwrap_or(1))
-        }
-        _ => {
-            eprintln!("usage: bingsu <init|prompt> ...");
-            ExitCode::from(2)
+    pub struct NonPromptArgs {
+        pub argv0: OsString,
+        pub args: Vec<OsString>,
+    }
+
+    pub fn dispatch(_enter_sandbox: fn() -> bingsu_core::front::Sandbox) -> NonPromptArgs {
+        let mut all = std::env::args_os();
+        let argv0 = all.next().unwrap_or_default();
+        NonPromptArgs {
+            argv0,
+            args: all.collect(),
         }
     }
+}
+
+fn main() -> ExitCode {
+    commands::run(prompt::dispatch(sandbox::enter))
 }

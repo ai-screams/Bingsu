@@ -1,5 +1,18 @@
-//! `bingsu prompt`: envelope -> status -> one record on fd 1, exit 0.
-//! M1 has no renderer (M2), so accepted envelopes yield the minimal record.
+//! `bingsu prompt`: the OS adapter, and the trusted computing base (TCB) of
+//! the prompt path. It decides nothing: the arguments become bytes,
+//! `bingsu_core::front` (pure, `no_std`) parses them and says what to read
+//! (`prepare`), this module carries the plan out (nothing to read yet) and
+//! `finish` gives the record, which this module writes before it exits. An
+//! unwind panic in the core becomes `bingsu_core::front::after_panic`'s
+//! record. `main` calls `dispatch` first; every other command gets the
+//! arguments back and runs in `crate::commands`, which this module cannot
+//! name.
+//!
+//! The system calls of the prompt are the rows of
+//! crates/bingsu/prompt-syscalls.tsv: core-cfg-check --adapter requires the
+//! libc names used here to equal its `libc` column, on Linux the seccomp
+//! filter allows only its `syscall` column, and the strace test checks the
+//! calls the prompt makes.
 // Prompt path: the clippy.toml rules (environment reads among them, spec 4
 // rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
 // be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
@@ -9,46 +22,223 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
-use crate::sys;
-use bingsu_core::envelope::{self, EnvelopeError};
-use bingsu_core::record::write_minimal_b1;
-use bingsu_core::status::Status;
+use bingsu_core::front;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-static PANICKED: AtomicBool = AtomicBool::new(false);
+/// The arguments of a command other than `prompt`, for `crate::commands`.
+pub struct NonPromptArgs {
+    pub argv0: OsString,
+    pub args: Vec<OsString>,
+}
 
-fn build(args: &[&[u8]], out: &mut Vec<u8>) {
-    match envelope::parse(args) {
-        Err(EnvelopeError::NoSupportedRecordVersion) => {}
-        Err(EnvelopeError::BadArgs(_)) => write_minimal_b1(Status::ERROR_BAD_ARGS, out),
-        Ok(env) => {
-            let status = if env.runtime_root.is_none() {
-                Status::DEGRADED_RUNTIME_ROOT
-            } else {
-                Status::OK_NONE
-            };
-            write_minimal_b1(status, out);
+/// Writes the whole record to fd 1, retrying on EINTR; a failed write is
+/// ignored (spec section 6 rule 3).
+fn write_record(mut buf: &[u8]) {
+    while !buf.is_empty() {
+        // SAFETY: `buf` is an initialized slice valid for `buf.len()` bytes.
+        let n = unsafe { libc::write(1, buf.as_ptr().cast(), buf.len()) };
+        if n < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return;
+        }
+        // Zero on a non-empty buffer is no progress; retrying would spin.
+        match usize::try_from(n) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => buf = &buf[n.min(buf.len())..],
         }
     }
 }
 
-pub fn run(args: &[OsString]) -> ! {
-    // The default hook writes to stderr before unwinding (spec section 6
-    // rule 1). This one only records in memory.
-    std::panic::set_hook(Box::new(|_| PANICKED.store(true, Ordering::Relaxed)));
+fn exit(code: i32) -> ! {
+    // SAFETY: _exit never returns and takes no pointers.
+    unsafe { libc::_exit(code) }
+}
+
+fn respond(raw: &[&[u8]]) -> Vec<u8> {
+    let plan = front::prepare(raw);
+    front::finish(plan, front::Observed::default()).record
+}
+
+/// The prompt process. The silent panic hook and the unwind guard come
+/// first, so the filter (building the BPF, installing it) and the record
+/// for a refused filter run inside them too. The default hook writes to
+/// stderr before unwinding (spec section 6 rule 1); this one does nothing.
+/// After an unwind panic the record is `front::after_panic`'s; a second
+/// panic inside that aborts with rc 101, and the shell draws its own
+/// minimal prompt (spec section 6 rule 2). Whether the core runs is
+/// `front::runs_core`; for a refused filter (decision P18) the core
+/// supplies only `without_sandbox`: the record-version pair rule and the
+/// minimal record, no envelope parse and no render.
+fn run_prompt(
+    args: &[OsString],
+    enter_sandbox: impl FnOnce() -> front::Sandbox,
+    respond: impl FnOnce(&[&[u8]]) -> Vec<u8>,
+    refused: impl FnOnce(&[&[u8]]) -> Vec<u8>,
+) -> ! {
+    std::panic::set_hook(Box::new(|_| {}));
     let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
-    let mut out = Vec::with_capacity(256);
-    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&raw, &mut out)));
-    // Panic fallback: untested until M3 injects a panic; a second panic
-    // inside this branch aborts the unwind with rc 101.
-    if built.is_err() || PANICKED.load(Ordering::Relaxed) {
-        out.clear();
-        if raw.windows(2).any(|w| w[0] == b"--record" && w[1] == b"B1") {
-            write_minimal_b1(Status::ERROR_INTERNAL, &mut out);
+    let rec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if front::runs_core(enter_sandbox()) {
+            respond(&raw)
+        } else {
+            refused(&raw)
         }
+    }))
+    .unwrap_or_else(|_| front::after_panic(&raw));
+    write_record(&rec);
+    exit(0)
+}
+
+/// The first thing `main` does: owns the process arguments, and for
+/// `bingsu prompt` never returns. Any other command gets them back.
+/// `enter_sandbox` (Linux: the seccomp filter of crates/bingsu/src/sandbox.rs,
+/// elsewhere nothing) runs as soon as the command is known to be `prompt`,
+/// before the core sees the arguments.
+pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
+    let mut all = std::env::args_os();
+    let argv0 = all.next().unwrap_or_default();
+    let args: Vec<OsString> = all.collect();
+    if args.first().map(|a| a.as_bytes()) == Some(b"prompt".as_slice()) {
+        run_prompt(&args[1..], enter_sandbox, respond, front::without_sandbox)
     }
-    let _ = sys::write_fd(1, &out);
-    sys::exit_now(0)
+    NonPromptArgs { argv0, args }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INTERNAL: &[u8] = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:internal\x1e";
+    const SANDBOX: &[u8] = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:sandbox\x1e";
+
+    fn args() -> Vec<OsString> {
+        [
+            "--ctx", "1", "--record", "B1", "--width", "80", "--shell", "zsh",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect()
+    }
+
+    fn panics(_: &[&[u8]]) -> Vec<u8> {
+        panic!("injected")
+    }
+
+    // Children of the tests below: each runs the whole prompt path in its
+    // own process, so the parent sees the real stdout, stderr and exit
+    // status. Test builds only: the shipped binary has no way to make the
+    // core or the filter panic on purpose.
+    #[test]
+    #[ignore = "child of the prompt path tests"]
+    fn core_panics_child() {
+        // The unwind runs under the prompt's seccomp filter, as in the shell.
+        run_prompt(
+            &args(),
+            crate::sandbox::enter,
+            panics,
+            front::without_sandbox,
+        )
+    }
+
+    #[test]
+    #[ignore = "child of the prompt path tests"]
+    fn filter_panics_child() {
+        run_prompt(
+            &args(),
+            || panic!("in the filter"),
+            respond,
+            front::without_sandbox,
+        )
+    }
+
+    #[test]
+    #[ignore = "child of the prompt path tests"]
+    fn refused_child() {
+        run_prompt(
+            &args(),
+            || front::Sandbox::Blocked,
+            panics,
+            front::without_sandbox,
+        )
+    }
+
+    #[test]
+    #[ignore = "child of the prompt path tests"]
+    fn refused_record_panics_child() {
+        run_prompt(&args(), || front::Sandbox::Blocked, respond, panics)
+    }
+
+    #[test]
+    #[ignore = "child of the prompt path tests"]
+    fn absent_child() {
+        run_prompt(
+            &args(),
+            || front::Sandbox::Absent,
+            |_| b"<rendered>".to_vec(),
+            panics,
+        )
+    }
+
+    fn child(name: &str, want: &[u8]) {
+        let me = std::env::current_exe().expect("test binary");
+        let out = std::process::Command::new(me)
+            .args([
+                "--ignored",
+                "--exact",
+                &format!("prompt::tests::{name}"),
+                "--test-threads=1",
+                "--nocapture",
+                "-q",
+            ])
+            .output()
+            .expect("child");
+        assert_eq!(out.status.code(), Some(0), "{name}");
+        assert!(
+            out.stderr.is_empty(),
+            "{name}: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // --nocapture: a panic message would reach the real stderr. libtest
+        // prints its header before the child runs; the record is the last
+        // thing written before _exit.
+        assert!(
+            out.stdout.ends_with(want),
+            "{name}: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    // 이것을 실패시키는 것: 조용한 panic hook을 지우는 것(기본 hook이 stderr에 씀), 패닉 뒤 0이 아닌 종료,
+    // 폴백 레코드를 쓰지 않거나 다른 상태로 쓰는 것.
+    #[test]
+    fn panic_fallback_is_silent() {
+        child("core_panics_child", INTERNAL);
+    }
+
+    // 이것을 실패시키는 것: 필터 설치(BPF 생성 포함)를 panic 보호 밖에서 하는 것.
+    #[test]
+    fn a_panic_in_the_filter_is_guarded() {
+        child("filter_panics_child", INTERNAL);
+    }
+
+    // 이것을 실패시키는 것: 거부된 필터에서 core를 부르는 것, degraded:sandbox가 아닌 레코드, 0이 아닌 종료.
+    #[test]
+    fn no_sandbox_skips_the_core() {
+        child("refused_child", SANDBOX);
+    }
+
+    // 이것을 실패시키는 것: 거부된 필터의 레코드를 panic 보호 밖에서 만드는 것.
+    #[test]
+    fn a_panic_in_the_refused_record_is_guarded() {
+        child("refused_record_panics_child", INTERNAL);
+    }
+
+    // 이것을 실패시키는 것: 커널에 seccomp가 없을 때 core를 건너뛰는 것(WSL1·오래된 커널에서 렌더 안 됨).
+    #[test]
+    fn no_seccomp_in_the_kernel_renders() {
+        child("absent_child", b"<rendered>");
+    }
 }

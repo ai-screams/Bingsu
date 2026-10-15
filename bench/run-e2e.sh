@@ -68,6 +68,9 @@ commit=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
 if [ -z "$cold" ]; then
   "${H[@]}" --export-json "$out/prompt.json" "$bin $args" "/usr/bin/true"
   "${H[@]}" --export-json "$out/redraw.json" "$bin $args --redraw"
+  # M3a: the rendered prompt (built-in default theme). hyperfine -N splits
+  # on spaces, and $tmp holds none (checked above).
+  "${H[@]}" --export-json "$out/prompt-rendered.json" "$bin $args --shell zsh --pwd $tmp/home/a/b/c --home=$tmp/home --status 1"
   # The generator process that `eval "$(bingsu init SHELL)"` runs inside the
   # shell's added start-up time: a measured sub-path of X-23 init.
   "${H[@]}" --export-json "$out/init-gen.json" "$bin init zsh" "$bin init bash" "$bin init fish"

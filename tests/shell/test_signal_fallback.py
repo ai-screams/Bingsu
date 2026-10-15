@@ -1,13 +1,14 @@
-"""A prompt call that a signal ended (spec section 6 rule 2; decision
+"""A prompt call that a signal ended (spec section 6 rule 2; decisions P18,
 P19): the shell draws its own fallback and does not call the binary again
 until the next command. Before this rule fish 3.6 reported the signal,
-redrew the prompt, called the binary again and looped (a defect since M1)."""
+redrew the prompt, called the binary again and looped (a defect since M1).
+Also: a `degraded:sandbox` record is reported once per session."""
 import os
 
 import pexpect
 import pytest
 
-from conftest import ROOT, Install, run_shell_script, trusted_env
+from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env
 from test_init_words import source
 from pty_session import Session
 
@@ -132,3 +133,34 @@ def test_failed_call_fires_no_error_trap(tmp_path, shell, kind):
     assert r.stdout.endswith(b"DONE\n"), (r.stdout, r.stderr)
     assert any("probe_fail" in x for x in lines), lines
     assert not any("_bingsu_call" in x for x in lines), lines
+
+
+# 이것을 실패시키는 것: degraded:sandbox 알림을 매 프롬프트 찍는 것, 찍지 않는 것, 다른 상태에서 찍는 것.
+@pytest.mark.parametrize("shell", SHELLS)
+def test_sandbox_notice_once(tmp_path, shell):
+    inst, s = start(tmp_path, shell, record=minimal_record(status=b"degraded:sandbox"),
+                    script=ROOT / "tests/shell/fake_bingsu.sh")
+    for _ in range(3):
+        s.run("true")
+    text = s.close().decode("utf-8", "replace")
+    assert text.count("could not start its system call filter") == 1, text
+
+
+# zsh with NO_PROMPT_PERCENT draws a constant prompt, but the record is still
+# checked, so the notice still comes.
+# 이것을 실패시키는 것: 레코드 검증을 PROMPT_PERCENT 조건 안에 두어 이 옵션에서 알림이 나오지 않는 것.
+def test_sandbox_notice_without_prompt_percent(tmp_path):
+    if "zsh" not in SHELLS:
+        pytest.skip("zsh not in BINGSU_TEST_SHELLS")
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    init = tmp_path / "init.zsh"
+    init.write_bytes(inst.init("zsh", env))
+    inst.use_fake(minimal_record(status=b"degraded:sandbox"), script=ROOT / "tests/shell/fake_bingsu.sh")
+    s = Session("zsh", env, cols=100, rows=30)
+    # Set before the first bingsu prompt, so every call sees the option.
+    s.run("setopt no_prompt_percent; " + source("zsh", init).decode().rstrip("\n"))
+    for _ in range(2):
+        s.run("true")
+    text = s.close().decode("utf-8", "replace")
+    assert text.count("could not start its system call filter") == 1, text

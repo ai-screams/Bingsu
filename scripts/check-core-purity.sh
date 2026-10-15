@@ -12,9 +12,10 @@
 # (cargo-deny), or a dead, untested, duplicated or silently removed rule
 # (canary checker with a pinned path count).
 # The CLI's environment rules (crates/bingsu/clippy.toml) are checked the same
-# way with their own canary, and the CLI prompt-path modules must forbid them
-# (check_cli_prompt_forbid.py). bingsu-core is no_std (core-cfg-check reads
-# the crate attributes, and core builds for wasm32v1-none, which has no std)
+# way with their own canary; the prompt adapter must forbid them, and
+# check_cli_prompt_forbid.py holds it to its syscall table and pinned
+# files. bingsu-core is no_std (core-cfg-check reads the crate attributes,
+# and core builds for wasm32v1-none, which has no std)
 # and its graph is pinned (check_core_no_std.py, with its rules tested on
 # synthetic metadata). The toolchain must be a stable release.
 # bingsu-core uses no conditional compilation other than #[cfg(test)], so no
@@ -102,8 +103,9 @@ python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/c
 # The graph rules on synthetic metadata (the real graph is clean), then the graph.
 python3 -B scripts/test_check_core_no_std.py
 python3 scripts/check_core_no_std.py
-# The CLI prompt path forbids the same rules per module (deny elsewhere).
-python3 scripts/check_cli_prompt_forbid.py
+# The prompt adapter: forbid attribute, adapter paths and syscall table, one
+# fn main that only dispatches, no code outside main.
+python3 scripts/check_cli_prompt_forbid.py --checker "$checker"
 # clippy on core, in a fresh temporary target directory with its config
 # pinned; diagnostics are counted, not only the exit code.
 python3 scripts/check_core_clippy_clean.py

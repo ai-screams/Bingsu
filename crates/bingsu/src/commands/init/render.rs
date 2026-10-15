@@ -1,7 +1,7 @@
 //! Fills script templates with shell-encoded words. Single pass: inserted
 //! values are never rescanned, so a path containing "@CONFIG_ROOT@" stays
 //! literal.
-use crate::messages::{MsgId, en};
+use crate::commands::messages::{MsgId, en};
 use bingsu_core::record::RecordVersion;
 use bingsu_core::root_arg::{
     CONFIG_ROOT_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
@@ -23,16 +23,16 @@ pub struct ScriptInputs<'a> {
 }
 
 const ZSH: [&str; 2] = [
-    include_str!("../shell/zsh/reader.zsh"),
-    include_str!("../shell/zsh/hooks.zsh"),
+    include_str!("../../shell/zsh/reader.zsh"),
+    include_str!("../../shell/zsh/hooks.zsh"),
 ];
 const BASH: [&str; 2] = [
-    include_str!("../shell/bash/reader.bash"),
-    include_str!("../shell/bash/hooks.bash"),
+    include_str!("../../shell/bash/reader.bash"),
+    include_str!("../../shell/bash/hooks.bash"),
 ];
 const FISH: [&str; 2] = [
-    include_str!("../shell/fish/reader.fish"),
-    include_str!("../shell/fish/hooks.fish"),
+    include_str!("../../shell/fish/reader.fish"),
+    include_str!("../../shell/fish/hooks.fish"),
 ];
 
 // bash < 5.1: the init process cannot know the parent shell's version, so
@@ -78,6 +78,12 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
         b"MSG_BASH_TOO_OLD" => encode_word(sh, en(MsgId::BashTooOld).as_bytes(), out),
         b"MSG_LATE_HOOK_ZSH" => encode_word(sh, en(MsgId::LateHookZsh).as_bytes(), out),
         b"MSG_LATE_HOOK_BASH" => encode_word(sh, en(MsgId::LateHookBash).as_bytes(), out),
+        b"MSG_NO_SANDBOX" => encode_word(sh, en(MsgId::NoSandbox).as_bytes(), out),
+        b"STATUS_SANDBOX" => {
+            let mut b = Vec::new();
+            Status::DEGRADED_SANDBOX.write_to(&mut b);
+            encode_word(sh, &b, out);
+        }
         b"KNOWN_CODES" => {
             for (n, s) in Status::KNOWN_NON_OK.iter().enumerate() {
                 if n > 0 {

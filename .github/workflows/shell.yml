@@ -113,6 +113,58 @@ jobs:
             "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
               exec python3 -m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q -rs -p no:cacheprovider --basetemp=/root/pytest'
 
+  # Every system call the prompt makes after its seccomp filter is installed
+  # is a row of crates/bingsu/prompt-syscalls.tsv and none is refused
+  # (tests/shell/test_prompt_env_paths.py::test_calls_after_the_filter_are_in_the_table),
+  # for each x86_64 libc and profile the release ships or tests run. The
+  # binary runs natively on the runner (no container: the runner's own glibc).
+  filter-calls:
+    name: Prompt filter calls (x86_64 ${{ matrix.libc }} ${{ matrix.profile }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [gnu, musl]
+        profile: [debug, release]
+    env:
+      LIBC: ${{ matrix.libc }}
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.libc }}-${{ matrix.profile }}
+      - name: Build
+        run: |
+          args=(-p bingsu)
+          dir=target
+          if [ "$PROFILE" = release ]; then args+=(--release); fi
+          if [ "$LIBC" = musl ]; then args+=(--target x86_64-unknown-linux-musl); dir=target/x86_64-unknown-linux-musl; fi
+          cargo build "${args[@]}"
+          echo "BINGSU_BIN=$PWD/$dir/$PROFILE/bingsu" >> "$GITHUB_ENV"
+      # strace, and a venv with the hash-pinned test dependencies: the system
+      # python refuses pip installs (PEP 668).
+      - name: Install strace and the test dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends strace
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      # The test skips without strace; here a skip is a failure.
+      - name: Calls after the filter are in the table
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py -k after_the_filter -q -rs -p no:cacheprovider | tee "$RUNNER_TEMP/pytest.out"
+          grep -q '2 passed' "$RUNNER_TEMP/pytest.out"
+
   shell-macos:
     name: Shell PTY (macOS Homebrew)
     needs: detect

@@ -87,8 +87,14 @@ def test_warm_run_shape(tmp_path):
     assert r.returncode == 0, (r.stderr, (tmp_path / "hf.log").read_text())
     entries = log(tmp_path)
     calls = [e["argv"] for e in entries if "argv" in e]
-    assert len(calls) in (5, 6) and all(c[:7] == ["-N", "--style", "basic", "--warmup", "20", "--runs", "300"]
+    assert len(calls) in (6, 7) and all(c[:7] == ["-N", "--style", "basic", "--warmup", "20", "--runs", "300"]
                                         for c in calls), calls
+    # M3a: the rendered prompt row, its file and its exact command.
+    rendered = [c for c in calls if "--shell" in " ".join(c)]
+    assert len(rendered) == 1, rendered
+    cmd = rendered[0][-1]
+    assert " --shell zsh --pwd " in cmd and " --home=" in cmd and cmd.endswith(" --status 1"), cmd
+    assert (out / "prompt-rendered.json").exists()
     ran = [e for e in entries if "cmd" in e]
     # run-e2e gives the timed commands a HOME of its own, not the caller's
     homes = {e["home"] for e in ran}
