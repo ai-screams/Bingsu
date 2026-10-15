@@ -10,17 +10,17 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: M2 (core renderer) is done; M3 (config, refresh helper, git reads, gates) is next. The record path and the shell hooks exist, and the
-  core renders a prompt, but `bingsu prompt` does not call the renderer yet; there is no release and no
-  user-visible prompt. `README.md` lists features as planned. Keep it that way until they ship.
+- **Stage**: M3a (config, snapshot, refresh helper) is in progress. `bingsu prompt` renders the built-in default
+  theme from the envelope alone (no config file support, no git segment yet); there is no release. `README.md` lists features
+  as planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout
 
 | Path | What |
 | -- | -- |
-| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): status grammar, B1 record encoder, shell words, root arguments, sanitize, width, icons, field types, color |
-| `crates/bingsu` | CLI: `init` pins the binary path and four roots, `prompt` turns the envelope into a record, `sys` wraps libc; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments from that input; status grammar, B1 record encoder, shell words, root arguments, sanitize, width, icons, field types, color, built-in default theme |
+| `crates/bingsu` | CLI: `src/prompt.rs` is the OS adapter that renders the built-in default theme from the envelope into a record through core; `src/commands/` holds `init` (pins the binary path and four roots), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
 | `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
 | `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
 | `crates/bingsu-golden` | Prints render output for fixed inputs; native (its test) and wasm32-wasip1 (CI) must equal `tests/golden/render/render.tsv` byte for byte; regenerate with `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv` and review the diff |
@@ -81,7 +81,7 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 | Workflow | Jobs | Notes |
 | -- | -- | -- |
 | `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build (also runs the render golden under wasmtime as wasm32-wasip1), Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace) | Rust jobs run only when `Cargo.toml` exists (detect job) |
-| `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew | `workflow_dispatch` input `record_observations` prints unpinned cells |
+| `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew; Prompt filter calls (Linux x86_64, GNU and musl, debug and release) | `workflow_dispatch` input `record_observations` prints unpinned cells |
 | `security.yml` | Secret scan (gitleaks), Dependency advisories (cargo-audit) | gitleaks scans full history; weekly cron; cargo-audit needs `Cargo.lock` |
 | `dependabot.yml` | github-actions and cargo, weekly | |
 

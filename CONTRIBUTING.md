@@ -3,8 +3,8 @@
 Thanks for your interest in bingsu! 🍧
 This guide explains how changes get into the repository and what the checks expect.
 
-> bingsu is in early development. The Rust workspace builds and tests today, but there is no release
-> and no user-visible prompt yet.
+> bingsu is in early development. The Rust workspace builds and tests today and `bingsu prompt` draws a
+> built-in default prompt, but there is no release and no config file support yet.
 
 ## Table of contents
 
@@ -112,6 +112,7 @@ Before you open one:
 | Core instruction counts | CI | Compares Callgrind instruction counts with the base tip and fails past the limit | Pull requests only, on Linux |
 | Filesystem budget scaffold (strace) | CI | Runs the binary under strace and checks the files it opens against the budget | Once `Cargo.toml` exists; Linux only |
 | Shell PTY (min-u22, min-d12, cur-d13 containers; macOS Homebrew) | Shell | Golden record vectors and PTY tests in bash, zsh and fish | Once `Cargo.toml` exists |
+| Prompt filter calls | Shell | Uses strace to check calls after the seccomp filter against `crates/bingsu/prompt-syscalls.tsv` and checks for refused calls, with GNU and musl builds in debug and release | Once `Cargo.toml` exists; Linux x86_64 |
 | Secret scan (gitleaks) | Security | Scans the full git history for leaked secrets | Every push and pull request, and weekly |
 | Dependency advisories (cargo-audit) | Security | Checks `Cargo.lock` against the RustSec database | Once `Cargo.lock` exists |
 
@@ -126,7 +127,7 @@ Dependabot proposes updates weekly.
 | -- | -- |
 | Rust (stable) via [rustup](https://rustup.rs) | Builds the engine |
 | bash, zsh and fish | Manual testing of shell integration |
-| A [Nerd Font](https://www.nerdfonts.com) | Seeing the default icon set as intended |
+| A terminal font with Unicode support | Seeing the built-in default icons |
 
 ### Commands
 
@@ -138,7 +139,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 scripts/check-core-purity.sh                       # core purity and CLI prompt-path gate
 cargo check -p bingsu --target x86_64-unknown-linux-musl   # CI builds musl; libc APIs differ
 tests/golden/record/run-all.sh                     # record golden vectors; SHELLS="bash zsh fish"
-BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -p no:cacheprovider
+BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider
 ```
 
 Run the same checks as CI before you push. The instruction-count check (`icount`) needs Callgrind, so it runs only
