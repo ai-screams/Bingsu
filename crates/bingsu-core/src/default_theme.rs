@@ -39,22 +39,19 @@ pub const LINES: [LineLayout<'static>; 2] = [
 
 /// The `narrow` band (spec section 2 "폭 구간별 레이아웃", width under 60,
 /// the spec's example): the right side is dropped and `duration` moves
-/// beside `char`, drawn lean.
+/// beside `char`, drawn lean (`NARROW_TEMPLATE`).
 pub const NARROW: Band = Band {
     min_cols: None,
     max_cols: Some(59),
     order: None,
 };
-pub const NARROW_LINES: [LineLayout<'static>; 2] = [
-    LineLayout {
-        left: &["host", "dir", "git"],
-        right: &[],
-    },
-    LineLayout {
-        left: &["duration", "char"],
-        right: &[],
-    },
-];
+/// Written as a template, not generated: the `lean` generator puts a literal
+/// space between segments, so a missing `duration`, `host` or `git` would
+/// leave a stray space (an indented `char`, a gap on line 1). Each gap sits
+/// in a group with the optional segment beside it and goes with it. `dir`
+/// and `char` are required, so they anchor the two lines.
+pub const NARROW_TEMPLATE: &str =
+    "{@group}{host} {@end}{dir}{@group} {git}{@end}{@nl}{@group}{duration} {@end}{char}";
 
 const DIR_METHODS: &[Method] = &[Method::Repo, Method::Abbrev(1), Method::Depth(1)];
 
@@ -98,6 +95,10 @@ fn lines(preset_name: &str, l: &[LineLayout<'_>]) -> Result<Vec<CompiledLine>, D
     compile(&t, BUILTIN).map_err(DefaultThemeError::Compile)
 }
 
+fn compile_all(src: &str) -> Result<Vec<CompiledLine>, DefaultThemeError> {
+    compile(src, BUILTIN).map_err(DefaultThemeError::Compile)
+}
+
 fn one_line(src: &str) -> Result<CompiledLine, DefaultThemeError> {
     let mut v = compile(src, BUILTIN).map_err(DefaultThemeError::Compile)?;
     Ok(v.remove(0))
@@ -133,7 +134,7 @@ impl DefaultTheme {
             }
         }
         Ok(Self {
-            variants: vec![lines("triangle", &LINES)?, lines("lean", &NARROW_LINES)?],
+            variants: vec![lines("triangle", &LINES)?, compile_all(NARROW_TEMPLATE)?],
             bands,
             band_order,
             transient: one_line("{char}")?,
@@ -174,6 +175,10 @@ mod tests {
     use alloc::string::String;
 
     fn draw(shell: Shell, width: u16) -> crate::render::RenderedPrompt {
+        draw_with(shell, width, true)
+    }
+
+    fn draw_with(shell: Shell, width: u16, duration: bool) -> crate::render::RenderedPrompt {
         let d = DefaultTheme::new(Mode::Dark).unwrap();
         let i = |id| BUILTIN.iter().position(|s| s.id == id).unwrap();
         let mut values = vec![None; BUILTIN.len()];
@@ -185,10 +190,12 @@ mod tests {
         let steps: [&[u8]; 2] = [b"Works", b"bingsu"];
         facts[i("dir")] = Some(PathFacts::new(Anchor::Home, &steps, None, &[]));
         let du = segment("duration").unwrap();
-        values[i("duration")] = Some(Value::new(
-            b"3.0s",
-            vec![Field::known(FieldValue::Duration { ms: 3000 }); du.fields.len()],
-        ));
+        if duration {
+            values[i("duration")] = Some(Value::new(
+                b"3.0s",
+                vec![Field::known(FieldValue::Duration { ms: 3000 }); du.fields.len()],
+            ));
+        }
         let inputs = Inputs {
             catalog: BUILTIN,
             values: &values,
@@ -247,6 +254,40 @@ mod tests {
         assert!(String::from_utf8_lossy(&wide.upper).contains("3.0s"));
         assert!(String::from_utf8_lossy(&narrow.left).contains("3.0s"));
         assert!(!String::from_utf8_lossy(&narrow.upper).contains("3.0s"));
+    }
+
+    // 이것을 실패시키는 것: narrow 템플릿의 간격을 리터럴 공백으로 되돌리는 것(`lean` 생성기처럼).
+    // 값 없는 duration이 입력 줄을 한 칸 들여쓰거나, 값 없는 host·git이 윗줄 앞뒤에 공백을 남긴다.
+    #[test]
+    fn narrow_gaps_vanish_with_their_segment() {
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            let r = draw_with(shell, 59, false);
+            let strip = |b: &[u8]| {
+                // Drop SGR runs and the shell's invisible-span markers.
+                let t = String::from_utf8_lossy(b).into_owned();
+                let mut out = String::new();
+                let mut esc = false;
+                for c in t.chars() {
+                    match (esc, c) {
+                        (false, '\u{1b}') => esc = true,
+                        (true, 'm') => esc = false,
+                        (false, c) => out.push(c),
+                        _ => {}
+                    }
+                }
+                out.replace("%{", "")
+                    .replace("%}", "")
+                    .replace(['\u{1}', '\u{2}'], "")
+            };
+            let left = strip(&r.left);
+            assert_eq!(left, "\u{276F}", "{shell:?} input line indented: {left:?}");
+            let upper = strip(&r.upper);
+            assert_eq!(
+                upper,
+                upper.trim(),
+                "{shell:?} stray space on line 1: {upper:?}"
+            );
+        }
     }
 
     // 이것을 실패시키는 것: dir을 required에서 빼는 것(좁은 폭에서 경로가 사라짐), char의 우선순위를 dir보다 낮추는 것.
