@@ -41,6 +41,13 @@ CORE_GRAPH = {
     ("bingsu-core", "0.0.0", "crates/bingsu-core/Cargo.toml"): ((), ("lib",)),
     ("libm", "0.2.16", CRATES_IO): ((), ("custom-build", "lib")),
     ("unicode-segmentation", "1.13.3", CRATES_IO): ((), ("lib",)),
+    # TOML for the config model (M3a S1): `parse` without `std`. Its nesting
+    # caps rely on the `unbounded` feature staying off; this pin keeps it so.
+    ("toml", "1.1.8+spec-1.1.0", CRATES_IO): (("parse",), ("lib",)),
+    ("toml_parser", "1.1.5+spec-1.1.0", CRATES_IO): (("alloc",), ("lib",)),
+    ("toml_datetime", "1.1.2+spec-1.1.0", CRATES_IO): (("alloc",), ("lib",)),
+    ("serde_spanned", "1.1.2", CRATES_IO): (("alloc",), ("lib",)),
+    ("winnow", "1.0.4", CRATES_IO): ((), ("lib",)),
 }
 # The shipped binary with default features (bench-stubs off): core's graph,
 # the binary and libc.
@@ -58,16 +65,54 @@ BINGSU_TARGETS = [{"name": "bingsu", "kind": ["bin"], "crate_types": ["bin"],
                    "src_path": "crates/bingsu/src/main.rs", "required-features": []}]
 
 
-def closure(nodes, root):
-    """Packages a root links or builds with: normal and build edges."""
+def turned_on(pkg, features):
+    """Dependency keys (rename or name) of `pkg` that its resolved
+    `features` turn on: `dep:x`, a non-weak `x/feature`, or the implicit
+    feature `x` of a package that never writes `dep:x`. A weak `x?/feature`
+    turns nothing on."""
+    table = pkg.get("features", {})
+    on = set()
+    for f in features:
+        for v in table.get(f, []):
+            if v.startswith("dep:"):
+                on.add(v[4:])
+            elif "/" in v and "?/" not in v:
+                on.add(v.split("/", 1)[0])
+    explicit = {v[4:] for vs in table.values() for v in vs if v.startswith("dep:")}
+    on |= {f for f in features if f not in explicit}
+    return on
+
+
+def edge_is_built(pkg, features, target, kinds):
+    """Whether the build links an edge from `pkg` to the package `target`
+    for these dep kinds. `cargo metadata` also lists an edge to an optional
+    dependency that only a weak feature names, when another workspace member
+    pulls that package in; the build leaves it out (`cargo build -p` makes
+    no unit for it). The edge is matched to its declarations by the target
+    package's name, never by the edge's lib name (a required dependency
+    whose lib is named like an optional one must not hide behind it)."""
+    on = turned_on(pkg, features)
+    decls = [d for d in pkg.get("dependencies", [])
+             if d["name"] == target["name"] and d.get("kind") in kinds]
+    if not decls:
+        return True  # no declaration to judge by: follow it
+    return any(not d["optional"] or (d.get("rename") or d["name"]) in on for d in decls)
+
+
+def closure(pkgs, nodes, root):
+    """Packages a root links or builds with: normal and build edges, followed
+    by package id; an optional dependency only when a resolved feature turns
+    it on."""
     seen, todo = set(), [root]
     while todo:
         nid = todo.pop()
         if nid in seen:
             continue
         seen.add(nid)
-        todo.extend(d["pkg"] for d in nodes[nid]["deps"]
-                    if any(k["kind"] in (None, "build") for k in d["dep_kinds"]))
+        for d in nodes[nid]["deps"]:
+            kinds = {k["kind"] for k in d["dep_kinds"]} & {None, "build"}
+            if kinds and edge_is_built(pkgs[nid], nodes[nid]["features"], pkgs[d["pkg"]], kinds):
+                todo.append(d["pkg"])
     return seen
 
 
@@ -109,7 +154,7 @@ def judge(meta, root_manifest, root):
             bad.append(f"{name}: expected one workspace package, got {len(roots)}")
             continue
         got = {}
-        for nid in closure(nodes, roots[0]):
+        for nid in closure(pkgs, nodes, roots[0]):
             p = pkgs[nid]
             kinds = tuple(sorted({k for t in p["targets"] for k in t["kind"]} - SKIP_KINDS))
             got[key_of(p, root)] = (tuple(sorted(nodes[nid]["features"])), kinds)

@@ -7,7 +7,17 @@
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
-allow = [{ name = "bingsu-core" }, { name = "libm" }, { name = "unicode-segmentation" }]
+allow = [
+  { name = "bingsu-core" },
+  { name = "libm" },
+  { name = "unicode-segmentation" },
+  # TOML for the config model (M3a S1): no_std + alloc, no build scripts.
+  { name = "toml" },
+  { name = "toml_parser" },
+  { name = "toml_datetime" },
+  { name = "serde_spanned" },
+  { name = "winnow" },
+]
 deny = [
   { crate = "libc" },
   { crate = "rustix" },

@@ -13,7 +13,9 @@ import check_core_no_std as gate
 
 ROOT = pathlib.Path("/w")
 EDGES = {
-    "bingsu-core": ["libm", "unicode-segmentation"],
+    "bingsu-core": ["libm", "unicode-segmentation", "toml"],
+    "toml": ["toml_parser", "toml_datetime", "serde_spanned", "winnow"],
+    "toml_parser": ["winnow"],
     "bingsu": ["bingsu-core", "libc"],
 }
 
@@ -148,6 +150,79 @@ class Judge(unittest.TestCase):
         m["packages"].append(twin)
         m["resolve"]["nodes"].append(twin_node)
         self.assertEqual(self.judged(m), [])
+
+    def optional_dep(self, m, owner, dep, kinds, table, enabled, rename=None, lib=None):
+        """`owner` gets an optional dependency on `dep` (of target `kinds`),
+        listed in the resolve as cargo metadata does when another member
+        pulls `dep` in. `lib` is the edge's lib name (default: the key)."""
+        add_dep(m, owner, dep, kinds)
+        p = pkg(m, owner)
+        p["features"] = table
+        p.setdefault("dependencies", []).append(
+            {"name": dep, "rename": rename, "optional": True, "kind": None})
+        node(m, owner)["deps"][-1]["name"] = lib or (rename or dep).replace("-", "_")
+        node(m, owner)["features"] = list(enabled)
+
+    # 이것을 실패시키는 것: weak feature(`x?/f`)만 가리키는 선택 의존을 간선으로 따라가는 것
+    # (cargo metadata는 다른 member가 그 package를 넣으면 간선을 적지만 빌드는 넣지 않는다).
+    def test_weak_feature_edge_is_not_followed(self):
+        # A dependency key may also name an unrelated enabled feature.
+        for rename in (None, "sc", "alloc"):
+            m = clean()
+            key = rename or "serde_core"
+            self.optional_dep(m, "serde_spanned", "serde_core", ["proc-macro"],
+                              {"alloc": [f"{key}?/alloc"], "serde": [f"dep:{key}"]}, ["alloc"], rename)
+            self.assertEqual(self.judged(m), [], rename)
+
+    # 이것을 실패시키는 것: 켜진 선택 의존을 건너뛰는 것(`dep:x`, weak 아닌 `x/f`, 암시적 feature,
+    # 이름을 바꾼 의존과 하이픈 이름 각각).
+    def test_enabled_optional_edge_is_followed(self):
+        cases = [
+            ({"alloc": [], "serde": ["dep:serde_core"]}, ["alloc", "serde"], None, "serde_core"),
+            ({"alloc": [], "std": ["serde_core/std"]}, ["alloc", "std"], None, "serde_core"),
+            ({"alloc": []}, ["alloc", "serde_core"], None, "serde_core"),
+            ({"alloc": [], "w": ["dep:uw"]}, ["alloc", "w"], "uw", "unicode-width"),
+            ({"alloc": []}, ["alloc", "uw"], "uw", "unicode-width"),
+            ({"alloc": [], "w": ["unicode-width/std"]}, ["alloc", "w"], None, "unicode-width"),
+        ]
+        for table, enabled, rename, dep in cases:
+            with self.subTest(table=table, rename=rename):
+                m = clean()
+                self.optional_dep(m, "serde_spanned", dep, ["proc-macro"], table, enabled, rename)
+                self.fails_with(m, f"{dep} is a proc-macro")
+
+    # 이것을 실패시키는 것: 간선을 lib 이름으로 선언에 맞추는 것. 필수 의존(proc-macro, build script)의
+    # lib 이름이 꺼진 선택 의존과 같으면 그 필수 간선이 "꺼진 선택 의존"으로 보여 빠졌다.
+    def test_required_dep_named_like_an_off_optional_one(self):
+        for kinds, reason in ((["proc-macro"], "evil is a proc-macro"),
+                              (["custom-build", "lib"], "build script of evil 1.0.0 is not reviewed")):
+            with self.subTest(kinds=kinds):
+                m = clean()
+                self.optional_dep(m, "bingsu-core", "foo", ["lib"], {"alloc": ["foo?/x"]}, [])
+                add_dep(m, "bingsu-core", "evil", kinds)
+                node(m, "bingsu-core")["deps"][-1]["name"] = "foo"  # `[lib] name = "foo"`
+                pkg(m, "bingsu-core")["dependencies"].append(
+                    {"name": "evil", "rename": None, "optional": False, "kind": None})
+                self.fails_with(m, reason)
+
+    # 이것을 실패시키는 것: 같은 이름이 한 번은 필수로, 한 번은 선택으로 선언됐을 때 선택으로만 보는 것.
+    def test_a_required_declaration_keeps_the_edge(self):
+        m = clean()
+        self.optional_dep(m, "serde_spanned", "serde_core", ["proc-macro"], {"alloc": ["serde_core?/alloc"]}, ["alloc"])
+        pkg(m, "serde_spanned")["dependencies"].append(
+            {"name": "serde_core", "rename": None, "optional": False, "kind": None})
+        self.fails_with(m, "serde_core is a proc-macro")
+
+    # 이것을 실패시키는 것: resolve 간선의 종류와 다른 선언까지 보고 선택 의존을 필수로 판정하는 것.
+    def test_declarations_match_the_edge_kind(self):
+        m = clean()
+        self.optional_dep(m, "serde_spanned", "serde_core", ["proc-macro"],
+                          {"alloc": ["serde_core?/alloc"]}, ["alloc"])
+        pkg(m, "serde_spanned")["dependencies"].append(
+            {"name": "serde_core", "rename": None, "optional": False, "kind": "build"})
+        self.assertEqual(self.judged(m), [])
+        node(m, "serde_spanned")["deps"][-1]["dep_kinds"] = [{"kind": "build"}]
+        self.fails_with(m, "serde_core is a proc-macro")
 
     # 이것을 실패시키는 것: [patch]·[replace] 검사를 지우는 것(둘 각각).
     def test_patch_and_replace(self):
