@@ -4,7 +4,8 @@
 //! (`SystemGroups` lives for one walk). A group whose members cannot be
 //! confirmed (NSS, LDAP, a failed lookup) is `Unknown`, which the rules
 //! treat as not safe, except the explicitly approved R-M1 private-primary
-//! group rule (primary gid, matching user/group name, no listed members).
+//! group rule (primary gid, matching user/group name, no listed members
+//! confirmed by the files source in `/etc/group`).
 //!
 //! The policy (`membership`) is a pure function of what the system said, so
 //! it is tested with made-up groups; `SystemGroups` asks the system through
@@ -68,17 +69,70 @@ pub fn membership(
     verdict
 }
 
-/// R-M1: the user's primary group, named after the user, with no explicit
-/// members, is private even when directory enumeration is incomplete.
+/// R-M1 candidate: the user's primary group, named after the user, with no
+/// explicit members. NSS may omit members (SSSD's ignore_group_members),
+/// so the files source must also confirm the empty list before accepting it.
 /// Residual risk: a directory administrator assigns another account this
 /// same primary gid. This exception was explicitly accepted by the user.
-pub fn private_group(
+fn private_group_candidate(
     gid: u32,
     user: &[u8],
     primary: Option<u32>,
     group: Option<(&[u8], &[Vec<u8>])>,
 ) -> bool {
     primary == Some(gid) && group.is_some_and(|(name, members)| name == user && members.is_empty())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FilesGroup {
+    name: Vec<u8>,
+    gid: u32,
+    empty_members: bool,
+}
+
+/// Parse only well-formed `name:password:gid:members` records. In particular,
+/// do not trim the member field: whitespace is not proof of an empty list.
+fn parse_files_groups(text: &str) -> Vec<FilesGroup> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            let _password = fields.next()?;
+            let gid = fields.next()?;
+            let members = fields.next()?;
+            if fields.next().is_some()
+                || name.is_empty()
+                || name.starts_with('#')
+                || line.bytes().any(|b| b.is_ascii_whitespace() || b == 0)
+                || !gid.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            Some(FilesGroup {
+                name: name.as_bytes().to_vec(),
+                gid: gid.parse().ok()?,
+                empty_members: members.is_empty(),
+            })
+        })
+        .collect()
+}
+
+/// An absent/unreadable files source cannot confirm an NSS empty list.
+/// Conflicting records for the same gid also leave it unconfirmed.
+fn files_confirm_empty_group(gid: u32, name: &[u8], files: Option<&[FilesGroup]>) -> bool {
+    let Some(files) = files else {
+        return false;
+    };
+    let mut found = false;
+    for group in files {
+        if group.gid == gid {
+            if group.name != name || !group.empty_members {
+                return false;
+            }
+            found = true;
+        }
+    }
+    found
 }
 
 /// N2/doctor diagnostic text, including the path encoded as a shell word.
@@ -148,10 +202,12 @@ fn account_source_read_complete(read: Result<&str, std::io::ErrorKind>) -> bool 
 
 /// Asks the system, once per gid for the life of this value (one walk).
 /// The account list is read at most once, and only if some entry is group
-/// writable.
+/// writable. The files group list (including a failed read) is read at most
+/// once, and only for a candidate for the private-primary-group exception.
 pub struct SystemGroups {
     me: Vec<u8>,
     accounts: OnceCell<Option<Vec<Account>>>,
+    files_groups: OnceCell<Option<Vec<FilesGroup>>>,
     seen: HashMap<u32, Group>,
 }
 
@@ -160,6 +216,7 @@ impl SystemGroups {
         Self {
             me: me.to_vec(),
             accounts: OnceCell::new(),
+            files_groups: OnceCell::new(),
             seen: HashMap::new(),
         }
     }
@@ -170,13 +227,13 @@ impl SystemGroups {
         }
         let listed = sys::group_info(gid);
         let own = sys::passwd_entry(sys::current_uid());
-        if private_group(
+        if self.private_group(
             gid,
-            &self.me,
             own.as_ref().filter(|p| p.name == self.me).map(|p| p.gid),
             listed
                 .as_ref()
                 .map(|(name, members)| (name.as_slice(), members.as_slice())),
+            || std::fs::read_to_string("/etc/group"),
         ) {
             self.seen.insert(gid, Group::OnlyRootAndUser);
             return Group::OnlyRootAndUser;
@@ -203,6 +260,22 @@ impl SystemGroups {
         );
         self.seen.insert(gid, g);
         g
+    }
+
+    fn private_group(
+        &self,
+        gid: u32,
+        primary: Option<u32>,
+        group: Option<(&[u8], &[Vec<u8>])>,
+        read_files: impl FnOnce() -> std::io::Result<String>,
+    ) -> bool {
+        if !private_group_candidate(gid, &self.me, primary, group) {
+            return false;
+        }
+        let files = self
+            .files_groups
+            .get_or_init(|| read_files().ok().map(|text| parse_files_groups(&text)));
+        files_confirm_empty_group(gid, &self.me, files.as_deref())
     }
 }
 
@@ -380,9 +453,11 @@ mod tests {
         let me = sys::passwd_entry(sys::current_uid()).unwrap().name;
         let mut g = SystemGroups::new(&me);
         assert!(g.accounts.get().is_none());
+        assert!(g.files_groups.get().is_none());
         let gid = u32::MAX - 7; // no such group
         assert_eq!(g.gid(gid), Group::Unknown);
         assert_eq!(g.seen.len(), 1);
+        assert!(g.files_groups.get().is_none());
         assert_eq!(g.gid(gid), Group::Unknown);
         assert_eq!(g.seen.len(), 1);
         // A distinct cached answer proves the second call does not ask the
@@ -393,36 +468,196 @@ mod tests {
     }
     // 이것을 실패시키는 것: 기본 gid·이름·빈 명시 구성원 중 하나라도 생략하거나 조회 실패를 개인 그룹으로 보는 것.
     #[test]
-    fn private_group_exception_requires_all_three_conditions() {
-        assert!(private_group(
+    fn private_group_candidate_requires_all_three_conditions() {
+        assert!(private_group_candidate(
             1000,
             b"alice",
             Some(1000),
             Some((b"alice", &[]))
         ));
-        assert!(!private_group(
+        assert!(!private_group_candidate(
             1000,
             b"alice",
             Some(2000),
             Some((b"alice", &[]))
         ));
-        assert!(!private_group(1000, b"alice", None, Some((b"alice", &[]))));
-        assert!(!private_group(
+        assert!(!private_group_candidate(
+            1000,
+            b"alice",
+            None,
+            Some((b"alice", &[]))
+        ));
+        assert!(!private_group_candidate(
             1000,
             b"alice",
             Some(1000),
             Some((b"team", &[]))
         ));
-        assert!(!private_group(
+        assert!(!private_group_candidate(
             1000,
             b"alice",
             Some(1000),
             Some((b"alice", &[b"alice".to_vec()]))
         ));
-        assert!(!private_group(1000, b"alice", Some(1000), None));
+        assert!(!private_group_candidate(1000, b"alice", Some(1000), None));
         assert!(!accounts_complete(Some(
             "passwd: files sss\ngroup: files sss\n"
         )));
+    }
+
+    // NSS may hide eve's supplementary membership. An absent, disagreeing,
+    // or nonempty files record must not bypass incomplete SSSD enumeration.
+    #[test]
+    fn sssd_empty_members_need_files_confirmation() {
+        let accounts = accounts_complete(Some("passwd: files sss\ngroup: files sss\n"))
+            .then(|| vec![acct("alice", 1000)]);
+        for files in [
+            "",
+            "root:x:0:\n",
+            "alice:x:1000:eve\n",
+            "team:x:1000:\n",
+            "alice:x:2000:\n",
+            "alice:x:1000:\nalice:x:1000:eve\n",
+            "alice:x:1000:eve\nalice:x:1000:\n",
+            "alice:x:1000:\nteam:x:1000:\n",
+        ] {
+            let groups = SystemGroups::new(b"alice");
+            let verdict = if groups.private_group(1000, Some(1000), Some((b"alice", &[])), || {
+                Ok(files.to_owned())
+            }) {
+                Group::OnlyRootAndUser
+            } else {
+                membership(1000, b"alice", Some(&[]), accounts.as_deref(), &mut |_| {
+                    Some(false)
+                })
+            };
+            assert_eq!(verdict, Group::Unknown, "files: {files:?}");
+        }
+    }
+
+    #[test]
+    fn confirmed_local_private_group_keeps_exception() {
+        let groups = SystemGroups::new(b"alice");
+        assert!(
+            groups.private_group(1000, Some(1000), Some((b"alice", &[])), || {
+                Ok("# local groups\nroot:x:0:\nalice:x:1000:\n".to_owned())
+            })
+        );
+        // The exception still avoids account enumeration, even with SSSD.
+        assert!(groups.accounts.get().is_none());
+    }
+
+    // Reading files is unnecessary unless every original candidate condition
+    // holds, and must remain unnecessary for the prompt front end.
+    #[test]
+    fn files_groups_are_read_only_for_private_group_candidates() {
+        let groups = SystemGroups::new(b"alice");
+        for (primary, group) in [
+            (None, Some((b"alice".as_slice(), [].as_slice()))),
+            (Some(2000), Some((b"alice".as_slice(), [].as_slice()))),
+            (Some(1000), None),
+            (Some(1000), Some((b"team".as_slice(), [].as_slice()))),
+            (
+                Some(1000),
+                Some((b"alice".as_slice(), [b"eve".to_vec()].as_slice())),
+            ),
+        ] {
+            assert!(
+                !groups.private_group(1000, primary, group, || panic!("unexpected files read"))
+            );
+        }
+        assert!(groups.files_groups.get().is_none());
+    }
+
+    #[test]
+    fn files_groups_are_read_once_per_walk() {
+        let groups = SystemGroups::new(b"alice");
+        assert!(
+            groups.private_group(1000, Some(1000), Some((b"alice", &[])), || {
+                Ok("alice:x:1000:\nalice:x:1001:\n".to_owned())
+            })
+        );
+        assert!(
+            groups.private_group(1001, Some(1001), Some((b"alice", &[])), || {
+                panic!("files read more than once")
+            })
+        );
+        let fresh = SystemGroups::new(b"alice");
+        assert!(fresh.files_groups.get().is_none());
+        assert!(
+            !fresh.private_group(1000, Some(1000), Some((b"alice", &[])), || {
+                Ok("alice:x:1000:eve\n".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn unreadable_files_groups_never_confirm_or_retry() {
+        use std::io::ErrorKind;
+        for error in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::Interrupted,
+        ] {
+            let groups = SystemGroups::new(b"alice");
+            assert!(
+                !groups.private_group(1000, Some(1000), Some((b"alice", &[])), || {
+                    Err(error.into())
+                })
+            );
+            assert!(
+                !groups.private_group(1000, Some(1000), Some((b"alice", &[])), || {
+                    panic!("failed files read retried")
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn files_group_parser_preserves_identity_and_member_presence() {
+        assert_eq!(
+            parse_files_groups(
+                "# comment\n \t# comment\n\n \t\nalice:x:1000:\r\nbob::1001:eve,root\n"
+            ),
+            [
+                FilesGroup {
+                    name: b"alice".to_vec(),
+                    gid: 1000,
+                    empty_members: true,
+                },
+                FilesGroup {
+                    name: b"bob".to_vec(),
+                    gid: 1001,
+                    empty_members: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn files_group_parser_ignores_malformed_lines() {
+        for malformed in [
+            "alice",
+            "alice:x",
+            "alice:x:1000",
+            "alice:x:1000::",
+            ":x:1000:",
+            "#alice:x:1000:",
+            "  #alice:x:1000:",
+            "alice:x::",
+            "alice:x:bad:",
+            "alice:x:-1000:",
+            "alice:x:+1000:",
+            "alice:x:4294967296:",
+            "alice:x: 1000:",
+            "alice:x:1000: ",
+            "alice:x:1000:\t",
+            "alice\0:x:1000:",
+        ] {
+            let files = parse_files_groups(&format!("{malformed}\nbob:x:1001:\n"));
+            assert_eq!(files, parse_files_groups("bob:x:1001:\n"), "{malformed:?}");
+        }
     }
 
     // 이것을 실패시키는 것: chmod g-w 안내를 빼거나 공백·따옴표·셸 메타문자를 인용하지 않는 것.
