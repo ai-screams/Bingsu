@@ -5,64 +5,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Worse verdicts compare greater: Safe < Unknown < Tamperable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Verdict {
-    Safe,
-    Unknown,
-    Tamperable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Group {
-    OnlyRootAndUser,
-    HasOthers,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    all(not(target_os = "macos"), not(test)),
-    expect(
-        dead_code,
-        reason = "only the macOS ACL reader yields DenyOnly and AllowsWrite"
-    )
-)]
-pub enum AclFacts {
-    None,
-    DenyOnly,
-    AllowsWrite,
-    Unknown,
-}
-
-/// One extended ACL entry as read on macOS.
-#[cfg(any(target_os = "macos", test))]
-#[derive(Clone, Copy, Debug)]
-pub enum AclEntry {
-    /// `writes`: grants write, append, delete, delete-child, attribute,
-    /// extended-attribute, security or ownership change.
-    Allow {
-        writes: bool,
-    },
-    Deny,
-}
-
-/// Folds the entries of one ACL. `Err` marks an ACL call that failed or an
-/// entry of a kind we do not know; the ACL then counts as unread (fail
-/// closed), unless an earlier entry already allowed writing.
-#[cfg(any(target_os = "macos", test))]
-pub fn fold_acl(entries: impl IntoIterator<Item = Result<AclEntry, ()>>) -> AclFacts {
-    let mut facts = AclFacts::None;
-    for e in entries {
-        match e {
-            Err(()) => return AclFacts::Unknown,
-            Ok(AclEntry::Allow { writes: true }) => return AclFacts::AllowsWrite,
-            Ok(AclEntry::Allow { writes: false }) => {}
-            Ok(AclEntry::Deny) => facts = AclFacts::DenyOnly,
-        }
-    }
-    facts
-}
+pub use bingsu_core::fs_trust::{AclFacts, Verdict};
+use bingsu_core::fs_trust::{Facts, GroupOracle, entry_verdict};
 
 /// The executable must live on a local file system (spec section 4,
 /// macOS executable row: not `MNT_LOCAL` is refused; init only warns).
@@ -110,31 +54,22 @@ pub fn invocation_path(argv0: &OsStr, path_env: Option<&OsStr>, cwd: &Path) -> O
     None
 }
 
-/// Pure rule for one path entry (table in Task A7).
-pub fn classify(e: &EntryFacts, uid: u32, group: &dyn Fn(u32) -> Group) -> Verdict {
-    if e.uid != 0 && e.uid != uid {
-        return Verdict::Tamperable;
-    }
-    let acl = match e.acl {
-        AclFacts::AllowsWrite => Verdict::Tamperable,
-        AclFacts::Unknown => Verdict::Unknown,
-        AclFacts::None | AclFacts::DenyOnly => Verdict::Safe,
+/// The rule for one path entry (Task A7 table; the rule itself is
+/// `bingsu_core::fs_trust::entry_verdict`, shared with the runtime root walk
+/// and the config file check).
+pub fn classify(e: &EntryFacts, uid: u32, groups: &mut dyn GroupOracle) -> Verdict {
+    // No answer is pinned to an executable path entry, so its identity is
+    // not needed.
+    let f = Facts {
+        ownership: Some(true),
+        dev: 0,
+        ino: 0,
+        uid: e.uid,
+        gid: e.gid,
+        mode: e.mode,
+        acl: e.acl,
     };
-    if e.is_symlink {
-        return acl; // a symlink's own mode bits are not used
-    }
-    let mode = if e.mode & 0o002 != 0 {
-        Verdict::Tamperable
-    } else if e.mode & 0o020 != 0 {
-        match group(e.gid) {
-            Group::OnlyRootAndUser => Verdict::Safe,
-            Group::HasOthers => Verdict::Tamperable,
-            Group::Unknown => Verdict::Unknown,
-        }
-    } else {
-        Verdict::Safe
-    };
-    mode.max(acl)
+    entry_verdict(&f, uid, e.is_symlink, groups)
 }
 
 fn facts(p: &Path) -> Option<EntryFacts> {
@@ -226,19 +161,10 @@ pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
     };
     // One verdict per gid for the whole walk: Homebrew paths cross several
     // group-writable folders of the same group (`bin`, `Cellar`).
-    // The account list is read once, and only if some folder is group
-    // writable.
-    let cache = std::cell::RefCell::new(std::collections::HashMap::<u32, Group>::new());
-    let users = std::cell::OnceCell::new();
-    let group = |gid: u32| {
-        *cache.borrow_mut().entry(gid).or_insert_with(|| {
-            let users = users.get_or_init(crate::commands::sys::local_users);
-            crate::commands::sys::group_membership(gid, user, users.as_deref())
-        })
-    };
+    let mut groups = crate::commands::group_policy::SystemGroups::new(user);
     paths
         .iter()
-        .map(|p| facts(p).map_or(Verdict::Unknown, |f| classify(&f, uid, &group)))
+        .map(|p| facts(p).map_or(Verdict::Unknown, |f| classify(&f, uid, &mut groups)))
         .chain([local_verdict(crate::commands::sys::fs_is_local(&target))])
         .max()
         .unwrap_or(Verdict::Unknown)
@@ -247,29 +173,9 @@ pub fn check_path(exe: &Path, uid: u32, user: &[u8]) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bingsu_core::fs_trust::Group;
 
     const ME: u32 = 501;
-
-    // 이것을 실패시키는 것: ACL 호출 오류나 모르는 항목을 "항목 없음"으로 읽는 것(fail-open).
-    #[test]
-    fn acl_errors_are_unknown() {
-        use AclEntry::{Allow, Deny};
-        let rows: &[(&[Result<AclEntry, ()>], AclFacts)] = &[
-            (&[], AclFacts::None),
-            (&[Ok(Deny)], AclFacts::DenyOnly),
-            (&[Ok(Allow { writes: false })], AclFacts::None),
-            (
-                &[Ok(Deny), Ok(Allow { writes: true })],
-                AclFacts::AllowsWrite,
-            ),
-            (&[Err(())], AclFacts::Unknown),
-            (&[Ok(Deny), Err(())], AclFacts::Unknown),
-            (&[Ok(Allow { writes: false }), Err(())], AclFacts::Unknown),
-        ];
-        for (entries, want) in rows {
-            assert_eq!(fold_acl(entries.iter().copied()), *want, "{entries:?}");
-        }
-    }
 
     // 이것을 실패시키는 것: 로컬이 아닌 파일 시스템이나 statfs 실패를 안전으로 보는 것.
     #[test]
@@ -304,11 +210,8 @@ mod tests {
     // 이것을 실패시키는 것: 없는 그룹을 "구성원 없음"으로 보는 것.
     #[test]
     fn missing_group_is_unknown() {
-        let users = crate::commands::sys::local_users();
-        assert_eq!(
-            crate::commands::sys::group_membership(u32::MAX - 7, b"nobody-here", users.as_deref()),
-            Group::Unknown
-        );
+        let mut groups = crate::commands::group_policy::SystemGroups::new(b"nobody-here");
+        assert_eq!(groups.gid(u32::MAX - 7), Group::Unknown);
     }
 
     // init only passes absolute paths; a relative one would be walked from
@@ -416,9 +319,14 @@ mod tests {
                 "worst of two wins",
             ),
         ];
+        struct Fixed(Group);
+        impl GroupOracle for Fixed {
+            fn group_write(&mut self, _: &Facts) -> Group {
+                self.0
+            }
+        }
         for (f, g, want, why) in rows {
-            let g = *g;
-            assert_eq!(classify(f, ME, &|_| g), *want, "{why}");
+            assert_eq!(classify(f, ME, &mut Fixed(*g)), *want, "{why}");
         }
     }
 }

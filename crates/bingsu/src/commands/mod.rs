@@ -5,6 +5,8 @@ use crate::prompt::NonPromptArgs;
 use std::process::ExitCode;
 
 #[cfg(unix)]
+mod group_policy;
+#[cfg(unix)]
 mod init;
 #[cfg(unix)]
 mod messages;
