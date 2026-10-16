@@ -3,8 +3,9 @@
 use crate::layout::PATH_BYTES_MAX;
 use crate::record::RecordVersion;
 use crate::root_arg::{
-    CONFIG_ROOT_PREFIX, CONFIG_ROOT_WRITTEN_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX,
-    RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX, parse_abs_path, parse_decimal, parse_runtime_root,
+    CONFIG_ROOT_PREFIX, CONFIG_ROOT_SHAPE_ONLY, CONFIG_ROOT_WRITTEN_PREFIX, HOME_PREFIX,
+    LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX, parse_abs_path, parse_decimal,
+    parse_runtime_root,
 };
 use crate::shell_word::Shell;
 use alloc::vec::Vec;
@@ -35,6 +36,9 @@ pub struct Envelope {
     pub config_root: Option<Vec<u8>>,
     /// Original spelling whose parent/link/target evidence N2 must rebuild.
     pub config_root_written: Option<Vec<u8>>,
+    /// `--config-root-shape-only`: init could not decide the root's safety,
+    /// so every file under it is shape-only. A trust ceiling only.
+    pub config_root_shape_only: bool,
     pub state_root: Option<Vec<u8>>,
     pub log_root: Option<Vec<u8>>,
     /// `--shell`, a constant word of each shell's hook. `None`: the hook is
@@ -211,6 +215,14 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
             i += 1;
             continue;
         }
+        if a == CONFIG_ROOT_SHAPE_ONLY {
+            if e.config_root_shape_only {
+                return Err(EnvelopeError::BadArgs("duplicate field"));
+            }
+            e.config_root_shape_only = true;
+            i += 1;
+            continue;
+        }
         // Two-word fields: `--name value`.
         let v = args
             .get(i + 1)
@@ -321,6 +333,48 @@ mod tests {
             e.config_root_written.as_deref(),
             Some(&b"/home/me/.config/bingsu"[..])
         );
+        assert!(!e.config_root_shape_only);
+    }
+
+    // 모양 전용 표식은 값 없는 한 단어다. 두 번 오면 거부하고, 값을 붙이거나 접두사처럼 쓰면 모르는 인자다.
+    // 이것을 실패시키는 것: 표식을 인식하지 않는 것(모양 전용 init 뒤 모든 프롬프트가 bad-args),
+    // 중복을 받아 주는 것, `starts_with`로 비교해 `--config-root-shape-only=/x`를 받아 주는 것.
+    #[test]
+    fn config_root_shape_only_is_one_flag_word() {
+        let base: [&[u8]; 7] = [
+            b"--ctx",
+            b"1",
+            b"--record",
+            b"B1",
+            b"--width",
+            b"80",
+            b"--config-root=/c",
+        ];
+        let with = |extra: &[&'static [u8]]| {
+            let mut a = base.to_vec();
+            a.extend_from_slice(extra);
+            super::parse(&a)
+        };
+        let e = with(&[b"--config-root-shape-only"]).unwrap();
+        assert!(e.config_root_shape_only);
+        assert_eq!(e.config_root.as_deref(), Some(&b"/c"[..]));
+        assert_eq!(
+            with(&[b"--config-root-shape-only", b"--config-root-shape-only"]).err(),
+            Some(super::EnvelopeError::BadArgs("duplicate field"))
+        );
+        for bad in [
+            &b"--config-root-shape-only=/x"[..],
+            b"--config-root-shape-onl",
+            b"--config-root-shape-only-x",
+        ] {
+            // A trailing word, so the parser reaches the unknown-name check
+            // instead of stopping at a missing two-word value.
+            assert_eq!(
+                with(&[bad, b"x"]).err(),
+                Some(super::EnvelopeError::BadArgs("unknown argument")),
+                "{bad:?}"
+            );
+        }
     }
 
     use super::*;

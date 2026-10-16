@@ -5,7 +5,8 @@
 //! use ancestor rules; user links (stow folding) also check the target folder.
 use crate::commands::sys::{self, Stamp};
 use bingsu_core::fs_trust::{
-    Facts, GroupOracle, Last, NextOwner, Refusal, RefuseGroupWrite, ancestor_verdict, walk_verdict,
+    AclFacts, Facts, Group, GroupOracle, Last, NextOwner, Refusal, RefuseGroupWrite,
+    ancestor_verdict, walk_verdict,
 };
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -115,6 +116,32 @@ fn folder_target_verdict(
     groups: &mut dyn GroupOracle,
 ) -> Result<(), Refusal> {
     walk_verdict(facts, me, Last::Mine, Some(true), groups)
+}
+
+/// See `Resolved::revalidate_assuming_decided`. Only undecidable facts
+/// change: a known other writer, owner or writable ACL stays as observed,
+/// and so does `Some(false)`, a volume known to ignore ownership (anyone
+/// may write there), which keeps the root refused.
+fn assume_decided_facts(f: Facts) -> Facts {
+    Facts {
+        ownership: f.ownership.or(Some(true)),
+        acl: match f.acl {
+            AclFacts::Unknown | AclFacts::PosixExtended => AclFacts::None,
+            known => known,
+        },
+        ..f
+    }
+}
+
+struct AssumeDecided<'a>(&'a mut dyn GroupOracle);
+
+impl GroupOracle for AssumeDecided<'_> {
+    fn group_write(&mut self, at: &Facts) -> Group {
+        match self.0.group_write(at) {
+            Group::Unknown => Group::OnlyRootAndUser,
+            known => known,
+        }
+    }
 }
 
 fn directory_stamp_matches(now: &Stamp, before: &Stamp) -> bool {
@@ -350,6 +377,39 @@ impl Resolved {
     /// timestamps and a fresh group oracle. No reopened source substitutes
     /// for the source whose bytes were compiled.
     pub fn revalidate(&self, me: u32, groups: &mut dyn GroupOracle) -> io::Result<()> {
+        self.revalidate_with(me, groups, false)
+    }
+
+    /// The same checks, with every fact that makes a rule undecidable read
+    /// as decided in the user's favour: ownership enforcement unread,
+    /// an unread ACL, a POSIX ACL mask under group write, group members the
+    /// system could not confirm. `Ok` means the only refusals in the whole
+    /// chain are `Undecided`; a hidden `Ancestor`, `Last` or `StickyNext`
+    /// (masked because `refusal` keeps the first one) still fails. Used for
+    /// a shape-only config root (user decision 2026-10-17, R3 I-1).
+    pub fn revalidate_assuming_decided(
+        &self,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+    ) -> io::Result<()> {
+        self.revalidate_with(me, groups, true)
+    }
+
+    /// Facts this walk retained for `path` (a folder it opened or the final
+    /// entry), to explain a refusal without a new lookup.
+    pub fn facts_at(&self, path: &Path) -> Option<Facts> {
+        if path == self.canonical {
+            return Some(self.facts);
+        }
+        self.nodes.iter().find(|n| n.path == path).map(|n| n.facts)
+    }
+
+    fn revalidate_with(
+        &self,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+        assume_decided: bool,
+    ) -> io::Result<()> {
         for n in &self.nodes {
             let now = sys::file_stamp(&n.file)?;
             // Directory content times may change because unrelated entries
@@ -390,14 +450,19 @@ impl Resolved {
         if !same || sys::fd_facts(self.file.as_fd())? != self.facts {
             return Err(io::Error::other("source evidence changed"));
         }
+        let mut decided = AssumeDecided(groups);
         for (i, check) in self.checks.iter().enumerate() {
             let mut facts = chain_facts(&self.nodes, &check.stack);
             if i + 1 == self.checks.len() {
                 facts.push(self.facts);
             }
-            check
-                .verdict(&facts, me, groups)
-                .map_err(|e| io::Error::other(format!("trust changed: {e:?}")))?;
+            let verdict = if assume_decided {
+                let facts: Vec<Facts> = facts.into_iter().map(assume_decided_facts).collect();
+                check.verdict(&facts, me, &mut decided)
+            } else {
+                check.verdict(&facts, me, decided.0)
+            };
+            verdict.map_err(|e| io::Error::other(format!("trust changed: {e:?}")))?;
         }
         Ok(())
     }
@@ -407,6 +472,50 @@ impl Resolved {
 mod tests {
     use super::*;
     use bingsu_core::fs_trust::{AclFacts, RefuseGroupWrite};
+
+    // 모양 전용 뿌리의 분류는 판정 불가 사실만 결정된 것으로 본다. 알려진 쓰기 ACL·소유자는 그대로 둔다.
+    // 이것을 실패시키는 것: 소유권 미확인·ACL 미확인을 그대로 두는 것(Undecided 뿌리를 버림), 소유권을 집행하지 않는
+    // 것이 확정된 볼륨(`Some(false)`)까지 올리는 것,
+    // 쓰기 허용 ACL까지 지우는 것(남이 쓸 수 있는 뿌리를 모양 전용으로 받음), 그룹 HasOthers를 바꾸는 것.
+    #[test]
+    fn assume_decided_changes_only_undecidable_facts() {
+        let f = Facts {
+            dev: 1,
+            ino: 2,
+            uid: 7,
+            gid: 20,
+            mode: 0o40775,
+            acl: AclFacts::Unknown,
+            ownership: None,
+        };
+        let d = assume_decided_facts(f);
+        assert_eq!(d.ownership, Some(true));
+        assert_eq!(d.acl, AclFacts::None);
+        assert_eq!((d.uid, d.mode), (7, 0o40775));
+        let ignored = assume_decided_facts(Facts {
+            ownership: Some(false),
+            acl: AclFacts::PosixExtended,
+            ..f
+        });
+        assert_eq!(ignored.acl, AclFacts::None);
+        assert_eq!(ignored.ownership, Some(false), "known not enforced stays");
+        for keep in [AclFacts::AllowsWrite, AclFacts::DenyOnly] {
+            assert_eq!(assume_decided_facts(Facts { acl: keep, ..f }).acl, keep);
+        }
+        struct Fixed(Group);
+        impl GroupOracle for Fixed {
+            fn group_write(&mut self, _: &Facts) -> Group {
+                self.0
+            }
+        }
+        for (inner, want) in [
+            (Group::Unknown, Group::OnlyRootAndUser),
+            (Group::HasOthers, Group::HasOthers),
+            (Group::OnlyRootAndUser, Group::OnlyRootAndUser),
+        ] {
+            assert_eq!(AssumeDecided(&mut Fixed(inner)).group_write(&f), want);
+        }
+    }
 
     // 이것을 실패시키는 것: root 소유 접두 링크의 부모에 사용자 소유·공유 쓰기·쓰기 ACL·소유권 미확인을 허용하는 것.
     #[test]

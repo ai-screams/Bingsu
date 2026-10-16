@@ -12,7 +12,8 @@
 //! - `Unsafe`: such a file that fails the check. Its execution keys are kept
 //!   so the segment can be named, and nothing it configures runs (core W405).
 //! - `ShapeOnly`: every other file, checked or not (spec: other `extends`
-//!   are shape-only whatever the check says).
+//!   are shape-only whatever the check says), and every file under a root
+//!   init marked shape-only (`ConfigRootPin::shape_only`).
 //!
 //! Root discovery probes metadata without retaining its descriptors. The
 //! read plan deduplicates FileKey; core then admits roots under its trusted
@@ -31,7 +32,7 @@ use bingsu_core::config::source::{
     ExtendsRef, FileKey, Found, OpenError, Opened, Resolver, Root, RootMeta, Status, Trust,
 };
 use bingsu_core::config::tree::FILE_BYTES_MAX;
-use bingsu_core::fs_trust::Refusal;
+use bingsu_core::fs_trust::{GroupOracle, Refusal};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Seek};
@@ -183,6 +184,10 @@ impl Loader {
     /// every original fd. Changed evidence means no new marker. A fresh
     /// oracle checks memberships again; cached per-walk answers do not leak.
     pub fn revalidate(&self) -> Result<(), String> {
+        self.revalidate_with(&mut SystemGroups::new(&self.places.user))
+    }
+
+    fn revalidate_with(&self, groups: &mut dyn GroupOracle) -> Result<(), String> {
         if !self.complete {
             return Err("incomplete session".into());
         }
@@ -192,22 +197,26 @@ impl Loader {
                 return Err("conf.d names changed".into());
             }
         }
-        let mut groups = SystemGroups::new(&self.places.user);
-        self.places
-            .config_root
-            .evidence
-            .revalidate(self.places.me, &mut groups)
-            .map_err(|e| format!("config root: {e}"))?;
+        let root = &self.places.config_root;
+        // A shape-only root grants nothing to run; it must still show no
+        // refusal other than `Undecided`, and its evidence must not change.
+        if root.shape_only {
+            root.evidence
+                .revalidate_assuming_decided(self.places.me, groups)
+        } else {
+            root.evidence.revalidate(self.places.me, groups)
+        }
+        .map_err(|e| format!("config root: {e}"))?;
         if let Some(record) = &self.record_evidence {
             record
-                .revalidate(self.places.me, &mut groups)
+                .revalidate(self.places.me, groups)
                 .map_err(|e| format!("record: {e:?}"))?;
         } else if self.record.is_some() {
             return Err("approval has no descriptor evidence".into());
         }
         for c in self.held.values().filter(|c| c.trust == Trust::Executable) {
             c.evidence
-                .revalidate(self.places.me, &mut groups)
+                .revalidate(self.places.me, groups)
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -216,15 +225,21 @@ impl Loader {
     /// Where a canonical path may give execution keys: under the config
     /// root, or the `config use` file (its identity is compared after the
     /// file is open).
+    /// Under a shape-only root nothing is a trusted place, the `config use`
+    /// file included when it lies under that root.
     fn trusted_place(&self, canonical: &Path) -> bool {
-        canonical.starts_with(&self.places.config_root.path)
-            || self.record.as_ref().is_some_and(|r| r.path == canonical)
+        let root = &self.places.config_root;
+        let under_root = canonical.starts_with(&root.path);
+        (under_root && !root.shape_only)
+            || (self.record.as_ref().is_some_and(|r| r.path == canonical)
+                && !(under_root && root.shape_only))
     }
 
     /// Candidate place only; this never grants execution trust on its own.
     /// Resolved checks every parent chain, link owner and folder target.
     fn linked_from_root(&self, written: &Path) -> bool {
-        written.starts_with(&self.places.config_root.path)
+        !self.places.config_root.shape_only
+            && written.starts_with(&self.places.config_root.path)
             && !written
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -644,11 +659,53 @@ mod tests {
             loader
         }
 
+        /// The root at 0775 with group members the system could not
+        /// confirm: init keeps it as a shape-only root (R3 I-1).
+        /// Group members unknown for the root folder only.
+        fn root_unknown(&self) -> UnknownAt {
+            let md = std::fs::metadata(&self.root).unwrap();
+            UnknownAt(md.dev(), md.ino())
+        }
+
+        fn shape_only_loader(&self, record: Option<Record>) -> Loader {
+            std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o775)).unwrap();
+            let me = sys::current_uid();
+            let pin = crate::commands::init::roots::ConfigRootPin::check(
+                &self.root,
+                me,
+                &mut self.root_unknown(),
+            )
+            .unwrap();
+            assert!(pin.shape_only);
+            let mut loader = Loader::new(Places {
+                config_root: pin,
+                home: self.home.clone(),
+                me,
+                user: sys::passwd_entry(me).unwrap().name,
+            });
+            loader.record = record;
+            loader
+        }
+
         fn read(&self, record: Option<Record>) -> (GraphResult, Loader) {
             let mut l = self.loader(record);
             let roots = l.roots(b"");
             let r = read_graph(roots, &mut l);
             (r, l)
+        }
+    }
+
+    struct UnknownAt(u64, u64);
+    impl GroupOracle for UnknownAt {
+        fn group_write(
+            &mut self,
+            at: &bingsu_core::fs_trust::Facts,
+        ) -> bingsu_core::fs_trust::Group {
+            if (at.dev, at.ino) == (self.0, self.1) {
+                bingsu_core::fs_trust::Group::Unknown
+            } else {
+                bingsu_core::fs_trust::Group::HasOthers
+            }
         }
     }
 
@@ -840,6 +897,85 @@ mod tests {
         assert!(
             reasons.iter().any(|v| v.contains("not a regular file")),
             "{d:?} {reasons:?}"
+        );
+    }
+
+    // 모양 전용 뿌리(사용자 결정 2026-10-17, R3 I-1): 그 아래 파일은 모두 ShapeOnly다. 색은 적용되고, 명령 세그먼트는
+    // 다른 모양 전용 원본과 같은 진단(W405 계열)으로 막히며 실행 단위가 없다. S3b 보고 경로로 확인한다.
+    // 이것을 실패시키는 것: trusted_place·linked_from_root에서 모양 전용 상한을 빼는 것(뿌리 아래 파일이 Executable 또는
+    // Unsafe가 됨), 발행 전 재확인에서 모양 전용 뿌리를 보통 뿌리처럼 다시 검사하는 것.
+    #[test]
+    fn a_shape_only_root_applies_colors_and_runs_nothing() {
+        use bingsu_core::color::palette::Mode;
+        use bingsu_core::config::compile::BUILTIN_TOML;
+        use bingsu_core::config::report::report;
+        let fx = Fx::new("shape-root");
+        fx.put(
+            &fx.root.join("config.toml"),
+            &format!("{CMD}[colors]\nmode = \"light\"\n"),
+        );
+        fx.put(&fx.root.join("conf.d/a.toml"), CMD);
+        // A link in the root to a file outside it (`linked_from_root`).
+        let linked = fx.put(&fx.home.join("linked.toml"), CMD);
+        std::os::unix::fs::symlink(&linked, fx.root.join("conf.d/b.toml")).unwrap();
+        let mut l = fx.shape_only_loader(None);
+        let roots = l.roots(BUILTIN_TOML.as_bytes());
+        let r = report(roots, &mut l, [0, 3, 0], Mode::Dark);
+        for end in ["/config.toml", "/a.toml", "/linked.toml"] {
+            let f = r
+                .files
+                .iter()
+                .find(|f| f.opened.display.ends_with(end.as_bytes()))
+                .unwrap();
+            assert_eq!(
+                (f.trust, f.status),
+                (Trust::ShapeOnly, Status::Applied),
+                "{end}"
+            );
+        }
+        let snap = r.snapshot.as_ref().expect("shape keys still compile");
+        assert_eq!(snap.palette, snap.light_palette, "colors.mode applied");
+        assert!(snap.exec_units.is_empty(), "{:?}", snap.exec_units);
+        let codes: Vec<_> = r.diagnostics.iter().map(|d| d.code).collect();
+        assert!(codes.contains(&codes::EXEC_KEY_IGNORED), "{codes:?}");
+        assert!(l.untrusted.is_empty());
+        // Publication rechecks the root with undecided facts read as
+        // decided; a plain recheck would refuse it on every read.
+        assert_eq!(l.revalidate_with(&mut fx.root_unknown()), Ok(()));
+    }
+
+    // `config use` 기록도 모양 전용 뿌리 아래 파일의 신뢰를 올리지 못한다. 뿌리 밖 기록 파일은 그대로 실행 신뢰를 얻는다.
+    // 이것을 실패시키는 것: trusted_place의 기록 분기에서 모양 전용 상한을 빼는 것.
+    #[test]
+    fn approval_cannot_lift_a_file_under_a_shape_only_root() {
+        let fx = Fx::new("shape-root-use");
+        let inside = fx.put(&fx.root.join("config.toml"), CMD);
+        let md = std::fs::metadata(&inside).unwrap();
+        let rec = Record {
+            dev: md.dev(),
+            ino: md.ino(),
+            path: inside.clone(),
+        };
+        let mut l = fx.shape_only_loader(Some(rec));
+        let roots = l.roots(b"");
+        let r = read_graph(roots, &mut l);
+        assert_eq!(
+            trust_of(&r, "/config.toml"),
+            Some((Trust::ShapeOnly, Status::Applied))
+        );
+        let outside = fx.put(&fx.home.join("work.toml"), CMD);
+        let md = std::fs::metadata(&outside).unwrap();
+        let rec = Record {
+            dev: md.dev(),
+            ino: md.ino(),
+            path: outside,
+        };
+        let mut l = fx.shape_only_loader(Some(rec));
+        let roots = l.roots(b"");
+        let r = read_graph(roots, &mut l);
+        assert_eq!(
+            trust_of(&r, "work.toml"),
+            Some((Trust::Executable, Status::Applied))
         );
     }
 
@@ -1095,6 +1231,7 @@ mod tests {
             crate::commands::init::roots::ConfigRootPin::reopen(
                 &l.places.config_root.written,
                 &l.places.config_root.path,
+                false,
                 me,
                 &mut SystemGroups::new(&sys::passwd_entry(me).unwrap().name),
             )

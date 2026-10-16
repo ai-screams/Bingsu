@@ -6,7 +6,7 @@ use crate::commands::{
     group_policy::{Recording, SystemGroups},
     runtime_root, sys,
 };
-use bingsu_core::fs_trust::{GroupOracle, GroupPin};
+use bingsu_core::fs_trust::{GroupOracle, GroupPin, Refusal};
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -37,6 +37,14 @@ pub struct ConfigRootPin {
     pub path: PathBuf,
     pub written: PathBuf,
     pub evidence: crate::commands::source_path::Resolved,
+    /// Trust ceiling for every file under the root (user decision
+    /// 2026-10-17, R3 I-1). `true`: the only refusals in the root's chain
+    /// are `Undecided` (group members, ACL or ownership enforcement could
+    /// not be confirmed), so the root is kept for colors and layout but
+    /// nothing under it is `Executable`, the `config use` record included.
+    /// Any other refusal (another user's link, a folder others can write)
+    /// still drops the root.
+    pub shape_only: bool,
 }
 
 impl ConfigRootPin {
@@ -50,16 +58,30 @@ impl ConfigRootPin {
         loop {
             match crate::commands::source_path::Resolved::open_dir(&prefix, me, groups) {
                 Ok(evidence) => {
-                    if evidence.refusal.is_some() {
-                        return Err(std::io::Error::other("untrusted config root path"));
-                    }
-                    evidence.revalidate(me, groups)?;
+                    // `refusal` is the first refusal only; an `Undecided`
+                    // one can hide a later `Ancestor` or `Last`, so the
+                    // whole chain is judged again with undecidable facts
+                    // read as decided.
+                    let shape_only = match evidence.refusal {
+                        None => {
+                            evidence.revalidate(me, groups)?;
+                            false
+                        }
+                        Some(Refusal::Undecided { .. }) => {
+                            evidence.revalidate_assuming_decided(me, groups)?;
+                            true
+                        }
+                        Some(_) => {
+                            return Err(std::io::Error::other("untrusted config root path"));
+                        }
+                    };
                     let mut path = evidence.canonical.clone();
                     path.extend(missing.iter().rev());
                     return Ok(Self {
                         path,
                         written: written.to_path_buf(),
                         evidence,
+                        shape_only,
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -81,18 +103,65 @@ impl ConfigRootPin {
 
     /// N2 rebuilds the trust evidence from the original spelling and must
     /// compare the result with init's canonical pin before loading sources.
+    /// `shape_only`: init's `--config-root-shape-only` mark. It can only
+    /// lower trust: a root init marked stays shape-only even when its chain
+    /// is clean now, and a root that turned undecidable since becomes
+    /// shape-only here.
     #[cfg_attr(not(test), expect(dead_code, reason = "Part N2 hand-off"))]
     pub fn reopen(
         written: &Path,
         canonical: &Path,
+        shape_only: bool,
         me: u32,
         groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
     ) -> std::io::Result<Self> {
-        let pin = Self::check(written, me, groups)?;
+        let mut pin = Self::check(written, me, groups)?;
         if pin.path != canonical {
             return Err(std::io::Error::other("config root target changed"));
         }
+        pin.shape_only |= shape_only;
         Ok(pin)
+    }
+
+    /// Init's stderr lines for a shape-only root: what happens, then the
+    /// cause at the first undecided folder.
+    pub fn shape_only_notice(&self) -> Option<[String; 2]> {
+        use crate::commands::messages::{MsgId, en};
+        if !self.shape_only {
+            return None;
+        }
+        let at = self.evidence.blocked_path.as_deref().unwrap_or(&self.path);
+        Some([
+            en(MsgId::ShapeOnlyConfigRoot).to_owned(),
+            format!(
+                "bingsu: {}",
+                undecided_cause(at, self.evidence.facts_at(at).as_ref())
+            ),
+        ])
+    }
+}
+
+/// Why `at` could not be decided, in `entry_verdict`'s order, with
+/// `chmod g-w` where group write is the cause (unconfirmed members, or a
+/// POSIX ACL mask that allows group write). The path is shell-quoted.
+fn undecided_cause(at: &Path, facts: Option<&bingsu_core::fs_trust::Facts>) -> String {
+    use bingsu_core::fs_trust::AclFacts;
+    let mut q = Vec::new();
+    bingsu_core::shell_word::encode_word(
+        bingsu_core::shell_word::Shell::Bash,
+        at.as_os_str().as_encoded_bytes(),
+        &mut q,
+    );
+    let quoted = String::from_utf8_lossy(&q);
+    match facts {
+        Some(f) if f.ownership != Some(true) => {
+            format!("could not confirm that the volume holding {quoted} enforces file ownership")
+        }
+        Some(f) if f.acl == AclFacts::Unknown => {
+            format!("could not read the access list of {quoted}")
+        }
+        Some(f) if f.mode & 0o020 != 0 => crate::commands::group_policy::undecided_remedy(at),
+        _ => format!("could not confirm who can change {quoted}"),
     }
 }
 
@@ -318,6 +387,7 @@ mod tests {
             ConfigRootPin::reopen(
                 &pin.written,
                 &pin.path,
+                false,
                 crate::commands::sys::current_uid(),
                 &mut bingsu_core::fs_trust::RefuseGroupWrite,
             )
@@ -397,11 +467,189 @@ mod tests {
         assert_eq!(pin.path, written);
         assert_eq!(pin.evidence.canonical, base);
         std::fs::create_dir_all(&written).unwrap();
-        assert!(ConfigRootPin::reopen(&pin.written, &pin.path, me, &mut groups).is_ok());
+        assert!(ConfigRootPin::reopen(&pin.written, &pin.path, false, me, &mut groups).is_ok());
         std::fs::remove_dir(&written).unwrap();
         std::os::unix::fs::symlink(base.join("absent"), &written).unwrap();
         assert!(ConfigRootPin::check(&written, me, &mut groups).is_err());
         assert!(ConfigRootPin::check(&base.join("absent/../elsewhere"), me, &mut groups).is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Group members unknown for the listed folders only; any other group
+    /// write is another user's.
+    struct UnknownAt(Vec<(u64, u64)>);
+    impl GroupOracle for UnknownAt {
+        fn group_write(
+            &mut self,
+            at: &bingsu_core::fs_trust::Facts,
+        ) -> bingsu_core::fs_trust::Group {
+            if self.0.contains(&(at.dev, at.ino)) {
+                bingsu_core::fs_trust::Group::Unknown
+            } else {
+                bingsu_core::fs_trust::Group::HasOthers
+            }
+        }
+    }
+
+    fn unknown_at(paths: &[&Path]) -> UnknownAt {
+        UnknownAt(
+            paths
+                .iter()
+                .map(|p| {
+                    let md = std::fs::metadata(p).unwrap();
+                    (md.dev(), md.ino())
+                })
+                .collect(),
+        )
+    }
+
+    fn mode(p: &Path, m: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    // 사용자 결정(2026-10-17, R3 I-1): 그룹 구성원을 확정하지 못한 뿌리(Undecided)는 모양 전용으로 남기고,
+    // 남이 쓸 수 있는 것으로 확정된 뿌리(Last)와 조상(Ancestor)은 지금처럼 버린다.
+    // 이것을 실패시키는 것: Undecided 뿌리를 버리는 것(모양 전용 분기 삭제), Last·Ancestor 거부를 모양 전용으로
+    // 받아 주는 것(`Some(_)` 분기를 모양 전용으로 바꾸기).
+    #[test]
+    fn undecided_root_is_kept_shape_only_and_others_are_dropped() {
+        let base = std::fs::canonicalize(scratch("shape-only-root")).unwrap();
+        let root = base.join("cfg/bingsu");
+        std::fs::create_dir_all(&root).unwrap();
+        let me = sys::current_uid();
+        mode(&root, 0o775);
+        let pin = ConfigRootPin::check(&root, me, &mut unknown_at(&[&root])).unwrap();
+        assert!(pin.shape_only);
+        assert_eq!(pin.path, root);
+        let clean = ConfigRootPin::check(&root, me, &mut unknown_at(&[])).err();
+        assert!(clean.is_some(), "group write by others is Last, dropped");
+        mode(&root, 0o777);
+        assert!(ConfigRootPin::check(&root, me, &mut unknown_at(&[&root])).is_err());
+        mode(&root, 0o755);
+        let full = ConfigRootPin::check(&root, me, &mut unknown_at(&[])).unwrap();
+        assert!(!full.shape_only);
+        mode(&base.join("cfg"), 0o777);
+        assert!(ConfigRootPin::check(&root, me, &mut unknown_at(&[&root])).is_err());
+        mode(&base.join("cfg"), 0o755);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // Resolved는 첫 거부만 남긴다. 조상이 Undecided여도 그 아래 뿌리를 남이 쓸 수 있으면(0777) 버려야 한다.
+    // 이것을 실패시키는 것: 첫 거부의 종류만 보고 모양 전용으로 정하는 것
+    // (`revalidate_assuming_decided` 대신 검사 없이 통과시키기).
+    #[test]
+    fn undecided_ancestor_does_not_hide_a_writable_root() {
+        let base = std::fs::canonicalize(scratch("shape-only-mask")).unwrap();
+        let home = base.join("cfg");
+        let root = home.join("bingsu");
+        std::fs::create_dir_all(&root).unwrap();
+        let me = sys::current_uid();
+        mode(&home, 0o775);
+        mode(&root, 0o755);
+        let pin = ConfigRootPin::check(&root, me, &mut unknown_at(&[&home])).unwrap();
+        assert!(pin.shape_only);
+        assert!(matches!(
+            pin.evidence.refusal,
+            Some(Refusal::Undecided { .. })
+        ));
+        mode(&root, 0o777);
+        let r =
+            crate::commands::source_path::Resolved::open_dir(&root, me, &mut unknown_at(&[&home]))
+                .unwrap();
+        assert!(
+            matches!(r.refusal, Some(Refusal::Undecided { .. })),
+            "masked"
+        );
+        assert!(ConfigRootPin::check(&root, me, &mut unknown_at(&[&home])).is_err());
+        mode(&home, 0o755);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 표식은 신뢰를 낮추기만 한다: init이 표시한 뿌리는 지금 깨끗해도 모양 전용, 지금 판정 불가면 표식이 없어도 모양 전용.
+    // 이것을 실패시키는 것: reopen에서 표식을 버리는 것(`|=` 줄 삭제), 표식으로 덮어써 신뢰를 올리는 것(`=`).
+    #[test]
+    fn reopen_mark_only_lowers_trust() {
+        let base = std::fs::canonicalize(scratch("shape-only-reopen")).unwrap();
+        let root = base.join("bingsu");
+        std::fs::create_dir_all(&root).unwrap();
+        let me = sys::current_uid();
+        mode(&root, 0o755);
+        let marked = ConfigRootPin::reopen(&root, &root, true, me, &mut unknown_at(&[])).unwrap();
+        assert!(marked.shape_only);
+        mode(&root, 0o775);
+        let now =
+            ConfigRootPin::reopen(&root, &root, false, me, &mut unknown_at(&[&root])).unwrap();
+        assert!(now.shape_only);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // init 안내: 고정 문구 한 줄과 원인 한 줄. 그룹 쓰기가 원인일 때만 `chmod g-w`를 붙인다.
+    // 이것을 실패시키는 것: 소유권·ACL 미확인에도 chmod g-w를 안내하는 것(분기 순서 바꾸기), 그룹 원인에서 빼는 것,
+    // 모양 전용이 아닌 뿌리에도 안내하는 것.
+    #[test]
+    fn shape_only_notice_names_the_cause() {
+        use bingsu_core::fs_trust::{AclFacts, Facts};
+        let at = Path::new("/h/a b/.config");
+        let f = Facts {
+            dev: 1,
+            ino: 2,
+            uid: 501,
+            gid: 20,
+            mode: 0o040775,
+            acl: AclFacts::None,
+            ownership: Some(true),
+        };
+        assert_eq!(
+            undecided_cause(at, Some(&f)),
+            "group membership could not be confirmed; chmod g-w '/h/a b/.config'"
+        );
+        let posix = Facts {
+            acl: AclFacts::PosixExtended,
+            ..f
+        };
+        assert!(undecided_cause(at, Some(&posix)).contains("chmod g-w"));
+        for odd in [
+            Facts {
+                ownership: None,
+                ..f
+            },
+            Facts {
+                acl: AclFacts::Unknown,
+                ..f
+            },
+            Facts {
+                mode: 0o040755,
+                ..f
+            },
+        ] {
+            let c = undecided_cause(at, Some(&odd));
+            assert!(!c.contains("chmod"), "{c}");
+            assert!(c.contains("'/h/a b/.config'"), "{c}");
+        }
+        assert!(undecided_cause(at, None).contains("'/h/a b/.config'"));
+
+        let base = std::fs::canonicalize(scratch("shape-only-notice")).unwrap();
+        let root = base.join("bingsu");
+        std::fs::create_dir_all(&root).unwrap();
+        let me = sys::current_uid();
+        mode(&root, 0o775);
+        let pin = ConfigRootPin::check(&root, me, &mut unknown_at(&[&root])).unwrap();
+        let [what, why] = pin.shape_only_notice().unwrap();
+        assert_eq!(
+            what,
+            crate::commands::messages::en(crate::commands::messages::MsgId::ShapeOnlyConfigRoot)
+        );
+        assert_eq!(
+            why,
+            format!(
+                "bingsu: {}",
+                crate::commands::group_policy::undecided_remedy(&root)
+            )
+        );
+        mode(&root, 0o755);
+        let full = ConfigRootPin::check(&root, me, &mut unknown_at(&[])).unwrap();
+        assert!(full.shape_only_notice().is_none());
         std::fs::remove_dir_all(base).unwrap();
     }
 

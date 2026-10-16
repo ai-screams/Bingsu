@@ -136,10 +136,6 @@ fn files_confirm_empty_group(gid: u32, name: &[u8], files: Option<&[FilesGroup]>
 }
 
 /// N2/doctor diagnostic text, including the path encoded as a shell word.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "R3/N2 will render this diagnostic")
-)]
 pub fn undecided_remedy(path: &std::path::Path) -> String {
     let mut quoted = Vec::new();
     bingsu_core::shell_word::encode_word(

@@ -4,6 +4,11 @@
 pub const RUNTIME_ROOT_PREFIX: &[u8] = b"--runtime-root=";
 pub const CONFIG_ROOT_PREFIX: &[u8] = b"--config-root=";
 pub const CONFIG_ROOT_WRITTEN_PREFIX: &[u8] = b"--config-root-written=";
+/// A whole word, no value: the config root words that come with it name a
+/// root whose safety init could not decide (`Refusal::Undecided`). Every
+/// file under it is shape-only; the helper may lower trust further, never
+/// raise it (user decision 2026-10-17 on R3 I-1).
+pub const CONFIG_ROOT_SHAPE_ONLY: &[u8] = b"--config-root-shape-only";
 pub const STATE_ROOT_PREFIX: &[u8] = b"--state-root=";
 pub const LOG_ROOT_PREFIX: &[u8] = b"--log-root=";
 /// Home folder from `getpwuid`, pinned by init like the roots (spec section
@@ -132,13 +137,15 @@ mod tests {
         assert_eq!(parse_decimal(b"0"), Some(0));
     }
 
-    // 이것을 실패시키는 것: 접두사 값 변경(`=` 누락 등), 한 접두사가 다른 접두사의 접두사가 되는 것.
+    // 이것을 실패시키는 것: 접두사 값 변경(`=` 누락 등), 한 접두사가 다른 접두사의 접두사가 되는 것
+    // (모양 전용 표식을 `--config-root`처럼 다른 단어의 접두사가 되게 바꾸는 것 포함).
     #[test]
     fn prefixes_are_pinned_and_disjoint() {
         let all = [
             (RUNTIME_ROOT_PREFIX, &b"--runtime-root="[..]),
             (CONFIG_ROOT_PREFIX, b"--config-root="),
             (CONFIG_ROOT_WRITTEN_PREFIX, b"--config-root-written="),
+            (CONFIG_ROOT_SHAPE_ONLY, b"--config-root-shape-only"),
             (STATE_ROOT_PREFIX, b"--state-root="),
             (LOG_ROOT_PREFIX, b"--log-root="),
             (HOME_PREFIX, b"--home="),
