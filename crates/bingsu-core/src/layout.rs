@@ -322,7 +322,8 @@ enum Src {
 #[derive(Clone, Copy)]
 struct Item {
     kind: Kind,
-    /// Head and separator: a block follows before the next head or tail.
+    /// Head and separator: a block follows before the next head or tail,
+    /// or a flat separator has plain content on both sides (see `clean`).
     ok: bool,
     /// Cells of its text alone.
     width: u32,
@@ -453,7 +454,7 @@ struct Lay<'l, 'i> {
     seps: SepTable,
     block_text: u16,
     char_seg: Option<usize>,
-    /// Step 6: no backgrounds, separators, heads or tails.
+    /// Step 6: no backgrounds, heads, tails or non-flat separators.
     plain: bool,
 }
 
@@ -1278,11 +1279,21 @@ fn with(spec_stack: &[Style], mut s: Style) -> Style {
 /// needs a block before it since the last head or tail (rulings A and B,
 /// 2026-10-13), a separator with no content before it goes, a separator
 /// right after a head goes, and separators with no content between them
-/// become one (the first stays). A flat separator is also the gap between
-/// plain segments: it needs content on both sides, including after the
-/// background-removal fallback. Linear: one pass from the end marks heads
-/// and separators, one pass from the start compacts.
+/// become one (the first stays). A flat separator additionally acts as a
+/// plain gap when the nearest content on each side, without crossing a
+/// head or tail, is non-block content. This includes the background-removal
+/// fallback; otherwise flat separators keep the block-ahead rule above.
+/// Linear, without allocation: mark plain content behind, check content
+/// ahead in reverse, then compact from the start.
 fn clean(items: &mut Vec<Item>) {
+    let mut plain_behind = false;
+    for it in items.iter_mut() {
+        match it.kind {
+            Kind::Content => plain_behind = it.block.is_none(),
+            Kind::Sep(SepKind::Head | SepKind::Tail, _) => plain_behind = false,
+            Kind::Sep(SepKind::Sep, _) => it.ok = plain_behind,
+        }
+    }
     let mut block_ahead = false;
     let mut content_ahead = false;
     for it in items.iter_mut().rev() {
@@ -1300,7 +1311,10 @@ fn clean(items: &mut Vec<Item>) {
                 block_ahead = false;
                 content_ahead = false;
             }
-            Kind::Sep(SepKind::Sep, Shape::Flat) => it.ok = content_ahead,
+            Kind::Sep(SepKind::Sep, Shape::Flat) => {
+                // With no block ahead, any content ahead is plain.
+                it.ok = block_ahead || (it.ok && content_ahead);
+            }
             Kind::Sep(SepKind::Sep, _) => it.ok = block_ahead,
         }
     }
@@ -1707,7 +1721,7 @@ pub fn layout_line_into<R: Recorder>(
                 }
             }
         }
-        // Step 6: plain text, no backgrounds, separators, heads or tails.
+        // Step 6: plain text, no backgrounds, heads, tails or non-flat separators.
         if R::ENABLED {
             r.step(n, Step::DropDecoration);
         }
@@ -2226,6 +2240,49 @@ pub(crate) mod tests {
         let f = fixture(&["Works"], "main");
         let out = one("{char:block}{@sep:flat}{char:block}{@nl}{char}", &f, 4);
         assert_eq!(text(&out[0].left), "❯ ❯");
+    }
+
+    // 이것을 실패시키는 것: 뒤의 리터럴만 보고 기존 블록 구분자를 남기거나,
+    // 가장 가까운 콘텐츠 대신 앞의 다른 plain 콘텐츠로 간격을 판단하는 것.
+    #[test]
+    fn flat_block_separators_keep_the_block_ahead_rule() {
+        let mut f = fixture(&["Works"], "main");
+        let template = "{dir:block}{@sep:flat}{git:block} x{@nl}{char}";
+        assert_eq!(text(&one(template, &f, 80)[0].left), " ~/Works   main  x");
+        f.values[idx("git")] = None;
+        assert_eq!(text(&one(template, &f, 80)[0].left), " ~/Works  x");
+        for (template, expected) in [
+            ("p{dir:block}{@sep:flat} x{@nl}{char}", "p ~/Works  x"),
+            ("{dir:block}p{@sep:flat}x{@nl}{char}", " ~/Works p x"),
+            (
+                "{dir}{@sep:flat}x{time:block}{@nl}{char}",
+                "~/Works x 12:34 ",
+            ),
+            (
+                "{dir:block}{@sep:flat}x{time:block}{@nl}{char}",
+                " ~/Works  x 12:34 ",
+            ),
+        ] {
+            assert_eq!(text(&one(template, &f, 80)[0].left), expected, "{template}");
+        }
+    }
+
+    // 이것을 실패시키는 것: flat 간격이 head/tail 경계를 넘어 콘텐츠를 찾는 것.
+    #[test]
+    fn flat_plain_gaps_respect_heads_and_tails() {
+        let f = fixture(&["Works"], "main");
+        for boundary in ["{@head:flat}", "{@tail:flat}"] {
+            for template in [
+                alloc::format!("{{dir}}{boundary}{{@sep:flat}}x{{@nl}}{{char}}"),
+                alloc::format!("{{dir}}{{@sep:flat}}{boundary}x{{@nl}}{{char}}"),
+            ] {
+                assert_eq!(
+                    text(&one(&template, &f, 80)[0].left),
+                    "~/Worksx",
+                    "{template}"
+                );
+            }
+        }
     }
 
     // 이것을 실패시키는 것: 값이 없는 세그먼트의 구분자가 남거나 겹치는 것, 꼬리가 사라지는 것.
