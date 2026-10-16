@@ -14,7 +14,7 @@ regex = ["dep:regex"]
 yaml-json = ["dep:serde-saphyr", "dep:serde_json"]
 
 [dependencies]
-gix = { version = "=0.88.0", default-features = false, features = ["status", "sha1", "max-performance-safe"] }
+gix = { version = "=0.89.0", default-features = false, features = ["status", "sha1", "max-performance-safe"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 unicode-segmentation = "1.13"
