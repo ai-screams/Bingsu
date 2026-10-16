@@ -3,6 +3,7 @@
 //! a template replaces both (`config check` reports the ignored levels from
 //! M3). Presets and options only produce template text: the renderer knows
 //! templates alone.
+use crate::ident::{IdError, parse_segment_id};
 use crate::template::compile::{FillKind, Shape};
 use crate::template::syntax::MAX_TEMPLATE_BYTES;
 use alloc::string::String;
@@ -99,6 +100,15 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
 pub enum StyleError {
     /// The generated template is longer than `MAX_TEMPLATE_BYTES`.
     TooLong,
+    /// A layout entry is not a segment id (`crate::ident`): checked before
+    /// it is joined into template text, where `}` or `{@` would be syntax.
+    SegmentId {
+        /// Zero-based line number.
+        line: usize,
+        /// Zero-based index across the left side followed by the right side.
+        index: usize,
+        error: IdError,
+    },
 }
 
 /// One line of `[layout.lineN]`: segment ids left and right.
@@ -184,6 +194,17 @@ pub fn generate(
     options: &StyleOptions,
     lines: &[LineLayout<'_>],
 ) -> Result<String, StyleError> {
+    for (n, line) in lines.iter().enumerate() {
+        for (index, id) in line.left.iter().chain(line.right).enumerate() {
+            if let Err(error) = parse_segment_id(id) {
+                return Err(StyleError::SegmentId {
+                    line: n,
+                    index,
+                    error,
+                });
+            }
+        }
+    }
     let o = options.over(preset.options);
     let mut out = String::new();
     for (n, line) in lines.iter().enumerate() {
@@ -246,6 +267,38 @@ mod tests {
             right: &[],
         },
     ];
+
+    // 이것을 실패시키는 것: 레이아웃 id를 검증하지 않고 템플릿 글에 잇는 것(`}`·`{@`가 구문이 됨),
+    // 또는 둘째 줄·양쪽 배열을 빠뜨리거나 오류 위치를 잘못 보고하는 것.
+    #[test]
+    fn layout_ids_are_checked_before_they_join_the_template() {
+        let left = LineLayout {
+            left: &["time}{@nl"],
+            right: &[],
+        };
+        let right = LineLayout {
+            left: &["dir"],
+            right: &["time}{@nl"],
+        };
+        for (line, index, bad) in [
+            (0, 0, [left, TWO[1]]),
+            (0, 1, [right, TWO[1]]),
+            (1, 0, [TWO[0], left]),
+            (1, 1, [TWO[0], right]),
+        ] {
+            for p in PRESETS {
+                let e = generate(p, &StyleOptions::default(), &bad).unwrap_err();
+                assert_eq!(
+                    e,
+                    StyleError::SegmentId {
+                        line,
+                        index,
+                        error: crate::ident::IdError::BadByte { at: 4 },
+                    }
+                );
+            }
+        }
+    }
 
     // 이것을 실패시키는 것: 프리셋이 만든 템플릿이 바뀌는 것(머리·꼬리·구분자·채움 자리).
     #[test]
