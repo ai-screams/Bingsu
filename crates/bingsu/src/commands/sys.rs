@@ -46,9 +46,10 @@ pub fn write_fd(fd: i32, mut buf: &[u8]) -> WriteOutcome {
     WriteOutcome::Done
 }
 
+use crate::commands::group_policy::Account;
 #[cfg(target_os = "macos")]
-use crate::commands::init::exe_path::{AclEntry, fold_acl};
-use crate::commands::init::exe_path::{AclFacts, Group};
+use bingsu_core::fs_trust::{AclEntry, fold_acl};
+use bingsu_core::fs_trust::{AclFacts, Facts};
 use std::ffi::{CStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -61,6 +62,7 @@ pub fn current_uid() -> u32 {
 pub struct Passwd {
     pub name: Vec<u8>,
     pub home: PathBuf,
+    pub gid: u32,
 }
 
 /// getpwuid_r, so `~` never comes from $HOME (spec section 2 extends rules).
@@ -86,6 +88,7 @@ pub fn passwd_entry(uid: u32) -> Option<Passwd> {
         let dir = unsafe { CStr::from_ptr(pw.pw_dir) }.to_bytes().to_vec();
         return Some(Passwd {
             name,
+            gid: pw.pw_gid,
             home: PathBuf::from(OsString::from_vec(dir)),
         });
     }
@@ -96,19 +99,9 @@ pub fn passwd_entry(uid: u32) -> Option<Passwd> {
 /// warning rather than a long walk.
 const MAX_USERS: usize = 4096;
 
-/// One local account, as the group-write rule needs it.
-pub struct UserEntry {
-    name: Vec<u8>,
-    gid: u32,
-    /// macOS: the account's membership uuid (`None` if it could not be
-    /// converted; any question about this user is then unanswered).
-    #[cfg(target_os = "macos")]
-    uuid: Option<[u8; 16]>,
-}
-
-/// Every account `getpwent` returns, read once per init. `None` if the
-/// enumeration ends with an error or passes `MAX_USERS`. init is
-/// single-threaded, so the non-reentrant getpwent walk is acceptable here.
+/// Every account `getpwent` returns, read at most once per `SystemGroups`
+/// walk. `None` if enumeration ends with an error or passes `MAX_USERS`.
+/// Callers must serialize these non-reentrant walks (init is single-threaded).
 ///
 /// macOS `getpwent` returns each local account twice (265 entries for 133
 /// accounts on the development Mac, all exact repeats), so entries equal in
@@ -116,7 +109,7 @@ pub struct UserEntry {
 /// them are all kept, so no check is dropped. The uuid is converted once per
 /// uid. `MAX_USERS` counts entries as returned, repeats included, so an
 /// enumeration that keeps returning the same entries still ends.
-pub fn local_users() -> Option<Vec<UserEntry>> {
+pub fn local_users() -> Option<Vec<Account>> {
     let mut out = Vec::new();
     let mut returned = 0usize;
     let mut kept = std::collections::HashSet::<(u32, Vec<u8>, u32)>::new();
@@ -146,7 +139,7 @@ pub fn local_users() -> Option<Vec<UserEntry>> {
         if !kept.insert((rec.pw_uid, name.clone(), rec.pw_gid)) {
             continue;
         }
-        out.push(UserEntry {
+        out.push(Account {
             name,
             gid: rec.pw_gid,
             #[cfg(target_os = "macos")]
@@ -160,16 +153,9 @@ pub fn local_users() -> Option<Vec<UserEntry>> {
     (!failed).then_some(out)
 }
 
-/// Membership of `gid` for the group-write rule (spec section 2 safety row,
-/// decision 6 review): supplementary members (`gr_mem`) plus every user whose
-/// primary group is `gid`. On macOS each user is also asked of the system
-/// (`mbr_check_membership`), because groups such as `everyone`,
-/// `localaccounts` and `_developer` have their members computed by the
-/// system: `gr_mem` is empty and no user has them as primary group.
-/// `users` is `local_users()`, read once by the caller. `Unknown` if the
-/// group lookup fails, `users` is `None`, or a membership question fails.
-pub fn group_membership(gid: u32, user: &[u8], users: Option<&[UserEntry]>) -> Group {
-    let ok = |n: &[u8]| n == b"root" || n == user;
+/// The supplementary members (`gr_mem`) of `gid`, `None` if the lookup
+/// fails. The rule that judges them is `group_policy::membership`.
+pub fn group_info(gid: u32) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
     let mut buf = vec![0u8; 4096];
     loop {
         // SAFETY: an all-zero group is a valid out-parameter value.
@@ -183,8 +169,9 @@ pub fn group_membership(gid: u32, user: &[u8], users: Option<&[UserEntry]>) -> G
             continue;
         }
         if rc != 0 || res.is_null() {
-            return Group::Unknown;
+            return None;
         }
+        let mut out = Vec::new();
         let mut p = gr.gr_mem;
         loop {
             // SAFETY: gr_mem is a NULL-terminated array of pointers inside
@@ -193,45 +180,37 @@ pub fn group_membership(gid: u32, user: &[u8], users: Option<&[UserEntry]>) -> G
             // not help: libinfo picks the offset).
             let m = unsafe { p.read_unaligned() };
             if m.is_null() {
-                break;
+                // SAFETY: successful getgrgid_r returned a NUL-terminated name.
+                let name = unsafe { CStr::from_ptr(gr.gr_name) }.to_bytes().to_vec();
+                return Some((name, out));
             }
             // SAFETY: each member is a NUL-terminated string inside `buf`.
-            if !ok(unsafe { CStr::from_ptr(m) }.to_bytes()) {
-                return Group::HasOthers;
-            }
+            out.push(unsafe { CStr::from_ptr(m) }.to_bytes().to_vec());
             // SAFETY: the terminator has not been reached, so p+1 is in bounds.
             p = unsafe { p.add(1) };
         }
-        break;
     }
-    let Some(users) = users else {
-        return Group::Unknown;
-    };
+}
+
+/// A question about one account (see `computed_member`).
+pub type MemberQuestion = Box<dyn FnMut(&Account) -> Option<bool>>;
+
+/// The system's answer to "is this account a member of `gid`" for groups
+/// whose members the system computes. macOS: `everyone`, `localaccounts`
+/// and `_developer` list no members and are nobody's primary group, so each
+/// account is asked (`mbr_check_membership`); `None` when a question fails.
+/// Elsewhere there is no such question (`Some(false)`).
+pub fn computed_member(gid: u32) -> MemberQuestion {
     #[cfg(target_os = "macos")]
-    let Some(group_uuid) = macos_mbr::gid_uuid(gid) else {
-        return Group::Unknown;
-    };
-    // Only the macOS membership question can lower this to `Unknown`.
-    #[cfg(target_os = "macos")]
-    let mut verdict = Group::OnlyRootAndUser;
+    {
+        let group = macos_mbr::gid_uuid(gid);
+        Box::new(move |a: &Account| macos_mbr::is_member(&a.uuid?, &group?))
+    }
     #[cfg(not(target_os = "macos"))]
-    let verdict = Group::OnlyRootAndUser;
-    for u in users {
-        if ok(&u.name) {
-            continue;
-        }
-        if u.gid == gid {
-            return Group::HasOthers;
-        }
-        #[cfg(target_os = "macos")]
-        match u.uuid.and_then(|uu| macos_mbr::is_member(&uu, &group_uuid)) {
-            Some(true) => return Group::HasOthers,
-            Some(false) => {}
-            // Keep looking: a member found later is worse than unknown.
-            None => verdict = Group::Unknown,
-        }
+    {
+        let _ = gid;
+        Box::new(|_: &Account| Some(false))
     }
-    verdict
 }
 
 #[cfg(target_os = "linux")]
@@ -324,6 +303,13 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
     };
     // SAFETY: `c` is NUL-terminated; NULL means "no extended ACL" or an error.
     let acl = unsafe { acl_get_link_np(c.as_ptr(), ACL_TYPE_EXTENDED) };
+    acl_entries(acl)
+}
+
+/// Folds and frees an ACL returned by `acl_get_link_np` or `acl_get_fd_np`.
+#[cfg(target_os = "macos")]
+fn acl_entries(acl: *mut libc::c_void) -> AclFacts {
+    use macos_acl::*;
     if acl.is_null() {
         let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         return if e == libc::ENOENT || e == 0 {
@@ -384,8 +370,13 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
     facts
 }
 
-/// Linux: a POSIX access ACL makes the verdict "unknown" until X-28 (M3a)
-/// shows whether the group mask bits already cover it.
+/// Linux: whether `path` has an extended POSIX access ACL. X-28 (Debian 12
+/// on the colima kernel, 2026-10-15): the mode's group bits are then the
+/// ACL mask, the upper bound of every named user and group entry (`setfacl
+/// -m u:nobody:rwx` then `chmod g-w`: nobody could not create a file). So
+/// the ACL matters only under group write, where `fs_trust` treats it as
+/// undecided (`PosixExtended`): the group rule speaks for the owning group,
+/// not for named entries.
 #[cfg(target_os = "linux")]
 pub fn acl_facts(path: &std::path::Path) -> AclFacts {
     use std::os::unix::ffi::OsStrExt;
@@ -401,8 +392,14 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
             0,
         )
     };
+    posix_acl_answer(n)
+}
+
+/// Linux: the answer of a `getxattr` length query for the access ACL.
+#[cfg(target_os = "linux")]
+fn posix_acl_answer(n: libc::ssize_t) -> AclFacts {
     if n > 0 {
-        return AclFacts::Unknown;
+        return AclFacts::PosixExtended;
     }
     let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     if n == 0 || e == libc::ENODATA || e == libc::ENOTSUP {
@@ -410,6 +407,93 @@ pub fn acl_facts(path: &std::path::Path) -> AclFacts {
     } else {
         AclFacts::Unknown
     }
+}
+
+/// macOS extended ACL of an open descriptor (`acl_get_fd_np`; works on an
+/// `O_SEARCH` descriptor, observed 2026-10-15 on macOS 27, also for a 0711
+/// folder).
+#[cfg(target_os = "macos")]
+pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, ty: libc::c_int) -> *mut libc::c_void;
+    }
+    // SAFETY: `fd` is open for the duration of the call; NULL means "no
+    // extended ACL" (ENOENT) or an error.
+    let acl = unsafe { acl_get_fd_np(fd.as_raw_fd(), macos_acl::ACL_TYPE_EXTENDED) };
+    acl_entries(acl)
+}
+
+/// Linux: as `acl_facts`, for an open descriptor. `fgetxattr` fails with
+/// EBADF on an `O_PATH` descriptor (observed 2026-10-15), so that case asks
+/// through `/proc/self/fd/N`, which names the same object.
+#[cfg(target_os = "linux")]
+pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
+    use std::os::fd::AsRawFd;
+    let name = c"system.posix_acl_access";
+    // SAFETY: `fd` is open; size 0 asks only for the length.
+    let n = unsafe { libc::fgetxattr(fd.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if n >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+        return posix_acl_answer(n);
+    }
+    let Ok(p) = std::ffi::CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
+        return AclFacts::Unknown;
+    };
+    // SAFETY: names are NUL-terminated; size 0 asks only for the length.
+    let n = unsafe { libc::getxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    posix_acl_answer(n)
+}
+
+/// `fstat` and the ACL of an open descriptor (search-only descriptors
+/// included).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "R1/R3 will inspect held descriptors")
+)]
+#[allow(
+    clippy::useless_conversion,
+    clippy::unnecessary_cast,
+    reason = "st_mode, st_dev and st_ino differ in type between macOS and Linux"
+)]
+pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an all-zero stat is a valid out-parameter value.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is open and `st` is a writable stat.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Facts {
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+        uid: st.st_uid,
+        gid: st.st_gid,
+        mode: u32::from(st.st_mode),
+        ownership: fd_ownership(fd),
+        // Linux: the ACL matters only under group write (see `acl_facts`).
+        acl: if cfg!(target_os = "linux") && u32::from(st.st_mode) & 0o020 == 0 {
+            AclFacts::None
+        } else {
+            acl_facts_fd(fd)
+        },
+    })
+}
+
+/// Mount ownership is a separate fact from locality. A failed fstatfs is
+/// undecidable. Linux ownership follows the platform filesystem contract.
+#[cfg(target_os = "macos")]
+pub fn fd_ownership(fd: std::os::fd::BorrowedFd<'_>) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: zero is valid for this out parameter; fd is borrowed and open.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: st is writable for the duration of the call.
+    (unsafe { libc::fstatfs(fd.as_raw_fd(), &mut st) } == 0)
+        .then(|| bingsu_core::fs_trust::macos_ownership_enforced(st.f_flags))
+}
+
+#[cfg(target_os = "linux")]
+pub fn fd_ownership(_: std::os::fd::BorrowedFd<'_>) -> Option<bool> {
+    Some(true)
 }
 
 /// 16 random bytes for the session value (spec section 3 "session").
@@ -457,19 +541,41 @@ pub fn fd_is_local(fd: std::os::fd::RawFd) -> Option<bool> {
 
 #[cfg(target_os = "macos")]
 fn flags_are_local(f_flags: u32) -> bool {
-    f_flags & (libc::MNT_LOCAL as u32) != 0
+    bingsu_core::fs_trust::macos_fs_is_local(f_flags)
 }
 
-/// Linux: a stub. Rejecting NFS, CIFS and FUSE by `f_type` is M3a; until then
-/// every file system counts as local (always `Some(true)`).
+/// Linux: `statfs.f_type` against the allowlist in
+/// `bingsu_core::fs_trust::LINUX_LOCAL_TYPES` (NFS, CIFS, FUSE and any type
+/// not listed are not local). `None` if statfs fails.
 #[cfg(target_os = "linux")]
-pub fn fs_is_local(_path: &std::path::Path) -> Option<bool> {
-    Some(true)
+pub fn fs_is_local(path: &std::path::Path) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: an all-zero statfs is a valid out-parameter value.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is NUL-terminated and `st` is a writable statfs.
+    (unsafe { libc::statfs(c.as_ptr(), &mut st) } == 0).then(|| f_type_is_local(&st))
 }
 
+/// As `fs_is_local`, for an open descriptor (`O_PATH` included: fstatfs
+/// works on it, observed 2026-10-15 on the colima kernel).
 #[cfg(target_os = "linux")]
-pub fn fd_is_local(_fd: std::os::fd::RawFd) -> Option<bool> {
-    Some(true)
+pub fn fd_is_local(fd: std::os::fd::RawFd) -> Option<bool> {
+    // SAFETY: an all-zero statfs is a valid out-parameter value.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `st` is a writable statfs; a bad fd only makes fstatfs fail.
+    (unsafe { libc::fstatfs(fd, &mut st) } == 0).then(|| f_type_is_local(&st))
+}
+
+/// `f_type` is `__fsword_t` on glibc and `c_ulong` on musl; magic numbers
+/// are 32-bit, so the low 32 bits are compared.
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "f_type differs between glibc and musl"
+)]
+fn f_type_is_local(st: &libc::statfs) -> bool {
+    bingsu_core::fs_trust::linux_fs_is_local(st.f_type as u64 & 0xffff_ffff)
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -500,11 +606,9 @@ mod tests {
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o775)).unwrap();
         let gid = std::fs::metadata(&d).unwrap().gid();
         let me = passwd_entry(current_uid()).unwrap().name;
+        let mut groups = crate::commands::group_policy::SystemGroups::new(&me);
+        assert_eq!(groups.gid(gid), bingsu_core::fs_trust::Group::HasOthers);
         let users = local_users();
-        assert_eq!(
-            group_membership(gid, &me, users.as_deref()),
-            Group::HasOthers
-        );
         // Exact repeats from getpwent are dropped: on this Mac every account
         // comes twice, and every kept entry differs in name or primary gid.
         // 이것을 실패시키는 것: 열거 결과의 중복을 없애지 않는 것(질의가 두 배).
@@ -650,5 +754,51 @@ mod random_tests {
         assert_ne!(a, [0; 16]);
         assert_ne!(b, [0; 16]);
         assert_ne!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod facts_tests {
+    use super::*;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // 이것을 실패시키는 것: 열린 fd의 정체·소유자·그룹·mode·소유권 집행·ACL을 다른 값으로 보고하는 것.
+    #[test]
+    fn descriptor_facts_match_the_open_entry() {
+        let path = std::env::temp_dir().join(format!("bingsu-r2-facts-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let dir = open_dir_at_search_nofollow(None, path.as_os_str()).unwrap();
+        let md = dir.metadata().unwrap();
+        let got = fd_facts(dir.as_fd()).unwrap();
+        assert_eq!((got.dev, got.ino), (md.dev(), md.ino()));
+        assert_eq!(
+            (got.uid, got.gid, got.mode),
+            (md.uid(), md.gid(), md.mode())
+        );
+        assert_eq!(got.ownership, Some(true));
+        assert_eq!(got.acl, AclFacts::None);
+        std::fs::remove_dir(&path).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 경로에서만 ACL을 읽고 열린 search fd의 쓰기 ACL을 빠뜨리는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn descriptor_acl_reports_write_permission() {
+        let path = std::env::temp_dir().join(format!("bingsu-r2-acl-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let dir = open_dir_at_search_nofollow(None, path.as_os_str()).unwrap();
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow write"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(fd_facts(dir.as_fd()).unwrap().acl, AclFacts::AllowsWrite);
+        assert_eq!(acl_facts(&path), AclFacts::AllowsWrite);
+        std::fs::remove_dir(&path).unwrap();
     }
 }

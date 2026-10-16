@@ -22,6 +22,7 @@ pub mod emit;
 pub mod envelope;
 pub mod field;
 pub mod front;
+pub mod fs_trust;
 pub mod icons;
 pub mod ident;
 pub mod layout;
