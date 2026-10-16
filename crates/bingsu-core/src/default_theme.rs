@@ -45,11 +45,10 @@ pub const NARROW: Band = Band {
     max_cols: Some(59),
     order: None,
 };
-/// Written as a template, not generated: the `lean` generator puts a literal
-/// space between segments, so a missing `duration`, `host` or `git` would
-/// leave a stray space (an indented `char`, a gap on line 1). Each gap sits
-/// in a group with the optional segment beside it and goes with it. `dir`
-/// and `char` are required, so they anchor the two lines.
+/// Written as a template with each literal gap grouped with the optional
+/// segment beside it, so both disappear together. `dir` and `char` are
+/// required and anchor the two lines. Generated `lean` layouts instead use
+/// flat separators, cleaned up between visible plain segments.
 pub const NARROW_TEMPLATE: &str =
     "{@group}{host} {@end}{dir}{@group} {git}{@end}{@nl}{@group}{duration} {@end}{char}";
 

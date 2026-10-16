@@ -170,7 +170,8 @@ fn run(out: &mut String, ids: &[&str], o: &StyleOptions, right: bool) {
                     out.push('}');
                 }
                 (_, Joining::Adjacent) => {}
-                (_, Joining::Spaced) | (false, Joining::Attached) => out.push(' '),
+                (false, Joining::Spaced | Joining::Attached) => out.push_str("{@sep:flat}"),
+                (true, Joining::Spaced) => out.push(' '),
             }
         }
         if block && (first || joining == Joining::Spaced) {
@@ -309,7 +310,10 @@ mod tests {
             "{dir:block}{@sep:triangle}{git:block}{@tail:triangle}{@fill:space}{@head:triangle}{status:block}{@sep:triangle}{time:block}{@nl}{char:block}{@tail:triangle}"
         );
         let lean = generate(preset("lean").unwrap(), &StyleOptions::default(), &TWO).unwrap();
-        assert_eq!(lean, "{dir} {git}{@fill:space}{status} {time}{@nl}{char}");
+        assert_eq!(
+            lean,
+            "{dir}{@sep:flat}{git}{@fill:space}{status}{@sep:flat}{time}{@nl}{char}"
+        );
         for t in [tri, lean] {
             assert!(compile(&t, BUILTIN).is_ok(), "{t}");
         }
@@ -395,7 +399,7 @@ mod tests {
         };
         assert_eq!(
             generate(preset("lean").unwrap(), &plain, &one).unwrap(),
-            "{dir} {git}{@fill:dot}{time}"
+            "{dir}{@sep:flat}{git}{@fill:dot}{time}"
         );
         let base = StyleOptions {
             frame: Some(true),
@@ -414,8 +418,8 @@ mod tests {
     }
 
     // The generated text must stay within the compiler's source cap. With the
-    // lean preset a left run costs 6 bytes per `dir` (5 + a space) and 7 per
-    // `time`, minus one for the last space.
+    // lean preset a left run costs 16 bytes per `dir` (5 + a flat separator)
+    // and 17 per `time`, minus eleven for the last separator.
     // 이것을 실패시키는 것: `>`를 `>=`로 바꾸는 것(정확히 4096바이트가 거부됨), 상한을 하나 늘리거나
     // 검사를 빼는 것(4097바이트가 통과함), `resolve`가 오류를 삼키는 것.
     #[test]
@@ -429,15 +433,16 @@ mod tests {
             }];
             generate(lean, &none, &line)
         };
-        let mut exact: Vec<&str> = alloc::vec!["dir"; 677];
-        exact.extend(["time"; 5]);
+        let mut exact: Vec<&str> = alloc::vec!["dir"; 245];
+        exact.extend(["time"; 11]);
         let t = fit(&exact).unwrap();
         assert_eq!(t.len(), MAX_TEMPLATE_BYTES);
         assert!(compile(&t, BUILTIN).is_ok());
-        let t = fit(&alloc::vec!["dir"; 682]).unwrap();
-        assert_eq!(t.len(), MAX_TEMPLATE_BYTES - 5);
+        let t = fit(&alloc::vec!["dir"; 256]).unwrap();
+        assert_eq!(t.len(), MAX_TEMPLATE_BYTES - 11);
         assert!(compile(&t, BUILTIN).is_ok());
-        let over = alloc::vec!["dir"; 683];
+        let mut over = exact.clone();
+        over[0] = "time";
         assert_eq!(fit(&over), Err(StyleError::TooLong));
         let line = [LineLayout {
             left: &over,
