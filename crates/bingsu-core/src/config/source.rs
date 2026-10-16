@@ -19,8 +19,9 @@
 //!    Trusted files get their place, depth and budget from trusted paths
 //!    alone (spec change S-7). A file that is not trusted is a leaf here.
 //! 2. Each such leaf, in apply order, is followed on its own. What it
-//!    reaches first is shape-only and goes just before it. A file already
-//!    placed stays where it is. If anything in that subgraph goes wrong
+//!    reaches first is shape-only and goes just before it. Registered
+//!    shape-only leaves are still walked; execution origins keep their
+//!    phase-1 positions. If anything in that subgraph goes wrong
 //!    (a cycle, depth, the budget left over, a file that does not parse),
 //!    the subgraph is dropped alone with a warning (rule 5) and its budget
 //!    is given back.
@@ -176,7 +177,8 @@ pub enum Status {
 pub struct Found {
     pub id: SourceId,
     pub opened: Opened,
-    /// Trust after taint: `ShapeOnly` when no trusted path reached it.
+    /// Trust after taint. An explicit `Unsafe` origin retains its execution
+    /// keys even when shape-only aliases also reach it.
     pub trust: Trust,
     /// The file's keys, without `extends`, `version` and `requires`
     /// (empty when the file did not parse).
@@ -346,6 +348,8 @@ struct Node {
     extends: Vec<ExtendsRef>,
     /// Problems of the file itself and of its `extends` entries.
     problems: Vec<Diagnostic>,
+    /// Phase-2 traversal is separate from phase-1 catalog registration.
+    walked: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -370,7 +374,18 @@ impl Walk<'_> {
         self.nodes.iter().position(|n| n.found.opened.key == key)
     }
 
-    /// A stronger trusted path replaces an untrusted leaf in the same
+    /// Executable paths retain S-7's placement rule. Without one, an
+    /// explicit unsafe origin must preserve the execution-blocking keys
+    /// that a shape-only alias would discard.
+    fn replaces_origin(&self, i: usize, trust: Trust) -> bool {
+        matches!(
+            (self.nodes[i].found.trust, trust),
+            (Trust::ShapeOnly, Trust::Unsafe | Trust::Executable)
+                | (Trust::Unsafe, Trust::Executable)
+        )
+    }
+
+    /// A stronger execution origin replaces an untrusted leaf in the same
     /// catalog slot. Its order, bytes, spans and chain come from that path.
     fn put(&mut self, node: Node) {
         let i = node.found.id.0 as usize;
@@ -419,6 +434,7 @@ impl Walk<'_> {
             },
             extends: meta.extends,
             problems,
+            walked: false,
         });
         i
     }
@@ -456,6 +472,7 @@ impl Walk<'_> {
             },
             extends: Vec::new(),
             problems: Vec::new(),
+            walked: false,
         });
     }
 
@@ -492,6 +509,7 @@ impl Walk<'_> {
             },
             extends: Vec::new(),
             problems,
+            walked: false,
         });
     }
 }
@@ -539,17 +557,15 @@ impl Walk<'_> {
                     }
                 };
                 if let Some(k) = self.known(child.key) {
-                    if child.trust != Trust::Executable
-                        || self.nodes[k].found.trust == Trust::Executable
-                    {
+                    if !self.replaces_origin(k, child.trust) {
                         self.resolver.adopt(child.key, self.adopted_trust(k));
                         if child.trust == Trust::Executable && self.stack.contains(&k) {
                             self.problem(i, Diagnostic::new(codes::EXTENDS_CYCLE, at));
                         }
                         continue; // diamond: keep the first trusted place
                     }
-                    // A shape-only/unsafe alias cannot claim the place or
-                    // depth of a later trusted path to this identity (P-S2).
+                    // An alias cannot claim a stronger origin's place,
+                    // provenance or depth (P-S2 and unsafe execution keys).
                     order.retain(|&placed| placed != k);
                 }
                 let exec = child.trust == Trust::Executable;
@@ -604,7 +620,13 @@ impl Walk<'_> {
         i: usize,
         order: &mut Vec<usize>,
         spent: &mut Budget,
+        visited: &mut Vec<usize>,
     ) -> Option<Diagnostic> {
+        self.nodes[i].walked = true;
+        visited.push(i);
+        if let Some(d) = self.nodes[i].problems.first() {
+            return Some(d.clone());
+        }
         self.stack.push(i);
         let mut via = self.nodes[i].found.via.clone();
         via.push(SourceId(i as u32));
@@ -622,15 +644,24 @@ impl Walk<'_> {
                             .arg("path", r.text.clone())
                             .arg("reason", e.reason),
                     );
-                    continue;
+                    break;
                 }
             };
             if let Some(k) = self.known(child.key) {
-                self.resolver.adopt(child.key, self.adopted_trust(k));
                 if self.stack.contains(&k) {
+                    self.resolver.adopt(child.key, self.adopted_trust(k));
                     first.get_or_insert(Diagnostic::new(codes::EXTENDS_CYCLE, at));
+                    break;
                 }
-                continue;
+                if self.nodes[k].found.trust != Trust::ShapeOnly
+                    || self.nodes[k].walked
+                    || self.nodes[k].found.status == Status::Dropped
+                {
+                    self.resolver.adopt(child.key, self.adopted_trust(k));
+                    continue;
+                }
+                // Registration is not traversal: walk this shape-only
+                // identity here, with this path's depth and provenance.
             }
             let limit = Budget {
                 files: self.used.files + spent.files,
@@ -640,15 +671,14 @@ impl Walk<'_> {
                 self.reject(child, &via, true);
                 d.at = at;
                 first.get_or_insert(d);
-                continue;
+                break;
             }
             spent.files += 1;
             spent.bytes += child.bytes.len();
             let k = self.open(child, &via, true);
-            if let Some(d) = self.nodes[k].problems.first() {
-                first.get_or_insert(d.clone());
-            } else if let Some(d) = self.shaped(k, order, spent) {
+            if let Some(d) = self.shaped(k, order, spent, visited) {
                 first.get_or_insert(d);
+                break;
             }
             order.push(k);
         }
@@ -675,16 +705,17 @@ pub fn load<R: Into<Root>>(
     };
     let mut order = Vec::new();
     // Untrusted roots provisionally reserve space until phase 2 charges
-    // their subgraphs. A later trusted alias removes that reservation.
+    // their subgraphs. A replacement origin removes the old reservation.
     let mut root_leaves = Vec::new();
     for r in roots {
         let r: Root = r.into();
         let (key, size, trust) = r.meta();
         if let Some(k) = w.known(key) {
-            if trust != Trust::Executable || w.nodes[k].found.trust == Trust::Executable {
+            if !w.replaces_origin(k, trust) {
                 continue;
             }
             order.retain(|&placed| placed != k);
+            root_leaves.retain(|&leaf| leaf != k);
         }
         // Promoted roots no longer consume the provisional shape budget.
         let leaves = root_leaves
@@ -747,9 +778,12 @@ pub fn load<R: Into<Root>>(
     let mut warnings = core::mem::take(&mut w.warnings);
     let mut full = Vec::with_capacity(order.len());
     for &i in &order {
+        if w.nodes[i].walked || w.nodes[i].found.status == Status::Dropped {
+            continue;
+        }
         if w.nodes[i].found.trust != Trust::Executable && w.nodes[i].problems.is_empty() {
-            let before = w.nodes.len();
             let mut sub = Vec::new();
+            let mut visited = Vec::new();
             // The leaf itself is the first thing its subgraph spends.
             let mut spent = Budget {
                 files: 1,
@@ -769,7 +803,7 @@ pub fn load<R: Into<Root>>(
                 };
                 Some(Diagnostic::new(code, at))
             } else {
-                w.shaped(i, &mut sub, &mut spent)
+                w.shaped(i, &mut sub, &mut spent, &mut visited)
             };
             match outcome {
                 None => {
@@ -778,10 +812,12 @@ pub fn load<R: Into<Root>>(
                     full.extend(sub);
                 }
                 Some(d) => {
-                    // Drop what this subgraph added; a shape-only file goes
-                    // with it, an unsafe one keeps its own keys.
-                    for k in before..w.nodes.len() {
-                        w.nodes[k].found.status = Status::Dropped;
+                    // Drop every shape-only node walked here, including
+                    // leaves registered in phase 1. Unsafe keeps its own keys.
+                    for k in visited {
+                        if k != i {
+                            w.nodes[k].found.status = Status::Dropped;
+                        }
                     }
                     let id = SourceId(i as u32);
                     if over || w.nodes[i].found.trust == Trust::ShapeOnly {
@@ -1084,6 +1120,170 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(order(&g), ["shape-t", "a", "f", "root"]);
+    }
+
+    // 등록만 된 모양 전용 잎도 DFS로 걷는다. 등록을 완료로 보거나 두 번 적용하면 실패한다.
+    #[test]
+    fn registered_shape_leaves_walk_depth_first_once() {
+        use crate::config::merge::{MValue, Slot, merge};
+        let mut f = files(&[
+            ("shape-a", "extends = ['shape-b']\nx = 1"),
+            ("shape-b", "x = 2"),
+        ]);
+        let g = load(
+            vec![opened("root", "extends = ['shape-a', 'shape-b']", 1)],
+            &mut f,
+            V,
+        )
+        .unwrap();
+        assert_eq!(order(&g), ["shape-b", "shape-a", "root"]);
+        assert_eq!(g.files.len(), 3);
+        assert_eq!(g.files[2].via, [SourceId(0), SourceId(1)]);
+        let m = merge(&g, &[], &|_| Slot::Shape);
+        assert_eq!(
+            m.root.get("x").unwrap().value,
+            MValue::Scalar(Value::Int(1))
+        );
+        assert!(g.warnings.is_empty());
+    }
+
+    // 미리 등록된 A↔B도 순환이다. 실패한 하위 그래프의 등록된 잎을 남기거나 다시 걷으면 실패한다.
+    #[test]
+    fn registered_shape_cycle_drops_the_whole_subgraph() {
+        let mut f = files(&[
+            ("shape-a", "extends = ['shape-b']"),
+            ("shape-b", "extends = ['shape-a']"),
+            ("shape-good", "x = 1"),
+        ]);
+        let g = load(
+            vec![opened(
+                "root",
+                "extends = ['shape-a', 'shape-b', 'shape-good']",
+                1,
+            )],
+            &mut f,
+            V,
+        )
+        .unwrap();
+        assert_eq!(order(&g), ["shape-good", "root"]);
+        assert_eq!(g.files[1].status, Status::Dropped);
+        assert_eq!(g.files[2].status, Status::Dropped);
+        assert_eq!(
+            codes_of(&g.warnings),
+            [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_CYCLE]
+        );
+    }
+
+    struct BudgetProbe {
+        files: Files,
+        overrun: bool,
+        opens_after_overrun: usize,
+    }
+
+    impl Resolver for BudgetProbe {
+        fn open(&mut self, from: &Opened, r: &ExtendsRef) -> Result<Opened, OpenError> {
+            // The independent recovery subgraph is allowed to keep working.
+            if self.overrun && from.display != b"shape-recovery" {
+                self.opens_after_overrun += 1;
+            }
+            self.files.open(from, r)
+        }
+
+        fn adopt(&mut self, _: FileKey, trust: Option<Trust>) {
+            // Every rejected candidate in this fixture exceeds a budget.
+            if trust.is_none() {
+                self.overrun = true;
+            }
+        }
+    }
+
+    // 초과 뒤 같은 노드·조상의 남은 간선을 열거나, 등록된 잎을 다시 걷거나, 버린 예산을 회수하지 않으면 실패한다.
+    #[test]
+    fn shape_budget_overrun_stops_all_opens_in_the_subgraph() {
+        for code in [
+            codes::EXTENDS_TOO_MANY,
+            codes::EXTENDS_TOO_BIG,
+            codes::EXTENDS_TOO_DEEP,
+        ] {
+            let mut f = if code == codes::EXTENDS_TOO_DEEP {
+                let mut f = chain(8, "d");
+                // d5 is at depth 8: d6 overruns before this sibling edge.
+                f.0.insert("d5", "extends = ['d6', 'after-child']".into());
+                f
+            } else {
+                files(&[])
+            };
+            let fan = if code == codes::EXTENDS_TOO_DEEP {
+                String::from("'d0', 'after-child'")
+            } else {
+                let n = if code == codes::EXTENDS_TOO_MANY {
+                    32
+                } else {
+                    5
+                };
+                for i in 0..n {
+                    f.0.insert(
+                        leak(alloc::format!("f{i}")),
+                        if code == codes::EXTENDS_TOO_BIG {
+                            "#".repeat(tree::FILE_BYTES_MAX)
+                        } else {
+                            String::new()
+                        },
+                    );
+                }
+                (0..n)
+                    .map(|i| alloc::format!("'f{i}'"))
+                    .chain(core::iter::once(String::from("'after-child'")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            f.0.insert(
+                "shape-bad",
+                "extends = ['shape-registered', 'after-parent']".into(),
+            );
+            f.0.insert("shape-registered", alloc::format!("extends = [{fan}]"));
+            f.0.insert("after-child", "x = 1".into());
+            f.0.insert("after-parent", "x = 1".into());
+            f.0.insert("shape-recovery", "extends = ['recovered']".into());
+            f.0.insert("recovered", "#".repeat(tree::FILE_BYTES_MAX));
+            let mut probe = BudgetProbe {
+                files: f,
+                overrun: false,
+                opens_after_overrun: 0,
+            };
+            let g = load(
+                vec![opened(
+                    "root",
+                    "extends = ['shape-bad', 'shape-registered', 'shape-recovery']",
+                    1,
+                )],
+                &mut probe,
+                V,
+            )
+            .unwrap();
+            assert!(probe.overrun, "{code:?}");
+            assert_eq!(probe.opens_after_overrun, 0, "{code:?}");
+            assert_eq!(
+                order(&g),
+                ["recovered", "shape-recovery", "root"],
+                "{code:?}"
+            );
+            assert_eq!(codes_of(&g.warnings), [codes::SHAPE_FILE_DROPPED, code]);
+            assert!(
+                g.files
+                    .iter()
+                    .all(|f| !f.opened.display.starts_with(b"after-"))
+            );
+            let catalog_len = if code == codes::EXTENDS_TOO_MANY {
+                35 // Four registered files, 29 children + rejection, recovery.
+            } else if code == codes::EXTENDS_TOO_BIG {
+                9 // Four registered files, three 256 KiB children + rejection, recovery.
+            } else {
+                12 // Four registered files, depths 3..=8 + rejection, recovery.
+            };
+            assert_eq!(g.files.len(), catalog_len, "{code:?}");
+            assert_eq!(g.files[2].status, Status::Dropped);
+        }
     }
 
     // 이것을 실패시키는 것: 모양 전용 하위 그래프가 예산·깊이·순환·문법으로 신뢰 파일을 실패시키는 것,
@@ -1710,6 +1910,102 @@ pub(crate) mod tests {
         }
     }
 
+    // ShapeOnly 별칭이 명시적인 Unsafe 원본의 자리·경유 경로·실행 키를 가리면 실패한다.
+    #[test]
+    fn unsafe_edge_origin_replaces_shape_alias_and_keeps_execution_keys() {
+        use crate::config::merge::{MValue, Slot, merge};
+        let unsafe_text = "command = ['blocked']";
+        let mut session = Session {
+            files: files(&[
+                ("shape-alias", unsafe_text),
+                ("unsafe-alias", unsafe_text),
+                ("clean", unsafe_text),
+                ("middle", "command = ['safe']"),
+                ("host", "extends = ['unsafe-alias']"),
+                ("shape-first", "extends = ['shape-alias']"),
+                ("shape-late", "extends = ['shape-alias']"),
+            ]),
+            root_bytes: b"extends = ['shape-alias', 'shape-first', 'middle', 'host', 'shape-alias', 'shape-late']"
+                .to_vec(),
+            pending: None,
+            adopted: Vec::new(),
+        };
+        let g = load(vec![on_disk("root", 100, 1)], &mut session, V).unwrap();
+        assert_eq!(
+            order(&g),
+            [
+                "shape-first",
+                "middle",
+                "unsafe-alias",
+                "host",
+                "shape-late",
+                "root"
+            ]
+        );
+        let f = &g.files[1];
+        assert_eq!(f.trust, Trust::Unsafe);
+        assert_eq!(f.opened.trust, Trust::Unsafe);
+        assert_eq!(f.via, [SourceId(0), SourceId(4)]);
+        assert_eq!(f.status, Status::Applied);
+        let m = merge(&g, &[], &|_| Slot::Exec);
+        let cmd = m.root.get("command").unwrap();
+        assert_eq!(cmd.origin.trust, Trust::Unsafe);
+        assert_eq!(cmd.origin.source, f.id);
+        let MValue::Array(args) = &cmd.value else {
+            panic!()
+        };
+        assert_eq!(args[0].value, Value::Str("blocked".into()));
+        assert_eq!(
+            &f.opened.bytes[cmd.origin.span.start as usize..cmd.origin.span.end as usize],
+            b"['blocked']"
+        );
+        assert_eq!(
+            session
+                .adopted
+                .iter()
+                .filter(|(key, _)| *key == f.opened.key)
+                .map(|(_, trust)| *trust)
+                .collect::<Vec<_>>(),
+            [
+                Some(Trust::ShapeOnly),
+                Some(Trust::Unsafe),
+                Some(Trust::Unsafe),
+                Some(Trust::Unsafe),
+                Some(Trust::Unsafe)
+            ]
+        );
+        assert!(session.pending.is_none());
+        assert!(g.warnings.is_empty() && m.warnings.is_empty());
+    }
+
+    // Unsafe 뿌리도 같은 자리 규칙을 따른다. 교체한 ShapeOnly 뿌리를 예산에 이중 계산하면 실패한다.
+    #[test]
+    fn unsafe_root_origin_replaces_shape_alias_without_double_charging() {
+        use crate::config::merge::{Slot, merge};
+        let mut roots = vec![
+            opened("shape-alias", "command = ['blocked']", 1),
+            opened("middle", "command = ['safe']", 2),
+            opened("unsafe-origin", "command = ['blocked']", 1),
+            opened("shape-later-alias", "command = ['blocked']", 1),
+        ];
+        roots.extend((3..32).map(|i| opened("r", "", i)));
+        roots.push(opened("shape-last", "", 32));
+        let g = load(roots, &mut files(&[]), V).unwrap();
+        assert_eq!(&order(&g)[..2], ["middle", "unsafe-origin"]);
+        assert_eq!(g.order.len(), 32);
+        assert_eq!(g.files.len(), 32);
+        assert!(g.warnings.is_empty());
+        let f = &g.files[0];
+        assert_eq!(f.trust, Trust::Unsafe);
+        assert_eq!(f.opened.display, b"unsafe-origin");
+        assert!(f.via.is_empty());
+        let m = merge(&g, &[], &|_| Slot::Exec);
+        let cmd = m.root.get("command").unwrap();
+        assert_eq!(cmd.origin.source, f.id);
+        assert_eq!(cmd.origin.trust, Trust::Unsafe);
+        assert!(m.warnings.is_empty());
+    }
+
     // 이것을 실패시키는 것: 먼저 본 모양 전용 뿌리가 같은 정체의 신뢰 뿌리를 가리거나, 승격한 뿌리를 비신뢰 예산에 이중 계산하는 것.
     #[test]
     fn trusted_root_aliases_replace_the_shape_place_and_budget() {
@@ -1796,7 +2092,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|(k, _)| k.ino == 100)
                 .collect();
-            assert_eq!(big.len(), 2);
+            assert_eq!(big.len(), if text.contains("shape-t") { 1 } else { 2 });
             assert!(big.iter().all(|(_, trust)| trust.is_none()));
         }
     }
