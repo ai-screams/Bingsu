@@ -3,4 +3,6 @@
 //! orders the `extends` graph, merges, records where every value came
 //! from, checks and compiles. Nothing here reads a file or a clock.
 pub mod edit;
+pub mod merge;
+pub mod source;
 pub mod tree;
