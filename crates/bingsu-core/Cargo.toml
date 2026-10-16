@@ -37,3 +37,9 @@ libm = { version = "=0.2.16", default-features = false }
 # (unicode_segmentation::UNICODE_VERSION); src/ucd.rs will be generated for
 # the same version in Task A2 (test ucd_version_matches_segmentation).
 unicode-segmentation = { version = "=1.13.3", default-features = false }
+# TOML for the config model (M3a S1): the `parse` feature
+# without `std` (no_std + alloc) gives spanned tables and recoverable
+# errors; editing is a pure span splice in this crate (config::edit), so
+# no std TOML editor joins the shipped graph (toml_edit would turn on std
+# in toml_parser and winnow for core too: feature unification).
+toml = { version = "=1.1.8", default-features = false, features = ["parse"] }
