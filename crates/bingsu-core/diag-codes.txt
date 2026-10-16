@@ -1,0 +1,35 @@
+# Diagnostic codes of bingsu-core (src/diag_codes.rs). Append only: a code is
+# never removed or reused; its status may change from stable to deprecated.
+E101 stable
+E102 stable
+E103 stable
+E104 stable
+E105 stable
+E201 stable
+E202 stable
+E203 stable
+E204 stable
+E205 stable
+E206 stable
+E207 stable
+E208 stable
+E209 stable
+E210 stable
+E301 stable
+E302 stable
+E303 stable
+E304 stable
+E305 stable
+E306 stable
+E307 stable
+W401 stable
+W402 stable
+W403 stable
+W404 stable
+W405 stable
+W406 stable
+W407 stable
+W408 stable
+N501 stable
+N502 stable
+N503 stable
