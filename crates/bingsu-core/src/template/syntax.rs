@@ -69,18 +69,9 @@ fn span(start: usize, end: usize) -> Span {
     }
 }
 
-fn is_id_part(s: &str) -> bool {
-    let mut b = s.bytes();
-    b.next().is_some_and(|c| c.is_ascii_lowercase())
-        && b.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
-}
-
-/// `seg-id = id-part [ "/" id-part ]` (provisional; M3 fixes the id ABNF).
+/// The segment id grammar of `crate::ident`, shared with the config.
 fn is_segment_id(s: &str) -> bool {
-    match s.split_once('/') {
-        Some((a, b)) => is_id_part(a) && is_id_part(b),
-        None => is_id_part(s),
-    }
+    crate::ident::parse_segment_id(s).is_ok()
 }
 
 fn is_field_name(s: &str) -> bool {

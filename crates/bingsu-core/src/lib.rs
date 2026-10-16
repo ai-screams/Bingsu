@@ -19,6 +19,7 @@ pub mod envelope;
 pub mod field;
 pub mod front;
 pub mod icons;
+pub mod ident;
 pub mod layout;
 pub mod record;
 pub mod recorder;
