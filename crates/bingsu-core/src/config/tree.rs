@@ -3,10 +3,13 @@
 //! file and byte range). The `toml` crate parses (no_std, `parse` feature);
 //! the rest of the config model sees only this tree, so the
 //! parser can change behind it.
-use alloc::borrow::ToOwned;
+use alloc::borrow::{Cow, ToOwned};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use toml::de::{DeTable, DeValue};
+use toml_parser::lexer::TokenKind;
+use toml_parser::parser::{Event, EventKind, RecursionGuard};
 
 /// Per file (spec section 2 "`extends` 규칙": 256 KB per file).
 pub const FILE_BYTES_MAX: usize = 256 * 1024;
@@ -117,17 +120,20 @@ pub enum SyntaxErrorKind {
 /// `depth` is the nesting of `v` itself (a value at the top is 1). Past
 /// `NESTING_MAX` the value is not copied and `TooDeep` is reported once:
 /// this count is over the parser's own tree, so it holds whatever the text
-/// scan before it got wrong.
+/// scan does not represent (notably array-of-tables element nodes).
 fn node(
     v: &toml::Spanned<DeValue<'_>>,
     text: &str,
     errors: &mut Vec<SyntaxError>,
+    too_deep_reported: &mut bool,
+    first_keys: &BTreeMap<usize, Span>,
     depth: u32,
 ) -> Node {
     let span = Span::of(v.span());
     let nested = matches!(v.get_ref(), DeValue::Array(_) | DeValue::Table(_));
     if nested && depth > NESTING_MAX {
-        if !errors.iter().any(|e| e.kind == SyntaxErrorKind::TooDeep) {
+        if !*too_deep_reported {
+            *too_deep_reported = true;
             errors.push(SyntaxError {
                 span,
                 kind: SyntaxErrorKind::TooDeep,
@@ -162,173 +168,206 @@ fn node(
         },
         DeValue::Boolean(b) => Value::Bool(*b),
         DeValue::Datetime(_) => Value::DateTime(text[v.span()].to_owned()),
-        DeValue::Array(a) => {
-            Value::Array(a.iter().map(|e| node(e, text, errors, depth + 1)).collect())
+        DeValue::Array(a) => Value::Array(
+            a.iter()
+                .map(|e| node(e, text, errors, too_deep_reported, first_keys, depth + 1))
+                .collect(),
+        ),
+        DeValue::Table(t) => {
+            Value::Table(table(t, text, errors, too_deep_reported, first_keys, depth))
         }
-        DeValue::Table(t) => Value::Table(table(t, text, errors, depth)),
     };
     Node { value, span }
 }
 
-fn table(t: &DeTable<'_>, text: &str, errors: &mut Vec<SyntaxError>, depth: u32) -> Table {
+fn table(
+    t: &DeTable<'_>,
+    text: &str,
+    errors: &mut Vec<SyntaxError>,
+    too_deep_reported: &mut bool,
+    first_keys: &BTreeMap<usize, Span>,
+    depth: u32,
+) -> Table {
     let mut entries: Vec<Entry> = t
         .iter()
         .map(|(k, v)| Entry {
             key: k.get_ref().as_ref().to_owned(),
-            key_span: Span::of(k.span()),
-            node: node(v, text, errors, depth + 1),
+            key_span: first_keys
+                .get(&k.span().start)
+                .copied()
+                .unwrap_or_else(|| Span::of(k.span())),
+            node: node(v, text, errors, too_deep_reported, first_keys, depth + 1),
         })
         .collect();
     entries.sort_by_key(|e| e.key_span.start);
     Table { entries }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Frame {
-    Array,
-    Inline,
+/// Inspect the same recovered events that build `DeTable`, without building
+/// recursive values. The event parser's guard bounds its own call stack;
+/// our combined count additionally includes dotted keys and table headers.
+/// A malformed key/value separator therefore cannot hide an opening brace.
+#[derive(Default)]
+struct Scan {
+    too_deep: Option<usize>,
+    header_depth: u32,
+    key_dots: u32,
+    depths: Vec<u32>,
+    in_header: bool,
+    header: Vec<Event>,
+    headers: Vec<Vec<Event>>,
 }
 
-/// The first byte where the combined nesting passes `NESTING_MAX`, found
-/// by a scan that knows strings, comments, keys and values, before the
-/// parser sees the text. Overcounting on text the parser would reject
-/// anyway is harmless.
-fn too_deep(text: &str) -> Option<usize> {
-    let b = text.as_bytes();
-    let mut i = 0;
-    // (frame, levels it adds: 1 + dots of the key that opened it)
-    let mut stack: Vec<(Frame, u32)> = Vec::new();
-    let mut header = 0u32; // levels of the current `[table]`
-    let mut dots = 0u32; // dots of the key being read
-    let mut in_key = true; // reading a key, not a value
-    let depth = |stack: &[(Frame, u32)], header: u32, extra: u32| {
-        header + stack.iter().map(|f| f.1).sum::<u32>() + extra
-    };
-    while i < b.len() {
-        let c = b[i];
-        match c {
-            b'#' => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
+impl Scan {
+    fn depth(&self) -> u32 {
+        self.depths.last().copied().unwrap_or(self.header_depth) + self.key_dots
+    }
+
+    fn event(&mut self, event: Event) {
+        match event.kind() {
+            EventKind::StdTableOpen | EventKind::ArrayTableOpen => {
+                self.header_depth = 1;
+                self.key_dots = 0;
+                self.in_header = true;
+                self.header.clear();
             }
-            b'"' | b'\'' => {
-                let triple = b[i..].starts_with(if c == b'"' { b"\"\"\"" } else { b"'''" });
-                let close: &[u8] = if triple {
-                    if c == b'"' { b"\"\"\"" } else { b"'''" }
-                } else if c == b'"' {
-                    b"\""
-                } else {
-                    b"'"
-                };
-                i += close.len();
-                while i < b.len() && !b[i..].starts_with(close) {
-                    if c == b'"' && b[i] == b'\\' {
-                        i += 1;
-                    }
-                    if !triple && b.get(i) == Some(&b'\n') {
-                        break;
-                    }
-                    i += 1;
-                }
-                i += close.len();
-                // A multi-line string may end with one or two more quotes
-                // before its closing three (`"""q""""` holds `q"`).
-                if triple {
-                    let mut extra = 0;
-                    while extra < 2 && b.get(i) == Some(&c) {
-                        i += 1;
-                        extra += 1;
-                    }
-                }
-                continue;
-            }
-            b'\n' => {
-                if stack.is_empty() {
-                    in_key = true;
-                    dots = 0;
+            EventKind::StdTableClose | EventKind::ArrayTableClose => {
+                self.header_depth += self.key_dots;
+                self.key_dots = 0;
+                self.in_header = false;
+                if self.too_deep.is_none() {
+                    self.headers.push(core::mem::take(&mut self.header));
                 }
             }
-            b'.' if in_key => dots += 1,
-            b'=' if in_key => in_key = false,
-            b'[' if in_key && stack.is_empty() => {
-                // A table header: `[a.b]` or `[[a.b]]`; count its dots.
-                let mut j = i;
-                let mut n = 1;
-                while j < b.len() && b[j] != b'\n' && b[j] != b']' {
-                    match b[j] {
-                        b'.' => n += 1,
-                        q @ (b'"' | b'\'') => {
-                            // A quoted part: its dots are not separators.
-                            j += 1;
-                            while j < b.len() && b[j] != q && b[j] != b'\n' {
-                                if q == b'"' && b[j] == b'\\' {
-                                    j += 1;
-                                }
-                                j += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                    j += 1;
-                }
-                header = n;
-                dots = 0;
-                if header > NESTING_MAX {
-                    return Some(i);
-                }
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
+            EventKind::SimpleKey if self.in_header && self.too_deep.is_none() => {
+                self.header.push(event);
             }
-            b'[' | b'{' if !in_key => {
-                let frame = if c == b'[' {
-                    Frame::Array
-                } else {
-                    Frame::Inline
-                };
-                // The first bracket of a value carries its key's dots.
-                let opened_by_key = stack.last().is_none_or(|f| f.0 == Frame::Inline);
-                let weight = 1 + if opened_by_key { dots } else { 0 };
-                stack.push((frame, weight));
-                dots = 0;
-                if frame == Frame::Inline {
-                    in_key = true;
-                }
+            EventKind::KeySep => self.key_dots += 1,
+            EventKind::InlineTableOpen | EventKind::ArrayOpen => {
+                self.depths.push(self.depth() + 1);
+                self.key_dots = 0;
             }
-            b']' | b'}' if !stack.is_empty() => {
-                stack.pop();
-                in_key = false;
+            EventKind::InlineTableClose | EventKind::ArrayClose => {
+                self.depths.pop();
+                self.key_dots = 0;
             }
-            b',' if stack.last().is_some_and(|f| f.0 == Frame::Inline) => {
-                in_key = true;
-                dots = 0;
+            EventKind::Scalar | EventKind::ValueSep => self.key_dots = 0,
+            EventKind::Newline if self.depths.is_empty() && !self.in_header => {
+                self.key_dots = 0;
             }
             _ => {}
         }
-        // Checked after every byte of a value (a bracket just opened
-        // included); inside an inline table, at its `=`.
-        if !in_key && depth(&stack, header, dots) > NESTING_MAX {
-            return Some(i);
+        if self.too_deep.is_none() && self.depth() > NESTING_MAX {
+            self.too_deep = Some(event.span().start());
         }
-        i += 1;
     }
-    None
+}
+
+fn scan(text: &str) -> Scan {
+    let tokens = toml_parser::Source::new(text).lex().into_vec();
+    let mut scan = Scan::default();
+    // Bound the event parser before calling it too. Recovery can emit a close
+    // without an open; its event guard alone must not be trusted to measure
+    // the actual call stack. The lexer never recurses and hides punctuation
+    // inside strings/comments. Mismatched closers cannot subtract depth.
+    let mut delimiters = Vec::new();
+    for token in &tokens {
+        match token.kind() {
+            TokenKind::LeftSquareBracket | TokenKind::LeftCurlyBracket => {
+                delimiters.push(token.kind());
+                if delimiters.len() > NESTING_MAX as usize {
+                    scan.too_deep = Some(token.span().start());
+                    return scan;
+                }
+            }
+            TokenKind::RightSquareBracket
+                if delimiters.last() == Some(&TokenKind::LeftSquareBracket) =>
+            {
+                delimiters.pop();
+            }
+            TokenKind::RightCurlyBracket
+                if delimiters.last() == Some(&TokenKind::LeftCurlyBracket) =>
+            {
+                delimiters.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut receive = |event| scan.event(event);
+    let mut guard = RecursionGuard::new(&mut receive, NESTING_MAX);
+    toml_parser::parser::parse_document(&tokens, &mut guard, &mut ());
+    scan
+}
+
+#[cfg(test)]
+fn too_deep(text: &str) -> Option<usize> {
+    scan(text).too_deep
+}
+
+/// Preserve the first spelling of every header path before a later explicit
+/// parent can replace its key span. Resolve each path in the finished tree:
+/// a parser key's offset identifies that particular entry, including entries
+/// in different elements of an array of tables. No textual key matching or
+/// global name-only map is used (quoted/escaped keys can name the same path).
+fn first_key_spans(doc: &DeTable<'_>, text: &str, headers: &[Vec<Event>]) -> BTreeMap<usize, Span> {
+    let source = toml_parser::Source::new(text);
+    let mut first = BTreeMap::new();
+    for header in headers {
+        let mut table = doc;
+        for event in header {
+            let mut decoded = Cow::Borrowed("");
+            source
+                .get(*event)
+                .expect("event span")
+                .decode_key(&mut decoded, &mut ());
+            let Some((key, value)) = table.get_key_value(decoded.as_ref()) else {
+                break; // Invalid paths cannot produce a successful tree.
+            };
+            let span = event.span();
+            first
+                .entry(key.span().start)
+                .or_insert_with(|| Span::of(key.span()).min(Span::of(span.start()..span.end())));
+            table = match value.get_ref() {
+                DeValue::Table(t) => t,
+                DeValue::Array(a) => {
+                    // A header belongs to the latest element opened before it.
+                    let end = a.partition_point(|v| v.span().start <= span.start());
+                    let Some(DeValue::Table(t)) = end.checked_sub(1).map(|i| a[i].get_ref()) else {
+                        break;
+                    };
+                    t
+                }
+                _ => break,
+            };
+        }
+    }
+    first
+}
+
+/// Never run the parser tree's recursive drop glue, even for a rejected tree.
+/// Move children onto a work list before dropping their now-empty container.
+fn drop_parser_tree(doc: DeTable<'_>) {
+    let mut pending = alloc::vec![DeValue::Table(doc)];
+    while let Some(value) = pending.pop() {
+        match value {
+            DeValue::Table(t) => pending.extend(t.into_iter().map(|(_, v)| v.into_inner())),
+            DeValue::Array(a) => pending.extend(a.into_iter().map(|v| v.into_inner())),
+            _ => {}
+        }
+    }
 }
 
 /// Parses one file. Every error the parser recovers from is reported, in
 /// byte order; any error means no tree. Nesting is capped twice: a text
-/// scan keeps the parser itself from recursing deep, and the copy into the
-/// tree counts the parser's own nodes, so the tree and every walk over it
-/// stay within `NESTING_MAX` even where the scan reads the text differently
-/// from the parser.
+/// event scan bounds recursion before constructing parser values, and the
+/// copy counts actual nodes (including each array-of-tables element) so the
+/// tree and every walk over it stay within `NESTING_MAX`. The parser tree is
+/// then dismantled iteratively, including when the file has errors.
 pub fn parse(bytes: &[u8]) -> Result<Table, Vec<SyntaxError>> {
     parse_inner(bytes, true)
 }
 
-fn parse_inner(bytes: &[u8], scan: bool) -> Result<Table, Vec<SyntaxError>> {
+fn parse_inner(bytes: &[u8], check_depth: bool) -> Result<Table, Vec<SyntaxError>> {
     if bytes.len() > FILE_BYTES_MAX {
         let at = FILE_BYTES_MAX as u32;
         return Err(alloc::vec![SyntaxError {
@@ -346,12 +385,13 @@ fn parse_inner(bytes: &[u8], scan: bool) -> Result<Table, Vec<SyntaxError>> {
             kind: SyntaxErrorKind::NotUtf8,
         }]
     })?;
-    if let Some(at) = too_deep(text).filter(|_| scan) {
+    let scanned = scan(text);
+    if let Some(at) = scanned.too_deep.filter(|_| check_depth) {
         let at = at as u32;
         return Err(alloc::vec![SyntaxError {
             span: Span {
                 start: at,
-                end: at + 1
+                end: (at + 1).min(bytes.len() as u32)
             },
             kind: SyntaxErrorKind::TooDeep,
         }]);
@@ -364,7 +404,17 @@ fn parse_inner(bytes: &[u8], scan: bool) -> Result<Table, Vec<SyntaxError>> {
             kind: SyntaxErrorKind::Toml(e.message().to_owned()),
         })
         .collect();
-    let tree = table(doc.get_ref(), text, &mut errors, 0);
+    let first_keys = first_key_spans(doc.get_ref(), text, &scanned.headers);
+    let mut too_deep_reported = false;
+    let tree = table(
+        doc.get_ref(),
+        text,
+        &mut errors,
+        &mut too_deep_reported,
+        &first_keys,
+        0,
+    );
+    drop_parser_tree(doc.into_inner());
     if errors.is_empty() {
         Ok(tree)
     } else {
@@ -441,6 +491,66 @@ mod tests {
             panic!()
         };
         assert_eq!(keys(mid), ["b", "a"]);
+    }
+
+    // 이것을 실패시키는 것: 나중에 명시한 부모의 span으로 첫 위치와 순서를 덮어쓰는 것.
+    #[test]
+    fn implicit_parents_keep_the_first_key_span() {
+        let src = "[a.b]\nx=1\n[c]\nx=2\n[a]\nx=3\n";
+        let t = parse(src.as_bytes()).unwrap();
+        assert_eq!(
+            t.entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert_eq!(t.get("a").unwrap().key_span, Span { start: 1, end: 2 });
+        assert_eq!(t.get("a").unwrap().node.span, sp(src, "[a]"));
+
+        let src = "a.b=1\n[z]\nx=2\n[a.c]\nx=3\n";
+        let t = parse(src.as_bytes()).unwrap();
+        assert_eq!(t.entries[0].key, "a");
+        assert_eq!(t.entries[0].key_span, Span { start: 0, end: 1 });
+
+        // Decode equivalent quoted spellings, preserve nested parents, and keep
+        // the two array elements' identical paths separate.
+        let src = "[[items]]\n[items.'a.b'.child]\nx=1\n[items.c]\nx=2\n[items.\"a\\u002Eb\"]\nx=3\n\
+                   [[items]]\n[items.c]\nx=4\n[items.\"a.b\".child]\nx=5\n[items.'a.b']\nx=6\n";
+        let t = parse(src.as_bytes()).unwrap();
+        let Value::Array(items) = &t.get("items").unwrap().node.value else {
+            panic!()
+        };
+        for (i, expected) in [["a.b", "c"], ["c", "a.b"]].iter().enumerate() {
+            let Value::Table(t) = &items[i].value else {
+                panic!()
+            };
+            assert_eq!(
+                t.entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+                *expected
+            );
+            let first = if i == 0 { "'a.b'" } else { "\"a.b\"" };
+            assert_eq!(t.get("a.b").unwrap().key_span, sp(src, first));
+        }
+    }
+
+    // 이것을 실패시키는 것: 원본 트리를 재귀 drop으로 해제하는 것(거부한 트리도 포함).
+    #[test]
+    fn parser_tree_drop_does_not_recurse() {
+        let mut value = DeValue::Boolean(true);
+        for i in 0..20_000 {
+            let child = toml::Spanned::new(0..0, value);
+            value = if i % 2 == 0 {
+                DeValue::Array(core::iter::once(child).collect())
+            } else {
+                let mut t = DeTable::new();
+                t.insert(toml::Spanned::new(0..0, Cow::Borrowed("a")), child);
+                DeValue::Table(t)
+            };
+        }
+        let mut doc = DeTable::new();
+        doc.insert(
+            toml::Spanned::new(0..0, Cow::Borrowed("root")),
+            toml::Spanned::new(0..0, value),
+        );
+        drop_parser_tree(doc);
     }
 
     fn kind_of(src: &str) -> Option<SyntaxErrorKind> {
