@@ -62,7 +62,7 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
         exe_path::Verdict::Unknown => eprintln!("{}", en(MsgId::TamperUnknown)),
         exe_path::Verdict::Tamperable => eprintln!("{}", en(MsgId::Tamperable)),
     }
-    let roots = roots::resolve(&env, &pw.home);
+    let roots = roots::resolve(&env, &pw.home, &pw.name);
     if roots.config.is_none() || roots.state.is_none() || roots.log.is_none() {
         eprintln!("{}", en(MsgId::UnconfirmedRoot));
     }

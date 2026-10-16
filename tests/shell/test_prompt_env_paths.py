@@ -182,15 +182,78 @@ def named_paths(line):
 SYSTEM_PATHS = re.compile(r"^/etc/ld\.so\.(cache|preload)$|^/(usr/)?lib(64)?/.+\.so(\.\d+)*$|^/proc/self/maps$")
 
 
+DIRFD_CALL = re.compile(r'^(\d+)\s+(\w+)\((\d+|AT_FDCWD), "((?:[^"\\]|\\.)*)"')
+OPENS = {"openat", "openat2", "open"}
+
+
+def resolve_dirfds(lines):
+    """Each line with the paths it names, a name relative to a descriptor
+    resolved against the path that descriptor was opened with (Task R1: the
+    runtime root walk opens "/" and then one name at a time with
+    `openat(fd, name, O_NOFOLLOW)`). Descriptors are tracked per process
+    from the `= N` of each open; a relative name under a descriptor this
+    trace did not see opened stays relative and fails. Close/dup/fork fd
+    lifetimes and unfinished/resumed file calls are deferred to N4's real
+    traces; this is only the straight-line walk decoder."""
+    fds = {}
+    out = []
+    for line in lines:
+        paths = named_paths(line)
+        m = DIRFD_CALL.match(line)
+        # An empty name with AT_EMPTY_PATH is the descriptor itself (allowed below).
+        if m and paths and paths[0] and m.group(3) != "AT_FDCWD" and not paths[0].startswith("/"):
+            base = fds.get((m.group(1), m.group(3)))
+            if base is not None:
+                paths = [base.rstrip("/") + "/" + paths[0]] + paths[1:]
+        r = RETURN.search(line)
+        if m and m.group(2) in OPENS and r and paths:
+            fds[(m.group(1), r.group(1))] = paths[0]
+        out.append((line, paths))
+    return out
+
+
 def allowed(path, line, exe, roots):
     """Spec section 5 (front-end prompt opens no file of the current folder
     or repository) and X-06 (only the roots pinned by init). A relative path
-    never passes."""
+    never passes. A folder above a pinned root passes only as a folder
+    (`O_DIRECTORY`): the runtime root walk opens each one to check it."""
     if path == "" and "AT_EMPTY_PATH" in line:
         return True  # fstat of an fd already open (glibc 2.35, 2.36): names no path
     if path == exe or SYSTEM_PATHS.match(path):
         return True
-    return any(path == r or path.startswith(r + "/") for r in roots)
+    if any(path == r or path.startswith(r + "/") for r in roots):
+        return True
+    above = path == "/" or any(r.startswith(path.rstrip("/") + "/") for r in roots)
+    return above and "O_DIRECTORY" in line
+
+
+# 이것을 실패시키는 것: 기술자 기준 상대 이름을 풀지 않는 것(걷기가 상대 경로로 거부됨), 모르는 기술자 기준 이름을
+# 통과시키는 것, 뿌리 위 폴더를 폴더가 아닌 열기에도 허용하는 것, 기술자를 프로세스마다 따로 세지 않는 것,
+# AT_EMPTY_PATH의 빈 이름을 기술자 아래의 새 이름으로 붙이는 것.
+def test_dirfd_walk_resolves_and_stays_under_the_roots():
+    roots = ["/run/user/1/bingsu"]
+    lines = [
+        '7 openat(AT_FDCWD, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY|O_PATH) = 3',
+        '7 openat(3, "run", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY|O_PATH) = 4',
+        '7 openat(4, "user", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY|O_PATH) = 5',
+        '7 openat(5, "1", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY|O_PATH) = 6',
+        '7 openat(6, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY|O_PATH) = 7',
+        '7 openat(7, "snapshot", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 8',
+    ]
+    lines.append('7 newfstatat(8, "", {st_mode=S_IFREG|0600, st_size=64, ...}, AT_EMPTY_PATH) = 0')
+    got = resolve_dirfds(lines)
+    assert [p for _, p in got][-2] == ["/run/user/1/bingsu/snapshot"]
+    assert [p for _, p in got][-1] == [""]
+    assert all(allowed(p, l, "/x/bingsu", roots) for l, ps in got for p in ps)
+    bad = [
+        '7 openat(AT_FDCWD, "/run", O_RDONLY|O_CLOEXEC) = 9',  # a folder above, not as a folder
+        '7 openat(4, "other", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 10',  # beside the root
+        '7 openat(42, "x", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 11',  # an fd never seen opened
+        '8 openat(7, "snapshot", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 12',  # fd 7 of another process
+    ]
+    for b in bad:
+        (line, paths), = resolve_dirfds(lines + [b])[-1:]
+        assert not all(allowed(p, line, "/x/bingsu", roots) for p in paths), b
 
 
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
@@ -239,7 +302,7 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
               (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
-    bad = [l for l in scoped if any(not allowed(p, l, exe, pinned) for p in named_paths(l))]
+    bad = [l for l, ps in resolve_dirfds(scoped) if any(not allowed(p, l, exe, pinned) for p in ps)]
     assert bad == [], ("paths outside the allowlist (a loader or library path of your distribution: "
                        "widen SYSTEM_PATHS and write why; anything else bingsu opened is a defect)", bad[:5])
 

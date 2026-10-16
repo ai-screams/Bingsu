@@ -1,9 +1,12 @@
-//! Roots pinned by init (spec section 4 "runtime root"). M1: a no-follow fd
-//! walk of the canonical parent, owner and 0700 of the final and missing
-//! folders, and the macOS local-file-system check (`MNT_LOCAL`). M3a: the
-//! owner, mode and sticky policy of existing ancestors, and the Linux
-//! `f_type` decision.
+//! Roots pinned by init (spec section 4 "runtime root"): create missing
+//! folders and secure the final folder, then judge the retained no-follow
+//! chain with the same rules as the helper (including local file system).
 use super::trusted_env::TrustedEnv;
+use crate::commands::{
+    group_policy::{Recording, SystemGroups},
+    runtime_root, sys,
+};
+use bingsu_core::fs_trust::{GroupOracle, GroupPin};
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +15,10 @@ pub struct RuntimeRootPin {
     pub dev: u64,
     pub ino: u64,
     pub path: PathBuf,
+    /// Ancestors whose group write was cleared by this walk (P-R1/S-8).
+    /// N4 carries these pins to the front end, which never asks the system.
+    #[cfg_attr(not(test), expect(dead_code, reason = "N4 hook hand-off"))]
+    pub group_ok: Vec<GroupPin>,
 }
 
 /// `None` for config, state or log: the path could not be confirmed (see
@@ -37,9 +44,9 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
     }
 }
 
-/// Pins the runtime folder (spec section 4 "runtime root"; ancestor rules
-/// are M3a). The parent's existing part is canonicalized and opened by a
-/// no-follow walk from "/" (`open_canonical_dir`); every
+/// Pins the runtime folder (spec section 4 "runtime root"). The parent's
+/// existing part is canonicalized and opened by a no-follow walk from "/"
+/// (`runtime_root::open_chain`); every
 /// missing folder below it, and the last folder, is created with `mkdirat`
 /// and opened with `openat(O_NOFOLLOW)` relative to the folder above, so a
 /// symlink in their place is refused, never followed. Through each
@@ -50,34 +57,15 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
 /// the last descriptor; `path` is the canonical parent plus the names
 /// opened. Any failure means no runtime root, and the folders this call
 /// created are removed again.
-pub fn pin(candidate: &Path) -> std::io::Result<RuntimeRootPin> {
-    pin_for(candidate, crate::commands::sys::current_uid())
+pub fn pin(candidate: &Path, user: &[u8]) -> std::io::Result<RuntimeRootPin> {
+    pin_for(candidate, sys::current_uid(), &mut SystemGroups::new(user))
 }
 
-/// Opens a canonical folder by walking it from "/" one name at a time with
-/// `openat(O_NOFOLLOW)`. A canonical path holds no symlink, so a name that
-/// is a symlink now (swapped in after canonicalization) fails the walk
-/// instead of redirecting it (the same walk as spec section 4 "runtime
-/// root" 4 at prompt time). Every descriptor is search-only, so an
-/// ancestor with x but not r (`/home` at 0711) does not stop the walk; the
-/// result only serves as the base for `openat` and `mkdirat` below.
-fn open_canonical_dir(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::fd::AsFd;
-    let mut dir =
-        crate::commands::sys::open_dir_at_search_nofollow(None, std::ffi::OsStr::new("/"))?;
-    for c in path.components() {
-        match c {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                dir = crate::commands::sys::open_dir_at_search_nofollow(Some(dir.as_fd()), name)?
-            }
-            _ => return Err(std::io::Error::other("runtime root: not a canonical path")),
-        }
-    }
-    Ok(dir)
-}
-
-fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
+fn pin_for(
+    candidate: &Path,
+    uid: u32,
+    groups: &mut dyn GroupOracle,
+) -> std::io::Result<RuntimeRootPin> {
     use std::os::fd::{AsFd, AsRawFd};
     use std::os::unix::fs::PermissionsExt;
     let bad = |what: &str| std::io::Error::other(format!("runtime root: {what}"));
@@ -101,47 +89,56 @@ fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
             _ => Err(bad("unexpected path component")),
         })
         .collect::<std::io::Result<_>>()?;
-    // `chain[i]` is the folder that holds `chain[i + 1]`; `created` lists
-    // (index of the holding folder, name) for each folder this call made.
-    let mut chain = vec![open_canonical_dir(&base)?];
+    // Keep the existing prefix and every created child's descriptors until
+    // the same chain is judged and its parent/name connections rechecked.
+    // `created` lists (holding descriptor index, name) for rollback.
+    let mut chain = runtime_root::open_chain(&base).map_err(|e| bad(&format!("{e:?}")))?;
+    let mut groups = Recording::new(groups);
     let mut created: Vec<(usize, std::ffi::OsString)> = Vec::new();
     let result = (|| {
-        let mut owned_child = |chain: &Vec<std::fs::File>, name: &std::ffi::OsStr| {
+        let mut owned_child = |chain: &[std::fs::File], name: &std::ffi::OsStr| {
             let holder = chain.len() - 1;
-            if crate::commands::sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
+            if sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
                 created.push((holder, name.to_os_string()));
             }
-            let child = crate::commands::sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
+            let child = sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
             if child.metadata()?.uid() != uid {
                 return Err(bad("owned by another user"));
             }
             Ok(child)
         };
         for name in &names {
-            let child = owned_child(&chain, name)?;
+            let child = owned_child(&chain.fds, name)?;
             child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-            chain.push(child);
+            chain.facts.push(sys::fd_facts(child.as_fd())?);
+            chain.names.push(name.to_os_string());
+            chain.fds.push(child);
         }
-        let root = owned_child(&chain, last)?;
-        if crate::commands::sys::fd_is_local(root.as_raw_fd()) != Some(true) {
+        let root = owned_child(&chain.fds, last)?;
+        if sys::fd_is_local(root.as_raw_fd()) != Some(true) {
             return Err(bad("not on a local file system"));
         }
         root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-        Ok(root)
+        chain.facts.push(sys::fd_facts(root.as_fd())?);
+        chain.names.push(last.to_os_string());
+        chain.fds.push(root);
+        runtime_root::judge(&chain, uid, &mut groups).map_err(|e| bad(&format!("{e:?}")))?;
+        chain.revalidate()?;
+        Ok(())
     })();
-    let root = match result {
-        Ok(root) => root,
+    match result {
+        Ok(()) => {}
         Err(e) => {
             // Undo what this call made, deepest first. Folders that already
             // existed are not touched; a folder another process filled in
             // the meantime is not empty and stays.
             for (holder, name) in created.iter().rev() {
-                let _ = crate::commands::sys::remove_dir_at(chain[*holder].as_fd(), name);
+                let _ = sys::remove_dir_at(chain.fds[*holder].as_fd(), name);
             }
             return Err(e);
         }
     };
-    let md = root.metadata()?;
+    let md = chain.last().metadata()?;
     let mut path = base;
     path.extend(&names);
     path.push(last);
@@ -149,6 +146,7 @@ fn pin_for(candidate: &Path, uid: u32) -> std::io::Result<RuntimeRootPin> {
         dev: md.dev(),
         ino: md.ino(),
         path,
+        group_ok: groups.cleared,
     })
 }
 
@@ -175,14 +173,14 @@ pub fn canonical_lenient(p: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn resolve(env: &TrustedEnv, home: &Path) -> Roots {
+pub fn resolve(env: &TrustedEnv, home: &Path, user: &[u8]) -> Roots {
     let state = canonical_lenient(
         &abs(&env.xdg_state_home)
             .unwrap_or_else(|| home.join(".local").join("state"))
             .join("bingsu"),
     );
     Roots {
-        runtime: pin(&runtime_candidate(env, home)).ok(),
+        runtime: pin(&runtime_candidate(env, home), user).ok(),
         config: canonical_lenient(
             &abs(&env.xdg_config_home)
                 .unwrap_or_else(|| home.join(".config"))
@@ -198,6 +196,7 @@ pub fn resolve(env: &TrustedEnv, home: &Path) -> Roots {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bingsu_core::fs_trust::RefuseGroupWrite;
 
     fn env(rt: Option<&str>, cache: Option<&str>) -> TrustedEnv {
         TrustedEnv {
@@ -243,7 +242,7 @@ mod tests {
             xdg_state_home: Some(base.join("state").into_os_string()),
             ..env(None, None)
         };
-        let roots = resolve(&e, &base.join("home"));
+        let roots = resolve(&e, &base.join("home"), b"unused");
         assert_eq!(roots.log, Some(std::fs::canonicalize(&elsewhere).unwrap()));
         assert_eq!(roots.state, Some(std::fs::canonicalize(&state).unwrap()));
         std::fs::remove_dir_all(&base).unwrap();
@@ -284,13 +283,20 @@ mod tests {
     fn pin_checks_owner_and_forces_0700() {
         use std::os::unix::fs::PermissionsExt;
         let base = scratch("pin");
-        let me = crate::commands::sys::current_uid();
+        let me = sys::current_uid();
         let loose = base.join("loose");
         std::fs::create_dir_all(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let got = pin_for(&loose, me).unwrap();
+        let got = pin_for(&loose, me, &mut RefuseGroupWrite).unwrap();
         assert_eq!(std::fs::metadata(&got.path).unwrap().mode() & 0o7777, 0o700);
-        assert!(pin_for(&base.join("other"), me.wrapping_add(1)).is_err());
+        assert!(
+            pin_for(
+                &base.join("other"),
+                me.wrapping_add(1),
+                &mut RefuseGroupWrite
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -309,9 +315,13 @@ mod tests {
             );
             return;
         }
-        let err = pin_for(Path::new("/System/Volumes/Data/home"), 0)
-            .err()
-            .expect("must refuse");
+        let err = pin_for(
+            Path::new("/System/Volumes/Data/home"),
+            0,
+            &mut RefuseGroupWrite,
+        )
+        .err()
+        .expect("must refuse");
         assert!(err.to_string().contains("local file system"), "{err}");
     }
 
@@ -323,8 +333,8 @@ mod tests {
         let base = std::fs::canonicalize(scratch("walk")).unwrap();
         std::fs::create_dir_all(base.join("real_a/b")).unwrap();
         std::os::unix::fs::symlink(base.join("real_a"), base.join("a")).unwrap();
-        assert!(open_canonical_dir(&base.join("real_a/b")).is_ok());
-        assert!(open_canonical_dir(&base.join("a/b")).is_err());
+        assert!(runtime_root::open_chain(&base.join("real_a/b")).is_ok());
+        assert!(runtime_root::open_chain(&base.join("a/b")).is_err());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -334,11 +344,18 @@ mod tests {
     #[test]
     fn failed_pin_removes_the_folders_it_created() {
         let base = scratch("rollback");
-        let me = crate::commands::sys::current_uid();
-        assert!(pin_for(&base.join("x/y/bingsu"), me.wrapping_add(1)).is_err());
+        let me = sys::current_uid();
+        assert!(
+            pin_for(
+                &base.join("x/y/bingsu"),
+                me.wrapping_add(1),
+                &mut RefuseGroupWrite
+            )
+            .is_err()
+        );
         assert!(!base.join("x").exists());
         assert!(base.exists());
-        assert!(pin_for(&base.join("x/y/bingsu"), me).is_ok());
+        assert!(pin_for(&base.join("x/y/bingsu"), me, &mut RefuseGroupWrite).is_ok());
         assert!(base.join("x/y/bingsu").is_dir());
         std::fs::remove_dir_all(&base).unwrap();
     }
@@ -351,11 +368,15 @@ mod tests {
     #[test]
     fn failed_pin_removes_created_folders_deepest_first() {
         let base = scratch("rollback-order");
-        let me = crate::commands::sys::current_uid();
+        let me = sys::current_uid();
         let too_long = "x".repeat(256);
-        let err = pin_for(&base.join("n1/n2").join(&too_long), me)
-            .err()
-            .expect("a 256-byte name must fail");
+        let err = pin_for(
+            &base.join("n1/n2").join(&too_long),
+            me,
+            &mut RefuseGroupWrite,
+        )
+        .err()
+        .expect("a 256-byte name must fail");
         assert_eq!(err.raw_os_error(), Some(libc::ENAMETOOLONG), "{err}");
         assert!(!base.join("n1/n2").exists());
         assert!(!base.join("n1").exists());
@@ -371,16 +392,119 @@ mod tests {
     fn pin_walks_through_search_only_ancestor() {
         use std::os::unix::fs::PermissionsExt;
         let base = scratch("search-only");
-        let me = crate::commands::sys::current_uid();
+        let me = sys::current_uid();
         let lk = base.join("lk");
         std::fs::create_dir_all(lk.join("run")).unwrap();
         std::fs::set_permissions(lk.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::set_permissions(&lk, std::fs::Permissions::from_mode(0o111)).unwrap();
-        let got = pin_for(&lk.join("run"), me);
+        let got = pin_for(&lk.join("run"), me, &mut RefuseGroupWrite);
         std::fs::set_permissions(&lk, std::fs::Permissions::from_mode(0o700)).unwrap();
         let got = got.expect("x-only ancestor must not lose the runtime root");
         assert_eq!(got.path, std::fs::canonicalize(lk.join("run")).unwrap());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // init도 상위 폴더 규칙을 건다(스펙 4절 "런타임 뿌리" 2): 그룹 쓰기 상위 폴더는 판정 P-R1의 oracle이 정한다.
+    // 이것을 실패시키는 것: init의 pin이 기존 상위 폴더를 보지 않는 것, 거부 뒤 만든 폴더를 남기는 것,
+    // 승인한 조상을 기록하지 않는 것, 앞단이 dev·ino·gid·mode가 다른 그룹 pin을 받는 것.
+    #[test]
+    fn pin_applies_rule_2_to_existing_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = scratch("gw-ancestor");
+        let me = sys::current_uid();
+        let gw = base.join("gw");
+        std::fs::create_dir_all(&gw).unwrap();
+        std::fs::set_permissions(&gw, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let got = pin_for(
+            &gw.join("bingsu"),
+            me,
+            &mut bingsu_core::fs_trust::RefuseGroupWrite,
+        );
+        assert!(got.is_err());
+        assert!(!gw.join("bingsu").exists());
+        struct Cleared;
+        impl bingsu_core::fs_trust::GroupOracle for Cleared {
+            fn group_write(
+                &mut self,
+                _: &bingsu_core::fs_trust::Facts,
+            ) -> bingsu_core::fs_trust::Group {
+                bingsu_core::fs_trust::Group::OnlyRootAndUser
+            }
+        }
+        // init clears it and pins it for the front end (P-R1, S-8).
+        let pin = pin_for(&gw.join("bingsu"), me, &mut Cleared).unwrap();
+        let gw_md = std::fs::metadata(&gw).unwrap();
+        assert_eq!(
+            pin.group_ok
+                .iter()
+                .map(|p| (p.dev, p.ino, p.gid, p.mode))
+                .collect::<Vec<_>>(),
+            [(gw_md.dev(), gw_md.ino(), gw_md.gid(), gw_md.mode())]
+        );
+        let root = runtime_root::Pinned {
+            dev: pin.dev,
+            ino: pin.ino,
+            path: pin.path,
+        };
+        use bingsu_core::fs_trust::PinnedGroupWrite;
+        assert!(
+            runtime_root::open_runtime_root(&root, me, &mut PinnedGroupWrite(&pin.group_ok))
+                .is_ok()
+        );
+        assert!(runtime_root::open_runtime_root(&root, me, &mut PinnedGroupWrite(&[])).is_err());
+        let ok = pin.group_ok[0];
+        for wrong in [
+            GroupPin {
+                dev: ok.dev.wrapping_add(1),
+                ..ok
+            },
+            GroupPin {
+                ino: ok.ino.wrapping_add(1),
+                ..ok
+            },
+            GroupPin {
+                gid: ok.gid.wrapping_add(1),
+                ..ok
+            },
+            GroupPin {
+                mode: ok.mode ^ 0o100,
+                ..ok
+            },
+        ] {
+            assert!(
+                runtime_root::open_runtime_root(&root, me, &mut PinnedGroupWrite(&[wrong]))
+                    .is_err()
+            );
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 그룹 조회 뒤 pin을 반환하기 전에 같은 fd·부모 이름을 재확인하지 않는 것.
+    #[test]
+    fn pin_rechecks_the_chain_after_group_queries() {
+        use bingsu_core::fs_trust::{Facts, Group};
+        use std::os::unix::fs::PermissionsExt;
+        struct ReplaceParent(PathBuf);
+        impl GroupOracle for ReplaceParent {
+            fn group_write(&mut self, _: &Facts) -> Group {
+                std::fs::rename(&self.0, self.0.with_file_name("moved")).unwrap();
+                std::fs::create_dir(&self.0).unwrap();
+                Group::OnlyRootAndUser
+            }
+        }
+        let base = scratch("pin-recheck");
+        let parent = base.join("group");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let result = pin_for(
+            &parent.join("new/run"),
+            sys::current_uid(),
+            &mut ReplaceParent(parent.clone()),
+        );
+        assert!(result.is_err());
+        assert!(!base.join("moved/new").exists());
+        assert!(parent.is_dir());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     // 이것을 실패시키는 것: 후보 순서를 바꾸거나 상대 경로를 받아 주는 것.

@@ -446,10 +446,6 @@ pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
 
 /// `fstat` and the ACL of an open descriptor (search-only descriptors
 /// included).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "R1/R3 will inspect held descriptors")
-)]
 #[allow(
     clippy::useless_conversion,
     clippy::unnecessary_cast,
@@ -683,8 +679,8 @@ const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
 
 /// Like `open_dir_at_nofollow`, but the descriptor is search-only (see
 /// `SEARCH_ONLY`); `dir = None` opens "/" itself. The descriptor is only a
-/// base for further `*at` calls: reading entries, `fchmod` and (on Linux)
-/// `fstatfs` do not work through it.
+/// base for further `*at` calls: reading entries and (on Linux) `fchmod`
+/// do not work through it. `fstatfs` works, as required by `fd_is_local`.
 pub fn open_dir_at_search_nofollow(
     dir: Option<std::os::fd::BorrowedFd<'_>>,
     name: &std::ffi::OsStr,
@@ -801,4 +797,55 @@ mod facts_tests {
         assert_eq!(acl_facts(&path), AclFacts::AllowsWrite);
         std::fs::remove_dir(&path).unwrap();
     }
+}
+
+/// Stable name/descriptor evidence retained by the N2 read session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub dev: u64,
+    pub ino: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u32,
+    pub size: u64,
+    pub ctime: (i64, i64),
+    pub mtime: (i64, i64),
+}
+
+/// Inspect the name itself, relative to a held parent, never its target.
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "stat fields differ across Unix targets"
+)]
+pub fn at_stamp(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<Stamp> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: zero initializes the out parameter; dir is open and c terminated.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: all pointers remain valid throughout this call.
+    if unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Stamp {
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+        uid: st.st_uid,
+        gid: st.st_gid,
+        mode: st.st_mode as u32,
+        size: st.st_size as u64,
+        ctime: (st.st_ctime, st.st_ctime_nsec),
+        mtime: (st.st_mtime, st.st_mtime_nsec),
+    })
 }

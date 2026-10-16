@@ -290,20 +290,12 @@ impl GroupOracle for SystemGroups {
 /// group-writable ancestors and pins the cleared ones next to the root, so
 /// the prompt front end, which cannot ask, compares against them
 /// (`bingsu_core::fs_trust::PinnedGroupWrite`).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "R1 will record runtime ancestors")
-)]
 pub struct Recording<'a> {
     inner: &'a mut dyn GroupOracle,
     pub cleared: Vec<GroupPin>,
 }
 
 impl<'a> Recording<'a> {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "R1 will record runtime ancestors")
-    )]
     pub fn new(inner: &'a mut dyn GroupOracle) -> Self {
         Self {
             inner,

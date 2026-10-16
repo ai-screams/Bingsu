@@ -11,6 +11,8 @@ mod init;
 #[cfg(unix)]
 mod messages;
 #[cfg(unix)]
+mod runtime_root;
+#[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;
 
