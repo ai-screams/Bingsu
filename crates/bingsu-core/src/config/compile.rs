@@ -17,7 +17,7 @@
 //! it out of a drawn line, turn the line off) but cannot turn one on (add it,
 //! turn a line on). Running is M6; this step records each unit with its
 //! whole policy and why one does not run.
-use crate::bands::{Band, order_bands};
+use crate::bands::{Band, MAX_BANDS, order_bands};
 use crate::color::notation::{ColorSpec, parse_color};
 use crate::color::palette::{Knobs, Mode, PaletteInput, ResolvedPalette, resolve_palette};
 use crate::config::check::parse_duration_ms;
@@ -34,7 +34,7 @@ use crate::icons::IconSet;
 use crate::layout::{SegmentSetup, When};
 use crate::render::Theme;
 use crate::shorten::Method;
-use crate::style::{LineLayout, StyleOptions, generate, preset};
+use crate::style::{Joining, LineLayout, StyleOptions, generate, preset};
 use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile as compile_template};
 use crate::template::syntax::{Span as TSpan, Syntax, parse as parse_template};
 use crate::width::WidthProfile;
@@ -488,6 +488,93 @@ fn blame(nodes: &[&MNode]) -> Place {
     pick.map_or(Place::Builtin, |n| at(n))
 }
 
+/// Expanded input budget: a segment reference costs 64 units plus its
+/// bytes; template text costs its byte length. Count inherited values even
+/// when overridden: `layouts` clones them before applying the override.
+/// This allows thousands of ordinary layouts, while preventing a large
+/// base line/template from being multiplied by thousands of bands.
+const MAX_LAYOUT_WORK: usize = 4 * 1024 * 1024;
+
+fn check_band_count(r: &MTable) -> Result<(), Vec<Diagnostic>> {
+    let bands = entries(r, &["layout", "when"]);
+    if bands.len() > MAX_BANDS {
+        return Err(vec![bad(
+            blame(&bands.iter().map(|b| &b.node).collect::<Vec<_>>()),
+            "layout.when",
+            &alloc::format!("{} bands", bands.len()),
+            &alloc::format!("at most {MAX_BANDS} bands"),
+        )]);
+    }
+    Ok(())
+}
+
+fn check_layout_budget(r: &MTable) -> Result<(), Vec<Diagnostic>> {
+    check_band_count(r)?;
+    // The checked layout contains scalar options, segment-id arrays and
+    // tables. Retain every charged origin, including inherited values and
+    // the band declarations that multiply them, for rule-5 isolation.
+    fn weight<'a>(n: &'a MNode, nodes: &mut Vec<&'a MNode>) -> (usize, usize) {
+        nodes.push(n);
+        match &n.value {
+            // Three bytes is the shortest template reference. Counting
+            // other string options this way is a conservative upper bound.
+            MValue::Scalar(Value::Str(s)) => (s.len(), s.len() / 3),
+            MValue::Array(a) => (
+                a.iter().fold(0usize, |sum, n| {
+                    sum.saturating_add(
+                        64 + match &n.value {
+                            Value::Str(s) => s.len(),
+                            _ => 0,
+                        },
+                    )
+                }),
+                a.len(),
+            ),
+            MValue::Table(t) => t.entries.iter().fold((0usize, 0usize), |(work, refs), e| {
+                let (w, r) = weight(&e.node, nodes);
+                (
+                    work.saturating_add(e.key.len()).saturating_add(w),
+                    refs.saturating_add(r),
+                )
+            }),
+            _ => (1, 0),
+        }
+    }
+    let mut nodes = Vec::new();
+    let (base, base_refs) = [
+        get(r, &["layout", "line1"]),
+        get(r, &["layout", "line2"]),
+        get(r, &["style", "template"]),
+    ]
+    .into_iter()
+    .flatten()
+    .fold((0usize, 0usize), |(work, refs), n| {
+        let (w, r) = weight(n, &mut nodes);
+        (work.saturating_add(w), refs.saturating_add(r))
+    });
+    let mut work = base;
+    for b in entries(r, &["layout", "when"]) {
+        let (own, own_refs) = weight(&b.node, &mut nodes);
+        // LayoutRef copies the band name for every drawn reference.
+        let name_work = base_refs
+            .saturating_add(own_refs)
+            .saturating_mul(b.key.len());
+        work = work
+            .saturating_add(base)
+            .saturating_add(own)
+            .saturating_add(name_work);
+    }
+    if work > MAX_LAYOUT_WORK {
+        return Err(vec![bad(
+            blame(&nodes),
+            "layout",
+            &alloc::format!("{work} expanded layout work units"),
+            &alloc::format!("at most {MAX_LAYOUT_WORK} expanded layout work units"),
+        )]);
+    }
+    Ok(())
+}
+
 /// The bands of a merged config, ordered, and the width table. Kept apart
 /// from the snapshot compile so `config check` shows the table even when
 /// another key has an error.
@@ -501,6 +588,7 @@ pub struct Bands {
 
 pub fn bands_of(m: &Merged) -> Result<Bands, Vec<Diagnostic>> {
     let r = &m.root;
+    check_band_count(r)?;
     let mut bands = Vec::new();
     let mut names = Vec::new();
     let mut nodes: Vec<Vec<MNode>> = Vec::new();
@@ -650,6 +738,9 @@ pub fn compile(
     trusted: &Merged,
     _auto: Mode,
 ) -> Result<(CompiledConfig, Vec<Diagnostic>), Vec<Diagnostic>> {
+    // Check both views before `layouts`/`drawn` can multiply inherited data.
+    check_layout_budget(&trusted.root)?;
+    check_layout_budget(&m.root)?;
     let r = &m.root;
     let mut notes = Vec::new();
     let (mode, light_mode) = match s(r, &["colors", "mode"]).unwrap_or(default_str("colors.mode")) {
@@ -744,6 +835,27 @@ pub fn compile(
         let mut involved: Vec<&MNode> = lay.lines.iter().flat_map(|l| l.nodes.iter()).collect();
         involved.extend(preset_node);
         involved.extend(template);
+        // Explicit templates replace these options; only generated layouts
+        // depend on their origins (including template-size failures).
+        if template.is_none() {
+            if layout_lines.len() > 1 {
+                involved.extend(get(r, &["layout", "frame"]));
+            }
+            if layout_lines.iter().any(|l| !l.right.is_empty()) {
+                involved.extend(get(r, &["layout", "fill"]));
+            }
+            if let Some(pr) = preset(p) {
+                let effective = options.over(pr.options);
+                if effective.background == Some(true)
+                    && effective.joining == Some(Joining::Attached)
+                    && layout_lines
+                        .iter()
+                        .any(|l| l.left.len() > 1 || l.right.len() > 1)
+                {
+                    involved.extend(get(r, &["style", "separator"]));
+                }
+            }
+        }
         let where_ = blame(&involved);
         let text = match template.map(|n| &n.value) {
             Some(MValue::Scalar(Value::Str(t))) => {
@@ -775,9 +887,13 @@ pub fn compile(
                 .filter(|(id, _, required)| *required && !off.contains(id))
                 .filter_map(|(id, _, _)| BUILTIN.iter().position(|d| d.id == *id))
                 .collect();
+            // Fields may be absent; booleans such as char.failed never
+            // print text. Only the segment itself guarantees an anchor.
             let draws = |i: usize| {
                 compiled.iter().any(|l| {
-                    l.nodes().iter().any(|n| matches!(n, Node::Segment { seg, .. } | Node::Field { seg, .. } if usize::from(*seg) == i))
+                    l.nodes()
+                        .iter()
+                        .any(|n| matches!(n, Node::Segment { seg, .. } if usize::from(*seg) == i))
                 })
             };
             if !needed.is_empty() && !needed.iter().any(|&i| draws(i)) {

@@ -368,6 +368,68 @@ pub(crate) mod tests {
         assert!(r.snapshot.is_some() && !codes_of(&r).contains(&codes::SHAPE_FILE_DROPPED));
     }
 
+    // 이것을 실패시키는 것: 출력 없는 불리언·없을 수 있는 필드 참조를 필수 앵커로 인정하는 것.
+    #[test]
+    fn fields_alone_are_not_required_anchors() {
+        let trusted = read("", &[]).snapshot.unwrap();
+        for template in ["{char.failed}", "{dir.path}", "{@group}{char.failed}{@end}"] {
+            crate::template::compile::compile(template, crate::field::BUILTIN).unwrap();
+            let theme = alloc::format!("[layout.when.narrow.style]\ntemplate = '{template}'\n");
+            let r = read("extends = ['shape-t']\n", &[("shape-t", &theme)]);
+            assert!(
+                codes_of(&r).contains(&codes::SHAPE_FILE_DROPPED),
+                "{template}"
+            );
+            assert_eq!(r.snapshot.unwrap(), trusted, "{template}");
+        }
+        for template in ["{char}", "{dir}", "{char.failed}{char}"] {
+            crate::template::compile::compile(template, crate::field::BUILTIN).unwrap();
+            let theme = alloc::format!("[layout.when.narrow.style]\ntemplate = '{template}'\n");
+            let r = read("extends = ['shape-t']\n", &[("shape-t", &theme)]);
+            assert!(r.snapshot.is_some());
+            assert!(!codes_of(&r).contains(&codes::SHAPE_FILE_DROPPED));
+        }
+    }
+
+    // 이것을 실패시키는 것: 생성에 사용한 frame/fill/separator의 출처를 잃어 신뢰 설정 전체를 거부하는 것.
+    #[test]
+    fn generated_template_overflow_isolates_style_option_origins() {
+        let line = |ids: &[&str], right: &str| {
+            alloc::format!(
+                "[layout.line1]\nleft = [{}]\nright = [{right}]\n",
+                ids.iter()
+                    .map(|id| alloc::format!("'{id}'"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        let frame_user = line(&vec!["dir"; 156], "");
+        let separator_user = alloc::format!(
+            "[style]\nseparator = 'flat'\n{}",
+            line(&vec!["dir"; 157], "")
+        );
+        let mut fill_ids = vec!["dir"; 154];
+        fill_ids[..3].fill("duration");
+        fill_ids[3] = "status";
+        let fill_user = alloc::format!("[layout]\nfill = 'dot'\n{}", line(&fill_ids, "'time'"));
+        for (user, shape) in [
+            (frame_user, "[layout]\nframe = 'line'\n"),
+            (separator_user, "[style]\nseparator = 'triangle'\n"),
+            (fill_user, "[layout]\nfill = 'space'\n"),
+        ] {
+            let baseline = read(&user, &[]).snapshot.unwrap();
+            let r = read_late(&user, shape);
+            assert!(
+                codes_of(&r).contains(&codes::SHAPE_FILE_DROPPED),
+                "{shape}: {:?}",
+                r.diagnostics
+            );
+            assert_eq!(r.files[2].status, Status::Dropped);
+            assert_eq!(r.order, [SourceId(0), SourceId(1)]);
+            assert_eq!(r.snapshot.unwrap(), baseline, "{shape}");
+        }
+    }
+
     // 사용자 레이아웃이 테마의 사용자 세그먼트를 쓰는데 테마가 그 선언을 없애거나 테마가 통째로 빠지면,
     // 설정 전체가 아니라 그 세그먼트만 숨긴다(경고 W408).
     // 이것을 실패시키는 것: 선언 없는 참조를 오류로 내는 것.
