@@ -31,7 +31,7 @@ def call(shell):
             "fish": b"_bingsu_call --width 80\n"}[shell]
 
 
-# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
+# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=`·`--config-root-written=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
 # 따옴표를 빼는 것(빈 단어가 사라짐).
 @pytest.mark.parametrize("idx,case", list(enumerate(CASES)))
 def test_words_arrive_intact(tmp_path, shells, idx, case):
@@ -50,6 +50,8 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         st = os.stat(run_root)
         assert argv[:5] == [b"prompt", b"--ctx", b"1", b"--record", b"B1"], (shell, argv)
         assert f"--runtime-root={st.st_dev}:{st.st_ino}:{run_root}".encode() in argv, (shell, argv)
+        # Both spellings must survive shell quoting, including hostile path bytes.
+        assert (b"--config-root-written=" + (env["XDG_CONFIG_HOME"] + "/bingsu").encode()) in argv
         # init canonicalizes the existing part of each root (os.path.realpath does the same).
         assert (b"--config-root=" + os.path.realpath(env["XDG_CONFIG_HOME"] + "/bingsu").encode()) in argv
         assert (b"--state-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu").encode()) in argv
@@ -61,8 +63,8 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
                                  b"--colorterm", b""], (shell, argv)
         assert (b"--home=" + pwd.getpwuid(os.getuid()).pw_dir.encode()) in argv, (shell, argv)
         # prompt --ctx 1 --record B1 --width 80, shell, pwd, colorterm,
-        # --session S --seq N, four roots and home
-        assert len(argv) == 22, (shell, argv)
+        # --session S --seq N, four roots, the written config root and home
+        assert len(argv) == 23, (shell, argv)
 
 
 def test_init_twice_redefines_runtime_root(tmp_path, shells):

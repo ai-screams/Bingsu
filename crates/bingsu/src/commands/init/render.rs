@@ -4,7 +4,8 @@
 use crate::commands::messages::{MsgId, en};
 use bingsu_core::record::RecordVersion;
 use bingsu_core::root_arg::{
-    CONFIG_ROOT_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
+    CONFIG_ROOT_PREFIX, CONFIG_ROOT_WRITTEN_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX,
+    RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
 };
 use bingsu_core::shell_word::{Shell, encode_word};
 use bingsu_core::status::Status;
@@ -14,7 +15,7 @@ pub struct ScriptInputs<'a> {
     pub exe: &'a [u8],
     pub runtime_root: Option<(u64, u64, &'a [u8])>,
     /// `None`: the path could not be confirmed; the word is left out.
-    pub config_root: Option<&'a [u8]>,
+    pub config_root: Option<(&'a [u8], &'a [u8])>,
     pub state_root: Option<&'a [u8]>,
     pub log_root: Option<&'a [u8]>,
     pub session_hex: &'a [u8; 32],
@@ -60,8 +61,10 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
             }
         }
         b"CONFIG_ROOT" => {
-            if let Some(v) = inp.config_root {
-                prefixed(sh, CONFIG_ROOT_PREFIX, v, out);
+            if let Some((canonical, written)) = inp.config_root {
+                prefixed(sh, CONFIG_ROOT_PREFIX, canonical, out);
+                out.push(b' ');
+                prefixed(sh, CONFIG_ROOT_WRITTEN_PREFIX, written, out);
             }
         }
         b"STATE_ROOT" => {
@@ -148,7 +151,7 @@ mod tests {
                 shell,
                 exe: b"/bin/bingsu",
                 runtime_root: Some((1, 2, b"/r")),
-                config_root: Some(b"/c"),
+                config_root: Some((b"/c", b"/original/c")),
                 state_root: Some(b"/s"),
                 log_root: Some(b"/l"),
                 session_hex: &[b'0'; 32],
@@ -174,6 +177,22 @@ mod tests {
             prefixed(shell, HOME_PREFIX, home, &mut want);
             assert_eq!(count(&s, &want), 1, "{shell:?}");
             assert_eq!(count(&s, b"@HOME@"), 0, "{shell:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 셸 인용된 작성 경로 또는 정규 경로를 전달하지 않는 것.
+    #[test]
+    fn config_root_handoff_keeps_both_paths() {
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            let s = script(shell, b"/home");
+            for (prefix, path) in [
+                (CONFIG_ROOT_PREFIX, &b"/c"[..]),
+                (CONFIG_ROOT_WRITTEN_PREFIX, &b"/original/c"[..]),
+            ] {
+                let mut word = Vec::new();
+                prefixed(shell, prefix, path, &mut word);
+                assert_eq!(count(&s, &word), 1, "{shell:?}");
+            }
         }
     }
 

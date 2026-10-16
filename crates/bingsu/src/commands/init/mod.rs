@@ -2,8 +2,8 @@
 //! diagnostics go to stderr (spec section 5 "init output").
 pub(crate) mod exe_path;
 mod render;
-mod roots;
-mod trusted_env;
+pub(super) mod roots;
+pub(super) mod trusted_env;
 
 use crate::commands::sys;
 use bingsu_core::shell_word::Shell;
@@ -80,7 +80,12 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
             .runtime
             .as_ref()
             .map(|r| (r.dev, r.ino, r.path.as_os_str().as_bytes())),
-        config_root: roots.config.as_ref().map(|p| p.as_os_str().as_bytes()),
+        config_root: roots.config.as_ref().map(|p| {
+            (
+                p.path.as_os_str().as_bytes(),
+                p.written.as_os_str().as_bytes(),
+            )
+        }),
         state_root: roots.state.as_ref().map(|p| p.as_os_str().as_bytes()),
         log_root: roots.log.as_ref().map(|p| p.as_os_str().as_bytes()),
         session_hex: &session,

@@ -3,6 +3,7 @@
 
 pub const RUNTIME_ROOT_PREFIX: &[u8] = b"--runtime-root=";
 pub const CONFIG_ROOT_PREFIX: &[u8] = b"--config-root=";
+pub const CONFIG_ROOT_WRITTEN_PREFIX: &[u8] = b"--config-root-written=";
 pub const STATE_ROOT_PREFIX: &[u8] = b"--state-root=";
 pub const LOG_ROOT_PREFIX: &[u8] = b"--log-root=";
 /// Home folder from `getpwuid`, pinned by init like the roots (spec section
@@ -137,6 +138,7 @@ mod tests {
         let all = [
             (RUNTIME_ROOT_PREFIX, &b"--runtime-root="[..]),
             (CONFIG_ROOT_PREFIX, b"--config-root="),
+            (CONFIG_ROOT_WRITTEN_PREFIX, b"--config-root-written="),
             (STATE_ROOT_PREFIX, b"--state-root="),
             (LOG_ROOT_PREFIX, b"--log-root="),
             (HOME_PREFIX, b"--home="),

@@ -21,13 +21,79 @@ pub struct RuntimeRootPin {
     pub group_ok: Vec<GroupPin>,
 }
 
-/// `None` for config, state or log: the path could not be confirmed (see
-/// `canonical_lenient`); init then leaves that word out and warns.
+/// `None`: the path could not be confirmed; config also requires the
+/// written path's trust evidence. Init omits that root word and warns.
 pub struct Roots {
     pub runtime: Option<RuntimeRootPin>,
-    pub config: Option<PathBuf>,
+    pub config: Option<ConfigRootPin>,
     pub state: Option<PathBuf>,
     pub log: Option<PathBuf>,
+}
+
+/// Config trust is a checked written path, never a canonical path alone.
+/// The helper receives both paths and calls `reopen`; descriptors are kept
+/// in-process through Loader::verified, not serialized into a shell word.
+pub struct ConfigRootPin {
+    pub path: PathBuf,
+    pub written: PathBuf,
+    pub evidence: crate::commands::source_path::Resolved,
+}
+
+impl ConfigRootPin {
+    pub fn check(
+        written: &Path,
+        me: u32,
+        groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+    ) -> std::io::Result<Self> {
+        let mut prefix = written.to_path_buf();
+        let mut missing = Vec::new();
+        loop {
+            match crate::commands::source_path::Resolved::open_dir(&prefix, me, groups) {
+                Ok(evidence) => {
+                    if evidence.refusal.is_some() {
+                        return Err(std::io::Error::other("untrusted config root path"));
+                    }
+                    evidence.revalidate(me, groups)?;
+                    let mut path = evidence.canonical.clone();
+                    path.extend(missing.iter().rev());
+                    return Ok(Self {
+                        path,
+                        written: written.to_path_buf(),
+                        evidence,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // A dangling link is not a missing name. Never erase it
+                    // from the checked prefix, or simplify a missing `..`.
+                    if std::fs::symlink_metadata(&prefix).is_ok() {
+                        return Err(e);
+                    }
+                    match prefix.components().next_back() {
+                        Some(Component::Normal(name)) => missing.push(name.to_os_string()),
+                        _ => return Err(e),
+                    }
+                    prefix.pop();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// N2 rebuilds the trust evidence from the original spelling and must
+    /// compare the result with init's canonical pin before loading sources.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Part N2 hand-off"))]
+    pub fn reopen(
+        written: &Path,
+        canonical: &Path,
+        me: u32,
+        groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+    ) -> std::io::Result<Self> {
+        let pin = Self::check(written, me, groups)?;
+        if pin.path != canonical {
+            return Err(std::io::Error::other("config root target changed"));
+        }
+        Ok(pin)
+    }
 }
 
 fn abs(v: &Option<OsString>) -> Option<PathBuf> {
@@ -181,11 +247,14 @@ pub fn resolve(env: &TrustedEnv, home: &Path, user: &[u8]) -> Roots {
     );
     Roots {
         runtime: pin(&runtime_candidate(env, home), user).ok(),
-        config: canonical_lenient(
+        config: ConfigRootPin::check(
             &abs(&env.xdg_config_home)
                 .unwrap_or_else(|| home.join(".config"))
                 .join("bingsu"),
-        ),
+            sys::current_uid(),
+            &mut SystemGroups::new(user),
+        )
+        .ok(),
         log: state
             .as_ref()
             .and_then(|s| canonical_lenient(&s.join("log"))),
@@ -206,6 +275,134 @@ mod tests {
             xdg_state_home: None,
             xdg_cache_home: cache.map(OsString::from),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    // 이것을 실패시키는 것: 다른 사용자가 심은 설정 뿌리 링크를 정규화만 하고 승인하는 것.
+    #[ignore = "requires an eve-owned root link in victim's config home"]
+    fn two_user_planted_config_root() {
+        let me = crate::commands::sys::current_uid();
+        assert_ne!(me, 0);
+        let pw = crate::commands::sys::passwd_entry(me).unwrap();
+        assert_eq!(pw.name, b"victim");
+        let e = env(None, None);
+        assert!(resolve(&e, &pw.home, &pw.name).config.is_none());
+    }
+
+    // 실제 root 소유 접두 링크도 원래 이름의 증거를 남기고 init을 통과해야 한다.
+    #[cfg(target_os = "macos")]
+    // 이것을 실패시키는 것: root가 보호하는 조상 링크도 사용자 링크로 판정해 거부하는 것.
+    #[test]
+    fn root_owned_ancestor_link_is_accepted() {
+        let link = Path::new("/tmp");
+        let md = std::fs::symlink_metadata(link).unwrap();
+        assert!(md.file_type().is_symlink());
+        assert_eq!(md.uid(), 0);
+        assert_ne!(crate::commands::sys::current_uid(), 0);
+        let base = link.join(format!("bingsu-root-ancestor-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("config/bingsu")).unwrap();
+        let pw = crate::commands::sys::passwd_entry(crate::commands::sys::current_uid()).unwrap();
+        let e = TrustedEnv {
+            xdg_config_home: Some(base.join("config").into_os_string()),
+            xdg_runtime_dir: Some(base.join("run").into_os_string()),
+            ..env(None, None)
+        };
+        let pin = resolve(&e, &base, &pw.name)
+            .config
+            .expect("a protected root-owned ancestor must not discard the config root");
+        assert_eq!(pin.written, base.join("config/bingsu"));
+        assert_eq!(pin.path, std::fs::canonicalize(&pin.written).unwrap());
+        assert!(pin.evidence.retains_link(link));
+        assert!(
+            ConfigRootPin::reopen(
+                &pin.written,
+                &pin.path,
+                crate::commands::sys::current_uid(),
+                &mut bingsu_core::fs_trust::RefuseGroupWrite,
+            )
+            .is_ok()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    // 이것을 실패시키는 것: root가 보호하는 접두 링크를 거부하거나 그 증거를 잃는 것.
+    #[ignore = "requires the root-owned /srv/partr-home ancestor link from Linux case F"]
+    fn root_owned_ancestor_link_is_accepted() {
+        let me = crate::commands::sys::current_uid();
+        assert_ne!(me, 0);
+        let pw = crate::commands::sys::passwd_entry(me).unwrap();
+        assert_eq!(pw.name, b"victim");
+        let link = Path::new("/srv/partr-home");
+        let md = std::fs::symlink_metadata(link).unwrap();
+        assert!(md.file_type().is_symlink());
+        assert_eq!(md.uid(), 0);
+        let home = link.join("victim");
+        let pin = resolve(&env(None, None), &home, &pw.name)
+            .config
+            .expect("a protected root-owned ancestor must not discard the config root");
+        assert_eq!(pin.written, home.join(".config/bingsu"));
+        assert_eq!(pin.path, std::fs::canonicalize(&pin.written).unwrap());
+        assert!(pin.evidence.retains_link(link));
+        pin.evidence
+            .revalidate(me, &mut bingsu_core::fs_trust::RefuseGroupWrite)
+            .unwrap();
+    }
+
+    // 본인 소유 링크여도 남이 바꿀 수 있는 부모는 C1 검사에서 거부해야 한다.
+    // 이것을 실패시키는 것: 사용자 설정 뿌리 링크의 부모 검사를 우회하는 것.
+    #[test]
+    fn user_planted_config_root_link_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::fs::canonicalize(scratch("user-root-link")).unwrap();
+        let config_home = base.join("config");
+        let target = base.join("repo");
+        std::fs::create_dir(&config_home).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let link = config_home.join("bingsu");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let me = crate::commands::sys::current_uid();
+        let pw = crate::commands::sys::passwd_entry(me).unwrap();
+        assert_eq!(std::fs::symlink_metadata(&link).unwrap().uid(), me);
+        let e = TrustedEnv {
+            xdg_config_home: Some(config_home.clone().into_os_string()),
+            xdg_runtime_dir: Some(base.join("run").into_os_string()),
+            ..env(None, None)
+        };
+        std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(resolve(&e, &base, &pw.name).config.is_none());
+        std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pin = resolve(&e, &base, &pw.name).config.unwrap();
+        assert_eq!(pin.path, target);
+        assert!(pin.evidence.retains_link(&link));
+        std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            pin.evidence
+                .revalidate(me, &mut bingsu_core::fs_trust::RefuseGroupWrite)
+                .is_err()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 없는 뿌리의 안전한 접두 증거를 잃거나 끊어진 링크·미해석 ..를 허용하는 것.
+    #[test]
+    fn config_pin_keeps_checked_prefix_for_missing_roots() {
+        let base = std::fs::canonicalize(scratch("missing-config")).unwrap();
+        let written = base.join("missing/bingsu");
+        let me = crate::commands::sys::current_uid();
+        let mut groups = bingsu_core::fs_trust::RefuseGroupWrite;
+        let pin = ConfigRootPin::check(&written, me, &mut groups).unwrap();
+        assert_eq!(pin.path, written);
+        assert_eq!(pin.evidence.canonical, base);
+        std::fs::create_dir_all(&written).unwrap();
+        assert!(ConfigRootPin::reopen(&pin.written, &pin.path, me, &mut groups).is_ok());
+        std::fs::remove_dir(&written).unwrap();
+        std::os::unix::fs::symlink(base.join("absent"), &written).unwrap();
+        assert!(ConfigRootPin::check(&written, me, &mut groups).is_err());
+        assert!(ConfigRootPin::check(&base.join("absent/../elsewhere"), me, &mut groups).is_err());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     // 이것을 실패시키는 것: 없는 이름을 버리거나, 있는 상위 폴더의 symlink를 풀지 않는 것.

@@ -212,11 +212,11 @@ fn tamper_rows_warn_on_stderr_only() {
             |_, exe| chmod(exe.parent().unwrap(), 0o777),
             TAMPER,
         ),
-        // 이것을 실패시키는 것: init이 남이 쓸 수 있는 런타임 조상을 거부하지 않는 것.
+        // 이것을 실패시키는 것: init이 남이 쓸 수 있는 런타임·설정 조상을 거부하지 않는 것.
         (
             "ancestor other-writable",
             |base, _| chmod(base, 0o777),
-            b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\nbingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor\n",
+            b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\nbingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor\nbingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor\n",
         ),
         (
             "target dir other-writable",

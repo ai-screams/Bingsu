@@ -3,8 +3,8 @@
 use crate::layout::PATH_BYTES_MAX;
 use crate::record::RecordVersion;
 use crate::root_arg::{
-    CONFIG_ROOT_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
-    parse_abs_path, parse_decimal, parse_runtime_root,
+    CONFIG_ROOT_PREFIX, CONFIG_ROOT_WRITTEN_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX,
+    RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX, parse_abs_path, parse_decimal, parse_runtime_root,
 };
 use crate::shell_word::Shell;
 use alloc::vec::Vec;
@@ -33,6 +33,8 @@ pub struct Envelope {
     pub redraw: bool,
     pub runtime_root: Option<OwnedRuntimeRoot>,
     pub config_root: Option<Vec<u8>>,
+    /// Original spelling whose parent/link/target evidence N2 must rebuild.
+    pub config_root_written: Option<Vec<u8>>,
     pub state_root: Option<Vec<u8>>,
     pub log_root: Option<Vec<u8>>,
     /// `--shell`, a constant word of each shell's hook. `None`: the hook is
@@ -154,6 +156,9 @@ fn root_slot<'e, 'a>(
     e: &'e mut Envelope,
     a: &'a [u8],
 ) -> Option<(&'e mut Option<Vec<u8>>, &'a [u8])> {
+    if let Some(v) = a.strip_prefix(CONFIG_ROOT_WRITTEN_PREFIX) {
+        return Some((&mut e.config_root_written, v));
+    }
     if let Some(v) = a.strip_prefix(CONFIG_ROOT_PREFIX) {
         return Some((&mut e.config_root, v));
     }
@@ -288,6 +293,36 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
 
 #[cfg(test)]
 mod tests {
+    // 이것을 실패시키는 것: 작성 경로를 인식하지 않거나 절대 경로 문법을 적용하지 않는 것.
+    #[test]
+    fn config_root_handoff_parses_both_paths() {
+        let e = super::parse(&[
+            b"--ctx",
+            b"1",
+            b"--record",
+            b"B1",
+            b"--width",
+            b"80",
+            b"--config-root=/target",
+            b"--config-root-written=/home/me/.config/bingsu",
+        ])
+        .unwrap();
+        for bad in [
+            b"--config-root-written=relative".as_slice(),
+            b"--config-root-written=",
+        ] {
+            assert!(
+                super::parse(&[b"--ctx", b"1", b"--record", b"B1", b"--width", b"80", bad])
+                    .is_err()
+            );
+        }
+        assert_eq!(e.config_root.as_deref(), Some(&b"/target"[..]));
+        assert_eq!(
+            e.config_root_written.as_deref(),
+            Some(&b"/home/me/.config/bingsu"[..])
+        );
+    }
+
     use super::*;
     use alloc::format;
     use alloc::vec;
