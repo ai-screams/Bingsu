@@ -52,10 +52,10 @@ pub const NARROW: Band = Band {
 pub const NARROW_TEMPLATE: &str =
     "{@group}{host} {@end}{dir}{@group} {git}{@end}{@nl}{@group}{duration} {@end}{char}";
 
-const DIR_METHODS: &[Method] = &[Method::Repo, Method::Abbrev(1), Method::Depth(1)];
+pub(crate) const DIR_METHODS: &[Method] = &[Method::Repo, Method::Abbrev(1), Method::Depth(1)];
 
 /// (segment id, priority, required). Higher priority stays longer.
-const SETUP: [(&str, u16, bool); 9] = [
+pub(crate) const SETUP: [(&str, u16, bool); 9] = [
     ("char", 1000, true),
     ("dir", 900, true),
     ("git", 800, false),

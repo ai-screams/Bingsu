@@ -1,6 +1,8 @@
-//! Instruction counts of reading one config file into the spanned tree
-//! (M3a S1, spec section 2 "설정 파서와 국소 편집": the parser is chosen by
-//! WASM size and speed). Its own bench target, like every group.
+//! Instruction counts of parsing and the complete config read pipeline.
+use bingsu_core::color::palette::Mode;
+use bingsu_core::config::compile::BUILTIN_TOML;
+use bingsu_core::config::report::{ConfigReport, report};
+use bingsu_core::config::source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust};
 use bingsu_core::config::tree::{SyntaxError, Table, parse};
 use gungraun::prelude::*;
 use std::hint::black_box;
@@ -41,7 +43,81 @@ fn config_parse(input: Vec<u8>) -> (Vec<u8>, Result<Table, Vec<SyntaxError>>) {
     (input, t)
 }
 
-library_benchmark_group!(name = config, benchmarks = [config_parse]);
+fn opened(bytes: Vec<u8>, ino: u64) -> Opened {
+    Opened {
+        key: FileKey { dev: 1, ino },
+        bytes,
+        trust: Trust::Executable,
+        display: b"f".to_vec(),
+    }
+}
 
-// Keep the generated main at top level so the benchmark actually runs.
+/// `extends` entries `p0`, `p1`, … answered with `parts`.
+struct Parts(Vec<Vec<u8>>);
+impl Resolver for Parts {
+    fn open(&mut self, _: &Opened, r: &ExtendsRef) -> Result<Opened, OpenError> {
+        let i: usize = r.text[1..].parse().map_err(|_| OpenError {
+            reason: String::new(),
+            trust: Trust::Executable,
+        })?;
+        Ok(opened(self.0[i].clone(), 10 + i as u64))
+    }
+}
+
+/// The whole read at the size caps: one file of 256 KiB, or a root that
+/// extends three more files of 256 KiB (1 MiB in all).
+fn graph(files: u32) -> (Vec<Opened>, Parts) {
+    // Keep the parser-only fixture unchanged; the full read uses only
+    // valid keys so it reaches compilation, then pads with a comment.
+    let part = |_| {
+        String::from_utf8(config(250 * 1024))
+            .unwrap()
+            .replace("min = 2.5\n", "")
+            .into_bytes()
+    };
+    let extends: Vec<String> = (0..files - 1).map(|i| format!("\"p{i}\"")).collect();
+    let mut root = format!("extends = [{}]\n", extends.join(", ")).into_bytes();
+    if files == 1 {
+        root.clear();
+    }
+    root.extend(part(0));
+    let pad = |b: &mut Vec<u8>, size| {
+        b.push(b'#');
+        b.resize(size - 1, b' ');
+        b.push(b'\n');
+    };
+    let mut parts = Parts((0..files - 1).map(part).collect());
+    for p in &mut parts.0 {
+        pad(p, 256 * 1024);
+    }
+    let root_size = 256 * 1024 - if files == 1 { 0 } else { BUILTIN_TOML.len() };
+    pad(&mut root, root_size);
+    (
+        vec![opened(BUILTIN_TOML.as_bytes().to_vec(), 0), opened(root, 1)],
+        parts,
+    )
+}
+
+#[inline(never)]
+fn read_all(roots: Vec<Opened>, parts: &mut Parts) -> ConfigReport {
+    report(roots, parts, [0, 3, 0], Mode::Dark)
+}
+
+#[library_benchmark]
+#[bench::kib256(args = [1], setup = graph)]
+#[bench::mib1(args = [4], setup = graph)]
+fn config_read(input: (Vec<Opened>, Parts)) -> (Parts, ConfigReport) {
+    let (roots, mut parts) = input;
+    let r = black_box(read_all(black_box(roots), &mut parts));
+    assert!(
+        r.snapshot.is_some(),
+        "the full-read benchmark must reach compilation"
+    );
+    (parts, r)
+}
+
+library_benchmark_group!(name = config, benchmarks = [config_parse, config_read]);
+
+// main! defines `fn main` itself: wrapped in a fn of ours the bench would
+// build, exit 0 and measure nothing.
 main!(library_benchmark_groups = config);

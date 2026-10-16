@@ -1,6 +1,68 @@
 //! Parse the worst combined nesting on a small helper-sized stack.
 //! An overflow aborts the process and cannot be caught as a parse error.
+use bingsu_core::color::palette::Mode;
+use bingsu_core::config::compile::BUILTIN_TOML;
+use bingsu_core::config::report::report;
+use bingsu_core::config::source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust};
 use bingsu_core::config::tree::{NESTING_MAX, SyntaxErrorKind, parse};
+
+struct NoFiles;
+impl Resolver for NoFiles {
+    fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
+        panic!("the pipeline fixture has no extends");
+    }
+}
+
+fn opened(text: &str, ino: u64) -> Opened {
+    Opened {
+        key: FileKey { dev: 1, ino },
+        bytes: text.as_bytes().to_vec(),
+        trust: Trust::Executable,
+        display: b"fixture".to_vec(),
+    }
+}
+
+// 이것을 실패시키는 것: 전체 읽기가 작은 스택에서 깊은 입력을 처리하지 못하거나 깊이 오류·원본을 잃는 것.
+#[test]
+fn the_whole_pipeline_reads_on_small_stacks() {
+    for stack in [256 * 1024, 1024 * 1024] {
+        std::thread::Builder::new()
+            .name("the_whole_pipeline_reads_on_small_stacks".into())
+            .stack_size(stack)
+            .spawn(|| {
+                for (i, src) in worst().iter().enumerate() {
+                    let r = report(
+                        vec![opened(BUILTIN_TOML, 0), opened(src, 1)],
+                        &mut NoFiles,
+                        [0, 3, 0],
+                        Mode::Dark,
+                    );
+                    assert_eq!(r.files.len(), 2);
+                    assert!(r.snapshot.is_none());
+                    let code = if i < 5 {
+                        bingsu_core::diag_codes::UNKNOWN_KEY
+                    } else {
+                        bingsu_core::diag_codes::NESTING_TOO_DEEP
+                    };
+                    assert!(
+                        r.diagnostics.iter().any(|d| d.code == code),
+                        "case {i}: {:?}",
+                        r.diagnostics
+                    );
+                }
+                let r = report(
+                    vec![opened(BUILTIN_TOML, 0)],
+                    &mut NoFiles,
+                    [0, 3, 0],
+                    Mode::Dark,
+                );
+                assert!(r.snapshot.is_some());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
 
 /// Inputs that reach `NESTING_MAX` in each way and mixed, and one past it.
 fn worst() -> Vec<String> {

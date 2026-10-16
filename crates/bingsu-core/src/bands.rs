@@ -4,7 +4,12 @@
 //! first"); bands that overlap without containment, or have the same
 //! range, must both carry `order`, which then decides (lower first). Names
 //! and file order never decide. Sorted once at compile time.
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
+
+/// Compilation accepts thousands of variants, but never an unbounded graph.
+pub const MAX_BANDS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
@@ -27,6 +32,8 @@ impl Band {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BandError {
+    /// More than `MAX_BANDS` variants.
+    TooMany,
     /// `min_cols > max_cols`.
     Empty(usize),
     /// Two bands overlap without containment (or are equal) and not both
@@ -66,42 +73,73 @@ fn before(bands: &[Band], a: usize, b: usize) -> Result<Option<bool>, BandError>
 /// (lo, hi), which only ever ties disjoint-or-ordered bands.
 pub fn order_bands(bands: &[Band]) -> Result<Vec<usize>, BandError> {
     let n = bands.len();
+    if n > MAX_BANDS {
+        return Err(BandError::TooMany);
+    }
     for (i, b) in bands.iter().enumerate() {
         if b.lo() > b.hi() {
             return Err(BandError::Empty(i));
         }
     }
+    if bands.iter().all(|b| b.order.is_none()) {
+        // Unordered ranges must form a containment forest. Sorting parents
+        // before children lets a stack validate it and emit children first:
+        // O(n log n) time, O(n) space even for deeply nested width bands.
+        let mut sorted: Vec<_> = (0..n).collect();
+        sorted.sort_unstable_by_key(|&i| (bands[i].lo(), Reverse(bands[i].hi()), i));
+        let mut stack: Vec<usize> = Vec::new();
+        let mut out = Vec::with_capacity(n);
+        for i in sorted {
+            while let Some(&parent) = stack.last() {
+                if bands[parent].hi() < bands[i].lo() {
+                    out.push(stack.pop().unwrap());
+                } else {
+                    if bands[parent].hi() < bands[i].hi()
+                        || (bands[parent].lo(), bands[parent].hi())
+                            == (bands[i].lo(), bands[i].hi())
+                    {
+                        return Err(BandError::NeedsOrder(parent.min(i), parent.max(i)));
+                    }
+                    break;
+                }
+            }
+            stack.push(i);
+        }
+        out.extend(stack.into_iter().rev());
+        return Ok(out);
+    }
+    // Mixed explicit order and containment can cycle. Count predecessors
+    // without storing the O(n²) edges, then revisit only the chosen band's
+    // outgoing relations. At most n(n-1) comparisons, O(n) storage; MAX_BANDS
+    // bounds this fallback as well as layout expansion in config::compile.
     let mut preds = alloc::vec![0usize; n];
-    let mut edges: Vec<(usize, usize)> = Vec::new();
     for a in 0..n {
         for b in a + 1..n {
             match before(bands, a, b)? {
-                Some(true) => edges.push((a, b)),
-                Some(false) => edges.push((b, a)),
+                Some(true) => preds[b] += 1,
+                Some(false) => preds[a] += 1,
                 None => {}
             }
         }
     }
-    for &(_, b) in &edges {
-        preds[b] += 1;
-    }
+    let key = |i: usize| (bands[i].lo(), bands[i].hi(), i);
+    let mut ready: BTreeSet<_> = (0..n).filter(|&i| preds[i] == 0).map(key).collect();
     let mut out = Vec::with_capacity(n);
     let mut placed = alloc::vec![false; n];
-    while out.len() < n {
-        // Containment and `order` are each acyclic, but mixed they can loop.
-        let Some(next) = (0..n)
-            .filter(|&i| !placed[i] && preds[i] == 0)
-            .min_by_key(|&i| (bands[i].lo(), bands[i].hi(), i))
-        else {
-            return Err(BandError::Cycle);
-        };
+    while let Some((_, _, next)) = ready.pop_first() {
         placed[next] = true;
         out.push(next);
-        for &(a, b) in &edges {
-            if a == next {
+        for b in 0..n {
+            if !placed[b] && before(bands, next, b)? == Some(true) {
                 preds[b] -= 1;
+                if preds[b] == 0 {
+                    ready.insert(key(b));
+                }
             }
         }
+    }
+    if out.len() != n {
+        return Err(BandError::Cycle);
     }
     Ok(out)
 }
@@ -210,6 +248,55 @@ mod tests {
             b(Some(40), Some(60), Some(2)),
         ];
         assert_eq!(order_bands(&looped), Err(BandError::Cycle));
+    }
+
+    // 이것을 실패시키는 것: 정렬/스택의 겹침 검증이나 간선 없는 위상 정렬이 기존 쌍별 규칙을 바꾸는 것.
+    #[test]
+    fn small_band_sets_match_pairwise_rules() {
+        fn reference(bands: &[Band]) -> Result<Vec<usize>, BandError> {
+            let mut edges = Vec::new();
+            for a in 0..bands.len() {
+                for b in a + 1..bands.len() {
+                    match before(bands, a, b)? {
+                        Some(true) => edges.push((a, b)),
+                        Some(false) => edges.push((b, a)),
+                        None => {}
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            while out.len() < bands.len() {
+                let next = (0..bands.len())
+                    .filter(|i| {
+                        !out.contains(i) && edges.iter().all(|&(a, b)| b != *i || out.contains(&a))
+                    })
+                    .min_by_key(|&i| (bands[i].lo(), bands[i].hi(), i))
+                    .ok_or(BandError::Cycle)?;
+                out.push(next);
+            }
+            Ok(out)
+        }
+        let mut choices = Vec::new();
+        for lo in 0..=2 {
+            for hi in lo..=2 {
+                for order in [None, Some(0), Some(1)] {
+                    choices.push(b(Some(lo), Some(hi), order));
+                }
+            }
+        }
+        for &a in &choices {
+            for &b in &choices {
+                for &c in &choices {
+                    let bands = [a, b, c];
+                    let (got, want) = (order_bands(&bands), reference(&bands));
+                    match (got, want) {
+                        (Ok(got), Ok(want)) => assert_eq!(got, want, "{bands:?}"),
+                        (Err(_), Err(_)) => {}
+                        pair => panic!("{bands:?}: {pair:?}"),
+                    }
+                }
+            }
+        }
     }
 
     // 이것을 실패시키는 것: 입력 순서(파일에 적힌 순서)가 결과를 바꾸는 것.
