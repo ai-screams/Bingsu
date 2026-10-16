@@ -849,7 +849,7 @@ impl<'l, 'i> Lay<'l, 'i> {
                     }
                 }
                 Node::Sep(shape) | Node::Head(shape) | Node::Tail(shape) => {
-                    if !self.plain {
+                    if !self.plain || matches!(self.nodes[k], Node::Sep(Shape::Flat)) {
                         let kind = match self.nodes[k] {
                             Node::Sep(_) => SepKind::Sep,
                             Node::Head(_) => SepKind::Head,
@@ -1278,18 +1278,29 @@ fn with(spec_stack: &[Style], mut s: Style) -> Style {
 /// needs a block before it since the last head or tail (rulings A and B,
 /// 2026-10-13), a separator with no content before it goes, a separator
 /// right after a head goes, and separators with no content between them
-/// become one (the first stays). Linear: one pass from the end marks heads
+/// become one (the first stays). A flat separator is also the gap between
+/// plain segments: it needs content on both sides, including after the
+/// background-removal fallback. Linear: one pass from the end marks heads
 /// and separators, one pass from the start compacts.
 fn clean(items: &mut Vec<Item>) {
     let mut block_ahead = false;
+    let mut content_ahead = false;
     for it in items.iter_mut().rev() {
         match it.kind {
-            Kind::Content => block_ahead |= it.block.is_some(),
+            Kind::Content => {
+                block_ahead |= it.block.is_some();
+                content_ahead = true;
+            }
             Kind::Sep(SepKind::Head, _) => {
                 it.ok = block_ahead;
                 block_ahead = false;
+                content_ahead = false;
             }
-            Kind::Sep(SepKind::Tail, _) => block_ahead = false,
+            Kind::Sep(SepKind::Tail, _) => {
+                block_ahead = false;
+                content_ahead = false;
+            }
+            Kind::Sep(SepKind::Sep, Shape::Flat) => it.ok = content_ahead,
             Kind::Sep(SepKind::Sep, _) => it.ok = block_ahead,
         }
     }
@@ -2118,7 +2129,7 @@ pub(crate) mod tests {
                                 "{name} w={w} {l:?}"
                             );
                             let t = text(&l.left);
-                            minimal += usize::from(l.minimal && w >= 2);
+                            minimal += usize::from(l.minimal);
                             ell += usize::from(amb == 1 && t.contains('\u{2026}'));
                             dot += usize::from(amb == 2 && t.contains('.'));
                             tight +=
@@ -2147,6 +2158,74 @@ pub(crate) mod tests {
         assert_eq!(input(3), "\u{276F}");
         assert!(lay(&lines, &f, &opts(1))[0].minimal);
         assert_eq!(text(&lay(&lines, &f, &opts(3))[0].left), "\u{2026}");
+    }
+
+    // 이것을 실패시키는 것: lean의 빈 host·git·duration 앞뒤에 공백이 남거나 빈 값 때문에 경로를 일찍 줄이는 것.
+    #[test]
+    fn lean_gaps_follow_visible_segments() {
+        let template = generate(
+            preset("lean").unwrap(),
+            &StyleOptions::default(),
+            &[
+                LineLayout {
+                    left: &["host", "dir", "git"],
+                    right: &[],
+                },
+                LineLayout {
+                    left: &["duration", "char"],
+                    right: &[],
+                },
+            ],
+        )
+        .unwrap();
+        let lines = compile(&template, BUILTIN).unwrap();
+        for mask in 0..8 {
+            let mut f = fixture(&["Works"], "main");
+            f.values[idx("host")] = (mask & 1 != 0).then(|| value("host", "host", &[]).unwrap());
+            f.values[idx("git")] = (mask & 2 != 0).then(|| value("git", "main", &[]).unwrap());
+            f.values[idx("duration")] =
+                (mask & 4 != 0).then(|| value("duration", "3s", &[]).unwrap());
+            let out = lay(&lines, &f, &opts(80));
+            let upper = [
+                if mask & 1 != 0 { "host" } else { "" },
+                "~/Works",
+                if mask & 2 != 0 { "main" } else { "" },
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            assert_eq!(text(&out[0].left), upper, "mask {mask}");
+            assert_eq!(
+                text(&out[1].left),
+                if mask & 4 != 0 { "3s ❯" } else { "❯" },
+                "mask {mask}"
+            );
+            if mask == 0 {
+                assert_eq!(text(&lay(&lines, &f, &opts(8))[0].left), "~/Works");
+            }
+        }
+        // Each side cleans its own leading, duplicate and trailing gaps.
+        let mut f = fixture(&["Works"], "main");
+        f.values[idx("status")] = None;
+        let out = one(
+            "{dir}{@fill}{status}{@sep:flat}{time}{@sep:flat}{host}{@nl}{char}",
+            &f,
+            80,
+        );
+        assert!(text(&out[0].left).ends_with("12:34"));
+        assert_eq!(
+            text(&out[0].left).trim_end().len(),
+            text(&out[0].left).len()
+        );
+    }
+
+    // 이것을 실패시키는 것: 배경 제거 단계에서 flat 공백까지 지워 이웃 세그먼트를 붙이는 것.
+    #[test]
+    fn flat_gaps_survive_background_removal() {
+        let f = fixture(&["Works"], "main");
+        let out = one("{char:block}{@sep:flat}{char:block}{@nl}{char}", &f, 4);
+        assert_eq!(text(&out[0].left), "❯ ❯");
     }
 
     // 이것을 실패시키는 것: 값이 없는 세그먼트의 구분자가 남거나 겹치는 것, 꼬리가 사라지는 것.
