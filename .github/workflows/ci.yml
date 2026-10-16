@@ -147,6 +147,14 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: scripts/check-core-purity.sh
+      - run: python3 -B scripts/test_check_diag_codes.py
+      - name: Diagnostic codes are append-only
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          python3 scripts/check_diag_codes.py "origin/$BASE_REF"
       - run: cargo deny --config deny.toml check
       # The size probe is outside the workspace with its own lock; the same
       # policy covers it.
