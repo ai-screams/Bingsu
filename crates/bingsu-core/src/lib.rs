@@ -11,6 +11,7 @@ extern crate alloc;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod bands;
+pub mod collection;
 pub mod color;
 pub mod config;
 pub mod default_theme;
@@ -24,6 +25,7 @@ pub mod field;
 pub mod front;
 pub mod fs_trust;
 pub mod handoff;
+pub mod helper;
 pub mod icons;
 pub mod ident;
 pub mod layout;

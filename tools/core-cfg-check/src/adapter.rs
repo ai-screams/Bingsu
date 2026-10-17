@@ -77,6 +77,7 @@ struct Walk<'a> {
     listed: &'a BTreeSet<String>,
     used: BTreeSet<String>,
     out: Vec<Finding>,
+    bootstrap_line: Option<(usize, usize)>,
 }
 
 impl Walk<'_> {
@@ -177,6 +178,10 @@ impl<'ast> Visit<'ast> for Walk<'_> {
             self.bad(path.span(), format!("{full}: path root not in PATH_ROOTS"));
         }
         match segs.first().map(String::as_str) {
+            Some("crate")
+                if full == "crate::prompt_spawn::bootstrap"
+                    && self.bootstrap_line
+                        == Some((line_of(path.span()), path.span().start().column)) => {}
             Some("crate" | "super") => {
                 self.bad(path.span(), format!("{full}: another module of the binary"))
             }
@@ -234,6 +239,7 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
         listed: &listed,
         used: BTreeSet::new(),
         out: Vec::new(),
+        bootstrap_line: bootstrap_line(&file),
     };
     let n = file.items.len();
     for (i, item) in file.items.iter().enumerate() {
@@ -251,4 +257,99 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
         });
     }
     walk.out
+}
+
+/// The one approved escape hatch is a statement in run_prompt's unwind guard,
+/// immediately before the filter branch. It cannot be imported or saved as a
+/// function value and the rest of the module path rules remain unchanged.
+fn bootstrap_line(file: &syn::File) -> Option<(usize, usize)> {
+    let f = file.items.iter().find_map(|i| match i {
+        syn::Item::Fn(f) if f.sig.ident == "run_prompt" => Some(f),
+        _ => None,
+    })?;
+    struct Calls(usize);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if matches!(call.func.as_ref(),syn::Expr::Path(p) if p.path.is_ident("enter_sandbox")) {
+                self.0 += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut calls = Calls(0);
+    calls.visit_block(&f.block);
+    if calls.0 != 1 {
+        return None;
+    }
+    let local = f.block.stmts.iter().find_map(|s| match s {
+        syn::Stmt::Local(l) if matches!(&l.pat, syn::Pat::Ident(p) if p.ident == "rec") => Some(l),
+        _ => None,
+    })?;
+    let syn::Expr::MethodCall(unwrap) = local.init.as_ref()?.expr.as_ref() else {
+        return None;
+    };
+    if unwrap.method != "unwrap_or_else" {
+        return None;
+    }
+    let syn::Expr::Call(catch) = unwrap.receiver.as_ref() else {
+        return None;
+    };
+    let syn::Expr::Path(path) = catch.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "std::panic::catch_unwind" {
+        return None;
+    }
+    let syn::Expr::Call(guard) = catch.args.first()? else {
+        return None;
+    };
+    let syn::Expr::Path(path) = guard.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "std::panic::AssertUnwindSafe" {
+        return None;
+    }
+    let syn::Expr::Closure(closure) = guard.args.first()? else {
+        return None;
+    };
+    let syn::Expr::Block(block) = closure.body.as_ref() else {
+        return None;
+    };
+    let [
+        syn::Stmt::Expr(syn::Expr::Call(bootstrap), Some(_)),
+        syn::Stmt::Expr(syn::Expr::If(branch), None),
+    ] = block.block.stmts.as_slice()
+    else {
+        return None;
+    };
+    let syn::Expr::Path(path) = bootstrap.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "crate::prompt_spawn::bootstrap"
+        || bootstrap.args.len() != 2
+    {
+        return None;
+    }
+    let syn::Expr::Call(runs) = branch.cond.as_ref() else {
+        return None;
+    };
+    let syn::Expr::Path(path) = runs.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "front::runs_core" {
+        return None;
+    }
+    let syn::Expr::Call(enter) = runs.args.first()? else {
+        return None;
+    };
+    let syn::Expr::Path(path) = enter.func.as_ref() else {
+        return None;
+    };
+    if !path.path.is_ident("enter_sandbox") || !enter.args.is_empty() {
+        return None;
+    }
+    Some((
+        line_of(bootstrap.func.span()),
+        bootstrap.func.span().start().column,
+    ))
 }

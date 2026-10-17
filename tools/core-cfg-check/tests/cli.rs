@@ -1084,3 +1084,27 @@ fn tcb_files_skip_only_the_address_and_library_rules() {
         assert!(!pass && err.contains(why), "{bad}: {err}");
     }
 }
+
+// 이것을 실패시키는 것: bootstrap을 필터 뒤나 다른 함수에서 허용하거나 다른 모듈 호출도 허용하는 것.
+#[test]
+fn bootstrap_is_only_a_prefilter_entry() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bingsu/src/prompt.rs"),
+    )
+    .unwrap();
+    let (ok, err) = run_adapter(&source);
+    assert!(ok, "{err}");
+    let call = "crate::prompt_spawn::bootstrap(exe, &raw);";
+    assert!(source.contains(call));
+    let after = source.replace(call, "").replace(
+        "respond(&raw)",
+        &format!("{call}\n            respond(&raw)"),
+    );
+    assert!(!run_adapter(&after).0);
+    let early = source.replace("let rec =", "enter_sandbox(); let rec =");
+    assert!(!run_adapter(&early).0);
+    let other = source.replace(call, "crate::other::run(exe, &raw);");
+    assert!(!run_adapter(&other).0);
+    let extra = source.replace("respond(&raw)", "crate::other::run(); respond(&raw)");
+    assert!(!run_adapter(&extra).0);
+}

@@ -1,8 +1,7 @@
 //! Segment values the front end makes from the envelope alone (spec
 //! section 4 process table: `status`, `duration`, `jobs`, `char`, and
-//! `dir` from the `$PWD` string, never opened). git, host, venv and time
-//! need a worker, the environment or a clock and stay hidden until their
-//! tasks land.
+//! `dir`, `host`, `venv` from display-only hook words, never opened).
+//! git and time stay hidden until their tasks land.
 use crate::envelope::Envelope;
 use crate::field::{BUILTIN, Field, FieldValue, Value, segment, write_duration};
 use crate::shorten::{Anchor, MAX_STEPS, PathFacts};
@@ -116,6 +115,35 @@ pub fn collect(e: &Envelope) -> Collected {
             *slot = Some(path_facts(pwd, e.home.as_deref()));
         }
     }
+    if let Some(host) = e.host.as_deref() {
+        put(
+            &mut c,
+            "host",
+            value(
+                "host",
+                host,
+                &[
+                    ("name", Field::text(host, 64, WidthProfile::DEFAULT)),
+                    ("ssh", Field::known(FieldValue::Bool(e.ssh))),
+                ],
+            ),
+        );
+    }
+    if let Some(venv) = e.venv.as_deref() {
+        let venv = venv
+            .rsplit(|b| *b == b'/')
+            .find(|p| !p.is_empty())
+            .unwrap_or(b"");
+        put(
+            &mut c,
+            "venv",
+            value(
+                "venv",
+                venv,
+                &[("name", Field::text(venv, 64, WidthProfile::DEFAULT))],
+            ),
+        );
+    }
     if failed {
         let joined: Vec<u8> = pipe
             .iter()
@@ -198,6 +226,29 @@ mod tests {
         assert_eq!(d(b"/etc", Some(b"/")), "/etc");
         assert_eq!(d(b"/", None), "/");
         assert_eq!(d(b"//a///b", None), "/a/b");
+    }
+
+    // 이것을 실패시키는 것: host/venv 정제를 빼거나 SSH를 host 존재에서 추론하는 것.
+    #[test]
+    fn display_words_are_sanitized_and_ssh_is_separate() {
+        let mut e = blank();
+        e.host = Some(b"host\x1b\n\0name".to_vec());
+        e.venv = Some(b"/virtual/env\x1b\r\0name/".to_vec());
+        let c = collect(&e);
+        assert_eq!(shown(&c, "host").as_deref(), Some("hostname"));
+        assert_eq!(shown(&c, "venv").as_deref(), Some("envname"));
+        let ssh = segment("host").unwrap().field_index("ssh").unwrap();
+        assert_eq!(
+            c.values[index("host")].as_ref().unwrap().fields[ssh].value,
+            FieldValue::Bool(false)
+        );
+        e.ssh = true;
+        assert_eq!(
+            collect(&e).values[index("host")].as_ref().unwrap().fields[ssh].value,
+            FieldValue::Bool(true)
+        );
+        e.host = None;
+        assert!(collect(&e).values[index("host")].is_none());
     }
 
     fn char_failed(c: &Collected) -> FieldValue {

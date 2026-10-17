@@ -11,6 +11,9 @@ use std::process::ExitCode;
 )]
 mod clock;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+mod collector;
+#[cfg(unix)]
 mod config;
 #[cfg(unix)]
 #[cfg_attr(
@@ -24,7 +27,18 @@ mod evidence;
 #[cfg(unix)]
 mod group_policy;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+mod helper;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod helper_filter;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod helper_limits;
+#[cfg(unix)]
 mod init;
+#[cfg(unix)]
+mod log;
 #[cfg(unix)]
 mod messages;
 #[cfg(unix)]
@@ -39,7 +53,6 @@ mod runtime_root;
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 mod snapshot_store;
 #[cfg(unix)]
-#[cfg_attr(not(test), expect(dead_code, reason = "N2 source session integration"))]
 mod source_path;
 #[cfg(unix)]
 #[allow(unsafe_code)]
@@ -56,6 +69,10 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
     let _ = &a.argv0;
     match a.args.first().and_then(|w| w.to_str()) {
         #[cfg(unix)]
+        Some("__refresh-v1") => helper::run(&a.argv0, &a.args[1..]),
+        #[cfg(unix)]
+        Some("__collect-v1") if a.args.len() == 1 => collector::run(),
+        #[cfg(unix)]
         Some("config") => config::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
@@ -69,3 +86,6 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod n3_test;

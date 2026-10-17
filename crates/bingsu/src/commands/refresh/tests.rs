@@ -127,6 +127,60 @@ fn published(r: RefreshResult) -> u64 {
     }
 }
 
+// 이것을 실패시키는 것: 없는 상태 뿌리를 만들지 않거나 설정 뿌리까지 만드는 것.
+#[test]
+fn fresh_state_root_publishes_on_first_refresh_without_creating_config() {
+    let mut f = Fx::new("fresh-state");
+    fs::remove_dir(&f.request.state_root).unwrap();
+    fs::remove_dir(&f.request.config_canonical).unwrap();
+    f.request.state_root = f.base.join("st/deep/bingsu");
+    assert_eq!(published(f.run()), 1);
+    for name in ["st", "st/deep", "st/deep/bingsu"] {
+        assert_eq!(
+            fs::metadata(f.base.join(name)).unwrap().mode() & 0o7777,
+            0o700
+        );
+    }
+    assert!(!f.request.config_canonical.exists());
+    assert_eq!(f.snap().id.generation, 1);
+    assert_eq!(f.run(), RefreshResult::Revalidated { generation: 1 });
+}
+
+// 이것을 실패시키는 것: 생성 전 조상 판정과 최종 사슬 판정을 생략하는 것.
+#[test]
+fn fresh_state_root_under_unsafe_ancestor_stays_incomplete() {
+    let mut f = Fx::new("unsafe-state");
+    let parent = f.base.join("unsafe");
+    fs::create_dir(&parent).unwrap();
+    // Other write is unsafe regardless of the machine's group membership.
+    mode(&parent, 0o757);
+    f.request.state_root = parent.join("st/bingsu");
+    assert_eq!(f.run(), RefreshResult::Incomplete);
+    assert!(!parent.join("st").exists());
+    assert!(!f.dir().join("snapshot").exists());
+    assert_eq!(fs::metadata(&parent).unwrap().mode() & 0o7777, 0o757);
+}
+
+// 이것을 실패시키는 것: init 뒤 심어진 상태 뿌리 링크를 정규화하거나 따라가는 것.
+#[test]
+fn planted_state_root_symlink_stays_incomplete_and_target_untouched() {
+    let mut f = Fx::new("linked-state");
+    let target = f.request.state_root.clone();
+    put(&target.join("canary"), b"unchanged");
+    f.request.state_root = f.base.join("planted");
+    symlink(&target, &f.request.state_root).unwrap();
+    assert_eq!(f.run(), RefreshResult::Incomplete);
+    assert!(
+        fs::symlink_metadata(&f.request.state_root)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(target.join("canary")).unwrap(), b"unchanged");
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+    assert!(!f.dir().join("snapshot").exists());
+}
+
 // 이것을 실패시키는 것: 같은 증거에서 G 또는 snapshot inode를 바꾸거나 marker의 V를 갱신하지 않는 것.
 #[test]
 fn unchanged_reuses_snapshot_and_both_palettes() {
@@ -1335,4 +1389,46 @@ fn selection_changes_and_late_contention_preserve_marker() {
         );
         assert_eq!(f.bytes("marker"), marker);
     }
+}
+
+// 이것을 실패시키는 것: 검증 전 broker 호출·필터 실패 후 발행·broker 뒤 최종 재검증 생략.
+#[test]
+fn broker_runs_after_validation_before_final_revalidation() {
+    let fx = Fx::new("broker");
+    fx.put(COMMAND);
+    let mut calls = 0;
+    let result = refresh_broker(
+        fx.request.clone(),
+        &mut Fixed(clock()),
+        &mut |_, display, now| {
+            calls += 1;
+            let (config, id) = display.unwrap();
+            assert!(!config.exec_units.is_empty());
+            assert_eq!(id.generation, 1);
+            assert_eq!(now.boot, clock().boot);
+            Err(StoreError::Unsafe)
+        },
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(result, RefreshResult::Incomplete);
+    assert!(!fx.dir().join("marker").exists());
+    let result = refresh_broker(fx.request.clone(), &mut Fixed(clock()), &mut |_, _, _| {
+        fx.put("broken = [");
+        Ok(())
+    });
+    assert_eq!(result, RefreshResult::Incomplete);
+    assert!(!fx.dir().join("marker").exists());
+    fx.put(COMMAND);
+    published(fx.run());
+    let id = fx.snap().id;
+    fx.put("broken = [");
+    let result = refresh_broker(
+        fx.request.clone(),
+        &mut Fixed(clock()),
+        &mut |_, display, _| {
+            assert_eq!(display.unwrap().1, id);
+            Ok(())
+        },
+    );
+    assert_eq!(result, RefreshResult::Invalid);
 }

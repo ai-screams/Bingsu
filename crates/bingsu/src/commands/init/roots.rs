@@ -17,7 +17,6 @@ pub struct RuntimeRootPin {
     pub path: PathBuf,
     /// Ancestors whose group write was cleared by this walk (P-R1/S-8).
     /// N4 carries these pins to the front end, which never asks the system.
-    #[cfg_attr(not(test), expect(dead_code, reason = "N4 hook hand-off"))]
     pub group_ok: Vec<GroupPin>,
 }
 
@@ -107,7 +106,6 @@ impl ConfigRootPin {
     /// lower trust: a root init marked stays shape-only even when its chain
     /// is clean now, and a root that turned undecidable since becomes
     /// shape-only here.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Part N2 hand-off"))]
     pub fn reopen(
         written: &Path,
         canonical: &Path,
@@ -201,8 +199,6 @@ fn pin_for(
     uid: u32,
     groups: &mut dyn GroupOracle,
 ) -> std::io::Result<RuntimeRootPin> {
-    use std::os::fd::{AsFd, AsRawFd};
-    use std::os::unix::fs::PermissionsExt;
     let bad = |what: &str| std::io::Error::other(format!("runtime root: {what}"));
     let (Some(parent), Some(last)) = (candidate.parent(), candidate.file_name()) else {
         return Err(bad("no folder name"));
@@ -224,59 +220,12 @@ fn pin_for(
             _ => Err(bad("unexpected path component")),
         })
         .collect::<std::io::Result<_>>()?;
-    // Keep the existing prefix and every created child's descriptors until
-    // the same chain is judged and its parent/name connections rechecked.
-    // `created` lists (holding descriptor index, name) for rollback.
-    let mut chain = runtime_root::open_chain(&base).map_err(|e| bad(&format!("{e:?}")))?;
-    let mut groups = Recording::new(groups);
-    let mut created: Vec<(usize, std::ffi::OsString)> = Vec::new();
-    let result = (|| {
-        let mut owned_child = |chain: &[std::fs::File], name: &std::ffi::OsStr| {
-            let holder = chain.len() - 1;
-            if sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
-                created.push((holder, name.to_os_string()));
-            }
-            let child = sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
-            if child.metadata()?.uid() != uid {
-                return Err(bad("owned by another user"));
-            }
-            Ok(child)
-        };
-        for name in &names {
-            let child = owned_child(&chain.fds, name)?;
-            child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-            chain.facts.push(sys::fd_facts(child.as_fd())?);
-            chain.names.push(name.to_os_string());
-            chain.fds.push(child);
-        }
-        let root = owned_child(&chain.fds, last)?;
-        if sys::fd_is_local(root.as_raw_fd()) != Some(true) {
-            return Err(bad("not on a local file system"));
-        }
-        root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-        chain.facts.push(sys::fd_facts(root.as_fd())?);
-        chain.names.push(last.to_os_string());
-        chain.fds.push(root);
-        runtime_root::judge(&chain, uid, &mut groups).map_err(|e| bad(&format!("{e:?}")))?;
-        chain.revalidate()?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {}
-        Err(e) => {
-            // Undo what this call made, deepest first. Folders that already
-            // existed are not touched; a folder another process filled in
-            // the meantime is not empty and stays.
-            for (holder, name) in created.iter().rev() {
-                let _ = sys::remove_dir_at(chain.fds[*holder].as_fd(), name);
-            }
-            return Err(e);
-        }
-    };
-    let md = chain.last().metadata()?;
     let mut path = base;
     path.extend(&names);
     path.push(last);
+    let mut groups = Recording::new(groups);
+    let chain = runtime_root::create_private(&path, uid, &mut groups)?;
+    let md = chain.last().metadata()?;
     Ok(RuntimeRootPin {
         dev: md.dev(),
         ino: md.ino(),

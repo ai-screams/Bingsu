@@ -19,6 +19,18 @@ _spec.loader.exec_module(golden)
 # Probe 4 cases (2026-10-04) plus spec cases: spaces, quotes, newline,
 # leading '-', ':' inside the path.
 CASES = ["a b", "it's", 'say "hi"', "-leading", "new\nline", "12:34:", "with\\back", "$(echo pwn)`id`", "한글 경로"]
+
+# _bingsu_call --width 80 in all three shells. A trailing '=' marks an
+# init-pinned or dynamic single-word option; the others consume one value.
+# Keep the complete hook contract here instead of counting argv entries.
+HOOK_WORDS = (
+    b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm",
+    b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
+    b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
+    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=",
+)
+
+
 def source(shell, path):
     """A quoted `source` line; the harness's own paths never carry the case."""
     p = str(path)
@@ -48,23 +60,34 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         (argv,) = inst.calls()
         run_root = os.path.realpath(env["XDG_RUNTIME_DIR"] + "/bingsu")
         st = os.stat(run_root)
-        assert argv[:5] == [b"prompt", b"--ctx", b"1", b"--record", b"B1"], (shell, argv)
-        assert f"--runtime-root={st.st_dev}:{st.st_ino}:{run_root}".encode() in argv, (shell, argv)
+        assert argv[0] == b"prompt", (shell, argv)
+        words = {}
+        args = iter(argv[1:])
+        for arg in args:
+            name, sep, value = arg.partition(b"=")
+            word = name + sep
+            assert word in HOOK_WORDS and word not in words, (shell, argv)
+            if not sep:
+                value = next(args, None)
+                assert value is not None, (shell, argv)
+            words[word] = value
+        assert set(words) == set(HOOK_WORDS), (shell, argv)
+        assert words[b"--ctx"] == b"1", (shell, argv)
+        assert words[b"--record"] == b"B1", (shell, argv)
+        assert words[b"--width"] == b"80", (shell, argv)
+        assert words[b"--runtime-root="] == f"{st.st_dev}:{st.st_ino}:{run_root}".encode(), (shell, argv)
         # Both spellings must survive shell quoting, including hostile path bytes.
-        assert (b"--config-root-written=" + (env["XDG_CONFIG_HOME"] + "/bingsu").encode()) in argv
+        assert words[b"--config-root-written="] == (env["XDG_CONFIG_HOME"] + "/bingsu").encode(), (shell, argv)
         # init canonicalizes the existing part of each root (os.path.realpath does the same).
-        assert (b"--config-root=" + os.path.realpath(env["XDG_CONFIG_HOME"] + "/bingsu").encode()) in argv
-        assert (b"--state-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu").encode()) in argv
-        assert (b"--log-root=" + os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu/log").encode()) in argv
+        assert words[b"--config-root="] == os.path.realpath(env["XDG_CONFIG_HOME"] + "/bingsu").encode(), (shell, argv)
+        assert words[b"--state-root="] == os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu").encode(), (shell, argv)
+        assert words[b"--log-root="] == os.path.realpath(env["XDG_STATE_HOME"] + "/bingsu/log").encode(), (shell, argv)
         # The display words of M3a: the hook's shell, $PWD, $COLORTERM, and
         # the home folder init found with getpwuid.
-        i = argv.index(b"--shell")
-        assert argv[i:i + 6] == [b"--shell", shell.encode(), b"--pwd", os.getcwd().encode(),
-                                 b"--colorterm", b""], (shell, argv)
-        assert (b"--home=" + pwd.getpwuid(os.getuid()).pw_dir.encode()) in argv, (shell, argv)
-        # prompt --ctx 1 --record B1 --width 80, shell, pwd, colorterm,
-        # --session S --seq N, four roots, the written config root and home
-        assert len(argv) == 23, (shell, argv)
+        assert words[b"--shell"] == shell.encode(), (shell, argv)
+        assert words[b"--pwd"] == os.getcwd().encode(), (shell, argv)
+        assert words[b"--colorterm"] == b"", (shell, argv)
+        assert words[b"--home="] == pwd.getpwuid(os.getuid()).pw_dir.encode(), (shell, argv)
 
 
 def test_init_twice_redefines_runtime_root(tmp_path, shells):

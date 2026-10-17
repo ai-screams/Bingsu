@@ -130,10 +130,31 @@ fn same_clock(a: Clock, b: Clock) -> bool {
 pub fn refresh(request: RefreshRequest, clock: &mut dyn ClockSource) -> RefreshResult {
     refresh_with(request, clock, &mut |_| {})
 }
+pub fn refresh_broker(
+    request: RefreshRequest,
+    clock: &mut dyn ClockSource,
+    broker: &mut Broker<'_>,
+) -> RefreshResult {
+    refresh_with_broker(request, clock, &mut |_| {}, broker)
+}
+type Broker<'a> = dyn FnMut(
+        &CheckedContextFd,
+        Option<(&bingsu_core::config::compile::CompiledConfig, Identity)>,
+        Clock,
+    ) -> Result<(), StoreError>
+    + 'a;
 fn refresh_with(
     request: RefreshRequest,
     clock: &mut dyn ClockSource,
     hook: &mut dyn FnMut(Checkpoint),
+) -> RefreshResult {
+    refresh_with_broker(request, clock, hook, &mut |_, _, _| Ok(()))
+}
+fn refresh_with_broker(
+    request: RefreshRequest,
+    clock: &mut dyn ClockSource,
+    hook: &mut dyn FnMut(Checkpoint),
+    broker: &mut Broker<'_>,
 ) -> RefreshResult {
     // This observation must precede even the runtime root's group queries.
     let Ok(start) = clock.observe() else {
@@ -142,7 +163,7 @@ fn refresh_with(
     let Some(budget) = Budget::new(start, request.process_started) else {
         return RefreshResult::Incomplete;
     };
-    match run(&request, clock, budget, hook) {
+    match run(&request, clock, budget, hook, broker) {
         Ok(r) => r,
         Err(StoreError::Busy) => RefreshResult::Busy,
         Err(_) => RefreshResult::Incomplete,
@@ -153,6 +174,7 @@ fn run(
     clock: &mut dyn ClockSource,
     b: Budget,
     hook: &mut dyn FnMut(Checkpoint),
+    broker: &mut Broker<'_>,
 ) -> Result<RefreshResult, StoreError> {
     let mut groups = SystemGroups::new(&r.user);
     let context = snapshot::context_crc(
@@ -171,6 +193,12 @@ fn run(
     hook(Checkpoint::Locked);
     b.check(clock)?;
     // Snapshot lock -> state selection lock, also across distinct runtimes.
+    super::runtime_root::ensure_root(
+        &r.state_root,
+        r.me,
+        &mut groups,
+        bingsu_core::fs_trust::Last::Mine,
+    )?;
     let selection = SelectionLock::try_lock(&r.state_root, r.me, &mut groups)
         .map_err(super::snapshot_store::lock_error)?;
     let record = selection
@@ -336,6 +364,30 @@ fn run(
     store.stage(Slot::Marker, &marker.encode())?;
     b.check(clock)?;
     hook(Checkpoint::Staged);
+    // Fully checked source/display state, before the helper's own filter.
+    // The collector uses this identity even if a later race cancels publication;
+    // a future front can only consume a response for its selected snapshot.
+    let fallback = if outcome == Outcome::Invalid && old.is_none() {
+        store
+            .read(DataFile::LastGood)?
+            .as_deref()
+            .and_then(|v| Snapshot::decode(v).ok())
+            .filter(|s| snapshot::same_boot(s.id, Some(b.start.boot), context))
+    } else {
+        None
+    };
+    let display = if replace {
+        report
+            .as_ref()
+            .and_then(|r| r.snapshot.as_ref())
+            .map(|c| (c, id))
+    } else {
+        old.as_ref()
+            .or(fallback.as_ref())
+            .map(|s| (&s.config, s.id))
+    };
+    broker(&root, display, b.check(clock)?)?;
+    b.check(clock)?;
     // Contention now is Incomplete: a sequence reservation may already exist.
     // Reacquire in the same context -> selection order through marker+renew.
     let selection = SelectionLock::try_lock(&r.state_root, r.me, &mut SystemGroups::new(&r.user))?;

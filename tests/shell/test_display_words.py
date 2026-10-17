@@ -160,3 +160,47 @@ def test_bash_unknown_lc_all_stays_quiet(tmp_path, shells):
     assert r.returncode == 0, r.stderr
     assert r.stderr.count(b"setlocale") <= 1 and b"line " not in r.stderr, r.stderr
     assert len(inst.calls()) == 3 and all(value_after(a, b"--pwd") == b"/" for a in inst.calls())
+
+# 이것을 실패시키는 것: 동적 수준·host/venv 한 단어·별도 SSH 전달 또는 새 기본값을 없애는 것.
+@pytest.mark.parametrize("level,want", [("debug", "debug"), ("info", "info"), ("error", "error"), ("OFF", "off"), ("/tmp/log", "off")])
+def test_optional_helper_display_words(tmp_path, shells, level, want):
+    for shell in shells:
+        base = tmp_path / shell
+        base.mkdir()
+        env = trusted_env(base)
+        raw = "space ' \" $(false)\nend"
+        env.update({"BINGSU_LOG": level, "HOST": raw, "HOSTNAME": raw,
+                    "VIRTUAL_ENV": "/venv/" + raw, "SSH_TTY": "yes"})
+        body = b""
+        if shell == "zsh":
+            body = ("HOST='" + raw.replace("'", "'\\''") + "'\n").encode()
+        if shell == "bash":
+            body += b"shopt -s nocasematch\n"
+        argv = call_once(base, shell, env, body)
+        assert ("--log-level=" + want).encode() in argv
+        # fish owns a read-only hostname; hostile host bytes are tested in bash/zsh.
+        if shell != "fish":
+            assert value_after(argv, b"--host") == raw.encode()
+        else:
+            assert value_after(argv, b"--host")
+        assert value_after(argv, b"--venv") == ("/venv/" + raw).encode()
+        assert b"--ssh=1" in argv
+        assert any(word.startswith(b"--runtime-groups=1") for word in argv)
+
+# 이것을 실패시키는 것: host/venv 바이트 상한을 없애거나 64 KiB 경계를 한 바이트 줄이는 것.
+def test_optional_display_word_caps(tmp_path, shells):
+    for shell in shells:
+        for length in (65536, 65537):
+            base = tmp_path / f"{shell}-{length}"
+            base.mkdir()
+            raw = b"x" * length
+            if shell == "fish":
+                body = b"set -g VIRTUAL_ENV '" + raw + b"'\n"
+            else:
+                host = b"HOST" if shell == "zsh" else b"HOSTNAME"
+                body = b"VIRTUAL_ENV='" + raw + b"'\n" + host + b"='" + raw + b"'\n"
+            argv = call_once(base, shell, trusted_env(base), body)
+            want = raw if length == 65536 else b""
+            assert value_after(argv, b"--venv") == want
+            if shell != "fish":
+                assert value_after(argv, b"--host") == want

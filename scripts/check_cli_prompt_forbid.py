@@ -44,14 +44,16 @@ import sys
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+BOOTSTRAP = ROOT / "crates/bingsu/src/prompt_spawn.rs"
 ADAPTER = ROOT / "crates/bingsu/src/prompt.rs"
 SYSCALLS = ROOT / "crates/bingsu/prompt-syscalls.tsv"
 SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 TCB_SHA256 = {
+    "crates/bingsu/src/prompt_spawn.rs": "969ea3ea75c9de2f6201c8fc39240d53b326bf54889ac0e347c62f256278cd52",
     "crates/bingsu/src/prompt_io.rs": "ffe561664f8a4e13b00e2c288c66858b92b91ec3c7c8081707e5eeccf47304e1",
-    "crates/bingsu/src/prompt.rs": "557da8e7b0f321794b2ac6504727ec6af12e1d52bc0a866970de797594df4a52",
-    "crates/bingsu/src/main.rs": "776685d05d3f8583dbd4d4821382c6554b4c8935ca0d8c94ff1bd6d4c172e8ab",
+    "crates/bingsu/src/prompt.rs": "b9fe523829ea557ba520eb60093538aa8825ffc61eaeea6676958c122d15fcbe",
+    "crates/bingsu/src/main.rs": "315678da9f291089bcd535b37a62b1e4cfb7bfb416d6e54f800304b54eab01b9",
     "crates/bingsu/src/sandbox.rs": "18f2d176111e3d57215071227ea3e6d7dc022156e2a4510a6e6fcf2e300c676c",
     "crates/bingsu/Cargo.toml": "15cbd7be07d65f0c9f246353e149889863917eda45a1a08d447613841d5d6719",
     "crates/bingsu/prompt-syscalls.tsv": "763649aa03810886aaac2ebbcd1e5d9ab570392139ebe3191a0247f3ca0c66f6",
@@ -64,11 +66,14 @@ def main():
     parser.add_argument("--checker", required=True, help="path to the core-cfg-check binary")
     args = parser.parse_args()
     bad = []
-    text = ADAPTER.read_text()
-    start = text.find("#![")
-    first = None if start < 0 else "".join(text[start:text.index("]", start) + 1].split())
-    if first != "".join(WANT.split()):
-        bad.append(f"{ADAPTER.relative_to(ROOT)}: first inner attribute is {first!r}")
+    # Both TCB entries are scanned by --binary below and must forbid the
+    # unchanged clippy forbidden-call rules. Their exact bytes are pinned.
+    for source in (ADAPTER, BOOTSTRAP):
+        text = source.read_text()
+        start = text.find("#![")
+        first = None if start < 0 else "".join(text[start:text.index("]", start) + 1].split())
+        if first != "".join(WANT.split()):
+            bad.append(f"{source.relative_to(ROOT)}: first inner attribute is {first!r}")
     for argv in ([args.checker, "--adapter", str(SYSCALLS), str(ADAPTER)],
                  [args.checker, "--binary", *sorted(str(p) for p in (ROOT / "crates/bingsu/src").rglob("*.rs"))]):
         out = subprocess.run(argv, capture_output=True, text=True)

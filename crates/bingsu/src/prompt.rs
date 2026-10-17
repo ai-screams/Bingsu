@@ -74,6 +74,7 @@ fn respond(raw: &[&[u8]]) -> Vec<u8> {
 /// minimal record, no envelope parse and no render.
 fn run_prompt(
     args: &[OsString],
+    exe: &OsString,
     enter_sandbox: impl FnOnce() -> front::Sandbox,
     respond: impl FnOnce(&[&[u8]]) -> Vec<u8>,
     refused: impl FnOnce(&[&[u8]]) -> Vec<u8>,
@@ -81,6 +82,7 @@ fn run_prompt(
     std::panic::set_hook(Box::new(|_| {}));
     let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let rec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::prompt_spawn::bootstrap(exe, &raw);
         if front::runs_core(enter_sandbox()) {
             respond(&raw)
         } else {
@@ -102,7 +104,13 @@ pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
     let argv0 = all.next().unwrap_or_default();
     let args: Vec<OsString> = all.collect();
     if args.first().map(|a| a.as_bytes()) == Some(b"prompt".as_slice()) {
-        run_prompt(&args[1..], enter_sandbox, respond, front::without_sandbox)
+        run_prompt(
+            &args[1..],
+            &argv0,
+            enter_sandbox,
+            respond,
+            front::without_sandbox,
+        )
     }
     NonPromptArgs { argv0, args }
 }
@@ -137,6 +145,7 @@ mod tests {
         // The unwind runs under the prompt's seccomp filter, as in the shell.
         run_prompt(
             &args(),
+            &OsString::new(),
             crate::sandbox::enter,
             panics,
             front::without_sandbox,
@@ -148,6 +157,7 @@ mod tests {
     fn filter_panics_child() {
         run_prompt(
             &args(),
+            &OsString::new(),
             || panic!("in the filter"),
             respond,
             front::without_sandbox,
@@ -159,6 +169,7 @@ mod tests {
     fn refused_child() {
         run_prompt(
             &args(),
+            &OsString::new(),
             || front::Sandbox::Blocked,
             panics,
             front::without_sandbox,
@@ -168,7 +179,13 @@ mod tests {
     #[test]
     #[ignore = "child of the prompt path tests"]
     fn refused_record_panics_child() {
-        run_prompt(&args(), || front::Sandbox::Blocked, respond, panics)
+        run_prompt(
+            &args(),
+            &OsString::new(),
+            || front::Sandbox::Blocked,
+            respond,
+            panics,
+        )
     }
 
     #[test]
@@ -176,10 +193,68 @@ mod tests {
     fn absent_child() {
         run_prompt(
             &args(),
+            &OsString::new(),
             || front::Sandbox::Absent,
             |_| b"<rendered>".to_vec(),
             panics,
         )
+    }
+
+    fn helper_args(home: &std::path::Path) -> Vec<OsString> {
+        let mut a = args();
+        a.extend(
+            [
+                "--runtime-root=1:2:/r",
+                "--config-root=/c",
+                "--config-root-written=/c",
+                "--state-root=/s",
+                "--log-level=info",
+            ]
+            .map(OsString::from),
+        );
+        a.push(OsString::from(format!("--home={}", home.display())));
+        a
+    }
+    // 이것을 실패시키는 것: spawn 실패를 sandbox 실패로 바꾸거나 record 출력을 막는 것.
+    #[test]
+    #[ignore = "isolated prompt entry"]
+    fn spawn_failure_child() {
+        run_prompt(
+            &helper_args(std::path::Path::new("/h")),
+            &OsString::from("/missing-bingsu"),
+            || front::Sandbox::Absent,
+            |_| b"<rendered>".to_vec(),
+            panics,
+        )
+    }
+    // 이것을 실패시키는 것: bootstrap을 필터 뒤로 옮기거나 Blocked일 때 미리 생성하지 않는 것.
+    #[test]
+    #[ignore = "isolated prompt entry"]
+    fn spawn_before_blocked_child() {
+        let (base, exe) = crate::commands::n3_test::probe("blocked");
+        run_prompt(
+            &helper_args(&base),
+            &exe.into_os_string(),
+            || {
+                // SAFETY: initialized writable storage for a read-only query.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                // SAFETY: valid signal and writable action; does not change disposition.
+                let rc = unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut action) };
+                assert_eq!(rc, 0);
+                assert_eq!(action.sa_sigaction, libc::SIG_IGN);
+                front::Sandbox::Blocked
+            },
+            panics,
+            front::without_sandbox,
+        )
+    }
+    // 이것을 실패시키는 것: spawn 실패·Blocked의 record 계약 또는 셸 파이프 EOF를 깨는 것.
+    #[test]
+    fn bootstrap_failure_and_blocked_do_not_delay_the_record() {
+        child("spawn_failure_child", b"<rendered>");
+        let start = std::time::Instant::now();
+        child("spawn_before_blocked_child", SANDBOX);
+        assert!(start.elapsed() < std::time::Duration::from_millis(1500));
     }
 
     fn child(name: &str, want: &[u8]) {

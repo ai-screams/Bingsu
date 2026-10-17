@@ -692,10 +692,6 @@ pub fn open_file_at_nofollow(
 /// Creates `name` inside `dir` (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode
 /// `mode`) for writing. Applies the exact mode through the new fd, regardless
 /// of umask; an existing entry is never changed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
-)]
 pub fn create_file_at(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
@@ -719,10 +715,6 @@ pub fn create_file_at(
 }
 
 /// `renameat(dir, from, dir, to)`: replaces `to` atomically.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
-)]
 pub fn rename_at(
     dir: std::os::fd::BorrowedFd<'_>,
     from: &std::ffi::OsStr,
@@ -1055,6 +1047,17 @@ pub fn open_lock_at(
 /// retain the open-file description after our File closes. Explicit unlock
 /// releases the shared flock even while those references remain alive.
 pub struct FileLock(std::fs::File);
+impl FileLock {
+    /// After a successful spawn, transfer unlock responsibility to the child
+    /// sharing this open-file description. The child must own a FileLock;
+    /// closing this parent's copy must not unlock the child's critical section.
+    pub fn into_inherited_file(self) -> std::fs::File {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop suppresses this guard's unlock and File drop.
+        // The owned File is moved out exactly once, with no remaining owner here.
+        unsafe { std::ptr::read(&this.0) }
+    }
+}
 impl std::ops::Deref for FileLock {
     type Target = std::fs::File;
 
@@ -1137,4 +1140,15 @@ pub fn unlink_at(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::OsStr) -> st
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+pub fn open_append_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    open_at(
+        Some(dir),
+        name,
+        libc::O_WRONLY | libc::O_APPEND | libc::O_NONBLOCK,
+    )
 }
