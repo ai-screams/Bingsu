@@ -97,7 +97,16 @@ pub fn report<R: Into<Root>>(
     version: [u32; 3],
     auto: Mode,
 ) -> ConfigReport {
-    let mut loaded: LoadReport = match load(roots, resolver, version) {
+    from_loaded(load(roots, resolver, version), auto)
+}
+
+/// Completes the same report pipeline after source loading. A publisher may
+/// compare freshly observed source evidence before paying for compilation.
+pub fn from_loaded(
+    loaded: Result<LoadReport, crate::config::source::LoadError>,
+    auto: Mode,
+) -> ConfigReport {
+    let mut loaded: LoadReport = match loaded {
         Ok(r) => r,
         Err(e) => {
             let mut d = e.errors;

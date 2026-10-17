@@ -490,5 +490,50 @@ pub fn ticks_to_ns(ticks: u64, numerator: u32, denominator: u32) -> Result<u64, 
     u64::try_from(ns).map_err(|_| ClockError::Time)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Publish,
+    Invalid,
+    Incomplete,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Keep,
+    Invalidate { seq: u64 },
+    Refresh { generation: u64, seq: u64 },
+    Replace { generation: u64, seq: u64 },
+}
+pub fn decide(
+    outcome: Outcome,
+    changed: bool,
+    g: u64,
+    seq: u64,
+    start: u64,
+    now: u64,
+    work_end: u64,
+) -> Action {
+    if now < start || now >= work_end || start.checked_add(T_NS).is_none_or(|e| now >= e) {
+        return Action::Keep;
+    }
+    let Some(next_seq) = seq.checked_add(1) else {
+        return Action::Keep;
+    };
+    match outcome {
+        Outcome::Invalid => Action::Invalidate { seq: next_seq },
+        Outcome::Publish if changed => match g.checked_add(1) {
+            Some(generation) => Action::Replace {
+                generation,
+                seq: next_seq,
+            },
+            None => Action::Keep,
+        },
+        Outcome::Publish => Action::Refresh {
+            generation: g,
+            seq: next_seq,
+        },
+        Outcome::Incomplete => Action::Keep,
+    }
+}
+
 #[cfg(test)]
 mod tests;

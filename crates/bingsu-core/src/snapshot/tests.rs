@@ -469,3 +469,63 @@ mod cases {
         assert!(ticks_to_ns(1, 1, 0).is_err());
     }
 }
+
+#[cfg(test)]
+mod publication {
+    use super::super::*;
+    // 이것을 실패시키는 것: Incomplete 보존·Invalid 번호·G/V 증가·마감/역행/overflow 검사 중 하나를 지우는 것.
+    #[test]
+    fn publication_transitions_obey_deadlines_and_never_wrap() {
+        assert_eq!(
+            decide(Outcome::Incomplete, true, 1, 2, 0, 1, 10),
+            Action::Keep
+        );
+        assert_eq!(
+            decide(Outcome::Invalid, true, 1, 2, 0, 1, 10),
+            Action::Invalidate { seq: 3 }
+        );
+        assert_eq!(
+            decide(Outcome::Publish, false, 1, 2, 0, 1, 10),
+            Action::Refresh {
+                generation: 1,
+                seq: 3
+            }
+        );
+        assert_eq!(
+            decide(Outcome::Publish, true, 1, 2, 0, 1, 10),
+            Action::Replace {
+                generation: 2,
+                seq: 3
+            }
+        );
+        assert_eq!(
+            decide(Outcome::Publish, true, 1, 2, 0, 10, 10),
+            Action::Keep
+        );
+        assert_eq!(decide(Outcome::Publish, true, 1, 2, 2, 1, 10), Action::Keep);
+        assert_eq!(
+            decide(Outcome::Publish, true, 1, 2, 0, T_NS, T_NS + 1),
+            Action::Keep
+        );
+        assert_eq!(
+            decide(Outcome::Publish, true, u64::MAX, 2, 0, 1, 10),
+            Action::Keep
+        );
+        assert_eq!(
+            decide(Outcome::Publish, true, 1, u64::MAX, 0, 1, 10),
+            Action::Keep
+        );
+        assert_eq!(
+            decide(
+                Outcome::Publish,
+                true,
+                1,
+                2,
+                u64::MAX - 1,
+                u64::MAX - 1,
+                u64::MAX
+            ),
+            Action::Keep
+        );
+    }
+}

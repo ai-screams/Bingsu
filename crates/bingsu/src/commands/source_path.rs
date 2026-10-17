@@ -150,6 +150,43 @@ fn directory_stamp_matches(now: &Stamp, before: &Stamp) -> bool {
 }
 
 impl Resolved {
+    /// Read-only export of the observations this resolver actually retained.
+    pub fn evidence_export(&self) -> io::Result<Vec<u8>> {
+        let mut e = super::evidence::Encoder::new();
+        e.path(&self.canonical);
+        e.stamp(&self.stamp);
+        e.facts(self.facts);
+        e.refusal(self.refusal);
+        e.count(self.nodes.len());
+        for n in &self.nodes {
+            e.path(&n.path);
+            e.stamp(&n.stamp);
+            e.facts(n.facts);
+        }
+        e.count(self.edges.len());
+        for edge in &self.edges {
+            e.count(edge.parent);
+            e.blob(std::os::unix::ffi::OsStrExt::as_bytes(
+                edge.name.as_os_str(),
+            ));
+            e.stamp(&edge.stamp);
+            e.byte(u8::from(edge.link.is_some()));
+            if let Some(link) = &edge.link {
+                e.path(&link.target);
+                e.byte(u8::from(link.root_ancestor));
+            }
+        }
+        e.count(self.checks.len());
+        for c in &self.checks {
+            e.byte(u8::from(c.root_ancestor));
+            e.count(c.stack.len());
+            for n in &c.stack {
+                e.count(*n);
+            }
+        }
+        e.finish()
+    }
+
     pub fn open(path: &Path, me: u32, groups: &mut dyn GroupOracle) -> io::Result<Self> {
         Self::open_kind(path, me, groups, false)
     }

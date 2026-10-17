@@ -690,7 +690,8 @@ pub fn open_file_at_nofollow(
 }
 
 /// Creates `name` inside `dir` (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode
-/// `mode`) for writing.
+/// `mode`) for writing. Applies the exact mode through the new fd, regardless
+/// of umask; an existing entry is never changed.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
@@ -702,8 +703,9 @@ pub fn create_file_at(
 ) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
-    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: `dir` is open and `c` is NUL-terminated; the mode is passed
     // as the variadic third argument as open(2) expects.
     let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), flags, mode as libc::c_uint) };
@@ -711,7 +713,9 @@ pub fn create_file_at(
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: openat returned a fresh descriptor that nothing else owns.
-    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    Ok(file)
 }
 
 /// `renameat(dir, from, dir, to)`: replaces `to` atomically.
@@ -1029,4 +1033,108 @@ pub fn directory_names(dir: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Vec<
         libc::closedir(stream);
     }
     result
+}
+
+/// Opens a persistent lock with a new open-file description. Never truncates
+/// or changes an existing entry's permissions.
+pub fn open_lock_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    match create_file_at(dir, name, 0o600) {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            open_at(Some(dir), name, libc::O_RDWR | libc::O_NONBLOCK)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// An acquired flock, released at the end of this owner's critical section.
+/// CLOEXEC prevents inheritance across exec, but fork/spawn can temporarily
+/// retain the open-file description after our File closes. Explicit unlock
+/// releases the shared flock even while those references remain alive.
+pub struct FileLock(std::fs::File);
+impl std::ops::Deref for FileLock {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        loop {
+            // SAFETY: this guard owns a live, successfully locked file. Unlock
+            // precedes File::drop and affects inherited references as well.
+            if unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+    }
+}
+
+pub fn try_lock(file: std::fs::File) -> std::io::Result<FileLock> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the file is live; no pointer arguments.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(FileLock(file))
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Keep inherited descriptors alive before exec without running Rust in the
+/// child of a multithreaded test process. SIGKILL also skips all destructors.
+#[cfg(test)]
+pub struct PausedFork(libc::pid_t);
+#[cfg(test)]
+impl PausedFork {
+    pub fn new() -> Self {
+        // SAFETY: the child calls only async-signal-safe pause; it never
+        // allocates, unwinds, or returns to the test harness after fork.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            loop {
+                // SAFETY: pause has no pointer arguments or preconditions.
+                unsafe { libc::pause() };
+            }
+        }
+        Self(pid)
+    }
+}
+#[cfg(test)]
+impl Drop for PausedFork {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the live, unreaped child PID.
+        assert_eq!(unsafe { libc::kill(self.0, libc::SIGKILL) }, 0);
+        loop {
+            // SAFETY: null status is allowed; this guard alone reaps the child.
+            let rc = unsafe { libc::waitpid(self.0, std::ptr::null_mut(), 0) };
+            if rc == self.0 {
+                break;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR)
+            );
+        }
+    }
+}
+
+pub fn unlink_at(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::OsStr) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: live dir and terminated name; flags 0 never remove a directory.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
