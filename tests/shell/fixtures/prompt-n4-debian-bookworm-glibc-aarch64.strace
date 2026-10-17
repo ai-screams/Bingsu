@@ -572,38 +572,25 @@
 2810  <... mmap resumed>)               = 0xf6fd2cb02000
 2809  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
 2810  close(3</usr/lib/aarch64-linux-gnu/libc.so.6> <unfinished ...>
-2809  openat(6</proc/2809/ns>, "time", O_RDONLY|O_CLOEXEC <unfinished ...>
+2809 readlinkat(6</proc/2809/ns>, "time", "time:[4026532442]", 28) = 17
 2810  <... close resumed>)              = 0
 2810  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
-2809  <... openat resumed>)             = 7<time:[4026532442]>
 2810  <... mmap resumed>)               = 0xf6fd2cb7e000
 2810  set_tid_address(0xf6fd2cb7e0f0 <unfinished ...>
-2809  newfstatat(7<time:[4026532442]>, "",  <unfinished ...>
 2810  <... set_tid_address resumed>)    = 2810
 2810  set_robust_list(0xf6fd2cb7e100, 24 <unfinished ...>
-2809  <... newfstatat resumed>{st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
 2810  <... set_robust_list resumed>)    = 0
-2809  fstatfs(7<time:[4026532442]>,  <unfinished ...>
 2810  rseq(0xf6fd2cb7e740, 0x20, 0, 0xd428bc00 <unfinished ...>
-2809  <... fstatfs resumed>{f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
 2810  <... rseq resumed>)               = 0
-2809  fgetxattr(7<time:[4026532442]>, "system.posix_acl_access",  <unfinished ...>
 2810  mprotect(0xf6fd2cafc000, 16384, PROT_READ <unfinished ...>
-2809  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
 2810  <... mprotect resumed>)           = 0
-2809  openat(6</proc/2809/ns>, "time_for_children", O_RDONLY|O_CLOEXEC <unfinished ...>
+2809 readlinkat(6</proc/2809/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  mprotect(0xf6fd2cb3f000, 4096, PROT_READ <unfinished ...>
-2809  <... openat resumed>)             = 8<time:[4026532442]>
 2810  <... mprotect resumed>)           = 0
-2809  newfstatat(8<time:[4026532442]>, "", {st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
 2810  mprotect(0xbb470e54a000, 155648, PROT_READ <unfinished ...>
-2809  fstatfs(8<time:[4026532442]>,  <unfinished ...>
 2810  <... mprotect resumed>)           = 0
-2809  <... fstatfs resumed>{f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
 2810  mprotect(0xf6fd2cb88000, 8192, PROT_READ <unfinished ...>
-2809  fgetxattr(8<time:[4026532442]>, "system.posix_acl_access",  <unfinished ...>
 2810  <... mprotect resumed>)           = 0
-2809  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
 2810  prlimit64(0, RLIMIT_STACK, NULL,  <unfinished ...>
 2809  openat(5</proc/2809>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
 2810  <... prlimit64 resumed>{rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
@@ -810,24 +797,21 @@
 2809  fcntl(3</home/USER>, F_GETFD <unfinished ...>
 2810  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2809  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
-2810  openat(4</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC <unfinished ...>
+2810 openat(3</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 5</proc/2810/timens_offsets>
+2810 statx(5</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(5</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(5</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(5</proc/2810/timens_offsets>) = 0
+2810 readlinkat(4</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(4</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2809  close(3</home/USER> <unfinished ...>
-2810  <... openat resumed>)             = 5<time:[4026532442]>
 2809  <... close resumed>)              = 0
-2810  fstatfs(5<time:[4026532442]>,  <unfinished ...>
 2809  openat(14</home/USER/pt>, "CASE", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
-2810  <... fstatfs resumed>{f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(5<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
 2809  <... openat resumed>)             = 3</home/USER/pt/CASE>
-2810  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
 2809  newfstatat(3</home/USER/pt/CASE>, "",  <unfinished ...>
-2810  fcntl(5<time:[4026532442]>, F_GETFD <unfinished ...>
 2809  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
-2810  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
 2809  fstatfs(3</home/USER/pt/CASE>,  <unfinished ...>
-2810  close(5<time:[4026532442]> <unfinished ...>
 2809  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23772207, f_bavail=22457417, f_files=6553600, f_ffree=6420100, f_fsid={val=[0x918c1fc2, 0x9a96fc5]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
-2810  <... close resumed>)              = 0
 2809  fgetxattr(3</home/USER/pt/CASE>, "system.posix_acl_access",  <unfinished ...>
 2810  fcntl(4</proc/2810/ns>, F_GETFD)  = 0x1 (flags FD_CLOEXEC)
 2809  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
@@ -945,22 +929,15 @@
 2810  openat(3</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
 2810  <... openat resumed>)             = 4</proc/2810/ns>
 2810  fstatfs(4</proc/2810/ns>,  <unfinished ...>
-2809  close(7<time:[4026532442]> <unfinished ...>
 2810  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2809  <... close resumed>)              = 0
-2810  openat(4</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC <unfinished ...>
-2810  <... openat resumed>)             = 5<time:[4026532442]>
-2809  close(8<time:[4026532442]> <unfinished ...>
-2810  fstatfs(5<time:[4026532442]>,  <unfinished ...>
-2809  <... close resumed>)              = 0
-2810  <... fstatfs resumed>{f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(5<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+2810 openat(3</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 5</proc/2810/timens_offsets>
+2810 statx(5</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(5</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(5</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(5</proc/2810/timens_offsets>) = 0
+2810 readlinkat(4</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(4</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2809  close(9</proc/2809/timens_offsets>) = 0
-2810  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(5<time:[4026532442]>, F_GETFD <unfinished ...>
-2810  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
-2810  close(5<time:[4026532442]> <unfinished ...>
-2810  <... close resumed>)              = 0
 2810  fcntl(4</proc/2810/ns>, F_GETFD)  = 0x1 (flags FD_CLOEXEC)
 2810  close(4</proc/2810/ns> <unfinished ...>
 2810  <... close resumed>)              = 0
@@ -1155,11 +1132,13 @@
 2810  fstatfs(5</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(5</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 6</proc/2810/ns>
 2810  fstatfs(6</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(6</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 7<time:[4026532442]>
-2810  fstatfs(7<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(7<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(7<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(7<time:[4026532442]>)       = 0
+2810 openat(5</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 7</proc/2810/timens_offsets>
+2810 statx(7</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(7</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(7</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(7</proc/2810/timens_offsets>) = 0
+2810 readlinkat(6</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(6</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(6</proc/2810/ns>, F_GETFD)  = 0x1 (flags FD_CLOEXEC)
 2810  close(6</proc/2810/ns>)           = 0
 2810  fcntl(5</proc/2810>, F_GETFD)     = 0x1 (flags FD_CLOEXEC)
@@ -1512,11 +1491,13 @@
 2810  fstatfs(10</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(10</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 11</proc/2810/ns>
 2810  fstatfs(11</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(11</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 12<time:[4026532442]>
-2810  fstatfs(12<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(12<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(12<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(12<time:[4026532442]>)      = 0
+2810 openat(10</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 12</proc/2810/timens_offsets>
+2810 statx(12</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(12</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(12</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(12</proc/2810/timens_offsets>) = 0
+2810 readlinkat(11</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(11</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(11</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(11</proc/2810/ns>)          = 0
 2810  fcntl(10</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -1534,11 +1515,13 @@
 2810  fstatfs(10</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(10</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 11</proc/2810/ns>
 2810  fstatfs(11</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(11</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 12<time:[4026532442]>
-2810  fstatfs(12<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(12<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(12<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(12<time:[4026532442]>)      = 0
+2810 openat(10</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 12</proc/2810/timens_offsets>
+2810 statx(12</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(12</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(12</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(12</proc/2810/timens_offsets>) = 0
+2810 readlinkat(11</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(11</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(11</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(11</proc/2810/ns>)          = 0
 2810  fcntl(10</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -1852,11 +1835,13 @@
 2810  fstatfs(10</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(10</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 11</proc/2810/ns>
 2810  fstatfs(11</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(11</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 12<time:[4026532442]>
-2810  fstatfs(12<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(12<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(12<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(12<time:[4026532442]>)      = 0
+2810 openat(10</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 12</proc/2810/timens_offsets>
+2810 statx(12</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(12</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(12</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(12</proc/2810/timens_offsets>) = 0
+2810 readlinkat(11</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(11</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(11</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(11</proc/2810/ns>)          = 0
 2810  fcntl(10</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -1871,11 +1856,13 @@
 2810  fstatfs(10</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(10</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 11</proc/2810/ns>
 2810  fstatfs(11</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(11</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 12<time:[4026532442]>
-2810  fstatfs(12<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(12<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(12<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(12<time:[4026532442]>)      = 0
+2810 openat(10</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 12</proc/2810/timens_offsets>
+2810 statx(12</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(12</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(12</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(12</proc/2810/timens_offsets>) = 0
+2810 readlinkat(11</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(11</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(11</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(11</proc/2810/ns>)          = 0
 2810  fcntl(10</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2158,11 +2145,13 @@
 2810  fstatfs(10</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(10</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 11</proc/2810/ns>
 2810  fstatfs(11</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(11</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 12<time:[4026532442]>
-2810  fstatfs(12<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(12<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(12<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(12<time:[4026532442]>)      = 0
+2810 openat(10</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 12</proc/2810/timens_offsets>
+2810 statx(12</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(12</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(12</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(12</proc/2810/timens_offsets>) = 0
+2810 readlinkat(11</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(11</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(11</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(11</proc/2810/ns>)          = 0
 2810  fcntl(10</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2202,11 +2191,13 @@
 2810  fstatfs(11</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(11</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 12</proc/2810/ns>
 2810  fstatfs(12</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(12</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 13<time:[4026532442]>
-2810  fstatfs(13<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(13<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(13<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(13<time:[4026532442]>)      = 0
+2810 openat(11</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 13</proc/2810/timens_offsets>
+2810 statx(13</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(13</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(13</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(13</proc/2810/timens_offsets>) = 0
+2810 readlinkat(12</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(12</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(12</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(12</proc/2810/ns>)          = 0
 2810  fcntl(11</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2222,11 +2213,13 @@
 2810  fstatfs(11</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(11</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 12</proc/2810/ns>
 2810  fstatfs(12</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(12</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 13<time:[4026532442]>
-2810  fstatfs(13<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(13<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(13<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(13<time:[4026532442]>)      = 0
+2810 openat(11</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 13</proc/2810/timens_offsets>
+2810 statx(13</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(13</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(13</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(13</proc/2810/timens_offsets>) = 0
+2810 readlinkat(12</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(12</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(12</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(12</proc/2810/ns>)          = 0
 2810  fcntl(11</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2253,11 +2246,13 @@
 2810  fstatfs(12</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(12</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 13</proc/2810/ns>
 2810  fstatfs(13</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(13</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 14<time:[4026532442]>
-2810  fstatfs(14<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(14<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(14<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(14<time:[4026532442]>)      = 0
+2810 openat(12</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 14</proc/2810/timens_offsets>
+2810 statx(14</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(14</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(14</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(14</proc/2810/timens_offsets>) = 0
+2810 readlinkat(13</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(13</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(13</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(13</proc/2810/ns>)          = 0
 2810  fcntl(12</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2298,11 +2293,13 @@
 2810  fstatfs(14</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(14</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 15</proc/2810/ns>
 2810  fstatfs(15</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(15</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 16<time:[4026532442]>
-2810  fstatfs(16<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(16<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(16<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(16<time:[4026532442]>)      = 0
+2810 openat(14</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 16</proc/2810/timens_offsets>
+2810 statx(16</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(16</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(16</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(16</proc/2810/timens_offsets>) = 0
+2810 readlinkat(15</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(15</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(15</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(15</proc/2810/ns>)          = 0
 2810  fcntl(14</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2317,11 +2314,13 @@
 2810  fstatfs(14</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(14</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 15</proc/2810/ns>
 2810  fstatfs(15</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(15</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 16<time:[4026532442]>
-2810  fstatfs(16<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(16<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(16<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(16<time:[4026532442]>)      = 0
+2810 openat(14</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 16</proc/2810/timens_offsets>
+2810 statx(16</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(16</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(16</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(16</proc/2810/timens_offsets>) = 0
+2810 readlinkat(15</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(15</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(15</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(15</proc/2810/ns>)          = 0
 2810  fcntl(14</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -2664,15 +2663,15 @@
 2812  <... read resumed>"c406bbd40000-c406bc108000 r-xp 00000000 00:2a 5803504                    /home/USER/target/debug/bingsu\nc406bc11a000-c406bc140000 r--p 003ca000 00:2a 5803504                    /home/USER/target/debug/bingsu\nc406bc140000-c406bc141000 rw-p 003f0000 00:2a 5803504                    /home/USER/target/debug/bingsu\nc406e9a50000-c406e9a71000 rw-p 00000000 00:00 0                          [heap]\ne018f5540000-e018f56cc000 r-xp 00000000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\ne018f56cc000-e018f56dc000 ---p 0018c000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\ne018f56dc000-e018f56e0000 r--p 0018c000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\ne018f56e0000-e018f56e2000 rw-p 00190000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\ne018f56e2000-e018f56ef000 rw-p 00000000 00:00 0 \ne018f56f0000-e018f5704000 r-xp 00000000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\ne018f5704000-e018f571f0", 1024) = 1024
 2810  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2812  read(6</proc/2812/maps>,  <unfinished ...>
-2810  openat(15</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC <unfinished ...>
+2810 openat(14</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 16</proc/2810/timens_offsets>
+2810 statx(16</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(16</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(16</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(16</proc/2810/timens_offsets>) = 0
+2810 readlinkat(15</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(15</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2812  <... read resumed>"00 ---p 00014000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\ne018f571f000-e018f5720000 r--p 0001f000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\ne018f5720000-e018f5721000 rw-p 00020000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\ne018f5727000-e018f574e000 r-xp 00000000 00:2a 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\ne018f575b000-e018f575d000 rw-p 00000000 00:00 0 \ne018f5760000-e018f5762000 rw-p 00000000 00:00 0 \ne018f5762000-e018f5764000 r--p 00000000 00:00 0                          [vvar]\ne018f5764000-e018f5765000 r-xp 00000000 00:00 0                          [vdso]\ne018f5765000-e018f5767000 r--p 0002e000 00:2a 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\ne018f5767000-e018f5769000 rw-p 00030000 00:2a 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nfffff097c000-fffff099d000 rw-p 00000000 00:00 0                          [stack]\n", 1024) = 1024
-2810  <... openat resumed>)             = 16<time:[4026532442]>
-2810  fstatfs(16<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(16<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
 2812  close(6</proc/2812/maps> <unfinished ...>
-2810  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(16<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(16<time:[4026532442]>)      = 0
 2810  fcntl(15</proc/2810/ns>, F_GETFD <unfinished ...>
 2812  <... close resumed>)              = 0
 2810  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
@@ -3184,11 +3183,13 @@
 2810  fstatfs(23</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(23</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 24</proc/2810/ns>
 2810  fstatfs(24</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(24</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 25<time:[4026532442]>
-2810  fstatfs(25<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(25<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(25<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(25<time:[4026532442]>)      = 0
+2810 openat(23</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 25</proc/2810/timens_offsets>
+2810 statx(25</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(25</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(25</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(25</proc/2810/timens_offsets>) = 0
+2810 readlinkat(24</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(24</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(24</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(24</proc/2810/ns>)          = 0
 2810  fcntl(23</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)
@@ -3227,11 +3228,13 @@
 2810  fstatfs(23</proc/2810>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
 2810  openat(23</proc/2810>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 24</proc/2810/ns>
 2810  fstatfs(24</proc/2810/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
-2810  openat(24</proc/2810/ns>, "time", O_RDONLY|O_CLOEXEC) = 25<time:[4026532442]>
-2810  fstatfs(25<time:[4026532442]>, {f_type=NSFS_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x4, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID}) = 0
-2810  statx(25<time:[4026532442]>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
-2810  fcntl(25<time:[4026532442]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
-2810  close(25<time:[4026532442]>)      = 0
+2810 openat(23</proc/2810>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 25</proc/2810/timens_offsets>
+2810 statx(25</proc/2810/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+2810 fstatfs(25</proc/2810/timens_offsets>, {f_type=PROC_SUPER_MAGIC}) = 0
+2810 fcntl(25</proc/2810/timens_offsets>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2810 close(25</proc/2810/timens_offsets>) = 0
+2810 readlinkat(24</proc/2810/ns>, "time", "time:[4026532442]", 28) = 17
+2810 readlinkat(24</proc/2810/ns>, "time_for_children", "time:[4026532442]", 28) = 17
 2810  fcntl(24</proc/2810/ns>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
 2810  close(24</proc/2810/ns>)          = 0
 2810  fcntl(23</proc/2810>, F_GETFD)    = 0x1 (flags FD_CLOEXEC)

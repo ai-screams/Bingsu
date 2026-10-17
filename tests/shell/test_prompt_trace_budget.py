@@ -172,6 +172,17 @@ def valid_trace():
         '11 openat(AT_FDCWD, "/dev/null", O_RDWR) = 0</dev/null>',
         '11 execve("/pinned/bin/bingsu", ["/pinned/bin/bingsu", "__refresh-v1", "--ctx", "1"], 0x2 /* 0 vars */) = 0',
         '10 <... clone resumed>) = 11',
+        '10 openat(AT_FDCWD, "/", O_RDONLY|O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 20</>',
+        '10 openat(20</>, "proc", O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 21</proc>',
+        '10 openat(21</proc>, "10", O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 22</proc/10>',
+        '10 openat(22</proc/10>, "ns", O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 23</proc/10/ns>',
+        '10 fstatfs(23</proc/10/ns>, {f_type=PROC_SUPER_MAGIC}) = 0',
+        '10 readlinkat(23</proc/10/ns>, "time", "time:[4026531834]", 28) = 17',
+        '10 readlinkat(23</proc/10/ns>, "time_for_children", "time:[4026531834]", 28) = 17',
+        '10 close(23</proc/10/ns>) = 0',
+        '10 close(22</proc/10>) = 0',
+        '10 close(21</proc>) = 0',
+        '10 close(20</>) = 0',
         '10 prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {len=42, filter=0x1}) = 0',
         '10 write(1</dev/null>, "B1\\37...", 16) = 16',
         '10 exit_group(0) = ?',
@@ -185,7 +196,8 @@ def valid_trace():
         '11 openat(AT_FDCWD, "/proc/self/statm", O_RDONLY) = 3</proc/11/statm>',
         '11 openat(AT_FDCWD, "/proc/self", O_RDONLY|O_DIRECTORY) = 8</proc/11>',
         '11 openat(8</proc/11>, "ns", O_RDONLY|O_DIRECTORY) = 9</proc/11/ns>',
-        '11 openat(9</proc/11/ns>, "time", O_RDONLY) = 10<time:[4026531834]>',
+        '11 readlinkat(9</proc/11/ns>, "time", "time:[4026531834]", 28) = 17',
+        '11 readlinkat(9</proc/11/ns>, "time_for_children", "time:[4026531834]", 28) = 17',
         '11 openat(AT_FDCWD, "/proc/sys/kernel/random/boot_id", O_RDONLY) = 3</proc/sys/kernel/random/boot_id>',
         '11 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0) = 3<UNIX-STREAM:[1]>',
         '11 connect(3<UNIX-STREAM:[1]>, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)',
@@ -373,7 +385,7 @@ def held_trace():
 
 @pytest.fixture(scope="module")
 def n4_real_trace():
-    """Real non-root debug capture at 4371ab3 with only documented fd fixes
+    """Real non-root debug capture at 4371ab3 with documented fd/link fixes
     projected (see fixtures/prompt-n4-trace.md); not a post-fix execution.
     """
     return Path(__file__).with_name("fixtures").joinpath(
@@ -385,9 +397,14 @@ def test_real_n4_debian_prompt_trace(n4_real_trace):
     assert_prompt_trace_budget(n4_real_trace, DEBIAN_EXE, DEBIAN_ROOTS)
     pids, scoped = budget.tree(n4_real_trace, DEBIAN_EXE)
     assert pids == {"2809", "2810", "2811", "2812", "2813"}
-    assert len(n4_real_trace) == 3317
+    assert len(n4_real_trace) == 3320
     calls = budget.parse_trace("\n".join(scoped))
-    assert len(calls) == 2449
+    assert len(calls) == 2473
+    links = [c for c in calls if c.name == "readlinkat"]
+    assert sum(c.pid == 2809 for c in links) == 2
+    assert sum(c.pid == 2810 for c in links) == 32
+    assert not any(c.name == "openat" and budget.args_of(c)[1] in {'"time"', '"time_for_children"'}
+                   for c in calls)
     assert any(c.pid == 2809 and c.name == "openat" and '"contexts-v2"' in c.args
                and c.ret.startswith("-1 ENOENT") for c in calls)
     assert any(c.pid == 2810 and c.name == "renameat" and '"snapshot"' in c.args for c in calls)
@@ -406,7 +423,7 @@ def test_held_snapshot_contract(held_trace):
     assert_prompt_trace_budget(held_trace, EXE, ROOTS)
 
 
-@pytest.mark.parametrize("name", ["fcntl", "openat", "fstat", "fstatfs", "fgetxattr", "getuid", "getpid", "lseek", "pread64", "readv"])
+@pytest.mark.parametrize("name", ["fcntl", "openat", "readlinkat", "fstat", "fstatfs", "fgetxattr", "getuid", "getpid", "lseek", "pread64", "readv"])
 def test_held_trace_rejects_every_non_table_call_after_filter(held_trace, name):
     # A path operation is refused even if it would name an otherwise approved file.
     extra = f'10 {name}(3, "snapshot", 0) = -1 EPERM (Operation not permitted)'
@@ -513,7 +530,7 @@ def test_real_n4_rejects_kernel_walk_held_after_filter(n4_real_trace):
 
 
 @pytest.mark.parametrize("old,new", [
-    ('"time", O_RDONLY', '"mnt", O_RDONLY'),
+    ('"time", "time:', '"mnt", "time:'),
     ('"2809", O_RDONLY', '"999", O_RDONLY'),
 ])
 def test_real_n4_rejects_kernel_path_expansion(n4_real_trace, old, new):
@@ -521,3 +538,70 @@ def test_real_n4_rejects_kernel_path_expansion(n4_real_trace, old, new):
     assert changed != n4_real_trace
     with pytest.raises(AssertionError, match="root path"):
         assert_prompt_trace_budget(changed, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+# Each new allowance is needed by both adapters, but only for the exact
+# relative namespace names and bounded buffer. Link output is not a pathname.
+@pytest.mark.parametrize("pid", [10, 11])
+@pytest.mark.parametrize("old,new", [
+    ('"time",', '"mnt",'),
+    ('"time_for_children",', '"mnt",'),
+    ('/ns>', '/other>'),
+    ('"time",', '"../ns/time",'),
+    (', 28)', ', 29)'),
+])
+def test_namespace_readlink_scope(pid, old, new):
+    lines = valid_trace()
+    changed = [line.replace(old, new) if line.startswith(f"{pid} readlinkat(") else line
+               for line in lines]
+    assert changed != lines
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("pid", [10, 11])
+def test_namespace_readlink_needs_allowance(monkeypatch, pid):
+    original = budget.time_namespace_readlink
+    monkeypatch.setattr(budget, "time_namespace_readlink", lambda call, path, owner:
+                        call.pid != pid and original(call, path, owner))
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(valid_trace(), EXE, ROOTS)
+
+
+@pytest.mark.parametrize("call", [
+    'newfstatat(23</proc/10/ns>, "time", {}, 28)',
+    'readlinkat(23</proc/10/ns>, "/proc/10/ns/time", "time:[123]", 28)',
+    'openat(23</proc/10/ns>, "time", O_RDONLY|O_CLOEXEC)',
+    'readlinkat(23</proc/999/ns>, "time", "time:[123]", 28)',
+])
+def test_root_refuses_namespace_open_or_nonrelative_readlink(call):
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if '10 readlinkat(' in line)
+    lines[at] = f'10 {call} = -1 EACCES (Permission denied)'
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("missing", ['10 fstatfs(23', '10 openat(22'])
+def test_root_namespace_link_requires_observed_held_directory(missing):
+    lines = [line for line in valid_trace() if not line.startswith(missing)]
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_root_namespace_link_rejects_wrong_held_file():
+    lines = [
+        '10 openat(22</proc/10>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 23</proc/10/timens_offsets>'
+        if line.startswith('10 openat(22') else line for line in valid_trace()
+    ]
+    # The same fd has filesystem evidence, but it was not opened as ns.
+    with pytest.raises(AssertionError, match="root namespace walk"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_root_namespace_link_is_prefilter_only():
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if '10 readlinkat(' in line)
+    lines.append(lines.pop(at))
+    with pytest.raises(AssertionError, match="post-filter syscall"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)

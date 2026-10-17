@@ -495,7 +495,6 @@ def prompt_open(call, path, pinned, root):
     dirs, files = prompt_sources(pinned)
     process = f"/proc/{root}"
     kernel_dirs = {"/proc", process, process + "/ns", "/proc/sys", "/proc/sys/kernel", "/proc/sys/kernel/random"}
-    namespace = {process + "/ns/time", process + "/ns/time_for_children"}
     kernel_files = {process + "/timens_offsets", "/proc/sys/kernel/random/boot_id"}
     if path == "/":
         shape = bool(re.fullmatch(r"AT_FDCWD(?:</[^<>]*>)?", args[0])) and args[1] == '"/"'
@@ -510,11 +509,19 @@ def prompt_open(call, path, pinned, root):
         return flags == {"O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"}
     if path in files:
         return flags == {"O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"}
-    if path in namespace:
-        return flags == {"O_RDONLY", "O_CLOEXEC"}  # verified nsfs magic links only
     if path in kernel_files:
         return flags == {"O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC"}
     return False
+
+
+def time_namespace_readlink(call, path, owner):
+    # The procfs walk is checked by the adapters. Read only these two links,
+    # relative to the current process's ns fd, with the parser's 27+1 bound.
+    # No nsfs target open/stat permission is needed in an unprivileged userns.
+    return (call.name == "readlinkat"
+            and path in {f"/proc/{owner}/ns/time", f"/proc/{owner}/ns/time_for_children"}
+            and descriptor_child(call, path)
+            and args_of(call)[3] == "28")
 
 
 def prompt_root_io(front, boundary, exe, pinned, root):
@@ -549,7 +556,12 @@ def prompt_root_io(front, boundary, exe, pinned, root):
                       and args[1:] == ['"system.posix_acl_access"', "NULL", "0"])
             system = path == exe and c.name == "execve" or bool(SYSTEM_PATHS.fullmatch(path))
             empty_stat = path == "" and c.name in {"newfstatat", "statx"} and "AT_EMPTY_PATH" in c.args
-            assert (system or bootstrap or acl_ok or empty_stat or prompt_open(c, path, pinned, root)), ("root path", c, path)
+            assert (system or bootstrap or acl_ok or empty_stat or prompt_open(c, path, pinned, root)
+                    or time_namespace_readlink(c, path, root)), ("root path", c, path)
+        if c.name == "readlinkat":
+            fd = int(args[0].split("<")[0])
+            assert (held.get(fd) == (f"/proc/{root}/ns", True)
+                    and fd in fs_observed), ("root namespace walk", c)
         if c.name in OPENS and paths:
             result = re.match(r"(\d+)(?:<.*>)?$", c.ret)
             if result:
@@ -663,6 +675,10 @@ def assert_prompt_trace_budget(lines, exe, pinned):
             assert c.ret.startswith(("-1 ENOENT", "-1 ECONNREFUSED")), ("unexpected NSS daemon", c)
         # 이것을 실패시키는 것: helper/collector가 pinned roots 밖의 repo·상대 경로·임의 시스템 파일에 접근하는 것.
         for path in call_paths(c) + content_paths(c):
+            # Historical N3 captures still contain namespace opens. New link
+            # reads get this exact budget, never the broad legacy proc allowance.
+            if c.name in {"readlink", "readlinkat"}:
+                assert time_namespace_readlink(c, path, owners[c.pid]), ("helper namespace link", c)
             # -y resolves /proc/self dirfds to /proc/<tgid>. Only this
             # process's numeric spelling is equivalent, not another PID's.
             own_proc = f"/proc/{owners[c.pid]}"

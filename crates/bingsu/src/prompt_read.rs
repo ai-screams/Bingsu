@@ -273,7 +273,8 @@ fn held(fd: PromptFd) -> std::io::Result<Held> {
 #[derive(Default)]
 struct ClockPins {
     identity: Option<Clock>,
-    // Keep the kernel observations alive across the filter and both clock samples.
+    // Keep ordinary kernel files alive across the filter and both samples.
+    // Namespace links are observed before the filter and retain no target fd.
     #[cfg(target_os = "linux")]
     fds: Vec<Held>,
 }
@@ -327,7 +328,8 @@ impl ClockPins {
             .map_err(|_| ClockError::Domain)?;
         let proc = self.last();
         // /proc/self is a symlink. Its numeric spelling identifies only this
-        // process, so the walk never follows it (the only follows are nsfs below).
+        // process, so the walk never follows it. Namespace targets are readlinkat
+        // observations below, not followed opens into the parent userns's nsfs.
         // SAFETY: getpid has no preconditions and runs before the filter.
         let pid =
             CString::new(unsafe { libc::getpid() }.to_string()).map_err(|_| ClockError::Domain)?;
@@ -337,14 +339,8 @@ impl ClockPins {
         self.kernel(process, c"ns", dir, procfs)
             .map_err(|_| ClockError::Domain)?;
         let ns = self.last();
-        let time = self.kernel(ns, c"time", libc::O_RDONLY, 0x6e736673);
-        let child = self.kernel(ns, c"time_for_children", libc::O_RDONLY, 0x6e736673);
         let offsets = self.kernel(process, c"timens_offsets", file, procfs);
-        let domain = crate::prompt_io::time_domain(
-            time.map(|f| (f.entry.dev, f.entry.ino)),
-            child.map(|_| ()),
-            offsets.map(|_| ()),
-        )?;
+        let domain = crate::prompt_io::time_namespace_domain(ns, offsets.map(|_| ()))?;
         let mut base = proc;
         for name in [c"sys", c"kernel", c"random"] {
             self.kernel(base, name, dir, procfs)
@@ -859,18 +855,18 @@ mod tests {
     #[test]
     fn native_publisher_reader_identity_agrees_and_walk_fds_are_closed() {
         let reader = ClockPins::prepare();
-        let publisher = crate::prompt_io::observe_clock().ok();
+        let publisher = crate::prompt_io::observe_clock().expect("publisher clock observation");
         let identity = |c: Clock| (c.boot, c.domain, c.kind, c.resume);
-        assert_eq!(reader.identity.map(identity), publisher.map(identity));
+        assert_eq!(
+            identity(reader.identity.expect("reader clock observation")),
+            identity(publisher)
+        );
         assert!(
             reader
                 .fds
                 .iter()
                 .all(|h| h.facts.entry.mode & 0o170000 == 0o100000)
         );
-        if reader.identity.is_none() {
-            assert!(reader.fds.is_empty());
-        }
     }
     #[test]
     fn colorfgbg_reaches_snapshot_and_default_rendering() {
