@@ -76,7 +76,8 @@ fn append(
     let dir = chain.last();
     let lock = sys::open_lock_at(dir.as_fd(), OsStr::new("log.lock"))?;
     checked(&lock, 0, me)?;
-    sys::try_lock(&lock).map_err(super::snapshot_store::lock_error)?;
+    // Held until return; dropping it unlocks explicitly (FileLock).
+    let _held = sys::try_lock(lock).map_err(super::snapshot_store::lock_error)?;
     let mut sizes = [0; 3];
     let mut exists = [false; 3];
     for (i, name) in NAMES.iter().enumerate() {
@@ -118,6 +119,8 @@ fn append(
     if size + bytes.len() > FILE_MAX {
         return Err(StoreError::Unsafe);
     }
+    #[cfg(test)]
+    super::n3_test::observe_lock_scope();
     if !matches!(
         sys::write_fd(file.as_raw_fd(), &bytes),
         sys::WriteOutcome::Done
@@ -135,6 +138,43 @@ mod tests {
         fs,
         os::unix::fs::{PermissionsExt, symlink},
     };
+    // 이것을 실패시키는 것: 쓰기 전에 guard를 버리거나 close에만 잠금 해제를 맡기는 것.
+    #[test]
+    fn log_guard_covers_write_and_unlocks_with_inherited_descriptors() {
+        let base = std::env::temp_dir().join(format!("bingsu-n3-log-lock-{}", std::process::id()));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let base = fs::canonicalize(base).unwrap();
+        let root = base.join("log");
+        let inherited = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let child = inherited.clone();
+        let lock_path = root.join("log.lock");
+        super::super::n3_test::on_lock_scope(move || {
+            *child.borrow_mut() = Some(sys::PausedFork::new());
+            assert!(matches!(
+                sys::try_lock(File::open(lock_path).unwrap()),
+                Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK)
+            ));
+        });
+        append(
+            Some(&root),
+            sys::current_uid(),
+            &mut RefuseGroupWrite,
+            "one",
+        )
+        .unwrap();
+        assert!(inherited.borrow().is_some());
+        append(
+            Some(&root),
+            sys::current_uid(),
+            &mut RefuseGroupWrite,
+            "two",
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join(NAMES[0])).unwrap(), b"one\ntwo\n");
+        drop(inherited);
+        fs::remove_dir_all(base).unwrap();
+    }
     // 이것을 실패시키는 것: off·수준 필터를 무시하거나 경로/파일 신뢰·크기·회전 검사를 빼는 것.
     #[test]
     fn bounded_logs_refuse_path_attacks_and_off_does_no_io() {

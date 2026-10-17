@@ -1,5 +1,21 @@
 //! Test-only native spawn probe compilation.
 use std::{path::PathBuf, process::Command};
+
+thread_local! {
+    static LOCK_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+pub fn on_lock_scope(observer: impl FnOnce() + 'static) {
+    LOCK_OBSERVER.with(|slot| {
+        assert!(slot.borrow_mut().replace(Box::new(observer)).is_none());
+    });
+}
+pub fn observe_lock_scope() {
+    let observer = LOCK_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer();
+    }
+}
 pub fn probe(tag: &str) -> (PathBuf, PathBuf) {
     let base = std::env::temp_dir().join(format!("bingsu-n3-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&base).unwrap();

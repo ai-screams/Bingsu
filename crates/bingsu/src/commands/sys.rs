@@ -1047,6 +1047,17 @@ pub fn open_lock_at(
 /// retain the open-file description after our File closes. Explicit unlock
 /// releases the shared flock even while those references remain alive.
 pub struct FileLock(std::fs::File);
+impl FileLock {
+    /// After a successful spawn, transfer unlock responsibility to the child
+    /// sharing this open-file description. The child must own a FileLock;
+    /// closing this parent's copy must not unlock the child's critical section.
+    pub fn into_inherited_file(self) -> std::fs::File {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop suppresses this guard's unlock and File drop.
+        // The owned File is moved out exactly once, with no remaining owner here.
+        unsafe { std::ptr::read(&this.0) }
+    }
+}
 impl std::ops::Deref for FileLock {
     type Target = std::fs::File;
 

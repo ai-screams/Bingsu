@@ -38,11 +38,12 @@ pub fn spawn(
     }
     let lock = sys::open_lock_at(dir.as_fd(), OsStr::new("collection.lock"))?;
     checked(&lock, 0, me)?;
-    match sys::try_lock(&lock) {
-        Ok(()) => {}
+    // Hold through request staging and spawn; errors explicitly unlock.
+    let lock = match sys::try_lock(lock) {
+        Ok(held) => held,
         Err(e) if matches!(e.raw_os_error(), Some(libc::EWOULDBLOCK)) => return Ok(()),
         Err(e) => return Err(e.into()),
-    }
+    };
     let staging = OsStr::new(".stage-request");
     match sys::open_data_at_nofollow(dir.as_fd(), staging) {
         Ok(old) => {
@@ -67,8 +68,11 @@ pub fn spawn(
     }
     drop(writable);
     sys::unlink_at(dir.as_fd(), staging)?;
+    #[cfg(test)]
+    super::n3_test::observe_lock_scope();
     spawn_fds(exe, [&readonly, &dir, &lock])?;
-    // Close local lock copy, never LOCK_UN: the child owns the same description.
+    // Only a successful spawn transfers unlock responsibility to the child.
+    drop(lock.into_inherited_file());
     Ok(())
 }
 fn spawn_fds(exe: &OsStr, files: [&File; 3]) -> Result<(), StoreError> {
@@ -206,6 +210,13 @@ fn stub() -> Result<(), StoreError> {
     let dir = unsafe { File::from_raw_fd(4) };
     // SAFETY: checked open fd, transferred once to File.
     let lock = unsafe { File::from_raw_fd(5) };
+    stub_files(request, dir, lock)
+}
+fn stub_files(request: File, dir: File, lock: File) -> Result<(), StoreError> {
+    // Re-locking the inherited open-file description adopts the parent's lock.
+    // Keep the guard even on validation errors, so inherited copies cannot
+    // extend this worker's critical section after it returns.
+    let lock = sys::try_lock(lock).map_err(super::snapshot_store::lock_error)?;
     let me = sys::current_uid();
     let md = request.metadata()?;
     // SAFETY: read-only flag query on live request fd.
@@ -307,16 +318,65 @@ mod tests {
         // SAFETY: duplicate live fd, deliberately without CLOEXEC.
         let high = unsafe { libc::fcntl(context.dir.as_raw_fd(), libc::F_DUPFD, 1025) };
         assert!(high >= 1025);
+        // A failed spawn must unlock even if another child inherited the fd.
+        let inherited = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let child = inherited.clone();
+        let lock_path = path.join("collection.lock");
+        super::super::n3_test::on_lock_scope(move || {
+            *child.borrow_mut() = Some(sys::PausedFork::new());
+            assert!(matches!(
+                sys::try_lock(File::open(lock_path).unwrap()),
+                Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK)
+            ));
+        });
+        assert!(
+            spawn(
+                base.join("missing-executable").as_os_str(),
+                &context,
+                &request,
+                sys::current_uid()
+            )
+            .is_err()
+        );
+        assert!(inherited.borrow().is_some());
+        drop(sys::try_lock(File::open(path.join("collection.lock")).unwrap()).unwrap());
+        // SAFETY: isolated test process; let PausedFork reap its own child.
+        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
+        drop(inherited);
+
+        // The real worker must explicitly unlock both success and error paths,
+        // including when a duplicated description remains open elsewhere.
+        let request_path = path.join("worker-request");
+        std::fs::write(&request_path, request.encode().unwrap()).unwrap();
+        std::fs::set_permissions(&request_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let readonly = File::open(&request_path).unwrap();
+        std::fs::remove_file(&request_path).unwrap();
+        for request_file in [readonly, File::open(&exe).unwrap()] {
+            let lock = sys::try_lock(File::open(path.join("collection.lock")).unwrap()).unwrap();
+            let inherited = lock.try_clone().unwrap();
+            let valid = request_file.metadata().unwrap().nlink() == 0;
+            assert_eq!(
+                stub_files(
+                    request_file,
+                    File::open(&path).unwrap(),
+                    lock.into_inherited_file()
+                )
+                .is_ok(),
+                valid
+            );
+            drop(sys::try_lock(File::open(path.join("collection.lock")).unwrap()).unwrap());
+            drop(inherited);
+        }
         spawn(exe.as_os_str(), &context, &request, sys::current_uid()).unwrap();
         let report = super::super::n3_test::wait_report(&path.join("probe"));
         assert_eq!(&report[..5], &[6, 0, libc::O_RDONLY, 1, 1]);
         assert_eq!(report[6], 0);
         assert!(!path.join(".stage-request").exists());
         let lock = File::open(path.join("collection.lock")).unwrap();
-        assert_eq!(
-            sys::try_lock(&lock).unwrap_err().raw_os_error(),
-            Some(libc::EWOULDBLOCK)
-        );
+        assert!(matches!(
+            sys::try_lock(lock),
+            Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK)
+        ));
         // Busy must not replace the request or create another collector.
         spawn(exe.as_os_str(), &context, &request, sys::current_uid()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
