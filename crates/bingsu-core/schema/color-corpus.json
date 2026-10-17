@@ -1,0 +1,278 @@
+[
+  [
+    "#000000",
+    true
+  ],
+  [
+    "#ffffff",
+    true
+  ],
+  [
+    "#8FB8f0",
+    true
+  ],
+  [
+    "16",
+    true
+  ],
+  [
+    "255",
+    true
+  ],
+  [
+    "208",
+    true
+  ],
+  [
+    "term.ansi.0",
+    true
+  ],
+  [
+    "term.ansi.9",
+    true
+  ],
+  [
+    "term.ansi.15",
+    true
+  ],
+  [
+    "oklch(0 0 0)",
+    true
+  ],
+  [
+    "oklch(1 0.5 360)",
+    true
+  ],
+  [
+    "oklch(100% 0.5 360)",
+    true
+  ],
+  [
+    "oklch(78% 0.12 60)",
+    true
+  ],
+  [
+    "oklch( 0.5   0.1  2 )",
+    true
+  ],
+  [
+    "oklch(0001 00.50 0360.00)",
+    true
+  ],
+  [
+    "oklch(000100% 0 0)",
+    true
+  ],
+  [
+    "oklch(0.0000000001 0.0000000001 0.0000000001)",
+    true
+  ],
+  [
+    "oklch(000000000001 0 000000000360)",
+    true
+  ],
+  [
+    "oklch(0.9999999999 0.4999999999 359.99999999)",
+    true
+  ],
+  [
+    "oklch(100.00000000% 0.5000000000 360.00000000)",
+    true
+  ],
+  [
+    "blue",
+    false
+  ],
+  [
+    "",
+    false
+  ],
+  [
+    "#fff",
+    false
+  ],
+  [
+    "#8fb8fg",
+    false
+  ],
+  [
+    "#8fb8f00",
+    false
+  ],
+  [
+    "#+1+2+3",
+    false
+  ],
+  [
+    "#\u00e9\u00e9\u00e9",
+    false
+  ],
+  [
+    "0",
+    false
+  ],
+  [
+    "15",
+    false
+  ],
+  [
+    "256",
+    false
+  ],
+  [
+    "016",
+    false
+  ],
+  [
+    "+16",
+    false
+  ],
+  [
+    "1000",
+    false
+  ],
+  [
+    "term.ansi.",
+    false
+  ],
+  [
+    "term.ansi.16",
+    false
+  ],
+  [
+    "term.ansi.255",
+    false
+  ],
+  [
+    "term.ansi.256",
+    false
+  ],
+  [
+    "term.ansi.01",
+    false
+  ],
+  [
+    "term.ansi.+1",
+    false
+  ],
+  [
+    "term.ansi.99999999999",
+    false
+  ],
+  [
+    "oklch(1.01 0 0)",
+    false
+  ],
+  [
+    "oklch(101% 0 0)",
+    false
+  ],
+  [
+    "oklch(0 0.51 0)",
+    false
+  ],
+  [
+    "oklch(0 0 360.5)",
+    false
+  ],
+  [
+    "oklch(0 0.5000000001 0)",
+    false
+  ],
+  [
+    "oklch(1.0000000001 0 0)",
+    false
+  ],
+  [
+    "oklch(0 0 360.00000001)",
+    false
+  ],
+  [
+    "oklch(100.00000001% 0 0)",
+    false
+  ],
+  [
+    "oklch(0.00000000001 0 0)",
+    false
+  ],
+  [
+    "oklch(0 0000000000000 0)",
+    false
+  ],
+  [
+    "oklch(0 0 0000000000360)",
+    false
+  ],
+  [
+    "oklch(0 0 0 0)",
+    false
+  ],
+  [
+    "oklch(0 0)",
+    false
+  ],
+  [
+    "oklch(.5 0 0)",
+    false
+  ],
+  [
+    "oklch(0 0. 0)",
+    false
+  ],
+  [
+    "oklch(1e0 0 0)",
+    false
+  ],
+  [
+    "oklch(nan 0 0)",
+    false
+  ],
+  [
+    "oklch(inf 0 0)",
+    false
+  ],
+  [
+    "oklch(-0 0 0)",
+    false
+  ],
+  [
+    "oklch(+0 0 0)",
+    false
+  ],
+  [
+    "oklch(0\t0 0)",
+    false
+  ],
+  [
+    "oklch(0\n0 0)",
+    false
+  ],
+  [
+    "oklch(0\u00a00 0)",
+    false
+  ],
+  [
+    "oklch(0 0 0)\n",
+    false
+  ],
+  [
+    " #000000",
+    false
+  ],
+  [
+    "#000000\n",
+    false
+  ],
+  [
+    "term.ansi.0\n",
+    false
+  ],
+  [
+    "16\n",
+    false
+  ],
+  [
+    "OKLCH(0 0 0)",
+    false
+  ]
+]

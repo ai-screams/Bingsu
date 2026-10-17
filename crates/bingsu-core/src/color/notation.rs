@@ -19,12 +19,15 @@ pub enum ColorError {
     OutOfRange,
 }
 
-/// `[0-9]+ ( "." [0-9]+ )?`, at most 12 characters; no sign, exponent,
-/// `inf` or `nan`.
+/// Token bounds shared with the schema generator.
+pub(crate) const NUMBER_MAX: usize = 12;
+pub(crate) const HEX_DIGITS: usize = 6;
+
+/// `[0-9]+ ( "." [0-9]+ )?`; no sign, exponent, `inf` or `nan`.
 fn number(s: &str) -> Result<f64, ColorError> {
     let (int, frac) = s.split_once('.').unwrap_or((s, "0"));
     let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
-    if s.len() > 12 || !digits(int) || !digits(frac) {
+    if s.len() > NUMBER_MAX || !digits(int) || !digits(frac) {
         return Err(ColorError::Syntax);
     }
     s.parse::<f64>().map_err(|_| ColorError::Syntax)
@@ -32,7 +35,7 @@ fn number(s: &str) -> Result<f64, ColorError> {
 
 pub fn parse_color(s: &str) -> Result<ColorSpec, ColorError> {
     if let Some(hex) = s.strip_prefix('#') {
-        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if hex.len() != HEX_DIGITS || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(ColorError::Syntax);
         }
         let byte =

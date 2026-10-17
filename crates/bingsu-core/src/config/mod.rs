@@ -8,5 +8,6 @@ pub mod edit;
 pub mod keys;
 pub mod merge;
 pub mod report;
+pub mod schema;
 pub mod source;
 pub mod tree;
