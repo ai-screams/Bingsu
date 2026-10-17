@@ -18,11 +18,12 @@ CALL = b"_bingsu_call --width 80\n"
 
 
 def pinned_roots(trusted):
-    """The four root words init pins for `trusted` (same rule as test_init_words)."""
+    """The root words and original config spelling init pins for `trusted` (same rule as test_init_words)."""
     run_root = os.path.realpath(trusted["XDG_RUNTIME_DIR"] + "/bingsu")
     st = os.stat(run_root)
     return {
         b"--runtime-root=": f"--runtime-root={st.st_dev}:{st.st_ino}:{run_root}".encode(),
+        b"--config-root-written=": b"--config-root-written=" + (trusted["XDG_CONFIG_HOME"] + "/bingsu").encode(),
         b"--config-root=": b"--config-root=" + os.path.realpath(trusted["XDG_CONFIG_HOME"] + "/bingsu").encode(),
         b"--state-root=": b"--state-root=" + os.path.realpath(trusted["XDG_STATE_HOME"] + "/bingsu").encode(),
         b"--log-root=": b"--log-root=" + os.path.realpath(trusted["XDG_STATE_HOME"] + "/bingsu/log").encode(),
@@ -36,7 +37,7 @@ def export_line(shell, values):
     return "export " + " ".join(f"{k}='{v}'" for k, v in values.items())
 
 
-# 이것을 실패시키는 것: hook이 프롬프트 때 환경 변수로 뿌리를 만드는 것
+# 이것을 실패시키는 것: hook이 프롬프트 때 환경 변수로 뿌리 또는 설정 작성 경로를 만드는 것
 # (예: `@CONFIG_ROOT@` 대신 "--config-root=$XDG_CONFIG_HOME/bingsu", 세 셸 각각).
 @pytest.mark.parametrize("shell", SHELLS)
 def test_prompt_time_path_environment_does_not_change_pinned_root_args(tmp_path, shell):
