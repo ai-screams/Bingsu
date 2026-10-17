@@ -17,7 +17,6 @@ pub struct RuntimeRootPin {
     pub path: PathBuf,
     /// Ancestors whose group write was cleared by this walk (P-R1/S-8).
     /// N4 carries these pins to the front end, which never asks the system.
-    #[cfg_attr(not(test), expect(dead_code, reason = "N4 hook hand-off"))]
     pub group_ok: Vec<GroupPin>,
 }
 
@@ -107,7 +106,6 @@ impl ConfigRootPin {
     /// lower trust: a root init marked stays shape-only even when its chain
     /// is clean now, and a root that turned undecidable since becomes
     /// shape-only here.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Part N2 hand-off"))]
     pub fn reopen(
         written: &Path,
         canonical: &Path,

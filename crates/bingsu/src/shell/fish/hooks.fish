@@ -36,7 +36,24 @@ function _bingsu_call
         # An empty list: the quotes below make it one empty word.
         set _bingsu_pwd
     end
-    set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ | string collect -N)
+    set -l _bingsu_log off
+    switch "$BINGSU_LOG"
+        case error info debug
+            set _bingsu_log "$BINGSU_LOG"
+    end
+    set -l _bingsu_host "$hostname"
+    set -l _bingsu_venv "$VIRTUAL_ENV"
+    if test (_bingsu_bytes "$_bingsu_host") -gt 65536
+        set _bingsu_host
+    end
+    if test (_bingsu_bytes "$_bingsu_venv") -gt 65536
+        set _bingsu_venv
+    end
+    set -l _bingsu_ssh 0
+    if test -n "$SSH_CONNECTION"; or test -n "$SSH_TTY"
+        set _bingsu_ssh 1
+    end
+    set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ | string collect -N)
     if test $pipestatus[1] -ge 128
         set -g _bingsu_dead 1
     end

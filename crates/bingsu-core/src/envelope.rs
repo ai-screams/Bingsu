@@ -18,6 +18,26 @@ pub struct OwnedRuntimeRoot {
     pub path: Vec<u8>,
 }
 
+/// Optional ctx 1 field. Unknown values are deliberately quiet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LogLevel {
+    #[default]
+    Off,
+    Error,
+    Info,
+    DebugLog,
+}
+impl LogLevel {
+    pub fn parse(v: &[u8]) -> Self {
+        match v {
+            b"error" => Self::Error,
+            b"info" => Self::Info,
+            b"debug" => Self::DebugLog,
+            _ => Self::Off,
+        }
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Envelope {
     pub record: Option<RecordVersion>,
@@ -52,6 +72,11 @@ pub struct Envelope {
     pub truecolor: bool,
     /// `--home=<path>`, pinned by init from getpwuid.
     pub home: Option<Vec<u8>>,
+    pub runtime_groups: Vec<crate::fs_trust::GroupPin>,
+    pub log_level: LogLevel,
+    pub host: Option<Vec<u8>>,
+    pub venv: Option<Vec<u8>>,
+    pub ssh: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,6 +120,10 @@ fn pwd_or_unknown(v: &[u8]) -> Option<Vec<u8>> {
 
 /// Width comes from the terminal, which bingsu does not control: anything
 /// that is not a `u16` decimal means "width unknown" (0), not a bad argument.
+fn display_or_unknown(v: &[u8]) -> Option<Vec<u8>> {
+    (!v.is_empty() && v.len() <= PATH_BYTES_MAX).then(|| v.to_vec())
+}
+
 fn width_or_unknown(v: &[u8]) -> u16 {
     parse_decimal(v)
         .and_then(|n| u16::try_from(n).ok())
@@ -109,7 +138,7 @@ fn ext_name_ok(n: &[u8]) -> bool {
 }
 
 /// Flags that take the next word as their value (the two-word fields).
-fn is_value_flag(a: &[u8]) -> bool {
+pub(crate) fn is_value_flag(a: &[u8]) -> bool {
     matches!(
         a,
         b"--record"
@@ -126,6 +155,8 @@ fn is_value_flag(a: &[u8]) -> bool {
             | b"--shell"
             | b"--pwd"
             | b"--colorterm"
+            | b"--host"
+            | b"--venv"
     )
 }
 
@@ -184,9 +215,26 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
     };
     let (mut ctx, mut width, mut ext) = (None::<()>, None::<u16>, 0usize);
     let (mut pwd, mut colorterm) = (None::<Option<Vec<u8>>>, None::<bool>);
+    let (mut log_level, mut ssh, mut groups) = (None, None, None);
+    let (mut host, mut venv) = (None, None);
     let mut i = 0;
     while i < args.len() {
         let a = args[i];
+        if let Some(v) = a.strip_prefix(b"--log-level=") {
+            set_once(&mut log_level, LogLevel::parse(v))?;
+            i += 1;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix(b"--ssh=") {
+            set_once(&mut ssh, v == b"1")?;
+            i += 1;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix(b"--runtime-groups=") {
+            set_once(&mut groups, v)?;
+            i += 1;
+            continue;
+        }
         // One-word fields: `--name=value` (values may hold any byte).
         if let Some(v) = a.strip_prefix(RUNTIME_ROOT_PREFIX) {
             let r = parse_runtime_root(v).map_err(|_| EnvelopeError::BadArgs("runtime root"))?;
@@ -245,6 +293,8 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
                 let sh = Shell::parse(v).ok_or(EnvelopeError::BadArgs("shell"))?;
                 set_once(&mut e.shell, sh)?;
             }
+            b"--host" => set_once(&mut host, display_or_unknown(v))?,
+            b"--venv" => set_once(&mut venv, display_or_unknown(v))?,
             b"--pwd" => set_once(&mut pwd, pwd_or_unknown(v))?,
             b"--colorterm" => set_once(&mut colorterm, v == b"truecolor" || v == b"24bit")?,
             b"--pipestatus" => {
@@ -300,6 +350,18 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
     e.width = width.ok_or(EnvelopeError::BadArgs("width missing"))?;
     e.pwd = pwd.flatten();
     e.truecolor = colorterm.unwrap_or(false);
+    e.log_level = log_level.unwrap_or_default();
+    e.ssh = ssh.unwrap_or(false);
+    e.host = host.flatten();
+    e.venv = venv.flatten();
+    let components = e.runtime_root.as_ref().map_or(0, |r| {
+        r.path
+            .split(|b| *b == b'/')
+            .filter(|v| !v.is_empty())
+            .count()
+    });
+    e.runtime_groups = crate::helper::decode_groups(groups.unwrap_or(b"1"), components)
+        .map_err(|_| EnvelopeError::BadArgs("runtime groups"))?;
     Ok(e)
 }
 
@@ -388,6 +450,77 @@ mod tests {
     fn parse_strs(a: &[&str]) -> Result<Envelope, EnvelopeError> {
         let v: Vec<&[u8]> = a.iter().map(|x| x.as_bytes()).collect();
         parse(&v)
+    }
+
+    // 이것을 실패시키는 것: 선택 필드 정규화·값 소비·중복·64 KiB 상한을 생략하는 것.
+    #[test]
+    fn optional_prompt_fields() {
+        let base = [
+            b"--ctx".as_slice(),
+            b"1",
+            b"--record",
+            b"B1",
+            b"--width",
+            b"80",
+        ];
+        let old = parse(&base).unwrap();
+        assert_eq!(old.log_level, LogLevel::Off);
+        assert!(!old.ssh);
+        assert_eq!((old.host, old.venv), (None, None));
+        for (word, expected) in [
+            (b"--log-level=off".as_slice(), LogLevel::Off),
+            (b"--log-level=error", LogLevel::Error),
+            (b"--log-level=info", LogLevel::Info),
+            (b"--log-level=debug", LogLevel::DebugLog),
+            (b"--log-level=/tmp/log", LogLevel::Off),
+        ] {
+            let mut a = base.to_vec();
+            a.extend([
+                word,
+                b"--log-root=/pinned",
+                b"--host",
+                b"--record",
+                b"--venv",
+                b"a b",
+                b"--ssh=1",
+            ]);
+            let e = parse(&a).unwrap();
+            assert_eq!(e.log_level, expected);
+            assert_eq!(e.log_root.as_deref(), Some(b"/pinned".as_slice()));
+            assert_eq!(e.host.as_deref(), Some(b"--record".as_slice()));
+            assert_eq!(e.venv.as_deref(), Some(b"a b".as_slice()));
+            assert!(e.ssh);
+            a.push(word);
+            assert!(parse(&a).is_err());
+        }
+        for flag in [b"--host".as_slice(), b"--venv"] {
+            let mut a = base.to_vec();
+            a.extend([flag, b"", flag, b"x"]);
+            assert!(parse(&a).is_err());
+            a.truncate(base.len() + 2);
+            let empty = parse(&a).unwrap();
+            assert!(empty.host.is_none() && empty.venv.is_none());
+        }
+        for flag in [b"--host".as_slice(), b"--venv"] {
+            let limit = alloc::vec![b'x'; PATH_BYTES_MAX];
+            let mut at_limit = base.to_vec();
+            at_limit.extend([flag, limit.as_slice()]);
+            let accepted = parse(&at_limit).unwrap();
+            assert_eq!(
+                accepted.host.or(accepted.venv).unwrap().len(),
+                PATH_BYTES_MAX
+            );
+            let huge = alloc::vec![b'x'; PATH_BYTES_MAX + 1];
+            let mut a = base.to_vec();
+            a.extend([flag, huge.as_slice()]);
+            let e = parse(&a).unwrap();
+            assert!(e.host.is_none() && e.venv.is_none());
+        }
+        let mut a = base.to_vec();
+        a.extend([b"--ssh=unknown".as_slice()]);
+        assert!(!parse(&a).unwrap().ssh);
+        a.push(b"--ssh=1");
+        assert!(parse(&a).is_err());
     }
 
     const BASE: [&str; 6] = ["--ctx", "1", "--record", "B1", "--width", "80"];

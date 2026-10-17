@@ -692,10 +692,6 @@ pub fn open_file_at_nofollow(
 /// Creates `name` inside `dir` (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode
 /// `mode`) for writing. Applies the exact mode through the new fd, regardless
 /// of umask; an existing entry is never changed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
-)]
 pub fn create_file_at(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
@@ -719,10 +715,6 @@ pub fn create_file_at(
 }
 
 /// `renameat(dir, from, dir, to)`: replaces `to` atomically.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
-)]
 pub fn rename_at(
     dir: std::os::fd::BorrowedFd<'_>,
     from: &std::ffi::OsStr,
@@ -1070,4 +1062,15 @@ pub fn unlink_at(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::OsStr) -> st
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+pub fn open_append_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    open_at(
+        Some(dir),
+        name,
+        libc::O_WRONLY | libc::O_APPEND | libc::O_NONBLOCK,
+    )
 }

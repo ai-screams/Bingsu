@@ -1278,3 +1278,45 @@ fn selection_changes_and_late_contention_preserve_marker() {
         assert_eq!(f.bytes("marker"), marker);
     }
 }
+
+// 이것을 실패시키는 것: 검증 전 broker 호출·필터 실패 후 발행·broker 뒤 최종 재검증 생략.
+#[test]
+fn broker_runs_after_validation_before_final_revalidation() {
+    let fx = Fx::new("broker");
+    fx.put(COMMAND);
+    let mut calls = 0;
+    let result = refresh_broker(
+        fx.request.clone(),
+        &mut Fixed(clock()),
+        &mut |_, display, now| {
+            calls += 1;
+            let (config, id) = display.unwrap();
+            assert!(!config.exec_units.is_empty());
+            assert_eq!(id.generation, 1);
+            assert_eq!(now.boot, clock().boot);
+            Err(StoreError::Unsafe)
+        },
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(result, RefreshResult::Incomplete);
+    assert!(!fx.dir().join("marker").exists());
+    let result = refresh_broker(fx.request.clone(), &mut Fixed(clock()), &mut |_, _, _| {
+        fx.put("broken = [");
+        Ok(())
+    });
+    assert_eq!(result, RefreshResult::Incomplete);
+    assert!(!fx.dir().join("marker").exists());
+    fx.put(COMMAND);
+    published(fx.run());
+    let id = fx.snap().id;
+    fx.put("broken = [");
+    let result = refresh_broker(
+        fx.request.clone(),
+        &mut Fixed(clock()),
+        &mut |_, display, _| {
+            assert_eq!(display.unwrap().1, id);
+            Ok(())
+        },
+    );
+    assert_eq!(result, RefreshResult::Invalid);
+}

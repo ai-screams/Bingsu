@@ -13,6 +13,7 @@ use bingsu_core::status::Status;
 pub struct ScriptInputs<'a> {
     pub shell: Shell,
     pub exe: &'a [u8],
+    pub runtime_groups: &'a [bingsu_core::fs_trust::GroupPin],
     pub runtime_root: Option<(u64, u64, &'a [u8])>,
     /// `(canonical, written, shape_only)`. `None`: the path could not be
     /// confirmed; the words are left out. `shape_only` adds
@@ -60,6 +61,16 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
                 let mut v = format!("{dev}:{ino}:").into_bytes();
                 v.extend_from_slice(path);
                 prefixed(sh, RUNTIME_ROOT_PREFIX, &v, out);
+            }
+        }
+        b"RUNTIME_GROUPS" => {
+            if inp.runtime_root.is_some() {
+                prefixed(
+                    sh,
+                    b"--runtime-groups=",
+                    bingsu_core::helper::encode_groups(inp.runtime_groups).as_bytes(),
+                    out,
+                );
             }
         }
         b"CONFIG_ROOT" => {
@@ -164,6 +175,7 @@ mod tests {
             &ScriptInputs {
                 shell,
                 exe: b"/bin/bingsu",
+                runtime_groups: &[],
                 runtime_root: Some((1, 2, b"/r")),
                 config_root,
                 state_root: Some(b"/s"),
@@ -251,7 +263,11 @@ mod tests {
             ),
         ] {
             let s = script(shell, b"/h");
-            assert_eq!(count(&s, cap.as_bytes()), 1, "{shell:?}");
+            assert_eq!(
+                count(&s, cap.as_bytes()),
+                if shell == Shell::Bash { 3 } else { 1 },
+                "{shell:?}"
+            );
         }
     }
 }

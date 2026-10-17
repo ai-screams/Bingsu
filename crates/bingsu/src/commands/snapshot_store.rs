@@ -75,7 +75,7 @@ impl DataFile {
 /// Constructed only after R1's pinned root walk and each 0700 child check.
 /// A CRC never selects a directory. No PATH_MAX-sized joined path is built.
 pub struct CheckedContextFd {
-    dir: File,
+    pub(super) dir: File,
     me: u32,
 }
 impl CheckedContextFd {
@@ -137,7 +137,7 @@ impl CheckedContextFd {
         Ok(bytes)
     }
 }
-fn data_verdict(
+pub(super) fn data_verdict(
     facts: bingsu_core::fs_trust::Facts,
     regular: bool,
     links: u64,

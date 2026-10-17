@@ -106,6 +106,7 @@ python3 scripts/check_core_no_std.py
 # The prompt adapter: forbid attribute, adapter paths and syscall table, one
 # fn main that only dispatches, no code outside main.
 python3 scripts/check_cli_prompt_forbid.py --checker "$checker"
+python3 -B scripts/test_prompt_bootstrap.py
 # clippy on core, in a fresh temporary target directory with its config
 # pinned; diagnostics are counted, not only the exit code.
 python3 scripts/check_core_clippy_clean.py

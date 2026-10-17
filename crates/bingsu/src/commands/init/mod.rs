@@ -98,6 +98,10 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     let inputs = render::ScriptInputs {
         shell,
         exe: exe.as_os_str().as_bytes(),
+        runtime_groups: roots
+            .runtime
+            .as_ref()
+            .map_or(&[], |r| r.group_ok.as_slice()),
         runtime_root: roots
             .runtime
             .as_ref()

@@ -20,13 +20,6 @@ use std::path::{Path, PathBuf};
 
 /// What `init` pinned (`--runtime-root=<st_dev>:<st_ino>:<path>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the refresh helper and the write child (Part N) are the first callers"
-    )
-)]
 pub struct Pinned {
     pub dev: u64,
     pub ino: u64,
@@ -44,13 +37,6 @@ pub enum RootError {
     Refused(Refusal),
     /// The last folder is not the pinned one (remounted, or removed and
     /// made again).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "constructed by open_runtime_root (Part N callers)"
-        )
-    )]
     Moved { dev: u64, ino: u64 },
 }
 
@@ -141,13 +127,6 @@ pub fn judge(chain: &Chain, me: u32, groups: &mut dyn GroupOracle) -> Result<(),
 /// Opens the pinned runtime root for the helper and the write child: the
 /// walk, rule 2 and the pin. The descriptor is search-only (a base for
 /// `openat`, `mkdirat`, `renameat`).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the refresh helper and the write child (Part N) are the first callers"
-    )
-)]
 pub fn open_runtime_root(
     pin: &Pinned,
     me: u32,
