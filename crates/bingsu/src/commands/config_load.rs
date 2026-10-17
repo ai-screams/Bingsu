@@ -1111,8 +1111,17 @@ mod tests {
         assert!(codes.contains(&codes::EXEC_KEY_IGNORED), "{codes:?}");
         assert!(l.untrusted.is_empty());
         // Publication rechecks the root with undecided facts read as
-        // decided; a plain recheck would refuse it on every read.
-        assert_eq!(l.revalidate_with(&mut fx.root_unknown()), Ok(()));
+        // decided; a plain recheck would refuse it on every read. Read and
+        // recheck use the same system oracle, so the result does not depend
+        // on how this machine answers group lookups.
+        assert_eq!(l.revalidate(), Ok(()));
+        // A real change between read and publish still blocks.
+        // 이것을 실패시키는 것: 발행 전 재확인이 observed 비교를 건너뛰는 것.
+        fx.put(&fx.root.join("conf.d/a.toml"), &format!("{CMD}# changed\n"));
+        assert_eq!(
+            l.revalidate(),
+            Err("source observation changed".to_string())
+        );
     }
 
     // `config use` 기록도 모양 전용 뿌리 아래 파일의 신뢰를 올리지 못한다. 뿌리 밖 기록 파일은 그대로 실행 신뢰를 얻는다.
