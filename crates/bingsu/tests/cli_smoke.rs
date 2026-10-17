@@ -8,5 +8,8 @@ fn no_args_prints_usage_to_stderr_and_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let err = String::from_utf8(out.stderr).unwrap();
-    assert!(err.starts_with("usage: bingsu <init|prompt>"), "{err}");
+    assert!(
+        err.starts_with("usage: bingsu <config|init|prompt>"),
+        "{err}"
+    );
 }

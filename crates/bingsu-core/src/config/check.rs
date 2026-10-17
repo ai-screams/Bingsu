@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 /// What `parse_duration_ms` accepts, as a JSON Schema pattern: 0–3600000
 /// ms or 0–3600 s, no leading zeros. The shared corpus test keeps the two
 /// equal.
-pub const DURATION_PATTERN: &str = "^((0|[1-9][0-9]{0,5}|[1-2][0-9]{6}|3[0-5][0-9]{5}|3600000)ms|(0|[1-9][0-9]{0,2}|[1-2][0-9]{3}|3[0-5][0-9]{2}|3600)s)$";
+pub const DURATION_PATTERN: &str = "^((0|[1-9][0-9]{0,5}|[1-2][0-9]{6}|3[0-5][0-9]{5}|3600000)ms|(0|[1-9][0-9]{0,2}|[1-2][0-9]{3}|3[0-5][0-9]{2}|3600)s)$(?![\\s\\S])";
 
 /// `"200ms"` or `"2s"` in milliseconds, up to one hour. No leading zeros,
 /// so the JSON Schema can say the same with `DURATION_PATTERN`.
