@@ -13,15 +13,16 @@ use crate::{
     diag::SourceId,
     diag_widths::WidthRun,
     icons::IconSet,
+    ident::parse_segment_id,
     layout::When,
     shorten::{Keep, Method},
     template::{
-        compile::{CompiledLine, FillKind, Node, Shape, StyleSpec},
+        compile::{CompiledLine, FillKind, MAX_LINES, Node, Shape, StyleSpec},
         syntax::{Mode, Span},
     },
     width::WidthProfile,
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, vec::Vec};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Short,
@@ -953,6 +954,12 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
     {
         return Err(Error::Shape);
     }
+    // Band names are arbitrary TOML keys, not segment ids. The source
+    // table and merge guarantee uniqueness, including for quoted keys.
+    let mut names = BTreeSet::new();
+    if c.band_names.iter().any(|name| !names.insert(name)) {
+        return Err(Error::Shape);
+    }
     // Validate the supplied order without allocating a graph or recompiling it.
     if c.band_order.len() != c.bands.len() {
         return Err(Error::Shape);
@@ -1024,10 +1031,14 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
             }
         }
     }
+    const _: () = assert!(crate::field::BUILTIN.len() < 32);
     if c.collect_mask >> crate::field::BUILTIN.len() != 0 {
         return Err(Error::Shape);
     }
-    if c.variants.iter().any(|v| v.len() != 2) {
+    if c.variants
+        .iter()
+        .any(|v| !(1..=MAX_LINES).contains(&v.len()))
+    {
         return Err(Error::Shape);
     }
     for p in [&c.palette, &c.light_palette] {
@@ -1052,6 +1063,23 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
         }
     }
     for u in &c.exec_units {
+        if parse_segment_id(&u.id).is_err() {
+            return Err(Error::Shape);
+        }
+        // Recheck the source compiler's permission boundary for either
+        // wire direction; a syntactically valid unit is not enough to run.
+        if u.not_run.is_none()
+            && (u.origins.iter().any(|(_, o)| o.trust == Trust::Unsafe)
+                || u.approved_by.is_empty()
+                || u.shown_at.is_empty())
+        {
+            return Err(Error::Shape);
+        }
+        if matches!(&u.not_run, Some(NotRun::UnsafeFile { key })
+            if !u.origins.iter().any(|(k, _)| k == key))
+        {
+            return Err(Error::Shape);
+        }
         for (_, o) in &u.origins {
             valid_origin(o)?;
         }

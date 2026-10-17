@@ -229,6 +229,231 @@ mod cases {
         b.extend(bytes(c));
         b
     }
+
+    fn rejected(c: &CompiledConfig) {
+        assert_eq!(encode_compiled(c), Err(Error::Shape));
+        // Bypass encode's validation so decode must enforce the same rule.
+        assert_eq!(decode_compiled(&raw_config(c)), Err(Error::Shape));
+    }
+
+    // 이것을 실패시키는 것: 한 줄을 거부하거나 왕복 중 레이아웃·렌더 바이트를 바꾸는 것.
+    #[test]
+    fn one_line_configs_roundtrip_and_render_equally() {
+        use crate::color::{palette::Mode, sgr::ColorDepth};
+        use crate::field::{BUILTIN, Value};
+        use crate::layout::{Inputs, Options};
+        use crate::recorder::NoopRecorder;
+        use crate::render::{Target, render_prompt};
+        use crate::shell_word::Shell;
+
+        for root in [
+            "[style]\ntemplate = '{dir}{char}'\n",
+            "[layout.line1]\nenabled = false\n",
+            "[layout.line2]\nenabled = false\n",
+        ] {
+            // The S3b load -> merge -> check -> compile pipeline, not a
+            // hand-edited CompiledConfig. The built-in narrow template
+            // remains two lines, so the same config exercises both sizes.
+            let c = crate::config::report::tests::read(root, &[])
+                .snapshot
+                .expect("one-line config compiles");
+            assert_eq!(c.variants[0].len(), 1, "{root}");
+            assert_eq!(c.variants[1].len(), 2, "{root}");
+            let d = decode_compiled(&encode_compiled(&c).unwrap()).unwrap();
+            assert_eq!(d, c);
+            let values = vec![Some(Value::new(b"fixture", vec![])); BUILTIN.len()];
+            let facts = vec![None; BUILTIN.len()];
+            for mode in [Mode::Dark, Mode::Light] {
+                for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+                    for width in [49, 60, 120] {
+                        let render = |compiled: &CompiledConfig| {
+                            render_prompt(
+                                &compiled.theme_for(mode),
+                                &Inputs {
+                                    catalog: BUILTIN,
+                                    values: &values,
+                                    facts: &facts,
+                                    setup: &compiled.setup(),
+                                },
+                                &Target {
+                                    shell,
+                                    depth: ColorDepth::TrueColor,
+                                    options: Options {
+                                        width,
+                                        profile: compiled.profile,
+                                        icons: compiled.icons,
+                                        use_last_column: compiled.use_last_column,
+                                    },
+                                },
+                                &mut NoopRecorder,
+                            )
+                        };
+                        let want = render(&c);
+                        assert_eq!(render(&d), want, "{root} {mode:?} {shell:?} {width}");
+                        if width >= 60 {
+                            assert!(want.upper.is_empty());
+                            assert!(!want.left.is_empty());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: 빈 variant 또는 MAX_LINES를 넘는 variant를 허용하는 것.
+    #[test]
+    fn variant_line_count_bounds() {
+        for count in [0, MAX_LINES + 1] {
+            let mut c = config();
+            c.variants[0] = vec![c.variants[0][0].clone(); count];
+            rejected(&c);
+        }
+    }
+
+    const COMMAND: &str = "[segment.\"custom/hello\"]\nkind='command'\ncommand=['echo','ok']\n";
+    const DRAW_COMMAND: &str = "[layout.line2]\nleft=['custom/hello','char']\n";
+
+    fn runnable_config() -> CompiledConfig {
+        let c = crate::config::report::tests::read(&format!("{COMMAND}{DRAW_COMMAND}"), &[])
+            .snapshot
+            .unwrap();
+        assert_eq!(c.exec_units.len(), 1);
+        assert_eq!(c.exec_units[0].not_run, None);
+        c
+    }
+
+    // 이것을 실패시키는 것: Unsafe 실행 키 출처가 있는 유닛을 실행 가능하게 받는 것.
+    #[test]
+    fn runnable_unit_rejects_unsafe_origin() {
+        let mut c = runnable_config();
+        c.exec_units[0].origins[0].1.trust = Trust::Unsafe;
+        rejected(&c);
+    }
+
+    // 이것을 실패시키는 것: 신뢰된 레이아웃의 승인 없이 실행 가능하게 받는 것.
+    #[test]
+    fn runnable_unit_requires_approval() {
+        let mut c = runnable_config();
+        c.exec_units[0].approved_by.clear();
+        rejected(&c);
+    }
+
+    // 이것을 실패시키는 것: 현재 레이아웃에서 보이지 않는 유닛을 실행 가능하게 받는 것.
+    #[test]
+    fn runnable_unit_requires_shown_location() {
+        let mut c = runnable_config();
+        c.exec_units[0].shown_at.clear();
+        rejected(&c);
+    }
+
+    // 이것을 실패시키는 것: 거부 사유가 출처에 없는 실행 키를 가리켜도 받는 것.
+    #[test]
+    fn unsafe_file_reason_requires_origin_key() {
+        let mut c = runnable_config();
+        c.exec_units[0].not_run = Some(NotRun::UnsafeFile {
+            key: "absent".into(),
+        });
+        rejected(&c);
+    }
+
+    // 이것을 실패시키는 것: 실행 여부와 무관하게 소스가 거부하는 ID 문법을 받는 것.
+    #[test]
+    fn exec_ids_follow_source_grammar() {
+        for id in [
+            "../../x\x1b]",
+            "",
+            "custom/Hello",
+            "custom/hello-",
+            "custom/a/b",
+            "file/hello",
+            &format!("custom/{}", "a".repeat(33)),
+        ] {
+            for not_run in [None, Some(NotRun::Disabled)] {
+                let mut c = runnable_config();
+                c.exec_units[0].id = id.into();
+                c.exec_units[0].not_run = not_run;
+                rejected(&c);
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: 리뷰의 조작된 실행 유닛을 encode 또는 raw decode가 허용하는 것.
+    #[test]
+    fn reviewers_crafted_runnable_unit_is_rejected() {
+        let mut c = runnable_config();
+        let u = &mut c.exec_units[0];
+        u.id = "../../x\x1b]".into();
+        for (_, o) in &mut u.origins {
+            o.trust = Trust::Unsafe;
+        }
+        u.approved_by.clear();
+        assert_eq!(u.not_run, None);
+        rejected(&c);
+    }
+
+    // 이것을 실패시키는 것: 소스가 만든 실행 가능·차단 유닛을 거부하거나 허가 정보를 바꾸는 것.
+    #[test]
+    fn source_exec_permissions_roundtrip() {
+        use crate::color::palette::Mode;
+        use crate::config::report::{report, tests::builtin};
+        use crate::config::source::tests::{files, opened};
+
+        for (root, trust, expected) in [
+            (format!("{COMMAND}{DRAW_COMMAND}"), Trust::Executable, None),
+            (
+                format!("{COMMAND}enabled=false\n{DRAW_COMMAND}"),
+                Trust::Executable,
+                Some(NotRun::Disabled),
+            ),
+            (
+                COMMAND.into(),
+                Trust::Executable,
+                Some(NotRun::NotInTrustedLayout),
+            ),
+            (
+                format!("{COMMAND}{DRAW_COMMAND}"),
+                Trust::Unsafe,
+                Some(NotRun::UnsafeFile { key: "kind".into() }),
+            ),
+        ] {
+            let mut source = opened("root", &root, 1);
+            source.trust = trust;
+            let c = report(
+                vec![builtin(), source],
+                &mut files(&[]),
+                [0, 3, 0],
+                Mode::Dark,
+            )
+            .snapshot
+            .expect("source compiles");
+            assert_eq!(c.exec_units[0].not_run, expected);
+            assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
+        }
+    }
+
+    // 이것을 실패시키는 것: band 이름에 segment ID 문법을 잘못 적용하거나 중복 이름을 받는 것.
+    #[test]
+    fn band_names_follow_source_table_keys() {
+        for (quoted, name) in [
+            ("\"\"", ""),
+            ("\"Wide band\"", "Wide band"),
+            ("\"넓음\"", "넓음"),
+            ("\"a/b\"", "a/b"),
+            ("\"../x\"", "../x"),
+            ("\"\\u001b]\"", "\x1b]"),
+        ] {
+            let root = format!("[layout.when.{quoted}]\nmin_cols=100\n");
+            let mut c = crate::config::report::tests::read(&root, &[])
+                .snapshot
+                .expect("quoted band name compiles");
+            assert!(c.band_names.iter().any(|n| n == name));
+            assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
+            c.band_names[1] = c.band_names[0].clone();
+            c.widths.clear();
+            rejected(&c);
+        }
+    }
+
     // 이것을 실패시키는 것: CRC가 맞는 본문의 크기 관계·순서·mask·팔레트·출처 검사를 빼는 것.
     #[test]
     fn compiled_invariants() {
@@ -261,9 +486,6 @@ mod cases {
         bad.push(c);
         let mut c = base.clone();
         c.collect_mask = u32::MAX;
-        bad.push(c);
-        let mut c = base.clone();
-        c.variants[0].pop();
         bad.push(c);
         let mut c = base.clone();
         c.palette
@@ -373,7 +595,7 @@ mod cases {
             origins: vec![("key".into(), origin)],
             approved_by: vec![],
             shown_at: vec![],
-            not_run: None,
+            not_run: Some(NotRun::Disabled),
         };
         let mut c = base.clone();
         c.exec_units.push(unit);
