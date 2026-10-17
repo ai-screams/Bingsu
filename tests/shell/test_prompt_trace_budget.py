@@ -335,3 +335,97 @@ def test_trace_rejects_collector_exec_contract_mutation(old, new):
     assert mutated != original
     with pytest.raises(AssertionError, match="execve"):
         assert_prompt_trace_budget(mutated, EXE, ROOTS)
+
+
+@pytest.fixture
+def held_trace():
+    """Synthetic N4 contract, NOT a Linux execution capture. The lead must
+    re-capture glibc/musl current/last-good/error paths after the new binary ships.
+    The historical Debian capture above stays unchanged as helper regression.
+    """
+    return Path(__file__).with_name("fixtures").joinpath("prompt-n4-held-synthetic.strace").read_text().splitlines()
+
+
+def test_held_snapshot_contract(held_trace):
+    assert_prompt_trace_budget(held_trace, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("name", ["openat", "fstat", "fstatfs", "fgetxattr", "getuid", "getpid", "lseek", "pread64", "readv"])
+def test_held_trace_rejects_every_non_table_call_after_filter(held_trace, name):
+    # A path operation is refused even if it would name an otherwise approved file.
+    extra = f'10 {name}(3, "snapshot", 0) = -1 EPERM (Operation not permitted)'
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(held_trace + [extra], EXE, ROOTS)
+
+
+@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"])
+def test_held_data_opens_require_each_flag(held_trace, flag):
+    changed = [line.replace("|" + flag, "") if '"snapshot",' in line and line.startswith("10 ") else line for line in held_trace]
+    assert changed != held_trace
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("flag", ["O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"])
+def test_held_walk_requires_each_flag(held_trace, flag):
+    changed = [line.replace("|" + flag, "") if '"contexts-v2",' in line and line.startswith("10 ") else line for line in held_trace]
+    assert changed != held_trace
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('"snapshot", O_RDONLY', '"other", O_RDONLY'),
+    ('"snapshot", O_RDONLY', '"../snapshot", O_RDONLY'),
+    ('"contexts-v2",', '"contexts-v3",'),
+    ('"time", O_RDONLY', '"mnt", O_RDONLY'),
+    ('"10", O_RDONLY', '"999", O_RDONLY'),
+    ('CLOCK_BOOTTIME', 'CLOCK_REALTIME'),
+    ('"system.posix_acl_access"', '"user.other"'),
+    (', 1024) = 1024', ', 16385) = 1024'),
+])
+def test_held_trace_rejects_scope_mutation(held_trace, old, new):
+    changed = [line.replace(old, new) if line.startswith("10 ") else line for line in held_trace]
+    assert changed != held_trace
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+def test_held_trace_rejects_read_without_successful_prefilter_open(held_trace):
+    changed = [line.split(" = ")[0] + " = -1 ENOENT (No such file or directory)"
+               if '"snapshot",' in line and line.startswith("10 ") else line for line in held_trace]
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+def test_held_trace_rejects_read_before_filter(held_trace):
+    lines = list(held_trace)
+    read = next(i for i, line in enumerate(lines) if '10 read(' in line and '/snapshot>' in line)
+    entry = lines.pop(read)
+    at = next(i for i, line in enumerate(lines) if 'PR_SET_SECCOMP' in line)
+    lines.insert(at, entry)
+    with pytest.raises(AssertionError, match="root pre-filter content"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("call", [
+    'read(99</pinned/config/secret>, "x", 1)',
+    'close(99</pinned/config/secret>)',
+    'read(0</dev/null>, "", 1)',
+])
+def test_held_trace_rejects_inherited_or_closed_descriptor(held_trace, call):
+    with pytest.raises(AssertionError, match="root held"):
+        assert_prompt_trace_budget(held_trace + [f'10 {call} = 0'], EXE, ROOTS)
+
+
+def test_held_trace_needs_exact_prefilter_allowance(held_trace, monkeypatch):
+    monkeypatch.setattr(budget, "prompt_open", lambda *args: False)
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(held_trace, EXE, ROOTS)
+
+
+def test_held_root_open_is_absolute_even_with_hostile_cwd(held_trace):
+    lines = [line.replace('openat(AT_FDCWD</>, "/",', 'openat(AT_FDCWD</repo/untrusted>, "/",')
+             if line.startswith("10 ") else line for line in held_trace]
+    assert lines != held_trace
+    assert_prompt_trace_budget(lines, EXE, ROOTS)

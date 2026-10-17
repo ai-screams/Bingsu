@@ -1,6 +1,7 @@
 //! N4 sans-I/O continuation. Only this module chooses names, descriptors and read
 //! lengths. An executor observes facts, never manufactures a safety verdict.
-//! The CLI connection requires a separate syscall/path-budget ruling.
+//! The CLI preopens `Prefetch` before confinement, then satisfies this continuation
+//! from the held descriptors and cached facts (N4 option 3, 2026-10-17).
 use crate::color::palette::Mode;
 use crate::config::compile::ExecUnit;
 use crate::envelope::{self, Envelope, EnvelopeError};
@@ -45,6 +46,57 @@ impl SnapshotCopy {
         }
     }
 }
+/// All possible data sources, authorized only after the runtime walk. The OS
+/// adapter prepares these before confinement; choosing which bytes to consume
+/// remains with the ordinary continuation below.
+pub struct Prefetch {
+    parent: Slot,
+    uid: u32,
+}
+impl Prefetch {
+    pub fn parent(&self) -> Slot {
+        self.parent
+    }
+    pub fn names(&self) -> [&'static [u8]; 3] {
+        [b"snapshot", b"last-good", b"marker"]
+    }
+    pub fn index(&self, effect: &Effect) -> Option<usize> {
+        match effect.operation() {
+            Operation::OpenFile {
+                parent,
+                name,
+                into: Slot::File,
+            } if *parent == self.parent => self.names().iter().position(|n| n == name),
+            _ => None,
+        }
+    }
+    /// Check every retained file before the filter, even a fallback that the
+    /// decoder may never select. No content allocation is made here.
+    pub fn accepts(&self, index: usize, facts: FdFacts) -> bool {
+        trusted_file(self.uid, facts)
+            && match index {
+                0 | 1 => FrontDecoder::new(facts.size).is_ok(),
+                2 => facts.size == snapshot::MARKER as u64,
+                _ => false,
+            }
+    }
+}
+
+fn trusted_file(uid: u32, f: FdFacts) -> bool {
+    let e = f.entry;
+    e.uid == uid
+        && e.mode == 0o100600
+        && f.nlink == 1
+        && e.ownership == Some(true)
+        && f.local == Some(true)
+        && matches!(
+            e.acl,
+            fs_trust::AclFacts::None
+                | fs_trust::AclFacts::DenyOnly
+                | fs_trust::AclFacts::PosixExtended
+        )
+}
+
 /// Read-only operations. Directory names are single canonical components;
 /// only the initial root open has no parent and names `/`.
 #[derive(Debug, PartialEq, Eq)]
@@ -185,6 +237,24 @@ pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
     }
 }
 impl ReadPlan {
+    /// Available at exactly the first file-open boundary, after every ancestor
+    /// and the init dev/ino pin have been approved. Invalid envelopes never get
+    /// a prefetch capability.
+    pub fn prefetch(&self, effect: &Effect) -> Option<Prefetch> {
+        if self.pending
+            && self.phase == Phase::OpenFile
+            && self.file == File::Snapshot(SnapshotCopy::Current)
+            && self.observed.runtime_ok
+            && matches!(effect.operation(), Operation::OpenFile { parent, name: b"snapshot", into: Slot::File } if *parent == self.directory)
+        {
+            Some(Prefetch {
+                parent: self.directory,
+                uid: self.uid?,
+            })
+        } else {
+            None
+        }
+    }
     fn initialize(&mut self) -> Option<()> {
         let e = self.parsed.as_ref().ok()?;
         e.shell?;
@@ -241,19 +311,7 @@ impl ReadPlan {
         let Some(uid) = self.uid else {
             return false;
         };
-        let e = f.entry;
-        if e.uid != uid
-            || e.mode != 0o100600
-            || f.nlink != 1
-            || e.ownership != Some(true)
-            || f.local != Some(true)
-            || !matches!(
-                e.acl,
-                fs_trust::AclFacts::None
-                    | fs_trust::AclFacts::DenyOnly
-                    | fs_trust::AclFacts::PosixExtended
-            )
-        {
+        if !trusted_file(uid, f) {
             return false;
         }
         match self.file {

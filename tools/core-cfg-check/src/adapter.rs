@@ -77,7 +77,7 @@ struct Walk<'a> {
     listed: &'a BTreeSet<String>,
     used: BTreeSet<String>,
     out: Vec<Finding>,
-    bootstrap_line: Option<(usize, usize)>,
+    prefilter_lines: Option<[(usize, usize); 2]>,
 }
 
 impl Walk<'_> {
@@ -180,7 +180,11 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         match segs.first().map(String::as_str) {
             Some("crate")
                 if full == "crate::prompt_spawn::bootstrap"
-                    && self.bootstrap_line
+                    && self.prefilter_lines.map(|lines| lines[0])
+                        == Some((line_of(path.span()), path.span().start().column)) => {}
+            Some("crate")
+                if full == "crate::prompt_read::prepare"
+                    && self.prefilter_lines.map(|lines| lines[1])
                         == Some((line_of(path.span()), path.span().start().column)) => {}
             Some("crate" | "super") => {
                 self.bad(path.span(), format!("{full}: another module of the binary"))
@@ -239,7 +243,7 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
         listed: &listed,
         used: BTreeSet::new(),
         out: Vec::new(),
-        bootstrap_line: bootstrap_line(&file),
+        prefilter_lines: prefilter_lines(&file),
     };
     let n = file.items.len();
     for (i, item) in file.items.iter().enumerate() {
@@ -259,10 +263,11 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
     walk.out
 }
 
-/// The one approved escape hatch is a statement in run_prompt's unwind guard,
-/// immediately before the filter branch. It cannot be imported or saved as a
-/// function value and the rest of the module path rules remain unchanged.
-fn bootstrap_line(file: &syn::File) -> Option<(usize, usize)> {
+/// The two approved entry calls are consecutive in run_prompt's unwind guard:
+/// fixed spawn, then held-fd preparation, immediately before the filter branch.
+/// Neither function may be imported or saved as a function value; all other
+/// module path rules remain unchanged. The prepared closure owns the held fds.
+fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     let f = file.items.iter().find_map(|i| match i {
         syn::Item::Fn(f) if f.sig.ident == "run_prompt" => Some(f),
         _ => None,
@@ -317,6 +322,7 @@ fn bootstrap_line(file: &syn::File) -> Option<(usize, usize)> {
     };
     let [
         syn::Stmt::Expr(syn::Expr::Call(bootstrap), Some(_)),
+        syn::Stmt::Local(prepared),
         syn::Stmt::Expr(syn::Expr::If(branch), None),
     ] = block.block.stmts.as_slice()
     else {
@@ -328,6 +334,18 @@ fn bootstrap_line(file: &syn::File) -> Option<(usize, usize)> {
     if joined(&path.path).join("::") != "crate::prompt_spawn::bootstrap"
         || bootstrap.args.len() != 2
     {
+        return None;
+    }
+    if !matches!(&prepared.pat, syn::Pat::Ident(p) if p.ident == "staged") {
+        return None;
+    }
+    let syn::Expr::Call(prepare) = prepared.init.as_ref()?.expr.as_ref() else {
+        return None;
+    };
+    let syn::Expr::Path(path) = prepare.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "crate::prompt_read::prepare" || prepare.args.len() != 1 {
         return None;
     }
     let syn::Expr::Call(runs) = branch.cond.as_ref() else {
@@ -348,8 +366,14 @@ fn bootstrap_line(file: &syn::File) -> Option<(usize, usize)> {
     if !path.path.is_ident("enter_sandbox") || !enter.args.is_empty() {
         return None;
     }
-    Some((
-        line_of(bootstrap.func.span()),
-        bootstrap.func.span().start().column,
-    ))
+    Some([
+        (
+            line_of(bootstrap.func.span()),
+            bootstrap.func.span().start().column,
+        ),
+        (
+            line_of(prepare.func.span()),
+            prepare.func.span().start().column,
+        ),
+    ])
 }

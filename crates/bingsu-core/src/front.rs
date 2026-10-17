@@ -1,12 +1,11 @@
 //! The front end's decisions as pure functions (sans-IO): argv bytes in,
 //! record bytes out. The `bingsu prompt` adapter in crates/bingsu
 //! (src/prompt.rs) only turns the process arguments into bytes, calls
-//! `prepare`, carries out the reads the plan names (none yet), calls
+//! `staged::prepare`, carries out the reads the plan names, calls
 //! `finish`, writes the record and exits; it decides nothing.
 //!
-//! The connected adapter still draws the built-in default. The N4 snapshot
-//! consumer is in `staged`; connecting its effects requires the prompt I/O
-//! budget ruling. An envelope without `--shell` (a hook older than the renderer)
+//! The N4 snapshot consumer is in `staged` (pre-filter held-fd preparation,
+//! followed by bounded reads under the option-3 syscall budget). An envelope without `--shell` (a hook older than the renderer)
 //! gets the shell-neutral minimal record.
 use crate::color::palette::Mode;
 use crate::color::sgr::ColorDepth;
@@ -24,8 +23,7 @@ use crate::status::Status;
 use crate::width::WidthProfile;
 use alloc::vec::Vec;
 
-/// Snapshot continuation and selection. The OS executor remains disconnected
-/// until the prompt syscall/path budget has an explicit N4 ruling.
+/// Snapshot continuation and selection; the CLI retains descriptors before confinement.
 pub mod staged;
 
 /// Appends the record of `fields`; a field the encoder refuses (a renderer

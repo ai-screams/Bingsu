@@ -1,6 +1,7 @@
 //! Linux seccomp for `bingsu prompt` (spec section 4 front end, revision
-//! S-5): `prompt::dispatch` calls `enter` right after it knows the command
-//! is `prompt`, inside its panic guard and before the core runs. From then
+//! S-5, N4 option 3): `prompt::dispatch` calls `enter` inside its panic guard
+//! after fixed helper spawn and core-directed fd preparation, before snapshot
+//! content decoding and rendering. From then
 //! on the kernel lets through only RULES, which are the `syscall` column of
 //! crates/bingsu/prompt-syscalls.tsv (scripts/check_cli_prompt_forbid.py
 //! keeps the two equal), some with argument checks (`write` to fd 1 only,
@@ -10,7 +11,8 @@
 //! a kill. Whether the prompt carries on after a refused call is up to the
 //! caller: the verified LD_PRELOAD allocators (jemalloc, mimalloc) do, an
 //! allocator whose `brk` is refused faults. The rule for adding a row: the
-//! call gives no file, network, process or time capability.
+//! N4 option 3 adds held-fd read/close and CLOCK_BOOTTIME only; every
+//! pathname and fd-fact operation must complete before this filter.
 //!
 //! The dynamic loader and any LD_PRELOAD library are platform TCB, like the
 //! kernel: they run before this filter (a constructor can even start a
@@ -67,10 +69,19 @@ const FD_1: Cond = Cond {
     want: 1,
 };
 
+const BOOTTIME: Cond = Cond {
+    arg: 0,
+    mask: u32::MAX,
+    want: libc::CLOCK_BOOTTIME as u32,
+};
+
 /// The system calls the prompt may make once the filter is on, by name,
 /// number and argument conditions; the names are the `syscall` column of
 /// prompt-syscalls.tsv.
-const RULES: [(&str, libc::c_long, &[Cond]); 18] = [
+const RULES: [(&str, libc::c_long, &[Cond]); 21] = [
+    ("read", libc::SYS_read, &[]),
+    ("close", libc::SYS_close, &[]),
+    ("clock_gettime", libc::SYS_clock_gettime, &[BOOTTIME]),
     ("write", libc::SYS_write, &[FD_1]),
     ("exit_group", libc::SYS_exit_group, &[]),
     ("exit", libc::SYS_exit, &[]),
@@ -374,10 +385,74 @@ mod tests {
             DENY
         );
         for (name, nr, _) in RULES {
-            assert_ne!(e(nr, [1, 0, rw, anon, u32::MAX, 0]), DENY, "{name}");
+            assert_ne!(
+                e(
+                    nr,
+                    [
+                        if name == "clock_gettime" {
+                            libc::CLOCK_BOOTTIME as u32
+                        } else {
+                            1
+                        },
+                        0,
+                        rw,
+                        anon,
+                        u32::MAX,
+                        0
+                    ]
+                ),
+                DENY,
+                "{name}"
+            );
         }
         assert_eq!(e(libc::SYS_getuid, [0; 6]), DENY);
         assert_eq!(e(libc::SYS_openat, [0; 6]), DENY);
+    }
+
+    // 이것을 실패시키는 것: 새 read/close/clock 허용 또는 BOOTTIME 인자 한정 누락.
+    #[test]
+    fn held_reads_and_only_boottime_are_allowed() {
+        let p = program(
+            ARCH,
+            cfg!(target_arch = "x86_64"),
+            &rules(),
+            libc::SECCOMP_RET_ALLOW,
+            DENY,
+        );
+        for nr in [libc::SYS_read, libc::SYS_close] {
+            assert_eq!(
+                eval(&p, nr as u32, ARCH, [42, 0, 64, 0, 0, 0]),
+                libc::SECCOMP_RET_ALLOW
+            );
+        }
+        for kind in [
+            libc::CLOCK_BOOTTIME,
+            libc::CLOCK_MONOTONIC,
+            libc::CLOCK_REALTIME,
+        ] {
+            assert_eq!(
+                eval(
+                    &p,
+                    libc::SYS_clock_gettime as u32,
+                    ARCH,
+                    [kind as u32, 0, 0, 0, 0, 0]
+                ),
+                if kind == libc::CLOCK_BOOTTIME {
+                    libc::SECCOMP_RET_ALLOW
+                } else {
+                    DENY
+                }
+            );
+        }
+        for nr in [
+            libc::SYS_openat,
+            libc::SYS_newfstatat,
+            libc::SYS_fstatfs,
+            libc::SYS_lseek,
+            libc::SYS_pread64,
+        ] {
+            assert_eq!(eval(&p, nr as u32, ARCH, [0; 6]), DENY);
+        }
     }
 
     // 이것을 실패시키는 것: 커널 지원 질의의 EINVAL을 막힘으로 보는 것, 설치의 EINVAL(우리 BPF 결함)을 없음으로 보는 것,

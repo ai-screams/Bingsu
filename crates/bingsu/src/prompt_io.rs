@@ -25,7 +25,7 @@ const CLOCK_KIND: u8 = 1;
 #[cfg(target_os = "macos")]
 const CLOCK_KIND: u8 = 2;
 
-fn monotonic_ns() -> Result<u64, ClockError> {
+pub(crate) fn monotonic_ns() -> Result<u64, ClockError> {
     #[cfg(target_os = "linux")]
     let kind = libc::CLOCK_BOOTTIME;
     #[cfg(target_os = "macos")]
@@ -48,7 +48,7 @@ fn monotonic_ns() -> Result<u64, ClockError> {
         .ok_or(ClockError::Time)
 }
 
-fn uuid(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
+pub(crate) fn uuid(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
     if bytes.len() != 36 {
         return Err(ClockError::Boot);
     }

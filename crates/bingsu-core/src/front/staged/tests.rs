@@ -620,4 +620,89 @@ mod cases {
             );
         }
     }
+    // 이것을 실패시키는 것: 승인된 조상 이전 prefetch 발급, 다른 parent/name/slot 허용.
+    #[test]
+    fn prefetch_is_bound_to_the_approved_first_file() {
+        let mut h = Harness::new();
+        let mut p = prepare(&args());
+        let mut previous = None;
+        loop {
+            let Step::Read(effect) = next(&mut p, previous.take()) else {
+                panic!("no first file")
+            };
+            if matches!(effect.operation(), Operation::OpenFile { .. }) {
+                let sources = p.prefetch(&effect).expect("approved boundary");
+                assert_eq!(
+                    sources.names(),
+                    [b"snapshot".as_slice(), b"last-good", b"marker"]
+                );
+                assert_eq!(sources.index(&effect), Some(0));
+                for (i, name) in sources.names().into_iter().enumerate() {
+                    let op = |parent, into, name| Effect {
+                        operation: Operation::OpenFile { parent, into, name },
+                    };
+                    assert_eq!(
+                        sources.index(&op(sources.parent(), Slot::File, name)),
+                        Some(i)
+                    );
+                    assert_eq!(
+                        sources.index(&op(sources.parent().other(), Slot::File, name)),
+                        None
+                    );
+                    assert_eq!(
+                        sources.index(&op(sources.parent(), Slot::Directory0, name)),
+                        None
+                    );
+                }
+                assert_eq!(
+                    sources.index(&Effect {
+                        operation: Operation::OpenFile {
+                            parent: sources.parent(),
+                            name: b"other",
+                            into: Slot::File
+                        }
+                    }),
+                    None
+                );
+                p.observed.runtime_ok = false;
+                assert!(p.prefetch(&effect).is_none());
+                break;
+            }
+            assert!(p.prefetch(&effect).is_none());
+            previous = Some(h.observe(effect));
+        }
+    }
+    // 이것을 실패시키는 것: 아직 선택하지 않은 last-good/marker 사실·크기를 필터 전에 승인하지 않는 것.
+    #[test]
+    fn prefetch_checks_every_saved_file_before_filter() {
+        let sources = Prefetch {
+            parent: Slot::Directory0,
+            uid: 501,
+        };
+        let h = Harness::new();
+        for (index, size) in [
+            (0, h.current.as_ref().unwrap().len()),
+            (1, h.current.as_ref().unwrap().len()),
+            (2, snapshot::MARKER),
+        ] {
+            let f = facts(false, false, size);
+            assert!(sources.accepts(index, f));
+            for case in 0..9 {
+                let mut bad = f;
+                match case {
+                    0 => bad.entry.uid = 0,
+                    1 => bad.entry.mode = 0o100644,
+                    2 => bad.nlink = 2,
+                    3 => bad.entry.ownership = None,
+                    4 => bad.local = Some(false),
+                    5 => bad.entry.acl = fs_trust::AclFacts::Unknown,
+                    6 => bad.entry.acl = fs_trust::AclFacts::AllowsWrite,
+                    7 => bad.size = 1,
+                    _ => bad.size = u64::MAX,
+                }
+                assert!(!sources.accepts(index, bad), "source {index} case {case}");
+            }
+            assert!(!sources.accepts(3, f));
+        }
+    }
 }

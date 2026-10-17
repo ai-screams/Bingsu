@@ -291,7 +291,7 @@ ROOT_CALLS = {r[0] for r in _ROWS if r[0] != "-"} | set("""
 execve clone clone3 vfork arch_prctl set_tid_address getrlimit prlimit64
 read readv pread64 close fcntl poll ppoll ioctl pipe2 open openat openat2
 access faccessat faccessat2 fstat newfstatat stat statx readlink readlinkat
-getdents64 prctl
+getdents64 prctl getuid getpid fstatfs fgetxattr getxattr
 """.split()) | {
     # Rust runtime start on glibc: the main-thread stack guard reads its own
     # attributes (pthread_getattr_np fills the CPU set) and thread id.
@@ -465,6 +465,112 @@ def successful_spawns(calls):
     return good
 
 
+def prompt_sources(pinned):
+    """Exact contexts-v2 address: canonical bytes, 60-byte chunks, no wildcard."""
+    store = pinned[0] + "/contexts-v2"
+    for label, path in zip(("config", "state"), pinned[1:3]):
+        data = os.fsencode(path)
+        store += "/" + label + "/" + "/".join(data[i:i + 60].hex() for i in range(0, len(data), 60))
+    store += "/store"
+    dirs = {"/"}
+    part = store
+    while part != "/":
+        dirs.add(part)
+        part = os.path.dirname(part)
+    return dirs, {store + "/" + n for n in ("snapshot", "last-good", "marker")}
+
+
+def prompt_open(call, path, pinned, root):
+    if call.name != "openat":
+        return False
+    args = args_of(call)
+    flags = set(args[2].split("|"))
+    dirs, files = prompt_sources(pinned)
+    process = f"/proc/{root}"
+    kernel_dirs = {"/proc", process, process + "/ns", "/proc/sys", "/proc/sys/kernel", "/proc/sys/kernel/random"}
+    namespace = {process + "/ns/time", process + "/ns/time_for_children"}
+    kernel_files = {process + "/timens_offsets", "/proc/sys/kernel/random/boot_id"}
+    if path == "/":
+        shape = bool(re.fullmatch(r"AT_FDCWD(?:</[^<>]*>)?", args[0])) and args[1] == '"/"'
+    else:
+        shape = descriptor_child(call, path)
+    if not shape:
+        return False
+    if path in dirs:
+        return {"O_PATH", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"} <= flags and not flags - {
+            "O_RDONLY", "O_PATH", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"}
+    if path in kernel_dirs:
+        return flags == {"O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"}
+    if path in files:
+        return flags == {"O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"}
+    if path in namespace:
+        return flags == {"O_RDONLY", "O_CLOEXEC"}  # verified nsfs magic links only
+    if path in kernel_files:
+        return flags == {"O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC"}
+    return False
+
+
+def prompt_root_io(front, boundary, exe, pinned, root):
+    """Track the root's prepared fds. No path operation survives the filter.
+
+    The existing real fixture predates N4. The separate N4 fixture is synthetic;
+    Linux CI must re-capture successful current/fallback and refused-file reads.
+    """
+    held = {}
+    acl_fallback = set()
+    _, files = prompt_sources(pinned)
+    table = {r[0] for r in _ROWS if r[0] != "-"}
+    for c in front:
+        args = args_of(c)
+        paths = call_paths(c)
+        post = c.index > boundary
+        if post:
+            assert c.name in table and not c.ret.startswith("-1 EPERM"), ("post-filter syscall", c)
+            assert not paths, ("post-filter path", c)
+        if c.name == "clock_gettime":
+            assert args[0] == "CLOCK_BOOTTIME", ("root clock", c)
+        for path in paths:
+            if post:
+                raise AssertionError(("post-filter path", c))
+            bootstrap = path == "/proc/self/fd" and c.name in {"openat", "open"}
+            acl = re.fullmatch(r"/proc/self/fd/(\d+)", path)
+            acl_ok = (c.name == "getxattr" and acl and int(acl.group(1)) in acl_fallback
+                      and args[1:] == ['"system.posix_acl_access"', "NULL", "0"])
+            system = path == exe and c.name == "execve" or bool(SYSTEM_PATHS.fullmatch(path))
+            empty_stat = path == "" and c.name in {"newfstatat", "statx"} and "AT_EMPTY_PATH" in c.args
+            assert (system or bootstrap or acl_ok or empty_stat or prompt_open(c, path, pinned, root)), ("root path", c, path)
+        if c.name in OPENS and paths:
+            result = re.match(r"(\d+)(?:<.*>)?$", c.ret)
+            if result:
+                fd = int(result.group(1))
+                held[fd] = (paths[0], prompt_open(c, paths[0], pinned, root))
+                acl_fallback.discard(fd)
+        if c.name in {"fstatfs", "fgetxattr"}:
+            fd = int(args[0].split("<")[0])
+            assert not post and fd in held and held[fd][1], ("root fd facts", c)
+            if c.name == "fgetxattr":
+                assert args[1:] == ['"system.posix_acl_access"', "NULL", "0"], ("root ACL", c)
+                if c.ret.startswith("-1 EBADF"):
+                    acl_fallback.add(fd)
+        if c.name == "read" and post:
+            fd = int(args[0].split("<")[0])
+            assert fd in held and held[fd][1] and held[fd][0] in files, ("root held read", c)
+            assert 0 < int(args[2]) <= 16384, ("root read length", c)
+        if not post:
+            for path in content_paths(c):
+                # Kernel -y annotations use this PID instead of /proc/self.
+                path = re.sub(rf"^/proc/{root}(?=/|$)", "/proc/self", path)
+                assert (SYSTEM_PATHS.fullmatch(path) or path == "/proc/self/fd" and c.name == "getdents64"
+                        or path == "/proc/sys/kernel/random/boot_id" and c.name == "read"
+                        or c.name == "write" and args[0].startswith("1<")), ("root pre-filter content", c)
+        if c.name == "close":
+            fd = int(args[0].split("<")[0])
+            if post:
+                assert fd in held and held[fd][1], ("root held close", c)
+            held.pop(fd, None)
+            acl_fallback.discard(fd)
+
+
 def assert_prompt_trace_budget(lines, exe, pinned):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
@@ -507,11 +613,7 @@ def assert_prompt_trace_budget(lines, exe, pinned):
     assert not stray, ("root network or process calls", stray)
     seen = {c.name for c in front[1:] if c.name in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}} - SPAWNS
     assert seen == ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
-    for c in front:
-        for path in call_paths(c):
-            # This one pre-filter fd enumeration belongs to the pinned bootstrap.
-            bootstrap_fd = path == "/proc/self/fd" and c.index < filters[0].index
-            assert bootstrap_fd or allowed(path, c.args, exe, pinned), ("root path", c, path)
+    prompt_root_io(front, filters[0].index, exe, pinned, root)
     # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
     assert all(c.name in HELPER_CALLS for c in helper), [c for c in helper if c.name not in HELPER_CALLS]
     # M3a collector exec: exactly the pinned executable and __collect-v1,

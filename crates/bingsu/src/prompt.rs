@@ -1,7 +1,7 @@
 //! `bingsu prompt`: the OS adapter, and the trusted computing base (TCB) of
 //! the prompt path. It decides nothing: the arguments become bytes,
 //! `bingsu_core::front` (pure, `no_std`) parses them and says what to read
-//! (`prepare`), this module carries the plan out (nothing to read yet) and
+//! (`prepare`), the pinned pre-filter reader retains approved descriptors and
 //! `finish` gives the record, which this module writes before it exits. An
 //! unwind panic in the core becomes `bingsu_core::front::after_panic`'s
 //! record. `main` calls `dispatch` first; every other command gets the
@@ -57,11 +57,6 @@ fn exit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-fn respond(raw: &[&[u8]]) -> Vec<u8> {
-    let plan = front::prepare(raw);
-    front::finish(plan, front::Observed::default()).record
-}
-
 /// The prompt process. The silent panic hook and the unwind guard come
 /// first, so the filter (building the BPF, installing it) and the record
 /// for a refused filter run inside them too. The default hook writes to
@@ -69,22 +64,23 @@ fn respond(raw: &[&[u8]]) -> Vec<u8> {
 /// After an unwind panic the record is `front::after_panic`'s; a second
 /// panic inside that aborts with rc 101, and the shell draws its own
 /// minimal prompt (spec section 6 rule 2). Whether the core runs is
-/// `front::runs_core`; for a refused filter (decision P18) the core
-/// supplies only `without_sandbox`: the record-version pair rule and the
-/// minimal record, no envelope parse and no render.
+/// `front::runs_core`; after pre-filter preparation, a refused filter
+/// (decision P18) supplies only `without_sandbox`: the record-version pair
+/// rule and the minimal record, no snapshot decoding or render.
 fn run_prompt(
     args: &[OsString],
     exe: &OsString,
     enter_sandbox: impl FnOnce() -> front::Sandbox,
-    respond: impl FnOnce(&[&[u8]]) -> Vec<u8>,
+    respond: impl FnOnce(Vec<u8>) -> Vec<u8>,
     refused: impl FnOnce(&[&[u8]]) -> Vec<u8>,
 ) -> ! {
     std::panic::set_hook(Box::new(|_| {}));
     let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let rec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::prompt_spawn::bootstrap(exe, &raw);
+        let staged = crate::prompt_read::prepare(&raw);
         if front::runs_core(enter_sandbox()) {
-            respond(&raw)
+            respond(staged())
         } else {
             refused(&raw)
         }
@@ -98,7 +94,7 @@ fn run_prompt(
 /// `bingsu prompt` never returns. Any other command gets them back.
 /// `enter_sandbox` (Linux: the seccomp filter of crates/bingsu/src/sandbox.rs,
 /// elsewhere nothing) runs as soon as the command is known to be `prompt`,
-/// before the core sees the arguments.
+/// after the core-directed descriptor preparation and before content reads.
 pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
     let mut all = std::env::args_os();
     let argv0 = all.next().unwrap_or_default();
@@ -108,7 +104,7 @@ pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
             &args[1..],
             &argv0,
             enter_sandbox,
-            respond,
+            |record| record,
             front::without_sandbox,
         )
     }
@@ -135,6 +131,10 @@ mod tests {
         panic!("injected")
     }
 
+    fn panic_record(_: Vec<u8>) -> Vec<u8> {
+        panic!("injected")
+    }
+
     // Children of the tests below: each runs the whole prompt path in its
     // own process, so the parent sees the real stdout, stderr and exit
     // status. Test builds only: the shipped binary has no way to make the
@@ -147,7 +147,7 @@ mod tests {
             &args(),
             &OsString::new(),
             crate::sandbox::enter,
-            panics,
+            panic_record,
             front::without_sandbox,
         )
     }
@@ -159,7 +159,7 @@ mod tests {
             &args(),
             &OsString::new(),
             || panic!("in the filter"),
-            respond,
+            |record| record,
             front::without_sandbox,
         )
     }
@@ -171,7 +171,7 @@ mod tests {
             &args(),
             &OsString::new(),
             || front::Sandbox::Blocked,
-            panics,
+            panic_record,
             front::without_sandbox,
         )
     }
@@ -183,7 +183,7 @@ mod tests {
             &args(),
             &OsString::new(),
             || front::Sandbox::Blocked,
-            respond,
+            |record| record,
             panics,
         )
     }
@@ -244,7 +244,7 @@ mod tests {
                 assert_eq!(action.sa_sigaction, libc::SIG_IGN);
                 front::Sandbox::Blocked
             },
-            panics,
+            panic_record,
             front::without_sandbox,
         )
     }

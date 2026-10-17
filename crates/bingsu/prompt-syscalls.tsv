@@ -1,10 +1,11 @@
 # The system calls `bingsu prompt` may make once the Linux seccomp filter
 # is on (crates/bingsu/src/sandbox.rs RULES, with the argument checks named
 # in `why`), one row each; any other call fails with EPERM and has no
-# effect. A row may only be a call that gives no file, network, process or
-# time capability. `syscall` is the kernel name (`-` for a constant row),
+# effect. N4 option 3 (2026-10-17) adds only held-fd reads/closes and
+# CLOCK_BOOTTIME observations; all pathname and fd-fact calls precede the filter.
+# `syscall` is the kernel name (`-` for a constant row),
 # `libc` the function or constant the adapter (crates/bingsu/src/prompt.rs)
-# names for it (`-` when std's allocator or the kernel makes the call).
+# names for it (`-` for std, kernel, or the pinned held-fd executor).
 # Kept in step by scripts/check_cli_prompt_forbid.py (header, columns,
 # duplicates, RULES), core-cfg-check --adapter (the `libc` column equals
 # the adapter's libc names), the strace tests (the rows with both columns
@@ -32,3 +33,6 @@ rt_sigreturn	-	return from any signal handler (kernel)
 rt_sigprocmask	-	the signal mask of this thread (abort, unwinders)
 rt_sigaction	-	this process's own signal handlers; std's fault handler resets SIGSEGV with it, and without it a fault loops forever
 sigaltstack	-	std's stack overflow guard
+read	-	N4: sequential reads of pre-filter held fds; lengths chosen by core
+close	-	N4: release pre-filter held fds exactly once (OwnedFd)
+clock_gettime	-	N4: CLOCK_BOOTTIME only; libc vDSO fallback syscall
