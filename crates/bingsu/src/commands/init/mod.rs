@@ -1,11 +1,13 @@
 //! `bingsu init <shell>`: stdout carries only the connection script;
 //! diagnostics go to stderr (spec section 5 "init output").
 pub(crate) mod exe_path;
+pub(super) mod pinned;
+pub(super) mod prime;
 mod render;
 pub(super) mod roots;
 pub(super) mod trusted_env;
 
-use crate::commands::sys;
+use crate::commands::{ctx, sys};
 use bingsu_core::shell_word::Shell;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -25,7 +27,7 @@ fn hex16(b: [u8; 16]) -> [u8; 32] {
 
 /// An empty or relative `pw_dir` would make every root relative to the
 /// working folder; treat it like a failed lookup.
-fn home_is_usable(home: &std::path::Path) -> bool {
+pub(in crate::commands) fn home_is_usable(home: &std::path::Path) -> bool {
     home.is_absolute()
 }
 
@@ -54,6 +56,31 @@ fn config_root_words(p: &roots::ConfigRootPin) -> (&[u8], &[u8], bool) {
     )
 }
 
+/// Warm init starts nothing. A missing root leaves nothing to start (init
+/// already said so on stderr), so the script goes out alone.
+fn prime_cold(
+    roots: &roots::Roots,
+    user: &ctx::User,
+    started: bingsu_core::snapshot::Clock,
+    exe: &std::path::Path,
+) -> prime::PrimeResult {
+    let Ok(request) = ctx::request(roots, user, started) else {
+        return prime::PrimeResult::Unavailable;
+    };
+    let mut spawn = || {
+        if let Some(words) = prime::helper_words(roots, &user.pw.home) {
+            let raw: Vec<&[u8]> = words.iter().map(Vec::as_slice).collect();
+            crate::prompt_spawn::bootstrap(exe.as_os_str(), &raw);
+        }
+    };
+    prime::prime_with_deadline(
+        &request,
+        started.boot,
+        std::time::Instant::now() + prime::INIT_LIMIT,
+        &mut spawn,
+    )
+}
+
 pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     let shell = match args {
         [one] => Shell::parse(one.as_bytes()),
@@ -63,12 +90,13 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
         eprintln!("{}", en(MsgId::UnsupportedShell));
         return ExitCode::from(2);
     };
+    let started = ctx::start();
     let env = trusted_env::TrustedEnv::capture();
-    let uid = sys::current_uid();
-    let Some(pw) = sys::passwd_entry(uid).filter(|pw| home_is_usable(&pw.home)) else {
+    let Some(user) = ctx::User::current() else {
         eprintln!("{}", en(MsgId::NoHome));
         return ExitCode::from(1);
     };
+    let (uid, pw) = (user.me, &user.pw);
     let found = std::env::current_dir()
         .ok()
         .and_then(|cwd| exe_path::invocation_path(argv0, env.path.as_deref(), &cwd));
@@ -82,19 +110,40 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
             }
         }
     };
-    match exe_path::check_path(&exe, uid, &pw.name) {
-        exe_path::Verdict::Safe => {}
-        exe_path::Verdict::Unknown => eprintln!("{}", en(MsgId::TamperUnknown)),
-        exe_path::Verdict::Tamperable => eprintln!("{}", en(MsgId::Tamperable)),
-    }
+    let exe_safe = match exe_path::check_path(&exe, uid, &pw.name) {
+        exe_path::Verdict::Safe => true,
+        exe_path::Verdict::Unknown => {
+            eprintln!("{}", en(MsgId::TamperUnknown));
+            false
+        }
+        exe_path::Verdict::Tamperable => {
+            eprintln!("{}", en(MsgId::Tamperable));
+            false
+        }
+    };
     let roots = roots::resolve(&env, &pw.home, &pw.name);
     for line in root_warnings(&roots) {
         eprintln!("{line}");
+    }
+    // A snapshot of this boot and context means no work. Otherwise one
+    // independent helper reads the settings while init waits for it at most
+    // INIT_LIMIT; the connection script is printed either way.
+    // A binary init just warned about is not started here; the first
+    // prompt's helper does the work.
+    if let (Some(started), true) = (started, exe_safe) {
+        match prime_cold(&roots, &user, started, &exe) {
+            prime::PrimeResult::AlreadyReady
+            | prime::PrimeResult::Published
+            | prime::PrimeResult::Unavailable => {}
+            prime::PrimeResult::Invalid => eprintln!("{}", en(MsgId::ColdInitInvalid)),
+            prime::PrimeResult::TimedOut => eprintln!("{}", en(MsgId::ColdInitUnfinished)),
+        }
     }
     let Some(random) = sys::random_bytes16() else {
         return ExitCode::from(1);
     };
     let session = hex16(random);
+    let roots_var = pinned::encode(&roots, &pw.home);
     let inputs = render::ScriptInputs {
         shell,
         exe: exe.as_os_str().as_bytes(),
@@ -109,6 +158,7 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
         config_root: roots.config.as_ref().map(config_root_words),
         state_root: roots.state.as_ref().map(|p| p.as_os_str().as_bytes()),
         log_root: roots.log.as_ref().map(|p| p.as_os_str().as_bytes()),
+        roots_var: roots_var.as_deref(),
         session_hex: &session,
         home: pw.home.as_os_str().as_bytes(),
     };

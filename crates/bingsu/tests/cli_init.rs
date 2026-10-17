@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 
 #[path = "support/exec_file.rs"]
 mod exec_file;
+#[path = "support/user_env.rs"]
+mod user_env;
 
 fn scratch(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -97,6 +99,8 @@ fn init_finds_bare_argv0_on_path_without_resolving_it() {
         .env_clear()
         .env("PATH", exe.parent().unwrap())
         .env("XDG_RUNTIME_DIR", base.join("run"))
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .env("XDG_STATE_HOME", base.join("state"))
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -156,6 +160,8 @@ fn relative_xdg_runtime_dir_falls_back_to_cache() {
         .env_clear()
         .env("XDG_RUNTIME_DIR", "relative/run")
         .env("XDG_CACHE_HOME", base.join("cache"))
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .env("XDG_STATE_HOME", base.join("state"))
         .output()
         .unwrap();
     let run = std::fs::canonicalize(base.join("cache/bingsu/run")).unwrap();
@@ -643,6 +649,8 @@ fn relative_path_entry_falls_back_to_resolved_executable() {
         .env_clear()
         .env("PATH", format!(".:{}", exe.parent().unwrap().display()))
         .env("XDG_RUNTIME_DIR", base.join("run"))
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .env("XDG_STATE_HOME", base.join("state"))
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -871,4 +879,75 @@ fn exec_file_copy_survives_forking_threads() {
         std::fs::remove_file(&dst).unwrap();
     }
     assert_eq!(busy, 0, "ETXTBSY in {busy} of 300 rounds");
+}
+
+// Cold init: no snapshot of this boot and context yet, so init asks the helper and waits for the first
+// publication (it is there when init returns); nothing is said on stderr.
+// 이것을 실패시키는 것: cold init이 helper를 띄우지 않거나 발행을 기다리지 않는 것, 정상 경로에서 stderr에 글자를 내는 것.
+#[test]
+fn cold_init_waits_for_the_first_compile() {
+    let e = user_env::Env::new("cli_init_n5", "cold");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let exe = install(&e.base, b"bin");
+    let out = init(&exe, "zsh", &e.base);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(e.context_dir().join("snapshot").exists());
+    // Second init: the snapshot is there, so it is quiet and fast (warm).
+    let t = std::time::Instant::now();
+    let out = init(&exe, "zsh", &e.base);
+    assert!(out.stderr.is_empty());
+    assert!(t.elapsed() < std::time::Duration::from_millis(450));
+}
+
+// A helper that cannot finish (the state folder cannot be made) holds init for the limit and no longer: the
+// whole connection script is still printed, the explanation is on stderr only, and the exit is 0.
+// 이것을 실패시키는 것: helper 종료까지 무한히 기다리는 것, 시간 초과 때 연결 스크립트를 내지 않는 것,
+// 설명을 stdout(eval되는 곳)에 쓰는 것, 설명을 빼는 것.
+#[test]
+fn cold_init_stall_still_prints_the_script() {
+    let e = user_env::Env::new("cli_init_n5", "stall");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    e.put("state", "not a folder");
+    let exe = install(&e.base, b"bin");
+    let t = std::time::Instant::now();
+    let out = init(&exe, "zsh", &e.base);
+    let took = t.elapsed();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(took >= std::time::Duration::from_millis(450), "{took:?}");
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+    let mut want = b"'".to_vec();
+    want.extend_from_slice(exe.as_os_str().as_bytes());
+    want.extend_from_slice(b"' prompt");
+    assert!(has(&out.stdout, &want));
+    assert!(!has(&out.stdout, b"did not finish"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "bingsu: reading your settings did not finish in time; the prompt starts with the built-in look and takes your settings when they are ready\n"
+    );
+}
+
+// An invalid first read ends the wait by itself (no 500 ms hold) with its own explanation.
+// 이것을 실패시키는 것: 무효 판정을 보지 못해 한도까지 기다리는 것, 무효를 "시간 초과" 문구로 설명하는 것.
+#[test]
+fn cold_init_with_invalid_settings_does_not_hold_the_shell() {
+    let e = user_env::Env::new("cli_init_n5", "invalid");
+    e.put_config("config.toml", "colr = 1\n");
+    let exe = install(&e.base, b"bin");
+    let t = std::time::Instant::now();
+    let out = init(&exe, "zsh", &e.base);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(450),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "bingsu: your settings are not valid, so the prompt starts with the built-in look. Run: bingsu config check\n"
+    );
 }

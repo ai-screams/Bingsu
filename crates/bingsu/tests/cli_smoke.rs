@@ -9,7 +9,7 @@ fn no_args_prints_usage_to_stderr_and_exits_2() {
     assert!(out.stdout.is_empty());
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
-        err.starts_with("usage: bingsu <config|init|prompt>"),
+        err.starts_with("usage: bingsu <config|init|prompt|reload>"),
         "{err}"
     );
 }

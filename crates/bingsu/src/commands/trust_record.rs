@@ -205,7 +205,8 @@ pub fn read_session(
     Ok(evidence)
 }
 
-/// Convenience for diagnostics only. N2 must use read_session/with_record.
+/// Convenience for tests. N2 and `config check` use read_session.
+#[cfg(test)]
 pub fn read(
     state_root: &Path,
     me: u32,

@@ -257,18 +257,28 @@ pub fn canonical_lenient(p: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn resolve(env: &TrustedEnv, home: &Path, user: &[u8]) -> Roots {
-    let state = canonical_lenient(
+/// The written config root before any check (`$XDG_CONFIG_HOME/bingsu`).
+pub fn config_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
+    abs(&env.xdg_config_home)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("bingsu")
+}
+
+/// The canonical state root, which may not exist yet.
+pub fn state_root(env: &TrustedEnv, home: &Path) -> Option<PathBuf> {
+    canonical_lenient(
         &abs(&env.xdg_state_home)
             .unwrap_or_else(|| home.join(".local").join("state"))
             .join("bingsu"),
-    );
+    )
+}
+
+pub fn resolve(env: &TrustedEnv, home: &Path, user: &[u8]) -> Roots {
+    let state = state_root(env, home);
     Roots {
         runtime: pin(&runtime_candidate(env, home), user).ok(),
         config: ConfigRootPin::check(
-            &abs(&env.xdg_config_home)
-                .unwrap_or_else(|| home.join(".config"))
-                .join("bingsu"),
+            &config_candidate(env, home),
             sys::current_uid(),
             &mut SystemGroups::new(user),
         )

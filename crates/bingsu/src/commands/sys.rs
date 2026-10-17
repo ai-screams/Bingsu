@@ -21,6 +21,13 @@ pub enum WriteOutcome {
     Failed,
 }
 
+/// Ends the process now without atexit handlers or a flush (a deadline
+/// that already passed; `std::process::exit` is disallowed here).
+pub fn exit_now(code: i32) -> ! {
+    // SAFETY: _exit takes one integer, touches no memory and never returns.
+    unsafe { libc::_exit(code) }
+}
+
 /// Hand-written write(2) loop. `write_all` retries EINTR on its own, which
 /// a timer could not interrupt (spec section 4 "output rules"). M3a adds
 /// the deadline-flag check on EINTR; M1 has no timer yet.
