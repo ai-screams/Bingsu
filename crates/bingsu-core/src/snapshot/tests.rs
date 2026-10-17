@@ -144,11 +144,13 @@ mod cases {
     #[test]
     fn eligibility_each_condition() {
         let (id, m, c) = fixture();
-        assert_eq!(eligible(id, Some(m), c), Ok(100 + T_NS));
-        assert_eq!(eligible(id, None, c), Err(Refusal::Missing));
+        assert_eq!(eligible(id, Some(m), c, id.context), Ok(100 + T_NS));
+        assert_eq!(eligible(id, None, c, id.context), Err(Refusal::Missing));
+        // 이것을 실패시키는 것: 서로 일치하는 외부 문맥의 사본·표식을 허용하는 것.
+        assert_eq!(eligible(id, Some(m), c, [99; 4]), Err(Refusal::Pair));
         let mut x = m;
         x.invalid = true;
-        assert_eq!(eligible(id, Some(x), c), Err(Refusal::Invalid));
+        assert_eq!(eligible(id, Some(x), c, id.context), Err(Refusal::Invalid));
         for field in 0..5 {
             let mut x = m;
             match field {
@@ -158,31 +160,35 @@ mod cases {
                 3 => x.id.epoch[0] ^= 1,
                 _ => x.id.context[0] ^= 1,
             };
-            assert_eq!(eligible(id, Some(x), c), Err(Refusal::Pair), "{field}");
+            assert_eq!(
+                eligible(id, Some(x), c, id.context),
+                Err(Refusal::Pair),
+                "{field}"
+            );
         }
         let mut x = c;
         x.boot[0] ^= 1;
-        assert_eq!(eligible(id, Some(m), x), Err(Refusal::Boot));
+        assert_eq!(eligible(id, Some(m), x, id.context), Err(Refusal::Boot));
         let mut x = c;
         x.kind = 2;
-        assert_eq!(eligible(id, Some(m), x), Err(Refusal::Clock));
+        assert_eq!(eligible(id, Some(m), x, id.context), Err(Refusal::Clock));
         let mut x = c;
         x.domain[0] ^= 1;
-        assert_eq!(eligible(id, Some(m), x), Err(Refusal::Clock));
+        assert_eq!(eligible(id, Some(m), x, id.context), Err(Refusal::Clock));
         let mut x = c;
         x.resume = 1;
-        assert_eq!(eligible(id, Some(m), x), Err(Refusal::Resume));
+        assert_eq!(eligible(id, Some(m), x, id.context), Err(Refusal::Resume));
         let mut x = c;
         x.now = 99;
-        assert_eq!(eligible(id, Some(m), x), Err(Refusal::Future));
+        assert_eq!(eligible(id, Some(m), x, id.context), Err(Refusal::Future));
         let mut x = c;
         x.now = 100 + T_NS;
-        assert_eq!(eligible(id, Some(m), x), Err(Refusal::Expired));
+        assert_eq!(eligible(id, Some(m), x, id.context), Err(Refusal::Expired));
         let mut x = m;
         x.verified_at = u64::MAX - 1;
         let mut c = c;
         c.now = u64::MAX - 1;
-        assert_eq!(eligible(id, Some(x), c), Err(Refusal::Expired));
+        assert_eq!(eligible(id, Some(x), c, id.context), Err(Refusal::Expired));
         assert!(!same_boot(id, None, id.context));
         assert!(!same_boot(id, Some([0; 16]), id.context));
         assert!(same_boot(id, Some(id.boot), id.context));
@@ -227,7 +233,7 @@ mod cases {
             let got = Snapshot::decode_front(front, b.len()).unwrap();
             assert_eq!(got.id, id);
             assert_eq!(got.config, s.config);
-            assert!(got.metadata.is_empty());
+            assert_eq!((got.clock_kind, got.resume), (1, 0));
             assert!(Snapshot::decode_front(front, b.len() + 1).is_err());
             for i in [
                 0,
@@ -409,7 +415,8 @@ mod cases {
                     Clock {
                         now: m.verified_at + offset,
                         ..c
-                    }
+                    },
+                    id.context
                 )
                 .is_ok(),
                 offset < T_NS
@@ -422,13 +429,19 @@ mod cases {
                     ..id
                 },
                 Some(Marker { invalid: true, ..m }),
-                Clock { now: u64::MAX, ..c }
+                Clock { now: u64::MAX, ..c },
+                id.context
             ),
             Err(Refusal::Invalid)
         );
         assert!(!same_boot(id, Some(id.boot), [99; 4]));
         assert_eq!(
-            eligible(id, Some(Marker { kind: 3, ..m }), Clock { kind: 3, ..c }),
+            eligible(
+                id,
+                Some(Marker { kind: 3, ..m }),
+                Clock { kind: 3, ..c },
+                id.context
+            ),
             Err(Refusal::Clock)
         );
         let mut unknown = Marker::encode(m);

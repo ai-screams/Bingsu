@@ -58,6 +58,10 @@ def main():
         "st_ok_future": one(b"L", status=b"ok:future-code"),
         "st_notice_future": one(b"L", status=b"notice:future-code"),
         "st_degraded_known": one(b"L", status=b"degraded:runtime-root"),
+        # 이것을 실패시키는 것: N4 trust 상태를 generic/다른 상태로 분류하는 것.
+        "st_trust_invalid": one(b"!", status=b"degraded:trust-invalid"),
+        "st_trust_mismatch": one(b"!", status=b"degraded:trust-mismatch"),
+        "st_trust_clock": one(b"!", status=b"degraded:trust-clock"),
         "st_error_known": one(b"L", status=b"error:bad-args"),
         "st_degraded_unknown": one(b"L", status=b"degraded:future-x"),
         "st_unknown_class": one(b"L", status=b"weird:thing"),

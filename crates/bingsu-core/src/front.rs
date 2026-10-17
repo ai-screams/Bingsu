@@ -4,11 +4,13 @@
 //! `prepare`, carries out the reads the plan names (none yet), calls
 //! `finish`, writes the record and exits; it decides nothing.
 //!
-//! There is no config snapshot yet (M3a later tasks), so every prompt draws
-//! the built-in default; an envelope without `--shell` (a hook older than
-//! the renderer) gets the shell-neutral minimal record.
+//! The connected adapter still draws the built-in default. The N4 snapshot
+//! consumer is in `staged`; connecting its effects requires the prompt I/O
+//! budget ruling. An envelope without `--shell` (a hook older than the renderer)
+//! gets the shell-neutral minimal record.
 use crate::color::palette::Mode;
 use crate::color::sgr::ColorDepth;
+use crate::config::compile::CompiledConfig;
 use crate::default_theme::DefaultTheme;
 use crate::envelope::{self, Envelope, EnvelopeError};
 use crate::field::BUILTIN;
@@ -21,6 +23,10 @@ use crate::shell_word::Shell;
 use crate::status::Status;
 use crate::width::WidthProfile;
 use alloc::vec::Vec;
+
+/// Snapshot continuation and selection. The OS executor remains disconnected
+/// until the prompt syscall/path budget has an explicit N4 ruling.
+pub mod staged;
 
 /// Appends the record of `fields`; a field the encoder refuses (a renderer
 /// defect: the B1 grammar is the producer's promise) gives the minimal
@@ -62,10 +68,78 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
     encode_or_internal(&to_b1_fields(&r), status, out);
 }
 
-/// What the adapter must read from the system before `finish`, decided from
-/// the arguments alone. Part V reads nothing, so the plan only carries the
-/// parsed envelope; N4 adds the snapshot header and marker reads (through
-/// the pinned runtime root) and the clock read as public fields.
+/// Shared snapshot/default rendering. Only the staged consumer enables P10;
+/// the legacy adapter remains disconnected pending its syscall-budget ruling.
+fn render_selected(
+    parsed: &Envelope,
+    shell: Shell,
+    status: Status,
+    compiled: Option<&CompiledConfig>,
+    mode: Mode,
+    out: &mut Vec<u8>,
+) {
+    let default;
+    let setup;
+    let (theme, setup, options, duration_min) = if let Some(c) = compiled {
+        setup = c.setup();
+        (
+            c.theme_for(mode),
+            setup.as_slice(),
+            Options {
+                width: parsed.width,
+                profile: c.profile,
+                icons: c.icons,
+                use_last_column: c.use_last_column,
+            },
+            c.duration_min_ms,
+        )
+    } else {
+        let Ok(d) = DefaultTheme::new(mode) else {
+            write_minimal_b1(Status::ERROR_INTERNAL, out);
+            return;
+        };
+        default = d;
+        (
+            default.theme(),
+            default.setup(),
+            Options {
+                width: parsed.width,
+                profile: WidthProfile::DEFAULT,
+                icons: crate::default_theme::ICONS,
+                use_last_column: false,
+            },
+            shell_values::DURATION_MIN_MS,
+        )
+    };
+    let collected = shell_values::collect_with_duration_min(parsed, duration_min);
+    let inputs = Inputs {
+        catalog: BUILTIN,
+        values: &collected.values,
+        facts: &collected.facts,
+        setup,
+    };
+    let target = Target {
+        shell,
+        depth: if parsed.truecolor {
+            ColorDepth::TrueColor
+        } else {
+            ColorDepth::Ansi256
+        },
+        options,
+    };
+    let notice = (status != Status::OK_NONE).then_some(crate::render::Notice::Warning);
+    let rendered = crate::render::render_prompt_with_notice(
+        &theme,
+        &inputs,
+        &target,
+        notice,
+        &mut NoopRecorder,
+    );
+    encode_or_internal(&to_b1_fields(&rendered), status, out);
+}
+
+/// The legacy adapter plan, which carries only a parsed envelope. The snapshot
+/// continuation uses `staged::ReadPlan`, whose read and ownership state is private.
 pub struct ReadPlan {
     parsed: Result<Envelope, EnvelopeError>,
 }
@@ -75,9 +149,9 @@ pub struct ReadPlan {
 #[derive(Default)]
 pub struct Observed {}
 
-/// What the adapter does next: write `record` and exit. N3 adds whether to
-/// start the refresh helper, N6 the output deadline; the adapter carries
-/// them out without deciding anything.
+/// What the connected adapter does next: write `record` and exit. The helper
+/// already starts before the filter; no response grants process creation.
+/// `staged::Response` additionally carries the snapshot's execution eligibility.
 pub struct Response {
     pub record: Vec<u8>,
 }

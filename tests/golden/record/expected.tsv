@@ -29,6 +29,9 @@ len_65537	reject	-	-	-
 st_ok_future	accept	ok	-	-
 st_notice_future	accept	notice	generic	-
 st_degraded_known	accept	degraded	degraded:runtime-root	-
+st_trust_invalid	accept	degraded	degraded:trust-invalid	-
+st_trust_mismatch	accept	degraded	degraded:trust-mismatch	-
+st_trust_clock	accept	degraded	degraded:trust-clock	-
 st_error_known	accept	error	error:bad-args	-
 st_degraded_unknown	accept	degraded	generic	-
 st_unknown_class	accept	degraded	generic	-

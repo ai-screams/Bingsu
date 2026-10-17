@@ -1,0 +1,650 @@
+//! N4 sans-I/O continuation. Only this module chooses names, descriptors and read
+//! lengths. An executor observes facts, never manufactures a safety verdict.
+//! The CLI connection requires a separate syscall/path-budget ruling.
+use crate::color::palette::Mode;
+use crate::config::compile::ExecUnit;
+use crate::envelope::{self, Envelope, EnvelopeError};
+use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
+use crate::handoff::Permit;
+use crate::snapshot::{self, Clock, FrontDecoder, FrontSnapshot, Marker, Refusal};
+use crate::status::Status;
+use alloc::{boxed::Box, vec, vec::Vec};
+
+/// Three slots suffice: parent, child, and one file. These are NOT raw OS fds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Directory0,
+    Directory1,
+    File,
+}
+impl Slot {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Directory0 => 0,
+            Self::Directory1 => 1,
+            Self::File => 2,
+        }
+    }
+    fn other(self) -> Self {
+        match self {
+            Self::Directory0 => Self::Directory1,
+            _ => Self::Directory0,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotCopy {
+    Current,
+    LastGood,
+}
+impl SnapshotCopy {
+    fn name(self) -> &'static [u8] {
+        match self {
+            Self::Current => b"snapshot",
+            Self::LastGood => b"last-good",
+        }
+    }
+}
+/// Read-only operations. Directory names are single canonical components;
+/// only the initial root open has no parent and names `/`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Operation {
+    Uid,
+    Clock,
+    OpenDirectory {
+        parent: Option<Slot>,
+        name: Vec<u8>,
+        into: Slot,
+    },
+    OpenFile {
+        parent: Slot,
+        name: &'static [u8],
+        into: Slot,
+    },
+    Inspect(Slot),
+    Read {
+        slot: Slot,
+        len: usize,
+    },
+    Close(Slot),
+}
+/// Cannot be constructed outside core. No raw arguments or source paths go to
+/// the executor, only a reference to this one approved operation.
+pub struct Effect {
+    operation: Operation,
+}
+impl Effect {
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FdFacts {
+    pub entry: Facts,
+    pub local: Option<bool>,
+    pub nlink: u64,
+    pub size: u64,
+}
+/// `Opened` means the executor has retained the descriptor in the requested
+/// empty slot. Inspect/read use that SAME descriptor. A failed close must still
+/// relinquish the slot, never retry a possibly recycled descriptor.
+pub enum Observation {
+    Uid(u32),
+    Clock(Option<Clock>),
+    Opened,
+    Facts(FdFacts),
+    Bytes(Vec<u8>),
+    Closed,
+    Failed,
+}
+pub enum Step {
+    Read(Effect),
+    Done(Observed),
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Start,
+    Uid,
+    StartClock,
+    OpenDirectory,
+    DirectoryFacts,
+    CloseParent,
+    OpenFile,
+    FileFacts,
+    ReadFile,
+    CloseFile,
+    FinalClock,
+    Cleanup,
+    Done,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum File {
+    Snapshot(SnapshotCopy),
+    Marker,
+}
+impl File {
+    fn name(self) -> &'static [u8] {
+        match self {
+            Self::Snapshot(c) => c.name(),
+            Self::Marker => b"marker",
+        }
+    }
+}
+/// Every field is private, including pending-operation and slot ownership state.
+pub struct ReadPlan {
+    parsed: Result<Envelope, EnvelopeError>,
+    phase: Phase,
+    after_close: Phase,
+    pending: bool,
+    names: Vec<Vec<u8>>,
+    runtime_at: usize,
+    at: usize,
+    directory: Slot,
+    live: [bool; 3],
+    owner: NextOwner,
+    uid: Option<u32>,
+    context: Option<[u8; 4]>,
+    start: Option<Clock>,
+    observed: Observed,
+    file: File,
+    decoder: Option<FrontDecoder>,
+    marker_bytes: Vec<u8>,
+    read_len: usize,
+}
+/// Only `next` can construct a successful observation. Default is fail-closed.
+#[derive(Default)]
+pub struct Observed {
+    runtime_ok: bool,
+    selected: Option<Box<FrontSnapshot>>,
+    last_good: bool,
+    marker: Option<Marker>,
+    clock: Option<Clock>,
+    boot_changed: bool,
+}
+
+pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
+    ReadPlan {
+        parsed: envelope::parse(argv),
+        phase: Phase::Start,
+        after_close: Phase::OpenFile,
+        pending: false,
+        names: Vec::new(),
+        runtime_at: 0,
+        at: 0,
+        directory: Slot::Directory0,
+        live: [false; 3],
+        owner: NextOwner::Any,
+        uid: None,
+        context: None,
+        start: None,
+        observed: Observed::default(),
+        file: File::Snapshot(SnapshotCopy::Current),
+        decoder: None,
+        marker_bytes: Vec::new(),
+        read_len: 0,
+    }
+}
+impl ReadPlan {
+    fn initialize(&mut self) -> Option<()> {
+        let e = self.parsed.as_ref().ok()?;
+        e.shell?;
+        let root = e.runtime_root.as_ref()?;
+        let config = e.config_root.as_deref()?;
+        let state = e.state_root.as_deref()?;
+        let contexts = snapshot::context_components(config, state).ok()?;
+        self.context = snapshot::context_crc(config, state).ok();
+        // Canonical spelling from init: no normalization and no source I/O.
+        if root.path.first() != Some(&b'/')
+            || root.path.contains(&0)
+            || root.path.len() > snapshot::COMPILED_MAX
+        {
+            return None;
+        }
+        self.names.push(vec![b'/']);
+        if root.path != b"/" {
+            for part in root.path[1..].split(|b| *b == b'/') {
+                if part.is_empty() || part == b"." || part == b".." {
+                    return None;
+                }
+                self.names.push(part.to_vec());
+            }
+        }
+        self.runtime_at = self.names.len() - 1;
+        self.names
+            .extend(contexts.into_iter().map(|s| s.into_bytes()));
+        Some(())
+    }
+    fn stop(&mut self) {
+        self.phase = Phase::Cleanup;
+    }
+    fn refuse_runtime(&mut self) {
+        self.observed = Observed::default();
+        self.stop();
+    }
+    fn next_file(&mut self) {
+        self.decoder = None;
+        self.after_close = Phase::OpenFile;
+        match self.file {
+            File::Snapshot(SnapshotCopy::Current) if self.observed.selected.is_none() => {
+                self.file = File::Snapshot(SnapshotCopy::LastGood);
+            }
+            File::Snapshot(_) => self.file = File::Marker,
+            File::Marker => self.after_close = Phase::FinalClock,
+        }
+        self.phase = if self.live[Slot::File.index()] {
+            Phase::CloseFile
+        } else {
+            self.after_close
+        };
+    }
+    fn file_facts(&mut self, f: FdFacts) -> bool {
+        let Some(uid) = self.uid else {
+            return false;
+        };
+        let e = f.entry;
+        if e.uid != uid
+            || e.mode != 0o100600
+            || f.nlink != 1
+            || e.ownership != Some(true)
+            || f.local != Some(true)
+            || !matches!(
+                e.acl,
+                fs_trust::AclFacts::None
+                    | fs_trust::AclFacts::DenyOnly
+                    | fs_trust::AclFacts::PosixExtended
+            )
+        {
+            return false;
+        }
+        match self.file {
+            File::Marker => f.size == snapshot::MARKER as u64,
+            File::Snapshot(_) => match FrontDecoder::new(f.size) {
+                Ok(d) => {
+                    self.decoder = Some(d);
+                    true
+                }
+                Err(_) => false,
+            },
+        }
+    }
+    fn directory_facts(&mut self, f: FdFacts) -> bool {
+        let (Some(uid), Ok(e)) = (self.uid, self.parsed.as_ref()) else {
+            return false;
+        };
+        if f.entry.mode & 0o170000 != 0o040000 {
+            return false;
+        }
+        let mut groups = PinnedGroupWrite(&e.runtime_groups);
+        if self.at < self.runtime_at {
+            match fs_trust::ancestor_verdict(&f.entry, uid, self.at, self.owner, &mut groups) {
+                Ok(owner) => self.owner = owner,
+                Err(_) => return false,
+            }
+        } else {
+            if fs_trust::final_verdict(
+                &f.entry,
+                uid,
+                self.at,
+                self.owner,
+                Last::PrivateFolder,
+                f.local,
+                &mut groups,
+            )
+            .is_err()
+            {
+                return false;
+            }
+            self.owner = NextOwner::Any;
+            if self.at == self.runtime_at {
+                let Some(pin) = e.runtime_root.as_ref() else {
+                    return false;
+                };
+                if (pin.dev, pin.ino) != (f.entry.dev, f.entry.ino) {
+                    return false;
+                }
+                self.observed.runtime_ok = true;
+            }
+        }
+        true
+    }
+    fn accept(&mut self, o: Observation) {
+        match (self.phase, o) {
+            (Phase::Uid, Observation::Uid(uid)) => {
+                self.uid = Some(uid);
+                self.phase = Phase::StartClock;
+            }
+            (Phase::StartClock, Observation::Clock(c)) => {
+                self.start = c;
+                self.phase = Phase::OpenDirectory;
+            }
+            (Phase::StartClock, Observation::Failed) => {
+                self.start = None;
+                self.phase = Phase::OpenDirectory;
+            }
+            (Phase::OpenDirectory, Observation::Opened) => {
+                self.live[self.directory.index()] = true;
+                self.phase = Phase::DirectoryFacts;
+            }
+            (Phase::OpenDirectory, Observation::Failed) => self.stop(),
+            (Phase::DirectoryFacts, Observation::Facts(f)) => {
+                if !self.directory_facts(f) {
+                    self.refuse_runtime();
+                } else if self.at > 0 {
+                    self.phase = Phase::CloseParent;
+                } else {
+                    self.after_directory();
+                }
+            }
+            (Phase::CloseParent, Observation::Closed) => {
+                self.live[self.directory.other().index()] = false;
+                self.after_directory();
+            }
+            (Phase::OpenFile, Observation::Opened) => {
+                self.live[Slot::File.index()] = true;
+                self.phase = Phase::FileFacts;
+            }
+            (Phase::OpenFile, Observation::Failed) => self.next_file(),
+            (Phase::FileFacts, Observation::Facts(f)) => {
+                if self.file_facts(f) {
+                    self.phase = Phase::ReadFile;
+                } else {
+                    self.next_file();
+                }
+            }
+            (Phase::ReadFile, Observation::Bytes(bytes)) => {
+                if bytes.is_empty() || bytes.len() > self.read_len {
+                    self.next_file();
+                    return;
+                }
+                match self.file {
+                    File::Marker => {
+                        self.marker_bytes.extend_from_slice(&bytes);
+                        if self.marker_bytes.len() == snapshot::MARKER {
+                            self.observed.marker = Marker::decode(&self.marker_bytes).ok();
+                            self.next_file();
+                        }
+                    }
+                    File::Snapshot(copy) => {
+                        let Some(d) = self.decoder.as_mut() else {
+                            self.next_file();
+                            return;
+                        };
+                        if d.push(&bytes).is_err() {
+                            self.next_file();
+                            return;
+                        }
+                        if d.read_len() == 0 {
+                            self.observed.selected = self
+                                .decoder
+                                .take()
+                                .and_then(|d| d.finish().ok())
+                                .map(Box::new)
+                                .filter(|s| {
+                                    snapshot::same_boot(
+                                        s.id,
+                                        self.start.map(|c| c.boot),
+                                        self.context.unwrap_or([0; 4]),
+                                    )
+                                });
+                            self.observed.last_good =
+                                copy == SnapshotCopy::LastGood && self.observed.selected.is_some();
+                            self.next_file();
+                        }
+                    }
+                }
+            }
+            (Phase::FileFacts | Phase::ReadFile, Observation::Failed) => self.next_file(),
+            (Phase::CloseFile, Observation::Closed) => {
+                self.live[Slot::File.index()] = false;
+                self.phase = self.after_close;
+            }
+            (Phase::FinalClock, Observation::Clock(c)) => {
+                // A backwards or changed clock during this prompt cannot authorize
+                // execution, even when the marker would otherwise still match.
+                self.observed.boot_changed =
+                    c.is_some_and(|end| self.start.is_none_or(|start| start.boot != end.boot));
+                self.observed.clock = c.filter(|end| {
+                    self.start.is_some_and(|start| {
+                        start.boot == end.boot
+                            && start.kind == end.kind
+                            && start.domain == end.domain
+                            && start.resume == end.resume
+                            && start.now <= end.now
+                    })
+                });
+                self.stop();
+            }
+            (Phase::FinalClock, Observation::Failed) => {
+                self.observed.clock = None;
+                self.stop();
+            }
+            (Phase::CloseParent, _) => {
+                self.live[self.directory.other().index()] = false;
+                self.refuse_runtime();
+            }
+            (Phase::CloseFile, _) => {
+                self.live[Slot::File.index()] = false;
+                self.refuse_runtime();
+            }
+            (Phase::Cleanup, Observation::Closed) => {
+                if let Some(i) = self.live.iter().position(|x| *x) {
+                    self.live[i] = false;
+                }
+            }
+            (Phase::Cleanup, _) => {
+                if let Some(i) = self.live.iter().position(|x| *x) {
+                    self.live[i] = false;
+                }
+                self.refuse_runtime();
+            }
+            // Failed or malformed observation is never inferred to be success.
+            _ => self.refuse_runtime(),
+        }
+    }
+    fn after_directory(&mut self) {
+        if self.at + 1 == self.names.len() {
+            // Without a boot identity no saved screen can be reused.
+            if self.start.is_none_or(|c| c.boot == [0; 16]) {
+                self.stop();
+            } else {
+                self.phase = Phase::OpenFile;
+            }
+        } else {
+            self.at += 1;
+            self.directory = self.directory.other();
+            self.phase = Phase::OpenDirectory;
+        }
+    }
+    fn operation(&mut self) -> Option<Operation> {
+        Some(match self.phase {
+            Phase::Uid => Operation::Uid,
+            Phase::StartClock | Phase::FinalClock => Operation::Clock,
+            Phase::OpenDirectory => Operation::OpenDirectory {
+                parent: (self.at > 0).then(|| self.directory.other()),
+                name: self.names.get(self.at)?.clone(),
+                into: self.directory,
+            },
+            Phase::DirectoryFacts => Operation::Inspect(self.directory),
+            Phase::CloseParent => Operation::Close(self.directory.other()),
+            Phase::OpenFile => Operation::OpenFile {
+                parent: self.directory,
+                name: self.file.name(),
+                into: Slot::File,
+            },
+            Phase::FileFacts => Operation::Inspect(Slot::File),
+            Phase::ReadFile => {
+                self.read_len = match self.file {
+                    File::Marker => snapshot::MARKER.saturating_sub(self.marker_bytes.len()),
+                    File::Snapshot(_) => self.decoder.as_ref()?.read_len(),
+                };
+                if self.read_len == 0 {
+                    return None;
+                }
+                Operation::Read {
+                    slot: Slot::File,
+                    len: self.read_len,
+                }
+            }
+            Phase::CloseFile => Operation::Close(Slot::File),
+            Phase::Cleanup => Operation::Close(match self.live.iter().position(|x| *x)? {
+                0 => Slot::Directory0,
+                1 => Slot::Directory1,
+                _ => Slot::File,
+            }),
+            _ => return None,
+        })
+    }
+}
+
+pub fn next(plan: &mut ReadPlan, previous: Option<Observation>) -> Step {
+    if plan.phase == Phase::Done {
+        return Step::Done(Observed::default());
+    }
+    if plan.phase == Phase::Start && previous.is_none() {
+        plan.phase = if plan.initialize().is_some() {
+            Phase::Uid
+        } else {
+            Phase::Cleanup
+        };
+    } else if plan.pending {
+        plan.pending = false;
+        if let Some(o) = previous {
+            plan.accept(o);
+        } else {
+            plan.refuse_runtime();
+        }
+    } else {
+        plan.refuse_runtime();
+    }
+    if let Some(operation) = plan.operation() {
+        plan.pending = true;
+        Step::Read(Effect { operation })
+    } else {
+        plan.phase = Phase::Done;
+        Step::Done(core::mem::take(&mut plan.observed))
+    }
+}
+
+/// Execution is permission for these decoded units only, never for arbitrary
+/// caller-supplied policies. A relay permit alone does not grant a unit.
+#[derive(Default)]
+pub struct Eligibility {
+    permit: Option<Permit>,
+    units: Vec<ExecUnit>,
+}
+impl Eligibility {
+    pub fn permit(&self) -> Option<Permit> {
+        self.permit
+    }
+    pub fn units(&self) -> &[ExecUnit] {
+        &self.units
+    }
+}
+pub struct Response {
+    pub record: Vec<u8>,
+    /// Output deadline is an N6 concern; this is the execution deadline only.
+    pub execution: Eligibility,
+    pub worker_mask: u32,
+    pub status: Status,
+}
+
+fn trust_status(refusal: Refusal) -> Status {
+    match refusal {
+        Refusal::Missing => Status::DEGRADED_TRUST_UNVERIFIED,
+        Refusal::Invalid => Status::DEGRADED_TRUST_INVALID,
+        Refusal::Pair => Status::DEGRADED_TRUST_MISMATCH,
+        Refusal::Expired => Status::DEGRADED_TRUST_EXPIRED,
+        Refusal::Boot | Refusal::Clock | Refusal::Resume | Refusal::Future => {
+            Status::DEGRADED_TRUST_CLOCK
+        }
+    }
+}
+/// Finish never observes the OS. `mode` is an already-observed display fact,
+/// separate from snapshot identity. Stored OSC observation / hook wiring waits
+/// for the front I/O ruling; neither this API nor the helper reads COLORFGBG.
+pub fn finish(plan: ReadPlan, mut observed: Observed, mode: Mode) -> Response {
+    let mut response = Response {
+        record: Vec::new(),
+        execution: Eligibility::default(),
+        worker_mask: 0,
+        status: Status::ERROR_CONFIG_DEFAULT,
+    };
+    let e = match plan.parsed {
+        Err(EnvelopeError::NoSupportedRecordVersion) => return response,
+        Err(EnvelopeError::BadArgs(_)) => {
+            response.status = Status::ERROR_BAD_ARGS;
+            crate::record::write_minimal_b1(response.status, &mut response.record);
+            return response;
+        }
+        Ok(e) => e,
+    };
+    // Binding to the current envelope is independent of the reader's address.
+    let context = e
+        .config_root
+        .as_deref()
+        .zip(e.state_root.as_deref())
+        .and_then(|(c, s)| snapshot::context_crc(c, s).ok());
+    if plan.phase != Phase::Done || !observed.runtime_ok {
+        observed.selected = None;
+        response.status = Status::DEGRADED_RUNTIME_ROOT;
+    } else {
+        observed.selected = observed.selected.filter(|s| {
+            !observed.boot_changed
+                && context.is_some_and(|context| {
+                    snapshot::same_boot(s.id, plan.start.map(|c| c.boot), context)
+                })
+        });
+        if let Some(s) = &observed.selected {
+            let eligibility = if observed.marker.is_some_and(|m| m.invalid) {
+                Err(Refusal::Invalid)
+            } else if observed.marker.is_none() {
+                Err(Refusal::Missing)
+            } else if observed.marker.is_some_and(|m| m.id != s.id) {
+                Err(Refusal::Pair)
+            } else {
+                observed
+                    .clock
+                    .ok_or(Refusal::Clock)
+                    .and_then(|clock| s.eligible(observed.marker, clock, context.unwrap_or([0; 4])))
+            };
+            response.status = if observed.last_good {
+                Status::ERROR_CONFIG_LAST_GOOD
+            } else {
+                eligibility.map_or_else(trust_status, |_| Status::OK_NONE)
+            };
+            response.worker_mask = crate::collection::worker_mask(s.config.collect_mask);
+            if let (Ok(deadline), Some(clock)) = (eligibility, observed.clock) {
+                response.execution.permit = Some(Permit {
+                    deadline,
+                    kind: clock.kind,
+                    boot: clock.boot,
+                    domain: clock.domain,
+                    resume: clock.resume,
+                });
+                response.execution.units = s
+                    .config
+                    .exec_units
+                    .iter()
+                    .filter(|u| u.not_run.is_none())
+                    .cloned()
+                    .collect();
+            }
+        }
+    }
+    if let Some(shell) = e.shell {
+        super::render_selected(
+            &e,
+            shell,
+            response.status,
+            observed.selected.as_ref().map(|s| &s.config),
+            mode,
+            &mut response.record,
+        );
+    } else {
+        crate::record::write_minimal_b1(response.status, &mut response.record);
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests;

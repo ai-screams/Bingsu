@@ -3,6 +3,10 @@ use crate::{
     snapshot::{Clock, crc32c},
     snapshot_codec::Error,
 };
+/// Reserved M6 entry. No executor or additional spawn path is installed by N4.
+pub const ENTRY: &str = "__exec-v2";
+pub const PERMIT_ARG: &str = "--permit-fd=3";
+pub const PERMIT_FD: u8 = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permit {
     pub kind: u8,
@@ -48,7 +52,9 @@ impl Permit {
         })
     }
     pub fn allows(self, now: Clock) -> bool {
-        self.kind == now.kind
+        [1, 2].contains(&self.kind)
+            && self.boot != [0; 16]
+            && self.kind == now.kind
             && self.boot == now.boot
             && self.resume == now.resume
             && self.domain == now.domain
@@ -76,6 +82,9 @@ mod tests {
             resume: 0,
             domain: p.domain,
         };
+        // 이것을 실패시키는 것: 직접 만든 permit의 미지원 시계/영 부팅을 허용하는 것.
+        assert!(!Permit { kind: 3, ..p }.allows(Clock { kind: 3, ..c }));
+        assert!(!Permit { boot: [0; 16], ..p }.allows(Clock { boot: [0; 16], ..c }));
         assert_eq!(Permit::decode(&p.encode()), Ok(p));
         assert!(p.allows(c));
         let mut x = c;
