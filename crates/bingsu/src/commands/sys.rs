@@ -1042,13 +1042,80 @@ pub fn open_lock_at(
     }
 }
 
-pub fn try_lock(file: &std::fs::File) -> std::io::Result<()> {
+/// An acquired flock, released at the end of this owner's critical section.
+/// CLOEXEC prevents inheritance across exec, but fork/spawn can temporarily
+/// retain the open-file description after our File closes. Explicit unlock
+/// releases the shared flock even while those references remain alive.
+pub struct FileLock(std::fs::File);
+impl std::ops::Deref for FileLock {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        loop {
+            // SAFETY: this guard owns a live, successfully locked file. Unlock
+            // precedes File::drop and affects inherited references as well.
+            if unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+    }
+}
+
+pub fn try_lock(file: std::fs::File) -> std::io::Result<FileLock> {
     use std::os::fd::AsRawFd;
-    // SAFETY: the file is live; no pointer arguments. Closing releases the lock.
+    // SAFETY: the file is live; no pointer arguments.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        Ok(())
+        Ok(FileLock(file))
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Keep inherited descriptors alive before exec without running Rust in the
+/// child of a multithreaded test process. SIGKILL also skips all destructors.
+#[cfg(test)]
+pub struct PausedFork(libc::pid_t);
+#[cfg(test)]
+impl PausedFork {
+    pub fn new() -> Self {
+        // SAFETY: the child calls only async-signal-safe pause; it never
+        // allocates, unwinds, or returns to the test harness after fork.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            loop {
+                // SAFETY: pause has no pointer arguments or preconditions.
+                unsafe { libc::pause() };
+            }
+        }
+        Self(pid)
+    }
+}
+#[cfg(test)]
+impl Drop for PausedFork {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the live, unreaped child PID.
+        assert_eq!(unsafe { libc::kill(self.0, libc::SIGKILL) }, 0);
+        loop {
+            // SAFETY: null status is allowed; this guard alone reaps the child.
+            let rc = unsafe { libc::waitpid(self.0, std::ptr::null_mut(), 0) };
+            if rc == self.0 {
+                break;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR)
+            );
+        }
     }
 }
 

@@ -224,7 +224,7 @@ fn validate_completed_record(f: &std::fs::File, me: u32) -> std::io::Result<()> 
 /// context snapshot lock first. The lock is persistent and never renamed.
 pub struct SelectionLock {
     chain: Chain,
-    lock: std::fs::File,
+    lock: sys::FileLock,
     state: PathBuf,
     me: u32,
 }
@@ -243,7 +243,7 @@ impl SelectionLock {
         if lock.metadata()?.len() != 0 {
             return Err(std::io::Error::other("nonempty selection lock"));
         }
-        sys::try_lock(&lock)?;
+        let lock = sys::try_lock(lock)?;
         let out = Self {
             chain,
             lock,

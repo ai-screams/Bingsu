@@ -496,7 +496,7 @@ impl Slot {
 }
 pub struct LockedStore<'a> {
     root: &'a CheckedContextFd,
-    lock: File,
+    lock: sys::FileLock,
     stages: std::cell::RefCell<[Option<Staged>; 4]>,
     snapshot_before: std::cell::RefCell<Option<Option<sys::Stamp>>>,
 }
@@ -510,7 +510,7 @@ impl CheckedContextFd {
     pub fn try_lock(&self) -> Result<LockedStore<'_>, StoreError> {
         let lock = sys::open_lock_at(self.dir.as_fd(), OsStr::new(DataFile::Lock.name()))?;
         self.check_file(&lock, 0)?;
-        sys::try_lock(&lock).map_err(lock_error)?;
+        let lock = sys::try_lock(lock).map_err(lock_error)?;
         let store = LockedStore {
             root: self,
             lock,

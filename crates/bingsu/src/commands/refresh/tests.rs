@@ -520,6 +520,59 @@ fn reserved_numbers_are_not_reused_after_failure() {
     assert_eq!(published(f.run()), 3);
     assert_eq!(f.marker().seq, 3);
 }
+// 이것을 실패시키는 것: CLOEXEC fd를 상속한 exec 전 자식이 종료할 때까지 정상 반환 뒤 잠금을 유지하는 것.
+#[test]
+fn inherited_descriptors_do_not_extend_a_refresh_lock() {
+    struct Expiring(Rc<Cell<bool>>);
+    impl ClockSource for Expiring {
+        fn observe(&mut self) -> Result<Clock, ClockError> {
+            let mut now = clock();
+            if self.0.get() {
+                now.now += WORK_NS;
+            }
+            Ok(now)
+        }
+    }
+    // Staged holds the snapshot lock; Validated holds both locks. Exercise
+    // successful publication and an Incomplete return with the child alive.
+    for point in [Checkpoint::Staged, Checkpoint::Validated] {
+        for incomplete in [false, true] {
+            let f = Fx::new(&format!("inherited-{point:?}-{incomplete}"));
+            f.put(COMMAND);
+            published(f.run());
+            let marker = f.bytes("marker");
+            f.put("icons='ascii'\n");
+            let mut child = None;
+            let expired = Rc::new(Cell::new(false));
+            let got = refresh_with(
+                f.request.clone(),
+                &mut Expiring(expired.clone()),
+                &mut |p| {
+                    if p == point {
+                        child = Some(sys::PausedFork::new());
+                        expired.set(incomplete);
+                    }
+                },
+            );
+            assert!(child.is_some());
+            if incomplete {
+                assert_eq!(got, RefreshResult::Incomplete);
+                assert_eq!(f.bytes("marker"), marker);
+            } else {
+                published(got);
+            }
+            // A fresh open-file description must acquire each lock while the
+            // child still owns inherited references to the previous ones.
+            drop(
+                SelectionLock::try_lock(&f.request.state_root, f.request.me, &mut RefuseGroupWrite)
+                    .unwrap(),
+            );
+            f.put(COMMAND);
+            published(f.run());
+            drop(child);
+        }
+    }
+}
 // 이것을 실패시키는 것: 회수 중 symlink·hardlink·mode·FIFO·초과 크기를 지우거나 현재 파일까지 지우는 것.
 #[test]
 fn staging_recovery_checks_safety_before_unlink() {
@@ -729,10 +782,15 @@ fn spawn_child(f: &Fx, point: &str) -> std::process::Child {
 fn await_ready(f: &Fx, child: &mut std::process::Child) {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
     while !f.base.join("ready").exists() {
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "child exited before checkpoint"
-        );
+        if let Some(status) = child.try_wait().unwrap() {
+            // The child can write ready and exit between exists and try_wait.
+            // Parents still check its exit status and exact checkpoint bytes.
+            assert!(
+                f.base.join("ready").exists(),
+                "child exited before checkpoint: {status}"
+            );
+            break;
+        }
         if std::time::Instant::now() >= until {
             child.kill().unwrap();
             child.wait().unwrap();
