@@ -6,11 +6,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
-from conftest import SHELL_CMD, Install, minimal_record, short_dir, trusted_env
+from conftest import ROOT, SHELL_CMD, Install, minimal_record, short_dir, trusted_env
 from pty_session import Session
+
+sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace, scan
 
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 HOSTILE_VARS = ["HOME", "USER", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CACHE_HOME", "BINGSU_LOG"]
@@ -213,11 +217,13 @@ def resolve_dirfds(lines):
     return out
 
 
-def allowed(path, line, exe, roots):
+def allowed(path, line, exe, roots, *, allow_walk=True):
     """Spec section 5 (front-end prompt opens no file of the current folder
     or repository) and X-06 (only the roots pinned by init). A relative path
     never passes. A folder above a pinned root passes only as a folder
-    (`O_DIRECTORY`): the runtime root walk opens each one to check it."""
+    (`O_PATH|O_NOFOLLOW|O_DIRECTORY`): the runtime root walk checks each
+    ancestor without opening its contents. Helper calls also check the syscall
+    and single-component walk shape separately."""
     if path == "" and "AT_EMPTY_PATH" in line:
         return True  # fstat of an fd already open (glibc 2.35, 2.36): names no path
     if path == exe or SYSTEM_PATHS.match(path):
@@ -225,7 +231,8 @@ def allowed(path, line, exe, roots):
     if any(path == r or path.startswith(r + "/") for r in roots):
         return True
     above = path == "/" or any(r.startswith(path.rstrip("/") + "/") for r in roots)
-    return above and "O_DIRECTORY" in line
+    return (allow_walk and above
+            and all(flag in line for flag in ("O_PATH", "O_NOFOLLOW", "O_DIRECTORY")))
 
 
 # 이것을 실패시키는 것: 기술자 기준 상대 이름을 풀지 않는 것(걷기가 상대 경로로 거부됨), 모르는 기술자 기준 이름을
@@ -257,6 +264,306 @@ def test_dirfd_walk_resolves_and_stays_under_the_roots():
         assert not all(allowed(p, line, "/x/bingsu", roots) for p in paths), b
 
 
+# strace -y supplies kernel-resolved dirfd paths, including inherited/duplicated
+# fds. Reuse the fsbudget parser for unfinished/resumed calls and quoted args.
+SPAWNS = {"clone", "clone3", "fork", "vfork"}
+# A positive allowlist for the entire helper/collector subtree, including libc
+# startup, the watchdog and publication. Network is restricted to failed local
+# nscd discovery below; no Internet socket, wait, arbitrary exec or signal.
+# pipe2 is musl posix_spawn's exec-error channel (also used by the root).
+HELPER_CALLS = set("""
+execve clone clone3 exit exit_group arch_prctl set_tid_address set_robust_list
+rseq brk mmap mprotect munmap mremap madvise futex sched_yield getrandom
+rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack restart_syscall
+read readv pread64 write writev pwrite64 close dup dup2 dup3 fcntl ioctl poll ppoll pipe2
+lseek fstat newfstatat stat lstat statx statfs fstatfs getdents64
+open openat openat2 access faccessat faccessat2 readlink readlinkat
+mkdir mkdirat unlink unlinkat rename renameat renameat2 fchmod fchmodat
+flock fsync fdatasync ftruncate getxattr lgetxattr fgetxattr
+getuid geteuid getgid getegid getpid getrlimit setrlimit prlimit64
+setsid umask chdir clock_gettime nanosleep clock_nanosleep prctl seccomp
+socket connect
+""".split()) | {
+    "sched_getaffinity",  # Rust/glibc main and watchdog thread stack setup queries CPU affinity.
+    "gettid",  # Rust/glibc stack setup identifies the main/watchdog thread.
+}
+ROOT_CALLS = {r[0] for r in _ROWS if r[0] != "-"} | set("""
+execve clone clone3 vfork arch_prctl set_tid_address getrlimit prlimit64
+read readv pread64 close fcntl poll ppoll ioctl pipe2 open openat openat2
+access faccessat faccessat2 fstat newfstatat stat statx readlink readlinkat
+getdents64 prctl
+""".split()) | {
+    # Rust runtime start on glibc: the main-thread stack guard reads its own
+    # attributes (pthread_getattr_np fills the CPU set) and thread id.
+    # 이것을 실패시키는 것: 이 둘을 빼는 것(Debian glibc 컨테이너의 prompt 루트가 부른다).
+    "sched_getaffinity",  # Rust/glibc main-thread stack setup queries CPU affinity.
+    "gettid",  # Rust/glibc main-thread stack setup identifies the thread.
+}
+# Only pathname arguments, never read buffers, xattr names or readlink results.
+# Each entry is (pathname argument, dirfd argument or None).
+FILE_ARGS = {
+    **{n: [(0, None)] for n in (
+        "execve open access readlink stat lstat statfs mkdir unlink chdir getxattr lgetxattr"
+    ).split()},
+    **{n: [(1, 0)] for n in (
+        "openat openat2 faccessat faccessat2 readlinkat newfstatat statx mkdirat unlinkat fchmodat"
+    ).split()},
+    "rename": [(0, None), (1, None)],
+    "renameat": [(1, 0), (3, 2)],
+    "renameat2": [(1, 0), (3, 2)],
+}
+NSS_PATHS = {"/etc/passwd", "/etc/group", "/etc/nsswitch.conf"}
+NSCD_PATHS = {"/var/run/nscd/socket", "/run/nscd/socket"}
+
+
+def args_of(call):
+    return scan(call.args)[0]
+
+
+def call_paths(call):
+    args = args_of(call)
+    paths = []
+    for index, dirfd in FILE_ARGS.get(call.name, []):
+        quoted = QUOTED.fullmatch(args[index])
+        assert quoted, ("unreadable or truncated pathname", call)
+        path = quoted.group(1)
+        # Reject escaped spellings conservatively; the fixture uses plain paths.
+        assert "\\" not in path, ("escaped pathname", call)
+        if path and not path.startswith("/") and dirfd is not None:
+            base = re.fullmatch(r'\d+<(/[^<>]*)>', args[dirfd])
+            if base:
+                path = base.group(1).rstrip("/") + "/" + path
+        if path.startswith("/"):
+            path = os.path.normpath(path)
+        paths.append(path)
+    if call.name == "connect":
+        paths.extend(QUOTED.findall(args[1]))
+    return paths
+
+
+def helper_walk_step(call, path, roots):
+    # Runtime-root validation opens only pinned ancestors, one component at a time, without content access.
+    if call.name != "openat" or not any(r.startswith(path.rstrip("/") + "/") for r in roots):
+        return False
+    args = args_of(call)
+    name = QUOTED.fullmatch(args[1]).group(1)
+    flags = set(args[2].split("|"))
+    if not {"O_PATH", "O_NOFOLLOW", "O_DIRECTORY"} <= flags:
+        return False
+    if flags - {"O_RDONLY", "O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"}:
+        return False
+    if name == "/":
+        return path == "/" and args[0] in {"AT_FDCWD", "AT_FDCWD</>"}
+    parent = re.fullmatch(r'\d+<(/[^<>]*)>', args[0])
+    return (bool(parent) and name not in {"", ".", ".."} and "/" not in name
+            and os.path.dirname(path) == parent.group(1))
+
+
+def descriptor_child(call, path):
+    """A single plain name relative to a kernel-annotated held parent."""
+    args = args_of(call)
+    name = QUOTED.fullmatch(args[1])
+    parent = re.fullmatch(r'\d+<(/[^<>]*)>', args[0])
+    return (bool(name and parent) and name.group(1) not in {"", ".", ".."}
+            and "/" not in name.group(1)
+            and path == parent.group(1).rstrip("/") + "/" + name.group(1))
+
+
+def helper_mkdir_step(call, path, roots):
+    # R1's shared creator and runtime publication/collector staging use only
+    # mkdirat(held-parent, one-name, 0700). Config roots are never created.
+    writable = roots[:1] + roots[2:]
+    below = any(path == r or path.startswith(r + "/") for r in writable)
+    # A fresh XDG_STATE_HOME can itself be missing above the state/log pin.
+    state_parent = any(r.startswith(path + "/") for r in roots[2:])
+    return (call.name == "mkdirat" and descriptor_child(call, path)
+            and args_of(call)[2] == "0700" and (below or state_parent))
+
+
+def helper_created_open(call, path, created):
+    # fchmod needs a readable fd on Linux. Permit that ancestor open only
+    # after this PID actually created the same directory; never read entries.
+    if call.name != "openat" or (call.pid, path) not in created:
+        return False
+    flags = set(args_of(call)[2].split("|"))
+    return (descriptor_child(call, path)
+            and {"O_RDONLY", "O_NOFOLLOW", "O_DIRECTORY"} <= flags
+            and not flags - {"O_RDONLY", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"})
+
+
+def helper_chain_stat(call, path, roots):
+    # Chain::revalidate checks held parent/name connections without following
+    # links. Only one component under a held parent belongs to this allowance.
+    if call.name != "newfstatat" or args_of(call)[3] != "AT_SYMLINK_NOFOLLOW":
+        return False
+    if not any(r.startswith(path.rstrip("/") + "/") for r in roots):
+        return False
+    return descriptor_child(call, path)
+
+
+def helper_ancestor_stat(call, path, roots):
+    # ConfigRootPin::check and config_load's absence observation/revalidation
+    # inspect missing prefixes of pinned roots with symlink_metadata (lstat).
+    # glibc/Rust can implement that with statx or newfstatat. This grants only
+    # path-based, no-follow metadata: never an open or fd content operation.
+    if call.name not in {"lstat", "newfstatat", "statx"}:
+        return False  # plain stat follows links and has no no-follow flag
+    if not any(r.startswith(path.rstrip("/") + "/") for r in roots):
+        return False
+    args = args_of(call)
+    if call.name == "lstat":
+        return args[0] == f'"{path}"'
+    if args[0] not in {"AT_FDCWD", "AT_FDCWD</>"} or args[1] != f'"{path}"':
+        return False
+    if call.name == "newfstatat":
+        return args[3] == "AT_SYMLINK_NOFOLLOW"
+    flags = set(args[2].split("|"))
+    return ("AT_SYMLINK_NOFOLLOW" in flags
+            and not flags - {"AT_SYMLINK_NOFOLLOW", "AT_STATX_SYNC_AS_STAT"})
+
+
+def helper_nss_root_stat(call, path):
+    # glibc NSS stats "/" to detect a changed root before reloading nsswitch.conf; metadata only.
+    # https://github.com/bminor/glibc/blob/release/2.36/master/nss/nss_database.c (root_ino/root_dev)
+    return (call.name == "newfstatat" and path == "/" and args_of(call)[1] == '"/"'
+            and args_of(call)[0] in {"AT_FDCWD", "AT_FDCWD</>"}
+            and args_of(call)[3] == "0")
+
+
+def content_paths(call):
+    """Check -y fd names too: an inherited fd must not bypass the path gate.
+
+    Ancestor metadata is allowed, but read/getdents/mmap of its contents is not.
+    Buffers remain opaque; only the descriptor's kernel annotation is a path.
+    """
+    if call.name in {"read", "readv", "pread64", "write", "writev", "pwrite64", "getdents64"}:
+        fd = args_of(call)[0]
+    elif call.name == "mmap":
+        fd = args_of(call)[4]
+    else:
+        return []
+    match = re.fullmatch(r'\d+<(/[^<>]*)>', fd)
+    return [os.path.normpath(match.group(1))] if match else []
+
+
+def fixed_exec(call, exe, verb):
+    args = args_of(call)
+    words = QUOTED.findall(args[1])
+    return (call.name == "execve" and args[0] == f'"{exe}"'
+            and (words == [exe, verb] if verb == "__collect-v1" else words[:2] == [exe, verb])
+            and (args[2] == "[]" or re.fullmatch(r'0x[0-9a-f]+ /\* 0 vars \*/', args[2]))
+            and call.ret == "0")
+
+
+def successful_spawns(calls):
+    attempts = [c for c in calls if c.name in SPAWNS]
+    good = [c for c in attempts if c.ret.isdecimal() and int(c.ret) > 0]
+    # glibc tries clone3 once before falling back to clone on older kernels.
+    fallback = [c for c in attempts if c not in good]
+    assert len(fallback) <= len(good) and all(c.name == "clone3" and c.ret.startswith("-1 ENOSYS")
+                                      for c in fallback), ("unexpected spawn attempt", fallback)
+    return good
+
+
+def assert_prompt_trace_budget(lines, exe, pinned):
+    pids, scoped = tree(lines, exe)
+    assert pids, "bingsu was not executed"
+    trace = parse_trace("\n".join(scoped))
+    assert not trace.errors, trace.errors
+    calls = [c for c in trace if c.name != EXIT_EVENT]
+    root = int(scoped[0].split()[0])
+    front = [c for c in calls if c.pid == root]
+    helper = [c for c in calls if c.pid != root]
+    assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
+    spawns = successful_spawns(front)
+    # 이것을 실패시키는 것: prompt가 helper 외 스레드/프로세스를 만들거나 helper 생성을 생략하는 것.
+    assert len(spawns) == 1, ("exactly one prompt spawn", spawns)
+    spawn, = spawns
+    for attempt in (c for c in front if c.name in SPAWNS):
+        assert attempt.name in {"clone", "clone3", "vfork"} and "CLONE_THREAD" not in attempt.args
+        if attempt.name != "vfork":
+            assert "CLONE_VM" in attempt.args and "CLONE_VFORK" in attempt.args, attempt
+    helper_pid = int(spawn.ret)
+    filters = [c for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args]
+    # 이것을 실패시키는 것: helper 생성이 prompt seccomp 설치 뒤로 옮겨지거나 필터 설치가 실패하는 것.
+    assert len(filters) == 1 and filters[0].ret == "0", filters
+    assert all(c.index < filters[0].index for c in front if c.name in SPAWNS), spawn
+    execs = [c for c in helper if c.name in {"execve", "execveat"}]
+    refresh = [c for c in execs if c.pid == helper_pid]
+    # 이것을 실패시키는 것: 고정 exe/argv[1]/빈 환경 계약을 깨거나 helper를 재-exec하는 것.
+    assert len(refresh) == 1 and fixed_exec(refresh[0], exe, "__refresh-v1"), refresh
+    # With CLONE_VFORK, exec has released the parent, but strace can print
+    # the child's execve *resumed* line after the parent's prctl. Compare
+    # entry lines, not the parser's completion order, across these two PIDs.
+    exec_entry = next(i for i, line in enumerate(scoped)
+                      if line.split()[0] == str(helper_pid) and is_root(line, exe))
+    filter_entry = next(i for i, line in enumerate(scoped)
+                        if line.split()[0] == str(root) and "PR_SET_SECCOMP" in line)
+    assert exec_entry < filter_entry, refresh
+    # 이것을 실패시키는 것: root의 다른 exec, 네트워크·signal·wait 호출 또는 표 밖 write/exit를 허용하는 것.
+    initial = front[0]
+    assert initial.name == "execve" and QUOTED.findall(args_of(initial)[1])[1] == "prompt"
+    stray = [c for c in front[1:] if c.name in NETWORK_OR_PROCESS - SPAWNS]
+    assert not stray, ("root network or process calls", stray)
+    seen = {c.name for c in front[1:] if c.name in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}} - SPAWNS
+    assert seen == ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
+    for c in front:
+        for path in call_paths(c):
+            # This one pre-filter fd enumeration belongs to the pinned bootstrap.
+            bootstrap_fd = path == "/proc/self/fd" and c.index < filters[0].index
+            assert bootstrap_fd or allowed(path, c.args, exe, pinned), ("root path", c, path)
+    # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
+    assert all(c.name in HELPER_CALLS for c in helper), [c for c in helper if c.name not in HELPER_CALLS]
+    # M3a collector exec: exactly the pinned executable and __collect-v1,
+    # no additional argv and an empty environment. It precedes confinement.
+    collectors = [c for c in execs if c.pid != helper_pid]
+    assert len(collectors) <= 1 and all(fixed_exec(c, exe, "__collect-v1") for c in collectors), collectors
+    mains = {helper_pid} | {c.pid for c in collectors}
+    owners = {pid: pid for pid in mains}
+    children = []
+    for pid in {c.pid for c in helper}:
+        made = successful_spawns([c for c in helper if c.pid == pid])
+        assert not made or pid in mains, ("worker spawned a child", made)
+        threads = [c for c in made if "CLONE_THREAD" in c.args]
+        processes = [c for c in made if c not in threads]
+        assert len(threads) <= 1, ("extra watchdog", threads)
+        owners.update({int(c.ret): pid for c in threads})
+        assert len(processes) <= (1 if pid == helper_pid else 0), processes
+        assert all(int(c.ret) in {x.pid for x in collectors} for c in processes), processes
+        children.extend(int(c.ret) for c in made)
+    assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
+    created = set()
+    for c in helper:
+        if c.name in {"mkdir", "mkdirat"}:
+            paths = call_paths(c)
+            assert len(paths) == 1 and helper_mkdir_step(c, paths[0], pinned), ("helper mkdir", c)
+            if c.ret == "0":
+                created.add((c.pid, paths[0]))
+        if c.name == "socket":
+            assert args_of(c)[0] == "AF_UNIX", ("non-NSS socket", c)
+        if c.name == "connect":
+            assert "AF_UNIX" in c.args and set(call_paths(c)) <= NSCD_PATHS, c
+            assert c.ret.startswith(("-1 ENOENT", "-1 ECONNREFUSED")), ("unexpected NSS daemon", c)
+        # 이것을 실패시키는 것: helper/collector가 pinned roots 밖의 repo·상대 경로·임의 시스템 파일에 접근하는 것.
+        for path in call_paths(c) + content_paths(c):
+            # -y resolves /proc/self dirfds to /proc/<tgid>. Only this
+            # process's numeric spelling is equivalent, not another PID's.
+            own_proc = f"/proc/{owners[c.pid]}"
+            if path == own_proc or path.startswith(own_proc + "/"):
+                path = "/proc/self" + path[len(own_proc):]
+            system = (path in NSS_PATHS | NSCD_PATHS | {"/dev/null", "/proc/self", "/proc/sys/kernel/random/boot_id"}
+                      or path.startswith("/proc/self/"))
+            detached = c.name == "chdir" and path == "/"
+            walk = helper_walk_step(c, path, pinned)
+            nss_root = helper_nss_root_stat(c, path)
+            creation = (c.name == "mkdirat" and helper_mkdir_step(c, path, pinned)
+                        or helper_created_open(c, path, created))
+            chain_stat = helper_chain_stat(c, path, pinned)
+            ancestor_stat = helper_ancestor_stat(c, path, pinned)
+            assert (system or detached or walk or nss_root or creation or chain_stat or ancestor_stat
+                    or allowed(path, c.args, exe, pinned, allow_walk=False)), ("helper path", c, path)
+
+
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
 # 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
 @pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
@@ -265,8 +572,8 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     ...) of the binary and its threads and children. SYSTEM_PATHS was
     observed on Debian and Ubuntu glibc (aarch64, the three test images) and
     takes the loader paths of Fedora (/lib64), Arch (/usr/lib) and Alpine
-    (/lib/ld-musl-*.so.1) by its shape; the CI musl build on x86_64 is
-    expected to name only its execve (UNVERIFIED). NixOS and Guix
+    (/lib/ld-musl-*.so.1) by its shape; the CI musl build on x86_64
+    also spawns the fixed helper before its filter. NixOS and Guix
     (/nix/store, /gnu/store) are not covered and fail here."""
     inst = Install(tmp_path)
     trusted = trusted_env(tmp_path)
@@ -277,35 +584,16 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     f = tmp_path / "s.bash"
     f.write_bytes(script + b"\n" + CALL)
     trace = tmp_path / "trace"
-    # %desc is left out: read and write buffers are quoted strings too.
-    r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file,%process,%network,write", "-o", str(trace)]
+    # Trace all calls; call_paths selects pathname arguments, not quoted data buffers.
+    r = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", str(trace)]
                        + SHELL_CMD["bash"] + [str(f)], env=env, capture_output=True, timeout=60)
     assert r.returncode == 0, r.stderr
     # execve names the pinned path (the symlink); its target never shows.
     exe = str(inst.exe)
-    pids, scoped = tree(trace.read_text(errors="replace").splitlines(), exe)
-    assert pids, "bingsu was not executed"
-    # The front end is single-threaded and starts no process before the
-    # refresh helper exists (P6, spec section 8 design rules): no clone,
-    # clone3, fork or vfork of the root. 이것을 실패시키는 것: prompt 경로에서 스레드나 자식을 만드는 것.
-    assert len(pids) == 1, ("the prompt started a thread or a process", [l for l in scoped if SPAWN_CALL.match(l)][:5])
-    # No network call and no process call at all, beyond its own execve and
-    # exit: the prompt path reaches the system only through write and _exit.
-    # 이것을 실패시키는 것: prompt 경로에서 소켓을 열거나, 신호를 보내거나, 자식을 기다리는 것.
-    stray = [l for l in scoped if (m := SYSCALL.match(l)) and m.group(1) in NETWORK_OR_PROCESS and not is_root(l, exe)]
-    assert stray == [], ("network or process calls", stray[:5])
-    # The traced write, process and network calls of the root are exactly
-    # the adapter's syscall table (its execve aside): nothing more, and no
-    # listed call left unused. 이것을 실패시키는 것: 표에 없는 호출을 하거나 표의 호출을 하지 않는 것.
-    seen = {m.group(1) for l in scoped if (m := SYSCALL.match(l)) and not is_root(l, exe)
-            and m.group(1) in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}}
-    assert seen == ADAPTER_CALLS, ("calls differ from crates/bingsu/prompt-syscalls.tsv", sorted(seen), sorted(ADAPTER_CALLS))
     pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
               (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
-    bad = [l for l, ps in resolve_dirfds(scoped) if any(not allowed(p, l, exe, pinned) for p in ps)]
-    assert bad == [], ("paths outside the allowlist (a loader or library path of your distribution: "
-                       "widen SYSTEM_PATHS and write why; anything else bingsu opened is a defect)", bad[:5])
+    assert_prompt_trace_budget(trace.read_text(errors="replace").splitlines(), exe, pinned)
 
 
 TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}

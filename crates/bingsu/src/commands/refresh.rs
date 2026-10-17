@@ -193,6 +193,12 @@ fn run(
     hook(Checkpoint::Locked);
     b.check(clock)?;
     // Snapshot lock -> state selection lock, also across distinct runtimes.
+    super::runtime_root::ensure_root(
+        &r.state_root,
+        r.me,
+        &mut groups,
+        bingsu_core::fs_trust::Last::Mine,
+    )?;
     let selection = SelectionLock::try_lock(&r.state_root, r.me, &mut groups)
         .map_err(super::snapshot_store::lock_error)?;
     let record = selection

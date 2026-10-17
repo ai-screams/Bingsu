@@ -57,22 +57,10 @@ fn append(
     message: &str,
 ) -> Result<(), StoreError> {
     let root = root.ok_or(StoreError::Unsafe)?;
-    // init may have resolved a log symlink once. Only the pinned canonical
-    // spelling is walked; creation is confined to its checked parent fd.
-    if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
-        let parent_chain = runtime_root::open_chain(parent).map_err(StoreError::Root)?;
-        bingsu_core::fs_trust::walk_verdict(
-            &parent_chain.facts,
-            me,
-            bingsu_core::fs_trust::Last::Mine,
-            sys::fd_is_local(parent_chain.last().as_raw_fd()),
-            groups,
-        )
-        .map_err(|_| StoreError::Unsafe)?;
-        sys::mkdir_at(parent_chain.last().as_fd(), name, 0o700)?;
-    }
-    let chain = runtime_root::open_chain(root).map_err(StoreError::Root)?;
-    runtime_root::judge(&chain, me, groups).map_err(StoreError::Root)?;
+    // The same held-descriptor creator as R1 init; a pinned spelling is
+    // never re-canonicalized, including when several parents are missing.
+    let chain =
+        runtime_root::ensure_root(root, me, groups, bingsu_core::fs_trust::Last::PrivateFolder)?;
     let dir = chain.last();
     let lock = sys::open_lock_at(dir.as_fd(), OsStr::new("log.lock"))?;
     checked(&lock, 0, me)?;
@@ -173,6 +161,33 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read(root.join(NAMES[0])).unwrap(), b"one\ntwo\n");
         drop(inherited);
+        fs::remove_dir_all(base).unwrap();
+    }
+    // 이것을 실패시키는 것: 로그의 여러 없는 부모를 R1 생성기로 만들지 않는 것.
+    #[test]
+    fn fresh_log_root_creates_its_missing_state_chain() {
+        let base = std::env::temp_dir().join(format!("bingsu-n3-fresh-log-{}", std::process::id()));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let base = fs::canonicalize(base).unwrap();
+        let root = base.join("st/bingsu/log");
+        append(
+            Some(&root),
+            sys::current_uid(),
+            &mut RefuseGroupWrite,
+            "refresh published",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join(NAMES[0])).unwrap(),
+            b"refresh published\n"
+        );
+        for name in ["st", "st/bingsu", "st/bingsu/log"] {
+            assert_eq!(
+                fs::metadata(base.join(name)).unwrap().mode() & 0o7777,
+                0o700
+            );
+        }
         fs::remove_dir_all(base).unwrap();
     }
     // 이것을 실패시키는 것: off·수준 필터를 무시하거나 경로/파일 신뢰·크기·회전 검사를 빼는 것.

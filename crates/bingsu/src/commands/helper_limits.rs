@@ -1,4 +1,4 @@
-//! Helper-only limits and an independent watchdog, ready before NSS or roots.
+//! Process-local limits and an independent watchdog, ready before NSS or roots.
 use std::io;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -7,8 +7,6 @@ pub const LIFETIME: Duration = Duration::from_secs(2);
 const MEMORY: u64 = 128 * 1024 * 1024;
 
 pub struct Watchdog {
-    #[cfg(target_os = "linux")]
-    initial_vm: u64,
     stop: mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -27,6 +25,7 @@ fn start_for(started: Instant, lifetime: Duration) -> io::Result<Watchdog> {
     let deadline = started
         .checked_add(lifetime)
         .ok_or_else(|| io::Error::other("deadline"))?;
+    #[cfg(target_os = "macos")]
     let baseline = memory_usage()?;
     let (stop, stopped) = mpsc::channel();
     let (ready, prepared) = mpsc::sync_channel(0);
@@ -34,16 +33,24 @@ fn start_for(started: Instant, lifetime: Duration) -> io::Result<Watchdog> {
         .name("refresh-watchdog".into())
         .stack_size(256 * 1024)
         .spawn(move || {
+            // Warm up malloc's per-thread arena before readiness, including
+            // space for the channel's parker. Linux measures VM in install().
+            let allocation = vec![0u8; 4096];
+            std::hint::black_box(&allocation);
             if ready.send(()).is_err() {
                 return;
             }
             loop {
-                if Instant::now() >= deadline || memory_exceeded(baseline) {
+                if Instant::now() >= deadline {
                     kill_self();
                 }
-                let remaining = deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(2));
+                #[cfg(target_os = "macos")]
+                if memory_exceeded(baseline) {
+                    kill_self();
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                #[cfg(target_os = "macos")]
+                let remaining = remaining.min(Duration::from_millis(2));
                 match stopped.recv_timeout(remaining) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -54,8 +61,6 @@ fn start_for(started: Instant, lifetime: Duration) -> io::Result<Watchdog> {
         .recv()
         .map_err(|_| io::Error::other("watchdog readiness"))?;
     Ok(Watchdog {
-        #[cfg(target_os = "linux")]
-        initial_vm: baseline,
         stop,
         thread: Some(thread),
     })
@@ -112,10 +117,6 @@ fn memory_usage() -> io::Result<u64> {
 fn memory_exceeded(baseline: u64) -> bool {
     memory_usage().map_or(true, |now| now > baseline.saturating_add(MEMORY))
 }
-#[cfg(not(target_os = "macos"))]
-fn memory_exceeded(_: u64) -> bool {
-    false
-}
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 type Resource = libc::__rlimit_resource_t;
@@ -170,33 +171,24 @@ fn kernel_nofile() -> io::Result<libc::rlim_t> {
 }
 
 pub fn install(watchdog: &Watchdog) -> io::Result<()> {
+    // The argument proves start()'s allocation/readiness barrier completed.
     let _ = watchdog;
     let fd = get(libc::RLIMIT_NOFILE)?;
-    set(
-        libc::RLIMIT_NOFILE,
-        4608.min(fd.rlim_max).min(kernel_nofile()?),
-        fd.rlim_max,
-    )?;
+    let cap = 4608.min(fd.rlim_max).min(kernel_nofile()?);
+    set(libc::RLIMIT_NOFILE, cap, cap)?;
     let cpu = get(libc::RLIMIT_CPU)?;
     set(libc::RLIMIT_CPU, 1.min(cpu.rlim_max), 2.min(cpu.rlim_max))?;
     let file = get(libc::RLIMIT_FSIZE)?;
-    set(
-        libc::RLIMIT_FSIZE,
-        (32 * 1024 * 1024).min(file.rlim_max),
-        file.rlim_max,
-    )?;
+    let cap = (32 * 1024 * 1024).min(file.rlim_cur).min(file.rlim_max);
+    set(libc::RLIMIT_FSIZE, cap, cap)?;
     #[cfg(target_os = "linux")]
     {
         let old = get(libc::RLIMIT_AS)?;
-        let cap = watchdog
-            .initial_vm
+        let cap = memory_usage()?
             .checked_add(MEMORY)
             .ok_or_else(|| io::Error::other("VM cap"))?;
-        set(
-            libc::RLIMIT_AS,
-            cap.min(old.rlim_cur).min(old.rlim_max),
-            old.rlim_max,
-        )?;
+        let cap = cap.min(old.rlim_cur).min(old.rlim_max);
+        set(libc::RLIMIT_AS, cap, cap)?;
     }
     Ok(())
 }
@@ -210,6 +202,12 @@ mod tests {
     #[test]
     #[ignore = "isolated rlimit child"]
     fn limits_child() {
+        set(
+            libc::RLIMIT_CORE,
+            4096.min(get(libc::RLIMIT_CORE).unwrap().rlim_max),
+            get(libc::RLIMIT_CORE).unwrap().rlim_max,
+        )
+        .unwrap();
         // SAFETY: isolated test process only.
         unsafe { libc::umask(0o777) };
         super::super::helper::detach().unwrap();
@@ -220,6 +218,7 @@ mod tests {
         let sid = unsafe { libc::getsid(0) };
         // SAFETY: no arguments.
         assert_eq!(sid, unsafe { libc::getpid() });
+        assert_detached();
         let old = get(libc::RLIMIT_NOFILE).unwrap();
         set(libc::RLIMIT_NOFILE, 256.min(old.rlim_max), old.rlim_max).unwrap();
         let started = Instant::now();
@@ -230,16 +229,138 @@ mod tests {
             fd.rlim_cur,
             4608.min(old.rlim_max).min(kernel_nofile().unwrap())
         );
-        assert_eq!(fd.rlim_max, old.rlim_max);
+        assert_eq!(fd.rlim_max, fd.rlim_cur);
         assert_eq!(get(libc::RLIMIT_CPU).unwrap().rlim_cur, 1);
         assert!(get(libc::RLIMIT_CPU).unwrap().rlim_max <= 2);
         assert_eq!(get(libc::RLIMIT_FSIZE).unwrap().rlim_cur, 32 * 1024 * 1024);
+        assert_irreversible();
         let lower = get(libc::RLIMIT_NOFILE).unwrap();
         set(libc::RLIMIT_NOFILE, 256, 1024.min(lower.rlim_max)).unwrap();
         install(&_watchdog).unwrap();
         assert_eq!(
             get(libc::RLIMIT_NOFILE).unwrap().rlim_cur,
             1024.min(kernel_nofile().unwrap())
+        );
+    }
+    fn assert_detached() {
+        // 이것을 실패시키는 것: helper/collector가 cwd를 붙들거나 core의 soft/hard 중 하나를 남기는 것.
+        assert_eq!(std::env::current_dir().unwrap(), std::path::Path::new("/"));
+        let core = get(libc::RLIMIT_CORE).unwrap();
+        assert_eq!((core.rlim_cur, core.rlim_max), (0, 0));
+    }
+    fn assert_irreversible() {
+        // 이것을 실패시키는 것: CPU·FSIZE·AS·NOFILE hard를 남겨 프로세스가 예산을 다시 올릴 수 있는 것.
+        for resource in [
+            libc::RLIMIT_CPU,
+            libc::RLIMIT_FSIZE,
+            libc::RLIMIT_NOFILE,
+            #[cfg(target_os = "linux")]
+            libc::RLIMIT_AS,
+        ] {
+            let limit = get(resource).unwrap();
+            assert_ne!(limit.rlim_max, libc::RLIM_INFINITY);
+            if resource != libc::RLIMIT_CPU {
+                assert_eq!(limit.rlim_cur, limit.rlim_max);
+            }
+            assert!(set(resource, limit.rlim_max + 1, limit.rlim_max + 1).is_err());
+        }
+    }
+    // 이것을 실패시키는 것: collector가 helper의 CPU hard를 상속하거나 자기 진입점에서 한도를 걸지 않는 것.
+    #[test]
+    #[ignore = "isolated collector entry, also spawned at the helper's broker boundary"]
+    fn collector_limits_child() {
+        assert!(get(libc::RLIMIT_CPU).unwrap().rlim_max > 2);
+        set(
+            libc::RLIMIT_CORE,
+            4096.min(get(libc::RLIMIT_CORE).unwrap().rlim_max),
+            get(libc::RLIMIT_CORE).unwrap().rlim_max,
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::collector::run(),
+            std::process::ExitCode::SUCCESS
+        );
+        assert_detached();
+        assert_eq!(get(libc::RLIMIT_CPU).unwrap().rlim_cur, 1);
+        assert_eq!(get(libc::RLIMIT_CPU).unwrap().rlim_max, 2);
+        assert_eq!(get(libc::RLIMIT_FSIZE).unwrap().rlim_cur, 32 * 1024 * 1024);
+        assert_irreversible();
+    }
+    // 이것을 실패시키는 것: watchdog의 malloc arena 준비 전에 VM 기준을 재서 128 MiB 여유가 줄어드는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "isolated address-space limit"]
+    fn headroom_child() {
+        let watchdog = start(Instant::now()).unwrap();
+        install(&watchdog).unwrap();
+        let available = get(libc::RLIMIT_AS).unwrap().rlim_cur - memory_usage().unwrap();
+        assert!(
+            available >= MEMORY,
+            "available VM: {available}, planned: {MEMORY}"
+        );
+        // Allocate the complete budget, not merely inspect the limit value.
+        // SAFETY: anonymous private mapping, no borrowed memory or file.
+        let region = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                MEMORY as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(region, libc::MAP_FAILED);
+        // SAFETY: exactly the mapping just returned.
+        assert_eq!(unsafe { libc::munmap(region, MEMORY as usize) }, 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watchdog_leaves_full_vm_headroom() {
+        let out = child("commands::helper_limits::tests::headroom_child");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // 이것을 실패시키는 것: Linux watchdog이 마감까지 한 번 기다리지 않고 2 ms마다 깨는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "isolates watchdog scheduling observations"]
+    fn watchdog_wait_child() {
+        let _watchdog = start(Instant::now()).unwrap();
+        let task = std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                std::fs::read_to_string(path.join("comm"))
+                    .unwrap()
+                    .starts_with("refresh-watchdo")
+            })
+            .unwrap();
+        let switches = || {
+            std::fs::read_to_string(task.join("status"))
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap()
+        };
+        let before = switches();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(switches() - before <= 2, "watchdog is polling");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watchdog_waits_until_deadline() {
+        let out = child("commands::helper_limits::tests::watchdog_wait_child");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
     // 이것을 실패시키는 것: watchdog가 worker 협조를 기다리거나 2초 수명을 강제하지 않는 것.

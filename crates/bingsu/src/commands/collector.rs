@@ -191,7 +191,19 @@ fn spawn_check(rc: i32) -> Result<(), StoreError> {
 }
 
 pub fn run() -> std::process::ExitCode {
+    let started = std::time::Instant::now();
     std::panic::set_hook(Box::new(|_| {}));
+    if super::helper::detach().is_err() {
+        return std::process::ExitCode::from(1);
+    }
+    let Ok(watchdog) = super::helper_limits::start(started) else {
+        return std::process::ExitCode::from(1);
+    };
+    // M3a stub budget, owned by this process. M3b can choose collection
+    // limits without inheriting an irreversible helper CPU/AS ceiling.
+    if super::helper_limits::install(&watchdog).is_err() {
+        return std::process::ExitCode::from(1);
+    }
     let _ = stub();
     std::process::ExitCode::SUCCESS
 }

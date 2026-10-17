@@ -118,6 +118,126 @@ pub fn open_chain(path: &Path) -> Result<Chain, RootError> {
     Ok(chain)
 }
 
+/// Create a private root at an already-canonical spelling. Shared by R1
+/// init and refresh/log writers: existing ancestors are judged before any
+/// mutation; missing names are made 0700 through held no-follow descriptors.
+/// The whole final chain is judged and revalidated; failures roll back only
+/// folders made by this call. Never canonicalize a helper's pinned spelling.
+pub fn create_private(
+    path: &Path,
+    uid: u32,
+    groups: &mut dyn GroupOracle,
+) -> std::io::Result<Chain> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let bad = |what: &str| std::io::Error::other(format!("private root: {what}"));
+    let all = names(path).map_err(|e| bad(&format!("{e:?}")))?;
+    let Some((last, parents)) = all.split_last() else {
+        return Err(bad("no folder name"));
+    };
+    let mut prefix = path.parent().ok_or_else(|| bad("no parent"))?.to_path_buf();
+    let mut chain = loop {
+        match open_chain(&prefix) {
+            Ok(chain) => break chain,
+            Err(RootError::Open {
+                errno: libc::ENOENT,
+                ..
+            }) => {
+                if !prefix.pop() {
+                    return Err(bad("no existing parent"));
+                }
+            }
+            Err(e) => return Err(bad(&format!("{e:?}"))),
+        }
+    };
+    let names = &parents[chain.names.len()..];
+    // Keep the existing prefix and every created child's descriptors until
+    // the same chain is judged and its parent/name connections rechecked.
+    // `created` lists (holding descriptor index, name) for rollback.
+    let mut next = bingsu_core::fs_trust::NextOwner::Any;
+    for (at, facts) in chain.facts.iter().enumerate() {
+        next = bingsu_core::fs_trust::ancestor_verdict(facts, uid, at, next, groups)
+            .map_err(|e| bad(&format!("{e:?}")))?;
+    }
+    chain.revalidate()?;
+    let mut created: Vec<(usize, std::ffi::OsString)> = Vec::new();
+    let result = (|| {
+        let mut owned_child = |chain: &[std::fs::File], name: &std::ffi::OsStr| {
+            let holder = chain.len() - 1;
+            if sys::mkdir_at(chain[holder].as_fd(), name, 0o700)? {
+                created.push((holder, name.to_os_string()));
+            }
+            let child = sys::open_dir_at_nofollow(chain[holder].as_fd(), name)?;
+            if child.metadata()?.uid() != uid {
+                return Err(bad("owned by another user"));
+            }
+            Ok(child)
+        };
+        for name in names {
+            let child = owned_child(&chain.fds, name)?;
+            child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+            chain.facts.push(sys::fd_facts(child.as_fd())?);
+            chain.names.push(name.to_os_string());
+            chain.fds.push(child);
+        }
+        let root = owned_child(&chain.fds, last)?;
+        if sys::fd_is_local(root.as_raw_fd()) != Some(true) {
+            return Err(bad("not on a local file system"));
+        }
+        root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        chain.facts.push(sys::fd_facts(root.as_fd())?);
+        chain.names.push(last.to_os_string());
+        chain.fds.push(root);
+        judge(&chain, uid, groups).map_err(|e| bad(&format!("{e:?}")))?;
+        chain.revalidate()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {}
+        Err(e) => {
+            // Undo what this call made, deepest first. Folders that already
+            // existed are not touched; a folder another process filled in
+            // the meantime is not empty and stays.
+            for (holder, name) in created.iter().rev() {
+                let _ = sys::remove_dir_at(chain.fds[*holder].as_fd(), name);
+            }
+            return Err(e);
+        }
+    };
+    Ok(chain)
+}
+
+/// A writer may create a missing pinned root, but an existing root must
+/// already satisfy its caller's trust policy (`Mine` for state, `PrivateFolder`
+/// for logs): do not repair its permissions or follow
+/// a link planted since init. No configuration root is created here.
+pub fn ensure_root(
+    path: &Path,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+    last: Last,
+) -> std::io::Result<Chain> {
+    let bad = |e| std::io::Error::other(format!("private root: {e:?}"));
+    match open_chain(path) {
+        Ok(chain) => {
+            walk_verdict(
+                &chain.facts,
+                me,
+                last,
+                sys::fd_is_local(chain.last().as_raw_fd()),
+                groups,
+            )
+            .map_err(|e| bad(RootError::Refused(e)))?;
+            chain.revalidate()?;
+            Ok(chain)
+        }
+        Err(RootError::Open {
+            errno: libc::ENOENT,
+            ..
+        }) => create_private(path, me, groups),
+        Err(e) => Err(bad(e)),
+    }
+}
+
 /// Rule 2 over an open chain whose last folder is a private root.
 pub fn judge(chain: &Chain, me: u32, groups: &mut dyn GroupOracle) -> Result<(), RootError> {
     let local = sys::fd_is_local(chain.last().as_raw_fd());
