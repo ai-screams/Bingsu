@@ -47,7 +47,7 @@ pub enum BandError {
 }
 
 /// Must `a` be tried before `b`? None when they never compete (disjoint).
-fn before(bands: &[Band], a: usize, b: usize) -> Result<Option<bool>, BandError> {
+pub(crate) fn before(bands: &[Band], a: usize, b: usize) -> Result<Option<bool>, BandError> {
     let (x, y) = (&bands[a], &bands[b]);
     if x.hi() < y.lo() || y.hi() < x.lo() {
         return Ok(None);

@@ -667,6 +667,14 @@ pub fn open_dir_at_nofollow(
     open_at(Some(dir), name, libc::O_RDONLY | libc::O_DIRECTORY)
 }
 
+/// Snapshot data is opened nonblocking so a FIFO is rejected before any read.
+pub fn open_data_at_nofollow(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    open_at(Some(dir), name, libc::O_RDONLY | libc::O_NONBLOCK)
+}
+
 /// Search-only access for a walk descriptor: it can serve as the folder
 /// that `openat` and `mkdirat` resolve names in, and needs only search (x)
 /// permission, never read (r). An ancestor like `/home` at 0711 is
@@ -848,4 +856,15 @@ pub fn at_stamp(
         ctime: (st.st_ctime, st.st_ctime_nsec),
         mtime: (st.st_mtime, st.st_mtime_nsec),
     })
+}
+
+#[cfg(test)]
+pub fn make_test_fifo(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: name is terminated, and mkfifo reads it only during this call.
+    if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }

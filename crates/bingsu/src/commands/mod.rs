@@ -5,6 +5,12 @@ use crate::prompt::NonPromptArgs;
 use std::process::ExitCode;
 
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "N2 connects the store and clock")
+)]
+mod clock;
+#[cfg(unix)]
 mod group_policy;
 #[cfg(unix)]
 mod init;
@@ -12,6 +18,9 @@ mod init;
 mod messages;
 #[cfg(unix)]
 mod runtime_root;
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
+mod snapshot_store;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;

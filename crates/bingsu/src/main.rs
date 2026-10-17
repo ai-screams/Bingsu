@@ -7,6 +7,13 @@
 use std::process::ExitCode;
 
 mod commands;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "N2 and N4 connect the clock adapter")
+)]
+mod prompt_io;
 // The prompt adapter: the trusted computing base of `bingsu prompt`. Its
 // system calls are crates/bingsu/prompt-syscalls.tsv; every decision is
 // bingsu_core::front.
