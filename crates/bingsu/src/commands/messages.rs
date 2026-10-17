@@ -18,6 +18,15 @@ pub enum MsgId {
     LateHookZsh,
     LateHookBash,
     NoSandbox,
+    ColdInitUnfinished,
+    ColdInitInvalid,
+    ReloadInvalid,
+    ReloadBusy,
+    ReloadIncomplete,
+    DeadlineReached,
+    UseSavedUnfinished,
+    UseSavedInvalid,
+    RootsFromEnvironment,
 }
 
 #[cfg_attr(
@@ -27,7 +36,7 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 12] = [
+pub const ALL: [MsgId; 21] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
@@ -40,9 +49,18 @@ pub const ALL: [MsgId; 12] = [
     MsgId::LateHookZsh,
     MsgId::LateHookBash,
     MsgId::NoSandbox,
+    MsgId::ColdInitUnfinished,
+    MsgId::ColdInitInvalid,
+    MsgId::ReloadInvalid,
+    MsgId::ReloadBusy,
+    MsgId::ReloadIncomplete,
+    MsgId::DeadlineReached,
+    MsgId::UseSavedUnfinished,
+    MsgId::UseSavedInvalid,
+    MsgId::RootsFromEnvironment,
 ];
 
-const EN: [(MsgId, &str); 12] = [
+const EN: [(MsgId, &str); 21] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -90,6 +108,42 @@ const EN: [(MsgId, &str); 12] = [
     (
         MsgId::NoSandbox,
         "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor",
+    ),
+    (
+        MsgId::ColdInitUnfinished,
+        "bingsu: reading your settings did not finish in time; the prompt starts with the built-in look and takes your settings when they are ready",
+    ),
+    (
+        MsgId::ColdInitInvalid,
+        "bingsu: your settings are not valid, so the prompt starts with the built-in look. Run: bingsu config check",
+    ),
+    (
+        MsgId::ReloadInvalid,
+        "bingsu: the settings are not valid, so nothing changed and the prompt keeps the last good settings. Run: bingsu config check",
+    ),
+    (
+        MsgId::ReloadBusy,
+        "bingsu: another refresh is running, so nothing changed. Try again in a moment",
+    ),
+    (
+        MsgId::ReloadIncomplete,
+        "bingsu: the settings could not be read to the end, so nothing changed. Run: bingsu config check",
+    ),
+    (
+        MsgId::DeadlineReached,
+        "bingsu: did not finish in time; nothing more was changed",
+    ),
+    (
+        MsgId::UseSavedUnfinished,
+        "bingsu: your choice was saved, but applying it is not finished; the next prompt applies it, or run: bingsu reload",
+    ),
+    (
+        MsgId::UseSavedInvalid,
+        "bingsu: your choice was saved, but the settings it gives are not valid and the prompt keeps the last good settings. Run: bingsu config check",
+    ),
+    (
+        MsgId::RootsFromEnvironment,
+        "bingsu: the folders were found from the environment now, not from what init pinned in this shell, so they may differ from the ones your prompt uses. Run: eval \"$(bingsu init <shell>)\" again",
     ),
 ];
 

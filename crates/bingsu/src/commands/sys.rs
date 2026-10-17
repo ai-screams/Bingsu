@@ -21,6 +21,43 @@ pub enum WriteOutcome {
     Failed,
 }
 
+/// Ends the process now without atexit handlers or a flush (a deadline
+/// that already passed; `std::process::exit` is disallowed here).
+pub fn exit_now(code: i32) -> ! {
+    // SAFETY: _exit takes one integer, touches no memory and never returns.
+    unsafe { libc::_exit(code) }
+}
+
+/// Best effort only: never wait for room in a full stderr pipe. A single
+/// nonblocking write avoids EINTR retries; the caller immediately uses _exit.
+pub fn write_deadline_notice(buf: &[u8]) {
+    // SAFETY: F_GETFL only reads descriptor flags.
+    let flags = unsafe { libc::fcntl(2, libc::F_GETFL) };
+    if flags < 0 {
+        return;
+    }
+    // SAFETY: F_SETFL accepts the existing flags plus O_NONBLOCK.
+    if unsafe { libc::fcntl(2, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return;
+    }
+    // SAFETY: buf is valid for its length. No retry or flush follows.
+    let _ = unsafe { libc::write(2, buf.as_ptr().cast(), buf.len()) };
+}
+
+#[cfg(test)]
+pub fn test_limit_fds(limit: libc::rlim_t) {
+    let mut limits = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: valid writable rlimit pointer for the current process.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) };
+    assert_eq!(rc, 0);
+    limits.rlim_cur = limit.min(limits.rlim_max);
+    // SAFETY: valid rlimit pointer; called only in a disposable test child.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) }, 0);
+}
+
 /// Hand-written write(2) loop. `write_all` retries EINTR on its own, which
 /// a timer could not interrupt (spec section 4 "output rules"). M3a adds
 /// the deadline-flag check on EINTR; M1 has no timer yet.

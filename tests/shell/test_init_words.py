@@ -105,6 +105,54 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
         (argv,) = inst.calls()
         root_b = os.path.realpath(b_env["XDG_RUNTIME_DIR"] + "/bingsu").encode()
         assert any(x.startswith(b"--runtime-root=") and x.endswith(b":" + root_b) for x in argv), (shell, argv)
+        # Every other pinned value follows the second init too (N-129), not only the runtime root.
+        want = {
+            b"--config-root=": os.path.realpath(b_env["XDG_CONFIG_HOME"] + "/bingsu").encode(),
+            b"--config-root-written=": (b_env["XDG_CONFIG_HOME"] + "/bingsu").encode(),
+            b"--state-root=": os.path.realpath(b_env["XDG_STATE_HOME"]).encode() + b"/bingsu",
+            b"--log-root=": os.path.realpath(b_env["XDG_STATE_HOME"]).encode() + b"/bingsu/log",
+        }
+        for word, value in want.items():
+            assert any(x == word + value for x in argv), (shell, word, argv)
+        assert not any(old in x for x in argv for old in (b"run-a", b"cfg-a", b"state-a")), (shell, argv)
+
+
+def _set_env(shell, name, value):
+    q = shlex.quote(value)
+    return f"set -gx {name} {q}\n" if shell == "fish" else f"export {name}={q}\n"
+
+
+# The init script exports the roots it pinned, and the user's commands follow them: after XDG_* moved and a
+# second init (the last one wins), `bingsu reload` and `config check` still act on the second init's folders,
+# for hostile bytes in every pinned path, and no notice appears.
+# 이것을 실패시키는 것: 내보내기 줄을 빼거나 셸 인용을 잘못해 값이 깨지는 것, 재-init이 이전 값을 남기는 것(옛 뿌리에 발행),
+# 명령이 변수 대신 바뀐 XDG_*를 쓰는 것.
+@pytest.mark.parametrize("idx,case", list(enumerate(CASES)))
+def test_exported_roots_survive_hostile_bytes_and_reinit(tmp_path, shells, idx, case):
+    for shell in shells:
+        base = tmp_path / shell / f"case{idx}"
+        inst = Install(base)
+        env_a = trusted_env(base, "a")
+        env_b = trusted_env(base, case)
+        a = inst.init(shell, env_a)
+        b = inst.init(shell, env_b)
+        (base / "a.sh").write_bytes(a)
+        (base / "b.sh").write_bytes(b)
+        junk = base / "junk"
+        script = source(shell, base / "a.sh") + source(shell, base / "b.sh")
+        for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            script += _set_env(shell, name, str(junk / name.lower()).strip()).encode()
+        exe = shlex.quote(str(inst.exe))
+        script += f"{exe} reload\n{exe} config check\n".encode()
+        r = run_shell_script(shell, script, env_b, base)
+        assert r.returncode == 0 and r.stderr == b"", (shell, r.stderr)
+        assert b"bingsu: reloaded; " in r.stdout, (shell, r.stdout)
+        assert not junk.exists(), shell
+        assert b"found from the environment" not in r.stderr + r.stdout, shell
+        cfg_b = os.path.realpath(env_b["XDG_CONFIG_HOME"]) + "/bingsu"
+        if case.isprintable():
+            assert f"settings folder: {cfg_b}".encode() in r.stdout, (shell, r.stdout)
+        assert b"cfg-a/bingsu" not in r.stdout, shell
 
 
 # Top-level hook code runs under the user's own shell options (only function
