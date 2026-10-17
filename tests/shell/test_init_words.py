@@ -24,7 +24,7 @@ CASES = ["a b", "it's", 'say "hi"', "-leading", "new\nline", "12:34:", "with\\ba
 # init-pinned or dynamic single-word option; the others consume one value.
 # Keep the complete hook contract here instead of counting argv entries.
 HOOK_WORDS = (
-    b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm",
+    b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm", b"--colorfgbg",
     b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
     b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=",
@@ -87,6 +87,7 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         assert words[b"--shell"] == shell.encode(), (shell, argv)
         assert words[b"--pwd"] == os.getcwd().encode(), (shell, argv)
         assert words[b"--colorterm"] == b"", (shell, argv)
+        assert words[b"--colorfgbg"] == b"", (shell, argv)
         assert words[b"--home="] == pwd.getpwuid(os.getuid()).pw_dir.encode(), (shell, argv)
 
 

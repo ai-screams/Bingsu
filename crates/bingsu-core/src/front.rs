@@ -37,10 +37,11 @@ fn encode_or_internal(fields: &Fields<'_>, status: Status, out: &mut Vec<u8>) {
 }
 
 fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
-    // Mode: spec section 2 "색 모드 판단" step 4 (nothing known: dark).
+    // Display-only envelope observation; absent/garbled falls back to dark.
     // Built-in constants (test default_theme_builds); were it ever to fail,
     // the adapter's panic fallback gives the same `error:internal` record.
-    let theme = DefaultTheme::new(Mode::Dark).expect("built-in default theme");
+    let theme =
+        DefaultTheme::new(parsed.colorfgbg.unwrap_or(Mode::Dark)).expect("built-in default theme");
     let c = shell_values::collect(parsed);
     let inputs = Inputs {
         catalog: BUILTIN,

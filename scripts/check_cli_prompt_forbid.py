@@ -51,9 +51,9 @@ SYSCALLS = ROOT / "crates/bingsu/prompt-syscalls.tsv"
 SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 TCB_SHA256 = {
-    "crates/bingsu/src/prompt_read.rs": "ae948a8fc17b3084b7c7e62e40ead8817e098963ef834e8d2dfa634e5f544670",
+    "crates/bingsu/src/prompt_read.rs": "a7a000136e12d328bd08995c7502048f5b7766e68965c3296397442e91a4555c",
     "crates/bingsu/src/prompt_spawn.rs": "969ea3ea75c9de2f6201c8fc39240d53b326bf54889ac0e347c62f256278cd52",
-    "crates/bingsu/src/prompt_io.rs": "23f6cc410e5d4928dc49442a23c0cbb71b7cd646bad04bc4421de24fe5822205",
+    "crates/bingsu/src/prompt_io.rs": "2e15eece7b1b9ccf635ba2ee0e21bb017358cbc7d0428139ce07cc3c5084fe4a",
     "crates/bingsu/src/prompt.rs": "2ee68d22e5e4996d09e956823748a4bc7046d811d29bb264632640601109c3ff",
     "crates/bingsu/src/main.rs": "2f4d0c5f7e49ef71721c499fb9b3f757bb07bd0d402116a9fc97f2262c08b3c1",
     "crates/bingsu/src/sandbox.rs": "e4600bc44f42d1b710a150fc4b08ad1e74614d94e59b159beb3a4d1743f5f5e2",

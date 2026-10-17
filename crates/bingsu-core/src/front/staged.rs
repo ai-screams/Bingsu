@@ -617,10 +617,10 @@ fn trust_status(refusal: Refusal) -> Status {
         }
     }
 }
-/// Finish never observes the OS. `mode` is an already-observed display fact,
-/// separate from snapshot identity. Stored OSC observation / hook wiring waits
-/// for the front I/O ruling; neither this API nor the helper reads COLORFGBG.
-pub fn finish(plan: ReadPlan, mut observed: Observed, mode: Mode) -> Response {
+/// Finish never observes the OS. COLORFGBG comes only from the display envelope,
+/// separate from snapshot identity. Saved OSC 11 observation is deferred until
+/// its observation file and address are defined (N4 review ruling).
+pub fn finish(plan: ReadPlan, mut observed: Observed) -> Response {
     let mut response = Response {
         record: Vec::new(),
         execution: Eligibility::default(),
@@ -695,7 +695,7 @@ pub fn finish(plan: ReadPlan, mut observed: Observed, mode: Mode) -> Response {
             shell,
             response.status,
             observed.selected.as_ref().map(|s| &s.config),
-            mode,
+            e.colorfgbg.unwrap_or(Mode::Dark),
             &mut response.record,
         );
     } else {

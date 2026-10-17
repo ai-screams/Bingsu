@@ -339,18 +339,74 @@ def test_trace_rejects_collector_exec_contract_mutation(old, new):
 
 @pytest.fixture
 def held_trace():
-    """Synthetic N4 contract, NOT a Linux execution capture. The lead must
-    re-capture glibc/musl current/last-good/error paths after the new binary ships.
-    The historical Debian capture above stays unchanged as helper regression.
+    """Small generated contract for successful held snapshot reads.
+
+    The real N4 capture below covers a first prompt with no context yet.
     """
-    return Path(__file__).with_name("fixtures").joinpath("prompt-n4-held-synthetic.strace").read_text().splitlines()
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if "PR_SET_SECCOMP" in line)
+    dirs, files = budget.prompt_sources(ROOTS)
+    held = []
+    fds = {}
+    for fd, path in enumerate(sorted(dirs, key=lambda p: (p.count("/"), p)), 21):
+        parent, _, name = path.rpartition("/")
+        base = "AT_FDCWD</>" if path == "/" else f"{fds[parent or '/']}<{parent or '/'}>"
+        name = "/" if path == "/" else name
+        held.append(f'10 openat({base}, "{name}", O_RDONLY|O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = {fd}<{path}>')
+        held.append(f'10 fstatfs({fd}<{path}>, {{}}) = 0')
+        held.append(f'10 fgetxattr({fd}<{path}>, "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)')
+        fds[path] = fd
+    for fd, path in enumerate(sorted(files), max(fds.values()) + 1):
+        parent, _, name = path.rpartition("/")
+        held.append(f'10 openat({fds[parent]}<{parent}>, "{name}", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|O_NOCTTY) = {fd}<{path}>')
+        fds[path] = fd
+    lines[at:at] = held
+    at = next(i for i, line in enumerate(lines) if "PR_SET_SECCOMP" in line) + 1
+    snapshot = next(path for path in files if path.endswith("/snapshot"))
+    lines[at:at] = [
+        '10 clock_gettime(CLOCK_BOOTTIME, {tv_sec=100, tv_nsec=0}) = 0',
+        f'10 read({fds[snapshot]}<{snapshot}>, "bytes", 1024) = 1024',
+        *[f'10 close({fd}<{path}>) = 0' for path, fd in fds.items()],
+    ]
+    return lines
+
+
+@pytest.fixture(scope="module")
+def n4_real_trace():
+    """Real non-root debug capture at 4371ab3 with only documented fd fixes
+    projected (see fixtures/prompt-n4-trace.md); not a post-fix execution.
+    """
+    return Path(__file__).with_name("fixtures").joinpath(
+        "prompt-n4-debian-bookworm-glibc-aarch64.strace"
+    ).read_text().splitlines()
+
+
+def test_real_n4_debian_prompt_trace(n4_real_trace):
+    assert_prompt_trace_budget(n4_real_trace, DEBIAN_EXE, DEBIAN_ROOTS)
+    pids, scoped = budget.tree(n4_real_trace, DEBIAN_EXE)
+    assert pids == {"2809", "2810", "2811", "2812", "2813"}
+    assert len(n4_real_trace) == 3317
+    calls = budget.parse_trace("\n".join(scoped))
+    assert len(calls) == 2449
+    assert any(c.pid == 2809 and c.name == "openat" and '"contexts-v2"' in c.args
+               and c.ret.startswith("-1 ENOENT") for c in calls)
+    assert any(c.pid == 2810 and c.name == "renameat" and '"snapshot"' in c.args for c in calls)
+
+
+def test_real_n4_rejects_debug_fd_probe(n4_real_trace):
+    changed = list(n4_real_trace)
+    at = next(i for i, line in enumerate(changed) if line.startswith("2809 ") and "write(1" in line)
+    changed.insert(at, '2809 fcntl(7<time:[4026532442]>, F_GETFD) = -1 EPERM (Operation not permitted)')
+    with pytest.raises(AssertionError, match="post-filter syscall"):
+        assert_prompt_trace_budget(changed, DEBIAN_EXE, DEBIAN_ROOTS)
+
 
 
 def test_held_snapshot_contract(held_trace):
     assert_prompt_trace_budget(held_trace, EXE, ROOTS)
 
 
-@pytest.mark.parametrize("name", ["openat", "fstat", "fstatfs", "fgetxattr", "getuid", "getpid", "lseek", "pread64", "readv"])
+@pytest.mark.parametrize("name", ["fcntl", "openat", "fstat", "fstatfs", "fgetxattr", "getuid", "getpid", "lseek", "pread64", "readv"])
 def test_held_trace_rejects_every_non_table_call_after_filter(held_trace, name):
     # A path operation is refused even if it would name an otherwise approved file.
     extra = f'10 {name}(3, "snapshot", 0) = -1 EPERM (Operation not permitted)'
@@ -378,8 +434,6 @@ def test_held_walk_requires_each_flag(held_trace, flag):
     ('"snapshot", O_RDONLY', '"other", O_RDONLY'),
     ('"snapshot", O_RDONLY', '"../snapshot", O_RDONLY'),
     ('"contexts-v2",', '"contexts-v3",'),
-    ('"time", O_RDONLY', '"mnt", O_RDONLY'),
-    ('"10", O_RDONLY', '"999", O_RDONLY'),
     ('CLOCK_BOOTTIME', 'CLOCK_REALTIME'),
     ('"system.posix_acl_access"', '"user.other"'),
     (', 1024) = 1024', ', 16385) = 1024'),
@@ -437,3 +491,33 @@ def test_walk_step_accepts_x86_64_largefile_flag():
     line = '9 openat(AT_FDCWD</>, "/", O_RDONLY|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 3</>'
     call = next(c for c in t.parse_trace(line) if c.name == "openat")
     assert t.helper_walk_step(call, "/", ["/root/x/run-t/bingsu"])
+
+
+def test_real_n4_rejects_duplicate_fstatfs(n4_real_trace):
+    lines = list(n4_real_trace)
+    at = next(i for i, line in enumerate(lines) if line.startswith("2809 ") and "fstatfs(4</proc>" in line)
+    lines.insert(at, '2809 fstatfs(4</proc>, {f_type=PROC_SUPER_MAGIC}) = 0')
+    with pytest.raises(AssertionError, match="root duplicate fstatfs"):
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+def test_real_n4_rejects_kernel_walk_held_after_filter(n4_real_trace):
+    lines = list(n4_real_trace)
+    at = next(i for i, line in enumerate(lines) if line.startswith("2809 ") and "close(4</proc>" in line)
+    entry = [lines.pop(at)]
+    if "<unfinished ...>" in entry[0]:
+        resumed = next(i for i in range(at, len(lines)) if lines[i].startswith("2809 ") and "<... close resumed>" in lines[i])
+        entry.append(lines.pop(resumed))
+    with pytest.raises(AssertionError, match="root kernel walk held after filter"):
+        assert_prompt_trace_budget(lines + entry, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('"time", O_RDONLY', '"mnt", O_RDONLY'),
+    ('"2809", O_RDONLY', '"999", O_RDONLY'),
+])
+def test_real_n4_rejects_kernel_path_expansion(n4_real_trace, old, new):
+    changed = [line.replace(old, new) if line.startswith("2809 ") else line for line in n4_real_trace]
+    assert changed != n4_real_trace
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(changed, DEBIAN_EXE, DEBIAN_ROOTS)

@@ -10,11 +10,31 @@ use bingsu_core::front::staged::{self, Effect, FdFacts, Observation, Operation, 
 use bingsu_core::fs_trust::{self, AclFacts, Facts};
 use bingsu_core::snapshot::{Clock, ClockError};
 use std::ffi::{CStr, CString};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+
+// std's debug OwnedFd drop probes F_GETFD, which the prompt filter forbids.
+// All exits (including unwind and unused prefetches) use exactly one close.
+struct PromptFd(Option<OwnedFd>);
+impl AsRawFd for PromptFd {
+    fn as_raw_fd(&self) -> i32 {
+        self.0.as_ref().expect("owned prompt fd").as_raw_fd()
+    }
+}
+impl Drop for PromptFd {
+    fn drop(&mut self) {
+        if let Some(fd) = self.0.take() {
+            // SAFETY: into_raw_fd transfers unique ownership, suppressing Drop.
+            // Never retry close: the descriptor may already have been recycled.
+            unsafe { libc::close(fd.into_raw_fd()) };
+        }
+    }
+}
 
 struct Held {
-    fd: OwnedFd,
+    fd: PromptFd,
     facts: FdFacts,
+    #[cfg(target_os = "linux")]
+    magic: u64,
 }
 struct Prepared {
     plan: staged::ReadPlan,
@@ -114,7 +134,7 @@ impl Prepared {
             .map_or(Observation::Failed, |h| Observation::Facts(h.facts))
     }
     fn close(&mut self, slot: Slot) -> Observation {
-        // OwnedFd closes once, without retrying a potentially recycled fd.
+        // PromptFd closes once, without std's post-filter debug fcntl probe.
         if self.slots[slot.index()].take().is_some() {
             Observation::Closed
         } else {
@@ -165,12 +185,7 @@ impl Prepared {
         loop {
             match self.step {
                 Step::Done(observed) => {
-                    return staged::finish(
-                        self.plan,
-                        observed,
-                        bingsu_core::color::palette::Mode::Dark,
-                    )
-                    .record;
+                    return staged::finish(self.plan, observed).record;
                 }
                 Step::Read(_) => {
                     // Move the effect out before mutably borrowing the executor.
@@ -195,14 +210,14 @@ const DIRECTORY_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW
 const DIRECTORY_FLAGS: i32 =
     libc::O_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
-fn open(base: i32, name: &CStr, flags: i32) -> std::io::Result<OwnedFd> {
+fn open(base: i32, name: &CStr, flags: i32) -> std::io::Result<PromptFd> {
     // SAFETY: base is held or AT_FDCWD for '/', name is terminated, no O_CREAT.
     let fd = unsafe { libc::openat(base, name.as_ptr(), flags) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: successful openat returned unique ownership.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    Ok(PromptFd(Some(unsafe { OwnedFd::from_raw_fd(fd) })))
 }
 
 #[allow(
@@ -210,7 +225,7 @@ fn open(base: i32, name: &CStr, flags: i32) -> std::io::Result<OwnedFd> {
     clippy::useless_conversion,
     reason = "stat fields differ across Linux libc and macOS"
 )]
-fn held(fd: OwnedFd) -> std::io::Result<Held> {
+fn held(fd: PromptFd) -> std::io::Result<Held> {
     // SAFETY: zeroed structs are valid output storage.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: zeroed structs are valid output storage.
@@ -247,7 +262,12 @@ fn held(fd: OwnedFd) -> std::io::Result<Held> {
         nlink: st.st_nlink as u64,
         size: u64::try_from(st.st_size).map_err(|_| std::io::Error::other("negative file size"))?,
     };
-    Ok(Held { fd, facts })
+    Ok(Held {
+        fd,
+        facts,
+        #[cfg(target_os = "linux")]
+        magic: fs.f_type as u64 & 0xffff_ffff,
+    })
 }
 
 #[derive(Default)]
@@ -255,7 +275,7 @@ struct ClockPins {
     identity: Option<Clock>,
     // Keep the kernel observations alive across the filter and both clock samples.
     #[cfg(target_os = "linux")]
-    fds: Vec<OwnedFd>,
+    fds: Vec<Held>,
 }
 impl ClockPins {
     fn observe(&self) -> Result<Clock, ClockError> {
@@ -273,31 +293,27 @@ impl ClockPins {
     fn prepare() -> Self {
         let mut p = Self::default();
         p.identity = p.linux().ok();
+        // Walk directories have served their purpose. Keep only the identity
+        // files alive for the two samples; a failed identity needs no pins.
+        p.fds
+            .retain(|h| p.identity.is_some() && h.facts.entry.mode & 0o170000 != 0o040000);
         p
     }
     #[cfg(target_os = "linux")]
     fn kernel(&mut self, base: i32, name: &CStr, flags: i32, magic: u64) -> Result<FdFacts, i32> {
         let fd =
             open(base, name, flags | libc::O_CLOEXEC).map_err(|e| e.raw_os_error().unwrap_or(0))?;
-        // SAFETY: writable statfs output storage.
-        let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
-        // SAFETY: live descriptor and writable output storage.
-        if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut fs) } != 0 {
-            return Err(libc::EIO);
-        }
         let h = held(fd).map_err(|_| libc::EIO)?;
         let facts = h.facts;
-        #[allow(clippy::unnecessary_cast, reason = "glibc/musl fsword types differ")]
-        let actual = fs.f_type as u64 & 0xffff_ffff;
-        if !kernel_entry(facts, flags & libc::O_DIRECTORY != 0, actual, magic) {
+        if !kernel_entry(facts, flags & libc::O_DIRECTORY != 0, h.magic, magic) {
             return Err(libc::EIO);
         }
-        self.fds.push(h.fd);
+        self.fds.push(h);
         Ok(facts)
     }
     #[cfg(target_os = "linux")]
     fn last(&self) -> i32 {
-        self.fds.last().expect("kernel retained fd").as_raw_fd()
+        self.fds.last().expect("kernel retained fd").fd.as_raw_fd()
     }
     #[cfg(target_os = "linux")]
     fn linux(&mut self) -> Result<Clock, ClockError> {
@@ -324,7 +340,11 @@ impl ClockPins {
         let time = self.kernel(ns, c"time", libc::O_RDONLY, 0x6e736673);
         let child = self.kernel(ns, c"time_for_children", libc::O_RDONLY, 0x6e736673);
         let offsets = self.kernel(process, c"timens_offsets", file, procfs);
-        let domain = time_domain(time, child, offsets)?;
+        let domain = crate::prompt_io::time_domain(
+            time.map(|f| (f.entry.dev, f.entry.ino)),
+            child.map(|_| ()),
+            offsets.map(|_| ()),
+        )?;
         let mut base = proc;
         for name in [c"sys", c"kernel", c"random"] {
             self.kernel(base, name, dir, procfs)
@@ -334,7 +354,7 @@ impl ClockPins {
         let facts = self
             .kernel(base, c"boot_id", file, procfs)
             .map_err(|_| ClockError::Boot)?;
-        if !boot_file(facts) {
+        if !crate::prompt_io::boot_file(facts.entry, procfs) {
             return Err(ClockError::Boot);
         }
         let mut bytes = [0; 38];
@@ -350,7 +370,7 @@ impl ClockPins {
             n += got;
         }
         Ok(Clock {
-            boot: boot_bytes(&bytes[..n])?,
+            boot: crate::prompt_io::boot_bytes(&bytes[..n])?,
             domain,
             now: 0,
             kind: 1,
@@ -371,39 +391,6 @@ fn kernel_entry(f: FdFacts, directory: bool, actual: u64, expected: u64) -> bool
             AclFacts::None | AclFacts::DenyOnly | AclFacts::PosixExtended
         )
 }
-#[cfg(any(test, target_os = "linux"))]
-fn time_domain(
-    time: Result<FdFacts, i32>,
-    child: Result<FdFacts, i32>,
-    offsets: Result<FdFacts, i32>,
-) -> Result<[u8; 16], ClockError> {
-    let missing = [
-        time == Err(libc::ENOENT),
-        child == Err(libc::ENOENT),
-        offsets == Err(libc::ENOENT),
-    ];
-    match time {
-        Ok(f) => {
-            if child.is_err() || offsets.is_err() {
-                return Err(ClockError::Domain);
-            }
-            bingsu_core::snapshot::namespace_domain(Some((f.entry.dev, f.entry.ino)), true, missing)
-        }
-        Err(_) => bingsu_core::snapshot::namespace_domain(None, true, missing),
-    }
-}
-#[cfg(any(test, target_os = "linux"))]
-fn boot_file(f: FdFacts) -> bool {
-    f.entry.uid == 0 && f.entry.mode & 0o170022 == 0o100000
-}
-#[cfg(any(test, target_os = "linux"))]
-fn boot_bytes(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
-    if bytes.len() != 37 || bytes[36] != b'\n' {
-        return Err(ClockError::Boot);
-    }
-    crate::prompt_io::uuid(&bytes[..36])
-}
-
 #[cfg(target_os = "macos")]
 mod macos_acl {
     unsafe extern "C" {
@@ -824,7 +811,7 @@ mod tests {
         assert!(p.slots.iter().all(Option::is_none) && p.files.iter().all(Option::is_none));
         assert!(text(p.respond()).contains("error:bad-args"));
     }
-    // 이것을 실패시키는 것: procfs/nsfs·fd 종류·ACL·부재/실패·boot 소유/형식 조건 누락.
+    // 이것을 실패시키는 것: procfs/nsfs·fd 종류·ACL·부재/실패 조건 누락.
     #[test]
     fn held_clock_evidence_is_strict() {
         let f = FdFacts {
@@ -853,33 +840,8 @@ mod tests {
             bad.entry.acl = acl;
             assert!(!kernel_entry(bad, false, 0x9fa0, 0x9fa0));
         }
-        assert!(time_domain(Ok(f), Ok(f), Ok(f)).is_ok());
-        assert!(time_domain(Err(libc::ENOENT), Err(libc::ENOENT), Err(libc::ENOENT)).is_ok());
-        for i in 0..3 {
-            let mut observed = [Err(libc::ENOENT); 3];
-            observed[i] = Err(libc::EACCES);
-            assert!(time_domain(observed[0], observed[1], observed[2]).is_err());
-        }
-        assert!(time_domain(Ok(f), Err(libc::ENOENT), Ok(f)).is_err());
-        assert!(time_domain(Ok(f), Ok(f), Err(libc::EACCES)).is_err());
-        assert!(boot_file(f));
-        for (uid, mode) in [(501, 0o100444), (0, 0o100446), (0, 0o040444)] {
-            let mut bad = f;
-            bad.entry.uid = uid;
-            bad.entry.mode = mode;
-            assert!(!boot_file(bad));
-        }
-        let uuid = b"00112233-4455-6677-8899-aabbccddeeff\n";
-        assert!(boot_bytes(uuid).is_ok());
-        for bytes in [
-            &uuid[..36],
-            b"00112233-4455-6677-8899-aabbccddeeff ",
-            b"00112233-4455-6677-8899-aabbccddeeff\nextra",
-            b"00000000-0000-0000-0000-000000000000\n".as_slice(),
-        ] {
-            assert!(boot_bytes(bytes).is_err());
-        }
     }
+
     // 이것을 실패시키는 것: 저장 시각 반환, 현재 관찰 생략, identity 실패를 성공으로 바꾸는 것.
     #[test]
     fn fresh_clock_is_monotonic_and_missing_identity_fails() {
@@ -890,6 +852,40 @@ mod tests {
         assert!(before > 0 && before <= observed.now && observed.now <= after);
         pins.identity = None;
         assert!(pins.observe().is_err());
+    }
+    // The same probe also runs under unshare -U/rootless containers: uid 65534
+    // must not make the reader disagree with the publisher.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_publisher_reader_identity_agrees_and_walk_fds_are_closed() {
+        let reader = ClockPins::prepare();
+        let publisher = crate::prompt_io::observe_clock().ok();
+        let identity = |c: Clock| (c.boot, c.domain, c.kind, c.resume);
+        assert_eq!(reader.identity.map(identity), publisher.map(identity));
+        assert!(
+            reader
+                .fds
+                .iter()
+                .all(|h| h.facts.entry.mode & 0o170000 == 0o100000)
+        );
+        if reader.identity.is_none() {
+            assert!(reader.fds.is_empty());
+        }
+    }
+    #[test]
+    fn colorfgbg_reaches_snapshot_and_default_rendering() {
+        let mut f = Fx::new();
+        let dark = f.prepared().respond();
+        f.args.extend([b"--colorfgbg".to_vec(), b"0;15".to_vec()]);
+        let light = f.prepared().respond();
+        assert_ne!(dark, light);
+        for name in ["snapshot", "last-good"] {
+            fs::write(f.store.join(name), b"broken").unwrap();
+        }
+        let light_default = f.prepared().respond();
+        f.args.pop();
+        f.args.push(b"15;0".to_vec());
+        assert_ne!(light_default, f.prepared().respond());
     }
     // 이것을 실패시키는 것: 필터 뒤 UID/path 준비 재실행을 허용하는 것.
     #[test]
@@ -939,7 +935,49 @@ mod tests {
     #[ignore = "child: installs the real seccomp filter"]
     fn confined_child() {
         let f = Fx::new();
-        let p = f.prepared();
+        let mut p = f.prepared();
+        // Exercise real clock-pin destruction as well as all snapshot slots.
+        p.clock.fds = ClockPins::prepare().fds;
+        // Production denies fcntl with EPERM, which std's debug probe ignores.
+        // This test-only filter kills it so a reintroduced probe turns us red.
+        let op = |code: u32, jt, jf, k| libc::sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        };
+        let mut filter = [
+            op(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+            op(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                0,
+                1,
+                libc::SYS_fcntl as u32,
+            ),
+            op(
+                libc::BPF_RET | libc::BPF_K,
+                0,
+                0,
+                libc::SECCOMP_RET_KILL_PROCESS,
+            ),
+            op(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: only this child is confined; the filter/program buffers live through prctl.
+        assert_eq!(
+            // SAFETY: no pointers; affects only this child process.
+            unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) },
+            0
+        );
+        // SAFETY: valid BPF program and no_new_privs is set above.
+        assert_eq!(
+            // SAFETY: program and its filter buffer remain live through this call.
+            unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program) },
+            0
+        );
         assert_eq!(
             crate::sandbox::enter(),
             bingsu_core::front::Sandbox::Installed

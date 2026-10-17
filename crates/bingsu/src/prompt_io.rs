@@ -76,6 +76,41 @@ pub(crate) fn uuid(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
     Ok(out)
 }
 
+// Shared publisher/reader judgements. Callers verify procfs/nsfs and file
+// kinds before passing domain identities; errors retain their errno so only
+// three ENOENT observations prove that time namespaces are unavailable.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn time_domain(
+    time: Result<(u64, u64), i32>,
+    child: Result<(), i32>,
+    offsets: Result<(), i32>,
+) -> Result<[u8; 16], ClockError> {
+    let missing = [
+        time == Err(libc::ENOENT),
+        child == Err(libc::ENOENT),
+        offsets == Err(libc::ENOENT),
+    ];
+    if time.is_ok() && (child.is_err() || offsets.is_err()) {
+        return Err(ClockError::Domain);
+    }
+    bingsu_core::snapshot::namespace_domain(time.ok(), true, missing)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn boot_file(f: bingsu_core::fs_trust::Facts, magic: u64) -> bool {
+    // uid is mapped by user namespaces (often to 65534). procfs proves the
+    // origin; a host uid spelling adds no protection against local users.
+    magic == 0x9fa0 && f.mode & 0o170022 == 0o100000
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn boot_bytes(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
+    if bytes.len() != 37 || bytes[36] != b'\n' {
+        return Err(ClockError::Boot);
+    }
+    uuid(&bytes[..36])
+}
+
 #[cfg(target_os = "macos")]
 fn boot_id() -> Result<[u8; 16], ClockError> {
     let mut bytes = [0u8; 37];
@@ -128,6 +163,33 @@ mod linux {
             libc::fstatfs(f.as_raw_fd(), &mut st) == 0 && st.f_type as i128 == i128::from(magic)
         }
     }
+    fn facts(f: &File) -> Result<bingsu_core::fs_trust::Facts, i32> {
+        let m = f.metadata().map_err(|_| libc::EIO)?;
+        Ok(bingsu_core::fs_trust::Facts {
+            dev: m.dev(),
+            ino: m.ino(),
+            uid: m.uid(),
+            gid: m.gid(),
+            mode: m.mode(),
+            ownership: Some(true),
+            // Kernel identity judgement does not use ACLs. The reader also
+            // checks ACLs as part of its pre-filter held-file inspection.
+            acl: bingsu_core::fs_trust::AclFacts::Unknown,
+        })
+    }
+    fn namespace_entry(
+        base: i32,
+        name: &CStr,
+        magic: libc::c_long,
+        flags: i32,
+    ) -> Result<(u64, u64), i32> {
+        let f = open_at(base, name, flags).map_err(|e| e.raw_os_error().unwrap_or(0))?;
+        let m = facts(&f)?;
+        if !on_fs(&f, magic) || m.mode & 0o170000 != 0o100000 {
+            return Err(libc::EIO);
+        }
+        Ok((m.dev, m.ino))
+    }
     fn proc_self() -> Result<File, ClockError> {
         let f = open_at(
             libc::AT_FDCWD,
@@ -151,36 +213,20 @@ mod linux {
         if !on_fs(&ns, 0x9fa0) {
             return Err(ClockError::Domain);
         }
-        let time = open_at(ns.as_raw_fd(), c"time", libc::O_RDONLY);
-        match time {
-            Ok(f) => {
-                if !on_fs(&f, 0x6e736673) {
-                    return Err(ClockError::Domain);
-                }
-                let m = f.metadata().map_err(|_| ClockError::Domain)?;
-                bingsu_core::snapshot::namespace_domain(Some((m.dev(), m.ino())), true, [false; 3])
-            }
-            Err(e) => {
-                // ENOENT alone is not feature absence: both proc directories are
-                // verified and all three kernel entries must be absent.
-                let child = open_at(ns.as_raw_fd(), c"time_for_children", libc::O_RDONLY);
-                let offsets = open_at(
-                    process.as_raw_fd(),
-                    c"timens_offsets",
-                    libc::O_RDONLY | libc::O_NOFOLLOW,
-                );
-                let missing = [
-                    e.raw_os_error() == Some(libc::ENOENT),
-                    child
-                        .err()
-                        .is_some_and(|e| e.raw_os_error() == Some(libc::ENOENT)),
-                    offsets
-                        .err()
-                        .is_some_and(|e| e.raw_os_error() == Some(libc::ENOENT)),
-                ];
-                bingsu_core::snapshot::namespace_domain(None, true, missing)
-            }
-        }
+        let time = namespace_entry(ns.as_raw_fd(), c"time", 0x6e736673, libc::O_RDONLY);
+        let child = namespace_entry(
+            ns.as_raw_fd(),
+            c"time_for_children",
+            0x6e736673,
+            libc::O_RDONLY,
+        );
+        let offsets = namespace_entry(
+            process.as_raw_fd(),
+            c"timens_offsets",
+            0x9fa0,
+            libc::O_RDONLY | libc::O_NOFOLLOW,
+        );
+        time_domain(time, child.map(|_| ()), offsets.map(|_| ()))
     }
     pub(super) fn boot() -> Result<[u8; 16], ClockError> {
         use std::io::Read;
@@ -190,7 +236,8 @@ mod linux {
             libc::O_RDONLY | libc::O_NOFOLLOW,
         )
         .map_err(|_| ClockError::Boot)?;
-        if !on_fs(&f, 0x9fa0) {
+        let facts = facts(&f).map_err(|_| ClockError::Boot)?;
+        if !boot_file(facts, if on_fs(&f, 0x9fa0) { 0x9fa0 } else { 0 }) {
             return Err(ClockError::Boot);
         }
         let mut b = [0; 38];
@@ -202,10 +249,7 @@ mod linux {
             }
             n += got;
         }
-        if n != 37 || b[36] != b'\n' {
-            return Err(ClockError::Boot);
-        }
-        uuid(&b[..36])
+        boot_bytes(&b[..n])
     }
 }
 #[cfg(target_os = "linux")]
@@ -220,6 +264,69 @@ fn clock_domain() -> Result<[u8; 16], ClockError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Both adapters call these exact judgements: user namespace uid mapping
+    // cannot change the decision, and a partially observed domain fails closed.
+    // 이것을 실패시키는 것: uid==0 복원, procfs/파일 종류/쓰기 비트/세 관찰 조건 제거.
+    #[test]
+    fn publisher_reader_boot_domain_table() {
+        use bingsu_core::fs_trust::{AclFacts, Facts};
+        let f = Facts {
+            dev: 1,
+            ino: 9,
+            uid: 0,
+            gid: 0,
+            mode: 0o100444,
+            ownership: Some(true),
+            acl: AclFacts::None,
+        };
+        for uid in [0, 501, 65534] {
+            for (mode, magic, expected) in [
+                (0o100444, 0x9fa0, true),
+                (0o100444, 0x6e736673, false),
+                (0o100446, 0x9fa0, false),
+                (0o100464, 0x9fa0, false),
+                (0o040444, 0x9fa0, false),
+            ] {
+                assert_eq!(
+                    boot_file(Facts { uid, mode, ..f }, magic),
+                    expected,
+                    "uid={uid} mode={mode:o}"
+                );
+            }
+        }
+        let identity = (f.dev, f.ino);
+        let expected = bingsu_core::snapshot::namespace_domain(Some(identity), true, [false; 3]);
+        let entries = [Ok(()), Err(libc::ENOENT), Err(libc::EACCES), Err(libc::EIO)];
+        for time in entries {
+            for child in entries {
+                for offsets in entries {
+                    let want = if [time, child, offsets] == [Ok(()); 3] {
+                        expected
+                    } else if [time, child, offsets] == [Err(libc::ENOENT); 3] {
+                        Ok([0; 16])
+                    } else {
+                        Err(ClockError::Domain)
+                    };
+                    assert_eq!(
+                        time_domain(time.map(|_| identity), child, offsets),
+                        want,
+                        "time={time:?}, child={child:?}, offsets={offsets:?}"
+                    );
+                }
+            }
+        }
+        let uuid = b"00112233-4455-6677-8899-aabbccddeeff\n";
+        assert!(boot_bytes(uuid).is_ok());
+        for bytes in [
+            &uuid[..36],
+            b"00112233-4455-6677-8899-aabbccddeeff ",
+            b"00112233-4455-6677-8899-aabbccddeeff\nextra",
+            b"00000000-0000-0000-0000-000000000000\n".as_slice(),
+        ] {
+            assert!(boot_bytes(bytes).is_err());
+        }
+    }
+
     // 이것을 실패시키는 것: UUID 길이·구분자·hex·영 UUID 검사 또는 바이트 순서를 바꾸는 것.
     #[test]
     fn kernel_uuid_is_strict() {

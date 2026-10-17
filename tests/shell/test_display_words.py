@@ -43,10 +43,11 @@ def test_pwd_and_colorterm_round_trip(tmp_path, shells, idx, name):
         base = tmp_path / shell
         folder = base / "d" / name
         folder.mkdir(parents=True)
-        env = dict(trusted_env(base), BINGSU_T_DIR=str(folder), COLORTERM=name)
+        env = dict(trusted_env(base), BINGSU_T_DIR=str(folder), COLORTERM=name, COLORFGBG=name)
         argv = call_once(base, shell, env, CD[shell])
         assert value_after(argv, b"--pwd") == os.fsencode(folder), (shell, argv)
         assert value_after(argv, b"--colorterm") == name.encode(), (shell, argv)
+        assert value_after(argv, b"--colorfgbg") == name.encode(), (shell, argv)
 
 
 # 65,536 bytes: the envelope's PATH_BYTES_MAX. 21,845 "가" are 65,535 bytes.
@@ -193,14 +194,42 @@ def test_optional_display_word_caps(tmp_path, shells):
         for length in (65536, 65537):
             base = tmp_path / f"{shell}-{length}"
             base.mkdir()
-            raw = b"x" * length
+            raw = "가".encode() * (length // 3) + b"x" * (length % 3)
             if shell == "fish":
                 body = b"set -g VIRTUAL_ENV '" + raw + b"'\n"
             else:
                 host = b"HOST" if shell == "zsh" else b"HOSTNAME"
                 body = b"VIRTUAL_ENV='" + raw + b"'\n" + host + b"='" + raw + b"'\n"
+            if shell == "fish":
+                body += b"set -g COLORFGBG '" + raw + b"'\n"
+            else:
+                body += b"COLORFGBG='" + raw + b"'\n"
             argv = call_once(base, shell, trusted_env(base), body)
             want = raw if length == 65536 else b""
             assert value_after(argv, b"--venv") == want
+            assert value_after(argv, b"--colorfgbg") == want
             if shell != "fish":
                 assert value_after(argv, b"--host") == want
+
+
+# NUL cannot occur in an OS argv/env word; core tests cover those three rows.
+# All other hostile classes use the same matrix as the renderer/PTY probes.
+from test_hostile_matrix import matrix
+
+
+@pytest.mark.parametrize("row", [r for r in matrix.rows() if b"\0" not in matrix.payload(r[1])], ids=lambda r: r[0])
+def test_colorfgbg_hostile_classes_are_one_bounded_word(tmp_path, shells, row):
+    for shell in shells:
+        base = tmp_path / shell
+        base.mkdir()
+        canary = base / "PWNED"
+        raw = matrix.payload(row[1], str(canary).encode())
+        if shell == "fish":
+            quoted = raw.replace(b"\\", b"\\\\").replace(b"'", b"\\'")
+            body = b"set -g COLORFGBG '" + quoted + b"'\n"
+        else:
+            body = b"COLORFGBG='" + raw.replace(b"'", b"'\\''") + b"'\n"
+        argv = call_once(base, shell, trusted_env(base), body)
+        assert not canary.exists(), (shell, row[0])
+        assert argv.count(b"--colorfgbg") == 1
+        assert value_after(argv, b"--colorfgbg") == (raw if len(raw) <= CAP else b""), (shell, row[0])

@@ -520,11 +520,12 @@ def prompt_open(call, path, pinned, root):
 def prompt_root_io(front, boundary, exe, pinned, root):
     """Track the root's prepared fds. No path operation survives the filter.
 
-    The existing real fixture predates N4. The separate N4 fixture is synthetic;
-    Linux CI must re-capture successful current/fallback and refused-file reads.
+    Real N3 and N4 captures cover helper publication and first-prompt fallback.
+    Linux CI must also capture successful current/last-good and refused-file reads.
     """
     held = {}
     acl_fallback = set()
+    fs_observed = set()
     _, files = prompt_sources(pinned)
     table = {r[0] for r in _ROWS if r[0] != "-"}
     for c in front:
@@ -534,6 +535,9 @@ def prompt_root_io(front, boundary, exe, pinned, root):
         if post:
             assert c.name in table and not c.ret.startswith("-1 EPERM"), ("post-filter syscall", c)
             assert not paths, ("post-filter path", c)
+        if post:
+            assert not any(re.fullmatch(r"/proc(?:/\d+(?:/ns)?|/sys(?:/kernel(?:/random)?)?)?", path)
+                           for path, prepared in held.values() if prepared), ("root kernel walk held after filter", c)
         if c.name == "clock_gettime":
             assert args[0] == "CLOCK_BOOTTIME", ("root clock", c)
         for path in paths:
@@ -552,9 +556,13 @@ def prompt_root_io(front, boundary, exe, pinned, root):
                 fd = int(result.group(1))
                 held[fd] = (paths[0], prompt_open(c, paths[0], pinned, root))
                 acl_fallback.discard(fd)
+                fs_observed.discard(fd)
         if c.name in {"fstatfs", "fgetxattr"}:
             fd = int(args[0].split("<")[0])
             assert not post and fd in held and held[fd][1], ("root fd facts", c)
+            if c.name == "fstatfs":
+                assert fd not in fs_observed, ("root duplicate fstatfs", c)
+                fs_observed.add(fd)
             if c.name == "fgetxattr":
                 assert args[1:] == ['"system.posix_acl_access"', "NULL", "0"], ("root ACL", c)
                 if c.ret.startswith("-1 EBADF"):

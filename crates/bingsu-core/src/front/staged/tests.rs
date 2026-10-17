@@ -2,6 +2,7 @@
 mod cases {
     use super::super::*;
     use crate::snapshot::{HEADER, Identity, PREFIX, Snapshot, T_NS};
+    use alloc::format;
     use alloc::string::String;
 
     fn args() -> Vec<&'static [u8]> {
@@ -214,14 +215,23 @@ mod cases {
             if fail { Observation::Failed } else { result }
         }
         fn run(&mut self, args: &[&[u8]], mode: Mode) -> Response {
-            let mut plan = prepare(args);
+            let mut args = args.to_vec();
+            args.extend([
+                b"--colorfgbg".as_slice(),
+                if mode == Mode::Light {
+                    b"0;15"
+                } else {
+                    b"15;0"
+                },
+            ]);
+            let mut plan = prepare(&args);
             let mut previous = None;
             for _ in 0..100_000 {
                 match next(&mut plan, previous.take()) {
                     Step::Read(e) => previous = Some(self.observe(e)),
                     Step::Done(o) => {
                         assert!(self.dirs.iter().all(Option::is_none) && !self.live_file);
-                        return finish(plan, o, mode);
+                        return finish(plan, o);
                     }
                 }
             }
@@ -537,12 +547,35 @@ mod cases {
             assert!(h.calls.is_empty());
             assert!(r.execution.permit().is_none());
         }
-        let r = finish(prepare(&args()), Observed::default(), Mode::Dark);
+        let r = finish(prepare(&args()), Observed::default());
         assert_eq!(r.status, Status::DEGRADED_RUNTIME_ROOT);
         let mut p = prepare(&args());
         assert!(matches!(next(&mut p, None), Step::Read(_)));
         assert!(matches!(next(&mut p, None), Step::Done(_)));
     }
+    // Explicit config modes win over either COLORFGBG observation; auto uses it.
+    // 이것을 실패시키는 것: 봉투 모드를 Dark로 고정하거나 명시 모드를 auto처럼 컴파일하는 것.
+    #[test]
+    fn colorfgbg_selects_auto_and_config_mode_wins() {
+        let mut records = Vec::new();
+        for configured in ["auto", "dark", "light"] {
+            let s = snapshot(&format!("[colors]\nmode='{configured}'\n"));
+            let mut h = Harness::new();
+            h.current = Some(s.encode(1, 0).unwrap());
+            h.marker = Some(marker(&s).encode().to_vec());
+            let dark = h.run(&args(), Mode::Dark);
+            let light = h.run(&args(), Mode::Light);
+            assert_eq!(dark.status, Status::OK_NONE);
+            assert_eq!(light.status, Status::OK_NONE);
+            records.push((dark.record, light.record));
+        }
+        assert_ne!(records[0].0, records[0].1);
+        assert_eq!(records[1].0, records[1].1);
+        assert_eq!(records[2].0, records[2].1);
+        assert_eq!(records[0].0, records[1].0);
+        assert_eq!(records[0].1, records[2].0);
+    }
+
     // 이것을 실패시키는 것: snapshot의 not_run/승인 정책 대신 임의 unit 허용, compiled render 옵션·팔레트 무시.
     #[test]
     fn compiled_screen_and_only_allowed_units_survive() {

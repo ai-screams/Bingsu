@@ -265,7 +265,8 @@ mod tests {
             let s = script(shell, b"/h");
             assert_eq!(
                 count(&s, cap.as_bytes()),
-                if shell == Shell::Bash { 3 } else { 1 },
+                // bash shares the byte counter across pwd, host, venv and COLORFGBG.
+                if shell == Shell::Bash { 4 } else { 1 },
                 "{shell:?}"
             );
         }
