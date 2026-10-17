@@ -36,6 +36,8 @@ pub enum Selection {
     Chosen(Record),
     /// A record is there but fails the trust rules; the text says which.
     Unusable(String),
+    /// The record could not be read; this says nothing about its trust.
+    Incomplete,
 }
 
 pub struct FileLine {
@@ -69,6 +71,7 @@ pub fn refusal_text(r: Refusal) -> &'static str {
 
 fn record_text(e: &RecordError) -> String {
     match e {
+        RecordError::Io(_) => "reading it did not finish".into(),
         RecordError::Absent => "no record".into(),
         RecordError::StateRoot(_) => "the state folder is not safe".into(),
         RecordError::NotAFile => "it is not a plain file".into(),
@@ -87,7 +90,7 @@ fn record_text(e: &RecordError) -> String {
 /// the fixed message and exit code of a root that cannot be used at all.
 pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (String, u8)> {
     let mut groups = SystemGroups::new(&user.pw.name);
-    let (pin, state, written) = match ctx::pinned_roots(user) {
+    let (pin, state, written) = match ctx::pinned_roots(user)? {
         Some(Roots {
             config: Some(pin),
             state,
@@ -99,7 +102,7 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
         _ => {
             let written = roots::config_candidate(env, &user.pw.home);
             let pin = ConfigRootPin::check(&written, user.me, &mut groups)
-                .map_err(|_| (en(MsgId::UnconfirmedRoot).to_owned(), EXIT_FAILED))?;
+                .map_err(|e| (en(MsgId::UnconfirmedRoot).to_owned(), ctx::io_exit(&e)))?;
             (pin, roots::state_root(env, &user.pw.home), written)
         }
     };
@@ -127,12 +130,17 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
             ..
         })))
         | None => (Loader::new(places), Selection::None),
+        Some(Err(e)) if e.incomplete() => (Loader::new(places), Selection::Incomplete),
         Some(Err(e)) => (Loader::new(places), Selection::Unusable(record_text(&e))),
     };
     let roots_in = loader.roots(BUILTIN_TOML.as_bytes());
     let loaded = load(roots_in, &mut loader, ctx::version());
     let report = report::from_loaded(loaded, Mode::Dark);
-    let verdict = loader.verified(&report.files, report.snapshot.is_some());
+    let verdict = if matches!(selection, Selection::Incomplete) {
+        Verified::Incomplete
+    } else {
+        loader.verified(&report.files, report.snapshot.is_some())
+    };
     let mut remedies: Vec<String> = Vec::new();
     for r in &loader.remedies {
         if !remedies.contains(r) {
@@ -202,6 +210,9 @@ fn trust_label(f: &Found, line: &FileLine) -> String {
 
 fn selection_line(s: &Selection) -> String {
     match s {
+        Selection::Incomplete => {
+            "selection: could not read the choice; inspection is incomplete".into()
+        }
         Selection::None => "selection: config.toml in the settings folder".into(),
         Selection::Chosen(r) => format!(
             "selection: {} (from bingsu config use; it stands in config.toml's place, conf.d and config.local.toml still apply)",
@@ -255,6 +266,9 @@ pub fn render_path(i: &Inspection) -> String {
             };
             let _ = writeln!(out, "  {shown}\n     {why}\n     {}", trust_label(f, line));
         }
+    }
+    if matches!(i.verdict, Verified::Incomplete) {
+        out.push_str("result: could not read everything; the applied list is incomplete\n");
     }
     out
 }
@@ -369,5 +383,44 @@ pub fn check() -> ExitCode {
 /// `config path` lists; it does not judge, so it succeeds whenever it could
 /// read the folder.
 pub fn path() -> ExitCode {
-    run_with(render_path, |_| 0)
+    run_with(render_path, path_exit)
+}
+
+fn path_exit(i: &Inspection) -> u8 {
+    if matches!(i.verdict, Verified::Incomplete) {
+        EXIT_UNFINISHED
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_path_explains_the_partial_list_and_exits_3() {
+        let mut i = Inspection {
+            root: "/config".into(),
+            root_written: "/config".into(),
+            root_notice: None,
+            selection: Selection::None,
+            report: ConfigReport {
+                files: vec![],
+                order: vec![],
+                diagnostics: vec![],
+                widths: vec![],
+                snapshot: None,
+            },
+            lines: vec![],
+            verdict: Verified::Incomplete,
+            remedies: vec![],
+        };
+        assert_eq!(path_exit(&i), 3);
+        assert!(
+            render_path(&i).contains("could not read everything; the applied list is incomplete")
+        );
+        i.verdict = Verified::Invalid;
+        assert_eq!(path_exit(&i), 0);
+    }
 }

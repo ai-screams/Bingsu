@@ -41,8 +41,10 @@ pub enum RecordError {
     Absent,
     /// The state root failed the walk or rule 2.
     StateRoot(RootError),
-    /// A symlink, FIFO or folder in the record's place, or a failed read.
+    /// A symlink, FIFO, folder or confirmed access/path failure.
     NotAFile,
+    /// An OS read/open failure, preserved for callers to distinguish I/O from trust.
+    Io(i32),
     Owner,
     Mode(u32),
     Links(u64),
@@ -52,6 +54,27 @@ pub enum RecordError {
     Acl,
     Ownership,
     Changed,
+}
+
+fn record_io(e: std::io::Error) -> RecordError {
+    match e.raw_os_error() {
+        Some(libc::ELOOP | libc::ENOTDIR | libc::EACCES | libc::EPERM) => RecordError::NotAFile,
+        Some(errno) => RecordError::Io(errno),
+        None => RecordError::Changed,
+    }
+}
+
+impl RecordError {
+    pub fn incomplete(&self) -> bool {
+        match self {
+            Self::Io(_) => true,
+            Self::StateRoot(RootError::Open { errno, .. }) => {
+                super::ctx::io_exit(&std::io::Error::from_raw_os_error(*errno))
+                    == super::ctx::EXIT_UNFINISHED
+            }
+            _ => false,
+        }
+    }
 }
 
 fn parse(bytes: &[u8]) -> Option<Record> {
@@ -110,7 +133,7 @@ pub struct RecordEvidence {
 }
 
 fn check_record(file: &std::fs::File, me: u32) -> Result<Facts, RecordError> {
-    let md = file.metadata().map_err(|_| RecordError::NotAFile)?;
+    let md = file.metadata().map_err(record_io)?;
     if !md.file_type().is_file() {
         return Err(RecordError::NotAFile);
     }
@@ -126,7 +149,7 @@ fn check_record(file: &std::fs::File, me: u32) -> Result<Facts, RecordError> {
     if md.len() > RECORD_MAX {
         return Err(RecordError::TooBig(md.len()));
     }
-    let facts = sys::fd_facts(file.as_fd()).map_err(|_| RecordError::NotAFile)?;
+    let facts = sys::fd_facts(file.as_fd()).map_err(record_io)?;
     record_permissions(facts)
 }
 
@@ -158,12 +181,12 @@ impl RecordEvidence {
     }
 
     pub fn revalidate(&self, me: u32, groups: &mut dyn GroupOracle) -> Result<(), RecordError> {
-        self.chain.revalidate().map_err(|_| RecordError::Changed)?;
+        self.chain.revalidate().map_err(record_io)?;
         state_verdict(&self.chain, me, groups)?;
         if check_record(&self.file, me)? != self.facts
-            || sys::file_stamp(&self.file).map_err(|_| RecordError::Changed)? != self.stamp
+            || sys::file_stamp(&self.file).map_err(record_io)? != self.stamp
             || sys::at_stamp(self.chain.last().as_fd(), OsStr::new(RECORD_NAME))
-                .map_err(|_| RecordError::Changed)?
+                .map_err(record_io)?
                 != self.stamp
         {
             return Err(RecordError::Changed);
@@ -181,15 +204,15 @@ pub fn read_session(
     let mut file = match sys::open_file_at_nofollow(chain.last().as_fd(), OsStr::new(RECORD_NAME)) {
         Ok(f) => f,
         Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Err(RecordError::Absent),
-        Err(_) => return Err(RecordError::NotAFile),
+        Err(e) => return Err(record_io(e)),
     };
     let facts = check_record(&file, me)?;
-    let stamp = sys::file_stamp(&file).map_err(|_| RecordError::NotAFile)?;
+    let stamp = sys::file_stamp(&file).map_err(record_io)?;
     let mut bytes = Vec::new();
     file.by_ref()
         .take(RECORD_MAX + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| RecordError::NotAFile)?;
+        .map_err(record_io)?;
     if bytes.len() as u64 > RECORD_MAX {
         return Err(RecordError::TooBig(bytes.len() as u64));
     }
@@ -378,6 +401,18 @@ mod tests {
     use super::*;
     use bingsu_core::fs_trust::RefuseGroupWrite;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn record_io_preserves_resource_errors_and_trust_errors() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::EIO, libc::ENOMEM] {
+            let e = record_io(std::io::Error::from_raw_os_error(errno));
+            assert_eq!(e, RecordError::Io(errno));
+            assert!(e.incomplete());
+            assert!(RecordError::StateRoot(RootError::Open { at: 1, errno }).incomplete());
+        }
+        assert!(!RecordError::Mode(0o644).incomplete());
+        assert!(!record_io(std::io::Error::from_raw_os_error(libc::ELOOP)).incomplete());
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("bingsu-tr-{tag}-{}", std::process::id()));

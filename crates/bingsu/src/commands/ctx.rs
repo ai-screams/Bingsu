@@ -66,24 +66,34 @@ pub fn print(text: &str) -> bool {
     sys::write_fd(1, text.as_bytes()) == sys::WriteOutcome::Done
 }
 
-/// The roots init pinned in this shell (`BINGSU_ROOTS`), re-checked now.
-/// `None`, after one stderr line, when the variable is absent, garbled,
-/// forged or no longer matches: the caller then resolves from the
-/// environment, as init does.
-pub fn pinned_roots(user: &User) -> Option<Roots> {
+/// The roots init pinned in this shell, re-checked now. Only absence may
+/// fall back to current XDG; a present but unusable pin must stop all writes.
+pub fn pinned_roots(user: &User) -> Result<Option<Roots>, (String, u8)> {
     use std::os::unix::ffi::OsStrExt;
-    let found = TrustedEnv::pinned_roots()
-        .and_then(|v| pinned::decode(v.as_bytes(), user.me, &user.pw.name, &user.pw.home));
-    if found.is_none() {
+    let Some(value) = TrustedEnv::pinned_roots() else {
         eprintln!("{}", en(MsgId::RootsFromEnvironment));
-    }
-    found
+        return Ok(None);
+    };
+    pinned::decode(value.as_bytes(), user.me, &user.pw.name, &user.pw.home)
+        .map(Some)
+        .ok_or_else(|| ("bingsu: the folders pinned in BINGSU_ROOTS no longer match; run bingsu init <shell> again".into(), EXIT_UNFINISHED))
 }
 
 /// Every root a command that publishes needs.
-pub fn roots_for_publishing(user: &User) -> Roots {
-    pinned_roots(user)
-        .unwrap_or_else(|| roots::resolve(&TrustedEnv::capture(), &user.pw.home, &user.pw.name))
+pub fn roots_for_publishing(user: &User) -> Result<Roots, (String, u8)> {
+    Ok(pinned_roots(user)?
+        .unwrap_or_else(|| roots::resolve(&TrustedEnv::capture(), &user.pw.home, &user.pw.name)))
+}
+
+/// System errors with an errno are incomplete unless they confirm a path or
+/// access failure. Semantic checks use errors without an errno.
+pub fn io_exit(e: &std::io::Error) -> u8 {
+    match e.raw_os_error() {
+        Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP | libc::EACCES | libc::EPERM) | None => {
+            EXIT_FAILED
+        }
+        Some(_) => EXIT_UNFINISHED,
+    }
 }
 
 /// What the engine needs, or the fixed message for what is missing.
@@ -155,25 +165,130 @@ pub fn start() -> Option<Clock> {
 /// A hard stop: the engine's budget is cooperative, so a source on a
 /// stalled mount could keep a command in the kernel. Past `limit` the
 /// process says so and ends with "not finished".
-pub fn arm_deadline(limit: Duration, text: String) {
-    let _ = std::thread::Builder::new()
-        .name("deadline".into())
-        .spawn(move || {
-            std::thread::sleep(limit);
-            let _ = sys::write_fd(2, text.as_bytes());
-            sys::exit_now(i32::from(EXIT_UNFINISHED));
-        });
+pub struct Deadline(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Deadline {
+    pub fn selection_saved(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn deadline_text(saved: bool, text: &str) -> &str {
+    if saved {
+        "bingsu: your choice was saved; applying it did not finish before the deadline\n"
+    } else {
+        text
+    }
+}
+
+fn require_watchdog<T>(result: std::io::Result<T>) -> Result<T, u8> {
+    result.map_err(|_| {
+        sys::write_deadline_notice(
+            b"bingsu: cannot start the deadline watchdog; nothing was changed\n",
+        );
+        EXIT_UNFINISHED
+    })
+}
+
+pub fn arm_deadline(limit: Duration, text: String) -> Result<Deadline, u8> {
+    let saved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stage = saved.clone();
+    let end = std::time::Instant::now() + limit;
+    require_watchdog(
+        std::thread::Builder::new()
+            .name("deadline".into())
+            .spawn(move || {
+                std::thread::sleep(end.saturating_duration_since(std::time::Instant::now()));
+                let text = deadline_text(stage.load(std::sync::atomic::Ordering::Acquire), &text);
+                sys::write_deadline_notice(text.as_bytes());
+                sys::exit_now(i32::from(EXIT_UNFINISHED));
+            }),
+    )?;
+    Ok(Deadline(saved))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn watchdog_creation_failure_stops_the_command() {
+        assert_eq!(
+            require_watchdog::<()>(Err(std::io::Error::from_raw_os_error(libc::EAGAIN))),
+            Err(3)
+        );
+    }
+
+    #[test]
+    fn selection_saved_stage_changes_deadline_message() {
+        let d = Deadline(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        assert_eq!(
+            deadline_text(d.0.load(std::sync::atomic::Ordering::Acquire), "generic"),
+            "generic"
+        );
+        d.selection_saved();
+        let text = deadline_text(d.0.load(std::sync::atomic::Ordering::Acquire), "generic");
+        assert!(text.contains("choice was saved"));
+        assert!(text.contains("applying it did not finish"));
+    }
+
+    #[test]
+    fn io_failures_are_not_configuration_failures() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EIO,
+            libc::ENOMEM,
+            libc::ENOSPC,
+        ] {
+            assert_eq!(io_exit(&std::io::Error::from_raw_os_error(errno)), 3);
+        }
+        for errno in [libc::ENOENT, libc::ENOTDIR, libc::ELOOP, libc::EACCES] {
+            assert_eq!(io_exit(&std::io::Error::from_raw_os_error(errno)), 1);
+        }
+    }
+
+    #[test]
+    fn deadline_exits_even_when_stderr_is_full() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        let (_reader, mut writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        while writer.write(&[b'x'; 4096]).is_ok() {}
+        writer.set_nonblocking(false).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::ctx::tests::deadline_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(OwnedFd::from(writer)))
+            .spawn()
+            .unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(3));
+                break;
+            }
+            if std::time::Instant::now() >= end {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("deadline blocked on full stderr");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     // The child half of `deadline_ends_the_process_with_3`: it arms a short deadline and then stays busy.
     #[test]
     #[ignore = "runs inside the child process of deadline_ends_the_process_with_3"]
     fn deadline_child() {
-        arm_deadline(Duration::from_millis(50), "bingsu: test deadline\n".into());
+        arm_deadline(Duration::from_millis(50), "bingsu: test deadline\n".into()).unwrap();
         std::thread::sleep(Duration::from_secs(20));
     }
 

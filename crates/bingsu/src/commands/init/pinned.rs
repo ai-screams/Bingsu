@@ -46,6 +46,9 @@ fn unframe(mut v: &[u8]) -> Option<Vec<&[u8]>> {
 
 /// The pinned roots, re-checked now; `None` for a missing, garbled, forged
 /// or no longer matching value.
+/// `Roots.log` and `RuntimeRootPin.group_ok` are copied from the environment,
+/// not verified evidence. Any later consumer must re-check the log root and
+/// group policy before using them (including before writing logs).
 pub fn decode(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<Roots> {
     let raw = unframe(var)?;
     let words = bingsu_core::helper::words(&raw).ok()?;

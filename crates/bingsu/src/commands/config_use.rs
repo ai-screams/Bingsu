@@ -46,7 +46,7 @@ fn vet(path: &Path, user: &User, shape_only_root: Option<&Path>) -> Result<Recor
             Some(n) => format!("it cannot be opened (errno {n})"),
             None => format!("it is not a plain file you can read ({e})"),
         };
-        refused(&why, path)
+        (refused(&why, path).0, ctx::io_exit(&e))
     })?;
     if let Some(r) = evidence.refusal {
         return Err(refused(
@@ -54,9 +54,12 @@ fn vet(path: &Path, user: &User, shape_only_root: Option<&Path>) -> Result<Recor
             path,
         ));
     }
-    evidence
-        .revalidate(user.me, &mut groups)
-        .map_err(|_| refused("it changed while it was checked", path))?;
+    evidence.revalidate(user.me, &mut groups).map_err(|e| {
+        (
+            refused("it changed while it was checked", path).0,
+            ctx::io_exit(&e),
+        )
+    })?;
     // Nothing under a settings folder that could not be confirmed safe may
     // run, so choosing a file there would save a choice that cannot work.
     if let Some(root) = shape_only_root
@@ -76,7 +79,12 @@ fn vet(path: &Path, user: &User, shape_only_root: Option<&Path>) -> Result<Recor
 
 /// Saves the record; the state folder is made first when it is missing, by
 /// the same rule as the helper's.
-fn save(state: &Path, user: &User, record: &Record) -> Result<(), String> {
+fn save(
+    state: &Path,
+    user: &User,
+    record: &Record,
+    deadline: &ctx::Deadline,
+) -> Result<(), String> {
     let mut groups = SystemGroups::new(&user.pw.name);
     runtime_root::ensure_root(state, user.me, &mut groups, Last::Mine)
         .map_err(|_| "the state folder cannot be used".to_owned())?;
@@ -84,7 +92,10 @@ fn save(state: &Path, user: &User, record: &Record) -> Result<(), String> {
     loop {
         let mut groups = SystemGroups::new(&user.pw.name);
         match trust_record::write(state, user.me, &mut groups, record) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                deadline.selection_saved();
+                return Ok(());
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < end => {
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -105,20 +116,29 @@ pub fn run(args: &[OsString]) -> ExitCode {
         eprintln!("{}", en(MsgId::ReloadIncomplete));
         return ctx::code(EXIT_UNFINISHED);
     };
-    ctx::arm_deadline(
+    let deadline = match ctx::arm_deadline(
         ctx::COMMAND_LIMIT,
         format!("{}\n", en(MsgId::DeadlineReached)),
-    );
+    ) {
+        Ok(d) => d,
+        Err(code) => return ctx::code(code),
+    };
     let Some(user) = User::current() else {
         eprintln!("{}", en(MsgId::NoHome));
         return ctx::code(EXIT_FAILED);
     };
     let Ok(cwd) = std::env::current_dir() else {
         eprintln!("bingsu: cannot read the current folder");
-        return ctx::code(EXIT_FAILED);
+        return ctx::code(EXIT_UNFINISHED);
     };
     let path: PathBuf = cwd.join(arg);
-    let roots = ctx::roots_for_publishing(&user);
+    let roots = match ctx::roots_for_publishing(&user) {
+        Ok(r) => r,
+        Err((text, code)) => {
+            eprintln!("{text}");
+            return ctx::code(code);
+        }
+    };
     let Some(state) = roots.state.clone() else {
         eprintln!("{}", en(MsgId::UnconfirmedRoot));
         return ctx::code(EXIT_FAILED);
@@ -135,7 +155,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
             return ctx::code(code);
         }
     };
-    if let Err(why) = save(&state, &user, &record) {
+    if let Err(why) = save(&state, &user, &record, &deadline) {
         eprintln!("bingsu: nothing was saved: {why}");
         return ctx::code(EXIT_UNFINISHED);
     }
@@ -160,5 +180,92 @@ pub fn run(args: &[OsString]) -> ExitCode {
             eprintln!("{}", en(MsgId::UseSavedUnfinished));
             ctx::code(EXIT_UNFINISHED)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "child of choice_vetting_preserves_emfile"]
+    fn choice_vetting_emfile_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("bingsu-n5-vet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let deep = base.join(vec!["deep"; 32].join("/"));
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let chosen = deep.join("chosen.toml");
+        std::fs::write(&chosen, "icons = \"ascii\"\n").unwrap();
+        let user = User::current().unwrap();
+        super::super::sys::test_limit_fds(24);
+        let (text, code) = vet(&chosen, &user, None).err().unwrap();
+        super::super::sys::test_limit_fds(256);
+        std::fs::remove_dir_all(base).unwrap();
+        assert_eq!(code, 3, "{text}");
+    }
+
+    #[test]
+    fn choice_vetting_preserves_emfile() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::config_use::tests::choice_vetting_emfile_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "child of saved_selection_is_reported_at_the_hard_deadline"]
+    fn saved_selection_deadline_child() {
+        let state = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("bingsu-n5-saved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let user = User::current().unwrap();
+        let deadline =
+            ctx::arm_deadline(Duration::from_secs(1), "generic timeout\n".into()).unwrap();
+        let record = Record {
+            dev: 1,
+            ino: 2,
+            path: "/chosen.toml".into(),
+        };
+        save(&state, &user, &record, &deadline).unwrap();
+        std::fs::remove_dir_all(state).unwrap();
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn saved_selection_is_reported_at_the_hard_deadline() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::config_use::tests::saved_selection_deadline_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.contains("choice was saved"), "{text}");
+        assert!(text.contains("applying it did not finish"), "{text}");
     }
 }

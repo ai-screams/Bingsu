@@ -22,6 +22,8 @@ pub struct RuntimeRootPin {
 
 /// `None`: the path could not be confirmed; config also requires the
 /// written path's trust evidence. Init omits that root word and warns.
+/// After environment decoding, `log` and `runtime.group_ok` are untrusted
+/// environment claims: re-check the log path and group policy before any use.
 pub struct Roots {
     pub runtime: Option<RuntimeRootPin>,
     pub config: Option<ConfigRootPin>,

@@ -1,6 +1,6 @@
 //! The user's commands act on the roots init pinned (`BINGSU_ROOTS`, the
-//! hook's own root words), not on `XDG_*` at run time; without a valid
-//! value they say so once and resolve from the environment.
+//! hook's own root words). Only an absent variable permits XDG fallback;
+//! an unusable pin stops the command.
 #![cfg(unix)]
 
 #[path = "support/user_env.rs"]
@@ -66,8 +66,7 @@ fn without_the_variable_one_notice_and_the_environment() {
     assert!(e.context_dir().join("snapshot").exists());
 }
 
-// Garbled, forged or stale values are refused as a whole, with the notice, and the environment is used: the
-// folders a forged value names are never touched.
+// Garbled, forged or stale values stop the command without XDG fallback or writes.
 // 이것을 실패시키는 것: 런타임 뿌리의 dev/ino 재확인을 빼는 것, 모르는 낱말·중복 낱말·상대 경로·남는 바이트를 받는 것,
 // home이 계정과 다른 값을 받는 것, 설정 뿌리를 다시 검사하지 않는 것.
 #[test]
@@ -122,9 +121,42 @@ fn forged_or_garbled_values_are_rejected() {
         })),
     ));
     for (name, var) in cases {
-        let o = e.cmd_pinned(&["reload"], &var).output().unwrap();
-        assert_eq!(text(&o.stderr), notice_line(), "{name}");
-        assert_eq!(o.status.code(), Some(0), "{name}");
+        let o = e.cmd_pinned(&["config", "path"], &var).output().unwrap();
+        assert!(
+            text(&o.stderr).contains("run bingsu init <shell> again"),
+            "{name}: {}",
+            text(&o.stderr)
+        );
+        assert_eq!(o.status.code(), Some(3), "{name}");
         assert!(!evil.exists(), "{name}");
+    }
+}
+
+#[test]
+fn replaced_runtime_and_config_pins_stop_read_commands_without_writes() {
+    for replacement in ["runtime", "config"] {
+        let e = env_with_config(&format!("replaced-{replacement}"));
+        let var = frame(&e.pinned_words());
+        if replacement == "runtime" {
+            std::fs::rename(e.base.join("run"), e.base.join("old-run")).unwrap();
+            std::fs::create_dir(e.base.join("run")).unwrap();
+            user_env::chmod(&e.base.join("run"), 0o700);
+        } else {
+            std::fs::rename(e.config_dir(), e.base.join("old-config")).unwrap();
+            std::os::unix::fs::symlink(e.base.join("old-config"), e.config_dir()).unwrap();
+        }
+        let before = e.tree();
+        for args in [vec!["config", "check"], vec!["config", "path"]] {
+            let o = e.cmd_pinned(&args, &var).output().unwrap();
+            assert_eq!(
+                o.status.code(),
+                Some(3),
+                "{replacement} {args:?}: {}",
+                text(&o.stderr)
+            );
+            assert!(text(&o.stderr).contains("run bingsu init <shell> again"));
+            assert_eq!(e.tree(), before, "{replacement} {args:?}");
+            assert!(!e.base.join("elsewhere").exists());
+        }
     }
 }

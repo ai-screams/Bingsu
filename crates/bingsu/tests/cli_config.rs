@@ -388,3 +388,66 @@ fn use_waits_out_a_short_selection_lock_and_gives_up_on_a_long_one() {
         record
     );
 }
+
+fn set_fd_limit(limit: libc::rlim_t) -> std::io::Result<()> {
+    let limits = libc::rlimit {
+        rlim_cur: limit,
+        rlim_max: limit,
+    };
+    // SAFETY: setrlimit reads a valid rlimit pointer for the calling child.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn limited(mut cmd: Command, limit: libc::rlim_t) -> std::process::Output {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure only calls setrlimit, with no allocation or locks.
+    unsafe {
+        cmd.pre_exec(move || set_fd_limit(limit));
+    }
+    cmd.output().unwrap()
+}
+
+#[test]
+fn fd_exhaustion_during_inspection_is_incomplete_and_read_only() {
+    let e = Env::new("cli_config", "fd-inspect");
+    e.put_config("config.toml", VALID);
+    let chosen = e.put("chosen.toml", VALID);
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(&chosen).unwrap();
+    e.put(
+        "state/bingsu/config-use",
+        &format!(
+            "bingsu-config-use 1\n{} {}\n{}",
+            md.dev(),
+            md.ino(),
+            chosen.display()
+        ),
+    );
+    for n in 0..16 {
+        e.put_config(&format!("conf.d/{n:02}.toml"), VALID);
+    }
+    let before = e.tree();
+    let mut incomplete = 0;
+    for limit in [32, 48, 64, 80, 96] {
+        for verb in ["check", "path"] {
+            let o = limited(e.cmd(&["config", verb]), limit);
+            assert!(
+                matches!(o.status.code(), Some(0 | 3)),
+                "{limit} {verb}: {:?} {} {}",
+                o.status.code(),
+                text(&o.stdout),
+                text(&o.stderr)
+            );
+            if o.status.code() == Some(3) {
+                incomplete += 1;
+                assert!(text(&o.stdout).contains("could not read") || !o.stderr.is_empty());
+                assert!(!text(&o.stdout).contains("choose the file again"));
+            }
+            assert_eq!(e.tree(), before);
+        }
+    }
+    assert!(incomplete > 0);
+}

@@ -54,15 +54,24 @@ pub fn run(args: &[OsString]) -> ExitCode {
         eprintln!("{}", en(MsgId::ReloadIncomplete));
         return ctx::code(EXIT_UNFINISHED);
     };
-    ctx::arm_deadline(
+    let _deadline = match ctx::arm_deadline(
         ctx::COMMAND_LIMIT,
         format!("{}\n", en(MsgId::DeadlineReached)),
-    );
+    ) {
+        Ok(d) => d,
+        Err(code) => return ctx::code(code),
+    };
     let Some(user) = User::current() else {
         eprintln!("{}", en(MsgId::NoHome));
         return ctx::code(EXIT_FAILED);
     };
-    let roots = ctx::roots_for_publishing(&user);
+    let roots = match ctx::roots_for_publishing(&user) {
+        Ok(r) => r,
+        Err((text, code)) => {
+            eprintln!("{text}");
+            return ctx::code(code);
+        }
+    };
     let applied = ctx::apply(&roots, &user, started, &mut SystemClock);
     match report(&applied, "reloaded") {
         Ok(text) => {

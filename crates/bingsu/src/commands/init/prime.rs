@@ -44,66 +44,151 @@ pub struct State {
     pub marker: Option<Vec<u8>>,
 }
 
-/// Read-only: no folder is created, no lock is taken.
-pub fn state_of(req: &RefreshRequest, boot: [u8; 16]) -> State {
-    let none = State {
-        snapshot_ready: false,
-        marker: None,
+/// Read-only store view. A healthy marker may have arrived just after the
+/// first snapshot read; retry the snapshot rather than calling it invalid.
+fn read_state(
+    boot: [u8; 16],
+    context: [u8; 4],
+    read: &mut dyn FnMut(DataFile) -> Option<Vec<u8>>,
+) -> State {
+    let ready = |bytes: Option<Vec<u8>>| {
+        bytes
+            .and_then(|b| Snapshot::decode(&b).ok())
+            .is_some_and(|s| snapshot::same_boot(s.id, Some(boot), context))
     };
-    let (config, state) = (
-        req.config_canonical.as_os_str().as_bytes(),
-        req.state_root.as_os_str().as_bytes(),
-    );
-    let Ok(context) = snapshot::context_crc(config, state) else {
-        return none;
-    };
-    let Ok(dir) = CheckedContextFd::open(
-        &req.runtime,
-        config,
-        state,
-        req.me,
-        &mut SystemGroups::new(&req.user),
-        false,
-    ) else {
-        return none;
-    };
-    let snapshot_ready = dir
-        .read(DataFile::Snapshot)
-        .ok()
-        .and_then(|b| Snapshot::decode(&b).ok())
-        .is_some_and(|s| snapshot::same_boot(s.id, Some(boot), context));
+    let mut snapshot_ready = ready(read(DataFile::Snapshot));
+    let marker = read(DataFile::Marker);
+    if !snapshot_ready
+        && marker
+            .as_deref()
+            .and_then(|b| snapshot::Marker::decode(b).ok())
+            .is_some_and(|m| snapshot::same_boot(m.id, Some(boot), context) && !m.invalid)
+    {
+        snapshot_ready = ready(read(DataFile::Snapshot));
+    }
     State {
         snapshot_ready,
-        marker: dir.read(DataFile::Marker).ok(),
+        marker,
     }
 }
 
-/// `spawn` starts the independent helper (once, and only when needed).
+#[cfg(test)]
+fn state_of(req: &RefreshRequest, boot: [u8; 16]) -> State {
+    store_reader(req.clone(), boot)()
+}
+
+/// Initialization and every read happen inside the worker. Keep the checked
+/// runtime descriptor and SystemGroups once, even before context folders exist.
+fn store_reader(req: RefreshRequest, boot: [u8; 16]) -> impl FnMut() -> State + Send {
+    let mut initialized = false;
+    let mut runtime = None;
+    let mut dir = None;
+    move || {
+        let config = req.config_canonical.as_os_str().as_bytes();
+        let state = req.state_root.as_os_str().as_bytes();
+        if !initialized {
+            initialized = true;
+            runtime = crate::commands::runtime_root::open_runtime_root(
+                &req.runtime,
+                req.me,
+                &mut SystemGroups::new(&req.user),
+            )
+            .ok();
+        }
+        if dir.is_none()
+            && let Some(runtime) = &runtime
+        {
+            dir = CheckedContextFd::under_runtime(runtime, config, state, req.me, false).ok();
+        }
+        read_state(
+            boot,
+            snapshot::context_crc(config, state).unwrap_or([0; 4]),
+            &mut |name| dir.as_ref()?.read(name).ok(),
+        )
+    }
+}
+
+enum Event {
+    Spawn,
+    Done(PrimeResult),
+}
+
+/// A detached worker may remain blocked in NSS or filesystem I/O. The parent
+/// only receives with the absolute deadline and never joins that worker.
+fn prime_reader_with_deadline(
+    boot: [u8; 16],
+    context: [u8; 4],
+    end: Instant,
+    spawn: &mut dyn FnMut(),
+    mut read: impl FnMut() -> State + Send + 'static,
+) -> PrimeResult {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (ack, proceed) = std::sync::mpsc::channel();
+    if std::thread::Builder::new()
+        .name("init-poll".into())
+        .spawn(move || {
+            let before = read();
+            if before.snapshot_ready {
+                let _ = tx.send(Event::Done(PrimeResult::AlreadyReady));
+                return;
+            }
+            if tx.send(Event::Spawn).is_err() || proceed.recv().is_err() {
+                return;
+            }
+            while Instant::now() < end {
+                let now = read();
+                let result = if now.snapshot_ready {
+                    Some(PrimeResult::Published)
+                } else if now.marker != before.marker
+                    && now
+                        .marker
+                        .as_deref()
+                        .and_then(|b| snapshot::Marker::decode(b).ok())
+                        .is_some_and(|m| {
+                            snapshot::same_boot(m.id, Some(boot), context) && m.invalid
+                        })
+                {
+                    Some(PrimeResult::Invalid)
+                } else {
+                    None
+                };
+                if let Some(result) = result {
+                    let _ = tx.send(Event::Done(result));
+                    return;
+                }
+                std::thread::sleep(POLL.min(end.saturating_duration_since(Instant::now())));
+            }
+        })
+        .is_err()
+    {
+        return PrimeResult::TimedOut;
+    }
+    loop {
+        match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(Event::Spawn) => {
+                spawn();
+                let _ = ack.send(());
+            }
+            Ok(Event::Done(result)) => return result,
+            Err(_) => return PrimeResult::TimedOut,
+        }
+    }
+}
+
+/// `spawn` starts the independent helper once; store reads cannot hold the
+/// caller past `end`, including the initial warm check.
 pub fn prime_with_deadline(
     req: &RefreshRequest,
     boot: [u8; 16],
     end: Instant,
     spawn: &mut dyn FnMut(),
 ) -> PrimeResult {
-    let before = state_of(req, boot);
-    if before.snapshot_ready {
-        return PrimeResult::AlreadyReady;
-    }
-    spawn();
-    loop {
-        let left = end.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return PrimeResult::TimedOut;
-        }
-        std::thread::sleep(POLL.min(left));
-        let now = state_of(req, boot);
-        if now.snapshot_ready {
-            return PrimeResult::Published;
-        }
-        if now.marker.is_some() && now.marker != before.marker {
-            return PrimeResult::Invalid;
-        }
-    }
+    let context = snapshot::context_crc(
+        req.config_canonical.as_os_str().as_bytes(),
+        req.state_root.as_os_str().as_bytes(),
+    )
+    .unwrap_or([0; 4]);
+    prime_reader_with_deadline(boot, context, end, spawn, store_reader(req.clone(), boot))
 }
 
 /// The words the shell hook hands the helper, as raw arguments for
@@ -225,6 +310,109 @@ mod tests {
     impl Drop for Fx {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn blocked_initial_or_later_store_read_cannot_hold_parent() {
+        for blocked_at in [0, 1] {
+            let (release, gate) = std::sync::mpsc::channel();
+            let mut calls = 0;
+            let t = Instant::now();
+            let mut spawned = 0;
+            let result = prime_reader_with_deadline(
+                BOOT,
+                [0; 4],
+                t + Duration::from_millis(80),
+                &mut || spawned += 1,
+                move || {
+                    if calls == blocked_at {
+                        let _ = gate.recv_timeout(Duration::from_secs(5));
+                    }
+                    calls += 1;
+                    State {
+                        snapshot_ready: false,
+                        marker: None,
+                    }
+                },
+            );
+            let elapsed = t.elapsed();
+            let _ = release.send(());
+            assert_eq!(result, PrimeResult::TimedOut);
+            assert_eq!(spawned, blocked_at);
+            assert!(elapsed >= Duration::from_millis(70));
+            assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        }
+    }
+
+    #[test]
+    fn store_reader_keeps_the_checked_runtime_instead_of_walking_again() {
+        let f = Fx::new("retained-runtime", "icons = \"ascii\"\n");
+        let mut read = store_reader(f.request.clone(), BOOT);
+        assert!(!read().snapshot_ready);
+        assert!(matches!(f.helper(), RefreshResult::Published { .. }));
+        std::fs::rename(f.base.join("runtime"), f.base.join("old-runtime")).unwrap();
+        assert!(read().snapshot_ready);
+    }
+
+    #[test]
+    fn healthy_marker_race_rechecks_snapshot() {
+        let f = Fx::new("marker-race", "icons = \"ascii\"\n");
+        assert!(matches!(f.helper(), RefreshResult::Published { .. }));
+        let context = snapshot::context_crc(
+            f.request.config_canonical.as_os_str().as_bytes(),
+            f.request.state_root.as_os_str().as_bytes(),
+        )
+        .unwrap();
+        let dir = CheckedContextFd::open(
+            &f.request.runtime,
+            f.request.config_canonical.as_os_str().as_bytes(),
+            f.request.state_root.as_os_str().as_bytes(),
+            f.request.me,
+            &mut SystemGroups::new(&f.request.user),
+            false,
+        )
+        .unwrap();
+        let mut first = true;
+        let state = read_state(BOOT, context, &mut |name| {
+            if matches!(name, DataFile::Snapshot) && first {
+                first = false;
+                None
+            } else {
+                dir.read(name).ok()
+            }
+        });
+        assert!(state.snapshot_ready);
+        // A marker for a different boot/context must never finish an invalid read.
+        let mut marker = snapshot::Marker::decode(state.marker.as_ref().unwrap()).unwrap();
+        marker.invalid = true;
+        for variant in 0..3 {
+            let mut m = marker;
+            match variant {
+                0 => m.invalid = false,
+                1 => m.id.boot = [9; 16],
+                _ => m.id.context = [9; 4],
+            }
+            let mut first = true;
+            let r = prime_reader_with_deadline(
+                BOOT,
+                context,
+                Instant::now() + Duration::from_millis(40),
+                &mut || {},
+                move || {
+                    let bytes = if first {
+                        None
+                    } else {
+                        Some(m.encode().to_vec())
+                    };
+                    first = false;
+                    State {
+                        snapshot_ready: false,
+                        marker: bytes,
+                    }
+                },
+            );
+            assert_eq!(r, PrimeResult::TimedOut);
         }
     }
 
