@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -333,6 +333,91 @@ mod tests {
             b"exact"
         );
     }
+    fn refuse_same_inode_rewrite(slot: Slot, original: &[u8], changed: &[u8]) {
+        let (base, pin) = fixture(slot.name());
+        let c = CheckedContextFd::open(
+            &pin,
+            b"/cfg",
+            b"/state",
+            sys::current_uid(),
+            &mut RefuseGroupWrite,
+            true,
+        )
+        .unwrap();
+        let store = c.try_lock().unwrap();
+        let staged_path = path(&base, b"/cfg", b"/state").join(slot.name());
+        let target = path(&base, b"/cfg", b"/state").join(slot.target().name());
+        // A matching small slot must install even though stage() left its fd at EOF.
+        store.stage(slot, original).unwrap();
+        store.install(slot).unwrap();
+        store.stage(slot, original).unwrap();
+        let before = std::fs::metadata(&staged_path).unwrap();
+        assert_ne!(original, changed);
+        assert_eq!(original.len(), changed.len());
+        validate_bytes(slot, changed).unwrap();
+        std::fs::write(&staged_path, changed).unwrap();
+        let after = std::fs::metadata(&staged_path).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(before.len(), after.len());
+        // Emulate a coarse mtime/ctime tick deterministically on every filesystem:
+        // make the saved stamp equal the current one, without changing saved bytes.
+        {
+            let mut stages = store.stages.borrow_mut();
+            let staged = stages[slot as usize].as_mut().unwrap();
+            staged.stamp = sys::file_stamp(&staged.file).unwrap();
+            assert_eq!(
+                staged.stamp,
+                sys::at_stamp(c.dir.as_fd(), OsStr::new(slot.name())).unwrap()
+            );
+        }
+        assert!(matches!(store.install(slot), Err(StoreError::Unsafe)));
+        assert_eq!(std::fs::read(target).unwrap(), original);
+        drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    // 이것을 실패시키는 것: stamp가 같은 Sequence의 보유 fd 바이트 대조를 빼는 것.
+    #[test]
+    fn sequence_same_inode_same_length_rewrite_refuses_even_with_matching_stamp() {
+        let seq = snapshot::Sequence {
+            boot: [1; 16],
+            epoch: [2; 16],
+            generation: 1,
+            verified: 1,
+        };
+        refuse_same_inode_rewrite(
+            Slot::Sequence,
+            &seq.encode(),
+            &snapshot::Sequence {
+                generation: 2,
+                ..seq
+            }
+            .encode(),
+        );
+    }
+    // 이것을 실패시키는 것: stamp가 같은 Marker의 보유 fd 바이트 대조를 빼는 것.
+    #[test]
+    fn marker_same_inode_same_length_rewrite_refuses_even_with_matching_stamp() {
+        let marker = snapshot::Marker {
+            id: snapshot::Identity {
+                boot: [1; 16],
+                epoch: [2; 16],
+                context: [3; 4],
+                generation: 1,
+                source: [4; 4],
+            },
+            seq: 1,
+            verified_at: 10,
+            kind: 1,
+            domain: [5; 16],
+            resume: 0,
+            invalid: false,
+        };
+        refuse_same_inode_rewrite(
+            Slot::Marker,
+            &marker.encode(),
+            &snapshot::Marker { seq: 2, ..marker }.encode(),
+        );
+    }
     // 이것을 실패시키는 것: FIFO를 blocking으로 열거나 일반 파일 검사 전에 읽는 것.
     #[test]
     fn fifo_open_is_nonblocking() {
@@ -412,8 +497,14 @@ impl Slot {
 pub struct LockedStore<'a> {
     root: &'a CheckedContextFd,
     lock: File,
-    stages: std::cell::RefCell<[Option<(File, sys::Stamp)>; 4]>,
+    stages: std::cell::RefCell<[Option<Staged>; 4]>,
     snapshot_before: std::cell::RefCell<Option<Option<sys::Stamp>>>,
+}
+struct Staged {
+    file: File,
+    stamp: sys::Stamp,
+    // Only Sequence (96 B) and Marker (208 B) are retained for the final pread.
+    small_bytes: Option<Vec<u8>>,
 }
 impl CheckedContextFd {
     pub fn try_lock(&self) -> Result<LockedStore<'_>, StoreError> {
@@ -524,20 +615,34 @@ impl LockedStore<'_> {
         validate_bytes(slot, &actual)?;
         same_name(&f, self.root.dir.as_fd(), slot.name())?;
         let stamp = sys::file_stamp(&f)?;
-        self.stages.borrow_mut()[slot as usize] = Some((f, stamp));
+        self.stages.borrow_mut()[slot as usize] = Some(Staged {
+            file: f,
+            stamp,
+            small_bytes: matches!(slot, Slot::Sequence | Slot::Marker).then(|| bytes.to_vec()),
+        });
         Ok(())
     }
-    /// All expensive copies and codec checks completed in stage(). Check only
-    /// the descriptor/name safety here, after Loader's final revalidation.
+    /// After Loader's final revalidation, check descriptor/name safety and
+    /// compare the small slots through the held fd. Large slots use stamps only;
+    /// their expensive copies and codec checks completed in stage().
     pub fn install(&self, slot: Slot) -> Result<(), StoreError> {
         self.verify_lock()?;
         let stages = self.stages.borrow();
-        let (f, stamp) = stages[slot as usize].as_ref().ok_or(StoreError::Unsafe)?;
+        let staged = stages[slot as usize].as_ref().ok_or(StoreError::Unsafe)?;
+        let f = &staged.file;
         self.root.check_file(f, slot.target().cap())?;
-        if sys::file_stamp(f)? != *stamp {
+        if sys::file_stamp(f)? != staged.stamp {
             return Err(StoreError::Unsafe);
         }
         same_name(f, self.root.dir.as_fd(), slot.name())?;
+        if let Some(expected) = &staged.small_bytes {
+            let mut actual = [0; snapshot::MARKER];
+            let actual = &mut actual[..expected.len()];
+            f.read_exact_at(actual, 0)?;
+            if actual != expected.as_slice() {
+                return Err(StoreError::Unsafe);
+            }
+        }
         sys::rename_at(
             self.root.dir.as_fd(),
             OsStr::new(slot.name()),

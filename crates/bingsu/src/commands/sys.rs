@@ -690,7 +690,8 @@ pub fn open_file_at_nofollow(
 }
 
 /// Creates `name` inside `dir` (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode
-/// `mode`) for writing.
+/// `mode`) for writing. Applies the exact mode through the new fd, regardless
+/// of umask; an existing entry is never changed.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
@@ -702,6 +703,7 @@ pub fn create_file_at(
 ) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
     let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: `dir` is open and `c` is NUL-terminated; the mode is passed
@@ -711,7 +713,9 @@ pub fn create_file_at(
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: openat returned a fresh descriptor that nothing else owns.
-    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    Ok(file)
 }
 
 /// `renameat(dir, from, dir, to)`: replaces `to` atomically.
@@ -1031,23 +1035,19 @@ pub fn directory_names(dir: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Vec<
     result
 }
 
-/// Opens a persistent lock with a new open-file description. Never truncates.
+/// Opens a persistent lock with a new open-file description. Never truncates
+/// or changes an existing entry's permissions.
 pub fn open_lock_at(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
 ) -> std::io::Result<std::fs::File> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::ffi::OsStrExt;
-    let name = std::ffi::CString::new(name.as_bytes())?;
-    let flags =
-        libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
-    // SAFETY: dir is live, name terminated, and the creation mode is supplied.
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, 0o600 as libc::c_uint) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    match create_file_at(dir, name, 0o600) {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            open_at(Some(dir), name, libc::O_RDWR | libc::O_NONBLOCK)
+        }
+        Err(e) => Err(e),
     }
-    // SAFETY: openat returned a new owned descriptor.
-    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
 pub fn try_lock(file: &std::fs::File) -> std::io::Result<()> {

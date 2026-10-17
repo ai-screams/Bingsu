@@ -702,7 +702,17 @@ fn child_request(base: PathBuf) -> RefreshRequest {
     }
 }
 fn spawn_child(f: &Fx, point: &str) -> std::process::Child {
-    std::process::Command::new(std::env::current_exe().unwrap())
+    let exe = std::env::current_exe().unwrap();
+    let mut command = if point == "umask" {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "umask 0277; exec \"$@\"", "bingsu-umask-test"])
+            .arg(exe);
+        command
+    } else {
+        std::process::Command::new(exe)
+    };
+    command
         .args([
             "--exact",
             "commands::refresh::tests::process_child",
@@ -816,6 +826,15 @@ fn process_child() {
     let base = PathBuf::from(std::env::var_os("BINGSU_N2_TEST_BASE").unwrap());
     let point = std::env::var("BINGSU_N2_TEST_POINT").unwrap();
     let r = child_request(base.clone());
+    if point == "umask" {
+        assert_eq!(published(refresh(r.clone(), &mut Fixed(clock()))), 1);
+        assert_eq!(
+            refresh(r, &mut Fixed(clock())),
+            RefreshResult::Revalidated { generation: 1 }
+        );
+        put(&base.join("ready"), b"Published and revalidated");
+        return;
+    }
     if point == "contend" {
         let got = refresh(r, &mut Fixed(clock()));
         assert_eq!(got, RefreshResult::Busy);
@@ -977,7 +996,7 @@ fn renewal_failure_keeps_published_result_and_new_selection() {
     );
     assert!(snapshot::eligible(f.snap().id, Some(f.marker()), clock()).is_ok());
 }
-// 이것을 실패시키는 것: staging의 형식·크기·동일 fd 검사 없이 잘못된 bytes를 rename하는 것.
+// 이것을 실패시키는 것: staging의 형식·크기 검사를 빼거나 staging 이름의 새 inode 교체를 허용하는 것.
 #[test]
 fn store_refuses_invalid_staged_wire_and_changed_fds() {
     let f = Fx::new("bad-stage");
@@ -999,14 +1018,58 @@ fn store_refuses_invalid_staged_wire_and_changed_fds() {
     };
     store.stage(Slot::Sequence, &seq.encode()).unwrap();
     put(
-        &f.dir().join(".sequence.stage"),
+        &f.dir().join("replacement"),
         &Sequence {
             generation: 2,
             ..seq
         }
         .encode(),
     );
+    fs::rename(f.dir().join("replacement"), f.dir().join(".sequence.stage")).unwrap();
     assert!(store.install(Slot::Sequence).is_err());
+}
+// 이것을 실패시키는 것: 새 stage/lock fd의 fchmod를 빼서 umask가 0600에서 소유자 쓰기 비트를 지우게 하는 것.
+#[test]
+fn restrictive_umask_still_publishes_private_files() {
+    let f = Fx::new("umask");
+    f.put(COMMAND);
+    // Provision the private directory walk before changing the child's umask;
+    // this regression concerns file creation, not mkdir's separate mode policy.
+    drop(f.open());
+    let mut child = spawn_child(&f, "umask");
+    await_ready(&f, &mut child);
+    assert!(child.wait().unwrap().success());
+    for name in [
+        "snapshot.lock",
+        "sequence",
+        "snapshot",
+        "last-good",
+        "marker",
+    ] {
+        assert_eq!(
+            fs::metadata(f.dir().join(name)).unwrap().mode() & 0o7777,
+            0o600,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        fs::metadata(f.request.state_root.join("selection.lock"))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o600
+    );
+}
+// 이것을 실패시키는 것: 기존 lock을 열 때도 0600으로 고쳐 안전하지 않은 mode를 숨기는 것.
+#[test]
+fn existing_lock_permissions_are_never_repaired() {
+    let f = Fx::new("existing-lock-mode");
+    f.put(COMMAND);
+    published(f.run());
+    let lock = f.dir().join("snapshot.lock");
+    mode(&lock, 0o640);
+    assert_eq!(f.run(), RefreshResult::Incomplete);
+    assert_eq!(fs::metadata(lock).unwrap().mode() & 0o7777, 0o640);
 }
 // 이것을 실패시키는 것: 매번 전체 컴파일하거나 증거 변경을 무시해 재검증 경로로 보내는 것.
 #[test]
