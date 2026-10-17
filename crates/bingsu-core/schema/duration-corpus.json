@@ -27,5 +27,12 @@
   ["s", false],
   ["ms", false],
   ["-1s", false],
-  ["10000000ms", false]
+  ["10000000ms", false],
+  ["2s\n", false],
+  ["2s\r", false],
+  ["2s\r\n", false],
+  ["\n2s", false],
+  ["2s ", false],
+  ["+1s", false],
+  ["١s", false]
 ]

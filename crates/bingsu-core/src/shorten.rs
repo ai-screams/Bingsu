@@ -400,6 +400,23 @@ pub fn shorten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: PathFacts 필드를 바꾸면서 config::schema::FACT_SCHEMA와 버전을 그대로 두는 것
+    // (구조 분해에 `..`가 없어 바꾸면 컴파일이 멈춘다).
+    #[test]
+    fn path_facts_fields_are_the_fact_schema() {
+        let p = PathFacts::new(Anchor::Root, &[], None, &[]);
+        let PathFacts {
+            anchor: _,
+            steps: _,
+            repo_root: _,
+            unique: _,
+        } = p;
+        assert!(
+            crate::config::schema::FACT_SCHEMA
+                .ends_with("PathFacts: anchor steps repo_root unique")
+        );
+    }
     use alloc::vec;
     const D: WidthProfile = WidthProfile::DEFAULT;
 

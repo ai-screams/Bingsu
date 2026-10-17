@@ -1,0 +1,701 @@
+[
+  {
+    "segment": {
+      "dir": {
+        "shorten": [
+          "repo"
+        ]
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "duration": {
+        "min": "2s"
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "dir": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "dir": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "dir": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "dir": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "dir": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "duration": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "duration": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "duration": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "duration": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "duration": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "git": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "git": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "git": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "git": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "git": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "char": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "char": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "char": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "char": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "char": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "host": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "host": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "host": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "host": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "host": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "jobs": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "jobs": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "jobs": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "jobs": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "jobs": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "status": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "status": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "status": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "status": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "status": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "time": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "time": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "time": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "time": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "time": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "venv": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "venv": {
+        "text": "x"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "venv": {
+        "enabled": false
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "venv": {
+        "kind": "text"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "venv": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "text",
+        "text": "prod"
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "text",
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "command",
+        "command": [
+          "ls"
+        ],
+        "cache": "2s"
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "env",
+        "var": "HOME"
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "language",
+        "cache": "2s"
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "language",
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "text": "inherited"
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "command": [
+          "ls"
+        ]
+      }
+    },
+    "ok": true,
+    "schemas": [
+      "config"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {}
+    },
+    "ok": true,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "unknown"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "shorten": [
+          "repo"
+        ]
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config",
+      "theme"
+    ]
+  }
+]
