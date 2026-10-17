@@ -107,6 +107,13 @@ fn schemas_follow_the_key_table() {
             assert_eq!(node["description"], k.en);
             assert_eq!(node["x-bingsu-description-ko"], k.ko);
             match k.ty {
+                Ty::Text => assert_eq!(node["x-bingsu-type"], "text"),
+                Ty::Color => assert_eq!(node["x-bingsu-type"], "color"),
+                Ty::Duration => assert_eq!(node["x-bingsu-type"], "duration"),
+                Ty::Segments => assert_eq!(node["items"]["x-bingsu-type"], "segment-id"),
+                _ => {}
+            }
+            match k.ty {
                 Ty::Table => {
                     assert_eq!(node["type"], "object");
                     assert!(
@@ -149,23 +156,236 @@ fn schemas_follow_the_key_table() {
     }
 }
 
-// 이것을 실패시키는 것: 고정 세그먼트 표에서 공통 키를 버려 유효한 설정을 편집기가 거부하는 것.
+// 이것을 실패시키는 것: 내장 표가 자체 키와 enabled 외의 공통 키를 받는 것.
 #[test]
-fn literal_tables_keep_shared_segment_keys() {
-    let root: serde_json::Value = serde_json::from_str(&schema(Which::Config)).unwrap();
-    let segments = &root["properties"]["segment"];
-    for name in ["dir", "duration"] {
-        let p = &segments["properties"][name]["properties"];
-        assert_eq!(
-            p["enabled"],
-            segments["additionalProperties"]["properties"]["enabled"]
-        );
-        assert_eq!(
-            p["command"],
-            segments["additionalProperties"]["properties"]["command"]
-        );
-        assert_eq!(segments["properties"][name]["additionalProperties"], false);
+fn builtin_tables_only_keep_own_keys_and_enabled() {
+    use bingsu_core::config::keys::{KEYS, lookup};
+    for which in [Which::Config, Which::Theme] {
+        let root: serde_json::Value = serde_json::from_str(&schema(which)).unwrap();
+        for decl in bingsu_core::field::BUILTIN {
+            let node = &root["properties"]["segment"]["properties"][decl.id];
+            assert_eq!(node["additionalProperties"], false);
+            for key in KEYS.iter().filter(|k| k.path.starts_with("segment.*.")) {
+                let name = key.path.rsplit('.').next().unwrap();
+                let def = lookup(&["segment", decl.id, name]).unwrap();
+                let allowed = (which == Which::Config || def.theme)
+                    && def.kinds.is_empty()
+                    && (!def.path.starts_with("segment.*.") || name == "enabled");
+                assert_eq!(
+                    node["properties"][name].is_object(),
+                    allowed,
+                    "{} {name}",
+                    decl.id
+                );
+            }
+        }
     }
-    assert!(segments["properties"]["dir"]["properties"]["shorten"].is_object());
-    assert!(segments["properties"]["duration"]["properties"]["min"].is_object());
+}
+
+fn merged_json(value: &serde_json::Value) -> bingsu_core::config::merge::Merged {
+    use bingsu_core::config::merge::{MEntry, MNode, MTable, MValue, Merged, Origin};
+    use bingsu_core::config::source::Trust;
+    use bingsu_core::config::tree::{Node, Span, Value};
+    use bingsu_core::diag::SourceId;
+    fn convert(v: &serde_json::Value) -> MValue {
+        match v {
+            serde_json::Value::Object(map) => MValue::Table(MTable {
+                entries: map
+                    .iter()
+                    .map(|(key, v)| MEntry {
+                        key: key.clone(),
+                        node: MNode {
+                            value: convert(v),
+                            origin: Origin {
+                                source: SourceId(1),
+                                key_span: Span::default(),
+                                span: Span::default(),
+                                trust: Trust::Executable,
+                            },
+                        },
+                    })
+                    .collect(),
+            }),
+            serde_json::Value::Array(a) => MValue::Array(
+                a.iter()
+                    .map(|v| {
+                        let MValue::Scalar(value) = convert(v) else {
+                            panic!("scalar corpus array")
+                        };
+                        Node {
+                            value,
+                            span: Span::default(),
+                        }
+                    })
+                    .collect(),
+            ),
+            serde_json::Value::String(s) => MValue::Scalar(Value::Str(s.clone())),
+            serde_json::Value::Bool(b) => MValue::Scalar(Value::Bool(*b)),
+            serde_json::Value::Number(n) => MValue::Scalar(if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else {
+                Value::Float(n.as_f64().unwrap())
+            }),
+            serde_json::Value::Null => panic!("no null in config corpus"),
+        }
+    }
+    let MValue::Table(root) = convert(value) else {
+        panic!("config object")
+    };
+    Merged {
+        root,
+        warnings: Vec::new(),
+    }
+}
+
+// 이것을 실패시키는 것: 엔진과 두 스키마 중 하나라도 같은 corpus를 다르게 판정하거나,
+// KEYS.kinds·BUILTIN·ID 문법·색 파서·정제 함수 변경을 스키마가 따라가지 못하는 것.
+#[test]
+fn schema_corpora_match_engine_and_both_schemas() {
+    use bingsu_core::config::check::check;
+    use bingsu_core::config::keys::{KEYS, KINDS, Ty};
+    use bingsu_core::diag_codes as codes;
+    use serde_json::{Value, json};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let rows = |text| serde_json::from_str::<Vec<(String, bool)>>(text).unwrap();
+    let ids = rows(include_str!(
+        "../../bingsu-core/schema/segment-id-corpus.json"
+    ));
+    for (id, ok) in ids {
+        let parsed = bingsu_core::ident::parse_segment_id(&id);
+        let known = parsed.is_ok_and(|s| match s.namespace() {
+            bingsu_core::ident::Namespace::Builtin => bingsu_core::field::segment(&id).is_some(),
+            bingsu_core::ident::Namespace::Custom => true,
+            bingsu_core::ident::Namespace::Plugin => false,
+        });
+        assert_eq!(known, ok, "segment-id {id:?}");
+        for config in [
+            json!({"layout":{"line1":{"left":[id]}}}),
+            json!({"segment":{&id:{"kind":"text"}}}),
+        ] {
+            let errors = check(&merged_json(&config));
+            let bad_id = errors
+                .iter()
+                .any(|d| d.code == codes::BAD_SEGMENT_ID || d.code == codes::UNKNOWN_SEGMENT);
+            assert_eq!(!bad_id, ok, "segment-id use {config}");
+        }
+    }
+    for (text, ok) in rows(include_str!("../../bingsu-core/schema/color-corpus.json")) {
+        assert_eq!(
+            bingsu_core::color::notation::parse_color(&text).is_ok(),
+            ok,
+            "color {text:?}"
+        );
+        let diagnostics = check(&merged_json(
+            &json!({"colors":{"override":{"git.dirty":text}}}),
+        ));
+        assert_eq!(
+            !diagnostics.iter().any(|d| d.code == codes::BAD_VALUE),
+            ok,
+            "color checker {text:?}"
+        );
+    }
+    for (text, ok) in rows(include_str!("../../bingsu-core/schema/text-corpus.json")) {
+        assert_eq!(
+            !text.chars().any(bingsu_core::sanitize::is_removed),
+            ok,
+            "text {text:?}"
+        );
+        let diagnostics = check(&merged_json(&json!({"style":{"template":text}})));
+        assert_eq!(
+            !diagnostics.iter().any(|d| d.code == codes::CONTROL_IN_TEXT),
+            ok,
+            "text checker {text:?}"
+        );
+    }
+
+    let mut segment_cases = Vec::new();
+    // Every builtin x key, and every user kind x key: expected acceptance
+    // comes from the actual checker, not a second copy of its kinds rule.
+    let definitions: Vec<_> = KEYS
+        .iter()
+        .filter(|k| k.path.starts_with("segment.") && k.ty != Ty::Table)
+        .collect();
+    for id in bingsu_core::field::BUILTIN
+        .iter()
+        .map(|d| d.id)
+        .chain(["custom/probe"])
+    {
+        let kinds: Vec<_> = if id.contains('/') {
+            KINDS.into_iter().map(Some).collect()
+        } else {
+            vec![None]
+        };
+        for kind in kinds {
+            for key in &definitions {
+                let name = key.path.rsplit('.').next().unwrap();
+                if name == "kind" {
+                    continue;
+                }
+                let example: Value =
+                    serde_json::from_str(key.example.or(key.default).unwrap()).unwrap();
+                let mut props = json!({name: example});
+                if let Some(kind) = kind {
+                    props["kind"] = json!(kind);
+                }
+                let segment = json!({id: props});
+                let diagnostics = check(&merged_json(&json!({"segment": segment})));
+                let ok = !diagnostics
+                    .iter()
+                    .any(|d| [codes::KEY_NOT_FOR_KIND, codes::UNKNOWN_KEY].contains(&d.code));
+                let schemas = if kind.is_none() && key.theme {
+                    json!(["config", "theme"])
+                } else {
+                    json!(["config"])
+                };
+                segment_cases.push(json!({"segment":segment,"ok":ok,"schemas":schemas}));
+            }
+        }
+    }
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../bingsu-core/schema/segment-keys-corpus.json"
+    ))
+    .unwrap();
+    for case in fixtures {
+        let mut segment = case["segment"].clone();
+        // A file may inherit its kind. Supply that inherited execution
+        // context only to the merged checker, never to the schema input.
+        for (id, props) in segment.as_object_mut().unwrap() {
+            if id.starts_with("custom/") && props.get("kind").is_none() {
+                props["kind"] = json!(if props.get("command").is_some() {
+                    "command"
+                } else {
+                    "text"
+                });
+            }
+        }
+        let diagnostics = check(&merged_json(&json!({"segment":segment})));
+        assert_eq!(
+            diagnostics.iter().all(|d| d.code == codes::KEY_PLANNED),
+            case["ok"].as_bool().unwrap(),
+            "{case}: {diagnostics:?}"
+        );
+    }
+    let data = json!({"schemas": {"config":serde_json::from_str::<Value>(&schema(Which::Config)).unwrap(), "theme":serde_json::from_str::<Value>(&schema(Which::Theme)).unwrap()}, "segment_cases":segment_cases});
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/check_schema_corpus.py"
+    );
+    let mut child = Command::new("python3")
+        .args([script, "--stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(data.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        child.wait().unwrap().success(),
+        "fresh schemas disagree with corpus"
+    );
 }

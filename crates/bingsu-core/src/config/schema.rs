@@ -8,7 +8,7 @@
 //! `config check`. Plugin fields cannot be listed ahead of time; `config
 //! check` checks them from the installed declarations.
 use crate::config::check::DURATION_PATTERN;
-use crate::config::keys::{KEYS, KeyDef, Level, Ty};
+use crate::config::keys::{KEYS, KINDS, KeyDef, Level, Ty};
 use crate::config::merge::KeyClass;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -169,7 +169,183 @@ fn children_under<'a>(
     children
 }
 
+// End guards are strict in both ECMAScript and Python (`$` alone admits a
+// final newline). Character classes are made from the engine predicates.
+const END: &str = "$(?![\\s\\S])";
+
+fn ascii_class(accepts: impl Fn(u8) -> bool) -> String {
+    let mut out = String::from("[");
+    for b in 0..=127 {
+        if accepts(b) {
+            let _ = write!(out, "\\u{b:04x}");
+        }
+    }
+    out.push(']');
+    out
+}
+
+fn segment_pattern() -> String {
+    use crate::ident::{CUSTOM_NAMESPACE, PART_MAX, part_byte, part_end};
+    let first = ascii_class(|b| part_byte(b, true));
+    let middle = ascii_class(|b| part_byte(b, false));
+    let last = ascii_class(|b| part_byte(b, false) && part_end(b));
+    let builtins = crate::field::BUILTIN
+        .iter()
+        .map(|d| d.id)
+        .collect::<Vec<_>>()
+        .join("|");
+    alloc::format!(
+        "^({builtins}|{CUSTOM_NAMESPACE}/{first}({middle}{{0,{}}}{last})?){END}",
+        PART_MAX - 2
+    )
+}
+
+fn text_pattern() -> String {
+    // Keep supplementary scalars outside character classes: ECMAScript
+    // without `u` sees them as surrogate pairs, Python as single scalars.
+    let removed = (0..=0x10ffff)
+        .filter_map(char::from_u32)
+        .filter(|&c| crate::sanitize::is_removed(c))
+        .map(|c| alloc::format!("{c}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    alloc::format!("^(?![\\s\\S]*({removed}))[\\s\\S]*{END}")
+}
+
+// Fixed-width decimal digit strings up to `max`. Inserting the decimal
+// point while emitting digits preserves the parser's token-length limit.
+fn decimal_range(max: u64, digits: usize, fraction: usize) -> String {
+    fn suffix(n: usize, at: usize, point: usize) -> String {
+        let mut out = String::new();
+        for i in at..n {
+            if i == point {
+                out.push_str("\\.");
+            }
+            out.push_str("[0-9]");
+        }
+        out
+    }
+    fn emit(bound: &[u8], at: usize, point: usize) -> String {
+        if at == bound.len() {
+            return String::new();
+        }
+        let dot = if at == point { "\\." } else { "" };
+        let d = bound[at] - b'0';
+        let exact = alloc::format!("{}{}", bound[at] as char, emit(bound, at + 1, point));
+        if d == 0 {
+            return alloc::format!("{dot}{exact}");
+        }
+        let lower = if d == 1 {
+            String::from("0")
+        } else {
+            alloc::format!("[0-{}]", d - 1)
+        };
+        alloc::format!(
+            "{dot}({lower}{}|{exact})",
+            suffix(bound.len(), at + 1, point)
+        )
+    }
+    let bound = alloc::format!("{max:0digits$}");
+    emit(
+        bound.as_bytes(),
+        0,
+        if fraction == 0 {
+            digits
+        } else {
+            digits - fraction
+        },
+    )
+}
+
+fn color_number(accepts: impl Fn(&str) -> bool) -> String {
+    let mut variants = Vec::new();
+    for width in 1..=crate::color::notation::NUMBER_MAX {
+        // A decimal point consumes one of NUMBER_MAX bytes.
+        for fraction in 0..width {
+            let digits = width - usize::from(fraction > 0);
+            if fraction >= digits {
+                continue;
+            }
+            let token = |n| {
+                let mut s = alloc::format!("{n:0digits$}");
+                if fraction > 0 {
+                    s.insert(digits - fraction, '.');
+                }
+                s
+            };
+            if !accepts(&token(0)) {
+                continue;
+            }
+            let (mut lo, mut hi) = (0, 10u64.pow(digits as u32));
+            while lo + 1 < hi {
+                let mid = lo + (hi - lo) / 2;
+                if accepts(&token(mid)) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            variants.push(decimal_range(lo, digits, fraction));
+        }
+    }
+    alloc::format!("({})", variants.join("|"))
+}
+
+fn color_pattern() -> String {
+    use crate::color::notation::parse_color;
+    // Probe the parser, including range endpoints, rather than copying its
+    // index/ANSI lists or OKLCH limits. Each numeric component is monotonic.
+    let indexes = (0..=u8::MAX).map(|v| alloc::format!("{v}"));
+    let ansi = (0..=u8::MAX).map(|v| alloc::format!("term.ansi.{v}"));
+    let finite = indexes
+        .chain(ansi)
+        .filter(|s| parse_color(s).is_ok())
+        .map(|s| s.replace('.', "\\."))
+        .collect::<Vec<_>>()
+        .join("|");
+    let hex = ascii_class(|b| {
+        let s: String =
+            core::iter::repeat_n(b as char, crate::color::notation::HEX_DIGITS).collect();
+        parse_color(&alloc::format!("#{s}")).is_ok()
+    });
+    let l = color_number(|n| parse_color(&alloc::format!("oklch({n} 0 0)")).is_ok());
+    let percent = color_number(|n| parse_color(&alloc::format!("oklch({n}% 0 0)")).is_ok());
+    let c = color_number(|n| parse_color(&alloc::format!("oklch(0 {n} 0)")).is_ok());
+    let h = color_number(|n| parse_color(&alloc::format!("oklch(0 0 {n})")).is_ok());
+    alloc::format!(
+        "^(#{hex}{{{}}}|{finite}|oklch\\( *({l}|{percent}%) +{c} +{h} *\\)){END}",
+        crate::color::notation::HEX_DIGITS
+    )
+}
+
+struct Patterns {
+    segment: String,
+    color: String,
+    text: String,
+}
+
+impl Patterns {
+    fn new() -> Self {
+        Self {
+            segment: segment_pattern(),
+            color: color_pattern(),
+            text: text_pattern(),
+        }
+    }
+}
+
 fn node(k: &KeyDef, which: Which, depth: usize, out: &mut String) {
+    node_at(k, k.path, which, depth, &Patterns::new(), out);
+}
+
+fn node_at(
+    k: &KeyDef,
+    path: &str,
+    which: Which,
+    depth: usize,
+    patterns: &Patterns,
+    out: &mut String,
+) {
     out.push_str("{\n");
     let mut fields: Vec<(&str, String)> = Vec::new();
     let mut v = String::new();
@@ -186,6 +362,15 @@ fn node(k: &KeyDef, which: Which, depth: usize, out: &mut String) {
             fields.push(("maximum", alloc::format!("{max}")));
         }
         Ty::Str | Ty::Text | Ty::Color => {
+            let pattern = match k.ty {
+                Ty::Text => Some(patterns.text.as_str()),
+                Ty::Color => Some(patterns.color.as_str()),
+                _ => None,
+            };
+            if let Some(pattern) = pattern {
+                esc(pattern, &mut v);
+                fields.push(("pattern", core::mem::take(&mut v)));
+            }
             fields.push(("type", String::from("\"string\"")));
             if k.path == "requires" {
                 esc(REQUIRES_PATTERN, &mut v);
@@ -203,7 +388,13 @@ fn node(k: &KeyDef, which: Which, depth: usize, out: &mut String) {
         }
         Ty::Strings | Ty::Segments => {
             fields.push(("type", String::from("\"array\"")));
-            fields.push(("items", String::from("{ \"type\": \"string\" }")));
+            let mut items = String::from("{ \"type\": \"string\"");
+            if k.ty == Ty::Segments {
+                items.push_str(", \"x-bingsu-type\": \"segment-id\", \"pattern\": ");
+                esc(&patterns.segment, &mut items);
+            }
+            items.push_str(" }");
+            fields.push(("items", items));
         }
         Ty::EnumList(list) => {
             fields.push(("type", String::from("\"array\"")));
@@ -215,34 +406,89 @@ fn node(k: &KeyDef, which: Which, depth: usize, out: &mut String) {
         }
         Ty::Table => {
             fields.push(("type", String::from("\"object\"")));
-            let children = keys_under(k.path, which);
-            let named: Vec<_> = children
+            let mut children = keys_under(path, which);
+            let builtin = path
+                .strip_prefix("segment.")
+                .is_some_and(|id| crate::field::segment(id).is_some());
+            if builtin {
+                children.retain(|c| {
+                    c.kinds.is_empty()
+                        && (!c.path.starts_with("segment.*.") || c.path.ends_with(".enabled"))
+                });
+            }
+            let mut named: Vec<(&KeyDef, String)> = children
                 .iter()
                 .filter(|c| !c.path.ends_with(".*"))
+                .map(|c| (*c, String::from(c.path)))
                 .collect();
+            if path == "segment" {
+                let star = children
+                    .iter()
+                    .find(|c| c.path.ends_with(".*"))
+                    .expect("segment wildcard");
+                for d in crate::field::BUILTIN {
+                    let p = alloc::format!("segment.{}", d.id);
+                    if !named.iter().any(|(_, path)| path == &p) {
+                        named.push((star, p));
+                    }
+                }
+                let mut names = String::from(
+                    "{ \"type\": \"string\", \"x-bingsu-type\": \"segment-id\", \"pattern\": ",
+                );
+                esc(&patterns.segment, &mut names);
+                names.push_str(" }");
+                fields.push(("propertyNames", names));
+            }
             if !named.is_empty() {
                 let mut props = String::from("{\n");
-                for (i, c) in named.iter().enumerate() {
+                for (i, (c, child_path)) in named.iter().enumerate() {
                     pad(depth + 2, &mut props);
-                    esc(c.path.rsplit('.').next().unwrap_or(""), &mut props);
+                    esc(child_path.rsplit('.').next().unwrap_or(""), &mut props);
                     props.push_str(": ");
-                    node(c, which, depth + 2, &mut props);
+                    node_at(c, child_path, which, depth + 2, patterns, &mut props);
                     props.push_str(if i + 1 < named.len() { ",\n" } else { "\n" });
                 }
                 pad(depth + 1, &mut props);
                 props.push('}');
                 fields.push(("properties", props));
             }
+            if path == "segment.*" && which == Which::Config {
+                let mut conditions = Vec::new();
+                for kind in KINDS {
+                    let forbidden: Vec<_> = children
+                        .iter()
+                        .filter(|c| !c.kinds.is_empty() && !c.kinds.contains(&kind))
+                        .map(|c| {
+                            let mut prop = String::new();
+                            esc(c.path.rsplit('.').next().unwrap_or(""), &mut prop);
+                            alloc::format!("{prop}: false")
+                        })
+                        .collect();
+                    let mut value = String::new();
+                    esc(kind, &mut value);
+                    conditions.push(alloc::format!("{{ \"if\": {{ \"required\": [\"kind\"], \"properties\": {{ \"kind\": {{ \"const\": {value} }} }} }}, \"then\": {{ \"properties\": {{ {} }} }} }}", forbidden.join(", ")));
+                }
+                fields.push(("allOf", alloc::format!("[{}]", conditions.join(", "))));
+            }
             let extra = match children.iter().find(|c| c.path.ends_with(".*")) {
                 Some(star) => {
                     let mut s = String::new();
-                    node(star, which, depth + 1, &mut s);
+                    node_at(star, star.path, which, depth + 1, patterns, &mut s);
                     s
                 }
                 None => String::from("false"),
             };
             fields.push(("additionalProperties", extra));
         }
+    }
+    let corpus_type = match k.ty {
+        Ty::Text => Some("text"),
+        Ty::Color => Some("color"),
+        Ty::Duration => Some("duration"),
+        _ => None,
+    };
+    if let Some(name) = corpus_type {
+        fields.push(("x-bingsu-type", alloc::format!("\"{name}\"")));
     }
     if let Some(d) = k.default {
         fields.push(("default", String::from(d)));

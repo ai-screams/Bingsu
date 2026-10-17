@@ -19,6 +19,8 @@
 /// Bytes of one part, and of the whole id.
 pub const PART_MAX: usize = 32;
 pub const ID_MAX: usize = 2 * PART_MAX + 1;
+/// Namespace for user-defined segments.
+pub const CUSTOM_NAMESPACE: &str = "custom";
 
 /// First parts no user or plugin segment may take.
 pub const RESERVED_NAMESPACES: [&str; 3] = ["bingsu", "topping", "file"];
@@ -44,7 +46,7 @@ impl<'a> SegmentId<'a> {
     pub fn namespace(self) -> Namespace {
         match self.0.split_once('/') {
             None => Namespace::Builtin,
-            Some(("custom", _)) => Namespace::Custom,
+            Some((CUSTOM_NAMESPACE, _)) => Namespace::Custom,
             Some(_) => Namespace::Plugin,
         }
     }
@@ -78,22 +80,27 @@ pub enum IdError {
     UnsupportedScheme,
 }
 
+/// The byte predicates used by both the parser and schema generator.
+pub(crate) fn part_byte(c: u8, first: bool) -> bool {
+    c.is_ascii_lowercase() || (!first && (c.is_ascii_digit() || c == b'_' || c == b'-'))
+}
+
+pub(crate) fn part_end(c: u8) -> bool {
+    !matches!(c, b'_' | b'-')
+}
+
 fn part(s: &str, base: usize) -> Result<(), IdError> {
     let b = s.as_bytes();
     if b.is_empty() || b.len() > PART_MAX {
         return Err(IdError::PartLength { at: base });
     }
     for (i, &c) in b.iter().enumerate() {
-        let ok = if i == 0 {
-            c.is_ascii_lowercase()
-        } else {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-'
-        };
+        let ok = part_byte(c, i == 0);
         if !ok {
             return Err(IdError::BadByte { at: base + i });
         }
     }
-    if matches!(b[b.len() - 1], b'_' | b'-') {
+    if !part_end(b[b.len() - 1]) {
         return Err(IdError::BadEnd {
             at: base + b.len() - 1,
         });
