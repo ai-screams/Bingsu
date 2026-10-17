@@ -16,7 +16,7 @@ SCHEMA_DIR = ROOT / "crates/bingsu-core/schema"
 
 
 def corpus(name):
-    return json.loads((SCHEMA_DIR / f"{name}-corpus.json").read_text())
+    return json.loads((SCHEMA_DIR / f"{name}-corpus.json").read_text(encoding="utf-8"))
 
 
 def nodes(node, path=()):
@@ -118,10 +118,10 @@ def check(schemas, segment_cases=()):
 
 def main():
     if "--stdin" in sys.argv:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
         check(data["schemas"], data.get("segment_cases", []))
     else:
-        check({name: json.loads((SCHEMA_DIR / f"{name}-v1.json").read_text())
+        check({name: json.loads((SCHEMA_DIR / f"{name}-v1.json").read_text(encoding="utf-8"))
                for name in ("config", "theme")})
     return 0
 
