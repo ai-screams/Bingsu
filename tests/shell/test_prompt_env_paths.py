@@ -341,13 +341,20 @@ def call_paths(call):
     return paths
 
 
+def open_flags(text):
+    """Open flags as strace prints them. O_LARGEFILE is dropped: strace adds it
+    on x86_64 and not on aarch64, and it changes no access.
+    이것을 실패시키는 것: O_LARGEFILE을 남기는 것(x86_64 CI의 helper 걷기 단계가 거부된다)."""
+    return set(text.split("|")) - {"O_LARGEFILE"}
+
+
 def helper_walk_step(call, path, roots):
     # Runtime-root validation opens only pinned ancestors, one component at a time, without content access.
     if call.name != "openat" or not any(r.startswith(path.rstrip("/") + "/") for r in roots):
         return False
     args = args_of(call)
     name = QUOTED.fullmatch(args[1]).group(1)
-    flags = set(args[2].split("|"))
+    flags = open_flags(args[2])
     if not {"O_PATH", "O_NOFOLLOW", "O_DIRECTORY"} <= flags:
         return False
     if flags - {"O_RDONLY", "O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"}:
@@ -385,7 +392,7 @@ def helper_created_open(call, path, created):
     # after this PID actually created the same directory; never read entries.
     if call.name != "openat" or (call.pid, path) not in created:
         return False
-    flags = set(args_of(call)[2].split("|"))
+    flags = open_flags(args_of(call)[2])
     return (descriptor_child(call, path)
             and {"O_RDONLY", "O_NOFOLLOW", "O_DIRECTORY"} <= flags
             and not flags - {"O_RDONLY", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"})
@@ -417,7 +424,7 @@ def helper_ancestor_stat(call, path, roots):
         return False
     if call.name == "newfstatat":
         return args[3] == "AT_SYMLINK_NOFOLLOW"
-    flags = set(args[2].split("|"))
+    flags = open_flags(args[2])
     return ("AT_SYMLINK_NOFOLLOW" in flags
             and not flags - {"AT_SYMLINK_NOFOLLOW", "AT_STATX_SYNC_AS_STAT"})
 
