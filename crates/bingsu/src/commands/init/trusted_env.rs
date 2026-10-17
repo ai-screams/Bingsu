@@ -1,7 +1,9 @@
 //! The one function in this crate that reads the environment. Only `init`
-//! calls it: init runs at a trusted moment and pins what it finds into the
-//! hook (spec section 4 "runtime root" 1 and 7, F-01). The prompt path
-//! never reads the environment (crates/bingsu/clippy.toml).
+//! and the user's own commands (`reload`, `config check|path|use`) call it:
+//! they run at a trusted moment, `init` pins what it finds into the hook
+//! (spec section 4 "runtime root" 1 and 7, F-01), and the commands find the
+//! same folders for the same user. The prompt path never reads the
+//! environment (crates/bingsu/clippy.toml).
 use std::ffi::OsString;
 
 pub struct TrustedEnv {
@@ -25,5 +27,14 @@ impl TrustedEnv {
             xdg_state_home: std::env::var_os("XDG_STATE_HOME"),
             xdg_cache_home: std::env::var_os("XDG_CACHE_HOME"),
         }
+    }
+
+    /// The roots variable the init script exported (see `pinned`).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's commands read the roots init exported"
+    )]
+    pub fn pinned_roots() -> Option<OsString> {
+        std::env::var_os(super::pinned::VAR)
     }
 }

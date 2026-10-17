@@ -87,8 +87,20 @@ impl CheckedContextFd {
         groups: &mut dyn GroupOracle,
         create: bool,
     ) -> Result<Self, StoreError> {
+        let dir = runtime_root::open_runtime_root(pin, me, groups).map_err(StoreError::Root)?;
+        Self::under_runtime(&dir, config, state, me, create)
+    }
+
+    /// The caller retains a previously checked runtime root descriptor.
+    pub fn under_runtime(
+        runtime: &File,
+        config: &[u8],
+        state: &[u8],
+        me: u32,
+        create: bool,
+    ) -> Result<Self, StoreError> {
         let components = snapshot::context_components(config, state)?;
-        let mut dir = runtime_root::open_runtime_root(pin, me, groups).map_err(StoreError::Root)?;
+        let mut dir = runtime.try_clone()?;
         for name in components {
             if create {
                 sys::mkdir_at(dir.as_fd(), OsStr::new(&name), 0o700)?;

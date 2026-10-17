@@ -17,6 +17,10 @@ def real_bin():
     return pathlib.Path(os.environ.get("BINGSU_BIN", ROOT / "target/debug/bingsu")).resolve()
 
 
+COLD_INIT_NOTICE = (b"bingsu: reading your settings did not finish in time; the prompt starts with "
+                    b"the built-in look and takes your settings when they are ready\n")
+
+
 class Install:
     """A folder holding `bingsu` as a symlink. init runs through the symlink
     (so the symlink path is pinned); use_fake() then swaps the target."""
@@ -32,7 +36,11 @@ class Install:
         # A warning here (an executable another user can change, a root that
         # could not be pinned) means the test runs in an arrangement it was
         # not written for, such as a CI binary owned by another uid.
-        assert r.returncode == 0 and r.stderr == b"", r.stderr
+        # The cold-init notice is the one allowed line: a busy machine (CI
+        # containers) can need more than the 500 ms first-compile wait.
+        # 이것을 실패시키는 것: 다른 경고를 이 예외에 넣는 것(그 줄만 지운 뒤 비어 있어야 한다).
+        rest = r.stderr.replace(COLD_INIT_NOTICE, b"")
+        assert r.returncode == 0 and rest == b"", r.stderr
         return r.stdout
 
     def use_fake(self, record: bytes, script=FAKE):

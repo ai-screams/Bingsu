@@ -16,11 +16,13 @@ mod collector;
 #[cfg(unix)]
 mod config;
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "S3b/N2 config session integration")
-)]
+mod config_inspect;
+#[cfg(unix)]
 mod config_load;
+#[cfg(unix)]
+mod config_use;
+#[cfg(unix)]
+mod ctx;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
@@ -42,11 +44,9 @@ mod log;
 #[cfg(unix)]
 mod messages;
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "N3/N5 call the publication engine")
-)]
 mod refresh;
+#[cfg(unix)]
+mod reload;
 #[cfg(unix)]
 mod runtime_root;
 #[cfg(unix)]
@@ -58,10 +58,6 @@ mod source_path;
 #[allow(unsafe_code)]
 mod sys;
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "N2/N5 approval record integration")
-)]
 mod trust_record;
 
 pub fn run(a: NonPromptArgs) -> ExitCode {
@@ -76,12 +72,14 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         Some("config") => config::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
+        #[cfg(unix)]
+        Some("reload") => reload::run(&a.args[1..]),
         #[cfg(feature = "bench-stubs")]
         Some("__collect-stub") => {
             ExitCode::from(u8::try_from(bingsu_collect::stub_main(&a.args[1..])).unwrap_or(1))
         }
         _ => {
-            eprintln!("usage: bingsu <config|init|prompt> ...");
+            eprintln!("usage: bingsu <config|init|prompt|reload> ...");
             ExitCode::from(2)
         }
     }

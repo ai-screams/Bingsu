@@ -21,6 +21,9 @@ pub struct ScriptInputs<'a> {
     pub config_root: Option<(&'a [u8], &'a [u8], bool)>,
     pub state_root: Option<&'a [u8]>,
     pub log_root: Option<&'a [u8]>,
+    /// The pinned roots for the user's commands (`pinned::encode`); `None`
+    /// clears any value an earlier init exported.
+    pub roots_var: Option<&'a [u8]>,
     pub session_hex: &'a [u8; 32],
     /// `pw_dir` from getpwuid, for the `~` of the dir segment.
     pub home: &'a [u8],
@@ -151,9 +154,31 @@ pub fn render(inp: &ScriptInputs<'_>, out: &mut Vec<u8>) {
         substitute(inp, t.as_bytes(), out);
         out.push(b'\n');
     }
+    export_roots(inp, out);
     if inp.shell == Shell::Bash {
         substitute(inp, BASH_EPILOGUE.as_bytes(), out);
     }
+}
+
+/// One exported variable the commands read; a re-init replaces or clears it.
+fn export_roots(inp: &ScriptInputs<'_>, out: &mut Vec<u8>) {
+    let fish = inp.shell == Shell::Fish;
+    match inp.roots_var {
+        Some(v) => {
+            out.extend_from_slice(if fish {
+                b"set -gx BINGSU_ROOTS ".as_slice()
+            } else {
+                b"export BINGSU_ROOTS=".as_slice()
+            });
+            encode_word(inp.shell, v, out);
+        }
+        None => out.extend_from_slice(if fish {
+            b"set -e BINGSU_ROOTS".as_slice()
+        } else {
+            b"unset BINGSU_ROOTS".as_slice()
+        }),
+    }
+    out.push(b'\n');
 }
 
 #[cfg(test)]
@@ -180,6 +205,7 @@ mod tests {
                 config_root,
                 state_root: Some(b"/s"),
                 log_root: Some(b"/l"),
+                roots_var: Some(b"5:a\nb'c"),
                 session_hex: &[b'0'; 32],
                 home,
             },
@@ -245,6 +271,46 @@ mod tests {
                 0,
                 "{shell:?}"
             );
+        }
+    }
+
+    // 고정 뿌리는 셸마다 한 번 내보내고(셸 단어 하나), 없으면 이전 init의 값을 지운다.
+    // 이것을 실패시키는 것: 내보내기 줄을 빼거나 두 번 내는 것, 값을 셸 단어로 인코딩하지 않는 것, 뿌리가 없을 때 옛 값을 남기는 것.
+    #[test]
+    fn roots_variable_is_exported_once_or_cleared() {
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            let s = script(shell, b"/h");
+            let mut want = if shell == Shell::Fish {
+                b"set -gx BINGSU_ROOTS ".to_vec()
+            } else {
+                b"export BINGSU_ROOTS=".to_vec()
+            };
+            encode_word(shell, b"5:a\nb'c", &mut want);
+            assert_eq!(count(&s, &want), 1, "{shell:?}");
+            assert_eq!(count(&s, b"BINGSU_ROOTS"), 1, "{shell:?}");
+            let mut out = Vec::new();
+            render(
+                &ScriptInputs {
+                    shell,
+                    exe: b"/bin/bingsu",
+                    runtime_groups: &[],
+                    runtime_root: None,
+                    config_root: None,
+                    state_root: None,
+                    log_root: None,
+                    roots_var: None,
+                    session_hex: &[b'0'; 32],
+                    home: b"/h",
+                },
+                &mut out,
+            );
+            let clear: &[u8] = if shell == Shell::Fish {
+                b"set -e BINGSU_ROOTS\n"
+            } else {
+                b"unset BINGSU_ROOTS\n"
+            };
+            assert_eq!(count(&out, clear), 1, "{shell:?}");
+            assert_eq!(count(&out, b"BINGSU_ROOTS"), 1, "{shell:?}");
         }
     }
 

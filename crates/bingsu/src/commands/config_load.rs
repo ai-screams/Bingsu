@@ -641,6 +641,12 @@ impl Loader {
         self.unread.insert(key, e);
     }
 
+    /// The spelling the read plan used for a file (`config path` shows it
+    /// next to the canonical path when the two differ).
+    pub fn written_path(&self, key: FileKey) -> Option<&Path> {
+        self.plan.get(&key).map(|p| p.written.as_path())
+    }
+
     /// N2 passes the final catalog and whether S3b produced a snapshot.
     /// This boundary deliberately uses only S3a types. Call immediately
     /// before publication, retaining this loader throughout compilation.
