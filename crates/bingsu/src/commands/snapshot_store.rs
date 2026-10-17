@@ -1,4 +1,4 @@
-//! Checked context directory and bounded file reads. Publication/locking is N2.
+//! Checked context directories, bounded reads, locking and atomic publication.
 use super::{runtime_root, sys};
 use bingsu_core::fs_trust::{AclFacts, GroupOracle, Last, RefuseGroupWrite, walk_verdict};
 use bingsu_core::snapshot::{self, COMPILED_MAX, HEADER, META_MAX, PREFIX};
@@ -10,10 +10,18 @@ use std::os::unix::fs::MetadataExt;
 
 #[derive(Debug)]
 pub enum StoreError {
+    Busy,
     Root(runtime_root::RootError),
     Io(io::Error),
     Codec(bingsu_core::snapshot_codec::Error),
     Unsafe,
+}
+pub fn lock_error(e: io::Error) -> StoreError {
+    if e.kind() == io::ErrorKind::WouldBlock {
+        StoreError::Busy
+    } else {
+        StoreError::Io(e)
+    }
 }
 impl From<io::Error> for StoreError {
     fn from(e: io::Error) -> Self {
@@ -28,6 +36,7 @@ impl From<bingsu_core::snapshot_codec::Error> for StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Busy => f.write_str("snapshot lock is busy"),
             Self::Root(e) => write!(f, "runtime root: {e:?}"),
             Self::Io(e) => e.fmt(f),
             Self::Codec(e) => write!(f, "snapshot: {e:?}"),
@@ -371,4 +380,196 @@ mod tests {
         assert!(c.read(DataFile::Marker).is_err());
         std::fs::remove_dir_all(base).unwrap();
     }
+}
+
+/// The four reusable slots are the entire crash-recovery namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Sequence,
+    Snapshot,
+    LastGood,
+    Marker,
+}
+impl Slot {
+    pub const ALL: [Self; 4] = [Self::Sequence, Self::Snapshot, Self::LastGood, Self::Marker];
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sequence => ".sequence.stage",
+            Self::Snapshot => ".snapshot.stage",
+            Self::LastGood => ".last-good.stage",
+            Self::Marker => ".marker.stage",
+        }
+    }
+    fn target(self) -> DataFile {
+        match self {
+            Self::Sequence => DataFile::Sequence,
+            Self::Snapshot => DataFile::Snapshot,
+            Self::LastGood => DataFile::LastGood,
+            Self::Marker => DataFile::Marker,
+        }
+    }
+}
+pub struct LockedStore<'a> {
+    root: &'a CheckedContextFd,
+    lock: File,
+    stages: std::cell::RefCell<[Option<(File, sys::Stamp)>; 4]>,
+    snapshot_before: std::cell::RefCell<Option<Option<sys::Stamp>>>,
+}
+impl CheckedContextFd {
+    pub fn try_lock(&self) -> Result<LockedStore<'_>, StoreError> {
+        let lock = sys::open_lock_at(self.dir.as_fd(), OsStr::new(DataFile::Lock.name()))?;
+        self.check_file(&lock, 0)?;
+        sys::try_lock(&lock).map_err(lock_error)?;
+        let store = LockedStore {
+            root: self,
+            lock,
+            stages: std::cell::RefCell::new(std::array::from_fn(|_| None)),
+            snapshot_before: std::cell::RefCell::new(None),
+        };
+        store.verify_lock()?;
+        store.recover()?;
+        Ok(store)
+    }
+    /// Reopen the context with a fresh group oracle, keeping this dirfd as the
+    /// sole base for mutations. Replacement never redirects a publication.
+    pub fn same_directory(&self, other: &Self) -> Result<(), StoreError> {
+        if sys::fd_facts(self.dir.as_fd())? != sys::fd_facts(other.dir.as_fd())? {
+            return Err(StoreError::Unsafe);
+        }
+        Ok(())
+    }
+}
+impl LockedStore<'_> {
+    pub fn verify_lock(&self) -> Result<(), StoreError> {
+        self.root.check_file(&self.lock, 0)?;
+        same_name(&self.lock, self.root.dir.as_fd(), DataFile::Lock.name())
+    }
+    fn recover(&self) -> Result<(), StoreError> {
+        self.verify_lock()?;
+        for slot in Slot::ALL {
+            self.remove_slot(slot)?;
+        }
+        Ok(())
+    }
+    fn remove_slot(&self, slot: Slot) -> Result<(), StoreError> {
+        let f = match sys::open_data_at_nofollow(self.root.dir.as_fd(), OsStr::new(slot.name())) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        // Interrupted contents need not decode, but safety is never waived.
+        self.root.check_file(&f, 32 * 1024 * 1024)?;
+        same_name(&f, self.root.dir.as_fd(), slot.name())?;
+        sys::unlink_at(self.root.dir.as_fd(), OsStr::new(slot.name()))?;
+        Ok(())
+    }
+    pub fn read(&self, name: DataFile) -> Result<Option<Vec<u8>>, StoreError> {
+        let mut f = match self.root.open_data(name) {
+            Ok(f) => f,
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                if matches!(name, DataFile::Snapshot) {
+                    *self.snapshot_before.borrow_mut() = Some(None);
+                }
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let stamp = sys::file_stamp(&f)?;
+        let len = self.root.check_file(&f, name.cap())?;
+        let bytes = read_exact_len(&mut f, len)?;
+        if sys::file_stamp(&f)? != stamp {
+            return Err(StoreError::Unsafe);
+        }
+        same_name(&f, self.root.dir.as_fd(), name.name())?;
+        if matches!(name, DataFile::Snapshot) {
+            *self.snapshot_before.borrow_mut() = Some(Some(stamp));
+        }
+        Ok(Some(bytes))
+    }
+    pub fn verify_snapshot(&self) -> Result<(), StoreError> {
+        match &*self.snapshot_before.borrow() {
+            Some(Some(before))
+                if sys::at_stamp(self.root.dir.as_fd(), OsStr::new("snapshot"))? == *before =>
+            {
+                Ok(())
+            }
+            Some(None)
+                if sys::at_stamp(self.root.dir.as_fd(), OsStr::new("snapshot"))
+                    .is_err_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+            {
+                Ok(())
+            }
+            _ => Err(StoreError::Unsafe),
+        }
+    }
+    pub fn stage(&self, slot: Slot, bytes: &[u8]) -> Result<(), StoreError> {
+        if bytes.len() > slot.target().cap() {
+            return Err(StoreError::Unsafe);
+        }
+        validate_bytes(slot, bytes)?;
+        let mut f = sys::create_file_at(self.root.dir.as_fd(), OsStr::new(slot.name()), 0o600)?;
+        if sys::write_fd(f.as_raw_fd(), bytes) != sys::WriteOutcome::Done {
+            return Err(io::Error::other("staging write failed").into());
+        }
+        let len = self.root.check_file(&f, slot.target().cap())?;
+        if len != bytes.len() {
+            return Err(StoreError::Unsafe);
+        }
+        use std::io::Seek;
+        f.rewind()?;
+        let actual = read_exact_len(&mut f, len)?;
+        if actual != bytes {
+            return Err(StoreError::Unsafe);
+        }
+        validate_bytes(slot, &actual)?;
+        same_name(&f, self.root.dir.as_fd(), slot.name())?;
+        let stamp = sys::file_stamp(&f)?;
+        self.stages.borrow_mut()[slot as usize] = Some((f, stamp));
+        Ok(())
+    }
+    /// All expensive copies and codec checks completed in stage(). Check only
+    /// the descriptor/name safety here, after Loader's final revalidation.
+    pub fn install(&self, slot: Slot) -> Result<(), StoreError> {
+        self.verify_lock()?;
+        let stages = self.stages.borrow();
+        let (f, stamp) = stages[slot as usize].as_ref().ok_or(StoreError::Unsafe)?;
+        self.root.check_file(f, slot.target().cap())?;
+        if sys::file_stamp(f)? != *stamp {
+            return Err(StoreError::Unsafe);
+        }
+        same_name(f, self.root.dir.as_fd(), slot.name())?;
+        sys::rename_at(
+            self.root.dir.as_fd(),
+            OsStr::new(slot.name()),
+            OsStr::new(slot.target().name()),
+        )?;
+        Ok(())
+    }
+}
+impl Drop for LockedStore<'_> {
+    fn drop(&mut self) {
+        // A normal error cleans only validated reserved entries, still locked.
+        // SIGKILL leaves them for the next owner. Never unlink the lock itself.
+        let _ = self.recover();
+    }
+}
+fn same_name(f: &File, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> Result<(), StoreError> {
+    if sys::file_stamp(f)? != sys::at_stamp(dir, OsStr::new(name))? {
+        return Err(StoreError::Unsafe);
+    }
+    Ok(())
+}
+fn validate_bytes(slot: Slot, bytes: &[u8]) -> Result<(), StoreError> {
+    match slot {
+        Slot::Snapshot | Slot::LastGood => {
+            snapshot::Snapshot::decode(bytes)?;
+        }
+        Slot::Sequence => {
+            snapshot::Sequence::decode(bytes)?;
+        }
+        Slot::Marker => {
+            snapshot::Marker::decode(bytes)?;
+        }
+    }
+    Ok(())
 }

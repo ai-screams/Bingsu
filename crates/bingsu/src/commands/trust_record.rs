@@ -144,6 +144,15 @@ fn record_permissions(facts: Facts) -> Result<Facts, RecordError> {
 }
 
 impl RecordEvidence {
+    pub fn export(&self, e: &mut super::evidence::Encoder) {
+        e.path(&self.record.path);
+        e.num(self.record.dev);
+        e.num(self.record.ino);
+        e.chain(&self.chain);
+        e.stamp(&self.stamp);
+        e.facts(self.facts);
+    }
+
     pub fn fd_count(&self) -> usize {
         self.chain.fds.len() + 1
     }
@@ -211,46 +220,156 @@ fn validate_completed_record(f: &std::fs::File, me: u32) -> std::io::Result<()> 
     Ok(())
 }
 
-/// Writes the record (for `config use`): temporary file, `fsync`, rename
-/// over the record, folder `fsync`.
+/// The shared state lock. Callers holding both locks always acquire the
+/// context snapshot lock first. The lock is persistent and never renamed.
+pub struct SelectionLock {
+    chain: Chain,
+    lock: std::fs::File,
+    state: PathBuf,
+    me: u32,
+}
+impl SelectionLock {
+    pub fn evidence_export(&self) -> std::io::Result<Vec<u8>> {
+        let mut e = super::evidence::Encoder::new();
+        e.chain(&self.chain);
+        e.finish()
+    }
+
+    pub fn try_lock(state: &Path, me: u32, groups: &mut dyn GroupOracle) -> std::io::Result<Self> {
+        let chain = open_state_root(state, me, groups)
+            .map_err(|e| std::io::Error::other(format!("state: {e:?}")))?;
+        let lock = sys::open_lock_at(chain.last().as_fd(), OsStr::new("selection.lock"))?;
+        check_record(&lock, me).map_err(|e| std::io::Error::other(format!("lock: {e:?}")))?;
+        if lock.metadata()?.len() != 0 {
+            return Err(std::io::Error::other("nonempty selection lock"));
+        }
+        sys::try_lock(&lock)?;
+        let out = Self {
+            chain,
+            lock,
+            state: state.to_path_buf(),
+            me,
+        };
+        out.verify(groups)?;
+        Ok(out)
+    }
+    pub fn verify(&self, groups: &mut dyn GroupOracle) -> std::io::Result<()> {
+        self.chain.revalidate()?;
+        state_verdict(&self.chain, self.me, groups)
+            .map_err(|e| std::io::Error::other(format!("state: {e:?}")))?;
+        check_record(&self.lock, self.me)
+            .map_err(|e| std::io::Error::other(format!("lock: {e:?}")))?;
+        if sys::file_stamp(&self.lock)?
+            != sys::at_stamp(self.chain.last().as_fd(), OsStr::new("selection.lock"))?
+            || self.lock.metadata()?.len() != 0
+        {
+            return Err(std::io::Error::other("selection lock changed"));
+        }
+        Ok(())
+    }
+    /// Retain a missing record as a checked absence as well as an existing fd.
+    pub fn read(
+        &self,
+        groups: &mut dyn GroupOracle,
+    ) -> Result<Option<RecordEvidence>, RecordError> {
+        match read_session(&self.state, self.me, groups) {
+            Ok(e) => Ok(Some(e)),
+            Err(RecordError::Absent) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn unchanged(
+        &self,
+        expected: Option<&RecordEvidence>,
+        groups: &mut dyn GroupOracle,
+    ) -> std::io::Result<()> {
+        self.verify(groups)?;
+        if let Some(e) = expected {
+            e.revalidate(self.me, groups)
+                .map_err(|e| std::io::Error::other(format!("selection: {e:?}")))
+        } else {
+            match sys::at_stamp(self.chain.last().as_fd(), OsStr::new(RECORD_NAME)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(std::io::Error::other("selection appeared")),
+            }
+        }
+    }
+    /// N5 can compare an earlier selection before replacing it. Automatic
+    /// renewal additionally requires the very same canonical selection.
+    pub fn replace(
+        &self,
+        expected: Option<&RecordEvidence>,
+        r: &Record,
+        groups: &mut dyn GroupOracle,
+    ) -> std::io::Result<()> {
+        self.unchanged(expected, groups)?;
+        self.write_record(r, groups)
+    }
+    pub fn renew(
+        &self,
+        expected: &RecordEvidence,
+        r: &Record,
+        groups: &mut dyn GroupOracle,
+    ) -> std::io::Result<()> {
+        if expected.record.path != r.path {
+            return Err(std::io::Error::other("renewal changed selection"));
+        }
+        self.replace(Some(expected), r, groups)
+    }
+    fn write_record(&self, r: &Record, groups: &mut dyn GroupOracle) -> std::io::Result<()> {
+        let bytes = encode(r);
+        if bytes.len() as u64 > RECORD_MAX || parse(&bytes).as_ref() != Some(r) {
+            return Err(std::io::Error::other("invalid approval record"));
+        }
+        let dir = self.chain.last();
+        let sync_dir = sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new("."))?;
+        let tmp = OsStr::new(".config-use.stage");
+        // One reserved durable-record slot, protected by selection.lock.
+        match sys::open_file_at_nofollow(dir.as_fd(), tmp) {
+            Ok(f) => {
+                validate_completed_record(&f, self.me)?;
+                if sys::file_stamp(&f)? != sys::at_stamp(dir.as_fd(), tmp)? {
+                    return Err(std::io::Error::other("record staging changed"));
+                }
+                sys::unlink_at(dir.as_fd(), tmp)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let f = sys::create_file_at(dir.as_fd(), tmp, 0o600)?;
+        let done = (|| {
+            use std::os::fd::AsRawFd;
+            if sys::write_fd(f.as_raw_fd(), &bytes) != sys::WriteOutcome::Done {
+                return Err(std::io::Error::other("write failed"));
+            }
+            validate_completed_record(&f, self.me)?;
+            self.verify(groups)?;
+            if sys::file_stamp(&f)? != sys::at_stamp(dir.as_fd(), tmp)? {
+                return Err(std::io::Error::other("record staging changed"));
+            }
+            f.sync_all()?;
+            sys::rename_at(dir.as_fd(), tmp, OsStr::new(RECORD_NAME))?;
+            sync_dir.sync_all()
+        })();
+        if done.is_err() && sys::file_stamp(&f).ok() == sys::at_stamp(dir.as_fd(), tmp).ok() {
+            let _ = sys::unlink_at(dir.as_fd(), tmp);
+        }
+        done
+    }
+}
+
+/// Explicit selection writes share exactly the same lock as automatic renew.
 pub fn write(
     state_root: &Path,
     me: u32,
     groups: &mut dyn GroupOracle,
     r: &Record,
 ) -> std::io::Result<()> {
-    let bytes = encode(r);
-    if bytes.len() as u64 > RECORD_MAX || parse(&bytes).as_ref() != Some(r) {
-        return Err(std::io::Error::other("invalid approval record"));
-    }
-    let chain = open_state_root(state_root, me, groups)
-        .map_err(|e| std::io::Error::other(format!("state root: {e:?}")))?;
-    let dir = chain.last();
-    // An fd that can be fsynced (the walk's descriptor is search-only).
-    let parent = state_root.parent().unwrap_or(Path::new("/"));
-    let name = state_root.file_name().unwrap_or_default();
-    let mut up = open_chain(parent).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    let sync_dir = sys::open_dir_at_nofollow(up.fds.pop().expect("chain").as_fd(), name)?;
-    let tmp = OsString::from(format!(".{RECORD_NAME}.{}", std::process::id()));
-    let f = sys::create_file_at(dir.as_fd(), &tmp, 0o600)?;
-    let done = (|| {
-        use std::os::fd::AsRawFd;
-        if sys::write_fd(f.as_raw_fd(), &bytes) != sys::WriteOutcome::Done {
-            return Err(std::io::Error::other("write failed"));
-        }
-        validate_completed_record(&f, me)?;
-        chain.revalidate()?;
-        if sys::fd_facts(sync_dir.as_fd())? != *chain.facts.last().expect("chain") {
-            return Err(std::io::Error::other("state root changed"));
-        }
-        f.sync_all()?;
-        sys::rename_at(dir.as_fd(), &tmp, OsStr::new(RECORD_NAME))?;
-        sync_dir.sync_all()
-    })();
-    if done.is_err() {
-        let _ = std::fs::remove_file(state_root.join(&tmp));
-    }
-    done
+    let lock = SelectionLock::try_lock(state_root, me, groups)?;
+    let expected = lock
+        .read(groups)
+        .map_err(|e| std::io::Error::other(format!("record: {e:?}")))?;
+    lock.replace(expected.as_ref(), r, groups)
 }
 
 #[cfg(test)]

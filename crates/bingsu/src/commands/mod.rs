@@ -17,11 +17,20 @@ mod clock;
 )]
 mod config_load;
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
+mod evidence;
+#[cfg(unix)]
 mod group_policy;
 #[cfg(unix)]
 mod init;
 #[cfg(unix)]
 mod messages;
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "N3/N5 call the publication engine")
+)]
+mod refresh;
 #[cfg(unix)]
 mod runtime_root;
 #[cfg(unix)]

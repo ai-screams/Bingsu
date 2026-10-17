@@ -23,6 +23,7 @@
 //! retain descriptors; shape-only or excluded candidates close immediately.
 //! Loader retains execution source, root, parent, link, listing and approval evidence until
 //! N2 calls verified immediately before publication.
+use super::evidence::{Encoder, EvidenceExport};
 use crate::commands::group_policy::SystemGroups;
 use crate::commands::runtime_root::{Chain, open_chain};
 use crate::commands::source_path::Resolved;
@@ -98,6 +99,7 @@ struct Planned {
 
 struct Listing {
     chain: Chain,
+    path_evidence: Vec<u8>,
     file: std::fs::File,
     names: Vec<OsString>,
 }
@@ -121,7 +123,7 @@ pub struct Loader {
     pending: Option<Checked>,
     /// Executable sources adopted by core, retained through publication.
     held: BTreeMap<FileKey, Checked>,
-    record_evidence: Option<RecordEvidence>,
+    pub(super) record_evidence: Option<RecordEvidence>,
     fds: usize,
     fd_cap: usize,
     listing: Option<Listing>,
@@ -137,6 +139,9 @@ pub struct Loader {
     pub renew: Option<Record>,
     /// False when the source set could not be listed to the end.
     complete: bool,
+    observed: BTreeMap<PathBuf, Vec<u8>>,
+    absent: BTreeMap<PathBuf, (PathBuf, Vec<u8>)>,
+    edges: Vec<(FileKey, ExtendsRef, PathBuf)>,
 }
 
 fn open_error(reason: impl Into<String>, trust: Trust) -> OpenError {
@@ -153,7 +158,7 @@ fn errno_text(e: &std::io::Error) -> String {
 
 impl Loader {
     pub fn new(places: Places) -> Self {
-        Self {
+        let mut loader = Self {
             record: None,
             held: BTreeMap::new(),
             plan: BTreeMap::new(),
@@ -168,7 +173,15 @@ impl Loader {
             remedies: Vec::new(),
             renew: None,
             complete: true,
+            observed: BTreeMap::new(),
+            absent: BTreeMap::new(),
+            edges: Vec::new(),
+        };
+        if loader.places.config_root.evidence.canonical != loader.places.config_root.path {
+            let missing = loader.places.config_root.path.clone();
+            loader.observe_absence(&missing);
         }
+        loader
     }
 
     /// The only production interface for an approved external config.
@@ -191,7 +204,34 @@ impl Loader {
         if !self.complete {
             return Err("incomplete session".into());
         }
+        for (path, before) in &self.observed {
+            let now = Resolved::open(path, self.places.me, groups).map_err(|e| e.to_string())?;
+            if now.evidence_export().map_err(|e| e.to_string())? != *before {
+                return Err("source observation changed".into());
+            }
+        }
+        for (path, (prefix, before)) in &self.absent {
+            if !std::fs::symlink_metadata(path)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err("absence changed".into());
+            }
+            let now =
+                Resolved::open_dir(prefix, self.places.me, groups).map_err(|e| e.to_string())?;
+            if now.evidence_export().map_err(|e| e.to_string())? != *before {
+                return Err("absence parent changed".into());
+            }
+        }
         if let Some(listing) = &self.listing {
+            let now = Resolved::open_dir(
+                &self.places.config_root.path.join("conf.d"),
+                self.places.me,
+                groups,
+            )
+            .map_err(|e| e.to_string())?;
+            if now.evidence_export().map_err(|e| e.to_string())? != listing.path_evidence {
+                return Err("conf.d path changed".into());
+            }
             listing.chain.revalidate().map_err(|e| e.to_string())?;
             if config_names(&listing.file).map_err(|e| e.to_string())? != listing.names {
                 return Err("conf.d names changed".into());
@@ -220,6 +260,111 @@ impl Loader {
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    fn observe_absence(&mut self, path: &Path) {
+        let mut prefix = path.parent();
+        while let Some(parent) = prefix {
+            match Resolved::open_dir(
+                parent,
+                self.places.me,
+                &mut SystemGroups::new(&self.places.user),
+            ) {
+                Ok(e) => {
+                    match e.evidence_export() {
+                        Ok(bytes) => {
+                            self.absent
+                                .insert(path.to_path_buf(), (parent.to_path_buf(), bytes));
+                        }
+                        Err(_) => self.complete = false,
+                    }
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => prefix = parent.parent(),
+                Err(_) => break,
+            }
+        }
+        self.complete = false;
+    }
+
+    /// Comparison data comes from this session, never from a second stat-only
+    /// summary. Shape-only observations are exported before their fds close.
+    pub fn evidence_export(
+        &self,
+        files: &[Found],
+        state: &Path,
+        version: [u32; 3],
+        selection: &[u8],
+    ) -> std::io::Result<EvidenceExport> {
+        let mut e = Encoder::new();
+        e.path(&self.places.config_root.path);
+        e.path(state);
+        e.path(&self.places.config_root.written);
+        e.path(&self.places.home);
+        e.byte(u8::from(self.places.config_root.shape_only));
+        for n in version {
+            e.num(n.into());
+        }
+        e.blob(selection);
+        let context_end = e.len();
+        e.catalog(files);
+        let catalog_end = e.len();
+        e.count(self.edges.len());
+        for (from, reference, path) in &self.edges {
+            e.num(from.dev);
+            e.num(from.ino);
+            e.blob(reference.text.as_bytes());
+            e.num(reference.span.start.into());
+            e.num(reference.span.end.into());
+            e.path(path);
+        }
+        let edges_end = e.len();
+        e.count(self.observed.len());
+        for (p, b) in &self.observed {
+            e.path(p);
+            e.blob(b);
+        }
+        let observations_end = e.len();
+        e.count(self.absent.len());
+        for (p, (prefix, b)) in &self.absent {
+            e.path(p);
+            e.path(prefix);
+            e.blob(b);
+        }
+        let absent_end = e.len();
+        e.blob(&self.places.config_root.evidence.evidence_export()?);
+        e.count(self.held.len());
+        for (key, c) in &self.held {
+            e.num(key.dev);
+            e.num(key.ino);
+            e.blob(&c.evidence.evidence_export()?);
+        }
+        let held_end = e.len();
+        e.byte(u8::from(self.listing.is_some()));
+        if let Some(l) = &self.listing {
+            e.chain(&l.chain);
+            e.blob(&l.path_evidence);
+            e.count(l.names.len());
+            for n in &l.names {
+                e.blob(n.as_bytes());
+            }
+        }
+        e.byte(u8::from(self.complete));
+        let listing_end = e.len();
+        e.byte(u8::from(self.record_evidence.is_some()));
+        if let Some(r) = &self.record_evidence {
+            r.export(&mut e);
+        }
+        Ok(EvidenceExport {
+            comparison: e.finish()?,
+            context_end,
+            catalog_end,
+            edges_end,
+            observations_end,
+            absent_end,
+            held_end,
+            listing_end,
+        })
     }
 
     /// Where a canonical path may give execution keys: under the config
@@ -286,11 +431,22 @@ impl Loader {
         let guess = self.unresolved_place(written);
         let mut groups = SystemGroups::new(&self.places.user);
         let evidence = Resolved::open(written, self.places.me, &mut groups).map_err(|e| {
-            if matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                self.observe_absence(written);
+            } else {
                 self.complete = false;
             }
             open_error(errno_text(&e), guess)
         })?;
+        match evidence.evidence_export() {
+            Ok(bytes) => {
+                if self.observed.get(written).is_some_and(|old| old != &bytes) {
+                    self.complete = false;
+                }
+                self.observed.entry(written.to_path_buf()).or_insert(bytes);
+            }
+            Err(_) => self.complete = false,
+        }
         let canonical = evidence.canonical.clone();
         let key = FileKey {
             dev: evidence.stamp.dev,
@@ -386,12 +542,23 @@ impl Loader {
             None => paths.push(root.join("config.toml")),
         }
         let listed = (|| -> std::io::Result<Listing> {
-            let canonical = std::fs::canonicalize(root.join("conf.d"))?;
+            let evidence = Resolved::open_dir(
+                &root.join("conf.d"),
+                self.places.me,
+                &mut SystemGroups::new(&self.places.user),
+            )?;
+            let path_evidence = evidence.evidence_export()?;
+            let canonical = evidence.canonical;
             let chain =
                 open_chain(&canonical).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             let file = sys::open_dir_at_nofollow(chain.last().as_fd(), std::ffi::OsStr::new("."))?;
             let names = config_names(&file)?;
-            Ok(Listing { chain, file, names })
+            Ok(Listing {
+                chain,
+                path_evidence,
+                file,
+                names,
+            })
         })();
         match listed {
             Ok(listing) => {
@@ -399,7 +566,9 @@ impl Loader {
                 self.fds += listing.chain.fds.len() + 1;
                 self.listing = Some(listing);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.observe_absence(&root.join("conf.d"));
+            }
             Err(_) => {
                 self.complete = false;
             }
@@ -413,6 +582,7 @@ impl Loader {
                 && std::fs::symlink_metadata(&p)
                     .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
             {
+                self.observe_absence(&p);
                 continue;
             }
             match self.check(&p) {
@@ -554,6 +724,7 @@ impl Resolver for Loader {
     fn open(&mut self, from: &Opened, r: &ExtendsRef) -> Result<Opened, OpenError> {
         let lexical = self.resolve(from, &r.text);
         let path = lexical.map_err(|why| open_error(why, Trust::ShapeOnly))?;
+        self.edges.push((from.key, r.clone(), path.clone()));
         let c = self.check(&path)?;
         self.read_candidate(c)
     }
