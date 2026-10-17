@@ -335,3 +335,11 @@ def test_trace_rejects_collector_exec_contract_mutation(old, new):
     assert mutated != original
     with pytest.raises(AssertionError, match="execve"):
         assert_prompt_trace_budget(mutated, EXE, ROOTS)
+
+
+# 이것을 실패시키는 것: open_flags가 O_LARGEFILE을 남기는 것.
+def test_walk_step_accepts_x86_64_largefile_flag():
+    import test_prompt_env_paths as t
+    line = '9 openat(AT_FDCWD</>, "/", O_RDONLY|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 3</>'
+    call = next(c for c in t.parse_trace(line) if c.name == "openat")
+    assert t.helper_walk_step(call, "/", ["/root/x/run-t/bingsu"])
