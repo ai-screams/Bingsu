@@ -147,6 +147,7 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: scripts/check-core-purity.sh
+      - run: python3 scripts/check_schema_corpus.py
       - run: python3 -B scripts/test_check_diag_codes.py
       - name: Diagnostic codes are append-only
         if: github.event_name == 'pull_request'

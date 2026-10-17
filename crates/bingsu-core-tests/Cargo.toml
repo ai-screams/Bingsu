@@ -16,3 +16,4 @@ bingsu-core = { path = "../bingsu-core" }
 
 [dev-dependencies]
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+serde_json = "1.0"

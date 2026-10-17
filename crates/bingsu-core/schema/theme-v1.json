@@ -1,0 +1,500 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "examples": [1],
+      "description": "Config format version.",
+      "x-bingsu-description-ko": "설정 형식 버전.",
+      "x-bingsu-level": "expert"
+    },
+    "requires": {
+      "type": "string",
+      "pattern": "^>=[0-9]{1,9}\\.[0-9]{1,9}(\\.[0-9]{1,9})?$(?![\\s\\S])",
+      "examples": [">=0.3"],
+      "description": "Minimum bingsu version.",
+      "x-bingsu-description-ko": "필요한 bingsu 최소 버전.",
+      "x-bingsu-level": "expert"
+    },
+    "colors": {
+      "type": "object",
+      "properties": {
+        "flavor": {
+          "enum": ["a"],
+          "default": "a",
+          "examples": ["a"],
+          "description": "Color flavor.",
+          "x-bingsu-description-ko": "색 flavor.",
+          "x-bingsu-level": "basic"
+        },
+        "knobs": {
+          "type": "object",
+          "properties": {
+            "accent_c": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 0.37,
+              "examples": [0.12],
+              "description": "Accent chroma.",
+              "x-bingsu-description-ko": "강조색 채도.",
+              "x-bingsu-level": "advanced"
+            },
+            "accent_l": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "examples": [0.76],
+              "description": "Accent lightness.",
+              "x-bingsu-description-ko": "강조색 밝기.",
+              "x-bingsu-level": "advanced"
+            },
+            "hue": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 360,
+              "examples": [280],
+              "description": "Accent hue in degrees.",
+              "x-bingsu-description-ko": "강조색 색상(도).",
+              "x-bingsu-level": "advanced"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Adjust the flavor.",
+          "x-bingsu-description-ko": "flavor 조절.",
+          "x-bingsu-level": "advanced"
+        },
+        "mode": {
+          "enum": ["auto", "dark", "light"],
+          "default": "auto",
+          "examples": ["auto"],
+          "description": "Dark or light background.",
+          "x-bingsu-description-ko": "어두운 배경 또는 밝은 배경.",
+          "x-bingsu-level": "basic"
+        },
+        "override": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "examples": ["oklch(0.78 0.12 60)"],
+            "description": "The new color.",
+            "x-bingsu-description-ko": "새 색.",
+            "x-bingsu-level": "expert"
+          },
+          "description": "Replace a palette color or token.",
+          "x-bingsu-description-ko": "팔레트 색이나 token을 바꿈.",
+          "x-bingsu-level": "expert"
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "examples": ["accent.blue"],
+            "description": "A palette color name.",
+            "x-bingsu-description-ko": "팔레트 색 이름.",
+            "x-bingsu-level": "expert"
+          },
+          "description": "Point a token at a palette color.",
+          "x-bingsu-description-ko": "token이 가리킬 팔레트 색.",
+          "x-bingsu-level": "expert"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Colors.",
+      "x-bingsu-description-ko": "색.",
+      "x-bingsu-level": "basic"
+    },
+    "icons": {
+      "enum": ["nerd", "light", "unicode", "ascii"],
+      "default": "unicode",
+      "examples": ["unicode"],
+      "description": "Icon set; falls back when a glyph does not fit.",
+      "x-bingsu-description-ko": "아이콘 집합. 글자가 맞지 않으면 다음 집합으로.",
+      "x-bingsu-level": "basic"
+    },
+    "layout": {
+      "type": "object",
+      "properties": {
+        "fill": {
+          "enum": ["space", "dot", "line"],
+          "default": "space",
+          "examples": ["space"],
+          "description": "What fills the gap between left and right.",
+          "x-bingsu-description-ko": "왼쪽과 오른쪽 사이를 채우는 것.",
+          "x-bingsu-level": "advanced"
+        },
+        "frame": {
+          "enum": ["none", "line"],
+          "default": "none",
+          "examples": ["none"],
+          "description": "Frame a two-line prompt with corner marks.",
+          "x-bingsu-description-ko": "두 줄 프롬프트를 모서리 표시로 묶음.",
+          "x-bingsu-level": "advanced"
+        },
+        "line1": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "examples": [true],
+              "description": "Draw this line.",
+              "x-bingsu-description-ko": "이 줄을 그림.",
+              "x-bingsu-level": "advanced"
+            },
+            "left": {
+              "type": "array",
+              "items": { "type": "string" },
+              "examples": [["dir", "git"]],
+              "description": "Segments on the left.",
+              "x-bingsu-description-ko": "왼쪽 세그먼트.",
+              "x-bingsu-level": "basic"
+            },
+            "right": {
+              "type": "array",
+              "items": { "type": "string" },
+              "examples": [["status", "duration"]],
+              "description": "Segments on the right.",
+              "x-bingsu-description-ko": "오른쪽 세그먼트.",
+              "x-bingsu-level": "basic"
+            }
+          },
+          "additionalProperties": false,
+          "description": "The first line.",
+          "x-bingsu-description-ko": "첫 줄.",
+          "x-bingsu-level": "basic"
+        },
+        "line2": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "examples": [true],
+              "description": "Draw this line.",
+              "x-bingsu-description-ko": "이 줄을 그림.",
+              "x-bingsu-level": "advanced"
+            },
+            "left": {
+              "type": "array",
+              "items": { "type": "string" },
+              "examples": [["char"]],
+              "description": "Segments on the left.",
+              "x-bingsu-description-ko": "왼쪽 세그먼트.",
+              "x-bingsu-level": "basic"
+            },
+            "right": {
+              "type": "array",
+              "items": { "type": "string" },
+              "examples": [[]],
+              "description": "Segments on the right.",
+              "x-bingsu-description-ko": "오른쪽 세그먼트.",
+              "x-bingsu-level": "basic"
+            }
+          },
+          "additionalProperties": false,
+          "description": "The second line.",
+          "x-bingsu-description-ko": "둘째 줄.",
+          "x-bingsu-level": "basic"
+        },
+        "transient": {
+          "enum": ["none", "char"],
+          "examples": ["char"],
+          "description": "Shorten the prompts above the current one (M4 and M5).",
+          "x-bingsu-description-ko": "지나간 프롬프트를 짧게 그림(M4·M5).",
+          "x-bingsu-level": "advanced",
+          "x-bingsu-planned": "M4"
+        },
+        "use_last_column": {
+          "type": "boolean",
+          "default": false,
+          "examples": [false],
+          "description": "Draw in the last column.",
+          "x-bingsu-description-ko": "마지막 칸까지 그림.",
+          "x-bingsu-level": "expert"
+        },
+        "when": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "line1": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "examples": [false],
+                    "description": "Draw this line.",
+                    "x-bingsu-description-ko": "이 줄을 그림.",
+                    "x-bingsu-level": "advanced"
+                  },
+                  "left": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "examples": [["dir"]],
+                    "description": "Segments on the left.",
+                    "x-bingsu-description-ko": "왼쪽 세그먼트.",
+                    "x-bingsu-level": "advanced"
+                  },
+                  "right": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "examples": [[]],
+                    "description": "Segments on the right.",
+                    "x-bingsu-description-ko": "오른쪽 세그먼트.",
+                    "x-bingsu-level": "advanced"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "The first line in this band.",
+                "x-bingsu-description-ko": "이 구간의 첫 줄.",
+                "x-bingsu-level": "advanced"
+              },
+              "line2": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "examples": [true],
+                    "description": "Draw this line.",
+                    "x-bingsu-description-ko": "이 줄을 그림.",
+                    "x-bingsu-level": "advanced"
+                  },
+                  "left": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "examples": [["duration", "char"]],
+                    "description": "Segments on the left.",
+                    "x-bingsu-description-ko": "왼쪽 세그먼트.",
+                    "x-bingsu-level": "advanced"
+                  },
+                  "right": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "examples": [[]],
+                    "description": "Segments on the right.",
+                    "x-bingsu-description-ko": "오른쪽 세그먼트.",
+                    "x-bingsu-level": "advanced"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "The second line in this band.",
+                "x-bingsu-description-ko": "이 구간의 둘째 줄.",
+                "x-bingsu-level": "advanced"
+              },
+              "max_cols": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "examples": [59],
+                "description": "Widest width of the band, inclusive.",
+                "x-bingsu-description-ko": "구간의 가장 넓은 폭(포함).",
+                "x-bingsu-level": "advanced"
+              },
+              "min_cols": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "examples": [120],
+                "description": "Narrowest width of the band, inclusive.",
+                "x-bingsu-description-ko": "구간의 가장 좁은 폭(포함).",
+                "x-bingsu-level": "advanced"
+              },
+              "order": {
+                "type": "integer",
+                "minimum": -1000,
+                "maximum": 1000,
+                "examples": [1],
+                "description": "Which overlapping band wins.",
+                "x-bingsu-description-ko": "겹치는 구간 중 무엇이 이기나.",
+                "x-bingsu-level": "expert"
+              },
+              "style": {
+                "type": "object",
+                "properties": {
+                  "preset": {
+                    "enum": ["lean", "triangle"],
+                    "examples": ["lean"],
+                    "description": "Style preset in this band.",
+                    "x-bingsu-description-ko": "이 구간의 스타일 프리셋.",
+                    "x-bingsu-level": "advanced"
+                  },
+                  "template": {
+                    "type": "string",
+                    "examples": ["{dir} {char}"],
+                    "description": "Template text in this band; replaces preset and options.",
+                    "x-bingsu-description-ko": "이 구간의 템플릿. 프리셋과 옵션을 대신함.",
+                    "x-bingsu-level": "expert"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Style in this band.",
+                "x-bingsu-description-ko": "이 구간의 스타일.",
+                "x-bingsu-level": "advanced"
+              }
+            },
+            "additionalProperties": false,
+            "description": "One band.",
+            "x-bingsu-description-ko": "구간 하나.",
+            "x-bingsu-level": "advanced"
+          },
+          "description": "Layouts for width bands.",
+          "x-bingsu-description-ko": "폭 구간별 레이아웃.",
+          "x-bingsu-level": "advanced"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Prompt lines.",
+      "x-bingsu-description-ko": "프롬프트 줄.",
+      "x-bingsu-level": "basic"
+    },
+    "segment": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "examples": ["prod"],
+              "description": "The text to show.",
+              "x-bingsu-description-ko": "보일 글.",
+              "x-bingsu-level": "basic"
+            },
+            "shorten": {
+              "type": "array",
+              "items": { "enum": ["none", "repo", "abbrev", "depth", "unique"] },
+              "default": ["repo", "abbrev", "depth"],
+              "examples": [["repo", "abbrev", "depth"]],
+              "description": "Ways to shorten a long path, in order.",
+              "x-bingsu-description-ko": "긴 경로를 줄이는 방법, 순서대로.",
+              "x-bingsu-level": "advanced"
+            },
+            "when": {
+              "enum": ["needed", "always"],
+              "default": "needed",
+              "examples": ["needed"],
+              "description": "Shorten only when the line overflows, or always.",
+              "x-bingsu-description-ko": "줄이 넘칠 때만 줄일지, 항상 줄일지.",
+              "x-bingsu-level": "advanced"
+            }
+          },
+          "additionalProperties": false,
+          "description": "The folder segment.",
+          "x-bingsu-description-ko": "폴더 세그먼트.",
+          "x-bingsu-level": "basic"
+        },
+        "duration": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "examples": ["prod"],
+              "description": "The text to show.",
+              "x-bingsu-description-ko": "보일 글.",
+              "x-bingsu-level": "basic"
+            },
+            "min": {
+              "type": "string",
+              "pattern": "^((0|[1-9][0-9]{0,5}|[1-2][0-9]{6}|3[0-5][0-9]{5}|3600000)ms|(0|[1-9][0-9]{0,2}|[1-2][0-9]{3}|3[0-5][0-9]{2}|3600)s)$(?![\\s\\S])",
+              "default": "2s",
+              "examples": ["2s"],
+              "description": "Show from this duration.",
+              "x-bingsu-description-ko": "이 시간부터 보임.",
+              "x-bingsu-level": "basic"
+            }
+          },
+          "additionalProperties": false,
+          "description": "The duration segment.",
+          "x-bingsu-description-ko": "실행 시간 세그먼트.",
+          "x-bingsu-level": "basic"
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "examples": ["prod"],
+            "description": "The text to show.",
+            "x-bingsu-description-ko": "보일 글.",
+            "x-bingsu-level": "basic"
+          }
+        },
+        "additionalProperties": false,
+        "description": "One segment.",
+        "x-bingsu-description-ko": "세그먼트 하나.",
+        "x-bingsu-level": "basic"
+      },
+      "description": "Segment settings.",
+      "x-bingsu-description-ko": "세그먼트 설정.",
+      "x-bingsu-level": "basic"
+    },
+    "style": {
+      "type": "object",
+      "properties": {
+        "preset": {
+          "enum": ["lean", "triangle"],
+          "default": "triangle",
+          "examples": ["triangle"],
+          "description": "Style preset.",
+          "x-bingsu-description-ko": "스타일 프리셋.",
+          "x-bingsu-level": "basic"
+        },
+        "separator": {
+          "enum": ["triangle", "round", "slant", "flat"],
+          "examples": ["round"],
+          "description": "Separator shape between blocks.",
+          "x-bingsu-description-ko": "블록 사이 구분자 모양.",
+          "x-bingsu-level": "advanced"
+        },
+        "template": {
+          "type": "string",
+          "examples": ["{dir} {git}{@nl}{char}"],
+          "description": "Template text; replaces preset and options.",
+          "x-bingsu-description-ko": "템플릿. 프리셋과 옵션을 대신함.",
+          "x-bingsu-level": "expert"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Style.",
+      "x-bingsu-description-ko": "스타일.",
+      "x-bingsu-level": "basic"
+    },
+    "width": {
+      "type": "object",
+      "properties": {
+        "ambiguous": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "default": 1,
+          "examples": [1],
+          "description": "Cells of East Asian Ambiguous characters (2 in most CJK setups).",
+          "x-bingsu-description-ko": "East Asian Ambiguous 글자의 칸 수(CJK 환경은 대개 2).",
+          "x-bingsu-level": "advanced"
+        },
+        "emoji": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "default": 2,
+          "examples": [2],
+          "description": "Cells of emoji.",
+          "x-bingsu-description-ko": "이모지의 칸 수.",
+          "x-bingsu-level": "advanced"
+        }
+      },
+      "additionalProperties": false,
+      "description": "How wide characters are.",
+      "x-bingsu-description-ko": "글자 폭.",
+      "x-bingsu-level": "advanced"
+    }
+  },
+  "additionalProperties": false,
+  "description": "bingsu theme",
+  "x-bingsu-description-ko": "bingsu 테마",
+  "x-bingsu-level": "basic"
+}
