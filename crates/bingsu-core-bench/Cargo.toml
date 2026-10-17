@@ -85,3 +85,8 @@ test = false
 name = "config"
 harness = false
 test = false
+
+[[bench]]
+name = "snapshot"
+harness = false
+test = false

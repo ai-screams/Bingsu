@@ -97,9 +97,9 @@ pub enum Node {
     GroupEnd,
 }
 
-/// One compiled template line. The fields are private: `compile` is the
-/// only way to make a non-empty line, so every `Node::Text` passed the
-/// template checks (no control or format character).
+/// One compiled template line. Only the source compiler and checked snapshot
+/// decoder construct non-empty lines. Every `Node::Text` passes the template
+/// checks (no control or format character).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CompiledLine {
     nodes: Vec<Node>,
@@ -110,6 +110,102 @@ pub struct CompiledLine {
 }
 
 impl CompiledLine {
+    /// N1 checked construction. No parser or compiler is run on the prompt path.
+    pub(crate) fn from_snapshot(
+        nodes: Vec<Node>,
+        origin: Vec<Span>,
+        fill: Option<usize>,
+    ) -> Option<Self> {
+        if nodes.len() > super::syntax::MAX_TEMPLATE_BYTES
+            || nodes.len() != origin.len()
+            || origin
+                .iter()
+                .any(|s| s.start > s.end || s.end as usize > super::syntax::MAX_TEMPLATE_BYTES)
+        {
+            return None;
+        }
+        let mut stack = [(false, 0); super::syntax::MAX_DEPTH];
+        let mut depth = 0usize;
+        let mut actual_fill = None;
+        let mut text_bytes = 0usize;
+        for (i, n) in nodes.iter().enumerate() {
+            match n {
+                Node::Text(s) => {
+                    text_bytes = text_bytes.checked_add(s.len())?;
+                    if text_bytes > super::syntax::MAX_TEMPLATE_BYTES
+                        || s.chars().any(crate::sanitize::is_removed)
+                    {
+                        return None;
+                    }
+                }
+                Node::Segment { seg, .. } if usize::from(*seg) >= crate::field::BUILTIN.len() => {
+                    return None;
+                }
+                Node::Field { seg, field } => {
+                    let decl = crate::field::BUILTIN.get(usize::from(*seg))?;
+                    if usize::from(*field) >= decl.fields.len() {
+                        return None;
+                    }
+                }
+                Node::Icon(x) if usize::from(*x) >= crate::icons::ICONS.len() => return None,
+                Node::Style(spec) => {
+                    if (spec.attrs == 0 && spec.fg.is_none() && spec.bg.is_none())
+                        || spec.attrs & !(BOLD | DIM | ITALIC | UNDERLINE) != 0
+                        || [spec.fg, spec.bg]
+                            .iter()
+                            .flatten()
+                            .any(|v| usize::from(*v) >= crate::color::palette::TOKENS.len())
+                    {
+                        return None;
+                    }
+                    *stack.get_mut(depth)? = (false, 0);
+                    depth += 1;
+                }
+                Node::StyleEnd => {
+                    depth = depth.checked_sub(1)?;
+                    if stack[depth].0 {
+                        return None;
+                    }
+                }
+                Node::Group { len } => {
+                    let end = i.checked_add(usize::try_from(*len).ok()?)?;
+                    if !matches!(nodes.get(end), Some(Node::GroupEnd)) {
+                        return None;
+                    }
+                    if !nodes[i + 1..end]
+                        .iter()
+                        .any(|n| matches!(n, Node::Segment { .. } | Node::Field { .. }))
+                    {
+                        return None;
+                    }
+                    *stack.get_mut(depth)? = (true, end);
+                    depth += 1;
+                }
+                Node::GroupEnd => {
+                    depth = depth.checked_sub(1)?;
+                    if stack[depth] != (true, i) {
+                        return None;
+                    }
+                }
+                Node::Fill(_) => {
+                    if depth != 0 || actual_fill.is_some() {
+                        return None;
+                    }
+                    actual_fill = Some(i);
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 || actual_fill != fill {
+            return None;
+        }
+        Some(Self {
+            nodes,
+            origin,
+            fill,
+        })
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
