@@ -675,6 +675,67 @@ pub fn open_data_at_nofollow(
     open_at(Some(dir), name, libc::O_RDONLY | libc::O_NONBLOCK)
 }
 
+/// Opens the file `name` inside `dir` for reading without following a
+/// symlink at that name. `O_NONBLOCK` keeps a FIFO put in a file's place
+/// from blocking the open; the caller checks the type with `fstat`.
+pub fn open_file_at_nofollow(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    open_at(
+        Some(dir),
+        name,
+        libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY,
+    )
+}
+
+/// Creates `name` inside `dir` (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode
+/// `mode`) for writing.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
+)]
+pub fn create_file_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+    mode: u32,
+) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())?;
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is open and `c` is NUL-terminated; the mode is passed
+    // as the variadic third argument as open(2) expects.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), flags, mode as libc::c_uint) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a fresh descriptor that nothing else owns.
+    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
+/// `renameat(dir, from, dir, to)`: replaces `to` atomically.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "config_load and trust_record (callers in Part N)")
+)]
+pub fn rename_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let a = std::ffi::CString::new(from.as_bytes())?;
+    let b = std::ffi::CString::new(to.as_bytes())?;
+    // SAFETY: `dir` is open and both names are NUL-terminated.
+    if unsafe { libc::renameat(dir.as_raw_fd(), a.as_ptr(), dir.as_raw_fd(), b.as_ptr()) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Search-only access for a walk descriptor: it can serve as the folder
 /// that `openat` and `mkdirat` resolve names in, and needs only search (x)
 /// permission, never read (r). An ancestor like `/home` at 0711 is
@@ -820,6 +881,21 @@ pub struct Stamp {
     pub mtime: (i64, i64),
 }
 
+pub fn file_stamp(file: &std::fs::File) -> std::io::Result<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let m = file.metadata()?;
+    Ok(Stamp {
+        dev: m.dev(),
+        ino: m.ino(),
+        uid: m.uid(),
+        gid: m.gid(),
+        mode: m.mode(),
+        size: m.len(),
+        ctime: (m.ctime(), m.ctime_nsec()),
+        mtime: (m.mtime(), m.mtime_nsec()),
+    })
+}
+
 /// Inspect the name itself, relative to a held parent, never its target.
 #[allow(
     clippy::unnecessary_cast,
@@ -867,4 +943,90 @@ pub fn make_test_fifo(path: &std::path::Path) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+pub fn read_link_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())?;
+    let mut out = vec![0u8; 4097];
+    // SAFETY: dir is open; c and the writable buffer have the stated lengths.
+    let n = unsafe {
+        libc::readlinkat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            out.as_mut_ptr().cast(),
+            out.len(),
+        )
+    };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if n as usize == out.len() {
+        return Err(std::io::Error::other("link too long"));
+    }
+    out.truncate(n as usize);
+    Ok(PathBuf::from(OsString::from_vec(out)))
+}
+
+/// Enumerate through an already held readable directory fd (N2 evidence).
+pub fn directory_names(dir: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Vec<OsString>> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: duplicating a borrowed open fd does not transfer its ownership.
+    let copy = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fdopendir takes ownership of copy on success only.
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: fdopendir failed and copy is still ours.
+        unsafe {
+            libc::close(copy);
+        }
+        return Err(err);
+    }
+    // SAFETY: stream is a live directory stream; reset the shared offset.
+    unsafe {
+        libc::rewinddir(stream);
+    }
+    let mut names = Vec::new();
+    let result = loop {
+        #[cfg(target_os = "macos")]
+        // SAFETY: libc returns this thread's errno slot.
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        // SAFETY: libc returns this thread's errno slot.
+        let errno = unsafe { libc::__errno_location() };
+        // SAFETY: this thread owns errno; stream is live.
+        unsafe {
+            *errno = 0;
+        }
+        // SAFETY: stream remains open until the loop ends.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            // SAFETY: errno is the thread-local slot obtained above.
+            break if unsafe { *errno } == 0 {
+                Ok(names)
+            } else {
+                Err(std::io::Error::last_os_error())
+            };
+        }
+        // SAFETY: readdir's name is NUL-terminated and valid until next call.
+        let name_ptr = unsafe { (*entry).d_name.as_ptr() };
+        // SAFETY: name_ptr is readdir's NUL-terminated name.
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(OsString::from_vec(name.to_vec()));
+        }
+    };
+    // SAFETY: closes the directory stream and its owned duplicated fd once.
+    unsafe {
+        libc::closedir(stream);
+    }
+    result
 }

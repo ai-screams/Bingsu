@@ -4,7 +4,8 @@
 use crate::commands::messages::{MsgId, en};
 use bingsu_core::record::RecordVersion;
 use bingsu_core::root_arg::{
-    CONFIG_ROOT_PREFIX, HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
+    CONFIG_ROOT_PREFIX, CONFIG_ROOT_SHAPE_ONLY, CONFIG_ROOT_WRITTEN_PREFIX, HOME_PREFIX,
+    LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
 };
 use bingsu_core::shell_word::{Shell, encode_word};
 use bingsu_core::status::Status;
@@ -13,8 +14,10 @@ pub struct ScriptInputs<'a> {
     pub shell: Shell,
     pub exe: &'a [u8],
     pub runtime_root: Option<(u64, u64, &'a [u8])>,
-    /// `None`: the path could not be confirmed; the word is left out.
-    pub config_root: Option<&'a [u8]>,
+    /// `(canonical, written, shape_only)`. `None`: the path could not be
+    /// confirmed; the words are left out. `shape_only` adds
+    /// `--config-root-shape-only` after them.
+    pub config_root: Option<(&'a [u8], &'a [u8], bool)>,
     pub state_root: Option<&'a [u8]>,
     pub log_root: Option<&'a [u8]>,
     pub session_hex: &'a [u8; 32],
@@ -60,8 +63,14 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
             }
         }
         b"CONFIG_ROOT" => {
-            if let Some(v) = inp.config_root {
-                prefixed(sh, CONFIG_ROOT_PREFIX, v, out);
+            if let Some((canonical, written, shape_only)) = inp.config_root {
+                prefixed(sh, CONFIG_ROOT_PREFIX, canonical, out);
+                out.push(b' ');
+                prefixed(sh, CONFIG_ROOT_WRITTEN_PREFIX, written, out);
+                if shape_only {
+                    out.push(b' ');
+                    encode_word(sh, CONFIG_ROOT_SHAPE_ONLY, out);
+                }
             }
         }
         b"STATE_ROOT" => {
@@ -142,13 +151,21 @@ mod tests {
     use bingsu_core::layout::PATH_BYTES_MAX;
 
     fn script(shell: Shell, home: &[u8]) -> Vec<u8> {
+        script_with(shell, home, Some((b"/c", b"/original/c", false)))
+    }
+
+    fn script_with(
+        shell: Shell,
+        home: &[u8],
+        config_root: Option<(&[u8], &[u8], bool)>,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         render(
             &ScriptInputs {
                 shell,
                 exe: b"/bin/bingsu",
                 runtime_root: Some((1, 2, b"/r")),
-                config_root: Some(b"/c"),
+                config_root,
                 state_root: Some(b"/s"),
                 log_root: Some(b"/l"),
                 session_hex: &[b'0'; 32],
@@ -174,6 +191,48 @@ mod tests {
             prefixed(shell, HOME_PREFIX, home, &mut want);
             assert_eq!(count(&s, &want), 1, "{shell:?}");
             assert_eq!(count(&s, b"@HOME@"), 0, "{shell:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 셸 인용된 작성 경로 또는 정규 경로를 전달하지 않는 것.
+    #[test]
+    fn config_root_handoff_keeps_both_paths() {
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            let s = script(shell, b"/home");
+            for (prefix, path) in [
+                (CONFIG_ROOT_PREFIX, &b"/c"[..]),
+                (CONFIG_ROOT_WRITTEN_PREFIX, &b"/original/c"[..]),
+            ] {
+                let mut word = Vec::new();
+                prefixed(shell, prefix, path, &mut word);
+                assert_eq!(count(&s, &word), 1, "{shell:?}");
+            }
+        }
+    }
+
+    // 모양 전용 뿌리는 두 뿌리 단어와 표식 한 단어를 함께 넘기고, 보통 뿌리·버린 뿌리에는 표식이 없다.
+    // 이것을 실패시키는 것: 표식을 빼는 것, 보통 뿌리에도 붙이는 것, 뿌리 없이 표식만 남기는 것.
+    #[test]
+    fn shape_only_root_adds_one_mark_word() {
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            let mut mark = Vec::new();
+            encode_word(shell, CONFIG_ROOT_SHAPE_ONLY, &mut mark);
+            let marked = script_with(shell, b"/h", Some((b"/c", b"/original/c", true)));
+            assert_eq!(count(&marked, &mark), 1, "{shell:?}");
+            let mut root = Vec::new();
+            prefixed(shell, CONFIG_ROOT_PREFIX, b"/c", &mut root);
+            assert_eq!(count(&marked, &root), 1, "{shell:?}");
+            assert_eq!(count(&script(shell, b"/h"), &mark), 0, "{shell:?}");
+            assert_eq!(
+                count(&script_with(shell, b"/h", None), &mark),
+                0,
+                "{shell:?}"
+            );
+            assert_eq!(
+                count(&script_with(shell, b"/h", None), &root),
+                0,
+                "{shell:?}"
+            );
         }
     }
 

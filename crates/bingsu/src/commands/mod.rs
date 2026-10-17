@@ -11,6 +11,12 @@ use std::process::ExitCode;
 )]
 mod clock;
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "S3b/N2 config session integration")
+)]
+mod config_load;
+#[cfg(unix)]
 mod group_policy;
 #[cfg(unix)]
 mod init;
@@ -22,8 +28,17 @@ mod runtime_root;
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 mod snapshot_store;
 #[cfg(unix)]
+#[cfg_attr(not(test), expect(dead_code, reason = "N2 source session integration"))]
+mod source_path;
+#[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "N2/N5 approval record integration")
+)]
+mod trust_record;
 
 pub fn run(a: NonPromptArgs) -> ExitCode {
     #[cfg(not(unix))]
