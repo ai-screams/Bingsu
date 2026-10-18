@@ -10,7 +10,6 @@ import pathlib
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 
 import pytest
@@ -19,19 +18,42 @@ from conftest import ROOT, real_bin
 ARGV = ["prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
 
 
+def is_static(path):
+    """True when the executable has no dynamic loader (static musl).
+    Reads the program headers directly, so no `file` tool is needed.
+    이것을 실패시키는 것: PT_INTERP(3)가 있는 동적 바이너리를 정적으로 보는 것."""
+    data = pathlib.Path(path).read_bytes()
+    if data[:4] != b"\x7fELF":
+        return False  # Mach-O: always dynamic on macOS
+    is64 = data[4] == 2
+    little = data[5] == 1
+    order = "<" if little else ">"
+    import struct
+    if is64:
+        phoff, = struct.unpack_from(order + "Q", data, 0x20)
+        phentsize, phnum = struct.unpack_from(order + "HH", data, 0x36)
+    else:
+        phoff, = struct.unpack_from(order + "I", data, 0x1C)
+        phentsize, phnum = struct.unpack_from(order + "HH", data, 0x2A)
+    for i in range(phnum):
+        p_type, = struct.unpack_from(order + "I", data, phoff + i * phentsize)
+        if p_type == 3:  # PT_INTERP
+            return False
+    return True
+
+
 @pytest.fixture(scope="module")
-def interposer():
+def interposer(tmp_path_factory):
     # Static musl cannot load a fault injector. The non-injected tests below
     # still exercise the real blocked writer on that target.
-    description = subprocess.check_output(["file", str(real_bin())], text=True)
-    if "statically linked" in description or "static-pie linked" in description:
+    if is_static(real_bin()):
         pytest.skip("static musl: libc interposition unavailable; native blocked-pipe tests still run")
-    with tempfile.TemporaryDirectory(dir=ROOT / "target", prefix="n6-") as tmp:
-        lib = pathlib.Path(tmp) / "deadline.dylib"
-        flags = ["-dynamiclib"] if sys.platform == "darwin" else ["-shared", "-fPIC", "-ldl"]
-        subprocess.run(["cc", "-O2", "-Wall", "-Werror", *flags,
-                        str(ROOT / "tests/shell/fixtures/deadline_interpose.c"), "-o", str(lib)], check=True)
-        yield lib
+    tmp = tmp_path_factory.mktemp("n6-interposer")
+    lib = tmp / "deadline.dylib"
+    flags = ["-dynamiclib"] if sys.platform == "darwin" else ["-shared", "-fPIC", "-ldl"]
+    subprocess.run(["cc", "-O2", "-Wall", "-Werror", *flags,
+                    str(ROOT / "tests/shell/fixtures/deadline_interpose.c"), "-o", str(lib)], check=True)
+    yield lib
 
 
 def injected(lib, mode):
