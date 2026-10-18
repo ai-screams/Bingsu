@@ -45,16 +45,17 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PREFETCH = ROOT / "crates/bingsu/src/prompt_read.rs"
+TIMING = ROOT / "crates/bingsu/src/prompt_io.rs"
 BOOTSTRAP = ROOT / "crates/bingsu/src/prompt_spawn.rs"
 ADAPTER = ROOT / "crates/bingsu/src/prompt.rs"
 SYSCALLS = ROOT / "crates/bingsu/prompt-syscalls.tsv"
 SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 TCB_SHA256 = {
-    "crates/bingsu/src/prompt_read.rs": "6291261f653f861f52b9e553531b13cd5dbdc6324aa9fb8ccd9c013ee9577aac",
-    "crates/bingsu/src/prompt_spawn.rs": "969ea3ea75c9de2f6201c8fc39240d53b326bf54889ac0e347c62f256278cd52",
-    "crates/bingsu/src/prompt_io.rs": "d66401c323de6448ef5ec28f9226b71d808d26229a2e2145429a41ae09e5bcaf",
-    "crates/bingsu/src/prompt.rs": "2ee68d22e5e4996d09e956823748a4bc7046d811d29bb264632640601109c3ff",
+    "crates/bingsu/src/prompt_read.rs": "7f5ca1be249ffb941e61dad40ae76fe9a3436b6fe8b71dfd05b8518ca3ad1731",
+    "crates/bingsu/src/prompt_spawn.rs": "e6c0b5652d0522d8d05d6d26ef2f574d0e0fcfe4234e57e4441b391e26e632f1",
+    "crates/bingsu/src/prompt_io.rs": "268c34257aa16c18a5e0e7b520dfe7e7a4b086ca10e633c21c23f8bd63d71e5c",
+    "crates/bingsu/src/prompt.rs": "bde58f41b9cc11e03139e62c0fc7aad2853d4ad5f37f1dc4cbc17f4d01df7ebe",
     "crates/bingsu/src/main.rs": "2f4d0c5f7e49ef71721c499fb9b3f757bb07bd0d402116a9fc97f2262c08b3c1",
     "crates/bingsu/src/sandbox.rs": "e4600bc44f42d1b710a150fc4b08ad1e74614d94e59b159beb3a4d1743f5f5e2",
     "crates/bingsu/Cargo.toml": "15cbd7be07d65f0c9f246353e149889863917eda45a1a08d447613841d5d6719",
@@ -70,7 +71,7 @@ def main():
     bad = []
     # All prompt entry TCB files are scanned by --binary below and must forbid the
     # unchanged clippy forbidden-call rules. Their exact bytes are pinned.
-    for source in (ADAPTER, BOOTSTRAP, PREFETCH):
+    for source in (ADAPTER, BOOTSTRAP, PREFETCH, TIMING):
         text = source.read_text()
         start = text.find("#![")
         first = None if start < 0 else "".join(text[start:text.index("]", start) + 1].split())

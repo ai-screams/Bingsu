@@ -6,6 +6,8 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
+use crate::prompt_io::check_deadline;
+use bingsu_core::front::output::Deadline;
 use bingsu_core::front::staged::{self, Effect, FdFacts, Observation, Operation, Slot, Step};
 use bingsu_core::fs_trust::{self, AclFacts, Facts};
 use bingsu_core::snapshot::{Clock, ClockError};
@@ -37,6 +39,7 @@ struct Held {
     magic: u64,
 }
 struct Prepared {
+    deadline: Option<Deadline>,
     plan: staged::ReadPlan,
     step: Step,
     slots: [Option<Held>; 3],
@@ -47,18 +50,30 @@ struct Prepared {
 
 /// The closure owns every descriptor, including clock evidence. Dropping it on
 /// a refused filter closes them; unwinding has the same ownership discipline.
-pub fn prepare(raw: &[&[u8]]) -> impl FnOnce() -> Vec<u8> + use<> {
-    let p = prepare_state(raw);
+pub fn prepare(raw: &[&[u8]], deadline: Deadline) -> impl FnOnce() -> Vec<u8> + use<> {
+    let p = prepare_state(raw, Some(deadline));
     move || p.respond()
 }
 
-fn prepare_state(raw: &[&[u8]]) -> Prepared {
-    prepare_with_clock(raw, ClockPins::prepare)
+fn prepare_state(raw: &[&[u8]], deadline: Option<Deadline>) -> Prepared {
+    prepare_with_clock(raw, ClockPins::prepare, deadline)
 }
 
-fn prepare_with_clock(raw: &[&[u8]], clock: fn() -> ClockPins) -> Prepared {
+fn prepare_with_clock(
+    raw: &[&[u8]],
+    clock: fn(Option<Deadline>) -> ClockPins,
+    deadline: Option<Deadline>,
+) -> Prepared {
+    check_deadline(deadline);
+    let plan = staged::prepare(raw);
+    let plan = if let Some(d) = deadline {
+        plan.with_deadline(d)
+    } else {
+        plan
+    };
     let mut p = Prepared {
-        plan: staged::prepare(raw),
+        deadline,
+        plan,
         step: Step::Done(staged::Observed::default()),
         slots: [None, None, None],
         files: [None, None, None],
@@ -67,6 +82,7 @@ fn prepare_with_clock(raw: &[&[u8]], clock: fn() -> ClockPins) -> Prepared {
     };
     let mut previous = None;
     loop {
+        check_deadline(deadline);
         let step = staged::next(&mut p.plan, previous.take());
         let Step::Read(effect) = step else {
             p.step = step;
@@ -77,8 +93,10 @@ fn prepare_with_clock(raw: &[&[u8]], clock: fn() -> ClockPins) -> Prepared {
                 for (i, name) in sources.names().into_iter().enumerate() {
                     p.files[i] = CString::new(name)
                         .ok()
-                        .and_then(|name| open(parent.fd.as_raw_fd(), &name, DATA_FLAGS).ok())
-                        .and_then(|fd| held(fd).ok())
+                        .and_then(|name| {
+                            open(parent.fd.as_raw_fd(), &name, DATA_FLAGS, deadline).ok()
+                        })
+                        .and_then(|fd| held(fd, deadline).ok())
                         .filter(|h| sources.accepts(i, h.facts));
                 }
             }
@@ -92,12 +110,13 @@ fn prepare_with_clock(raw: &[&[u8]], clock: fn() -> ClockPins) -> Prepared {
 }
 
 impl Prepared {
-    fn before(&mut self, effect: &Effect, clock: fn() -> ClockPins) -> Observation {
+    fn before(&mut self, effect: &Effect, clock: fn(Option<Deadline>) -> ClockPins) -> Observation {
+        check_deadline(self.deadline);
         match effect.operation() {
             // SAFETY: getuid has no preconditions and cannot fail.
             Operation::Uid => Observation::Uid(unsafe { libc::getuid() }),
             Operation::Clock => {
-                self.clock = clock();
+                self.clock = clock(self.deadline);
                 Observation::Clock(self.clock.observe().ok())
             }
             Operation::OpenDirectory { parent, name, into } => {
@@ -110,8 +129,8 @@ impl Prepared {
                 };
                 let h = CString::new(name.as_slice())
                     .ok()
-                    .and_then(|name| open(base, &name, DIRECTORY_FLAGS).ok())
-                    .and_then(|fd| held(fd).ok());
+                    .and_then(|name| open(base, &name, DIRECTORY_FLAGS, self.deadline).ok())
+                    .and_then(|fd| held(fd, self.deadline).ok());
                 if self.slots[into.index()].is_some() {
                     return Observation::Failed;
                 }
@@ -142,6 +161,7 @@ impl Prepared {
         }
     }
     fn after(&mut self, effect: &Effect) -> Observation {
+        check_deadline(self.deadline);
         match effect.operation() {
             Operation::OpenFile { into, .. } => {
                 if self.slots[into.index()].is_some() {
@@ -164,6 +184,7 @@ impl Prepared {
                 };
                 // The continuation alone determines sequential offsets and lengths.
                 let mut bytes = vec![0; *len];
+                check_deadline(self.deadline);
                 // SAFETY: held descriptor and writable initialized buffer of len bytes.
                 let n =
                     unsafe { libc::read(h.fd.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
@@ -183,6 +204,7 @@ impl Prepared {
     }
     fn respond(mut self) -> Vec<u8> {
         loop {
+            check_deadline(self.deadline);
             match self.step {
                 Step::Done(observed) => {
                     return staged::finish(self.plan, observed).record;
@@ -210,7 +232,13 @@ const DIRECTORY_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW
 const DIRECTORY_FLAGS: i32 =
     libc::O_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
-fn open(base: i32, name: &CStr, flags: i32) -> std::io::Result<PromptFd> {
+fn open(
+    base: i32,
+    name: &CStr,
+    flags: i32,
+    deadline: Option<Deadline>,
+) -> std::io::Result<PromptFd> {
+    check_deadline(deadline);
     // SAFETY: base is held or AT_FDCWD for '/', name is terminated, no O_CREAT.
     let fd = unsafe { libc::openat(base, name.as_ptr(), flags) };
     if fd < 0 {
@@ -225,15 +253,17 @@ fn open(base: i32, name: &CStr, flags: i32) -> std::io::Result<PromptFd> {
     clippy::useless_conversion,
     reason = "stat fields differ across Linux libc and macOS"
 )]
-fn held(fd: PromptFd) -> std::io::Result<Held> {
+fn held(fd: PromptFd, deadline: Option<Deadline>) -> std::io::Result<Held> {
     // SAFETY: zeroed structs are valid output storage.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: zeroed structs are valid output storage.
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    check_deadline(deadline);
     // SAFETY: owned descriptor and valid output pointers.
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    check_deadline(deadline);
     // SAFETY: owned descriptor and valid output pointer.
     if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut fs) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -256,7 +286,7 @@ fn held(fd: PromptFd) -> std::io::Result<Held> {
             gid: st.st_gid,
             mode: u32::from(st.st_mode),
             ownership: Some(ownership),
-            acl: acl(fd.as_raw_fd()),
+            acl: acl(fd.as_raw_fd(), deadline),
         },
         local: Some(local),
         nlink: st.st_nlink as u64,
@@ -272,6 +302,7 @@ fn held(fd: PromptFd) -> std::io::Result<Held> {
 
 #[derive(Default)]
 struct ClockPins {
+    deadline: Option<Deadline>,
     identity: Option<Clock>,
     // Keep ordinary kernel files alive across the filter and both samples.
     // Namespace links are observed before the filter and retain no target fd.
@@ -280,19 +311,26 @@ struct ClockPins {
 }
 impl ClockPins {
     fn observe(&self) -> Result<Clock, ClockError> {
+        check_deadline(self.deadline);
         let mut clock = self.identity.ok_or(ClockError::Boot)?;
         clock.now = crate::prompt_io::monotonic_ns()?;
         Ok(clock)
     }
     #[cfg(target_os = "macos")]
-    fn prepare() -> Self {
+    fn prepare(deadline: Option<Deadline>) -> Self {
+        check_deadline(deadline);
         Self {
-            identity: crate::prompt_io::observe_clock().ok(),
+            deadline,
+            identity: crate::prompt_io::observe_clock_until(deadline).ok(),
         }
     }
     #[cfg(target_os = "linux")]
-    fn prepare() -> Self {
-        let mut p = Self::default();
+    fn prepare(deadline: Option<Deadline>) -> Self {
+        check_deadline(deadline);
+        let mut p = Self {
+            deadline,
+            ..Self::default()
+        };
         p.identity = p.linux().ok();
         // Walk directories have served their purpose. Keep only the identity
         // files alive for the two samples; a failed identity needs no pins.
@@ -302,9 +340,9 @@ impl ClockPins {
     }
     #[cfg(target_os = "linux")]
     fn kernel(&mut self, base: i32, name: &CStr, flags: i32, magic: u64) -> Result<FdFacts, i32> {
-        let fd =
-            open(base, name, flags | libc::O_CLOEXEC).map_err(|e| e.raw_os_error().unwrap_or(0))?;
-        let h = held(fd).map_err(|_| libc::EIO)?;
+        let fd = open(base, name, flags | libc::O_CLOEXEC, self.deadline)
+            .map_err(|e| e.raw_os_error().unwrap_or(0))?;
+        let h = held(fd, self.deadline).map_err(|_| libc::EIO)?;
         let facts = h.facts;
         if !kernel_entry(facts, flags & libc::O_DIRECTORY != 0, h.magic, magic) {
             return Err(libc::EIO);
@@ -321,9 +359,12 @@ impl ClockPins {
         let dir = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY;
         let file = libc::O_RDONLY | libc::O_NOFOLLOW;
         let procfs = 0x9fa0;
-        let root =
-            held(open(libc::AT_FDCWD, c"/", DIRECTORY_FLAGS).map_err(|_| ClockError::Domain)?)
-                .map_err(|_| ClockError::Domain)?;
+        let root = held(
+            open(libc::AT_FDCWD, c"/", DIRECTORY_FLAGS, self.deadline)
+                .map_err(|_| ClockError::Domain)?,
+            self.deadline,
+        )
+        .map_err(|_| ClockError::Domain)?;
         self.kernel(root.fd.as_raw_fd(), c"proc", dir, procfs)
             .map_err(|_| ClockError::Domain)?;
         let proc = self.last();
@@ -340,7 +381,9 @@ impl ClockPins {
             .map_err(|_| ClockError::Domain)?;
         let ns = self.last();
         let offsets = self.kernel(process, c"timens_offsets", file, procfs);
-        let domain = crate::prompt_io::time_namespace_domain(ns, offsets.map(|_| ()))?;
+        check_deadline(self.deadline);
+        let domain =
+            crate::prompt_io::time_namespace_domain_until(ns, offsets.map(|_| ()), self.deadline)?;
         let mut base = proc;
         for name in [c"sys", c"kernel", c"random"] {
             self.kernel(base, name, dir, procfs)
@@ -356,6 +399,7 @@ impl ClockPins {
         let mut bytes = [0; 38];
         let mut n = 0;
         while n < bytes.len() {
+            check_deadline(self.deadline);
             // SAFETY: retained boot fd and initialized writable suffix.
             let got =
                 unsafe { libc::read(self.last(), bytes[n..].as_mut_ptr().cast(), bytes.len() - n) };
@@ -485,7 +529,8 @@ fn acl_entries(acl: *mut libc::c_void) -> AclFacts {
 }
 
 #[cfg(target_os = "macos")]
-fn acl(fd: i32) -> AclFacts {
+fn acl(fd: i32, deadline: Option<Deadline>) -> AclFacts {
+    check_deadline(deadline);
     unsafe extern "C" {
         fn acl_get_fd_np(fd: libc::c_int, ty: libc::c_int) -> *mut libc::c_void;
     }
@@ -493,7 +538,8 @@ fn acl(fd: i32) -> AclFacts {
     acl_entries(unsafe { acl_get_fd_np(fd, macos_acl::ACL_TYPE_EXTENDED) })
 }
 #[cfg(target_os = "linux")]
-fn acl(fd: i32) -> AclFacts {
+fn acl(fd: i32, deadline: Option<Deadline>) -> AclFacts {
+    check_deadline(deadline);
     // SAFETY: held descriptor, terminated name; length-only query.
     let mut n = unsafe {
         libc::fgetxattr(
@@ -508,6 +554,7 @@ fn acl(fd: i32) -> AclFacts {
         let Ok(path) = CString::new(format!("/proc/self/fd/{fd}")) else {
             return AclFacts::Unknown;
         };
+        check_deadline(deadline);
         // SAFETY: terminated names; length-only query on the held fd alias.
         n = unsafe {
             libc::getxattr(
@@ -553,9 +600,10 @@ mod tests {
     }
     // macOS sandbox may deny kern.bootsessionuuid. Only the tests inject the
     // boot identity; production always uses ClockPins::prepare.
-    fn fixed_clock() -> ClockPins {
+    fn fixed_clock(deadline: Option<Deadline>) -> ClockPins {
         let kind = if cfg!(target_os = "linux") { 1 } else { 2 };
         ClockPins {
+            deadline,
             identity: Some(Clock {
                 boot: [1; 16],
                 domain: [0; 16],
@@ -606,7 +654,7 @@ mod tests {
                 fs::create_dir(&store).unwrap();
                 fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).unwrap();
             }
-            let clock = fixed_clock().observe().unwrap();
+            let clock = fixed_clock(None).observe().unwrap();
             let roots: Vec<_> = [
                 BUILTIN_TOML,
                 "icons='ascii'\n[layout.line2]\nleft=['char']\n",
@@ -686,6 +734,7 @@ mod tests {
             prepare_with_clock(
                 &self.args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                 fixed_clock,
+                None,
             )
         }
     }
@@ -802,7 +851,7 @@ mod tests {
     // 이것을 실패시키는 것: 잘못된 봉투에서 UID·clock·파일 관찰을 시작하는 것.
     #[test]
     fn invalid_envelope_opens_nothing() {
-        let p = prepare_state(&[b"--ctx", b"2", b"--record", b"B1"]);
+        let p = prepare_state(&[b"--ctx", b"2", b"--record", b"B1"], None);
         assert!(p.sources.is_none() && p.clock.identity.is_none());
         assert!(p.slots.iter().all(Option::is_none) && p.files.iter().all(Option::is_none));
         assert!(text(p.respond()).contains("error:bad-args"));
@@ -842,7 +891,7 @@ mod tests {
     #[test]
     fn fresh_clock_is_monotonic_and_missing_identity_fails() {
         let before = crate::prompt_io::monotonic_ns().unwrap();
-        let mut pins = fixed_clock();
+        let mut pins = fixed_clock(None);
         let observed = pins.observe().unwrap();
         let after = crate::prompt_io::monotonic_ns().unwrap();
         assert!(before > 0 && before <= observed.now && observed.now <= after);
@@ -854,7 +903,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn native_publisher_reader_identity_agrees_and_walk_fds_are_closed() {
-        let reader = ClockPins::prepare();
+        let reader = ClockPins::prepare(None);
         let publisher = crate::prompt_io::observe_clock().expect("publisher clock observation");
         let identity = |c: Clock| (c.boot, c.domain, c.kind, c.resume);
         assert_eq!(
@@ -902,7 +951,7 @@ mod tests {
         };
         let Step::Read(directory) = staged::next(
             &mut plan,
-            Some(Observation::Clock(fixed_clock().observe().ok())),
+            Some(Observation::Clock(fixed_clock(None).observe().ok())),
         ) else {
             panic!("directory")
         };
@@ -933,7 +982,7 @@ mod tests {
         let f = Fx::new();
         let mut p = f.prepared();
         // Exercise real clock-pin destruction as well as all snapshot slots.
-        p.clock.fds = ClockPins::prepare().fds;
+        p.clock.fds = ClockPins::prepare(None).fds;
         // Production denies fcntl with EPERM, which std's debug probe ignores.
         // This test-only filter kills it so a reintroduced probe turns us red.
         let op = |code: u32, jt, jf, k| libc::sock_filter {
@@ -1007,5 +1056,56 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
+    }
+    #[test]
+    #[ignore = "child: expires before prefilter preparation"]
+    fn expired_preparation_child() {
+        prepare_state(&[], Deadline::from_entry(0, 1));
+        // SAFETY: child-only sentinel; production must have exited first.
+        unsafe { libc::_exit(88) }
+    }
+
+    #[test]
+    #[ignore = "child: expires between held-fd reads"]
+    fn expired_read_child() {
+        let f = Fx::new();
+        let mut p = f.prepared();
+        drop(f); // Unlink the fixture now: retained descriptors still own the bytes.
+        loop {
+            let Step::Read(effect) =
+                std::mem::replace(&mut p.step, Step::Done(staged::Observed::default()))
+            else {
+                panic!("expected a snapshot read");
+            };
+            if matches!(effect.operation(), Operation::Read { .. }) {
+                p.deadline = Deadline::from_entry(0, 1);
+                p.after(&effect);
+                // SAFETY: child-only sentinel: no read is allowed after expiry.
+                unsafe { libc::_exit(88) }
+            }
+            let observed = p.after(&effect);
+            p.step = staged::next(&mut p.plan, Some(observed));
+        }
+    }
+
+    // 이것을 실패시키는 것: 준비·각 스냅샷 읽기 전에 절대 마감을 검사하지 않는 것.
+    #[test]
+    fn expired_preparation_and_read_start_no_new_io() {
+        for name in ["expired_preparation_child", "expired_read_child"] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    &format!("prompt_read::tests::{name}"),
+                    "--test-threads=1",
+                    "--nocapture",
+                    "-q",
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{name}: {:?}", out.stderr);
+            assert!(out.stderr.is_empty());
+            assert!(!out.stdout.windows(3).any(|bytes| bytes == b"B1\x1f"));
+        }
     }
 }

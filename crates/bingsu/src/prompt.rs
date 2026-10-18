@@ -32,22 +32,64 @@ pub struct NonPromptArgs {
     pub args: Vec<OsString>,
 }
 
-/// Writes the whole record to fd 1, retrying on EINTR; a failed write is
-/// ignored (spec section 6 rule 3).
-fn write_record(mut buf: &[u8]) {
+/// A completed record is the only output attempt. An unwind after even one
+/// byte must not append after_panic's second B1 record.
+fn write_until(record: &[u8], deadline: front::output::Deadline) -> ! {
+    write_guarded(
+        record,
+        deadline,
+        crate::prompt_io::deadline_now,
+        write_stdout,
+    )
+}
+
+fn write_guarded(
+    record: &[u8],
+    deadline: front::output::Deadline,
+    observe: impl FnMut(front::output::Deadline) -> Option<u64>,
+    write: impl FnMut(&[u8]) -> front::output::IoResult,
+) -> ! {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        write_loop(record, deadline, observe, write);
+    }));
+    exit(0)
+}
+
+fn write_stdout(buf: &[u8]) -> front::output::IoResult {
+    // SAFETY: initialized slice, valid for buf.len() bytes, fixed stdout fd.
+    let n = unsafe { libc::write(1, buf.as_ptr().cast(), buf.len()) };
+    if n < 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            front::output::IoResult::Interrupted
+        } else {
+            front::output::IoResult::Failed
+        }
+    } else {
+        match usize::try_from(n) {
+            Ok(n) => front::output::IoResult::Written(n),
+            Err(_) => front::output::IoResult::Failed,
+        }
+    }
+}
+
+fn write_loop(
+    mut buf: &[u8],
+    deadline: front::output::Deadline,
+    mut observe: impl FnMut(front::output::Deadline) -> Option<u64>,
+    mut write: impl FnMut(&[u8]) -> front::output::IoResult,
+) {
     while !buf.is_empty() {
-        // SAFETY: `buf` is an initialized slice valid for `buf.len()` bytes.
-        let n = unsafe { libc::write(1, buf.as_ptr().cast(), buf.len()) };
-        if n < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
+        if observe(deadline).is_none() {
             return;
         }
-        // Zero on a non-empty buffer is no progress; retrying would spin.
-        match usize::try_from(n) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => buf = &buf[n.min(buf.len())..],
+        let result = write(buf);
+        let Some(now) = observe(deadline) else {
+            return;
+        };
+        match front::output::write_decision(buf.len(), result, false, now, deadline.end()) {
+            front::output::WriteStep::Continue(n) => buf = &buf[n..],
+            front::output::WriteStep::Retry => {}
+            front::output::WriteStep::Stop => return,
         }
     }
 }
@@ -57,9 +99,9 @@ fn exit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// The prompt process. The silent panic hook and the unwind guard come
-/// first, so the filter (building the BPF, installing it) and the record
-/// for a refused filter run inside them too. The default hook writes to
+/// The prompt process. After fail-closed deadline setup, the silent panic hook
+/// and unwind guard protect BPF construction, filter installation and the
+/// record for a refused filter. The default hook writes to
 /// stderr before unwinding (spec section 6 rule 1); this one does nothing.
 /// After an unwind panic the record is `front::after_panic`'s; a second
 /// panic inside that aborts with rc 101, and the shell draws its own
@@ -68,17 +110,22 @@ fn exit(code: i32) -> ! {
 /// (decision P18) supplies only `without_sandbox`: the record-version pair
 /// rule and the minimal record, no snapshot decoding or render.
 fn run_prompt(
+    deadline: Option<front::output::Deadline>,
     args: &[OsString],
     exe: &OsString,
     enter_sandbox: impl FnOnce() -> front::Sandbox,
     respond: impl FnOnce(Vec<u8>) -> Vec<u8>,
     refused: impl FnOnce(&[&[u8]]) -> Vec<u8>,
 ) -> ! {
+    let Some(deadline) = deadline else { exit(0) };
     std::panic::set_hook(Box::new(|_| {}));
     let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+    if !crate::prompt_io::arm_deadline(deadline) {
+        exit(0)
+    }
     let rec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::prompt_spawn::bootstrap(exe, &raw);
-        let staged = crate::prompt_read::prepare(&raw);
+        crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));
+        let staged = crate::prompt_read::prepare(&raw, deadline);
         if front::runs_core(enter_sandbox()) {
             respond(staged())
         } else {
@@ -86,8 +133,7 @@ fn run_prompt(
         }
     }))
     .unwrap_or_else(|_| front::after_panic(&raw));
-    write_record(&rec);
-    exit(0)
+    write_until(&rec, deadline)
 }
 
 /// The first thing `main` does: owns the process arguments, and for
@@ -96,11 +142,13 @@ fn run_prompt(
 /// elsewhere nothing) runs as soon as the command is known to be `prompt`,
 /// after the core-directed descriptor preparation and before content reads.
 pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
+    let deadline = crate::prompt_io::entry_deadline();
     let mut all = std::env::args_os();
     let argv0 = all.next().unwrap_or_default();
     let args: Vec<OsString> = all.collect();
     if args.first().map(|a| a.as_bytes()) == Some(b"prompt".as_slice()) {
         run_prompt(
+            deadline,
             &args[1..],
             &argv0,
             enter_sandbox,
@@ -144,6 +192,7 @@ mod tests {
     fn core_panics_child() {
         // The unwind runs under the prompt's seccomp filter, as in the shell.
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &args(),
             &OsString::new(),
             crate::sandbox::enter,
@@ -156,6 +205,7 @@ mod tests {
     #[ignore = "child of the prompt path tests"]
     fn filter_panics_child() {
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &args(),
             &OsString::new(),
             || panic!("in the filter"),
@@ -168,6 +218,7 @@ mod tests {
     #[ignore = "child of the prompt path tests"]
     fn refused_child() {
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &args(),
             &OsString::new(),
             || front::Sandbox::Blocked,
@@ -180,6 +231,7 @@ mod tests {
     #[ignore = "child of the prompt path tests"]
     fn refused_record_panics_child() {
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &args(),
             &OsString::new(),
             || front::Sandbox::Blocked,
@@ -192,6 +244,7 @@ mod tests {
     #[ignore = "child of the prompt path tests"]
     fn absent_child() {
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &args(),
             &OsString::new(),
             || front::Sandbox::Absent,
@@ -220,6 +273,7 @@ mod tests {
     #[ignore = "isolated prompt entry"]
     fn spawn_failure_child() {
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &helper_args(std::path::Path::new("/h")),
             &OsString::from("/missing-bingsu"),
             || front::Sandbox::Absent,
@@ -233,6 +287,7 @@ mod tests {
     fn spawn_before_blocked_child() {
         let (base, exe) = crate::commands::n3_test::probe("blocked");
         run_prompt(
+            crate::prompt_io::entry_deadline(),
             &helper_args(&base),
             &exe.into_os_string(),
             || {
@@ -315,5 +370,87 @@ mod tests {
     #[test]
     fn no_seccomp_in_the_kernel_renders() {
         child("absent_child", b"<rendered>");
+    }
+    // 이것을 실패시키는 것: 부분 쓰기·EINTR 뒤 접두부 재출력, 오류·0-byte 재시도.
+    #[test]
+    fn writer_progress_and_interrupts_use_exact_suffixes() {
+        use front::output::IoResult::{Failed, Interrupted, Written};
+        let deadline = front::output::Deadline::from_entry(10, 20).unwrap();
+        for end in [Failed, Written(0), Written(100)] {
+            let mut steps = [Written(2), Interrupted, Written(1), end].into_iter();
+            let mut seen = Vec::new();
+            write_loop(
+                b"abcdef",
+                deadline,
+                |_| Some(11),
+                |buf| {
+                    seen.push(buf.to_vec());
+                    steps.next().expect("must stop")
+                },
+            );
+            assert_eq!(
+                seen,
+                [
+                    b"abcdef".to_vec(),
+                    b"cdef".to_vec(),
+                    b"cdef".to_vec(),
+                    b"def".to_vec()
+                ]
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: 첫 쓰기·재시도 전 새 시각 검사 누락, 신호 폭주로 마감 연장.
+    #[test]
+    fn writer_checks_before_every_attempt_and_after_every_result() {
+        use front::output::IoResult::{Interrupted, Written};
+        let deadline = front::output::Deadline::from_entry(10, 20).unwrap();
+        for result in [Written(1), Interrupted] {
+            for allowed_observations in 0..=8 {
+                let mut samples = 0;
+                let mut writes = 0;
+                write_loop(
+                    b"abcdefghijklmnop",
+                    deadline,
+                    |_| {
+                        samples += 1;
+                        (samples <= allowed_observations).then_some(11)
+                    },
+                    |_| {
+                        writes += 1;
+                        result
+                    },
+                );
+                assert_eq!(writes, (allowed_observations + 1) / 2);
+                assert_eq!(samples, allowed_observations + 1);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "child: exits after a partial write and injected unwind"]
+    fn partial_panic_child() {
+        std::panic::set_hook(Box::new(|_| {}));
+        let deadline = front::output::Deadline::from_entry(10, 20).unwrap();
+        let mut writes = 0;
+        write_guarded(
+            INTERNAL,
+            deadline,
+            |_| Some(11),
+            |buf| {
+                writes += 1;
+                if writes == 1 {
+                    write_stdout(&buf[..3])
+                } else {
+                    panic!("after prefix")
+                }
+            },
+        );
+    }
+
+    // 이것을 실패시키는 것: 출력 시작 뒤 panic에서 after_panic 레코드를 추가하거나 stderr 출력.
+    #[test]
+    fn partial_panic_never_appends_another_record() {
+        child("partial_panic_child", b"B1\x1f");
     }
 }

@@ -26,7 +26,7 @@ class Bootstrap(unittest.TestCase):
                                        "--checker", str(CHECKER)], capture_output=True, text=True)
             good = run()
             self.assertEqual(good.returncode, 0, good.stderr)
-            for module in ("prompt_spawn", "prompt_read"):
+            for module in ("prompt_spawn", "prompt_read", "prompt_io"):
                 with self.subTest(module=module):
                     path = root / f"crates/bingsu/src/{module}.rs"
                     original = path.read_bytes()

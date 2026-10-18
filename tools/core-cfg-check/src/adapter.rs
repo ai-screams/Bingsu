@@ -78,6 +78,7 @@ struct Walk<'a> {
     used: BTreeSet<String>,
     out: Vec<Finding>,
     prefilter_lines: Option<[(usize, usize); 2]>,
+    timer_lines: Option<[(usize, usize); 2]>,
 }
 
 impl Walk<'_> {
@@ -186,6 +187,17 @@ impl<'ast> Visit<'ast> for Walk<'_> {
                 if full == "crate::prompt_read::prepare"
                     && self.prefilter_lines.map(|lines| lines[1])
                         == Some((line_of(path.span()), path.span().start().column)) => {}
+            Some("crate")
+                if full == "crate::prompt_io::entry_deadline"
+                    && self.timer_lines.map(|lines| lines[0])
+                        == Some((line_of(path.span()), path.span().start().column)) => {}
+            Some("crate")
+                if full == "crate::prompt_io::arm_deadline"
+                    && self.timer_lines.map(|lines| lines[1])
+                        == Some((line_of(path.span()), path.span().start().column)) => {}
+            // Hash-pinned observation wrapper: clock + lock-free flag, no timer
+            // or pathname access. It is also passed to the injected write loop.
+            Some("crate") if full == "crate::prompt_io::deadline_now" => {}
             Some("crate" | "super") => {
                 self.bad(path.span(), format!("{full}: another module of the binary"))
             }
@@ -244,7 +256,14 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
         used: BTreeSet::new(),
         out: Vec::new(),
         prefilter_lines: prefilter_lines(&file),
+        timer_lines: timer_lines(&file),
     };
+    if walk.prefilter_lines.is_some() && walk.timer_lines.is_none() {
+        walk.bad(
+            Span::call_site(),
+            "missing fail-closed prefilter deadline setup".to_owned(),
+        );
+    }
     let n = file.items.len();
     for (i, item) in file.items.iter().enumerate() {
         if i + 1 == n && is_test_mod(item) {
@@ -332,7 +351,7 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
         return None;
     };
     if joined(&path.path).join("::") != "crate::prompt_spawn::bootstrap"
-        || bootstrap.args.len() != 2
+        || bootstrap.args.len() != 3
     {
         return None;
     }
@@ -345,7 +364,7 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     let syn::Expr::Path(path) = prepare.func.as_ref() else {
         return None;
     };
-    if joined(&path.path).join("::") != "crate::prompt_read::prepare" || prepare.args.len() != 1 {
+    if joined(&path.path).join("::") != "crate::prompt_read::prepare" || prepare.args.len() != 2 {
         return None;
     }
     let syn::Expr::Call(runs) = branch.cond.as_ref() else {
@@ -375,5 +394,77 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
             line_of(prepare.func.span()),
             prepare.func.span().start().column,
         ),
+    ])
+}
+
+/// N6: capture time as dispatch's first statement; install the timer in a
+/// fail-closed guard before the unwind block containing the sole filter call.
+/// These two pre-filter capabilities cannot be called elsewhere or aliased.
+fn timer_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
+    prefilter_lines(file)?;
+    let function = |name: &str| {
+        file.items.iter().find_map(|i| match i {
+            syn::Item::Fn(f) if f.sig.ident == name => Some(f),
+            _ => None,
+        })
+    };
+    let dispatch = function("dispatch")?;
+    let syn::Stmt::Local(local) = dispatch.block.stmts.first()? else {
+        return None;
+    };
+    if !matches!(&local.pat, syn::Pat::Ident(p) if p.ident == "deadline") {
+        return None;
+    }
+    let syn::Expr::Call(entry) = local.init.as_ref()?.expr.as_ref() else {
+        return None;
+    };
+    let syn::Expr::Path(path) = entry.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "crate::prompt_io::entry_deadline" || !entry.args.is_empty()
+    {
+        return None;
+    }
+    let run = function("run_prompt")?;
+    let at = run.block.stmts.iter().position(|s| {
+        matches!(s,
+        syn::Stmt::Local(l) if matches!(&l.pat, syn::Pat::Ident(p) if p.ident == "rec"))
+    })?;
+    let syn::Stmt::Expr(syn::Expr::If(guard), _) = run.block.stmts.get(at.checked_sub(1)?)? else {
+        return None;
+    };
+    if guard.else_branch.is_some() {
+        return None;
+    }
+    let syn::Expr::Unary(negation) = guard.cond.as_ref() else {
+        return None;
+    };
+    if !matches!(negation.op, syn::UnOp::Not(_)) {
+        return None;
+    }
+    let syn::Expr::Call(arm) = negation.expr.as_ref() else {
+        return None;
+    };
+    let syn::Expr::Path(path) = arm.func.as_ref() else {
+        return None;
+    };
+    if joined(&path.path).join("::") != "crate::prompt_io::arm_deadline"
+        || arm.args.len() != 1
+        || !matches!(arm.args.first()?, syn::Expr::Path(p) if p.path.is_ident("deadline"))
+    {
+        return None;
+    }
+    let [syn::Stmt::Expr(syn::Expr::Call(exit), _)] = guard.then_branch.stmts.as_slice() else {
+        return None;
+    };
+    if !matches!(exit.func.as_ref(), syn::Expr::Path(p) if p.path.is_ident("exit"))
+        || exit.args.len() != 1
+        || !matches!(exit.args.first()?, syn::Expr::Lit(l) if matches!(&l.lit, syn::Lit::Int(n) if n.base10_digits() == "0"))
+    {
+        return None;
+    }
+    Some([
+        (line_of(entry.func.span()), entry.func.span().start().column),
+        (line_of(arm.func.span()), arm.func.span().start().column),
     ])
 }

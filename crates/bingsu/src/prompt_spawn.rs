@@ -8,10 +8,19 @@
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 
-pub fn bootstrap(exe: &OsStr, raw: &[&[u8]]) {
-    let _ = spawn(exe, raw);
+pub fn bootstrap(
+    exe: &OsStr,
+    raw: &[&[u8]],
+    deadline: Option<bingsu_core::front::output::Deadline>,
+) {
+    let _ = spawn_until(exe, raw, deadline);
 }
-fn spawn(exe: &OsStr, raw: &[&[u8]]) -> Result<(), ()> {
+fn spawn_until(
+    exe: &OsStr,
+    raw: &[&[u8]],
+    deadline: Option<bingsu_core::front::output::Deadline>,
+) -> Result<(), ()> {
+    crate::prompt_io::check_deadline(deadline);
     if !exe.as_bytes().starts_with(b"/") {
         return Err(());
     }
@@ -77,7 +86,11 @@ fn spawn(exe: &OsStr, raw: &[&[u8]]) -> Result<(), ()> {
             // Single-threaded front end. Enumerate the complete fd table, not
             // RLIMIT_NOFILE (which can be lowered below an already open fd).
             // Uses POSIX actions on both glibc and musl, including old releases.
-            for entry in std::fs::read_dir("/proc/self/fd").map_err(|_| ())? {
+            crate::prompt_io::check_deadline(deadline);
+            let mut entries = std::fs::read_dir("/proc/self/fd").map_err(|_| ())?;
+            loop {
+                crate::prompt_io::check_deadline(deadline);
+                let Some(entry) = entries.next() else { break };
                 let entry = entry.map_err(|_| ())?;
                 let fd: i32 = entry
                     .file_name()
@@ -93,6 +106,7 @@ fn spawn(exe: &OsStr, raw: &[&[u8]]) -> Result<(), ()> {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         return Err(());
+        crate::prompt_io::check_deadline(deadline);
         let mut pid = 0;
         // SAFETY: all strings, pointer arrays, initialized objects outlive spawn;
         // env and argv are NUL terminated. No function pointer or PATH lookup.
@@ -119,6 +133,9 @@ fn check(rc: i32) -> Result<(), ()> {
 
 #[cfg(test)]
 mod tests {
+    fn spawn(exe: &std::ffi::OsStr, raw: &[&[u8]]) -> Result<(), ()> {
+        super::spawn_until(exe, raw, None)
+    }
     use super::*;
     use std::{
         fs,

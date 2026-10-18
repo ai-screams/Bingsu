@@ -2,6 +2,7 @@
 //! lengths. An executor observes facts, never manufactures a safety verdict.
 //! The CLI preopens `Prefetch` before confinement, then satisfies this continuation
 //! from the held descriptors and cached facts (N4 option 3, 2026-10-17).
+use super::output::Deadline;
 use crate::color::palette::Mode;
 use crate::config::compile::ExecUnit;
 use crate::envelope::{self, Envelope, EnvelopeError};
@@ -184,6 +185,7 @@ impl File {
 }
 /// Every field is private, including pending-operation and slot ownership state.
 pub struct ReadPlan {
+    deadline: Option<Deadline>,
     parsed: Result<Envelope, EnvelopeError>,
     phase: Phase,
     after_close: Phase,
@@ -216,6 +218,7 @@ pub struct Observed {
 
 pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
     ReadPlan {
+        deadline: None,
         parsed: envelope::parse(argv),
         phase: Phase::Start,
         after_close: Phase::OpenFile,
@@ -237,6 +240,13 @@ pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
     }
 }
 impl ReadPlan {
+    /// Carry the adapter's entry deadline unchanged through decoding/rendering.
+    /// The adapter must check it before every OS effect; core does not read time.
+    pub fn with_deadline(mut self, deadline: Deadline) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
     /// Available at exactly the first file-open boundary, after every ancestor
     /// and the init dev/ino pin have been approved. Invalid envelopes never get
     /// a prefetch capability.
@@ -600,7 +610,12 @@ impl Eligibility {
 }
 pub struct Response {
     pub record: Vec<u8>,
-    /// Output deadline is an N6 concern; this is the execution deadline only.
+    /// The prompt entry deadline, distinct from the snapshot's execution permit.
+    /// Informational: the adapter enforces the deadline itself (its pre-filter
+    /// timer, the per-step clock check and the write loop); nothing reads this
+    /// field to stop work, so later code must not assume it does.
+    pub deadline: Option<Deadline>,
+    /// Snapshot trust expiry; it must never extend the prompt's output deadline.
     pub execution: Eligibility,
     pub worker_mask: u32,
     pub status: Status,
@@ -623,6 +638,7 @@ fn trust_status(refusal: Refusal) -> Status {
 pub fn finish(plan: ReadPlan, mut observed: Observed) -> Response {
     let mut response = Response {
         record: Vec::new(),
+        deadline: plan.deadline,
         execution: Eligibility::default(),
         worker_mask: 0,
         status: Status::ERROR_CONFIG_DEFAULT,

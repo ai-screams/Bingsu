@@ -31,6 +31,24 @@ mod cases {
             now: 101,
         }
     }
+
+    // 이것을 실패시키는 것: finish의 정상·오류·빈 출력에서 진입 마감을 잃거나 다시 잡는 것.
+    #[test]
+    fn response_preserves_entry_deadline_on_every_record_path() {
+        let deadline = Deadline::from_entry(100, 50).unwrap();
+        for argv in [
+            args(),
+            vec![b"--ctx".as_slice(), b"2", b"--record", b"B1"],
+            Vec::new(),
+        ] {
+            let ordinary = finish(prepare(&argv), Observed::default());
+            let timed = finish(prepare(&argv).with_deadline(deadline), Observed::default());
+            assert_eq!(timed.deadline, Some(deadline));
+            assert_eq!(timed.record, ordinary.record);
+            assert_eq!(timed.status, ordinary.status);
+            assert_eq!(timed.execution.permit(), ordinary.execution.permit());
+        }
+    }
     fn snapshot(text: &str) -> Snapshot {
         Snapshot {
             id: Identity {
