@@ -5,11 +5,105 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
+use bingsu_core::front::output::Deadline;
 use bingsu_core::snapshot::{Clock, ClockError};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Provisional whole-prompt budget (N6 ruling, 2026-10-18); N7 measures it.
+const PROMPT_BUDGET_NS: u64 = 50_000_000;
+
+// AtomicBool is lock-free on the supported aarch64/x86_64 targets. No other
+// operation, including errno access, allocation or a lock, belongs in this handler.
+static EXPIRED: AtomicBool = AtomicBool::new(false);
+extern "C" fn alarm_handler(_: i32) {
+    EXPIRED.store(true, Ordering::Relaxed);
+}
+
+/// Sample at dispatch entry, before collecting/parsing argv or doing any I/O.
+pub(crate) fn entry_deadline() -> Option<Deadline> {
+    Deadline::from_entry(monotonic_ns().ok()?, PROMPT_BUDGET_NS)
+}
+
+/// Post-filter observation: only the already-allowed monotonic clock call.
+pub(crate) fn deadline_now(deadline: Deadline) -> Option<u64> {
+    if EXPIRED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let now = monotonic_ns().ok()?;
+    deadline.remaining(now)?;
+    Some(now)
+}
+
+/// Pre-filter ONLY, once per prompt. A failed setup never permits a write.
+/// Keep the timer armed until _exit: disarming after confinement would require
+/// a new syscall. Repeating alarms close the signal-before-write race.
+pub(crate) fn arm_deadline(deadline: Deadline) -> bool {
+    // SAFETY: zeroed signal action storage, with masks initialized below.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: writable signal set.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+        return false;
+    }
+    action.sa_sigaction = libc::SIG_IGN;
+    // SAFETY: initialized action and a valid signal; no old action requested.
+    if unsafe { libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut()) } != 0 {
+        return false;
+    }
+    action.sa_sigaction = alarm_handler as *const () as usize;
+    action.sa_flags = 0; // In particular, no SA_RESTART.
+    // SAFETY: the handler has C ABI and process lifetime; mask is initialized.
+    if unsafe { libc::sigaction(libc::SIGALRM, &action, std::ptr::null_mut()) } != 0 {
+        return false;
+    }
+    // SAFETY: initialize a signal set containing only SIGALRM.
+    if unsafe { libc::sigaddset(&mut action.sa_mask, libc::SIGALRM) } != 0 {
+        return false;
+    }
+    // SAFETY: this front end is single threaded. Undo an inherited blocked alarm.
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &action.sa_mask, std::ptr::null_mut()) } != 0 {
+        return false;
+    }
+    // Do not clear EXPIRED: a pending or early alarm must remain fail-closed.
+    let Some(us) = deadline_now(deadline).and_then(|now| deadline.timer_micros(now)) else {
+        return false;
+    };
+    let Ok(seconds) = (us / 1_000_000).try_into() else {
+        return false;
+    };
+    let timer = libc::itimerval {
+        it_value: libc::timeval {
+            tv_sec: seconds,
+            tv_usec: (us % 1_000_000) as _,
+        },
+        it_interval: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 1_000,
+        },
+    };
+    // SAFETY: initialized nonzero relative timer, repeating every 1 ms; no old timer.
+    unsafe { libc::setitimer(libc::ITIMER_REAL, &timer, std::ptr::null_mut()) == 0 }
+}
+
+/// The held-fd executor uses None only in untimed unit fixtures. Production
+/// always supplies the one entry deadline. Exit directly, without new cleanup
+/// I/O or a replacement record, when no time/usable clock remains.
+pub(crate) fn check_deadline(deadline: Option<Deadline>) {
+    if deadline.is_some_and(|d| deadline_now(d).is_none()) {
+        // SAFETY: _exit has no pointer arguments and never returns.
+        unsafe { libc::_exit(0) }
+    }
+}
 
 pub fn observe_clock() -> Result<Clock, ClockError> {
+    observe_clock_until(None)
+}
+
+pub(crate) fn observe_clock_until(deadline: Option<Deadline>) -> Result<Clock, ClockError> {
+    check_deadline(deadline);
     let boot = boot_id()?;
+    check_deadline(deadline);
     let domain = clock_domain()?;
+    check_deadline(deadline);
     let now = monotonic_ns()?;
     Ok(Clock {
         boot,
@@ -152,11 +246,20 @@ pub(crate) fn time_namespace_domain(
     ns: i32,
     offsets: Result<(), i32>,
 ) -> Result<[u8; 16], ClockError> {
-    time_domain(
-        time_link(ns, c"time"),
-        time_link(ns, c"time_for_children"),
-        offsets,
-    )
+    time_namespace_domain_until(ns, offsets, None)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn time_namespace_domain_until(
+    ns: i32,
+    offsets: Result<(), i32>,
+    deadline: Option<Deadline>,
+) -> Result<[u8; 16], ClockError> {
+    check_deadline(deadline);
+    let time = time_link(ns, c"time");
+    check_deadline(deadline);
+    let children = time_link(ns, c"time_for_children");
+    time_domain(time, children, offsets)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -319,6 +422,46 @@ fn clock_domain() -> Result<[u8; 16], ClockError> {
 
 #[cfg(test)]
 mod tests {
+    // 이것을 실패시키는 것: 제품 예산 상수 변경 또는 진입 시각 외 기준으로 마감 계산.
+    #[test]
+    fn entry_uses_the_provisional_whole_prompt_budget() {
+        let before = super::monotonic_ns().unwrap();
+        let deadline = super::entry_deadline().unwrap();
+        let after = super::monotonic_ns().unwrap();
+        assert!((before + 50_000_000..=after + 50_000_000).contains(&deadline.end()));
+    }
+
+    #[test]
+    #[ignore = "child: changes the process-wide signal flag"]
+    fn early_alarm_child() {
+        let deadline = super::entry_deadline().unwrap();
+        super::alarm_handler(libc::SIGALRM);
+        let code = if super::deadline_now(deadline).is_none() {
+            0
+        } else {
+            88
+        };
+        // SAFETY: child process exits; no global flag leaks into parallel tests.
+        unsafe { libc::_exit(code) }
+    }
+
+    // 이것을 실패시키는 것: handler가 만료 플래그를 세우지 않거나 writer가 그것을 무시하는 것.
+    #[test]
+    fn early_alarm_flag_stops_before_the_clock_deadline() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "prompt_io::tests::early_alarm_child",
+                "--test-threads=1",
+                "--nocapture",
+                "-q",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stderr.is_empty());
+    }
     use super::*;
     use std::{
         fs::{self, File},

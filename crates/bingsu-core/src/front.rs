@@ -26,6 +26,9 @@ use alloc::vec::Vec;
 /// Snapshot continuation and selection; the CLI retains descriptors before confinement.
 pub mod staged;
 
+/// Absolute prompt deadlines and write progress, without OS observations.
+pub mod output;
+
 /// Appends the record of `fields`; a field the encoder refuses (a renderer
 /// defect: the B1 grammar is the producer's promise) gives the minimal
 /// record with `error:internal` instead. `encode_b1` checks every field

@@ -70,7 +70,7 @@ fn prime_cold(
     let mut spawn = || {
         if let Some(words) = prime::helper_words(roots, &user.pw.home) {
             let raw: Vec<&[u8]> = words.iter().map(Vec::as_slice).collect();
-            crate::prompt_spawn::bootstrap(exe.as_os_str(), &raw);
+            crate::prompt_spawn::bootstrap(exe.as_os_str(), &raw, None);
         }
     };
     prime::prime_with_deadline(

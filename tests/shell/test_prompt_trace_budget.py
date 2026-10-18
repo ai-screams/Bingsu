@@ -605,3 +605,26 @@ def test_root_namespace_link_is_prefilter_only():
     lines.append(lines.pop(at))
     with pytest.raises(AssertionError, match="post-filter syscall"):
         assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+# 이것을 실패시키는 것: 타이머 호출을 필터 뒤·반복 없는 값·다른 타이머·재설정으로 넓히는 것.
+@pytest.mark.parametrize("change", ["valid", "after", "oneshot", "zero", "long", "virtual", "twice"])
+def test_n6_timer_is_one_repeating_prefilter_timer(debian_trace, change):
+    line = '1947 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=1000}, it_value={tv_sec=0, tv_usec=49000}}, NULL) = 0'
+    lines = list(debian_trace)
+    at = next(i for i, l in enumerate(lines) if l.startswith("1947 ") and "PR_SET_SECCOMP" in l)
+    if change == "after":
+        at = next(i for i, l in enumerate(lines) if l.startswith("1947 ") and "write(1" in l)
+    if change == "oneshot":
+        line = line.replace("tv_usec=1000", "tv_usec=0")
+    if change == "zero":
+        line = line.replace("tv_usec=49000", "tv_usec=0")
+    if change == "long":
+        line = line.replace("tv_usec=49000", "tv_usec=50001")
+    if change == "virtual":
+        line = line.replace("ITIMER_REAL", "ITIMER_VIRTUAL")
+    lines[at:at] = [line] * (2 if change == "twice" else 1)
+    if change == "valid":
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+    else:
+        with pytest.raises(AssertionError, match="timer"):
+            assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)

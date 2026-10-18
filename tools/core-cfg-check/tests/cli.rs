@@ -1094,7 +1094,7 @@ fn bootstrap_is_only_a_prefilter_entry() {
     .unwrap();
     let (ok, err) = run_adapter(&source);
     assert!(ok, "{err}");
-    let call = "crate::prompt_spawn::bootstrap(exe, &raw);";
+    let call = "crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));";
     assert!(source.contains(call));
     let after = source.replace(call, "").replace(
         "respond(staged())",
@@ -1120,24 +1120,62 @@ fn reader_is_only_a_prefilter_entry() {
     )
     .unwrap();
     assert!(run_adapter(&source).0);
-    let call = "let staged = crate::prompt_read::prepare(&raw);";
+    let call = "let staged = crate::prompt_read::prepare(&raw, deadline);";
     assert!(source.contains(call));
     for bad in [
         source
             .replace(call, "")
             .replace("respond(staged())", &format!("{call} respond(staged())")),
-        source.replace(call, &format!("{call} crate::prompt_read::prepare(&raw);")),
+        source.replace(
+            call,
+            &format!("{call} crate::prompt_read::prepare(&raw, deadline);"),
+        ),
         source.replace(
             "respond(staged())",
             "crate::other::run(); respond(staged())",
         ),
         source.replace(
-            "fn write_record",
-            "fn extra() { crate::prompt_read::prepare(&[]); } fn write_record",
+            "fn write_until",
+            "fn extra() { crate::prompt_read::prepare(&[]); } fn write_until",
         ),
         source.replace("crate::prompt_read::prepare", "crate::other::prepare"),
     ] {
         let (ok, err) = run_adapter(&bad);
         assert!(!ok, "{err}");
+    }
+}
+
+// 이것을 실패시키는 것: 타이머 설치를 필터 뒤·다른 함수에서 허용하거나 실패를 무시하는 것.
+#[test]
+fn deadline_install_is_only_a_fail_closed_prefilter_entry() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bingsu/src/prompt.rs"),
+    )
+    .unwrap();
+    assert!(run_adapter(&source).0);
+    for bad in [
+        source.replace("crate::prompt_io::arm_deadline(deadline)", "true"),
+        source.replace(
+            "if !crate::prompt_io::arm_deadline",
+            "if crate::prompt_io::arm_deadline",
+        ),
+        source.replace(
+            "respond(staged())",
+            "crate::prompt_io::arm_deadline(deadline); respond(staged())",
+        ),
+        source.replace(
+            "fn write_until",
+            "fn extra() { crate::prompt_io::arm_deadline(d); } fn write_until",
+        ),
+        source.replace(
+            "let deadline = crate::prompt_io::entry_deadline();",
+            "let skipped = 0; let deadline = crate::prompt_io::entry_deadline();",
+        ),
+        source.replace(
+            "crate::prompt_io::deadline_now",
+            "crate::prompt_io::observe_clock",
+        ),
+    ] {
+        assert!(!run_adapter(&bad).0, "{bad}");
     }
 }

@@ -291,7 +291,7 @@ ROOT_CALLS = {r[0] for r in _ROWS if r[0] != "-"} | set("""
 execve clone clone3 vfork arch_prctl set_tid_address getrlimit prlimit64
 read readv pread64 close fcntl poll ppoll ioctl pipe2 open openat openat2
 access faccessat faccessat2 fstat newfstatat stat statx readlink readlinkat
-getdents64 prctl getuid getpid fstatfs fgetxattr getxattr
+getdents64 prctl getuid getpid fstatfs fgetxattr getxattr setitimer
 """.split()) | {
     # Rust runtime start on glibc: the main-thread stack guard reads its own
     # attributes (pthread_getattr_np fills the CPU set) and thread id.
@@ -608,6 +608,13 @@ def assert_prompt_trace_budget(lines, exe, pinned):
     front = [c for c in calls if c.pid == root]
     helper = [c for c in calls if c.pid != root]
     assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
+    timers = [c for c in front if c.name == "setitimer"]
+    assert len(timers) <= 1, ("one entry timer", timers)
+    for timer in timers:
+        args = args_of(timer)
+        assert args[0] == "ITIMER_REAL" and args[2] == "NULL", ("entry timer", timer)
+        value = re.fullmatch(r"\{it_interval=\{tv_sec=0, tv_usec=1000\}, it_value=\{tv_sec=0, tv_usec=(\d+)\}\}", args[1])
+        assert value and 0 < int(value[1]) <= 50_000 and timer.ret == "0", ("entry timer", timer)
     spawns = successful_spawns(front)
     # 이것을 실패시키는 것: prompt가 helper 외 스레드/프로세스를 만들거나 helper 생성을 생략하는 것.
     assert len(spawns) == 1, ("exactly one prompt spawn", spawns)
@@ -621,6 +628,7 @@ def assert_prompt_trace_budget(lines, exe, pinned):
     # 이것을 실패시키는 것: helper 생성이 prompt seccomp 설치 뒤로 옮겨지거나 필터 설치가 실패하는 것.
     assert len(filters) == 1 and filters[0].ret == "0", filters
     assert all(c.index < filters[0].index for c in front if c.name in SPAWNS), spawn
+    assert all(c.index < filters[0].index for c in timers), ("post-filter timer", timers)
     execs = [c for c in helper if c.name in {"execve", "execveat"}]
     refresh = [c for c in execs if c.pid == helper_pid]
     # 이것을 실패시키는 것: 고정 exe/argv[1]/빈 환경 계약을 깨거나 helper를 재-exec하는 것.
