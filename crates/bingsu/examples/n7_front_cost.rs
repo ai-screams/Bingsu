@@ -4,17 +4,17 @@
     dead_code,
     reason = "shares production adapters and the complete wire fixture"
 )]
-#[cfg(not(test))]
+#[cfg(all(unix, not(test)))]
 #[path = "../../bingsu-core-tests/src/snapshot_fixture.rs"]
 mod fixture;
-#[cfg(not(test))]
+#[cfg(all(unix, not(test)))]
 #[path = "../src/prompt_io.rs"]
 mod prompt_io;
-#[cfg(not(test))]
+#[cfg(all(unix, not(test)))]
 #[path = "../src/prompt_read.rs"]
 mod prompt_read;
 
-#[cfg(not(test))]
+#[cfg(all(unix, not(test)))]
 fn main() {
     use bingsu_core::{
         bands::Band,
@@ -163,5 +163,6 @@ fn main() {
         }
     }
 }
-#[cfg(test)]
+// The shipped readers exist only on Unix; elsewhere this entry is empty.
+#[cfg(not(all(unix, not(test))))]
 fn main() {}
