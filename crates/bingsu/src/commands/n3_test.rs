@@ -54,6 +54,8 @@ pub fn wait_report(path: &std::path::Path) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     // 이것을 실패시키는 것: bootstrap이 존재하는 상대 실행 경로를 허용하는 것.
+    // Unix only: the bootstrap and symlinks exist only there.
+    #[cfg(unix)]
     #[test]
     fn n7_relative_executable_is_rejected() {
         let (base, exe) = super::probe("n7-relative");
