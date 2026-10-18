@@ -510,6 +510,58 @@ mod tests {
     use super::*;
     use bingsu_core::fs_trust::{AclFacts, RefuseGroupWrite};
 
+    // 이것을 실패시키는 것: 보유한 source fd의 최종 stamp 비교를 생략하는 것.
+    #[test]
+    fn n7_final_source_stamp_is_independent_of_name_evidence() {
+        let base = std::env::temp_dir().join(format!("n7-source-stamp-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let file = base.join("config.toml");
+        std::fs::write(&file, b"icons='ascii'").unwrap();
+        let mut evidence =
+            Resolved::open(&file, sys::current_uid(), &mut RefuseGroupWrite).unwrap();
+        assert!(
+            evidence
+                .revalidate(sys::current_uid(), &mut RefuseGroupWrite)
+                .is_ok()
+        );
+        // Independently injected stored fd observation; parent/name evidence stays valid.
+        evidence.stamp.mtime.0 -= 1;
+        assert!(
+            evidence
+                .revalidate(sys::current_uid(), &mut RefuseGroupWrite)
+                .is_err()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 부모의 이름에 보유한 source가 그대로 연결됐는지 확인하지 않는 것.
+    #[test]
+    fn n7_parent_name_evidence_is_independent_of_source_stamp() {
+        let base = std::env::temp_dir().join(format!("n7-name-stamp-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let file = base.join("config.toml");
+        std::fs::write(&file, b"icons='ascii'").unwrap();
+        let mut evidence =
+            Resolved::open(&file, sys::current_uid(), &mut RefuseGroupWrite).unwrap();
+        assert!(
+            evidence
+                .revalidate(sys::current_uid(), &mut RefuseGroupWrite)
+                .is_ok()
+        );
+        // Inject only the prior name observation; current source fd/facts stay valid.
+        evidence.edges.last_mut().unwrap().stamp.ino ^= 1;
+        assert!(
+            evidence
+                .revalidate(sys::current_uid(), &mut RefuseGroupWrite)
+                .is_err()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     // 모양 전용 뿌리의 분류는 판정 불가 사실만 결정된 것으로 본다. 알려진 쓰기 ACL·소유자는 그대로 둔다.
     // 이것을 실패시키는 것: 소유권 미확인·ACL 미확인을 그대로 두는 것(Undecided 뿌리를 버림), 소유권을 집행하지 않는
     // 것이 확정된 볼륨(`Some(false)`)까지 올리는 것,

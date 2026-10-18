@@ -1,0 +1,3580 @@
+[
+  {
+    "id": "N-001",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_magic",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_magic",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "if &b[..8] != b\"BNGSNP02\"",
+        "after": "if false",
+        "count": 2,
+        "replace": 1
+      }
+    ]
+  },
+  {
+    "id": "N-002",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_version",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_version",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "|| b[8..12] != [2, 0, 64, 0]",
+        "after": "|| b[10..12] != [64, 0]",
+        "count": 2,
+        "replace": 1
+      }
+    ]
+  },
+  {
+    "id": "N-003",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_header_length",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_header_length",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "|| b[8..12] != [2, 0, 64, 0]",
+        "after": "|| b[8..10] != [2, 0]",
+        "count": 2,
+        "replace": 1
+      }
+    ]
+  },
+  {
+    "id": "N-004",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_reserved",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_reserved",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "|| b[13..16] != [0; 3]",
+        "after": "|| false",
+        "count": 2,
+        "replace": 1
+      }
+    ]
+  },
+  {
+    "id": "N-009",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_abi",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_abi",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "|| b[72..76] != [2, 0, 128, 0]",
+        "after": "|| b[74..76] != [128, 0]",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-005",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_compiled_length",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_compiled_length",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "if !(PREFIX..=PREFIX + COMPILED_MAX).contains(&c)",
+        "after": "if c < PREFIX",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-006",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::rechecksummed_frames_and_limits",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::rechecksummed_frames_and_limits",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "|| m > META_MAX",
+        "after": "|| false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-007",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::compiled_roundtrip_and_frame",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::compiled_roundtrip_and_frame",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "if file_len != HEADER + PREFIX + c_len + m_len || bytes.len() != HEADER + PREFIX + c_len",
+        "after": "if bytes.len() != HEADER + PREFIX + c_len",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-010",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "1 => Ok(true),\n            _ => Err(Error::Tag),",
+        "after": "1 => Ok(true),\n            _ => Ok(false),",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-011",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "Ok(if bool::get(r)? {",
+        "after": "Ok(if u8::get(r)? == 1 {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-012",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "2 => Ok(Self::Unsafe),\n            _ => Err(Error::Tag),",
+        "after": "2 => Ok(Self::Unsafe),\n            _ => Ok(Self::Unsafe),",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-013",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "if n > r.rest.len() {",
+        "after": "if false {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-014",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "let s = core::str::from_utf8(r.take(n)?).map_err(|_| Error::Utf8)?;",
+        "after": "let s = core::str::from_utf8(r.take(n.min(r.rest.len()))?).map_err(|_| Error::Utf8)?;",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-015",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "let s = core::str::from_utf8(r.take(n)?).map_err(|_| Error::Utf8)?;",
+        "after": "let s = core::str::from_utf8(r.take(n)?).unwrap_or(\"\");",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-016",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::codec_reject_trailing_bytes",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::codec_reject_trailing_bytes",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "if !r.rest.is_empty() {",
+        "after": "if false {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-017",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "self.budget = self.budget.checked_sub(n).ok_or(Error::Limit)?;",
+        "after": "self.budget = self.budget.saturating_sub(n);",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-018",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::codec_reject_arithmetic_overflow",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::codec_reject_arithmetic_overflow",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "self.len.checked_add(b.len())",
+        "after": "Some(self.len.wrapping_add(b.len()))",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-019",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "|| s.chars().any(crate::sanitize::is_removed)",
+        "after": "|| false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-020",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if usize::from(*seg) >= crate::field::BUILTIN.len() =>",
+        "after": "if false =>",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-021",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if usize::from(*field) >= decl.fields.len() {",
+        "after": "if false {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-022",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if usize::from(*x) >= crate::icons::ICONS.len() =>",
+        "after": "if false =>",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-023",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "|| spec.attrs & !(BOLD | DIM | ITALIC | UNDERLINE) != 0",
+        "after": "|| false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-024",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if depth != 0 || actual_fill != fill {",
+        "after": "if actual_fill != fill {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-025",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if !matches!(nodes.get(end), Some(Node::GroupEnd)) {",
+        "after": "if false {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-026",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if !nodes[i + 1..end]\n                        .iter()\n                        .any(|n| matches!(n, Node::Segment { .. } | Node::Field { .. }))",
+        "after": "if false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-027",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "if depth != 0 || actual_fill.is_some() {",
+        "after": "if actual_fill.is_some() {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-028",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::checked_line_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/template/compile.rs",
+        "before": "|| nodes.len() != origin.len()",
+        "after": "|| false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-029",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::compiled_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::compiled_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "if c.band_order.len() != c.bands.len() {",
+        "after": "if false {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-030",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::compiled_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::compiled_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "|| c.setup.len() != crate::field::BUILTIN.len()",
+        "after": "|| false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-031",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::compiled_invariants",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::compiled_invariants",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "|| c.palette.tokens.len() != crate::color::palette::TOKENS.len()",
+        "after": "|| false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-032",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "Self::new(u8::get(r)?, u8::get(r)?).ok_or(Error::Shape)",
+        "after": "Ok(Self::new(u8::get(r)?, u8::get(r)?).unwrap_or(Self::new(1, 2).unwrap()))",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-033",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::file_facts_gate_every_read",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "e.uid == uid",
+        "after": "true",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-034",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::file_facts_gate_every_read",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "&& e.mode == 0o100600",
+        "after": "&& e.mode & 0o170000 == 0o100000",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-035",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::file_facts_gate_every_read",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "&& e.mode == 0o100600",
+        "after": "&& e.mode & 0o7777 == 0o600",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-036",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::file_facts_gate_every_read",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "&& f.nlink == 1",
+        "after": "&& true",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-038",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::file_facts_gate_every_read",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "&& matches!(\n            e.acl,\n            fs_trust::AclFacts::None\n                | fs_trust::AclFacts::DenyOnly\n                | fs_trust::AclFacts::PosixExtended\n        )",
+        "after": "&& true",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-039",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::file_facts_gate_every_read",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "&& e.ownership == Some(true)",
+        "after": "&& true",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-040",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::wire_reject_file_capacity",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::wire_reject_file_capacity",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "if !(HEADER + PREFIX..=HEADER + PREFIX + COMPILED_MAX + META_MAX).contains(&file_len)",
+        "after": "if file_len < HEADER + PREFIX",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-075",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::staged_groups_use_only_the_exact_init_pin",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::staged_groups_use_only_the_exact_init_pin",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/fs_trust.rs",
+        "before": "self.0.contains(&GroupPin::of(at))",
+        "after": "self.0.iter().any(|p| (p.dev, p.ino, p.gid) == (at.dev, at.ino, at.gid))",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-080",
+    "kind": "rust",
+    "anchor": "collection::tests::fixed_collection_wire_and_eligibility",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "collection::tests::fixed_collection_wire_and_eligibility",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/collection.rs",
+        "before": ".map_or(0, |i| mask & (1 << i))",
+        "after": ".map_or(0, |_i| mask)",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-084",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::status_priority_and_trust_rejections",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::status_priority_and_trust_rejections",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "} else if observed.marker.is_none() {",
+        "after": "} else if observed.marker.is_none() || observed.clock.is_none() {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-138",
+    "kind": "rust",
+    "anchor": "front::output::tests::write_progress_is_exact_and_failures_stop",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::output::tests::write_progress_is_exact_and_failures_stop",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/output.rs",
+        "before": "WriteStep::Continue(n),",
+        "after": "WriteStep::Continue(remaining),",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-141",
+    "kind": "rust",
+    "anchor": "front::output::tests::write_progress_is_exact_and_failures_stop",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::output::tests::write_progress_is_exact_and_failures_stop",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/output.rs",
+        "before": "IoResult::Written(n) if n > 0 && n <= remaining",
+        "after": "IoResult::Written(n) if n <= remaining",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-037",
+    "kind": "rust",
+    "anchor": "prompt_read::tests::prefilter_rejects_symlink_hardlink_mode_and_fifo",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_read::tests::prefilter_rejects_symlink_hardlink_mode_and_fifo",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_read.rs",
+        "before": "libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY",
+        "after": "libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-085",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::two_processes_observe_nonblocking_snapshot_and_selection_locks",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::two_processes_observe_nonblocking_snapshot_and_selection_locks",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "libc::LOCK_EX | libc::LOCK_NB",
+        "after": "libc::LOCK_EX",
+        "count": 1
+      }
+    ],
+    "timeout": 15
+  },
+  {
+    "id": "N-086",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::lock_safety_and_identity_are_enforced",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::lock_safety_and_identity_are_enforced",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "let lock = sys::try_lock(lock).map_err(lock_error)?;",
+        "after": "sys::unlink_at(self.dir.as_fd(), OsStr::new(DataFile::Lock.name()))?;\n        let lock = sys::try_lock(lock).map_err(lock_error)?;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-087",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::snapshot_changed_under_lock_is_not_published",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::snapshot_changed_under_lock_is_not_published",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "store.verify_snapshot()?;",
+        "after": "// mutation: no final G/name check",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-088",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::evidence_fields_are_explicit_and_directory_times_are_not_sources",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::evidence_fields_are_explicit_and_directory_times_are_not_sources",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/evidence.rs",
+        "before": "self.num(f.ino);",
+        "after": "self.num(0);",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-089",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::evidence_fields_are_explicit_and_directory_times_are_not_sources",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::evidence_fields_are_explicit_and_directory_times_are_not_sources",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/evidence.rs",
+        "before": "[s.mtime, s.ctime]",
+        "after": "[(0, 0), s.ctime]",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-090",
+    "kind": "rust",
+    "anchor": "commands::source_path::tests::n7_final_source_stamp_is_independent_of_name_evidence",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::source_path::tests::n7_final_source_stamp_is_independent_of_name_evidence",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/source_path.rs",
+        "before": "now == self.stamp",
+        "after": "true",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-091",
+    "kind": "rust",
+    "anchor": "commands::source_path::tests::n7_parent_name_evidence_is_independent_of_source_stamp",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::source_path::tests::n7_parent_name_evidence_is_independent_of_source_stamp",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/source_path.rs",
+        "before": "if !same {\n                return Err(io::Error::other(\"parent/name binding changed\"));",
+        "after": "if false {\n                return Err(io::Error::other(\"parent/name binding changed\"));",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-092",
+    "kind": "rust",
+    "anchor": "commands::config_load::tests::session_rechecks_directory_listing",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::config_load::tests::session_rechecks_directory_listing",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_load.rs",
+        "before": "if config_names(&listing.file).map_err(|e| e.to_string())? != listing.names {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-093",
+    "kind": "rust",
+    "anchor": "commands::config_load::tests::n7_listing_removed",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::config_load::tests::n7_listing_removed",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_load.rs",
+        "before": "if config_names(&listing.file).map_err(|e| e.to_string())? != listing.names {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-094",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::observation_errors_preserve_all_published_bytes",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::observation_errors_preserve_all_published_bytes",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_load.rs",
+        "before": "Err(_) => {\n                self.complete = false;\n            }",
+        "after": "Err(_) => {}",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-095",
+    "kind": "rust",
+    "anchor": "commands::snapshot_store::tests::failed_observations_and_changed_length_refuse",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::snapshot_store::tests::failed_observations_and_changed_length_refuse",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "AclFacts::None | AclFacts::DenyOnly | AclFacts::PosixExtended\n        )",
+        "after": "AclFacts::None | AclFacts::DenyOnly | AclFacts::PosixExtended | AclFacts::Unknown\n        )",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-096",
+    "kind": "rust",
+    "anchor": "commands::config_load::tests::candidate_read_failures_are_incomplete",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::config_load::tests::candidate_read_failures_are_incomplete",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_load.rs",
+        "before": "self.complete = false;\n                open_error(errno_text(&e), c.trust)",
+        "after": "open_error(errno_text(&e), c.trust)",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-097",
+    "kind": "rust",
+    "anchor": "commands::config_load::tests::descriptor_cap_is_incomplete_not_a_file_budget_error",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::config_load::tests::descriptor_cap_is_incomplete_not_a_file_budget_error",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_load.rs",
+        "before": "if self.fds - previous + count > self.fd_cap {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-098",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::n7_capacity_is_incomplete",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::n7_capacity_is_incomplete",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "Err(_) => RefreshResult::Incomplete,",
+        "after": "Err(_) => RefreshResult::Invalid,",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-099",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::left_out_publishes_remaining_execution_set",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::left_out_publishes_remaining_execution_set",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "Verified::Publish { left_out: paths } => {\n            left_out = paths;\n            Outcome::Publish",
+        "after": "Verified::Publish { left_out: paths } => {\n            left_out = paths;\n            if left_out.is_empty() { Outcome::Publish } else { Outcome::Invalid }",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-100",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::invalid_preserves_display_and_advances_only_verification",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::invalid_preserves_display_and_advances_only_verification",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "invalid: outcome == Outcome::Invalid,",
+        "after": "invalid: false,",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-101",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::reserved_numbers_are_not_reused_after_failure",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::reserved_numbers_are_not_reused_after_failure",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "install(&store, Slot::Sequence, hook)?;",
+        "after": "// mutation: no durable-in-runtime reservation",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-102",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::sigkill_before_and_after_every_rename_recovers_fixed_slots",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::sigkill_before_and_after_every_rename_recovers_fixed_slots",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "let last = if old.is_some() {",
+        "after": "let last = if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-103",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::sigkill_before_and_after_every_rename_recovers_fixed_slots",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::sigkill_before_and_after_every_rename_recovers_fixed_slots",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "install(&store, Slot::Snapshot, hook)?;",
+        "after": "store.install(Slot::Marker)?;\n        install(&store, Slot::Snapshot, hook)?;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-104",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::n7_marker_replacement_changes_inode",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::n7_marker_replacement_changes_inode",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "sys::rename_at(\n            self.root.dir.as_fd(),\n            OsStr::new(slot.name()),\n            OsStr::new(slot.target().name()),\n        )?;",
+        "after": "if matches!(slot, Slot::Marker) {\n            let mut dest = sys::open_lock_at(self.root.dir.as_fd(), OsStr::new(slot.target().name()))?;\n            dest.set_len(0)?;\n            std::io::Write::write_all(&mut dest, staged.small_bytes.as_ref().unwrap())?;\n        } else {\n            sys::rename_at(self.root.dir.as_fd(), OsStr::new(slot.name()), OsStr::new(slot.target().name()))?;\n        }",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-105",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::selection_renewal_is_serialized_and_follows_publication",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::selection_renewal_is_serialized_and_follows_publication",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "hook(Checkpoint::Staged);",
+        "after": "if let (Some(next), Some(expected)) = (&loader.renew, &loader.record_evidence) {\n        let early = SelectionLock::try_lock(&r.state_root, r.me, &mut SystemGroups::new(&r.user))?;\n        let _ = early.renew(expected, next, &mut SystemGroups::new(&r.user));\n    }\n    hook(Checkpoint::Staged);",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-106",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::selection_changes_and_late_contention_preserve_marker",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::selection_changes_and_late_contention_preserve_marker",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "if selection.evidence_export()? != selection_evidence {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-108",
+    "kind": "rust",
+    "anchor": "prompt::tests::bootstrap_failure_and_blocked_do_not_delay_the_record",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt::tests::bootstrap_failure_and_blocked_do_not_delay_the_record",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));\n        let staged",
+        "after": "let filter = enter_sandbox();\n        crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));\n        let staged",
+        "count": 1
+      },
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "if front::runs_core(enter_sandbox()) {",
+        "after": "if front::runs_core(filter) {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-109",
+    "kind": "rust",
+    "anchor": "prompt::tests::bootstrap_failure_and_blocked_do_not_delay_the_record",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt::tests::bootstrap_failure_and_blocked_do_not_delay_the_record",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "let _ = spawn_until(exe, raw, deadline);",
+        "after": "spawn_until(exe, raw, deadline).expect(\"spawn failed\");",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-110",
+    "kind": "rust",
+    "anchor": "prompt::tests::no_sandbox_skips_the_core",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt::tests::no_sandbox_skips_the_core",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "if front::runs_core(enter_sandbox()) {",
+        "after": "if { let _ = enter_sandbox(); true } {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-111",
+    "kind": "rust",
+    "anchor": "commands::n3_test::tests::n7_relative_executable_is_rejected",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::n3_test::tests::n7_relative_executable_is_rejected",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "if !exe.as_bytes().starts_with(b\"/\") {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-112",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "for fd in 0..3 {",
+        "after": "for fd in [0, 2] {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-113",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "for fd in 0..3 {",
+        "after": "for fd in 0..2 {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-114",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "let flags = flags | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;",
+        "after": "let flags = flags;",
+        "count": 1
+      }
+    ],
+    "timeout": 90,
+    "platform_patches": {
+      "linux": [
+        {
+          "file": "crates/bingsu/src/prompt_spawn.rs",
+          "before": "if fd >= 3 {",
+          "after": "if false {"
+        }
+      ]
+    }
+  },
+  {
+    "id": "N-115",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper.rs",
+        "before": "if unsafe { libc::setsid() } < 0 {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-116",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "set(libc::RLIMIT_CPU, 1.min(cpu.rlim_max), 2.min(cpu.rlim_max))?;",
+        "after": "let _ = cpu;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-117",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "set(libc::RLIMIT_NOFILE, cap, cap)?;",
+        "after": "let _ = cap;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-118",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "set(libc::RLIMIT_FSIZE, cap, cap)?;",
+        "after": "let _ = cap;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-119",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::memory_is_enforced",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::memory_is_enforced",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "if memory_exceeded(baseline) {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90,
+    "platform_patches": {
+      "linux": [
+        {
+          "file": "crates/bingsu/src/commands/helper_limits.rs",
+          "before": "set(libc::RLIMIT_AS, cap, cap)?;",
+          "after": "let _ = cap;"
+        }
+      ]
+    }
+  },
+  {
+    "id": "N-120",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "if Instant::now() >= deadline {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 20
+  },
+  {
+    "id": "N-121",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "reap.sa_sigaction = libc::SIG_IGN;\n        reap.sa_flags = libc::SA_NOCLDWAIT;",
+        "after": "reap.sa_sigaction = libc::SIG_DFL;\n        reap.sa_flags = 0;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-123",
+    "kind": "rust",
+    "anchor": "commands::log::tests::bounded_logs_refuse_path_attacks_and_off_does_no_io",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::log::tests::bounded_logs_refuse_path_attacks_and_off_does_no_io",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/log.rs",
+        "before": "if level == LogLevel::Off || severity == LogLevel::Off || rank(severity) > rank(level) {",
+        "after": "if level != LogLevel::Off && (severity == LogLevel::Off || rank(severity) > rank(level)) {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-124",
+    "kind": "rust",
+    "anchor": "commands::log::tests::bounded_logs_refuse_path_attacks_and_off_does_no_io",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::log::tests::bounded_logs_refuse_path_attacks_and_off_does_no_io",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC;",
+        "after": "let flags = access | libc::O_CLOEXEC;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-125",
+    "kind": "rust",
+    "anchor": "commands::log::tests::bounded_logs_refuse_path_attacks_and_off_does_no_io",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::log::tests::bounded_logs_refuse_path_attacks_and_off_does_no_io",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/log.rs",
+        "before": "runtime_root::ensure_root(root, me, groups, bingsu_core::fs_trust::Last::PrivateFolder)?",
+        "after": "runtime_root::ensure_root(root, me, groups, bingsu_core::fs_trust::Last::Mine)?",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-127",
+    "kind": "rust",
+    "anchor": "commands::init::prime::tests::warm_init_starts_nothing",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::init::prime::tests::warm_init_starts_nothing",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/init/prime.rs",
+        "before": "if before.snapshot_ready {",
+        "after": "if false {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-128",
+    "kind": "rust",
+    "anchor": "commands::init::prime::tests::cold_init_stall_ends_at_the_limit",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::init::prime::tests::cold_init_stall_ends_at_the_limit",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/init/prime.rs",
+        "before": "while Instant::now() < end {",
+        "after": "while Instant::now() < end + Duration::from_secs(5) {",
+        "count": 1
+      },
+      {
+        "file": "crates/bingsu/src/commands/init/prime.rs",
+        "before": "match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {",
+        "after": "match rx.recv_timeout(Duration::from_secs(5)) {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-132",
+    "kind": "rust",
+    "anchor": "commands::config_load::tests::selected_config_keeps_overlays_and_missing_selection_is_an_error",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::config_load::tests::selected_config_keeps_overlays_and_missing_selection_is_an_error",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_load.rs",
+        "before": "paths.push(root.join(\"config.local.toml\"));",
+        "after": "// mutation: selection discards local overlay",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-133",
+    "kind": "rust",
+    "anchor": "selection_partial_success",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--test",
+      "cli_config",
+      "--",
+      "selection_partial_success",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config_use.rs",
+        "before": "eprintln!(\"{}\", en(MsgId::UseSavedUnfinished));\n            ctx::code(EXIT_UNFINISHED)",
+        "after": "eprintln!(\"{}\", en(MsgId::UseSavedUnfinished));\n            ExitCode::SUCCESS",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-139",
+    "kind": "rust",
+    "anchor": "prompt::tests::writer_checks_before_every_attempt_and_after_every_result",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt::tests::writer_checks_before_every_attempt_and_after_every_result",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "let Some(now) = observe(deadline) else {",
+        "after": "let Some(now) = Some(0) else {",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-143",
+    "kind": "rust",
+    "anchor": "prompt::tests::partial_panic_never_appends_another_record",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt::tests::partial_panic_never_appends_another_record",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n        write_loop(record, deadline, observe, write);\n    }));",
+        "after": "if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n        write_loop(record, deadline, observe, write);\n    })).is_err() { let _ = write_stdout(b\"B1\\x1f8\\x1f> \\x1e\"); }",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-198",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "set(libc::RLIMIT_NOFILE, cap, cap)?;",
+        "after": "let _ = cap;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-199",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::limits_and_independent_lifetime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::limits_and_independent_lifetime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "4608.min(fd.rlim_max).min(kernel_nofile()?)",
+        "after": "4608.min(kernel_nofile()?)",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-203",
+    "kind": "rust",
+    "anchor": "commands::snapshot_store::tests::context_walk_is_private_and_separate",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::snapshot_store::tests::context_walk_is_private_and_separate",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "let components = snapshot::context_components(config, state)?;",
+        "after": "let components = snapshot::context_components(config, b\"/global-state\")?;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-204",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::two_processes_observe_nonblocking_snapshot_and_selection_locks",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::two_processes_observe_nonblocking_snapshot_and_selection_locks",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "let lock = sys::try_lock(lock).map_err(lock_error)?;",
+        "after": "let _ = lock;\n        let lock = sys::try_lock(sys::open_lock_at(self.dir.as_fd(), OsStr::new(&format!(\"snapshot-{}.lock\", std::process::id())))?).map_err(lock_error)?;",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-207",
+    "kind": "rust",
+    "anchor": "helper::tests::narrow_handoff",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "helper::tests::narrow_handoff",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/helper.rs",
+        "before": "envelope::LogLevel::DebugLog => b\"--log-level=debug\",",
+        "after": "envelope::LogLevel::DebugLog => b\"--log-level=off\",",
+        "count": 1
+      }
+    ],
+    "timeout": 90
+  },
+  {
+    "id": "N-041",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::status_priority_and_trust_rejections",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::status_priority_and_trust_rejections",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "} else if observed.marker.is_none() {\n                Err(Refusal::Missing)",
+        "after": "} else if observed.marker.is_none() {\n                Ok(snapshot::T_NS)",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-042",
+    "kind": "rust",
+    "anchor": "snapshot::tests::cases::crc_reserved_and_legacy_rejected",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot::tests::cases::crc_reserved_and_legacy_rejected",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "if &b[..8] != b\"BNGMRK02\"",
+        "after": "if false",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-071",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "id.boot != [0; 16] && boot == Some(id.boot) && context == id.context",
+        "after": "context == id.context",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-072",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot.rs",
+        "before": "    pub fn finish(self) -> Result<FrontSnapshot, Error> {",
+        "after": "    pub fn n7_current_generation(&self) -> Option<u64> { u64at(&self.bytes, 16).ok() }\n    pub fn finish(self) -> Result<FrontSnapshot, Error> {"
+      },
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "    selected: Option<Box<FrontSnapshot>>,",
+        "after": "    selected: Option<Box<FrontSnapshot>>,\n    current_generation: Option<u64>,"
+      },
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "                        if d.read_len() == 0 {\n                            self.observed.selected = self",
+        "after": "                        if d.read_len() == 0 {\n                            if copy == SnapshotCopy::Current { self.observed.current_generation = d.n7_current_generation(); }\n                            self.observed.selected = self"
+      },
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "                                .map(Box::new)",
+        "after": "                                .map(|mut s| {\n                                    if copy == SnapshotCopy::LastGood {\n                                        if let Some(g) = self.observed.current_generation { s.id.generation = g; }\n                                    }\n                                    Box::new(s)\n                                })"
+      }
+    ]
+  },
+  {
+    "id": "N-073",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "if self.at < self.runtime_at {",
+        "after": "if false {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-074",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/fs_trust.rs",
+        "before": "return Ok(NextOwner::Mine { parent: at });",
+        "after": "return Ok(NextOwner::Any);",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-079",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "response.worker_mask = crate::collection::worker_mask(s.config.collect_mask);",
+        "after": "response.worker_mask = if observed.marker.is_some_and(|m| m.invalid) { 0 } else { crate::collection::worker_mask(s.config.collect_mask) };",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-081",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front.rs",
+        "before": "icons: c.icons,",
+        "after": "icons: crate::icons::IconSet::Unicode,",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-082",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front.rs",
+        "before": "c.duration_min_ms,",
+        "after": "2_000,",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-083",
+    "kind": "rust",
+    "anchor": "warning_reserves_only_the_input_line_and_keeps_shell_grammar",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core-tests",
+      "--test",
+      "front_notice",
+      "--",
+      "warning_reserves_only_the_input_line_and_keeps_shell_grammar",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/render.rs",
+        "before": "width: budget.saturating_sub(1) as u16,",
+        "after": "width: budget as u16,",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-130",
+    "kind": "rust",
+    "anchor": "n7_check_is_read_only_without_runtime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--test",
+      "cli_config",
+      "--",
+      "n7_check_is_read_only_without_runtime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config.rs",
+        "before": "[Some(\"check\")] => return config_inspect::check(),",
+        "after": "[Some(\"check\")] => { let _ = super::reload::run(&[]); return config_inspect::check(); },",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-131",
+    "kind": "rust",
+    "anchor": "n7_path_is_read_only_without_runtime",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--test",
+      "cli_config",
+      "--",
+      "n7_path_is_read_only_without_runtime",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/config.rs",
+        "before": "[Some(\"path\")] => return config_inspect::path(),",
+        "after": "[Some(\"path\")] => { let _ = super::reload::run(&[]); return config_inspect::path(); },",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-134",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_deadline.py::test_setup_failure_clock_failure_and_expiry_emit_nothing[8]",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_deadline.py::test_setup_failure_clock_failure_and_expiry_emit_nothing[8]",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_io.rs",
+        "before": "deadline.remaining(now)?;",
+        "after": "let deadline = Deadline::from_entry(now, PROMPT_BUDGET_NS)?;\n    deadline.remaining(now)?;"
+      }
+    ]
+  },
+  {
+    "id": "N-140",
+    "kind": "rust",
+    "anchor": "closed_stdout_is_silent_and_exits_zero",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--test",
+      "cli_prompt",
+      "--",
+      "closed_stdout_is_silent_and_exits_zero",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "front::output::IoResult::Failed\n        }",
+        "after": "{ let _ = unsafe { libc::write(2, b\"EPIPE\".as_ptr().cast(), 5) }; front::output::IoResult::Failed }\n        }",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-142",
+    "kind": "rust",
+    "anchor": "prompt_does_not_change_stdout_flags",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--test",
+      "cli_prompt",
+      "--",
+      "prompt_does_not_change_stdout_flags",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "let n = unsafe { libc::write(1, buf.as_ptr().cast(), buf.len()) };",
+        "after": "unsafe { libc::fcntl(1, libc::F_SETFL, libc::O_NONBLOCK) };\n    let n = unsafe { libc::write(1, buf.as_ptr().cast(), buf.len()) };",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-205",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "if self.at < self.runtime_at {",
+        "after": "if self.at > self.runtime_at { return true; }\n        if self.at < self.runtime_at {",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-206",
+    "kind": "rust",
+    "anchor": "front::staged::tests::cases::n7_missing_context_never_reads_global_store",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "front::staged::tests::cases::n7_missing_context_never_reads_global_store",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/front/staged.rs",
+        "before": "(Phase::OpenDirectory, Observation::Failed) => self.stop(),",
+        "after": "(Phase::OpenDirectory, Observation::Failed) => { self.observed.runtime_ok = true; self.phase = Phase::OpenFile; },",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "N-202",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::fixed_spawn_fd_hygiene_and_reaping",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "let flags = flags | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;",
+        "after": "let flags = flags;",
+        "count": 1
+      }
+    ],
+    "platform_patches": {
+      "linux": [
+        {
+          "file": "crates/bingsu/src/prompt_spawn.rs",
+          "before": "if fd >= 3 {",
+          "after": "if false {"
+        }
+      ]
+    }
+  },
+  {
+    "id": "N-135",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_deadline.py::test_signal_before_write_is_interrupted_again",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_deadline.py::test_signal_before_write_is_interrupted_again",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_io.rs",
+        "before": "tv_usec: 1_000,",
+        "after": "tv_usec: 0,"
+      }
+    ]
+  },
+  {
+    "id": "N-136",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_deadline.py::test_setup_failure_clock_failure_and_expiry_emit_nothing[6]",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_deadline.py::test_setup_failure_clock_failure_and_expiry_emit_nothing[6]",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "if !crate::prompt_io::arm_deadline(deadline) {",
+        "after": "if false && !crate::prompt_io::arm_deadline(deadline) {"
+      }
+    ]
+  },
+  {
+    "id": "N-137",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_deadline.py::test_full_pipe_is_abandoned_by_single_thread[True]",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_deadline.py::test_full_pipe_is_abandoned_by_single_thread[True]",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_io.rs",
+        "before": "libc::sigprocmask(libc::SIG_UNBLOCK, &action.sa_mask, std::ptr::null_mut())",
+        "after": "libc::sigprocmask(libc::SIG_BLOCK, &action.sa_mask, std::ptr::null_mut())"
+      }
+    ]
+  },
+  {
+    "id": "N-144",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_deadline.py::test_full_pipe_is_abandoned_by_single_thread[False]",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_deadline.py::test_full_pipe_is_abandoned_by_single_thread[False]",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt.rs",
+        "before": "let Some(deadline) = deadline else { exit(0) };",
+        "after": "let _ = std::thread::spawn(|| loop { std::thread::park(); });\n    let Some(deadline) = deadline else { exit(0) };"
+      }
+    ]
+  },
+  {
+    "id": "N-201",
+    "kind": "rust",
+    "anchor": "commands::helper_limits::tests::n7_parent_nofile_unchanged",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::helper_limits::tests::n7_parent_nofile_unchanged",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "let _ = spawn_until(exe, raw, deadline);",
+        "after": "let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };\n    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim); lim.rlim_cur = 128; libc::setrlimit(libc::RLIMIT_NOFILE, &lim); }\n    let _ = spawn_until(exe, raw, deadline);"
+      }
+    ]
+  },
+  {
+    "id": "N-107",
+    "kind": "rust",
+    "anchor": "commands::refresh::tests::n7_runtime_publication_has_no_fsync",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::refresh::tests::n7_runtime_publication_has_no_fsync",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "        sys::rename_at(\n            self.root.dir.as_fd(),",
+        "after": "        // SAFETY: held runtime directory, test mutation only.\n        #[allow(unsafe_code)]\n        unsafe { libc::fsync(self.root.dir.as_raw_fd()); }\n        sys::rename_at(\n            self.root.dir.as_fd(),"
+      }
+    ]
+  },
+  {
+    "id": "N-126",
+    "kind": "python",
+    "anchor": "tests/shell/test_helper_lifecycle.py::test_each_prompt_forwards_level_to_fixed_log_root",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_helper_lifecycle.py::test_each_prompt_forwards_level_to_fixed_log_root",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper.rs",
+        "before": "    let log_root = e\n",
+        "after": "    let override_root = std::env::var_os(\"BINGSU_LOG\");\n    let log_root = e\n"
+      },
+      {
+        "file": "crates/bingsu/src/commands/helper.rs",
+        "before": "        .map(|b| Path::new(OsStr::from_bytes(b)));",
+        "after": "        .map(|b| Path::new(OsStr::from_bytes(b)));\n    let log_root = override_root.as_deref().map(Path::new).or(log_root);"
+      }
+    ]
+  },
+  {
+    "id": "N-129",
+    "kind": "python",
+    "anchor": "tests/shell/test_init_words.py::test_init_twice_redefines_runtime_root",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_init_words.py::test_init_twice_redefines_runtime_root",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/shell/bash/hooks.bash",
+        "before": "_bingsu_call() {\n  local _bingsu_cn='\\#'\n  _bingsu_cn=${_bingsu_cn@P}\n  if [[ ${_bingsu_dead_cn-} == \"$_bingsu_cn\" ]]; then\n    _bingsu_rec=\n    return 0\n  fi\n  case $_bingsu_seq in\n    ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;\n  esac\n  _bingsu_seq=$(( _bingsu_seq + 1 ))\n  # Over 64 KiB (bytes): passed empty (see hooks.zsh). ${PWD-}: set -u after\n  # unset PWD. _bingsu_bytes counts bytes under a local LC_ALL=C.\n  local _bingsu_pwd=${PWD-} _bingsu_n=0 _bingsu_st=0\n  # 2>/dev/null: restoring an LC_ALL naming a locale that is not installed\n  # makes bash warn when _bingsu_bytes returns.\n  _bingsu_bytes \"$_bingsu_pwd\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_pwd=\n  local _bingsu_log=off _bingsu_host=${HOSTNAME-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0 _bingsu_colorfgbg=${COLORFGBG-}\n  local _bingsu_log_nm=0\n  if shopt -q nocasematch; then _bingsu_log_nm=1; shopt -u nocasematch; fi\n  case ${BINGSU_LOG-} in error|info|debug) _bingsu_log=$BINGSU_LOG ;; esac\n  if (( _bingsu_log_nm )); then shopt -s nocasematch; fi\n  _bingsu_bytes \"$_bingsu_host\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_host=\n  _bingsu_bytes \"$_bingsu_venv\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_venv=\n  _bingsu_bytes \"$_bingsu_colorfgbg\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_colorfgbg=\n  [[ -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ]] && _bingsu_ssh=1\n  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ \"$@\" --shell bash --pwd \"$_bingsu_pwd\" --colorterm \"${COLORTERM-}\" --colorfgbg \"$_bingsu_colorfgbg\" \"--log-level=$_bingsu_log\" --host \"$_bingsu_host\" --venv \"$_bingsu_venv\" \"--ssh=$_bingsu_ssh\" --session \"$_bingsu_session\" --seq \"$_bingsu_seq\" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null\n  (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn\n  _bingsu_rec=${_bingsu_rec%.}\n}",
+        "after": "if ! declare -F _bingsu_call >/dev/null; then\n_bingsu_call() {\n  local _bingsu_cn='\\#'\n  _bingsu_cn=${_bingsu_cn@P}\n  if [[ ${_bingsu_dead_cn-} == \"$_bingsu_cn\" ]]; then\n    _bingsu_rec=\n    return 0\n  fi\n  case $_bingsu_seq in\n    ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;\n  esac\n  _bingsu_seq=$(( _bingsu_seq + 1 ))\n  # Over 64 KiB (bytes): passed empty (see hooks.zsh). ${PWD-}: set -u after\n  # unset PWD. _bingsu_bytes counts bytes under a local LC_ALL=C.\n  local _bingsu_pwd=${PWD-} _bingsu_n=0 _bingsu_st=0\n  # 2>/dev/null: restoring an LC_ALL naming a locale that is not installed\n  # makes bash warn when _bingsu_bytes returns.\n  _bingsu_bytes \"$_bingsu_pwd\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_pwd=\n  local _bingsu_log=off _bingsu_host=${HOSTNAME-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0 _bingsu_colorfgbg=${COLORFGBG-}\n  local _bingsu_log_nm=0\n  if shopt -q nocasematch; then _bingsu_log_nm=1; shopt -u nocasematch; fi\n  case ${BINGSU_LOG-} in error|info|debug) _bingsu_log=$BINGSU_LOG ;; esac\n  if (( _bingsu_log_nm )); then shopt -s nocasematch; fi\n  _bingsu_bytes \"$_bingsu_host\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_host=\n  _bingsu_bytes \"$_bingsu_venv\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_venv=\n  _bingsu_bytes \"$_bingsu_colorfgbg\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_colorfgbg=\n  [[ -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ]] && _bingsu_ssh=1\n  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ \"$@\" --shell bash --pwd \"$_bingsu_pwd\" --colorterm \"${COLORTERM-}\" --colorfgbg \"$_bingsu_colorfgbg\" \"--log-level=$_bingsu_log\" --host \"$_bingsu_host\" --venv \"$_bingsu_venv\" \"--ssh=$_bingsu_ssh\" --session \"$_bingsu_session\" --seq \"$_bingsu_seq\" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null\n  (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn\n  _bingsu_rec=${_bingsu_rec%.}\n}\nfi"
+      }
+    ]
+  },
+  {
+    "id": "N-122",
+    "kind": "python",
+    "anchor": "tests/shell/test_helper_lifecycle.py::test_helper_never_executes_configured_commands",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_helper_lifecycle.py::test_helper_never_executes_configured_commands",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper.rs",
+        "before": "        let request = if let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) {",
+        "after": "        if let Some((config, _)) = display {\n            for unit in &config.exec_units {\n                if let bingsu_core::config::compile::ExecPolicy::Command { argv, .. } = &unit.policy {\n                    let _ = std::process::Command::new(&argv[0]).args(&argv[1..]).status();\n                }\n            }\n        }\n        let request = if let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) {"
+      }
+    ]
+  },
+  {
+    "id": "I-NSS",
+    "kind": "python",
+    "anchor": "tests/shell/test_helper_lifecycle.py::test_nss_stall_requests_kill_independently",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_helper_lifecycle.py::test_nss_stall_requests_kill_independently",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/helper_limits.rs",
+        "before": "if Instant::now() >= deadline {",
+        "after": "if false {"
+      }
+    ]
+  },
+  {
+    "id": "I-REFRESH",
+    "kind": "python",
+    "anchor": "tests/shell/test_snapshot_refresh.py::test_refresh_observes_replacements_and_overlay_membership",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_snapshot_refresh.py::test_refresh_observes_replacements_and_overlay_membership",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/evidence.rs",
+        "before": "self.num(f.ino);",
+        "after": "self.num(0);",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "I-CONTEXT",
+    "kind": "python",
+    "anchor": "tests/shell/test_snapshot_refresh.py::test_shared_context_busy_and_distinct_state_progress",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_snapshot_refresh.py::test_shared_context_busy_and_distinct_state_progress",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/snapshot_store.rs",
+        "before": "let lock = sys::try_lock(lock).map_err(lock_error)?;",
+        "after": "let _ = lock;\n        let lock = sys::try_lock(sys::open_lock_at(self.dir.as_fd(), OsStr::new(&format!(\"snapshot-{}.lock\", std::process::id())))?).map_err(lock_error)?;",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": "I-INVALID",
+    "kind": "python",
+    "anchor": "tests/shell/test_snapshot_refresh.py::test_invalid_config_keeps_display_and_recovers",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ],
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_snapshot_refresh.py::test_invalid_config_keeps_display_and_recovers",
+      "-v",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/refresh.rs",
+        "before": "invalid: outcome == Outcome::Invalid,",
+        "after": "invalid: false,",
+        "count": 1
+      }
+    ]
+  }
+]

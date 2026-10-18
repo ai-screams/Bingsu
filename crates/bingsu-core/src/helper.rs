@@ -200,6 +200,18 @@ mod tests {
             Some(b"/state/log".as_slice())
         );
         assert!(words(&[b"--host"]).is_err());
+        // 이것을 실패시키는 것: 매 prompt의 debug 수준을 init/off 값으로 고정하는 것.
+        let mut debug = raw.to_vec();
+        let level_at = debug
+            .iter()
+            .position(|word| word.starts_with(b"--log-level="))
+            .unwrap();
+        debug[level_at] = b"--log-level=debug";
+        assert!(
+            words(&debug)
+                .unwrap()
+                .contains(&b"--log-level=debug".as_slice())
+        );
         let mut unknown = raw.to_vec();
         let at = unknown
             .iter()

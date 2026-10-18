@@ -224,6 +224,27 @@ mod cases {
         assert_eq!(decode_compiled(&vec![0; MAX_BYTES + 1]), Err(Error::Limit));
     }
 
+    // 이것을 실패시키는 것: 완전한 codec 뒤의 남은 바이트를 허용하는 것.
+    #[test]
+    fn codec_reject_trailing_bytes() {
+        let mut b = encode_compiled(&config()).unwrap();
+        b.push(0);
+        assert_eq!(decode_compiled(&b), Err(Error::Trailing));
+    }
+
+    // 이것을 실패시키는 것: Writer의 길이 덧셈 overflow를 wrapping으로 바꾸는 것.
+    #[test]
+    fn codec_reject_arithmetic_overflow() {
+        let mut w = Writer {
+            bytes: None,
+            len: usize::MAX,
+            error: None,
+        };
+        w.extend_from_slice(&[0]);
+        assert_eq!(w.error, Some(Error::Limit));
+        assert_eq!(w.len, usize::MAX);
+    }
+
     fn raw_config(c: &CompiledConfig) -> Vec<u8> {
         let mut b = b"BNGCFG02\x02\0".to_vec();
         b.extend(bytes(c));
