@@ -75,6 +75,26 @@ const VALID: &str = "icons = \"ascii\"\n";
 // An unknown top-level key is an error (E201), which no layer may carry.
 const INVALID: &str = "colr = 1\n";
 
+fn n7_read_only_without_runtime(verb: &str) {
+    let e = Env::new("cli_config", &format!("n7-cold-{verb}"));
+    e.put_config("config.toml", VALID);
+    let before = e.tree();
+    let result = e.run(&["config", verb]);
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(quiet(&result.stderr), "");
+    assert_eq!(e.tree(), before);
+}
+// 이것을 실패시키는 것: check가 fresh 환경에서 refresh를 호출하는 것.
+#[test]
+fn n7_check_is_read_only_without_runtime() {
+    n7_read_only_without_runtime("check");
+}
+// 이것을 실패시키는 것: path가 fresh 환경에서 refresh/renew를 호출하는 것.
+#[test]
+fn n7_path_is_read_only_without_runtime() {
+    n7_read_only_without_runtime("path");
+}
+
 fn out(o: &std::process::Output) -> (Option<i32>, String, String) {
     (o.status.code(), text(&o.stdout), quiet(&o.stderr))
 }

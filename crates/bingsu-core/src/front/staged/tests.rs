@@ -541,6 +541,8 @@ mod cases {
             &mut PinnedGroupWrite(&[]),
         )
         .unwrap();
+        // 이것을 실패시키는 것: sticky 조상의 NextOwner::Mine을 Any로 초기화하는 것.
+        assert_eq!(next, NextOwner::Mine { parent: 0 });
         let mut child = facts(true, false, 0);
         child.entry.uid = 0;
         assert!(
@@ -625,6 +627,46 @@ mod cases {
         assert_ne!(dark.record, light.record);
         assert!(!record(&dark).contains('\u{276f}'));
     }
+    // 이것을 실패시키는 것: Invalid 표식이 내장 수집 mask까지 0으로 만드는 것.
+    #[test]
+    fn n7_builtin_collection_survives_invalid_marker() {
+        let mut h = Harness::new();
+        let ordinary = h.run(&args(), Mode::Dark);
+        assert_ne!(ordinary.worker_mask, 0);
+        let mut m = marker(&snapshot(""));
+        m.invalid = true;
+        h.marker = Some(m.encode().to_vec());
+        let invalid = h.run(&args(), Mode::Dark);
+        assert_eq!(invalid.worker_mask, ordinary.worker_mask);
+        assert!(invalid.execution.permit().is_none());
+    }
+
+    // 이것을 실패시키는 것: 문맥 부재에서 구 전역 저장소 이름으로 읽기를 계속하는 것.
+    #[test]
+    fn n7_missing_context_never_reads_global_store() {
+        let mut h = Harness::new();
+        // Uid, Clock, open '/', inspect '/', open 'r', inspect 'r', close '/',
+        // then the first missing context component. Derive its position from a normal walk.
+        h.run(&args(), Mode::Dark);
+        let missing = h
+            .calls
+            .iter()
+            .position(|op| {
+                matches!(op,
+            Operation::OpenDirectory { name, .. } if name == b"contexts-v2")
+            })
+            .unwrap();
+        let mut h = Harness::new();
+        h.fail_at = Some(missing);
+        let response = h.run(&args(), Mode::Dark);
+        assert!(response.execution.permit().is_none());
+        assert!(
+            !h.calls
+                .iter()
+                .any(|op| matches!(op, Operation::OpenFile { .. }))
+        );
+    }
+
     // 이것을 실패시키는 것: 관찰 오류를 성공으로 간주하거나 닫기 실패를 무한 재시도하는 것.
     #[test]
     fn every_failed_effect_terminates_with_no_authorization() {

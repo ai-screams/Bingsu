@@ -111,6 +111,74 @@ mod cases {
             );
         }
     }
+    fn valid_header() -> Vec<u8> {
+        let (id, _, _) = fixture();
+        Snapshot {
+            id,
+            config: crate::config::report::tests::read("", &[])
+                .snapshot
+                .unwrap(),
+            metadata: encode_metadata(b"").unwrap(),
+        }
+        .encode(1, 0)
+        .unwrap()
+    }
+    // 이것을 실패시키는 것: N7 magic 검사를 머리 단계에서 생략하는 것.
+    #[test]
+    fn wire_reject_magic() {
+        let mut b = valid_header();
+        assert_eq!(header(&b[..HEADER]), Ok(()));
+        b[0] ^= 0x80;
+        assert_eq!(header(&b[..HEADER]), Err(Error::Tag));
+    }
+    // 이것을 실패시키는 것: N7 version 검사를 머리 단계에서 생략하는 것.
+    #[test]
+    fn wire_reject_version() {
+        let mut b = valid_header();
+        assert_eq!(header(&b[..HEADER]), Ok(()));
+        b[8] ^= 0x80;
+        assert_eq!(header(&b[..HEADER]), Err(Error::Tag));
+    }
+    // 이것을 실패시키는 것: N7 header_length 검사를 머리 단계에서 생략하는 것.
+    #[test]
+    fn wire_reject_header_length() {
+        let mut b = valid_header();
+        assert_eq!(header(&b[..HEADER]), Ok(()));
+        b[10] ^= 0x80;
+        assert_eq!(header(&b[..HEADER]), Err(Error::Tag));
+    }
+    // 이것을 실패시키는 것: N7 reserved 검사를 머리 단계에서 생략하는 것.
+    #[test]
+    fn wire_reject_reserved() {
+        let mut b = valid_header();
+        assert_eq!(header(&b[..HEADER]), Ok(()));
+        b[13] ^= 0x80;
+        assert_eq!(header(&b[..HEADER]), Err(Error::Tag));
+    }
+    // 이것을 실패시키는 것: N7 abi 검사를 머리 단계에서 생략하는 것.
+    #[test]
+    fn wire_reject_abi() {
+        let mut b = valid_header();
+        assert_eq!(header(&b[..HEADER]), Ok(()));
+        b[72] ^= 0x80;
+        assert_eq!(lengths(&b), Err(Error::Tag));
+    }
+    // 이것을 실패시키는 것: compiled 길이 상한 검사를 머리 단계에서 생략하는 것.
+    #[test]
+    fn wire_reject_compiled_length() {
+        let mut b = valid_header();
+        b[60..64].copy_from_slice(&((PREFIX + COMPILED_MAX + 1) as u32).to_le_bytes());
+        assert_eq!(header(&b[..HEADER]), Err(Error::Limit));
+    }
+
+    // 이것을 실패시키는 것: fd 크기 상한을 없애 본문 할당 단계로 진행하는 것.
+    #[test]
+    fn wire_reject_file_capacity() {
+        let cap = (HEADER + PREFIX + COMPILED_MAX + META_MAX) as u64;
+        assert!(FrontDecoder::new(cap).is_ok());
+        assert!(matches!(FrontDecoder::new(cap + 1), Err(Error::Limit)));
+    }
+
     fn fixture() -> (Identity, Marker, Clock) {
         let id = Identity {
             boot: [1; 16],

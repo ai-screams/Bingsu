@@ -198,6 +198,36 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
+    // 이것을 실패시키는 것: parent bootstrap이 부모의 NOFILE soft를 바꾸는 것.
+    #[test]
+    fn n7_parent_nofile_unchanged() {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::helper_limits::tests::n7_parent_limit_child",
+                "--ignored",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+    }
+    #[test]
+    #[ignore = "isolated parent rlimit fixture"]
+    fn n7_parent_limit_child() {
+        let old = get(libc::RLIMIT_NOFILE).unwrap();
+        set(libc::RLIMIT_NOFILE, 256.min(old.rlim_max), old.rlim_max).unwrap();
+        let before = get(libc::RLIMIT_NOFILE).unwrap();
+        crate::prompt_spawn::bootstrap(std::ffi::OsStr::new("/n7-does-not-exist"), &[], None);
+        let after = get(libc::RLIMIT_NOFILE).unwrap();
+        assert_eq!(
+            (before.rlim_cur, before.rlim_max),
+            (after.rlim_cur, after.rlim_max)
+        );
+    }
     // 이것을 실패시키는 것: 자식만 NOFILE을 올리지 않거나 CPU·FSIZE readback을 생략하는 것.
     #[test]
     #[ignore = "isolated rlimit child"]

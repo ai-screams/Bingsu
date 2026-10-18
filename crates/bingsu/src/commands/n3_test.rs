@@ -50,3 +50,28 @@ pub fn wait_report(path: &std::path::Path) -> Vec<i32> {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // 이것을 실패시키는 것: bootstrap이 존재하는 상대 실행 경로를 허용하는 것.
+    #[test]
+    fn n7_relative_executable_is_rejected() {
+        let (base, exe) = super::probe("n7-relative");
+        let relative = std::path::PathBuf::from(format!(".n7-relative-{}", std::process::id()));
+        std::os::unix::fs::symlink(&exe, &relative).unwrap();
+        let home = format!("--home={}", base.display());
+        let raw = [
+            b"--runtime-root=1:2:/r".as_slice(),
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            home.as_bytes(),
+        ];
+        crate::prompt_spawn::bootstrap(relative.as_os_str(), &raw, None);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let spawned = base.join("probe").exists();
+        std::fs::remove_file(relative).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+        assert!(!spawned, "relative executable ran");
+    }
+}

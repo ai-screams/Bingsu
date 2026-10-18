@@ -902,6 +902,16 @@ fn sigkill_before_and_after_every_rename_recovers_fixed_slots() {
             if point != Checkpoint::After(Slot::Marker) {
                 assert_eq!(f.bytes("marker"), old_marker);
             }
+            // 이것을 실패시키는 것: last-good rename 뒤 현재의 옛 정상 세대를 잃는 것.
+            if matches!(
+                point,
+                Checkpoint::After(Slot::LastGood)
+                    | Checkpoint::Before(Slot::Snapshot)
+                    | Checkpoint::After(Slot::Snapshot)
+                    | Checkpoint::Before(Slot::Marker)
+            ) {
+                assert_eq!(Snapshot::decode(&f.bytes("last-good")).unwrap().id, old);
+            }
             if matches!(
                 point,
                 Checkpoint::After(Slot::Snapshot) | Checkpoint::Before(Slot::Marker)
@@ -1439,4 +1449,176 @@ fn broker_runs_after_validation_before_final_revalidation() {
         },
     );
     assert_eq!(result, RefreshResult::Invalid);
+}
+
+// 이것을 실패시키는 것: staging 용량 초과를 확인한 설정 Invalid로 바꾸거나 표식을 갱신하는 것.
+#[test]
+fn n7_capacity_is_incomplete() {
+    let f = Fx::new("n7-capacity");
+    f.put(COMMAND);
+    published(f.run());
+    let before = f.state();
+    f.put(&format!("icons='ascii'\n{COMMAND}"));
+    let result = f.hook(&mut |point| {
+        if point == Checkpoint::Staged {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(f.dir().join(".snapshot.stage"))
+                .unwrap()
+                .set_len(
+                    (snapshot::HEADER
+                        + snapshot::PREFIX
+                        + snapshot::COMPILED_MAX
+                        + snapshot::META_MAX
+                        + 1) as u64,
+                )
+                .unwrap();
+        }
+    });
+    assert_eq!(result, RefreshResult::Incomplete);
+    assert_eq!(f.state(), before);
+}
+
+// 이것을 실패시키는 것: marker 원자 rename을 기존 inode의 overwrite로 바꾸는 것.
+#[test]
+fn n7_marker_replacement_changes_inode() {
+    let f = Fx::new("n7-marker-inode");
+    f.put(COMMAND);
+    published(f.run());
+    // Keep the old inode open, so inode-number recycling cannot mimic overwrite.
+    let old = fs::File::open(f.dir().join("marker")).unwrap();
+    let old_bytes = f.bytes("marker");
+    assert!(matches!(f.run(), RefreshResult::Revalidated { .. }));
+    assert_ne!(
+        old.metadata().unwrap().ino(),
+        fs::metadata(f.dir().join("marker")).unwrap().ino()
+    );
+    use std::os::unix::fs::FileExt;
+    let mut held = vec![0; old_bytes.len()];
+    old.read_exact_at(&mut held, 0).unwrap();
+    assert_eq!(held, old_bytes);
+}
+
+// 이것을 실패시키는 것: changed/unchanged 분류를 바꾸거나 경계 설정을 발행하지 못하는 것.
+#[test]
+#[ignore = "N7 release measurements: 20 warmups, 240 alternating pairs; --nocapture"]
+fn n7_measure_publish() {
+    struct Advancing;
+    impl ClockSource for Advancing {
+        fn observe(&mut self) -> Result<Clock, ClockError> {
+            Ok(Clock {
+                now: crate::prompt_io::monotonic_ns()?,
+                ..clock()
+            })
+        }
+    }
+    for (name, body) in [
+        ("normal", COMMAND.to_owned()),
+        (
+            "4096-band",
+            (0..4095)
+                .map(|i| format!("[layout.when.b{i}]\nmin_cols={}\nmax_cols=10000\n", i + 60))
+                .collect::<String>(),
+        ),
+    ] {
+        let f = Fx::new(&format!("n7-measure-{name}"));
+        let mut request = f.request.clone();
+        // Sample held descriptors at publication boundaries in a separate pass;
+        // enumeration itself must not inflate any timed sample.
+        f.put(&body);
+        request.process_started = Advancing.observe().unwrap();
+        let mut peak = 0;
+        let probe = refresh_with(request.clone(), &mut Advancing, &mut |_| {
+            let directory = if cfg!(target_os = "linux") {
+                "/proc/self/fd"
+            } else {
+                "/dev/fd"
+            };
+            let count = fs::read_dir(directory).unwrap().count().saturating_sub(1);
+            peak = peak.max(count);
+        });
+        println!("N7_FD\t{name}\tcheckpoint_peak={peak}\tresult={probe:?}");
+        let mut run = || {
+            request.process_started = Advancing.observe().unwrap();
+            let start = std::time::Instant::now();
+            let result = refresh(request.clone(), &mut Advancing);
+            (result, start.elapsed().as_nanos())
+        };
+        for i in 0..260 {
+            f.put(&format!(
+                "icons='{}'\n{body}",
+                if i % 2 == 0 { "ascii" } else { "unicode" }
+            ));
+            let (changed, changed_ns) = run();
+            if !matches!(changed, RefreshResult::Published { .. }) {
+                eprintln!(
+                    "N7_STOP\t{name}\titeration={i}\tresult={changed:?}\telapsed_ns={changed_ns}"
+                );
+                break; // report; do not raise a budget or reinterpret Incomplete
+            }
+            let (unchanged, unchanged_ns) = run();
+            assert!(matches!(unchanged, RefreshResult::Revalidated { .. }));
+            if i >= 20 {
+                println!(
+                    "N7_PUBLISH\t{name}\t{}\t{changed_ns}\t{unchanged_ns}\t{}",
+                    i - 20,
+                    f.bytes("snapshot").len()
+                );
+            }
+        }
+    }
+}
+
+// 이것을 실패시키는 것: runtime staging/rename 경로에 fsync를 추가하는 것.
+#[test]
+#[cfg(not(target_env = "musl"))]
+fn n7_runtime_publication_has_no_fsync() {
+    use std::process::Command;
+    let f = Fx::new("n7-fsync-parent");
+    let library = f.base.join("no-fsync.dylib");
+    let mut compiler = Command::new("cc");
+    #[cfg(target_os = "macos")]
+    compiler.arg("-dynamiclib");
+    #[cfg(target_os = "linux")]
+    compiler.args(["-shared", "-fPIC"]);
+    let compiled = compiler
+        .args(["-Wall", "-Werror", "-o"])
+        .arg(&library)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/n7_no_fsync.c"))
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let key = if cfg!(target_os = "macos") {
+        "DYLD_INSERT_LIBRARIES"
+    } else {
+        "LD_PRELOAD"
+    };
+    let result = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "commands::refresh::tests::n7_runtime_fsync_child",
+            "--ignored",
+        ])
+        .env(key, &library)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "runtime fsync probe: {:?}\n{}\n{}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+#[test]
+#[ignore = "isolated preload fixture; persistent selection renewal is deliberately absent"]
+fn n7_runtime_fsync_child() {
+    let f = Fx::new("n7-fsync-child");
+    f.put(COMMAND);
+    published(f.run());
+    assert!(matches!(f.run(), RefreshResult::Revalidated { .. }));
 }

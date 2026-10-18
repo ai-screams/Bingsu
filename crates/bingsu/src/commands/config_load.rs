@@ -1692,6 +1692,20 @@ mod tests {
         assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
     }
 
+    // 이것을 실패시키는 것: conf.d 삭제를 최종 이름 목록 대조에서 놓치는 것.
+    #[test]
+    fn n7_listing_removed() {
+        let fx = Fx::new("n7-listing-remove");
+        let path = fx.put(&fx.root.join("conf.d/remove.toml"), "");
+        let mut loader = fx.loader(None);
+        let _roots = loader.roots(b"");
+        // Isolate the listing observation: no source was read or adopted yet.
+        loader.observed.clear();
+        assert!(loader.revalidate().is_ok());
+        std::fs::remove_file(path).unwrap();
+        assert!(loader.revalidate().is_err());
+    }
+
     // 이것을 실패시키는 것: S3b가 전달한 내장 원본을 버리거나 바꾸는 것.
     #[test]
     fn builtin_bytes_are_supplied_by_the_caller() {
