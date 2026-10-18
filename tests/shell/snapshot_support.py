@@ -4,6 +4,9 @@ import pathlib
 import shlex
 import struct
 import subprocess
+import sys
+import tempfile
+import threading
 import time
 
 from conftest import COLD_INIT_NOTICE, real_bin, trusted_env
@@ -21,9 +24,37 @@ class SnapshotSession:
         self.config = pathlib.Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.words = []
+        self._helper_count = 0
+        self._count_lock = threading.Lock()
+        self._completed = pathlib.Path(tempfile.mkdtemp(prefix=f"helpers-{tag}-", dir=self.base))
+        self._launcher = self._completed / "bingsu"
+        # The real prompt still spawns its fixed argv0. Only this test wrapper
+        # waits for that helper and signals completion, even at log-level=off.
+        # The helper gets the real binary as argv0, keeping collection native.
+        self._launcher.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, subprocess, sys\n"
+            f"binary = {str(real_bin())!r}\n"
+            "if sys.argv[1:2] == ['__refresh-v1']:\n"
+            "    result = subprocess.run([binary, *sys.argv[1:]])\n"
+            f"    done = pathlib.Path({str(self._completed)!r}) / str(os.getpid())\n"
+            "    pending = done.with_suffix('.pending')\n"
+            "    pending.write_text(str(result.returncode))\n"
+            "    pending.replace(done)\n"
+            "    sys.exit(result.returncode)\n"
+            "os.execv(binary, [sys.argv[0], *sys.argv[1:]])\n"
+        )
+        self._launcher.chmod(0o700)
 
     def run(self, *args, timeout=5):
-        return subprocess.run([str(real_bin()), *args], cwd=self.base, env=self.env,
+        # Every prompt asks for one helper. A cold init does too; warm init
+        # deliberately does not. Count before launch, so an unscheduled wrapper
+        # cannot make wait_quiet pass by leaving no PID/completion file yet.
+        if args[0] in ("prompt", "__refresh-v1") or (
+                args[0] == "init" and not (self.store() / "snapshot").exists()):
+            with self._count_lock:
+                self._helper_count += 1
+        return subprocess.run([str(self._launcher), *args], cwd=self.base, env=self.env,
                               capture_output=True, timeout=timeout)
 
     def put(self, text, name="config.toml"):
@@ -96,9 +127,16 @@ class SnapshotSession:
             time.sleep(0.02)
         raise AssertionError(("completed refresh never reached prompt", text, records[-3:]))
 
-    def wait_quiet(self):
-        # Helpers have an independent two-second lifetime; cleanup must not race them.
-        time.sleep(2.1)
+    def wait_quiet(self, timeout=5):
+        end = time.monotonic() + timeout
+        while True:
+            completed = list(self._completed.glob("[0-9]*"))
+            completed = [p for p in completed if p.suffix != ".pending"]
+            if len(completed) == self._helper_count:
+                return
+            assert time.monotonic() < end, (
+                "helpers did not exit", len(completed), self._helper_count)
+            time.sleep(0.01)
 
 
 def require_native_boot():

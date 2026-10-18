@@ -61,16 +61,26 @@ def test_shared_context_busy_and_distinct_state_progress(tmp_path):
     b.init()
     b.await_text("SHARED")
     a.wait_quiet()
+    before_generation = a.identity()[1]
     lock = a.store() / "snapshot.lock"
     before_inode = lock.stat().st_ino
     with lock.open("rb") as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         a.put(appearance("CHANGED"))
+        result = a.run("reload")
+        assert result.returncode == 3, (result.stdout, result.stderr)
+        assert a.identity()[1] == before_generation
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             records = list(pool.map(lambda _: a.prompt(), range(4)))
         assert all(b"SHARED" in record and b"CHANGED" not in record for record in records)
         b.await_text("CHANGED")
         assert a.store() != b.store()
+        a.wait_quiet()
+        b.wait_quiet()
+        assert a.identity()[1] == before_generation
+    result = a.run("reload")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert a.identity()[1] > before_generation
     a.await_text("CHANGED")
     assert lock.stat().st_ino == before_inode
     a.wait_quiet()

@@ -53,7 +53,7 @@ SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 TCB_SHA256 = {
     "crates/bingsu/src/prompt_read.rs": "7f5ca1be249ffb941e61dad40ae76fe9a3436b6fe8b71dfd05b8518ca3ad1731",
-    "crates/bingsu/src/prompt_spawn.rs": "e6c0b5652d0522d8d05d6d26ef2f574d0e0fcfe4234e57e4441b391e26e632f1",
+    "crates/bingsu/src/prompt_spawn.rs": "8768c6abc70e321c33fcd7173b9c0c704ed529bb96da12aa6b290c44fc6811ee",
     "crates/bingsu/src/prompt_io.rs": "268c34257aa16c18a5e0e7b520dfe7e7a4b086ca10e633c21c23f8bd63d71e5c",
     "crates/bingsu/src/prompt.rs": "bde58f41b9cc11e03139e62c0fc7aad2853d4ad5f37f1dc4cbc17f4d01df7ebe",
     "crates/bingsu/src/main.rs": "2f4d0c5f7e49ef71721c499fb9b3f757bb07bd0d402116a9fc97f2262c08b3c1",

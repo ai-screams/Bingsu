@@ -10,11 +10,40 @@ import hashlib
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+TIMEOUT = 124
+
+
+def stop_group(child, grace=1):
+    """Do not return while a timed-out run can still touch the checkout."""
+    def signal_group(sig):
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def alive():
+        child.poll()  # Reap the group leader too, including after SIGKILL.
+        try:
+            os.killpg(child.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    signal_group(signal.SIGTERM)
+    end = time.monotonic() + grace
+    while alive() and time.monotonic() < end:
+        time.sleep(0.01)
+    if alive():
+        signal_group(signal.SIGKILL)
+    while alive():
+        time.sleep(0.01)
+    child.wait()
 
 
 def execute(command, log, timeout):
@@ -22,15 +51,16 @@ def execute(command, log, timeout):
     cache = ROOT / "target/n7/uv-cache"
     if cache.is_dir():
         environment.setdefault("UV_CACHE_DIR", str(cache))
-    try:
-        result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, timeout=timeout,
-                                env=environment)
-        output = result.stdout.decode(errors="replace")
-        code = result.returncode
-    except subprocess.TimeoutExpired as error:
-        output = (error.stdout or b"").decode(errors="replace") + "\nN7 HARNESS TIMEOUT\n"
-        code = 124
+    with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, start_new_session=True,
+                          env=environment) as child:
+        try:
+            output = child.communicate(timeout=timeout)[0].decode(errors="replace")
+            code = child.returncode
+        except subprocess.TimeoutExpired:
+            stop_group(child)
+            output = child.communicate()[0].decode(errors="replace") + "\nN7 HARNESS TIMEOUT\n"
+            code = TIMEOUT
     log.write_text(output)
     return code, output
 
@@ -43,9 +73,13 @@ def run(case, dest):
     patches = case.get("platform_patches", {}).get(sys.platform, case["patches"])
     if case.get("build"):
         code, _ = execute(case["build"], dest / f"{name}-baseline-build.log", timeout)
+        if code == TIMEOUT:
+            return {"status": "ERROR", "reason": "baseline build timed out"}
         if code:
             return {"status": "not done", "reason": "baseline build failed"}
     baseline_code, baseline = execute(command, dest / f"{name}-baseline.log", timeout)
+    if baseline_code == TIMEOUT:
+        return {"status": "ERROR", "reason": "baseline timed out"}
     passed = f"test {anchor} ... ok" if case["kind"] == "rust" else f"{anchor} PASSED"
     if baseline_code or passed not in baseline:
         return {"status": "not done", "reason": "baseline did not pass the named test"}
@@ -62,9 +96,13 @@ def run(case, dest):
             path.write_text(source.replace(before, patch["after"], patch.get("replace", count)))
         if case.get("build"):
             code, _ = execute(case["build"], dest / f"{name}-mutant-build.log", timeout)
+            if code == TIMEOUT:
+                return {"status": "ERROR", "reason": "mutant build timed out"}
             if code:
                 return {"status": "ERROR", "reason": "mutant build failed; not a test failure"}
         code, output = execute(command, dest / f"{name}-mutant.log", timeout)
+        if code == TIMEOUT:
+            return {"status": "ERROR", "returncode": code, "reason": "mutant timed out"}
         failed = (f"test {anchor} ... FAILED" if case["kind"] == "rust"
                   else f"{anchor} FAILED")
         status = "KILLED" if code != 0 and failed in output else "SURVIVED" if code == 0 else "ERROR"

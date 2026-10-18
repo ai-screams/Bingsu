@@ -67,11 +67,14 @@ mod tests {
             b"--state-root=/s",
             home.as_bytes(),
         ];
-        crate::prompt_spawn::bootstrap(relative.as_os_str(), &raw, None);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let spawned = base.join("probe").exists();
+        let result = crate::prompt_spawn::spawn_for_test(relative.as_os_str(), &raw);
+        // A successful spawn is already a failure, even if the child has not
+        // been scheduled or finished scanning its descriptor table yet.
+        if result.is_ok() {
+            super::wait_report(&base.join("probe"));
+        }
         std::fs::remove_file(relative).unwrap();
         std::fs::remove_dir_all(base).unwrap();
-        assert!(!spawned, "relative executable ran");
+        assert!(result.is_err(), "relative executable spawned");
     }
 }
