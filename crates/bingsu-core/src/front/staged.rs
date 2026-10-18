@@ -611,6 +611,9 @@ impl Eligibility {
 pub struct Response {
     pub record: Vec<u8>,
     /// The prompt entry deadline, distinct from the snapshot's execution permit.
+    /// Informational: the adapter enforces the deadline itself (its pre-filter
+    /// timer, the per-step clock check and the write loop); nothing reads this
+    /// field to stop work, so later code must not assume it does.
     pub deadline: Option<Deadline>,
     /// Snapshot trust expiry; it must never extend the prompt's output deadline.
     pub execution: Eligibility,
