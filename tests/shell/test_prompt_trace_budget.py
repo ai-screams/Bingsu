@@ -172,6 +172,17 @@ def valid_trace():
         '11 openat(AT_FDCWD, "/dev/null", O_RDWR) = 0</dev/null>',
         '11 execve("/pinned/bin/bingsu", ["/pinned/bin/bingsu", "__refresh-v1", "--ctx", "1"], 0x2 /* 0 vars */) = 0',
         '10 <... clone resumed>) = 11',
+        '10 openat(AT_FDCWD, "/", O_RDONLY|O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 20</>',
+        '10 openat(20</>, "proc", O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 21</proc>',
+        '10 openat(21</proc>, "10", O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 22</proc/10>',
+        '10 openat(22</proc/10>, "ns", O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = 23</proc/10/ns>',
+        '10 fstatfs(23</proc/10/ns>, {f_type=PROC_SUPER_MAGIC}) = 0',
+        '10 readlinkat(23</proc/10/ns>, "time", "time:[4026531834]", 28) = 17',
+        '10 readlinkat(23</proc/10/ns>, "time_for_children", "time:[4026531834]", 28) = 17',
+        '10 close(23</proc/10/ns>) = 0',
+        '10 close(22</proc/10>) = 0',
+        '10 close(21</proc>) = 0',
+        '10 close(20</>) = 0',
         '10 prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {len=42, filter=0x1}) = 0',
         '10 write(1</dev/null>, "B1\\37...", 16) = 16',
         '10 exit_group(0) = ?',
@@ -185,7 +196,8 @@ def valid_trace():
         '11 openat(AT_FDCWD, "/proc/self/statm", O_RDONLY) = 3</proc/11/statm>',
         '11 openat(AT_FDCWD, "/proc/self", O_RDONLY|O_DIRECTORY) = 8</proc/11>',
         '11 openat(8</proc/11>, "ns", O_RDONLY|O_DIRECTORY) = 9</proc/11/ns>',
-        '11 openat(9</proc/11/ns>, "time", O_RDONLY) = 10<time:[4026531834]>',
+        '11 readlinkat(9</proc/11/ns>, "time", "time:[4026531834]", 28) = 17',
+        '11 readlinkat(9</proc/11/ns>, "time_for_children", "time:[4026531834]", 28) = 17',
         '11 openat(AT_FDCWD, "/proc/sys/kernel/random/boot_id", O_RDONLY) = 3</proc/sys/kernel/random/boot_id>',
         '11 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0) = 3<UNIX-STREAM:[1]>',
         '11 connect(3<UNIX-STREAM:[1]>, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)',
@@ -337,9 +349,259 @@ def test_trace_rejects_collector_exec_contract_mutation(old, new):
         assert_prompt_trace_budget(mutated, EXE, ROOTS)
 
 
+@pytest.fixture
+def held_trace():
+    """Small generated contract for successful held snapshot reads.
+
+    The real N4 capture below covers a first prompt with no context yet.
+    """
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if "PR_SET_SECCOMP" in line)
+    dirs, files = budget.prompt_sources(ROOTS)
+    held = []
+    fds = {}
+    for fd, path in enumerate(sorted(dirs, key=lambda p: (p.count("/"), p)), 21):
+        parent, _, name = path.rpartition("/")
+        base = "AT_FDCWD</>" if path == "/" else f"{fds[parent or '/']}<{parent or '/'}>"
+        name = "/" if path == "/" else name
+        held.append(f'10 openat({base}, "{name}", O_RDONLY|O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) = {fd}<{path}>')
+        held.append(f'10 fstatfs({fd}<{path}>, {{}}) = 0')
+        held.append(f'10 fgetxattr({fd}<{path}>, "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)')
+        fds[path] = fd
+    for fd, path in enumerate(sorted(files), max(fds.values()) + 1):
+        parent, _, name = path.rpartition("/")
+        held.append(f'10 openat({fds[parent]}<{parent}>, "{name}", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|O_NOCTTY) = {fd}<{path}>')
+        fds[path] = fd
+    lines[at:at] = held
+    at = next(i for i, line in enumerate(lines) if "PR_SET_SECCOMP" in line) + 1
+    snapshot = next(path for path in files if path.endswith("/snapshot"))
+    lines[at:at] = [
+        '10 clock_gettime(CLOCK_BOOTTIME, {tv_sec=100, tv_nsec=0}) = 0',
+        f'10 read({fds[snapshot]}<{snapshot}>, "bytes", 1024) = 1024',
+        *[f'10 close({fd}<{path}>) = 0' for path, fd in fds.items()],
+    ]
+    return lines
+
+
+@pytest.fixture(scope="module")
+def n4_real_trace():
+    """Real non-root debug capture at 4371ab3 with documented fd/link fixes
+    projected (see fixtures/prompt-n4-trace.md); not a post-fix execution.
+    """
+    return Path(__file__).with_name("fixtures").joinpath(
+        "prompt-n4-debian-bookworm-glibc-aarch64.strace"
+    ).read_text().splitlines()
+
+
+def test_real_n4_debian_prompt_trace(n4_real_trace):
+    assert_prompt_trace_budget(n4_real_trace, DEBIAN_EXE, DEBIAN_ROOTS)
+    pids, scoped = budget.tree(n4_real_trace, DEBIAN_EXE)
+    assert pids == {"2809", "2810", "2811", "2812", "2813"}
+    assert len(n4_real_trace) == 3320
+    calls = budget.parse_trace("\n".join(scoped))
+    assert len(calls) == 2473
+    links = [c for c in calls if c.name == "readlinkat"]
+    assert sum(c.pid == 2809 for c in links) == 2
+    assert sum(c.pid == 2810 for c in links) == 32
+    assert not any(c.name == "openat" and budget.args_of(c)[1] in {'"time"', '"time_for_children"'}
+                   for c in calls)
+    assert any(c.pid == 2809 and c.name == "openat" and '"contexts-v2"' in c.args
+               and c.ret.startswith("-1 ENOENT") for c in calls)
+    assert any(c.pid == 2810 and c.name == "renameat" and '"snapshot"' in c.args for c in calls)
+
+
+def test_real_n4_rejects_debug_fd_probe(n4_real_trace):
+    changed = list(n4_real_trace)
+    at = next(i for i, line in enumerate(changed) if line.startswith("2809 ") and "write(1" in line)
+    changed.insert(at, '2809 fcntl(7<time:[4026532442]>, F_GETFD) = -1 EPERM (Operation not permitted)')
+    with pytest.raises(AssertionError, match="post-filter syscall"):
+        assert_prompt_trace_budget(changed, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+
+def test_held_snapshot_contract(held_trace):
+    assert_prompt_trace_budget(held_trace, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("name", ["fcntl", "openat", "readlinkat", "fstat", "fstatfs", "fgetxattr", "getuid", "getpid", "lseek", "pread64", "readv"])
+def test_held_trace_rejects_every_non_table_call_after_filter(held_trace, name):
+    # A path operation is refused even if it would name an otherwise approved file.
+    extra = f'10 {name}(3, "snapshot", 0) = -1 EPERM (Operation not permitted)'
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(held_trace + [extra], EXE, ROOTS)
+
+
+@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"])
+def test_held_data_opens_require_each_flag(held_trace, flag):
+    changed = [line.replace("|" + flag, "") if '"snapshot",' in line and line.startswith("10 ") else line for line in held_trace]
+    assert changed != held_trace
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("flag", ["O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"])
+def test_held_walk_requires_each_flag(held_trace, flag):
+    changed = [line.replace("|" + flag, "") if '"contexts-v2",' in line and line.startswith("10 ") else line for line in held_trace]
+    assert changed != held_trace
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('"snapshot", O_RDONLY', '"other", O_RDONLY'),
+    ('"snapshot", O_RDONLY', '"../snapshot", O_RDONLY'),
+    ('"contexts-v2",', '"contexts-v3",'),
+    ('CLOCK_BOOTTIME', 'CLOCK_REALTIME'),
+    ('"system.posix_acl_access"', '"user.other"'),
+    (', 1024) = 1024', ', 16385) = 1024'),
+])
+def test_held_trace_rejects_scope_mutation(held_trace, old, new):
+    changed = [line.replace(old, new) if line.startswith("10 ") else line for line in held_trace]
+    assert changed != held_trace
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+def test_held_trace_rejects_read_without_successful_prefilter_open(held_trace):
+    changed = [line.split(" = ")[0] + " = -1 ENOENT (No such file or directory)"
+               if '"snapshot",' in line and line.startswith("10 ") else line for line in held_trace]
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+def test_held_trace_rejects_read_before_filter(held_trace):
+    lines = list(held_trace)
+    read = next(i for i, line in enumerate(lines) if '10 read(' in line and '/snapshot>' in line)
+    entry = lines.pop(read)
+    at = next(i for i, line in enumerate(lines) if 'PR_SET_SECCOMP' in line)
+    lines.insert(at, entry)
+    with pytest.raises(AssertionError, match="root pre-filter content"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("call", [
+    'read(99</pinned/config/secret>, "x", 1)',
+    'close(99</pinned/config/secret>)',
+    'read(0</dev/null>, "", 1)',
+])
+def test_held_trace_rejects_inherited_or_closed_descriptor(held_trace, call):
+    with pytest.raises(AssertionError, match="root held"):
+        assert_prompt_trace_budget(held_trace + [f'10 {call} = 0'], EXE, ROOTS)
+
+
+def test_held_trace_needs_exact_prefilter_allowance(held_trace, monkeypatch):
+    monkeypatch.setattr(budget, "prompt_open", lambda *args: False)
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(held_trace, EXE, ROOTS)
+
+
+def test_held_root_open_is_absolute_even_with_hostile_cwd(held_trace):
+    lines = [line.replace('openat(AT_FDCWD</>, "/",', 'openat(AT_FDCWD</repo/untrusted>, "/",')
+             if line.startswith("10 ") else line for line in held_trace]
+    assert lines != held_trace
+    assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
 # 이것을 실패시키는 것: open_flags가 O_LARGEFILE을 남기는 것.
 def test_walk_step_accepts_x86_64_largefile_flag():
     import test_prompt_env_paths as t
     line = '9 openat(AT_FDCWD</>, "/", O_RDONLY|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 3</>'
     call = next(c for c in t.parse_trace(line) if c.name == "openat")
     assert t.helper_walk_step(call, "/", ["/root/x/run-t/bingsu"])
+
+
+def test_real_n4_rejects_duplicate_fstatfs(n4_real_trace):
+    lines = list(n4_real_trace)
+    at = next(i for i, line in enumerate(lines) if line.startswith("2809 ") and "fstatfs(4</proc>" in line)
+    lines.insert(at, '2809 fstatfs(4</proc>, {f_type=PROC_SUPER_MAGIC}) = 0')
+    with pytest.raises(AssertionError, match="root duplicate fstatfs"):
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+def test_real_n4_rejects_kernel_walk_held_after_filter(n4_real_trace):
+    lines = list(n4_real_trace)
+    at = next(i for i, line in enumerate(lines) if line.startswith("2809 ") and "close(4</proc>" in line)
+    entry = [lines.pop(at)]
+    if "<unfinished ...>" in entry[0]:
+        resumed = next(i for i in range(at, len(lines)) if lines[i].startswith("2809 ") and "<... close resumed>" in lines[i])
+        entry.append(lines.pop(resumed))
+    with pytest.raises(AssertionError, match="root kernel walk held after filter"):
+        assert_prompt_trace_budget(lines + entry, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('"time", "time:', '"mnt", "time:'),
+    ('"2809", O_RDONLY', '"999", O_RDONLY'),
+])
+def test_real_n4_rejects_kernel_path_expansion(n4_real_trace, old, new):
+    changed = [line.replace(old, new) if line.startswith("2809 ") else line for line in n4_real_trace]
+    assert changed != n4_real_trace
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(changed, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+# Each new allowance is needed by both adapters, but only for the exact
+# relative namespace names and bounded buffer. Link output is not a pathname.
+@pytest.mark.parametrize("pid", [10, 11])
+@pytest.mark.parametrize("old,new", [
+    ('"time",', '"mnt",'),
+    ('"time_for_children",', '"mnt",'),
+    ('/ns>', '/other>'),
+    ('"time",', '"../ns/time",'),
+    (', 28)', ', 29)'),
+])
+def test_namespace_readlink_scope(pid, old, new):
+    lines = valid_trace()
+    changed = [line.replace(old, new) if line.startswith(f"{pid} readlinkat(") else line
+               for line in lines]
+    assert changed != lines
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("pid", [10, 11])
+def test_namespace_readlink_needs_allowance(monkeypatch, pid):
+    original = budget.time_namespace_readlink
+    monkeypatch.setattr(budget, "time_namespace_readlink", lambda call, path, owner:
+                        call.pid != pid and original(call, path, owner))
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(valid_trace(), EXE, ROOTS)
+
+
+@pytest.mark.parametrize("call", [
+    'newfstatat(23</proc/10/ns>, "time", {}, 28)',
+    'readlinkat(23</proc/10/ns>, "/proc/10/ns/time", "time:[123]", 28)',
+    'openat(23</proc/10/ns>, "time", O_RDONLY|O_CLOEXEC)',
+    'readlinkat(23</proc/999/ns>, "time", "time:[123]", 28)',
+])
+def test_root_refuses_namespace_open_or_nonrelative_readlink(call):
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if '10 readlinkat(' in line)
+    lines[at] = f'10 {call} = -1 EACCES (Permission denied)'
+    with pytest.raises(AssertionError, match="root path"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("missing", ['10 fstatfs(23', '10 openat(22'])
+def test_root_namespace_link_requires_observed_held_directory(missing):
+    lines = [line for line in valid_trace() if not line.startswith(missing)]
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_root_namespace_link_rejects_wrong_held_file():
+    lines = [
+        '10 openat(22</proc/10>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 23</proc/10/timens_offsets>'
+        if line.startswith('10 openat(22') else line for line in valid_trace()
+    ]
+    # The same fd has filesystem evidence, but it was not opened as ns.
+    with pytest.raises(AssertionError, match="root namespace walk"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_root_namespace_link_is_prefilter_only():
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if '10 readlinkat(' in line)
+    lines.append(lines.pop(at))
+    with pytest.raises(AssertionError, match="post-filter syscall"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)

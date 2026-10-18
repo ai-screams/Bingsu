@@ -1,14 +1,15 @@
 //! The front end's decisions as pure functions (sans-IO): argv bytes in,
 //! record bytes out. The `bingsu prompt` adapter in crates/bingsu
 //! (src/prompt.rs) only turns the process arguments into bytes, calls
-//! `prepare`, carries out the reads the plan names (none yet), calls
+//! `staged::prepare`, carries out the reads the plan names, calls
 //! `finish`, writes the record and exits; it decides nothing.
 //!
-//! There is no config snapshot yet (M3a later tasks), so every prompt draws
-//! the built-in default; an envelope without `--shell` (a hook older than
-//! the renderer) gets the shell-neutral minimal record.
+//! The N4 snapshot consumer is in `staged` (pre-filter held-fd preparation,
+//! followed by bounded reads under the option-3 syscall budget). An envelope without `--shell` (a hook older than the renderer)
+//! gets the shell-neutral minimal record.
 use crate::color::palette::Mode;
 use crate::color::sgr::ColorDepth;
+use crate::config::compile::CompiledConfig;
 use crate::default_theme::DefaultTheme;
 use crate::envelope::{self, Envelope, EnvelopeError};
 use crate::field::BUILTIN;
@@ -22,6 +23,9 @@ use crate::status::Status;
 use crate::width::WidthProfile;
 use alloc::vec::Vec;
 
+/// Snapshot continuation and selection; the CLI retains descriptors before confinement.
+pub mod staged;
+
 /// Appends the record of `fields`; a field the encoder refuses (a renderer
 /// defect: the B1 grammar is the producer's promise) gives the minimal
 /// record with `error:internal` instead. `encode_b1` checks every field
@@ -33,10 +37,11 @@ fn encode_or_internal(fields: &Fields<'_>, status: Status, out: &mut Vec<u8>) {
 }
 
 fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
-    // Mode: spec section 2 "색 모드 판단" step 4 (nothing known: dark).
+    // Display-only envelope observation; absent/garbled falls back to dark.
     // Built-in constants (test default_theme_builds); were it ever to fail,
     // the adapter's panic fallback gives the same `error:internal` record.
-    let theme = DefaultTheme::new(Mode::Dark).expect("built-in default theme");
+    let theme =
+        DefaultTheme::new(parsed.colorfgbg.unwrap_or(Mode::Dark)).expect("built-in default theme");
     let c = shell_values::collect(parsed);
     let inputs = Inputs {
         catalog: BUILTIN,
@@ -62,10 +67,78 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
     encode_or_internal(&to_b1_fields(&r), status, out);
 }
 
-/// What the adapter must read from the system before `finish`, decided from
-/// the arguments alone. Part V reads nothing, so the plan only carries the
-/// parsed envelope; N4 adds the snapshot header and marker reads (through
-/// the pinned runtime root) and the clock read as public fields.
+/// Shared snapshot/default rendering. Only the staged consumer enables P10;
+/// the legacy adapter remains disconnected pending its syscall-budget ruling.
+fn render_selected(
+    parsed: &Envelope,
+    shell: Shell,
+    status: Status,
+    compiled: Option<&CompiledConfig>,
+    mode: Mode,
+    out: &mut Vec<u8>,
+) {
+    let default;
+    let setup;
+    let (theme, setup, options, duration_min) = if let Some(c) = compiled {
+        setup = c.setup();
+        (
+            c.theme_for(mode),
+            setup.as_slice(),
+            Options {
+                width: parsed.width,
+                profile: c.profile,
+                icons: c.icons,
+                use_last_column: c.use_last_column,
+            },
+            c.duration_min_ms,
+        )
+    } else {
+        let Ok(d) = DefaultTheme::new(mode) else {
+            write_minimal_b1(Status::ERROR_INTERNAL, out);
+            return;
+        };
+        default = d;
+        (
+            default.theme(),
+            default.setup(),
+            Options {
+                width: parsed.width,
+                profile: WidthProfile::DEFAULT,
+                icons: crate::default_theme::ICONS,
+                use_last_column: false,
+            },
+            shell_values::DURATION_MIN_MS,
+        )
+    };
+    let collected = shell_values::collect_with_duration_min(parsed, duration_min);
+    let inputs = Inputs {
+        catalog: BUILTIN,
+        values: &collected.values,
+        facts: &collected.facts,
+        setup,
+    };
+    let target = Target {
+        shell,
+        depth: if parsed.truecolor {
+            ColorDepth::TrueColor
+        } else {
+            ColorDepth::Ansi256
+        },
+        options,
+    };
+    let notice = (status != Status::OK_NONE).then_some(crate::render::Notice::Warning);
+    let rendered = crate::render::render_prompt_with_notice(
+        &theme,
+        &inputs,
+        &target,
+        notice,
+        &mut NoopRecorder,
+    );
+    encode_or_internal(&to_b1_fields(&rendered), status, out);
+}
+
+/// The legacy adapter plan, which carries only a parsed envelope. The snapshot
+/// continuation uses `staged::ReadPlan`, whose read and ownership state is private.
 pub struct ReadPlan {
     parsed: Result<Envelope, EnvelopeError>,
 }
@@ -75,9 +148,9 @@ pub struct ReadPlan {
 #[derive(Default)]
 pub struct Observed {}
 
-/// What the adapter does next: write `record` and exit. N3 adds whether to
-/// start the refresh helper, N6 the output deadline; the adapter carries
-/// them out without deciding anything.
+/// What the connected adapter does next: write `record` and exit. The helper
+/// already starts before the filter; no response grants process creation.
+/// `staged::Response` additionally carries the snapshot's execution eligibility.
 pub struct Response {
     pub record: Vec<u8>,
 }

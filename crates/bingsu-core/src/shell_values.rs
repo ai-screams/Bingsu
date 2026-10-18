@@ -79,6 +79,11 @@ fn decimal(n: impl core::fmt::Display) -> Vec<u8> {
 }
 
 pub fn collect(e: &Envelope) -> Collected {
+    collect_with_duration_min(e, DURATION_MIN_MS)
+}
+
+/// The threshold is from the validated compiled configuration, in milliseconds.
+pub fn collect_with_duration_min(e: &Envelope, duration_min_ms: u64) -> Collected {
     let mut c = Collected {
         values: vec![None; BUILTIN.len()],
         facts: vec![None; BUILTIN.len()],
@@ -165,7 +170,7 @@ pub fn collect(e: &Envelope) -> Collected {
         }
         put(&mut c, "status", value("status", &text, &set));
     }
-    if let Some(ms) = e.duration_ms.filter(|&ms| ms >= DURATION_MIN_MS) {
+    if let Some(ms) = e.duration_ms.filter(|&ms| ms >= duration_min_ms) {
         let mut t = String::new();
         write_duration(ms, &mut t);
         put(

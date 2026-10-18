@@ -1,4 +1,4 @@
-//! Fixed kernel observations shared by command clocks and the future front reader.
+//! Fixed kernel observations shared by publisher clocks and the front reader.
 //! No environment, configurable paths, wall-clock fallback or command module access.
 #![forbid(
     clippy::disallowed_methods,
@@ -25,7 +25,7 @@ const CLOCK_KIND: u8 = 1;
 #[cfg(target_os = "macos")]
 const CLOCK_KIND: u8 = 2;
 
-fn monotonic_ns() -> Result<u64, ClockError> {
+pub(crate) fn monotonic_ns() -> Result<u64, ClockError> {
     #[cfg(target_os = "linux")]
     let kind = libc::CLOCK_BOOTTIME;
     #[cfg(target_os = "macos")]
@@ -48,7 +48,7 @@ fn monotonic_ns() -> Result<u64, ClockError> {
         .ok_or(ClockError::Time)
 }
 
-fn uuid(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
+pub(crate) fn uuid(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
     if bytes.len() != 36 {
         return Err(ClockError::Boot);
     }
@@ -74,6 +74,104 @@ fn uuid(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
         return Err(ClockError::Boot);
     }
     Ok(out)
+}
+
+// Shared publisher/reader judgements. Callers verify the procfs walk and file
+// kinds before passing observations; errors retain their errno so only
+// three ENOENT observations prove that time namespaces are unavailable.
+#[cfg(any(test, target_os = "linux"))]
+fn time_domain(
+    time: Result<u64, i32>,
+    child: Result<u64, i32>,
+    offsets: Result<(), i32>,
+) -> Result<[u8; 16], ClockError> {
+    let missing = [
+        time == Err(libc::ENOENT),
+        child == Err(libc::ENOENT),
+        offsets == Err(libc::ENOENT),
+    ];
+    if time.is_ok() && (child.is_err() || offsets.is_err()) {
+        return Err(ClockError::Domain);
+    }
+    // readlink exposes the same inode as fstat, but no st_dev. Use a fixed
+    // nsfs discriminator instead of a mount's device number. Both adapters
+    // use this encoding; old device-based markers become stale and refresh.
+    let identity = time.ok().map(|ino| (0x6e736673, ino));
+    bingsu_core::snapshot::namespace_domain(identity, true, missing)
+}
+
+// "time:[" + at most 20 decimal u64 digits + "]". One extra read byte
+// ensures even a valid maximum-length prefix with trailing data is refused.
+#[cfg(any(test, target_os = "linux"))]
+const TIME_LINK_MAX: usize = 27;
+
+#[cfg(any(test, target_os = "linux"))]
+fn time_inode(bytes: &[u8]) -> Result<u64, i32> {
+    if bytes.len() > TIME_LINK_MAX {
+        return Err(libc::EIO);
+    }
+    let digits = bytes
+        .strip_prefix(b"time:[")
+        .and_then(|b| b.strip_suffix(b"]"))
+        .ok_or(libc::EIO)?;
+    let mut ino = 0u64;
+    for &digit in digits {
+        if !digit.is_ascii_digit() {
+            return Err(libc::EIO);
+        }
+        ino = ino
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(u64::from(digit - b'0')))
+            .ok_or(libc::EIO)?;
+    }
+    if ino == 0 {
+        // also rejects an empty decimal field
+        return Err(libc::EIO);
+    }
+    Ok(ino)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn time_link(ns: i32, name: &std::ffi::CStr) -> Result<u64, i32> {
+    let mut bytes = [0; TIME_LINK_MAX + 1];
+    // SAFETY: borrowed directory fd, terminated fixed name and writable buffer.
+    // This reads the link itself; opening its nsfs target can fail in a userns.
+    let n = unsafe { libc::readlinkat(ns, name.as_ptr(), bytes.as_mut_ptr().cast(), bytes.len()) };
+    let n = usize::try_from(n).map_err(|_| {
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    })?;
+    time_inode(&bytes[..n])
+}
+
+/// Pre-filter only. `ns` must be the current process's verified procfs ns
+/// directory. Publisher and reader share both link observation and judgement.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn time_namespace_domain(
+    ns: i32,
+    offsets: Result<(), i32>,
+) -> Result<[u8; 16], ClockError> {
+    time_domain(
+        time_link(ns, c"time"),
+        time_link(ns, c"time_for_children"),
+        offsets,
+    )
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn boot_file(f: bingsu_core::fs_trust::Facts, magic: u64) -> bool {
+    // uid is mapped by user namespaces (often to 65534). procfs proves the
+    // origin; a host uid spelling adds no protection against local users.
+    magic == 0x9fa0 && f.mode & 0o170022 == 0o100000
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn boot_bytes(bytes: &[u8]) -> Result<[u8; 16], ClockError> {
+    if bytes.len() != 37 || bytes[36] != b'\n' {
+        return Err(ClockError::Boot);
+    }
+    uuid(&bytes[..36])
 }
 
 #[cfg(target_os = "macos")]
@@ -109,8 +207,8 @@ mod linux {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
 
-    // Private effects accept only the constant names below. Namespace magic links
-    // are the one deliberate follow operation; snapshot paths use another adapter.
+    // Private effects accept only the constant names below. /proc/self is the
+    // sole followed link; namespace magic links are read, never opened.
     fn open_at(base: i32, name: &CStr, flags: i32) -> std::io::Result<File> {
         // SAFETY: base is borrowed or AT_FDCWD; name is terminated; no O_CREAT.
         let fd = unsafe { libc::openat(base, name.as_ptr(), flags | libc::O_CLOEXEC) };
@@ -127,6 +225,33 @@ mod linux {
         unsafe {
             libc::fstatfs(f.as_raw_fd(), &mut st) == 0 && st.f_type as i128 == i128::from(magic)
         }
+    }
+    fn facts(f: &File) -> Result<bingsu_core::fs_trust::Facts, i32> {
+        let m = f.metadata().map_err(|_| libc::EIO)?;
+        Ok(bingsu_core::fs_trust::Facts {
+            dev: m.dev(),
+            ino: m.ino(),
+            uid: m.uid(),
+            gid: m.gid(),
+            mode: m.mode(),
+            ownership: Some(true),
+            // Kernel identity judgement does not use ACLs. The reader also
+            // checks ACLs as part of its pre-filter held-file inspection.
+            acl: bingsu_core::fs_trust::AclFacts::Unknown,
+        })
+    }
+    fn namespace_entry(
+        base: i32,
+        name: &CStr,
+        magic: libc::c_long,
+        flags: i32,
+    ) -> Result<(u64, u64), i32> {
+        let f = open_at(base, name, flags).map_err(|e| e.raw_os_error().unwrap_or(0))?;
+        let m = facts(&f)?;
+        if !on_fs(&f, magic) || m.mode & 0o170000 != 0o100000 {
+            return Err(libc::EIO);
+        }
+        Ok((m.dev, m.ino))
     }
     fn proc_self() -> Result<File, ClockError> {
         let f = open_at(
@@ -151,36 +276,13 @@ mod linux {
         if !on_fs(&ns, 0x9fa0) {
             return Err(ClockError::Domain);
         }
-        let time = open_at(ns.as_raw_fd(), c"time", libc::O_RDONLY);
-        match time {
-            Ok(f) => {
-                if !on_fs(&f, 0x6e736673) {
-                    return Err(ClockError::Domain);
-                }
-                let m = f.metadata().map_err(|_| ClockError::Domain)?;
-                bingsu_core::snapshot::namespace_domain(Some((m.dev(), m.ino())), true, [false; 3])
-            }
-            Err(e) => {
-                // ENOENT alone is not feature absence: both proc directories are
-                // verified and all three kernel entries must be absent.
-                let child = open_at(ns.as_raw_fd(), c"time_for_children", libc::O_RDONLY);
-                let offsets = open_at(
-                    process.as_raw_fd(),
-                    c"timens_offsets",
-                    libc::O_RDONLY | libc::O_NOFOLLOW,
-                );
-                let missing = [
-                    e.raw_os_error() == Some(libc::ENOENT),
-                    child
-                        .err()
-                        .is_some_and(|e| e.raw_os_error() == Some(libc::ENOENT)),
-                    offsets
-                        .err()
-                        .is_some_and(|e| e.raw_os_error() == Some(libc::ENOENT)),
-                ];
-                bingsu_core::snapshot::namespace_domain(None, true, missing)
-            }
-        }
+        let offsets = namespace_entry(
+            process.as_raw_fd(),
+            c"timens_offsets",
+            0x9fa0,
+            libc::O_RDONLY | libc::O_NOFOLLOW,
+        );
+        time_namespace_domain(ns.as_raw_fd(), offsets.map(|_| ()))
     }
     pub(super) fn boot() -> Result<[u8; 16], ClockError> {
         use std::io::Read;
@@ -190,7 +292,8 @@ mod linux {
             libc::O_RDONLY | libc::O_NOFOLLOW,
         )
         .map_err(|_| ClockError::Boot)?;
-        if !on_fs(&f, 0x9fa0) {
+        let facts = facts(&f).map_err(|_| ClockError::Boot)?;
+        if !boot_file(facts, if on_fs(&f, 0x9fa0) { 0x9fa0 } else { 0 }) {
             return Err(ClockError::Boot);
         }
         let mut b = [0; 38];
@@ -202,10 +305,7 @@ mod linux {
             }
             n += got;
         }
-        if n != 37 || b[36] != b'\n' {
-            return Err(ClockError::Boot);
-        }
-        uuid(&b[..36])
+        boot_bytes(&b[..n])
     }
 }
 #[cfg(target_os = "linux")]
@@ -220,6 +320,247 @@ fn clock_domain() -> Result<[u8; 16], ClockError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs::{self, File},
+        os::{fd::AsRawFd, unix::fs::symlink},
+        path::PathBuf,
+    };
+
+    struct Links(PathBuf);
+    impl Links {
+        fn new(time: Option<&str>, child: Option<&str>) -> Self {
+            static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "bingsu-time-links-{}-{}",
+                std::process::id(),
+                COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            for (name, text) in [("time", time), ("time_for_children", child)] {
+                if let Some(text) = text {
+                    symlink(text, path.join(name)).unwrap();
+                }
+            }
+            Self(path)
+        }
+        fn directory(&self) -> File {
+            File::open(&self.0).unwrap()
+        }
+    }
+    impl Drop for Links {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    // 이것을 실패시키는 것: 길이·접두/접미·빈 숫자·ASCII 숫자·오버플로·영 inode 검사 제거.
+    #[test]
+    fn time_link_parser_is_strict_and_bounded() {
+        for (text, ino) in [
+            ("time:[123]", 123),
+            ("time:[4026532442]", 4026532442),
+            ("time:[000123]", 123), // decimal digits, still within the bound
+            ("time:[18446744073709551615]", u64::MAX),
+        ] {
+            assert_eq!(time_inode(text.as_bytes()), Ok(ino), "{text}");
+        }
+        for bad in [
+            "",
+            "time:[]",
+            "time:[0]",
+            "time:[000]",
+            "mnt:[123]",
+            "TIME:[123]",
+            "time:123]",
+            "time:[123",
+            "time:[123]]",
+            "time:[+123]",
+            "time:[-123]",
+            "time:[ 123]",
+            "time:[123 ]",
+            "time:[1a3]",
+            "time:[１２３]",
+            " time:[123]",
+            "time:[123]\n",
+            "time:[123]\0",
+            "time:[123]extra",
+            "time:[000000000000000000001]",
+            "time:[18446744073709551617]",
+            "time:[99999999999999999999]",
+        ] {
+            assert_eq!(time_inode(bad.as_bytes()), Err(libc::EIO), "{bad:?}");
+        }
+        assert_eq!(time_inode(b"time:[\xff]"), Err(libc::EIO));
+    }
+
+    // Both callers supply a procfs-verified ns fd and the offsets result to
+    // this same routine. Independent descriptors model their separate walks;
+    // the table exercises actual readlinkat, including errors and truncation.
+    // 이것을 실패시키는 것: 두 링크 중 하나를 생략·교환, readlink 오류 은폐, 버퍼 여유 제거.
+    #[test]
+    fn publisher_reader_readlink_domain_table() {
+        let domain = |ino| {
+            bingsu_core::snapshot::namespace_domain(Some((0x6e736673, ino)), true, [false; 3])
+        };
+        for (time, child, offsets, want) in [
+            (Some("time:[123]"), Some("time:[123]"), Ok(()), domain(123)),
+            // A child may be in another time namespace; the current one wins.
+            (Some("time:[123]"), Some("time:[456]"), Ok(()), domain(123)),
+            (
+                Some("time:[18446744073709551615]"),
+                Some("time:[1]"),
+                Ok(()),
+                domain(u64::MAX),
+            ),
+            (
+                Some("time:[18446744073709551615]x"),
+                Some("time:[1]"),
+                Ok(()),
+                Err(ClockError::Domain),
+            ),
+            (
+                Some("mnt:[123]"),
+                Some("time:[123]"),
+                Ok(()),
+                Err(ClockError::Domain),
+            ),
+            (
+                Some("time:[123]"),
+                Some("mnt:[123]"),
+                Ok(()),
+                Err(ClockError::Domain),
+            ),
+            (Some("time:[123]"), None, Ok(()), Err(ClockError::Domain)),
+            (None, Some("time:[123]"), Ok(()), Err(ClockError::Domain)),
+            (
+                Some("time:[123]"),
+                Some("time:[123]"),
+                Err(libc::EACCES),
+                Err(ClockError::Domain),
+            ),
+            (None, None, Err(libc::ENOENT), Ok([0; 16])),
+            (None, None, Err(libc::EACCES), Err(ClockError::Domain)),
+        ] {
+            let links = Links::new(time, child);
+            let publisher = time_namespace_domain(links.directory().as_raw_fd(), offsets);
+            let reader = time_namespace_domain(links.directory().as_raw_fd(), offsets);
+            assert_eq!(publisher, want, "{time:?}, {child:?}, {offsets:?}");
+            assert_eq!(reader, publisher);
+        }
+        assert_eq!(time_link(-1, c"time"), Err(libc::EBADF));
+    }
+
+    // 이것을 실패시키는 것: namespace 링크의 readlink를 open/fstat으로 되돌리는 것.
+    #[test]
+    fn namespace_open_permission_denied_does_not_affect_readlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let links = Links::new(Some("time:[123]"), Some("time:[123]"));
+        let target = links.0.join("time:[123]");
+        fs::write(&target, b"unreadable nsfs stand-in").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root can bypass file permissions; non-root CI/macOS exercises EACCES.
+        // The real Linux probe below also covers parent-userns nsfs permissions.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            for name in ["time", "time_for_children"] {
+                assert_eq!(
+                    File::open(links.0.join(name)).unwrap_err().raw_os_error(),
+                    Some(libc::EACCES)
+                );
+            }
+        }
+        let ns = links.directory();
+        assert_eq!(time_link(ns.as_raw_fd(), c"time"), Ok(123));
+        assert_eq!(
+            time_namespace_domain(ns.as_raw_fd(), Ok(())),
+            bingsu_core::snapshot::namespace_domain(Some((0x6e736673, 123)), true, [false; 3])
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_readlink_matches_opened_namespace_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let ns = File::open("/proc/self/ns").unwrap();
+        for name in [c"time", c"time_for_children"] {
+            let inode = time_link(ns.as_raw_fd(), name);
+            let path = format!("/proc/self/ns/{}", name.to_str().unwrap());
+            match File::open(path) {
+                Ok(f) => assert_eq!(inode, Ok(f.metadata().unwrap().ino())),
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                    assert_eq!(inode, Err(libc::ENOENT));
+                }
+                Err(e) => {
+                    assert_eq!(e.raw_os_error(), Some(libc::EACCES));
+                    assert!(inode.is_ok(), "readlink still works in a user namespace");
+                }
+            }
+        }
+    }
+
+    // Both adapters call these exact judgements: user namespace uid mapping
+    // cannot change the decision, and a partially observed domain fails closed.
+    // 이것을 실패시키는 것: uid==0 복원, procfs/파일 종류/쓰기 비트/세 관찰 조건 제거.
+    #[test]
+    fn publisher_reader_boot_domain_table() {
+        use bingsu_core::fs_trust::{AclFacts, Facts};
+        let f = Facts {
+            dev: 1,
+            ino: 9,
+            uid: 0,
+            gid: 0,
+            mode: 0o100444,
+            ownership: Some(true),
+            acl: AclFacts::None,
+        };
+        for uid in [0, 501, 65534] {
+            for (mode, magic, expected) in [
+                (0o100444, 0x9fa0, true),
+                (0o100444, 0x6e736673, false),
+                (0o100446, 0x9fa0, false),
+                (0o100464, 0x9fa0, false),
+                (0o040444, 0x9fa0, false),
+            ] {
+                assert_eq!(
+                    boot_file(Facts { uid, mode, ..f }, magic),
+                    expected,
+                    "uid={uid} mode={mode:o}"
+                );
+            }
+        }
+        let identity = (0x6e736673, f.ino);
+        let expected = bingsu_core::snapshot::namespace_domain(Some(identity), true, [false; 3]);
+        let entries = [Ok(()), Err(libc::ENOENT), Err(libc::EACCES), Err(libc::EIO)];
+        for time in entries {
+            for child in entries {
+                for offsets in entries {
+                    let want = if [time, child, offsets] == [Ok(()); 3] {
+                        expected
+                    } else if [time, child, offsets] == [Err(libc::ENOENT); 3] {
+                        Ok([0; 16])
+                    } else {
+                        Err(ClockError::Domain)
+                    };
+                    assert_eq!(
+                        time_domain(time.map(|_| f.ino), child.map(|_| f.ino), offsets),
+                        want,
+                        "time={time:?}, child={child:?}, offsets={offsets:?}"
+                    );
+                }
+            }
+        }
+        let uuid = b"00112233-4455-6677-8899-aabbccddeeff\n";
+        assert!(boot_bytes(uuid).is_ok());
+        for bytes in [
+            &uuid[..36],
+            b"00112233-4455-6677-8899-aabbccddeeff ",
+            b"00112233-4455-6677-8899-aabbccddeeff\nextra",
+            b"00000000-0000-0000-0000-000000000000\n".as_slice(),
+        ] {
+            assert!(boot_bytes(bytes).is_err());
+        }
+    }
+
     // 이것을 실패시키는 것: UUID 길이·구분자·hex·영 UUID 검사 또는 바이트 순서를 바꾸는 것.
     #[test]
     fn kernel_uuid_is_strict() {

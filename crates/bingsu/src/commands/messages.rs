@@ -18,6 +18,9 @@ pub enum MsgId {
     LateHookZsh,
     LateHookBash,
     NoSandbox,
+    TrustInvalid,
+    TrustMismatch,
+    TrustClock,
     ColdInitUnfinished,
     ColdInitInvalid,
     ReloadInvalid,
@@ -36,7 +39,7 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 21] = [
+pub const ALL: [MsgId; 24] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
@@ -49,6 +52,9 @@ pub const ALL: [MsgId; 21] = [
     MsgId::LateHookZsh,
     MsgId::LateHookBash,
     MsgId::NoSandbox,
+    MsgId::TrustInvalid,
+    MsgId::TrustMismatch,
+    MsgId::TrustClock,
     MsgId::ColdInitUnfinished,
     MsgId::ColdInitInvalid,
     MsgId::ReloadInvalid,
@@ -60,7 +66,7 @@ pub const ALL: [MsgId; 21] = [
     MsgId::RootsFromEnvironment,
 ];
 
-const EN: [(MsgId, &str); 21] = [
+const EN: [(MsgId, &str); 24] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -104,6 +110,18 @@ const EN: [(MsgId, &str); 21] = [
     (
         MsgId::LateHookBash,
         "bingsu: another prompt hook runs after bingsu; put the bingsu init line last in your .bashrc",
+    ),
+    (
+        MsgId::TrustInvalid,
+        "bingsu: settings verification failed; configured commands are paused. Run: bingsu doctor",
+    ),
+    (
+        MsgId::TrustMismatch,
+        "bingsu: saved settings and their verification do not match; configured commands are paused. Run: bingsu doctor",
+    ),
+    (
+        MsgId::TrustClock,
+        "bingsu: settings verification time could not be confirmed; configured commands are paused. Run: bingsu doctor",
     ),
     (
         MsgId::NoSandbox,

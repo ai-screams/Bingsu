@@ -70,6 +70,8 @@ pub struct Envelope {
     /// `--colorterm "$COLORTERM"`: `truecolor` or `24bit` (spec section 3
     /// "색 출력"). Absent or anything else: 256 colors.
     pub truecolor: bool,
+    /// Display-only COLORFGBG observation; malformed or absent means dark.
+    pub colorfgbg: Option<crate::color::palette::Mode>,
     /// `--home=<path>`, pinned by init from getpwuid.
     pub home: Option<Vec<u8>>,
     pub runtime_groups: Vec<crate::fs_trust::GroupPin>,
@@ -124,6 +126,26 @@ fn display_or_unknown(v: &[u8]) -> Option<Vec<u8>> {
     (!v.is_empty() && v.len() <= PATH_BYTES_MAX).then(|| v.to_vec())
 }
 
+// Accept only two ANSI indices, without retaining or rendering hostile bytes.
+// A valid word is at most five bytes ("15;15"); parsing cost is bounded too.
+fn colorfgbg_mode(v: &[u8]) -> Option<crate::color::palette::Mode> {
+    use crate::color::palette::Mode;
+    if v.len() > 5 {
+        return None;
+    }
+    let sep = v.iter().position(|&b| b == b';')?;
+    let fg = parse_decimal(&v[..sep])?;
+    let bg = parse_decimal(&v[sep + 1..])?;
+    if fg > 15 {
+        return None;
+    }
+    match bg {
+        0..=6 | 8 => Some(Mode::Dark),
+        7 | 9..=15 => Some(Mode::Light),
+        _ => None,
+    }
+}
+
 fn width_or_unknown(v: &[u8]) -> u16 {
     parse_decimal(v)
         .and_then(|n| u16::try_from(n).ok())
@@ -155,6 +177,7 @@ pub(crate) fn is_value_flag(a: &[u8]) -> bool {
             | b"--shell"
             | b"--pwd"
             | b"--colorterm"
+            | b"--colorfgbg"
             | b"--host"
             | b"--venv"
     )
@@ -216,7 +239,7 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
     let (mut ctx, mut width, mut ext) = (None::<()>, None::<u16>, 0usize);
     let (mut pwd, mut colorterm) = (None::<Option<Vec<u8>>>, None::<bool>);
     let (mut log_level, mut ssh, mut groups) = (None, None, None);
-    let (mut host, mut venv) = (None, None);
+    let (mut host, mut venv, mut colorfgbg) = (None, None, None);
     let mut i = 0;
     while i < args.len() {
         let a = args[i];
@@ -296,6 +319,7 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
             b"--host" => set_once(&mut host, display_or_unknown(v))?,
             b"--venv" => set_once(&mut venv, display_or_unknown(v))?,
             b"--pwd" => set_once(&mut pwd, pwd_or_unknown(v))?,
+            b"--colorfgbg" => set_once(&mut colorfgbg, colorfgbg_mode(v))?,
             b"--colorterm" => set_once(&mut colorterm, v == b"truecolor" || v == b"24bit")?,
             b"--pipestatus" => {
                 let items: Vec<u8> = v
@@ -350,6 +374,7 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
     e.width = width.ok_or(EnvelopeError::BadArgs("width missing"))?;
     e.pwd = pwd.flatten();
     e.truecolor = colorterm.unwrap_or(false);
+    e.colorfgbg = colorfgbg.flatten();
     e.log_level = log_level.unwrap_or_default();
     e.ssh = ssh.unwrap_or(false);
     e.host = host.flatten();
@@ -450,6 +475,51 @@ mod tests {
     fn parse_strs(a: &[&str]) -> Result<Envelope, EnvelopeError> {
         let v: Vec<&[u8]> = a.iter().map(|x| x.as_bytes()).collect();
         parse(&v)
+    }
+
+    // 이것을 실패시키는 것: COLORFGBG 값 소비/중복/문법/상한/배경별 모드 판단 제거.
+    #[test]
+    fn colorfgbg_is_a_bounded_display_observation() {
+        use crate::color::palette::Mode;
+        for bg in 0..=15 {
+            let value = format!("15;{bg}");
+            let mut a = base_with_width("80");
+            a.extend([b"--colorfgbg", value.as_bytes()]);
+            assert_eq!(
+                parse(&a).unwrap().colorfgbg,
+                Some(if matches!(bg, 7 | 9..=15) {
+                    Mode::Light
+                } else {
+                    Mode::Dark
+                })
+            );
+            a.extend([b"--colorfgbg".as_slice(), b""]);
+            assert_eq!(parse(&a), Err(EnvelopeError::BadArgs("duplicate field")));
+        }
+        let huge = vec![b'7'; PATH_BYTES_MAX + 1];
+        for bad in [
+            b"".as_slice(),
+            b"7",
+            b";7",
+            b"0;",
+            b"0;16",
+            b"16;7",
+            b"0;7;0",
+            b"0;7\n",
+            b"0;7\x1b",
+            b"x;7",
+            b"0;-1",
+            b"--record",
+            &huge,
+        ] {
+            let mut a = base_with_width("80");
+            a.extend([b"--colorfgbg", bad]);
+            assert_eq!(parse(&a).unwrap().colorfgbg, None, "{bad:?}");
+        }
+        assert_eq!(parse(&base_with_width("80")).unwrap().colorfgbg, None);
+        let mut a = base_with_width("80");
+        a.extend([b"--colorfgbg".as_slice(), b"", b"--colorfgbg", b"0;7"]);
+        assert_eq!(parse(&a), Err(EnvelopeError::BadArgs("duplicate field")));
     }
 
     // 이것을 실패시키는 것: 선택 필드 정규화·값 소비·중복·64 KiB 상한을 생략하는 것.

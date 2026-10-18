@@ -22,6 +22,9 @@ mod prompt_io;
 mod prompt;
 #[cfg(unix)]
 #[allow(unsafe_code)]
+mod prompt_read;
+#[cfg(unix)]
+#[allow(unsafe_code)]
 mod prompt_spawn;
 // Linux: the prompt's seccomp filter. Elsewhere there is no filter.
 #[cfg(target_os = "linux")]

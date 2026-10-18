@@ -26,16 +26,20 @@ class Bootstrap(unittest.TestCase):
                                        "--checker", str(CHECKER)], capture_output=True, text=True)
             good = run()
             self.assertEqual(good.returncode, 0, good.stderr)
-            path = root / "crates/bingsu/src/prompt_spawn.rs"
-            original = path.read_bytes()
-            path.write_bytes(original + b"\n// changed bootstrap\n")
-            changed = run()
-            self.assertNotEqual(changed.returncode, 0)
-            self.assertIn("prompt_spawn.rs: sha256", changed.stderr)
-            path.write_bytes(original.replace(b"#![forbid(", b"#![allow(", 1))
-            changed = run()
-            self.assertIn("prompt_spawn.rs: first inner attribute", changed.stderr)
-            path.write_bytes(original)
+            for module in ("prompt_spawn", "prompt_read"):
+                with self.subTest(module=module):
+                    path = root / f"crates/bingsu/src/{module}.rs"
+                    original = path.read_bytes()
+                    try:
+                        path.write_bytes(original + b"\n// changed TCB\n")
+                        changed = run()
+                        self.assertNotEqual(changed.returncode, 0)
+                        self.assertIn(f"{module}.rs: sha256", changed.stderr)
+                        path.write_bytes(original.replace(b"#![forbid(", b"#![allow(", 1))
+                        changed = run()
+                        self.assertIn(f"{module}.rs: first inner attribute", changed.stderr)
+                    finally:
+                        path.write_bytes(original)
 
 if __name__ == "__main__":
     unittest.main()

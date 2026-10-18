@@ -81,7 +81,8 @@ fn without(drop: &[&str]) -> Vec<Vec<u8>> {
 // 이것을 실패시키는 것: 봉투 규칙 하나라도 다르게 구현하는 것(벡터마다 기대 바이트가 고정돼 있음).
 #[test]
 fn envelope_golden_vectors() {
-    let ok = minimal("ok:none");
+    // /r is a syntax fixture, not an init-pinned runtime directory.
+    let ok = minimal("degraded:runtime-root");
     let bad = minimal("error:bad-args");
     check("ok_minimal", with(&[]), &ok);
     check(
@@ -323,7 +324,7 @@ fn rendered_record_for_each_shell() {
         assert!(out.stderr.is_empty(), "{shell}");
         let rec = out.stdout;
         assert!(
-            rec.starts_with(b"B1\x1f8\x1f") && rec.ends_with(b"\x1fok:none\x1e"),
+            rec.starts_with(b"B1\x1f8\x1f") && rec.ends_with(b"\x1fdegraded:runtime-root\x1e"),
             "{shell}"
         );
         assert_eq!(rec.iter().filter(|&&b| b == 0x1f).count(), 9, "{shell}");

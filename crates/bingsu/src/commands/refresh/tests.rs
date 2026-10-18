@@ -907,13 +907,19 @@ fn sigkill_before_and_after_every_rename_recovers_fixed_slots() {
                 Checkpoint::After(Slot::Snapshot) | Checkpoint::Before(Slot::Marker)
             ) {
                 assert_ne!(f.snap().id, old);
-                assert!(snapshot::eligible(f.snap().id, Some(f.marker()), clock()).is_err());
+                assert!(
+                    snapshot::eligible(f.snap().id, Some(f.marker()), clock(), f.snap().id.context)
+                        .is_err()
+                );
             }
             assert!(matches!(
                 f.run(),
                 RefreshResult::Published { .. } | RefreshResult::Revalidated { .. }
             ));
-            assert!(snapshot::eligible(f.snap().id, Some(f.marker()), clock()).is_ok());
+            assert!(
+                snapshot::eligible(f.snap().id, Some(f.marker()), clock(), f.snap().id.context)
+                    .is_ok()
+            );
             assert_eq!(
                 fs::metadata(f.dir().join("snapshot.lock")).unwrap().ino(),
                 lock_ino
@@ -1106,7 +1112,9 @@ fn renewal_failure_keeps_published_result_and_new_selection() {
         fs::read(f.request.state_root.join("config-use")).unwrap(),
         b"concurrently changed selection"
     );
-    assert!(snapshot::eligible(f.snap().id, Some(f.marker()), clock()).is_ok());
+    assert!(
+        snapshot::eligible(f.snap().id, Some(f.marker()), clock(), f.snap().id.context).is_ok()
+    );
 }
 // 이것을 실패시키는 것: staging의 형식·크기 검사를 빼거나 staging 이름의 새 inode 교체를 허용하는 것.
 #[test]

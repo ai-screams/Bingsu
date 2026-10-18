@@ -1097,14 +1097,47 @@ fn bootstrap_is_only_a_prefilter_entry() {
     let call = "crate::prompt_spawn::bootstrap(exe, &raw);";
     assert!(source.contains(call));
     let after = source.replace(call, "").replace(
-        "respond(&raw)",
-        &format!("{call}\n            respond(&raw)"),
+        "respond(staged())",
+        &format!("{call}\n            respond(staged())"),
     );
     assert!(!run_adapter(&after).0);
     let early = source.replace("let rec =", "enter_sandbox(); let rec =");
     assert!(!run_adapter(&early).0);
     let other = source.replace(call, "crate::other::run(exe, &raw);");
     assert!(!run_adapter(&other).0);
-    let extra = source.replace("respond(&raw)", "crate::other::run(); respond(&raw)");
+    let extra = source.replace(
+        "respond(staged())",
+        "crate::other::run(); respond(staged())",
+    );
     assert!(!run_adapter(&extra).0);
+}
+
+// 이것을 실패시키는 것: reader 호출을 필터 뒤·다른 함수·추가 모듈 호출로 확대하는 것.
+#[test]
+fn reader_is_only_a_prefilter_entry() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bingsu/src/prompt.rs"),
+    )
+    .unwrap();
+    assert!(run_adapter(&source).0);
+    let call = "let staged = crate::prompt_read::prepare(&raw);";
+    assert!(source.contains(call));
+    for bad in [
+        source
+            .replace(call, "")
+            .replace("respond(staged())", &format!("{call} respond(staged())")),
+        source.replace(call, &format!("{call} crate::prompt_read::prepare(&raw);")),
+        source.replace(
+            "respond(staged())",
+            "crate::other::run(); respond(staged())",
+        ),
+        source.replace(
+            "fn write_record",
+            "fn extra() { crate::prompt_read::prepare(&[]); } fn write_record",
+        ),
+        source.replace("crate::prompt_read::prepare", "crate::other::prepare"),
+    ] {
+        let (ok, err) = run_adapter(&bad);
+        assert!(!ok, "{err}");
+    }
 }

@@ -4,6 +4,9 @@ degraded:runtime-root
 degraded:oversize
 degraded:trust-unverified
 degraded:trust-expired
+degraded:trust-invalid
+degraded:trust-mismatch
+degraded:trust-clock
 degraded:sandbox
 error:config-last-good
 error:config-default

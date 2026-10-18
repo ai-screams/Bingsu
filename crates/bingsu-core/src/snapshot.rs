@@ -211,15 +211,23 @@ impl Marker {
         })
     }
 }
-pub fn eligible(selected: Identity, m: Option<Marker>, now: Clock) -> Result<u64, Refusal> {
+/// `context` is derived from the current shell's canonical config/state roots,
+/// independently of the selected file and marker. A matching foreign pair is not
+/// an authorization for this shell (the exact address is checked by the reader).
+pub fn eligible(
+    selected: Identity,
+    m: Option<Marker>,
+    now: Clock,
+    context: [u8; 4],
+) -> Result<u64, Refusal> {
     let m = m.ok_or(Refusal::Missing)?;
     if m.invalid {
         return Err(Refusal::Invalid);
     }
-    if m.id != selected {
+    if m.id != selected || selected.context != context {
         return Err(Refusal::Pair);
     }
-    if now.boot != selected.boot {
+    if now.boot == [0; 16] || now.boot != selected.boot {
         return Err(Refusal::Boot);
     }
     if ![1, 2].contains(&now.kind) || now.kind != m.kind || now.domain != m.domain {
@@ -238,7 +246,119 @@ pub fn eligible(selected: Identity, m: Option<Marker>, now: Clock) -> Result<u64
     Ok(end)
 }
 pub fn same_boot(id: Identity, boot: Option<[u8; 16]>, context: [u8; 4]) -> bool {
-    boot == Some(id.boot) && context == id.context
+    id.boot != [0; 16] && boot == Some(id.boot) && context == id.context
+}
+/// The front never receives source metadata. Clock fields belong to the selected
+/// compiled section, including when that section came from last-good.
+#[derive(Debug, PartialEq)]
+pub struct FrontSnapshot {
+    pub id: Identity,
+    pub clock_kind: u8,
+    pub resume: u64,
+    pub config: CompiledConfig,
+}
+impl FrontSnapshot {
+    pub fn eligible(
+        &self,
+        marker: Option<Marker>,
+        now: Clock,
+        context: [u8; 4],
+    ) -> Result<u64, Refusal> {
+        // Invalid and pair failures take precedence over clock failures.
+        let result = eligible(self.id, marker, now, context);
+        if matches!(
+            result,
+            Err(Refusal::Missing | Refusal::Invalid | Refusal::Pair | Refusal::Boot)
+        ) {
+            return result;
+        }
+        if self.clock_kind != now.kind {
+            return Err(Refusal::Clock);
+        }
+        if self.resume != now.resume {
+            return Err(Refusal::Resume);
+        }
+        result
+    }
+}
+
+/// Maximum single read, independent of attacker-controlled wire lengths.
+pub const READ_CHUNK: usize = 16 * 1024;
+
+/// Sequential front decoder: header, prefix, then only the compiled section.
+/// Construct only after the descriptor's owner/mode/type/link/ACL/size checks.
+/// No body allocation is approved until BOTH fixed parts and file size agree.
+pub struct FrontDecoder {
+    bytes: Vec<u8>,
+    file_len: usize,
+    end: usize,
+}
+impl FrontDecoder {
+    pub fn new(file_len: u64) -> Result<Self, Error> {
+        let file_len = usize::try_from(file_len).map_err(|_| Error::Limit)?;
+        if !(HEADER + PREFIX..=HEADER + PREFIX + COMPILED_MAX + META_MAX).contains(&file_len) {
+            return Err(Error::Limit);
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(HEADER + PREFIX)
+            .map_err(|_| Error::Limit)?;
+        Ok(Self {
+            bytes,
+            file_len,
+            end: HEADER,
+        })
+    }
+    /// Zero means complete. Short reads are accepted; EOF before zero is failure.
+    pub fn read_len(&self) -> usize {
+        self.end.saturating_sub(self.bytes.len()).min(READ_CHUNK)
+    }
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.is_empty() || bytes.len() > self.read_len() {
+            return Err(Error::Short);
+        }
+        self.bytes.extend_from_slice(bytes);
+        if self.bytes.len() != self.end {
+            return Ok(());
+        }
+        if self.end == HEADER {
+            header(&self.bytes)?;
+            self.end = HEADER + PREFIX;
+        } else if self.end == HEADER + PREFIX {
+            let (c, m) = lengths(&self.bytes)?;
+            if self.file_len != HEADER + PREFIX + c + m {
+                return Err(Error::Shape);
+            }
+            self.bytes.try_reserve_exact(c).map_err(|_| Error::Limit)?;
+            self.end += c;
+        }
+        Ok(())
+    }
+    pub fn finish(self) -> Result<FrontSnapshot, Error> {
+        if self.read_len() != 0 {
+            return Err(Error::Short);
+        }
+        Snapshot::decode_front(&self.bytes, self.file_len)
+    }
+}
+
+fn header(b: &[u8]) -> Result<(), Error> {
+    if b.len() < HEADER {
+        return Err(Error::Short);
+    }
+    if &b[..8] != b"BNGSNP02"
+        || b[8..12] != [2, 0, 64, 0]
+        || b[12] > 1
+        || b[13..16] != [0; 3]
+        || b[28..56] != [0; 28]
+    {
+        return Err(Error::Tag);
+    }
+    let c = usize::try_from(u32at(b, 60)?).map_err(|_| Error::Limit)?;
+    if !(PREFIX..=PREFIX + COMPILED_MAX).contains(&c) {
+        return Err(Error::Limit);
+    }
+    Ok(())
 }
 #[derive(Debug, PartialEq)]
 pub struct Snapshot {
@@ -289,7 +409,12 @@ impl Snapshot {
         if bytes.len() != end + m {
             return Err(Error::Shape);
         }
-        let mut out = Self::decode_front(&bytes[..end], bytes.len())?;
+        let front = Self::decode_front(&bytes[..end], bytes.len())?;
+        let mut out = Self {
+            id: front.id,
+            config: front.config,
+            metadata: Vec::new(),
+        };
         decode_metadata(&bytes[end..])?;
         out.metadata
             .try_reserve_exact(m)
@@ -297,7 +422,7 @@ impl Snapshot {
         out.metadata.extend_from_slice(&bytes[end..]);
         Ok(out)
     }
-    pub fn decode_front(bytes: &[u8], file_len: usize) -> Result<Self, Error> {
+    pub fn decode_front(bytes: &[u8], file_len: usize) -> Result<FrontSnapshot, Error> {
         let (c_len, m_len) = lengths(bytes)?;
         if file_len != HEADER + PREFIX + c_len + m_len || bytes.len() != HEADER + PREFIX + c_len {
             return Err(Error::Shape);
@@ -312,7 +437,7 @@ impl Snapshot {
         {
             return Err(Error::Shape);
         }
-        Ok(Self {
+        Ok(FrontSnapshot {
             id: Identity {
                 generation: u64at(bytes, 16)?,
                 source: n(bytes, 24)?,
@@ -321,11 +446,13 @@ impl Snapshot {
                 context: n(bytes, 120)?,
             },
             config,
-            metadata: Vec::new(),
+            clock_kind: bytes[84],
+            resume: u64at(bytes, 152)?,
         })
     }
 }
 pub fn lengths(b: &[u8]) -> Result<(usize, usize), Error> {
+    header(b)?;
     if b.len() < HEADER + PREFIX {
         return Err(Error::Short);
     }

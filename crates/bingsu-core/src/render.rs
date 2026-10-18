@@ -13,6 +13,57 @@ use crate::template::compile::CompiledLine;
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// A fixed core-owned warning, never text from a snapshot or shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Warning,
+}
+
+fn notice_layout<R: Recorder>(
+    theme: &Theme<'_>,
+    inp: &Inputs<'_>,
+    t: &Target,
+    r: &mut R,
+) -> Vec<crate::layout::LaidLine> {
+    // Select the band with the actual terminal width, before reserving notice
+    // space. Upper lines keep their entire budget and the user's template.
+    let band = crate::bands::select(theme.band_order, theme.bands, t.options.width);
+    if R::ENABLED {
+        r.begin();
+        r.band(band);
+    }
+    let lines = band
+        .and_then(|b| theme.variants.get(b + 1))
+        .or(theme.variants.first())
+        .map_or(&[][..], Vec::as_slice);
+    let budget = crate::layout::target(&t.options);
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let upper = i + 1 < lines.len();
+        let options = if upper {
+            t.options
+        } else {
+            Options {
+                width: budget.saturating_sub(1) as u16,
+                use_last_column: true,
+                ..t.options
+            }
+        };
+        let mut laid = layout_line(i, line, upper, inp, &options, r);
+        if !upper && budget > 0 {
+            laid.left.insert(
+                0,
+                Run {
+                    text: alloc::string::String::from("!"),
+                    style: crate::color::sgr::Style::default(),
+                },
+            );
+        }
+        out.push(laid);
+    }
+    out
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Theme<'a> {
     /// `variants[0]` default layout, `variants[i + 1]` band `i`.
@@ -103,14 +154,31 @@ pub fn render_prompt<R: Recorder>(
     t: &Target,
     r: &mut R,
 ) -> RenderedPrompt {
-    let lines = layout(
-        theme.variants,
-        theme.bands,
-        theme.band_order,
-        inp,
-        &t.options,
-        r,
-    );
+    render_prompt_with_notice(theme, inp, t, None, r)
+}
+
+/// Reserves one input-line cell before layout, then emits the fixed `!` through
+/// the normal shell emitter. Width zero has no cells; width one shows only `!`.
+/// Without a notice this is byte-for-byte the original renderer.
+pub fn render_prompt_with_notice<R: Recorder>(
+    theme: &Theme<'_>,
+    inp: &Inputs<'_>,
+    t: &Target,
+    notice: Option<Notice>,
+    r: &mut R,
+) -> RenderedPrompt {
+    let lines = if notice.is_some() {
+        notice_layout(theme, inp, t, r)
+    } else {
+        layout(
+            theme.variants,
+            theme.bands,
+            theme.band_order,
+            inp,
+            &t.options,
+            r,
+        )
+    };
     let p = theme.palette;
     // At most two lines (template::compile::MAX_LINES): the last is the
     // input line, one before it the upper line. A dropped upper line has

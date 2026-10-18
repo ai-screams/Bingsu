@@ -55,7 +55,7 @@ _bingsu_call() {
   # makes bash warn when _bingsu_bytes returns.
   _bingsu_bytes "$_bingsu_pwd" 2>/dev/null
   (( _bingsu_n <= 65536 )) || _bingsu_pwd=
-  local _bingsu_log=off _bingsu_host=${HOSTNAME-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0
+  local _bingsu_log=off _bingsu_host=${HOSTNAME-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0 _bingsu_colorfgbg=${COLORFGBG-}
   local _bingsu_log_nm=0
   if shopt -q nocasematch; then _bingsu_log_nm=1; shopt -u nocasematch; fi
   case ${BINGSU_LOG-} in error|info|debug) _bingsu_log=$BINGSU_LOG ;; esac
@@ -64,8 +64,10 @@ _bingsu_call() {
   (( _bingsu_n <= 65536 )) || _bingsu_host=
   _bingsu_bytes "$_bingsu_venv" 2>/dev/null
   (( _bingsu_n <= 65536 )) || _bingsu_venv=
+  _bingsu_bytes "$_bingsu_colorfgbg" 2>/dev/null
+  (( _bingsu_n <= 65536 )) || _bingsu_colorfgbg=
   [[ -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ]] && _bingsu_ssh=1
-  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null
+  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --colorfgbg "$_bingsu_colorfgbg" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null
   (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn
   _bingsu_rec=${_bingsu_rec%.}
 }

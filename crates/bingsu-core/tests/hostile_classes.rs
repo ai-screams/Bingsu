@@ -83,3 +83,36 @@ fn producer_column_matches() {
     }
     assert_eq!(rows, declared, "classes.tsv declares {declared} rows");
 }
+
+// All hostile classes, including NUL/invalid UTF-8 and 1 MiB, are display data.
+// 이것을 실패시키는 것: COLORFGBG 원문을 그리거나 잘못된 값으로 다른 모드를 고르는 것.
+#[test]
+fn colorfgbg_hostile_classes_are_discarded() {
+    let base: &[&[u8]] = &[
+        b"--ctx",
+        b"1",
+        b"--record",
+        b"B1",
+        b"--width",
+        b"80",
+        b"--shell",
+        b"bash",
+    ];
+    let expected = bingsu_core::front::respond(base);
+    for row in include_str!("../../../tests/hostile/classes.tsv")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let cells: Vec<_> = row.split('\t').collect();
+        let bytes = payload(cells[1]);
+        let mut args = base.to_vec();
+        args.extend([b"--colorfgbg".as_slice(), &bytes]);
+        assert_eq!(
+            bingsu_core::envelope::parse(&args).unwrap().colorfgbg,
+            None,
+            "{}",
+            cells[0]
+        );
+        assert_eq!(bingsu_core::front::respond(&args), expected, "{}", cells[0]);
+    }
+}
