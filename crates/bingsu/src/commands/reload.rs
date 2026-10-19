@@ -7,7 +7,7 @@ use super::{
     ctx::{self, Applied, EXIT_FAILED, EXIT_UNFINISHED, EXIT_USAGE, User},
     messages::{MsgId, en},
 };
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
 /// The words for each way an application can end: stdout text for success,
@@ -45,7 +45,7 @@ pub fn report(applied: &Applied, what: &str) -> Result<String, (String, u8)> {
     }
 }
 
-pub fn run(args: &[OsString]) -> ExitCode {
+pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if !args.is_empty() {
         eprintln!("usage: bingsu reload");
         return ctx::code(EXIT_USAGE);
@@ -72,7 +72,13 @@ pub fn run(args: &[OsString]) -> ExitCode {
             return ctx::code(code);
         }
     };
-    let applied = ctx::apply(&roots, &user, started, &mut SystemClock);
+    let applied = ctx::apply(
+        std::path::Path::new(exe),
+        &roots,
+        &user,
+        started,
+        &mut SystemClock,
+    );
     match report(&applied, "reloaded") {
         Ok(text) => {
             if ctx::print(&text) {

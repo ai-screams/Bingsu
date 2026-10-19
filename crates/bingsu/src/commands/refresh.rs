@@ -31,12 +31,15 @@ pub struct RefreshRequest {
     pub me: u32,
     pub user: Vec<u8>,
     pub version: [u32; 3],
+    /// Cache discriminator only; None always requires compilation.
+    pub build: Option<super::build_identity::BuildIdentity>,
     /// Captured at process entry, before root/NSS observations. N3 also
     /// enforces this deadline with its independent watchdog.
     pub process_started: Clock,
 }
 impl RefreshRequest {
     pub fn from_envelope(
+        exe: &std::path::Path,
         e: &Envelope,
         user: &sys::Passwd,
         process_started: Clock,
@@ -58,6 +61,7 @@ impl RefreshRequest {
             me: sys::current_uid(),
             user: user.name.clone(),
             version,
+            build: super::build_identity::read(exe),
             process_started,
         })
     }
@@ -253,8 +257,15 @@ fn run(
         Ok(l) => &l.files,
         Err(e) => &e.files,
     };
-    let export = loader.evidence_export(files, &r.state_root, r.version, &selection_evidence)?;
-    let unchanged = loaded.is_ok()
+    let export = loader.evidence_export(
+        files,
+        &r.state_root,
+        r.version,
+        r.build.as_ref().map_or(&[], |id| id.as_slice()),
+        &selection_evidence,
+    )?;
+    let unchanged = r.build.is_some()
+        && loaded.is_ok()
         && old.as_ref().is_some_and(|s| {
             s.id.epoch == seq.epoch
                 && s.id.generation <= seq.generation
@@ -269,7 +280,7 @@ fn run(
     };
     b.check(clock)?;
     let compiled = unchanged || report.as_ref().is_some_and(|r| r.snapshot.is_some());
-    // Invalid also needs revalidation: R3's verified(false) returns early.
+    // Revalidate before considering publication or invalidation.
     loader.revalidate().map_err(|_| StoreError::Unsafe)?;
     let verification = loader.verified(
         report.as_ref().map_or(&[], |r| r.files.as_slice()),

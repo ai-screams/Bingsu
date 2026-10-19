@@ -64,6 +64,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         .map(|n| n.parse().unwrap_or(0))
         .collect::<Vec<_>>();
     let Some(request) = RefreshRequest::from_envelope(
+        Path::new(exe),
         &e,
         &user,
         process_started,

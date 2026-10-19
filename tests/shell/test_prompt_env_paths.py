@@ -530,6 +530,94 @@ def proc_self_readlink(call, path):
             and descriptor_child(call, path) and args_of(call)[3] == "11")
 
 
+class HelperExecutableWalk:
+    """Per-process executable chain, expanded only by earlier link results."""
+
+    def __init__(self, exe):
+        self.roots = {exe}
+        self.links = set()
+        self.held = {}
+        self.regular = set()
+
+    def parent_held(self, call, path):
+        args = args_of(call)
+        return (descriptor_child(call, path)
+                and self.held.get(args[0]) == os.path.dirname(path))
+
+    def readlink(self, call, path):
+        # Build identity reads one link name under its held parent, bounded by
+        # read_link_at's 4096+1 truncation detector; the output is evidence only.
+        if (call.name != "readlinkat" or not self.parent_held(call, path)
+                or not any(r == path or r.startswith(path + "/") for r in self.roots)):
+            return False
+        args = args_of(call)
+        target = QUOTED.fullmatch(args[2])
+        if (args[3] != "4097" or not target or "\\" in target.group(1)
+                or not call.ret.isdecimal()
+                or not 0 < int(call.ret) < 4097
+                or len(os.fsencode(target.group(1))) != int(call.ret)):
+            return False
+        target = target.group(1)
+        # Preserve the unresolved suffix when an ancestor itself is a link.
+        # Keep prefixes traversed before '..' too: those are real walk steps.
+        for root in tuple(self.roots):
+            if root == path or root.startswith(path + "/"):
+                expansion = os.path.join(os.path.dirname(path), target) + root[len(path):]
+                parts = expansion.split("/")
+                for i in range(1, len(parts) + 1):
+                    self.roots.add(os.path.normpath("/".join(parts[:i]) or "/"))
+        self.links.add(path)
+        return True
+
+    def file_op(self, call, path):
+        # Only the verified last regular file may get a readable descriptor;
+        # its flags prevent following links/blocking/devices. No content I/O.
+        if call.name == "newfstatat":
+            return (self.parent_held(call, path)
+                    and args_of(call)[3] == "AT_SYMLINK_NOFOLLOW")
+        if call.name == "openat":
+            return (path not in self.links and path in self.regular
+                    and self.parent_held(call, path)
+                    and open_flags(args_of(call)[2]) == {
+                        "O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"})
+        return False
+
+    def observe(self, call):
+        args = args_of(call)
+        paths = call_paths(call)
+        if (call.name == "newfstatat" and paths and paths[0] in self.roots
+                and self.file_op(call, paths[0])):
+            self.regular.discard(paths[0])
+            if call.ret == "0" and "st_mode=S_IFREG|" in args[2]:
+                self.regular.add(paths[0])
+        if call.name in OPENS:
+            result = re.fullmatch(r"(\d+)<(/[^<>]*)>", call.ret)
+            if result:
+                fd, path = result.groups()
+                # Any successful open reuses the fd, even outside this walk.
+                self.held = {k: v for k, v in self.held.items() if not k.startswith(fd + "<")}
+                if (paths == [path] and (helper_walk_step(call, path, self.roots)
+                                        or path in self.roots and self.file_op(call, path))):
+                    self.held[fd + "<" + path + ">"] = path
+        if call.name == "close":
+            self.held.pop(args[0], None)
+
+    def fd_stat(self, call):
+        # fstat and libc's empty-name equivalents inspect the successfully
+        # opened target descriptor, never a pathname or an unobserved fd.
+        args = args_of(call)
+        if args[0] not in self.held:
+            return False
+        if call.name == "fstat":
+            return True
+        if call.name == "newfstatat":
+            return args[1] == '""' and args[3] == "AT_EMPTY_PATH"
+        if call.name == "statx":
+            return (args[1] == '""' and "AT_EMPTY_PATH" in open_flags(args[2])
+                    and not open_flags(args[2]) - {"AT_EMPTY_PATH", "AT_STATX_SYNC_AS_STAT"})
+        return False
+
+
 def prompt_root_io(front, boundary, exe, pinned, root):
     """Track the root's prepared fds. No path operation survives the filter.
 
@@ -678,7 +766,9 @@ def assert_prompt_trace_budget(lines, exe, pinned):
         children.extend(int(c.ret) for c in made)
     assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
     created = set()
+    exe_walks = {pid: HelperExecutableWalk(exe) for pid in owners}
     for c in helper:
+        exe_walk = exe_walks[c.pid]
         if c.name in {"mkdir", "mkdirat"}:
             paths = call_paths(c)
             assert len(paths) == 1 and helper_mkdir_step(c, paths[0], pinned), ("helper mkdir", c)
@@ -690,11 +780,25 @@ def assert_prompt_trace_budget(lines, exe, pinned):
             assert "AF_UNIX" in c.args and set(call_paths(c)) <= NSCD_PATHS, c
             assert c.ret.startswith(("-1 ENOENT", "-1 ECONNREFUSED")), ("unexpected NSS daemon", c)
         # 이것을 실패시키는 것: helper/collector가 pinned roots 밖의 repo·상대 경로·임의 시스템 파일에 접근하는 것.
-        for path in call_paths(c) + content_paths(c):
+        contents = content_paths(c)
+        # Learning a link target grants walk/metadata access only, including
+        # when a chain path overlaps an otherwise broadly allowed pathname.
+        assert not any(r == path or r.startswith(path.rstrip("/") + "/")
+                       for path in contents for r in exe_walk.roots), ("helper path", c, "executable content")
+        paths = call_paths(c) + contents
+        if c.name in {"fstat", "newfstatat", "statx"}:
+            fd = args_of(c)[0]
+            annotation = re.fullmatch(r"\d+<(/[^<>]*)>", fd)
+            empty = c.name == "fstat" or args_of(c)[1] == '""'
+            if empty and annotation and annotation.group(1) in exe_walk.roots:
+                assert exe_walk.fd_stat(c), ("helper executable metadata", c)
+        for path in paths:
             # Historical N3 captures still contain namespace opens. New link
             # reads get this exact budget, never the broad legacy proc allowance.
             if c.name in {"readlink", "readlinkat"}:
-                assert time_namespace_readlink(c, path, owners[c.pid]), ("helper namespace link", c)
+                assert (time_namespace_readlink(c, path, owners[c.pid])
+                        or exe_walk.readlink(c, path)), ("helper namespace link", c)
+                continue
             # -y resolves /proc/self dirfds to /proc/<tgid>. Only this
             # process's numeric spelling is equivalent, not another PID's.
             own_proc = f"/proc/{owners[c.pid]}"
@@ -703,14 +807,26 @@ def assert_prompt_trace_budget(lines, exe, pinned):
             system = (path in NSS_PATHS | NSCD_PATHS | {"/dev/null", "/proc/self", "/proc/sys/kernel/random/boot_id"}
                       or path.startswith("/proc/self/"))
             detached = c.name == "chdir" and path == "/"
-            walk = helper_walk_step(c, path, pinned)
+            # The helper resolves the pinned executable hop by hop for its build
+            # identity, so the executable joins the walk roots (ancestors only as
+            # no-follow walk steps and metadata, never content).
+            # 이것을 실패시키는 것: exe를 걷기 뿌리에서 빼는 것(컨테이너에서 bin 조상 stat이 거부된다).
+            # Link targets learned earlier need the same no-follow ancestor
+            # traversal and metadata checks to verify the executable binding.
+            walk_roots = [*pinned, exe, *exe_walk.roots]
+            walk = helper_walk_step(c, path, walk_roots)
             nss_root = helper_nss_root_stat(c, path)
             creation = (c.name == "mkdirat" and helper_mkdir_step(c, path, pinned)
                         or helper_created_open(c, path, created))
-            chain_stat = helper_chain_stat(c, path, pinned)
-            ancestor_stat = helper_ancestor_stat(c, path, pinned)
+            chain_stat = helper_chain_stat(c, path, walk_roots)
+            ancestor_stat = helper_ancestor_stat(c, path, walk_roots)
+            if c.name != "execve" and path in exe_walk.roots and path != "/" and not any(
+                    r.startswith(path + "/") for r in exe_walk.roots):
+                assert exe_walk.file_op(c, path), ("helper executable path", c, path)
+                continue
             assert (system or detached or walk or nss_root or creation or chain_stat or ancestor_stat
                     or allowed(path, c.args, exe, pinned, allow_walk=False)), ("helper path", c, path)
+        exe_walk.observe(c)
 
 
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —

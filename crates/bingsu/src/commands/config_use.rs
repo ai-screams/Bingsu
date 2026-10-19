@@ -18,7 +18,7 @@ use super::{
     trust_record::{self, Record},
 };
 use bingsu_core::fs_trust::Last;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -107,7 +107,7 @@ fn save(
     }
 }
 
-pub fn run(args: &[OsString]) -> ExitCode {
+pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let [arg] = args else {
         eprintln!("usage: bingsu config use PATH");
         return ctx::code(EXIT_USAGE);
@@ -160,7 +160,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
         return ctx::code(EXIT_UNFINISHED);
     }
     let shown = ctx::show(&record.path);
-    let applied = ctx::apply(&roots, &user, started, &mut SystemClock);
+    let applied = ctx::apply(Path::new(exe), &roots, &user, started, &mut SystemClock);
     match (&applied, reload::report(&applied, "applied")) {
         (_, Ok(text)) => {
             let line = format!("bingsu: using {shown} in place of config.toml\n{text}");

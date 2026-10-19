@@ -72,7 +72,7 @@ pub enum Verified {
     Publish { left_out: Vec<PathBuf> },
     /// A trusted file failed: confirmed, so an invalid marker (spec 4).
     Invalid,
-    /// The source set was not read to the end (a `conf.d` listing failed):
+    /// An observation failed or changed before it could be confirmed:
     /// no new marker; the old one ages out after T.
     Incomplete,
 }
@@ -116,6 +116,8 @@ fn config_names(file: &std::fs::File) -> std::io::Result<Vec<OsString>> {
 /// Opens and judges files for one config read.
 pub struct Loader {
     places: Places,
+    #[cfg(test)]
+    groups: Option<std::cell::RefCell<Box<dyn GroupOracle>>>,
     record: Option<Record>,
     /// Metadata-only read plan, keyed by identity. Core owns file budgets.
     plan: BTreeMap<FileKey, Planned>,
@@ -131,7 +133,7 @@ pub struct Loader {
     unread: BTreeMap<FileKey, OpenError>,
     /// Why each file that could have been trusted was not.
     pub untrusted: Vec<(FileKey, PathBuf, Untrusted)>,
-    pub remedies: Vec<String>,
+    pub remedies: Vec<(FileKey, String)>,
     /// The `config use` file's new identity, when another file now stands
     /// at the recorded path and it passed the whole safety check (ruling
     /// P-R3c, spec change S-10). The caller writes it back with
@@ -159,6 +161,8 @@ fn errno_text(e: &std::io::Error) -> String {
 impl Loader {
     pub fn new(places: Places) -> Self {
         let mut loader = Self {
+            #[cfg(test)]
+            groups: None,
             record: None,
             held: BTreeMap::new(),
             plan: BTreeMap::new(),
@@ -184,6 +188,16 @@ impl Loader {
         loader
     }
 
+    // Production creates a fresh system oracle for each walk. Tests can keep
+    // the same undecidable oracle through discovery, reads and publication.
+    fn with_groups<T>(&self, f: impl FnOnce(&mut dyn GroupOracle) -> T) -> T {
+        #[cfg(test)]
+        if let Some(groups) = &self.groups {
+            return f(groups.borrow_mut().as_mut());
+        }
+        f(&mut SystemGroups::new(&self.places.user))
+    }
+
     /// The only production interface for an approved external config.
     pub fn with_record(places: Places, evidence: RecordEvidence) -> Self {
         let mut loader = Self::new(places);
@@ -197,7 +211,7 @@ impl Loader {
     /// every original fd. Changed evidence means no new marker. A fresh
     /// oracle checks memberships again; cached per-walk answers do not leak.
     pub fn revalidate(&self) -> Result<(), String> {
-        self.revalidate_with(&mut SystemGroups::new(&self.places.user))
+        self.with_groups(|groups| self.revalidate_with(groups))
     }
 
     fn revalidate_with(&self, groups: &mut dyn GroupOracle) -> Result<(), String> {
@@ -265,11 +279,7 @@ impl Loader {
     fn observe_absence(&mut self, path: &Path) {
         let mut prefix = path.parent();
         while let Some(parent) = prefix {
-            match Resolved::open_dir(
-                parent,
-                self.places.me,
-                &mut SystemGroups::new(&self.places.user),
-            ) {
+            match self.with_groups(|groups| Resolved::open_dir(parent, self.places.me, groups)) {
                 Ok(e) => {
                     match e.evidence_export() {
                         Ok(bytes) => {
@@ -294,6 +304,7 @@ impl Loader {
         files: &[Found],
         state: &Path,
         version: [u32; 3],
+        build: &[u8],
         selection: &[u8],
     ) -> std::io::Result<EvidenceExport> {
         let mut e = Encoder::new();
@@ -305,6 +316,7 @@ impl Loader {
         for n in version {
             e.num(n.into());
         }
+        e.blob(build);
         e.blob(selection);
         let context_end = e.len();
         e.catalog(files);
@@ -390,54 +402,16 @@ impl Loader {
                 .any(|c| matches!(c, std::path::Component::ParentDir))
     }
 
-    /// Unresolved errors have a separate, conservative place verdict.
-    /// Resolve the longest existing prefix before classifying a missing
-    /// suffix; never pass `/config/../themes/missing` to trusted_place.
-    fn unresolved_place(&self, written: &Path) -> Trust {
-        let mut prefix = written.to_path_buf();
-        let mut suffix = Vec::new();
-        loop {
-            if let Ok(mut resolved) = std::fs::canonicalize(&prefix) {
-                for part in suffix.iter().rev() {
-                    resolved.push(part);
-                }
-                let mut normalized = PathBuf::new();
-                for c in resolved.components() {
-                    match c {
-                        std::path::Component::ParentDir => {
-                            normalized.pop();
-                        }
-                        std::path::Component::CurDir => {}
-                        other => normalized.push(other.as_os_str()),
-                    }
-                }
-                return if self.trusted_place(&normalized) || self.linked_from_root(written) {
-                    Trust::Executable
-                } else {
-                    Trust::ShapeOnly
-                };
-            }
-            let Some(name) = prefix.file_name().map(|n| n.to_os_string()) else {
-                return Trust::ShapeOnly;
-            };
-            suffix.push(name);
-            if !prefix.pop() {
-                return Trust::ShapeOnly;
-            }
-        }
-    }
-
     fn check(&mut self, written: &Path) -> Result<Checked, OpenError> {
-        let guess = self.unresolved_place(written);
-        let mut groups = SystemGroups::new(&self.places.user);
-        let evidence = Resolved::open(written, self.places.me, &mut groups).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                self.observe_absence(written);
-            } else {
+        let evidence = self
+            .with_groups(|groups| Resolved::open(written, self.places.me, groups))
+            .map_err(|e| {
+                // A failed walk proves neither a trusted place nor a stable
+                // absence. ENOENT can be a concurrent save or a broken link.
+                // Optional roots have their own checked absence path in roots().
                 self.complete = false;
-            }
-            open_error(errno_text(&e), guess)
-        })?;
+                open_error(errno_text(&e), Trust::ShapeOnly)
+            })?;
         match evidence.evidence_export() {
             Ok(bytes) => {
                 if self.observed.get(written).is_some_and(|old| old != &bytes) {
@@ -456,16 +430,31 @@ impl Loader {
         let trust = if !place {
             Trust::ShapeOnly
         } else if let Some(r) = evidence.refusal {
-            if matches!(r, Refusal::Undecided { .. }) {
-                self.remedies
-                    .push(crate::commands::group_policy::undecided_remedy(
-                        evidence.blocked_path.as_deref().unwrap_or(&canonical),
+            if !self
+                .plan
+                .get(&key)
+                .is_some_and(|p| p.trust == Trust::Executable)
+                && !self
+                    .held
+                    .get(&key)
+                    .is_some_and(|c| c.trust == Trust::Executable)
+            {
+                if matches!(r, Refusal::Undecided { .. }) {
+                    self.remedies.push((
+                        key,
+                        crate::commands::group_policy::undecided_remedy(
+                            evidence.blocked_path.as_deref().unwrap_or(&canonical),
+                        ),
                     ));
+                }
+                self.untrusted
+                    .push((key, canonical.clone(), Untrusted::Unsafe(r)));
             }
-            self.untrusted
-                .push((key, canonical.clone(), Untrusted::Unsafe(r)));
             Trust::Unsafe
         } else {
+            // A safe alias promotes this identity, including its diagnostics.
+            self.untrusted.retain(|(k, _, _)| *k != key);
+            self.remedies.retain(|(k, _)| *k != key);
             Trust::Executable
         };
         Ok(Checked {
@@ -495,9 +484,7 @@ impl Loader {
                 open_error(errno_text(&e), c.trust)
             })?;
         if c.trust == Trust::Executable {
-            let mut groups = SystemGroups::new(&self.places.user);
-            c.evidence
-                .revalidate(self.places.me, &mut groups)
+            self.with_groups(|groups| c.evidence.revalidate(self.places.me, groups))
                 .map_err(|e| {
                     self.complete = false;
                     open_error(e.to_string(), c.trust)
@@ -542,11 +529,9 @@ impl Loader {
             None => paths.push(root.join("config.toml")),
         }
         let listed = (|| -> std::io::Result<Listing> {
-            let evidence = Resolved::open_dir(
-                &root.join("conf.d"),
-                self.places.me,
-                &mut SystemGroups::new(&self.places.user),
-            )?;
+            let evidence = self.with_groups(|groups| {
+                Resolved::open_dir(&root.join("conf.d"), self.places.me, groups)
+            })?;
             let path_evidence = evidence.evidence_export()?;
             let canonical = evidence.canonical;
             let chain =
@@ -654,11 +639,11 @@ impl Loader {
         if !self.complete {
             return Verified::Incomplete;
         }
-        if !compiled {
-            return Verified::Invalid;
-        }
         if self.revalidate().is_err() {
             return Verified::Incomplete;
+        }
+        if !compiled {
+            return Verified::Invalid;
         }
         let left_out = files
             .iter()
@@ -861,6 +846,7 @@ mod tests {
                 user: sys::passwd_entry(me).unwrap().name,
             });
             loader.record = record;
+            loader.groups = Some(std::cell::RefCell::new(Box::new(self.root_unknown())));
             loader
         }
 
@@ -987,7 +973,7 @@ mod tests {
     }
 
     // extends 경로: 상대 경로는 선언한 파일의 폴더 기준, `~/`는 getpwuid 홈, URL·`$`·`~user`는 거부.
-    // 신뢰 경로의 파일이 없으면 읽기 실패, 모양 전용 경로의 파일이 없으면 그것만 빠진다(W406).
+    // 미해결 경로에는 실행 신뢰를 추정하지 않으며 발행은 Incomplete다.
     // 이것을 실패시키는 것: 상대 경로를 현재 폴더 기준으로 푸는 것, 환경 변수를 펼치는 것, 없는 파일의 신뢰를 잘못 정하는 것.
     #[test]
     fn extends_paths_resolve_from_the_declaring_file() {
@@ -1027,8 +1013,9 @@ mod tests {
             &fx.root.join("config.toml"),
             "extends = [\"parts/none.toml\"]\n",
         );
-        let (r, _) = fx.read(None);
-        assert!(!r.succeeded);
+        let (r, l) = fx.read(None);
+        assert!(r.succeeded);
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
         fx.put(
             &fx.root.join("config.toml"),
             "extends = [\"~/none.toml\"]\n",
@@ -1096,8 +1083,24 @@ mod tests {
         let linked = fx.put(&fx.home.join("linked.toml"), CMD);
         std::os::unix::fs::symlink(&linked, fx.root.join("conf.d/b.toml")).unwrap();
         let mut l = fx.shape_only_loader(None);
+        struct Counted(UnknownAt, std::rc::Rc<std::cell::Cell<usize>>);
+        impl GroupOracle for Counted {
+            fn group_write(
+                &mut self,
+                facts: &bingsu_core::fs_trust::Facts,
+            ) -> bingsu_core::fs_trust::Group {
+                self.1.set(self.1.get() + 1);
+                self.0.group_write(facts)
+            }
+        }
+        let queries = std::rc::Rc::new(std::cell::Cell::new(0));
+        l.groups = Some(std::cell::RefCell::new(Box::new(Counted(
+            fx.root_unknown(),
+            queries.clone(),
+        ))));
         let roots = l.roots(BUILTIN_TOML.as_bytes());
         let r = report(roots, &mut l, [0, 3, 0], Mode::Dark);
+        assert!(queries.get() > 0, "read uses the injected oracle");
         for end in ["/config.toml", "/a.toml", "/linked.toml"] {
             let f = r
                 .files
@@ -1118,9 +1121,19 @@ mod tests {
         assert!(l.untrusted.is_empty());
         // Publication rechecks the root with undecided facts read as
         // decided; a plain recheck would refuse it on every read. Read and
-        // recheck use the same system oracle, so the result does not depend
-        // on how this machine answers group lookups.
+        // recheck use the same injected Undecided oracle, independent of NSS.
+        // 이것을 실패시키는 것: Loader의 oracle 주입을 무시하거나 Undecided를 그대로 거부하는 것.
+        assert!(
+            l.with_groups(|groups| l
+                .places
+                .config_root
+                .evidence
+                .revalidate(l.places.me, groups))
+                .is_err()
+        );
+        let before = queries.get();
         assert_eq!(l.revalidate(), Ok(()));
+        assert!(queries.get() > before, "recheck uses the same oracle");
         // A real change between read and publish still blocks.
         // 이것을 실패시키는 것: 발행 전 재확인이 observed 비교를 건너뛰는 것.
         fx.put(&fx.root.join("conf.d/a.toml"), &format!("{CMD}# changed\n"));
@@ -1540,7 +1553,9 @@ mod tests {
             &fx.root.join("config.toml"),
             "extends = [\"missing.toml\"]\n",
         );
-        assert!(!fx.read(None).0.succeeded);
+        let (r, l) = fx.read(None);
+        assert!(r.succeeded);
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
     }
 
     // 이것을 실패시키는 것: 같은 FileKey 별칭을 중복 계획하거나 Unsafe가 신뢰 예산을 차지하는 것.
@@ -1803,9 +1818,9 @@ mod tests {
         );
         std::fs::remove_file(chosen).unwrap();
         let (r, l) = fx.read(Some(record));
-        assert!(!r.succeeded);
-        assert!(codes_of(&r).contains(&codes::EXTENDS_BAD_PATH));
-        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Invalid);
+        assert!(r.succeeded);
+        assert!(codes_of(&r).contains(&codes::SHAPE_FILE_DROPPED));
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
     }
 
     // 이것을 실패시키는 것: 승인 경로가 다른 정규 대상으로 향해도 실행 신뢰를 승계하는 것.
@@ -1857,5 +1872,93 @@ mod tests {
             l.verified(&r.files, true),
             Verified::Publish { .. }
         ));
+    }
+    // 이것을 실패시키는 것: Executable 승격 시 해당 FileKey의 Unsafe·remedy를 남기거나 다른 파일 진단까지 지우는 것.
+    #[test]
+    fn alias_promotion_clears_only_its_diagnostics() {
+        let fx = Fx::new("alias-diagnostics");
+        let target = fx.put(&fx.home.join("target.toml"), "");
+        let other = fx.put(&fx.home.join("other.toml"), "");
+        std::fs::set_permissions(&fx.home, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let md = std::fs::metadata(&fx.home).unwrap();
+        std::os::unix::fs::symlink(&target, fx.root.join("config.toml")).unwrap();
+        std::os::unix::fs::symlink(&other, fx.root.join("conf.d/a.toml")).unwrap();
+        std::fs::hard_link(&target, fx.root.join("conf.d/b.toml")).unwrap();
+        // The unsafe spelling visited after promotion must not reintroduce it.
+        std::os::unix::fs::symlink(&target, fx.root.join("config.local.toml")).unwrap();
+        let mut l = fx.loader(None);
+        l.groups = Some(std::cell::RefCell::new(Box::new(UnknownAt(
+            md.dev(),
+            md.ino(),
+        ))));
+        let roots = l.roots(b"");
+        assert!(
+            !l.untrusted.is_empty(),
+            "unrelated refusal survives planning"
+        );
+        assert!(!l.remedies.is_empty(), "unrelated remedy survives planning");
+        assert!(l.untrusted.iter().all(|(_, path, _)| *path == other));
+        let target_md = std::fs::metadata(&target).unwrap();
+        let target_key = FileKey {
+            dev: target_md.dev(),
+            ino: target_md.ino(),
+        };
+        assert!(l.remedies.iter().all(|(key, _)| *key != target_key));
+        let r = read_graph(roots, &mut l);
+        assert!(r.succeeded);
+        assert_eq!(
+            trust_of(&r, "b.toml"),
+            Some((Trust::Executable, Status::Applied))
+        );
+        assert!(!l.untrusted.is_empty());
+        assert!(l.untrusted.iter().all(|(_, path, _)| *path == other));
+        let other_md = std::fs::metadata(&other).unwrap();
+        let key = FileKey {
+            dev: other_md.dev(),
+            ino: other_md.ino(),
+        };
+        assert!(!l.remedies.is_empty());
+        assert!(l.remedies.iter().all(|(k, _)| *k == key));
+    }
+
+    // 이것을 실패시키는 것: 이미 채택한 Executable 원본의 늦은 Unsafe 별칭이 진단을 되살리는 것.
+    #[test]
+    fn adopted_safe_alias_keeps_diagnostics_clear() {
+        let fx = Fx::new("held-alias-diagnostics");
+        let target = fx.put(&fx.home.join("target.toml"), "");
+        let safe = fx.root.join("safe.toml");
+        std::fs::hard_link(&target, &safe).unwrap();
+        let unsafe_path = fx.root.join("unsafe.toml");
+        std::os::unix::fs::symlink(target, &unsafe_path).unwrap();
+        std::fs::set_permissions(&fx.home, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mut l = fx.loader(None);
+        let c = l.check(&safe).unwrap();
+        let opened = l.read_candidate(c).unwrap();
+        l.adopt(opened.key, Some(Trust::Executable));
+        assert_eq!(l.check(&unsafe_path).unwrap().trust, Trust::Unsafe);
+        assert!(l.untrusted.is_empty());
+    }
+
+    // 이것을 실패시키는 것: 미해결 경로를 canonicalize/작성 경로로 신뢰한다고 추정하는 것.
+    #[test]
+    fn unresolved_walks_have_no_execution_trust() {
+        let fx = Fx::new("unresolved-trust");
+        let path = fx.root.join("conf.d/missing.toml");
+        let mut l = fx.loader(None);
+        let e = l.check(&path).err().unwrap();
+        assert_eq!(e.trust, Trust::ShapeOnly);
+        assert_eq!(l.verified(&[], true), Verified::Incomplete);
+        assert_eq!(l.verified(&[], false), Verified::Incomplete);
+    }
+
+    // 이것을 실패시키는 것: 컴파일 실패를 재확인 전에 Invalid로 확정하는 것.
+    #[test]
+    fn invalid_requires_unchanged_observations() {
+        let fx = Fx::new("invalid-observation");
+        let path = fx.put(&fx.root.join("config.toml"), "icons = 7");
+        let (r, l) = fx.read(None);
+        assert_eq!(l.verified(&r.files, false), Verified::Invalid);
+        fx.put(&path, "icons = 'ascii'");
+        assert_eq!(l.verified(&r.files, false), Verified::Incomplete);
     }
 }

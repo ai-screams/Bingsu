@@ -64,7 +64,7 @@ fn prime_cold(
     started: bingsu_core::snapshot::Clock,
     exe: &std::path::Path,
 ) -> prime::PrimeResult {
-    let Ok(request) = ctx::request(roots, user, started) else {
+    let Ok(request) = ctx::request(exe, roots, user, started) else {
         return prime::PrimeResult::Unavailable;
     };
     let mut spawn = || {

@@ -287,6 +287,7 @@ mod tests {
                     me,
                     user: sys::passwd_entry(me).unwrap().name,
                     version: [0, 3, 0],
+                    build: Some([1; 40]),
                     process_started: Fixed.observe().unwrap(),
                 },
                 base,
