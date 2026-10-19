@@ -20,8 +20,8 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 | Path | What |
 | -- | -- |
-| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments from that input; status grammar, B1 record encoder, shell words, root arguments, sanitize, width, icons, field types, color, built-in default theme |
-| `crates/bingsu` | CLI: `src/prompt.rs` is the OS adapter that renders the built-in default theme from the envelope into a record through core; `src/commands/` holds `init` (pins the binary path and four roots), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments; `config` (merge, check, compile, edit, schema), `template`, `layout`/`render`/`bands`, `snapshot`/`snapshot_codec` (helper to prompt hand-off), `diag*`; status grammar, B1 record encoder, shell words, sanitize, width, icons, color, built-in default theme |
+| `crates/bingsu` | CLI: `src/prompt.rs` renders a record from the envelope and the published snapshot (`prompt_read.rs` reads it, `prompt_spawn.rs` starts the refresh helper before the filter, `prompt_io.rs` writes under the deadline; these and `sandbox.rs` are hash-pinned); `src/commands/` holds `init` (pins the binary path and four roots), `config`/`reload`/`refresh`/`helper` (load, trust, publish), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
 | `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
 | `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
 | `crates/bingsu-golden` | Prints render output for fixed inputs; native (its test) and wasm32-wasip1 (CI) must equal `tests/golden/render/render.tsv` byte for byte; regenerate with `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv` and review the diff |
@@ -29,7 +29,8 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 | `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
 | `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes |
 | `tests/hostile` | Hostile-value matrix shared by core, golden and PTY tests |
-| `scripts/`, `tools/core-cfg-check` | Purity and prompt-forbid gates |
+| `scripts/`, `tools/core-cfg-check` | Purity, prompt-forbid and diagnostic-code gates; `scripts/pin_tcb.py` re-pins TCB hashes |
+| `tools/fsbudget`, `tools/gen-ucd-tables` | strace filesystem budget check; generator for `src/ucd.rs` |
 
 ## Collaboration rules (MUST FOLLOW)
 
