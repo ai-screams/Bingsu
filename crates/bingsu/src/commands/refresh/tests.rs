@@ -56,6 +56,7 @@ impl Fx {
             me: sys::current_uid(),
             user: sys::passwd_entry(sys::current_uid()).unwrap().name,
             version: [0, 3, 0],
+            build: Some([1; 40]),
             process_started: clock(),
         };
         Self { base, request }
@@ -203,6 +204,68 @@ fn unchanged_reuses_snapshot_and_both_palettes() {
         fs::metadata(f.dir().join("last-good")).unwrap().ino()
     );
 }
+// 이것을 실패시키는 것: 비교 증거에서 build identity를 빼고 같은 semver의 snapshot을 재사용하는 것.
+#[test]
+fn same_version_different_build_recompiles() {
+    // Each fact alone must invalidate the compilation, including mtime ns.
+    for offset in [0, 8, 16, 24, 32] {
+        let mut f = Fx::new(&format!("changed-build-{offset}"));
+        f.put(COMMAND);
+        assert_eq!(published(f.run()), 1);
+        let old = f.bytes("snapshot");
+        assert_eq!(f.run(), RefreshResult::Revalidated { generation: 1 });
+        f.request.build.as_mut().unwrap()[offset] ^= 1;
+        assert_eq!(published(f.run()), 2);
+        assert_eq!(f.bytes("last-good"), old);
+        assert_eq!(f.run(), RefreshResult::Revalidated { generation: 2 });
+    }
+}
+
+// 이것을 실패시키는 것: 빌드 식별값을 읽지 못한 두 요청을 같다고 보고 재사용하는 것.
+#[test]
+fn unavailable_build_identity_always_recompiles() {
+    let mut f = Fx::new("unavailable-build");
+    f.put(COMMAND);
+    assert_eq!(published(f.run()), 1);
+    f.request.build = None;
+    for generation in 2..=3 {
+        let old = f.bytes("snapshot");
+        assert_eq!(published(f.run()), generation);
+        assert_eq!(f.bytes("last-good"), old);
+    }
+}
+
+// 이것을 실패시키는 것: ENOENT·끊긴 링크·FIFO의 미완료 관찰을 발행/Invalid로 확정하는 것.
+#[test]
+fn unresolved_sources_preserve_all_published_bytes() {
+    for kind in ["missing", "dangling", "fifo"] {
+        let f = Fx::new(&format!("unresolved-{kind}"));
+        f.put(COMMAND);
+        published(f.run());
+        let before = f.state();
+        let sequence = f.bytes("sequence");
+        match kind {
+            "missing" => f.put("extends = ['missing.toml']\n"),
+            _ => {
+                // A shared conf.d target cannot establish execution trust for
+                // a child that the descriptor walk could not resolve.
+                let shared = f.base.join("shared");
+                fs::create_dir(&shared).unwrap();
+                mode(&shared, 0o777);
+                symlink(&shared, f.request.config_canonical.join("conf.d")).unwrap();
+                if kind == "dangling" {
+                    symlink("missing.toml", shared.join("bad.toml")).unwrap();
+                } else {
+                    sys::make_test_fifo(&shared.join("bad.toml")).unwrap();
+                }
+            }
+        }
+        assert_eq!(f.run(), RefreshResult::Incomplete, "{kind}");
+        assert_eq!(f.state(), before, "{kind}");
+        assert_eq!(f.bytes("sequence"), sequence, "{kind}");
+    }
+}
+
 // 이것을 실패시키는 것: 같은 내용의 새 inode나 mtime/ctime 변경을 CRC 일치만으로 재검증 처리하는 것.
 #[test]
 fn identical_bytes_replacement_and_edit_back_advance_generation() {
@@ -246,7 +309,11 @@ fn envelope_shape_only_ceiling_survives_clean_reopen() {
         home: f.base.clone(),
         gid: 0,
     };
-    let r = RefreshRequest::from_envelope(&e, &user, clock(), [0, 3, 0]).unwrap();
+    let exe = f.base.join("pinned-exe");
+    put(&exe, b"init-pinned executable");
+    let r = RefreshRequest::from_envelope(&exe, &e, &user, clock(), [0, 3, 0]).unwrap();
+    let identity = super::super::build_identity::read(&exe).unwrap();
+    assert_eq!(r.build, Some(identity));
     assert!(r.config_root_shape_only);
     published(refresh(r, &mut Fixed(clock())));
     assert!(
@@ -257,7 +324,7 @@ fn envelope_shape_only_ceiling_survives_clean_reopen() {
             .all(|u| u.not_run.is_some())
     );
     e.config_root_written = None;
-    assert!(RefreshRequest::from_envelope(&e, &user, clock(), [0, 3, 0]).is_none());
+    assert!(RefreshRequest::from_envelope(&exe, &e, &user, clock(), [0, 3, 0]).is_none());
 }
 // 이것을 실패시키는 것: shape-only 파일 오류를 전체 Invalid로 바꾸거나 left_out 집합을 누락하는 것.
 #[test]
@@ -633,7 +700,14 @@ fn staging_recovery_checks_safety_before_unlink() {
     for kind in 0..6 {
         let f = Fx::new(&format!("recover-{kind}"));
         f.put(COMMAND);
-        published(f.run());
+        let mut child = None;
+        published(f.hook(&mut |point| {
+            if point == Checkpoint::Validated {
+                child = Some(sys::PausedFork::new());
+            }
+        }));
+        // 이것을 실패시키는 것: 상속 fd가 살아 있을 때 scope 종료의 명시적 unlock을 생략하는 것.
+        assert!(child.is_some());
         let before = f.state();
         let p = f.dir().join(".snapshot.stage");
         match kind {
@@ -805,6 +879,7 @@ fn child_request(base: PathBuf) -> RefreshRequest {
         me: sys::current_uid(),
         user: sys::passwd_entry(sys::current_uid()).unwrap().name,
         version: [0, 3, 0],
+        build: Some([1; 40]),
         process_started: clock(),
     }
 }

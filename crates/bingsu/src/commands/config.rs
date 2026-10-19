@@ -3,16 +3,16 @@
 //! `config.toml`'s place and applies it.
 use super::{config_inspect, config_use, sys};
 use bingsu_core::config::schema::{Which, schema};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: bingsu config <check|path|schema [--theme]|use PATH>";
 
-pub fn run(args: &[OsString]) -> ExitCode {
+pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let [verb, rest @ ..] = args
         && verb == "use"
     {
-        return config_use::run(rest);
+        return config_use::run(exe, rest);
     }
     let words: Vec<Option<&str>> = args.iter().map(|a| a.to_str()).collect();
     let which = match words.as_slice() {

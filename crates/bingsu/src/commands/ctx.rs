@@ -97,7 +97,12 @@ pub fn io_exit(e: &std::io::Error) -> u8 {
 }
 
 /// What the engine needs, or the fixed message for what is missing.
-pub fn request(roots: &Roots, user: &User, started: Clock) -> Result<RefreshRequest, MsgId> {
+pub fn request(
+    exe: &Path,
+    roots: &Roots,
+    user: &User,
+    started: Clock,
+) -> Result<RefreshRequest, MsgId> {
     let runtime = roots.runtime.as_ref().ok_or(MsgId::NoRuntimeRoot)?;
     let (Some(config), Some(state)) = (roots.config.as_ref(), roots.state.as_ref()) else {
         return Err(MsgId::UnconfirmedRoot);
@@ -116,6 +121,7 @@ pub fn request(roots: &Roots, user: &User, started: Clock) -> Result<RefreshRequ
         me: user.me,
         user: user.pw.name.clone(),
         version: version(),
+        build: super::build_identity::read(exe),
         process_started: started,
     })
 }
@@ -138,8 +144,14 @@ pub enum Applied {
 
 /// The one way a command publishes: the N2 engine, same locks, same
 /// source evidence, same deadline as the refresh helper.
-pub fn apply(roots: &Roots, user: &User, started: Clock, clock: &mut dyn ClockSource) -> Applied {
-    match request(roots, user, started) {
+pub fn apply(
+    exe: &Path,
+    roots: &Roots,
+    user: &User,
+    started: Clock,
+    clock: &mut dyn ClockSource,
+) -> Applied {
+    match request(exe, roots, user, started) {
         Ok(r) => match refresh::refresh(r, clock) {
             RefreshResult::Published {
                 generation,

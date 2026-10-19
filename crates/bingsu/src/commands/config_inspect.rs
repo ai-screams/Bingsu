@@ -142,7 +142,7 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
         loader.verified(&report.files, report.snapshot.is_some())
     };
     let mut remedies: Vec<String> = Vec::new();
-    for r in &loader.remedies {
+    for (_, r) in &loader.remedies {
         if !remedies.contains(r) {
             remedies.push(r.clone());
         }
