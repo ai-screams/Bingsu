@@ -117,7 +117,12 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
         payload: &bytes[HEADER..],
     })
 }
-/// An adapter calls this on the bytes held when EOF arrives, including empty EOF.
+/// Decode the bytes held when EOF arrives. Empty EOF returns
+/// [`ProtocolError::Truncated`], as required before Complete. After Complete,
+/// [`Transcript::accept_bytes`] handles empty EOF as success.
+///
+/// The adapter must stop the exchange at the first `Err`: codec rejections are
+/// transactional and do not latch a failure that blocks later calls.
 pub fn decode_eof(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
     if bytes.len() < HEADER {
         return Err(ProtocolError::Truncated);
@@ -610,10 +615,20 @@ impl Transcript {
         self.frames = frames;
         Ok(())
     }
-    /// Even one trailing byte after Complete is a protocol violation.
+    /// Accept an encoded frame or the bytes held when EOF arrives. Empty EOF
+    /// before Complete returns [`ProtocolError::Truncated`]; after Complete it
+    /// returns `Ok(())`. Even one trailing byte after Complete is a protocol
+    /// violation.
+    ///
+    /// The adapter must stop the exchange at the first `Err`: a rejection leaves
+    /// the transcript unchanged and does not latch a failure blocking later calls.
     pub fn accept_bytes(&mut self, bytes: &[u8]) -> Result<(), ProtocolError> {
-        if self.complete && !bytes.is_empty() {
-            return Err(ProtocolError::Order);
+        if self.complete {
+            return if bytes.is_empty() {
+                Ok(())
+            } else {
+                Err(ProtocolError::Order)
+            };
         }
         self.accept(decode_eof(bytes)?)
     }

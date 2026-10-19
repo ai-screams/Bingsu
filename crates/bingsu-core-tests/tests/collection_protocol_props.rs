@@ -99,13 +99,13 @@ proptest! {
         let r=request();let p=ready();let mut d=RequestDecoder::new();let mut t=Transcript::new(&r);
         d.accept(frame(&r,Kind::Ready,&p)).unwrap();t.accept(frame(&r,Kind::Ready,&p)).unwrap();t.request_sent().unwrap();
         t.accept(frame(&r,Kind::Update,&[3,0,0])).unwrap();
-        let original=t.clone().finish(EndReason::Deadline,clock()).unwrap().unwrap();let original_before=original.clone();
+        let original=t.clone().finish(EndReason::Deadline,clock()).unwrap().unwrap();
         let body=r.encode_body().unwrap();let mut begin=(body.len() as u32).to_le_bytes().to_vec();begin.extend(3u64.to_le_bytes());
         d.accept(frame(&r,Kind::RequestBegin,&begin)).unwrap();
         let mut chunk=0u32.to_le_bytes().to_vec();chunk.extend(&body);
         d.accept(frame(&r,Kind::RequestChunk,&chunk)).unwrap();
         let mut raw_bytes=vec![0;length];if !raw.is_empty() {for (i,b) in raw_bytes.iter_mut().enumerate() {*b=raw[i%raw.len()];}}
-        let raw_before=raw_bytes.clone();let saved_d=d.clone();let saved_t=t.clone();
+        let saved_d=d.clone();let saved_t=t.clone();
         // A fixed input buffer, one <=256 KiB request body, <=256 KiB stored
         // result, and temporary sanitized fields (at most 3x wire input),
         // plus <=32x32 declarations fit below this conservative live bound.
@@ -121,7 +121,6 @@ proptest! {
         prop_assert!(counts.2<=allocation_max,"allocation {counts:?}");
         if raw_dr.is_err() {prop_assert_eq!(&d,&saved_d);}
         if raw_tr.is_err() {prop_assert_eq!(&t,&saved_t);}
-        prop_assert_eq!(&raw_bytes,&raw_before);prop_assert_eq!(&original,&original_before);
         // Arbitrary bytes almost always fail at the header. Also exercise
         // all payload kinds against a fully valid prefix below.
         d=saved_d;t=saved_t;
@@ -136,8 +135,8 @@ proptest! {
             if dr.is_err() {prop_assert_eq!(&d,&before_d);}
             if tr.is_err() {prop_assert_eq!(&t,&before_t);}
             let mut stored=original.encode().unwrap();let index=offset%stored.len();stored[index]^=byte;
-            let before=stored.clone();let counts=allocation::counted(||{let _=Completed::decode(&stored);});
-            prop_assert!(counts.2<=allocation_max);prop_assert_eq!(&stored,&before);prop_assert_eq!(&original,&original_before);
+            let counts=allocation::counted(||{let _=Completed::decode(&stored);});
+            prop_assert!(counts.2<=allocation_max);
         }
         if let Some(c)=t.finish(EndReason::Protocol,clock()).unwrap() {prop_assert!(c.encode().unwrap().len()<=wire::STREAM_MAX);}
     }

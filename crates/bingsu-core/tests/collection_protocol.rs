@@ -489,6 +489,41 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     f.request_id = RequestId([3; 32]);
     assert_eq!(d.accept(f), Err(E::Id));
 }
+// 이것을 실패시키는 것: Complete 뒤 빈 EOF도 decode_eof로 넘겨 Truncated를 반환하는 것.
+#[test]
+fn empty_eof_after_complete_is_ok() {
+    let r = request(false);
+    let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Update, &[31, 0, 0])).unwrap();
+    t.accept(frame(&r, Kind::Complete, &[])).unwrap();
+    let before = t.clone();
+    assert_eq!(t.accept_bytes(&[]), Ok(()));
+    assert_eq!(t, before);
+}
+
+// 이것을 실패시키는 것: Complete 전에도 빈 EOF를 Ok(())로 처리하는 것.
+#[test]
+fn empty_eof_before_complete_is_truncated() {
+    let r = request(false);
+    let initial = Transcript::with_catalog(&r, &CATALOG).unwrap();
+    let mut ready_only = initial.clone();
+    ready_only
+        .accept(frame(&r, Kind::Ready, &ready(r.binding.mask)))
+        .unwrap();
+    let sent = transcript(&r);
+    let mut updated = sent.clone();
+    updated
+        .accept(frame(&r, Kind::Update, &[31, 0, 0]))
+        .unwrap();
+
+    assert_eq!(wire::decode_eof(&[]), Err(E::Truncated));
+    for mut t in [initial, ready_only, sent, updated] {
+        let before = t.clone();
+        assert_eq!(t.accept_bytes(&[]), Err(E::Truncated));
+        assert_eq!(t, before);
+    }
+}
+
 // 이것을 실패시키는 것: build/version/features를 협상하거나 EOF를 완전한 메시지로 취급하는 것.
 #[test]
 fn mixed_build_or_version_exits_without_reply() {
