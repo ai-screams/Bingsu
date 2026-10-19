@@ -63,8 +63,8 @@ notice. The helper later publishes. Generated small traces in
 reads, read bounds, descriptor ownership, and refused paths. The historical
 N3 capture remains unchanged.
 
-The lead must recapture the fixed binary in debug and release, as root and
-non-root, including current / last-good / refused-file paths. Run the native
+A fresh capture of the fixed binary should cover debug and release, root and
+non-root, and the current / last-good / refused-file paths. Run the native
 `prompt_read::tests::held_reader_under_real_seccomp` test (its test-only filter
 kills any fcntl probe) and `native_publisher_reader_identity_agrees_and_walk_fds_are_closed`
 inside a user namespace/rootless container as well. No fcntl allowance was

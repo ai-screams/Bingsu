@@ -55,6 +55,96 @@ def test_real_debian_prompt_trace(debian_trace):
     assert {c.pid for c in calls if c.name == budget.EXIT_EVENT and c.args == "exited with 0"} == set(map(int, pids))
 
 
+H2_BASE = "/home/USER/pt/CASE_BUILD_IDENTITY_TRACE_0000000"
+H2_EXE = H2_BASE + "/bin/bingsu"
+H2_ROOTS = [H2_BASE + suffix for suffix in (
+    "/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log",
+)]
+H2_TARGET = "/home/USER/target/debug/bingsu"
+
+
+@pytest.fixture(scope="module")
+def h2_trace():
+    """Unprojected c4da804 non-root capture; see fixtures/prompt-h2-trace.md."""
+    return Path(__file__).with_name("fixtures").joinpath(
+        "prompt-h2-debian-bookworm-glibc-aarch64.strace"
+    ).read_text().splitlines()
+
+
+def test_real_h2_build_identity_trace(h2_trace):
+    assert_prompt_trace_budget(h2_trace, H2_EXE, H2_ROOTS)
+    pids, scoped = budget.tree(h2_trace, H2_EXE)
+    calls = budget.parse_trace("\n".join(scoped))
+    assert pids == {"1169", "1170", "1171", "1172", "1173"}
+    assert len(h2_trace) == 3566
+    assert len(calls) == 2547
+    links = [c for c in calls if c.name == "readlinkat" and budget.call_paths(c) == [H2_EXE]]
+    assert len(links) == 2  # Initial resolution and retained-link revalidation.
+    assert all(budget.args_of(c)[2] == f'"{H2_TARGET}"' for c in links)
+    assert any(c.name == "openat" and budget.call_paths(c) == [H2_TARGET] for c in calls)
+    assert not any(H2_TARGET in budget.content_paths(c) for c in calls)
+    assert {c.pid for c in calls if c.name == budget.EXIT_EVENT and c.args == "exited with 0"} == set(map(int, pids))
+
+
+@pytest.mark.parametrize("extra", [
+    f'readlinkat(8<{H2_BASE}/bin>, "other", "/elsewhere", 4097) = 10',
+    'readlinkat(12</home/USER/target/debug>, "other", "/elsewhere", 4097) = 10',
+    'read(12</home/USER/target/debug>, "contents", 8) = 8',
+    'getdents64(12</home/USER/target/debug>, [], 4096) = 0',
+    'mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, 12</home/USER/target/debug>, 0) = 0x1',
+    f'read(13<{H2_TARGET}>, "contents", 8) = 8',
+    f'read(8<{H2_EXE}>, "contents", 8) = 8',
+    'openat(12</home/USER/target/debug>, "other", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|O_NOCTTY) = 99',
+    'newfstatat(12</home/USER/target/debug>, "other", {}, AT_SYMLINK_NOFOLLOW) = 0',
+    f'fstat(99<{H2_TARGET}>, {{}}) = 0',
+])
+def test_real_h2_rejects_executable_walk_expansion(h2_trace, extra):
+    # Both the original link parent and the target parent are still held here;
+    # unrelated links must fail by scope, not merely because their fd closed.
+    lines = list(h2_trace)
+    at = next(i for i, line in enumerate(lines)
+              if '1170  openat(12</home/USER/target/debug>, "bingsu",' in line)
+    lines.insert(at, "1170 " + extra)
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(lines, H2_EXE, H2_ROOTS)
+
+
+@pytest.mark.parametrize("allowance", ["readlink", "file_op", "fd_stat"])
+def test_real_h2_needs_each_executable_allowance(h2_trace, monkeypatch, allowance):
+    monkeypatch.setattr(budget.HelperExecutableWalk, allowance, lambda *args: False)
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(h2_trace, H2_EXE, H2_ROOTS)
+
+
+@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"])
+def test_real_h2_requires_final_open_flags(h2_trace, flag):
+    changed = [line.replace("|" + flag, "")
+               if 'openat(12</home/USER/target/debug>, "bingsu",' in line else line
+               for line in h2_trace]
+    assert changed != h2_trace
+    with pytest.raises(AssertionError, match="helper executable path"):
+        assert_prompt_trace_budget(changed, H2_EXE, H2_ROOTS)
+
+
+@pytest.mark.parametrize("flag", ["O_PATH", "O_NOFOLLOW", "O_DIRECTORY"])
+def test_real_h2_requires_target_ancestor_walk_flags(h2_trace, flag):
+    changed = [line.replace("|" + flag, "")
+               if 'openat(11</home/USER/target>, "debug",' in line else line
+               for line in h2_trace]
+    assert changed != h2_trace
+    with pytest.raises(AssertionError, match="helper path"):
+        assert_prompt_trace_budget(changed, H2_EXE, H2_ROOTS)
+
+
+def test_real_h2_requires_nofollow_target_ancestor_metadata(h2_trace):
+    lines = list(h2_trace)
+    at = next(i for i, line in enumerate(lines)
+              if '1170  openat(11</home/USER/target>, "debug",' in line)
+    lines.insert(at, '1170 newfstatat(11</home/USER/target>, "debug", {}, 0) = 0')
+    with pytest.raises(AssertionError, match="helper path"):
+        assert_prompt_trace_budget(lines, H2_EXE, H2_ROOTS)
+
+
 # 이것을 실패시키는 것: glibc에서 실제로 관측한 각 runtime 호출의 허용을 제거하는 것.
 @pytest.mark.parametrize("table,name", [
     ("ROOT_CALLS", "sched_getaffinity"),
@@ -222,6 +312,90 @@ def valid_trace():
         '12 exit(0) = ?',
         '11 exit_group(0) = ?',
     ]
+
+
+@pytest.fixture
+def executable_trace():
+    """Two observed hops: an absolute target then a relative ancestor link."""
+    lines = valid_trace()
+    walk = [
+        'openat(AT_FDCWD</>, "/", O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 30</>',
+        'openat(30</>, "pinned", O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 31</pinned>',
+        'openat(31</pinned>, "bin", O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 32</pinned/bin>',
+        'newfstatat(32</pinned/bin>, "bingsu", {st_mode=S_IFLNK|0777}, AT_SYMLINK_NOFOLLOW) = 0',
+        'readlinkat(32</pinned/bin>, "bingsu", "/build/current/bingsu", 4097) = 21',
+        'openat(30</>, "build", O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 33</build>',
+        'newfstatat(33</build>, "current", {st_mode=S_IFLNK|0777}, AT_SYMLINK_NOFOLLOW) = 0',
+        'readlinkat(33</build>, "current", "releases/v2", 4097) = 11',
+        'openat(33</build>, "releases", O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 34</build/releases>',
+        'openat(34</build/releases>, "v2", O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 35</build/releases/v2>',
+        'newfstatat(35</build/releases/v2>, "bingsu", {st_mode=S_IFREG|0755}, AT_SYMLINK_NOFOLLOW) = 0',
+        'openat(35</build/releases/v2>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|O_NOCTTY) = 36</build/releases/v2/bingsu>',
+        'fstat(36</build/releases/v2/bingsu>, {st_mode=S_IFREG|0755}) = 0',
+        # Revalidation may revisit previously resolved links.
+        'readlinkat(32</pinned/bin>, "bingsu", "/build/current/bingsu", 4097) = 21',
+        'readlinkat(33</build>, "current", "releases/v2", 4097) = 11',
+    ]
+    at = next(i for i, line in enumerate(lines) if line.startswith('11 chdir'))
+    lines[at:at] = ["11 " + line for line in walk]
+    return lines
+
+
+def test_executable_walk_derives_later_relative_ancestor_hop(executable_trace):
+    assert_prompt_trace_budget(executable_trace, EXE, ROOTS)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('32</pinned/bin>, "bingsu", "/build', '32</pinned/bin>, "/pinned/bin/bingsu", "/build'),
+    ('32</pinned/bin>, "bingsu", "/build', '99</pinned/bin>, "bingsu", "/build'),
+    ('33</build>, "current", "releases', '33</build>, "other", "releases'),
+    (', 4097)', ', 4098)'),
+    (') = 21', ') = 4097'),  # Truncated result must never grant a new path.
+    ('"/build/current/bingsu", 4097', '"/build/current/bingsu"..., 4097'),
+    ('{st_mode=S_IFREG|0755}, AT_SYMLINK_NOFOLLOW', '{st_mode=S_IFLNK|0777}, AT_SYMLINK_NOFOLLOW'),
+    ('AT_SYMLINK_NOFOLLOW) = 0', '0) = 0'),
+    ('fstat(36<', 'fstat(99<'),
+    ('"releases", O_PATH|O_NOFOLLOW', '"releases", O_PATH'),
+])
+def test_executable_walk_rejects_scope_mutations(executable_trace, old, new):
+    changed = [line.replace(old, new) for line in executable_trace]
+    assert changed != executable_trace
+    with pytest.raises(AssertionError):
+        assert_prompt_trace_budget(changed, EXE, ROOTS)
+
+
+def test_executable_walk_cannot_use_future_link_results(executable_trace):
+    lines = list(executable_trace)
+    at = next(i for i, line in enumerate(lines) if '11 openat(30</>, "build"' in line)
+    entry = lines.pop(at)
+    at = next(i for i, line in enumerate(lines) if '11 readlinkat(32' in line)
+    lines.insert(at, entry)
+    with pytest.raises(AssertionError, match="helper path"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_executable_walk_cannot_use_closed_parent(executable_trace):
+    lines = list(executable_trace)
+    at = next(i for i, line in enumerate(lines) if '11 readlinkat(32' in line)
+    lines.insert(at, '11 close(32</pinned/bin>) = 0')
+    with pytest.raises(AssertionError, match="helper namespace link"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_executable_walk_cannot_use_another_process_evidence(executable_trace):
+    lines = list(executable_trace)
+    at = next(i for i, line in enumerate(lines) if '11 readlinkat(33' in line)
+    lines[at] = lines[at].replace("11 readlinkat", "12 readlinkat")
+    with pytest.raises(AssertionError, match="helper namespace link"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def test_executable_walk_requires_latest_regular_file_check(executable_trace):
+    lines = list(executable_trace)
+    at = next(i for i, line in enumerate(lines) if '11 openat(35' in line)
+    lines.insert(at, '11 newfstatat(35</build/releases/v2>, "bingsu", {}, AT_SYMLINK_NOFOLLOW) = -1 ENOENT (No such file or directory)')
+    with pytest.raises(AssertionError, match="helper executable path"):
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
 
 
 # 이것을 실패시키는 것: 부모 clone 반환보다 앞선 helper exec를 놓치거나, helper write/exit를 root 표에 합치는 것,
