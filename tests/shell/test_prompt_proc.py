@@ -6,13 +6,17 @@ import sys
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, real_bin
 from test_prompt_deadline import is_static
 
 
 # 이것을 실패시키는 것: 앞단이 mounted procfs의 self 대신 libc getpid로 process 폴더를 여는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="native Linux procfs fixture")
 def test_mounted_proc_self_survives_a_different_visible_pid(tmp_path):
+    # Check the installed binary before asking Cargo: static-musl shell
+    # containers have neither Cargo nor cc. The native GNU host runs this.
+    if is_static(real_bin()):
+        pytest.skip("static musl: interposition unavailable; numeric-link unit fixture still runs")
     build = subprocess.run([
         "cargo", "test", "-j", "2", "-p", "bingsu", "--bin", "bingsu",
         "--no-run", "--message-format=json",

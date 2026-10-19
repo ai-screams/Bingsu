@@ -68,6 +68,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Static musl binary: the runner's glibc is newer than the images'.
       - run: cargo build -p bingsu --target x86_64-unknown-linux-musl
+      # K60 must round-trip through the minimum shells without Cargo in
+      # their images. Check the root on the host, but embed the /w mount.
+      - name: Generate shape-only init fixture
+        run: |
+          cargo test -j 2 -p bingsu --bin bingsu --no-run
+          fixture=$(mktemp -d "$PWD/target/shape-only-fixture.XXXXXX")
+          M3A_FIXTURE_DIR="$fixture" M3A_FIXTURE_ROOT="/w/target/${fixture##*/}" \
+            cargo test -j 2 -p bingsu --bin bingsu commands::init::tests::write_shape_only_shell_fixture -- --exact --ignored --test-threads=1
+          echo "BINGSU_SHAPE_ONLY_FIXTURE=/w/target/${fixture##*/}" >> "$GITHUB_ENV"
       - run: tests/shell/containers/check-digests.sh
       - run: docker build -f "tests/shell/containers/${{ matrix.image }}.Dockerfile" -t "bingsu-${{ matrix.image }}" tests/shell/containers
       - name: Assert minimum versions
@@ -96,6 +105,7 @@ jobs:
           # While recording (record_observations), -s shows the OBSERVE-PTY lines in the job log.
           docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
+            -e CI=true -e BINGSU_SHAPE_ONLY_FIXTURE \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
             "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
@@ -151,6 +161,11 @@ jobs:
           if [ "$LIBC" = musl ]; then args+=(--target x86_64-unknown-linux-musl); dir=target/x86_64-unknown-linux-musl; fi
           cargo build "${args[@]}"
           echo "BINGSU_BIN=$PWD/$dir/$PROFILE/bingsu" >> "$GITHUB_ENV"
+      # K82 uses a glibc test binary with LD_PRELOAD. Build it before pytest
+      # so its 120-second Cargo discovery cannot turn into a cold compile.
+      - name: Build procfs test profile
+        if: matrix.libc == 'gnu' && matrix.profile == 'debug'
+        run: cargo test -j 2 -p bingsu --bin bingsu --no-run
       # strace, and a venv with the hash-pinned test dependencies: the system
       # python refuses pip installs (PEP 668).
       - name: Install strace and the test dependencies
@@ -164,6 +179,11 @@ jobs:
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py -k after_the_filter -q -rs -p no:cacheprovider | tee "$RUNNER_TEMP/pytest.out"
           grep -q '2 passed' "$RUNNER_TEMP/pytest.out"
+      - name: Mounted procfs self with a different visible PID
+        if: matrix.libc == 'gnu' && matrix.profile == 'debug'
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_proc.py -q -rs -p no:cacheprovider | tee "$RUNNER_TEMP/proc-pytest.out"
+          grep -q '1 passed' "$RUNNER_TEMP/proc-pytest.out"
 
   shell-macos:
     name: Shell PTY (macOS Homebrew)
@@ -189,6 +209,13 @@ jobs:
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
       - run: cargo build -p bingsu
+      - name: Generate shape-only init fixture
+        run: |
+          cargo test -j 2 -p bingsu --bin bingsu --no-run
+          fixture=$(mktemp -d "$PWD/target/shape-only-fixture.XXXXXX")
+          M3A_FIXTURE_DIR="$fixture" M3A_FIXTURE_ROOT="$fixture" \
+            cargo test -j 2 -p bingsu --bin bingsu commands::init::tests::write_shape_only_shell_fixture -- --exact --ignored --test-threads=1
+          echo "BINGSU_SHAPE_ONLY_FIXTURE=$fixture" >> "$GITHUB_ENV"
       - name: Record shell versions
         run: |
           { echo "### macOS shell versions"; echo; echo '```'; "$BINGSU_PY" tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

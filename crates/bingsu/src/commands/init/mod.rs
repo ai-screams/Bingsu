@@ -198,11 +198,17 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
         let written = base.join("written ' space");
-        symlink(&root, &written).unwrap();
-        let pin = roots::ConfigRootPin::check(&written, sys::current_uid(), &mut Unknown).unwrap();
+        symlink(root.file_name().unwrap(), &written).unwrap();
+        let mut pin =
+            roots::ConfigRootPin::check(&written, sys::current_uid(), &mut Unknown).unwrap();
         assert!(pin.shape_only);
         assert_ne!(pin.path, pin.written);
-        let exe = base.join("probe");
+        // The host checks the real paths above; render their spellings at
+        // the consumer's mount point (/w in the minimum-shell containers).
+        let embedded = std::path::PathBuf::from(std::env::var_os("M3A_FIXTURE_ROOT").unwrap());
+        pin.path = embedded.join(pin.path.strip_prefix(&base).unwrap());
+        pin.written = embedded.join(pin.written.strip_prefix(&base).unwrap());
+        let exe = embedded.join("probe");
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let mut out = Vec::new();
             render::render(
