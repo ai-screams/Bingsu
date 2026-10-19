@@ -2,7 +2,7 @@
 //! never grows a String or a Vec (no `realloc`), a second `layout_into`
 //! into the same output reuses its run buffers, and the largest input the
 //! limits allow stays within a fixed amount of memory. Its own test binary;
-//! the tests here take `SERIAL` so only one counts at a time.
+//! counters are thread-local, so harness/other-test allocations are excluded.
 use bingsu_core::field::{BUILTIN, Field, FieldValue, Value, segment};
 use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{
@@ -13,87 +13,12 @@ use bingsu_core::shorten::{Anchor, Keep, MAX_STEPS, Method, PathFacts};
 use bingsu_core::template::compile::compile;
 use bingsu_core::template::syntax::MAX_TEMPLATE_BYTES;
 use bingsu_core::width::WidthProfile;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-struct Counting;
-
-static SERIAL: Mutex<()> = Mutex::new(());
-static ARMED: AtomicBool = AtomicBool::new(false);
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-static REALLOCS: AtomicUsize = AtomicUsize::new(0);
-/// Bytes allocated while armed and not yet freed, and their high mark.
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn grow(n: usize) {
-    let live = LIVE.fetch_add(n, Ordering::Relaxed) + n;
-    PEAK.fetch_max(live, Ordering::Relaxed);
-}
-
-fn shrink(n: usize) {
-    // Memory allocated before arming may be freed while armed.
-    // A plain compare-exchange loop: `fetch_update` is deprecated on newer
-    // toolchains and its replacement is missing on older ones.
-    let mut live = LIVE.load(Ordering::Relaxed);
-    while let Err(now) = LIVE.compare_exchange_weak(
-        live,
-        live.saturating_sub(n),
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    ) {
-        live = now;
-    }
-}
-
-// SAFETY: every method forwards to `System` with the caller's arguments
-// unchanged; the counters are atomics and never allocate.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            grow(layout.size());
-        }
-        // SAFETY: the caller's contract for `alloc` is passed on as is.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::Relaxed) {
-            shrink(layout.size());
-        }
-        // SAFETY: `ptr` came from `System` through this allocator.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
-            REALLOCS.fetch_add(1, Ordering::Relaxed);
-            grow(new_size);
-            shrink(layout.size());
-        }
-        // SAFETY: `ptr` came from `System` through this allocator.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+#[path = "support/allocation.rs"]
+mod allocation;
+use allocation::{Counting, counted};
 
 #[global_allocator]
 static GLOBAL: Counting = Counting;
-
-/// Runs `f` with the counters reset and armed: (allocations, reallocations,
-/// peak live bytes).
-fn counted(f: impl FnOnce()) -> (usize, usize, usize) {
-    for c in [&ALLOCS, &REALLOCS, &LIVE, &PEAK] {
-        c.store(0, Ordering::Relaxed);
-    }
-    ARMED.store(true, Ordering::Relaxed);
-    f();
-    ARMED.store(false, Ordering::Relaxed);
-    (
-        ALLOCS.load(Ordering::Relaxed),
-        REALLOCS.load(Ordering::Relaxed),
-        PEAK.load(Ordering::Relaxed),
-    )
-}
 
 fn value(id: &str, text: &[u8]) -> Option<Value> {
     let d = segment(id).unwrap();
@@ -111,9 +36,6 @@ fn value(id: &str, text: &[u8]) -> Option<Value> {
 // 두 번째 호출이 run 버퍼를 다시 쓰지 않고 새로 잡는 것, 줄이 그리지 않는 세그먼트를 줄이는 것.
 #[test]
 fn a_fitting_line_never_grows_a_buffer() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let i = |id| BUILTIN.iter().position(|d| d.id == id).unwrap();
     let mut values = vec![None; BUILTIN.len()];
     values[i("char")] = value("char", b"");
@@ -260,9 +182,6 @@ fn largest(
 // fill 바이트를 세지 않는 것(약 192 KB 줄).
 #[test]
 fn the_largest_inputs_stay_small() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dirs = "{dir}".repeat(MAX_TEMPLATE_BYTES / 5);
     assert_eq!(dirs.len(), 4095);
     // Ordinary names; `depth 1000` keeps 1,000 steps (2,001 pieces) and
@@ -317,9 +236,6 @@ fn the_largest_inputs_stay_small() {
 // (두 번째 호출의 할당이 기록 없는 호출보다 많다), 줄당 기록 수가 `Recorder` 문서의 상한을 넘는 것.
 #[test]
 fn a_reused_log_keeps_one_call_and_its_memory() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let i = |id| BUILTIN.iter().position(|d| d.id == id).unwrap();
     let mut values: Vec<Option<Value>> = BUILTIN
         .iter()
@@ -400,4 +316,54 @@ fn a_reused_log_keeps_one_call_and_its_memory() {
         (log.steps.len(), log.shortened.len(), log.hidden.len()),
         (7, 16, 17)
     );
+}
+
+// 이것을 실패시키는 것: 측정 중 다른 스레드의 할당·재할당·해제를 합산하는 것.
+#[test]
+fn another_threads_allocations_are_not_counted() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let start = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            while !start.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&[7u8; 16]);
+            bytes.reserve_exact(4096);
+            std::hint::black_box(&bytes);
+            drop(bytes);
+            done.store(true, Ordering::Release);
+        });
+        let own = counted(|| {
+            start.store(true, Ordering::Release);
+            while !done.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+        });
+        worker.join().unwrap();
+        assert_eq!(own, (0, 0, 0));
+    });
+}
+
+// 이것을 실패시키는 것: 같은 스레드의 측정까지 끄거나 이전 측정값을 누적하는 것.
+#[test]
+fn local_allocations_are_counted_and_reset() {
+    for _ in 0..2 {
+        let counts = counted(|| {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&[7u8; 16]);
+            bytes.reserve_exact(4096);
+            std::hint::black_box(&bytes);
+        });
+        assert_eq!(counts, (1, 1, 16 + 4112));
+    }
+}
+
+// 이것을 실패시키는 것: 측정한 함수의 panic 뒤에도 계수를 켠 채로 두는 것.
+#[test]
+fn panic_disarms_the_counter() {
+    assert!(std::panic::catch_unwind(|| counted(|| panic!("fixture"))).is_err());
+    assert_eq!(counted(|| {}), (0, 0, 0));
 }

@@ -4,7 +4,7 @@
 //! binary does not depend on the benches of another.
 use bingsu_core::color::palette::{Knobs, Mode, PaletteInput, ResolvedPalette, resolve_palette};
 use bingsu_core::color::sgr::ColorDepth;
-use bingsu_core::field::{BUILTIN, Field, Value, segment};
+use bingsu_core::field::{BUILTIN, Value};
 use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, Options, SegmentSetup, When};
 use bingsu_core::recorder::NoopRecorder;
@@ -16,6 +16,9 @@ use bingsu_core::template::compile::{CompiledLine, compile};
 use bingsu_core::width::WidthProfile;
 use gungraun::prelude::*;
 use std::hint::black_box;
+
+#[path = "support/catalog.rs"]
+mod catalog;
 
 struct RenderCase {
     lines: Vec<CompiledLine>,
@@ -29,10 +32,8 @@ struct RenderCase {
 // Everything the render reads is made here: the palette, the compiled
 // lines and the inputs. Only `render_prompt` runs in the counted code.
 fn render_case(_: u32) -> RenderCase {
-    let i = |id: &str| BUILTIN.iter().position(|d| d.id == id).unwrap_or(0);
-    let v = |id: &str, text: &[u8]| {
-        segment(id).map(|d| Value::new(text, vec![Field::ABSENT; d.fields.len()]))
-    };
+    let i = catalog::index;
+    let v = catalog::value;
     let mut values = vec![None; BUILTIN.len()];
     let mut facts = vec![None; BUILTIN.len()];
     let mut setup = vec![

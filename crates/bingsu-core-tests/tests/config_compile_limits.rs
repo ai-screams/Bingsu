@@ -1,5 +1,5 @@
 //! Bounded compilation, including input small enough to pass the source caps.
-use bingsu_core::bands::{Band, MAX_BANDS, order_bands};
+use bingsu_core::bands::{Band, MAX_BANDS, order_bands, order_bands_work};
 use bingsu_core::color::palette::Mode;
 use bingsu_core::config::compile::BUILTIN_TOML;
 use bingsu_core::config::report::{ConfigReport, report};
@@ -8,7 +8,6 @@ use bingsu_core::config::source::{
 };
 use bingsu_core::diag::{Place, SourceId};
 use bingsu_core::diag_codes as codes;
-use std::time::{Duration, Instant};
 
 struct NoFiles;
 impl Resolver for NoFiles {
@@ -64,16 +63,21 @@ fn isolated(r: &ConfigReport) {
 
 // 이것을 실패시키는 것: 236 KB의 모양 전용 입력이 전체 간선 저장·반복 순회에 들어가는 것.
 #[test]
-fn reviewers_7000_bands_finish_within_budget() {
+fn reviewers_7000_bands_do_no_graph_work() {
     let source = nested(7000);
     assert_eq!(source.len(), 235_990);
-    let start = Instant::now();
+    let bands = vec![
+        Band {
+            min_cols: None,
+            max_cols: Some(100),
+            order: None
+        };
+        7000
+    ];
+    let (result, work) = order_bands_work(&bands);
+    assert_eq!(result, Err(bingsu_core::bands::BandError::TooMany));
+    assert_eq!(work, 0, "over-cap input reached graph work");
     let r = read("", &source, Trust::ShapeOnly);
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "7000 bands took {elapsed:?}"
-    );
     isolated(&r);
     assert_eq!(r.snapshot, read("", "", Trust::Executable).snapshot);
 }
@@ -123,7 +127,7 @@ fn band_limit_keeps_thousands_and_respects_source_trust() {
 
 // 이것을 실패시키는 것: 명시적 순서가 섞인 경로에서 매 구간마다 전체 간선을 다시 순회하는 것.
 #[test]
-fn ordered_bands_at_the_limit_finish_within_budget() {
+fn ordered_bands_at_the_limit_have_quadratic_work() {
     let bands: Vec<_> = (0..MAX_BANDS)
         .map(|i| Band {
             min_cols: None,
@@ -131,14 +135,12 @@ fn ordered_bands_at_the_limit_finish_within_budget() {
             order: Some(i as i32),
         })
         .collect();
-    let start = Instant::now();
-    let order = order_bands(&bands).unwrap();
-    let elapsed = start.elapsed();
-    assert_eq!(order, (0..MAX_BANDS).collect::<Vec<_>>());
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "ordered bands took {elapsed:?}"
-    );
+    let (order, work) = order_bands_work(&bands);
+    assert_eq!(order.unwrap(), (0..MAX_BANDS).collect::<Vec<_>>());
+    // One input pass, one order probe, each initial pair once, then one
+    // outgoing scan per chosen band. A whole-graph rescan per band is cubic.
+    let n = MAX_BANDS;
+    assert_eq!(work, n + 1 + n * (n - 1) / 2 + n * n);
 }
 
 fn wide_line() -> String {
