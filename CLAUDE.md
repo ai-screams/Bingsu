@@ -54,7 +54,7 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 ```bash
 cargo build
-cargo test --workspace --all-features
+cargo test --workspace --all-features            # schema test: BINGSU_SCHEMA_PY=<venv python with scripts/schema-requirements.txt>
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 scripts/check-core-purity.sh                       # core purity + CLI prompt-path forbid gate

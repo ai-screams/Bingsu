@@ -1,7 +1,7 @@
 //! Instruction counts of line layout (spec section 8 "측정과 게이트", section
 //! 9 M2 row). Each bench group is its own bench target, so the code
 //! generation of one binary does not depend on the benches of another.
-use bingsu_core::field::{BUILTIN, Field, Value, segment};
+use bingsu_core::field::{BUILTIN, Value};
 use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, LaidLine, Options, SegmentSetup, When, layout_into};
 use bingsu_core::recorder::NoopRecorder;
@@ -11,6 +11,9 @@ use bingsu_core::template::compile::{CompiledLine, compile};
 use bingsu_core::width::WidthProfile;
 use gungraun::prelude::*;
 use std::hint::black_box;
+
+#[path = "support/catalog.rs"]
+mod catalog;
 
 struct LayoutCase {
     lines: Vec<CompiledLine>,
@@ -41,10 +44,8 @@ fn layout_options(width: u16) -> Options {
 // run buffers that already have their size and never grows a String or a
 // Vec of its own (benches/field.rs says why the growth path is kept out).
 fn layout_case(width: u32) -> (LayoutCase, Vec<LaidLine>) {
-    let i = |id: &str| BUILTIN.iter().position(|d| d.id == id).unwrap_or(0);
-    let v = |id: &str, text: &[u8]| {
-        segment(id).map(|d| Value::new(text, vec![Field::ABSENT; d.fields.len()]))
-    };
+    let i = catalog::index;
+    let v = catalog::value;
     let mut values = vec![None; BUILTIN.len()];
     let mut facts = vec![None; BUILTIN.len()];
     let mut setup = vec![

@@ -95,6 +95,19 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - if: runner.os == 'Linux'
         run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install the schema test validator
+        shell: python3 {0}
+        run: |
+          import os
+          import pathlib
+          import subprocess
+          import venv
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "schema-venv"
+          venv.create(root, with_pip=True)
+          python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+          subprocess.run([str(python), "-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r", "scripts/schema-requirements.txt"], check=True)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"BINGSU_SCHEMA_PY={python}\n")
       # The runners are not in a container, so clone3 must reach the kernel
       # (EINVAL) without the stub's filter; the clone3 test fails otherwise.
       # They also run as a non-root user, so the tests that skip as root must
@@ -147,6 +160,11 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: scripts/check-core-purity.sh
+      - name: Install the schema test validator
+        run: |
+          python3 -m venv "$RUNNER_TEMP/schema-venv"
+          "$RUNNER_TEMP/schema-venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r scripts/schema-requirements.txt
+          echo "$RUNNER_TEMP/schema-venv/bin" >> "$GITHUB_PATH"
       - run: python3 scripts/check_schema_corpus.py
       - run: python3 -B scripts/test_check_diag_codes.py
       - name: Diagnostic codes are append-only
@@ -196,6 +214,16 @@ jobs:
           cargo build -p bingsu-golden --release --target wasm32-wasip1
           wasmtime run target/wasm32-wasip1/release/bingsu-golden.wasm > "$RUNNER_TEMP/render-wasm.tsv"
           cmp "$RUNNER_TEMP/render-wasm.tsv" tests/golden/render/render.tsv
+
+      # 이것을 실패시키는 것: snapshot codec의 native/WASM 바이트 차이.
+      - name: Snapshot golden (native and wasm32-unknown-unknown)
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          cargo run -q -p bingsu-core-tests --example snapshot_fixture > "$RUNNER_TEMP/snapshot-native.bin"
+          cmp "$RUNNER_TEMP/snapshot-native.bin" tests/golden/snapshot/fixture.bin
+          RUSTFLAGS='--cfg getrandom_backend="unsupported"' cargo build -p bingsu-core-tests --example snapshot_fixture --target wasm32-unknown-unknown
+          node scripts/check_snapshot_wasm.mjs target/wasm32-unknown-unknown/debug/examples/snapshot_fixture.wasm "$RUNNER_TEMP/snapshot-native.bin"
 
   # src/ucd.rs must be exactly what the generator makes from the Unicode
   # 17.0.0 files committed under tools/gen-ucd-tables/data (sha256 checked

@@ -330,6 +330,16 @@ fn same_visible_text_in_every_shell() {
 // golden 파일이 없는 것. 100칸은 두 줄 기본, 50칸은 narrow 구간이다.
 #[test]
 fn default_theme_outputs() {
+    default_theme_goldens(true, "");
+}
+
+// 이것을 실패시키는 것: duration 없는 기본 테마에 공백·구분자가 남는 것.
+#[test]
+fn default_theme_without_duration_outputs() {
+    default_theme_goldens(false, "_no_duration");
+}
+
+fn default_theme_goldens(duration: bool, suffix: &str) {
     use bingsu_core::default_theme::DefaultTheme;
     let d = DefaultTheme::new(Mode::Dark).unwrap();
     let i = |id| BUILTIN.iter().position(|x| x.id == id).unwrap();
@@ -348,11 +358,13 @@ fn default_theme_outputs() {
     let steps: [&[u8]; 3] = [b"Works", b"AiScream", b"50% done"];
     facts[i("dir")] = Some(PathFacts::new(Anchor::Home, &steps, None, &[]));
     values[i("status")] = v("status", b"1", &[("code", FieldValue::Int(1))]);
-    values[i("duration")] = v(
-        "duration",
-        b"3.2s",
-        &[("ms", FieldValue::Duration { ms: 3200 })],
-    );
+    if duration {
+        values[i("duration")] = v(
+            "duration",
+            b"3.2s",
+            &[("ms", FieldValue::Duration { ms: 3200 })],
+        );
+    }
     let inputs = Inputs {
         catalog: BUILTIN,
         values: &values,
@@ -379,7 +391,10 @@ fn default_theme_outputs() {
                 bytes.extend_from_slice(b);
                 bytes.push(b'\n');
             }
-            check_golden(&format!("{}_default_{width}.bin", shell.as_str()), &bytes);
+            check_golden(
+                &format!("{}_default_{width}{suffix}.bin", shell.as_str()),
+                &bytes,
+            );
         }
     }
 }

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Check the shared engine/schema corpora against both generated schemas.
+"""Validate shared engine/schema corpora with JSON Schema draft 2020-12.
 
-Only the schema keywords used by these focused checks are interpreted here;
-this is not a general JSON Schema validator. No third-party dependency is
-needed by the purity CI job. Rust also calls this with freshly generated
-schemas on stdin, after checking the same rows against engine functions.
+Install scripts/schema-requirements.txt first. Standalone runs the Rust oracle,
+which supplies fresh schemas and exhaustive key combinations on stdin. Missing
+Python dependencies, a failed engine check, and empty combinations all fail.
 """
 import json
+import os
 import pathlib
-import re
+import subprocess
 import sys
+
+from jsonschema import Draft202012Validator
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "crates/bingsu-core/schema"
@@ -30,46 +32,21 @@ def nodes(node, path=()):
 
 
 def accepts(node, value):
-    """Evaluate the keywords needed by corpus fragments (including if/then)."""
-    if isinstance(node, bool):
-        return node
-    if "type" in node:
-        typ = node["type"]
-        types = {"string": str, "array": list, "object": dict,
-                 "boolean": bool, "integer": int, "number": (int, float)}
-        if not isinstance(value, types[typ]):
-            return False
-    if "enum" in node and value not in node["enum"]:
-        return False
-    if "const" in node and value != node["const"]:
-        return False
-    if "pattern" in node and isinstance(value, str):
-        if not re.search(node["pattern"], value):
-            return False
-    if "allOf" in node and not all(accepts(n, value) for n in node["allOf"]):
-        return False
-    if "if" in node and accepts(node["if"], value):
-        if not accepts(node.get("then", True), value):
-            return False
-    if isinstance(value, dict):
-        if any(key not in value for key in node.get("required", [])):
-            return False
-        props = node.get("properties", {})
-        for key, item in value.items():
-            if not accepts(node.get("propertyNames", True), key):
-                return False
-            if not accepts(props.get(key, node.get("additionalProperties", True)), item):
-                return False
-    if isinstance(value, list) and "items" in node:
-        if not all(accepts(node["items"], item) for item in value):
-            return False
-    return True
+    return Draft202012Validator(node).is_valid(value)
 
 
-def check(schemas, segment_cases=()):
+def check(schemas, segment_cases):
+    # 이것을 실패시키는 것: stdin에서 키 조합을 빠뜨리고 corpus만 통과시키는 것.
+    assert segment_cases, "missing engine-generated key combinations"
+    # 이것을 실패시키는 것: config 또는 theme 스키마를 통째로 누락하는 것.
+    assert set(schemas) == {"config", "theme"}, "both schemas are required"
     bad = []
     counts = {}
     for name, root in schemas.items():
+        # 이것을 실패시키는 것: 잘못된 스키마 keyword/type을 검사 없이 사용하는 것.
+        Draft202012Validator.check_schema(root)
+        # 이것을 실패시키는 것: 한 스키마의 생성 키 조합만 모두 누락하는 것.
+        assert any(name in c["schemas"] for c in segment_cases), f"{name}: no key combinations"
         by_path = dict(nodes(root))
         # Engine types, rather than property-name guesses, identify every
         # duration/text/color/segments occurrence through the generated tag.
@@ -119,10 +96,18 @@ def check(schemas, segment_cases=()):
 def main():
     if "--stdin" in sys.argv:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-        check(data["schemas"], data.get("segment_cases", []))
+        check(data["schemas"], data["segment_cases"])
     else:
-        check({name: json.loads((SCHEMA_DIR / f"{name}-v1.json").read_text(encoding="utf-8"))
-               for name in ("config", "theme")})
+        # The same engine oracle and generated combinations as cargo test.
+        # The Rust test invokes this script with --stdin, so no recursion.
+        result = subprocess.run([
+            "cargo", "test", "-j", "2", "-p", "bingsu-core-tests",
+            "--test", "config_files", "schema", "--", "--nocapture",
+        ], cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "BINGSU_SCHEMA_PY": sys.executable})
+        print(result.stdout, end="")
+        # 이것을 실패시키는 것: Rust 시험 이름 변경/필터 오타로 0개만 실행하는 것.
+        assert "schema corpus: ok;" in result.stdout, "Rust schema oracle did not run"
     return 0
 
 

@@ -356,6 +356,15 @@ fn schema_corpora_match_engine_and_both_schemas() {
             }
         }
     }
+    // 이것을 실패시키는 것: 생성 행을 일부 또는 전부 빠뜨려 키 행렬 검사를 줄이는 것.
+    let non_kind_keys = definitions
+        .iter()
+        .filter(|key| key.path.rsplit('.').next() != Some("kind"))
+        .count();
+    assert_eq!(
+        segment_cases.len(),
+        non_kind_keys * (bingsu_core::field::BUILTIN.len() + KINDS.len())
+    );
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
         "../../bingsu-core/schema/segment-keys-corpus.json"
     ))
@@ -385,7 +394,8 @@ fn schema_corpora_match_engine_and_both_schemas() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../scripts/check_schema_corpus.py"
     );
-    let mut child = Command::new("python3")
+    let python = std::env::var_os("BINGSU_SCHEMA_PY").unwrap_or_else(|| "python3".into());
+    let mut child = Command::new(python)
         .args([script, "--stdin"])
         .stdin(Stdio::piped())
         .spawn()
@@ -398,6 +408,7 @@ fn schema_corpora_match_engine_and_both_schemas() {
         .unwrap();
     assert!(
         child.wait().unwrap().success(),
-        "fresh schemas disagree with corpus"
+        "fresh schemas disagree with corpus, or the validator is missing: install \
+         scripts/schema-requirements.txt into a venv and set BINGSU_SCHEMA_PY to its python"
     );
 }
