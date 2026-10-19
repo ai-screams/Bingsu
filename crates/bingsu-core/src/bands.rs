@@ -47,7 +47,13 @@ pub enum BandError {
 }
 
 /// Must `a` be tried before `b`? None when they never compete (disjoint).
-pub(crate) fn before(bands: &[Band], a: usize, b: usize) -> Result<Option<bool>, BandError> {
+pub(crate) fn before(
+    bands: &[Band],
+    a: usize,
+    b: usize,
+    compare: &mut impl FnMut(),
+) -> Result<Option<bool>, BandError> {
+    compare();
     let (x, y) = (&bands[a], &bands[b]);
     if x.hi() < y.lo() || y.hi() < x.lo() {
         return Ok(None);
@@ -72,6 +78,22 @@ pub(crate) fn before(bands: &[Band], a: usize, b: usize) -> Result<Option<bool>,
 /// placed once every band that must precede it is placed, ties broken by
 /// (lo, hi), which only ever ties disjoint-or-ordered bands.
 pub fn order_bands(bands: &[Band]) -> Result<Vec<usize>, BandError> {
+    order_bands_impl(bands, &mut || {})
+}
+
+/// The same ordering path with a deterministic count of pairwise relation
+/// comparisons (calls to `before`) in the mixed-order graph path. The
+/// containment-forest fast path does not use pairwise relations. The ordinary
+/// entry point monomorphizes the observer away: no branch or allocation.
+/// This counts comparisons, never elapsed time.
+#[doc(hidden)]
+pub fn order_bands_work(bands: &[Band]) -> (Result<Vec<usize>, BandError>, usize) {
+    let mut work = 0;
+    let result = order_bands_impl(bands, &mut || work += 1);
+    (result, work)
+}
+
+fn order_bands_impl(bands: &[Band], compare: &mut impl FnMut()) -> Result<Vec<usize>, BandError> {
     let n = bands.len();
     if n > MAX_BANDS {
         return Err(BandError::TooMany);
@@ -115,7 +137,7 @@ pub fn order_bands(bands: &[Band]) -> Result<Vec<usize>, BandError> {
     let mut preds = alloc::vec![0usize; n];
     for a in 0..n {
         for b in a + 1..n {
-            match before(bands, a, b)? {
+            match before(bands, a, b, compare)? {
                 Some(true) => preds[b] += 1,
                 Some(false) => preds[a] += 1,
                 None => {}
@@ -130,7 +152,7 @@ pub fn order_bands(bands: &[Band]) -> Result<Vec<usize>, BandError> {
         placed[next] = true;
         out.push(next);
         for b in 0..n {
-            if !placed[b] && before(bands, next, b)? == Some(true) {
+            if !placed[b] && before(bands, next, b, compare)? == Some(true) {
                 preds[b] -= 1;
                 if preds[b] == 0 {
                     ready.insert(key(b));
@@ -257,7 +279,7 @@ mod tests {
             let mut edges = Vec::new();
             for a in 0..bands.len() {
                 for b in a + 1..bands.len() {
-                    match before(bands, a, b)? {
+                    match before(bands, a, b, &mut || {})? {
                         Some(true) => edges.push((a, b)),
                         Some(false) => edges.push((b, a)),
                         None => {}

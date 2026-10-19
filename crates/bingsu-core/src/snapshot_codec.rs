@@ -1008,7 +1008,8 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
             }
             if depth > 0 {
                 let parent = usize::from(stack[depth - 1]);
-                let _ = crate::bands::before(&c.bands, child, parent).map_err(|_| Error::Shape)?;
+                let _ = crate::bands::before(&c.bands, child, parent, &mut || {})
+                    .map_err(|_| Error::Shape)?;
                 if ranks[child] >= ranks[parent] {
                     return Err(Error::Shape);
                 }
@@ -1022,7 +1023,7 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
         for i in 0..c.bands.len() {
             for j in i + 1..c.bands.len() {
                 if let Some(before) =
-                    crate::bands::before(&c.bands, i, j).map_err(|_| Error::Shape)?
+                    crate::bands::before(&c.bands, i, j, &mut || {}).map_err(|_| Error::Shape)?
                 {
                     if (ranks[i] < ranks[j]) != before {
                         return Err(Error::Shape);

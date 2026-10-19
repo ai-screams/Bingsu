@@ -5,7 +5,7 @@
 use bingsu_core::color::palette::Mode;
 use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::default_theme::DefaultTheme;
-use bingsu_core::field::{BUILTIN, Field, Value, segment};
+use bingsu_core::field::{BUILTIN, Value};
 use bingsu_core::layout::{Inputs, Options};
 use bingsu_core::recorder::NoopRecorder;
 use bingsu_core::render::{RenderedPrompt, Target, render_prompt};
@@ -14,6 +14,9 @@ use bingsu_core::shorten::{Anchor, PathFacts};
 use bingsu_core::width::WidthProfile;
 use gungraun::prelude::*;
 use std::hint::black_box;
+
+#[path = "support/catalog.rs"]
+mod catalog;
 
 // The measured calls sit behind `#[inline(never)]` (CLAUDE.md: inlined into
 // the bench wrapper, Callgrind on aarch64 undercounts them).
@@ -28,8 +31,8 @@ struct Case {
 }
 
 fn case(_: u32) -> Case {
-    let i = |id: &str| BUILTIN.iter().position(|d| d.id == id).unwrap_or(0);
-    let v = |id: &str| segment(id).map(|d| Value::new(b"", vec![Field::ABSENT; d.fields.len()]));
+    let i = catalog::index;
+    let v = |id: &str| catalog::value(id, b"");
     let mut values = vec![None; BUILTIN.len()];
     let mut facts = vec![None; BUILTIN.len()];
     values[i("char")] = v("char");

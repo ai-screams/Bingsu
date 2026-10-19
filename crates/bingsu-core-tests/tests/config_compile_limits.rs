@@ -1,5 +1,5 @@
 //! Bounded compilation, including input small enough to pass the source caps.
-use bingsu_core::bands::{Band, MAX_BANDS, order_bands};
+use bingsu_core::bands::{Band, MAX_BANDS, order_bands, order_bands_work};
 use bingsu_core::color::palette::Mode;
 use bingsu_core::config::compile::BUILTIN_TOML;
 use bingsu_core::config::report::{ConfigReport, report};
@@ -8,7 +8,13 @@ use bingsu_core::config::source::{
 };
 use bingsu_core::diag::{Place, SourceId};
 use bingsu_core::diag_codes as codes;
-use std::time::{Duration, Instant};
+
+#[path = "support/allocation.rs"]
+mod allocation;
+use allocation::{Counting, counted};
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
 
 struct NoFiles;
 impl Resolver for NoFiles {
@@ -62,20 +68,34 @@ fn isolated(r: &ConfigReport) {
     );
 }
 
-// 이것을 실패시키는 것: 236 KB의 모양 전용 입력이 전체 간선 저장·반복 순회에 들어가는 것.
+// 이것을 실패시키는 것: 236 KB 입력의 실제 read/report가 제한 검사 전에 구간 그래프를 만드는 것.
 #[test]
-fn reviewers_7000_bands_finish_within_budget() {
+fn reviewers_7000_bands_do_no_graph_work() {
     let source = nested(7000);
     assert_eq!(source.len(), 235_990);
-    let start = Instant::now();
-    let r = read("", &source, Trust::ShapeOnly);
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "7000 bands took {elapsed:?}"
-    );
-    isolated(&r);
-    assert_eq!(r.snapshot, read("", "", Trust::Executable).snapshot);
+    for trust in [Trust::ShapeOnly, Trust::Executable] {
+        let mut r = None;
+        // Measure the shipped read/report path, including parsing, compilation,
+        // shape-only retry and the width-table fallback after a trusted error.
+        // The counter lives in this test binary, outside the pure core.
+        let counts = counted(|| r = Some(read("", &source, trust)));
+        // Baseline allocations: ShapeOnly 136,682; Executable 184,642.
+        // Less than 3% headroom: constructing/cloning 7,001 band nodes before
+        // rejecting them exceeds this budget, even if diagnostics stay equal.
+        let budget = if trust == Trust::ShapeOnly {
+            140_000
+        } else {
+            190_000
+        };
+        assert!(counts.0 <= budget, "{trust:?}: read allocations {counts:?}");
+        let r = r.unwrap();
+        if trust == Trust::ShapeOnly {
+            isolated(&r);
+            assert_eq!(r.snapshot, read("", "", Trust::Executable).snapshot);
+        } else {
+            assert!(r.snapshot.is_none());
+        }
+    }
 }
 
 // 이것을 실패시키는 것: 현실적인 수천 구간을 거부하거나 한도 초과를 신뢰 파일에 잘못 붙이는 것.
@@ -123,7 +143,7 @@ fn band_limit_keeps_thousands_and_respects_source_trust() {
 
 // 이것을 실패시키는 것: 명시적 순서가 섞인 경로에서 매 구간마다 전체 간선을 다시 순회하는 것.
 #[test]
-fn ordered_bands_at_the_limit_finish_within_budget() {
+fn ordered_bands_at_the_limit_have_quadratic_work() {
     let bands: Vec<_> = (0..MAX_BANDS)
         .map(|i| Band {
             min_cols: None,
@@ -131,14 +151,29 @@ fn ordered_bands_at_the_limit_finish_within_budget() {
             order: Some(i as i32),
         })
         .collect();
-    let start = Instant::now();
-    let order = order_bands(&bands).unwrap();
-    let elapsed = start.elapsed();
-    assert_eq!(order, (0..MAX_BANDS).collect::<Vec<_>>());
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "ordered bands took {elapsed:?}"
-    );
+    let (order, work) = order_bands_work(&bands);
+    assert_eq!(order.unwrap(), (0..MAX_BANDS).collect::<Vec<_>>());
+    // Each initial pair once, then each chosen band against unplaced bands.
+    // Count inside `before`, so recomputing predecessors cannot hide work.
+    let n = MAX_BANDS;
+    assert_eq!(work, n * (n - 1));
+}
+
+// 이것을 실패시키는 것: visit 추가 없이 매 구간의 선행자를 전체 구간에서 다시 계산하는 것.
+// Small enough that the cubic mutation finishes and fails the comparison budget.
+#[test]
+fn predecessor_rescans_cannot_hide_relation_comparisons() {
+    let n = 64;
+    let bands: Vec<_> = (0..n)
+        .map(|i| Band {
+            min_cols: None,
+            max_cols: Some(i as u16 + 100),
+            order: Some(i as i32),
+        })
+        .collect();
+    let (order, comparisons) = order_bands_work(&bands);
+    assert_eq!(order.unwrap(), (0..n).collect::<Vec<_>>());
+    assert_eq!(comparisons, n * (n - 1));
 }
 
 fn wide_line() -> String {
