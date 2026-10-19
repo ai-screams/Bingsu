@@ -400,7 +400,10 @@ fn parse_inner(bytes: &[u8], check_depth: bool) -> Result<Table, Vec<SyntaxError
     let mut errors: Vec<SyntaxError> = parse_errors
         .iter()
         .map(|e| SyntaxError {
-            span: e.span().map(Span::of).unwrap_or_default(),
+            span: match e.span() {
+                Some(span) => Span::of(span),
+                None => Span::default(),
+            },
             kind: SyntaxErrorKind::Toml(e.message().to_owned()),
         })
         .collect();

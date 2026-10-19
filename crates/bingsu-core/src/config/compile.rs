@@ -244,8 +244,18 @@ fn at(n: &MNode) -> Place {
     }
 }
 
+fn optional_duration(text: Option<&str>) -> Option<u64> {
+    match text {
+        Some(text) => parse_duration_ms(text),
+        None => None,
+    }
+}
+
 fn place_of(t: &MTable, path: &[&str]) -> Place {
-    get(t, path).map_or(Place::Builtin, at)
+    match get(t, path) {
+        Some(n) => at(n),
+        None => Place::Builtin,
+    }
 }
 
 /// One line of one layout table, over the line it inherits: each side and
@@ -823,8 +833,8 @@ pub fn compile(
             .iter()
             .map(|(a, b)| {
                 (
-                    a.iter().map(String::as_str).collect(),
-                    b.iter().map(String::as_str).collect(),
+                    a.iter().map(|s| s.as_str()).collect(),
+                    b.iter().map(|s| s.as_str()).collect(),
                 )
             })
             .collect();
@@ -972,8 +982,7 @@ pub fn compile(
     .unwrap_or(WidthProfile::DEFAULT);
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
-    let duration_min_ms = s(r, &["segment", "duration", "min"])
-        .and_then(parse_duration_ms)
+    let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
         .or_else(|| parse_duration_ms(default_str("segment.duration.min")))
         .unwrap_or(2000);
     Ok((
@@ -1011,7 +1020,10 @@ fn exec_units(r: &MTable, trusted: &MTable, notes: &mut Vec<Diagnostic>) -> Vec<
             Some(MValue::Scalar(Value::Str(v))) => Some(v.clone()),
             _ => None,
         };
-        let list = |k: &str| t.get(k).map(strings).unwrap_or_default();
+        let list = |k: &str| match t.get(k) {
+            Some(n) => strings(n),
+            None => Vec::new(),
+        };
         let policy = match str_of("kind").as_deref() {
             Some("command") => ExecPolicy::Command {
                 argv: list("command"),
@@ -1065,8 +1077,8 @@ fn exec_units(r: &MTable, trusted: &MTable, notes: &mut Vec<Diagnostic>) -> Vec<
         out.push(ExecUnit {
             id: e.key.clone(),
             policy,
-            timeout_ms: str_of("timeout").as_deref().and_then(parse_duration_ms),
-            cache_ms: str_of("cache").as_deref().and_then(parse_duration_ms),
+            timeout_ms: optional_duration(str_of("timeout").as_deref()),
+            cache_ms: optional_duration(str_of("cache").as_deref()),
             origins,
             approved_by,
             shown_at,

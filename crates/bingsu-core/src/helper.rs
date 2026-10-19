@@ -24,11 +24,10 @@ pub fn decode_groups(word: &[u8], components: usize) -> Result<Vec<GroupPin>, En
         if pins.len() >= components {
             return Err(bad());
         }
-        let nums = part
-            .split(|b| *b == b',')
-            .map(parse_decimal)
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(bad)?;
+        let mut nums = Vec::new();
+        for text in part.split(|b| *b == b',') {
+            nums.push(parse_decimal(text).ok_or_else(bad)?);
+        }
         if nums.len() != 4 {
             return Err(bad());
         }

@@ -90,30 +90,41 @@ pub struct DefaultTheme {
 
 fn lines(preset_name: &str, l: &[LineLayout<'_>]) -> Result<Vec<CompiledLine>, DefaultThemeError> {
     let p = preset(preset_name).ok_or(DefaultThemeError::UnknownPreset)?;
-    let t = generate(p, &StyleOptions::default(), l).map_err(DefaultThemeError::Style)?;
-    compile(&t, BUILTIN).map_err(DefaultThemeError::Compile)
+    let t = match generate(p, &StyleOptions::default(), l) {
+        Ok(t) => t,
+        Err(error) => return Err(DefaultThemeError::Style(error)),
+    };
+    compile_all(&t)
 }
 
 fn compile_all(src: &str) -> Result<Vec<CompiledLine>, DefaultThemeError> {
-    compile(src, BUILTIN).map_err(DefaultThemeError::Compile)
+    match compile(src, BUILTIN) {
+        Ok(lines) => Ok(lines),
+        Err(error) => Err(DefaultThemeError::Compile(error)),
+    }
 }
 
 fn one_line(src: &str) -> Result<CompiledLine, DefaultThemeError> {
-    let mut v = compile(src, BUILTIN).map_err(DefaultThemeError::Compile)?;
+    let mut v = compile_all(src)?;
     Ok(v.remove(0))
 }
 
 impl DefaultTheme {
     pub fn new(mode: Mode) -> Result<Self, DefaultThemeError> {
         let bands = [NARROW];
-        let band_order = order_bands(&bands).map_err(DefaultThemeError::Bands)?;
-        let palette = resolve_palette(&PaletteInput {
+        let band_order = match order_bands(&bands) {
+            Ok(order) => order,
+            Err(error) => return Err(DefaultThemeError::Bands(error)),
+        };
+        let palette = match resolve_palette(&PaletteInput {
             mode,
             knobs: Knobs::default(),
             overrides: &[],
             roles: &[],
-        })
-        .map_err(DefaultThemeError::Palette)?;
+        }) {
+            Ok(palette) => palette,
+            Err(error) => return Err(DefaultThemeError::Palette(error)),
+        };
         let mut setup = vec![
             SegmentSetup {
                 priority: 0,

@@ -208,8 +208,7 @@ fn text_pattern() -> String {
     // Keep supplementary scalars outside character classes: ECMAScript
     // without `u` sees them as surrogate pairs, Python as single scalars.
     let removed = (0..=0x10ffff)
-        .filter_map(char::from_u32)
-        .filter(|&c| crate::sanitize::is_removed(c))
+        .filter_map(|n| char::from_u32(n).filter(|&c| crate::sanitize::is_removed(c)))
         .map(|c| alloc::format!("{c}"))
         .collect::<Vec<_>>()
         .join("|");

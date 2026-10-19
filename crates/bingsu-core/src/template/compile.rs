@@ -133,7 +133,7 @@ impl CompiledLine {
                 Node::Text(s) => {
                     text_bytes = text_bytes.checked_add(s.len())?;
                     if text_bytes > super::syntax::MAX_TEMPLATE_BYTES
-                        || s.chars().any(crate::sanitize::is_removed)
+                        || !s.chars().all(|c| !crate::sanitize::is_removed(c))
                     {
                         return None;
                     }

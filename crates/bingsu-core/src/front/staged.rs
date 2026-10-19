@@ -445,8 +445,10 @@ impl ReadPlan {
                             self.observed.selected = self
                                 .decoder
                                 .take()
-                                .and_then(|d| d.finish().ok())
-                                .map(Box::new)
+                                .and_then(|d| match d.finish() {
+                                    Ok(plan) => Some(Box::new(plan)),
+                                    Err(_) => None,
+                                })
                                 .filter(|s| {
                                     snapshot::same_boot(
                                         s.id,
@@ -684,7 +686,10 @@ pub fn finish(plan: ReadPlan, mut observed: Observed) -> Response {
             response.status = if observed.last_good {
                 Status::ERROR_CONFIG_LAST_GOOD
             } else {
-                eligibility.map_or_else(trust_status, |_| Status::OK_NONE)
+                match eligibility {
+                    Err(why) => trust_status(why),
+                    Ok(_) => Status::OK_NONE,
+                }
             };
             response.worker_mask = crate::collection::worker_mask(s.config.collect_mask);
             if let (Ok(deadline), Some(clock)) = (eligibility, observed.clock) {

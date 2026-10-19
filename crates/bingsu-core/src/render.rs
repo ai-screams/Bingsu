@@ -35,7 +35,7 @@ fn notice_layout<R: Recorder>(
     let lines = band
         .and_then(|b| theme.variants.get(b + 1))
         .or(theme.variants.first())
-        .map_or(&[][..], Vec::as_slice);
+        .map_or(&[][..], |v| v.as_slice());
     let budget = crate::layout::target(&t.options);
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {

@@ -85,7 +85,7 @@ impl PathFacts {
                 .copied()
                 .flatten()
                 .and_then(|raw| distinct_len(&s, me, raw, &mut path_left, &name))
-                .unwrap_or_else(|| s.graphemes(true).next().map_or(0, str::len));
+                .unwrap_or_else(|| s.graphemes(true).next().map_or(0, |s| s.len()));
             unique.push(cut);
             kept.push(s);
         }
@@ -343,7 +343,7 @@ pub fn validate(req: &ShortenRequest<'_>, r: &ShortenResult) -> Result<u32, Reje
     if r.pieces.is_empty()
         || r.pieces
             .iter()
-            .any(|p| p.text.is_empty() || p.text.chars().any(is_removed))
+            .any(|p| p.text.is_empty() || !p.text.chars().all(|c| !is_removed(c)))
     {
         return Err(Reject::Malformed);
     }

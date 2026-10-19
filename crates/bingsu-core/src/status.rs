@@ -108,7 +108,7 @@ pub fn is_valid_status(s: &[u8]) -> bool {
     };
     let (class, code) = (&s[..colon], &s[colon + 1..]);
     !class.is_empty()
-        && class.iter().all(u8::is_ascii_lowercase)
+        && class.iter().all(|b| b.is_ascii_lowercase())
         && !code.is_empty()
         && code.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
 }

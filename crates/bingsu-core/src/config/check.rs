@@ -212,7 +212,7 @@ fn is_line_name(k: &str) -> bool {
 fn walk(t: &MTable, path: &mut Vec<String>, out: &mut Vec<Diagnostic>) {
     for e in &t.entries {
         path.push(e.key.clone());
-        let segs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
         let dotted = segs.join(".");
         let def: Option<&KeyDef> = keys::lookup(&segs);
         match (segs.as_slice(), def) {
@@ -444,7 +444,7 @@ pub fn check_theme(id: crate::diag::SourceId, t: &Table) -> Vec<Diagnostic> {
     fn go(t: &Table, path: &mut Vec<String>, id: crate::diag::SourceId, out: &mut Vec<Diagnostic>) {
         for e in &t.entries {
             path.push(e.key.clone());
-            let segs: Vec<&str> = path.iter().map(String::as_str).collect();
+            let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
             let allowed = keys::lookup(&segs).is_none_or(|d| d.theme);
             let is_table = matches!(e.node.value, Value::Table(_));
             if !allowed

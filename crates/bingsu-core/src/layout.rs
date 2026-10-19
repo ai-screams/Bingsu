@@ -151,7 +151,7 @@ pub fn runs_width(runs: &[Run], p: WidthProfile) -> u32 {
 
 /// Byte length of the first grapheme of `s`.
 fn head_len(s: &str) -> usize {
-    s.graphemes(true).next().map_or(0, str::len)
+    s.graphemes(true).next().map_or(0, |s| s.len())
 }
 
 /// Byte offset where the last grapheme of `s` starts.
@@ -588,7 +588,7 @@ impl<'l, 'i> Lay<'l, 'i> {
                     if let Some(f) = inp
                         .values
                         .get(usize::from(seg))
-                        .and_then(Option::as_ref)
+                        .and_then(|v| v.as_ref())
                         .and_then(|v| v.fields.get(usize::from(field)))
                     {
                         x.a = fields.len();
@@ -655,7 +655,7 @@ impl<'l, 'i> Lay<'l, 'i> {
     }
 
     fn value(&self, s: usize) -> Option<&'i Value> {
-        self.inp.values.get(s).and_then(Option::as_ref)
+        self.inp.values.get(s).and_then(|v| v.as_ref())
     }
 
     fn base_str(&self, s: usize) -> &str {
@@ -698,17 +698,8 @@ impl<'l, 'i> Lay<'l, 'i> {
             return None;
         }
         let mut best: Option<(Vec<Piece>, u32)> = None;
-        // The method's index exists only for the record: found from the
-        // method's place in the slice, under `R::ENABLED` (an index carried
-        // through the loop cost 12 instructions with `NoopRecorder`).
-        let at = |m: &Method| {
-            methods
-                .iter()
-                .position(|x| core::ptr::eq(x, m))
-                .unwrap_or(0)
-        };
         let mut best_at = 0;
-        for m in methods.iter().take(METHODS_MAX) {
+        for (at, m) in methods.iter().take(METHODS_MAX).enumerate() {
             if too_big(*m, self.source(s)) {
                 continue;
             }
@@ -725,13 +716,13 @@ impl<'l, 'i> Lay<'l, 'i> {
             }
             if w <= budget {
                 if R::ENABLED {
-                    rec.shortened(n, s, at(m));
+                    rec.shortened(n, s, at);
                 }
                 return Some(res.pieces);
             }
             if best.as_ref().is_none_or(|b| w < b.1) {
                 if R::ENABLED {
-                    best_at = at(m);
+                    best_at = at;
                 }
                 best = Some((res.pieces, w));
             }
@@ -1247,7 +1238,7 @@ fn too_big(m: Method, src: Source<'_>) -> bool {
 fn field_of<'a>(inp: &Inputs<'a>, seg: usize, field: usize) -> Option<&'a FieldValue> {
     inp.values
         .get(seg)
-        .and_then(Option::as_ref)
+        .and_then(|v| v.as_ref())
         .and_then(|v| v.fields.get(field))
         .map(|f| &f.value)
 }
@@ -1575,7 +1566,7 @@ pub fn layout_line_into<R: Recorder>(
     let mut b = lay.new_bufs(join);
     if R::ENABLED {
         for (s, slot) in lay.slots.iter().enumerate() {
-            if slot.entry.iter().any(Option::is_some) && !slot.present {
+            if slot.entry.iter().any(|v| v.is_some()) && !slot.present {
                 r.hidden(n, s, HideReason::NoValue);
             }
         }
@@ -1917,7 +1908,7 @@ pub fn layout_into<R: Recorder>(
     let lines = band
         .and_then(|b| variants.get(b + 1))
         .or(variants.first())
-        .map_or(&[][..], Vec::as_slice);
+        .map_or(&[][..], |v| v.as_slice());
     if out.capacity() < lines.len() {
         *out = Vec::with_capacity(lines.len());
     }

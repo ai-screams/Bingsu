@@ -47,7 +47,7 @@
 //!     output depend on the allocator or on ASLR): a raw pointer type, a
 //!     function pointer type, a cast of a function of the same file (`f as
 //!     usize`; clippy's fn_to_numeric_cast_any covers the rest), a name in
-//!     ADDRESS_APIS, `core::ptr` other than `ptr::eq`,
+//!     ADDRESS_APIS (including Rc/Weak::ptr_eq), any `core::ptr`,
 //!     and a string that formats a pointer (a placeholder whose type is `p`,
 //!     with any fill, alignment, flags, width or precision: `{:p}`, `{v:#p}`,
 //!     `{:>20p}`, `{:}>20p}`). Macro bodies, which syn does not parse, get
@@ -66,6 +66,9 @@
 //!     name in DEBUG_AND_HASH: Debug and Hash implementations may write an
 //!     address (a Waker's vtable, a function pointer). `#[derive(Debug)]`
 //!     stays allowed, since nothing in production code can call it;
+//!   - production glob imports (they can import Debug::fmt without naming
+//!     Debug), and function items stored/returned/merged outside a direct
+//!     call (see function_items.rs);
 //!   - in a library file named `lib.rs` (the crate root), a missing inner
 //!     attribute `#![no_std]` or `#![forbid(unsafe_code)]`, read by the
 //!     parser so a commented-out or quoted copy does not count.
@@ -88,6 +91,9 @@
 //!
 //! `core-cfg-check --adapter SYSCALLS.tsv FILE.rs` checks the prompt adapter
 //! (see adapter.rs).
+//! `--rules SYSCALLS.tsv FILE.rs` checks the actual sandbox RULES initializer.
+//! `--prompt-io NAMES FILE.rs` scans every OS bridge branch for CLI forbidden
+//! calls; this supplements its binary scan, clippy forbid and TCB hash.
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
 //!
@@ -104,6 +110,8 @@ use syn::ext::IdentExt;
 use syn::visit::Visit;
 
 mod adapter;
+mod function_items;
+mod rules;
 
 struct Finding {
     line: usize,
@@ -269,7 +277,8 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
 }
 
 /// Names whose call or path exposes an address or leaks an allocation.
-const ADDRESS_APIS: [&str; 15] = [
+const ADDRESS_APIS: [&str; 16] = [
+    "ptr_eq",
     "into_raw",
     "into_raw_parts",
     "leak",
@@ -302,8 +311,8 @@ impl<'ast> Visit<'ast> for FnNames {
 }
 
 /// The address checks on tokens, for macro bodies: names in ADDRESS_APIS,
-/// `*const`/`*mut`, a `fn(` type, `ptr` as a path segment other than
-/// `ptr::eq`, `name as` for a function of the file, and string literals
+/// `*const`/`*mut`, a `fn(` type, `ptr` as a path segment,
+/// `name as` for a function of the file, and string literals
 /// that format a pointer.
 fn macro_addresses(stream: TokenStream, fns: &[String], out: &mut Vec<Finding>) {
     let tokens: Vec<TokenTree> = stream.into_iter().collect();
@@ -329,8 +338,8 @@ fn macro_addresses(stream: TokenStream, fns: &[String], out: &mut Vec<Finding>) 
                     Some(format!("{name} exposes an address"))
                 } else if name == "fn" && matches!(tokens.get(i + 1), Some(TokenTree::Group(_))) {
                     Some("function pointer type exposes an address".to_owned())
-                } else if name == "ptr" && in_path && !is_ident(tokens.get(i + 3), "eq") {
-                    Some("core::ptr other than ptr::eq exposes an address".to_owned())
+                } else if name == "ptr" && in_path {
+                    Some("core::ptr exposes an address or pointer identity".to_owned())
                 } else if fns.contains(&name) && is_ident(tokens.get(i + 1), "as") {
                     Some(format!("casting function {name} exposes its address"))
                 } else {
@@ -409,10 +418,10 @@ fn formats_type(text: &str, wanted: fn(&str) -> bool) -> bool {
 /// Length of the identifier that starts at `at` (0 if none).
 fn ident_len(s: &[char], at: usize) -> usize {
     match s.get(at) {
-        Some(c) if c.is_alphabetic() || *c == '_' => {
+        Some(c) if unicode_ident::is_xid_start(*c) || *c == '_' => {
             1 + s[at + 1..]
                 .iter()
-                .take_while(|c| c.is_alphanumeric() || **c == '_')
+                .take_while(|c| unicode_ident::is_xid_continue(**c))
                 .count()
         }
         _ => 0,
@@ -474,6 +483,44 @@ struct Addresses<'a> {
     out: &'a mut Vec<Finding>,
 }
 
+/// Glob imports can put Debug::fmt in scope without a Debug token.
+struct ProductionGlobs<'a> {
+    tests: &'a TestSpans,
+    out: &'a mut Vec<Finding>,
+}
+
+impl<'ast> Visit<'ast> for ProductionGlobs<'_> {
+    fn visit_use_glob(&mut self, glob: &'ast syn::UseGlob) {
+        if !self.tests.contains(glob.star_token.span) {
+            self.out.push(Finding {
+                line: line_of(glob.star_token.span),
+                reason: "production glob import hides Debug or Hash".to_owned(),
+            });
+        }
+    }
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        fn scan(walk: &mut ProductionGlobs<'_>, stream: TokenStream) {
+            let tokens: Vec<_> = stream.into_iter().collect();
+            for (at, t) in tokens.iter().enumerate() {
+                if let TokenTree::Group(g) = t {
+                    scan(walk, g.stream());
+                }
+                if is_ident(Some(t), "use") {
+                    let end = tokens[at..].iter().position(|t| is_punct(Some(t), ';'));
+                    if let Some(end) = end
+                        && let Ok(import) = syn::parse2::<syn::ItemUse>(
+                            tokens[at..=at + end].iter().cloned().collect(),
+                        )
+                    {
+                        walk.visit_item_use(&import);
+                    }
+                }
+            }
+        }
+        scan(self, m.tokens.clone());
+    }
+}
+
 fn is_test_item(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         matches!(&a.meta, syn::Meta::List(l)
@@ -482,6 +529,26 @@ fn is_test_item(attrs: &[syn::Attribute]) -> bool {
 }
 
 impl<'ast> Visit<'ast> for Addresses<'_> {
+    fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+        let ident = match tree {
+            syn::UseTree::Path(p) => Some(&p.ident),
+            syn::UseTree::Name(n) => Some(&n.ident),
+            syn::UseTree::Rename(r) => Some(&r.ident),
+            _ => None,
+        };
+        if let Some(ident) = ident {
+            let name = unraw(ident);
+            if name == "ptr" || name == "ptr_eq" {
+                self.out.push(Finding {
+                    line: line_of(ident.span()),
+                    reason: format!(
+                        "{name} exposes an address or pointer identity through an import"
+                    ),
+                });
+            }
+        }
+        syn::visit::visit_use_tree(self, tree);
+    }
     fn visit_item(&mut self, item: &'ast syn::Item) {
         let attrs = match item {
             syn::Item::Mod(m) => &m.attrs,
@@ -534,14 +601,12 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
         syn::visit::visit_expr_method_call(self, m);
     }
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        // core::ptr: only ptr::eq (compares two addresses, exposes neither).
+        // Equality still observes allocation identity without exposing a number.
         let segs: Vec<String> = path.segments.iter().map(|s| unraw(&s.ident)).collect();
-        if let Some(at) = segs.iter().position(|s| s == "ptr")
-            && segs.get(at + 1).map(String::as_str) != Some("eq")
-        {
+        if let Some(at) = segs.iter().position(|s| s == "ptr") {
             self.out.push(Finding {
                 line: line_of(path.segments[at].ident.span()),
-                reason: "core::ptr other than ptr::eq exposes an address".to_owned(),
+                reason: "core::ptr exposes an address or pointer identity".to_owned(),
             });
         }
         syn::visit::visit_path(self, path);
@@ -815,6 +880,12 @@ fn check(source: &str, library: bool, crate_root: bool, addresses: bool) -> Vec<
     if library {
         let mut tests = TestSpans(Vec::new());
         tests.visit_file(&file);
+        ProductionGlobs {
+            tests: &tests,
+            out: &mut out,
+        }
+        .visit_file(&file);
+        function_items::check(&file, &tests, &mut out);
         scan_debug_and_hash(stream.clone(), &tests, false, &mut out);
         let mut env_count = 0;
         scan_format_sources(stream.clone(), &mut env_count, &mut out);
@@ -1144,11 +1215,34 @@ fn check_binary(source: &str) -> Vec<Finding> {
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--prompt-io") {
+        let [_, forbidden, path] = args.as_slice() else {
+            eprintln!("usage: core-cfg-check --prompt-io NAME,NAME,... FILE.rs");
+            return ExitCode::FAILURE;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            eprintln!("{path}: unreadable");
+            return ExitCode::FAILURE;
+        };
+        let names: Vec<_> = forbidden.split(',').collect();
+        let findings = check_prompt_io(&source, &names);
+        for f in &findings {
+            eprintln!("{path}:{}: {}", f.line, f.reason);
+        }
+        return if findings.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     let binary = args.first().is_some_and(|a| a == "--binary");
     if binary {
         args.remove(0);
     }
-    if args.first().is_some_and(|a| a == "--adapter") {
+    if args
+        .first()
+        .is_some_and(|a| a == "--adapter" || a == "--rules")
+    {
         let [_, tsv, file] = args.as_slice() else {
             eprintln!("usage: core-cfg-check --adapter SYSCALLS.tsv FILE.rs");
             return ExitCode::FAILURE;
@@ -1158,7 +1252,11 @@ fn main() -> ExitCode {
             eprintln!("core-cfg-check: unreadable {tsv} or {file}");
             return ExitCode::FAILURE;
         };
-        let findings = adapter::check_adapter(&source, &table);
+        let findings = if args[0] == "--rules" {
+            rules::check(&source, &table)
+        } else {
+            adapter::check_adapter(&source, &table)
+        };
         for finding in &findings {
             eprintln!("{file}:{}: {}", finding.line, finding.reason);
         }
@@ -1238,4 +1336,46 @@ enum Kind {
     Library,
     Test,
     Tcb,
+}
+
+/// The OS bridge deliberately has platform cfg, atomics and pointer arguments.
+/// Scan *all* branches (including test code), with no cfg evaluation, for the
+/// CLI's forbidden call names and syntax that could conceal/generate them.
+/// This adds a scan; it does not replace --binary, clippy forbid or TCB pins.
+fn check_prompt_io(source: &str, names: &[&str]) -> Vec<Finding> {
+    fn scan(stream: TokenStream, names: &[&str], out: &mut Vec<Finding>) {
+        for t in stream {
+            match t {
+                TokenTree::Group(g) => scan(g.stream(), names, out),
+                TokenTree::Ident(n)
+                    if names.contains(&unraw(&n).as_str())
+                        || ["include", "macro_rules", "cfg_attr"].contains(&unraw(&n).as_str()) =>
+                {
+                    out.push(Finding {
+                        line: line_of(n.span()),
+                        reason: format!("prompt I/O forbidden token {}", unraw(&n)),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    // Parse and lex the same source. A shebang is never valid in this TCB file.
+    if (source.starts_with("#!") && !source.starts_with("#![")) || syn::parse_file(source).is_err()
+    {
+        out.push(Finding {
+            line: 1,
+            reason: "prompt I/O unparsable or shebang".to_owned(),
+        });
+        return out;
+    }
+    match TokenStream::from_str(source) {
+        Ok(stream) => scan(stream, names, &mut out),
+        Err(e) => out.push(Finding {
+            line: line_of(e.span()),
+            reason: "prompt I/O unparsable".to_owned(),
+        }),
+    }
+    out
 }

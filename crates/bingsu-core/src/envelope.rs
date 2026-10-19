@@ -204,7 +204,10 @@ pub(crate) fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeEr
     if count > 1 {
         return Err(EnvelopeError::BadArgs("duplicate field"));
     }
-    match first.flatten().and_then(RecordVersion::parse) {
+    let Some(bytes) = first.flatten() else {
+        return Err(EnvelopeError::NoSupportedRecordVersion);
+    };
+    match RecordVersion::parse(bytes) {
         Some(v) => Ok(v),
         None => Err(EnvelopeError::NoSupportedRecordVersion),
     }

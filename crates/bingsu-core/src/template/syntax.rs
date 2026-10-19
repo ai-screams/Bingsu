@@ -1,6 +1,7 @@
 //! Template syntax (spec section 3 "템플릿 문법"; ABNF in the M2 plan).
 //! Only `{` and `}` are special. Every construct is inside braces, so a new
 //! helper never changes how an existing theme parses (decision 10).
+use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -99,7 +100,10 @@ fn body(inner: &str, sp: Span) -> Result<Syntax, SyntaxError> {
     let bad = |kind| SyntaxError { kind, span: sp };
     if let Some(h) = inner.strip_prefix('@') {
         let (name, args) = match h.split_once(':') {
-            Some((n, a)) => (n, a.split(',').map(String::from).collect::<Vec<_>>()),
+            Some((n, a)) => (
+                n,
+                a.split(',').map(|part| part.to_owned()).collect::<Vec<_>>(),
+            ),
             None => (h, Vec::new()),
         };
         if !is_helper_name(name) {
@@ -254,7 +258,7 @@ pub fn parse(src: &str) -> Result<Vec<(Syntax, Span)>, SyntaxError> {
                 if text.is_empty() {
                     text_start = i;
                 }
-                let ch_len = src[i..].chars().next().map_or(1, char::len_utf8);
+                let ch_len = src[i..].chars().next().map_or(1, |c| c.len_utf8());
                 text.push_str(&src[i..i + ch_len]);
                 i += ch_len;
             }

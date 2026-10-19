@@ -22,7 +22,9 @@ keeps it that small (spec section 4 front end, F-01):
    duplicate cell in either name column, and its `syscall` column equals
    RULES in crates/bingsu/src/sandbox.rs (the Linux seccomp filter;
    cargo build scripts are not allowed, so the Rust table is committed and
-   compared here); each RULES entry is `("name", libc::SYS_name, conditions)`;
+   compared by core-cfg-check --rules); the actual RULES initializer must be
+   an array of `("name", libc::SYS_name, conditions)`, not matching text in
+   comments, strings, other constants or aliases;
 5. no symlink under crates/bingsu/src, and crates/bingsu/Cargo.toml has no
    `autobins`, `autoexamples`, `autotests`, `autobenches`, `[lib]` or
    `[[bin]]` (the bin target itself is pinned by check_core_no_std.py);
@@ -38,7 +40,6 @@ Usage: check_cli_prompt_forbid.py --checker PATH   (from the repository root)
 import argparse
 import hashlib
 import pathlib
-import re
 import subprocess
 import sys
 import tomllib
@@ -78,6 +79,7 @@ def main():
         if first != "".join(WANT.split()):
             bad.append(f"{source.relative_to(ROOT)}: first inner attribute is {first!r}")
     for argv in ([args.checker, "--adapter", str(SYSCALLS), str(ADAPTER)],
+                 [args.checker, "--rules", str(SYSCALLS), str(SANDBOX)],
                  [args.checker, "--binary", *sorted(str(p) for p in (ROOT / "crates/bingsu/src").rglob("*.rs"))]):
         out = subprocess.run(argv, capture_output=True, text=True)
         if out.returncode != 0:
@@ -95,12 +97,6 @@ def main():
             dups = sorted({n for n in names if names.count(n) > 1})
             if dups:
                 bad.append(f"{SYSCALLS.name}: duplicate {('syscall', 'libc')[col]} {dups}")
-        table = sorted(r[0] for r in body if len(r) == 3 and r[0] != "-")
-        entries = re.findall(r'\("(\w+)",\s*libc::SYS_(\w+),', SANDBOX.read_text())
-        if any(a != b for a, b in entries):
-            bad.append(f"sandbox.rs: RULES entries must be (\"name\", libc::SYS_name, conditions): {entries}")
-        if sorted(a for a, _ in entries) != table:
-            bad.append(f"sandbox.rs RULES {sorted(a for a, _ in entries)} differs from the syscall column {table}")
     links = [str(p.relative_to(ROOT)) for p in (ROOT / "crates/bingsu/src").rglob("*") if p.is_symlink()]
     if links:
         bad.append(f"symlinks under crates/bingsu/src: {links}")

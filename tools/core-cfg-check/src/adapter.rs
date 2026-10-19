@@ -364,7 +364,14 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     let syn::Expr::Path(path) = prepare.func.as_ref() else {
         return None;
     };
-    if joined(&path.path).join("::") != "crate::prompt_read::prepare" || prepare.args.len() != 2 {
+    if joined(&path.path).join("::") != "crate::prompt_read::prepare"
+        || prepare.args.len() != 2
+        || !matches!(prepare.args.first()?, syn::Expr::Reference(r)
+            if r.mutability.is_none() && matches!(r.expr.as_ref(), syn::Expr::Path(p)
+                if p.qself.is_none() && p.path.is_ident("raw")))
+        || !matches!(prepare.args.last()?, syn::Expr::Path(p)
+            if p.qself.is_none() && p.path.is_ident("deadline"))
+    {
         return None;
     }
     let syn::Expr::Call(runs) = branch.cond.as_ref() else {
