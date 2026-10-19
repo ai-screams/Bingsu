@@ -255,6 +255,10 @@ pub fn open_runtime_root(
     use std::os::unix::fs::MetadataExt;
     let chain = open_chain(&pin.path)?;
     judge(&chain, me, groups)?;
+    chain.revalidate().map_err(|e| RootError::Open {
+        at: chain.fds.len() - 1,
+        errno: e.raw_os_error().unwrap_or(0),
+    })?;
     let md = chain.last().metadata().map_err(|e| RootError::Open {
         at: chain.fds.len() - 1,
         errno: e.raw_os_error().unwrap_or(0),
@@ -290,6 +294,56 @@ mod tests {
             dev: md.dev(),
             ino: md.ino(),
             path: p.to_path_buf(),
+        }
+    }
+
+    // 이것을 실패시키는 것: judge 뒤 전체 chain 재확인을 생략하고 마지막 inode만 비교하는 것.
+    #[test]
+    fn runtime_open_rechecks_ancestors_after_judgement() {
+        struct Change {
+            parent: PathBuf,
+            rename: bool,
+            fired: bool,
+        }
+        impl GroupOracle for Change {
+            fn group_write(&mut self, _: &Facts) -> bingsu_core::fs_trust::Group {
+                if !self.fired {
+                    self.fired = true;
+                    if self.rename {
+                        std::fs::rename(&self.parent, self.parent.with_extension("old")).unwrap();
+                        std::fs::create_dir(&self.parent).unwrap();
+                    } else {
+                        std::fs::set_permissions(
+                            &self.parent,
+                            std::fs::Permissions::from_mode(0o777),
+                        )
+                        .unwrap();
+                    }
+                }
+                bingsu_core::fs_trust::Group::OnlyRootAndUser
+            }
+        }
+        for rename in [false, true] {
+            let base = scratch(&format!("judge-race-{rename}"));
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let parent = base.join("parent");
+            let pin = private(&parent.join("run"));
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+            let mut groups = Change {
+                parent: parent.clone(),
+                rename,
+                fired: false,
+            };
+            assert!(open_runtime_root(&pin, sys::current_uid(), &mut groups).is_err());
+            assert!(groups.fired);
+            let last = if rename {
+                parent.with_extension("old").join("run")
+            } else {
+                pin.path.clone()
+            };
+            let md = std::fs::metadata(last).unwrap();
+            assert_eq!((md.dev(), md.ino()), (pin.dev, pin.ino));
+            std::fs::remove_dir_all(base).unwrap();
         }
     }
 

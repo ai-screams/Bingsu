@@ -270,3 +270,79 @@ impl EvidenceExport {
         p.get(start..end)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts() -> Facts {
+        Facts {
+            dev: 1,
+            ino: 2,
+            uid: 501,
+            gid: 20,
+            mode: 0o100600,
+            acl: AclFacts::None,
+            ownership: Some(true),
+        }
+    }
+    fn export(e: Encoder) -> EvidenceExport {
+        let comparison = e.finish().unwrap();
+        let end = comparison.len();
+        EvidenceExport {
+            comparison,
+            context_end: end,
+            catalog_end: end,
+            edges_end: end,
+            observations_end: end,
+            absent_end: end,
+            held_end: end,
+            listing_end: end,
+        }
+    }
+    fn rejects_reuse(before: Encoder, after: Encoder) {
+        let before = export(before);
+        let after = export(after);
+        let report = ConfigReport {
+            files: vec![],
+            order: vec![],
+            diagnostics: vec![],
+            widths: vec![],
+            snapshot: None,
+        };
+        let metadata = before.metadata(&report).unwrap();
+        assert!(before.matches(&metadata));
+        assert_ne!(before.comparison, after.comparison);
+        assert!(!after.matches(&metadata));
+    }
+
+    // 이것을 실패시키는 것: facts 직렬화에서 inode만 누락해 같은 증거로 재사용하는 것.
+    #[test]
+    fn inode_alone_changes_facts_evidence_and_prevents_reuse() {
+        let mut before = Encoder::new();
+        before.facts(facts());
+        let mut after = Encoder::new();
+        after.facts(Facts { ino: 3, ..facts() });
+        rejects_reuse(before, after);
+    }
+
+    // 이것을 실패시키는 것: stamp 직렬화에서 inode만 누락해 같은 증거로 재사용하는 것.
+    #[test]
+    fn inode_alone_changes_stamp_evidence_and_prevents_reuse() {
+        let stamp = Stamp {
+            dev: 1,
+            ino: 2,
+            uid: 501,
+            gid: 20,
+            mode: 0o100600,
+            size: 7,
+            ctime: (8, 9),
+            mtime: (10, 11),
+        };
+        let mut before = Encoder::new();
+        before.stamp(&stamp);
+        let mut after = Encoder::new();
+        after.stamp(&Stamp { ino: 3, ..stamp });
+        rejects_reuse(before, after);
+    }
+}

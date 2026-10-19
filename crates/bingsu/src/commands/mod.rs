@@ -5,6 +5,8 @@ use crate::prompt::NonPromptArgs;
 use std::process::ExitCode;
 
 #[cfg(unix)]
+mod build_identity;
+#[cfg(unix)]
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "N2 connects the store and clock")
@@ -69,11 +71,11 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("__collect-v1") if a.args.len() == 1 => collector::run(),
         #[cfg(unix)]
-        Some("config") => config::run(&a.args[1..]),
+        Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
-        Some("reload") => reload::run(&a.args[1..]),
+        Some("reload") => reload::run(&a.argv0, &a.args[1..]),
         #[cfg(feature = "bench-stubs")]
         Some("__collect-stub") => {
             ExitCode::from(u8::try_from(bingsu_collect::stub_main(&a.args[1..])).unwrap_or(1))
