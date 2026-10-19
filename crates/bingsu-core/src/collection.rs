@@ -1,8 +1,13 @@
+//! Legacy helper request and bounded collector protocol.
 //! Bounded, read-only fixed collector request. Never a configured command.
 use crate::{
     snapshot::{self, Clock, Identity},
     snapshot_codec::Error,
 };
+pub mod cwd_hash;
+pub mod response;
+pub mod wire;
+
 use alloc::{string::String, vec::Vec};
 pub const REQUEST_MAX: usize = 108 + 3 * crate::layout::PATH_BYTES_MAX;
 #[derive(Clone, Debug, PartialEq, Eq)]

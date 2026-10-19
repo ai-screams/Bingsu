@@ -90,3 +90,8 @@ test = false
 name = "snapshot"
 harness = false
 test = false
+
+[[bench]]
+name = "collection"
+harness = false
+test = false

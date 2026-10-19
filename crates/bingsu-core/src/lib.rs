@@ -11,6 +11,7 @@ extern crate alloc;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod bands;
+/// Bounded collector exchange and completed response codecs.
 pub mod collection;
 pub mod color;
 pub mod config;
