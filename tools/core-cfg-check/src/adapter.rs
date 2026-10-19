@@ -291,6 +291,38 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
         syn::Item::Fn(f) if f.sig.ident == "run_prompt" => Some(f),
         _ => None,
     })?;
+    // The incoming Option is refined once by the first statement. Count all
+    // body patterns (including closures, loops and match arms), not just lets.
+    let syn::Stmt::Local(deadline) = f.block.stmts.first()? else {
+        return None;
+    };
+    let pinned: syn::Stmt = syn::parse_str("let Some(deadline) = deadline else { exit(0) };")
+        .expect("pinned deadline refinement");
+    if syn::Stmt::Local(deadline.clone()) != pinned {
+        return None;
+    }
+    struct Bindings {
+        raw: usize,
+        deadline: usize,
+    }
+    impl<'ast> Visit<'ast> for Bindings {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            match p.ident.unraw().to_string().as_str() {
+                "raw" => self.raw += 1,
+                "deadline" => self.deadline += 1,
+                _ => {}
+            }
+            syn::visit::visit_pat_ident(self, p);
+        }
+    }
+    let mut bindings = Bindings {
+        raw: 0,
+        deadline: 0,
+    };
+    bindings.visit_block(&f.block);
+    if bindings.raw != 1 || bindings.deadline != 1 {
+        return None;
+    }
     struct Calls(usize);
     impl<'ast> Visit<'ast> for Calls {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {

@@ -277,6 +277,8 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
 }
 
 /// Names whose call or path exposes an address or leaks an allocation.
+// Known: revisit element_offset when the MSRV reaches 1.94; it reopens
+// allocation identity without an explicit pointer type.
 const ADDRESS_APIS: [&str; 16] = [
     "ptr_eq",
     "into_raw",
@@ -329,6 +331,9 @@ fn macro_addresses(stream: TokenStream, fns: &[String], out: &mut Vec<Finding>) 
             TokenTree::Punct(p) if p.as_char() == '*' => (is_ident(tokens.get(i + 1), "const")
                 || is_ident(tokens.get(i + 1), "mut"))
             .then(|| "raw pointer type exposes an address".to_owned()),
+            TokenTree::Punct(p) if p.as_char() == '&' => (is_ident(tokens.get(i + 1), "raw")
+                && (is_ident(tokens.get(i + 2), "const") || is_ident(tokens.get(i + 2), "mut")))
+            .then(|| "raw borrow exposes an address or pointer identity".to_owned()),
             TokenTree::Punct(_) => None,
             TokenTree::Ident(ident) => {
                 let name = unraw(ident);
@@ -416,6 +421,8 @@ fn formats_type(text: &str, wanted: fn(&str) -> bool) -> bool {
 }
 
 /// Length of the identifier that starts at `at` (0 if none).
+// Known: unicode-ident uses Unicode 18.0, while rustc uses 17.0; this
+// conservative format-argument scan can recognize more identifiers.
 fn ident_len(s: &[char], at: usize) -> usize {
     match s.get(at) {
         Some(c) if unicode_ident::is_xid_start(*c) || *c == '_' => {
@@ -589,6 +596,13 @@ impl<'ast> Visit<'ast> for Addresses<'_> {
             reason: "raw pointer type exposes an address".to_owned(),
         });
         syn::visit::visit_type_ptr(self, t);
+    }
+    fn visit_expr_raw_addr(&mut self, r: &'ast syn::ExprRawAddr) {
+        self.out.push(Finding {
+            line: line_of(r.and_token.span),
+            reason: "raw borrow exposes an address or pointer identity".to_owned(),
+        });
+        syn::visit::visit_expr_raw_addr(self, r);
     }
     fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
         let name = unraw(&m.method);
@@ -834,7 +848,14 @@ fn check_crate_root(attrs: &[syn::Attribute], out: &mut Vec<Finding>) {
     }
 }
 
-fn check(source: &str, library: bool, crate_root: bool, addresses: bool) -> Vec<Finding> {
+fn check(
+    source: &str,
+    library: bool,
+    crate_root: bool,
+    addresses: bool,
+    path: &str,
+    data: &function_items::Data,
+) -> Vec<Finding> {
     let mut out = Vec::new();
     // syn::parse_file and the proc-macro2 lexer each drop a leading BOM on
     // their own; remove it here too, so the shebang policy sees the first
@@ -885,7 +906,7 @@ fn check(source: &str, library: bool, crate_root: bool, addresses: bool) -> Vec<
             out: &mut out,
         }
         .visit_file(&file);
-        function_items::check(&file, &tests, &mut out);
+        function_items::check(&file, path, data, &tests, &mut out);
         scan_debug_and_hash(stream.clone(), &tests, false, &mut out);
         let mut env_count = 0;
         scan_format_sources(stream.clone(), &mut env_count, &mut out);
@@ -1283,6 +1304,7 @@ fn main() -> ExitCode {
     }
     let mut failed = false;
     let mut sources = Vec::new();
+    let data = function_items::Data::from_paths(&library);
     let files = library
         .iter()
         .map(|p| (p, Kind::Library))
@@ -1307,6 +1329,8 @@ fn main() -> ExitCode {
                 kind == Kind::Library,
                 crate_root,
                 kind != Kind::Tcb,
+                path,
+                &data,
             )
         };
         sources.push((path.clone(), source));
@@ -1343,17 +1367,44 @@ enum Kind {
 /// CLI's forbidden call names and syntax that could conceal/generate them.
 /// This adds a scan; it does not replace --binary, clippy forbid or TCB pins.
 fn check_prompt_io(source: &str, names: &[&str]) -> Vec<Finding> {
+    struct Modules<'a>(&'a mut Vec<Finding>);
+    impl<'ast> Visit<'ast> for Modules<'_> {
+        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+            if module.content.is_none() {
+                self.0.push(Finding {
+                    line: line_of(module.ident.span()),
+                    reason: "prompt I/O out-of-line module escapes the scanned file".to_owned(),
+                });
+            }
+            syn::visit::visit_item_mod(self, module);
+        }
+    }
     fn scan(stream: TokenStream, names: &[&str], out: &mut Vec<Finding>) {
-        for t in stream {
+        let tokens: Vec<_> = stream.into_iter().collect();
+        for (at, t) in tokens.iter().enumerate() {
+            if is_punct(Some(t), '#') {
+                let next = at
+                    + if is_punct(tokens.get(at + 1), '!') {
+                        2
+                    } else {
+                        1
+                    };
+                if is_path_attr_group(tokens.get(next)) {
+                    out.push(Finding {
+                        line: line_of(t.span()),
+                        reason: "prompt I/O #[path] escapes the scanned file".to_owned(),
+                    });
+                }
+            }
             match t {
                 TokenTree::Group(g) => scan(g.stream(), names, out),
                 TokenTree::Ident(n)
-                    if names.contains(&unraw(&n).as_str())
-                        || ["include", "macro_rules", "cfg_attr"].contains(&unraw(&n).as_str()) =>
+                    if names.contains(&unraw(n).as_str())
+                        || ["include", "macro_rules", "cfg_attr"].contains(&unraw(n).as_str()) =>
                 {
                     out.push(Finding {
                         line: line_of(n.span()),
-                        reason: format!("prompt I/O forbidden token {}", unraw(&n)),
+                        reason: format!("prompt I/O forbidden token {}", unraw(n)),
                     });
                 }
                 _ => {}
@@ -1362,14 +1413,16 @@ fn check_prompt_io(source: &str, names: &[&str]) -> Vec<Finding> {
     }
     let mut out = Vec::new();
     // Parse and lex the same source. A shebang is never valid in this TCB file.
-    if (source.starts_with("#!") && !source.starts_with("#![")) || syn::parse_file(source).is_err()
-    {
+    let parsed = syn::parse_file(source);
+    if (source.starts_with("#!") && !source.starts_with("#![")) || parsed.is_err() {
         out.push(Finding {
             line: 1,
             reason: "prompt I/O unparsable or shebang".to_owned(),
         });
         return out;
     }
+    // Inline linux/tests modules remain in this token stream, even behind cfg.
+    Modules(&mut out).visit_file(&parsed.expect("parsed prompt I/O"));
     match TokenStream::from_str(source) {
         Ok(stream) => scan(stream, names, &mut out),
         Err(e) => out.push(Finding {

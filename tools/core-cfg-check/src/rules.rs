@@ -1,8 +1,8 @@
-//! Compare the actual RULES initializer, never tuples in comments or decoys.
+//! Pin the RULES initializer and its consumer; no second syscall table.
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use crate::{Finding, line_of};
+use crate::{Finding, TestSpans, is_ident, is_punct, line_of, unraw};
 
 pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -44,6 +44,101 @@ pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
         );
         return out;
     };
+    let mut tests = TestSpans(Vec::new());
+    tests.visit_file(&file);
+    // Scan tokens too: macro arguments can contain paths that syn won't visit.
+    fn syscalls(
+        stream: proc_macro2::TokenStream,
+        tests: &TestSpans,
+        initializer: &TestSpans,
+        out: &mut Vec<Finding>,
+    ) {
+        use proc_macro2::TokenTree;
+        fn syscall_tail(token: &TokenTree) -> bool {
+            match token {
+                TokenTree::Ident(n) => unraw(n).starts_with("SYS_"),
+                // A group import still names libc::SYS_* paths.
+                TokenTree::Group(g) if g.delimiter() == proc_macro2::Delimiter::Brace => {
+                    g.stream().into_iter().any(|t| syscall_tail(&t))
+                }
+                _ => false,
+            }
+        }
+        let tokens: Vec<_> = stream.into_iter().collect();
+        for (i, token) in tokens.iter().enumerate() {
+            if tests.contains(token.span()) || initializer.contains(token.span()) {
+                continue;
+            }
+            if let TokenTree::Group(g) = token {
+                syscalls(g.stream(), tests, initializer, out);
+            }
+            if is_ident(Some(token), "libc")
+                && is_punct(tokens.get(i + 1), ':')
+                && is_punct(tokens.get(i + 2), ':')
+                && tokens.get(i + 3).is_some_and(syscall_tail)
+            {
+                out.push(Finding {
+                    line: line_of(token.span()),
+                    reason: "RULES: libc::SYS_* outside RULES initializer".to_owned(),
+                });
+            }
+        }
+    }
+    match source.parse() {
+        Ok(stream) => syscalls(
+            stream,
+            &tests,
+            &TestSpans(vec![(rules.expr.span().start(), rules.expr.span().end())]),
+            &mut out,
+        ),
+        Err(_) => fail(&mut out, file.span(), "unlexable sandbox"),
+    }
+    struct Consumers<'a> {
+        tests: &'a TestSpans,
+        functions: Vec<&'a syn::ItemFn>,
+    }
+    impl<'ast> Visit<'ast> for Consumers<'ast> {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !self.tests.contains(item.span()) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            if f.sig.ident == "rules" {
+                self.functions.push(f);
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+    }
+    let mut consumers = Consumers {
+        tests: &tests,
+        functions: Vec::new(),
+    };
+    consumers.visit_file(&file);
+    let pinned: syn::ItemFn = syn::parse_str(
+        r#"fn rules() -> Vec<(u32, &'static [Cond])> {
+            RULES.iter()
+                .map(|&(_, nr, c)| (u32::try_from(nr).expect("syscall number"), c))
+                .collect()
+        }"#,
+    )
+    .expect("pinned rules function");
+    let consumer = file.items.iter().find_map(|i| match i {
+        syn::Item::Fn(f) if f.sig.ident == "rules" => Some(f),
+        _ => None,
+    });
+    if !consumer.is_some_and(|f| {
+        consumers.functions.len() == 1
+            && f.attrs.iter().all(|a| a.path().is_ident("doc"))
+            && f.sig == pinned.sig
+            && f.block == pinned.block
+    }) {
+        fail(
+            &mut out,
+            file.span(),
+            "rules() must use the pinned RULES.iter().map(...).collect() body",
+        );
+    }
     let syn::Expr::Array(array) = rules.expr.as_ref() else {
         fail(
             &mut out,

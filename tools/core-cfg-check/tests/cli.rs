@@ -1312,7 +1312,12 @@ fn run_rules(source: &str) -> (bool, String) {
 // 이것을 실패시키는 것: 실제 RULES 대신 파일 전체의 tuple/문자열/주석을 비교하는 것.
 #[test]
 fn rules_initializer_ignores_decoys_and_rejects_indirection() {
-    let good = "const RULES: [(&str, i64, &[u8]); 1] = [(\"read\", libc::SYS_read, &[])];";
+    let good = r#"const RULES: [(&str, i64, &[u8]); 1] = [("read", libc::SYS_read, &[])];
+        fn rules() -> Vec<(u32, &'static [Cond])> {
+            RULES.iter()
+                .map(|&(_, nr, c)| (u32::try_from(nr).expect("syscall number"), c))
+                .collect()
+        }"#;
     assert!(run_rules(good).0);
     for bad in [
         "// (\"read\", libc::SYS_read, &[])\nconst RULES: [(); 0] = [];",

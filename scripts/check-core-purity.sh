@@ -110,6 +110,7 @@ python3 scripts/check_core_no_std.py
 # fn main that only dispatches, no code outside main.
 python3 scripts/check_cli_prompt_forbid.py --checker "$checker"
 python3 -B scripts/test_prompt_bootstrap.py
+python3 -B scripts/test_gate_bypass.py
 python3 -B scripts/test_check_core_cfg.py
 python3 -B scripts/test_check_core_purity_env.py
 # clippy on core, in a fresh temporary target directory with its config

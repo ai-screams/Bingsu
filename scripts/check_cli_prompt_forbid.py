@@ -30,8 +30,8 @@ keeps it that small (spec section 4 front end, F-01):
    `[[bin]]` (the bin target itself is pinned by check_core_no_std.py);
 6. the trusted files hash to TCB_SHA256: on macOS and anywhere without
    seccomp the kernel does not hold the adapter to the table, so any change
-   to these files changes a pinned value in the same pull request, where
-   review sees it.
+   to these files changes a pinned value in the same pull request, making
+   the change visible to maintainers.
 The adapter's file also passes core's token rules (check_core_cfg.py), and
 at run time the strace test checks files, threads, processes, network and
 the syscall column of the same table.
@@ -52,6 +52,8 @@ ADAPTER = ROOT / "crates/bingsu/src/prompt.rs"
 SYSCALLS = ROOT / "crates/bingsu/prompt-syscalls.tsv"
 SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
+# K38: copying a new hash can self-approve a change; these pins are a change-detection
+# tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
     "crates/bingsu/src/prompt_read.rs": "7c771115ddbd124e3888a759fe928440d325cafee37ab7ecd62352c449ff7ce5",
     "crates/bingsu/src/prompt_spawn.rs": "d3e49c09bcbd6a1f63011fcc657828109dae8c4f57038f2eda866e18911a2d24",
@@ -107,7 +109,7 @@ def main():
     for rel, want in TCB_SHA256.items():
         got = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
         if got != want:
-            bad.append(f"{rel}: sha256 {got}, pinned {want or '(none)'}; review the change as a security change, then run scripts/pin_tcb.py")
+            bad.append(f"{rel}: sha256 {got}, pinned {want or '(none)'}; assess the security impact of the change, then run scripts/pin_tcb.py")
     if bad:
         print("prompt adapter gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
         return 1
