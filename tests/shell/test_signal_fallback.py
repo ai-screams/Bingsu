@@ -135,7 +135,7 @@ def test_failed_call_fires_no_error_trap(tmp_path, shell, kind):
     assert not any("_bingsu_call" in x for x in lines), lines
 
 
-# 이것을 실패시키는 것: degraded:sandbox 알림을 매 프롬프트 찍는 것, 찍지 않는 것, 다른 상태에서 찍는 것.
+# 이것을 실패시키는 것: degraded:sandbox 알림을 매 프롬프트 찍는 것, 찍지 않는 것.
 @pytest.mark.parametrize("shell", SHELLS)
 def test_sandbox_notice_once(tmp_path, shell):
     inst, s = start(tmp_path, shell, record=minimal_record(status=b"degraded:sandbox"),
@@ -144,6 +144,24 @@ def test_sandbox_notice_once(tmp_path, shell):
         s.run("true")
     text = s.close().decode("utf-8", "replace")
     assert text.count("could not start its system call filter") == 1, text
+
+
+# 이것을 실패시키는 것: sandbox 이외 상태를 sandbox 알림 조건으로 받는 것.
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("status", [
+    b"ok:none", b"error:bad-args", b"error:internal", b"degraded:runtime-root",
+    b"degraded:oversize", b"degraded:trust-unverified", b"degraded:trust-expired",
+    b"degraded:trust-invalid", b"degraded:trust-mismatch", b"degraded:trust-clock",
+    b"error:config-last-good", b"error:config-default", b"notice:future",
+])
+def test_other_statuses_never_report_sandbox(tmp_path, shell, status):
+    inst, s = start(tmp_path, shell, record=minimal_record(status=status),
+                    script=ROOT / "tests/shell/fake_bingsu.sh")
+    for _ in range(2):
+        s.run("true")
+    text = s.close()
+    assert inst.calls(), "the hook must consume the fixture"
+    assert b"could not start its system call filter" not in text, text
 
 
 # zsh with NO_PROMPT_PERCENT draws a constant prompt, but the record is still

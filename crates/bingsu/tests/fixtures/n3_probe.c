@@ -14,7 +14,10 @@ int main(int argc, char **argv) {
     struct rlimit limit;
     if (getrlimit(RLIMIT_NOFILE, &limit)) return 10;
     int count = 0, unexpected = 0;
-    for (unsigned long fd = 0; fd < limit.rlim_cur; fd++) {
+    /* The parent fixture opens fd 1025, then may lower BOTH limits to 32.
+     * Scanning only the inherited limit would miss precisely that leak. */
+    unsigned long scan = limit.rlim_cur < 2048 ? 2048 : limit.rlim_cur;
+    for (unsigned long fd = 0; fd < scan; fd++) {
         if (fcntl((int)fd, F_GETFD) >= 0) {
             count++;
             if (fd >= (collect ? 6 : 3)) unexpected++;

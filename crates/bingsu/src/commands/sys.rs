@@ -611,6 +611,42 @@ fn f_type_is_local(st: &libc::statfs) -> bool {
     bingsu_core::fs_trust::linux_fs_is_local(st.f_type as u64 & 0xffff_ffff)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod linux_boundary_tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: Linux ACL의 확장·없음·조회 실패를 같은 결과로 처리하는 것.
+    #[test]
+    fn posix_acl_errors_do_not_grant_trust() {
+        for (n, errno, want) in [
+            (12, 0, AclFacts::PosixExtended),
+            (0, libc::EIO, AclFacts::None),
+            (-1, libc::ENODATA, AclFacts::None),
+            (-1, libc::ENOTSUP, AclFacts::None),
+            (-1, libc::EACCES, AclFacts::Unknown),
+            (-1, libc::EIO, AclFacts::Unknown),
+        ] {
+            // SAFETY: libc's errno slot is local to this test thread.
+            unsafe { *errno_location() = errno };
+            assert_eq!(posix_acl_answer(n), want, "n={n} errno={errno}");
+        }
+    }
+
+    // 이것을 실패시키는 것: Linux f_type 마스크·로컬 판정 또는 실패 fd의 None을 없애는 것.
+    #[test]
+    fn linux_filesystem_identity_and_errors() {
+        // SAFETY: initialized value used only as an input to the pure classifier.
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        for (magic, want) in [(0xef53u64, true), (0x6969, false), (0xdead, false)] {
+            st.f_type = magic as _;
+            assert_eq!(f_type_is_local(&st), want);
+            st.f_type = (magic | (1u64 << 32)) as _;
+            assert_eq!(f_type_is_local(&st), want);
+        }
+        assert_eq!(fd_is_local(-1), None);
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;

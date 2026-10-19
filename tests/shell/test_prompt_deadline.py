@@ -160,3 +160,15 @@ def test_setup_failure_clock_failure_and_expiry_emit_nothing(interposer, mode):
     result = subprocess.run([str(real_bin()), *ARGV], capture_output=True,
                             env=injected(interposer, mode), timeout=1)
     assert result.returncode == 0 and result.stdout == b"" and result.stderr == b""
+
+
+# 이것을 실패시키는 것: SIGPIPE 설치 뒤에 SIGALRM 처리기를 설치해 상속 타이머가 프로세스를 죽이는 것.
+# The loader/argv/pre-entry window remains outside this controlled reproduction.
+def test_direct_exec_timer_during_pipe_setup_exits_silently(interposer, tmp_path):
+    launcher = tmp_path / "exec-timer"
+    subprocess.run(["cc", "-O2", "-Wall", "-Werror",
+                    str(ROOT / "tests/shell/fixtures/exec_timer.c"), "-o", str(launcher)], check=True)
+    result = subprocess.run([str(launcher), str(real_bin()), *ARGV], capture_output=True,
+                            env=injected(interposer, 10), timeout=2)
+    assert result.returncode == 0 and result.stdout == b"", result
+    assert result.stderr == b"K87 inherited timer at PIPE setup\n", result

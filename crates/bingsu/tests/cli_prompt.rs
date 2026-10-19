@@ -357,10 +357,11 @@ fn output_does_not_depend_on_the_environment() {
         ("COLUMNS", "3"),
         ("NO_COLOR", "1"),
     ];
-    let cases: [&[&str]; 3] = [
+    let cases: [&[&str]; 4] = [
         &[],
         &["--shell", "zsh", "--pwd", "/srv/p", "--status", "1"],
-        &["--shell", "bash", "--width", "9"],
+        &["--shell", "bash", "--pwd", "/srv/p"],
+        &["--shell", "fish", "--pwd", "/srv/p"],
     ];
     for extra in cases {
         let args = with(extra);
@@ -376,6 +377,14 @@ fn output_does_not_depend_on_the_environment() {
         let dirty = run(&hostile);
         assert_eq!(clean.status.code(), Some(0));
         assert!(!clean.stdout.is_empty(), "{extra:?}");
+        // 이것을 실패시키는 것: 중복 width로 bad-args를 비교하거나 셸 렌더를 건너뛰는 것.
+        assert!(
+            !clean.stdout.windows(14).any(|w| w == b"error:bad-args\x1e"),
+            "{extra:?}"
+        );
+        if !extra.is_empty() {
+            assert!(clean.stdout.windows(5).any(|w| w == b"/srv/"), "{extra:?}");
+        }
         assert_eq!(clean.stdout, dirty.stdout, "{extra:?}");
         assert_eq!(
             (clean.stderr.len(), dirty.stderr.len()),

@@ -742,6 +742,34 @@ def test_namespace_readlink_needs_allowance(monkeypatch, pid):
         assert_prompt_trace_budget(valid_trace(), EXE, ROOTS)
 
 
+# 이것을 실패시키는 것: proc/self의 상대 경로·11-byte 상한·보유 procfs fd·필터 전 경계를 없애는 것.
+@pytest.mark.parametrize("change", ["valid", "path", "absolute", "size", "unobserved", "closed", "after"])
+def test_proc_self_link_is_bounded_and_held(change):
+    lines = valid_trace()
+    at = next(i for i, line in enumerate(lines) if line.startswith('10 openat(21'))
+    probe = '10 readlinkat(21</proc>, "self", "10", 11) = 2'
+    facts = '10 fstatfs(21</proc>, {f_type=PROC_SUPER_MAGIC}) = 0'
+    if change == "path":
+        probe = probe.replace('"self"', '"thread-self"')
+    if change == "absolute":
+        probe = probe.replace('"self"', '"/proc/self"')
+    if change == "size":
+        probe = probe.replace(', 11)', ', 12)')
+    (parsed,) = budget.parse_trace(probe)
+    assert budget.proc_self_readlink(parsed, budget.call_paths(parsed)[0]) == (
+        change not in {"path", "absolute", "size"})
+    lines[at:at] = ([] if change == "unobserved" else [facts]) + (
+        ['10 close(21</proc>) = 0'] if change == "closed" else []) + (
+        [] if change == "after" else [probe])
+    if change == "after":
+        lines.append(probe)
+    if change == "valid":
+        assert_prompt_trace_budget(lines, EXE, ROOTS)
+    else:
+        with pytest.raises(AssertionError):
+            assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
 @pytest.mark.parametrize("call", [
     'newfstatat(23</proc/10/ns>, "time", {}, 28)',
     'readlinkat(23</proc/10/ns>, "/proc/10/ns/time", "time:[123]", 28)',

@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(md.uid(), 0);
         assert_ne!(crate::commands::sys::current_uid(), 0);
         let base = link.join(format!("bingsu-root-ancestor-{}", std::process::id()));
-        std::fs::create_dir_all(base.join("config/bingsu")).unwrap();
+        private_dirs(base.join("config/bingsu")).unwrap();
         let pw = crate::commands::sys::passwd_entry(crate::commands::sys::current_uid()).unwrap();
         let e = TrustedEnv {
             xdg_config_home: Some(base.join("config").into_os_string()),
@@ -429,7 +429,7 @@ mod tests {
         let pin = ConfigRootPin::check(&written, me, &mut groups).unwrap();
         assert_eq!(pin.path, written);
         assert_eq!(pin.evidence.canonical, base);
-        std::fs::create_dir_all(&written).unwrap();
+        private_dirs(&written).unwrap();
         assert!(ConfigRootPin::reopen(&pin.written, &pin.path, false, me, &mut groups).is_ok());
         std::fs::remove_dir(&written).unwrap();
         std::os::unix::fs::symlink(base.join("absent"), &written).unwrap();
@@ -479,7 +479,7 @@ mod tests {
     fn undecided_root_is_kept_shape_only_and_others_are_dropped() {
         let base = std::fs::canonicalize(scratch("shape-only-root")).unwrap();
         let root = base.join("cfg/bingsu");
-        std::fs::create_dir_all(&root).unwrap();
+        private_dirs(&root).unwrap();
         let me = sys::current_uid();
         mode(&root, 0o775);
         let pin = ConfigRootPin::check(&root, me, &mut unknown_at(&[&root])).unwrap();
@@ -506,7 +506,7 @@ mod tests {
         let base = std::fs::canonicalize(scratch("shape-only-mask")).unwrap();
         let home = base.join("cfg");
         let root = home.join("bingsu");
-        std::fs::create_dir_all(&root).unwrap();
+        private_dirs(&root).unwrap();
         let me = sys::current_uid();
         mode(&home, 0o775);
         mode(&root, 0o755);
@@ -535,7 +535,7 @@ mod tests {
     fn reopen_mark_only_lowers_trust() {
         let base = std::fs::canonicalize(scratch("shape-only-reopen")).unwrap();
         let root = base.join("bingsu");
-        std::fs::create_dir_all(&root).unwrap();
+        private_dirs(&root).unwrap();
         let me = sys::current_uid();
         mode(&root, 0o755);
         let marked = ConfigRootPin::reopen(&root, &root, true, me, &mut unknown_at(&[])).unwrap();
@@ -637,7 +637,7 @@ mod tests {
 
         let base = std::fs::canonicalize(scratch("shape-only-notice")).unwrap();
         let root = base.join("bingsu");
-        std::fs::create_dir_all(&root).unwrap();
+        private_dirs(&root).unwrap();
         let me = sys::current_uid();
         mode(&root, 0o775);
         let pin = ConfigRootPin::check(&root, me, &mut unknown_at(&[&root])).unwrap();
@@ -664,7 +664,7 @@ mod tests {
     fn canonical_lenient_resolves_existing_part_only() {
         let base = std::env::temp_dir().join(format!("bingsu-lenient-{}", std::process::id()));
         let real = base.join("real");
-        std::fs::create_dir_all(&real).unwrap();
+        private_dirs(&real).unwrap();
         let link = base.join("link");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -686,8 +686,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("bingsu-logroot-{}", std::process::id()));
         let elsewhere = base.join("elsewhere");
         let state = base.join("state").join("bingsu");
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::fs::create_dir_all(&state).unwrap();
+        private_dirs(&elsewhere).unwrap();
+        private_dirs(&state).unwrap();
         std::os::unix::fs::symlink(&elsewhere, state.join("log")).unwrap();
         let e = TrustedEnv {
             xdg_state_home: Some(base.join("state").into_os_string()),
@@ -699,10 +699,19 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    // 이것을 실패시키는 것: 시험 폴더를 기본 mode로 만들어 umask 002에서 그룹 쓰기 조상을 남기는 것.
+    fn private_dirs(path: impl AsRef<Path>) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("bingsu-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        private_dirs(&d).unwrap();
         d
     }
 
@@ -713,7 +722,7 @@ mod tests {
     #[test]
     fn canonical_lenient_refuses_dotdot_after_missing_names() {
         let base = scratch("lenient-dotdot");
-        std::fs::create_dir_all(base.join("deep/a/b")).unwrap();
+        private_dirs(base.join("deep/a/b")).unwrap();
         std::os::unix::fs::symlink(base.join("deep/a/b"), base.join("lnk")).unwrap();
         let canon = std::fs::canonicalize(&base).unwrap();
         assert_eq!(canonical_lenient(&base.join("missing/../lnk/../x")), None);
@@ -736,7 +745,7 @@ mod tests {
         let base = scratch("pin");
         let me = sys::current_uid();
         let loose = base.join("loose");
-        std::fs::create_dir_all(&loose).unwrap();
+        private_dirs(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
         let got = pin_for(&loose, me, &mut RefuseGroupWrite).unwrap();
         assert_eq!(std::fs::metadata(&got.path).unwrap().mode() & 0o7777, 0o700);
@@ -782,7 +791,7 @@ mod tests {
     #[test]
     fn canonical_walk_refuses_symlinked_component() {
         let base = std::fs::canonicalize(scratch("walk")).unwrap();
-        std::fs::create_dir_all(base.join("real_a/b")).unwrap();
+        private_dirs(base.join("real_a/b")).unwrap();
         std::os::unix::fs::symlink(base.join("real_a"), base.join("a")).unwrap();
         assert!(runtime_root::open_chain(&base.join("real_a/b")).is_ok());
         assert!(runtime_root::open_chain(&base.join("a/b")).is_err());
@@ -845,7 +854,7 @@ mod tests {
         let base = scratch("search-only");
         let me = sys::current_uid();
         let lk = base.join("lk");
-        std::fs::create_dir_all(lk.join("run")).unwrap();
+        private_dirs(lk.join("run")).unwrap();
         std::fs::set_permissions(lk.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::set_permissions(&lk, std::fs::Permissions::from_mode(0o111)).unwrap();
         let got = pin_for(&lk.join("run"), me, &mut RefuseGroupWrite);
@@ -864,7 +873,7 @@ mod tests {
         let base = scratch("gw-ancestor");
         let me = sys::current_uid();
         let gw = base.join("gw");
-        std::fs::create_dir_all(&gw).unwrap();
+        private_dirs(&gw).unwrap();
         std::fs::set_permissions(&gw, std::fs::Permissions::from_mode(0o775)).unwrap();
         let got = pin_for(
             &gw.join("bingsu"),
