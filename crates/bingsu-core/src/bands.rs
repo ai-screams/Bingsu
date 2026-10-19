@@ -47,7 +47,13 @@ pub enum BandError {
 }
 
 /// Must `a` be tried before `b`? None when they never compete (disjoint).
-pub(crate) fn before(bands: &[Band], a: usize, b: usize) -> Result<Option<bool>, BandError> {
+pub(crate) fn before(
+    bands: &[Band],
+    a: usize,
+    b: usize,
+    compare: &mut impl FnMut(),
+) -> Result<Option<bool>, BandError> {
+    compare();
     let (x, y) = (&bands[a], &bands[b]);
     if x.hi() < y.lo() || y.hi() < x.lo() {
         return Ok(None);
@@ -75,9 +81,11 @@ pub fn order_bands(bands: &[Band]) -> Result<Vec<usize>, BandError> {
     order_bands_impl(bands, &mut || {})
 }
 
-/// The same ordering path with a deterministic count of band visits and relation
-/// checks. Useful for work-budget regression tests; the ordinary entry point
-/// monomorphizes the observer away. This counts work, never elapsed time.
+/// The same ordering path with a deterministic count of pairwise relation
+/// comparisons (calls to `before`) in the mixed-order graph path. The
+/// containment-forest fast path does not use pairwise relations. The ordinary
+/// entry point monomorphizes the observer away: no branch or allocation.
+/// This counts comparisons, never elapsed time.
 #[doc(hidden)]
 pub fn order_bands_work(bands: &[Band]) -> (Result<Vec<usize>, BandError>, usize) {
     let mut work = 0;
@@ -85,35 +93,26 @@ pub fn order_bands_work(bands: &[Band]) -> (Result<Vec<usize>, BandError>, usize
     (result, work)
 }
 
-fn order_bands_impl(bands: &[Band], visit: &mut impl FnMut()) -> Result<Vec<usize>, BandError> {
+fn order_bands_impl(bands: &[Band], compare: &mut impl FnMut()) -> Result<Vec<usize>, BandError> {
     let n = bands.len();
     if n > MAX_BANDS {
         return Err(BandError::TooMany);
     }
     for (i, b) in bands.iter().enumerate() {
-        visit();
         if b.lo() > b.hi() {
             return Err(BandError::Empty(i));
         }
     }
-    if bands.iter().all(|b| {
-        visit();
-        b.order.is_none()
-    }) {
+    if bands.iter().all(|b| b.order.is_none()) {
         // Unordered ranges must form a containment forest. Sorting parents
         // before children lets a stack validate it and emit children first:
         // O(n log n) time, O(n) space even for deeply nested width bands.
         let mut sorted: Vec<_> = (0..n).collect();
-        sorted.sort_unstable_by_key(|&i| {
-            visit();
-            (bands[i].lo(), Reverse(bands[i].hi()), i)
-        });
+        sorted.sort_unstable_by_key(|&i| (bands[i].lo(), Reverse(bands[i].hi()), i));
         let mut stack: Vec<usize> = Vec::new();
         let mut out = Vec::with_capacity(n);
         for i in sorted {
-            visit();
             while let Some(&parent) = stack.last() {
-                visit();
                 if bands[parent].hi() < bands[i].lo() {
                     out.push(stack.pop().unwrap());
                 } else {
@@ -138,8 +137,7 @@ fn order_bands_impl(bands: &[Band], visit: &mut impl FnMut()) -> Result<Vec<usiz
     let mut preds = alloc::vec![0usize; n];
     for a in 0..n {
         for b in a + 1..n {
-            visit();
-            match before(bands, a, b)? {
+            match before(bands, a, b, compare)? {
                 Some(true) => preds[b] += 1,
                 Some(false) => preds[a] += 1,
                 None => {}
@@ -154,8 +152,7 @@ fn order_bands_impl(bands: &[Band], visit: &mut impl FnMut()) -> Result<Vec<usiz
         placed[next] = true;
         out.push(next);
         for b in 0..n {
-            visit();
-            if !placed[b] && before(bands, next, b)? == Some(true) {
+            if !placed[b] && before(bands, next, b, compare)? == Some(true) {
                 preds[b] -= 1;
                 if preds[b] == 0 {
                     ready.insert(key(b));
@@ -282,7 +279,7 @@ mod tests {
             let mut edges = Vec::new();
             for a in 0..bands.len() {
                 for b in a + 1..bands.len() {
-                    match before(bands, a, b)? {
+                    match before(bands, a, b, &mut || {})? {
                         Some(true) => edges.push((a, b)),
                         Some(false) => edges.push((b, a)),
                         None => {}

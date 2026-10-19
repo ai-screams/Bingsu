@@ -9,6 +9,13 @@ use bingsu_core::config::source::{
 use bingsu_core::diag::{Place, SourceId};
 use bingsu_core::diag_codes as codes;
 
+#[path = "support/allocation.rs"]
+mod allocation;
+use allocation::{Counting, counted};
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
 struct NoFiles;
 impl Resolver for NoFiles {
     fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
@@ -61,25 +68,34 @@ fn isolated(r: &ConfigReport) {
     );
 }
 
-// 이것을 실패시키는 것: 236 KB의 모양 전용 입력이 전체 간선 저장·반복 순회에 들어가는 것.
+// 이것을 실패시키는 것: 236 KB 입력의 실제 read/report가 제한 검사 전에 구간 그래프를 만드는 것.
 #[test]
 fn reviewers_7000_bands_do_no_graph_work() {
     let source = nested(7000);
     assert_eq!(source.len(), 235_990);
-    let bands = vec![
-        Band {
-            min_cols: None,
-            max_cols: Some(100),
-            order: None
+    for trust in [Trust::ShapeOnly, Trust::Executable] {
+        let mut r = None;
+        // Measure the shipped read/report path, including parsing, compilation,
+        // shape-only retry and the width-table fallback after a trusted error.
+        // The counter lives in this test binary, outside the pure core.
+        let counts = counted(|| r = Some(read("", &source, trust)));
+        // Baseline allocations: ShapeOnly 136,682; Executable 184,642.
+        // Less than 3% headroom: constructing/cloning 7,001 band nodes before
+        // rejecting them exceeds this budget, even if diagnostics stay equal.
+        let budget = if trust == Trust::ShapeOnly {
+            140_000
+        } else {
+            190_000
         };
-        7000
-    ];
-    let (result, work) = order_bands_work(&bands);
-    assert_eq!(result, Err(bingsu_core::bands::BandError::TooMany));
-    assert_eq!(work, 0, "over-cap input reached graph work");
-    let r = read("", &source, Trust::ShapeOnly);
-    isolated(&r);
-    assert_eq!(r.snapshot, read("", "", Trust::Executable).snapshot);
+        assert!(counts.0 <= budget, "{trust:?}: read allocations {counts:?}");
+        let r = r.unwrap();
+        if trust == Trust::ShapeOnly {
+            isolated(&r);
+            assert_eq!(r.snapshot, read("", "", Trust::Executable).snapshot);
+        } else {
+            assert!(r.snapshot.is_none());
+        }
+    }
 }
 
 // 이것을 실패시키는 것: 현실적인 수천 구간을 거부하거나 한도 초과를 신뢰 파일에 잘못 붙이는 것.
@@ -137,10 +153,27 @@ fn ordered_bands_at_the_limit_have_quadratic_work() {
         .collect();
     let (order, work) = order_bands_work(&bands);
     assert_eq!(order.unwrap(), (0..MAX_BANDS).collect::<Vec<_>>());
-    // One input pass, one order probe, each initial pair once, then one
-    // outgoing scan per chosen band. A whole-graph rescan per band is cubic.
+    // Each initial pair once, then each chosen band against unplaced bands.
+    // Count inside `before`, so recomputing predecessors cannot hide work.
     let n = MAX_BANDS;
-    assert_eq!(work, n + 1 + n * (n - 1) / 2 + n * n);
+    assert_eq!(work, n * (n - 1));
+}
+
+// 이것을 실패시키는 것: visit 추가 없이 매 구간의 선행자를 전체 구간에서 다시 계산하는 것.
+// Small enough that the cubic mutation finishes and fails the comparison budget.
+#[test]
+fn predecessor_rescans_cannot_hide_relation_comparisons() {
+    let n = 64;
+    let bands: Vec<_> = (0..n)
+        .map(|i| Band {
+            min_cols: None,
+            max_cols: Some(i as u16 + 100),
+            order: Some(i as i32),
+        })
+        .collect();
+    let (order, comparisons) = order_bands_work(&bands);
+    assert_eq!(order.unwrap(), (0..n).collect::<Vec<_>>());
+    assert_eq!(comparisons, n * (n - 1));
 }
 
 fn wide_line() -> String {
