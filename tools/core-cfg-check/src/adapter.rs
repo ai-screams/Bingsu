@@ -301,6 +301,18 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     if syn::Stmt::Local(deadline.clone()) != pinned {
         return None;
     }
+    // The TCB hash pin remains the last line for shapes these AST pins do not cover.
+    let raw = f.block.stmts.iter().find(|s| {
+        matches!(s, syn::Stmt::Local(l)
+            if matches!(&l.pat, syn::Pat::Type(t)
+                if matches!(t.pat.as_ref(), syn::Pat::Ident(p) if p.ident == "raw")))
+    })?;
+    let pinned: syn::Stmt =
+        syn::parse_str("let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();")
+            .expect("pinned raw initializer");
+    if *raw != pinned {
+        return None;
+    }
     struct Bindings {
         raw: usize,
         deadline: usize,

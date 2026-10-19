@@ -52,7 +52,11 @@ fn accepts(source: &str, mode: &[&str]) {
 
 // Extract whole top-level items so another rejected construct in zz.rs cannot mask a bypass.
 fn probe_items(names: &[&str]) -> String {
-    let source = fixture("wt/crates/bingsu-core/src/zz.rs");
+    fixture_items("wt/crates/bingsu-core/src/zz.rs", names)
+}
+
+fn fixture_items(name: &str, names: &[&str]) -> String {
+    let source = fixture(name);
     let file = syn::parse_file(&source).unwrap();
     file.items
         .iter()
@@ -73,6 +77,49 @@ fn probe_items(names: &[&str]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// 이것을 실패시키는 것: enter 본문·DENY 초기식 고정이나 libc 별칭 금지를 제거하는 것.
+#[test]
+fn bypass_k24_entry_and_deny_are_pinned() {
+    let mode = ["--rules", "crates/bingsu/prompt-syscalls.tsv"];
+    for name in ["k24/literal.rs", "k24/alias.rs", "k24/miss_allow.rs"] {
+        rejects(&fixture(name), &mode, "enter() must");
+    }
+    rejects(&fixture("k24/alias.rs"), &mode, "renamed libc import");
+    let good = std::fs::read_to_string(root().join("crates/bingsu/src/sandbox.rs")).unwrap();
+    for source in [
+        good.replace("pub fn enter()", "pub fn other()"),
+        good.replace("pub fn enter()", "#[cfg(any())] pub fn enter()"),
+        format!("{good}\nmod nested {{ fn enter() {{}} }}"),
+        good.replace("install(&prog)", "Sandbox::Installed"),
+    ] {
+        rejects(&source, &mode, "enter() must");
+    }
+    for source in [
+        good.replace(
+            "libc::SECCOMP_RET_ERRNO | libc::EPERM as u32",
+            "libc::SECCOMP_RET_ALLOW",
+        ),
+        good.replace("const DENY:", "const OTHER:"),
+        good.replace("const DENY:", "#[cfg(any())] const DENY:"),
+        format!("{good}\nmod nested {{ const DENY: u32 = 0; }}"),
+    ] {
+        rejects(&source, &mode, "DENY must");
+    }
+    // A renamed import must fail even when enter and DENY remain intact.
+    for import in [
+        "use libc as l;",
+        "use ::r#libc as l;",
+        "use {libc as l};",
+        "use libc::{self as l};",
+        "use libc::SECCOMP_RET_ALLOW as ALLOW;",
+        "extern crate libc as l;",
+        "fn hidden() { use libc as l; }",
+        "#[cfg(test)] mod extra { use libc as l; }",
+    ] {
+        rejects(&format!("{good}\n{import}"), &mode, "renamed libc import");
+    }
 }
 
 // 이것을 실패시키는 것: RULES 밖 syscall 경로 검사와 소비 함수 본문 고정을 제거하는 것.
@@ -201,6 +248,32 @@ fn bypass_k03_closure_merges() {
     accepts("fn f() { let _ = [consume(|| 1), consume(|| 2)]; }", &[]);
 }
 
+// 이것을 실패시키는 것: 필드로 저장한 클로저의 병합을 허용하는 것.
+#[test]
+fn bypass_k03_closure_fields() {
+    let fixture = "wt/crates/bingsu-core/src/zz2.rs";
+    let reason = "closure stored in a tuple or struct field";
+    for name in ["k03_tuple_field", "k03_array_fields", "k03_struct_field"] {
+        rejects(&fixture_items(fixture, &["lt", "P", name]), &[], reason);
+    }
+    for body in [
+        "let _ = ((|x: u8| x),);",
+        "let _ = ({ |x: u8| x },);",
+        "let _ = ((|x: u8| x,),);",
+        "let _ = S { field: (|x: u8| x) };",
+        "let _ = S { field: { |x: u8| x } };",
+        "let f = |x: u8| x; let _ = (f,);",
+        "let field = |x: u8| x; let _ = S { field };",
+        "m!((|x: u8| x,));",
+        "m!(S { field: |x: u8| x });",
+    ] {
+        rejects(&format!("fn f() {{ {body} }}"), &[], reason);
+        accepts(&format!("#[cfg(test)] fn f() {{ {body} }}"), &[]);
+    }
+    accepts("fn f() { let _ = (consume(|| 1), 2); }", &[]);
+    accepts("fn f() { let _ = S { field: consume(|| 1) }; }", &[]);
+}
+
 // 이것을 실패시키는 것: tuple struct 또는 대문자 import를 값으로 간주하는 것.
 #[test]
 fn bypass_k03_constructors_and_uppercase_import() {
@@ -282,6 +355,29 @@ fn bypass_k83_shadow_bindings() {
         let bad = good.replace("let rec =", &format!("{shadow} let rec ="));
         assert!(!check(&bad, &mode).0, "{shadow}");
     }
+}
+
+// 이것을 실패시키는 것: raw 바인딩 개수만 검사하고 초기식은 허용하는 것.
+#[test]
+fn bypass_k83_raw_initializer_is_pinned() {
+    let mode = ["--adapter", "crates/bingsu/prompt-syscalls.tsv"];
+    let reason = "another module of the binary";
+    rejects(&fixture("k83/init.rs"), &mode, reason);
+    let good = std::fs::read_to_string(root().join("crates/bingsu/src/prompt.rs")).unwrap();
+    for initializer in [
+        "args[..0].iter().map(|a| a.as_bytes()).collect()",
+        "args.iter().skip(1).map(|a| a.as_bytes()).collect()",
+        "args.iter().map(|a| &a.as_bytes()[..0]).collect()",
+        "Vec::new()",
+    ] {
+        rejects(
+            &good.replace("args.iter().map(|a| a.as_bytes()).collect()", initializer),
+            &mode,
+            reason,
+        );
+    }
+    rejects(&good.replace("let raw:", "let mut raw:"), &mode, reason);
+    accepts(&good, &mode);
 }
 
 // 이것을 실패시키는 것: 데이터 증명을 이름만으로 공유하여 다른 모듈의 함수를 허용하는 것.

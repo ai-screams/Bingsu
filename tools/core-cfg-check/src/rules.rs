@@ -1,4 +1,5 @@
 //! Pin the RULES initializer and its consumer; no second syscall table.
+// The TCB hash pin remains the last line for shapes these AST pins do not cover.
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -19,23 +20,54 @@ pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
             return out;
         }
     };
-    struct Count(usize);
+    struct Count {
+        rules: usize,
+        renamed_libc: Vec<proc_macro2::Span>,
+    }
     impl<'ast> Visit<'ast> for Count {
         fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
             if c.ident == "RULES" {
-                self.0 += 1;
+                self.rules += 1;
             }
             syn::visit::visit_item_const(self, c);
         }
+        fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+            fn renamed_libc(tree: &syn::UseTree, within_libc: bool) -> bool {
+                match tree {
+                    syn::UseTree::Path(p) => {
+                        renamed_libc(&p.tree, within_libc || unraw(&p.ident) == "libc")
+                    }
+                    syn::UseTree::Rename(r) => within_libc || unraw(&r.ident) == "libc",
+                    syn::UseTree::Group(g) => g.items.iter().any(|t| renamed_libc(t, within_libc)),
+                    _ => false,
+                }
+            }
+            if renamed_libc(&u.tree, false) {
+                self.renamed_libc.push(u.span());
+            }
+            syn::visit::visit_item_use(self, u);
+        }
+        fn visit_item_extern_crate(&mut self, e: &'ast syn::ItemExternCrate) {
+            if unraw(&e.ident) == "libc" && e.rename.is_some() {
+                self.renamed_libc.push(e.span());
+            }
+            syn::visit::visit_item_extern_crate(self, e);
+        }
     }
-    let mut count = Count(0);
+    let mut count = Count {
+        rules: 0,
+        renamed_libc: Vec::new(),
+    };
     count.visit_file(&file);
+    for span in count.renamed_libc {
+        fail(&mut out, span, "renamed libc import");
+    }
     let rules = file.items.iter().find_map(|i| match i {
         syn::Item::Const(c) if c.ident == "RULES" => Some(c),
         _ => None,
     });
     let Some(rules) =
-        rules.filter(|c| count.0 == 1 && c.attrs.iter().all(|a| a.path().is_ident("doc")))
+        rules.filter(|c| count.rules == 1 && c.attrs.iter().all(|a| a.path().is_ident("doc")))
     else {
         fail(
             &mut out,
@@ -96,6 +128,8 @@ pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
     struct Consumers<'a> {
         tests: &'a TestSpans,
         functions: Vec<&'a syn::ItemFn>,
+        entries: Vec<&'a syn::ItemFn>,
+        denies: Vec<&'a syn::ItemConst>,
     }
     impl<'ast> Visit<'ast> for Consumers<'ast> {
         fn visit_item(&mut self, item: &'ast syn::Item) {
@@ -107,12 +141,23 @@ pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
             if f.sig.ident == "rules" {
                 self.functions.push(f);
             }
+            if f.sig.ident == "enter" {
+                self.entries.push(f);
+            }
             syn::visit::visit_item_fn(self, f);
+        }
+        fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
+            if c.ident == "DENY" {
+                self.denies.push(c);
+            }
+            syn::visit::visit_item_const(self, c);
         }
     }
     let mut consumers = Consumers {
         tests: &tests,
         functions: Vec::new(),
+        entries: Vec::new(),
+        denies: Vec::new(),
     };
     consumers.visit_file(&file);
     let pinned: syn::ItemFn = syn::parse_str(
@@ -137,6 +182,61 @@ pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
             &mut out,
             file.span(),
             "rules() must use the pinned RULES.iter().map(...).collect() body",
+        );
+    }
+    let pinned: syn::ItemFn = syn::parse_str(
+        r#"pub fn enter() -> Sandbox {
+            let query = if unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) } < 0 {
+                Err(errno())
+            } else {
+                Ok(())
+            };
+            outcome(query, || {
+                let prog = program(
+                    ARCH,
+                    cfg!(target_arch = "x86_64"),
+                    &rules(),
+                    libc::SECCOMP_RET_ALLOW,
+                    DENY,
+                );
+                install(&prog)
+            })
+        }"#,
+    )
+    .expect("pinned enter function");
+    let entry = file.items.iter().find_map(|i| match i {
+        syn::Item::Fn(f) if f.sig.ident == "enter" => Some(f),
+        _ => None,
+    });
+    if !entry.is_some_and(|f| {
+        consumers.entries.len() == 1
+            && f.attrs.iter().all(|a| a.path().is_ident("doc"))
+            && f.sig == pinned.sig
+            && f.block == pinned.block
+    }) {
+        fail(
+            &mut out,
+            file.span(),
+            "enter() must use the pinned program and install body",
+        );
+    }
+    let pinned: syn::ItemConst =
+        syn::parse_str("const DENY: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;")
+            .expect("pinned DENY initializer");
+    let deny = file.items.iter().find_map(|i| match i {
+        syn::Item::Const(c) if c.ident == "DENY" => Some(c),
+        _ => None,
+    });
+    if !deny.is_some_and(|c| {
+        consumers.denies.len() == 1
+            && c.attrs.iter().all(|a| a.path().is_ident("doc"))
+            && c.ty == pinned.ty
+            && c.expr == pinned.expr
+    }) {
+        fail(
+            &mut out,
+            file.span(),
+            "DENY must use the pinned initializer",
         );
     }
     let syn::Expr::Array(array) = rules.expr.as_ref() else {

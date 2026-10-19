@@ -186,6 +186,15 @@ impl Walk<'_> {
             });
         }
     }
+    fn closure_field(&mut self, e: &syn::Expr) {
+        // Field projections are not tracked through later branch/array merges.
+        if self.closure_value(e) > 0 {
+            self.out.push(Finding {
+                line: line_of(e.span()),
+                reason: "closure stored in a tuple or struct field".to_owned(),
+            });
+        }
+    }
     fn bind(&mut self, pat: &syn::Pat) {
         let mut b = Bindings(Vec::new());
         b.visit_pat(pat);
@@ -236,6 +245,18 @@ impl<'ast> Visit<'ast> for Walk<'_> {
             a.span(),
         );
         syn::visit::visit_expr_array(self, a);
+    }
+    fn visit_expr_tuple(&mut self, t: &'ast syn::ExprTuple) {
+        for e in &t.elems {
+            self.closure_field(e);
+        }
+        syn::visit::visit_expr_tuple(self, t);
+    }
+    fn visit_expr_struct(&mut self, s: &'ast syn::ExprStruct) {
+        for field in &s.fields {
+            self.closure_field(&field.expr);
+        }
+        syn::visit::visit_expr_struct(self, s);
     }
     fn visit_item(&mut self, i: &'ast syn::Item) {
         if !self.tests.contains(i.span()) {

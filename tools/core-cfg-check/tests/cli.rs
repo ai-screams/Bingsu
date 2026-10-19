@@ -1317,6 +1317,24 @@ fn rules_initializer_ignores_decoys_and_rejects_indirection() {
             RULES.iter()
                 .map(|&(_, nr, c)| (u32::try_from(nr).expect("syscall number"), c))
                 .collect()
+        }
+        const DENY: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        pub fn enter() -> Sandbox {
+            let query = if unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) } < 0 {
+                Err(errno())
+            } else {
+                Ok(())
+            };
+            outcome(query, || {
+                let prog = program(
+                    ARCH,
+                    cfg!(target_arch = "x86_64"),
+                    &rules(),
+                    libc::SECCOMP_RET_ALLOW,
+                    DENY,
+                );
+                install(&prog)
+            })
         }"#;
     assert!(run_rules(good).0);
     for bad in [
