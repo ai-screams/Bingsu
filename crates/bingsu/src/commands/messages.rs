@@ -30,6 +30,7 @@ pub enum MsgId {
     UseSavedUnfinished,
     UseSavedInvalid,
     RootsFromEnvironment,
+    UseShapeOnlyRoot,
 }
 
 #[cfg_attr(
@@ -39,7 +40,7 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 24] = [
+pub const ALL: [MsgId; 25] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
@@ -64,9 +65,10 @@ pub const ALL: [MsgId; 24] = [
     MsgId::UseSavedUnfinished,
     MsgId::UseSavedInvalid,
     MsgId::RootsFromEnvironment,
+    MsgId::UseShapeOnlyRoot,
 ];
 
-const EN: [(MsgId, &str); 24] = [
+const EN: [(MsgId, &str); 25] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -77,23 +79,23 @@ const EN: [(MsgId, &str); 24] = [
     ),
     (
         MsgId::NoExePath,
-        "bingsu: could not find the path you ran bingsu from; using the resolved executable path. Run: bingsu doctor",
+        "bingsu: could not find the path you ran bingsu from; using the resolved executable path. Check your PATH and open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::Tamperable,
-        "bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor",
+        "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::TamperUnknown,
-        "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Run: bingsu doctor",
+        "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::NoRuntimeRoot,
-        "bingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor",
+        "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::UnconfirmedRoot,
-        "bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor",
+        "bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Check the path and its permissions, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::ShapeOnlyConfigRoot,
@@ -101,7 +103,7 @@ const EN: [(MsgId, &str); 24] = [
     ),
     (
         MsgId::BashTooOld,
-        "bingsu: bash 5.1 or newer is required; this shell keeps its own prompt. Run: bingsu doctor",
+        "bingsu: bash 5.1 or newer is required; this shell keeps its own prompt. Upgrade bash, then open a new bash",
     ),
     (
         MsgId::LateHookZsh,
@@ -113,19 +115,19 @@ const EN: [(MsgId, &str); 24] = [
     ),
     (
         MsgId::TrustInvalid,
-        "bingsu: settings verification failed; configured commands are paused. Run: bingsu doctor",
+        "bingsu: settings verification failed; configured commands are paused. Run: bingsu config check, then bingsu reload",
     ),
     (
         MsgId::TrustMismatch,
-        "bingsu: saved settings and their verification do not match; configured commands are paused. Run: bingsu doctor",
+        "bingsu: saved settings and their verification do not match; configured commands are paused. Run: bingsu config check, then bingsu reload",
     ),
     (
         MsgId::TrustClock,
-        "bingsu: settings verification time could not be confirmed; configured commands are paused. Run: bingsu doctor",
+        "bingsu: settings verification time could not be confirmed; configured commands are paused. Run: bingsu reload",
     ),
     (
         MsgId::NoSandbox,
-        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor",
+        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Check that your system permits seccomp filters, then open a new shell",
     ),
     (
         MsgId::ColdInitUnfinished,
@@ -163,6 +165,10 @@ const EN: [(MsgId, &str); 24] = [
         MsgId::RootsFromEnvironment,
         "bingsu: the folders were found from the environment now, not from what init pinned in this shell, so they may differ from the ones your prompt uses. Run: eval \"$(bingsu init <shell>)\" again",
     ),
+    (
+        MsgId::UseShapeOnlyRoot,
+        "bingsu: not using {path}: it is inside the settings folder, which could not be confirmed safe, so nothing in it runs. Run: bingsu config check",
+    ),
 ];
 
 pub fn en(id: MsgId) -> &'static str {
@@ -174,6 +180,14 @@ pub fn en(id: MsgId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 아직 없는 doctor 명령을 고정 안내에 다시 넣는 것.
+    #[test]
+    fn guidance_uses_available_commands() {
+        for id in ALL {
+            assert!(!en(id).contains("doctor"), "{id:?}");
+        }
+    }
 
     // 이것을 실패시키는 것: id가 표에 없거나 두 번 있는 것, 여러 줄·제어 문자·작은따옴표·접두사 없는 문구.
     #[test]

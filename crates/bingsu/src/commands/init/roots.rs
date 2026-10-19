@@ -143,7 +143,8 @@ impl ConfigRootPin {
 
 /// Why `at` could not be decided, in `entry_verdict`'s order, with
 /// `chmod g-w` where group write is the cause (unconfirmed members, or a
-/// POSIX ACL mask that allows group write). The path is shell-quoted.
+/// POSIX ACL mask that allows group write). The path is shell-quoted and
+/// the resulting display text is sanitized; hook arguments keep the original bytes.
 fn undecided_cause(at: &Path, facts: Option<&bingsu_core::fs_trust::Facts>) -> String {
     use bingsu_core::fs_trust::AclFacts;
     let mut q = Vec::new();
@@ -153,7 +154,7 @@ fn undecided_cause(at: &Path, facts: Option<&bingsu_core::fs_trust::Facts>) -> S
         &mut q,
     );
     let quoted = String::from_utf8_lossy(&q);
-    match facts {
+    let cause = match facts {
         Some(f) if f.ownership != Some(true) => {
             format!("could not confirm that the volume holding {quoted} enforces file ownership")
         }
@@ -162,7 +163,8 @@ fn undecided_cause(at: &Path, facts: Option<&bingsu_core::fs_trust::Facts>) -> S
         }
         Some(f) if f.mode & 0o020 != 0 => crate::commands::group_policy::undecided_remedy(at),
         _ => format!("could not confirm who can change {quoted}"),
-    }
+    };
+    bingsu_core::sanitize::sanitize(cause.as_bytes())
 }
 
 fn abs(v: &Option<OsString>) -> Option<PathBuf> {
@@ -543,6 +545,49 @@ mod tests {
             ConfigRootPin::reopen(&root, &root, false, me, &mut unknown_at(&[&root])).unwrap();
         assert!(now.shape_only);
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 원인 표시의 정제를 빼서 경로의 제어 문자가 터미널에 도달하는 것.
+    #[test]
+    fn shape_only_cause_sanitizes_every_path_branch() {
+        use bingsu_core::fs_trust::{AclFacts, Facts};
+        use std::os::unix::ffi::OsStrExt;
+        let at = Path::new(std::ffi::OsStr::from_bytes(
+            b"/h/a'\x1b\n\r\t\x7f\xc2\x9b\xe2\x80\xae\xff b",
+        ));
+        let facts = Facts {
+            dev: 1,
+            ino: 2,
+            uid: 501,
+            gid: 20,
+            mode: 0o040775,
+            acl: AclFacts::None,
+            ownership: Some(true),
+        };
+        for f in [
+            None,
+            Some(facts),
+            Some(Facts {
+                ownership: None,
+                ..facts
+            }),
+            Some(Facts {
+                acl: AclFacts::Unknown,
+                ..facts
+            }),
+            Some(Facts {
+                mode: 0o040755,
+                ..facts
+            }),
+        ] {
+            let cause = undecided_cause(at, f.as_ref());
+            assert!(
+                !cause.chars().any(|c| c.is_control() || c == '\u{202e}'),
+                "{cause:?}"
+            );
+            assert!(cause.contains("/h/a"), "{cause:?}");
+            assert!(cause.contains("\u{fffd} b'"), "{cause:?}");
+        }
     }
 
     // init 안내: 고정 문구 한 줄과 원인 한 줄. 그룹 쓰기가 원인일 때만 `chmod g-w`를 붙인다.

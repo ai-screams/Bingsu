@@ -65,9 +65,9 @@ fn vet(path: &Path, user: &User, shape_only_root: Option<&Path>) -> Result<Recor
     if let Some(root) = shape_only_root
         && evidence.canonical.starts_with(root)
     {
-        return Err(refused(
-            "it is inside the settings folder, which could not be confirmed safe, so nothing in it runs. Run: bingsu doctor",
-            path,
+        return Err((
+            en(MsgId::UseShapeOnlyRoot).replace("{path}", &ctx::show(path)),
+            EXIT_FAILED,
         ));
     }
     Ok(Record {
@@ -186,6 +186,27 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 모양 전용 거부 안내에 경로 치환을 빼거나 정제하지 않는 것, 아직 없는 명령을 안내하는 것.
+    #[test]
+    fn shape_only_refusal_shows_a_clean_path_and_current_guidance() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("bingsu-shape-refusal-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let chosen = base.join("chosen\x1b\n.toml");
+        std::fs::write(&chosen, "icons = \"ascii\"\n").unwrap();
+        let user = User::current().unwrap();
+        let (text, code) = vet(&chosen, &user, Some(&base)).err().unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+        assert_eq!(code, EXIT_FAILED);
+        assert!(text.contains("chosen.toml"), "{text:?}");
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(text.contains("Run: bingsu config check"), "{text}");
+    }
 
     #[test]
     #[ignore = "child of choice_vetting_preserves_emfile"]

@@ -178,7 +178,7 @@ fn unusable_runtime_root_drops_the_word_and_says_why() {
     assert!(!has(&out.stdout, b"--runtime-root="));
     assert_eq!(
         out.stderr,
-        b"bingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor\n"
+        b"bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again\n"
     );
 }
 
@@ -208,7 +208,7 @@ fn template_markers_inside_paths_are_not_substituted() {
 // Decision 2 checks, one row per inspected place. 이것을 실패시키는 것: 링크·대상·상위 폴더 중 하나를 빼고 보는 것.
 #[test]
 fn tamper_rows_warn_on_stderr_only() {
-    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\n";
+    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\n";
     // (row, setup on (base, exe), expected stderr)
     type Setup = fn(&Path, &Path);
     let rows: &[(&str, Setup, &[u8])] = &[
@@ -222,7 +222,7 @@ fn tamper_rows_warn_on_stderr_only() {
         (
             "ancestor other-writable",
             |base, _| chmod(base, 0o777),
-            b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\nbingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor\nbingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor\n",
+            b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\nbingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Check the path and its permissions, then open a new shell or evaluate your bingsu init line again\nbingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again\n",
         ),
         (
             "target dir other-writable",
@@ -303,7 +303,7 @@ fn uninspectable_target_warns_unknown() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         out.stderr,
-        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Run: bingsu doctor\n"
+        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists, then open a new shell or evaluate your bingsu init line again\n"
     );
 }
 
@@ -400,7 +400,7 @@ fn concurrent_init_pins_same_runtime_root() {
 // 이것을 실패시키는 것: 실행 경로와 최종 정규 대상만 보고 사슬 중간 hop과 그 폴더를 건너뛰는 것.
 #[test]
 fn symlink_chain_hops_are_checked() {
-    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\n";
+    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\n";
     for (row, hop_mode, want) in [
         ("clean chain", 0o755, &b""[..]),
         ("hop dir other-writable", 0o777, TAMPER),
@@ -455,7 +455,7 @@ fn symlink_chain_over_40_hops_warns_unknown() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         out.stderr,
-        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Run: bingsu doctor\n"
+        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists, then open a new shell or evaluate your bingsu init line again\n"
     );
 }
 
@@ -464,7 +464,7 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-const TAMPER_LINE: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Run: bingsu doctor\n";
+const TAMPER_LINE: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\n";
 
 // macOS computes the members of `everyone` (nobody, daemon, ...); the group
 // lists none. Also the path that read the member array unaligned.
@@ -656,13 +656,13 @@ fn relative_path_entry_falls_back_to_resolved_executable() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         out.stderr,
-        b"bingsu: could not find the path you ran bingsu from; using the resolved executable path. Run: bingsu doctor\n"
+        b"bingsu: could not find the path you ran bingsu from; using the resolved executable path. Check your PATH and open a new shell or evaluate your bingsu init line again\n"
     );
     assert!(!has(&out.stdout, exe.as_os_str().as_bytes()));
 }
 
 const NO_RUNTIME: &[u8] =
-    b"bingsu: no usable runtime folder; the prompt runs without saved state. Run: bingsu doctor\n";
+    b"bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again\n";
 
 // The last runtime folder must be opened without following a symlink:
 // `run/bingsu -> victim` is refused, and victim keeps its mode.
@@ -741,7 +741,7 @@ fn state_root_with_dotdot_after_missing_name_is_not_pinned() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         out.stderr,
-        b"bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor\n"
+        b"bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Check the path and its permissions, then open a new shell or evaluate your bingsu init line again\n"
     );
     assert!(!has(&out.stdout, b"--state-root="));
     assert!(!has(&out.stdout, b"--log-root="));

@@ -198,8 +198,10 @@ def resolve_dirfds(lines):
     `openat(fd, name, O_NOFOLLOW)`). Descriptors are tracked per process
     from the `= N` of each open; a relative name under a descriptor this
     trace did not see opened stays relative and fails. Close/dup/fork fd
-    lifetimes and unfinished/resumed file calls are deferred to N4's real
-    traces; this is only the straight-line walk decoder."""
+    lifetimes and unfinished/resumed calls are outside this small decoder's
+    fixtures. The live gate uses assert_prompt_trace_budget with strace -y
+    descriptor paths and the shared parser; test_prompt_trace_budget covers
+    inherited/duplicated descriptors and unfinished/resumed calls."""
     fds = {}
     out = []
     for line in lines:
