@@ -4,7 +4,7 @@ Thanks for your interest in bingsu! 🍧
 This guide explains how changes get into the repository and what the checks expect.
 
 > bingsu is in early development. The Rust workspace builds and tests today and `bingsu prompt` draws a
-> built-in default prompt, but there is no release and no config file support yet.
+> built-in default prompt or a TOML-configured look, but there is no release yet.
 
 ## Table of contents
 
@@ -16,6 +16,7 @@ This guide explains how changes get into the repository and what the checks expe
 - [CI checks](#ci-checks)
 - [Development setup](#development-setup)
 - [Design rules](#design-rules)
+- [Schema compatibility review](#schema-compatibility-review)
 - [Changelog](#changelog)
 - [License](#license)
 
@@ -155,6 +156,15 @@ bingsu cares about things lining up. Keep these in mind when you touch anything 
 4. **Width is counted in terminal cells.** Separators take exactly one cell. Right-aligned content must end on the last cell.
 5. **Every icon has a fallback.** Nerd Font glyphs need Unicode and ASCII alternatives.
 6. **The prompt must not wait.** Slow work gets a time budget and runs in the background.
+
+## Schema compatibility review
+
+When changing `FieldValue`, `ValueState` or `PathFacts`, review `FACT_SCHEMA_VERSION` in
+`crates/bingsu-core/src/config/schema.rs` in the same change. The structural checks catch added, removed or renamed
+fields and variants; they do not enforce version increases or detect a changed meaning. Review units, absent and
+pending states, path anchors and how readers interpret each field, even when the Rust shape is unchanged. Increase
+the fact schema version whenever an older reader could misinterpret the result, and review the readers and fixtures.
+Config syntax changes need a separate review of `CONFIG_VERSION` and the generated config and theme schemas.
 
 ## Changelog
 

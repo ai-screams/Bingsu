@@ -6,8 +6,9 @@
 //!
 //! Rule 5 after the merge: a check or compile error whose place is a
 //! shape-only source drops that source, and what it brought in, and the
-//! read starts again without it. Each round drops at least one of at most
-//! 32 sources, so it ends. An error in a trusted source rejects the read
+//! same loaded sources are merged, checked and compiled again without it;
+//! files are not read again. Each round drops at least one of at most 32
+//! sources, so it ends. An error in a trusted source rejects the read
 //! (no snapshot; the caller keeps the last good one).
 use crate::color::palette::Mode;
 use crate::config::check::check;
