@@ -639,18 +639,20 @@ impl Walk<'_> {
             let child = match self.resolver.open(&self.nodes[i].found.opened, &r) {
                 Ok(c) => c,
                 Err(e) => {
-                    first.get_or_insert(
-                        Diagnostic::new(codes::EXTENDS_BAD_PATH, at)
-                            .arg("path", r.text.clone())
-                            .arg("reason", e.reason),
-                    );
+                    let mut d = Diagnostic::new(codes::EXTENDS_BAD_PATH, at)
+                        .arg("path", r.text.clone())
+                        .arg("reason", e.reason);
+                    d.via = self.nodes[i].found.via.clone();
+                    first.get_or_insert(d);
                     break;
                 }
             };
             if let Some(k) = self.known(child.key) {
                 if self.stack.contains(&k) {
                     self.resolver.adopt(child.key, self.adopted_trust(k));
-                    first.get_or_insert(Diagnostic::new(codes::EXTENDS_CYCLE, at));
+                    let mut d = Diagnostic::new(codes::EXTENDS_CYCLE, at);
+                    d.via = self.nodes[i].found.via.clone();
+                    first.get_or_insert(d);
                     break;
                 }
                 if self.nodes[k].found.trust != Trust::ShapeOnly
@@ -670,6 +672,7 @@ impl Walk<'_> {
             if let Some(mut d) = self.edge_problem(&child, via.len(), limit) {
                 self.reject(child, &via, true);
                 d.at = at;
+                d.via = self.nodes[i].found.via.clone();
                 first.get_or_insert(d);
                 break;
             }
@@ -801,7 +804,9 @@ pub fn load<R: Into<Root>>(
                     id: SourceId(i as u32),
                     span: Span::default(),
                 };
-                Some(Diagnostic::new(code, at))
+                let mut d = Diagnostic::new(code, at);
+                d.via = w.nodes[i].found.via.clone();
+                Some(d)
             } else {
                 w.shaped(i, &mut sub, &mut spent, &mut visited)
             };
@@ -1392,6 +1397,93 @@ pub(crate) mod tests {
                 [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_TOO_MANY]
             );
         }
+    }
+
+    fn assert_shape_via(g: &LoadReport, code: DiagCode, expected: &[&str]) {
+        let d = g.warnings.iter().find(|d| d.code == code).unwrap();
+        let actual: Vec<String> = d.via.iter().map(|id| name(g.get(*id).unwrap())).collect();
+        assert_eq!(actual, expected, "{code}");
+    }
+
+    // 이것을 실패시키는 것: 모양 전용 경로 오류에서 현재 파일의 경유 목록을 빼는 것.
+    #[test]
+    fn shaped_bad_path_keeps_via() {
+        let mut f = files(&[
+            ("shape-parent", "extends = [\"leaf\"]"),
+            ("leaf", "extends = [\"missing\"]"),
+        ]);
+        let g = load(
+            vec![opened("root", "extends = [\"shape-parent\"]", 1)],
+            &mut f,
+            V,
+        )
+        .unwrap();
+        assert_shape_via(&g, codes::EXTENDS_BAD_PATH, &["root", "shape-parent"]);
+    }
+
+    // 이것을 실패시키는 것: 모양 전용 순환 오류에서 현재 파일의 경유 목록을 빼는 것.
+    #[test]
+    fn shaped_cycle_keeps_via() {
+        let mut f = files(&[
+            ("shape-parent", "extends = [\"leaf\"]"),
+            ("leaf", "extends = [\"shape-parent\"]"),
+        ]);
+        let g = load(
+            vec![opened("root", "extends = [\"shape-parent\"]", 1)],
+            &mut f,
+            V,
+        )
+        .unwrap();
+        assert_shape_via(&g, codes::EXTENDS_CYCLE, &["root", "shape-parent"]);
+    }
+
+    // 이것을 실패시키는 것: 모양 전용 깊이·파일 수·바이트 예산 오류에서 경유 목록을 빼는 것.
+    #[test]
+    fn shaped_edge_budgets_keep_via() {
+        for code in [
+            codes::EXTENDS_TOO_DEEP,
+            codes::EXTENDS_TOO_MANY,
+            codes::EXTENDS_TOO_BIG,
+        ] {
+            let mut f = files(&[
+                ("shape-parent", "extends = [\"leaf\"]"),
+                ("leaf", "extends = [\"end\"]"),
+                ("end", ""),
+            ]);
+            let mut roots = vec![opened("root", "extends = [\"shape-parent\"]", 1)];
+            let mut expected = vec!["root", "shape-parent"];
+            if code == codes::EXTENDS_TOO_DEEP {
+                for n in 0..7 {
+                    let next = if n == 6 {
+                        "end".to_owned()
+                    } else {
+                        alloc::format!("hop{}", n + 1)
+                    };
+                    let name = leak(alloc::format!("hop{n}"));
+                    f.0.insert(name, alloc::format!("extends = [\"{next}\"]"));
+                    if n < 6 {
+                        expected.push(name);
+                    }
+                }
+                f.0.insert("shape-parent", "extends = [\"hop0\"]".to_owned());
+            } else if code == codes::EXTENDS_TOO_MANY {
+                roots.extend((0..29).map(|n| opened("trusted", "", 2 + n)));
+            } else {
+                f.0.insert("end", "#".repeat(TOTAL_BYTES_MAX));
+            }
+            let g = load(roots, &mut f, V).unwrap();
+            assert_shape_via(&g, code, &expected);
+        }
+    }
+
+    // 이것을 실패시키는 것: 모양 전용 파일 자체가 잔여 예산을 넘을 때 경유 목록을 빼는 것.
+    #[test]
+    fn shaped_leaf_over_budget_keeps_via() {
+        let mut f = files(&[("shape-leaf", "")]);
+        let mut roots = vec![opened("root", "extends = [\"shape-leaf\"]", 1)];
+        roots.extend((0..31).map(|n| opened("trusted", "", 2 + n)));
+        let g = load(roots, &mut f, V).unwrap();
+        assert_shape_via(&g, codes::EXTENDS_TOO_MANY, &["root"]);
     }
 
     // 이것을 실패시키는 것: 모양 전용 잎을 열지 못하거나 너무 클 때 그것을 가리킨 신뢰 파일의 문제로 보는 것

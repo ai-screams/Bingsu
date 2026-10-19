@@ -135,7 +135,7 @@ fn files_confirm_empty_group(gid: u32, name: &[u8], files: Option<&[FilesGroup]>
     found
 }
 
-/// N2/doctor diagnostic text, including the path encoded as a shell word.
+/// Diagnostic text with a shell-encoded path; sanitize it before display.
 pub fn undecided_remedy(path: &std::path::Path) -> String {
     let mut quoted = Vec::new();
     bingsu_core::shell_word::encode_word(

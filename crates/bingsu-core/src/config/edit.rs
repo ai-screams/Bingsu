@@ -1,7 +1,8 @@
 //! Local edits of one config file (spec section 2 "설정 파서와 국소 편집"):
 //! change only around the changed key and keep comments, order and the way
-//! the rest is written. `config use`, `setup`, `topping add` and Studio use
-//! these functions.
+//! the rest is written. The replacement value uses the caller's TOML spelling,
+//! including its quotes. These functions support local value edits; `config
+//! use` saves a selection record instead of editing a config file.
 //!
 //! An edit is a splice of byte ranges from the spanned tree (S1): set
 //! replaces a value's range, insert adds one line after the table's last

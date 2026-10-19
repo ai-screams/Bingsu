@@ -21,7 +21,11 @@ use core::fmt::Write as _;
 /// stands for. The tests `fact_schema_matches_the_types` (here) and
 /// `path_facts_fields_are_the_fact_schema` (`shorten.rs`) stop compiling
 /// when a variant or field is added, removed or renamed, so the text and the
-/// version are looked at in the same change.
+/// version are looked at in the same change. They do not detect semantic
+/// changes or enforce a version bump. Review changes to units, absent/pending
+/// meaning, path anchors and field interpretation manually; bump this version
+/// when an older reader could misread the new meaning, even if the shape stays
+/// the same.
 pub const FACT_SCHEMA_VERSION: u16 = 1;
 pub const FACT_SCHEMA: &str = "FieldType: Text{max_cells} Count Int Duration Bool; FieldValue: Text Count{n,saturated} Int Duration{ms} Bool Absent; ValueState: Known Pending; PathFacts: anchor steps repo_root unique";
 /// Version of the config format (`version = 1`).

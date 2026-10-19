@@ -95,6 +95,62 @@ On Linux, the prompt installs a seccomp system call filter before rendering. A k
 the prompt; a failed filter check or installation gives a minimal prompt with `degraded:sandbox` and a shell notice once per session.
 Without a usable runtime folder, the prompt still renders with `degraded:runtime-root`; `init` warns that saved state is unavailable.
 
+## Installing and refreshing shell hooks
+
+Use bash 5.1+, zsh 5.8+ or fish 3.6+. Put the matching init line in your shell startup file
+(`.bashrc`, `.zshrc` or `config.fish`); keep the bash and zsh line after other prompt hooks:
+
+```bash
+# bash
+eval "$(bingsu init bash)"
+# zsh
+eval "$(bingsu init zsh)"
+# fish
+bingsu init fish | source
+```
+
+After upgrading or downgrading the binary, open a new shell or evaluate the matching init line again in each
+running shell. Hooks and the binary must come from the same version: newer hooks can pass arguments an older
+binary does not know, and older hooks can leave a newer binary unable to trust saved settings until init runs again.
+The record reader can accept older compatible records; that does not promise compatibility between hook and binary versions.
+
+Init pins the executable and the runtime, settings, state and log folder paths. After changing XDG paths or replacing
+a settings-folder symlink (for example with stow), evaluate init again or open a new shell. A changed symlink target
+is refused until then; roots are not automatically selected again. `bingsu reload` refreshes settings for the pinned
+folders. `bingsu config use PATH` saves which file stands in `config.toml`'s place; it does not edit that file, and
+`conf.d/*.toml` and `config.local.toml` still apply. Without the exported pins, user commands discover folders from
+the current environment and warn that these can differ from the prompt's folders.
+
+Use `bingsu config check` to see diagnostics and folder safety details, and `bingsu config path` to see the applied
+file order. A folder whose safety cannot be confirmed can supply colors and layout only; choosing a file inside it
+with `config use` does not grant execution trust. Check the ownership, permissions and access lists named by the
+diagnostic before running init again. External text in diagnostics is sanitized for terminal display; path arguments
+in the hooks retain their original bytes. Displayed paths with removed control characters are not exact copies of the names.
+
+## Current limits
+
+- The default prompt remains two lines at narrow widths, including in fish; segments move or disappear as width permits.
+- If a shape-only source fails checking or compilation during config inspection, it and its descendants are dropped
+  and the already loaded data is merged, checked and compiled again; the remaining files are not read again.
+- Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.
+  The changed value uses the caller's TOML spelling, including its quotes.
+- `config check` and `config path` have no command deadline and can wait on a stalled mount. Commands that change
+  settings have a three-second limit. The prompt's 50 ms and refresh work's 500 ms budgets are unchanged.
+- A deadline cannot interrupt kernel I/O in uninterruptible sleep, including hard NFS or some FUSE operations.
+  macOS timer coalescing can delay alarm delivery by several milliseconds. On Linux, a blocked write during suspend
+  may take up to roughly another 50 ms after resume to stop. These are not hard wall-clock guarantees.
+- A prompt deadline or write failure can end output silently; the shell falls back if it does not receive a complete
+  record. An unwind during the output loop also ends silently, even before the first byte; it does not append a panic
+  record.
+- Linux needs an accessible `/proc` for the refresh helper to start. If it is missing, the helper may fail to start
+  without a notice and settings may not refresh. Logging is best effort: without a usable state/log folder, errors
+  may leave no log. `config check` provides a direct inspection even when no helper log is available.
+- `BINGSU_ROOTS` exports pinned paths to child processes, much like XDG variables. Code running in the shell can
+  change these values; they are not a boundary against that code. In fish, non-UTF-8 path round trips depend on
+  fish's encoding behavior; a failed round trip falls back rather than applying unverified settings.
+- Root-owned targets in `/nix/store` with mode 1775 are refused by the current ownership rules.
+  Re-initializing does not relax those rules.
+
 ## How bingsu compares
 
 | Tool | Closest to bingsu in | Where bingsu differs |

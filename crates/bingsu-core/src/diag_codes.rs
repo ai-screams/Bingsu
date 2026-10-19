@@ -221,8 +221,8 @@ pub const CODES: &[CodeInfo] = &[
     stable(
         EXEC_KEY_IGNORED,
         "`{key}` is ignored here",
-        "this file may change how the prompt looks but not what runs: it is not under your config folder and not approved with `config use`",
-        "move the key into your own config, or run `bingsu config use` on the file",
+        "this file is trusted for colors and layout only; execution keys are not allowed",
+        "put the key in a trusted config file; run `bingsu config check` for folder safety details",
     ),
     stable(
         ENV_SEGMENT_IGNORED,
@@ -246,7 +246,7 @@ pub const CODES: &[CodeInfo] = &[
         NOT_RUN_UNSAFE_FILE,
         "segment `{id}` does not run: `{key}` comes from a file that failed the safety check",
         "{reason}",
-        "see `bingsu doctor`",
+        "check the file and folder ownership, write permissions and access lists; run `bingsu config check`",
     ),
     stable(
         SHAPE_FILE_DROPPED,
@@ -289,6 +289,25 @@ pub const CODES: &[CodeInfo] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 진단 도움말에 아직 없는 doctor 명령을 다시 넣는 것.
+    #[test]
+    fn fixes_use_available_commands() {
+        for c in CODES {
+            assert!(!c.fix.contains("doctor"), "{}", c.code);
+        }
+    }
+
+    // 이것을 실패시키는 것: 모양 전용을 설정 폴더 밖의 미승인 파일로만 설명하거나, 안전 확인 없이 config use만 안내하는 것.
+    #[test]
+    fn shape_only_reason_also_fits_an_unconfirmed_config_root() {
+        let c = CODES.iter().find(|c| c.code == EXEC_KEY_IGNORED).unwrap();
+        assert_eq!(
+            c.why,
+            "this file is trusted for colors and layout only; execution keys are not allowed"
+        );
+        assert!(c.fix.contains("bingsu config check"));
+    }
 
     // 이것을 실패시키는 것: 문구 틀의 인자 이름이 없는 칸을 남기는 것(`{` 짝 틀림).
     #[test]
