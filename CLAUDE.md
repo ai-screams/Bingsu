@@ -20,8 +20,8 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 | Path | What |
 | -- | -- |
-| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments from that input; status grammar, B1 record encoder, shell words, root arguments, sanitize, width, icons, field types, color, built-in default theme |
-| `crates/bingsu` | CLI: `src/prompt.rs` is the OS adapter that renders the built-in default theme from the envelope into a record through core; `src/commands/` holds `init` (pins the binary path and four roots), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments; `config` (merge, check, compile, edit, schema), `template`, `layout`/`render`/`bands`, `snapshot`/`snapshot_codec` (helper to prompt hand-off), `diag*`; status grammar, B1 record encoder, shell words, sanitize, width, icons, color, built-in default theme |
+| `crates/bingsu` | CLI: `src/prompt.rs` renders a record from the envelope and the published snapshot (`prompt_read.rs` reads it, `prompt_spawn.rs` starts the refresh helper before the filter, `prompt_io.rs` writes under the deadline; these and `sandbox.rs` are hash-pinned); `src/commands/` holds `init` (pins the binary path and four roots), `config`/`reload`/`refresh`/`helper` (load, trust, publish), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
 | `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
 | `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
 | `crates/bingsu-golden` | Prints render output for fixed inputs; native (its test) and wasm32-wasip1 (CI) must equal `tests/golden/render/render.tsv` byte for byte; regenerate with `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv` and review the diff |
@@ -29,7 +29,8 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 | `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
 | `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes |
 | `tests/hostile` | Hostile-value matrix shared by core, golden and PTY tests |
-| `scripts/`, `tools/core-cfg-check` | Purity and prompt-forbid gates |
+| `scripts/`, `tools/core-cfg-check` | Purity, prompt-forbid and diagnostic-code gates; `scripts/pin_tcb.py` re-pins TCB hashes |
+| `tools/fsbudget`, `tools/gen-ucd-tables` | strace filesystem budget check; generator for `src/ucd.rs` |
 
 ## Collaboration rules (MUST FOLLOW)
 
@@ -64,6 +65,7 @@ BINGSU_TEST_SHELLS="zsh fish bash" python -m pytest tests/shell tests/golden/rec
 ```
 
 Shell tests (`tests/shell`):
+- The minimum-shell images have no cargo or cc: a pytest under `tests/shell` must not build. Generate fixtures on the host before docker (see `BINGSU_SHAPE_ONLY_FIXTURE` in `shell.yml`); tests needing a glibc test binary run in the `filter-calls` gnu debug job.
 - `tests/hostile/classes.tsv` is the one source for core, golden and PTY hostile-value tests; add a row, not a per-shell case.
 - NUL outcomes per shell, version and locale live in `tests/golden/record/nul_expected.tsv` (first match wins; `*` rows generalise beyond what was observed).
 - Minimum shells (bash 5.1, zsh 5.8, fish 3.6) run in `tests/shell/containers/*.Dockerfile`; in a container run tests as root with a root-owned copy of the binary and `--basetemp` outside `/tmp`, because init warns about a folder above the binary that another user can change.
@@ -116,6 +118,10 @@ Anything visible must line up. Before changing a segment, a generator or a style
 - For each new test or condition, make it fail once with a deliberate mutation before trusting it.
 - For claims like "none", "all" or "always" in PR bodies or docs, have the search command that proves it.
 - Run actionlint on workflow changes and gitleaks on the working tree before pushing.
+- Tests that read repository sources and edit them as text normalize `\r\n` to `\n` first; Windows checkouts are CRLF.
+- Changing a hash-pinned prompt file (TCB): review it as a security change, then `scripts/pin_tcb.py --write`.
+- Gate bypass shapes live in `tools/core-cfg-check/tests/fixtures/bypass/` and run through the real gates via `scripts/test_gate_bypass.py`; add a fixture per new rule.
+- Python test dependencies are hash-pinned (`pip install --require-hashes --only-binary=:all: -r …`); regenerate with `uv pip compile --universal --generate-hashes`.
 
 ## Internal notes
 
