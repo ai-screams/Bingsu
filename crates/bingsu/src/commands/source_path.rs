@@ -441,12 +441,11 @@ impl Resolved {
         self.nodes.iter().find(|n| n.path == path).map(|n| n.facts)
     }
 
-    fn revalidate_with(
-        &self,
-        me: u32,
-        groups: &mut dyn GroupOracle,
-        assume_decided: bool,
-    ) -> io::Result<()> {
+    /// Verify retained descriptors, every parent/name binding and link text.
+    /// This establishes stability only, never trust. Executable cache identity
+    /// uses it without config's user-only ownership rules; config callers must
+    /// use `revalidate` (or `revalidate_assuming_decided`) as before.
+    pub fn revalidate_bindings(&self) -> io::Result<()> {
         for n in &self.nodes {
             let now = sys::file_stamp(&n.file)?;
             // Directory content times may change because unrelated entries
@@ -468,12 +467,7 @@ impl Resolved {
                 return Err(io::Error::other("parent/name binding changed"));
             }
             if let Some(link) = &e.link
-                && (sys::read_link_at(dir, &e.name)? != link.target
-                    || if link.root_ancestor {
-                        now.uid != 0
-                    } else {
-                        !link_owner_is_mine(now.uid, me)
-                    })
+                && sys::read_link_at(dir, &e.name)? != link.target
             {
                 return Err(io::Error::other("link evidence changed"));
             }
@@ -486,6 +480,27 @@ impl Resolved {
         };
         if !same || sys::fd_facts(self.file.as_fd())? != self.facts {
             return Err(io::Error::other("source evidence changed"));
+        }
+        Ok(())
+    }
+
+    fn revalidate_with(
+        &self,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+        assume_decided: bool,
+    ) -> io::Result<()> {
+        self.revalidate_bindings()?;
+        for e in &self.edges {
+            if let Some(link) = &e.link
+                && if link.root_ancestor {
+                    e.stamp.uid != 0
+                } else {
+                    !link_owner_is_mine(e.stamp.uid, me)
+                }
+            {
+                return Err(io::Error::other("link evidence changed"));
+            }
         }
         let mut decided = AssumeDecided(groups);
         for (i, check) in self.checks.iter().enumerate() {

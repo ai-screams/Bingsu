@@ -204,6 +204,29 @@ fn unchanged_reuses_snapshot_and_both_palettes() {
         fs::metadata(f.dir().join("last-good")).unwrap().ino()
     );
 }
+// 이것을 실패시키는 것: 정상 exe -> link -> binary 설치의 마지막 링크를 거부해 매번 재컴파일하는 것.
+#[test]
+fn symlinked_build_identity_reuses_snapshot() {
+    let mut f = Fx::new("linked-build");
+    f.put(COMMAND);
+    fs::create_dir(f.base.join("bin")).unwrap();
+    put(&f.base.join("binary"), b"installed executable");
+    symlink(f.base.join("binary"), f.base.join("link")).unwrap();
+    let exe = f.base.join("bin/exe");
+    symlink("../link", &exe).unwrap();
+    let first = super::super::build_identity::read(&exe).unwrap();
+    f.request.build = Some(first);
+    assert_eq!(published(f.run()), 1);
+    let before = f.state();
+    let ino = fs::metadata(f.dir().join("snapshot")).unwrap().ino();
+    f.request.build = super::super::build_identity::read(&exe);
+    assert_eq!(f.request.build, Some(first));
+    assert_eq!(f.run(), RefreshResult::Revalidated { generation: 1 });
+    assert_eq!(f.bytes("snapshot"), before[0]);
+    assert_eq!(f.bytes("last-good"), before[1]);
+    assert_eq!(fs::metadata(f.dir().join("snapshot")).unwrap().ino(), ino);
+}
+
 // 이것을 실패시키는 것: 비교 증거에서 build identity를 빼고 같은 semver의 snapshot을 재사용하는 것.
 #[test]
 fn same_version_different_build_recompiles() {
