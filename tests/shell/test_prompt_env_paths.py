@@ -524,6 +524,12 @@ def time_namespace_readlink(call, path, owner):
             and args_of(call)[3] == "28")
 
 
+def proc_self_readlink(call, path):
+    # K82: one bounded kernel link lookup, relative to the verified proc fd.
+    return (call.name == "readlinkat" and path == "/proc/self"
+            and descriptor_child(call, path) and args_of(call)[3] == "11")
+
+
 def prompt_root_io(front, boundary, exe, pinned, root):
     """Track the root's prepared fds. No path operation survives the filter.
 
@@ -557,10 +563,12 @@ def prompt_root_io(front, boundary, exe, pinned, root):
             system = path == exe and c.name == "execve" or bool(SYSTEM_PATHS.fullmatch(path))
             empty_stat = path == "" and c.name in {"newfstatat", "statx"} and "AT_EMPTY_PATH" in c.args
             assert (system or bootstrap or acl_ok or empty_stat or prompt_open(c, path, pinned, root)
-                    or time_namespace_readlink(c, path, root)), ("root path", c, path)
+                    or time_namespace_readlink(c, path, root)
+                    or proc_self_readlink(c, path)), ("root path", c, path)
         if c.name == "readlinkat":
             fd = int(args[0].split("<")[0])
-            assert (held.get(fd) == (f"/proc/{root}/ns", True)
+            expected = "/proc" if paths == ["/proc/self"] else f"/proc/{root}/ns"
+            assert (held.get(fd) == (expected, True)
                     and fd in fs_observed), ("root namespace walk", c)
         if c.name in OPENS and paths:
             result = re.match(r"(\d+)(?:<.*>)?$", c.ret)

@@ -45,6 +45,21 @@ static void alarm_seen(int signal) {
     handler(signal);
 }
 static int probe_action(int sig, const struct sigaction *act, struct sigaction *old) {
+    if (mode == 10 && act && sig == SIGPIPE) {
+        /* Direct-exec fixture: the launcher blocks ALRM across exec solely to
+         * make delivery at this old pre-handler window deterministic. */
+        struct itimerval inherited;
+        sigset_t pending, alarm;
+        if (getitimer(ITIMER_REAL, &inherited) || sigpending(&pending)) _exit(92);
+        if (!inherited.it_value.tv_sec && !inherited.it_value.tv_usec &&
+            !sigismember(&pending, SIGALRM)) _exit(93);
+        const char witness[] = "K87 inherited timer at PIPE setup\n";
+        real_write(2, witness, sizeof(witness) - 1);
+        sigemptyset(&alarm); sigaddset(&alarm, SIGALRM);
+        real_mask(SIG_UNBLOCK, &alarm, NULL);
+        struct timespec delay = {0, 100000000};
+        while (nanosleep(&delay, &delay) && errno == EINTR) {}
+    }
     if (act && ((mode == 3 && sig == SIGPIPE) || (mode == 4 && sig == SIGALRM))) {
         errno = EPERM;
         return -1;
@@ -65,6 +80,7 @@ static int probe_mask(int how, const sigset_t *set, sigset_t *old) {
     return real_mask(how, set, old);
 }
 static int probe_timer(int which, const struct itimerval *value, struct itimerval *old) {
+    if (mode == 10) return real_timer(which, value, old); /* direct-exec launcher's one-shot */
     if (mode == 6) { errno = EPERM; return -1; }
     if (which != ITIMER_REAL || !value ||
         (mode != 1 && (value->it_interval.tv_sec != 0 || value->it_interval.tv_usec != 1000)) ||

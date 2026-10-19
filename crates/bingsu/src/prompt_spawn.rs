@@ -89,7 +89,9 @@ fn spawn_until(
         {
             // Single-threaded front end. Enumerate the complete fd table, not
             // RLIMIT_NOFILE (which can be lowered below an already open fd).
-            // Uses POSIX actions on both glibc and musl, including old releases.
+            // Mark descriptors close-on-exec in this single-threaded process.
+            // addclose rejects fds above a lowered NOFILE limit on glibc;
+            // F_SETFD still works, even after the hard limit was lowered.
             crate::prompt_io::check_deadline(deadline);
             let mut entries = std::fs::read_dir("/proc/self/fd").map_err(|_| ())?;
             loop {
@@ -103,8 +105,9 @@ fn spawn_until(
                     .parse()
                     .map_err(|_| ())?;
                 if fd >= 3 {
-                    // SAFETY: initialized action; the integer came from the kernel fd table.
-                    check(unsafe { libc::posix_spawn_file_actions_addclose(&mut actions, fd) })?;
+                    // SAFETY: the integer came from the live kernel fd table.
+                    // This changes descriptor flags, not the shared open-file flags.
+                    check(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) })?;
                 }
             }
         }
@@ -150,6 +153,17 @@ mod tests {
     #[test]
     #[ignore = "isolates signal disposition and inherited fds"]
     fn spawn_child() {
+        spawn_fixture(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "child: irreversibly lowers NOFILE after opening a high fd"]
+    fn lowered_nofile_child() {
+        spawn_fixture(true);
+    }
+
+    fn spawn_fixture(lower_limit: bool) {
         let (base, exe) = crate::commands::n3_test::probe("spawn");
         let file = fs::File::open("/dev/null").unwrap();
         use std::os::fd::AsRawFd;
@@ -167,6 +181,12 @@ mod tests {
         // SAFETY: live fd; deliberately non-CLOEXEC high descriptor.
         let high = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 1025) };
         assert!(high >= 1025);
+        if lower_limit {
+            limit.rlim_cur = 32;
+            limit.rlim_max = 32;
+            // SAFETY: isolated fixture process; high remains open above both limits.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        }
         let home = format!("--home={}", base.display());
         let raw: Vec<&[u8]> = vec![
             b"--runtime-root=1:2:/r",
@@ -219,10 +239,21 @@ mod tests {
     // 이것을 실패시키는 것: 고정 생성의 fd 정리·자동 회수·실패 반환이 망가지는 것.
     #[test]
     fn fixed_spawn_fd_hygiene_and_reaping() {
+        child("spawn_child");
+    }
+
+    // 이것을 실패시키는 것: 낮춘 NOFILE 위의 fd를 addclose에 넣거나 exec에 상속시키는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lowered_nofile_still_spawns_without_leaking_fds() {
+        child("lowered_nofile_child");
+    }
+
+    fn child(name: &str) {
         let out = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "prompt_spawn::tests::spawn_child",
+                &format!("prompt_spawn::tests::{name}"),
                 "--ignored",
                 "--nocapture",
                 "--test-threads=1",

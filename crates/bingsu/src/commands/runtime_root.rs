@@ -275,15 +275,24 @@ mod tests {
     use bingsu_core::fs_trust::RefuseGroupWrite;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    // 이것을 실패시키는 것: 시험 폴더를 기본 mode로 만들어 umask 002에서 그룹 쓰기 조상을 남기는 것.
+    fn private_dirs(path: impl AsRef<Path>) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("bingsu-rt-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        private_dirs(&d).unwrap();
         std::fs::canonicalize(&d).unwrap()
     }
 
     fn private(p: &Path) -> Pinned {
-        std::fs::create_dir_all(p).unwrap();
+        private_dirs(p).unwrap();
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
         let md = std::fs::metadata(p).unwrap();
         Pinned {
