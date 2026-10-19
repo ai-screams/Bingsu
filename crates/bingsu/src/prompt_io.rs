@@ -44,15 +44,18 @@ pub(crate) fn arm_deadline(deadline: Deadline) -> bool {
     if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
         return false;
     }
-    action.sa_sigaction = libc::SIG_IGN;
-    // SAFETY: initialized action and a valid signal; no old action requested.
-    if unsafe { libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut()) } != 0 {
-        return false;
-    }
+    // Direct exec preserves ITIMER_REAL. Install ALRM before PIPE setup so
+    // an inherited timer expiring there is recorded, not fatal. This cannot
+    // protect the loader, argv collection, or any earlier entry window.
     action.sa_sigaction = alarm_handler as *const () as usize;
     action.sa_flags = 0; // In particular, no SA_RESTART.
     // SAFETY: the handler has C ABI and process lifetime; mask is initialized.
     if unsafe { libc::sigaction(libc::SIGALRM, &action, std::ptr::null_mut()) } != 0 {
+        return false;
+    }
+    action.sa_sigaction = libc::SIG_IGN;
+    // SAFETY: initialized action and a valid signal; no old action requested.
+    if unsafe { libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut()) } != 0 {
         return false;
     }
     // SAFETY: initialize a signal set containing only SIGALRM.

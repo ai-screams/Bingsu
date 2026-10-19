@@ -174,6 +174,67 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
 mod tests {
     use super::*;
 
+    // Test-only producer consumed by test_init_words.py. The real resolver
+    // gets an Unknown oracle; no production environment switch is added.
+    // 이것을 실패시키는 것: Undecided pin의 두 경로 또는 shape-only 표식을 셸 렌더에서 잃는 것.
+    #[test]
+    #[ignore = "fixture producer for the three real shell round trips"]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only fixture destination, never production input"
+    )]
+    fn write_shape_only_shell_fixture() {
+        use bingsu_core::fs_trust::{Facts, Group, GroupOracle};
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        struct Unknown;
+        impl GroupOracle for Unknown {
+            fn group_write(&mut self, _: &Facts) -> Group {
+                Group::Unknown
+            }
+        }
+        let base = std::path::PathBuf::from(std::env::var_os("M3A_FIXTURE_DIR").unwrap());
+        let base = std::fs::canonicalize(base).unwrap();
+        let root = base.join("canonical ' space");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let written = base.join("written ' space");
+        symlink(root.file_name().unwrap(), &written).unwrap();
+        let mut pin =
+            roots::ConfigRootPin::check(&written, sys::current_uid(), &mut Unknown).unwrap();
+        assert!(pin.shape_only);
+        assert_ne!(pin.path, pin.written);
+        // The host checks the real paths above; render their spellings at
+        // the consumer's mount point (/w in the minimum-shell containers).
+        let embedded = std::path::PathBuf::from(std::env::var_os("M3A_FIXTURE_ROOT").unwrap());
+        pin.path = embedded.join(pin.path.strip_prefix(&base).unwrap());
+        pin.written = embedded.join(pin.written.strip_prefix(&base).unwrap());
+        let exe = embedded.join("probe");
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut out = Vec::new();
+            render::render(
+                &render::ScriptInputs {
+                    shell,
+                    exe: exe.as_os_str().as_bytes(),
+                    runtime_groups: &[],
+                    runtime_root: None,
+                    config_root: Some(config_root_words(&pin)),
+                    state_root: None,
+                    log_root: None,
+                    roots_var: None,
+                    session_hex: &[b'0'; 32],
+                    home: b"/h",
+                },
+                &mut out,
+            );
+            let name = match shell {
+                Shell::Bash => "bash",
+                Shell::Zsh => "zsh",
+                Shell::Fish => "fish",
+            };
+            std::fs::write(base.join(format!("init.{name}")), out).unwrap();
+        }
+    }
+
     // 모양 전용 뿌리(Undecided)도 두 경로와 표식을 넘기고, stderr 안내 두 줄을 내며 "쓰지 않는 폴더" 경고는 내지 않는다.
     // 보통 뿌리에는 표식이 없다.
     // 이것을 실패시키는 것: init이 pin의 모양 전용 상한을 단어로 넘기지 않는 것(`false` 고정), 안내 줄을 빼는 것,

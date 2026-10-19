@@ -1,0 +1,1048 @@
+[
+  {
+    "id": "K25-duplicate-width",
+    "kind": "rust",
+    "anchor": "output_does_not_depend_on_the_environment",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--test",
+      "cli_prompt",
+      "--",
+      "output_does_not_depend_on_the_environment",
+      "--exact"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/tests/cli_prompt.rs",
+        "before": "&[\"--shell\", \"bash\", \"--pwd\", \"/srv/p\"],",
+        "after": "&[\"--shell\", \"bash\", \"--width\", \"9\"],"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K25-duplicate-width"
+  },
+  {
+    "id": "K26-bash",
+    "kind": "python",
+    "anchor": "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-bash]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-bash]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/shell/bash/hooks.bash",
+        "before": "${_bingsu_f[9]-} == @STATUS_SANDBOX@",
+        "after": "${_bingsu_f[9]-} == 'ok:none'"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K26-bash",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ]
+  },
+  {
+    "id": "K26-zsh",
+    "kind": "python",
+    "anchor": "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-zsh]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-zsh]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/shell/zsh/hooks.zsh",
+        "before": "${_bingsu_f[10]-} == @STATUS_SANDBOX@",
+        "after": "${_bingsu_f[10]-} == 'ok:none'"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K26-zsh",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ]
+  },
+  {
+    "id": "K26-fish",
+    "kind": "python",
+    "anchor": "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-fish]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-fish]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/shell/fish/hooks.fish",
+        "before": "\"$_bingsu_f[10]\" = @STATUS_SANDBOX@",
+        "after": "\"$_bingsu_f[10]\" = 'ok:none'"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K26-fish",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ]
+  },
+  {
+    "id": "K43-runtime_root",
+    "kind": "rust",
+    "anchor": "commands::runtime_root::tests::the_pinned_root_opens_and_nothing_else",
+    "command": [
+      "sh",
+      "-c",
+      "umask 002; exec cargo test -j 2 -p bingsu --bin bingsu -- commands::runtime_root::tests::the_pinned_root_opens_and_nothing_else --exact --test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/runtime_root.rs",
+        "before": ".mode(0o700)",
+        "after": ".mode(0o777)"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K43-runtime_root"
+  },
+  {
+    "id": "K43-roots",
+    "kind": "rust",
+    "anchor": "commands::init::roots::tests::pin_checks_owner_and_forces_0700",
+    "command": [
+      "sh",
+      "-c",
+      "umask 002; exec cargo test -j 2 -p bingsu --bin bingsu -- commands::init::roots::tests::pin_checks_owner_and_forces_0700 --exact --test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/init/roots.rs",
+        "before": ".mode(0o700)",
+        "after": ".mode(0o777)"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K43-roots"
+  },
+  {
+    "id": "K60-mark",
+    "kind": "python",
+    "anchor": "tests/shell/test_init_words.py::test_shape_only_root_words_survive_real_shells",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_init_words.py::test_shape_only_root_words_survive_real_shells",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/init/render.rs",
+        "before": "if shape_only {",
+        "after": "if !shape_only {"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K60-mark"
+  },
+  {
+    "id": "K60-canonical",
+    "kind": "python",
+    "anchor": "tests/shell/test_init_words.py::test_shape_only_root_words_survive_real_shells",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_init_words.py::test_shape_only_root_words_survive_real_shells",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/init/render.rs",
+        "before": "prefixed(sh, CONFIG_ROOT_PREFIX, canonical, out);",
+        "after": "prefixed(sh, CONFIG_ROOT_PREFIX, written, out);"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K60-canonical"
+  },
+  {
+    "id": "K60-written",
+    "kind": "python",
+    "anchor": "tests/shell/test_init_words.py::test_shape_only_root_words_survive_real_shells",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_init_words.py::test_shape_only_root_words_survive_real_shells",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/init/render.rs",
+        "before": "prefixed(sh, CONFIG_ROOT_WRITTEN_PREFIX, written, out);",
+        "after": "prefixed(sh, CONFIG_ROOT_WRITTEN_PREFIX, canonical, out);"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K60-written"
+  },
+  {
+    "id": "K82-local-pid",
+    "kind": "rust",
+    "anchor": "prompt_read::tests::proc_self_uses_the_mounted_namespace",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_read::tests::proc_self_uses_the_mounted_namespace",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_read.rs",
+        "before": "proc_self_component(&bytes[..n])",
+        "after": "CString::new(std::process::id().to_string()).map_err(|_| ClockError::Domain)"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-local-pid"
+  },
+  {
+    "id": "K82-empty",
+    "kind": "rust",
+    "anchor": "prompt_read::tests::proc_self_rejects_errors_truncation_and_paths",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_read::tests::proc_self_rejects_errors_truncation_and_paths",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_read.rs",
+        "before": "bytes.is_empty() || bytes.len() >= 11",
+        "after": "false || bytes.len() >= 11"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-empty"
+  },
+  {
+    "id": "K82-length",
+    "kind": "rust",
+    "anchor": "prompt_read::tests::proc_self_rejects_errors_truncation_and_paths",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_read::tests::proc_self_rejects_errors_truncation_and_paths",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_read.rs",
+        "before": "bytes.len() >= 11",
+        "after": "false"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-length"
+  },
+  {
+    "id": "K82-digits",
+    "kind": "rust",
+    "anchor": "prompt_read::tests::proc_self_rejects_errors_truncation_and_paths",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_read::tests::proc_self_rejects_errors_truncation_and_paths",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_read.rs",
+        "before": "!bytes.iter().all(u8::is_ascii_digit)",
+        "after": "false"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-digits"
+  },
+  {
+    "id": "K87-late-alarm",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_deadline.py::test_direct_exec_timer_during_pipe_setup_exits_silently",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_deadline.py::test_direct_exec_timer_during_pipe_setup_exits_silently",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_io.rs",
+        "before": "    // Direct exec preserves ITIMER_REAL. Install ALRM before PIPE setup so\n    // an inherited timer expiring there is recorded, not fatal. This cannot\n    // protect the loader, argv collection, or any earlier entry window.\n    action.sa_sigaction = alarm_handler as *const () as usize;\n    action.sa_flags = 0; // In particular, no SA_RESTART.\n    // SAFETY: the handler has C ABI and process lifetime; mask is initialized.\n    if unsafe { libc::sigaction(libc::SIGALRM, &action, std::ptr::null_mut()) } != 0 {\n        return false;\n    }\n    action.sa_sigaction = libc::SIG_IGN;\n    // SAFETY: initialized action and a valid signal; no old action requested.\n    if unsafe { libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut()) } != 0 {\n        return false;\n    }\n",
+        "after": "    action.sa_sigaction = libc::SIG_IGN;\n    // SAFETY: initialized action and a valid signal; no old action requested.\n    if unsafe { libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut()) } != 0 {\n        return false;\n    }\n    // Direct exec preserves ITIMER_REAL. Install ALRM before PIPE setup so\n    // an inherited timer expiring there is recorded, not fatal. This cannot\n    // protect the loader, argv collection, or any earlier entry window.\n    action.sa_sigaction = alarm_handler as *const () as usize;\n    action.sa_flags = 0; // In particular, no SA_RESTART.\n    // SAFETY: the handler has C ABI and process lifetime; mask is initialized.\n    if unsafe { libc::sigaction(libc::SIGALRM, &action, std::ptr::null_mut()) } != 0 {\n        return false;\n    }\n"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K87-late-alarm",
+    "build": [
+      "cargo",
+      "build",
+      "-j",
+      "2",
+      "-p",
+      "bingsu"
+    ]
+  },
+  {
+    "id": "K82-trace-allow",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[valid]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[valid]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "tests/shell/test_prompt_env_paths.py",
+        "before": "and path == \"/proc/self\"",
+        "after": "and False"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-trace-allow"
+  },
+  {
+    "id": "K82-trace-path",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[path]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[path]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "tests/shell/test_prompt_env_paths.py",
+        "before": "and path == \"/proc/self\"",
+        "after": "and True"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-trace-path"
+  },
+  {
+    "id": "K82-trace-relative",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[absolute]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[absolute]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "tests/shell/test_prompt_env_paths.py",
+        "before": "and descriptor_child(call, path) and args_of(call)[3] == \"11\"",
+        "after": "and args_of(call)[3] == \"11\""
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-trace-relative"
+  },
+  {
+    "id": "K82-trace-size",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[size]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[size]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "tests/shell/test_prompt_env_paths.py",
+        "before": "and args_of(call)[3] == \"11\"",
+        "after": "and True"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-trace-size"
+  },
+  {
+    "id": "K82-trace-held",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[closed]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[closed]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "tests/shell/test_prompt_env_paths.py",
+        "before": "held.get(fd) == (expected, True)",
+        "after": "True"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-trace-held"
+  },
+  {
+    "id": "K82-trace-observed",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[unobserved]",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_trace_budget.py::test_proc_self_link_is_bounded_and_held[unobserved]",
+      "-vv",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "target/m3a-mutation-shell"
+    ],
+    "patches": [
+      {
+        "file": "tests/shell/test_prompt_env_paths.py",
+        "before": "and fd in fs_observed",
+        "after": "and True"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K82-trace-observed"
+  },
+  {
+    "id": "K78-addclose",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::lowered_nofile_still_spawns_without_leaking_fds",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::lowered_nofile_still_spawns_without_leaking_fds",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "check(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) })?;",
+        "after": "check(unsafe { libc::posix_spawn_file_actions_addclose(&mut actions, fd) })?;"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K78-addclose",
+    "requires": "native Linux glibc: reproduces addclose EBADF above lowered NOFILE; musl runs the baseline separately"
+  },
+  {
+    "id": "K78-inherit-high-fd",
+    "kind": "rust",
+    "anchor": "prompt_spawn::tests::lowered_nofile_still_spawns_without_leaking_fds",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "prompt_spawn::tests::lowered_nofile_still_spawns_without_leaking_fds",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_spawn.rs",
+        "before": "if fd >= 3 {",
+        "after": "if fd >= 3 && fd < 1025 {"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K78-inherit-high-fd",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K29-native-must-fail",
+    "kind": "rust",
+    "anchor": "sandbox::tests::unsupported_emulators_do_not_replace_native_filter_tests",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "sandbox::tests::unsupported_emulators_do_not_replace_native_filter_tests",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/sandbox.rs",
+        "before": "matches!(emulator, Some(\"rosetta\" | \"qemu\")) && result != Sandbox::Installed",
+        "after": "true && result != Sandbox::Installed"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K29-native-must-fail",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K30-installed-must-run",
+    "kind": "rust",
+    "anchor": "sandbox::tests::unsupported_emulators_do_not_replace_native_filter_tests",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "sandbox::tests::unsupported_emulators_do_not_replace_native_filter_tests",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/sandbox.rs",
+        "before": "&& result != Sandbox::Installed",
+        "after": "&& true"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K30-installed-must-run",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K29-emulator-report",
+    "kind": "rust",
+    "anchor": "sandbox::tests::unsupported_emulators_do_not_replace_native_filter_tests",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "sandbox::tests::unsupported_emulators_do_not_replace_native_filter_tests",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/sandbox.rs",
+        "before": "Some(\"rosetta\" | \"qemu\")) && result != Sandbox::Installed",
+        "after": "Some(\"neither\")) && result != Sandbox::Installed"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K29-emulator-report",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K84-clock-argument",
+    "kind": "rust",
+    "anchor": "sandbox::tests::x86_64_boottime_uses_explicit_abi_numbers",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "sandbox::tests::x86_64_boottime_uses_explicit_abi_numbers",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/sandbox.rs",
+        "before": "want: libc::CLOCK_BOOTTIME as u32,",
+        "after": "want: libc::CLOCK_MONOTONIC as u32,"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K84-clock-argument",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K21-acl-extended",
+    "kind": "rust",
+    "anchor": "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "if n > 0 {",
+        "after": "if n > 100 {"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K21-acl-extended",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K21-acl-empty",
+    "kind": "rust",
+    "anchor": "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "n == 0 || e == libc::ENODATA",
+        "after": "false || e == libc::ENODATA"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K21-acl-empty",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K21-acl-nodata",
+    "kind": "rust",
+    "anchor": "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "e == libc::ENODATA",
+        "after": "false"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K21-acl-nodata",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K21-acl-notsup",
+    "kind": "rust",
+    "anchor": "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::sys::linux_boundary_tests::posix_acl_errors_do_not_grant_trust",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "e == libc::ENOTSUP",
+        "after": "false"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K21-acl-notsup",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K21-fstype-mask",
+    "kind": "rust",
+    "anchor": "commands::sys::linux_boundary_tests::linux_filesystem_identity_and_errors",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::sys::linux_boundary_tests::linux_filesystem_identity_and_errors",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/sys.rs",
+        "before": "st.f_type as u64 & 0xffff_ffff",
+        "after": "st.f_type as u64"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K21-fstype-mask",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K21-owner",
+    "kind": "rust",
+    "anchor": "commands::trust_record::tests::the_record_is_read_like_a_state_file",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu",
+      "--bin",
+      "bingsu",
+      "--",
+      "commands::trust_record::tests::the_record_is_read_like_a_state_file",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/commands/trust_record.rs",
+        "before": "if md.uid() != me {",
+        "after": "if false {"
+      }
+    ],
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: K21-owner",
+    "requires": "native Linux; macOS compile-only is not execution evidence"
+  },
+  {
+    "id": "K82-native-walk",
+    "kind": "python",
+    "anchor": "tests/shell/test_prompt_proc.py::test_mounted_proc_self_survives_a_different_visible_pid",
+    "command": [
+      "uv",
+      "run",
+      "--offline",
+      "--no-project",
+      "--with",
+      "pytest",
+      "--with",
+      "pexpect",
+      "--with",
+      "pyte",
+      "python",
+      "-m",
+      "pytest",
+      "tests/shell/test_prompt_proc.py::test_mounted_proc_self_survives_a_different_visible_pid",
+      "-vv",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu/src/prompt_read.rs",
+        "before": "let pid = proc_self_name(proc, self.deadline)?;",
+        "after": "let pid = CString::new(std::process::id().to_string()).map_err(|_| ClockError::Domain)?;"
+      }
+    ],
+    "requires": "native Linux dynamic libc",
+    "timeout": 180,
+    "reason": "이것을 실패시키는 것: 실제 clock 준비가 mounted self 대신 getpid 경로를 여는 것"
+  }
+]

@@ -3,9 +3,11 @@
 new runtime root (F-23 golden)."""
 import importlib.util
 import os
+import pathlib
 import pwd
 import re
 import shlex
+import subprocess
 
 import pytest
 
@@ -29,6 +31,33 @@ HOOK_WORDS = (
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
     b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=",
 )
+
+
+# 이것을 실패시키는 것: Undecided 뿌리의 작성·정규 경로나 표식을 실제 셸에서 누락·중복·분할하는 것.
+def test_shape_only_root_words_survive_real_shells(tmp_path, shells):
+    # Produced before pytest on the host; minimum-shell images have no Rust
+    # toolchain. The scripts embed this directory (in Docker, under /w).
+    fixture = pathlib.Path(os.environ.get("BINGSU_SHAPE_ONLY_FIXTURE", ROOT / "target/shape-only-fixture")).resolve()
+    if not all((fixture / f"init.{shell}").is_file() for shell in shells):
+        reason = f"missing shape-only init fixture in {fixture}; generate it with write_shape_only_shell_fixture before pytest"
+        if os.environ.get("CI") == "true":
+            pytest.fail(reason)
+        pytest.skip(reason)
+    probe = fixture / "probe"
+    probe.write_text('#!/bin/sh\nprintf \'%s\\0\' "$@" > "${0%/*}/words"\n')
+    probe.chmod(0o700)
+    want = [
+        b"--config-root=" + os.fsencode(fixture / "canonical ' space"),
+        b"--config-root-written=" + os.fsencode(fixture / "written ' space"),
+        b"--config-root-shape-only",
+    ]
+    for shell in shells:
+        result = run_shell_script(shell, source(shell, fixture / f"init.{shell}") + call(shell),
+                                  trusted_env(tmp_path), tmp_path)
+        assert result.returncode == 0 and result.stderr == b"", (shell, result)
+        words = (fixture / "words").read_bytes().split(b"\0")[:-1]
+        roots = [w for w in words if w.startswith(b"--config-root")]
+        assert roots == want, (shell, words)
 
 
 def source(shell, path):

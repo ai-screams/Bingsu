@@ -455,6 +455,96 @@ mod tests {
         }
     }
 
+    // 이것을 실패시키는 것: x86_64 clock_gettime(228)에 BOOTTIME(7) 조건을 빼거나 잘못 붙이는 것.
+    #[test]
+    fn x86_64_boottime_uses_explicit_abi_numbers() {
+        // These are x86_64 Linux ABI numbers even on an aarch64 test host.
+        let p = program(
+            X86_64,
+            true,
+            &[(0, &[]), (3, &[]), (228, &[BOOTTIME])],
+            libc::SECCOMP_RET_ALLOW,
+            DENY,
+        );
+        for nr in [0, 3] {
+            assert_eq!(eval(&p, nr, X86_64, [42; 6]), libc::SECCOMP_RET_ALLOW);
+        }
+        for (clock, want) in [(7, libc::SECCOMP_RET_ALLOW), (0, DENY), (1, DENY)] {
+            assert_eq!(eval(&p, 228, X86_64, [clock, 0, 0, 0, 0, 0]), want);
+        }
+        assert_eq!(
+            eval(&p, 228 | X32_SYSCALL_BIT, X86_64, [7; 6]),
+            libc::SECCOMP_RET_KILL_PROCESS
+        );
+    }
+
+    // Only an explicitly labelled emulator run may report unsupported. A
+    // native regression must still fail, including Absent on a native runner.
+    fn unsupported(emulator: Option<&str>, result: Sandbox) -> bool {
+        matches!(emulator, Some("rosetta" | "qemu")) && result != Sandbox::Installed
+    }
+
+    // 이것을 실패시키는 것: native의 Absent/Blocked를 skip하거나 emulator의 Installed를 skip하는 것.
+    #[test]
+    fn unsupported_emulators_do_not_replace_native_filter_tests() {
+        for emulator in [
+            None,
+            Some("native"),
+            Some("typo"),
+            Some("qemu"),
+            Some("rosetta"),
+        ] {
+            assert!(!unsupported(emulator, Sandbox::Installed));
+            for result in [Sandbox::Absent, Sandbox::Blocked] {
+                assert_eq!(
+                    unsupported(emulator, result),
+                    matches!(emulator, Some("qemu" | "rosetta"))
+                );
+            }
+        }
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only emulator label; production policy is unchanged"
+    )]
+    fn emulator_label() -> Option<String> {
+        std::env::var("BINGSU_TEST_EMULATOR").ok()
+    }
+
+    fn require_native_filter() {
+        let emulator = emulator_label();
+        let result = enter();
+        if unsupported(emulator.as_deref(), result) {
+            // enter did not install a filter, so stderr is still available.
+            eprintln!(
+                "UNSUPPORTED emulator={} seccomp={result:?}; native filter coverage NOT exercised",
+                emulator.unwrap()
+            );
+            // SAFETY: isolated test child; distinct from success and SIGSYS.
+            unsafe { libc::_exit(77) }
+        }
+        assert_eq!(result, Sandbox::Installed);
+    }
+
+    fn reported_unsupported(out: &std::process::Output) -> bool {
+        if out.status.code() != Some(77) {
+            return false;
+        }
+        let emulator = emulator_label();
+        assert!(matches!(emulator.as_deref(), Some("qemu" | "rosetta")));
+        let report = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            report.contains("UNSUPPORTED emulator=")
+                && report.contains("native filter coverage NOT exercised"),
+            "{report}"
+        );
+        // Bypass libtest's successful-test capture: unsupported must remain
+        // visible in ordinary cargo test output, separately from native proof.
+        write_fd(2, report.as_bytes());
+        true
+    }
+
     // 이것을 실패시키는 것: 커널 지원 질의의 EINVAL을 막힘으로 보는 것, 설치의 EINVAL(우리 BPF 결함)을 없음으로 보는 것,
     // 질의가 다른 이유로 실패했는데 설치하는 것.
     #[test]
@@ -520,7 +610,7 @@ mod tests {
         // SAFETY: no arguments.
         let parent = unsafe { libc::getppid() };
         let path = std::env::temp_dir().join(format!("bingsu-sandbox-{parent}"));
-        assert_eq!(enter(), Sandbox::Installed);
+        require_native_filter();
         // A disguised getuid: EPERM, and the record that follows is the same.
         // SAFETY: no arguments.
         if unsafe { libc::syscall(libc::SYS_getuid) } != -1 || errno() != libc::EPERM {
@@ -576,6 +666,9 @@ mod tests {
     #[test]
     fn calls_outside_the_rules_fail_without_effect() {
         let out = run_child("sandbox::tests::outside_child");
+        if reported_unsupported(&out) {
+            return;
+        }
         let text = String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.code(), Some(0), "{:?} {text}", out.status);
         assert!(text.ends_with("<alive>"), "{text}");
@@ -646,6 +739,12 @@ mod tests {
     fn each_row_names_the_syscall_its_function_makes() {
         let funcs: Vec<String> = rows().into_iter().map(|(_, f)| f).collect();
         assert_eq!(funcs, ["write", "_exit"]);
+        let support = run_child("sandbox::tests::outside_child");
+        if reported_unsupported(&support) {
+            return;
+        }
+        assert!(support.status.success(), "{support:?}");
+        assert!(support.stdout.ends_with(b"<alive>"), "{support:?}");
         for child in ["probe_write_child", "probe_exit_child"] {
             let out = run_child(&format!("sandbox::tests::{child}"));
             let text = String::from_utf8_lossy(&out.stdout);

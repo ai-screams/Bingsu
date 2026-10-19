@@ -368,12 +368,10 @@ impl ClockPins {
         self.kernel(root.fd.as_raw_fd(), c"proc", dir, procfs)
             .map_err(|_| ClockError::Domain)?;
         let proc = self.last();
-        // /proc/self is a symlink. Its numeric spelling identifies only this
-        // process, so the walk never follows it. Namespace targets are readlinkat
-        // observations below, not followed opens into the parent userns's nsfs.
-        // SAFETY: getpid has no preconditions and runs before the filter.
-        let pid =
-            CString::new(unsafe { libc::getpid() }.to_string()).map_err(|_| ClockError::Domain)?;
+        // The mounted procfs may belong to an ancestor PID namespace. Its
+        // kernel-owned self link, not getpid(), names us in that mount.
+        // Read a bounded numeric component; keep O_NOFOLLOW on the walk.
+        let pid = proc_self_name(proc, self.deadline)?;
         self.kernel(proc, &pid, dir, procfs)
             .map_err(|_| ClockError::Domain)?;
         let process = self.last();
@@ -417,6 +415,32 @@ impl ClockPins {
             resume: 0,
         })
     }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn proc_self_name(proc: i32, deadline: Option<Deadline>) -> Result<CString, ClockError> {
+    check_deadline(deadline);
+    // A positive pid_t is at most ten decimal digits; reserve a truncation byte.
+    let mut bytes = [0u8; 11];
+    // SAFETY: held proc directory and initialized writable buffer; no link is followed.
+    let n = unsafe {
+        libc::readlinkat(
+            proc,
+            c"self".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+        )
+    };
+    let n = usize::try_from(n).map_err(|_| ClockError::Domain)?;
+    proc_self_component(&bytes[..n])
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn proc_self_component(bytes: &[u8]) -> Result<CString, ClockError> {
+    if bytes.is_empty() || bytes.len() >= 11 || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(ClockError::Domain);
+    }
+    CString::new(bytes).map_err(|_| ClockError::Domain)
 }
 
 // The native observations are judged separately so error/absence and filesystem
@@ -592,6 +616,48 @@ mod tests {
         os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::PathBuf,
     };
+
+    // 이것을 실패시키는 것: procfs의 self 대신 현재 namespace의 getpid 숫자를 사용하는 것.
+    #[test]
+    fn proc_self_uses_the_mounted_namespace() {
+        let base = std::env::temp_dir().join(format!("bingsu-proc-self-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let dir = fs::File::open(&base).unwrap();
+        let other_pid = (u64::from(std::process::id()) + 1).to_string();
+        symlink(&other_pid, base.join("self")).unwrap();
+        assert_eq!(
+            proc_self_name(dir.as_raw_fd(), None).unwrap().to_bytes(),
+            other_pid.as_bytes()
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: readlink 오류·잘린 결과·숫자 아닌 경로를 PID 구간으로 사용하는 것.
+    #[test]
+    fn proc_self_rejects_errors_truncation_and_paths() {
+        assert!(proc_self_component(b"").is_err());
+        let base = std::env::temp_dir().join(format!("bingsu-proc-bad-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let dir = fs::File::open(&base).unwrap();
+        assert!(proc_self_name(dir.as_raw_fd(), None).is_err());
+        for target in ["12345678901", "../123", "/123", "12x"] {
+            symlink(target, base.join("self")).unwrap();
+            assert!(proc_self_name(dir.as_raw_fd(), None).is_err(), "{target}");
+            fs::remove_file(base.join("self")).unwrap();
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 실제 clock 준비가 self 이름 대신 getpid 이름을 다시 사용하는 것.
+    // test_prompt_proc.py runs this with a different visible getpid value.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mounted_proc_clock_matches_publisher() {
+        let mut publisher = crate::prompt_io::observe_clock().expect("native procfs clock");
+        publisher.now = 0; // Identity preparation deliberately does not sample time.
+        assert_eq!(ClockPins::prepare(None).identity, Some(publisher));
+    }
+
     struct NoFiles;
     impl Resolver for NoFiles {
         fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
