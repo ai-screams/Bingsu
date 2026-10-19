@@ -10,9 +10,10 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: M3a (config, snapshot, refresh helper) is in progress. `bingsu prompt` renders the built-in default
-  theme from the envelope alone (no config file support, no git segment yet); there is no release. `README.md` lists features
-  as planned until they ship and records working behavior in its Status table.
+- **Stage**: M3a (config, snapshot, refresh helper) is done; M3b (collection: git and other built-in data) is next.
+  `bingsu prompt` renders the built-in default theme or the user's TOML config through a snapshot the refresh helper
+  publishes; command segments are checked but not run yet (M6); there is no release. `README.md` lists features as
+  planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout

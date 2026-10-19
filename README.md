@@ -12,9 +12,9 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in early development (M3a in progress).** `bingsu prompt` now draws a built-in default prompt in bash,
-> zsh and fish (folder, exit status, command duration, jobs), with Unicode icons by default.
-> There is no release, no config file support and no git segment yet. Published performance numbers do not exist yet.
+> **bingsu is in early development (M3a done, M3b next).** `bingsu prompt` draws the built-in default prompt in bash,
+> zsh and fish, or your own look from a TOML config file. There is no release and no git segment yet, and command
+> segments are checked but not run yet. Published performance numbers do not exist yet.
 > This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
 
 ## What is bingsu?
@@ -81,11 +81,11 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Implementation language | Rust |
 | Record path and shell hooks (M1) | Done |
 | Core renderer (M2: layout, width, colors, per-shell output) | Done, used by `bingsu prompt` |
-| Config, snapshot and refresh helper (M3a) | In progress; config files are not supported yet |
+| Config, snapshot and refresh helper (M3a) | Done: TOML config files (`config.toml`, `conf.d/*.toml`, `config.local.toml`, `extends`) with a JSON Schema; a background helper compiles them into a snapshot the prompt reads; `bingsu config check`, `config path`, `config use`, `config schema` and `bingsu reload` |
 | Git segment | Planned; git data is not collected yet |
 | Performance measurement (M1 Part B) | Measurement tools in progress, no published numbers yet |
-| User-visible prompt | Built-in default theme in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width |
-| Theme selection and customization | Planned |
+| User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width |
+| Theme selection and customization | Partly: style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
