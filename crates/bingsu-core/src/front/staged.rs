@@ -637,7 +637,17 @@ fn trust_status(refusal: Refusal) -> Status {
 /// Finish never observes the OS. COLORFGBG comes only from the display envelope,
 /// separate from snapshot identity. Saved OSC 11 observation is deferred until
 /// its observation file and address are defined (N4 review ruling).
-pub fn finish(plan: ReadPlan, mut observed: Observed) -> Response {
+pub fn finish(plan: ReadPlan, observed: Observed) -> Response {
+    finish_with_catalog(plan, observed, &crate::collection::selection::PRODUCT)
+}
+
+/// Pure adapter seam. The shipped adapter always uses `finish` and its fixed
+/// product catalog; declarations and worker capability are not shell input.
+pub fn finish_with_catalog(
+    plan: ReadPlan,
+    mut observed: Observed,
+    catalog: &crate::collection::selection::Catalog<'_>,
+) -> Response {
     let mut response = Response {
         record: Vec::new(),
         deadline: plan.deadline,
@@ -691,7 +701,7 @@ pub fn finish(plan: ReadPlan, mut observed: Observed) -> Response {
                     Ok(_) => Status::OK_NONE,
                 }
             };
-            response.worker_mask = crate::collection::worker_mask(s.config.collect_mask);
+            response.worker_mask = catalog.worker_mask(&s.config, e.width, e.redraw);
             if let (Ok(deadline), Some(clock)) = (eligibility, observed.clock) {
                 response.execution.permit = Some(Permit {
                     deadline,

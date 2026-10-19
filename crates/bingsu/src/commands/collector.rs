@@ -310,9 +310,18 @@ mod tests {
             resume: 0,
             now: 1,
         };
-        let request = Request::new(id, now, b"/c", b"/s", b"/repo", u32::MAX)
-            .unwrap()
-            .unwrap();
+        // Explicit legacy wire input keeps the fd contract tested while the
+        // product request constructor is disabled.
+        let request = Request {
+            id,
+            kind: now.kind,
+            domain: now.domain,
+            resume: now.resume,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            cwd: b"/repo".to_vec(),
+            mask: 1 << 3,
+        };
         let path = snapshot::context_components(b"/c", b"/s")
             .unwrap()
             .iter()

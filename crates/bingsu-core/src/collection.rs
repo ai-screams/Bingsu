@@ -6,7 +6,28 @@ use crate::{
 };
 pub mod cwd_hash;
 pub mod response;
+pub mod selection;
 pub mod wire;
+
+/// The caller supplies a mask selected from its fixed catalog. Empty selections
+/// do not create a request; nonempty requests use the same bounded wire checks.
+pub fn request(
+    binding: wire::Binding,
+    request_id: wire::RequestId,
+    budget_ms: u32,
+) -> Result<Option<wire::Request>, wire::ProtocolError> {
+    if binding.mask == 0 {
+        return Ok(None);
+    }
+    let request = wire::Request {
+        request_id,
+        binding,
+        budget_ms,
+        environment: Vec::new(),
+    };
+    request.encode_body()?;
+    Ok(Some(request))
+}
 
 use alloc::{string::String, vec::Vec};
 pub const REQUEST_MAX: usize = 108 + 3 * crate::layout::PATH_BYTES_MAX;
@@ -22,6 +43,11 @@ pub struct Request {
     pub mask: u32,
 }
 pub fn worker_mask(mask: u32) -> u32 {
+    mask & selection::PRODUCT.workers
+}
+// Retain the old codec until its adapter is replaced. Its schema is not the
+// product worker policy: Request::new still selects only PRODUCT.workers.
+fn legacy_schema_mask(mask: u32) -> u32 {
     crate::field::BUILTIN
         .iter()
         .position(|s| s.id == "git")
@@ -66,7 +92,7 @@ impl Request {
         }
         if ![1, 2].contains(&self.kind)
             || self.mask == 0
-            || worker_mask(self.mask) != self.mask
+            || legacy_schema_mask(self.mask) != self.mask
             || snapshot::context_crc(&self.config, &self.state)? != self.id.context
         {
             return Err(Error::Tag);
@@ -160,6 +186,42 @@ impl Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 이것을 실패시키는 것: legacy 요청 생성자가 제품 worker를 다시 허용하는 것.
+    #[test]
+    fn legacy_request_cannot_enable_product_collection() {
+        let clock = Clock {
+            kind: 1,
+            boot: [1; 16],
+            domain: [2; 16],
+            resume: 0,
+            now: 10,
+        };
+        let id = Identity {
+            boot: clock.boot,
+            epoch: [3; 16],
+            generation: 1,
+            source: [4; 4],
+            context: snapshot::context_crc(b"/c", b"/s").unwrap(),
+        };
+        for mask in [0, u32::MAX, 1 << 3, 1 << 31] {
+            assert!(
+                Request::new(id, clock, b"/c", b"/s", b"/r", mask)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let forged = Request {
+            id,
+            kind: clock.kind,
+            domain: clock.domain,
+            resume: 0,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            cwd: b"/r".to_vec(),
+            mask: 1 << 31,
+        };
+        assert!(forged.encode().is_err());
+    }
     // 이것을 실패시키는 것: 내장 git 선택·정체/시각·길이·CRC 검사를 제거하는 것.
     #[test]
     fn fixed_collection_wire_and_eligibility() {
@@ -177,29 +239,32 @@ mod tests {
             source: [4; 4],
             context: snapshot::context_crc(b"/c", b"/s").unwrap(),
         };
-        let r = Request::new(id, clock, b"/c", b"/s", b"/r", u32::MAX)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            r.mask,
-            1 << crate::field::BUILTIN
-                .iter()
-                .position(|s| s.id == "git")
-                .unwrap()
-        );
-        assert!(
-            Request::new(id, clock, b"/c", b"/s", b"/r", !r.mask)
-                .unwrap()
-                .is_none()
-        );
-        assert!(Request::new(id, clock, b"/wrong", b"/s", b"/r", r.mask).is_err());
-        assert!(Request::new(id, clock, b"/c", b"/s", b"relative", r.mask).is_err());
-        let mut wrong_clock = clock;
-        wrong_clock.boot[0] ^= 1;
-        assert!(Request::new(id, wrong_clock, b"/c", b"/s", b"/r", r.mask).is_err());
-        for bad_cwd in [b"".as_slice(), b"/x\0y"] {
-            assert!(Request::new(id, clock, b"/c", b"/s", bad_cwd, r.mask).is_err());
+        let r = Request {
+            id,
+            kind: clock.kind,
+            domain: clock.domain,
+            resume: clock.resume,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            cwd: b"/r".to_vec(),
+            mask: legacy_schema_mask(u32::MAX),
+        };
+        assert_ne!(r.mask, 0);
+        for mask in [0, r.mask, u32::MAX] {
+            assert!(
+                Request::new(id, clock, b"/c", b"/s", b"/r", mask)
+                    .unwrap()
+                    .is_none()
+            );
         }
+        for bad_cwd in [b"".as_slice(), b"relative", b"/x\0y"] {
+            let mut bad = r.clone();
+            bad.cwd = bad_cwd.to_vec();
+            assert!(bad.encode().is_err());
+        }
+        let mut bad = r.clone();
+        bad.config = b"/wrong".to_vec();
+        assert!(bad.encode().is_err());
         for field in 0..3 {
             let mut bad = r.clone();
             match field {

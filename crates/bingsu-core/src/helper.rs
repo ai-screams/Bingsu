@@ -49,10 +49,11 @@ pub fn decode_groups(word: &[u8], components: usize) -> Result<Vec<GroupPin>, En
     Ok(pins)
 }
 
-/// Only fixed roots, group pins, home, level and a display cwd cross the
+/// Only fixed roots, group pins, home, level, width, redraw and a display cwd cross the
 /// boundary. Two-word display fields cannot smuggle a root option as a value.
 pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<&'a [u8]>, EnvelopeError> {
-    let mut out: Vec<&[u8]> = alloc::vec![b"--ctx", b"1", b"--record", b"B1", b"--width", b"0"];
+    let mut out: Vec<&[u8]> = alloc::vec![b"--ctx", b"1", b"--record", b"B1"];
+    let mut has_width = false;
     let mut i = 0;
     while i < raw.len() {
         let a = raw[i];
@@ -60,8 +61,9 @@ pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<&'a [u8]>, EnvelopeError> {
             let v = raw
                 .get(i + 1)
                 .ok_or(EnvelopeError::BadArgs("missing value"))?;
-            if a == b"--pwd" {
+            if a == b"--pwd" || a == b"--width" {
                 out.extend([a, *v]);
+                has_width |= a == b"--width";
             }
             i += 2;
         } else {
@@ -78,11 +80,15 @@ pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<&'a [u8]>, EnvelopeError> {
             .iter()
             .any(|p| a.starts_with(p))
                 || a == b"--config-root-shape-only"
+                || a == b"--redraw"
             {
                 out.push(a);
             }
             i += 1;
         }
+    }
+    if !has_width {
+        out.extend([b"--width".as_slice(), b"0"]);
     }
     let checked = validate(&out)?;
     if let Some(word) = out

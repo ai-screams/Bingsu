@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from conftest import ROOT, SHELL_CMD, Install, minimal_record, short_dir, trusted_env
+from conftest import ROOT, SHELL_CMD, Install, minimal_record, real_bin, short_dir, trusted_env
 from pty_session import Session
 
 sys.path.insert(0, str(ROOT / "tools/fsbudget"))
@@ -19,6 +19,52 @@ from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace, scan
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 HOSTILE_VARS = ["HOME", "USER", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CACHE_HOME", "BINGSU_LOG"]
 CALL = b"_bingsu_call --width 80\n"
+
+
+# 이것을 실패시키는 것: 시험 target·의존 진입점 또는 fixture 문자열을 제품에 포함하는 것.
+def test_product_fixture_is_unreachable(tmp_path):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_cli_prompt_forbid import check_product_fixture_isolation
+    assert check_product_fixture_isolation(real_bin()) == []
+    altered = tmp_path / "product-with-fixture"
+    altered.write_bytes(real_bin().read_bytes() + b"collector_builtin_test_only_31")
+    assert check_product_fixture_isolation(altered)
+    base = [str(real_bin()), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
+    hostile = dict(os.environ, BINGSU_TEST_BUILTIN="fixture", BINGSU_COLLECTOR_FIXTURE="1")
+    ordinary = subprocess.run(base, capture_output=True, check=True)
+    injected = subprocess.run(base, env=hostile, capture_output=True, check=True)
+    assert ordinary.stdout == injected.stdout
+    argv = subprocess.run(base + ["--collector-fixture"], env=hostile, capture_output=True, check=True)
+    assert b"error:bad-args" in argv.stdout
+
+
+# 이것을 실패시키는 것: 시험 target의 수·소유 package·종류 또는 제품 의존 진입점 검사를 빼는 것.
+@pytest.mark.parametrize("entry", ["missing", "duplicate", "product", "binary", "dependency"])
+def test_fixture_build_gate_rejects_product_entry(monkeypatch, entry):
+    import copy
+    import json
+    from types import SimpleNamespace
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import check_cli_prompt_forbid as gate
+    metadata = json.loads(subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version=1"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout)
+    owner = next(p for p in metadata["packages"] if p["name"] == "bingsu-core-tests")
+    target = next(t for t in owner["targets"] if t["name"] == "collector_builtin")
+    if entry == "missing":
+        owner["targets"].remove(target)
+    elif entry == "duplicate":
+        owner["targets"].append(copy.deepcopy(target))
+    elif entry == "product":
+        owner["name"] = "bingsu"
+    elif entry == "binary":
+        target["kind"] = ["bin"]
+    else:
+        product = next(p for p in metadata["packages"] if p["name"] == "bingsu")
+        product["dependencies"].append({"name": "bingsu-core-tests"})
+    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=json.dumps(metadata)))
+    assert gate.check_product_fixture_isolation()
 
 
 def pinned_roots(trusted):
@@ -697,6 +743,15 @@ def prompt_root_io(front, boundary, exe, pinned, root):
 
 
 def assert_prompt_trace_budget(lines, exe, pinned):
+    _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=0)
+
+
+def assert_historical_prompt_trace_budget(lines, exe, pinned):
+    """Archived captures retain the previous fixed-stub allowance."""
+    _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1)
+
+
+def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -752,7 +807,7 @@ def assert_prompt_trace_budget(lines, exe, pinned):
     # M3a collector exec: exactly the pinned executable and __collect-v1,
     # no additional argv and an empty environment. It precedes confinement.
     collectors = [c for c in execs if c.pid != helper_pid]
-    assert len(collectors) <= 1 and all(fixed_exec(c, exe, "__collect-v1") for c in collectors), collectors
+    assert len(collectors) <= collector_limit and all(fixed_exec(c, exe, "__collect-v1") for c in collectors), collectors
     mains = {helper_pid} | {c.pid for c in collectors}
     owners = {pid: pid for pid in mains}
     children = []
@@ -763,7 +818,7 @@ def assert_prompt_trace_budget(lines, exe, pinned):
         processes = [c for c in made if c not in threads]
         assert len(threads) <= 1, ("extra watchdog", threads)
         owners.update({int(c.ret): pid for c in threads})
-        assert len(processes) <= (1 if pid == helper_pid else 0), processes
+        assert len(processes) <= (collector_limit if pid == helper_pid else 0), processes
         assert all(int(c.ret) in {x.pid for x in collectors} for c in processes), processes
         children.extend(int(c.ret) for c in made)
     assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
@@ -834,7 +889,8 @@ def assert_prompt_trace_budget(lines, exe, pinned):
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
 # 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
 @pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
-def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path):
+@pytest.mark.parametrize("fixture_input", [False, True])
+def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path, fixture_input):
     """Every path argument of every traced call (open, stat, rename, link,
     ...) of the binary and its threads and children. SYSTEM_PATHS was
     observed on Debian and Ubuntu glibc (aarch64, the three test images) and
@@ -848,8 +904,11 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     repo = tmp_path / "repo"
     repo.mkdir()
     env = dict(trusted, **{k: str(repo / k.lower()) for k in HOSTILE_VARS})
+    if fixture_input:
+        env.update(BINGSU_TEST_BUILTIN="fixture", BINGSU_COLLECTOR_FIXTURE="1")
     f = tmp_path / "s.bash"
-    f.write_bytes(script + b"\n" + CALL)
+    call = CALL.replace(b"\n", b" --collector-fixture\n") if fixture_input else CALL
+    f.write_bytes(script + b"\n" + call)
     trace = tmp_path / "trace"
     # Trace all calls; call_paths selects pathname arguments, not quoted data buffers.
     r = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", str(trace)]

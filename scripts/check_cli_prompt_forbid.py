@@ -67,11 +67,40 @@ TCB_SHA256 = {
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
 
 
+def check_product_fixture_isolation(binary=None):
+    """The worker fixture is an explicit test target, with no product entry."""
+    bad = []
+    fixture = "tests/fixtures/collector_builtin.rs"
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version=1"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    import json
+    graph = json.loads(metadata.stdout)
+    packages = graph["packages"]
+    workspace = pathlib.Path(graph["workspace_root"])
+    targets = [(p["name"], t) for p in packages for t in p["targets"]
+               if pathlib.Path(t["src_path"]).resolve() == workspace / fixture]
+    if len(targets) != 1 or targets[0][0] != "bingsu-core-tests" or targets[0][1]["kind"] != ["test"]:
+        bad.append("collector fixture must be exactly one test target in bingsu-core-tests")
+    for package in packages:
+        if package["name"] in {"bingsu", "bingsu-core", "bingsu-collect"}:
+            if any(d["name"] == "bingsu-core-tests" for d in package["dependencies"]):
+                bad.append("product dependency reaches the collector fixture package")
+    if binary is not None:
+        data = pathlib.Path(binary).read_bytes()
+        for marker in (b"collector_builtin", b"collector_builtin_test_only_31"):
+            if marker in data:
+                bad.append("product binary contains a collector fixture symbol or string")
+    return bad
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checker", required=True, help="path to the core-cfg-check binary")
+    parser.add_argument("--product-binary", help="also audit the built product for fixture symbols and strings")
     args = parser.parse_args()
-    bad = []
+    bad = check_product_fixture_isolation(args.product_binary)
     # All prompt entry TCB files are scanned by --binary below and must forbid the
     # unchanged clippy forbidden-call rules. Their exact bytes are pinned.
     for source in (ADAPTER, BOOTSTRAP, PREFETCH, TIMING):

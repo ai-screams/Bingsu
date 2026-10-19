@@ -2768,8 +2768,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/front/staged.rs",
-        "before": "response.worker_mask = crate::collection::worker_mask(s.config.collect_mask);",
-        "after": "response.worker_mask = if observed.marker.is_some_and(|m| m.invalid) { 0 } else { crate::collection::worker_mask(s.config.collect_mask) };",
+        "before": "response.worker_mask = catalog.worker_mask(&s.config, e.width, e.redraw);",
+        "after": "response.worker_mask = if observed.marker.is_some_and(|m| m.invalid) { 0 } else { catalog.worker_mask(&s.config, e.width, e.redraw) };",
         "count": 1
       }
     ]

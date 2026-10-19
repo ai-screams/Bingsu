@@ -1,4 +1,5 @@
 //! First appearance records positive instruction counts; later runs compare them.
+use bingsu_core::{bands::Band, collection::selection, config::compile::CompiledConfig};
 use bingsu_core::{
     collection::{
         cwd_hash,
@@ -163,6 +164,57 @@ fn cwd_sha256(b: Vec<u8>) -> (Vec<u8>, [u8; 32]) {
 fn rejected_prefix(b: [u8; 80]) -> Result<usize, ProtocolError> {
     black_box(reject(black_box(&b)))
 }
+
+fn selected_config() -> CompiledConfig {
+    use bingsu_core::{
+        color::palette::Mode,
+        config::{
+            compile::BUILTIN_TOML,
+            report::report,
+            source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust},
+        },
+    };
+    struct NoSources;
+    impl Resolver for NoSources {
+        fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
+            panic!("no source references")
+        }
+    }
+    let mut c = report(
+        vec![Opened {
+            key: FileKey { dev: 1, ino: 1 },
+            bytes: BUILTIN_TOML.as_bytes().to_vec(),
+            trust: Trust::Executable,
+            display: vec![],
+        }],
+        &mut NoSources,
+        [0, 3, 0],
+        Mode::Dark,
+    )
+    .snapshot
+    .unwrap();
+    c.bands = (0..4096)
+        .map(|i| Band {
+            min_cols: Some(i * 16),
+            max_cols: Some(i * 16 + 15),
+            order: None,
+        })
+        .collect();
+    c.band_order = (0..4096).collect();
+    c.variants = vec![c.variants[0].clone(); 4097];
+    c
+}
+#[inline(never)]
+fn selected(c: &CompiledConfig) -> u32 {
+    selection::builtin_mask(c, 65535)
+}
+#[library_benchmark]
+#[bench::bands4096(setup=selected_config)]
+fn selected_variant(c: CompiledConfig) -> (CompiledConfig, u32) {
+    let mask = black_box(selected(black_box(&c)));
+    assert_ne!(mask, 0);
+    (c, mask)
+}
 library_benchmark_group!(
     name = collection,
     benchmarks = [
@@ -172,7 +224,8 @@ library_benchmark_group!(
         response_decode,
         binding_compare,
         cwd_sha256,
-        rejected_prefix
+        rejected_prefix,
+        selected_variant
     ]
 );
 main!(library_benchmark_groups = collection);
