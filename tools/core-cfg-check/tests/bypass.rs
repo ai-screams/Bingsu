@@ -11,6 +11,13 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+// A Windows checkout has CRLF line endings; the mutations below replace LF text.
+fn repo_source(path: &str) -> String {
+    std::fs::read_to_string(root().join(path))
+        .unwrap()
+        .replace("\r\n", "\n")
+}
+
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -18,6 +25,7 @@ fn fixture(name: &str) -> String {
             .join(name),
     )
     .unwrap()
+    .replace("\r\n", "\n")
 }
 
 fn check(source: &str, mode: &[&str]) -> (bool, String) {
@@ -87,7 +95,7 @@ fn bypass_k24_entry_and_deny_are_pinned() {
         rejects(&fixture(name), &mode, "enter() must");
     }
     rejects(&fixture("k24/alias.rs"), &mode, "renamed libc import");
-    let good = std::fs::read_to_string(root().join("crates/bingsu/src/sandbox.rs")).unwrap();
+    let good = repo_source("crates/bingsu/src/sandbox.rs");
     for source in [
         good.replace("pub fn enter()", "pub fn other()"),
         good.replace("pub fn enter()", "#[cfg(any())] pub fn enter()"),
@@ -129,7 +137,7 @@ fn bypass_k24_decoy() {
     let mode = ["--rules", "crates/bingsu/prompt-syscalls.tsv"];
     rejects(&source, &mode, "outside RULES initializer");
     rejects(&source, &mode, "rules() must");
-    let good = std::fs::read_to_string(root().join("crates/bingsu/src/sandbox.rs")).unwrap();
+    let good = repo_source("crates/bingsu/src/sandbox.rs");
     accepts(&good, &mode);
     // Each half also has an independent witness: a correct consumer cannot
     // excuse an extra syscall, and no extra syscall is needed to swap consumers.
@@ -345,7 +353,7 @@ fn bypass_k83_shadow_bindings() {
         let (ok, err) = check(&fixture(name), &mode);
         assert!(!ok, "{name}: {err}");
     }
-    let good = std::fs::read_to_string(root().join("crates/bingsu/src/prompt.rs")).unwrap();
+    let good = repo_source("crates/bingsu/src/prompt.rs");
     accepts(&good, &mode);
     for shadow in [
         "let (raw,) = (&raw[..0],);",
@@ -363,7 +371,7 @@ fn bypass_k83_raw_initializer_is_pinned() {
     let mode = ["--adapter", "crates/bingsu/prompt-syscalls.tsv"];
     let reason = "another module of the binary";
     rejects(&fixture("k83/init.rs"), &mode, reason);
-    let good = std::fs::read_to_string(root().join("crates/bingsu/src/prompt.rs")).unwrap();
+    let good = repo_source("crates/bingsu/src/prompt.rs");
     for initializer in [
         "args[..0].iter().map(|a| a.as_bytes()).collect()",
         "args.iter().skip(1).map(|a| a.as_bytes()).collect()",
