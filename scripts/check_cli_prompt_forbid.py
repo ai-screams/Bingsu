@@ -22,14 +22,16 @@ keeps it that small (spec section 4 front end, F-01):
    duplicate cell in either name column, and its `syscall` column equals
    RULES in crates/bingsu/src/sandbox.rs (the Linux seccomp filter;
    cargo build scripts are not allowed, so the Rust table is committed and
-   compared here); each RULES entry is `("name", libc::SYS_name, conditions)`;
+   compared by core-cfg-check --rules); the actual RULES initializer must be
+   an array of `("name", libc::SYS_name, conditions)`, not matching text in
+   comments, strings, other constants or aliases;
 5. no symlink under crates/bingsu/src, and crates/bingsu/Cargo.toml has no
    `autobins`, `autoexamples`, `autotests`, `autobenches`, `[lib]` or
    `[[bin]]` (the bin target itself is pinned by check_core_no_std.py);
 6. the trusted files hash to TCB_SHA256: on macOS and anywhere without
    seccomp the kernel does not hold the adapter to the table, so any change
-   to these files changes a pinned value in the same pull request, where
-   review sees it.
+   to these files changes a pinned value in the same pull request, making
+   the change visible to maintainers.
 The adapter's file also passes core's token rules (check_core_cfg.py), and
 at run time the strace test checks files, threads, processes, network and
 the syscall column of the same table.
@@ -38,7 +40,6 @@ Usage: check_cli_prompt_forbid.py --checker PATH   (from the repository root)
 import argparse
 import hashlib
 import pathlib
-import re
 import subprocess
 import sys
 import tomllib
@@ -51,6 +52,8 @@ ADAPTER = ROOT / "crates/bingsu/src/prompt.rs"
 SYSCALLS = ROOT / "crates/bingsu/prompt-syscalls.tsv"
 SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
+# K38: copying a new hash can self-approve a change; these pins are a change-detection
+# tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
     "crates/bingsu/src/prompt_read.rs": "7c771115ddbd124e3888a759fe928440d325cafee37ab7ecd62352c449ff7ce5",
     "crates/bingsu/src/prompt_spawn.rs": "d3e49c09bcbd6a1f63011fcc657828109dae8c4f57038f2eda866e18911a2d24",
@@ -78,6 +81,7 @@ def main():
         if first != "".join(WANT.split()):
             bad.append(f"{source.relative_to(ROOT)}: first inner attribute is {first!r}")
     for argv in ([args.checker, "--adapter", str(SYSCALLS), str(ADAPTER)],
+                 [args.checker, "--rules", str(SYSCALLS), str(SANDBOX)],
                  [args.checker, "--binary", *sorted(str(p) for p in (ROOT / "crates/bingsu/src").rglob("*.rs"))]):
         out = subprocess.run(argv, capture_output=True, text=True)
         if out.returncode != 0:
@@ -95,12 +99,6 @@ def main():
             dups = sorted({n for n in names if names.count(n) > 1})
             if dups:
                 bad.append(f"{SYSCALLS.name}: duplicate {('syscall', 'libc')[col]} {dups}")
-        table = sorted(r[0] for r in body if len(r) == 3 and r[0] != "-")
-        entries = re.findall(r'\("(\w+)",\s*libc::SYS_(\w+),', SANDBOX.read_text())
-        if any(a != b for a, b in entries):
-            bad.append(f"sandbox.rs: RULES entries must be (\"name\", libc::SYS_name, conditions): {entries}")
-        if sorted(a for a, _ in entries) != table:
-            bad.append(f"sandbox.rs RULES {sorted(a for a, _ in entries)} differs from the syscall column {table}")
     links = [str(p.relative_to(ROOT)) for p in (ROOT / "crates/bingsu/src").rglob("*") if p.is_symlink()]
     if links:
         bad.append(f"symlinks under crates/bingsu/src: {links}")
@@ -111,7 +109,7 @@ def main():
     for rel, want in TCB_SHA256.items():
         got = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
         if got != want:
-            bad.append(f"{rel}: sha256 {got}, pinned {want or '(none)'}; review the change as a security change, then run scripts/pin_tcb.py")
+            bad.append(f"{rel}: sha256 {got}, pinned {want or '(none)'}; assess the security impact of the change, then run scripts/pin_tcb.py")
     if bad:
         print("prompt adapter gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
         return 1

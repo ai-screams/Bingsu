@@ -503,7 +503,7 @@ fn core_exposes_no_address() {
         fails_with(bad, why);
     }
     passes(
-        "fn f(a: &u8, b: &u8) -> bool {\n    core::ptr::eq(a, b)\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
+        "fn f(a: &u8, b: &u8) -> bool {\n    a == b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let v = [1u8];\n        let _ = v.as_ptr();\n    }\n}\n",
     );
     passes("#[cfg(test)]\nfn t() {\n    let _ = [1u8].as_ptr();\n}\n");
     // fill p (`{:p<5}` is Display), an escaped brace, hex, a fill `}`, a width argument named pw,
@@ -689,12 +689,12 @@ fn function_and_macro_addresses_fail() {
         ),
         (
             "pub fn f(v: &u8) -> alloc::string::String {\n    alloc::format!(\"{}\", core::ptr::from_ref(v).addr())\n}\n",
-            "core::ptr other than ptr::eq",
+            "core::ptr exposes an address",
         ),
-        ("m!(use core::ptr);\n", "core::ptr other than ptr::eq"),
+        ("m!(use core::ptr);\n", "core::ptr exposes an address"),
         (
             "pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", ptr::null::<u8>())\n}\n",
-            "core::ptr other than ptr::eq",
+            "core::ptr exposes an address",
         ),
         (
             "pub fn f() -> alloc::string::String {\n    alloc::format!(\"{:?}\", (|| 0) as fn() -> u8)\n}\n",
@@ -704,7 +704,7 @@ fn function_and_macro_addresses_fail() {
         fails_with(bad, why);
     }
     passes(
-        "fn marker() -> u8 {\n    1\n}\npub fn f(a: &u8, b: &u8, n: u8, ptr: u8) -> alloc::string::String {\n    alloc::format!(\"{} {} {} {}\", core::ptr::eq(a, b), n as usize, ptr, marker())\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = alloc::format!(\"{:?}\", [1u8].as_ptr_range());\n    }\n}\n",
+        "fn marker() -> u8 {\n    1\n}\npub fn f(a: &u8, b: &u8, n: u8, ptr: u8) -> alloc::string::String {\n    alloc::format!(\"{} {} {} {}\", a == b, n as usize, ptr, marker())\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = alloc::format!(\"{:?}\", [1u8].as_ptr_range());\n    }\n}\n",
     );
 }
 
@@ -1178,4 +1178,220 @@ fn deadline_install_is_only_a_fail_closed_prefilter_entry() {
     ] {
         assert!(!run_adapter(&bad).0, "{bad}");
     }
+}
+
+// 이것을 실패시키는 것: XID_Start/Continue를 alphabetic/alphanumeric으로 되돌리는 것.
+#[test]
+fn unicode_xid_format_arguments_and_counts() {
+    for fmt in [
+        "{a\u{332}:p}",
+        "{℘:p}",
+        "{x:a\u{332}$p}",
+        "{x:.a\u{332}$p}",
+        "{a\u{332}:?}",
+        "{℘:#?}",
+        "{x:a\u{332}$?}",
+    ] {
+        let source = format!("const X: &str = {fmt:?};");
+        fails_with(&source, if fmt.ends_with("p}") { "{:p}" } else { "{:?}" });
+    }
+    passes("const X: &str = \"{a̲} {@icon:frame.top} {{a̲:p}}\";");
+}
+
+// 이것을 실패시키는 것: production glob visitor 제거 또는 group 안 glob을 놓치는 것.
+#[test]
+fn production_glob_cannot_import_debug_fmt() {
+    for import in [
+        "use core::fmt::*;",
+        "use core::{fmt::{*}};",
+        "use core::r#fmt::*;",
+    ] {
+        fails_with(
+            &format!(
+                "{import}\nstruct S(core::task::Waker);\nimpl core::fmt::Display for S {{ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ self.0.fmt(f) }} }}"
+            ),
+            "production glob",
+        );
+    }
+    passes("#[cfg(test)] mod tests { use core::fmt::*; }");
+}
+
+// 이것을 실패시키는 것: 매크로 그룹 안 use를 AST glob 검사에서 제외하는 것.
+#[test]
+fn production_glob_in_macro_blocks_is_checked() {
+    fails_with(
+        "fn f() { let _ = alloc::vec![{ use core::fmt::*; 0 }]; }",
+        "production glob",
+    );
+    passes("#[cfg(test)] mod tests { fn t() { m!({ use core::fmt::*; }); } }");
+}
+
+// 이것을 실패시키는 것: 함수 item 검사 제거, callee를 허용하면서 배열·분기까지 건너뛰는 것.
+#[test]
+fn function_items_cannot_be_stored_or_coerced_for_ordering() {
+    for body in [
+        "let fs = [a, b]; let _ = fs[0] < fs[1];",
+        "let mut fs = [a, b]; fs.sort();",
+        "let _ = alloc::collections::BTreeMap::from([(a, 1), (b, 2)]);",
+        "let _ = a;",
+        "let a = [a, b];",
+        "consume(if flag { a } else { b });",
+        "let _ = alloc::vec![a, b];",
+        "let _ = || a;",
+        "let _ = (a);",
+        "let _ = &a;",
+        "consume(a);",
+        "let fs = [core::convert::identity(a), core::convert::identity(b)];",
+    ] {
+        fails_with(
+            &format!("extern crate alloc; fn a() {{}} fn b() {{}} fn f(flag: bool) {{ {body} }}"),
+            "function item",
+        );
+    }
+    fails_with(
+        "use crate::elsewhere::f as F; fn g() { let _ = F; }",
+        "function item F",
+    );
+    fails_with(
+        "fn f() { let _ = [crate::a::f, crate::b::f]; }",
+        "function item f",
+    );
+    passes("fn a() {} fn f() { a(); (a)(); consume(|| a()); let a = 1; let _ = a; }");
+    passes("fn a() {} #[cfg(test)] mod tests { fn t() { let _ = super::a; } }");
+}
+
+// 이것을 실패시키는 것: 매크로 표현식 파싱 제거로 turbofish를 경로 접두사처럼 건너뛰는 것.
+#[test]
+fn function_items_with_turbofish_in_macros_cannot_escape() {
+    fails_with(
+        "fn a<T>() {} fn b<T>() {} fn f() { let fs = alloc::vec![a::<u8>, b::<u8>]; }",
+        "function item",
+    );
+    fails_with(
+        "fn f() { let fs = alloc::vec![crate::a::f, crate::b::f]; }",
+        "function item",
+    );
+    fails_with(
+        "struct S; impl S { fn A() {} fn B() {} } fn f() { let fs = [S::A, S::B]; }",
+        "function item",
+    );
+}
+
+// 이것을 실패시키는 것: ptr::eq 예외 복구 또는 ptr_eq를 ADDRESS_APIS에서 빼는 것.
+#[test]
+fn pointer_identity_is_not_a_pure_value() {
+    for body in [
+        "core::ptr::eq(a, b)",
+        "core::ptr::r#eq(a, b)",
+        "alloc::rc::Rc::ptr_eq(a, b)",
+        "alloc::rc::Weak::ptr_eq(a, b)",
+    ] {
+        fails_with(
+            &format!("fn f(a: &u8, b: &u8) -> bool {{ {body} }}"),
+            "exposes an address",
+        );
+        fails_with(&format!("m!({body});"), "exposes an address");
+    }
+    fails_with("use core::ptr::eq as same;", "pointer identity");
+    passes("#[cfg(test)] mod tests { fn t() { core::ptr::eq(&1, &1); } }");
+}
+
+fn run_rules(source: &str) -> (bool, String) {
+    let source = fixture(source);
+    let table = fixture("syscall\tlibc\twhy\nread\tread\theld fd\n");
+    let result = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .args(["--rules", table.to_str().unwrap(), source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    (
+        result.status.success(),
+        String::from_utf8(result.stderr).unwrap(),
+    )
+}
+
+// 이것을 실패시키는 것: 실제 RULES 대신 파일 전체의 tuple/문자열/주석을 비교하는 것.
+#[test]
+fn rules_initializer_ignores_decoys_and_rejects_indirection() {
+    let good = r#"const RULES: [(&str, i64, &[u8]); 1] = [("read", libc::SYS_read, &[])];
+        fn rules() -> Vec<(u32, &'static [Cond])> {
+            RULES.iter()
+                .map(|&(_, nr, c)| (u32::try_from(nr).expect("syscall number"), c))
+                .collect()
+        }
+        const DENY: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        pub fn enter() -> Sandbox {
+            let query = if unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) } < 0 {
+                Err(errno())
+            } else {
+                Ok(())
+            };
+            outcome(query, || {
+                let prog = program(
+                    ARCH,
+                    cfg!(target_arch = "x86_64"),
+                    &rules(),
+                    libc::SECCOMP_RET_ALLOW,
+                    DENY,
+                );
+                install(&prog)
+            })
+        }"#;
+    assert!(run_rules(good).0);
+    for bad in [
+        "// (\"read\", libc::SYS_read, &[])\nconst RULES: [(); 0] = [];",
+        "const DECOY: &[(&str, i64, &[u8])] = &[(\"read\", libc::SYS_read, &[])]; const RULES: [(); 0] = [];",
+        "const DECOY: &str = r#\"(\"read\", libc::SYS_read, &[])\"#; const RULES: [(); 0] = [];",
+        "const DECOY: [(&str, i64, &[u8]); 1] = [(\"read\", libc::SYS_read, &[])]; const RULES: [(&str, i64, &[u8]); 1] = DECOY;",
+        "const RULES: [(&str, i64, &[u8]); 1] = [(\"read\", libc::SYS_write, &[])];",
+        "const RULES: [(&str, i64, &[u8]); 1] = [row()];",
+    ] {
+        let (ok, err) = run_rules(bad);
+        assert!(!ok && err.contains("RULES:"), "{bad}: {err}");
+    }
+    // A decoy must not create a false syscall mismatch either.
+    assert!(run_rules(&format!("{good}\n// (\"execve\", libc::SYS_execve, &[])")).0);
+}
+
+// 이것을 실패시키는 것: prepare 인자 AST 검사를 제거하거나 인자 개수만 보는 것.
+#[test]
+fn prepare_arguments_are_exact() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bingsu/src/prompt.rs"),
+    )
+    .unwrap();
+    assert!(run_adapter(&source).0);
+    for args in [
+        "&[], deadline",
+        "&raw, deadline + 1",
+        "&raw, other",
+        "&mut raw, deadline",
+        "&raw, { deadline }",
+    ] {
+        let bad = source.replace("prepare(&raw, deadline)", &format!("prepare({args})"));
+        let (ok, err) = run_adapter(&bad);
+        assert!(!ok, "{args}: {err}");
+    }
+}
+
+// 이것을 실패시키는 것: 직접 호출의 인자를 건너뛰어 identity로 함수 값을 유출하는 것.
+#[test]
+fn function_items_cannot_escape_through_arguments() {
+    fails_with(
+        "fn a() {} fn b() {} fn f() { let fs = [core::convert::identity(a), core::convert::identity(b)]; }",
+        "function item",
+    );
+}
+
+// 이것을 실패시키는 것: tuple variant 생성자와 그 import를 함수 item으로 세지 않는 것.
+#[test]
+fn function_item_constructors_cannot_be_ordered() {
+    fails_with(
+        "enum E { A(u8), B(u8) } fn f() { let fs = [E::A, E::B]; }",
+        "function item",
+    );
+    fails_with(
+        "enum E { A(u8), B(u8) } use E::{A,B}; fn f() { let fs = [A,B]; }",
+        "function item",
+    );
+    passes("enum E { Unit } use E::Unit as Data; fn f() { consume(Data); }");
 }

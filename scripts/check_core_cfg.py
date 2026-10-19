@@ -70,6 +70,7 @@ import tomllib
 
 CORE = "crates/bingsu-core"
 ADAPTER = "crates/bingsu/src/prompt.rs"
+PROMPT_IO = "crates/bingsu/src/prompt_io.rs"
 BINARY = "crates/bingsu"
 SKIP = {"purity-canary", "target"}
 ALLOWED = {"src", "tests", "benches"}
@@ -208,6 +209,15 @@ def check_tokens(checker, errors):
     result = subprocess.run([checker, *checker_args(collect([])), "--tcb", ADAPTER])
     if result.returncode != 0:
         errors.append("core-cfg-check rejected the files above")
+    # Unlike pure core, this bridge owns OS cfg/atomics. Its forbidden-call
+    # scan visits every branch; keep the existing adapter --tcb rules intact.
+    with open(f"{BINARY}/clippy.toml", "rb") as f:
+        config = tomllib.load(f)
+    names = sorted({entry["path"].split("::")[-1]
+                    for entry in config["disallowed-methods"]})
+    result = subprocess.run([checker, "--prompt-io", ",".join(names), PROMPT_IO])
+    if result.returncode != 0:
+        errors.append("core-cfg-check rejected prompt I/O forbidden calls")
     check_split_canary(checker, errors)
 
 

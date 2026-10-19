@@ -126,14 +126,14 @@ pub fn from_loaded(
     // report shows why each was dropped and everything else it had.
     let mut dropped_notes: Vec<Diagnostic> = Vec::new();
     loop {
-        let full = merge(&loaded, &skip, &keys::slot);
+        let full = merge(&loaded, &skip, &|path| keys::slot(path));
         let untrusted: Vec<SourceId> = loaded
             .files
             .iter()
             .filter(|f| f.trust != Trust::Executable)
             .map(|f| f.id)
             .collect();
-        let trusted = merge(&loaded, &untrusted, &keys::slot);
+        let trusted = merge(&loaded, &untrusted, &|path| keys::slot(path));
         let mut diags = full.warnings.clone();
         diags.extend(check(&full));
         let mut compiled = None;

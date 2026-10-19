@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The approved pre-filter file is part of the pinned, scanned TCB."""
 import pathlib
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,34 @@ class Bootstrap(unittest.TestCase):
                         self.assertIn(f"{module}.rs: first inner attribute", changed.stderr)
                     finally:
                         path.write_bytes(original)
+
+    # 이것을 실패시키는 것: --rules AST 호출 제거/전체 파일 regex 복구. 해시만으로 검출하면 실패.
+    def test_rules_initializer_is_checked_even_after_tcb_review(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:
+            root = pathlib.Path(temp)
+            for name in ["scripts/check_cli_prompt_forbid.py", *gate.TCB_SHA256]:
+                dest = root / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / name, dest)
+            sandbox = root / "crates/bingsu/src/sandbox.rs"
+            # A comment retains exactly the tuples the old whole-file regex saw.
+            source = sandbox.read_text()
+            start = source.index('const RULES:')
+            end = source.index('\n];', start) + len('\n];')
+            old = source[start:end]
+            changed = (source[:start] + '/*' + old + '*/\n'
+                       'const RULES: [(&str, libc::c_long, &[Cond]); 1] = '
+                       '[("", libc::SYS_execve, &[])];' + source[end:])
+            sandbox.write_text(changed)
+            script = root / "scripts/check_cli_prompt_forbid.py"
+            script.write_text(script.read_text().replace(
+                gate.TCB_SHA256["crates/bingsu/src/sandbox.rs"],
+                hashlib.sha256(sandbox.read_bytes()).hexdigest()))
+            out = subprocess.run([sys.executable, str(script), "--checker", str(CHECKER)],
+                                 capture_output=True, text=True)
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn("RULES:", out.stderr)
+            self.assertNotIn("sha256", out.stderr)
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,9 @@ fi
 # scope, as above. wasm32-unknown-unknown is not enough: it has a std whose
 # I/O returns errors at run time.
 cargo build --quiet -p bingsu-core --target wasm32v1-none
+# Exercise rustdoc under the same sanitized environment as rustc. The child
+# environment regression test observes this invocation, not just unset text.
+cargo doc --quiet -p bingsu-core --no-deps
 python3 - <<'EOF'
 import sys, tomllib
 core = tomllib.load(open("crates/bingsu-core/Cargo.toml", "rb")).get("lints", {})
@@ -107,6 +110,9 @@ python3 scripts/check_core_no_std.py
 # fn main that only dispatches, no code outside main.
 python3 scripts/check_cli_prompt_forbid.py --checker "$checker"
 python3 -B scripts/test_prompt_bootstrap.py
+python3 -B scripts/test_gate_bypass.py
+python3 -B scripts/test_check_core_cfg.py
+python3 -B scripts/test_check_core_purity_env.py
 # clippy on core, in a fresh temporary target directory with its config
 # pinned; diagnostics are counted, not only the exit code.
 python3 scripts/check_core_clippy_clean.py

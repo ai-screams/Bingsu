@@ -291,6 +291,50 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
         syn::Item::Fn(f) if f.sig.ident == "run_prompt" => Some(f),
         _ => None,
     })?;
+    // The incoming Option is refined once by the first statement. Count all
+    // body patterns (including closures, loops and match arms), not just lets.
+    let syn::Stmt::Local(deadline) = f.block.stmts.first()? else {
+        return None;
+    };
+    let pinned: syn::Stmt = syn::parse_str("let Some(deadline) = deadline else { exit(0) };")
+        .expect("pinned deadline refinement");
+    if syn::Stmt::Local(deadline.clone()) != pinned {
+        return None;
+    }
+    // The TCB hash pin remains the last line for shapes these AST pins do not cover.
+    let raw = f.block.stmts.iter().find(|s| {
+        matches!(s, syn::Stmt::Local(l)
+            if matches!(&l.pat, syn::Pat::Type(t)
+                if matches!(t.pat.as_ref(), syn::Pat::Ident(p) if p.ident == "raw")))
+    })?;
+    let pinned: syn::Stmt =
+        syn::parse_str("let raw: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();")
+            .expect("pinned raw initializer");
+    if *raw != pinned {
+        return None;
+    }
+    struct Bindings {
+        raw: usize,
+        deadline: usize,
+    }
+    impl<'ast> Visit<'ast> for Bindings {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            match p.ident.unraw().to_string().as_str() {
+                "raw" => self.raw += 1,
+                "deadline" => self.deadline += 1,
+                _ => {}
+            }
+            syn::visit::visit_pat_ident(self, p);
+        }
+    }
+    let mut bindings = Bindings {
+        raw: 0,
+        deadline: 0,
+    };
+    bindings.visit_block(&f.block);
+    if bindings.raw != 1 || bindings.deadline != 1 {
+        return None;
+    }
     struct Calls(usize);
     impl<'ast> Visit<'ast> for Calls {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -364,7 +408,14 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     let syn::Expr::Path(path) = prepare.func.as_ref() else {
         return None;
     };
-    if joined(&path.path).join("::") != "crate::prompt_read::prepare" || prepare.args.len() != 2 {
+    if joined(&path.path).join("::") != "crate::prompt_read::prepare"
+        || prepare.args.len() != 2
+        || !matches!(prepare.args.first()?, syn::Expr::Reference(r)
+            if r.mutability.is_none() && matches!(r.expr.as_ref(), syn::Expr::Path(p)
+                if p.qself.is_none() && p.path.is_ident("raw")))
+        || !matches!(prepare.args.last()?, syn::Expr::Path(p)
+            if p.qself.is_none() && p.path.is_ident("deadline"))
+    {
         return None;
     }
     let syn::Expr::Call(runs) = branch.cond.as_ref() else {

@@ -20,3 +20,4 @@ workspace = true
 # span-locations gives Span::start(), used for file:line in errors.
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "3", features = ["full", "visit", "extra-traits"] }
+unicode-ident = "1"

@@ -4,6 +4,8 @@ Run: python3 -B scripts/test_check_diag_codes.py
 """
 import contextlib
 import io
+import hashlib
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -12,6 +14,8 @@ from unittest.mock import patch
 
 import check_diag_codes as gate
 
+REGISTRY = "crates/bingsu-core/src/diag_codes.rs"
+REVIEWS = "crates/bingsu-core/diag-code-reviews.json"
 
 class DiagnosticCodes(unittest.TestCase):
     def setUp(self):
@@ -21,12 +25,17 @@ class DiagnosticCodes(unittest.TestCase):
         self.head = self.root / gate.REL
         self.head.parent.mkdir(parents=True)
         self.base = self.root / "base.txt"
+        self.registry = self.root / REGISTRY
+        self.registry.parent.mkdir(parents=True)
+        self.registry.write_text('const MEANING: &str = "invalid TOML";\n')
+        self.base_registry = self.root / "base.rs"
+        self.base_registry.write_text(self.registry.read_text())
 
     def check_files(self, base, head):
         self.base.write_text(base)
         self.head.write_text(head)
         with patch.object(gate, "ROOT", self.root):
-            return self.run_gate(["--base-file", str(self.base)])
+            return self.run_gate(["--base-file", str(self.base), "--base-registry", str(self.base_registry)])
 
     def run_gate(self, args):
         out, err = io.StringIO(), io.StringIO()
@@ -92,11 +101,69 @@ class DiagnosticCodes(unittest.TestCase):
         self.head.write_text("E101 stable\n")
         results = [subprocess.CompletedProcess([], 0),
                    subprocess.CompletedProcess([], 0, stdout=gate.REL),
-                   subprocess.CompletedProcess([], 0, stdout="E101 stable\nW407 stable\n")]
+                   subprocess.CompletedProcess([], 0, stdout="E101 stable\nW407 stable\n"),
+                   subprocess.CompletedProcess([], 0, stdout=self.base_registry.read_text())]
         with patch.object(gate, "ROOT", self.root), patch.object(gate.subprocess, "run", side_effect=results):
             result, _, err = self.run_gate(["origin/main"])
         self.assertEqual(result, 1)
         self.assertIn("W407 was removed", err)
+
+    def review(self, kind="wording", reason="Same invalid TOML condition; clearer wording"):
+        entry = {"before": hashlib.sha256(self.base_registry.read_bytes()).hexdigest(),
+                 "after": hashlib.sha256(self.registry.read_bytes()).hexdigest(),
+                 "kind": kind, "reason": reason}
+        (self.root / REVIEWS).write_text(json.dumps([entry]))
+
+    # 이것을 실패시키는 것: 번호·상태만 비교하고 같은 번호의 진단 레지스트리 변경을 놓치는 것.
+    def test_same_code_and_status_cannot_silently_change_meaning(self):
+        self.registry.write_text('const MEANING: &str = "permission denied";\n')
+        result, _, err = self.check_files("E101 stable\n", "E101 stable\n")
+        self.assertEqual(result, 1)
+        self.assertIn("explicit wording/meaning review", err)
+
+    # 이것을 실패시키는 것: 의미 검토를 이유로 모든 문구 수정을 금지하는 것.
+    def test_reviewed_wording_and_meaning_changes_have_an_explicit_path(self):
+        self.registry.write_text('const MEANING: &str = "TOML syntax is invalid";\n')
+        for kind in ("wording", "meaning"):
+            with self.subTest(kind=kind):
+                self.review(kind, "Reviewed E101: still TOML syntax; no number reused")
+                result, _, err = self.check_files("E101 stable\n", "E101 stable\n")
+                self.assertEqual(result, 0, err)
+
+    # 이것을 실패시키는 것: 예전 해시·빈 근거·잘못된 분류·중복 검토를 수용하는 것.
+    def test_review_is_bound_to_the_exact_diff_and_explained(self):
+        self.registry.write_text("changed\n")
+        for kind, reason in [("skip", "because"), ("wording", " ")]:
+            self.review(kind, reason)
+            self.assertEqual(self.check_files("E101 stable\n", "E101 stable\n")[0], 1)
+        self.review()
+        self.registry.write_text("changed again\n")
+        self.assertEqual(self.check_files("E101 stable\n", "E101 stable\n")[0], 1)
+        self.review()
+        review = self.root / REVIEWS
+        review.write_text(json.dumps(json.loads(review.read_text()) * 2))
+        self.assertEqual(self.check_files("E101 stable\n", "E101 stable\n")[0], 1)
+
+    # 이것을 실패시키는 것: 검토 기록으로 삭제·상태 역행까지 우회하는 것.
+    def test_review_does_not_override_append_only_rules(self):
+        self.registry.write_text("changed\n")
+        self.review("meaning", "New code for a new condition")
+        result, _, err = self.check_files("E101 stable\nW407 stable\n", "E101 stable\n")
+        self.assertEqual(result, 1)
+        self.assertIn("W407 was removed", err)
+
+    # 이것을 실패시키는 것: --base-file만 주거나 기준 레지스트리를 읽지 못해도 통과시키는 것.
+    def test_missing_base_registry_fails_closed(self):
+        self.base.write_text("E101 stable\n")
+        self.assertEqual(self.run_gate(["--base-file", str(self.base)])[0], 1)
+        results = [subprocess.CompletedProcess([], 0),
+                   subprocess.CompletedProcess([], 0, stdout=gate.REL),
+                   subprocess.CompletedProcess([], 0, stdout="E101 stable\n"),
+                   subprocess.CompletedProcess([], 1, stderr="missing source")]
+        with patch.object(gate.subprocess, "run", side_effect=results):
+            result, _, err = self.run_gate(["origin/main"])
+        self.assertEqual(result, 1)
+        self.assertIn("cannot read base registry", err)
 
 
 if __name__ == "__main__":

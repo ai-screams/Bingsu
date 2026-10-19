@@ -133,7 +133,7 @@ fn dropped(key: &str, path: &[String], n: &Node, cx: &mut Ctx<'_>) {
 fn merge_table(into: &mut MTable, from: &Table, path: &mut Vec<String>, cx: &mut Ctx<'_>) {
     for e in &from.entries {
         path.push(e.key.clone());
-        let segs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
         let is_table = matches!(e.node.value, Value::Table(_));
         // From a shape-only file a value must have the shape its row has: a
         // table only where the row is a table (its keys are then checked one
