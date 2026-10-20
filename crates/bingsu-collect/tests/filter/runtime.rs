@@ -3,6 +3,8 @@ use std::{io, process::Command};
 #[allow(dead_code)]
 #[path = "../../src/limits.rs"]
 mod limits;
+#[path = "../support/process.rs"]
+mod process;
 #[allow(dead_code)]
 #[path = "../../src/sys.rs"]
 mod sys;
@@ -41,17 +43,20 @@ fn protect() {
     sys::final_filter().unwrap();
 }
 fn child(case: &str) -> std::process::Output {
-    let out = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "runtime::kernel_child",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("BINGSU_FILTER_CASE", case)
-        .output()
-        .unwrap();
+    let out = process::output(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::kernel_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BINGSU_FILTER_CASE", case),
+        case,
+        process::PROBE_TIMEOUT,
+    )
+    .unwrap();
     assert!(out.status.success(), "{case}: {out:?}");
     assert!(
         String::from_utf8_lossy(&out.stdout)
@@ -168,7 +173,10 @@ fn x14_threads_and_status_survive_fork_is_refused() {
 // 이것을 실패시키는 것: seal 생략·prlimit64 상위32 누락·root의 변경 성공.
 #[test]
 fn filter_installed_before_threads_and_ready() {
-    child("limits");
+    let out = child("limits");
+    // The privileged CI invocation also uses this bounded parent. Forward the
+    // child's already-validated marker for the workflow's exact grep check.
+    print!("{}", String::from_utf8(out.stdout).unwrap());
 }
 // 이것을 실패시키는 것: 실제 커널에서 잘못된 arch 또는 x32 호출을 살려두는 것.
 #[test]
@@ -180,17 +188,20 @@ fn wrong_arch_and_x32_kill_the_child() {
         &["wrong-arch"]
     };
     for case in cases {
-        let out = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "runtime::kernel_child",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("BINGSU_FILTER_CASE", case)
-            .output()
-            .unwrap();
+        let out = process::output(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::kernel_child",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("BINGSU_FILTER_CASE", case),
+            case,
+            process::PROBE_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(out.status.signal(), Some(libc::SIGSYS), "{case}: {out:?}");
     }
 }
@@ -204,6 +215,9 @@ fn landlock_kernel_denies_write_without_seccomp() {
 #[ignore = "only the isolated parent invokes this child, with an exact PASS marker"]
 fn kernel_child() {
     let case = std::env::var("BINGSU_FILTER_CASE").unwrap();
+    // libtest's "test runtime::kernel_child ... " has no trailing newline.
+    // Keep every machine-readable record on its own line, including timing.
+    println!();
     if std::env::var_os("BINGSU_REQUIRE_ROOT_FILTER").is_some() {
         // SAFETY: read-only identity query before the isolated protection step.
         assert_eq!(unsafe { libc::geteuid() }, 0, "BLOCKED: root required");
@@ -287,8 +301,10 @@ fn kernel_child() {
             clone3_control();
             #[cfg(target_env = "gnu")]
             {
+                // SAFETY: read-only libc version query.
+                let version = unsafe { libc::gnu_get_libc_version() };
                 // SAFETY: libc returns a static, NUL-terminated version string.
-                let v = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }
+                let v = unsafe { std::ffi::CStr::from_ptr(version) }
                     .to_str()
                     .unwrap();
                 let mut parts = v.split('.').map(|s| s.parse::<u32>().unwrap());
@@ -349,19 +365,26 @@ fn kernel_child() {
 fn every_table_row_reaches_the_kernel() {
     use std::os::unix::process::ExitStatusExt;
     for row in filter::rows(filter::AuditArch::native()) {
-        let out = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "runtime::row_child",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("BINGSU_ROW_PROBE", row.probe)
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains(&format!("B2 ROW {} ENTER", row.probe)),
+        let out = process::output(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::row_child",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("BINGSU_ROW_PROBE", row.probe),
+            row.probe,
+            process::PROBE_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| *line == format!("B2 ROW {} ENTER", row.probe))
+                .count(),
+            1,
             "row not run: {out:?}"
         );
         if row.name == "rt_sigreturn" {
@@ -388,19 +411,22 @@ fn row_child() {
     limits::drop_capabilities().unwrap();
     nnp();
     landlock::install_read_only().unwrap();
+    if row.name == "exit" {
+        exit_row_child(&row);
+    }
     filter::install_bootstrap().unwrap();
     limits::lower_as_under_filter().unwrap();
     if !row.condition.starts_with("bootstrap_") {
         filter::seal_limits().unwrap();
     }
-    println!("B2 ROW {} ENTER", row.probe);
+    println!("\nB2 ROW {} ENTER", row.probe);
     if row.name == "clone" {
         assert_eq!(std::thread::spawn(|| 11).join().unwrap(), 11);
     } else {
         let mut args = super::positive(row.condition);
         // A safe zero/invalid-argument call must reach kernel validation, not
         // get EPERM from seccomp. Terminating syscalls use an exact exit code.
-        if matches!(row.name, "exit" | "exit_group") {
+        if row.name == "exit_group" {
             args[0] = 73;
         }
         if row.name == "futex" {
@@ -414,6 +440,7 @@ fn row_child() {
             }
         }
         let rc = raw(row.nr as libc::c_long, args);
+        assert_ne!(row.name, "exit_group", "{} returned: {rc}", row.probe);
         if row.condition == "enosys" {
             assert_eq!((rc, errno()), (-1, libc::ENOSYS));
         } else {
@@ -426,6 +453,86 @@ fn row_child() {
     }
     // SAFETY: exact completion code proves the selected row ran.
     unsafe { libc::_exit(73) };
+}
+
+fn exit_row_child(row: &filter::Row<'_>) -> ! {
+    // SYS_exit kills only its calling thread. Running it on libtest's worker
+    // strands the harness waiting for a completion message. Fork BEFORE the
+    // filter, then install both real BPF layers in a single-threaded child.
+    // Base limits, dropped capabilities, NNP and Landlock are inherited.
+    // Prepare all allocation/formatting before fork; the child uses only raw
+    // syscalls and _exit, never Rust locks, allocation or unwinding.
+    let bootstrap = filter::bootstrap_program(filter::AuditArch::native());
+    let final_filter = filter::program(filter::AuditArch::native());
+    let programs = [&bootstrap, &final_filter].map(|p| libc::sock_fprog {
+        len: p.len() as u16,
+        filter: p.as_ptr().cast_mut(),
+    });
+    let marker = format!("\nB2 ROW {} ENTER\n", row.probe);
+    // SAFETY: the child only uses prebuilt buffers and async-signal-safe calls.
+    let pid = unsafe { libc::fork() };
+    assert!(
+        pid >= 0,
+        "{}: fork: {}",
+        row.probe,
+        io::Error::last_os_error()
+    );
+    if pid == 0 {
+        for program in &programs {
+            if raw(
+                libc::SYS_seccomp,
+                [1, 0, (program as *const libc::sock_fprog) as u64, 0, 0, 0],
+            ) != 0
+            {
+                // SAFETY: terminate this isolated child without destructors.
+                unsafe { libc::_exit(90) };
+            }
+        }
+        if raw(
+            libc::SYS_write,
+            [1, marker.as_ptr() as u64, marker.len() as u64, 0, 0, 0],
+        ) == marker.len() as libc::c_long
+        {
+            raw(row.nr as libc::c_long, [73, 0, 0, 0, 0, 0]);
+        }
+        // A returning/denied SYS_exit must never masquerade as exit code 73.
+        // SAFETY: terminate this isolated child without destructors.
+        unsafe { libc::_exit(91) };
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut status = 0;
+    loop {
+        // SAFETY: exclusively owned child and valid status storage.
+        let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if rc == pid {
+            assert!(libc::WIFEXITED(status), "{}: status {status}", row.probe);
+            assert_eq!(libc::WEXITSTATUS(status), 73, "{}", row.probe);
+            // SAFETY: propagate the verified syscall's exit code to our parent.
+            unsafe { libc::_exit(73) };
+        }
+        let error = (rc == -1).then(io::Error::last_os_error);
+        if error
+            .as_ref()
+            .is_some_and(|e| e.kind() != io::ErrorKind::Interrupted)
+            || std::time::Instant::now() >= deadline
+        {
+            // SAFETY: kill our own still-unreaped child before reporting failure.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            loop {
+                // SAFETY: reap the killed child; retry only interrupted waits.
+                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1
+                    || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+                {
+                    break;
+                }
+            }
+            panic!(
+                "{}: child {pid} timed out after 5s or waitpid failed: {error:?}; killed and reaped",
+                row.probe
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 // 이것을 실패시키는 것: FSIZE 0을 쓰기 차단으로 오인하거나 X-16 한 행을 실행하지 않는 것.
@@ -457,23 +564,27 @@ fn x16_all_mutations_are_denied_with_fsize_zero() {
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../bench/probes/x16-write-denial.c");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    assert!(
+    let compiled = process::output(
         Command::new(cc)
             .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
             .arg(source)
             .arg("-o")
-            .arg(dir.join("probe"))
-            .status()
-            .unwrap()
-            .success()
-    );
+            .arg(dir.join("probe")),
+        "X-16 compiler",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(compiled.status.success(), "X-16 compiler: {compiled:?}");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let out = Command::new(dir.join("probe"))
-        .arg(&dir)
-        .arg(listener.local_addr().unwrap().port().to_string())
-        .output()
-        .unwrap();
+    let out = process::output(
+        Command::new(dir.join("probe"))
+            .arg(&dir)
+            .arg(listener.local_addr().unwrap().port().to_string()),
+        "X-16 probe",
+        process::PROBE_TIMEOUT,
+    )
+    .unwrap();
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
     for cell in [
