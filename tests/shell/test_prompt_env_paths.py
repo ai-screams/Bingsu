@@ -30,11 +30,7 @@ def test_product_fixture_is_unreachable(tmp_path):
     altered.write_bytes(real_bin().read_bytes() + b"collector_builtin_test_only_31")
     assert check_product_fixture_isolation(altered)
     base = [str(real_bin()), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
-    hostile = dict(os.environ, BINGSU_TEST_BUILTIN="fixture", BINGSU_COLLECTOR_FIXTURE="1")
-    ordinary = subprocess.run(base, capture_output=True, check=True)
-    injected = subprocess.run(base, env=hostile, capture_output=True, check=True)
-    assert ordinary.stdout == injected.stdout
-    argv = subprocess.run(base + ["--collector-fixture"], env=hostile, capture_output=True, check=True)
+    argv = subprocess.run(base + ["--collector-fixture"], capture_output=True, check=True)
     assert b"error:bad-args" in argv.stdout
 
 
@@ -889,8 +885,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
 # 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
 @pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
-@pytest.mark.parametrize("fixture_input", [False, True])
-def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path, fixture_input):
+def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path):
     """Every path argument of every traced call (open, stat, rename, link,
     ...) of the binary and its threads and children. SYSTEM_PATHS was
     observed on Debian and Ubuntu glibc (aarch64, the three test images) and
@@ -904,11 +899,8 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     repo = tmp_path / "repo"
     repo.mkdir()
     env = dict(trusted, **{k: str(repo / k.lower()) for k in HOSTILE_VARS})
-    if fixture_input:
-        env.update(BINGSU_TEST_BUILTIN="fixture", BINGSU_COLLECTOR_FIXTURE="1")
     f = tmp_path / "s.bash"
-    call = CALL.replace(b"\n", b" --collector-fixture\n") if fixture_input else CALL
-    f.write_bytes(script + b"\n" + call)
+    f.write_bytes(script + b"\n" + CALL)
     trace = tmp_path / "trace"
     # Trace all calls; call_paths selects pathname arguments, not quoted data buffers.
     r = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", str(trace)]

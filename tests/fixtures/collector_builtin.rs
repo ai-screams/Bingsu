@@ -99,6 +99,7 @@ pub fn update(sample: Sample) -> Update {
 
 fn request() -> Request {
     collection::request(
+        &CATALOG,
         Binding {
             build_id: BuildId([0x71; 32]),
             snapshot: Identity {

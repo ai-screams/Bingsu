@@ -39,14 +39,20 @@ pub fn builtin_mask(config: &CompiledConfig, width: u16) -> u32 {
 }
 
 impl Catalog<'_> {
-    pub fn worker_mask(&self, config: &CompiledConfig, width: u16, redraw: bool) -> u32 {
-        if redraw || self.segments.len() > 32 {
+    pub(crate) fn declared_mask(&self) -> u32 {
+        if self.segments.len() > 32 {
             return 0;
         }
-        let declared = u32::MAX
+        u32::MAX
             .checked_shr(32 - self.segments.len() as u32)
-            .unwrap_or(0);
-        builtin_mask(config, width) & self.workers & declared
+            .unwrap_or(0)
+    }
+
+    pub fn worker_mask(&self, config: &CompiledConfig, width: u16, redraw: bool) -> u32 {
+        if redraw {
+            return 0;
+        }
+        builtin_mask(config, width) & self.workers & self.declared_mask()
     }
 }
 

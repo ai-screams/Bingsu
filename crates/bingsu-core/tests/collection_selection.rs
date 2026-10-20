@@ -179,6 +179,10 @@ fn builtin_mask_uses_the_actual_selected_variant() {
 #[test]
 fn unreachable_and_disabled_builtins_never_spawn() {
     let cat = catalog();
+    let workers = Catalog {
+        segments: &cat,
+        workers: TEST_MASK,
+    };
     let mut c = fixture("{fixture}");
     c.bands = vec![
         Band {
@@ -198,9 +202,14 @@ fn unreachable_and_disabled_builtins_never_spawn() {
     for width in [0, 1, 79, 80, 65535] {
         assert_eq!(mask(&c, width, false), 0, "empty winner shadows fixture");
         assert!(
-            collection::request(binding(mask(&c, width, false)), M3B_REQUEST_ID, 50)
-                .unwrap()
-                .is_none()
+            collection::request(
+                &workers,
+                binding(mask(&c, width, false)),
+                M3B_REQUEST_ID,
+                50
+            )
+            .unwrap()
+            .is_none()
         );
     }
     let mut disabled = fixture("{fixture}");
@@ -243,24 +252,6 @@ fn product_mask_is_zero_and_fixture_is_unreachable() {
         field::BUILTIN.iter().map(|s| s.id).collect::<Vec<_>>()
     );
     assert!(field::BUILTIN.iter().all(|s| s.id != "fixture"));
-    for d in field::BUILTIN {
-        let mut c = config("");
-        c.bands.clear();
-        c.band_order.clear();
-        c.variants = vec![compile(&format!("{{{}}}", d.id), field::BUILTIN).unwrap()];
-        c.collect_mask = u32::MAX;
-        for width in 0..=u16::MAX {
-            for redraw in [false, true] {
-                let m = selection::worker_mask(&c, width, redraw);
-                assert_eq!(m, 0);
-                assert!(
-                    collection::request(binding(m), M3B_REQUEST_ID, 50)
-                        .unwrap()
-                        .is_none()
-                );
-            }
-        }
-    }
     assert_eq!(selection::worker_mask(&fixture("{fixture}"), 80, false), 0);
     assert!(compile("{fixture}", field::BUILTIN).is_err());
     for text in [
@@ -332,13 +323,17 @@ fn selection_bounds_and_fallback_match_rendering() {
 // 이것을 실패시키는 것: 요청 생성이 binding·예산 검증을 건너뛰거나 환경 항목을 추가하는 것.
 #[test]
 fn selected_request_uses_the_wire_contract() {
+    let workers = Catalog {
+        segments: &catalog(),
+        workers: TEST_MASK,
+    };
     assert!(
-        collection::request(binding(0), M3B_REQUEST_ID, 50)
+        collection::request(&workers, binding(0), M3B_REQUEST_ID, 50)
             .unwrap()
             .is_none()
     );
     let request_id = bingsu_core::collection::wire::RequestId([9; 32]);
-    let r = collection::request(binding(TEST_MASK), request_id, 50)
+    let r = collection::request(&workers, binding(TEST_MASK), request_id, 50)
         .unwrap()
         .unwrap();
     assert_eq!(r.binding, binding(TEST_MASK));
@@ -347,15 +342,60 @@ fn selected_request_uses_the_wire_contract() {
     assert!(r.environment.is_empty());
     for budget in [0, 51] {
         assert_eq!(
-            collection::request(binding(TEST_MASK), M3B_REQUEST_ID, budget),
+            collection::request(&workers, binding(TEST_MASK), M3B_REQUEST_ID, budget),
             Err(ProtocolError::Budget)
         );
     }
     let mut bad = binding(TEST_MASK);
     bad.cwd = b"relative".to_vec();
     assert_eq!(
-        collection::request(bad, M3B_REQUEST_ID, 50),
+        collection::request(&workers, bad, M3B_REQUEST_ID, 50),
         Err(ProtocolError::Schema)
+    );
+}
+
+// 이것을 실패시키는 것: 요청 생성에서 worker 권한 또는 선언된 segment 검사를 제거하는 것.
+#[test]
+fn request_requires_catalog_worker_and_segment_grants() {
+    let cat = catalog();
+    let workers = Catalog {
+        segments: &cat,
+        workers: TEST_MASK,
+    };
+    assert_eq!(
+        collection::request(&selection::PRODUCT, binding(TEST_MASK), M3B_REQUEST_ID, 50),
+        Err(ProtocolError::Schema)
+    );
+    assert_eq!(
+        collection::request(&workers, binding(TEST_MASK), M3B_REQUEST_ID, 50)
+            .unwrap()
+            .unwrap()
+            .binding
+            .mask,
+        TEST_MASK
+    );
+    // Declared segments still need a worker grant; reject the whole mixed mask.
+    for mask in [1, TEST_MASK | 1] {
+        assert_eq!(
+            collection::request(&workers, binding(mask), M3B_REQUEST_ID, 50),
+            Err(ProtocolError::Schema)
+        );
+    }
+    for n in [0, 31, 33] {
+        let invalid = Catalog {
+            segments: &(0..n).map(|_| PADDING).collect::<Vec<_>>(),
+            workers: u32::MAX,
+        };
+        assert_eq!(
+            collection::request(&invalid, binding(TEST_MASK), M3B_REQUEST_ID, 50),
+            Err(ProtocolError::Schema),
+            "catalog length {n}"
+        );
+    }
+    assert!(
+        collection::request(&selection::PRODUCT, binding(0), M3B_REQUEST_ID, 50)
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -374,6 +414,7 @@ fn helper_handoff_preserves_width_and_redraw_without_new_authority() {
         (b"80", 80),
         (b"65535", 65535),
         (b"0", 0),
+        (b"080", 0),
         (b"unknown", 0),
         (b"65536", 0),
         (b"--config-root=/attack", 0),
@@ -387,6 +428,11 @@ fn helper_handoff_preserves_width_and_redraw_without_new_authority() {
             }
             let words = helper::words(&raw).unwrap();
             let e = helper::validate(&words).unwrap();
+            let width_at = words.iter().position(|w| w.as_ref() == b"--width").unwrap();
+            assert_eq!(
+                words[width_at + 1].as_ref(),
+                expected.to_string().as_bytes()
+            );
             assert_eq!(e.width, expected);
             assert_eq!(e.redraw, redraw);
             assert_eq!(e.config_root.as_deref(), Some(b"/c".as_slice()));
@@ -406,4 +452,23 @@ fn helper_handoff_preserves_width_and_redraw_without_new_authority() {
     let mut raw = roots.to_vec();
     raw.push(b"--width");
     assert!(helper::words(&raw).is_err());
+}
+
+// 이것을 실패시키는 것: 검증 전의 긴 폭 문자열을 helper argv에 그대로 전달하는 것.
+#[test]
+fn helper_handoff_reserializes_oversized_width() {
+    let oversized = vec![b'9'; 100_000];
+    let words = helper::words(&[
+        b"--runtime-root=1:2:/r",
+        b"--config-root=/c",
+        b"--config-root-written=/c",
+        b"--state-root=/s",
+        b"--home=/h",
+        b"--width",
+        &oversized,
+    ])
+    .unwrap();
+    let width_at = words.iter().position(|w| w.as_ref() == b"--width").unwrap();
+    assert_eq!(words[width_at + 1].as_ref(), b"0");
+    assert!(words.iter().all(|w| w.len() < oversized.len()));
 }

@@ -51,6 +51,12 @@ fn unframe(mut v: &[u8]) -> Option<Vec<&[u8]>> {
 /// group policy before using them (including before writing logs).
 pub fn decode(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<Roots> {
     let raw = unframe(var)?;
+    if raw
+        .iter()
+        .any(|word| matches!(*word, b"--redraw" | b"--width"))
+    {
+        return None;
+    }
     let words = bingsu_core::helper::words(&raw).ok()?;
     // The prompt path drops words it does not know; a pinned value that
     // holds any is not what init wrote.
@@ -93,6 +99,46 @@ pub fn decode(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<Roots> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: pinned roots에서 prompt 전용 --redraw/--width를 받는 것.
+    #[test]
+    fn pinned_roots_reject_prompt_flags() {
+        use crate::commands::sys;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                std::fs::remove_dir(&self.0).unwrap();
+            }
+        }
+        let base = std::env::temp_dir().join(format!("bingsu-pinned-flags-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let _cleanup = Cleanup(base.clone());
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let md = std::fs::metadata(&base).unwrap();
+        let me = sys::current_uid();
+        let user = sys::passwd_entry(me).unwrap().name;
+        let roots = Roots {
+            runtime: Some(RuntimeRootPin {
+                dev: md.dev(),
+                ino: md.ino(),
+                path: base.clone(),
+                group_ok: Vec::new(),
+            }),
+            config: Some(ConfigRootPin::check(&base, me, &mut SystemGroups::new(&user)).unwrap()),
+            state: Some(base.join("state")),
+            log: None,
+        };
+        let valid = encode(&roots, &base).unwrap();
+        assert!(decode(&valid, me, &user, &base).is_some());
+        for extra in [b"8:--redraw".as_slice(), b"7:--width2:80", b"7:--width"] {
+            let mut forged = valid.clone();
+            forged.extend_from_slice(extra);
+            assert!(decode(&forged, me, &user, &base).is_none(), "{extra:?}");
+        }
+    }
 
     // 이것을 실패시키는 것: 길이를 무시하고 구분자로 자르는 것(경로 속 ':'·줄바꿈이 낱말을 끊음), 길이 0·넘치는 길이·앞 0·남는 바이트를 받는 것.
     #[test]
