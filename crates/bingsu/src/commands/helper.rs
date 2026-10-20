@@ -73,36 +73,46 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         return ExitCode::from(1);
     };
     let mut filter_failed = false;
+    let mut supervisor = None;
     let result = refresh::refresh_broker(request, &mut clock, &mut |context, display, now| {
-        let request = if let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) {
-            collection::Request::new(
-                id,
-                now,
-                e.config_root.as_deref().unwrap_or(b""),
-                e.state_root.as_deref().unwrap_or(b""),
-                cwd,
-                collection::selection::worker_mask(config, e.width, e.redraw),
-            )?
-        } else {
-            None
-        };
-        before_filter(
-            &_watchdog,
-            request,
-            |request| {
-                // Collection failure keeps the last completed result and does not
-                // change independently validated configuration publication.
-                let _ = collector::spawn(exe, context, &request, sys::current_uid());
-            },
-            || {
-                if let Err(error) = helper_filter::install() {
-                    filter_failed = true;
-                    return Err(error.into());
-                }
-                Ok(())
-            },
-        )
+        let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
+        if let Some(request) = request {
+            // Collection admission failure does not invalidate independent
+            // snapshot publication. No product catalog grants a worker yet.
+            supervisor = (|| {
+                let path = e
+                    .collector_exe
+                    .as_deref()
+                    .ok_or(super::snapshot_store::StoreError::Unsafe)?;
+                let pin = collector::PinnedCollector::verify(
+                    OsStr::from_bytes(path),
+                    sys::current_uid(),
+                    &mut groups,
+                )?;
+                let lock = collector::acquire(context, &request.binding, sys::current_uid())?;
+                let job = collector::spawn(&pin, request, lock, &_watchdog)?;
+                // The storage task supplies the publisher at this boundary.
+                Ok::<_, super::snapshot_store::StoreError>(job.start(Box::new(|_| Ok(())))?)
+            })()
+            .ok();
+        }
+        let child_pidfd = supervisor.as_ref().and_then(|handle| handle.child_pidfd());
+        let confinement =
+            helper_limits::install(&_watchdog).and_then(|()| helper_filter::install(child_pidfd));
+        if let Err(error) = confinement {
+            filter_failed = true;
+            drop(supervisor.take());
+            return Err(error.into());
+        }
+        if let Some(handle) = &supervisor {
+            handle.confirm_confinement()?;
+        }
+        Ok(())
     });
+    // refresh_broker has released the snapshot lock and source descriptors.
+    if let Some(handle) = supervisor {
+        let _ = handle.finish();
+    }
     if filter_failed {
         report(
             &mut groups,
@@ -148,121 +158,33 @@ pub(super) fn detach() -> Result<(), ()> {
     }
 }
 
-fn before_filter(
-    watchdog: &helper_limits::Watchdog,
-    request: Option<collection::Request>,
-    spawn: impl FnOnce(collection::Request),
-    filter: impl FnOnce() -> Result<(), super::snapshot_store::StoreError>,
-) -> Result<(), super::snapshot_store::StoreError> {
-    if let Some(request) = request {
-        spawn(request);
-    }
-    // The collector must inherit the caller's original hard limits. It sets
-    // its own budget on entry; only now may the helper lower its hard limits.
-    helper_limits::install(watchdog)?;
-    filter()
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // 이것을 실패시키는 것: 수집 전에 필터를 설치하거나 필요 없는 worker를 생성하거나 필터 실패를 무시하는 것.
-    #[test]
-    #[ignore = "isolates irreversible helper limits and collector inheritance"]
-    fn collection_precedes_filter_only_when_needed() {
-        let watchdog = helper_limits::start(Instant::now()).unwrap();
-        let events = std::cell::RefCell::new(Vec::new());
-        let id = bingsu_core::snapshot::Identity {
-            boot: [1; 16],
-            epoch: [2; 16],
-            generation: 1,
-            source: [3; 4],
-            context: bingsu_core::snapshot::context_crc(b"/c", b"/s").unwrap(),
-        };
-        let now = bingsu_core::snapshot::Clock {
-            boot: id.boot,
-            kind: 1,
-            domain: [0; 16],
-            resume: 0,
-            now: 1,
-        };
-        // Inject only at the test seam: the product request constructor returns None.
-        let request = Some(collection::Request {
-            id,
-            kind: now.kind,
+pub(crate) fn selected_request(
+    catalog: &collection::selection::Catalog<'_>,
+    e: &bingsu_core::envelope::Envelope,
+    display: Option<(
+        &bingsu_core::config::compile::CompiledConfig,
+        bingsu_core::snapshot::Identity,
+    )>,
+    now: bingsu_core::snapshot::Clock,
+) -> Result<Option<collection::wire::Request>, super::snapshot_store::StoreError> {
+    let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) else {
+        return Ok(None);
+    };
+    collection::request(
+        catalog,
+        collection::wire::Binding {
+            build_id: bingsu_collect::build_id(),
+            snapshot: id,
+            clock_kind: now.kind,
             domain: now.domain,
             resume: now.resume,
-            config: b"/c".to_vec(),
-            state: b"/s".to_vec(),
-            cwd: b"/r".to_vec(),
-            mask: 1 << 31,
-        });
-        before_filter(
-            &watchdog,
-            request,
-            |_| {
-                events.borrow_mut().push("spawn");
-                let out = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "commands::helper_limits::tests::collector_limits_child",
-                        "--ignored",
-                        "--nocapture",
-                        "--test-threads=1",
-                    ])
-                    .output()
-                    .unwrap();
-                assert!(
-                    out.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            },
-            || {
-                events.borrow_mut().push("filter");
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(*events.borrow(), ["spawn", "filter"]);
-        events.borrow_mut().clear();
-        before_filter(
-            &watchdog,
-            None,
-            |_| panic!("unexpected spawn"),
-            || {
-                events.borrow_mut().push("filter");
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(*events.borrow(), ["filter"]);
-        assert!(
-            before_filter(
-                &watchdog,
-                None,
-                |_| {},
-                || Err(super::super::snapshot_store::StoreError::Unsafe)
-            )
-            .is_err()
-        );
-    }
-    // 이것을 실패시키는 것: helper 한도를 collector 생성 전에 걸거나 collector 자신의 한도·detach를 생략하는 것.
-    #[test]
-    fn collector_owns_limits_before_helper_is_confined() {
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "commands::helper::tests::collection_precedes_filter_only_when_needed",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+            config: e.config_root.as_deref().unwrap_or(b"").to_vec(),
+            state: e.state_root.as_deref().unwrap_or(b"").to_vec(),
+            cwd: cwd.to_vec(),
+            mask: catalog.worker_mask(config, e.width, e.redraw),
+        },
+        collection::wire::M3B_REQUEST_ID,
+        50,
+    )
+    .map_err(|_| super::snapshot_store::StoreError::Unsafe)
 }

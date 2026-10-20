@@ -1,18 +1,115 @@
 //! Process-local limits and an independent watchdog, ready before NSS or roots.
+use super::collector_process::{OwnedChild, SignalChild, now_ns};
 use std::io;
 use std::sync::mpsc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU8, AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 pub const LIFETIME: Duration = Duration::from_secs(2);
 const MEMORY: u64 = 128 * 1024 * 1024;
+#[cfg(target_os = "macos")]
+fn sample_over_limit(baseline: u64, sample: &io::Result<Option<u64>>) -> bool {
+    sample.as_ref().map_or(true, |value| {
+        value.is_some_and(|bytes| bytes > baseline.saturating_add(32 * 1024 * 1024))
+    })
+}
+#[cfg(target_os = "macos")]
+fn sample_wait(remaining: Duration) -> Duration {
+    remaining.min(Duration::from_millis(2))
+}
 
 pub struct Watchdog {
     stop: mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
+    collector: Arc<Mutex<Option<WatchedCollector>>>,
+    expires_ns: u64,
+    #[cfg(all(test, target_os = "macos"))]
+    #[allow(dead_code, reason = "native integration measurements")]
+    pub(crate) observations: Arc<Mutex<Vec<(u64, u64, u64)>>>,
+}
+struct WatchedCollector {
+    child: SignalChild,
+    expires_ns: Arc<AtomicU64>,
+    reason: Arc<AtomicU8>,
+    #[cfg(target_os = "macos")]
+    baseline: u64,
+}
+pub(crate) struct CollectorRegistration {
+    collector: Arc<Mutex<Option<WatchedCollector>>>,
+    expires_ns: Arc<AtomicU64>,
+    reason: Arc<AtomicU8>,
+    wake: mpsc::Sender<()>,
+}
+impl CollectorRegistration {
+    pub fn reason(&self) -> Option<bingsu_core::collection::wire::EndReason> {
+        use bingsu_core::collection::wire::EndReason;
+        match self.reason.load(Ordering::Acquire) {
+            1 => Some(EndReason::Deadline),
+            2 => Some(EndReason::Resource),
+            _ => None,
+        }
+    }
+    pub fn set_deadline(&self, deadline: u64) {
+        self.expires_ns.store(deadline, Ordering::Release);
+        let _ = self.wake.send(());
+    }
+}
+impl Drop for CollectorRegistration {
+    fn drop(&mut self) {
+        // The watchdog holds this same mutex through signal/sample completion.
+        self.collector
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let _ = self.wake.send(());
+    }
+}
+impl Watchdog {
+    pub fn expires_ns(&self) -> u64 {
+        self.expires_ns
+    }
+    pub fn register_collector(
+        &self,
+        child: &OwnedChild,
+        expires_ns: u64,
+    ) -> io::Result<CollectorRegistration> {
+        let mut slot = self.collector.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return Err(io::Error::other("collector already registered"));
+        }
+        let child = child.signal_copy()?;
+        #[cfg(target_os = "macos")]
+        let baseline = child
+            .footprint()?
+            .ok_or_else(|| io::Error::other("collector exited"))?;
+        let expires_ns = Arc::new(AtomicU64::new(expires_ns.min(self.expires_ns)));
+        let reason = Arc::new(AtomicU8::new(0));
+        *slot = Some(WatchedCollector {
+            child,
+            expires_ns: expires_ns.clone(),
+            reason: reason.clone(),
+            #[cfg(target_os = "macos")]
+            baseline,
+        });
+        let registration = CollectorRegistration {
+            collector: self.collector.clone(),
+            expires_ns,
+            reason,
+            wake: self.stop.clone(),
+        };
+        let _ = self.stop.send(());
+        Ok(registration)
+    }
 }
 impl Drop for Watchdog {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        // A wake-up is not a stop: registration and shortened deadlines wake
+        // the same channel. Disconnect it only after active ownership ends.
+        let (replacement, _) = mpsc::channel();
+        self.stop = replacement;
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -22,9 +119,18 @@ pub fn start(started: Instant) -> io::Result<Watchdog> {
     start_for(started, LIFETIME)
 }
 fn start_for(started: Instant, lifetime: Duration) -> io::Result<Watchdog> {
-    let deadline = started
-        .checked_add(lifetime)
+    let expires_ns = now_ns()?
+        .checked_add(
+            u64::try_from(lifetime.saturating_sub(started.elapsed()).as_nanos())
+                .map_err(io::Error::other)?,
+        )
         .ok_or_else(|| io::Error::other("deadline"))?;
+    let collector: Arc<Mutex<Option<WatchedCollector>>> = Arc::default();
+    let watched = collector.clone();
+    #[cfg(all(test, target_os = "macos"))]
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    #[cfg(all(test, target_os = "macos"))]
+    let samples = observations.clone();
     #[cfg(target_os = "macos")]
     let baseline = memory_usage()?;
     let (stop, stopped) = mpsc::channel();
@@ -41,19 +147,63 @@ fn start_for(started: Instant, lifetime: Duration) -> io::Result<Watchdog> {
                 return;
             }
             loop {
-                if Instant::now() >= deadline {
+                let now = now_ns().unwrap_or(u64::MAX);
+                let mut next = expires_ns;
+                #[cfg(target_os = "macos")]
+                let helper_over = memory_exceeded(baseline);
+                #[cfg(not(target_os = "macos"))]
+                let helper_over = false;
+                {
+                    let slot = watched.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(worker) = slot.as_ref() {
+                        let deadline = worker.expires_ns.load(Ordering::Acquire);
+                        let terminate = now >= deadline || now >= expires_ns;
+                        #[cfg(target_os = "macos")]
+                        let footprint = worker.child.footprint();
+                        #[cfg(all(test, target_os = "macos"))]
+                        let sampled_at = now_ns().unwrap();
+                        #[cfg(target_os = "macos")]
+                        let resource =
+                            helper_over || sample_over_limit(worker.baseline, &footprint);
+                        #[cfg(not(target_os = "macos"))]
+                        let resource = helper_over;
+                        if terminate || resource {
+                            // Collector first, before logging, file I/O, or helper death.
+                            let _ = worker.reason.compare_exchange(
+                                0,
+                                if resource { 2 } else { 1 },
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            );
+                            let _ = worker.child.signal(libc::SIGKILL);
+                        } else if !worker.child.reaped() {
+                            next = next.min(deadline);
+                        }
+                        #[cfg(all(test, target_os = "macos"))]
+                        if let Ok(Some(bytes)) = footprint {
+                            let overshoot = bytes
+                                .saturating_sub(worker.baseline.saturating_add(32 * 1024 * 1024));
+                            let signalled_at = if overshoot > 0 && worker.child.kill_requested() {
+                                now_ns().unwrap()
+                            } else {
+                                0
+                            };
+                            samples
+                                .lock()
+                                .unwrap()
+                                .push((sampled_at, overshoot, signalled_at));
+                        }
+                    }
+                }
+                if now >= expires_ns || helper_over {
                     kill_self();
                 }
+                let remaining = Duration::from_nanos(next.saturating_sub(now));
                 #[cfg(target_os = "macos")]
-                if memory_exceeded(baseline) {
-                    kill_self();
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                #[cfg(target_os = "macos")]
-                let remaining = remaining.min(Duration::from_millis(2));
+                let remaining = sample_wait(remaining);
                 match stopped.recv_timeout(remaining) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
             }
         })?;
@@ -63,6 +213,10 @@ fn start_for(started: Instant, lifetime: Duration) -> io::Result<Watchdog> {
     Ok(Watchdog {
         stop,
         thread: Some(thread),
+        collector,
+        expires_ns,
+        #[cfg(all(test, target_os = "macos"))]
+        observations,
     })
 }
 fn kill_self() -> ! {
@@ -198,6 +352,27 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
+    // 이것을 실패시키는 것: 표본 오류를 무시하거나 초과 경계/2ms 대기 상한을 바꾸는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn first_completed_sample_and_wait_bound() {
+        let cap = 100 + 32 * 1024 * 1024;
+        assert!(!sample_over_limit(100, &Ok(Some(cap))));
+        assert!(sample_over_limit(100, &Ok(Some(cap + 1))));
+        assert!(sample_over_limit(
+            100,
+            &Err(io::Error::other("sample error"))
+        ));
+        assert!(!sample_over_limit(100, &Ok(None)));
+        assert_eq!(
+            sample_wait(Duration::from_secs(1)),
+            Duration::from_millis(2)
+        );
+        assert_eq!(
+            sample_wait(Duration::from_micros(500)),
+            Duration::from_micros(500)
+        );
+    }
     // 이것을 실패시키는 것: parent bootstrap이 부모의 NOFILE soft를 바꾸는 것.
     #[test]
     fn n7_parent_nofile_unchanged() {
@@ -294,27 +469,6 @@ mod tests {
             }
             assert!(set(resource, limit.rlim_max + 1, limit.rlim_max + 1).is_err());
         }
-    }
-    // 이것을 실패시키는 것: collector가 helper의 CPU hard를 상속하거나 자기 진입점에서 한도를 걸지 않는 것.
-    #[test]
-    #[ignore = "isolated collector entry, also spawned at the helper's broker boundary"]
-    fn collector_limits_child() {
-        assert!(get(libc::RLIMIT_CPU).unwrap().rlim_max > 2);
-        set(
-            libc::RLIMIT_CORE,
-            4096.min(get(libc::RLIMIT_CORE).unwrap().rlim_max),
-            get(libc::RLIMIT_CORE).unwrap().rlim_max,
-        )
-        .unwrap();
-        assert_eq!(
-            super::super::collector::run(),
-            std::process::ExitCode::SUCCESS
-        );
-        assert_detached();
-        assert_eq!(get(libc::RLIMIT_CPU).unwrap().rlim_cur, 1);
-        assert_eq!(get(libc::RLIMIT_CPU).unwrap().rlim_max, 2);
-        assert_eq!(get(libc::RLIMIT_FSIZE).unwrap().rlim_cur, 32 * 1024 * 1024);
-        assert_irreversible();
     }
     // 이것을 실패시키는 것: watchdog의 malloc arena 준비 전에 VM 기준을 재서 128 MiB 여유가 줄어드는 것.
     #[cfg(target_os = "linux")]

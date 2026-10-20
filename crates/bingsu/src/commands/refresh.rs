@@ -141,6 +141,8 @@ pub fn refresh_broker(
 ) -> RefreshResult {
     refresh_with_broker(request, clock, &mut |_| {}, broker)
 }
+// The broker may start supervision here but must return without joining it.
+// All snapshot/source owners are released before refresh_broker returns.
 type Broker<'a> = dyn FnMut(
         &CheckedContextFd,
         Option<(&bingsu_core::config::compile::CompiledConfig, Identity)>,

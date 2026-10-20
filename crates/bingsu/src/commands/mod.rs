@@ -16,6 +16,12 @@ mod clock;
 #[allow(unsafe_code)]
 mod collector;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod collector_process;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod collector_supervisor;
+#[cfg(unix)]
 mod config;
 #[cfg(unix)]
 mod config_inspect;
@@ -32,13 +38,13 @@ mod evidence;
 mod group_policy;
 #[cfg(unix)]
 #[allow(unsafe_code)]
-mod helper;
+pub(crate) mod helper;
 #[cfg(unix)]
 #[allow(unsafe_code)]
-mod helper_filter;
+pub(crate) mod helper_filter;
 #[cfg(unix)]
 #[allow(unsafe_code)]
-mod helper_limits;
+pub(crate) mod helper_limits;
 #[cfg(unix)]
 mod init;
 #[cfg(unix)]
@@ -46,11 +52,11 @@ mod log;
 #[cfg(unix)]
 mod messages;
 #[cfg(unix)]
-mod refresh;
+pub(crate) mod refresh;
 #[cfg(unix)]
 mod reload;
 #[cfg(unix)]
-mod runtime_root;
+pub(crate) mod runtime_root;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 mod snapshot_store;
@@ -58,7 +64,7 @@ mod snapshot_store;
 mod source_path;
 #[cfg(unix)]
 #[allow(unsafe_code)]
-mod sys;
+pub(crate) mod sys;
 #[cfg(unix)]
 mod trust_record;
 
@@ -72,8 +78,6 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
     match a.args.first().and_then(|w| w.to_str()) {
         #[cfg(unix)]
         Some("__refresh-v1") => helper::run(&a.argv0, &a.args[1..]),
-        #[cfg(unix)]
-        Some("__collect-legacy-v1") if a.args.len() == 1 => collector::run(),
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]

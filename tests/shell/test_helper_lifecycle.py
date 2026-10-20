@@ -39,6 +39,8 @@ left=['custom/probe','char']
         session.prompt()
     session.wait_quiet()
     assert not canary.exists()
+    # 이것을 실패시키는 것: 제품의 빈 worker catalog에서도 collection 저장소를 만드는 것.
+    assert not list(session.store().rglob("collection.lock"))
 
 
 # 이것을 실패시키는 것: prompt 수준 전달을 고정하거나 helper가 BINGSU_LOG를 경로로 해석하는 것.
