@@ -74,6 +74,8 @@ pub struct Envelope {
     pub colorfgbg: Option<crate::color::palette::Mode>,
     /// `--home=<path>`, pinned by init from getpwuid.
     pub home: Option<Vec<u8>>,
+    /// Canonical dedicated sibling pinned by init; never read from environment.
+    pub collector_exe: Option<Vec<u8>>,
     pub runtime_groups: Vec<crate::fs_trust::GroupPin>,
     pub log_level: LogLevel,
     pub host: Option<Vec<u8>>,
@@ -225,6 +227,9 @@ fn root_slot<'e, 'a>(
     }
     if let Some(v) = a.strip_prefix(STATE_ROOT_PREFIX) {
         return Some((&mut e.state_root, v));
+    }
+    if let Some(v) = a.strip_prefix(b"--collector-exe=") {
+        return Some((&mut e.collector_exe, v));
     }
     if let Some(v) = a.strip_prefix(HOME_PREFIX) {
         return Some((&mut e.home, v));

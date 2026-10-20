@@ -62,14 +62,18 @@ mod sys;
 #[cfg(unix)]
 mod trust_record;
 
+#[used]
+static ROLE_TAG: [u8; 49] = bingsu_collect::role_tag(bingsu_collect::BINGSU_ROLE);
+
 pub fn run(a: NonPromptArgs) -> ExitCode {
+    std::hint::black_box(&ROLE_TAG);
     #[cfg(not(unix))]
     let _ = &a.argv0;
     match a.args.first().and_then(|w| w.to_str()) {
         #[cfg(unix)]
         Some("__refresh-v1") => helper::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
-        Some("__collect-v1") if a.args.len() == 1 => collector::run(),
+        Some("__collect-legacy-v1") if a.args.len() == 1 => collector::run(),
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
@@ -77,9 +81,9 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("reload") => reload::run(&a.argv0, &a.args[1..]),
         #[cfg(feature = "bench-stubs")]
-        Some("__collect-stub") => {
-            ExitCode::from(u8::try_from(bingsu_collect::stub_main(&a.args[1..])).unwrap_or(1))
-        }
+        Some("__collect-stub") => ExitCode::from(
+            u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
+        ),
         _ => {
             eprintln!("usage: bingsu <config|init|prompt|reload> ...");
             ExitCode::from(2)

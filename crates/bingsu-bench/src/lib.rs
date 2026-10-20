@@ -14,3 +14,5 @@ pub const BUF: usize = 4096;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub mod sys;
+
+pub mod collector_stub;

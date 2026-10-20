@@ -52,3 +52,10 @@ path = "src/bin/m1_macos_rlimit_as.rs"
 [[bin]]
 name = "m1-rlimit-as-start"
 path = "src/bin/m1_rlimit_as_start.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+
+[[bin]]
+name = "m1-collect-stub"
+path = "src/bin/m1_collect_stub.rs"

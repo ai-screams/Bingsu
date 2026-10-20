@@ -55,13 +55,15 @@ MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 # K38: copying a new hash can self-approve a change; these pins are a change-detection
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
+    "crates/bingsu-collect/build.rs": "fadb31a93cd6238adc07e45a705b48ca9e96286a995c2ecbffe486bd41f006fd",
+    "crates/bingsu-collect/src/lib.rs": "ef97306d92420c2f69cdf0d4464eeefa6ff517fc7aa10caee0b9ce717b5904f3",
     "crates/bingsu/src/prompt_read.rs": "7c771115ddbd124e3888a759fe928440d325cafee37ab7ecd62352c449ff7ce5",
     "crates/bingsu/src/prompt_spawn.rs": "d3e49c09bcbd6a1f63011fcc657828109dae8c4f57038f2eda866e18911a2d24",
     "crates/bingsu/src/prompt_io.rs": "a96be63b68e2fac1ecb79f51eb59e532fd74ab36ba6177e5d74407551022b67c",
     "crates/bingsu/src/prompt.rs": "bde58f41b9cc11e03139e62c0fc7aad2853d4ad5f37f1dc4cbc17f4d01df7ebe",
     "crates/bingsu/src/main.rs": "2f4d0c5f7e49ef71721c499fb9b3f757bb07bd0d402116a9fc97f2262c08b3c1",
     "crates/bingsu/src/sandbox.rs": "ae8438157ed1a565418721e24450a780e0738a6a2f349a40c21778d8cca9af2f",
-    "crates/bingsu/Cargo.toml": "15cbd7be07d65f0c9f246353e149889863917eda45a1a08d447613841d5d6719",
+    "crates/bingsu/Cargo.toml": "498aacc68cbbbac0f22e12a6431b1ebbebc186e03d53d67deff7b0946aa46730",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
 }
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"

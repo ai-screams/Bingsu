@@ -16,7 +16,8 @@ EDGES = {
     "bingsu-core": ["libm", "unicode-segmentation", "toml"],
     "toml": ["toml_parser", "toml_datetime", "serde_spanned", "winnow"],
     "toml_parser": ["winnow"],
-    "bingsu": ["bingsu-core", "libc"],
+    "bingsu": ["bingsu-core", "bingsu-collect", "libc"],
+    "bingsu-collect": ["bingsu-core", "libc"],
 }
 
 

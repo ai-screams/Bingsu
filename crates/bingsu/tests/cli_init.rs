@@ -87,7 +87,8 @@ fn init_embeds_invoked_symlink_path_not_target() {
     want.extend_from_slice(b"' prompt");
     assert!(has(&out.stdout, &want));
     let target = std::fs::canonicalize(env!("CARGO_BIN_EXE_bingsu")).unwrap();
-    assert!(!has(&out.stdout, target.as_os_str().as_bytes()));
+    let target_word = [b"'", target.as_os_str().as_bytes(), b"' prompt"].concat();
+    assert!(!has(&out.stdout, &target_word));
 }
 
 #[test]

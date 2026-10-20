@@ -7,11 +7,13 @@ import pathlib
 import pwd
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 
 import pytest
 
-from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env
+from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin, real_collector
 
 # The golden runner's reader rendering (T-A7 below compares against it).
 _spec = importlib.util.spec_from_file_location("golden_record_run", ROOT / "tests/golden/record/run.py")
@@ -29,7 +31,7 @@ HOOK_WORDS = (
     b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm", b"--colorfgbg",
     b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
-    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=",
+    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--collector-exe=",
 )
 
 
@@ -72,13 +74,20 @@ def call(shell):
             "fish": b"_bingsu_call --width 80\n"}[shell]
 
 
-# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=`·`--config-root-written=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
+# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=`·`--config-root-written=`·`--collector-exe=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
 # 따옴표를 빼는 것(빈 단어가 사라짐).
 @pytest.mark.parametrize("idx,case", list(enumerate(CASES)))
 def test_words_arrive_intact(tmp_path, shells, idx, case):
     for shell in shells:
         base = tmp_path / shell / f"case{idx}"  # the hostile string lives only in the install and XDG dirs
         inst = Install(base, name=f"bin {case}")
+        # Use the actual matched binary pair, including their distinct roles.
+        inst.exe.unlink()
+        shutil.copyfile(real_bin(), inst.exe)
+        inst.exe.chmod(0o700)
+        collector = inst.dir / "bingsu-collect"
+        shutil.copyfile(real_collector(), collector)
+        collector.chmod(0o700)
         env = trusted_env(base, tag=case)
         script = inst.init(shell, env)
         inst.use_fake(minimal_record())
@@ -101,6 +110,7 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
                 assert value is not None, (shell, argv)
             words[word] = value
         assert set(words) == set(HOOK_WORDS), (shell, argv)
+        assert words[b"--collector-exe="] == os.fsencode(collector.resolve()), (shell, argv)
         assert words[b"--ctx"] == b"1", (shell, argv)
         assert words[b"--record"] == b"B1", (shell, argv)
         assert words[b"--width"] == b"80", (shell, argv)
@@ -118,6 +128,44 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         assert words[b"--colorterm"] == b"", (shell, argv)
         assert words[b"--colorfgbg"] == b"", (shell, argv)
         assert words[b"--home="] == pwd.getpwuid(os.getuid()).pw_dir.encode(), (shell, argv)
+
+
+# 이것을 실패시키는 것: 역할 검사를 빼거나 형제 링크를 해석하거나 unsafe bingsu에서 pin하는 것.
+@pytest.mark.parametrize("case", ["real", "bingsu-copy", "tag-only", "symlink", "unsafe-bingsu"])
+def test_collector_pin_requires_safe_install_and_collector_role(case, tmp_path):
+    # Keep the positive control outside sticky temporary-directory ancestors.
+    with tempfile.TemporaryDirectory(prefix="collector-pin-", dir=tmp_path) as folder:
+        base = pathlib.Path(folder)
+        inst = Install(base)
+        inst.exe.unlink()
+        shutil.copyfile(real_bin(), inst.exe)
+        inst.exe.chmod(0o700)
+        collector = inst.dir / "bingsu-collect"
+        shutil.copyfile(real_collector(), collector)
+        collector.chmod(0o700)
+        if case == "bingsu-copy":
+            shutil.copyfile(inst.exe, collector)
+        elif case == "tag-only":
+            binary = collector.read_bytes()
+            marker = b"BNGSIBLING-ID02\0"
+            assert binary.count(marker) == 1
+            at = binary.index(marker)
+            collector.write_bytes(binary[at:at + 48])
+        elif case == "symlink":
+            other = base / "other"
+            other.mkdir()
+            collector.rename(other / collector.name)
+            collector.symlink_to(other / collector.name)
+        elif case == "unsafe-bingsu":
+            inst.exe.chmod(0o702)
+        out = subprocess.run([str(inst.exe), "init", "bash"], env=trusted_env(base), capture_output=True)
+        assert out.returncode == 0, out
+        assert (b"--collector-exe=" in out.stdout) == (case == "real"), out
+        if case == "real":
+            assert os.fsencode(collector.resolve()) in out.stdout
+        if case == "bingsu-copy":
+            refused = subprocess.run([str(collector), "__collect-v1"], capture_output=True)
+            assert refused.returncode == 2, refused
 
 
 def test_init_twice_redefines_runtime_root(tmp_path, shells):

@@ -13,6 +13,7 @@ use bingsu_core::status::Status;
 pub struct ScriptInputs<'a> {
     pub shell: Shell,
     pub exe: &'a [u8],
+    pub collector_exe: Option<&'a [u8]>,
     pub runtime_groups: &'a [bingsu_core::fs_trust::GroupPin],
     pub runtime_root: Option<(u64, u64, &'a [u8])>,
     /// `(canonical, written, shape_only)`. `None`: the path could not be
@@ -57,6 +58,11 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
     let sh = inp.shell;
     match name {
         b"BIN" => encode_word(sh, inp.exe, out),
+        b"COLLECTOR_EXE" => {
+            if let Some(exe) = inp.collector_exe {
+                prefixed(sh, b"--collector-exe=", exe, out);
+            }
+        }
         b"RECORD" => encode_word(sh, RecordVersion::B1.as_str().as_bytes(), out),
         b"SESSION" => encode_word(sh, inp.session_hex, out),
         b"RUNTIME_ROOT" => {
@@ -200,6 +206,7 @@ mod tests {
             &ScriptInputs {
                 shell,
                 exe: b"/bin/bingsu",
+                collector_exe: Some(b"/bin/bingsu-collect"),
                 runtime_groups: &[],
                 runtime_root: Some((1, 2, b"/r")),
                 config_root,
@@ -293,6 +300,7 @@ mod tests {
                 &ScriptInputs {
                     shell,
                     exe: b"/bin/bingsu",
+                    collector_exe: Some(b"/bin/bingsu-collect"),
                     runtime_groups: &[],
                     runtime_root: None,
                     config_root: None,
