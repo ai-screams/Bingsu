@@ -29,6 +29,7 @@ pub fn run() -> i32 {
 
 #[cfg(unix)]
 fn execute() -> std::io::Result<()> {
+    sys::orphan_guard()?;
     // Warm the allocator and the only frame buffer before baseline measurement.
     let mut buffer = Box::new([0; wire::FRAME_MAX]);
     std::hint::black_box(&mut buffer);
@@ -228,6 +229,7 @@ mod tests {
 )]
 pub(crate) fn fixture_entry() -> std::io::Result<()> {
     use bingsu_core::field::SegmentDecl;
+    sys::orphan_guard()?;
     let mut buffer = Box::new([0; wire::FRAME_MAX]);
     let mut fds = sys::validate_worker_fds()?;
     sys::hygiene()?;

@@ -5,6 +5,47 @@ use std::{
     os::fd::FromRawFd,
 };
 
+/// Best-effort orphan fallback for an idle or cooperative worker. The helper's
+/// absolute supervision deadline remains authoritative, even with no frames.
+pub(crate) fn orphan_guard() -> io::Result<()> {
+    // SAFETY: writable signal action, initialized before registration.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: writable empty signal set.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: worker-local SIGALRM default disposition.
+    if unsafe { libc::sigaction(libc::SIGALRM, &action, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut mask = action.sa_mask;
+    // SAFETY: initialized set and valid signal number.
+    if unsafe { libc::sigaddset(&mut mask, libc::SIGALRM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: only the worker's timer signal is unblocked.
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: process-local one-second fallback, armed before startup I/O.
+    unsafe { libc::alarm(1) };
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: read-only parent identity, before installing the death signal.
+        let parent = unsafe { libc::getppid() };
+        // SAFETY: worker-local fallback; does not grant any capability.
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: detect a death/reparenting race during installation.
+        if parent == 1 || unsafe { libc::getppid() } != parent {
+            return Err(io::Error::other("worker parent exited"));
+        }
+    }
+    Ok(())
+}
+
 /// Unique ownership of the private result/request pipes and the inherited lock.
 /// Dropping the lock only closes it: never LOCK_UN on a shared description.
 pub struct WorkerFds {
