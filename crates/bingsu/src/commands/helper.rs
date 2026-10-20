@@ -96,15 +96,16 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             })()
             .ok();
         }
+        let child_pidfd = supervisor.as_ref().and_then(|handle| handle.child_pidfd());
         let confinement =
-            helper_limits::install(&_watchdog).and_then(|()| helper_filter::install());
+            helper_limits::install(&_watchdog).and_then(|()| helper_filter::install(child_pidfd));
         if let Err(error) = confinement {
             filter_failed = true;
             drop(supervisor.take());
             return Err(error.into());
         }
         if let Some(handle) = &supervisor {
-            handle.allow_publication()?;
+            handle.confirm_confinement()?;
         }
         Ok(())
     });

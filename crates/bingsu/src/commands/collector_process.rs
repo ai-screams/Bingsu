@@ -18,7 +18,8 @@ struct State {
 
 pub(crate) struct SignalChild {
     #[cfg(target_os = "linux")]
-    pidfd: OwnedFd,
+    // Every signal owner retains the same descriptor number across TSYNC.
+    pidfd: Arc<OwnedFd>,
     #[cfg(target_os = "macos")]
     pid: libc::pid_t,
     state: Arc<Mutex<State>>,
@@ -30,6 +31,17 @@ pub(crate) struct OwnedChild {
 }
 
 impl SignalChild {
+    pub fn pidfd(&self) -> Option<std::os::fd::RawFd> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.pidfd.as_raw_fd())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     pub fn signal(&self, signal: i32) -> io::Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.reaped || state.killed {
@@ -92,6 +104,15 @@ impl SignalChild {
 }
 
 impl OwnedChild {
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "Linux native integration fixes the pidfd before TSYNC"
+    )]
+    pub fn pidfd(&self) -> Option<std::os::fd::RawFd> {
+        self.signal.pidfd()
+    }
+
     fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -106,7 +127,7 @@ impl OwnedChild {
             let pidfd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
             Ok(Self {
                 signal: SignalChild {
-                    pidfd,
+                    pidfd: Arc::new(pidfd),
                     state: Arc::default(),
                 },
                 expires_ns,
@@ -131,7 +152,7 @@ impl OwnedChild {
     pub fn signal_copy(&self) -> io::Result<SignalChild> {
         Ok(SignalChild {
             #[cfg(target_os = "linux")]
-            pidfd: self.signal.pidfd.try_clone()?,
+            pidfd: self.signal.pidfd.clone(),
             #[cfg(target_os = "macos")]
             pid: self.signal.pid,
             state: self.signal.state.clone(),
@@ -171,9 +192,15 @@ impl OwnedChild {
             // SAFETY: sole reaper; signal and sampling are excluded by state.
             let rc = unsafe { libc::waitpid(self.signal.pid, std::ptr::null_mut(), libc::WNOHANG) };
             if rc < 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    state.reaped = true;
+                } else {
+                    return Err(error);
+                }
+            } else {
+                state.reaped = rc == self.signal.pid;
             }
-            state.reaped = rc == self.signal.pid;
         }
         Ok(state.reaped)
     }
@@ -222,14 +249,20 @@ pub(crate) fn now_ns() -> io::Result<u64> {
 
 pub(crate) fn pipe() -> io::Result<(File, File)> {
     let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
+    // SAFETY: writable storage; CLOEXEC is set atomically at creation.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
     // SAFETY: writable storage for two new descriptors.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: both descriptors are newly owned and transferred once.
     let read = unsafe { File::from_raw_fd(fds[0]) };
     // SAFETY: the second newly owned pipe descriptor.
     let write = unsafe { File::from_raw_fd(fds[1]) };
+    #[cfg(not(target_os = "linux"))]
     for file in [&read, &write] {
         // SAFETY: live private fd; no unrelated open-file description is changed.
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
@@ -393,4 +426,78 @@ pub(crate) fn spawn_args(
     // SAFETY: initialized attributes, no longer used.
     unsafe { libc::posix_spawnattr_destroy(&mut attr) };
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: pipe2의 O_CLOEXEC(또는 macOS fcntl 설정) 제거.
+    #[test]
+    fn pipe_endpoints_are_cloexec() {
+        let (read, write) = pipe().unwrap();
+        for file in [read, write] {
+            // SAFETY: live test-owned descriptor, read-only flag query.
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        }
+    }
+
+    // 이것을 실패시키는 것: signal_copy가 별도 fd 번호를 복제하는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signal_copies_retain_one_descriptor_number() {
+        // SAFETY: read-only own identity query.
+        let pid = unsafe { libc::getpid() };
+        // SAFETY: acquisition of our own pidfd.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(fd >= 0);
+        let child = OwnedChild {
+            signal: SignalChild {
+                // SAFETY: newly owned descriptor, transferred exactly once.
+                pidfd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd as i32) }),
+                // Mark reaped so this descriptor-sharing test never signals.
+                state: Arc::new(Mutex::new(State {
+                    killed: false,
+                    reaped: true,
+                })),
+            },
+            expires_ns: 0,
+        };
+        let first = child.signal_copy().unwrap();
+        let second = child.signal_copy().unwrap();
+        assert_eq!(first.pidfd(), child.pidfd());
+        assert_eq!(second.pidfd(), child.pidfd());
+        drop(child);
+        drop(first);
+        // SAFETY: the last Arc must retain the original descriptor.
+        assert!(unsafe { libc::fcntl(second.pidfd().unwrap(), libc::F_GETFD) } >= 0);
+    }
+
+    // 이것을 실패시키는 것: ECHILD 뒤 reaped=true 전이를 제거하는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn echild_marks_reaped_before_any_later_signal() {
+        // Our own PID cannot be our child, so waitpid must return ECHILD.
+        // Mark killed for panic-safe teardown even under the deliberate mutation.
+        let mut child = OwnedChild {
+            signal: SignalChild {
+                // SAFETY: read-only own identity.
+                pid: unsafe { libc::getpid() },
+                state: Arc::new(Mutex::new(State {
+                    killed: true,
+                    reaped: false,
+                })),
+            },
+            expires_ns: 0,
+        };
+        let copy = child.signal_copy().unwrap();
+        assert!(child.reap().unwrap());
+        assert!(copy.reaped());
+        child.signal.state.lock().unwrap().killed = false;
+        // Signal 0 is harmless even if the reaped guard is mutated away.
+        copy.signal(0).unwrap();
+        assert!(!child.kill_requested());
+        assert!(child.reap().unwrap());
+    }
 }

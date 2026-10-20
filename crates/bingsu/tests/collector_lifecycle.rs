@@ -267,7 +267,7 @@ fn run_peer_observed(
         }))
         .unwrap();
     if allow {
-        handle.allow_publication().unwrap();
+        handle.confirm_confinement().unwrap();
     } else {
         std::thread::sleep(Duration::from_millis(20));
         assert!(
@@ -361,8 +361,8 @@ fn stable_handle_child() {
             Ok(())
         }))
         .unwrap();
-    commands::helper_filter::install().unwrap();
-    handle.allow_publication().unwrap();
+    commands::helper_filter::install(handle.child_pidfd()).unwrap();
+    handle.confirm_confinement().unwrap();
     let report = handle.finish();
     assert_eq!(report.reason, EndReason::Complete);
     assert!(report.kill_requested && report.reaped, "{report:?}");
@@ -374,6 +374,82 @@ fn stable_handle_child() {
 fn helper_filter_failure_cannot_race_publication() {
     let (_, values) = run_peer("normal", false);
     assert!(values.is_empty());
+}
+
+// 이것을 실패시키는 것: exchange의 confinement 대기를 제거하는 것.
+#[test]
+fn immediate_ready_is_not_read_or_decoded_before_confinement() {
+    passed(&isolated("immediate_ready_child"));
+}
+#[test]
+#[ignore = "installs irreversible helper limits and filter"]
+fn immediate_ready_child() {
+    let job_peer = peer();
+    let watchdog = helper_limits::start(Instant::now()).unwrap();
+    let job = CollectorJob::fixture(
+        job_peer.as_os_str(),
+        OsStr::new("normal"),
+        request(false),
+        lock("confined"),
+        &watchdog,
+        &SEGMENTS,
+    )
+    .unwrap();
+    let input = job.fixture_input().unwrap();
+    let mut pollfd = libc::pollfd {
+        fd: input.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: live pipe and initialized pollfd; this observes but never reads.
+    assert_eq!(unsafe { libc::poll(&mut pollfd, 1, 50) }, 1);
+    assert_ne!(
+        pollfd.revents & libc::POLLIN,
+        0,
+        "Ready must already be queued"
+    );
+    let handle = job.start(Box::new(|_| Ok(()))).unwrap();
+    // Give the live supervisor time to attempt reading the already-ready pipe.
+    std::thread::sleep(Duration::from_millis(20));
+    helper_limits::install(&watchdog).unwrap();
+    commands::helper_filter::install(handle.child_pidfd()).unwrap();
+    handle.confirm_confinement().unwrap();
+    let report = handle.finish();
+    assert_eq!(report.unconfined_reads, 0, "{report:?}");
+    assert_eq!(report.unconfined_decodes, 0, "{report:?}");
+    assert_eq!(report.reason, EndReason::Complete, "{report:?}");
+    assert_eq!(report.frames, 3);
+    assert!(report.bytes > 0 && report.reaped);
+}
+
+// 이것을 실패시키는 것: confinement 대기의 마감을 spawn+100ms보다 늘리는 것.
+#[test]
+fn stalled_confinement_expires_without_reading_ready() {
+    let job_peer = peer();
+    let watchdog = helper_limits::start(Instant::now()).unwrap();
+    let job = CollectorJob::fixture(
+        job_peer.as_os_str(),
+        OsStr::new("normal"),
+        request(false),
+        lock("confinement-timeout"),
+        &watchdog,
+        &SEGMENTS,
+    )
+    .unwrap();
+    let handle = job
+        .start(Box::new(|_| panic!("unconfined publication")))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        handle.fixture_finished(),
+        "confinement wait exceeded the Ready deadline"
+    );
+    // Late confirmation must not restart the Ready deadline.
+    handle.confirm_confinement().unwrap();
+    let report = handle.finish();
+    assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
+    assert_eq!((report.bytes, report.frames), (0, 0));
+    assert!(report.kill_requested && report.reaped);
 }
 
 // 이것을 실패시키는 것: 조기 종료 후 재회수하거나 회수 뒤 숫자 PID로 signal하는 것.
@@ -527,7 +603,7 @@ fn helper_watchdog_self_sigkill_still_works() {
 #[ignore = "intentionally killed under the helper filter"]
 fn filtered_watchdog_child() {
     let _watchdog = helper_limits::start(Instant::now() - Duration::from_millis(1750)).unwrap();
-    commands::helper_filter::install().unwrap();
+    commands::helper_filter::install(None).unwrap();
     println!("watchdog armed");
     std::io::stdout().flush().unwrap();
     std::thread::sleep(Duration::from_secs(3));
@@ -566,8 +642,8 @@ fn stalled_publisher_child() {
             Ok(())
         }))
         .unwrap();
-    commands::helper_filter::install().unwrap();
-    handle.allow_publication().unwrap();
+    commands::helper_filter::install(handle.child_pidfd()).unwrap();
+    handle.confirm_confinement().unwrap();
     handle.finish();
     panic!("stalled helper survived");
 }
@@ -860,10 +936,10 @@ fn verified_screen_child() {
                 }))?);
             }
             helper_limits::install(&watchdog)?;
-            commands::helper_filter::install()?;
+            commands::helper_filter::install(handle.as_ref().and_then(|h| h.child_pidfd()))?;
             confined = true;
             if let Some(handle) = &handle {
-                handle.allow_publication()?;
+                handle.confirm_confinement()?;
             }
             Ok(())
         },
@@ -1214,7 +1290,7 @@ fn thread_failure_child() {
         &SEGMENTS,
     )
     .unwrap();
-    commands::helper_filter::install().unwrap();
+    commands::helper_filter::install(job.child_pidfd()).unwrap();
     assert!(
         job.start(Box::new(|_| panic!("failed supervisor published")))
             .is_err()
@@ -1263,7 +1339,7 @@ fn interrupted_poll_child() {
     let handle = job
         .start(Box::new(|_| panic!("incomplete Ready published")))
         .unwrap();
-    handle.allow_publication().unwrap();
+    handle.confirm_confinement().unwrap();
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(2));
         handle.fixture_interrupt();

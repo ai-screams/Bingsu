@@ -55,12 +55,16 @@ pub(crate) struct SupervisionReport {
     pub frames: u16,
     pub kill_requested: bool,
     pub reaped: bool,
+    #[cfg(test)]
+    pub unconfined_reads: u32,
+    #[cfg(test)]
+    pub unconfined_decodes: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Permission {
     Pending,
-    Allowed,
+    Confined,
     Cancelled,
 }
 struct Barrier {
@@ -74,6 +78,21 @@ pub(crate) struct SupervisorHandle {
 }
 
 impl CollectorJob {
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "Linux native integration fixes the pidfd before TSYNC"
+    )]
+    pub fn child_pidfd(&self) -> Option<std::os::fd::RawFd> {
+        self.child.pidfd()
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code, reason = "native integration observes queued Ready bytes")]
+    pub(crate) fn fixture_input(&self) -> io::Result<File> {
+        self.input.try_clone()
+    }
+
     #[cfg(test)]
     #[allow(dead_code, reason = "used by the native integration target")]
     pub(crate) fn fixture(
@@ -181,6 +200,10 @@ impl CollectorJob {
             frames: 0,
             kill_requested: false,
             reaped: false,
+            #[cfg(test)]
+            unconfined_reads: 0,
+            #[cfg(test)]
+            unconfined_decodes: 0,
         };
         let result = Transcript::with_catalog(&self.request, self.catalog);
         if let Ok(mut transcript) = result {
@@ -191,8 +214,8 @@ impl CollectorJob {
             if report.reason != EndReason::Complete {
                 let _ = self.child.signal(libc::SIGKILL);
             }
-            // Publication has a separate cancellation gate. No snapshot lock
-            // is owned here, and a stalled publisher cannot block the watchdog.
+            // Cancellation also gates publication. No snapshot lock is owned
+            // here, and a stalled publisher cannot block the watchdog.
             let clock = super::clock::SystemClock.observe();
             #[cfg(test)]
             let clock = if self.fixture_clock {
@@ -216,7 +239,7 @@ impl CollectorJob {
                         .unwrap_or_else(|e| e.into_inner())
                         .0;
                 }
-                if *permission == Permission::Allowed
+                if *permission == Permission::Confined
                     && now_ns().is_ok_and(|now| now < self.helper_ns)
                 {
                     // Serialize cancellation with the publication admission.
@@ -265,10 +288,32 @@ impl CollectorJob {
         report: &mut SupervisionReport,
         barrier: &Barrier,
     ) -> EndReason {
+        // The supervisor thread must exist before TSYNC, but cannot touch the
+        // hostile pipe until both limits and the synchronized filter are live.
+        // Waiting consumes the original spawn-to-Ready budget.
+        let mut deadline = deadlines(self.started_ns, self.helper_ns).0;
+        let mut permission = barrier.state.lock().unwrap_or_else(|e| e.into_inner());
+        while *permission == Permission::Pending {
+            let Ok(now) = now_ns() else {
+                return EndReason::Resource;
+            };
+            let remaining = deadline.saturating_sub(now);
+            if remaining == 0 {
+                return EndReason::Deadline;
+            }
+            permission = barrier
+                .changed
+                .wait_timeout(permission, Duration::from_nanos(remaining))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        if *permission != Permission::Confined {
+            return EndReason::Resource;
+        }
+        drop(permission);
         let mut buffer = Box::new([0u8; wire::FRAME_MAX]);
         let mut have = 0;
         let mut want = wire::HEADER;
-        let mut deadline = deadlines(self.started_ns, self.helper_ns).0;
         let mut outgoing = Vec::new();
         let mut sent = 0;
         let mut ready = false;
@@ -303,6 +348,10 @@ impl CollectorJob {
                     return EndReason::Deadline;
                 }
             }
+            #[cfg(test)]
+            if *barrier.state.lock().unwrap_or_else(|e| e.into_inner()) == Permission::Pending {
+                report.unconfined_reads += 1;
+            }
             match self.input.read(&mut buffer[have..want]) {
                 Ok(0) => {
                     return if transcript.accept_bytes(&buffer[..have]).is_ok() && complete {
@@ -330,6 +379,12 @@ impl CollectorJob {
                         want = length;
                     }
                     if have == want {
+                        #[cfg(test)]
+                        if *barrier.state.lock().unwrap_or_else(|e| e.into_inner())
+                            == Permission::Pending
+                        {
+                            report.unconfined_decodes += 1;
+                        }
                         let Ok(frame) = wire::decode_frame(&buffer[..have]) else {
                             return EndReason::Protocol;
                         };
@@ -470,6 +525,16 @@ fn request_bytes(
 }
 
 impl SupervisorHandle {
+    pub fn child_pidfd(&self) -> Option<std::os::fd::RawFd> {
+        self.signal.pidfd()
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code, reason = "native integration observes confinement timeout")]
+    pub(crate) fn fixture_finished(&self) -> bool {
+        self.thread.as_ref().unwrap().is_finished()
+    }
+
     #[cfg(test)]
     #[allow(
         dead_code,
@@ -486,12 +551,13 @@ impl SupervisorHandle {
         let rc = unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
         assert!(rc == 0 || rc == libc::ESRCH);
     }
-    pub fn allow_publication(&self) -> io::Result<()> {
+    /// Call only after helper limits and the TSYNC filter have both succeeded.
+    pub fn confirm_confinement(&self) -> io::Result<()> {
         let mut state = self.barrier.state.lock().unwrap_or_else(|e| e.into_inner());
         if *state != Permission::Pending {
-            return Err(io::Error::other("publication gate"));
+            return Err(io::Error::other("confinement gate"));
         }
-        *state = Permission::Allowed;
+        *state = Permission::Confined;
         self.barrier.changed.notify_all();
         Ok(())
     }
@@ -514,6 +580,10 @@ impl SupervisorHandle {
                 frames: 0,
                 kill_requested: self.signal.signal(libc::SIGKILL).is_ok(),
                 reaped: self.signal.reaped(),
+                #[cfg(test)]
+                unconfined_reads: 0,
+                #[cfg(test)]
+                unconfined_decodes: 0,
             })
     }
 }
