@@ -33,22 +33,24 @@ impl PinnedCollector {
         me: u32,
         groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
     ) -> Result<Self, StoreError> {
-        use bingsu_core::fs_trust::{NextOwner, ancestor_verdict};
+        use bingsu_core::fs_trust::{Verdict, entry_verdict};
         let path = std::path::Path::new(exe);
         if path.file_name() != Some(OsStr::new("bingsu-collect")) {
             return Err(StoreError::Unsafe);
         }
         let parent = path.parent().ok_or(StoreError::Unsafe)?;
         let chain = super::runtime_root::open_chain(parent).map_err(StoreError::Root)?;
-        let mut next = NextOwner::Any;
-        for (at, facts) in chain.facts.iter().enumerate() {
-            next = ancestor_verdict(facts, me, at, next, groups).map_err(|_| StoreError::Unsafe)?;
+        for facts in &chain.facts {
+            if entry_verdict(facts, me, false, groups) != Verdict::Safe {
+                return Err(StoreError::Unsafe);
+            }
         }
         let executable =
             sys::open_data_at_nofollow(chain.last().as_fd(), OsStr::new("bingsu-collect"))?;
         let facts = sys::fd_facts(executable.as_fd())?;
-        ancestor_verdict(&facts, me, chain.facts.len(), next, groups)
-            .map_err(|_| StoreError::Unsafe)?;
+        if entry_verdict(&facts, me, false, groups) != Verdict::Safe {
+            return Err(StoreError::Unsafe);
+        }
         let md = executable.metadata()?;
         if !md.is_file()
             || !executable_mode(md.mode())
@@ -92,6 +94,7 @@ fn verify_build(file: &File) -> Result<(), StoreError> {
     let mut buffer = [0u8; 65_536];
     let expected = bingsu_collect::build_id();
     let mut found = 0;
+    let mut roles = 0;
     let mut offset = 0;
     let mut overlap = 0;
     while offset < size {
@@ -100,19 +103,33 @@ fn verify_build(file: &File) -> Result<(), StoreError> {
             return Err(StoreError::Unsafe);
         }
         let length = overlap + n;
-        for window in buffer[..length].windows(48) {
+        let end = if offset + n as u64 == size {
+            length.saturating_sub(15)
+        } else {
+            length.saturating_sub(48)
+        };
+        for at in 0..end {
+            let window = &buffer[at..length];
             if window[..16] == bingsu_collect::manifest_tag()[..16] {
-                if window[16..] != expected.0 {
+                if window.get(16..48) != Some(expected.0.as_slice()) {
                     return Err(StoreError::Unsafe);
                 }
                 found += 1;
             }
+            if window[..16] == std::hint::black_box(&super::ROLE_TAG)[..16] {
+                if window.get(16) != Some(&bingsu_collect::COLLECTOR_ROLE)
+                    || window.get(17..49) != Some(expected.0.as_slice())
+                {
+                    return Err(StoreError::Unsafe);
+                }
+                roles += 1;
+            }
         }
-        overlap = length.min(47);
+        overlap = length - end;
         buffer.copy_within(length - overlap..length, 0);
         offset += n as u64;
     }
-    if found != 1 {
+    if found != 1 || roles != 1 {
         return Err(StoreError::Unsafe);
     }
     Ok(())
@@ -183,7 +200,7 @@ fn spawn_fds(exe: &OsStr, files: [&File; 3]) -> Result<(), StoreError> {
     let path = CString::new(exe.as_bytes()).map_err(|_| StoreError::Unsafe)?;
     let argv = [
         path.as_ptr().cast_mut(),
-        c"__collect-v1".as_ptr().cast_mut(),
+        c"__collect-legacy-v1".as_ptr().cast_mut(),
         std::ptr::null_mut(),
     ];
     let env = [std::ptr::null_mut()];
@@ -385,7 +402,9 @@ mod tests {
     #[test]
     fn collector_path_never_uses_prompt_environment() {
         use std::os::unix::fs::PermissionsExt;
-        let base = std::env::temp_dir().join(format!("bingsu-worker-pin-{}", std::process::id()));
+        let base = std::env::current_dir()
+            .unwrap()
+            .join(format!("bingsu-worker-pin-{}", std::process::id()));
         std::fs::create_dir(&base).unwrap();
         let base = std::fs::canonicalize(base).unwrap();
         let directory = base.join("install");
@@ -394,7 +413,7 @@ mod tests {
         let me = sys::current_uid();
         let check = || PinnedCollector::verify(path.as_os_str(), me, &mut RefuseGroupWrite);
         assert!(check().is_err());
-        std::fs::write(&path, bingsu_collect::manifest_tag()).unwrap();
+        std::fs::write(&path, collector_fixture()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         let pin = check().unwrap();
         assert_eq!(pin.executable().unwrap(), path.as_os_str());
@@ -432,23 +451,67 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    fn collector_fixture() -> Vec<u8> {
+        [
+            bingsu_collect::manifest_tag().as_slice(),
+            &bingsu_collect::role_tag(bingsu_collect::COLLECTOR_ROLE),
+        ]
+        .concat()
+    }
+
+    // 이것을 실패시키는 것: 실행 파일에 runtime-root의 sticky 예외를 적용하는 것.
+    #[test]
+    fn collector_refuses_sticky_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        let md = std::fs::metadata(&tmp).unwrap();
+        assert_eq!((md.uid(), md.mode() & 0o1777), (0, 0o1777));
+        let base = tmp.join(format!("bingsu-sticky-pin-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = base.join("bingsu-collect");
+        std::fs::write(&path, collector_fixture()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result =
+            PinnedCollector::verify(path.as_os_str(), sys::current_uid(), &mut RefuseGroupWrite);
+        std::fs::remove_dir_all(base).unwrap();
+        assert!(result.is_err());
+    }
+
     // 이것을 실패시키는 것: 같은 wire 버전의 다른 build-id나 중복 tag를 받는 것.
     #[test]
     fn sibling_build_id_is_exact() {
         let path = std::env::temp_dir().join(format!("bingsu-worker-build-{}", std::process::id()));
-        let valid = bingsu_collect::manifest_tag();
-        for offset in 16..48 {
-            let mut bad = *valid;
+        let valid = collector_fixture();
+        for offset in (16..48).chain(64..97) {
+            let mut bad = valid.clone();
             bad[offset] ^= 1;
             std::fs::write(&path, bad).unwrap();
             assert!(verify_build(&File::open(&path).unwrap()).is_err());
         }
-        for prefix in [0, 65_520, 65_535, 65_536] {
+        for bad in [
+            bingsu_collect::manifest_tag().to_vec(),
+            [
+                valid.as_slice(),
+                &bingsu_collect::role_tag(bingsu_collect::BINGSU_ROLE),
+            ]
+            .concat(),
+            [
+                valid.as_slice(),
+                &bingsu_collect::role_tag(bingsu_collect::COLLECTOR_ROLE),
+            ]
+            .concat(),
+            valid[..96].to_vec(),
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(verify_build(&File::open(&path).unwrap()).is_err());
+        }
+        for prefix in [0, 65_480, 65_520, 65_535, 65_536] {
             let mut bytes = vec![0; prefix];
-            bytes.extend(valid);
+            bytes.extend(&valid);
             std::fs::write(&path, &bytes).unwrap();
             assert!(verify_build(&File::open(&path).unwrap()).is_ok());
-            bytes.extend(valid);
+            bytes.extend(&valid);
             std::fs::write(&path, bytes).unwrap();
             assert!(verify_build(&File::open(&path).unwrap()).is_err());
         }
@@ -609,9 +672,9 @@ mod tests {
             .output()
             .unwrap();
         assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout).contains("test result: ok. 1 passed;"),
+            "{out:?}"
         );
     }
 }

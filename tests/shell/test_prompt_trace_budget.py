@@ -18,13 +18,14 @@ def debian_trace():
     after the state-root fix, with a fresh state home.
     USER/CASE/SOURCE/TRACE_HOST replace machine paths/host; encoded context path
     components are normalized too, preserving their observed chunk boundaries.
-    All 3012 records, including shell setup, are retained. The helper creates
-    state-t/bingsu with 0700, executes the pinned __collect-v1, revalidates
+    All 3012 records, including shell setup, are retained. The historical
+    legacy verb is projected to its current spelling before validation. The helper creates
+    state-t/bingsu with 0700, executes the pinned __collect-legacy-v1, revalidates
     config absence and publishes snapshot/marker; both processes exit with 0.
     """
     return Path(__file__).with_name("fixtures").joinpath(
         "prompt-debian-bookworm-glibc-aarch64.strace"
-    ).read_text().splitlines()
+    ).read_text().replace("__collect-v1", "__collect-legacy-v1").splitlines()
 
 
 DEBIAN_BASE = "/home/USER/pt/CASE"
@@ -52,7 +53,7 @@ def test_real_debian_prompt_trace(debian_trace):
         assert any(c.pid == 1948 and c.name == "mkdirat" and c.ret == "0"
                    and budget.call_paths(c) == [path] and budget.args_of(c)[2] == "0700"
                    for c in calls)
-    assert any(c.pid == 1950 and budget.fixed_exec(c, DEBIAN_EXE, "__collect-v1")
+    assert any(c.pid == 1950 and budget.fixed_exec(c, DEBIAN_EXE, "__collect-legacy-v1")
                for c in calls if c.name == "execve")
     for stage, final in ((".snapshot.stage", "snapshot"), (".marker.stage", "marker")):
         assert any(c.pid == 1948 and c.name == "renameat" and c.ret == "0"
@@ -71,10 +72,10 @@ H2_TARGET = "/home/USER/target/debug/bingsu"
 
 @pytest.fixture(scope="module")
 def h2_trace():
-    """Unprojected c4da804 non-root capture; see fixtures/prompt-h2-trace.md."""
+    """c4da804 capture with the legacy verb renamed; see fixtures/prompt-h2-trace.md."""
     return Path(__file__).with_name("fixtures").joinpath(
         "prompt-h2-debian-bookworm-glibc-aarch64.strace"
-    ).read_text().splitlines()
+    ).read_text().replace("__collect-v1", "__collect-legacy-v1").splitlines()
 
 
 def test_real_h2_build_identity_trace(h2_trace):
@@ -178,7 +179,7 @@ def test_real_trace_needs_each_helper_path_allowance(debian_trace, monkeypatch, 
 def test_real_trace_needs_collector_exec_allowance(debian_trace, monkeypatch):
     original = budget.fixed_exec
     monkeypatch.setattr(budget, "fixed_exec", lambda call, exe, verb:
-                        verb != "__collect-v1" and original(call, exe, verb))
+                        verb != "__collect-legacy-v1" and original(call, exe, verb))
     with pytest.raises(AssertionError, match="execve"):
         assert_prompt_trace_budget(debian_trace, DEBIAN_EXE, DEBIAN_ROOTS)
 
@@ -307,7 +308,7 @@ def valid_trace():
         '11 read(5</pinned/run/snapshot>, "not a pathname", 64) = 14',
         '11 renameat(4</pinned/run>, ".stage", 4</pinned/run>, "marker") = 0',
         '11 clone(child_stack=0x2, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 13',
-        '13 execve("/pinned/bin/bingsu", ["/pinned/bin/bingsu", "__collect-v1"], []) = 0',
+        '13 execve("/pinned/bin/bingsu", ["/pinned/bin/bingsu", "__collect-legacy-v1"], []) = 0',
         '13 openat(4</pinned/run>, "collection.lock", O_RDONLY) = 6</pinned/run/collection.lock>',
         '13 chdir("/") = 0',
         '13 clone(child_stack=0x3, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 14',
@@ -436,7 +437,7 @@ def test_exec_completion_may_follow_parent_filter():
     ('11 read(5', '11 ptrace(5'),
     ('socket(AF_UNIX', 'socket(AF_INET'),
     ('"/var/run/nscd/socket"', '"/repo/socket"'),
-    ('"__collect-v1"', '"__other"'),
+    ('"__collect-legacy-v1"', '"__other"'),
     ('"snapshot", O_RDONLY', '"../secret", O_RDONLY'),
     ('9</proc/11/ns>', '9</proc/999/ns>'),
 ])
@@ -503,7 +504,7 @@ def test_trace_needs_creation_and_collector_allowances(monkeypatch, allowance):
     if allowance == "fixed_exec":
         # Disable only the collector allowance, preserving the refresh check.
         monkeypatch.setattr(budget, allowance, lambda call, exe, verb:
-                            verb != "__collect-v1" and original(call, exe, verb))
+                            verb != "__collect-legacy-v1" and original(call, exe, verb))
     else:
         monkeypatch.setattr(budget, allowance, lambda *args: False)
     with pytest.raises(AssertionError):
@@ -517,9 +518,9 @@ def test_trace_needs_created_ancestor_open_allowance(monkeypatch):
 
 
 @pytest.mark.parametrize("old,new", [
-    ('"__collect-v1"], []', '"__collect-v1", "extra"], []'),
+    ('"__collect-legacy-v1"], []', '"__collect-legacy-v1", "extra"], []'),
     ('13 execve("/pinned/bin/bingsu"', '13 execve("/other/bin/bingsu"'),
-    ('"__collect-v1"], []', '"__collect-v1"], 0x3 /* 1 vars */'),
+    ('"__collect-legacy-v1"], []', '"__collect-legacy-v1"], 0x3 /* 1 vars */'),
 ])
 def test_trace_rejects_collector_exec_contract_mutation(old, new):
     original = valid_trace()
@@ -570,7 +571,7 @@ def n4_real_trace():
     """
     return Path(__file__).with_name("fixtures").joinpath(
         "prompt-n4-debian-bookworm-glibc-aarch64.strace"
-    ).read_text().splitlines()
+    ).read_text().replace("__collect-v1", "__collect-legacy-v1").splitlines()
 
 
 def test_real_n4_debian_prompt_trace(n4_real_trace):

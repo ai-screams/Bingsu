@@ -4,6 +4,27 @@
 
 include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 
+pub const ROLE_MARKER: [u8; 16] = *b"BNGROLE-ID02\0\0\0\0";
+pub const COLLECTOR_ROLE: u8 = 1;
+pub const BINGSU_ROLE: u8 = 2;
+
+/// Only each binary's entry embeds its own role, bound to this build identity.
+pub const fn role_tag(role: u8) -> [u8; 49] {
+    let mut tag = [0; 49];
+    let mut i = 0;
+    while i < 16 {
+        tag[i] = ROLE_MARKER[i];
+        i += 1;
+    }
+    tag[16] = role;
+    i = 0;
+    while i < 32 {
+        tag[17 + i] = BUILD_ID.0[i];
+        i += 1;
+    }
+    tag
+}
+
 /// Reference the whole manifest tag so deployment checks can inspect both files.
 pub fn build_id() -> bingsu_core::collection::wire::BuildId {
     let tag = manifest_tag();

@@ -117,6 +117,7 @@ fn dedicated_entry_refuses_stub_and_unknown_arguments() {
         vec!["__collect-v1", "--probe-exec"],
         vec!["__collect-v1", "extra"],
         vec!["__collect-stub"],
+        vec!["__collect-legacy-v1"],
     ] {
         let out = Command::new(binary()).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2));
@@ -169,6 +170,14 @@ fn child(name: &str) -> std::process::Output {
         .output()
         .unwrap()
 }
+
+fn assert_one_passed(out: &std::process::Output) {
+    assert!(
+        out.status.success()
+            && String::from_utf8_lossy(&out.stdout).contains("test result: ok. 1 passed;"),
+        "{out:?}"
+    );
+}
 // 이것을 실패시키는 것: 기본 한도 중 하나를 생략하거나 상속 soft/hard를 올리는 것.
 #[test]
 fn limits_are_irreversible_and_owned_by_worker() {
@@ -181,12 +190,7 @@ fn limits_are_irreversible_and_owned_by_worker() {
         0
     );
     let out = child("base_limits_child");
-    assert!(
-        out.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_one_passed(&out);
     // SAFETY: output storage for read-only parent limit snapshot.
     let mut after: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: valid resource and storage.
@@ -237,10 +241,10 @@ fn worker_limits_fail_without_blocking_front() {
     #[cfg(target_os = "linux")]
     {
         let memory = child("as_limit_child");
-        assert!(memory.status.success(), "{memory:?}");
+        assert_one_passed(&memory);
     }
     let fd = child("fd_ceiling_child");
-    assert!(fd.status.success(), "{:?}", fd);
+    assert_one_passed(&fd);
     let cpu = child("cpu_limit_child");
     assert!(
         matches!(cpu.status.signal(), Some(libc::SIGKILL | libc::SIGXCPU)),
@@ -325,7 +329,15 @@ fn worker_fd_contract_has_no_shell_or_authority_fds() {
         "--test-threads=1",
     ]);
     let out = command.output().unwrap();
-    assert!(out.status.success(), "{:?}", out);
+    // The worker owns stdout and closes it before libtest can print a summary.
+    assert!(
+        out.status.success()
+            && out
+                .stdout
+                .windows(b"fd_contract_child: passed".len())
+                .any(|word| word == b"fd_contract_child: passed"),
+        "{out:?}"
+    );
     let competing = File::open(&fixture.path).unwrap();
     // SAFETY: separate description must still be excluded by the parent lock.
     assert_eq!(
@@ -352,6 +364,8 @@ fn fd_contract_child() {
         let open = unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
         assert_eq!(open, [0, 1, 2, 3, 5].contains(&fd), "fd {fd}");
     }
+    println!("fd_contract_child: passed");
+    std::io::stdout().flush().unwrap();
     drop(fds);
 }
 
@@ -428,7 +442,13 @@ fn worker_rejects_invalid_handoff_before_ready() {
             "--test-threads=1",
         ])
         .stdout(File::create(&output_path).unwrap());
-    assert!(check.status().unwrap().success());
+    let status = check.status().unwrap();
+    assert!(status.success());
+    assert!(
+        fs::read_to_string(&output_path)
+            .unwrap()
+            .contains("test result: ok. 1 passed;")
+    );
     fs::remove_file(output_path).unwrap();
     for condition in [
         "environment",
@@ -535,4 +555,80 @@ fn worker_rejects_invalid_handoff_before_ready() {
 #[ignore = "invoked by worker_rejects_invalid_handoff_before_ready"]
 fn fd_reject_child() {
     assert!(sys::validate_worker_fds().is_err());
+}
+
+// 이것을 실패시키는 것: exec로 상속된 ignored/blocked limit 신호를 그대로 두는 것.
+#[test]
+fn worker_resets_inherited_limit_signals() {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--exact",
+        "inherited_limit_signals_child",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    let inherit = || {
+        // SAFETY: plain C signal storage, initialized before use.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_IGN;
+        // SAFETY: writable signal set.
+        if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut mask = action.sa_mask;
+        for signal in [libc::SIGXCPU, libc::SIGXFSZ, libc::SIGALRM] {
+            // SAFETY: supported signal and initialized action.
+            if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: initialized set and supported signal.
+            if unsafe { libc::sigaddset(&mut mask, signal) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        // SAFETY: initialized set; changes only the exec child's mask.
+        if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    };
+    // SAFETY: the child closure only uses async-signal-safe signal operations.
+    unsafe {
+        command.pre_exec(inherit);
+    }
+    assert_one_passed(&command.output().unwrap());
+}
+
+#[test]
+#[ignore = "invoked by worker_resets_inherited_limit_signals"]
+fn inherited_limit_signals_child() {
+    fn check(disposition: libc::sighandler_t, blocked: libc::c_int) {
+        // SAFETY: plain C output storage for read-only signal queries.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: plain C output storage initialized by sigprocmask.
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            // SAFETY: null input leaves the mask unchanged; output is writable.
+            unsafe { libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) },
+            0
+        );
+        for signal in [libc::SIGXCPU, libc::SIGXFSZ, libc::SIGALRM] {
+            assert_eq!(
+                // SAFETY: supported signal, read-only query with writable output.
+                unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
+                0
+            );
+            assert_eq!(action.sa_sigaction, disposition, "signal {signal}");
+            assert_eq!(
+                // SAFETY: initialized mask and supported signal.
+                unsafe { libc::sigismember(&mask, signal) },
+                blocked,
+                "signal {signal}"
+            );
+        }
+    }
+    check(libc::SIG_IGN, 1);
+    limits::install_base().unwrap();
+    check(libc::SIG_DFL, 0);
 }

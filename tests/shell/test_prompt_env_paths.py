@@ -466,7 +466,7 @@ def fixed_exec(call, exe, verb):
     args = args_of(call)
     words = QUOTED.findall(args[1])
     return (call.name == "execve" and args[0] == f'"{exe}"'
-            and (words == [exe, verb] if verb == "__collect-v1" else words[:2] == [exe, verb])
+            and (words == [exe, verb] if verb == "__collect-legacy-v1" else words[:2] == [exe, verb])
             and (args[2] == "[]" or re.fullmatch(r'0x[0-9a-f]+ /\* 0 vars \*/', args[2]))
             and call.ret == "0")
 
@@ -765,10 +765,10 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
     prompt_root_io(front, filters[0].index, exe, pinned, root)
     # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
     assert all(c.name in HELPER_CALLS for c in helper), [c for c in helper if c.name not in HELPER_CALLS]
-    # M3a collector exec: exactly the pinned executable and __collect-v1,
+    # M3a collector exec: exactly the pinned executable and __collect-legacy-v1,
     # no additional argv and an empty environment. It precedes confinement.
     collectors = [c for c in execs if c.pid != helper_pid]
-    assert len(collectors) <= collector_limit and all(fixed_exec(c, exe, "__collect-v1") for c in collectors), collectors
+    assert len(collectors) <= collector_limit and all(fixed_exec(c, exe, "__collect-legacy-v1") for c in collectors), collectors
     mains = {helper_pid} | {c.pid for c in collectors}
     owners = {pid: pid for pid in mains}
     children = []

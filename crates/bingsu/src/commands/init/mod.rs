@@ -121,11 +121,15 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
             false
         }
     };
-    let collector = exe_path::collector_sibling(
-        &exe,
-        uid,
-        &mut crate::commands::group_policy::SystemGroups::new(&pw.name),
-    );
+    let collector = if exe_safe {
+        exe_path::collector_sibling(
+            &exe,
+            uid,
+            &mut crate::commands::group_policy::SystemGroups::new(&pw.name),
+        )
+    } else {
+        None
+    };
     let roots = roots::resolve(&env, &pw.home, &pw.name);
     for line in root_warnings(&roots) {
         eprintln!("{line}");

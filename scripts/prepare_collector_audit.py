@@ -45,7 +45,15 @@ def main():
     if sys.platform == "darwin":
         manifest["canary"] = str(interposer(directory))
         source = directory / "mutation.c"
-        source.write_text('#include <unistd.h>\nint main(void) { fork(); return 0; }\n')
+        source.write_text('''#include <unistd.h>
+#include <sys/wait.h>
+int main(void) {
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) { usleep(250000); _exit(0); }
+    return waitpid(child, 0, 0) == child ? 0 : 1;
+}
+''')
         mutant = directory / "mutation"
         subprocess.run(["cc", str(source), "-o", str(mutant)], check=True)
         manifest["mutant"] = str(mutant)

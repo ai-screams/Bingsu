@@ -100,9 +100,11 @@ jobs:
       - if: runner.os == 'Linux'
         name: Privileged capability removal (no silent skip)
         run: |
+          set -o pipefail
           cargo test -j 2 -p bingsu-collect --test startup --no-run --message-format=json > "$RUNNER_TEMP/startup.json"
           bin=$(python3 -c 'import json,sys; print(next(v["executable"] for line in open(sys.argv[1]) if (v:=json.loads(line)).get("reason")=="compiler-artifact" and v["target"]["name"]=="startup" and v.get("executable")))' "$RUNNER_TEMP/startup.json")
-          sudo "$bin" --exact limits::tests::root_cannot_restore_limits_or_capabilities --ignored --test-threads=1
+          sudo "$bin" --exact limits::tests::root_cannot_restore_limits_or_capabilities --ignored --test-threads=1 | tee "$RUNNER_TEMP/root-capabilities.txt"
+          grep -F 'test result: ok. 1 passed;' "$RUNNER_TEMP/root-capabilities.txt"
       - if: runner.os == 'macOS'
         name: Product imports and matching deployment pair
         run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu

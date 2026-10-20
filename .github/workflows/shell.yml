@@ -67,7 +67,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Static musl binary: the runner's glibc is newer than the images'.
-      - run: cargo build -p bingsu --target x86_64-unknown-linux-musl
+      - run: cargo build -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl
       # K60 must round-trip through the minimum shells without Cargo in
       # their images. Check the root on the host, but embed the /w mount.
       - name: Generate shape-only init fixture
@@ -107,7 +107,7 @@ jobs:
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e CI=true -e BINGSU_SHAPE_ONLY_FIXTURE \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
-            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
+            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
@@ -121,7 +121,7 @@ jobs:
           docker run --rm --security-opt apparmor=unconfined -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e LC_ALL=C.UTF-8 \
-            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
+            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
               exec python3 -m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q -rs -p no:cacheprovider --basetemp=/root/pytest'
 
   # Every system call the prompt makes after its seccomp filter is installed
@@ -156,7 +156,7 @@ jobs:
           key: ${{ matrix.libc }}-${{ matrix.profile }}
       - name: Build
         run: |
-          args=(-p bingsu)
+          args=(-p bingsu -p bingsu-collect)
           dir=target
           if [ "$PROFILE" = release ]; then args+=(--release); fi
           if [ "$LIBC" = musl ]; then args+=(--target x86_64-unknown-linux-musl); dir=target/x86_64-unknown-linux-musl; fi
@@ -209,7 +209,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
-      - run: cargo build -p bingsu
+      - run: cargo build -p bingsu -p bingsu-collect
       - name: Generate shape-only init fixture
         run: |
           cargo test -j 2 -p bingsu --bin bingsu --no-run

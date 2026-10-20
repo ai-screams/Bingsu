@@ -55,6 +55,7 @@ fn lower_with(
 }
 
 pub fn install_base() -> io::Result<()> {
+    reset_limit_signals()?;
     for (resource, ceiling) in [
         (libc::RLIMIT_CPU, 1),
         (libc::RLIMIT_NOFILE, 64),
@@ -62,6 +63,34 @@ pub fn install_base() -> io::Result<()> {
         (libc::RLIMIT_CORE, 0),
     ] {
         lower(resource, ceiling)?;
+    }
+    Ok(())
+}
+
+/// An exec preserves ignored dispositions and blocked signals. The worker
+/// owns these limit/watchdog signals, regardless of the spawning shell.
+fn reset_limit_signals() -> io::Result<()> {
+    // SAFETY: plain C signal storage, initialized before use below.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: writable signal set in the action.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut signals = action.sa_mask;
+    for signal in [libc::SIGXCPU, libc::SIGXFSZ, libc::SIGALRM] {
+        // SAFETY: supported signal, initialized action, no previous-action output.
+        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: initialized set and supported signal.
+        if unsafe { libc::sigaddset(&mut signals, signal) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // SAFETY: single-threaded worker startup; unblock only its owned signals.
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }

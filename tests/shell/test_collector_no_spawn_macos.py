@@ -44,9 +44,9 @@ def children(pid):
     lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
     lib.proc_listchildpids.restype = ctypes.c_int
     values = (ctypes.c_int * 64)()
-    size = lib.proc_listchildpids(pid, values, ctypes.sizeof(values))
-    assert 0 <= size < ctypes.sizeof(values), "descendant census failed or overflowed"
-    return list(values)[:size // ctypes.sizeof(ctypes.c_int)]
+    count = lib.proc_listchildpids(pid, values, ctypes.sizeof(values))
+    assert 0 <= count < len(values), "descendant census failed or overflowed"
+    return list(values)[:count]
 
 
 def run_worker(command, dylib, tmp_path, mutation=False):
@@ -60,7 +60,7 @@ def run_worker(command, dylib, tmp_path, mutation=False):
         os.dup2(sources[1], 5)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, cwd="/", close_fds=False, preexec_fn=setup,
-                               env={"DYLD_INSERT_LIBRARIES": str(dylib)})
+                               env={"DYLD_INSERT_LIBRARIES": str(dylib)} if dylib else {})
     seen, output, sent = [], bytearray(), False
     deadline = time.monotonic() + 5
     try:
@@ -110,8 +110,9 @@ def prepared():
 
 # 이것을 실패시키는 것: 자식의 한도 실패가 앞단의 exit0·B1·stderr0 계약을 바꾸는 것.
 def test_worker_limits_fail_without_blocking_front():
-    subprocess.run([prepared()["startup"], "--exact", "worker_limits_fail_without_blocking_front",
-                    "--test-threads=1"], check=True, capture_output=True, timeout=15)
+    result = subprocess.run([prepared()["startup"], "--exact", "worker_limits_fail_without_blocking_front",
+                             "--test-threads=1"], check=True, capture_output=True, timeout=15)
+    assert b"test result: ok. 1 passed;" in result.stdout, result
     prompt = subprocess.run([prepared()["front"], "prompt", "--ctx", "1",
                              "--record", "B1", "--width", "80", "--runtime-root=1:2:/r"],
                             env={}, stdin=subprocess.DEVNULL, capture_output=True, timeout=2)
@@ -137,4 +138,11 @@ def test_macos_no_spawn_harness_detects_creation(tmp_path):
     run_worker([str(mutant)], canary, tmp_path, mutation=True)
     with pytest.raises(AssertionError):
         run_worker([str(mutant)], canary, tmp_path)
+
+
+# 이것을 실패시키는 것: count를 bytes로 나누어 실제 fork의 자식을 놓치는 것.
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS descendant census")
+def test_macos_descendant_census_catches_fork_without_canary(tmp_path):
+    with pytest.raises(AssertionError, match="descendants:"):
+        run_worker([prepared()["mutant"]], None, tmp_path)
 

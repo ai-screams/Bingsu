@@ -17,6 +17,10 @@ def real_bin():
     return pathlib.Path(os.environ.get("BINGSU_BIN", ROOT / "target/debug/bingsu")).resolve()
 
 
+def real_collector():
+    return pathlib.Path(os.environ.get("BINGSU_COLLECTOR_BIN", real_bin().with_name("bingsu-collect"))).resolve()
+
+
 COLD_INIT_NOTICE = (b"bingsu: reading your settings did not finish in time; the prompt starts with "
                     b"the built-in look and takes your settings when they are ready\n")
 

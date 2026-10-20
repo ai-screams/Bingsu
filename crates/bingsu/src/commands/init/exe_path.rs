@@ -86,13 +86,16 @@ fn facts(p: &Path) -> Option<EntryFacts> {
 /// The same bound Linux uses for one path lookup (MAXSYMLINKS = 40).
 const MAX_SYMLINK_HOPS: usize = 40;
 
-/// Resolve the running installation first, then its dedicated sibling. A PATH
-/// lookup or a prompt environment value can never select the worker.
+/// Resolve only the running installation. The sibling is opened without
+/// following links through the retained canonical folder descriptor chain.
 pub fn collector_sibling(exe: &Path, me: u32, groups: &mut dyn GroupOracle) -> Option<PathBuf> {
-    let canonical = std::fs::canonicalize(exe).ok()?;
-    let sibling = std::fs::canonicalize(canonical.parent()?.join("bingsu-collect")).ok()?;
+    // H2's descriptor walk retains the invocation's link/name bindings too.
+    // Its config-specific ownership verdict is not the executable policy.
+    let resolved = crate::commands::source_path::Resolved::open(exe, me, groups).ok()?;
+    let sibling = resolved.canonical.parent()?.join("bingsu-collect");
     let pin = crate::commands::collector::PinnedCollector::verify(sibling.as_os_str(), me, groups)
         .ok()?;
+    resolved.revalidate_bindings().ok()?;
     Some(PathBuf::from(pin.executable().ok()?))
 }
 

@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 int main(int argc, char **argv) {
-    int collect = argc == 2 && !strcmp(argv[1], "__collect-v1");
+    int collect = argc == 2 && !strcmp(argv[1], "__collect-legacy-v1");
     if (!collect && (argc < 2 || strcmp(argv[1], "__refresh-v1"))) return 9;
     struct rlimit limit;
     if (getrlimit(RLIMIT_NOFILE, &limit)) return 10;

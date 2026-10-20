@@ -20,7 +20,7 @@ def load(name):
 def test_macos_collection_binary_has_no_spawn_imports(tmp_path):
     audit = load("check_collector_symbols")
     for symbol in ("posix_spawn", "posix_spawnp", "execve", "execv", "execvp", "execvpe",
-                   "execl", "execlp", "execle", "fork", "vfork", "system", "popen", "dlsym"):
+                   "execl", "execlp", "execle", "fork", "vfork", "system", "popen", "dlsym", "dlopen", "syscall"):
         fixture = tmp_path / "symbols"
         fixture.write_text(f"                 _{symbol}\n")
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check_collector_symbols.py"),
@@ -101,3 +101,22 @@ def test_sibling_build_manifest_is_exact(tmp_path):
             identity()
     finally:
         link.unlink()
+
+
+# 이것을 실패시키는 것: 동일 build-id인 다른 역할, 역할 없음, 중복 역할을 허용하는 것.
+def test_sibling_audit_requires_distinct_roles(tmp_path):
+    audit = load("check_collector_symbols")
+    identity = bytes(range(32))
+    manifest = audit.TAG + identity
+    collector = audit.ROLE + bytes([1]) + identity
+    front = audit.ROLE + bytes([2]) + identity
+    path = tmp_path / "bingsu-collect"
+    for role, tag in [(1, collector), (2, front)]:
+        path.write_bytes(manifest + tag)
+        assert audit.build_id(path, role) == identity
+        for bad in [manifest, manifest + (front if role == 1 else collector),
+                    manifest + collector + front, manifest + tag + tag,
+                    manifest + tag[:-1], manifest + tag[:-1] + bytes([255])]:
+            path.write_bytes(bad)
+            with pytest.raises(ValueError):
+                audit.build_id(path, role)
