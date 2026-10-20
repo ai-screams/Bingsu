@@ -17,6 +17,16 @@
 
 static void require(int yes) { if (!yes) _exit(90); }
 static struct stat identity;
+/* musl stdio writes with writev, which the filter refuses; print with write(2). */
+static void say(const char *text) {
+    size_t left = strlen(text);
+    while (left > 0) {
+        ssize_t n = write(1, text, left);
+        require(n > 0);
+        text += n;
+        left -= (size_t)n;
+    }
+}
 static void unchanged(void) {
     struct stat after;
     char bytes[64];
@@ -31,12 +41,12 @@ static void unchanged(void) {
 static void refused(const char *name, long result) {
     require(result == -1 && errno == EPERM);
     unchanged();
-    printf("X-16 %s EPERM unchanged\n", name);
+    say("X-16 ");
+    say(name);
+    say(" EPERM unchanged\n");
 }
 int main(int argc, char **argv) {
     require(argc == 3 && chdir(argv[1]) == 0);
-    /* Keep stdio off the heap after the limit/filter transition. */
-    require(setvbuf(stdout, NULL, _IONBF, 0) == 0);
     int fd = open("filter.bpf", O_RDONLY | O_CLOEXEC);
     struct sock_filter program[4096];
     ssize_t size = read(fd, program, sizeof(program));
@@ -63,6 +73,6 @@ int main(int argc, char **argv) {
     refused("connect", connect(connected, (struct sockaddr *)&address, sizeof(address)));
     struct rlimit actual;
     require(getrlimit(RLIMIT_FSIZE, &actual) == 0 && actual.rlim_cur == 0 && actual.rlim_max == 0);
-    puts("X-16 PASS cells=6 fsize=0 control_truncated=1");
+    say("X-16 PASS cells=6 fsize=0 control_truncated=1\n");
     return 0;
 }
