@@ -121,6 +121,11 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
             false
         }
     };
+    let collector = exe_path::collector_sibling(
+        &exe,
+        uid,
+        &mut crate::commands::group_policy::SystemGroups::new(&pw.name),
+    );
     let roots = roots::resolve(&env, &pw.home, &pw.name);
     for line in root_warnings(&roots) {
         eprintln!("{line}");
@@ -147,6 +152,7 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     let inputs = render::ScriptInputs {
         shell,
         exe: exe.as_os_str().as_bytes(),
+        collector_exe: collector.as_ref().map(|p| p.as_os_str().as_bytes()),
         runtime_groups: roots
             .runtime
             .as_ref()
@@ -215,6 +221,7 @@ mod tests {
                 &render::ScriptInputs {
                     shell,
                     exe: exe.as_os_str().as_bytes(),
+                    collector_exe: None,
                     runtime_groups: &[],
                     runtime_root: None,
                     config_root: Some(config_root_words(&pin)),

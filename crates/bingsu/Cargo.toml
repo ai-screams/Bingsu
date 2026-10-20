@@ -13,11 +13,12 @@ workspace = true
 
 [features]
 # Measurement-only hidden subcommand `__collect-stub` (M1 cost matrix).
-bench-stubs = ["dep:bingsu-collect"]
+bench-stubs = ["dep:bingsu-bench", "bingsu-collect/bench-build"]
 
 [dependencies]
 bingsu-core = { path = "../bingsu-core" }
-bingsu-collect = { path = "../bingsu-collect", optional = true }
+bingsu-collect = { path = "../bingsu-collect" }
+bingsu-bench = { path = "../bingsu-bench", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

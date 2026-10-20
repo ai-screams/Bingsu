@@ -109,6 +109,7 @@ jobs:
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
             "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu /usr/local/bin/bingsu &&
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
+                --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
@@ -227,4 +228,5 @@ jobs:
         env:
           BINGSU_TEST_LOCALE: en_US.UTF-8
           BINGSU_TEST_SHELLS: zsh bash fish
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        # The prepared collector runtime harness runs in ci.yml's collector job.
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py ${BINGSU_RECORD_OBSERVATIONS:+-s}'

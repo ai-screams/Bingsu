@@ -1,0 +1,226 @@
+//! Fixed product entry and one bounded request. Every startup error precedes
+//! Ready and the first request read. Linux protection is completed by B2.
+#[cfg(unix)]
+use crate::{limits, sys};
+#[cfg(unix)]
+use bingsu_core::collection::{
+    self,
+    selection::PRODUCT,
+    wire::{self, Frame, Kind, M3B_REQUEST_ID, RequestDecoder},
+};
+
+pub fn run() -> i32 {
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("__collect-v1"))
+        || arguments.next().is_some()
+    {
+        return 2;
+    }
+    #[cfg(unix)]
+    {
+        execute().map_or(1, |()| 0)
+    }
+    #[cfg(not(unix))]
+    {
+        1
+    }
+}
+
+#[cfg(unix)]
+fn execute() -> std::io::Result<()> {
+    // Warm the allocator and the only frame buffer before baseline measurement.
+    let mut buffer = Box::new([0; wire::FRAME_MAX]);
+    std::hint::black_box(&mut buffer);
+    let mut fds = sys::validate_worker_fds()?;
+    sys::hygiene()?;
+    let (installed, landlock) = protect(
+        limits::install_base,
+        limits::drop_capabilities,
+        sys::no_new_privs,
+        sys::initial_filter,
+        limits::lower_as_under_filter,
+        sys::final_filter,
+    )?;
+    exchange(
+        &mut fds,
+        &mut buffer,
+        installed.baseline_bytes,
+        landlock,
+        &PRODUCT,
+        crate::build_id(),
+        |_| Err(std::io::Error::other("no product workers")),
+    )
+}
+
+#[cfg(unix)]
+fn protect(
+    base: impl FnOnce() -> std::io::Result<()>,
+    caps: impl FnOnce() -> std::io::Result<()>,
+    nnp: impl FnOnce() -> std::io::Result<()>,
+    initial: impl FnOnce() -> std::io::Result<u32>,
+    baseline: impl FnOnce() -> std::io::Result<limits::InstalledLimits>,
+    final_filter: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<(limits::InstalledLimits, u32)> {
+    base()?;
+    caps()?;
+    nnp()?;
+    let landlock = initial()?;
+    let installed = baseline()?;
+    final_filter()?;
+    Ok((installed, landlock))
+}
+
+#[cfg(unix)]
+fn exchange(
+    fds: &mut sys::WorkerFds,
+    buffer: &mut [u8; wire::FRAME_MAX],
+    baseline: u64,
+    landlock: u32,
+    catalog: &collection::selection::Catalog<'_>,
+    build_id: wire::BuildId,
+    collect: impl FnOnce(&wire::Request) -> std::io::Result<Vec<u8>>,
+) -> std::io::Result<()> {
+    let bad = |_| std::io::Error::other("worker protocol");
+    let mut payload = [0; 24];
+    payload[..8].copy_from_slice(&wire::FEATURES.to_le_bytes());
+    payload[8..12].copy_from_slice(&catalog.workers.to_le_bytes());
+    payload[12..16].copy_from_slice(&landlock.to_le_bytes());
+    payload[16..].copy_from_slice(&baseline.to_le_bytes());
+    let ready = Frame {
+        kind: Kind::Ready,
+        build_id,
+        request_id: M3B_REQUEST_ID,
+        payload: &payload,
+    };
+    let n = wire::encode_frame(ready, buffer).map_err(bad)?;
+    fds.write_all(&buffer[..n])?;
+    let mut decoder = RequestDecoder::new();
+    decoder.accept(ready).map_err(bad)?;
+    loop {
+        fds.read_exact(&mut buffer[..wire::HEADER])?;
+        let len = wire::frame_len(&buffer[..wire::HEADER]).map_err(bad)?;
+        fds.read_exact(&mut buffer[wire::HEADER..len])?;
+        let frame = wire::decode_frame(&buffer[..len]).map_err(bad)?;
+        if let Some(request) = decoder.accept(frame).map_err(bad)? {
+            // Second product policy boundary, even after wire validation. A
+            // catalog is explicit; no argv, feature or environment selects it.
+            let selected = collection::request(
+                catalog,
+                request.binding,
+                request.request_id,
+                request.budget_ms,
+            )
+            .map_err(bad)?;
+            if let Some(request) = selected {
+                let payload = collect(&request)?;
+                let update = Frame {
+                    kind: Kind::Update,
+                    build_id,
+                    request_id: M3B_REQUEST_ID,
+                    payload: &payload,
+                };
+                let n = wire::encode_frame(update, buffer).map_err(bad)?;
+                fds.write_all(&buffer[..n])?;
+            }
+            let complete = Frame {
+                kind: Kind::Complete,
+                build_id,
+                request_id: M3B_REQUEST_ID,
+                payload: &[],
+            };
+            let n = wire::encode_frame(complete, buffer).map_err(bad)?;
+            return fds.write_all(&buffer[..n]);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, io};
+
+    // 이것을 실패시키는 것: 보호 단계의 순서를 바꾸거나 실패 뒤 단계를 실행하는 것.
+    #[test]
+    fn startup_baseline_is_read_under_filter_before_ready() {
+        for failure in 0..=6 {
+            let trace = RefCell::new(Vec::new());
+            let stage = |n| {
+                trace.borrow_mut().push(n);
+                if failure == n {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            };
+            let result = protect(
+                || stage(1),
+                || stage(2),
+                || stage(3),
+                || stage(4).map(|()| 0),
+                || {
+                    stage(5).map(|()| limits::InstalledLimits {
+                        baseline_bytes: 1,
+                        memory_limit_bytes: 2,
+                    })
+                },
+                || stage(6),
+            );
+            assert_eq!(result.is_ok(), failure == 0);
+            assert_eq!(
+                *trace.borrow(),
+                (1..=if failure == 0 { 6 } else { failure }).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// Test target only, with a distinct build identity and a fixed deterministic
+/// catalog. No product feature, argv or environment switch reaches this entry.
+#[cfg(all(test, unix))]
+#[allow(
+    dead_code,
+    reason = "called by the startup integration target, never shipped"
+)]
+pub(crate) fn fixture_entry() -> std::io::Result<()> {
+    use bingsu_core::field::SegmentDecl;
+    let mut buffer = Box::new([0; wire::FRAME_MAX]);
+    let mut fds = sys::validate_worker_fds()?;
+    sys::hygiene()?;
+    let (installed, landlock) = protect(
+        limits::install_base,
+        limits::drop_capabilities,
+        sys::no_new_privs,
+        sys::initial_filter,
+        limits::lower_as_under_filter,
+        sys::final_filter,
+    )?;
+    let catalog = collection::selection::Catalog {
+        segments: &[const {
+            SegmentDecl {
+                id: "fixture",
+                role: "fg",
+                fields: &[],
+            }
+        }; 32],
+        workers: 1 << 31,
+    };
+    let test_id = wire::BuildId(bingsu_core::collection::cwd_hash::sha256(
+        &[crate::build_id().0.as_slice(), b"test-worker"].concat(),
+    ));
+    exchange(
+        &mut fds,
+        &mut buffer,
+        installed.baseline_bytes,
+        landlock,
+        &catalog,
+        test_id,
+        |_| {
+            let mut payload = vec![31, 0, 1];
+            payload.extend(7u32.to_le_bytes());
+            payload.extend(b"fixture");
+            payload.extend(0u16.to_le_bytes());
+            Ok(payload)
+        },
+    )
+}

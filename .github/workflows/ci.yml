@@ -73,7 +73,49 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # The shell workflow tests a static musl build; check it compiles here
       # too, for pull requests where that workflow does not get that far.
-      - run: cargo check -p bingsu --target x86_64-unknown-linux-musl
+      - run: cargo check -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl -j 2
+
+  collector:
+    name: Dedicated collector (${{ matrix.os }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test -j 2 -p bingsu-collect --test startup -- --test-threads=2
+      - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
+      - name: Exact product and separate bench dependency audit
+        run: python3 scripts/check_collector_dependencies.py
+      - if: runner.os == 'Linux'
+        name: Privileged capability removal (no silent skip)
+        run: |
+          cargo test -j 2 -p bingsu-collect --test startup --no-run --message-format=json > "$RUNNER_TEMP/startup.json"
+          bin=$(python3 -c 'import json,sys; print(next(v["executable"] for line in open(sys.argv[1]) if (v:=json.loads(line)).get("reason")=="compiler-artifact" and v["target"]["name"]=="startup" and v.get("executable")))' "$RUNNER_TEMP/startup.json")
+          sudo "$bin" --exact limits::tests::root_cannot_restore_limits_or_capabilities --ignored --test-threads=1
+      - if: runner.os == 'macOS'
+        name: Product imports and matching deployment pair
+        run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu
+      - name: Prepare Python audit tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/collector-tests"
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      - name: Host dependency, symbol and manifest mutations
+        run: '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest scripts/test_collector_audits.py -q -p no:cacheprovider'
+      - name: Prepare runtime audit fixtures on the host
+        run: python3 scripts/prepare_collector_audit.py
+      - name: Resource isolation; macOS interpose and descendant audit
+        run: '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_no_spawn_macos.py -q -p no:cacheprovider'
 
   test:
     name: Test (${{ matrix.os }})

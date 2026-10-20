@@ -7,11 +7,12 @@ import pathlib
 import pwd
 import re
 import shlex
+import shutil
 import subprocess
 
 import pytest
 
-from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env
+from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin
 
 # The golden runner's reader rendering (T-A7 below compares against it).
 _spec = importlib.util.spec_from_file_location("golden_record_run", ROOT / "tests/golden/record/run.py")
@@ -29,7 +30,7 @@ HOOK_WORDS = (
     b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm", b"--colorfgbg",
     b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
-    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=",
+    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--collector-exe=",
 )
 
 
@@ -72,13 +73,24 @@ def call(shell):
             "fish": b"_bingsu_call --width 80\n"}[shell]
 
 
-# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=`·`--config-root-written=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
+# 이것을 실패시키는 것: hook이 `--shell`·`--pwd`·`--colorterm`·`--home=`·`--config-root-written=`·`--collector-exe=` 중 하나를 빠뜨리는 것, 빈 `$COLORTERM`의
 # 따옴표를 빼는 것(빈 단어가 사라짐).
 @pytest.mark.parametrize("idx,case", list(enumerate(CASES)))
 def test_words_arrive_intact(tmp_path, shells, idx, case):
     for shell in shells:
         base = tmp_path / shell / f"case{idx}"  # the hostile string lives only in the install and XDG dirs
         inst = Install(base, name=f"bin {case}")
+        # Install a matched sibling fixture; product selection is still zero.
+        inst.exe.unlink()
+        shutil.copyfile(real_bin(), inst.exe)
+        inst.exe.chmod(0o700)
+        tag = b"BNGSIBLING-ID02\0"
+        binary = real_bin().read_bytes()
+        assert binary.count(tag) == 1
+        at = binary.index(tag)
+        collector = inst.dir / "bingsu-collect"
+        collector.write_bytes(binary[at:at + 48])
+        collector.chmod(0o700)
         env = trusted_env(base, tag=case)
         script = inst.init(shell, env)
         inst.use_fake(minimal_record())
@@ -101,6 +113,7 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
                 assert value is not None, (shell, argv)
             words[word] = value
         assert set(words) == set(HOOK_WORDS), (shell, argv)
+        assert words[b"--collector-exe="] == os.fsencode(collector.resolve()), (shell, argv)
         assert words[b"--ctx"] == b"1", (shell, argv)
         assert words[b"--record"] == b"B1", (shell, argv)
         assert words[b"--width"] == b"80", (shell, argv)

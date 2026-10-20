@@ -54,12 +54,16 @@ CORE_GRAPH = {
 BINGSU_GRAPH = {
     **CORE_GRAPH,
     ("bingsu", "0.0.0", "crates/bingsu/Cargo.toml"): ((), ("bin",)),
+    # The shared no_std identity library, not the worker binary's OS modules.
+    ("bingsu-collect", "0.0.0", "crates/bingsu-collect/Cargo.toml"): ((), ("bin", "custom-build", "lib")),
     ("libc", "0.2.190", CRATES_IO): (("default", "std"), ("custom-build", "lib")),
 }
 PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH}
 # Build scripts read at these versions: they print cargo:rustc-cfg,
 # rustc-check-cfg, rustc-env and warnings, and no rustc-link-* line.
-REVIEWED_BUILD = {("libm", "0.2.16"), ("libc", "0.2.190")}
+# Collector's hash-pinned script writes only an identity constant to OUT_DIR;
+# it emits rerun directives, no linker/configuration/native-code directives.
+REVIEWED_BUILD = {("libm", "0.2.16"), ("libc", "0.2.190"), ("bingsu-collect", "0.0.0")}
 SKIP_KINDS = {"test", "bench", "example"}
 BINGSU_TARGETS = [{"name": "bingsu", "kind": ["bin"], "crate_types": ["bin"],
                    "src_path": "crates/bingsu/src/main.rs", "required-features": []}]

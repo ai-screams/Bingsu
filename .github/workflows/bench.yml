@@ -31,7 +31,7 @@ jobs:
         run: |
           printf '{"meta":{"host":"github-actions","runner":"ubuntu-24.04","arch":"%s","kernel":"%s","nproc":%s,"commit":"%s"}}\n' \
             "$(uname -m)" "$(uname -r)" "$(nproc)" "$GITHUB_SHA" > m1-spawn-ci-linux.jsonl
-          target/release/m1-spawn-matrix --dedicated target/release/bingsu-collect --same target/release/bingsu >> m1-spawn-ci-linux.jsonl
+          target/release/m1-spawn-matrix --dedicated target/release/m1-collect-stub --same target/release/bingsu >> m1-spawn-ci-linux.jsonl
           cat m1-spawn-ci-linux.jsonl
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

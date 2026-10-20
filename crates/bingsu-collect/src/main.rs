@@ -1,4 +1,15 @@
+//! Dedicated entry; the helper links only the identity library.
+#![deny(unsafe_code)]
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod limits;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod sys;
+mod worker;
+#[cfg(unix)]
+use bingsu_collect::build_id;
+
 fn main() {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    std::process::exit(bingsu_collect::stub_main(&args));
+    std::process::exit(worker::run());
 }

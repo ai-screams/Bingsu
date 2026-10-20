@@ -27,7 +27,7 @@ mod imp {
     use std::time::Instant;
 
     const USAGE: &str = "usage: m1-spawn-matrix --dedicated PATH --same PATH [--rounds N] [--warmup N] [--cgroup-dir DIR]";
-    /// The stub's filter is partial (bingsu-collect `sys::sandbox`), so rows
+    /// The stub's filter is partial (collector_stub `sys::sandbox`), so rows
     /// that install it measure a lower bound for the spec's filter.
     const LOWER_BOUND: (&str, &str) = ("sandbox_filter", r#""lower-bound""#);
 

@@ -77,6 +77,7 @@ pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<Cow<'a, [u8]>>, EnvelopeError> 
                 b"--state-root=",
                 b"--log-root=",
                 b"--home=",
+                b"--collector-exe=",
                 b"--log-level=",
             ]
             .iter()
@@ -126,6 +127,42 @@ pub fn validate(raw: &[impl AsRef<[u8]>]) -> Result<Envelope, EnvelopeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: collector pin을 동적 값 자리에서 승격하거나 고정 단어를 누락하는 것.
+    #[test]
+    fn collector_pin_is_one_fixed_word() {
+        let base: &[&[u8]] = &[
+            b"--runtime-root=1:2:/r",
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            b"--home=/h",
+        ];
+        let mut raw = base.to_vec();
+        raw.extend([
+            b"--collector-exe=/install/bingsu-collect".as_slice(),
+            b"--host",
+            b"--collector-exe=/attack",
+        ]);
+        let checked = validate(&words(&raw).unwrap()).unwrap();
+        assert_eq!(
+            checked.collector_exe.as_deref(),
+            Some(b"/install/bingsu-collect".as_slice())
+        );
+        raw.push(b"--collector-exe=/duplicate");
+        assert!(words(&raw).is_err());
+        for bad in [b"--collector-exe=".as_slice(), b"--collector-exe=relative"] {
+            let mut raw = base.to_vec();
+            raw.push(bad);
+            assert!(words(&raw).is_err());
+        }
+        assert!(
+            validate(&words(base).unwrap())
+                .unwrap()
+                .collector_exe
+                .is_none()
+        );
+    }
     // 이것을 실패시키는 것: group 숫자 문법·중복 inode·범위·구성 요소 수 검사를 지우는 것.
     #[test]
     fn group_words() {

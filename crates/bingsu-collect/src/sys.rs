@@ -1,430 +1,234 @@
-//! The only module in this crate allowed to use `unsafe`.
-use std::io;
+//! Descriptor-only entry checks and the B2 protection seam. No spawn APIs.
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    os::fd::FromRawFd,
+};
 
-/// Hands all of `b` to `w`, retrying short writes and EINTR.
-fn write_all(mut b: &[u8], mut w: impl FnMut(&[u8]) -> io::Result<usize>) -> io::Result<()> {
-    while !b.is_empty() {
-        match w(b) {
-            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-            Ok(n) => b = &b[n..],
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
+/// Unique ownership of the private result/request pipes and the inherited lock.
+/// Dropping the lock only closes it: never LOCK_UN on a shared description.
+pub struct WorkerFds {
+    result: File,
+    request: File,
+    _lock: File,
+}
+impl WorkerFds {
+    pub(crate) fn read_exact(&mut self, bytes: &mut [u8]) -> io::Result<()> {
+        self.request.read_exact(bytes)
+    }
+    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.result.write_all(bytes)
+    }
+}
+fn stat(fd: i32) -> io::Result<libc::stat> {
+    // SAFETY: integer-only output structure.
+    let mut value = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat validates fd; output is valid writable storage.
+    if unsafe { libc::fstat(fd, &mut value) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(value)
+}
+fn access(fd: i32, expected: i32) -> io::Result<()> {
+    // SAFETY: read-only descriptor query.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE != expected {
+        return Err(io::Error::other("descriptor access"));
+    }
+    Ok(())
+}
+fn null_device(fd: i32) -> io::Result<()> {
+    let value = stat(fd)?;
+    if value.st_mode & libc::S_IFMT != libc::S_IFCHR {
+        return Err(io::Error::other("null device type"));
+    }
+    #[cfg(target_os = "linux")]
+    if value.st_rdev != libc::makedev(1, 3) {
+        return Err(io::Error::other("null device identity"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut path = [0u8; libc::PATH_MAX as usize];
+        // SAFETY: writable PATH_MAX buffer for this descriptor-only query.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } != 0
+            || path[..10] != *b"/dev/null\0"
+        {
+            return Err(io::Error::other("null device identity"));
         }
     }
     Ok(())
 }
 
-/// Writes all of `b` to fd 1.
-fn write1(b: &[u8]) -> io::Result<()> {
-    write_all(b, |b| {
-        // SAFETY: `b` is readable for its length.
-        let n = unsafe { libc::write(1, b.as_ptr().cast(), b.len()) };
-        usize::try_from(n).map_err(|_| io::Error::last_os_error())
+/// Close unwanted descriptors before NOFILE falls. No /proc path observation.
+fn close_extras() -> io::Result<()> {
+    // SAFETY: fd4 is forbidden and not owned by a Rust object in this entry.
+    unsafe { libc::close(4) };
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: this single-threaded entry owns all inherited descriptors.
+        if unsafe { libc::syscall(libc::SYS_close_range, 6u32, u32::MAX, 0u32) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // A fixed census also detects inherited descriptors above a lowered
+        // hard limit. Too many inherited descriptors fail closed.
+        // SAFETY: integer-only array of proc_fdinfo records.
+        let mut records: [libc::proc_fdinfo; 256] = unsafe { std::mem::zeroed() };
+        // SAFETY: no arguments.
+        let pid = unsafe { libc::getpid() };
+        // SAFETY: PROC_PIDLISTFDS writes at most the supplied array length.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                records.as_mut_ptr().cast(),
+                std::mem::size_of_val(&records) as i32,
+            )
+        };
+        let n = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
+        if n == 0
+            || n >= std::mem::size_of_val(&records)
+            || n % std::mem::size_of::<libc::proc_fdinfo>() != 0
+        {
+            return Err(io::Error::other("descriptor census"));
+        }
+        for record in &records[..n / std::mem::size_of::<libc::proc_fdinfo>()] {
+            if record.proc_fd >= 6 {
+                // SAFETY: inherited descriptor from the single-threaded census.
+                if unsafe { libc::close(record.proc_fd) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Entry-only API: call once before constructing any descriptor owners.
+pub fn validate_worker_fds() -> io::Result<WorkerFds> {
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return Err(io::Error::other("worker descriptors already claimed"));
+    }
+    close_extras()?;
+    null_device(0)?;
+    null_device(2)?;
+    access(1, libc::O_WRONLY)?;
+    access(3, libc::O_RDONLY)?;
+    for fd in [1, 3] {
+        if stat(fd)?.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return Err(io::Error::other("private pipe required"));
+        }
+    }
+    let lock = stat(5)?;
+    // SAFETY: read-only effective uid query.
+    let me = unsafe { libc::geteuid() };
+    if lock.st_mode & libc::S_IFMT != libc::S_IFREG
+        || lock.st_mode & 0o7777 != 0o600
+        || lock.st_uid != me
+        || lock.st_size != 0
+        || lock.st_nlink != 1
+    {
+        return Err(io::Error::other("lock descriptor"));
+    }
+    // Lock validity includes ACLs; inheritance does not authorize filesystem I/O.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: fixed attribute name, size-only descriptor query.
+        let n = unsafe {
+            libc::fgetxattr(
+                5,
+                c"system.posix_acl_access".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if n >= 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ENODATA) {
+            return Err(io::Error::other("lock ACL"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: descriptor-only ACL query returns an owned ACL.
+        let acl = unsafe { acl_get_fd_np(5, 0x100) };
+        if acl.is_null() {
+            if io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                return Err(io::Error::last_os_error());
+            }
+        } else {
+            let mut entry = std::ptr::null_mut();
+            // SAFETY: live ACL and writable entry output.
+            let rc = unsafe { acl_get_entry(acl, 0, &mut entry) };
+            let errno = io::Error::last_os_error().raw_os_error();
+            // SAFETY: frees the ACL exactly once.
+            unsafe { acl_free(acl) };
+            if rc != -1 || errno != Some(libc::EINVAL) {
+                return Err(io::Error::other("lock ACL"));
+            }
+        }
+    }
+    // SAFETY: all three descriptors were checked; entry transfers them once.
+    let result = unsafe { File::from_raw_fd(1) };
+    // SAFETY: checked descriptor, no other Rust owner.
+    let request = unsafe { File::from_raw_fd(3) };
+    // SAFETY: checked descriptor; close-only ownership, never flock unlock.
+    let lock = unsafe { File::from_raw_fd(5) };
+    Ok(WorkerFds {
+        result,
+        request,
+        _lock: lock,
     })
 }
 
-/// RLIMIT_CPU 1 s, RLIMIT_NOFILE 64, RLIMIT_FSIZE 0 (spec section 4).
-pub fn set_limits() -> io::Result<()> {
-    for (res, v) in [
-        (libc::RLIMIT_CPU, 1),
-        (libc::RLIMIT_NOFILE, 64),
-        (libc::RLIMIT_FSIZE, 0),
-    ] {
-        let lim = libc::rlimit {
-            rlim_cur: v,
-            rlim_max: v,
-        };
-        // SAFETY: `lim` is a valid rlimit value for setrlimit.
-        if unsafe { libc::setrlimit(res, &lim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+pub(crate) fn hygiene() -> io::Result<()> {
+    if std::env::vars_os().next().is_some() || std::env::current_dir()?.as_os_str() != "/" {
+        return Err(io::Error::other("worker environment or cwd"));
     }
+    // SAFETY: changes only the dedicated worker's process-local creation mask.
+    unsafe { libc::umask(0o077) };
     Ok(())
 }
 
-/// `AUDIT_ARCH_X86_64` from <linux/audit.h>: EM_X86_64 (62) | 64BIT | LE.
-#[cfg(target_os = "linux")]
-const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
-/// `__X32_SYSCALL_BIT` from <asm/unistd.h>: x32 ABI calls carry this bit.
-#[cfg(target_os = "linux")]
-const X32_SYSCALL_BIT: u32 = 0x4000_0000;
-
-/// x86_64 only: kills the process on any x32 ABI call (nr with
-/// `__X32_SYSCALL_BIT`). seccompiler checks the arch but not this bit, so an
-/// x32 `execve` would miss its deny rule. KILL_PROCESS, not an errno: the
-/// same action seccompiler takes for a wrong arch, since no code here makes
-/// x32 calls on purpose. offsetof(seccomp_data, nr) = 0, arch = 4.
-#[cfg(target_os = "linux")]
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-fn x32_deny_program() -> seccompiler::BpfProgram {
-    use seccompiler::sock_filter;
-    let op = |code: u32, jt: u8, jf: u8, k: u32| sock_filter {
-        code: code as u16,
-        jt,
-        jf,
-        k,
-    };
-    vec![
-        op(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 4),
-        op(
-            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
-            0,
-            3,
-            AUDIT_ARCH_X86_64,
-        ),
-        op(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
-        op(
-            libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
-            1,
-            0,
-            X32_SYSCALL_BIT,
-        ),
-        op(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
-        op(
-            libc::BPF_RET | libc::BPF_K,
-            0,
-            0,
-            libc::SECCOMP_RET_KILL_PROCESS,
-        ),
-    ]
-}
-
-/// no_new_privs, then three filters: (x86_64) kill x32 calls; deny the exec
-/// family and, on x86_64, the legacy `fork`/`vfork` system calls with EPERM;
-/// clone3 with ENOSYS so glibc falls back to `clone`. The `clone`-based libc
-/// `fork()` is not blocked: the clone flag check and the write-deny rules
-/// are M3b, so the install cost measured here is a lower bound for the
-/// spec's filter. seccompiler's apply_filter sets no_new_privs again for
-/// each filter (one prctl per filter, part of the measured cost).
-#[cfg(target_os = "linux")]
-pub fn sandbox() -> io::Result<()> {
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
-    use std::collections::BTreeMap;
-    fn filter(calls: &[libc::c_long], errno: libc::c_int) -> io::Result<BpfProgram> {
-        let arch: TargetArch = std::env::consts::ARCH
-            .try_into()
-            .map_err(io::Error::other)?;
-        // c_long is i64 on the 64-bit targets and i32 on 32-bit Linux.
-        #[allow(clippy::useless_conversion)]
-        let rules: BTreeMap<i64, Vec<SeccompRule>> =
-            calls.iter().map(|&n| (i64::from(n), Vec::new())).collect();
-        SeccompFilter::new(
-            rules,
-            SeccompAction::Allow,
-            SeccompAction::Errno(errno as u32),
-            arch,
-        )
-        .map_err(io::Error::other)?
-        .try_into()
-        .map_err(io::Error::other)
-    }
-    // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments only.
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[cfg(target_arch = "x86_64")]
-    seccompiler::apply_filter(&x32_deny_program()).map_err(io::Error::other)?;
-    #[allow(unused_mut)]
-    let mut deny = vec![libc::SYS_execve, libc::SYS_execveat];
-    #[cfg(target_arch = "x86_64")]
-    deny.extend([libc::SYS_fork, libc::SYS_vfork]);
-    seccompiler::apply_filter(&filter(&deny, libc::EPERM)?).map_err(io::Error::other)?;
-    seccompiler::apply_filter(&filter(&[libc::SYS_clone3], libc::ENOSYS)?)
-        .map_err(io::Error::other)?;
-    Ok(())
-}
-
-/// macOS has no supported execution ban (spec section 4, OS limit).
-#[cfg(not(target_os = "linux"))]
-pub fn sandbox() -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
-}
-
-/// Tries to exec /bin/true; prints "P" if the filter refused with EPERM.
-pub fn probe_exec() -> io::Result<()> {
-    let argv = [c"/bin/true".as_ptr(), std::ptr::null()];
-    // SAFETY: path and argv are NUL-terminated; on success this never returns.
-    unsafe { libc::execv(c"/bin/true".as_ptr(), argv.as_ptr()) };
-    if io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
-        write1(b"P")?;
-    }
-    Ok(())
-}
-
-/// Calls clone3 with a NULL argument block of size 0, which the kernel
-/// rejects with EINVAL before creating anything; prints "C" if the call
-/// failed with ENOSYS instead (the filter, or a host that blocks clone3).
-/// Not part of the cost rows: it checks that the clone3 filter is in place.
-#[cfg(target_os = "linux")]
-pub fn probe_clone3() -> io::Result<()> {
-    // SAFETY: clone3 with a NULL pointer and size 0 is refused (EINVAL) or
-    // filtered (ENOSYS); it never creates a task.
-    let rc = unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0usize) };
-    if rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) {
-        write1(b"C")?;
-    }
-    Ok(())
-}
-
-/// Not reached: stub_main refuses `--probe-clone3` off Linux.
-#[cfg(not(target_os = "linux"))]
-pub fn probe_clone3() -> io::Result<()> {
-    Ok(())
-}
-
-/// x86_64 Linux: raw `fork` and `vfork` system calls; prints "F" if both
-/// failed with EPERM. Without the rules they succeed: the child leaves at
-/// once with `_exit` (after a raw vfork it shares this stack, so a missing
-/// rule may also crash the parent; either way the probe does not print F).
-/// stub_main allows it in sandbox mode only. Not part of the cost rows.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn probe_fork() -> io::Result<()> {
-    let mut denied = 0;
-    for nr in [libc::SYS_fork, libc::SYS_vfork] {
-        // SAFETY: fork/vfork take no arguments; a child (rc 0) only calls _exit.
-        let rc = unsafe { libc::syscall(nr) };
-        if rc == 0 {
-            // SAFETY: _exit is async-signal-safe and does not return.
-            unsafe { libc::_exit(0) };
-        }
-        let err = io::Error::last_os_error();
-        let wait = |pid: libc::pid_t| {
-            let mut st = 0;
-            // SAFETY: `pid` is our child; `st` is a valid out-parameter.
-            let got = unsafe { libc::waitpid(pid, &mut st, 0) };
-            if got < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok((got, st))
-            }
-        };
-        if fork_outcome(rc, err, wait)? {
-            denied += 1;
-        }
-    }
-    if denied == 2 {
-        write1(b"F")?;
-    }
-    Ok(())
-}
-
-/// One call of the fork probe, after the child (rc 0) has left: Ok(true)
-/// if the call was refused with EPERM; Ok(false) if it made a child that
-/// `wait` reaped (EINTR retried) with exit status 0. Any other errno, a
-/// wait error, another pid or another status is an error, so the stub
-/// exits nonzero instead of printing R.
-#[cfg_attr(
-    not(all(target_os = "linux", target_arch = "x86_64")),
-    allow(dead_code)
-)]
-fn fork_outcome(
-    rc: libc::c_long,
-    err: io::Error,
-    mut wait: impl FnMut(libc::pid_t) -> io::Result<(libc::pid_t, libc::c_int)>,
-) -> io::Result<bool> {
-    if rc < 0 {
-        return if err.raw_os_error() == Some(libc::EPERM) {
-            Ok(true)
-        } else {
-            Err(err)
-        };
-    }
-    let pid = libc::pid_t::try_from(rc).map_err(io::Error::other)?;
-    let (got, st) = loop {
-        match wait(pid) {
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            r => break r?,
-        }
-    };
-    if got == pid && libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0 {
-        Ok(false)
-    } else {
-        Err(io::Error::other(format!(
-            "fork probe child {got}: status {st:#x}"
-        )))
-    }
-}
-
-/// Not reached: stub_main refuses `--probe-fork` off x86_64 Linux.
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-pub fn probe_fork() -> io::Result<()> {
-    Ok(())
-}
-
-/// x86_64 Linux: an x32 ABI `getpid` (nr | `__X32_SYSCALL_BIT`). With the
-/// sandbox's x32 filter installed the process dies with SIGSYS; without it
-/// the call returns (ENOSYS on a kernel without x32) and nothing is printed.
-/// Not part of the cost rows: it shows the x32 filter is installed.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn probe_x32() -> io::Result<()> {
-    let nr = libc::c_long::from(X32_SYSCALL_BIT) | libc::SYS_getpid;
-    // SAFETY: getpid takes no arguments; the x32 bit only changes the ABI.
-    unsafe { libc::syscall(nr) };
-    Ok(())
-}
-
-/// Not reached: stub_main refuses `--probe-x32` off x86_64 Linux.
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-pub fn probe_x32() -> io::Result<()> {
-    Ok(())
-}
-
-/// Linux: VmSize of this process right after the limits, for the
-/// RLIMIT_AS = start + allowance rule (spec section 4).
-pub fn report_vm() -> io::Result<()> {
+pub(crate) fn no_new_privs() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-        let kib = s
-            .lines()
-            .find_map(|l| l.strip_prefix("VmSize:"))
-            .map(|v| v.trim().trim_end_matches(" kB").to_string());
-        write1(format!("VM {}\n", kib.unwrap_or_else(|| "unknown".into())).as_bytes())
-    }
-    #[cfg(not(target_os = "linux"))]
-    write1(b"VM unsupported\n")
-}
-
-/// `L cpu=<soft>/<hard> nofile=… fsize=…\n` as getrlimit reports them
-/// (`inf` for RLIM_INFINITY). Not part of the cost rows: it shows which
-/// startup limits are in place.
-pub fn report_limits() -> io::Result<()> {
-    use std::fmt::Write;
-    let show = |v: libc::rlim_t| {
-        if v == libc::RLIM_INFINITY {
-            "inf".to_string()
-        } else {
-            v.to_string()
-        }
-    };
-    let mut line = String::from("L");
-    for (name, res) in [
-        ("cpu", libc::RLIMIT_CPU),
-        ("nofile", libc::RLIMIT_NOFILE),
-        ("fsize", libc::RLIMIT_FSIZE),
-    ] {
-        let mut lim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: `lim` is a valid out-parameter for getrlimit.
-        if unsafe { libc::getrlimit(res, &mut lim) } != 0 {
+        // SAFETY: integer-only irreversible privilege restriction.
+        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let _ = write!(
-            line,
-            " {name}={}/{}",
-            show(lim.rlim_cur),
-            show(lim.rlim_max)
-        );
     }
-    line.push('\n');
-    write1(line.as_bytes())
+    Ok(())
 }
 
-pub fn ready() -> io::Result<()> {
-    write1(b"R")
+/// B2 supplies Landlock and the initial allowlist here. Until then Linux
+/// cannot emit Ready: there is no permissive substitute or M1 filter reuse.
+pub(crate) fn initial_filter() -> io::Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(0)
+    } // Audited binary + external sampling, not a kernel execution ban.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+pub(crate) fn final_filter() -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // 이것을 실패시키는 것: EPERM 밖의 오류를 삼키는 것, waitpid의 EINTR을 재시도하지 않는 것,
-    // 다른 pid나 0이 아닌 종료·신호 종료를 정상으로 받는 것, wait 오류를 삼키는 것.
-    #[test]
-    fn fork_outcome_is_closed() {
-        let errno = io::Error::from_raw_os_error;
-        let no_wait =
-            |_| -> io::Result<(libc::pid_t, libc::c_int)> { panic!("no child to wait for") };
-        assert!(fork_outcome(-1, errno(libc::EPERM), no_wait).unwrap());
-        assert!(fork_outcome(-1, errno(libc::ENOSYS), no_wait).is_err());
-        let mut calls = 0;
-        let eintr_then_ok = |pid| {
-            calls += 1;
-            if calls == 1 {
-                Err(io::ErrorKind::Interrupted.into())
-            } else {
-                Ok((pid, 0))
-            }
-        };
-        assert!(!fork_outcome(42, errno(0), eintr_then_ok).unwrap());
-        assert_eq!(calls, 2);
-        assert!(fork_outcome(42, errno(0), |_| Ok((41, 0))).is_err());
-        assert!(fork_outcome(42, errno(0), |pid| Ok((pid, 1 << 8))).is_err()); // exit 1
-        assert!(fork_outcome(42, errno(0), |pid| Ok((pid, libc::SIGKILL))).is_err());
-        assert!(fork_outcome(42, errno(0), |_| Err(errno(libc::ECHILD))).is_err());
-    }
-
-    // 이것을 실패시키는 것: short write에서 남은 바이트를 버리는 것, EINTR을 오류로 돌려주는 것,
-    // 0바이트 쓰기에서 멈추지 않는 것(무한 루프), 다른 오류를 삼키는 것.
-    #[test]
-    fn write_all_finishes_or_reports() {
-        let mut got = Vec::new();
-        let mut eintr = true;
-        let r = write_all(b"VM 1\nR", |b| {
-            if std::mem::take(&mut eintr) {
-                return Err(io::ErrorKind::Interrupted.into());
-            }
-            got.push(b[0]);
-            Ok(1)
-        });
-        assert_eq!((r.is_ok(), got.as_slice()), (true, &b"VM 1\nR"[..]));
-        let zero = write_all(b"R", |_| Ok(0));
-        assert_eq!(zero.unwrap_err().kind(), io::ErrorKind::WriteZero);
-        let bad = write_all(b"R", |_| Err(io::ErrorKind::BrokenPipe.into()));
-        assert_eq!(bad.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-    }
-
-    #[cfg(target_os = "linux")]
-    /// A classic-BPF evaluator for the opcodes x32_deny_program uses, over
-    /// a seccomp_data with only `nr` (offset 0) and `arch` (offset 4).
-    fn eval(prog: &[seccompiler::sock_filter], nr: u32, arch: u32) -> u32 {
-        let (ld, jeq, jset, ret) = (
-            libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
-            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
-            libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
-            libc::BPF_RET | libc::BPF_K,
-        );
-        let (mut pc, mut acc) = (0usize, 0u32);
-        loop {
-            let i = &prog[pc];
-            let code = u32::from(i.code);
-            pc += 1;
-            if code == ld {
-                acc = match i.k {
-                    0 => nr,
-                    4 => arch,
-                    k => panic!("load from offset {k}"),
-                };
-            } else if code == jeq || code == jset {
-                let hit = if code == jeq {
-                    acc == i.k
-                } else {
-                    acc & i.k != 0
-                };
-                pc += usize::from(if hit { i.jt } else { i.jf });
-            } else if code == ret {
-                return i.k;
-            } else {
-                panic!("opcode {code:#x}");
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    // 이것을 실패시키는 것: x32 비트 검사(JSET)를 빼거나, arch 검사를 빼거나, 점프 거리를 틀리는 것.
-    #[test]
-    fn x32_calls_are_killed() {
-        let p = x32_deny_program();
-        let (allow, kill) = (libc::SECCOMP_RET_ALLOW, libc::SECCOMP_RET_KILL_PROCESS);
-        let execve_x86_64 = 59;
-        assert_eq!(eval(&p, execve_x86_64, AUDIT_ARCH_X86_64), allow);
-        assert_eq!(
-            eval(&p, execve_x86_64 | X32_SYSCALL_BIT, AUDIT_ARCH_X86_64),
-            kill
-        );
-        assert_eq!(eval(&p, 520 | X32_SYSCALL_BIT, AUDIT_ARCH_X86_64), kill); // x32 execve
-        assert_eq!(eval(&p, execve_x86_64, 0x4000_0003), kill); // i386
-    }
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_get_fd_np(fd: i32, kind: i32) -> *mut libc::c_void;
+    fn acl_get_entry(acl: *mut libc::c_void, id: i32, entry: *mut *mut libc::c_void) -> i32;
+    fn acl_free(acl: *mut libc::c_void) -> i32;
 }

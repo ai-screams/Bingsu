@@ -6,7 +6,7 @@ use std::process::Command;
 /// otherwise leave a `core` file wherever core_pattern points (a bare
 /// "core" in Linux containers lands in the crate directory).
 fn stub(args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bingsu-collect"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_m1-collect-stub"));
     cmd.args(args);
     let no_core = || {
         let zero = libc::rlimit {

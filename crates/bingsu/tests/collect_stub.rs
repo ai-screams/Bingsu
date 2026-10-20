@@ -1,6 +1,6 @@
 //! The same-binary collector stub, `bingsu __collect-stub` (feature
-//! `bench-stubs`), behaves like the dedicated `bingsu-collect`. The expected
-//! bytes and exit codes are the ones crates/bingsu-collect/tests/stub.rs
+//! `bench-stubs`), behaves like the dedicated `m1-collect-stub`. The expected
+//! bytes and exit codes are the ones crates/bingsu-bench/tests/collector_stub.rs
 //! pins for the dedicated binary (this crate's tests cannot name that
 //! binary: cargo exposes only a package's own executables to its tests).
 #![cfg(all(unix, feature = "bench-stubs"))]
