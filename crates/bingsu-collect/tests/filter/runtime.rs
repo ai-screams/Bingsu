@@ -567,6 +567,12 @@ fn x16_all_mutations_are_denied_with_fsize_zero() {
     let compiled = process::output(
         Command::new(cc)
             .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
+            // musl-gcc leaves out the kernel UAPI headers; CI passes them here.
+            .args(
+                std::env::var("BINGSU_X16_CFLAGS")
+                    .unwrap_or_default()
+                    .split_whitespace(),
+            )
             .arg(source)
             .arg("-o")
             .arg(dir.join("probe")),
