@@ -123,6 +123,9 @@ pub fn validate_worker_fds() -> io::Result<WorkerFds> {
             return Err(io::Error::other("private pipe required"));
         }
     }
+    // Linux must not inherit a writable regular file, even the close-only lock.
+    #[cfg(target_os = "linux")]
+    access(5, libc::O_RDONLY)?;
     let lock = stat(5)?;
     // SAFETY: read-only effective uid query.
     let me = unsafe { libc::geteuid() };
@@ -203,24 +206,36 @@ pub(crate) fn no_new_privs() -> io::Result<()> {
     Ok(())
 }
 
-/// B2 supplies Landlock and the initial allowlist here. Until then Linux
-/// cannot emit Ready: there is no permissive substitute or M1 filter reuse.
+/// Landlock precedes the initial filter; any protection error prevents Ready.
 pub(crate) fn initial_filter() -> io::Result<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let state = bingsu_collect::landlock::install_read_only()?;
+        bingsu_collect::filter::install_bootstrap()?;
+        Ok(match state {
+            bingsu_collect::landlock::LandlockState::Installed { abi } => abi,
+            bingsu_collect::landlock::LandlockState::Absent => 0,
+        })
+    }
     #[cfg(target_os = "macos")]
     {
         Ok(0)
     } // Audited binary + external sampling, not a kernel execution ban.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Err(io::ErrorKind::Unsupported.into())
     }
 }
 pub(crate) fn final_filter() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        bingsu_collect::filter::seal_limits()
+    }
     #[cfg(target_os = "macos")]
     {
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Err(io::ErrorKind::Unsupported.into())
     }

@@ -163,9 +163,27 @@ pub fn lower_as_under_filter() -> io::Result<InstalledLimits> {
     let ceiling = baseline
         .checked_add(MEMORY_ALLOWANCE)
         .ok_or_else(|| io::Error::other("AS overflow"))?;
-    let installed = lower(
-        libc::RLIMIT_AS,
+    let installed = lower_with(
         ceiling.try_into().map_err(io::Error::other)?,
+        || get(libc::RLIMIT_AS),
+        |value| {
+            // SAFETY: live rlimit storage on the reviewed 64-bit Linux ABIs.
+            // Use the inspectable syscall on both libcs: musl setrlimit uses
+            // SYS_setrlimit, which is deliberately never allowed by the filter.
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_prlimit64,
+                    0,
+                    libc::RLIMIT_AS,
+                    value,
+                    std::ptr::null_mut::<libc::rlimit>(),
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        },
     )?;
     Ok(InstalledLimits {
         baseline_bytes: baseline,

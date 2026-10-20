@@ -1,0 +1,13 @@
+[package]
+name = "collector-x14"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Independent experiment, never a product/workspace dependency.
+[workspace]
+
+[dependencies]
+bingsu-collect = { path = "../../../crates/bingsu-collect" }
+libc = "0.2"
+gix = { version = "=0.83.0", default-features = false, features = ["status", "sha1"] }

@@ -56,6 +56,8 @@ impl Fixture {
             .unwrap();
         lock.set_permissions(fs::Permissions::from_mode(0o600))
             .unwrap();
+        #[cfg(target_os = "linux")]
+        let lock = File::open(&path).unwrap();
         let (read, write) = pipe();
         Self {
             path,
@@ -71,8 +73,9 @@ impl Fixture {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        let inherited_lock = &self.lock;
         // Copies outside reserved slots avoid pre_exec's dup2 clobbering sources.
-        let copies: Vec<_> = [self.read.as_raw_fd(), self.lock.as_raw_fd()]
+        let copies: Vec<_> = [self.read.as_raw_fd(), inherited_lock.as_raw_fd()]
             .iter()
             .map(|fd| {
                 // SAFETY: live fd, owned duplicate above destination slots.
@@ -371,7 +374,6 @@ fn fd_contract_child() {
 
 // 이것을 실패시키는 것: Ready의 build-id가 공유된 빌드 manifest와 다르게 나오는 것.
 #[test]
-#[cfg(target_os = "macos")]
 fn sibling_build_id_is_exact() {
     use bingsu_core::collection::wire;
     let fixture = Fixture::new("identity");
@@ -403,18 +405,6 @@ fn sibling_build_id_is_exact() {
     let result = process.wait_with_output().unwrap();
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
-}
-
-// 이것을 실패시키는 것: Linux 초기 필터 부재를 정상 준비됨으로 취급하는 것.
-#[test]
-#[cfg(target_os = "linux")]
-fn startup_baseline_is_read_under_filter_before_ready() {
-    let fixture = Fixture::new("filter-pending");
-    let mut command = Command::new(binary());
-    fixture.prepare(&mut command, false);
-    let out = command.arg("__collect-v1").output().unwrap();
-    assert!(!out.status.success());
-    assert!(out.stdout.is_empty());
 }
 
 #[test]
@@ -505,7 +495,12 @@ fn worker_rejects_invalid_handoff_before_ready() {
                 .lock
                 .set_permissions(fs::Permissions::from_mode(0o640))
                 .unwrap(),
-            "lock-size" => fixture.lock.set_len(1).unwrap(),
+            "lock-size" => OpenOptions::new()
+                .write(true)
+                .open(&fixture.path)
+                .unwrap()
+                .set_len(1)
+                .unwrap(),
             "regular" => {
                 command.stdout(output.try_clone().unwrap());
             }
@@ -546,7 +541,12 @@ fn worker_rejects_invalid_handoff_before_ready() {
             .lock
             .set_permissions(fs::Permissions::from_mode(0o600))
             .unwrap();
-        fixture.lock.set_len(0).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&fixture.path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
         fs::remove_file(output_path).unwrap();
     }
 }
@@ -631,4 +631,35 @@ fn inherited_limit_signals_child() {
     check(libc::SIG_IGN, 1);
     limits::install_base().unwrap();
     check(libc::SIG_DFL, 0);
+}
+
+// 이것을 실패시키는 것: Linux worker가 쓰기 가능한 일반 파일을 상속하는 것.
+#[test]
+#[cfg(target_os = "linux")]
+fn writable_lock_is_rejected_on_linux() {
+    let fixture = Fixture::new("writable-lock");
+    let writable = OpenOptions::new().write(true).open(&fixture.path).unwrap();
+    // SAFETY: owned duplicate above all reserved protocol slots.
+    let fd = unsafe { libc::fcntl(writable.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 20) };
+    assert!(fd >= 20);
+    // SAFETY: the duplicate has exactly one owner.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut command = Command::new(binary());
+    fixture.prepare(&mut command, false);
+    let setup = move || {
+        // SAFETY: live duplicate and a reserved descriptor in this child only.
+        if unsafe { libc::dup2(fd.as_raw_fd(), 5) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    };
+    // SAFETY: setup uses only async-signal-safe descriptor duplication.
+    unsafe {
+        command.pre_exec(setup);
+    }
+    File::from(fixture.write.try_clone().unwrap())
+        .write_all(&[b'x'; 80])
+        .unwrap();
+    let out = command.arg("__collect-v1").output().unwrap();
+    assert!(!out.status.success() && out.stdout.is_empty());
 }

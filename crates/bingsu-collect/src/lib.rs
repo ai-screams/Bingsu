@@ -2,6 +2,17 @@
 #![no_std]
 #![deny(unsafe_code)]
 
+// The helper still links only identity code. Linux probes use the exact same
+// policy builder and installer as the dedicated worker, without a feature flag.
+#[cfg(any(target_os = "linux", test))]
+extern crate std;
+#[cfg(any(target_os = "linux", test))]
+#[allow(unsafe_code)]
+pub mod filter;
+#[cfg(any(target_os = "linux", test))]
+#[allow(unsafe_code)]
+pub mod landlock;
+
 include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 
 pub const ROLE_MARKER: [u8; 16] = *b"BNGROLE-ID02\0\0\0\0";
