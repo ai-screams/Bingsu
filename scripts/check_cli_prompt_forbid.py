@@ -56,7 +56,7 @@ MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
     "crates/bingsu-collect/build.rs": "fadb31a93cd6238adc07e45a705b48ca9e96286a995c2ecbffe486bd41f006fd",
-    "crates/bingsu-collect/src/lib.rs": "a1f418f3637e97290a99731d96e5509d31a6bb81a7cdfb4d911256d0f6e54f4c",
+    "crates/bingsu-collect/src/lib.rs": "ef97306d92420c2f69cdf0d4464eeefa6ff517fc7aa10caee0b9ce717b5904f3",
     "crates/bingsu/src/prompt_read.rs": "7c771115ddbd124e3888a759fe928440d325cafee37ab7ecd62352c449ff7ce5",
     "crates/bingsu/src/prompt_spawn.rs": "d3e49c09bcbd6a1f63011fcc657828109dae8c4f57038f2eda866e18911a2d24",
     "crates/bingsu/src/prompt_io.rs": "a96be63b68e2fac1ecb79f51eb59e532fd74ab36ba6177e5d74407551022b67c",

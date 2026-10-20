@@ -210,11 +210,11 @@ pub(crate) fn no_new_privs() -> io::Result<()> {
 pub(crate) fn initial_filter() -> io::Result<u32> {
     #[cfg(target_os = "linux")]
     {
-        let state = bingsu_collect::landlock::install_read_only()?;
-        bingsu_collect::filter::install_bootstrap()?;
+        let state = crate::landlock::install_read_only()?;
+        crate::filter::install_bootstrap()?;
         Ok(match state {
-            bingsu_collect::landlock::LandlockState::Installed { abi } => abi,
-            bingsu_collect::landlock::LandlockState::Absent => 0,
+            crate::landlock::LandlockState::Installed { abi } => abi,
+            crate::landlock::LandlockState::Absent => 0,
         })
     }
     #[cfg(target_os = "macos")]
@@ -229,7 +229,7 @@ pub(crate) fn initial_filter() -> io::Result<u32> {
 pub(crate) fn final_filter() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        bingsu_collect::filter::seal_limits()
+        crate::filter::seal_limits()
     }
     #[cfg(target_os = "macos")]
     {

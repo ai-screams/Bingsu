@@ -15,6 +15,14 @@ use std::{
 };
 // Include the same implementation in this test-only target, allowing failure
 // injection and a fixture entry without a shipped feature or public test API.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/filter.rs"]
+mod filter;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/landlock.rs"]
+mod landlock;
 #[allow(dead_code)]
 #[path = "../src/limits.rs"]
 mod limits;

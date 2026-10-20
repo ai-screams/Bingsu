@@ -1,4 +1,4 @@
-use bingsu_collect::{filter, landlock};
+use crate::{filter, landlock};
 use std::{io, process::Command};
 #[allow(dead_code)]
 #[path = "../../src/limits.rs"]

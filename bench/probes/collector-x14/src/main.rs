@@ -3,9 +3,13 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("X-14 requires a native Linux kernel");
 #[allow(dead_code)]
+#[path = "../../../../crates/bingsu-collect/src/filter.rs"]
+mod filter;
+#[path = "../../../../crates/bingsu-collect/src/landlock.rs"]
+mod landlock;
+#[allow(dead_code)]
 #[path = "../../../../crates/bingsu-collect/src/limits.rs"]
 mod limits;
-use bingsu_collect::{filter, landlock};
 use std::{
     path::Path,
     process::{Command, Stdio},

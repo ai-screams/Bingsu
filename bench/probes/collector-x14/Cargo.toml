@@ -8,6 +8,5 @@ publish = false
 [workspace]
 
 [dependencies]
-bingsu-collect = { path = "../../../crates/bingsu-collect" }
 libc = "0.2"
 gix = { version = "=0.83.0", default-features = false, features = ["status", "sha1"] }

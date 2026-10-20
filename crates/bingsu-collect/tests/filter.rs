@@ -1,10 +1,11 @@
 //! Both syscall ABIs are evaluated on every host. Kernel probes are isolated.
 #[allow(dead_code)]
+#[path = "../src/filter.rs"]
+mod filter;
+#[allow(dead_code)]
 #[path = "../src/landlock.rs"]
 mod landlock;
-#[allow(dead_code)]
-#[path = "../src/filter.rs"]
-mod policy;
+use filter as policy;
 use policy::{ALLOW, AuditArch, DENY, ENOSYS, Instruction, KILL};
 
 const ARCHES: [AuditArch; 2] = [AuditArch::X86_64, AuditArch::Aarch64];
