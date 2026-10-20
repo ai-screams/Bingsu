@@ -1,0 +1,48 @@
+# Linux ABI numbers; - means the syscall does not exist on that architecture.
+# Bootstrap exceptions disappear in the stacked final policy.
+syscall	x86_64	aarch64	condition	probe	why
+read	0	63	any	row_read_any	Read bounded protocol and repository bytes
+write	1	64	response	row_write_response	Write framed responses only to the validated pipe at fd 1
+open	2	-	open	row_open_open	Read-only libc open on x86_64 musl
+close	3	57	any	row_close_any	Release owned descriptors
+stat	4	-	any	row_stat_any	Read file metadata on x86_64 libc
+fstat	5	80	any	row_fstat_any	Inspect opened read-only files
+lstat	6	-	any	row_lstat_any	Inspect symlinks without following them
+lseek	8	62	any	row_lseek_any	Seek within read-only index and object files
+mmap	9	222	mapping	row_mmap_mapping	Allocate private memory or map files privately read-only
+mprotect	10	226	protect	row_mprotect_protect	Set allocator and thread stack protections without execution
+munmap	11	215	any	row_munmap_any	Release private mappings and thread stacks
+brk	12	214	any	row_brk_any	Grow or shrink the libc heap under RLIMIT_AS
+rt_sigaction	13	134	any	row_rt_sigaction_any	Install libc thread signal handlers
+rt_sigprocmask	14	135	any	row_rt_sigprocmask_any	Manage thread signal masks
+rt_sigreturn	15	139	any	row_rt_sigreturn_any	Return from a signal handler
+pread64	17	67	any	row_pread64_any	Read index and object file ranges
+sched_yield	24	124	any	row_sched_yield_any	Yield while synchronizing worker threads
+mremap	25	216	any	row_mremap_any	Resize private allocator mappings
+madvise	28	233	any	row_madvise_any	Release unused allocator and thread stack pages
+getpid	39	172	any	row_getpid_any	Obtain process identity for libc thread setup
+clone	56	220	thread	row_clone_thread	Create a thread sharing the existing process only
+exit	60	93	any	row_exit_any	Terminate a worker thread
+fcntl	72	25	fcntl	row_fcntl_fcntl	Query descriptor validity and access mode only
+getcwd	79	17	any	row_getcwd_any	Resolve the trusted status probe repository path
+readlink	89	-	any	row_readlink_any	Read symbolic link targets on x86_64
+getrlimit	97	163	any	row_getrlimit_any	Read libc resource limits without changing them
+geteuid	107	175	any	row_geteuid_any	Check repository ownership in the status probe
+sigaltstack	131	132	any	row_sigaltstack_any	Set up and release Rust thread signal stacks
+prctl	157	167	nnp_query	row_prctl_nnp_query	Verify no_new_privs before filtered baseline measurement
+gettid	186	178	any	row_gettid_any	Obtain the current libc thread identity
+futex	202	98	any	row_futex_any	Synchronize and join worker threads
+getdents64	217	61	any	row_getdents64_any	Enumerate repository directories read-only
+clock_gettime	228	113	clock	row_clock_gettime_clock	Read monotonic or boottime deadlines only
+exit_group	231	94	any	row_exit_group_any	Terminate the dedicated collector
+openat	257	56	openat	row_openat_openat	Open the fixed statm path and probe inputs read-only
+newfstatat	262	79	any	row_newfstatat_any	Read path metadata for the status probe
+readlinkat	267	78	any	row_readlinkat_any	Read symbolic link targets relative to a directory
+set_robust_list	273	99	any	row_set_robust_list_any	Register libc thread robust mutex cleanup
+prlimit64	302	261	query	row_prlimit64_query	Read resource limits with a full-width NULL new_limit
+getrandom	318	278	any	row_getrandom_any	Seed randomized in-memory hash tables
+statx	332	291	any	row_statx_any	Read file metadata with modern libc
+rseq	334	293	any	row_rseq_any	Register glibc per-thread restartable sequences
+clone3	435	435	enosys	row_clone3_enosys	Force libc to fall back to inspectable clone arguments
+prlimit64	302	261	bootstrap_as	row_prlimit64_bootstrap_as	Set the initial address-space ceiling before sealing
+seccomp	317	277	bootstrap_filter	row_seccomp_bootstrap_filter	Stack the final filter before Ready

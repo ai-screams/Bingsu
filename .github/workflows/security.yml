@@ -59,3 +59,6 @@ jobs:
       # The size probe's own lock (outside the workspace).
       - if: steps.check.outputs.lock == 'true'
         run: cargo audit --file bench/size-probe/Cargo.lock
+      # Independent X-14 lock: absence is a failure until the lead supplies it.
+      - if: steps.check.outputs.lock == 'true'
+        run: cargo audit --file bench/probes/collector-x14/Cargo.lock

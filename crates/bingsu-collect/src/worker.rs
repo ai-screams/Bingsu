@@ -1,5 +1,5 @@
 //! Fixed product entry and one bounded request. Every startup error precedes
-//! Ready and the first request read. Linux protection is completed by B2.
+//! Ready and the first request read. Both Linux filters precede collection.
 #[cfg(unix)]
 use crate::{limits, sys};
 #[cfg(unix)]
@@ -139,6 +139,50 @@ fn exchange(
 mod tests {
     use super::*;
     use std::{cell::RefCell, io};
+
+    // 이것을 실패시키는 것: 최종 필터 전에 Ready·요청·스레드를 허용하거나 seal 생략.
+    #[test]
+    fn filter_installed_before_threads_and_ready() {
+        for failure in 0..=7 {
+            let trace = RefCell::new(Vec::new());
+            let stage = |n| {
+                trace.borrow_mut().push(n);
+                if n == failure {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            };
+            let result = protect(
+                || stage(1),
+                || stage(2),
+                || stage(3),
+                || {
+                    stage(4)?;
+                    stage(5)?;
+                    Ok(3)
+                },
+                || {
+                    stage(6)?;
+                    Ok(limits::InstalledLimits {
+                        baseline_bytes: 1,
+                        memory_limit_bytes: 2,
+                    })
+                },
+                || stage(7),
+            );
+            if result.is_ok() {
+                for event in [8, 9, 10] {
+                    stage(event).unwrap();
+                } // Ready, request, thread
+            }
+            assert_eq!(result.is_ok(), failure == 0);
+            assert_eq!(
+                *trace.borrow(),
+                (1..=if failure == 0 { 10 } else { failure }).collect::<Vec<_>>()
+            );
+        }
+    }
 
     // 이것을 실패시키는 것: 보호 단계의 순서를 바꾸거나 실패 뒤 단계를 실행하는 것.
     #[test]

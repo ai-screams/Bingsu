@@ -84,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,6 +94,60 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test -j 2 -p bingsu-collect --test startup -- --test-threads=2
+      - name: Collector policy evaluator and table correspondence
+        run: python3 scripts/check_collector_filter.py
+      - if: runner.os == 'Linux'
+        name: Native collector kernel probes (required cells, no silent skip)
+        env:
+          BINGSU_REQUIRE_CLONE3_CONTROL: "1"
+          BINGSU_REQUIRE_LANDLOCK: "1"
+        run: cargo test --locked -j 2 -p bingsu-collect --test filter -- --nocapture --test-threads=2
+      - if: runner.os == 'Linux'
+        name: Collector policy mutations, including real seal and fd rules
+        env:
+          BINGSU_REQUIRE_CLONE3_CONTROL: "1"
+          BINGSU_REQUIRE_LANDLOCK: "1"
+        run: python3 scripts/check_collector_filter.py --mutations --runtime
+      - if: runner.os == 'Linux'
+        name: Final filter refuses root limit and capability changes
+        run: |
+          set -o pipefail
+          cargo test --locked -j 2 -p bingsu-collect --test filter --no-run --message-format=json > "$RUNNER_TEMP/filter.json"
+          bin=$(python3 -c 'import json,sys; print(next(v["executable"] for line in open(sys.argv[1]) if (v:=json.loads(line)).get("reason")=="compiler-artifact" and v["target"]["name"]=="filter" and v.get("executable")))' "$RUNNER_TEMP/filter.json")
+          sudo env BINGSU_REQUIRE_LANDLOCK=1 BINGSU_REQUIRE_ROOT_FILTER=1 "$bin" --exact runtime::filter_installed_before_threads_and_ready --nocapture --test-threads=1 | tee "$RUNNER_TEMP/root-filter.txt"
+          grep -Fx 'B2 limits PASS' "$RUNNER_TEMP/root-filter.txt"
+      - if: runner.os == 'Linux'
+        name: Native musl collector probes (both architectures)
+        env:
+          BINGSU_REQUIRE_CLONE3_CONTROL: "1"
+          BINGSU_REQUIRE_LANDLOCK: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC: musl-gcc
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+          target="$(uname -m)-unknown-linux-musl"
+          rustup target add "$target"
+          # musl-gcc drops /usr/include, where linux-libc-dev puts the UAPI headers.
+          BINGSU_X16_CFLAGS="-idirafter /usr/include -idirafter /usr/include/$(uname -m)-linux-gnu"
+          export BINGSU_X16_CFLAGS
+          cargo test --locked -j 2 -p bingsu-collect --target "$target" --test startup --test filter -- --nocapture --test-threads=2
+      - if: runner.os == 'Linux'
+        name: Independent gix 0.83.0 X-14 (locked, glibc and musl)
+        env:
+          BINGSU_REQUIRE_LANDLOCK: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -o pipefail
+          # The release lead supplies this lock; absence is an incomplete gate.
+          test -s bench/probes/collector-x14/Cargo.lock
+          cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --release -- --case all | tee "$RUNNER_TEMP/x14-gnu.txt"
+          grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-gnu.txt"
+          target="$(uname -m)-unknown-linux-musl"
+          CC=musl-gcc cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --target "$target" --release -- --case all | tee "$RUNNER_TEMP/x14-musl.txt"
+          grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-musl.txt"
       - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
       - name: Exact product and separate bench dependency audit
         run: python3 scripts/check_collector_dependencies.py
