@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import test_prompt_env_paths as budget
-from test_prompt_env_paths import assert_prompt_trace_budget
+from test_prompt_env_paths import assert_historical_prompt_trace_budget as assert_prompt_trace_budget
 
 EXE = "/pinned/bin/bingsu"
 ROOTS = ["/pinned/run", "/pinned/config", "/pinned/state"]
@@ -32,6 +32,12 @@ DEBIAN_EXE = DEBIAN_BASE + "/bin/bingsu"
 DEBIAN_ROOTS = [DEBIAN_BASE + suffix for suffix in (
     "/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log",
 )]
+
+
+# 이것을 실패시키는 것: 현재 제품 trace에 과거 collector 생성 허용량을 적용하는 것.
+def test_product_trace_rejects_the_historical_collector(debian_trace):
+    with pytest.raises(AssertionError):
+        budget.assert_prompt_trace_budget(debian_trace, DEBIAN_EXE, DEBIAN_ROOTS)
 
 
 def test_real_debian_prompt_trace(debian_trace):

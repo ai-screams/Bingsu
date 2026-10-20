@@ -81,7 +81,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 e.config_root.as_deref().unwrap_or(b""),
                 e.state_root.as_deref().unwrap_or(b""),
                 cwd,
-                config.collect_mask,
+                collection::selection::worker_mask(config, e.width, e.redraw),
             )?
         } else {
             None
@@ -185,7 +185,17 @@ mod tests {
             resume: 0,
             now: 1,
         };
-        let request = collection::Request::new(id, now, b"/c", b"/s", b"/r", u32::MAX).unwrap();
+        // Inject only at the test seam: the product request constructor returns None.
+        let request = Some(collection::Request {
+            id,
+            kind: now.kind,
+            domain: now.domain,
+            resume: now.resume,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            cwd: b"/r".to_vec(),
+            mask: 1 << 31,
+        });
         before_filter(
             &watchdog,
             request,

@@ -519,3 +519,20 @@ fn timer_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
         (line_of(arm.func.span()), arm.func.span().start().column),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    // 이것을 실패시키는 것: 앞단 어댑터의 import 목록에 catalog 주입 권한을 추가하는 것.
+    #[test]
+    fn adapter_cannot_inject_a_worker_catalog() {
+        let findings = super::check_adapter(
+            "use bingsu_core::collection::selection::Catalog;",
+            "syscall\tlibc\twhy\n",
+        );
+        assert!(
+            findings.iter().any(|f| f
+                .reason
+                .contains("use bingsu_core::collection::selection::Catalog is not in USE_ALLOWED"))
+        );
+    }
+}

@@ -134,8 +134,9 @@ pub struct CompiledConfig {
     pub palette: ResolvedPalette,
     pub light_palette: ResolvedPalette,
     pub setup: Vec<Setup>,
-    /// Bit i: `field::BUILTIN[i]` is drawn in some layout and not turned
-    /// off, so the collector gathers it.
+    /// Disabled-aware upper bound over all layout references, including bands
+    /// hidden by priority. Collection intersects it with the selected variant
+    /// and the adapter's fixed worker catalog; it is not execution authority.
     pub collect_mask: u32,
     pub icons: IconSet,
     pub profile: WidthProfile,
@@ -915,11 +916,9 @@ pub fn compile(
                 )]);
             }
         }
+        let referenced = crate::collection::selection::references(&compiled);
         for (i, d) in BUILTIN.iter().enumerate() {
-            let uses = |l: &CompiledLine| {
-                l.nodes().iter().any(|n| matches!(n, Node::Segment { seg, .. } | Node::Field { seg, .. } if usize::from(*seg) == i))
-            };
-            if compiled.iter().any(uses) && !off.contains(d.id) {
+            if referenced & (1 << i) != 0 && !off.contains(d.id) {
                 mask |= 1 << i;
             }
         }

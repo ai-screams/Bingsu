@@ -233,6 +233,14 @@ mod cases {
             if fail { Observation::Failed } else { result }
         }
         fn run(&mut self, args: &[&[u8]], mode: Mode) -> Response {
+            self.run_catalog(args, mode, None)
+        }
+        fn run_catalog(
+            &mut self,
+            args: &[&[u8]],
+            mode: Mode,
+            fixture: Option<&crate::collection::selection::Catalog<'_>>,
+        ) -> Response {
             let mut args = args.to_vec();
             args.extend([
                 b"--colorfgbg".as_slice(),
@@ -247,8 +255,24 @@ mod cases {
             for _ in 0..100_000 {
                 match next(&mut plan, previous.take()) {
                     Step::Read(e) => previous = Some(self.observe(e)),
-                    Step::Done(o) => {
+                    Step::Done(mut o) => {
                         assert!(self.dirs.iter().all(Option::is_none) && !self.live_file);
+                        if let Some(catalog) = fixture {
+                            if let Some(s) = o.selected.as_mut() {
+                                // Catalog injection follows the same verified read plan.
+                                s.config.bands.clear();
+                                s.config.band_order.clear();
+                                s.config.collect_mask = 1 << 31;
+                                s.config.variants = vec![
+                                    crate::template::compile::compile(
+                                        "{fixture}",
+                                        catalog.segments,
+                                    )
+                                    .unwrap(),
+                                ];
+                            }
+                            return finish_with_catalog(plan, o, catalog);
+                        }
                         return finish(plan, o);
                     }
                 }
@@ -429,8 +453,8 @@ mod cases {
             assert_eq!(r.status, want, "case {case}");
             assert!(r.execution.permit().is_none(), "case {case}");
             assert!(record(&r).contains('!'));
-            // A trust failure never turns built-in git need into user execution.
-            assert_ne!(r.worker_mask, 0);
+            // Product collection remains empty independently of execution eligibility.
+            assert_eq!(r.worker_mask, 0);
         }
     }
     // 이것을 실패시키는 것: 부팅/현재 셸 문맥을 선택에서 빼거나 외부 문맥의 일치하는 짝을 허용하는 것.
@@ -627,18 +651,45 @@ mod cases {
         assert_ne!(dark.record, light.record);
         assert!(!record(&dark).contains('\u{276f}'));
     }
-    // 이것을 실패시키는 것: Invalid 표식이 내장 수집 mask까지 0으로 만드는 것.
+    // 이것을 실패시키는 것: Invalid·만료 표식이 안전한 화면의 fixture 수집까지 0으로 만드는 것.
     #[test]
     fn n7_builtin_collection_survives_invalid_marker() {
         let mut h = Harness::new();
         let ordinary = h.run(&args(), Mode::Dark);
-        assert_ne!(ordinary.worker_mask, 0);
+        assert_eq!(ordinary.worker_mask, 0);
         let mut m = marker(&snapshot(""));
         m.invalid = true;
         h.marker = Some(m.encode().to_vec());
         let invalid = h.run(&args(), Mode::Dark);
         assert_eq!(invalid.worker_mask, ordinary.worker_mask);
         assert!(invalid.execution.permit().is_none());
+        let ids = [
+            "a00", "a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a11",
+            "a12", "a13", "a14", "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23",
+            "a24", "a25", "a26", "a27", "a28", "a29", "a30", "fixture",
+        ];
+        let segments = ids.map(|id| crate::field::SegmentDecl {
+            id,
+            role: "fg",
+            fields: &[],
+        });
+        let catalog = crate::collection::selection::Catalog {
+            segments: &segments,
+            workers: 1 << 31,
+        };
+        for invalid in [false, true] {
+            let mut h = Harness::new();
+            let mut m = marker(&snapshot(""));
+            m.invalid = invalid;
+            if !invalid {
+                m.verified_at = 0;
+                h.final_clock.as_mut().unwrap().now = T_NS + 1;
+            }
+            h.marker = Some(m.encode().to_vec());
+            let r = h.run_catalog(&args(), Mode::Dark, Some(&catalog));
+            assert_eq!(r.worker_mask, 1 << 31);
+            assert!(r.execution.permit().is_none());
+        }
     }
 
     // 이것을 실패시키는 것: 문맥 부재에서 구 전역 저장소 이름으로 읽기를 계속하는 것.

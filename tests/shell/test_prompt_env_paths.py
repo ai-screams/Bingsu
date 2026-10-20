@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from conftest import ROOT, SHELL_CMD, Install, minimal_record, short_dir, trusted_env
+from conftest import ROOT, SHELL_CMD, Install, minimal_record, real_bin, short_dir, trusted_env
 from pty_session import Session
 
 sys.path.insert(0, str(ROOT / "tools/fsbudget"))
@@ -19,6 +19,13 @@ from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace, scan
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 HOSTILE_VARS = ["HOME", "USER", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CACHE_HOME", "BINGSU_LOG"]
 CALL = b"_bingsu_call --width 80\n"
+
+
+# 이것을 실패시키는 것: 제품 prompt가 시험 전용 --collector-fixture 인자를 받아들이는 것.
+def test_product_rejects_collector_fixture():
+    base = [str(real_bin()), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
+    argv = subprocess.run(base + ["--collector-fixture"], capture_output=True, check=True)
+    assert b"error:bad-args" in argv.stdout
 
 
 def pinned_roots(trusted):
@@ -697,6 +704,15 @@ def prompt_root_io(front, boundary, exe, pinned, root):
 
 
 def assert_prompt_trace_budget(lines, exe, pinned):
+    _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=0)
+
+
+def assert_historical_prompt_trace_budget(lines, exe, pinned):
+    """Archived captures retain the previous fixed-stub allowance."""
+    _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1)
+
+
+def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -752,7 +768,7 @@ def assert_prompt_trace_budget(lines, exe, pinned):
     # M3a collector exec: exactly the pinned executable and __collect-v1,
     # no additional argv and an empty environment. It precedes confinement.
     collectors = [c for c in execs if c.pid != helper_pid]
-    assert len(collectors) <= 1 and all(fixed_exec(c, exe, "__collect-v1") for c in collectors), collectors
+    assert len(collectors) <= collector_limit and all(fixed_exec(c, exe, "__collect-v1") for c in collectors), collectors
     mains = {helper_pid} | {c.pid for c in collectors}
     owners = {pid: pid for pid in mains}
     children = []
@@ -763,7 +779,7 @@ def assert_prompt_trace_budget(lines, exe, pinned):
         processes = [c for c in made if c not in threads]
         assert len(threads) <= 1, ("extra watchdog", threads)
         owners.update({int(c.ret): pid for c in threads})
-        assert len(processes) <= (1 if pid == helper_pid else 0), processes
+        assert len(processes) <= (collector_limit if pid == helper_pid else 0), processes
         assert all(int(c.ret) in {x.pid for x in collectors} for c in processes), processes
         children.extend(int(c.ret) for c in made)
     assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
