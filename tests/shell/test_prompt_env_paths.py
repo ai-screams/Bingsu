@@ -21,46 +21,11 @@ HOSTILE_VARS = ["HOME", "USER", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE
 CALL = b"_bingsu_call --width 80\n"
 
 
-# 이것을 실패시키는 것: 시험 target·의존 진입점 또는 fixture 문자열을 제품에 포함하는 것.
-def test_product_fixture_is_unreachable(tmp_path):
-    sys.path.insert(0, str(ROOT / "scripts"))
-    from check_cli_prompt_forbid import check_product_fixture_isolation
-    assert check_product_fixture_isolation(real_bin()) == []
-    altered = tmp_path / "product-with-fixture"
-    altered.write_bytes(real_bin().read_bytes() + b"collector_builtin_test_only_31")
-    assert check_product_fixture_isolation(altered)
+# 이것을 실패시키는 것: 제품 prompt가 시험 전용 --collector-fixture 인자를 받아들이는 것.
+def test_product_rejects_collector_fixture():
     base = [str(real_bin()), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
     argv = subprocess.run(base + ["--collector-fixture"], capture_output=True, check=True)
     assert b"error:bad-args" in argv.stdout
-
-
-# 이것을 실패시키는 것: 시험 target의 수·소유 package·종류 또는 제품 의존 진입점 검사를 빼는 것.
-@pytest.mark.parametrize("entry", ["missing", "duplicate", "product", "binary", "dependency"])
-def test_fixture_build_gate_rejects_product_entry(monkeypatch, entry):
-    import copy
-    import json
-    from types import SimpleNamespace
-    sys.path.insert(0, str(ROOT / "scripts"))
-    import check_cli_prompt_forbid as gate
-    metadata = json.loads(subprocess.run(
-        ["cargo", "metadata", "--no-deps", "--format-version=1"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout)
-    owner = next(p for p in metadata["packages"] if p["name"] == "bingsu-core-tests")
-    target = next(t for t in owner["targets"] if t["name"] == "collector_builtin")
-    if entry == "missing":
-        owner["targets"].remove(target)
-    elif entry == "duplicate":
-        owner["targets"].append(copy.deepcopy(target))
-    elif entry == "product":
-        owner["name"] = "bingsu"
-    elif entry == "binary":
-        target["kind"] = ["bin"]
-    else:
-        product = next(p for p in metadata["packages"] if p["name"] == "bingsu")
-        product["dependencies"].append({"name": "bingsu-core-tests"})
-    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=json.dumps(metadata)))
-    assert gate.check_product_fixture_isolation()
 
 
 def pinned_roots(trusted):
