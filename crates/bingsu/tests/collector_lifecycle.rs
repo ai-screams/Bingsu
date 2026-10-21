@@ -852,7 +852,7 @@ fn verified_screen_child() {
     };
     use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
     let case = std::env::var("C1_CASE").unwrap();
-    let root = peer().parent().unwrap().join("refresh");
+    let root = peer().join("refresh");
     std::fs::create_dir(&root).unwrap();
     for name in ["runtime", "config", "state"] {
         std::fs::create_dir(root.join(name)).unwrap();
