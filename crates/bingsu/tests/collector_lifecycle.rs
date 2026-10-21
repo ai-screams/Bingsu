@@ -852,7 +852,14 @@ fn verified_screen_child() {
     };
     use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
     let case = std::env::var("C1_CASE").unwrap();
-    let root = peer().join("refresh");
+    // A cached target/ can hold this folder from an earlier run whose process
+    // had the same pid; start from an empty one.
+    let root = peer().parent().unwrap().join("refresh");
+    match std::fs::remove_dir_all(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("{}: {error}", root.display()),
+    }
     std::fs::create_dir(&root).unwrap();
     for name in ["runtime", "config", "state"] {
         std::fs::create_dir(root.join(name)).unwrap();
