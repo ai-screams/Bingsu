@@ -37,6 +37,9 @@ EXIT = re.compile(r"^\+\+\+ (exited with \d+|killed by \S+( \(core dumped\))?) \
 EXIT_EVENT = "+++exit"
 # An fd that strace -y names: a number (also `fd=3` in a struct) or AT_FDCWD.
 FD_BEFORE_NAME = re.compile(r"(?:^|[^\w])(?:\d+|AT_FDCWD)$")
+# strace's value-changed annotation between input and output structs. This
+# belongs to the argument grammar, not a clone3-only syscall exception.
+STRUCT_UPDATE = re.compile(r"=>\s*(?=\{)")
 CLOSE = {")": "(", "]": "[", "}": "{"}
 
 
@@ -51,7 +54,8 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
     truncated) and `/* comments */` are opaque. `<...>` is an fd name and is
     allowed only right after an fd number or AT_FDCWD; strace -y escapes `<`
     and `>` inside it (\\74, \\76), so the first `>` closes it. Brackets must
-    nest by type. Anything else is a StructureError.
+    nest by type. `} => {` joins input/output structs within one argument;
+    both structs are still checked. Other bare angle brackets remain errors.
 
     With until_close the scan stops at the `)` that closes the call and
     returns the index after it; otherwise the whole text must be balanced.
@@ -79,6 +83,11 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
             cur.append(text[i:j + 2])
             i = j + 2
             continue
+        if ch == "=" and "".join(cur).rstrip().endswith("}"):
+            if update := STRUCT_UPDATE.match(text, i):
+                cur.append(update.group())
+                i = update.end()
+                continue
         if ch == "<":
             if not FD_BEFORE_NAME.search("".join(cur)):
                 raise StructureError(f"'<' not after an fd at {i}")

@@ -1,6 +1,6 @@
 import pytest
 
-from fsbudget.classify import kind, split_args
+from fsbudget.classify import collector_kind, kind, split_args
 from fsbudget.strace_parse import EXIT_EVENT, StructureError, parse, scan
 
 TRACE = """\
@@ -31,6 +31,81 @@ def test_parse_merges_unfinished_and_skips_signals():
     resumed = [c for c in calls if c.name == "openat" and c.ret.startswith("4")]
     assert resumed and resumed[0].pid == 100 and '"/r"' in resumed[0].args
     assert calls.errors == []
+
+
+# Ubuntu 24.04 aarch64, strace 6.8: the successful clone3 was hidden by
+# Docker's ENOSYS fallback in the earlier local captures.
+CLONE3_INPUT = (
+    "{flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|"
+    "CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0xe45fa8cb4250, "
+    "parent_tid=0xe45fa8cb4250, exit_signal=0, stack=0xe45fa84a5000, "
+    "stack_size=0x80ea40, tls=0xe45fa8cb48c0}"
+)
+CLONE3_SUCCESS = f"2516  clone3({CLONE3_INPUT} => {{parent_tid=[2517]}}, 88) = 2517"
+CLONE3_ENOSYS = f"2519  clone3({CLONE3_INPUT}, 88) = -1 ENOSYS (Function not implemented)"
+
+
+# 이것을 실패시키는 것: 성공 clone3의 in => out을 거부하거나 split 재결합·인자 경계·실패 시도 분류를 잃는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "split"])
+@pytest.mark.parametrize("line,pid,output,ret", [
+    (CLONE3_SUCCESS, 2516, " => {parent_tid=[2517]}", "2517"),
+    (CLONE3_ENOSYS, 2519, "", "-1 ENOSYS (Function not implemented)"),
+])
+def test_ubuntu_clone3_records(line, pid, output, ret, split):
+    if split:
+        line = line.replace(CLONE3_INPUT, CLONE3_INPUT + f" <unfinished ...>\n{pid}  <... clone3 resumed>")
+    calls = parse(line)
+    assert not calls.errors, calls.errors
+    call, = calls
+    assert (call.pid, call.name, call.ret) == (pid, "clone3", ret)
+    assert split_args(call.args) == [CLONE3_INPUT + output, "88"]
+    assert collector_kind(call) == "thread"
+    assert kind(call) is None  # Historical prompt vocabulary excludes spawn/thread counts.
+
+
+# 이것을 실패시키는 것: CLONE_VM 또는 clone3라는 이름만으로 CLONE_VFORK 프로세스를 스레드로 세는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "split"])
+@pytest.mark.parametrize("annotation", [False, True])
+def test_clone3_vfork_is_a_process(split, annotation):
+    flags = "CLONE_VM|CLONE_VFORK" + ("|CLONE_PARENT_SETTID" if annotation else "")
+    before = f"{{flags={flags}, exit_signal=SIGCHLD}}"
+    after = (" => {parent_tid=[2517]}" if annotation else "") + ", 88) = 2517"
+    if split:
+        after = " <unfinished ...>\n2516 <... clone3 resumed>" + after
+    calls = parse(f"2516 clone3({before}" + after)
+    assert not calls.errors, calls.errors
+    call, = calls
+    assert collector_kind(call) == "spawn"
+    assert kind(call) is None
+
+
+# 이것을 실패시키는 것: struct 주석을 clone3에만 허용하거나 중첩 출력 struct의 쉼표를 인자 경계로 보는 것.
+def test_struct_update_is_not_syscall_specific():
+    body = '3</dev/tty>, TCGETS, {c_iflag=0} => {c_iflag=ICRNL, c_cc=[1, 2]}'
+    calls = parse(f"40 ioctl({body}) = 0")
+    assert not calls.errors, calls.errors
+    assert split_args(calls[0].args) == ["3</dev/tty>", "TCGETS",
+                                       "{c_iflag=0} => {c_iflag=ICRNL, c_cc=[1, 2]}"]
+
+
+# 이것을 실패시키는 것: => 지원 때문에 잘못된 꺾쇠·입력 없는 주석·출력 struct 손상을 허용하는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "split"])
+@pytest.mark.parametrize("old,new", [
+    (" => ", " > "),
+    (" => ", " =>> "),
+    (CLONE3_INPUT, ""),
+    ("{parent_tid=[2517]}", "[2517]"),
+    ("{parent_tid=[2517]}", "{parent_tid=[2517]} >"),
+    ("{parent_tid=[2517]}", "{parent_tid=[2517]"),
+    ("{parent_tid=[2517]}", "{parent_tid=<2517>}"),
+])
+def test_clone3_struct_update_rejects_malformed_records(old, new, split):
+    line = CLONE3_SUCCESS
+    if split:
+        line = line.replace(" => ", " <unfinished ...>\n2516  <... clone3 resumed> => ")
+    assert old in line
+    calls = parse(line.replace(old, new))
+    assert calls.errors and not calls, calls
 
 
 BROKEN = {

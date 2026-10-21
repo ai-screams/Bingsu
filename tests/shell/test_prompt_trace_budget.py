@@ -421,6 +421,78 @@ def test_exec_completion_may_follow_parent_filter():
     assert_prompt_trace_budget(lines, EXE, ROOTS)
 
 
+def clone_prompt_reference(historical):
+    lines = valid_trace()
+    if not historical:
+        lines = [line for line in lines if not line.startswith(("13 ", "14 ", "11 clone(child_stack=0x2"))]
+        # The archived fixture abbreviates held directory opens, reusing 3
+        # for unrelated names. Give those implicit inherited fds distinct
+        # numbers for the current gate's descriptor-lifetime validation.
+        lines = [line.replace('3</pinned>', '30</pinned>').replace('3</>', '31</>')
+                 if line.startswith('11 ') else line for line in lines]
+    return lines
+
+
+def clone3_prompt_trace(split, historical):
+    # A successful clone3 replaces the ENOSYS + clone fallback pair.
+    lines = [line for line in clone_prompt_reference(historical) if "ENOSYS" not in line]
+    text = '\n'.join(lines).replace(
+        'clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>',
+        'clone3({flags=CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD} <unfinished ...>'
+    ).replace('<... clone resumed>)', '<... clone3 resumed>, 88)')
+    text = text.replace(
+        'clone(child_stack=0x2, flags=CLONE_VM|CLONE_VFORK|SIGCHLD)',
+        'clone3({flags=CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD}, 88)')
+    for parent, child, stack in ((11, 12, "0x1"), (13, 14, "0x3")):
+        before = '{flags=CLONE_VM|CLONE_FILES|CLONE_THREAD|CLONE_PARENT_SETTID, exit_signal=0}'
+        after = f' => {{parent_tid=[{child}]}}, 88) = {child}'
+        if split:
+            after = f' <unfinished ...>\n{parent} <... clone3 resumed>' + after
+        text = text.replace(
+            f'clone(child_stack={stack}, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = {child}',
+            'clone3(' + before + after)
+    return text.splitlines()
+
+
+# 이것을 실패시키는 것: prompt의 현재/과거 게이트가 성공 clone3의 =>·스레드 owner·vfork 생성 예산을 다르게 처리하는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "split"])
+@pytest.mark.parametrize("historical", [False, True], ids=["product", "historical"])
+def test_prompt_gates_accept_clone3_struct_updates(split, historical):
+    from collections import Counter
+    from fsbudget.classify import kind
+    lines = clone3_prompt_trace(split, historical)
+    check = assert_prompt_trace_budget if historical else budget.assert_prompt_trace_budget
+    check(lines, EXE, ROOTS)
+    pids, scoped = budget.tree(lines, EXE)
+    assert pids == ({"10", "11", "12", "13", "14"} if historical else {"10", "11", "12"})
+    original = clone_prompt_reference(historical)
+    check(original, EXE, ROOTS)
+
+    def counts(records):
+        calls = budget.parse_trace('\n'.join(records))
+        assert not calls.errors, calls.errors
+        return Counter((c.pid, k) for c in calls if (k := kind(c)) is not None)
+
+    assert counts(scoped) == counts(original)
+
+
+# 이것을 실패시키는 것: clone3 형식으로 root 스레드·추가 watchdog·파서 손상을 숨겨 prompt 게이트를 우회하는 것.
+@pytest.mark.parametrize("historical", [False, True], ids=["product", "historical"])
+@pytest.mark.parametrize("change", ["root-thread", "extra-thread", "stray-angle"])
+def test_prompt_clone3_mutations_are_refused(historical, change):
+    lines = clone3_prompt_trace(split=True, historical=historical)
+    text = '\n'.join(lines)
+    if change == "root-thread":
+        text = text.replace("CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD", "CLONE_VM|CLONE_THREAD, exit_signal=SIGCHLD", 1)
+    elif change == "extra-thread":
+        text += '\n11 clone3({flags=CLONE_VM|CLONE_FILES|CLONE_THREAD} => {parent_tid=[15]}, 88) = 15'
+    else:
+        text = text.replace(" => ", " > ", 1)
+    check = assert_prompt_trace_budget if historical else budget.assert_prompt_trace_budget
+    with pytest.raises(AssertionError):
+        check(text.splitlines(), EXE, ROOTS)
+
+
 # 이것을 실패시키는 것: bootstrap의 횟수·시점·고정 exe/verb·빈 환경 또는 root의 기존 제한을 완화하는 것,
 # helper 하위 트리의 경로·syscall·자식 예산을 통째로 제외하거나 NSS를 임의 네트워크로 넓히는 것.
 @pytest.mark.parametrize("old,new", [

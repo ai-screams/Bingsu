@@ -378,6 +378,77 @@ PRODUCT = [
 PINNED_PRODUCT = {"front": "/bin/bingsu", "helper": "/bin/bingsu", "collector": "/bin/bingsu-collect"}
 
 
+def product_thread_trace(clone3=False, split=False):
+    """Extend PRODUCT with shared helper fds and a vfork's private fd copy.
+
+    Child activity deliberately precedes the parent's resumed record.
+    clone3 and clone runs have the same syscalls, roles and fd lifetimes.
+    """
+    lines = PRODUCT[:4] + [
+        '11 openat(AT_FDCWD</>, "/old", O_RDONLY) = 7</old>',
+        '11 close(7</old>) = 0',
+        '11 openat(AT_FDCWD</>, "/inherited", O_RDONLY) = 9</inherited>',
+        '11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 21',
+        '21 openat(AT_FDCWD</>, "/runtime", O_RDONLY) = 7</runtime>',
+        '11 close(7</runtime>) = 0',
+        '11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 22',
+        '22 openat(AT_FDCWD</>, "/runtime2", O_RDONLY) = 7</runtime2>',
+        '21 close(7</runtime2>) = 0',
+        '21 +++ exited with 0 +++',
+        '22 +++ exited with 0 +++',
+        '11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>',
+        '12 close(9</inherited>) = 0',
+        *PRODUCT[5:7],
+        '11 read(9</inherited>, "x", 1) = 1',
+        *PRODUCT[7:],
+    ]
+    if not clone3:
+        return lines
+    # Explicit rewrites preserve the reference fixture's entry/return order.
+    text = '\n'.join(lines)
+    text = text.replace(
+        'clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>',
+        'clone3({flags=CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD} <unfinished ...>')
+    text = text.replace('<... clone resumed>)', '<... clone3 resumed>, 88)')
+    for child in (21, 22):
+        before = '{flags=CLONE_VM|CLONE_FILES|CLONE_THREAD|CLONE_PARENT_SETTID, exit_signal=0}'
+        after = f' => {{parent_tid=[{child}]}}, 88) = {child}'
+        if split:
+            after = ' <unfinished ...>\n11 <... clone3 resumed>' + after
+        text = text.replace(
+            f'clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = {child}',
+            f'clone3({before}' + after)
+    return text.splitlines()
+
+
+# 이것을 실패시키는 것: clone3를 spawn으로만 세거나 스레드 owner/fd 공유·vfork fd 복사·부모 역할을 잃는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "split"])
+def test_clone3_product_matches_clone_roles_fds_and_counts(split):
+    from fsbudget.attribute import collector_attribute
+    expected = {
+        "front": {"exec": 1, "spawn": 1},
+        "helper": {"exec": 1, "spawn": 1, "thread": 2, "openat": 4, "read": 1},
+        "collector": {"exec": 1, "openat": 1, "read": 1},
+    }
+    for lines in (product_thread_trace(), product_thread_trace(clone3=True, split=split)):
+        got = collector_attribute(lines, PINNED_PRODUCT)
+        assert not got.errors, got.errors
+        assert got.counts == expected
+
+
+# 이것을 실패시키는 것: clone3 스레드 간 close 전파나 vfork 자식의 상속 fd 정체성을 검증하지 않는 것.
+@pytest.mark.parametrize("old,new", [
+    ('12 close(9</inherited>)', '12 close(9</different>)'),
+    ('11 read(9</inherited>, "x", 1)', '11 read(7</runtime2>, "x", 1)'),
+])
+def test_clone3_product_rejects_fd_mutations(old, new):
+    from fsbudget.attribute import collector_attribute
+    text = '\n'.join(product_thread_trace(clone3=True, split=True))
+    assert old in text
+    got = collector_attribute(text.replace(old, new).splitlines(), PINNED_PRODUCT)
+    assert any("descriptor lifetime/identity mismatch" in e for e in got.errors), got.errors
+
+
 # 이것을 실패시키는 것: 부모 반환 순서로 역할을 정하거나 dup/close의 fd 생애를 잃는 것.
 def test_trace_attributes_spawn_sites_and_fd_lifetimes():
     from fsbudget.attribute import collector_attribute

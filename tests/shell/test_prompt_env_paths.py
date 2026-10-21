@@ -171,6 +171,24 @@ def test_tree_follows_trace_order():
     assert any('"/early"' in l for l in scoped)
 
 
+# 이것을 실패시키는 것: => 주석이 든 clone3의 자식·스레드 또는 부모 반환 전 자식 기록을 prompt 범위에서 빼는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "split"])
+def test_tree_follows_clone3_struct_updates(split):
+    before = '10 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_PARENT_SETTID, exit_signal=SIGCHLD}'
+    after = ' => {parent_tid=[11]}, 88) = 11'
+    child = '11 openat(AT_FDCWD, "/early", O_RDONLY) = 3'
+    spawn = ([before + ' <unfinished ...>', child, '10 <... clone3 resumed>' + after]
+             if split else [before + after, child])
+    lines = ['10 execve("/pinned/bin/bingsu", ["/pinned/bin/bingsu", "prompt"], []) = 0',
+             *spawn,
+             '11 clone3({flags=CLONE_VM|CLONE_FILES|CLONE_THREAD|CLONE_PARENT_SETTID, exit_signal=0}'
+             ' => {parent_tid=[12]}, 88) = 12',
+             '12 close(3</early>) = 0']
+    pids, scoped = tree(lines, "/pinned/bin/bingsu")
+    assert pids == {"10", "11", "12"}
+    assert scoped == lines
+
+
 def named_paths(line):
     """The paths a syscall line names: execve its pathname only (argv
     follows), any other call every quoted string (both paths of linkat,
