@@ -118,8 +118,8 @@ static int proc_readable(int fd, const char *base) {
         before.st_dev == after.st_dev && before.st_ino == after.st_ino;
     close(copy); return good;
 }
-struct result { int exit_code, exec_errno, canaries, leaks; };
-static int leave_high_fd;
+struct result { int exit_code, exec_errno, canaries, leaks, high_fd, soft_limit; };
+static int leave_high_fd, high_fd;
 /* Enumerate the open set, including descriptors above a lowered soft limit. */
 static void close_unlisted(int script, int errors) {
     DIR *fds = opendir("/proc/self/fd"); REQUIRE(fds != NULL);
@@ -127,16 +127,25 @@ static void close_unlisted(int script, int errors) {
     while ((entry = readdir(fds))) {
         char *end; long fd = strtol(entry->d_name, &end, 10);
         if (*end || fd < 3 || fd == dirfd(fds) || fd == script || fd == 100 || fd == errors) continue;
-        if (leave_high_fd && fd == 1025) continue;
+        if (leave_high_fd && fd == high_fd) continue;
         REQUIRE(close((int)fd) == 0);
     }
     REQUIRE(closedir(fds) == 0);
 }
 static struct result execute(int interpreter, int script, int clear, int direct) {
     int out[2], errors[2]; REQUIRE(pipe2(out, O_CLOEXEC) == 0 && pipe2(errors, O_CLOEXEC) == 0);
-    struct rlimit limits; REQUIRE(getrlimit(RLIMIT_NOFILE, &limits) == 0 && limits.rlim_cur > 1025);
-    REQUIRE(fcntl(1025, F_GETFD) == -1 && errno == EBADF);
-    REQUIRE(dup2(interpreter, 1025) == 1025); /* inherited before lowering the limit */
+    struct rlimit limits; REQUIRE(getrlimit(RLIMIT_NOFILE, &limits) == 0);
+    /* Leave room for fixed fds 100/101 and an fd above the child limit.
+     * A low starting soft limit may be raised within the existing hard limit. */
+    if (limits.rlim_cur < 104) {
+        limits.rlim_cur = limits.rlim_max;
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &limits) == 0);
+    }
+    REQUIRE(limits.rlim_cur >= 104);
+    int soft_limit = limits.rlim_cur > 257 ? 256 : (int)limits.rlim_cur - 2;
+    /* F_DUPFD picks an unused, inheritable fd within the current limit. */
+    high_fd = fcntl(interpreter, F_DUPFD, soft_limit + 1);
+    REQUIRE(high_fd > soft_limit);
     pid_t pid = fork(); REQUIRE(pid >= 0);
     if (!pid) {
         REQUIRE(dup2(out[1], 1) == 1);
@@ -144,7 +153,7 @@ static struct result execute(int interpreter, int script, int clear, int direct)
         REQUIRE(dup3(interpreter, 100, O_CLOEXEC) == 100);
         /* An unrelated deliberately inheritable fd must be explicitly closed. */
         REQUIRE(dup2(interpreter, 101) == 101);
-        limits.rlim_cur = 256; REQUIRE(setrlimit(RLIMIT_NOFILE, &limits) == 0);
+        limits.rlim_cur = soft_limit; REQUIRE(setrlimit(RLIMIT_NOFILE, &limits) == 0);
         close_unlisted(script, errors[1]);
         if (clear && script >= 0) REQUIRE(fcntl(script, F_SETFD, 0) == 0);
         char path[64]; snprintf(path, sizeof(path), "/proc/self/fd/%d", script);
@@ -153,14 +162,14 @@ static struct result execute(int interpreter, int script, int clear, int direct)
         syscall(SYS_execveat, 100, "", args, env, AT_EMPTY_PATH);
         int error = errno; (void)write(errors[1], &error, sizeof(error)); _exit(120);
     }
-    REQUIRE(close(1025) == 0);
+    REQUIRE(close(high_fd) == 0);
     REQUIRE(close(out[1]) == 0 && close(errors[1]) == 0);
     char output[256]; ssize_t n = 0, got;
     while ((got = read(out[0], output + n, sizeof(output) - 1 - n)) > 0) {
         n += got; REQUIRE(n < (ssize_t)sizeof(output) - 1);
     }
     REQUIRE(got == 0);
-    struct result r = {0, 0, 0, -1};
+    struct result r = {0, 0, 0, -1, high_fd, soft_limit};
     ssize_t e = read(errors[0], &r.exec_errno, sizeof(r.exec_errno)); REQUIRE(e == 0 || e == sizeof(int));
     REQUIRE(close(out[0]) == 0 && close(errors[0]) == 0);
     int status; REQUIRE(waitpid(pid, &status, 0) == pid && WIFEXITED(status)); r.exit_code = WEXITSTATUS(status);
@@ -190,7 +199,7 @@ static void handoff(const char *cell, int interp, const char *script, int mutate
     REQUIRE(closed.exit_code != 0 && closed.exec_errno == 0 && closed.canaries == 0);
     /* 이것을 실패시키는 것: script fd의 CLOEXEC를 끄지 않거나 canary를 두 번 실행하는 것. */
     REQUIRE(fcntl(fd, F_GETFD) & FD_CLOEXEC); /* parent flags unchanged */
-    printf("{\"cell\":\"%s\",\"evidence\":{\"closed_exit\":%d,\"closed_canary\":0,\"open_exit\":0,\"open_canary\":1,\"exec_errno\":0,\"leaks\":%d,\"high_fd\":1025,\"soft_limit\":256,\"seals\":%d,\"fallback_errno\":%d,\"noexec_errno\":%d}}\n", cell, closed.exit_code, open.leaks, fcntl(fd, F_GET_SEALS), fallback_errno, noexec_errno);
+    printf("{\"cell\":\"%s\",\"evidence\":{\"closed_exit\":%d,\"closed_canary\":0,\"open_exit\":0,\"open_canary\":1,\"exec_errno\":0,\"leaks\":%d,\"high_fd\":%d,\"soft_limit\":%d,\"seals\":%d,\"fallback_errno\":%d,\"noexec_errno\":%d}}\n", cell, closed.exit_code, open.leaks, open.high_fd, open.soft_limit, fcntl(fd, F_GET_SEALS), fallback_errno, noexec_errno);
     REQUIRE(open.exit_code == 0 && open.exec_errno == 0 && open.canaries == (mutate ? 2 : 1) && open.leaks == 0);
     REQUIRE(close(fd) == 0);
 }

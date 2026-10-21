@@ -137,7 +137,8 @@ def validate(case, stdout, mutate=False):
             e = cells[cell]
             require(e["closed_exit"] != 0 and e["closed_canary"] == 0 and e["open_exit"] == 0
                     and e["open_canary"] == (2 if mutate else 1) and e["exec_errno"] == 0
-                    and e["leaks"] == 0 and e["high_fd"] == 1025 and e["soft_limit"] == 256 and e["seals"] & 15 == 15 and e["fallback_errno"] in (0, 22), "handoff evidence")
+                    and e["leaks"] == 0 and e["high_fd"] > e["soft_limit"] > 101
+                    and e["seals"] & 15 == 15 and e["fallback_errno"] in (0, 22), "handoff evidence")
             require(e["noexec_errno"] == (0 if e["fallback_errno"] == 22 else 13), "NOEXEC_SEAL execution refusal")
         require(cells["native_modes"] == {"rdonly_exit": 0, "opath_exit": 0, "opath_read_errno": 9, "canaries": 2}, "native modes")
         require(cells["shebang_boundary"] == {"exec_errno": 2, "canary": 0, "nested_rejected": 1}, "shebang boundary")

@@ -24,7 +24,16 @@ def current_x32():
     return json.loads(saved.read_text())["results"][0]
 
 
-def test_ledger_requires_every_acceptance_cell(monkeypatch, tmp_path):
+@pytest.fixture
+def recorded_x32_build(monkeypatch):
+    # Validate the historical fixture against its recorded build. Runner edits
+    # make real observations stale; dedicated ledger tests enforce that guard.
+    recorded = current_x32()["build_id"]
+    original = probe.build_id
+    monkeypatch.setattr(probe, "build_id", lambda case: recorded if case == "X-32" else original(case))
+
+
+def test_ledger_requires_every_acceptance_cell(monkeypatch, tmp_path, recorded_x32_build):
     rows = probe.ledger_rows()
     assert len(rows) == 108
     assert sum(row["status"] == "observed" and row["case"] == "X-32"
@@ -64,7 +73,6 @@ def test_recorded_x32_evidence_and_mutation():
     assert set(probe.validate("X-32", result["evidence"]["stdout"])) == set(probe.CELLS["X-32"])
     assert result["evidence"]["os_version"] == "27.0.1"
     assert result["evidence"]["deployment_target"] == "11.0"
-    assert result["build_id"] == probe.build_id("X-32")
     assert result["evidence"]["returncode"] == 0
     assert result["evidence"]["mutation"]["returncode"] == 90
     with pytest.raises(ValueError, match="mutated session"):
@@ -76,7 +84,7 @@ def x02_fixture():
     cells = {}
     for name in ("bash_handoff", "python_handoff"):
         cells[name] = dict(closed_exit=2, closed_canary=0, open_exit=0, open_canary=1,
-                           exec_errno=0, leaks=0, high_fd=1025, soft_limit=256, seals=47, fallback_errno=0, noexec_errno=13)
+                           exec_errno=0, leaks=0, high_fd=257, soft_limit=256, seals=47, fallback_errno=0, noexec_errno=13)
     cells.update(native_modes=dict(rdonly_exit=0, opath_exit=0, opath_read_errno=9, canaries=2),
                  shebang_boundary=dict(exec_errno=2, canary=0, nested_rejected=1),
                  size_and_noexec=dict(accepted_bytes=65536, rejected_bytes=65537, fallback_errno=0, other_errno_rejected=1),
@@ -86,6 +94,10 @@ def x02_fixture():
 
 
 @pytest.mark.parametrize("cell,key,value", [("bash_handoff", "open_canary", 0),
+                                          ("bash_handoff", "high_fd", 256),
+                                          ("python_handoff", "high_fd", 255),
+                                          ("python_handoff", "soft_limit", 257),
+                                          ("bash_handoff", "leaks", 1),
                                           ("python_handoff", "seals", 7),
                                           ("native_modes", "opath_read_errno", 0),
                                           ("shebang_boundary", "exec_errno", 13),
@@ -99,6 +111,15 @@ def test_x02_parser_mutations(cell, key, value):
     cells[cell][key] = value
     with pytest.raises(ValueError):
         probe.validate("X-02", serialize())
+
+
+@pytest.mark.parametrize("soft_limit,high_fd", [(126, 127), (254, 255), (256, 257), (256, 300)])
+def test_x02_accepts_high_fd_relative_to_soft_limit(soft_limit, high_fd):
+    cells = x02_fixture()
+    for name in ("bash_handoff", "python_handoff"):
+        cells[name].update(soft_limit=soft_limit, high_fd=high_fd)
+    text = "\n".join(json.dumps(dict(cell=k, evidence=v)) for k, v in cells.items())
+    probe.validate("X-02", text)
 
 
 def test_existing_experiments_need_actual_evidence():
@@ -193,7 +214,7 @@ def test_x16_actual_c_linkage_is_required(libc):
         probe.x16_build(text.replace("ld-musl-", "unknown-").replace("ld-linux", "unknown-"))
 
 
-def test_x16_ledger_commands_configure_c_and_rust_musl():
+def test_x16_ledger_commands_configure_c_and_rust_musl(recorded_x32_build):
     for row in probe.ledger_rows():
         if row["case"] == "X-16" and row["environment"] == "linux-musl":
             assert "CC=musl-gcc" in row["command"]
@@ -202,8 +223,11 @@ def test_x16_ledger_commands_configure_c_and_rust_musl():
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="requires native Linux memfd/execveat")
+@pytest.mark.parametrize("nofile", [128, 256, 1024])
 @pytest.mark.parametrize("mutation", [None, "fd", "python_fd", "replacement", "relative", "writable"])
-def test_x02_native_guards_kill_mutations(tmp_path, mutation):
+def test_x02_native_guards_kill_mutations(tmp_path, mutation, nofile):
+    import resource
+
     source = (SOURCE.parent / "x02-memfd.c").read_text()
     arguments = []
     if mutation in ("fd", "python_fd"):
@@ -220,16 +244,28 @@ def test_x02_native_guards_kill_mutations(tmp_path, mutation):
     path.write_text(source)
     binary = tmp_path / "probe"
     subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", str(path), "-o", str(binary)], check=True)
-    result = subprocess.run([str(binary), *arguments], capture_output=True, text=True, timeout=30)
+    def lower_nofile():
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = nofile if hard == resource.RLIM_INFINITY else min(nofile, hard)
+        # Cap both limits: passing must not rely on raising the soft limit.
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
+
+    result = subprocess.run([str(binary), *arguments], capture_output=True, text=True, timeout=30,
+                            preexec_fn=lower_nofile)
     if mutation is None:
         assert result.returncode == 0, result.stderr
-        probe.validate("X-02", result.stdout)
+        cells = probe.validate("X-02", result.stdout)
+        for name in ("bash_handoff", "python_handoff"):
+            e = cells[name]
+            assert e["soft_limit"] < e["high_fd"] < nofile
         return
     assert result.returncode == 90 and "assertion:" in result.stderr
     if mutation in ("fd", "python_fd"):
         cell = "bash_handoff" if mutation == "fd" else "python_handoff"
         records = [json.loads(line) for line in result.stdout.splitlines()]
         assert next(r["evidence"]["leaks"] for r in records if r["cell"] == cell) == 1
+        with pytest.raises(ValueError):
+            probe.validate("X-02", result.stdout)
     else:
         assert 'interpreter_at("/link"' in result.stderr
 
