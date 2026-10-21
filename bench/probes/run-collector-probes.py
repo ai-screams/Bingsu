@@ -97,6 +97,21 @@ def run_probe(case: str, command: list[str], timeout_s: float) -> ProbeResult:
     return result
 
 
+def x16_build(stdout, expected=None):
+    """Require evidence from the C executable, independent of the Rust target."""
+    def field(name):
+        values = re.findall(r"^X-16 " + name + r"=(.+)$", stdout, re.M)
+        require(len(values) == 1, "missing X-16 C build " + name)
+        return values[0]
+    compiler, flags = field("compiler"), field("cflags")
+    loader, c_libc = field("elf_interpreter"), field("c_libc")
+    libc = "musl" if re.fullmatch(r"/[^\s]*ld-musl-[^/\s]+\.so\.1", loader) else "glibc"
+    require(libc == "musl" or re.fullmatch(r"/[^\s]*ld-linux[^/\s]*\.so\.[12]", loader), "unidentified X-16 C linkage")
+    require(c_libc == ("non-glibc" if libc == "musl" else "glibc"), "X-16 C headers/linkage mismatch")
+    require(expected is None or libc == expected, "X-16 C linkage does not match Rust target")
+    return dict(compiler=compiler, compile_flags=flags, elf_interpreter=loader, libc=libc)
+
+
 def validate(case, stdout, mutate=False):
     """Validate raw observations, not a standalone PASS word."""
     if case == "X-14":
@@ -106,6 +121,7 @@ def validate(case, stdout, mutate=False):
         require(changes >= (999999 if mutate else 2) and 0 < baseline < limit, "X-14 status/AS evidence")
         return {"status": {"changes": changes, "index_unchanged": 1, "baseline": baseline, "limit": limit}}
     if case == "X-16":
+        x16_build(stdout)
         for cell in CELLS[case]:
             require(stdout.splitlines().count(f"X-16 {cell} EPERM unchanged") == (2 if mutate else 1), "missing X-16 denial")
         require("X-16 PASS cells=6 fsize=0 control_truncated=1" in stdout, "missing FSIZE control")
@@ -121,7 +137,7 @@ def validate(case, stdout, mutate=False):
             e = cells[cell]
             require(e["closed_exit"] != 0 and e["closed_canary"] == 0 and e["open_exit"] == 0
                     and e["open_canary"] == (2 if mutate else 1) and e["exec_errno"] == 0
-                    and e["leaks"] == 0 and e["seals"] & 15 == 15 and e["fallback_errno"] in (0, 22), "handoff evidence")
+                    and e["leaks"] == 0 and e["high_fd"] == 1025 and e["soft_limit"] == 256 and e["seals"] & 15 == 15 and e["fallback_errno"] in (0, 22), "handoff evidence")
             require(e["noexec_errno"] == (0 if e["fallback_errno"] == 22 else 13), "NOEXEC_SEAL execution refusal")
         require(cells["native_modes"] == {"rdonly_exit": 0, "opath_exit": 0, "opath_read_errno": 9, "canaries": 2}, "native modes")
         require(cells["shebang_boundary"] == {"exec_errno": 2, "canary": 0, "nested_rejected": 1}, "shebang boundary")
@@ -131,7 +147,7 @@ def validate(case, stdout, mutate=False):
         e = cells["system_walk"]
         require(e["native"] == 1 and e["exit"] == 0 and e["canary"] == 1 and e["links"] >= 1
                 and e["merged_usr"] == 1, "merged-/usr walk")
-        require(cells["refusals"] == dict.fromkeys(("relative", "relative_link", "env", "proc_missing", "replaced_link", "writable_chain"), 1), "refusal fixtures")
+        require(cells["refusals"] == dict.fromkeys(("relative", "relative_link", "env", "proc_missing", "replaced_link", "writable_chain", "writable_control", "relative_control", "replacement_control"), 1), "refusal fixtures")
     else:
         for cell in CELLS[case][:-1]:
             e = cells[cell]
@@ -219,10 +235,15 @@ def execute_case(case, target=None):
                     command += ["--target", target]
                 command += ["--test", "filter", "--", "--exact", "runtime::x16_all_mutations_are_denied_with_fsize_zero", "--nocapture", "--test-threads=1"]
             result = run_probe(case, command, 900)
-            if target and "musl" in target:
+            if case == "X-14" and target and "musl" in target:
                 result.libc = "musl (static target)"
         if result.outcome == "PASS":
             try:
+                if case == "X-16":
+                    expected = ("musl" if "musl" in target else "glibc") if target else None
+                    c_build = x16_build(result.evidence["stdout"], expected)
+                    result.evidence["c_build"] = c_build
+                    result.libc = c_build["libc"] + " (verified C ELF interpreter)"
                 result.evidence["cells"] = validate(case, result.evidence["stdout"])
                 if case in ("X-14", "X-16"):
                     try:
@@ -239,7 +260,7 @@ def execute_case(case, target=None):
         return result
 
 
-def ledger_rows():
+def ledger_rows(allow_stale=False):
     rows = list(csv.DictReader((HERE / "collector-acceptance.tsv").open(), delimiter="\t"))
     require(rows and set(rows[0]) == set(FIELDS), "ledger schema")
     expected = set()
@@ -262,6 +283,15 @@ def ledger_rows():
                        and r["outcome"] == "PASS" and r["evidence"]["environment"] == row["environment"]]
             require(len(matches) == 1, "observed evidence mismatch")
             result = matches[0]
+            if allow_stale and result.get("build_id") != build_id(row["case"]):
+                row.update(status="not observed", outcome="BLOCKED", reason="observed build_id is stale")
+                continue
+            require(result.get("build_id") == build_id(row["case"]), "observed build_id is stale")
+            require(type(result["evidence"].get("returncode")) is int and result["evidence"]["returncode"] == 0,
+                    "observed returncode must be 0")
+            if row["case"] == "X-16":
+                c_build = x16_build(result["evidence"]["stdout"], row["environment"].removeprefix("linux-"))
+                require(result["evidence"].get("c_build") == c_build, "X-16 C build record mismatch")
             require(result["platform"] == ("Darwin" if row["case"] == "X-32" else "Linux"), "wrong native platform")
             require(row["cell"] in validate(row["case"], result["evidence"]["stdout"]), "observed cell missing")
             if row["case"] == "X-32":
@@ -285,7 +315,7 @@ def main():
     if args.ledger_out and args.ledger_out.resolve() == (HERE / "collector-acceptance.tsv").resolve():
         parser.error("use a separate output ledger")
     try:
-        rows = ledger_rows()
+        rows = ledger_rows(allow_stale=True)
     except (ValueError, KeyError, OSError) as error:
         print(f"BLOCKED: {error}")
         return 2

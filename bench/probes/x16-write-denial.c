@@ -46,6 +46,11 @@ static void refused(const char *name, long result) {
     say(" EPERM unchanged\n");
 }
 int main(int argc, char **argv) {
+#ifdef __GLIBC__
+    say("X-16 c_libc=glibc\n");
+#else
+    say("X-16 c_libc=non-glibc\n");
+#endif
     require(argc == 3 && chdir(argv[1]) == 0);
     int fd = open("filter.bpf", O_RDONLY | O_CLOEXEC);
     struct sock_filter program[4096];
