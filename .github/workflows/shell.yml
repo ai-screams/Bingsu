@@ -162,11 +162,11 @@ jobs:
           if [ "$LIBC" = musl ]; then args+=(--target x86_64-unknown-linux-musl); dir=target/x86_64-unknown-linux-musl; fi
           cargo build "${args[@]}"
           echo "BINGSU_BIN=$PWD/$dir/$PROFILE/bingsu" >> "$GITHUB_ENV"
-      # K82 uses a glibc test binary with LD_PRELOAD. Build it before pytest
-      # so its 120-second Cargo discovery cannot turn into a cold compile.
+      # K82 uses a glibc test binary with LD_PRELOAD; C3 uses a main-thread
+      # reader target. Build both before pytest (shell tests never compile).
       - name: Build procfs test profile
         if: matrix.libc == 'gnu' && matrix.profile == 'debug'
-        run: cargo test -j 2 -p bingsu --bin bingsu --no-run
+        run: cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --no-run
       # strace, and a venv with the hash-pinned test dependencies: the system
       # python refuses pip installs (PEP 668).
       - name: Install strace and the test dependencies
@@ -212,7 +212,7 @@ jobs:
       - run: cargo build -p bingsu -p bingsu-collect
       - name: Generate shape-only init fixture
         run: |
-          cargo test -j 2 -p bingsu --bin bingsu --no-run
+          cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --no-run
           fixture=$(mktemp -d "$PWD/target/shape-only-fixture.XXXXXX")
           M3A_FIXTURE_DIR="$fixture" M3A_FIXTURE_ROOT="$fixture" \
             cargo test -j 2 -p bingsu --bin bingsu commands::init::tests::write_shape_only_shell_fixture -- --exact --ignored --test-threads=1

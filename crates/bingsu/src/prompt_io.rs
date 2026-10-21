@@ -122,6 +122,18 @@ const CLOCK_KIND: u8 = 1;
 #[cfg(target_os = "macos")]
 const CLOCK_KIND: u8 = 2;
 
+/// Bind the entry timestamp to the identity observed by the fixed clock path.
+/// Both entry and observation use this process's same suspend-inclusive clock.
+pub(crate) fn entry_clock(deadline: Deadline, observed: Clock) -> Option<Clock> {
+    (observed.kind == CLOCK_KIND
+        && observed.boot != [0; 16]
+        && deadline.remaining(observed.now).is_some())
+    .then_some(Clock {
+        now: deadline.start(),
+        ..observed
+    })
+}
+
 pub(crate) fn monotonic_ns() -> Result<u64, ClockError> {
     #[cfg(target_os = "linux")]
     let kind = libc::CLOCK_BOOTTIME;
@@ -425,6 +437,45 @@ fn clock_domain() -> Result<[u8; 16], ClockError> {
 
 #[cfg(test)]
 mod tests {
+    // 이것을 실패시키는 것: 준비 시각을 entry로 쓰거나 다른 kind/boot/마감 밖 관찰을 결합하는 것.
+    #[test]
+    fn entry_clock_uses_only_the_original_deadline_start() {
+        let deadline = Deadline::from_entry(100, 50).unwrap();
+        let observed = Clock {
+            boot: [1; 16],
+            domain: [2; 16],
+            kind: CLOCK_KIND,
+            resume: 0,
+            now: 102,
+        };
+        assert_eq!(
+            entry_clock(deadline, observed),
+            Some(Clock {
+                now: 100,
+                ..observed
+            })
+        );
+        for bad in [
+            Clock {
+                kind: 0,
+                ..observed
+            },
+            Clock {
+                boot: [0; 16],
+                ..observed
+            },
+            Clock {
+                now: 99,
+                ..observed
+            },
+            Clock {
+                now: 150,
+                ..observed
+            },
+        ] {
+            assert_eq!(entry_clock(deadline, bad), None);
+        }
+    }
     // 이것을 실패시키는 것: 제품 예산 상수 변경 또는 진입 시각 외 기준으로 마감 계산.
     #[test]
     fn entry_uses_the_provisional_whole_prompt_budget() {

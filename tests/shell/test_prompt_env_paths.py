@@ -3,6 +3,8 @@ repository; the hook must still pass only the roots pinned by init, and the
 binary (with every process and thread it starts) must touch nothing under
 the repository."""
 import os
+import ast
+import hashlib
 import re
 import shutil
 import subprocess
@@ -496,12 +498,32 @@ def prompt_sources(pinned):
     return dirs, {store + "/" + n for n in ("snapshot", "last-good", "marker")}
 
 
-def prompt_open(call, path, pinned, root):
+
+def prompt_collection_sources(pinned, cwd):
+    if cwd is None or not 1 <= len(cwd) <= 65536 or not cwd.startswith(b"/") or b"\0" in cwd:
+        return set(), set()
+    _, snapshots = prompt_sources(pinned)
+    context = os.path.dirname(next(iter(snapshots)))
+    root = context + "/collections-v1"
+    address = root + "/" + hashlib.sha256(cwd).hexdigest()
+    store = address + "/store"
+    return {root, address, store}, {store + "/response", store + "/previous"}
+
+
+def prompt_cwd(call):
+    words = [ast.literal_eval('b"' + word + '"') for word in QUOTED.findall(args_of(call)[1])]
+    values = [words[i+1] for i in range(1, len(words)-1) if words[i] == b"--pwd"]
+    return values[0] if len(values) == 1 else None
+
+def prompt_open(call, path, pinned, root, cwd=None):
     if call.name != "openat":
         return False
     args = args_of(call)
     flags = open_flags(args[2])
     dirs, files = prompt_sources(pinned)
+    collection_dirs, collection_files = prompt_collection_sources(pinned, cwd)
+    dirs |= collection_dirs
+    files |= collection_files
     process = f"/proc/{root}"
     kernel_dirs = {"/proc", process, process + "/ns", "/proc/sys", "/proc/sys/kernel", "/proc/sys/kernel/random"}
     kernel_files = {process + "/timens_offsets", "/proc/sys/kernel/random/boot_id"}
@@ -627,7 +649,7 @@ class HelperExecutableWalk:
         return False
 
 
-def prompt_root_io(front, boundary, exe, pinned, root):
+def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
     """Track the root's prepared fds. No path operation survives the filter.
 
     Real N3 and N4 captures cover helper publication and first-prompt fallback.
@@ -637,6 +659,7 @@ def prompt_root_io(front, boundary, exe, pinned, root):
     acl_fallback = set()
     fs_observed = set()
     _, files = prompt_sources(pinned)
+    files |= prompt_collection_sources(pinned, cwd)[1]
     table = {r[0] for r in _ROWS if r[0] != "-"}
     for c in front:
         args = args_of(c)
@@ -659,7 +682,7 @@ def prompt_root_io(front, boundary, exe, pinned, root):
                       and args[1:] == ['"system.posix_acl_access"', "NULL", "0"])
             system = path == exe and c.name == "execve" or bool(SYSTEM_PATHS.fullmatch(path))
             empty_stat = path == "" and c.name in {"newfstatat", "statx"} and "AT_EMPTY_PATH" in c.args
-            assert (system or bootstrap or acl_ok or empty_stat or prompt_open(c, path, pinned, root)
+            assert (system or bootstrap or acl_ok or empty_stat or prompt_open(c, path, pinned, root, cwd)
                     or time_namespace_readlink(c, path, root)
                     or proc_self_readlink(c, path)), ("root path", c, path)
         if c.name == "readlinkat":
@@ -671,7 +694,7 @@ def prompt_root_io(front, boundary, exe, pinned, root):
             result = re.match(r"(\d+)(?:<.*>)?$", c.ret)
             if result:
                 fd = int(result.group(1))
-                held[fd] = (paths[0], prompt_open(c, paths[0], pinned, root))
+                held[fd] = (paths[0], prompt_open(c, paths[0], pinned, root, cwd))
                 acl_fallback.discard(fd)
                 fs_observed.discard(fd)
         if c.name in {"fstatfs", "fgetxattr"}:
@@ -762,7 +785,10 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
     assert not stray, ("root network or process calls", stray)
     seen = {c.name for c in front[1:] if c.name in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}} - SPAWNS
     assert seen == ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
-    prompt_root_io(front, filters[0].index, exe, pinned, root)
+    cwd = prompt_cwd(initial)
+    prompt_root_io(front, filters[0].index, exe, pinned, root, cwd)
+    if collector_limit == 0 and cwd is not None:
+        assert_collection_trace(front, filters[0].index, pinned, cwd)
     # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
     assert all(c.name in HELPER_CALLS for c in helper), [c for c in helper if c.name not in HELPER_CALLS]
     # M3a collector exec: exactly the pinned executable and __collect-legacy-v1,
@@ -849,7 +875,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
 
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
 # 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
-@pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path):
     """Every path argument of every traced call (open, stat, rename, link,
     ...) of the binary and its threads and children. SYSTEM_PATHS was
@@ -858,6 +884,7 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     (/lib/ld-musl-*.so.1) by its shape; the CI musl build on x86_64
     also spawns the fixed helper before its filter. NixOS and Guix
     (/nix/store, /gnu/store) are not covered and fail here."""
+    assert shutil.which("strace"), "Linux path gate must execute strace"
     inst = Install(tmp_path)
     trusted = trusted_env(tmp_path)
     script = inst.init("bash", trusted)
@@ -884,7 +911,7 @@ TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}
 
 # 이것을 실패시키는 것: 필터 뒤에 표에 없는 호출이 필요한 것(이 환경의 할당자·unwind가 부르는 호출을 표에서 빠뜨림),
 # 정상 프롬프트에서 호출이 EPERM으로 거부되는 것.
-@pytest.mark.skipif(shutil.which("strace") is None, reason="strace (Linux) not available")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("pwd", ["/srv/p", "/" + "a/" * 32767])
 def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
     """Every call the prompt makes after its seccomp filter is installed
@@ -892,6 +919,7 @@ def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
     table, and none is refused: the table is complete for this libc and
     allocator. LD_PRELOAD in the environment (an allocator under test) is
     passed through."""
+    assert shutil.which("strace"), "Linux syscall gate must execute strace"
     exe = str(Install(tmp_path).exe)
     trace = tmp_path / "trace"
     args = [exe, "prompt", "--ctx", "1", "--record", "B1", "--width", "100", "--runtime-root=1:2:/r",
@@ -907,3 +935,103 @@ def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
     assert names <= TABLE_SYSCALLS, sorted(names - TABLE_SYSCALLS)
     refused = [l for l in after if "= -1 EPERM" in l]
     assert refused == [], refused[:5]
+
+
+def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None):
+    """Exact C3 increment, separate from existing runtime/context C-axis calls."""
+    from fsbudget.formula import collection_front_expected
+    dirs, files = prompt_collection_sources(pinned, cwd)
+    assert dirs, "fixture needs a canonical cwd"
+    root, address, store = sorted(dirs, key=len)
+    expected = [root, address, store, store + "/response", store + "/previous"]
+    _, snapshots = prompt_sources(pinned)
+    if required is None:
+        required = any(c.name == "openat" and call_paths(c) == [os.path.dirname(root) + "/snapshot"] for c in calls)
+    opens, held, sizes, reads = [], {}, {}, {}
+    valid_headers = {}
+    counts = {name: 0 for name in ("openat", "fstat", "fstatfs", "fgetxattr", "getxattr", "read")}
+    facts = {}
+    stopped = False
+    for c in calls:
+        args = args_of(c)
+        paths = call_paths(c)
+        scoped = [p for p in paths if p == root or p.startswith(root + "/")]
+        if c.name == "openat" and scoped:
+            assert not stopped and len(opens) < 5, ("collection extra open", c)
+            path = scoped[0]
+            assert path == expected[len(opens)], ("collection address/order", c, expected)
+            assert c.index < boundary, ("collection post-filter open", c)
+            assert prompt_open(c, path, pinned, c.pid, cwd), ("collection flags/parent", c)
+            if opens:
+                parent = int(args[0].split("<")[0])
+                assert held.get(parent) == os.path.dirname(path), ("collection parent fd", c)
+                assert facts[parent] == {"fstat", "fstatfs", "fgetxattr", "getxattr"}, ("collection unverified parent", c)
+            opens.append(c); counts["openat"] += 1
+            result = re.match(r"(\d+)(?:<.*>)?$", c.ret)
+            if result:
+                fd = int(result.group(1)); held[fd] = path; facts[fd] = set()
+            elif path in dirs:
+                stopped = True
+            continue
+        if scoped:
+            raise AssertionError(("collection unexpected path effect", c))
+        if c.name == "getxattr":
+            match = re.fullmatch(r'"/proc/self/fd/(\d+)"', args[0])
+            fd = int(match.group(1)) if match else -1
+        elif c.name in {"fstat", "newfstatat", "statx", "fstatfs", "fgetxattr", "read", "close"}:
+            match = re.match(r"(\d+)(?:<.*>)?$", args[0])
+            fd = int(match.group(1)) if match else -1
+        else:
+            continue
+        if fd not in held:
+            continue
+        path = held[fd]
+        if c.name == "close":
+            held.pop(fd); facts.pop(fd)
+            continue
+        name = "fstat" if c.name in {"newfstatat", "statx"} else c.name
+        if name == "read":
+            assert c.index > boundary and path in files, ("collection read phase/fd", c)
+            assert facts[fd] == {"fstat", "fstatfs", "fgetxattr"}, ("collection unverified file", c)
+            previous = reads.setdefault(path, [])
+            want = 64 if not previous else min(16384, sizes[path] - sum(previous))
+            assert want > 0 and int(args[2]) == want and c.ret == str(want), ("collection bounded read", c, want)
+            if not previous:
+                header = ast.literal_eval("b" + args[1])
+                assert len(header) == 64, ("collection header bytes", c)
+                total = int.from_bytes(header[12:16], "little") + 64
+                valid_headers[path] = (header[:8] == b"BNGRES02" and header[8:12] == bytes([2,0,64,0])
+                                       and header[20:] == bytes(44) and total == sizes[path] and total <= 262144)
+            else:
+                assert valid_headers[path], ("collection body after invalid header", c)
+            previous.append(want)
+        else:
+            assert c.index < boundary and name not in facts[fd], ("collection facts count/phase", c)
+            if name == "fstat":
+                if c.name in {"newfstatat", "statx"}:
+                    assert args[1] == '""' and "AT_EMPTY_PATH" in c.args, ("collection fd metadata", c)
+                size = re.search(r"st[x]?_size=(\d+)", c.args)
+                assert size, ("collection file length observation", c)
+                sizes[path] = int(size.group(1))
+            if name in {"getxattr", "fgetxattr"}:
+                assert args[1:] == ['"system.posix_acl_access"', "NULL", "0"], ("collection ACL arguments", c)
+                if name == "getxattr":
+                    assert path in dirs and "fgetxattr" in facts[fd], ("collection ACL fallback", c)
+            facts[fd].add(name)
+        counts[name] += 1
+    if not opens:
+        assert not required, "collection root open missing"
+        return counts
+    if opens[0].ret.startswith("-1 ENOENT"):
+        assert counts == collection_front_expected(0, (), (), absent=True), counts
+        return counts
+    assert len(opens) <= 5
+    # Full normal fixture: exact facts counts and exact immutable header/body reads.
+    if len(opens) == 5 and all(not c.ret.startswith("-1") for c in opens):
+        want = collection_front_expected(3, tuple(sizes[p] for p in expected[3:]), tuple(sizes[p]-64 for p in reads))
+        # Only an invalid declaration may stop before its exact fstat length.
+        want["read"] = sum(1 + ((sizes[p]-64+16383)//16384 if valid_headers[p] else 0) for p in reads)
+        assert counts == want, ("collection syscall count", counts, want)
+        for path, chunks in reads.items():
+            assert (not valid_headers[path] and chunks == [64]) or sum(chunks) == sizes[path], ("collection incomplete read", path, chunks)
+    return counts

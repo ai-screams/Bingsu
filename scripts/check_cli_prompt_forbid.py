@@ -57,13 +57,13 @@ MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 TCB_SHA256 = {
     "crates/bingsu-collect/build.rs": "fadb31a93cd6238adc07e45a705b48ca9e96286a995c2ecbffe486bd41f006fd",
     "crates/bingsu-collect/src/lib.rs": "ef97306d92420c2f69cdf0d4464eeefa6ff517fc7aa10caee0b9ce717b5904f3",
-    "crates/bingsu/src/prompt_read.rs": "fcb5bddd7426048e7ee3d0a957db4dc7ab0c11d95b67d0cfc76c9fc0589414ca",
+    "crates/bingsu/src/prompt_read.rs": "5d22c0fff723e8eb5d211dcdbc0b2364ac417630602f5eef381510fe187e81f3",
     "crates/bingsu/src/prompt_spawn.rs": "a5d9658ca752e05cf6056435a00106116f874556fd7b5a06302e6a2e4753d413",
-    "crates/bingsu/src/prompt_io.rs": "973b627639a84105333ec39238a6c15ad890a62e212cf1b6869faa04328f9b30",
-    "crates/bingsu/src/prompt.rs": "c79a830309af319956c285181f349763dc104686f72b4cad8781fd17eea07588",
+    "crates/bingsu/src/prompt_io.rs": "1ce5d695c9d828da7f9ebdfda10b606219747029d6e2937af888cc3a79fb7e46",
+    "crates/bingsu/src/prompt.rs": "a593d7d74425a29ee31f0f618ff4778463801ba3aa61bbfa9633e567663c5cb2",
     "crates/bingsu/src/main.rs": "2f4d0c5f7e49ef71721c499fb9b3f757bb07bd0d402116a9fc97f2262c08b3c1",
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
-    "crates/bingsu/Cargo.toml": "498aacc68cbbbac0f22e12a6431b1ebbebc186e03d53d67deff7b0946aa46730",
+    "crates/bingsu/Cargo.toml": "2343243f569366f307928f9f87ad367ac0f9dc26f78179536900149a015d861a",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
 }
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"

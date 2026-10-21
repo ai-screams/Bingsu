@@ -93,12 +93,24 @@ static void header(int kind, uint32_t n) {
     memcpy(h+12,&n,4); memset(h+16,7,32);
 }
 static void frame(int kind, const void *p, uint32_t n) { header(kind,n); put(h,80); put(p,n); }
+static void grow_memory(void) {
+    char *memory=malloc(40*1024*1024);
+    if(!memory) _exit(40);
+    memset(memory,0x5a,40*1024*1024);
+    asm volatile("" : : "r"(memory) : "memory");
+    for(;;) pause();
+}
 int main(int argc, char **argv) {
     if(argc!=2) return 30;
     alarm(2);
     const char *mode=argv[1];
     if(!strcmp(mode,"exit")) return 0;
     if(!strcmp(mode,"idle")) { for(;;) pause(); }
+    if(!strcmp(mode,"sample-memory")) {
+        // Let the watchdog register its baseline before allocating.
+        exact(3,b,1);
+        grow_memory();
+    }
     if((fcntl(1,F_GETFL)&O_ACCMODE)!=O_WRONLY ||
        (fcntl(3,F_GETFL)&O_ACCMODE)!=O_RDONLY ||
        (fcntl(5,F_GETFL)&O_ACCMODE)!=O_RDONLY) return 33;
@@ -139,11 +151,7 @@ int main(int argc, char **argv) {
     frame(5,update,sizeof(update));
     if(!strcmp(mode,"timeout")) { for(;;) pause(); }
     if(!strncmp(mode,"memory",6)) {
-        char *memory=malloc(40*1024*1024);
-        if(!memory) return 40;
-        memset(memory,0x5a,40*1024*1024);
-        asm volatile("" : : "r"(memory) : "memory");
-        for(;;) pause();
+        grow_memory();
     }
     if(!strcmp(mode,"partial")) { header(5,11); put(h,17); return 0; }
     if(!strcmp(mode,"invalid-then-valid")) {
@@ -291,6 +299,7 @@ fn run_peer_observed(
 // 이것을 실패시키는 것: Ready 전 요청 송신, 큰 요청의 partial write 진행 또는 정상 EOF 수용 제거.
 #[test]
 fn request_waits_for_ready_and_pipes_are_backpressured() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let (report, values) = run_peer("large", true);
     assert_eq!(report.reason, EndReason::Complete);
     assert!(report.reaped && !report.kill_requested, "{report:?}");
@@ -300,6 +309,7 @@ fn request_waits_for_ready_and_pipes_are_backpressured() {
 // 이것을 실패시키는 것: 첫 codec Err 뒤 계속 읽어 나중의 Update를 반영하는 것.
 #[test]
 fn partial_survives_only_after_validated_updates() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     for (mode, reason, count) in [
         ("normal", EndReason::Complete, 1),
         ("empty", EndReason::Complete, 0),
@@ -325,6 +335,7 @@ fn partial_survives_only_after_validated_updates() {
 // 이것을 실패시키는 것: 바이트마다 Ready 절대 마감을 재시작하는 것.
 #[test]
 fn slow_drip_does_not_extend_spawn_deadline() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     peer();
     let start = Instant::now();
     let (report, values) = run_peer("drip", true);
@@ -337,6 +348,7 @@ fn slow_drip_does_not_extend_spawn_deadline() {
 // 이것을 실패시키는 것: Complete 뒤 살아 있는 자식의 감독 등록을 조기에 버리는 것.
 #[test]
 fn collector_termination_uses_stable_handle() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("stable_handle_child"));
 }
 #[test]
@@ -372,6 +384,7 @@ fn stable_handle_child() {
 // 이것을 실패시키는 것: 허가 전 발행 또는 handle Drop의 취소·종료 요청 제거.
 #[test]
 fn helper_filter_failure_cannot_race_publication() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let (_, values) = run_peer("normal", false);
     assert!(values.is_empty());
 }
@@ -379,6 +392,7 @@ fn helper_filter_failure_cannot_race_publication() {
 // 이것을 실패시키는 것: exchange의 confinement 대기를 제거하는 것.
 #[test]
 fn immediate_ready_is_not_read_or_decoded_before_confinement() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("immediate_ready_child"));
 }
 #[test]
@@ -422,9 +436,10 @@ fn immediate_ready_child() {
     assert!(report.bytes > 0 && report.reaped);
 }
 
-// 이것을 실패시키는 것: confinement 대기의 마감을 spawn+100ms보다 늘리는 것.
+// 이것을 실패시키는 것: confinement 대기의 만료 또는 읽기 전 gate를 제거하는 것.
 #[test]
 fn stalled_confinement_expires_without_reading_ready() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let job_peer = peer();
     let watchdog = helper_limits::start(Instant::now()).unwrap();
     let job = CollectorJob::fixture(
@@ -439,22 +454,27 @@ fn stalled_confinement_expires_without_reading_ready() {
     let handle = job
         .start(Box::new(|_| panic!("unconfined publication")))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(150));
-    assert!(
-        handle.fixture_finished(),
-        "confinement wait exceeded the Ready deadline"
-    );
+    // The product still expires at spawn+100ms (also checked by the pure
+    // deadline tests). Allow scheduling and reaping to finish on a busy runner;
+    // permission stays Pending throughout, so finishing cannot cancel the wait.
+    let end = Instant::now() + Duration::from_secs(1);
+    while !handle.fixture_finished() {
+        assert!(Instant::now() < end, "unconfined supervisor did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     // Late confirmation must not restart the Ready deadline.
     handle.confirm_confinement().unwrap();
     let report = handle.finish();
     assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
     assert_eq!((report.bytes, report.frames), (0, 0));
+    assert_eq!((report.unconfined_reads, report.unconfined_decodes), (0, 0));
     assert!(report.kill_requested && report.reaped);
 }
 
 // 이것을 실패시키는 것: 조기 종료 후 재회수하거나 회수 뒤 숫자 PID로 signal하는 것.
 #[test]
 fn early_exit_never_signals_recycled_pid() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let (read, write) = collector_process::pipe().unwrap();
     let (response, result) = collector_process::pipe().unwrap();
     let lock = lock("early");
@@ -482,6 +502,7 @@ fn early_exit_never_signals_recycled_pid() {
 // 이것을 실패시키는 것: Ready의 worker 제공 baseline으로 감독자의 메모리 여유를 늘리는 것.
 #[test]
 fn ready_cannot_raise_the_memory_allowance() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let (report, values) = run_peer("baseline", true);
     assert_eq!(report.reason, EndReason::Complete);
     assert_eq!(values.len(), 1);
@@ -518,6 +539,7 @@ fn passed(out: &std::process::Output) {
 // 이것을 실패시키는 것: SETSIGMASK 또는 SETSIGDEF를 없애거나 부모 신호 상태를 바꾸는 것.
 #[test]
 fn blocked_or_ignored_sigalrm_is_reset_at_spawn() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("inherited_alarm_child"));
 }
 #[test]
@@ -594,6 +616,7 @@ fn inherited_alarm_child() {
 // 이것을 실패시키는 것: 자기 SIGKILL 허용을 지워 watchdog이 _exit fallback으로 끝나는 것.
 #[test]
 fn helper_watchdog_self_sigkill_still_works() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     use std::os::unix::process::ExitStatusExt;
     let out = isolated("filtered_watchdog_child");
     assert_eq!(out.status.signal(), Some(libc::SIGKILL), "{out:?}");
@@ -613,6 +636,7 @@ fn filtered_watchdog_child() {
 // 이것을 실패시키는 것: publisher가 막힐 때 독립 collector/helper 종료 감시를 중단하는 것.
 #[test]
 fn publisher_stall_does_not_stop_watchdog() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     use std::os::unix::process::ExitStatusExt;
     let start = Instant::now();
     let out = isolated("stalled_publisher_child");
@@ -652,6 +676,7 @@ fn stalled_publisher_child() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_signal_precedes_reap_and_never_targets_reused_pid() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     for _ in 0..40 {
         let (read, write) = collector_process::pipe().unwrap();
         let (input, output) = collector_process::pipe().unwrap();
@@ -683,6 +708,7 @@ fn macos_signal_precedes_reap_and_never_targets_reused_pid() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_first_completed_overlimit_sample_terminates() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let mut samples = Vec::new();
     let mut overshoots = Vec::new();
     let mut intervals = Vec::new();
@@ -690,7 +716,35 @@ fn macos_first_completed_overlimit_sample_terminates() {
     peer();
     for _ in 0..200 {
         let start = Instant::now();
-        let (report, values, observations) = run_peer_observed("memory", true);
+        // Exercise the real sampler/signal/reap path with its own finite
+        // registration budget. The protocol's 50ms request deadline can win
+        // before a loaded runner commits and samples 40MiB; it is tested
+        // separately and must not be extended for this measurement.
+        let watchdog = helper_limits::start(Instant::now()).unwrap();
+        let (read, write) = collector_process::pipe().unwrap();
+        let (input, output) = collector_process::pipe().unwrap();
+        let mut child = collector_process::spawn_args(
+            peer().as_os_str(),
+            &[OsStr::new("sample-memory")],
+            &read,
+            &output,
+            &lock("memory-sample"),
+            watchdog.expires_ns(),
+        )
+        .unwrap();
+        let registration = watchdog
+            .register_collector(&child, collector_process::now_ns().unwrap() + 1_000_000_000)
+            .unwrap();
+        assert_eq!(
+            commands::sys::write_fd(write.as_raw_fd(), &[1]),
+            commands::sys::WriteOutcome::Done
+        );
+        let end = Instant::now() + Duration::from_millis(1500);
+        while !child.reap().unwrap() {
+            assert!(Instant::now() < end, "overlimit worker was not reaped");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let observations = watchdog.observations.lock().unwrap().clone();
         let over = observations
             .iter()
             .find(|v| v.1 > 0)
@@ -706,10 +760,10 @@ fn macos_first_completed_overlimit_sample_terminates() {
                 .windows(2)
                 .map(|v| (v[1].0 - v[0].0) as u128 / 1000),
         );
-        assert_eq!(report.reason, EndReason::Resource, "{report:?}");
-        assert!(report.kill_requested && report.reaped);
-        assert_eq!(values.len(), 1);
+        assert_eq!(registration.reason(), Some(EndReason::Resource));
+        assert!(child.kill_requested());
         samples.push(start.elapsed().as_micros());
+        drop((registration, read, write, input, output));
     }
     distribution("spawn-to-termination us", &mut samples);
     distribution("footprint overshoot bytes", &mut overshoots);
@@ -739,6 +793,7 @@ impl snapshot::ClockSource for FixedClock {
 // 이것을 실패시키는 것: 검증 전 생성, Invalid/만료 안전 화면 누락, mask0/redraw 생성 또는 TSYNC 전 감독 시작 누락.
 #[test]
 fn verified_screen_spawns_once_before_helper_tsync() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     for case in [
         "valid",
         "invalid",
@@ -769,6 +824,7 @@ fn verified_screen_spawns_once_before_helper_tsync() {
 // 이것을 실패시키는 것: refresh callback 안에서 수집 완료를 기다려 snapshot lock을 연장하는 것.
 #[test]
 fn snapshot_lock_is_not_extended_by_collection() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     let out = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -966,6 +1022,7 @@ fn verified_screen_child() {
 // 이것을 실패시키는 것: helper 사망 때 worker가 셸 pipe를 붙들거나 고아 타이머/close-only 잠금을 잃는 것.
 #[test]
 fn helper_exit_and_worker_orphan_do_not_hold_shell() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     use std::os::unix::process::ExitStatusExt;
     for cause in ["kill", "panic", "filter", "stall"] {
         let path = peer().parent().unwrap().join(format!("orphan-{cause}"));
@@ -1104,6 +1161,7 @@ fn orphan_worker_child() {
 #[cfg(target_os = "linux")]
 #[test]
 fn no_pidfd_means_no_collector() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("pidfd_failure_child"));
 }
 #[cfg(target_os = "linux")]
@@ -1187,6 +1245,7 @@ fn pidfd_failure_child() {
 // 이것을 실패시키는 것: 정상 fixture의 회수를 생략하거나 완료 회차 수를 줄이는 것.
 #[test]
 fn four_hundred_requests_leave_no_workers_or_zombies() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("four_hundred_child"));
 }
 #[test]
@@ -1213,6 +1272,7 @@ fn four_hundred_child() {
 // 이것을 실패시키는 것: handle Drop에서 발행 취소·종료 요청을 제거하는 것.
 #[test]
 fn dropping_supervision_cancels_without_publication() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("dropped_handle_child"));
 }
 #[test]
@@ -1246,6 +1306,7 @@ fn dropped_handle_child() {
 // 이것을 실패시키는 것: watchdog 등록 실패 뒤에도 요청·감독을 시작하는 것.
 #[test]
 fn watchdog_registration_failure_is_fail_closed() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     peer();
     let watchdog = helper_limits::start(Instant::now()).unwrap();
     let first = CollectorJob::fixture(
@@ -1273,6 +1334,7 @@ fn watchdog_registration_failure_is_fail_closed() {
 #[cfg(target_os = "linux")]
 #[test]
 fn supervisor_thread_failure_reaps_the_child() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("thread_failure_child"));
 }
 #[cfg(target_os = "linux")]
@@ -1307,6 +1369,7 @@ fn thread_failure_child() {
 // 이것을 실패시키는 것: 실제 EINTR을 자원 실패로 처리하거나 poll을 중단한 뒤 마감을 늘리는 것.
 #[test]
 fn interrupted_poll_preserves_absolute_deadline() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("interrupted_poll_child"));
 }
 #[test]

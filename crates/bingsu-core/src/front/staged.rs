@@ -3,6 +3,11 @@
 //! The CLI preopens `Prefetch` before confinement, then satisfies this continuation
 //! from the held descriptors and cached facts (N4 option 3, 2026-10-17).
 use super::output::Deadline;
+use crate::collection::{
+    response::{self, Completed},
+    selection::{Catalog, PRODUCT},
+    wire::{Binding, BuildId, STREAM_MAX},
+};
 use crate::color::palette::Mode;
 use crate::config::compile::ExecUnit;
 use crate::envelope::{self, Envelope, EnvelopeError};
@@ -10,7 +15,27 @@ use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
 use crate::handoff::Permit;
 use crate::snapshot::{self, Clock, FrontDecoder, FrontSnapshot, Marker, Refusal};
 use crate::status::Status;
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionCopy {
+    Current,
+    Previous,
+}
+impl CollectionCopy {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Current => 0,
+            Self::Previous => 1,
+        }
+    }
+    pub fn name(self) -> &'static [u8] {
+        match self {
+            Self::Current => b"response",
+            Self::Previous => b"previous",
+        }
+    }
+}
 
 /// Three slots suffice: parent, child, and one file. These are NOT raw OS fds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,8 +78,34 @@ impl SnapshotCopy {
 pub struct Prefetch {
     parent: Slot,
     uid: u32,
+    cwd: Option<Vec<u8>>,
 }
 impl Prefetch {
+    /// Advance only after successfully opening and validating the preceding
+    /// directory: an absent collections-v1 root must not hash the cwd.
+    pub fn collection_components(&self) -> Option<impl Iterator<Item = String> + '_> {
+        let cwd = self.cwd.as_deref()?;
+        Some(collection_components_with_address(move || {
+            crate::collection::cwd_hash::address(cwd)
+        }))
+    }
+    pub fn accepts_collection_directory(&self, facts: FdFacts) -> bool {
+        fs_trust::final_verdict(
+            &facts.entry,
+            self.uid,
+            0,
+            NextOwner::Any,
+            Last::PrivateFolder,
+            facts.local,
+            &mut PinnedGroupWrite(&[]),
+        )
+        .is_ok()
+            && facts.entry.mode == 0o040700
+    }
+    pub fn accepts_collection(&self, facts: FdFacts) -> bool {
+        trusted_file(self.uid, facts)
+            && (response::HEADER as u64..=STREAM_MAX as u64).contains(&facts.size)
+    }
     pub fn parent(&self) -> Slot {
         self.parent
     }
@@ -81,6 +132,14 @@ impl Prefetch {
                 _ => false,
             }
     }
+}
+
+fn collection_components_with_address(
+    address: impl FnOnce() -> String,
+) -> impl Iterator<Item = String> {
+    core::iter::once_with(|| String::from("collections-v1"))
+        .chain(core::iter::once_with(address))
+        .chain(core::iter::once_with(|| String::from("store")))
 }
 
 fn trusted_file(uid: u32, f: FdFacts) -> bool {
@@ -114,6 +173,8 @@ pub enum Operation {
         name: &'static [u8],
         into: Slot,
     },
+    /// Consume one of the two separately prefetched collection descriptors.
+    OpenCollection(CollectionCopy),
     Inspect(Slot),
     Read {
         slot: Slot,
@@ -174,12 +235,14 @@ enum Phase {
 enum File {
     Snapshot(SnapshotCopy),
     Marker,
+    Collection(CollectionCopy),
 }
 impl File {
     fn name(self) -> &'static [u8] {
         match self {
             Self::Snapshot(c) => c.name(),
             Self::Marker => b"marker",
+            Self::Collection(copy) => copy.name(),
         }
     }
 }
@@ -199,6 +262,13 @@ pub struct ReadPlan {
     uid: Option<u32>,
     context: Option<[u8; 4]>,
     start: Option<Clock>,
+    entry: Option<Clock>,
+    build_id: Option<BuildId>,
+    catalog: Catalog<'static>,
+    render_config: Option<super::CompiledConfig>,
+    collection_bytes: Vec<u8>,
+    collection_len: usize,
+    collection_end: usize,
     observed: Observed,
     file: File,
     decoder: Option<FrontDecoder>,
@@ -214,6 +284,7 @@ pub struct Observed {
     marker: Option<Marker>,
     clock: Option<Clock>,
     boot_changed: bool,
+    collection: Option<Box<Completed>>,
 }
 
 pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
@@ -232,6 +303,13 @@ pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
         uid: None,
         context: None,
         start: None,
+        entry: None,
+        build_id: None,
+        catalog: PRODUCT,
+        render_config: None,
+        collection_bytes: Vec::new(),
+        collection_len: 0,
+        collection_end: response::HEADER,
         observed: Observed::default(),
         file: File::Snapshot(SnapshotCopy::Current),
         decoder: None,
@@ -240,6 +318,25 @@ pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
     }
 }
 impl ReadPlan {
+    pub fn with_entry(mut self, entry: Clock) -> Self {
+        self.entry = Some(entry);
+        self
+    }
+    pub fn with_build_id(mut self, build_id: BuildId) -> Self {
+        self.build_id = Some(build_id);
+        self
+    }
+    /// Pure adapter policy seam. The product adapter uses only `prepare` and
+    /// the fixed snapshot decoder; catalogs and render inputs never come from argv.
+    pub fn with_catalog(
+        mut self,
+        catalog: Catalog<'static>,
+        config: super::CompiledConfig,
+    ) -> Self {
+        self.catalog = catalog;
+        self.render_config = Some(config);
+        self
+    }
     /// Carry the adapter's entry deadline unchanged through decoding/rendering.
     /// The adapter must check it before every OS effect; core does not read time.
     pub fn with_deadline(mut self, deadline: Deadline) -> Self {
@@ -260,6 +357,13 @@ impl ReadPlan {
             Some(Prefetch {
                 parent: self.directory,
                 uid: self.uid?,
+                cwd: self
+                    .parsed
+                    .as_ref()
+                    .ok()?
+                    .pwd
+                    .clone()
+                    .filter(|p| p.first() == Some(&b'/') && p.len() <= 65_536 && !p.contains(&0)),
             })
         } else {
             None
@@ -309,7 +413,13 @@ impl ReadPlan {
                 self.file = File::Snapshot(SnapshotCopy::LastGood);
             }
             File::Snapshot(_) => self.file = File::Marker,
-            File::Marker => self.after_close = Phase::FinalClock,
+            File::Marker if self.expected_binding().is_some() => {
+                self.file = File::Collection(CollectionCopy::Current)
+            }
+            File::Collection(CollectionCopy::Current) if self.observed.collection.is_none() => {
+                self.file = File::Collection(CollectionCopy::Previous)
+            }
+            File::Marker | File::Collection(_) => self.after_close = Phase::FinalClock,
         }
         self.phase = if self.live[Slot::File.index()] {
             Phase::CloseFile
@@ -333,7 +443,79 @@ impl ReadPlan {
                 }
                 Err(_) => false,
             },
+            File::Collection(_) => {
+                if !(response::HEADER as u64..=STREAM_MAX as u64).contains(&f.size) {
+                    return false;
+                }
+                self.collection_bytes.clear();
+                self.collection_len = f.size as usize;
+                self.collection_end = response::HEADER;
+                true
+            }
         }
+    }
+    fn expected_binding(&self) -> Option<Binding> {
+        let e = self.parsed.as_ref().ok()?;
+        let selected = self.observed.selected.as_ref()?;
+        let entry = self.entry?;
+        let start = self.start?;
+        if entry.boot != start.boot
+            || entry.kind != start.kind
+            || entry.domain != start.domain
+            || entry.resume != start.resume
+            || entry.now > start.now
+            || ![1, 2].contains(&entry.kind)
+        {
+            return None;
+        }
+        Some(Binding {
+            build_id: self.build_id?,
+            snapshot: selected.id,
+            clock_kind: entry.kind,
+            domain: entry.domain,
+            resume: entry.resume,
+            config: e.config_root.clone()?,
+            state: e.state_root.clone()?,
+            cwd: e.pwd.clone()?,
+            mask: self.catalog.worker_mask(&selected.config, e.width, false),
+        })
+    }
+    fn collection_bytes(&mut self, bytes: &[u8]) {
+        self.collection_bytes.extend_from_slice(bytes);
+        if self.collection_bytes.len() != self.collection_end {
+            return;
+        }
+        if self.collection_end == response::HEADER {
+            if response::declared_len(&self.collection_bytes).ok() != Some(self.collection_len) {
+                self.next_file();
+                return;
+            }
+            if self
+                .collection_bytes
+                .try_reserve_exact(self.collection_len - self.collection_bytes.len())
+                .is_err()
+            {
+                self.next_file();
+                return;
+            }
+            self.collection_end = self.collection_len;
+            if self.collection_bytes.len() < self.collection_end {
+                return;
+            }
+        }
+        self.observed.collection =
+            Completed::decode_with_catalog(&self.collection_bytes, self.catalog.segments)
+                .ok()
+                .filter(|r| {
+                    self.expected_binding()
+                        .zip(self.entry)
+                        .is_some_and(|(binding, entry)| r.eligible(&binding, entry))
+                })
+                .map(|r| {
+                    // Keep ownership explicit without exposing a function address.
+                    Box::new(r)
+                });
+        self.next_file();
     }
     fn directory_facts(&mut self, f: FdFacts) -> bool {
         let (Some(uid), Ok(e)) = (self.uid, self.parsed.as_ref()) else {
@@ -425,6 +607,7 @@ impl ReadPlan {
                     return;
                 }
                 match self.file {
+                    File::Collection(_) => self.collection_bytes(&bytes),
                     File::Marker => {
                         self.marker_bytes.extend_from_slice(&bytes);
                         if self.marker_bytes.len() == snapshot::MARKER {
@@ -456,6 +639,11 @@ impl ReadPlan {
                                         self.context.unwrap_or([0; 4]),
                                     )
                                 });
+                            if let Some(selected) = self.observed.selected.as_mut() {
+                                if let Some(config) = self.render_config.take() {
+                                    selected.config = config;
+                                }
+                            }
                             self.observed.last_good =
                                 copy == SnapshotCopy::LastGood && self.observed.selected.is_some();
                             self.next_file();
@@ -482,10 +670,14 @@ impl ReadPlan {
                             && start.now <= end.now
                     })
                 });
+                if self.observed.clock.is_none() {
+                    self.observed.collection = None;
+                }
                 self.stop();
             }
             (Phase::FinalClock, Observation::Failed) => {
                 self.observed.clock = None;
+                self.observed.collection = None;
                 self.stop();
             }
             (Phase::CloseParent, _) => {
@@ -536,6 +728,12 @@ impl ReadPlan {
             },
             Phase::DirectoryFacts => Operation::Inspect(self.directory),
             Phase::CloseParent => Operation::Close(self.directory.other()),
+            Phase::OpenFile if matches!(self.file, File::Collection(_)) => {
+                let File::Collection(copy) = self.file else {
+                    return None;
+                };
+                Operation::OpenCollection(copy)
+            }
             Phase::OpenFile => Operation::OpenFile {
                 parent: self.directory,
                 name: self.file.name(),
@@ -546,6 +744,10 @@ impl ReadPlan {
                 self.read_len = match self.file {
                     File::Marker => snapshot::MARKER.saturating_sub(self.marker_bytes.len()),
                     File::Snapshot(_) => self.decoder.as_ref()?.read_len(),
+                    File::Collection(_) => self
+                        .collection_end
+                        .saturating_sub(self.collection_bytes.len())
+                        .min(16_384),
                 };
                 if self.read_len == 0 {
                     return None;
@@ -638,7 +840,11 @@ fn trust_status(refusal: Refusal) -> Status {
 /// separate from snapshot identity. Saved OSC 11 observation is deferred until
 /// its observation file and address are defined (N4 review ruling).
 pub fn finish(plan: ReadPlan, observed: Observed) -> Response {
-    finish_with_catalog(plan, observed, &crate::collection::selection::PRODUCT)
+    let catalog = Catalog {
+        segments: plan.catalog.segments,
+        workers: plan.catalog.workers,
+    };
+    finish_with_catalog(plan, observed, &catalog)
 }
 
 /// Pure adapter seam. The shipped adapter always uses `finish` and its fixed
@@ -721,12 +927,17 @@ pub fn finish_with_catalog(
         }
     }
     if let Some(shell) = e.shell {
-        super::render_selected(
+        super::render_selected_with_catalog(
             &e,
             shell,
             response.status,
             observed.selected.as_ref().map(|s| &s.config),
             e.colorfgbg.unwrap_or(Mode::Dark),
+            observed
+                .collection
+                .as_deref()
+                .filter(|_| observed.selected.is_some()),
+            catalog,
             &mut response.record,
         );
     } else {

@@ -25,3 +25,8 @@ libc = "0.2"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+# Trace the confined reader on the process main thread, as the product runs.
+[[test]]
+name = "collection_reader"
+harness = false

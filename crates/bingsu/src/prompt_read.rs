@@ -44,6 +44,7 @@ struct Prepared {
     step: Step,
     slots: [Option<Held>; 3],
     files: [Option<Held>; 3],
+    collections: [Option<Held>; 2],
     sources: Option<staged::Prefetch>,
     clock: ClockPins,
 }
@@ -65,7 +66,7 @@ fn prepare_with_clock(
     deadline: Option<Deadline>,
 ) -> Prepared {
     check_deadline(deadline);
-    let plan = staged::prepare(raw);
+    let plan = staged::prepare(raw).with_build_id(bingsu_collect::build_id());
     let plan = if let Some(d) = deadline {
         plan.with_deadline(d)
     } else {
@@ -77,6 +78,7 @@ fn prepare_with_clock(
         step: Step::Done(staged::Observed::default()),
         slots: [None, None, None],
         files: [None, None, None],
+        collections: [None, None],
         sources: None,
         clock: ClockPins::default(),
     };
@@ -99,14 +101,58 @@ fn prepare_with_clock(
                         .and_then(|fd| held(fd, deadline).ok())
                         .filter(|h| sources.accepts(i, h.facts));
                 }
+                p.collections = prefetch_collections(parent.fd.as_raw_fd(), &sources, deadline);
             }
             p.sources = Some(sources);
             p.step = Step::Read(effect);
             break;
         }
-        previous = Some(p.before(&effect, clock));
+        let observation = p.before(&effect, clock);
+        if let (Some(deadline), Observation::Clock(Some(observed))) = (deadline, &observation) {
+            if let Some(entry) = crate::prompt_io::entry_clock(deadline, *observed) {
+                p.plan = p.plan.with_entry(entry);
+            }
+        }
+        previous = Some(observation);
     }
     p
+}
+
+fn prefetch_collections(
+    base: i32,
+    sources: &staged::Prefetch,
+    deadline: Option<Deadline>,
+) -> [Option<Held>; 2] {
+    let Some(components) = sources.collection_components() else {
+        return [None, None];
+    };
+    let mut directory: Option<Held> = None;
+    for component in components {
+        let parent = directory.as_ref().map_or(base, |h| h.fd.as_raw_fd());
+        let next = CString::new(component)
+            .ok()
+            .and_then(|name| open(parent, &name, DIRECTORY_FLAGS, deadline).ok())
+            .and_then(|fd| held(fd, deadline).ok())
+            .filter(|h| sources.accepts_collection_directory(h.facts));
+        if next.is_none() {
+            return [None, None];
+        }
+        directory = next;
+    }
+    let Some(directory) = directory else {
+        return [None, None];
+    };
+    [
+        staged::CollectionCopy::Current,
+        staged::CollectionCopy::Previous,
+    ]
+    .map(|copy| {
+        CString::new(copy.name())
+            .ok()
+            .and_then(|name| open(directory.fd.as_raw_fd(), &name, DATA_FLAGS, deadline).ok())
+            .and_then(|fd| held(fd, deadline).ok())
+            .filter(|h| sources.accepts_collection(h.facts))
+    })
 }
 
 impl Prepared {
@@ -163,6 +209,17 @@ impl Prepared {
     fn after(&mut self, effect: &Effect) -> Observation {
         check_deadline(self.deadline);
         match effect.operation() {
+            Operation::OpenCollection(copy) => {
+                if self.slots[Slot::File.index()].is_some() {
+                    return Observation::Failed;
+                }
+                self.slots[Slot::File.index()] = self.collections[copy.index()].take();
+                if self.slots[Slot::File.index()].is_some() {
+                    Observation::Opened
+                } else {
+                    Observation::Failed
+                }
+            }
             Operation::OpenFile { into, .. } => {
                 if self.slots[into.index()].is_some() {
                     return Observation::Failed;
@@ -241,6 +298,8 @@ fn open(
     check_deadline(deadline);
     // SAFETY: base is held or AT_FDCWD for '/', name is terminated, no O_CREAT.
     let fd = unsafe { libc::openat(base, name.as_ptr(), flags) };
+    #[cfg(test)]
+    tests::record_open(base, name, flags, fd);
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -254,6 +313,8 @@ fn open(
     reason = "stat fields differ across Linux libc and macOS"
 )]
 fn held(fd: PromptFd, deadline: Option<Deadline>) -> std::io::Result<Held> {
+    #[cfg(test)]
+    tests::record_facts(fd.as_raw_fd());
     // SAFETY: zeroed structs are valid output storage.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: zeroed structs are valid output storage.
@@ -304,6 +365,8 @@ fn held(fd: PromptFd, deadline: Option<Deadline>) -> std::io::Result<Held> {
 struct ClockPins {
     deadline: Option<Deadline>,
     identity: Option<Clock>,
+    #[cfg(test)]
+    fixed_now: Option<u64>,
     // Keep ordinary kernel files alive across the filter and both samples.
     // Namespace links are observed before the filter and retain no target fd.
     #[cfg(target_os = "linux")]
@@ -313,6 +376,11 @@ impl ClockPins {
     fn observe(&self) -> Result<Clock, ClockError> {
         check_deadline(self.deadline);
         let mut clock = self.identity.ok_or(ClockError::Boot)?;
+        #[cfg(test)]
+        if let Some(now) = self.fixed_now {
+            clock.now = now;
+            return Ok(clock);
+        }
         clock.now = crate::prompt_io::monotonic_ns()?;
         Ok(clock)
     }
@@ -322,6 +390,8 @@ impl ClockPins {
         Self {
             deadline,
             identity: crate::prompt_io::observe_clock_until(deadline).ok(),
+            #[cfg(test)]
+            fixed_now: None,
         }
     }
     #[cfg(target_os = "linux")]
@@ -601,7 +671,7 @@ fn acl(fd: i32, deadline: Option<Deadline>) -> AclFacts {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bingsu_core::{
         color::palette::Mode,
@@ -617,6 +687,593 @@ mod tests {
         path::PathBuf,
     };
 
+    #[derive(Clone, Debug)]
+    enum Event {
+        Open(i32, Vec<u8>, i32, i32),
+        Facts(i32),
+    }
+    std::thread_local! { static EVENTS: std::cell::RefCell<Vec<Event>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    pub(super) fn record_open(base: i32, name: &CStr, flags: i32, fd: i32) {
+        EVENTS.with_borrow_mut(|events| {
+            events.push(Event::Open(base, name.to_bytes().to_vec(), flags, fd))
+        });
+    }
+    pub(super) fn record_facts(fd: i32) {
+        EVENTS.with_borrow_mut(|events| events.push(Event::Facts(fd)));
+    }
+    fn take_events() -> Vec<Event> {
+        EVENTS.with_borrow_mut(std::mem::take)
+    }
+    fn collection_events() -> Vec<Event> {
+        let events = take_events();
+        let at = events
+            .iter()
+            .position(|e| matches!(e, Event::Open(_, name, _, _) if name == b"collections-v1"))
+            .expect("collection root attempted");
+        events[at..].to_vec()
+    }
+    use bingsu_core::collection::{
+        response::Completed,
+        selection::Catalog,
+        wire::{Binding, EndReason, M3B_REQUEST_ID, Update},
+    };
+    use bingsu_core::field::{Field, FieldDecl, FieldType, SegmentDecl, Value};
+    const TEST_MASK: u32 = 1 << 31;
+    static COLLECTION_CATALOG: [SegmentDecl; 32] = {
+        let ids = [
+            "a00", "a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a11",
+            "a12", "a13", "a14", "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23",
+            "a24", "a25", "a26", "a27", "a28", "a29", "a30", "fixture",
+        ];
+        let mut c = [const {
+            SegmentDecl {
+                id: "unused",
+                role: "fg",
+                fields: &[],
+            }
+        }; 32];
+        let mut i = 0;
+        while i < 32 {
+            c[i] = SegmentDecl {
+                id: ids[i],
+                role: "fg",
+                fields: &[],
+            };
+            i += 1;
+        }
+        c[31] = SegmentDecl {
+            id: "fixture",
+            role: "fg",
+            fields: &[FieldDecl {
+                name: "text",
+                ty: FieldType::Text { max_cells: 4096 },
+            }],
+        };
+        c
+    };
+    fn fixture_config(f: &Fx) -> bingsu_core::config::compile::CompiledConfig {
+        let mut s = Snapshot::decode(&f.wire).unwrap();
+        s.config.bands.clear();
+        s.config.band_order.clear();
+        s.config.collect_mask = TEST_MASK;
+        s.config.variants = vec![
+            bingsu_core::template::compile::compile("{fixture}", &COLLECTION_CATALOG).unwrap(),
+        ];
+        s.config
+    }
+    fn collection_fixture(cwd: &[u8]) -> (Fx, Binding, PathBuf) {
+        let mut f = Fx::new();
+        f.args.extend([b"--pwd".to_vec(), cwd.to_vec()]);
+        let c = fixed_clock(None).observe().unwrap();
+        let b = Binding {
+            build_id: bingsu_collect::build_id(),
+            snapshot: Marker::decode(&fs::read(f.store.join("marker")).unwrap())
+                .unwrap()
+                .id,
+            clock_kind: c.kind,
+            domain: c.domain,
+            resume: c.resume,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            cwd: cwd.to_vec(),
+            mask: TEST_MASK,
+        };
+        let path = b
+            .components()
+            .into_iter()
+            .fold(f.store.clone(), |p, n| p.join(n));
+        (f, b, path)
+    }
+    fn publish_fixture(f: &Fx, b: &Binding, at: u64, text: &[u8]) {
+        use crate::commands::{
+            collection_gc, collection_store::CollectionStore, snapshot_store::CheckedContextFd, sys,
+        };
+        let runtime = fs::File::open(&f.base).unwrap();
+        let context = CheckedContextFd::under_runtime(
+            &runtime,
+            &b.config,
+            &b.state,
+            sys::current_uid(),
+            false,
+        )
+        .unwrap();
+        let now = fixed_clock(None).observe().unwrap();
+        for _ in 0..8 {
+            let report =
+                collection_gc::fixture_reclaim(&context, now, 4096, &COLLECTION_CATALOG).unwrap();
+            if !report.incomplete {
+                break;
+            }
+        }
+        let mut store =
+            CollectionStore::fixture(&context, b, now, &COLLECTION_CATALOG, None).unwrap();
+        let r = Completed {
+            request_id: M3B_REQUEST_ID,
+            binding: b.clone(),
+            completed_at_ns: at,
+            reason: EndReason::Deadline,
+            updates: vec![Update {
+                segment: 31,
+                value: Some(Value::new(
+                    text,
+                    vec![Field::text(
+                        text,
+                        4096,
+                        bingsu_core::width::WidthProfile::DEFAULT,
+                    )],
+                )),
+            }],
+        };
+        store.publish(&r).unwrap();
+    }
+    fn fixture_prepared(f: &Fx, entry: u64) -> Prepared {
+        let mut p = f.prepared();
+        p.plan = p
+            .plan
+            .with_entry(Clock {
+                now: entry,
+                ..fixed_clock(None).observe().unwrap()
+            })
+            .with_catalog(
+                Catalog {
+                    segments: &COLLECTION_CATALOG,
+                    workers: TEST_MASK,
+                },
+                fixture_config(f),
+            );
+        p
+    }
+
+    // 이것을 실패시키는 것: 어댑터가 deadline.start 대신 StartClock을 완료 cutoff로 쓰는 것.
+    #[test]
+    fn adapter_uses_deadline_entry_before_the_start_clock_observation() {
+        fn delayed_clock(deadline: Option<Deadline>) -> ClockPins {
+            ClockPins {
+                fixed_now: Some(deadline.unwrap().start() + 2),
+                ..fixed_clock(deadline)
+            }
+        }
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (f, b, _) = collection_fixture(b"/cwd");
+        let entry = crate::prompt_io::monotonic_ns().unwrap();
+        publish_fixture(&f, &b, entry - 1, b"PREVIOUS");
+        publish_fixture(&f, &b, entry + 1, b"CURRENT");
+        for (start, want, refused) in [
+            (entry, "PREVIOUS", "CURRENT"),
+            (entry + 2, "CURRENT", "PREVIOUS"),
+        ] {
+            let deadline = Deadline::from_entry(start, 60_000_000_000).unwrap();
+            let mut p = prepare_with_clock(
+                &f.args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                delayed_clock,
+                Some(deadline),
+            );
+            assert!(p.collections.iter().all(Option::is_some));
+            // Supply only the test worker catalog, never override the entry
+            // chosen by the adapter under test.
+            p.plan = p.plan.with_catalog(
+                Catalog {
+                    segments: &COLLECTION_CATALOG,
+                    workers: TEST_MASK,
+                },
+                fixture_config(&f),
+            );
+            let record = text(p.respond());
+            assert!(
+                record.contains(want) && !record.contains(refused),
+                "{record}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: collections-v1 실패 뒤 추가 open 또는 facts를 수행하는 것.
+    #[test]
+    fn missing_collections_stops_after_one_enoent() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        for n in [1, 3841, 65_536] {
+            let mut cwd = vec![b'a'; n];
+            cwd[0] = b'/';
+            let (f, _, _) = collection_fixture(&cwd);
+            let p = f.prepared();
+            let events = collection_events();
+            assert!(
+                matches!(events.as_slice(), [Event::Open(_, name, flags, -1)] if name == b"collections-v1" && *flags == DIRECTORY_FLAGS),
+                "{events:?}"
+            );
+            assert!(p.collections.iter().all(Option::is_none));
+            let ordinary = p.respond();
+            assert_eq!(ordinary, f.prepared().respond());
+        }
+    }
+
+    // 이것을 실패시키는 것: cwd 길이에 따라 open 수를 늘리거나 descriptor 검증·NOFOLLOW를 빼는 것.
+    #[test]
+    fn collection_prefetch_has_five_fixed_path_opens() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        for cwd in [
+            b"/".to_vec(),
+            b"/prefix/\xff".to_vec(),
+            [b"/".as_slice(), &vec![b'a'; 65_535]].concat(),
+        ] {
+            let (f, b, path) = collection_fixture(&cwd);
+            publish_fixture(&f, &b, 98, b"PREVIOUS");
+            publish_fixture(&f, &b, 99, b"CURRENT");
+            let p = fixture_prepared(&f, 100);
+            let events = collection_events();
+            let opens: Vec<_> = events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Open(base, n, flags, fd) => Some((*base, n, *flags, *fd)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(opens.len(), 5, "{events:?}");
+            let names = [
+                b"collections-v1".to_vec(),
+                b.components()[1].as_bytes().to_vec(),
+                b"store".to_vec(),
+                b"response".to_vec(),
+                b"previous".to_vec(),
+            ];
+            for (i, (base, name, flags, fd)) in opens.iter().enumerate() {
+                assert_eq!(**name, names[i]);
+                assert!(*base >= 0 && *fd >= 0);
+                assert_eq!(*flags, if i < 3 { DIRECTORY_FLAGS } else { DATA_FLAGS });
+                if i > 0 {
+                    assert_eq!(*base, opens[if i == 4 { 2 } else { i - 1 }].3);
+                }
+                assert!(matches!(&events[i*2+1], Event::Facts(n) if n == fd));
+            }
+            assert!(p.collections.iter().all(Option::is_some));
+            for h in p.collections.iter().flatten() {
+                // SAFETY: live descriptor; read-only query before confinement.
+                assert_eq!(
+                    // SAFETY: this fixture retains the descriptor before confinement.
+                    unsafe { libc::lseek(h.fd.as_raw_fd(), 0, libc::SEEK_CUR) },
+                    0
+                );
+            }
+            fs::rename(path.join("response"), path.join("saved")).unwrap();
+            fs::write(path.join("response"), b"torn replacement").unwrap();
+            assert!(text(p.respond()).contains("CURRENT"));
+            assert!(text(fixture_prepared(&f, 100).respond()).contains("PREVIOUS"));
+        }
+    }
+
+    // 이것을 실패시키는 것: 원본 cwd 접근·unsafe directory 통과·구 경로 fallback을 추가하는 것.
+    #[test]
+    fn prefetch_uses_only_validated_context_and_cwd_address() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (f, b, path) = collection_fixture(b"/never-open-this-cwd");
+        publish_fixture(&f, &b, 99, b"SAFE");
+        for depth in 0..3 {
+            let directory = b.components()[..=depth]
+                .iter()
+                .fold(f.store.clone(), |p, n| p.join(n));
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+            let p = fixture_prepared(&f, 100);
+            let events = collection_events();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, Event::Open(..)))
+                    .count(),
+                depth + 1
+            );
+            assert!(p.collections.iter().all(Option::is_none));
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::rename(&path, path.with_file_name("elsewhere")).unwrap();
+        symlink("elsewhere", &path).unwrap();
+        assert!(f.prepared().collections.iter().all(Option::is_none));
+        let events = collection_events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::Open(..)))
+                .count(),
+            3
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Open(_,n,_,_) if n == &b.cwd))
+        );
+    }
+
+    // 이것을 실패시키는 것: current 부재·decode 실패를 오류로 만들거나 다른 binding의 응답을 재사용하는 것.
+    #[test]
+    fn published_fixture_previous_and_unknown_reach_render() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (f, b, path) = collection_fixture(b"/cwd");
+        publish_fixture(&f, &b, 99, b"PREVIOUS");
+        publish_fixture(&f, &b, 101, b"CURRENT");
+        assert!(text(fixture_prepared(&f, 100).respond()).contains("PREVIOUS"));
+        assert!(text(fixture_prepared(&f, 102).respond()).contains("CURRENT"));
+        fs::remove_file(path.join("response")).unwrap();
+        assert!(text(fixture_prepared(&f, 100).respond()).contains("PREVIOUS"));
+        fs::write(path.join("previous"), b"undecodable").unwrap();
+        let record = text(fixture_prepared(&f, 100).respond());
+        assert!(
+            record.contains('?') && record.contains("ok:none"),
+            "{record}"
+        );
+    }
+
+    // 이것을 실패시키는 것: 새 수집의 완료 또는 lock 해제를 현재 prompt가 기다리는 것.
+    #[test]
+    fn new_completion_never_blocks_the_current_prompt() {
+        // Share the guard with every child-spawning test in this binary,
+        // from fixture publication until the worker has dropped its store.
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        use crate::commands::{
+            collection_store::CollectionStore, snapshot_store::CheckedContextFd, sys,
+        };
+        let (f, b, _) = collection_fixture(b"/cwd");
+        publish_fixture(&f, &b, 99, b"PREVIOUS");
+        let runtime = fs::File::open(&f.base).unwrap();
+        let context = CheckedContextFd::under_runtime(
+            &runtime,
+            &b.config,
+            &b.state,
+            sys::current_uid(),
+            false,
+        )
+        .unwrap();
+        let mut store = CollectionStore::fixture(
+            &context,
+            &b,
+            fixed_clock(None).observe().unwrap(),
+            &COLLECTION_CATALOG,
+            None,
+        )
+        .unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let released = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+            if released.is_ok() {
+                store
+                    .publish(&Completed {
+                        request_id: M3B_REQUEST_ID,
+                        binding: b,
+                        completed_at_ns: 101,
+                        reason: EndReason::Complete,
+                        updates: vec![Update {
+                            segment: 31,
+                            value: Some(Value::new(
+                                b"CURRENT",
+                                vec![Field::text(
+                                    b"CURRENT",
+                                    4096,
+                                    bingsu_core::width::WidthProfile::DEFAULT,
+                                )],
+                            )),
+                        }],
+                    })
+                    .unwrap();
+            }
+        });
+        ready_rx.recv().unwrap();
+        let begin = std::time::Instant::now();
+        let record = text(fixture_prepared(&f, 100).respond());
+        assert!(
+            begin.elapsed() < std::time::Duration::from_secs(2),
+            "prompt waited for stalled collection"
+        );
+        assert!(record.contains("PREVIOUS") && !record.contains("CURRENT"));
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(text(fixture_prepared(&f, 102).respond()).contains("CURRENT"));
+    }
+
+    // Called only by the harness=false test target, on the process main thread.
+    #[allow(
+        dead_code,
+        reason = "entry for the separate collection_reader test target"
+    )]
+    pub(crate) fn collection_trace_child() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        use std::io::Read;
+        #[cfg(target_os = "linux")]
+        // SAFETY: these identity queries have no pointer arguments.
+        assert_eq!(unsafe { libc::gettid() }, unsafe { libc::getpid() });
+        #[cfg(target_os = "macos")]
+        // SAFETY: pthread_main_np has no arguments and reports the current thread.
+        assert_eq!(unsafe { libc::pthread_main_np() }, 1);
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
+        let mut input = input.split('\0');
+        let mode = input.next().filter(|s| !s.is_empty()).unwrap_or("current");
+        let length: usize = input.next().and_then(|n| n.parse().ok()).unwrap_or(4);
+        let shell = input.next().unwrap_or("bash");
+        let payload = input.next().unwrap_or("CURRENT");
+        let mut cwd = vec![b'a'; length];
+        cwd[0] = b'/';
+        if length > 1 {
+            cwd[length - 1] = 0xff;
+        }
+        let (mut f, b, path) = collection_fixture(&cwd);
+        f.args[5] = shell.as_bytes().to_vec();
+        f.args[7] = b"400".to_vec();
+        if mode != "absent" {
+            publish_fixture(&f, &b, 98, b"PREVIOUS");
+            publish_fixture(&f, &b, 99, payload.as_bytes());
+            if mode == "previous" {
+                fs::remove_file(path.join("response")).unwrap();
+            }
+            if mode == "corrupt" {
+                fs::write(path.join("response"), vec![0; 64]).unwrap();
+            }
+        }
+        // Marker writes delimit fixture preparation from the actual reader.
+        let begin = b"C3-BEGIN\n";
+        // SAFETY: initialized bytes and the test child's stdout.
+        assert_eq!(
+            // SAFETY: initialized bytes and the isolated child stdout.
+            unsafe { libc::write(1, begin.as_ptr().cast(), begin.len()) },
+            begin.len() as isize
+        );
+        let p = fixture_prepared(&f, 100);
+        let prepared = b"C3-PREPARED\n";
+        // SAFETY: initialized bytes and stdout, before installing the filter.
+        assert_eq!(
+            // SAFETY: initialized bytes and the isolated child stdout.
+            unsafe { libc::write(1, prepared.as_ptr().cast(), prepared.len()) },
+            prepared.len() as isize
+        );
+        let sandbox = crate::sandbox::enter();
+        assert!(bingsu_core::front::runs_core(sandbox));
+        #[cfg(target_os = "linux")]
+        assert_eq!(sandbox, bingsu_core::front::Sandbox::Installed);
+        let record = p.respond();
+        // SAFETY: initialized B1 bytes and stdout; no file/metadata effects.
+        assert_eq!(
+            // SAFETY: initialized bytes and the isolated child stdout.
+            unsafe { libc::write(1, record.as_ptr().cast(), record.len()) },
+            record.len() as isize
+        );
+        // SAFETY: isolated child; no fixture path cleanup after confinement.
+        unsafe { libc::_exit(0) }
+    }
+
+    // 이것을 실패시키는 것: collection 파일의 NOFOLLOW/종류/0600/nlink/크기 검사를 생략하는 것.
+    #[test]
+    fn collection_files_reject_unsafe_metadata_without_blocking() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (f, b, path) = collection_fixture(b"/cwd");
+        publish_fixture(&f, &b, 98, b"PREVIOUS");
+        publish_fixture(&f, &b, 99, b"CURRENT");
+        let current = path.join("response");
+        let saved = fs::read(&current).unwrap();
+        for case in 0..6 {
+            fs::remove_file(&current).unwrap();
+            match case {
+                0 => symlink("previous", &current).unwrap(),
+                1 => {
+                    fs::write(&current, &saved).unwrap();
+                    fs::set_permissions(&current, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+                2 => fs::hard_link(path.join("previous"), &current).unwrap(),
+                3 => {
+                    let c = CString::new(current.as_os_str().as_encoded_bytes()).unwrap();
+                    // SAFETY: terminated fixture path, created before confinement.
+                    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+                }
+                4 => {
+                    fs::write(&current, []).unwrap();
+                    fs::set_permissions(&current, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                _ => {
+                    fs::write(&current, vec![0; 262145]).unwrap();
+                    fs::set_permissions(&current, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+            }
+            let p = fixture_prepared(&f, 100);
+            assert!(p.collections[0].is_none(), "case {case}");
+            let record = text(p.respond());
+            assert!(!record.contains("CURRENT"));
+            assert!(
+                record.contains(if case == 2 { "?" } else { "PREVIOUS" }),
+                "case {case}: {record}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: 해시 주소가 같다는 이유로 파일 속 다른 cwd를 수용하는 것.
+    #[test]
+    fn stored_cwd_bytes_override_no_address_authority() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (f, b, path) = collection_fixture(b"/cwd");
+        publish_fixture(&f, &b, 99, b"COLLISION");
+        let mut r = Completed::decode_with_catalog(
+            &fs::read(path.join("response")).unwrap(),
+            &COLLECTION_CATALOG,
+        )
+        .unwrap();
+        r.binding.cwd = b"/another-cwd".to_vec();
+        fs::write(
+            path.join("response"),
+            r.encode_with_catalog(&COLLECTION_CATALOG).unwrap(),
+        )
+        .unwrap();
+        let record = text(fixture_prepared(&f, 100).respond());
+        assert!(record.contains('?') && !record.contains("COLLISION"));
+    }
+
+    #[test]
+    #[ignore = "200 warm observations per case; latency evidence, not a timing assertion"]
+    fn collection_read_latency() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        for mode in ["absent", "current", "previous"] {
+            let (f, b, _) = collection_fixture(b"/cwd");
+            if mode != "absent" {
+                publish_fixture(&f, &b, 98, b"PREVIOUS");
+                publish_fixture(
+                    &f,
+                    &b,
+                    if mode == "previous" { 101 } else { 99 },
+                    b"CURRENT",
+                );
+            }
+            let mut samples = Vec::new();
+            for i in 0..201 {
+                let mut p = fixture_prepared(&f, 100);
+                let mut start = None;
+                let mut elapsed = None;
+                let record = loop {
+                    match std::mem::replace(&mut p.step, Step::Done(staged::Observed::default())) {
+                        Step::Done(observed) => break staged::finish(p.plan, observed).record,
+                        Step::Read(effect) => {
+                            if matches!(effect.operation(), Operation::OpenCollection(_))
+                                && start.is_none()
+                            {
+                                start = Some(crate::prompt_io::monotonic_ns().unwrap());
+                            }
+                            if matches!(effect.operation(), Operation::Clock) {
+                                elapsed =
+                                    start.map(|at| crate::prompt_io::monotonic_ns().unwrap() - at);
+                            }
+                            let observation = p.after(&effect);
+                            p.step = staged::next(&mut p.plan, Some(observation));
+                        }
+                    }
+                };
+                let elapsed = elapsed.expect("collection read window executed");
+                assert!(record.starts_with(b"B1"));
+                if i > 0 {
+                    samples.push(elapsed);
+                }
+            }
+            samples.sort_unstable();
+            assert_eq!(samples.len(), 200);
+            println!(
+                "collection-read {mode}: n=200 p50_ns={} p95_ns={}",
+                samples[100], samples[189]
+            );
+        }
+    }
     // 이것을 실패시키는 것: procfs의 self 대신 현재 namespace의 getpid 숫자를 사용하는 것.
     #[test]
     fn proc_self_uses_the_mounted_namespace() {
@@ -677,6 +1334,7 @@ mod tests {
                 kind,
                 resume: 0,
             }),
+            fixed_now: None,
             #[cfg(target_os = "linux")]
             fds: Vec::new(),
         }
@@ -797,6 +1455,7 @@ mod tests {
             }
         }
         fn prepared(&self) -> Prepared {
+            take_events();
             prepare_with_clock(
                 &self.args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                 fixed_clock,

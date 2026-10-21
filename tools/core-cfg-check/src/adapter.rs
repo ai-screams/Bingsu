@@ -286,6 +286,8 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
 /// fixed spawn, then held-fd preparation, immediately before the filter branch.
 /// Neither function may be imported or saved as a function value; all other
 /// module path rules remain unchanged. The prepared closure owns the held fds.
+/// Its pinned reader includes three snapshot slots and two collection slots;
+/// collection preparation adds only three no-follow directories and two files.
 fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     let f = file.items.iter().find_map(|i| match i {
         syn::Item::Fn(f) if f.sig.ident == "run_prompt" => Some(f),
