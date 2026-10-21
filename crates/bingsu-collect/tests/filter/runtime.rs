@@ -581,6 +581,49 @@ fn x16_all_mutations_are_denied_with_fsize_zero() {
     )
     .unwrap();
     assert!(compiled.status.success(), "X-16 compiler: {compiled:?}");
+    // Inspect the actual C ELF, not just Cargo's Rust target name. Static or
+    // unidentified linkage is deliberately insufficient for this experiment.
+    let elf = process::output(
+        Command::new("readelf").args(["-lW"]).arg(dir.join("probe")),
+        "X-16 C linkage",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(elf.status.success(), "X-16 readelf: {elf:?}");
+    let elf_text = String::from_utf8(elf.stdout).unwrap();
+    let loader = elf_text
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("[Requesting program interpreter: ")
+        })
+        .and_then(|line| line.strip_suffix(']'))
+        .expect("X-16 needs an identifiable dynamic C ELF interpreter");
+    let musl = loader.contains("/ld-musl-") && loader.ends_with(".so.1");
+    assert_eq!(
+        musl,
+        cfg!(target_env = "musl"),
+        "X-16 C/Rust libc mismatch: {loader}"
+    );
+    assert!(
+        musl || loader.contains("/ld-linux"),
+        "unknown C libc: {loader}"
+    );
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let version = process::output(
+        Command::new(&cc).arg("--version"),
+        "X-16 compiler identity",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(version.status.success());
+    let version = String::from_utf8(version.stdout).unwrap();
+    println!("\nX-16 compiler={cc}: {}", version.lines().next().unwrap());
+    println!(
+        "X-16 cflags=-std=c11 -Wall -Wextra -Werror -O2 {}",
+        std::env::var("BINGSU_X16_CFLAGS").unwrap_or_default()
+    );
+    println!("X-16 elf_interpreter={loader}");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let out = process::output(
@@ -631,6 +674,8 @@ fn x16_all_mutations_are_denied_with_fsize_zero() {
     assert!(!dir.join("renamed").exists());
     assert_eq!(std::fs::metadata(dir.join("control")).unwrap().len(), 0);
     std::fs::remove_dir_all(dir).unwrap();
+    // Forward validated raw probe records to the standalone acceptance ledger.
+    println!("\n{text}");
 }
 
 // 이것을 실패시키는 것: 설치 비용의 필수 200개 표본을 누락하거나 일부 단계 측정 생략.

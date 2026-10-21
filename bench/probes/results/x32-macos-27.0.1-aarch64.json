@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "results": [
+    {
+      "case": "X-32",
+      "platform": "Darwin",
+      "kernel": "27.0.0",
+      "libc": "libSystem",
+      "arch": "aarch64",
+      "build_id": "06136093358e3581d7e76856ef1e1b741b835877ab108070df98d4dea674a2f6",
+      "outcome": "PASS",
+      "evidence": {
+        "returncode": 0,
+        "stdout": "{\"cell\":\"setsid\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":65772,\"child_pid\":65772,\"sid\":65772,\"parent_sid\":65771,\"leaks\":1,\"high_open\":1,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":0,\"pipe_write_fd\":5,\"elapsed_us\":10189,\"close_ns\":0}}\n{\"cell\":\"cloexec_default\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":65773,\"child_pid\":65773,\"sid\":65771,\"parent_sid\":65771,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":0,\"pipe_write_fd\":5,\"elapsed_us\":10232,\"close_ns\":0}}\n{\"cell\":\"both\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":65774,\"child_pid\":65774,\"sid\":65774,\"parent_sid\":65771,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":0,\"pipe_write_fd\":5,\"elapsed_us\":10499,\"close_ns\":0}}\n{\"cell\":\"fallback_missing\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":1,\"fallback\":1,\"pid\":65775,\"child_pid\":65775,\"sid\":65775,\"parent_sid\":65771,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":8,\"pipe_write_fd\":5,\"elapsed_us\":19576,\"close_ns\":8442000}}\n{\"cell\":\"fallback_einval\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":22,\"missing\":0,\"fallback\":1,\"pid\":65776,\"child_pid\":65776,\"sid\":65776,\"parent_sid\":65771,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":8,\"pipe_write_fd\":5,\"elapsed_us\":20305,\"close_ns\":8728000}}\n{\"cell\":\"race\",\"evidence\":{\"outcome\":\"PASS\",\"opens\":11380,\"high_fd\":1025,\"soft_limit\":256,\"close_ceiling\":92160,\"other_errno_rejected\":1}}\n",
+        "stderr": "",
+        "elapsed_s": 0.07436870799999999,
+        "observed_at": "2026-10-21T11:43:01.094737+00:00",
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "compile_flags": [
+          "-std=c11",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-O2",
+          "-pthread",
+          "-mmacosx-version-min=11.0"
+        ],
+        "binary_sha256": "fee5063f3d42cbb580c8560425593b64f7d8eceacf10340fc6a78c483a8a7e31",
+        "sdk": "27.0",
+        "deployment_target": "11.0",
+        "mutation": {
+          "returncode": 90,
+          "stdout": "{\"cell\":\"setsid\",\"evidence\":{\"outcome\":\"FAIL\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":65781,\"child_pid\":65781,\"sid\":65781,\"parent_sid\":65780,\"leaks\":1,\"high_open\":1,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":0,\"pipe_write_fd\":5,\"elapsed_us\":10260,\"close_ns\":0}}\n{\"cell\":\"cloexec_default\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":65782,\"child_pid\":65782,\"sid\":65780,\"parent_sid\":65780,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":0,\"pipe_write_fd\":5,\"elapsed_us\":10450,\"close_ns\":0}}\n{\"cell\":\"both\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":65783,\"child_pid\":65783,\"sid\":65783,\"parent_sid\":65780,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":0,\"pipe_write_fd\":5,\"elapsed_us\":10204,\"close_ns\":0}}\n{\"cell\":\"fallback_missing\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":0,\"missing\":1,\"fallback\":1,\"pid\":65784,\"child_pid\":65784,\"sid\":65784,\"parent_sid\":65780,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":8,\"pipe_write_fd\":5,\"elapsed_us\":20420,\"close_ns\":8642000}}\n{\"cell\":\"fallback_einval\",\"evidence\":{\"outcome\":\"PASS\",\"stage\":\"complete\",\"setup_errno\":0,\"errno\":22,\"missing\":0,\"fallback\":1,\"pid\":65785,\"child_pid\":65785,\"sid\":65785,\"parent_sid\":65780,\"leaks\":0,\"high_open\":0,\"exit\":0,\"signal\":0,\"wait_status\":0,\"wait_errno\":0,\"report_bytes\":16,\"read_errno\":0,\"timing_bytes\":8,\"pipe_write_fd\":5,\"elapsed_us\":19913,\"close_ns\":8531000}}\n{\"cell\":\"race\",\"evidence\":{\"outcome\":\"PASS\",\"opens\":10971,\"high_fd\":1025,\"soft_limit\":256,\"close_ceiling\":92160,\"other_errno_rejected\":1}}\n",
+          "stderr": ""
+        },
+        "cells": {
+          "setsid": {
+            "outcome": "PASS",
+            "stage": "complete",
+            "setup_errno": 0,
+            "errno": 0,
+            "missing": 0,
+            "fallback": 0,
+            "pid": 65772,
+            "child_pid": 65772,
+            "sid": 65772,
+            "parent_sid": 65771,
+            "leaks": 1,
+            "high_open": 1,
+            "exit": 0,
+            "signal": 0,
+            "wait_status": 0,
+            "wait_errno": 0,
+            "report_bytes": 16,
+            "read_errno": 0,
+            "timing_bytes": 0,
+            "pipe_write_fd": 5,
+            "elapsed_us": 10189,
+            "close_ns": 0
+          },
+          "cloexec_default": {
+            "outcome": "PASS",
+            "stage": "complete",
+            "setup_errno": 0,
+            "errno": 0,
+            "missing": 0,
+            "fallback": 0,
+            "pid": 65773,
+            "child_pid": 65773,
+            "sid": 65771,
+            "parent_sid": 65771,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "signal": 0,
+            "wait_status": 0,
+            "wait_errno": 0,
+            "report_bytes": 16,
+            "read_errno": 0,
+            "timing_bytes": 0,
+            "pipe_write_fd": 5,
+            "elapsed_us": 10232,
+            "close_ns": 0
+          },
+          "both": {
+            "outcome": "PASS",
+            "stage": "complete",
+            "setup_errno": 0,
+            "errno": 0,
+            "missing": 0,
+            "fallback": 0,
+            "pid": 65774,
+            "child_pid": 65774,
+            "sid": 65774,
+            "parent_sid": 65771,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "signal": 0,
+            "wait_status": 0,
+            "wait_errno": 0,
+            "report_bytes": 16,
+            "read_errno": 0,
+            "timing_bytes": 0,
+            "pipe_write_fd": 5,
+            "elapsed_us": 10499,
+            "close_ns": 0
+          },
+          "fallback_missing": {
+            "outcome": "PASS",
+            "stage": "complete",
+            "setup_errno": 0,
+            "errno": 0,
+            "missing": 1,
+            "fallback": 1,
+            "pid": 65775,
+            "child_pid": 65775,
+            "sid": 65775,
+            "parent_sid": 65771,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "signal": 0,
+            "wait_status": 0,
+            "wait_errno": 0,
+            "report_bytes": 16,
+            "read_errno": 0,
+            "timing_bytes": 8,
+            "pipe_write_fd": 5,
+            "elapsed_us": 19576,
+            "close_ns": 8442000
+          },
+          "fallback_einval": {
+            "outcome": "PASS",
+            "stage": "complete",
+            "setup_errno": 0,
+            "errno": 22,
+            "missing": 0,
+            "fallback": 1,
+            "pid": 65776,
+            "child_pid": 65776,
+            "sid": 65776,
+            "parent_sid": 65771,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "signal": 0,
+            "wait_status": 0,
+            "wait_errno": 0,
+            "report_bytes": 16,
+            "read_errno": 0,
+            "timing_bytes": 8,
+            "pipe_write_fd": 5,
+            "elapsed_us": 20305,
+            "close_ns": 8728000
+          },
+          "race": {
+            "outcome": "PASS",
+            "opens": 11380,
+            "high_fd": 1025,
+            "soft_limit": 256,
+            "close_ceiling": 92160,
+            "other_errno_rejected": 1
+          }
+        },
+        "cell_outcomes": {
+          "setsid": {
+            "outcome": "PASS",
+            "kind": "observation",
+            "reason": ""
+          },
+          "cloexec_default": {
+            "outcome": "PASS",
+            "kind": "observation",
+            "reason": ""
+          },
+          "both": {
+            "outcome": "PASS",
+            "kind": "observation",
+            "reason": ""
+          },
+          "fallback_missing": {
+            "outcome": "PASS",
+            "kind": "observation",
+            "reason": ""
+          },
+          "fallback_einval": {
+            "outcome": "PASS",
+            "kind": "observation",
+            "reason": ""
+          },
+          "race": {
+            "outcome": "PASS",
+            "kind": "observation",
+            "reason": ""
+          }
+        },
+        "os_version": "27.0.1",
+        "os_build": "26A434",
+        "environment": "macos-current"
+      }
+    }
+  ]
+}

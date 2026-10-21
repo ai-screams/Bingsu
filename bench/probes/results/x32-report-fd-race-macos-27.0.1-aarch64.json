@@ -1,0 +1,26 @@
+{
+  "source_revision": "121e34f",
+  "instrumentation": "Print cell/pipe fds; on short report read, waitpid and print child status before original assertion. No fd behavior changed.",
+  "returncode": 90,
+  "stdout": "{\"cell\":\"setsid\",\"evidence\":{\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":69838,\"sid\":69838,\"parent_sid\":66792,\"leaks\":1,\"high_open\":1,\"exit\":0,\"elapsed_us\":12204,\"close_ns\":0}}\n{\"cell\":\"cloexec_default\",\"evidence\":{\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":69839,\"sid\":66792,\"parent_sid\":66792,\"leaks\":0,\"high_open\":0,\"exit\":0,\"elapsed_us\":13276,\"close_ns\":0}}\n",
+  "stderr": "cell=setsid pipe=3,5\ncell=cloexec_default pipe=4,5\ncell=both pipe=4,3\ngot=0 status=23552 exit=92 signal=0\nassertion: got == sizeof(r) errno=0\n",
+  "iteration": 21,
+  "os_version": "27.0.1",
+  "os_build": "26A434",
+  "arch": "aarch64",
+  "acceptance_evidence": false,
+  "original_source_sha256": "38d8f0505771afd152b11656e32386fef17b43687e73f16b7b3125e327b3b31e",
+  "diagnostic_source_sha256": "c2428361f48d2ff733dfc1376388495a1ea71c39c1e10704bce7a58621ada8c2",
+  "fixed_stress": {
+    "iterations": 100,
+    "all_cells": "PASS",
+    "writer_fd3_corrected": {
+      "setsid": 1,
+      "cloexec_default": 7,
+      "both": 2,
+      "fallback_missing": 1,
+      "fallback_einval": 2
+    },
+    "build_id": "06136093358e3581d7e76856ef1e1b741b835877ab108070df98d4dea674a2f6"
+  }
+}
