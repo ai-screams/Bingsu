@@ -787,3 +787,9 @@ fn validate_bytes(slot: Slot, bytes: &[u8]) -> Result<(), StoreError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) fn context_dir_for_test(context: &CheckedContextFd) -> File {
+    context.dir.try_clone().unwrap()
+}

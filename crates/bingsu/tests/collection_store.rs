@@ -160,14 +160,8 @@ impl Fixture {
         CollectionStore::fixture(&self.context, &self.binding, clock(), &SCHEMA, None)
     }
     fn gc(&self, now: Clock) -> collection_gc::GcReport {
-        collection_gc::fixture_reclaim(
-            &self.runtime,
-            &self.context,
-            now,
-            GcBudget::default().max_ops,
-            &SCHEMA,
-        )
-        .unwrap()
+        collection_gc::fixture_reclaim(&self.context, now, GcBudget::default().max_ops, &SCHEMA)
+            .unwrap()
     }
     fn publish(&self, value: &[u8]) {
         self.acquire()
@@ -443,9 +437,9 @@ fn publication_recovers_corrupt_store_after_inventory() {
     );
 }
 
-// 이것을 실패시키는 것: collections-v1 부재 뒤 catalog/lock을 열거나 만드는 것.
+// 이것을 실패시키는 것: runtime catalog 부재 뒤 lock을 열거나 catalog/lock을 만드는 것.
 #[test]
-fn gc_absent_namespace_only_attempts_one_open() {
+fn gc_absent_catalog_only_attempts_one_open() {
     let f = Fixture::new("absent");
     for _ in 0..3 {
         let report = f.gc(clock());
@@ -991,7 +985,9 @@ fn gc_cannot_split_lock_inode_or_delete_inflight_store() {
                 Err(StoreError::Busy)
             ));
             let racing_gc = f.gc(clock());
-            assert!(!racing_gc.incomplete);
+            // The catalog already exists before mkdir, so runtime-wide GC
+            // attempts the global lock and must stop at the admission owner.
+            assert!(racing_gc.incomplete);
             assert_eq!(racing_gc.removed_dirs, 0);
             assert_eq!(racing_gc.visited, 0);
             assert!(!f.path().exists());
@@ -1103,8 +1099,7 @@ fn gc_is_bounded_and_resumable() {
     let mut ops = 0;
     let mut visited = 0;
     for _ in 0..100 {
-        let r =
-            collection_gc::fixture_reclaim(&f.runtime, &f.context, clock(), 900, &SCHEMA).unwrap();
+        let r = collection_gc::fixture_reclaim(&f.context, clock(), 900, &SCHEMA).unwrap();
         assert!(r.ops <= 900);
         ops += r.ops;
         visited += r.visited;
@@ -1130,11 +1125,8 @@ fn gc_time_cap_stops_before_filesystem_work() {
     let f = Fixture::new("time-cap");
     f.publish(b"keep");
     let before = fs::read(f.base.join(".collections.catalog")).unwrap();
-    let path = f.path();
-    let context = File::open(path.ancestors().nth(3).unwrap()).unwrap();
     let r = collection_gc::reclaim(
         &f.runtime,
-        &context,
         clock(),
         GcBudget {
             max_ops: u32::MAX,
@@ -1739,8 +1731,7 @@ fn gc_deep_inventory_respects_smaller_sweep_budget() {
     fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
     let mut skipped = 0;
     for _ in 0..64 {
-        let report =
-            collection_gc::fixture_reclaim(&f.runtime, &f.context, clock(), 900, &SCHEMA).unwrap();
+        let report = collection_gc::fixture_reclaim(&f.context, clock(), 900, &SCHEMA).unwrap();
         assert!(report.ops <= 900);
         skipped += report.skipped;
         if !report.incomplete {
@@ -1760,9 +1751,7 @@ fn gc_small_budget_keeps_shallow_store_reachable() {
     f.publish(b"current");
     fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
     for max_ops in (600..1_600).step_by(100) {
-        let report =
-            collection_gc::fixture_reclaim(&f.runtime, &f.context, clock(), max_ops, &SCHEMA)
-                .unwrap();
+        let report = collection_gc::fixture_reclaim(&f.context, clock(), max_ops, &SCHEMA).unwrap();
         assert_eq!(
             report.skipped, 0,
             "a shallow store is resumable at budget {max_ops}"
@@ -1783,13 +1772,239 @@ fn interrupted_prune_fixture(tag: &str) -> (Fixture, PathBuf, Clock) {
         f.publish(b"seed");
         let later = day(1);
         let parent = f.path().parent().unwrap().to_path_buf();
-        let report =
-            collection_gc::fixture_reclaim(&f.runtime, &f.context, later, max_ops, &SCHEMA)
-                .unwrap();
+        let report = collection_gc::fixture_reclaim(&f.context, later, max_ops, &SCHEMA).unwrap();
         assert!(report.ops <= max_ops);
         if report.removed_dirs > 0 && parent.exists() {
             return (f, parent, later);
         }
     }
     panic!("the fixture must stop between store and address cleanup");
+}
+
+// Reviewer probe: deep admissions must not collapse into one unknown occupation
+// after rebuilding the catalog. Removing reserve's depth check kills this test.
+#[test]
+fn review_deep_context_undercount() {
+    let f = Fixture::new("review-deep");
+    f.publish(b"first");
+    let mut deep = binding(b"/d");
+    deep.config = b"/".to_vec();
+    deep.config.extend(std::iter::repeat_n(b'a', 2_700));
+    deep.snapshot.context = snapshot::context_crc(&deep.config, &deep.state).unwrap();
+    let ctx = CheckedContextFd::under_runtime(
+        &f.runtime,
+        &deep.config,
+        &deep.state,
+        sys::current_uid(),
+        true,
+    )
+    .unwrap();
+    let gc = |context: &CheckedContextFd, now| {
+        collection_gc::fixture_reclaim(context, now, 4_096, &SCHEMA).unwrap()
+    };
+    let mut admitted = 0;
+    for i in 0..120 {
+        deep.cwd = format!("/deep-{i}").into_bytes();
+        match CollectionStore::fixture(&ctx, &deep, clock(), &SCHEMA, None) {
+            Ok(mut store) => {
+                store.publish(&completed(&deep, b"v")).unwrap();
+                admitted += 1;
+            }
+            Err(StoreError::Busy) => break,
+            Err(error) => panic!("unexpected deep admission error: {error:?}"),
+        }
+        for _ in 0..3 {
+            gc(&ctx, clock());
+        }
+    }
+    assert_eq!(
+        admitted, 0,
+        "stores beyond the inventory depth must be refused"
+    );
+    let context_dir = commands::snapshot_store::context_dir_for_test(&ctx);
+    assert!(
+        sys::open_dir_at_nofollow(context_dir.as_fd(), OsStr::new("collections-v1"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+        "refusal must precede the first collection mkdir"
+    );
+    fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+    let mut skipped = 0;
+    let mut rebuilt = false;
+    for _ in 0..64 {
+        let report = gc(&ctx, clock());
+        assert!(report.ops <= 4_096);
+        skipped += report.skipped;
+        if !report.incomplete {
+            rebuilt = true;
+            break;
+        }
+    }
+    assert!(rebuilt, "catalog rebuild must finish");
+    assert_eq!(skipped, 1, "the deep context itself is unknown occupation");
+    let deep_real = || {
+        (0..120)
+            .filter(|i| {
+                let mut b = deep.clone();
+                b.cwd = format!("/deep-{i}").into_bytes();
+                let mut dir = commands::snapshot_store::context_dir_for_test(&ctx);
+                for name in b.components() {
+                    match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)) {
+                        Ok(child) => dir = child,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+                        Err(error) => panic!("store census failed: {error:?}"),
+                    }
+                }
+                true
+            })
+            .count() as u64
+    };
+    assert_eq!(deep_real(), 0);
+    // Retain locks so pressure cannot evict these new stores and conceal an
+    // over-admission. The unknown reservation must still consume capacity.
+    let before = catalog_counts(&f);
+    let mut held = vec![];
+    let mut refused = false;
+    for i in 0..200 {
+        let mut b = f.binding.clone();
+        b.cwd = format!("/n-{i}").into_bytes();
+        match CollectionStore::fixture(&f.context, &b, clock(), &SCHEMA, None) {
+            Ok(mut store) => {
+                store.publish(&completed(&b, b"v")).unwrap();
+                held.push(store);
+            }
+            Err(StoreError::Busy) => {
+                assert!(!f.path_for(&b).exists());
+                refused = true;
+                break;
+            }
+            Err(error) => panic!("unexpected shallow admission error: {error:?}"),
+        }
+        let counts = catalog_counts(&f);
+        assert_eq!(counts.0, before.0 + held.len() as u64);
+        assert_eq!(
+            counts.2,
+            before.2 + held.len() as u64 * collection_gc::RESERVATION
+        );
+        assert!(collection_gc::capacity(
+            counts.0,
+            counts.1,
+            counts.2 + 2 * collection_gc::CATALOG_MAX as u64
+        ));
+    }
+    assert!(refused && !held.is_empty());
+    assert!(1 + held.len() as u64 + deep_real() <= collection_gc::MAX_STORES);
+    let counts = catalog_counts(&f);
+    assert!(
+        counts.2 + collection_gc::RESERVATION + 2 * collection_gc::CATALOG_MAX as u64
+            > collection_gc::MAX_BYTES
+    );
+    for _ in 0..10 {
+        gc(&ctx, day(3));
+    }
+    assert_eq!(deep_real(), 0);
+    assert!(matches!(
+        CollectionStore::fixture(&ctx, &deep, day(3), &SCHEMA, None),
+        Err(StoreError::Busy)
+    ));
+}
+
+// Reviewer probe: Y must reclaim X's stale stores even before Y has a
+// collections-v1 directory. Gating on Y's namespace kills this test.
+#[test]
+fn review_cross_context_starvation() {
+    let f = Fixture::new("review-starve");
+    let mut paths = vec![];
+    let mut refused = false;
+    for i in 0..200 {
+        let mut b = f.binding.clone();
+        b.cwd = format!("/x-{i}").into_bytes();
+        match CollectionStore::fixture(&f.context, &b, clock(), &SCHEMA, None) {
+            Ok(mut store) => {
+                store.publish(&completed(&b, b"v")).unwrap();
+                paths.push(f.path_for(&b));
+            }
+            Err(StoreError::Busy) => {
+                refused = true;
+                break;
+            }
+            Err(error) => panic!("unexpected X admission error: {error:?}"),
+        }
+    }
+    assert!(refused && !paths.is_empty());
+    let mut y = binding(b"/y");
+    y.config = b"/other-config".to_vec();
+    y.snapshot.context = snapshot::context_crc(&y.config, &y.state).unwrap();
+    let ycx =
+        CheckedContextFd::under_runtime(&f.runtime, &y.config, &y.state, sys::current_uid(), true)
+            .unwrap();
+    assert!(matches!(
+        CollectionStore::fixture(&ycx, &y, day(3), &SCHEMA, None),
+        Err(StoreError::Busy)
+    ));
+    let collections = f
+        .path_for(&y)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(!collections.exists());
+    let mut removed = 0;
+    for _ in 0..5 {
+        let report = collection_gc::fixture_reclaim(&ycx, day(3), 4_096, &SCHEMA).unwrap();
+        assert!(report.ops <= 4_096);
+        removed += report.removed_dirs;
+    }
+    assert!(removed > 0, "GC from Y must reclaim X's stale stores");
+    assert!(paths.iter().all(|path| !path.exists()));
+    assert!(!collections.exists(), "GC must not create Y's namespace");
+    let mut store = CollectionStore::fixture(&ycx, &y, day(3), &SCHEMA, None)
+        .expect("Y must be admitted after reclaiming X's stale stores");
+    store.publish(&completed(&y, b"Y admitted")).unwrap();
+    assert!(f.path_for(&y).join("response").exists());
+}
+
+// 이것을 실패시키는 것: 깊이 제한의 >=를 >로 바꾸거나 경계 바로 아래도 거부하는 것.
+#[test]
+fn reserve_depth_boundary_matches_inventory() {
+    for (config_len, depth, allowed) in [(2_340, 47, true), (2_341, 48, false), (2_401, 49, false)]
+    {
+        let f = Fixture::new("reserve-depth-boundary");
+        f.publish(b"initialize catalog before adding the deep context");
+        let mut b = binding(b"/boundary");
+        b.config = vec![b'a'; config_len];
+        b.config[0] = b'/';
+        b.snapshot.context = snapshot::context_crc(&b.config, &b.state).unwrap();
+        assert_eq!(
+            snapshot::context_components(&b.config, &b.state)
+                .unwrap()
+                .len()
+                + b.components().len(),
+            depth
+        );
+        let context = CheckedContextFd::under_runtime(
+            &f.runtime,
+            &b.config,
+            &b.state,
+            sys::current_uid(),
+            true,
+        )
+        .unwrap();
+        let before = fs::read(f.base.join(".collections.catalog")).unwrap();
+        let acquired = CollectionStore::fixture(&context, &b, clock(), &SCHEMA, None);
+        if allowed {
+            acquired.expect("a store just below the inventory depth must be admitted");
+        } else {
+            assert!(matches!(acquired, Err(StoreError::Busy)));
+            assert_eq!(
+                fs::read(f.base.join(".collections.catalog")).unwrap(),
+                before
+            );
+            let dir = commands::snapshot_store::context_dir_for_test(&context);
+            assert!(
+                sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new("collections-v1"))
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            );
+        }
+    }
 }

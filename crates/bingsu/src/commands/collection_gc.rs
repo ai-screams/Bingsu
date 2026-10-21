@@ -50,6 +50,12 @@ impl GcBudget {
     pub(super) fn start(self) -> sys::CollectionMeter {
         sys::CollectionMeter::start(self.max_ops.min(4_096), self.max_ns.min(20_000_000))
     }
+    fn max_depth(self) -> usize {
+        // Allow two checked ancestor walks plus fixed inspection/checkpoint work.
+        // Smaller test/maintenance budgets must not save an unreopenable cursor.
+        // Keep the short context/hash/store grammar reachable after a tiny sweep.
+        (self.max_ops.saturating_sub(440) / 44).clamp(10, MAX_SCAN_DEPTH as u32) as usize
+    }
 }
 #[derive(Debug, Default)]
 pub(crate) struct GcReport {
@@ -153,8 +159,8 @@ impl<'a> Registration<'a> {
         };
         if catalog.entries.iter().any(|entry| entry.ino == 0) || !catalog.prune.is_empty() {
             // A pre-mkdir reservation or unfinished empty suffix can outlive
-            // collections-v1. Its absent-namespace GC is intentionally a no-op;
-            // rebuild accounting under this admission's global lock instead.
+            // collections-v1. Rebuild accounting under the global lock before
+            // admitting another store, without waiting for a reclamation sweep.
             catalog = Catalog::empty(runtime)?;
         }
         if !catalog.ready {
@@ -195,6 +201,11 @@ impl<'a> Registration<'a> {
     ) -> Result<(), StoreError> {
         let mut path = snapshot::context_components(&context.config, &context.state)?;
         path.extend(["collections-v1".into(), address.into(), "store".into()]);
+        if path.len() >= GcBudget::default().max_depth() {
+            // Inventory skips this depth before inspecting a store. Unknown
+            // occupation covers legacy/same-uid trees, never new admissions.
+            return Err(StoreError::Busy);
+        }
         if self
             .catalog
             .unknown
@@ -285,13 +296,11 @@ impl<'a> Registration<'a> {
 
 pub(crate) fn reclaim(
     runtime: &File,
-    context: &File,
     now: Clock,
     budget: GcBudget,
 ) -> Result<GcReport, StoreError> {
     reclaim_inner(
         runtime,
-        context,
         now,
         budget,
         bingsu_core::field::BUILTIN,
@@ -301,7 +310,6 @@ pub(crate) fn reclaim(
 #[cfg(test)]
 #[allow(dead_code, reason = "native collection_store integration target")]
 pub(crate) fn fixture_reclaim(
-    runtime: &File,
     context: &CheckedContextFd,
     now: Clock,
     max_ops: u32,
@@ -314,8 +322,7 @@ pub(crate) fn fixture_reclaim(
         ..GcBudget::default()
     };
     reclaim_inner(
-        runtime,
-        &context.dir,
+        &context.runtime,
         now,
         budget,
         schema,
@@ -324,17 +331,17 @@ pub(crate) fn fixture_reclaim(
 }
 fn reclaim_inner(
     runtime: &File,
-    context: &File,
     now: Clock,
     budget: GcBudget,
     schema: &[SegmentDecl],
     meter: sys::CollectionMeter,
 ) -> Result<GcReport, StoreError> {
     let mut report = GcReport::default();
-    // This is the first filesystem operation. A checked context with no
-    // collection namespace needs no runtime catalog, global lock or inventory.
-    match sys::open_dir_at_nofollow(context.as_fd(), OsStr::new("collections-v1")) {
-        Ok(dir) => drop(dir),
+    // This is the first filesystem operation. A runtime that never collected
+    // needs no global lock or inventory. Existing stores in any context can
+    // need reclamation even before the current context's first admission.
+    match sys::open_data_at_nofollow(runtime.as_fd(), OsStr::new(CATALOG)) {
+        Ok(file) => drop(file),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             #[cfg(test)]
             {
@@ -595,12 +602,7 @@ fn inventory(
     catalog: &mut Catalog,
     report: &mut GcReport,
 ) -> Result<(), StoreError> {
-    // Allow two checked ancestor walks plus fixed inspection/checkpoint work.
-    // Smaller test/maintenance budgets must not save an unreopenable cursor.
-    // Keep the short context/hash/store grammar reachable even after a tiny
-    // sweep interrupts a tombstone checkpoint; later sweeps can finish it.
-    let max_depth =
-        (budget.max_ops.saturating_sub(440) / 44).clamp(10, MAX_SCAN_DEPTH as u32) as usize;
+    let max_depth = budget.max_depth();
     // Reopen and verify every saved ancestor, never trust a path in the cursor.
     let mut path = Vec::new();
     let mut dirs = Vec::new();
