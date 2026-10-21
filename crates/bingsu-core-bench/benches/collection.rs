@@ -215,6 +215,24 @@ fn selected_variant(c: CompiledConfig) -> (CompiledConfig, u32) {
     assert_ne!(mask, 0);
     (c, mask)
 }
+// The same deterministic fixture drives continuation tests and instruction counts.
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "shared integration fixture; bench measures only its continuation"
+)]
+#[path = "../../bingsu-core/tests/collection_front.rs"]
+mod front_fixture;
+#[library_benchmark]
+#[bench::absent(args=[0], setup=front_fixture::bench_case)]
+#[bench::current(args=[1], setup=front_fixture::bench_case)]
+#[bench::previous(args=[2], setup=front_fixture::bench_case)]
+#[bench::maximum(args=[3], setup=front_fixture::bench_case)]
+#[bench::width_change(args=[4], setup=front_fixture::bench_case)]
+fn front_collection(mut fixture: front_fixture::Harness) -> (front_fixture::Harness, Vec<u8>) {
+    let record = black_box(fixture.run().record);
+    (fixture, record)
+}
 library_benchmark_group!(
     name = collection,
     benchmarks = [
@@ -225,7 +243,8 @@ library_benchmark_group!(
         binding_compare,
         cwd_sha256,
         rejected_prefix,
-        selected_variant
+        selected_variant,
+        front_collection
     ]
 );
 main!(library_benchmark_groups = collection);

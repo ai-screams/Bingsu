@@ -108,3 +108,27 @@ def collection_expected(components: int, body_bytes: int, previous: bool, staged
         "flock": 0,
         "fsync": 0,
     }
+
+
+def collection_front_expected(directories: int, file_sizes: tuple[int | None, ...],
+                              body_bytes: tuple[int, ...], *, absent: bool = False) -> dict[str, int]:
+    """Front increment only: O_PATH directories, immutable data and 16 KiB reads.
+
+    `directories` counts successfully inspected private collection directories;
+    a failed directory open contributes one attempt and no facts. None file sizes
+    mean ENOENT slots. Body sizes name only records whose header was accepted.
+    A normal two-slot fixture has directories=3 and two file sizes; a missing
+    namespace has absent=True and no successful directory/file observations.
+    """
+    if not 0 <= directories <= 3 or len(file_sizes) > 2 or any(n is not None and n < 0 for n in file_sizes):
+        raise ValueError("invalid collection prefetch axes")
+    if directories < 3 and file_sizes or len(body_bytes) > 2 or any(not 0 <= n <= 262_144 - 64 for n in body_bytes):
+        raise ValueError("invalid collection read axes")
+    if absent and (directories or file_sizes or body_bytes):
+        raise ValueError("absent namespace has no facts or reads")
+    files = sum(n is not None for n in file_sizes)
+    opens = 1 if absent else directories + (1 if directories < 3 else len(file_sizes))
+    facts = directories + files
+    return {"openat": opens, "fstat": facts, "fstatfs": facts,
+            "fgetxattr": facts, "getxattr": directories,
+            "read": sum(1 + ceil_div(n, 16_384) for n in body_bytes)}

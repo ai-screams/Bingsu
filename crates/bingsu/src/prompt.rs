@@ -2,6 +2,7 @@
 //! the prompt path. It decides nothing: the arguments become bytes,
 //! `bingsu_core::front` (pure, `no_std`) parses them and says what to read
 //! (`prepare`), the pinned pre-filter reader retains approved descriptors and
+//! completed collection slots remain distinct from snapshot slots;
 //! `finish` gives the record, which this module writes before it exits. An
 //! unwind panic in the core becomes `bingsu_core::front::after_panic`'s
 //! record. `main` calls `dispatch` first; every other command gets the

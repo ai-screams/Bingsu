@@ -837,3 +837,87 @@ def test_n6_timer_is_one_repeating_prefilter_timer(debian_trace, change):
     else:
         with pytest.raises(AssertionError, match="timer"):
             assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+
+
+def collection_trace(*, absent=False, previous=False):
+    """Minimal C3 window with real header bytes and all five same-fd facts."""
+    import hashlib
+    import struct
+    cwd = b"/cwd"
+    _, snapshots = budget.prompt_sources(ROOTS)
+    context = str(Path(next(iter(snapshots))).parent)
+    root = context + "/collections-v1"
+    paths = [root, root + "/" + hashlib.sha256(cwd).hexdigest()]
+    paths += [paths[-1] + "/store"]
+    paths += [paths[-1] + "/response", paths[-1] + "/previous"]
+    lines = []
+    for i, path in enumerate(paths):
+        fd = i + 20
+        base = 19 if i == 0 else (22 if i == 4 else fd - 1)
+        parent = str(Path(path).parent)
+        flags = "O_RDONLY|O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC" if i < 3 else "O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|O_NOCTTY"
+        result = "-1 ENOENT (No such file or directory)" if absent else f"{fd}<{path}>"
+        lines.append(f'77 openat({base}<{parent}>, "{Path(path).name}", {flags}) = {result}')
+        if absent:
+            break
+        mode = "S_IFDIR|0700" if i < 3 else "S_IFREG|0600"
+        lines.append(f'77 fstat({fd}<{path}>, {{st_mode={mode}, st_size=100}}) = 0')
+        lines.append(f'77 fstatfs({fd}<{path}>, {{f_type=EXT4_SUPER_MAGIC}}) = 0')
+        result = "-1 EBADF (Bad file descriptor)" if i < 3 else "-1 ENODATA (No data available)"
+        lines.append(f'77 fgetxattr({fd}<{path}>, "system.posix_acl_access", NULL, 0) = {result}')
+        if i < 3:
+            lines.append(f'77 getxattr("/proc/self/fd/{fd}", "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)')
+    lines.append('77 prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, 0x1) = 0')
+    if not absent:
+        for i in ([3, 4] if previous else [3]):
+            path = paths[i]; fd = i + 20
+            header = b"BNGRES02" + struct.pack("<HHII", 2, 64, 36, 0) + bytes(44)
+            encoded = ''.join(chr(b) if 32 <= b < 127 and b not in (34,92) else f'\\{b:03o}' for b in header)
+            lines.append(f'77 read({fd}<{path}>, "{encoded}", 64) = 64')
+            lines.append(f'77 read({fd}<{path}>, "' + 'a'*36 + '", 36) = 36')
+    return lines, paths
+
+
+def check_collection(lines):
+    calls = budget.parse_trace("\n".join(lines))
+    assert not calls.errors
+    boundary, = [c.index for c in calls if c.name == "prctl"]
+    return budget.assert_collection_trace(calls, boundary, ROOTS, b"/cwd", required=True)
+
+
+# 이것을 실패시키는 것: 부재1회·정상5회의 facts/read 항을 gate하지 않는 것.
+@pytest.mark.parametrize("absent,previous,opens,reads", [(True,False,1,0), (False,False,5,2), (False,True,5,4)])
+def test_collection_exact_open_and_read_budget(absent, previous, opens, reads):
+    lines, _ = collection_trace(absent=absent, previous=previous)
+    counts = check_collection(lines)
+    assert counts["openat"] == opens and counts["read"] == reads
+
+
+# 이것을 실패시키는 것: 경로/플래그/부모/facts/read/필터 경계 확장을 하나라도 허용하는 것.
+@pytest.mark.parametrize("change", ["extra-open", "absent-retry", "nofollow", "cloexec", "nonblock", "noctty", "wrong-hash", "wrong-parent", "extra-fstat", "extra-statfs", "extra-acl", "pre-read", "post-open", "post-facts", "eof-read", "large-read", "short-header", "missing-facts", "missing-open"])
+def test_collection_budget_rejects_one_mutation(change):
+    lines, paths = collection_trace(absent=change == "absent-retry")
+    original = list(lines)
+    filt = next(i for i,s in enumerate(lines) if "prctl(" in s)
+    open_at = next(i for i,s in enumerate(lines) if '"collections-v1"' in s)
+    response_at = next((i for i,s in enumerate(lines) if '"response"' in s), open_at)
+    fact_at = next((i for i,s in enumerate(lines) if 'fstat(23<' in s), 1)
+    if change in {"extra-open", "absent-retry"}: lines.insert(open_at+1, lines[open_at])
+    elif change in {"nofollow", "cloexec", "nonblock", "noctty"}:
+        lines[response_at] = lines[response_at].replace("|O_"+change.upper(), "")
+    elif change == "wrong-hash": lines[5] = lines[5].replace(Path(paths[1]).name, "a"*64)
+    elif change == "wrong-parent": lines[response_at] = lines[response_at].replace("22<", "99<")
+    elif change == "extra-fstat": lines.insert(fact_at, lines[fact_at])
+    elif change == "extra-statfs": lines.insert(fact_at+1, lines[fact_at+1])
+    elif change == "extra-acl": lines.insert(fact_at+2, lines[fact_at+2])
+    elif change == "pre-read": lines.insert(filt, lines.pop(filt+1))
+    elif change == "post-open": lines.append(lines[response_at])
+    elif change == "post-facts": lines.append(lines[fact_at])
+    elif change == "eof-read": lines.append(f'77 read(23<{paths[3]}>, "", 1) = 0')
+    elif change == "large-read": lines[-1] = lines[-1].replace(", 36) = 36", ", 16385) = 36")
+    elif change == "short-header": lines[-2] = lines[-2].replace(", 64) = 64", ", 63) = 63")
+    elif change == "missing-facts": lines.pop(fact_at)
+    elif change == "missing-open": lines = [s for s in lines if "openat(" not in s]
+    assert lines != original, change
+    with pytest.raises(AssertionError):
+        check_collection(lines)

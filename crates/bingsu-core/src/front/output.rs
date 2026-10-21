@@ -23,6 +23,10 @@ impl Deadline {
         self.end
     }
 
+    pub fn start(self) -> ClockValue {
+        self.start
+    }
+
     /// A clock moving behind entry is also unusable. Equality is expired.
     pub fn remaining(self, now: ClockValue) -> Option<u64> {
         if now < self.start || now >= self.end {

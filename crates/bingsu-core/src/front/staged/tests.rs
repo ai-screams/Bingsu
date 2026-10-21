@@ -190,6 +190,7 @@ mod cases {
                             .map_or_else(|| facts(true, name == b"/", 0), |(_, f)| *f),
                     )
                 }
+                Operation::OpenCollection(_) => Observation::Failed,
                 Operation::OpenFile { parent, name, into } => {
                     assert_eq!(*into, Slot::File);
                     assert_eq!(
@@ -822,6 +823,7 @@ mod cases {
         let sources = Prefetch {
             parent: Slot::Directory0,
             uid: 501,
+            cwd: None,
         };
         let h = Harness::new();
         for (index, size) in [

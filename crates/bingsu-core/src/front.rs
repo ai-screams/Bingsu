@@ -72,12 +72,39 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
 
 /// Shared snapshot/default rendering. Only the staged consumer enables P10;
 /// the legacy adapter remains disconnected pending its syscall-budget ruling.
-fn render_selected(
+pub fn render_selected(
     parsed: &Envelope,
     shell: Shell,
     status: Status,
     compiled: Option<&CompiledConfig>,
     mode: Mode,
+    collection: Option<&crate::collection::response::Completed>,
+    out: &mut Vec<u8>,
+) {
+    render_selected_with_catalog(
+        parsed,
+        shell,
+        status,
+        compiled,
+        mode,
+        collection,
+        &crate::collection::selection::PRODUCT,
+        out,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fixed pure renderer inputs and adapter catalog"
+)]
+fn render_selected_with_catalog(
+    parsed: &Envelope,
+    shell: Shell,
+    status: Status,
+    compiled: Option<&CompiledConfig>,
+    mode: Mode,
+    collection: Option<&crate::collection::response::Completed>,
+    catalog: &crate::collection::selection::Catalog<'_>,
     out: &mut Vec<u8>,
 ) {
     let default;
@@ -113,9 +140,11 @@ fn render_selected(
             shell_values::DURATION_MIN_MS,
         )
     };
-    let collected = shell_values::collect_with_duration_min(parsed, duration_min);
+    let mut collected = shell_values::collect_with_duration_min(parsed, duration_min);
+    let mask = compiled.map_or(0, |c| catalog.worker_mask(c, parsed.width, false));
+    crate::collection::merge(&mut collected, collection, mask);
     let inputs = Inputs {
-        catalog: BUILTIN,
+        catalog: catalog.segments,
         values: &collected.values,
         facts: &collected.facts,
         setup,
