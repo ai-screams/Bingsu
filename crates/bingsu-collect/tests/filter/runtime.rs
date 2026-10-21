@@ -631,6 +631,8 @@ fn x16_all_mutations_are_denied_with_fsize_zero() {
     assert!(!dir.join("renamed").exists());
     assert_eq!(std::fs::metadata(dir.join("control")).unwrap().len(), 0);
     std::fs::remove_dir_all(dir).unwrap();
+    // Forward validated raw probe records to the standalone acceptance ledger.
+    println!("\n{text}");
 }
 
 // 이것을 실패시키는 것: 설치 비용의 필수 200개 표본을 누락하거나 일부 단계 측정 생략.

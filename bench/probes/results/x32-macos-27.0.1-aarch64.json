@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "results": [
+    {
+      "case": "X-32",
+      "platform": "Darwin",
+      "kernel": "27.0.0",
+      "libc": "libSystem",
+      "arch": "aarch64",
+      "build_id": "7bfc8816b8a49c921ef50af4ba3a921d3fe4e9626be051f35b56d248d22f074a",
+      "outcome": "PASS",
+      "evidence": {
+        "returncode": 0,
+        "stdout": "{\"cell\":\"setsid\",\"evidence\":{\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":94779,\"sid\":94779,\"parent_sid\":94778,\"leaks\":1,\"high_open\":1,\"exit\":0,\"elapsed_us\":11094,\"close_ns\":0}}\n{\"cell\":\"cloexec_default\",\"evidence\":{\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":94780,\"sid\":94778,\"parent_sid\":94778,\"leaks\":0,\"high_open\":0,\"exit\":0,\"elapsed_us\":11154,\"close_ns\":0}}\n{\"cell\":\"both\",\"evidence\":{\"errno\":0,\"missing\":0,\"fallback\":0,\"pid\":94781,\"sid\":94781,\"parent_sid\":94778,\"leaks\":0,\"high_open\":0,\"exit\":0,\"elapsed_us\":11552,\"close_ns\":0}}\n{\"cell\":\"fallback_missing\",\"evidence\":{\"errno\":0,\"missing\":1,\"fallback\":1,\"pid\":94782,\"sid\":94782,\"parent_sid\":94778,\"leaks\":0,\"high_open\":0,\"exit\":0,\"elapsed_us\":21626,\"close_ns\":8874000}}\n{\"cell\":\"fallback_einval\",\"evidence\":{\"errno\":22,\"missing\":0,\"fallback\":1,\"pid\":94783,\"sid\":94783,\"parent_sid\":94778,\"leaks\":0,\"high_open\":0,\"exit\":0,\"elapsed_us\":23213,\"close_ns\":10419000}}\n{\"cell\":\"race\",\"evidence\":{\"opens\":11296,\"high_fd\":1025,\"soft_limit\":256,\"close_ceiling\":92160,\"other_errno_rejected\":1}}\n",
+        "stderr": "",
+        "elapsed_s": 0.08250233298167586,
+        "observed_at": "2026-10-21T05:12:55.425323+00:00",
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "compile_flags": [
+          "-std=c11",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-O2",
+          "-pthread",
+          "-mmacosx-version-min=11.0"
+        ],
+        "binary_sha256": "9ad1249550c0984fd879cb78228852b288ba40bd032d3334ce5e1c2550656072",
+        "sdk": "27.0",
+        "deployment_target": "11.0",
+        "mutation": {
+          "returncode": 90,
+          "stderr": "assertion: mutate ? r.sid != r.pid : (detached ? r.sid == r.pid && r.sid != getsid(0) : r.sid == getsid(0)) errno=0\n"
+        },
+        "cells": {
+          "setsid": {
+            "errno": 0,
+            "missing": 0,
+            "fallback": 0,
+            "pid": 94779,
+            "sid": 94779,
+            "parent_sid": 94778,
+            "leaks": 1,
+            "high_open": 1,
+            "exit": 0,
+            "elapsed_us": 11094,
+            "close_ns": 0
+          },
+          "cloexec_default": {
+            "errno": 0,
+            "missing": 0,
+            "fallback": 0,
+            "pid": 94780,
+            "sid": 94778,
+            "parent_sid": 94778,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "elapsed_us": 11154,
+            "close_ns": 0
+          },
+          "both": {
+            "errno": 0,
+            "missing": 0,
+            "fallback": 0,
+            "pid": 94781,
+            "sid": 94781,
+            "parent_sid": 94778,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "elapsed_us": 11552,
+            "close_ns": 0
+          },
+          "fallback_missing": {
+            "errno": 0,
+            "missing": 1,
+            "fallback": 1,
+            "pid": 94782,
+            "sid": 94782,
+            "parent_sid": 94778,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "elapsed_us": 21626,
+            "close_ns": 8874000
+          },
+          "fallback_einval": {
+            "errno": 22,
+            "missing": 0,
+            "fallback": 1,
+            "pid": 94783,
+            "sid": 94783,
+            "parent_sid": 94778,
+            "leaks": 0,
+            "high_open": 0,
+            "exit": 0,
+            "elapsed_us": 23213,
+            "close_ns": 10419000
+          },
+          "race": {
+            "opens": 11296,
+            "high_fd": 1025,
+            "soft_limit": 256,
+            "close_ceiling": 92160,
+            "other_errno_rejected": 1
+          }
+        },
+        "os_version": "27.0.1",
+        "os_build": "26A434",
+        "environment": "macos-current"
+      }
+    }
+  ]
+}

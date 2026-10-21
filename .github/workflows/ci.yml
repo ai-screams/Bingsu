@@ -53,6 +53,44 @@ jobs:
       - name: Run actionlint
         run: ./actionlint -color
 
+  collector-probes:
+    name: Collector experiments (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            probe: X-02
+          - os: ubuntu-24.04-arm
+            probe: X-02
+          - os: macos-latest
+            probe: X-32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare the acceptance parser tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/probe-tests"
+          "$RUNNER_TEMP/probe-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      - name: Required ledger cells and evidence mutations
+        run: '"$RUNNER_TEMP/probe-tests/bin/python" -m pytest bench/tests/test_collector_probes.py -q -p no:cacheprovider'
+      # Only read the default sysctl value. Other values require disposable VMs.
+      # The actual macOS version is recorded; this is not minimum-VM evidence.
+      - name: Native probe and deliberately wrong expectation
+        env:
+          PROBE_CASE: ${{ matrix.probe }}
+        run: python3 bench/probes/run-collector-probes.py --case "$PROBE_CASE" --out target/collector-probes/result.json --ledger-out target/collector-probes/acceptance.tsv
+      - name: Preserve observations, including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: collector-probes-${{ matrix.os }}
+          path: target/collector-probes/
+          if-no-files-found: error
+
   lint:
     name: Lint (rustfmt, clippy)
     needs: detect
