@@ -81,13 +81,13 @@ pub struct Prefetch {
     cwd: Option<Vec<u8>>,
 }
 impl Prefetch {
-    pub fn collection_components(&self) -> Option<Vec<String>> {
+    /// Advance only after successfully opening and validating the preceding
+    /// directory: an absent collections-v1 root must not hash the cwd.
+    pub fn collection_components(&self) -> Option<impl Iterator<Item = String> + '_> {
         let cwd = self.cwd.as_deref()?;
-        Some(vec![
-            String::from("collections-v1"),
-            crate::collection::cwd_hash::address(cwd),
-            String::from("store"),
-        ])
+        Some(collection_components_with_address(move || {
+            crate::collection::cwd_hash::address(cwd)
+        }))
     }
     pub fn accepts_collection_directory(&self, facts: FdFacts) -> bool {
         fs_trust::final_verdict(
@@ -132,6 +132,14 @@ impl Prefetch {
                 _ => false,
             }
     }
+}
+
+fn collection_components_with_address(
+    address: impl FnOnce() -> String,
+) -> impl Iterator<Item = String> {
+    core::iter::once_with(|| String::from("collections-v1"))
+        .chain(core::iter::once_with(address))
+        .chain(core::iter::once_with(|| String::from("store")))
 }
 
 fn trusted_file(uid: u32, f: FdFacts) -> bool {

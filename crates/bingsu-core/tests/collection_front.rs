@@ -200,6 +200,7 @@ pub struct Harness {
     entry: Clock,
     start: Clock,
     end: Clock,
+    fail_final_clock: bool,
     prefetch: Option<Vec<String>>,
     args: Vec<Vec<u8>>,
     fixture: bool,
@@ -234,6 +235,7 @@ impl Harness {
             entry: clock(100),
             start: clock(102),
             end: clock(103),
+            fail_final_clock: false,
             prefetch: None,
             args: args(),
             fixture: true,
@@ -276,17 +278,21 @@ impl Harness {
                 Step::Read(e) => e,
             };
             if let Some(p) = plan.prefetch(&effect) {
-                self.prefetch = p.collection_components();
+                self.prefetch = p.collection_components().map(Iterator::collect);
             }
             let o = match effect.operation() {
                 Operation::Uid => Observation::Uid(501),
                 Operation::Clock => {
                     self.clocks += 1;
-                    Observation::Clock(Some(if self.clocks == 1 {
-                        self.start
+                    if self.clocks > 1 && self.fail_final_clock {
+                        Observation::Failed
                     } else {
-                        self.end
-                    }))
+                        Observation::Clock(Some(if self.clocks == 1 {
+                            self.start
+                        } else {
+                            self.end
+                        }))
+                    }
                 }
                 Operation::OpenDirectory { .. } => Observation::Opened,
                 Operation::Inspect(staged::Slot::File) => {
@@ -357,6 +363,33 @@ fn entry_cutoff_and_selected_binding_are_independent_of_prefetch_time() {
         h.start.kind = kind;
         h.end.kind = kind;
         assert!(h.text().contains("CLOCK"));
+    }
+}
+
+// 이것을 실패시키는 것: 최종 시계 관찰 Failed 뒤 이미 읽은 collection을 렌더하는 것.
+#[test]
+fn failed_final_clock_discards_an_already_selected_collection() {
+    for previous in [false, true] {
+        let response = completed(99, b"COLLECTED");
+        let mut h = if previous {
+            Harness::new(None, Some(response))
+        } else {
+            Harness::new(Some(response), None)
+        };
+        assert!(h.text().contains("COLLECTED"));
+        h.fail_final_clock = true;
+        let record = h.text();
+        assert_eq!(h.clocks, 2);
+        let selected = if previous {
+            b"previous".as_slice()
+        } else {
+            b"response"
+        };
+        assert!(h.reads.iter().any(|(name, _, _)| *name == selected));
+        assert!(
+            record.contains('?') && !record.contains("COLLECTED"),
+            "{record}"
+        );
     }
 }
 

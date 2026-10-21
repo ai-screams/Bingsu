@@ -365,6 +365,8 @@ fn held(fd: PromptFd, deadline: Option<Deadline>) -> std::io::Result<Held> {
 struct ClockPins {
     deadline: Option<Deadline>,
     identity: Option<Clock>,
+    #[cfg(test)]
+    fixed_now: Option<u64>,
     // Keep ordinary kernel files alive across the filter and both samples.
     // Namespace links are observed before the filter and retain no target fd.
     #[cfg(target_os = "linux")]
@@ -374,6 +376,11 @@ impl ClockPins {
     fn observe(&self) -> Result<Clock, ClockError> {
         check_deadline(self.deadline);
         let mut clock = self.identity.ok_or(ClockError::Boot)?;
+        #[cfg(test)]
+        if let Some(now) = self.fixed_now {
+            clock.now = now;
+            return Ok(clock);
+        }
         clock.now = crate::prompt_io::monotonic_ns()?;
         Ok(clock)
     }
@@ -383,6 +390,8 @@ impl ClockPins {
         Self {
             deadline,
             identity: crate::prompt_io::observe_clock_until(deadline).ok(),
+            #[cfg(test)]
+            fixed_now: None,
         }
     }
     #[cfg(target_os = "linux")]
@@ -662,7 +671,7 @@ fn acl(fd: i32, deadline: Option<Deadline>) -> AclFacts {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bingsu_core::{
         color::palette::Mode,
@@ -833,6 +842,48 @@ mod tests {
                 fixture_config(f),
             );
         p
+    }
+
+    // 이것을 실패시키는 것: 어댑터가 deadline.start 대신 StartClock을 완료 cutoff로 쓰는 것.
+    #[test]
+    fn adapter_uses_deadline_entry_before_the_start_clock_observation() {
+        fn delayed_clock(deadline: Option<Deadline>) -> ClockPins {
+            ClockPins {
+                fixed_now: Some(deadline.unwrap().start() + 2),
+                ..fixed_clock(deadline)
+            }
+        }
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (f, b, _) = collection_fixture(b"/cwd");
+        let entry = crate::prompt_io::monotonic_ns().unwrap();
+        publish_fixture(&f, &b, entry - 1, b"PREVIOUS");
+        publish_fixture(&f, &b, entry + 1, b"CURRENT");
+        for (start, want, refused) in [
+            (entry, "PREVIOUS", "CURRENT"),
+            (entry + 2, "CURRENT", "PREVIOUS"),
+        ] {
+            let deadline = Deadline::from_entry(start, 60_000_000_000).unwrap();
+            let mut p = prepare_with_clock(
+                &f.args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                delayed_clock,
+                Some(deadline),
+            );
+            assert!(p.collections.iter().all(Option::is_some));
+            // Supply only the test worker catalog, never override the entry
+            // chosen by the adapter under test.
+            p.plan = p.plan.with_catalog(
+                Catalog {
+                    segments: &COLLECTION_CATALOG,
+                    workers: TEST_MASK,
+                },
+                fixture_config(&f),
+            );
+            let record = text(p.respond());
+            assert!(
+                record.contains(want) && !record.contains(refused),
+                "{record}"
+            );
+        }
     }
 
     // 이것을 실패시키는 것: collections-v1 실패 뒤 추가 open 또는 facts를 수행하는 것.
@@ -1034,10 +1085,19 @@ mod tests {
         assert!(text(fixture_prepared(&f, 102).respond()).contains("CURRENT"));
     }
 
-    #[test]
-    #[ignore = "isolated C3 reader with the native filter and strace window"]
-    fn collection_trace_child() {
+    // Called only by the harness=false test target, on the process main thread.
+    #[allow(
+        dead_code,
+        reason = "entry for the separate collection_reader test target"
+    )]
+    pub(crate) fn collection_trace_child() {
         use std::io::Read;
+        #[cfg(target_os = "linux")]
+        // SAFETY: these identity queries have no pointer arguments.
+        assert_eq!(unsafe { libc::gettid() }, unsafe { libc::getpid() });
+        #[cfg(target_os = "macos")]
+        // SAFETY: pthread_main_np has no arguments and reports the current thread.
+        assert_eq!(unsafe { libc::pthread_main_np() }, 1);
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input).unwrap();
         let mut input = input.split('\0');
@@ -1270,6 +1330,7 @@ mod tests {
                 kind,
                 resume: 0,
             }),
+            fixed_now: None,
             #[cfg(target_os = "linux")]
             fds: Vec::new(),
         }

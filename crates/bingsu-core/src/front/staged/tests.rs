@@ -32,6 +32,31 @@ mod cases {
         }
     }
 
+    // 이것을 실패시키는 것: collections-v1 open 실패로 순회를 멈춰도 cwd 해시를 계산하는 것.
+    #[test]
+    fn collection_address_is_computed_only_after_advancing_past_the_root() {
+        let hashes = core::cell::Cell::new(0);
+        let address = || {
+            hashes.set(hashes.get() + 1);
+            String::from("cwd-address")
+        };
+        {
+            let mut components = collection_components_with_address(address);
+            assert_eq!(hashes.get(), 0);
+            assert_eq!(components.next().as_deref(), Some("collections-v1"));
+            assert_eq!(hashes.get(), 0);
+            // The adapter returns here on ENOENT, dropping the iterator.
+        }
+        assert_eq!(hashes.get(), 0);
+        let mut components = collection_components_with_address(address);
+        assert_eq!(components.next().as_deref(), Some("collections-v1"));
+        assert_eq!(components.next().as_deref(), Some("cwd-address"));
+        assert_eq!(hashes.get(), 1);
+        assert_eq!(components.next().as_deref(), Some("store"));
+        assert_eq!(components.next(), None);
+        assert_eq!(hashes.get(), 1);
+    }
+
     // 이것을 실패시키는 것: finish의 정상·오류·빈 출력에서 진입 마감을 잃거나 다시 잡는 것.
     #[test]
     fn response_preserves_entry_deadline_on_every_record_path() {
