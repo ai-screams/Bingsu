@@ -63,6 +63,9 @@ pub fn test_limit_fds(limit: libc::rlim_t) {
 /// the deadline-flag check on EINTR; M1 has no timer yet.
 pub fn write_fd(fd: i32, mut buf: &[u8]) -> WriteOutcome {
     while !buf.is_empty() {
+        if collection_ops(1).is_err() {
+            return WriteOutcome::Failed;
+        }
         // SAFETY: `buf` is an initialized slice valid for `buf.len()` bytes.
         let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
         if n < 0 {
@@ -451,6 +454,9 @@ fn posix_acl_answer(n: libc::ssize_t) -> AclFacts {
 /// folder).
 #[cfg(target_os = "macos")]
 pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
+    if collection_ops(16).is_err() {
+        return AclFacts::Unknown;
+    }
     use std::os::fd::AsRawFd;
     unsafe extern "C" {
         fn acl_get_fd_np(fd: libc::c_int, ty: libc::c_int) -> *mut libc::c_void;
@@ -466,6 +472,9 @@ pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
 /// through `/proc/self/fd/N`, which names the same object.
 #[cfg(target_os = "linux")]
 pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
+    if collection_ops(16).is_err() {
+        return AclFacts::Unknown;
+    }
     use std::os::fd::AsRawFd;
     let name = c"system.posix_acl_access";
     // SAFETY: `fd` is open; size 0 asks only for the length.
@@ -489,6 +498,7 @@ pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
     reason = "st_mode, st_dev and st_ino differ in type between macOS and Linux"
 )]
 pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     // SAFETY: an all-zero stat is a valid out-parameter value.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -516,6 +526,7 @@ pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
 /// undecidable. Linux ownership follows the platform filesystem contract.
 #[cfg(target_os = "macos")]
 pub fn fd_ownership(fd: std::os::fd::BorrowedFd<'_>) -> Option<bool> {
+    collection_ops(1).ok()?;
     use std::os::fd::AsRawFd;
     // SAFETY: zero is valid for this out parameter; fd is borrowed and open.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
@@ -566,6 +577,7 @@ pub fn fs_is_local(path: &std::path::Path) -> Option<bool> {
 /// As `fs_is_local`, for an open descriptor.
 #[cfg(target_os = "macos")]
 pub fn fd_is_local(fd: std::os::fd::RawFd) -> Option<bool> {
+    collection_ops(1).ok()?;
     // SAFETY: an all-zero statfs is a valid out-parameter value.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `st` is a writable statfs; a bad fd only makes fstatfs fail.
@@ -594,6 +606,7 @@ pub fn fs_is_local(path: &std::path::Path) -> Option<bool> {
 /// works on it, observed 2026-10-15 on the colima kernel).
 #[cfg(target_os = "linux")]
 pub fn fd_is_local(fd: std::os::fd::RawFd) -> Option<bool> {
+    collection_ops(1).ok()?;
     // SAFETY: an all-zero statfs is a valid out-parameter value.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `st` is a writable statfs; a bad fd only makes fstatfs fail.
@@ -698,6 +711,7 @@ pub fn mkdir_at(
     name: &std::ffi::OsStr,
     mode: u32,
 ) -> std::io::Result<bool> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
@@ -719,6 +733,7 @@ pub fn remove_dir_at(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
 ) -> std::io::Result<()> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
@@ -770,6 +785,7 @@ pub fn create_file_at(
     name: &std::ffi::OsStr,
     mode: u32,
 ) -> std::io::Result<std::fs::File> {
+    collection_ops(2)?;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
@@ -783,6 +799,7 @@ pub fn create_file_at(
     }
     // SAFETY: openat returned a fresh descriptor that nothing else owns.
     let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    collection_ops(1)?;
     file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     Ok(file)
 }
@@ -793,6 +810,7 @@ pub fn rename_at(
     from: &std::ffi::OsStr,
     to: &std::ffi::OsStr,
 ) -> std::io::Result<()> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let a = std::ffi::CString::new(from.as_bytes())?;
@@ -833,6 +851,7 @@ fn open_at(
     name: &std::ffi::OsStr,
     access: libc::c_int,
 ) -> std::io::Result<std::fs::File> {
+    collection_ops(2)?;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
@@ -951,6 +970,7 @@ pub struct Stamp {
 }
 
 pub fn file_stamp(file: &std::fs::File) -> std::io::Result<Stamp> {
+    collection_ops(1)?;
     use std::os::unix::fs::MetadataExt;
     let m = file.metadata()?;
     Ok(Stamp {
@@ -974,6 +994,7 @@ pub fn at_stamp(
     dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
 ) -> std::io::Result<Stamp> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(name.as_bytes())?;
@@ -1155,6 +1176,7 @@ impl Drop for FileLock {
 }
 
 pub fn try_lock(file: std::fs::File) -> std::io::Result<FileLock> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     // SAFETY: the file is live; no pointer arguments.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -1204,6 +1226,7 @@ impl Drop for PausedFork {
 }
 
 pub fn unlink_at(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::OsStr) -> std::io::Result<()> {
+    collection_ops(1)?;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::CString::new(name.as_bytes())?;
@@ -1224,4 +1247,130 @@ pub fn open_append_at(
         name,
         libc::O_WRONLY | libc::O_APPEND | libc::O_NONBLOCK,
     )
+}
+
+// The collection sweep meters the same trusted OS primitives as publication.
+// Outside a sweep this thread-local slot is empty. Descriptors reserve their
+// eventual close before acquisition, including error cleanup at the deadline.
+thread_local! {
+    static COLLECTION_METER: std::cell::RefCell<Option<MeterState>> = const { std::cell::RefCell::new(None) };
+}
+struct MeterState {
+    started: std::time::Instant,
+    max_ops: u32,
+    max_ns: u64,
+    used: u32,
+    checkpoint: bool,
+}
+pub(super) struct CollectionMeter;
+impl CollectionMeter {
+    pub(super) fn start(max_ops: u32, max_ns: u64) -> Self {
+        COLLECTION_METER.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(MeterState {
+                started: std::time::Instant::now(),
+                max_ops,
+                max_ns,
+                used: 0,
+                checkpoint: false,
+            });
+        });
+        Self
+    }
+    pub(super) fn checkpoint(&self) {
+        COLLECTION_METER.with(|slot| slot.borrow_mut().as_mut().unwrap().checkpoint = true);
+    }
+    #[cfg(test)]
+    pub(super) fn used(&self) -> u32 {
+        COLLECTION_METER.with(|slot| slot.borrow().as_ref().unwrap().used)
+    }
+}
+impl Drop for CollectionMeter {
+    fn drop(&mut self) {
+        COLLECTION_METER.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+pub(super) fn collection_ops(count: u32) -> std::io::Result<()> {
+    COLLECTION_METER.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(meter) = slot.as_mut() else {
+            return Ok(());
+        };
+        let (ops, ns) = if meter.checkpoint {
+            (meter.max_ops, meter.max_ns)
+        } else {
+            (
+                meter.max_ops.saturating_sub(320),
+                meter.max_ns.saturating_sub(2_000_000),
+            )
+        };
+        if count > ops.saturating_sub(meter.used)
+            || meter.started.elapsed().as_nanos() >= u128::from(ns)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "collection sweep budget",
+            ));
+        }
+        meter.used += count;
+        Ok(())
+    })
+}
+
+/// One directory stream, never a vector of the directory's contents. A saved
+/// cursor is a name, not a libc cookie reused with a different DIR stream.
+pub(super) struct DirectoryCursor(*mut libc::DIR);
+impl DirectoryCursor {
+    pub(super) fn open(dir: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        // A new OFD avoids sharing enumeration offsets with a retained dirfd.
+        let file = open_dir_at_nofollow(dir, std::ffi::OsStr::new("."))?;
+        collection_ops(2)?; // fdopendir may query fd flags and metadata.
+        // SAFETY: ownership transfers only if fdopendir succeeds.
+        let stream = unsafe { libc::fdopendir(file.as_raw_fd()) };
+        if stream.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _ = file.into_raw_fd();
+        Ok(Self(stream))
+    }
+    pub(super) fn next(&mut self) -> std::io::Result<Option<OsString>> {
+        collection_ops(1)?;
+        #[cfg(target_os = "macos")]
+        // SAFETY: this thread's errno storage.
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        // SAFETY: this thread's errno storage.
+        let errno = unsafe { libc::__errno_location() };
+        // SAFETY: the stream remains owned and errno is thread-local.
+        unsafe {
+            *errno = 0;
+        }
+        // SAFETY: this cursor exclusively owns the live stream.
+        let entry = unsafe { libc::readdir(self.0) };
+        if entry.is_null() {
+            // SAFETY: errno is the thread-local slot above.
+            return if unsafe { *errno } == 0 {
+                Ok(None)
+            } else {
+                Err(std::io::Error::last_os_error())
+            };
+        }
+        // SAFETY: readdir provides a terminated name until the next call.
+        let name_ptr = unsafe { (*entry).d_name.as_ptr() };
+        // SAFETY: readdir's name is terminated until the next stream operation.
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
+        Ok(Some(OsString::from_vec(name.to_vec())))
+    }
+}
+impl Drop for DirectoryCursor {
+    fn drop(&mut self) {
+        // SAFETY: uniquely owned stream; close was reserved when opened.
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+pub(super) fn collection_meter_active() -> bool {
+    COLLECTION_METER.with(|slot| slot.borrow().is_some())
 }

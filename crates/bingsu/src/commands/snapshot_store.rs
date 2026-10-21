@@ -76,6 +76,9 @@ impl DataFile {
 /// A CRC never selects a directory. No PATH_MAX-sized joined path is built.
 pub struct CheckedContextFd {
     pub(super) dir: File,
+    pub(super) runtime: File,
+    pub(super) config: Vec<u8>,
+    pub(super) state: Vec<u8>,
     me: u32,
 }
 impl CheckedContextFd {
@@ -117,7 +120,13 @@ impl CheckedContextFd {
             .map_err(|_| StoreError::Unsafe)?;
             dir = next;
         }
-        Ok(Self { dir, me })
+        Ok(Self {
+            dir,
+            runtime: runtime.try_clone()?,
+            config: config.to_vec(),
+            state: state.to_vec(),
+            me,
+        })
     }
     pub fn open_data(&self, name: DataFile) -> Result<File, StoreError> {
         // NONBLOCK means FIFO/device entries cannot stall an open. No read occurs
@@ -127,17 +136,7 @@ impl CheckedContextFd {
         Ok(f)
     }
     fn check_file(&self, f: &File, cap: usize) -> Result<usize, StoreError> {
-        let facts = sys::fd_facts(f.as_fd())?;
-        let md = f.metadata()?;
-        data_verdict(
-            facts,
-            md.is_file(),
-            md.nlink(),
-            md.len(),
-            cap,
-            sys::fd_is_local(f.as_raw_fd()),
-            self.me,
-        )
+        check_data(f, cap, self.me)
     }
     pub fn read(&self, name: DataFile) -> Result<Vec<u8>, StoreError> {
         let mut f = self.open_data(name)?;
@@ -148,6 +147,30 @@ impl CheckedContextFd {
         }
         Ok(bytes)
     }
+}
+pub(super) fn check_data(f: &File, cap: usize, me: u32) -> Result<usize, StoreError> {
+    let facts = sys::fd_facts(f.as_fd())?;
+    sys::collection_ops(1)?;
+    let md = f.metadata()?;
+    data_verdict(
+        facts,
+        md.is_file(),
+        md.nlink(),
+        md.len(),
+        cap,
+        sys::fd_is_local(f.as_raw_fd()),
+        me,
+    )
+}
+pub(super) fn check_directory(dir: &File, me: u32) -> Result<(), StoreError> {
+    walk_verdict(
+        &[sys::fd_facts(dir.as_fd())?],
+        me,
+        Last::PrivateFolder,
+        sys::fd_is_local(dir.as_raw_fd()),
+        &mut RefuseGroupWrite,
+    )
+    .map_err(|_| StoreError::Unsafe)
 }
 pub(super) fn data_verdict(
     facts: bingsu_core::fs_trust::Facts,
@@ -177,14 +200,28 @@ pub(super) fn data_verdict(
     }
     Ok(n)
 }
-fn read_exact_len(f: &mut impl Read, len: usize) -> Result<Vec<u8>, StoreError> {
+pub(super) fn read_exact_len(f: &mut impl Read, len: usize) -> Result<Vec<u8>, StoreError> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(len)
         .map_err(|_| io::Error::other("snapshot allocation"))?;
     bytes.resize(len, 0);
-    f.read_exact(&mut bytes)?;
+    if sys::collection_meter_active() {
+        let mut at = 0;
+        while at < len {
+            sys::collection_ops(1)?;
+            let end = (at + 16_384).min(len);
+            let n = f.read(&mut bytes[at..end])?;
+            if n == 0 {
+                return Err(StoreError::Unsafe);
+            }
+            at += n;
+        }
+    } else {
+        f.read_exact(&mut bytes)?;
+    }
     let mut extra = [0];
+    sys::collection_ops(1)?;
     if f.read(&mut extra)? != 0 {
         return Err(StoreError::Unsafe);
     }
@@ -512,7 +549,7 @@ pub struct LockedStore<'a> {
     stages: std::cell::RefCell<[Option<Staged>; 4]>,
     snapshot_before: std::cell::RefCell<Option<Option<sys::Stamp>>>,
 }
-struct Staged {
+pub(super) struct Staged {
     file: File,
     stamp: sys::Stamp,
     // Only Sequence (96 B) and Marker (208 B) are retained for the final pread.
@@ -606,32 +643,17 @@ impl LockedStore<'_> {
         }
     }
     pub fn stage(&self, slot: Slot, bytes: &[u8]) -> Result<(), StoreError> {
-        if bytes.len() > slot.target().cap() {
-            return Err(StoreError::Unsafe);
-        }
-        validate_bytes(slot, bytes)?;
-        let mut f = sys::create_file_at(self.root.dir.as_fd(), OsStr::new(slot.name()), 0o600)?;
-        if sys::write_fd(f.as_raw_fd(), bytes) != sys::WriteOutcome::Done {
-            return Err(io::Error::other("staging write failed").into());
-        }
-        let len = self.root.check_file(&f, slot.target().cap())?;
-        if len != bytes.len() {
-            return Err(StoreError::Unsafe);
-        }
-        use std::io::Seek;
-        f.rewind()?;
-        let actual = read_exact_len(&mut f, len)?;
-        if actual != bytes {
-            return Err(StoreError::Unsafe);
-        }
-        validate_bytes(slot, &actual)?;
-        same_name(&f, self.root.dir.as_fd(), slot.name())?;
-        let stamp = sys::file_stamp(&f)?;
-        self.stages.borrow_mut()[slot as usize] = Some(Staged {
-            file: f,
-            stamp,
-            small_bytes: matches!(slot, Slot::Sequence | Slot::Marker).then(|| bytes.to_vec()),
-        });
+        let mut staged = stage_verified(
+            &self.root.dir,
+            self.root.me,
+            slot.name(),
+            bytes,
+            slot.target().cap(),
+            &mut |bytes| validate_bytes(slot, bytes),
+            &mut |_| {},
+        )?;
+        staged.small_bytes = matches!(slot, Slot::Sequence | Slot::Marker).then(|| bytes.to_vec());
+        self.stages.borrow_mut()[slot as usize] = Some(staged);
         Ok(())
     }
     /// After Loader's final revalidation, check descriptor/name safety and
@@ -642,11 +664,12 @@ impl LockedStore<'_> {
         let stages = self.stages.borrow();
         let staged = stages[slot as usize].as_ref().ok_or(StoreError::Unsafe)?;
         let f = &staged.file;
-        self.root.check_file(f, slot.target().cap())?;
-        if sys::file_stamp(f)? != staged.stamp {
-            return Err(StoreError::Unsafe);
-        }
-        same_name(f, self.root.dir.as_fd(), slot.name())?;
+        staged.verify(
+            &self.root.dir,
+            self.root.me,
+            slot.name(),
+            slot.target().cap(),
+        )?;
         if let Some(expected) = &staged.small_bytes {
             let mut actual = [0; snapshot::MARKER];
             let actual = &mut actual[..expected.len()];
@@ -655,11 +678,7 @@ impl LockedStore<'_> {
                 return Err(StoreError::Unsafe);
             }
         }
-        sys::rename_at(
-            self.root.dir.as_fd(),
-            OsStr::new(slot.name()),
-            OsStr::new(slot.target().name()),
-        )?;
+        staged.rename(&self.root.dir, slot.name(), slot.target().name())?;
         Ok(())
     }
 }
@@ -670,11 +689,88 @@ impl Drop for LockedStore<'_> {
         let _ = self.recover();
     }
 }
-fn same_name(f: &File, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> Result<(), StoreError> {
+pub(super) fn same_name(
+    f: &File,
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+) -> Result<(), StoreError> {
     if sys::file_stamp(f)? != sys::at_stamp(dir, OsStr::new(name))? {
         return Err(StoreError::Unsafe);
     }
     Ok(())
+}
+/// The shared publication engine: exclusive creation, same-fd readback,
+/// codec validation and descriptor/name identity. No runtime fsync.
+pub(super) fn stage_verified(
+    dir: &File,
+    me: u32,
+    name: &str,
+    bytes: &[u8],
+    cap: usize,
+    validate: &mut dyn FnMut(&[u8]) -> Result<(), StoreError>,
+    checkpoint: &mut dyn FnMut(&str),
+) -> Result<Staged, StoreError> {
+    if bytes.len() > cap {
+        return Err(StoreError::Unsafe);
+    }
+    validate(bytes)?;
+    checkpoint("before_create");
+    let mut f = sys::create_file_at(dir.as_fd(), OsStr::new(name), 0o600)?;
+    checkpoint("before_write");
+    if sys::write_fd(f.as_raw_fd(), bytes) != sys::WriteOutcome::Done {
+        return Err(io::Error::other("staging write failed").into());
+    }
+    checkpoint("after_write");
+    let len = check_data(&f, cap, me)?;
+    if len != bytes.len() {
+        return Err(StoreError::Unsafe);
+    }
+    use std::io::Seek;
+    sys::collection_ops(1)?;
+    f.rewind()?;
+    let actual = read_exact_len(&mut f, len)?;
+    if actual != bytes {
+        return Err(StoreError::Unsafe);
+    }
+    validate(&actual)?;
+    same_name(&f, dir.as_fd(), name)?;
+    let stamp = sys::file_stamp(&f)?;
+    checkpoint("after_check");
+    Ok(Staged {
+        file: f,
+        stamp,
+        small_bytes: None,
+    })
+}
+impl Staged {
+    pub(super) fn verify(
+        &self,
+        dir: &File,
+        me: u32,
+        name: &str,
+        cap: usize,
+    ) -> Result<(), StoreError> {
+        check_data(&self.file, cap, me)?;
+        if sys::file_stamp(&self.file)? != self.stamp {
+            return Err(StoreError::Unsafe);
+        }
+        same_name(&self.file, dir.as_fd(), name)
+    }
+    pub(super) fn install(
+        &self,
+        dir: &File,
+        me: u32,
+        name: &str,
+        target: &str,
+        cap: usize,
+    ) -> Result<(), StoreError> {
+        self.verify(dir, me, name, cap)?;
+        self.rename(dir, name, target)
+    }
+    fn rename(&self, dir: &File, name: &str, target: &str) -> Result<(), StoreError> {
+        sys::rename_at(dir.as_fd(), OsStr::new(name), OsStr::new(target))?;
+        Ok(())
+    }
 }
 fn validate_bytes(slot: Slot, bytes: &[u8]) -> Result<(), StoreError> {
     match slot {

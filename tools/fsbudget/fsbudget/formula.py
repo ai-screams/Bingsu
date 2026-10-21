@@ -73,3 +73,38 @@ def front_expected(C: int, section_bytes: int, session_bytes: int, buf: int) -> 
         "fstat": C + 3,
         "read": ceil_div(section_bytes, buf) + 1 + 1 + ceil_div(session_bytes, buf),
     }
+
+
+def collection_expected(components: int, body_bytes: int, previous: bool, staged: bool) -> dict[str, int]:
+    """Helper supervisor publication, after admission; Linux local-filesystem fixture.
+
+    `components` counts held collection directory edges (normally three).
+    `previous` means a current response is rotated into an absent previous slot;
+    `staged` means a safe abandoned stage is removed first. Both complete records
+    have the fixture's body length. Reads/writes complete their requested buffer
+    in one call; the shared helper engine includes an EOF read on readback.
+
+    Four chain/lock validations: (16*C+16) stat, (8*C+4) statfs.
+    Stage write/readback and three install checks: 20 stat, 4 statfs.
+    Two destination probes: 2 stat. Existing current: 13 stat, 3 statfs,
+    1 header + ceil(body/16384) reads, 1 rename. Abandoned stage: 4 stat, 1 statfs, 1 unlink.
+    The exact five opens are current, previous, stage recovery, legacy request
+    recovery, and exclusive stage creation. No process is spawned here.
+
+    Admission/catalog and GC operations are separate helper phases, never
+    charged to the worker. Front header/body reads (16 KiB) are a separate phase.
+    """
+    if not 0 <= components <= 3300 or not 0 <= body_bytes <= 262_144 - 64:
+        raise ValueError("collection publication axes exceed their bounds")
+    p, s = int(previous), int(staged)
+    return {
+        "openat": 5,
+        "fstat": 16 * components + 38 + 13 * p + 4 * s,
+        "statfs": 8 * components + 8 + 3 * p + s,
+        "read": 2 + (1 + ceil_div(body_bytes, 16_384)) * p,
+        "write": 1,
+        "renameat": 1 + p,
+        "unlinkat": s,
+        "flock": 0,
+        "fsync": 0,
+    }

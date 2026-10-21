@@ -13,6 +13,10 @@ mod build_identity;
 )]
 mod clock;
 #[cfg(unix)]
+pub(crate) mod collection_gc;
+#[cfg(unix)]
+pub(crate) mod collection_store;
+#[cfg(unix)]
 #[allow(unsafe_code)]
 mod collector;
 #[cfg(unix)]
@@ -59,7 +63,7 @@ mod reload;
 pub(crate) mod runtime_root;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
-mod snapshot_store;
+pub(crate) mod snapshot_store;
 #[cfg(unix)]
 mod source_path;
 #[cfg(unix)]

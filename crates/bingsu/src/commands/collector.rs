@@ -1,10 +1,7 @@
 //! Verified dedicated executable and on-demand supervised collection.
-use super::{
-    log::checked,
-    snapshot_store::{CheckedContextFd, StoreError},
-    sys,
-};
-use bingsu_core::fs_trust::{Last, RefuseGroupWrite, walk_verdict};
+use super::{snapshot_store::StoreError, sys};
+#[cfg(test)]
+use bingsu_core::fs_trust::RefuseGroupWrite;
 use std::{
     ffi::OsStr,
     fs::File,
@@ -145,40 +142,6 @@ pub fn spawn(
         watchdog,
         started_ns,
     )?)
-}
-
-/// Temporary admission until the bounded store owns this operation. Product
-/// selection is empty; no directory is created for an empty request.
-pub(super) fn acquire(
-    context: &CheckedContextFd,
-    binding: &bingsu_core::collection::wire::Binding,
-    me: u32,
-) -> Result<File, StoreError> {
-    let mut dir = context.dir.try_clone()?;
-    for name in binding.components() {
-        sys::mkdir_at(dir.as_fd(), OsStr::new(&name), 0o700)?;
-        dir = sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name))?;
-        walk_verdict(
-            &[sys::fd_facts(dir.as_fd())?],
-            me,
-            Last::PrivateFolder,
-            sys::fd_is_local(dir.as_raw_fd()),
-            &mut RefuseGroupWrite,
-        )
-        .map_err(|_| StoreError::Unsafe)?;
-    }
-    drop(sys::open_lock_at(
-        dir.as_fd(),
-        OsStr::new("collection.lock"),
-    )?);
-    let lock = sys::open_data_at_nofollow(dir.as_fd(), OsStr::new("collection.lock"))?;
-    checked(&lock, 0, me)?;
-    if sys::at_stamp(dir.as_fd(), OsStr::new("collection.lock"))? != sys::file_stamp(&lock)? {
-        return Err(StoreError::Unsafe);
-    }
-    // Transfer immediately into close-only ownership before sharing it.
-    let lock = sys::try_lock(lock)?.into_inherited_file();
-    Ok(lock)
 }
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ pub(crate) struct SupervisionReport {
     pub frames: u16,
     pub kill_requested: bool,
     pub reaped: bool,
+    pub published: bool,
     #[cfg(test)]
     pub unconfined_reads: u32,
     #[cfg(test)]
@@ -200,6 +201,7 @@ impl CollectorJob {
             frames: 0,
             kill_requested: false,
             reaped: false,
+            published: false,
             #[cfg(test)]
             unconfined_reads: 0,
             #[cfg(test)]
@@ -244,7 +246,7 @@ impl CollectorJob {
                 {
                     // Serialize cancellation with the publication admission.
                     drop(permission);
-                    let _ = publish(completed);
+                    report.published = publish(completed).is_ok();
                 }
             }
             // EOF is not proof of process death. Complete workers that keep
@@ -580,6 +582,7 @@ impl SupervisorHandle {
                 frames: 0,
                 kill_requested: self.signal.signal(libc::SIGKILL).is_ok(),
                 reaped: self.signal.reaped(),
+                published: false,
                 #[cfg(test)]
                 unconfined_reads: 0,
                 #[cfg(test)]
