@@ -107,14 +107,18 @@ struct Fixture {
 }
 impl Fixture {
     fn new(tag: &str) -> Self {
+        Self::new_in(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/c2-fixtures"),
+            tag,
+        )
+    }
+    fn new_in(root: PathBuf, tag: &str) -> Self {
         let serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/c2-fixtures")
-            .join(format!(
-                "{tag}-{}-{}",
-                std::process::id(),
-                SEQUENCE.fetch_add(1, Ordering::Relaxed)
-            ));
+        let base = root.join(format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&base).unwrap();
         fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
         let runtime = File::open(&base).unwrap();
@@ -169,7 +173,25 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        // std's remove_dir_all keeps one descriptor per level; the 1,093-level
+        // legacy chain needs more than a 1,024 soft limit.
+        raise_nofile_soft_limit();
         fs::remove_dir_all(&self.base).unwrap();
+    }
+}
+
+fn raise_nofile_soft_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit only read and write `limit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+        && limit.rlim_cur < limit.rlim_max
+    {
+        limit.rlim_cur = limit.rlim_max.min(65_536);
+        // SAFETY: as above.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
     }
 }
 
@@ -795,7 +817,10 @@ fn gc_catalog_damage_never_authorizes_arbitrary_deletion() {
 #[cfg(target_os = "linux")]
 #[test]
 fn deep_cwd_gc_preserves_shared_prefix_and_live_lock() {
-    let f = Fixture::new("legacy");
+    // The checkout can be a host-shared mount even in a native Linux
+    // container. Honor TMPDIR so this chain can live on a Linux filesystem
+    // independently of CARGO_MANIFEST_DIR or CARGO_TARGET_DIR.
+    let f = Fixture::new_in(std::env::temp_dir(), "bingsu-c2-legacy");
     f.publish(b"current");
     let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
     let mut dir = File::open(&collections).unwrap();
@@ -806,8 +831,30 @@ fn deep_cwd_gc_preserves_shared_prefix_and_live_lock() {
     let mut sibling = None;
     for (i, chunk) in cwd.chunks(60).enumerate() {
         let name = chunk.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        sys::mkdir_at(dir.as_fd(), OsStr::new(&name), 0o700).unwrap();
-        dir = sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)).unwrap();
+        assert_eq!(name.len(), chunk.len() * 2, "legacy chunk {i}");
+        sys::mkdir_at(dir.as_fd(), OsStr::new(&name), 0o700).unwrap_or_else(|error| {
+            // Path-based LSM checks can reject even a single-component *at
+            // call. Keep the failure and report the active policy for reruns.
+            eprintln!(
+                "legacy mkdirat failure: index={i}, chunk_bytes={}, name_bytes={}, security_profile={:?}, apparmor_path_max={:?}",
+                chunk.len(),
+                name.len(),
+                fs::read_to_string("/proc/thread-self/attr/current"),
+                fs::read_to_string("/sys/module/apparmor/parameters/path_max"),
+            );
+            panic!(
+                "legacy mkdirat: chunk={i}, name_bytes={}, root={}: {error}",
+                name.len(),
+                collections.display()
+            )
+        });
+        dir = sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)).unwrap_or_else(|error| {
+            panic!(
+                "legacy openat: chunk={i}, name_bytes={}, root={}: {error}",
+                name.len(),
+                collections.display()
+            )
+        });
         if i == 0 {
             // Another live legacy cwd shares the first 60 raw bytes.
             sys::mkdir_at(dir.as_fd(), OsStr::new("6c697665"), 0o700).unwrap();
