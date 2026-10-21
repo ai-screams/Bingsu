@@ -727,6 +727,12 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
 
 
 def assert_prompt_trace_budget(lines, exe, pinned):
+    from fsbudget.attribute import collector_attribute
+    _, scoped = tree(lines, exe)
+    roles = collector_attribute(scoped, {"front": exe, "helper": exe,
+                                "collector": os.path.join(os.path.dirname(exe), "bingsu-collect"),
+                                "collectors": 0})
+    assert not roles.errors, roles.errors
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=0)
 
 
@@ -1035,3 +1041,14 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None):
         for path, chunks in reads.items():
             assert (not valid_headers[path] and chunks == [64]) or sum(chunks) == sizes[path], ("collection incomplete read", path, chunks)
     return counts
+
+
+def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict) -> None:
+    """M3b product role/kind gate; historical M3a fixtures keep their own gate."""
+    from fsbudget.attribute import collector_attribute
+    from fsbudget.gate import check
+    measured = collector_attribute(lines, pinned)
+    assert not measured.errors, measured.errors
+    assert set(measured.counts) == set(expected), ("missing or extra role", measured.counts, expected)
+    errors = check(measured.counts, expected, "exact", expected.keys())
+    assert not errors, errors

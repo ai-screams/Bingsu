@@ -1,0 +1,31 @@
+id	property	platform	test	stage
+SEC-AS	AS allocation above baseline plus allowance fails; partial/unknown front survives	Linux	tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]	M3b
+SEC-CPU	CPU soft/hard 1 second terminates; absolute collection deadline preserves partial	Unix	tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]	M3b
+SEC-NOFILE	NOFILE soft/hard 64 returns EMFILE; partial/unknown front survives	Unix	tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]	M3b
+SEC-FOOTPRINT	First completed overlimit sample signals; overshoot and intervals are measured	macOS	tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample	M3b
+SEC-EXEC	execve returns EPERM under product filter; partial/unknown front survives	Linux	tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]	M3b
+SEC-ROOT	Root cannot restore capabilities or limits	Linux root	limits::tests::root_cannot_restore_limits_or_capabilities	M3b
+SEC-ROLE	Entry-order spawn ancestry; unfinished/resumed; failed exec; PID and fd lifetimes	portable	tools/fsbudget/tests/test_attribute.py::test_trace_attributes_spawn_sites_and_fd_lifetimes	M3b
+SEC-ROLE-DENY	Direct collector spawn, late helper spawn, worker effects, alias and missing roles fail	portable	tools/fsbudget/tests/test_attribute.py::test_collector_role_mutations_are_refused	M3b
+SEC-SURPLUS	A different role or call kind cannot offset surplus	portable	tools/fsbudget/tests/test_gate.py::test_role_and_kind_surplus_is_never_hidden	M3b
+SEC-TRACE	Product trace adapter uses separate role/kind budgets	portable	tests/shell/test_prompt_trace_budget.py::test_collector_gate_keeps_role_and_kind_budgets_separate	M3b
+SEC-PARTIAL	Only validated updates survive malformed/truncated/deadline endings	Unix	partial_survives_only_after_validated_updates	M3b
+SEC-DRIP	Slow bytes never extend the absolute spawn deadline	Unix	slow_drip_does_not_extend_spawn_deadline	M3b
+SEC-READY	Hostile bytes are read only after helper confinement	Unix	immediate_ready_is_not_read_or_decoded_before_confinement	M3b
+SEC-VERIFY	Runtime/context/display verified before spawn; product/redraw mask stays zero	Unix	verified_screen_spawns_once_before_helper_tsync	M3b
+SEC-PUBLISH	Same-fd identity/bytes checked before atomic rename	Unix	publication_checks_same_fd_bytes_and_identity	M3b
+SEC-LOCK	Closing helper duplicate never unlocks live worker	Unix	helper_close_never_unlocks_live_worker	M3b
+SEC-COLLISION	Exact cwd bytes override hash address	Unix	hash_collision_never_reuses_or_overwrites_other_cwd	M3b
+SEC-GC	Live lock inode cannot be split or deleted	Unix	gc_cannot_split_lock_inode_or_delete_inflight_store	M3b
+SEC-GC-LEGACY	Legacy cleanup prunes only empty suffixes	Unix	legacy_gc_prunes_only_empty_suffixes	M3b
+SEC-GC-TIME	Exhausted time budget starts no filesystem work	Unix	gc_time_cap_stops_before_filesystem_work	M3b; progress under persistent time exhaustion remains M3c
+PERF-INTERVALS	Verify start/end to spawn, spawn/Ready, request/completion, publication, lock and front read separated	Unix	bench/tests/test_collector_product.py::test_latency_measures_verification_spawn_ready_and_read_separately	M3b observation; formal B5-B7 remains M3d
+PERF-PAIR	200 alternating warm observations; first process separate; p50/p95/variance and host metadata	Unix	bench/tests/test_collector_product.py::test_pair_alternates_and_preserves_raw_observations	M3b observation
+PERF-POLICY	Product filter evidence includes table hash, BPF lengths, ABI, baseline and actual Ready	Unix	tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence	M3b observation
+PERF-BUDGET	Phase/chunk/directory axes for normal, failure, previous, collision and GC fixtures	portable	bench/tests/test_collector_product.py::test_product_budgets_cover_success_failure_and_gc	M3b increments; full coefficients remain M3d
+CI-CELLS	Required native libc, root, macOS and all four experiment rows exist	portable	tests/shell/test_collector_security.py::test_ci_has_no_silent_acceptance_skip	M3b
+X-LEDGER	Every required experiment acceptance cell has validated evidence	native	bench/tests/test_collector_probes.py::test_ledger_requires_every_acceptance_cell	X-02/X-14/X-16/X-32; missing host cells BLOCKED
+PRODUCT-ZERO	No product worker in any screen/width/redraw	portable	product_mask_is_zero_and_fixture_is_unreachable	M3b
+PERF-WIRING	Product helper and fixture share verification clocks and lifecycle report attachment	portable	bench/tests/test_collector_product.py::test_product_helper_keeps_the_shared_observation_wiring	M3b
+PERF-NORMAL	Fallback/degraded output cannot be reported as normal prompt latency	portable	bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records	M3b
+PERF-BLOCKED	Unavailable normal prompt preserves 200 lifecycle samples and blocks overall acceptance	portable	bench/tests/test_collector_product.py::test_unavailable_normal_prompt_keeps_evidence_but_blocks_acceptance	M3b; missing0 still required for completion

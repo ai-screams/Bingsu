@@ -221,3 +221,144 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
             if open_:
                 errors.append(f"pid {pid}: window still open at the end of the trace")
     return Attribution({r: dict(v) for r, v in counts.items()}, errors)
+
+
+def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
+    """Product roles require a pinned exec AND its validated creation parent.
+
+    Work in syscall *entry* order. A vfork child's exec may precede its
+    parent's return. Reconstruct entries without changing the historical trace
+    parser/fixtures. Threads share role, filter boundary and descriptor table.
+    PID reuse starts a new lifetime; failed exec never changes the role.
+    `pinned` contains front/helper/collector paths and optional exact argv verbs.
+    """
+    import json
+    from .classify import collector_kind, collector_bootstrap_kind
+    from .strace_parse import CALL_HEAD, LINE, parse
+
+    trace = parse("\n".join(lines))
+    errors = list(trace.errors)
+    starts = defaultdict(deque)
+    exits = defaultdict(deque)
+    for i, line in enumerate(lines):
+        match = LINE.match(line)
+        if match and (head := CALL_HEAD.match(match[2])):
+            starts[int(match[1]), head[1]].append(i)
+        elif match and match[2].startswith("+++ "):
+            exits[int(match[1])].append(i)
+    ordered = []
+    for c in trace:
+        if c.name == EXIT_EVENT:
+            # Exit records have no outstanding successor in the same lifetime.
+            at = exits[c.pid].popleft() if exits[c.pid] else len(lines)
+        else:
+            queue = starts[c.pid, c.name]
+            at = queue.popleft() if queue else len(lines)
+        ordered.append((at, c))
+    ordered.sort(key=lambda pair: pair[0])
+    roles, owner, fds, closed, confined = {}, {}, {}, {}, set()
+    counts = defaultdict(lambda: defaultdict(int))
+    root = trace.first_pid
+    if root is not None:
+        roles[root], owner[root], fds[root], closed[root] = "front", root, {}, set()
+    seen_exec = set()
+    collector_execs = 0
+    verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
+    verbs.update(pinned.get("verbs", {}))
+
+    def bad(c, reason):
+        errors.append(f"pid {c.pid} ({roles.get(c.pid, UNRESOLVED)}): {reason}: {c.name}({c.args})")
+
+    for _, c in ordered:
+        if c.pid not in roles:
+            bad(c, "no live spawn parent")
+            roles[c.pid], owner[c.pid], fds[c.pid], closed[c.pid] = UNRESOLVED, c.pid, {}, set()
+        role, process = roles[c.pid], owner[c.pid]
+        if c.name == EXIT_EVENT:
+            roles.pop(c.pid, None)
+            owner.pop(c.pid, None)
+            # State belongs to the process owner until its last thread exits.
+            if process not in owner.values():
+                fds.pop(process, None)
+                closed.pop(process, None)
+                confined.discard(process)
+                seen_exec.discard(process)
+            continue
+        args = split_args(c.args)
+        result = c.ret.split()[0]
+        success = bool(re.match(r"^\d+", c.ret))
+        k = collector_bootstrap_kind(c) if role == "collector" else collector_kind(c)
+        if k in {"spawn", "thread"}:
+            if k == "spawn" and (role not in {"front", "helper"} or process in confined):
+                bad(c, "spawn outside the pre-filter creation site")
+            if success:
+                child = int(result)
+                roles[child] = role
+                owner[child] = process if k == "thread" else child
+                if k != "thread":
+                    fds[child], closed[child] = dict(fds[process]), set(closed[process])
+            counts[role][k] += 1
+            continue
+        if k == "exec":
+            if result == "0":
+                new = None
+                for candidate in ("front", "helper", "collector"):
+                    path = pinned.get(candidate)
+                    if path and len(args) >= 2 and args[0] == json.dumps(path):
+                        prefix = '[' + json.dumps(path) + ', ' + json.dumps(verbs[candidate])
+                        if args[1].startswith(prefix + (']' if candidate == "collector" else ',')) or args[1] == prefix + ']':
+                            new = candidate
+                            break
+                expected_parent = {"front": "front", "helper": "front", "collector": "helper"}
+                if (new is None or role != expected_parent.get(new)
+                        or process in seen_exec or process in confined
+                        or (new == "front") != (c.pid == root)):
+                    bad(c, "exec lacks pinned identity and creation parent")
+                else:
+                    roles[c.pid] = role = new
+                    seen_exec.add(process)
+                    collector_execs += int(new == "collector")
+            counts[role]["exec"] += 1
+            continue
+        if (c.name == "seccomp" and "SECCOMP_SET_MODE_FILTER" in c.args
+                or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
+            confined.add(process)
+        if c.name == "close" and success and args:
+            fd = args[0].split('<')[0]
+            fds[process].pop(fd, None)
+            closed[process].add(fd)
+        elif c.name in {"dup", "dup2", "dup3"} and success and args:
+            src, dst = args[0].split('<')[0], re.match(r"^\d+", c.ret)[0]
+            fds[process][dst] = fds[process].get(src, fd_identity(args[0]))
+            closed[process].discard(dst)
+        elif c.name in {"openat", "open", "openat2", "creat"} and re.match(r"^\d+", c.ret):
+            fd = re.match(r"^(\d+)", c.ret)[1]
+            fds[process][fd] = fd_identity(c.ret)
+            closed[process].discard(fd)
+        elif args and c.name in {"read", "pread64", "readv", "write", "writev", "pwrite64", "fstat", "fcntl"}:
+            fd = args[0].split('<')[0]
+            identity = fd_identity(args[0])
+            if fd in closed[process] or fd in fds[process] and fds[process][fd] != identity:
+                bad(c, "descriptor lifetime/identity mismatch")
+        # Only the exact existing loader pairs may be excluded, before the
+        # process's first filter. A collector never borrows helper NSS paths.
+        if process not in confined and _prologue_call(c, target(c)):
+            continue
+        if role == "collector":
+            if c.name in {"open", "openat"} and any(flag in c.args for flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")):
+                bad(c, "collector writable open")
+            if k in {"write", "renameat", "unlinkat", "network", "unknown-fs", "fsync"}:
+                bad(c, "collector forbidden effect")
+            if k == "cwd" and (not args or args[0] != '"/"'):
+                bad(c, "collector cwd is not neutral root")
+            where = target(c)
+            if where and k in {"openat", "read"} and where not in {"/proc/self/statm", f"/proc/{process}/statm"}:
+                bad(c, "collector read outside the M3b bootstrap")
+        if k:
+            counts[role][k] += 1
+    if not seen_exec and not counts:
+        errors.append("no product process observed")
+    required = pinned.get("collectors", 1)
+    if collector_execs != required:
+        errors.append(f"collector execs: measured {collector_execs}, expected {required}")
+    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors)

@@ -97,6 +97,7 @@ jobs:
       # changed by another user (Install.init fails on any init warning). A
       # root-owned copy in /usr/local/bin is what an installed bingsu looks
       # like; --user would need a passwd entry, which init reads for the home.
+      # M3b security runs with prebuilt fixtures in the native CI job.
       # The test folders live in /root, not in /tmp: init warns about the
       # world-writable /tmp above an executable symlink there as well.
       - name: PTY tests
@@ -110,6 +111,7 @@ jobs:
             "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
+                --ignore tests/shell/test_collector_security.py \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
@@ -186,6 +188,17 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_proc.py -q -rs -p no:cacheprovider | tee "$RUNNER_TEMP/proc-pytest.out"
           grep -q '1 passed' "$RUNNER_TEMP/proc-pytest.out"
 
+      - name: Previous-response path/facts/chunk gate on native Linux
+        if: matrix.libc == 'gnu' && matrix.profile == 'debug'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_collector_response.py -k post_filter_has_no_new_path_or_metadata_effects -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/collection-reader.txt"
+          for mode in absent current previous corrupt; do
+            for length in 1 3841 65536; do
+              grep -F "PASSED tests/shell/test_collector_response.py::test_post_filter_has_no_new_path_or_metadata_effects[$mode-$length]" "$RUNNER_TEMP/collection-reader.txt"
+            done
+          done
+
   shell-macos:
     name: Shell PTY (macOS Homebrew)
     needs: detect
@@ -229,4 +242,4 @@ jobs:
           BINGSU_TEST_LOCALE: en_US.UTF-8
           BINGSU_TEST_SHELLS: zsh bash fish
         # The prepared collector runtime harness runs in ci.yml's collector job.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py ${BINGSU_RECORD_OBSERVATIONS:+-s}'

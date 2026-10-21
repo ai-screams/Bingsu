@@ -921,3 +921,29 @@ def test_collection_budget_rejects_one_mutation(change):
     assert lines != original, change
     with pytest.raises(AssertionError):
         check_collection(lines)
+
+
+# 이것을 실패시키는 것: D2가 과거 fixture의 collector 허용량을 새 역할 게이트에 재사용하는 것.
+def test_collector_gate_keeps_role_and_kind_budgets_separate():
+    from copy import deepcopy
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/fsbudget"))
+    # Share the adversarial entry-order fixture with the attribution oracle.
+    spec_path = Path(__file__).resolve().parents[2] / "tools/fsbudget/tests/test_attribute.py"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("collector_attribution_fixture", spec_path)
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    expected = {"front": {"exec": 1, "spawn": 1}, "helper": {"exec": 1, "spawn": 1},
+                "collector": {"exec": 1, "openat": 1, "read": 1}}
+    budget.assert_collector_trace_budget(fixture.PRODUCT, fixture.PINNED_PRODUCT, expected)
+    saved = list(fixture.PRODUCT)
+    mutated = saved.copy()
+    mutated.insert(-3, '12 write(9</stage>, "x", 1) = 1')
+    with pytest.raises(AssertionError):
+        budget.assert_collector_trace_budget(mutated, fixture.PINNED_PRODUCT, expected)
+    assert saved == fixture.PRODUCT
+    reduced = deepcopy(expected)
+    reduced["collector"]["read"] = 0
+    with pytest.raises(AssertionError, match="collector.read"):
+        budget.assert_collector_trace_budget(saved, fixture.PINNED_PRODUCT, reduced)

@@ -354,3 +354,79 @@ def test_each_trusted_library_folder(d):
 def test_window_rules_fail_closed(name):
     got = attribute(parse(HEAD + BAD[name]), RULES, markers=True)
     assert got.errors, f"{name}: scaffold accepted a broken window"
+
+
+PRODUCT = [
+    '10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], 0x0 /* 0 vars */) = 0',
+    '10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>',
+    '11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1", "--width", "80"], 0x0 /* 0 vars */) = 0',
+    '10 <... clone resumed>) = 11',
+    '11 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>',
+    '12 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], 0x0 /* 0 vars */) = 0',
+    '11 <... clone resumed>) = 12',
+    '11 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0',
+    '12 seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=12}) = 0',
+    '12 openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY) = 7</proc/12/statm>',
+    '12 dup(7</proc/12/statm>) = 8</proc/12/statm>',
+    '12 close(7</proc/12/statm>) = 0',
+    '12 read(8</proc/12/statm>, "100 20", 64) = 6',
+    '12 close(8</proc/12/statm>) = 0',
+    '12 +++ exited with 0 +++',
+    '11 +++ exited with 0 +++',
+    '10 +++ exited with 0 +++',
+]
+PINNED_PRODUCT = {"front": "/bin/bingsu", "helper": "/bin/bingsu", "collector": "/bin/bingsu-collect"}
+
+
+# 이것을 실패시키는 것: 부모 반환 순서로 역할을 정하거나 dup/close의 fd 생애를 잃는 것.
+def test_trace_attributes_spawn_sites_and_fd_lifetimes():
+    from fsbudget.attribute import collector_attribute
+    got = collector_attribute(PRODUCT, PINNED_PRODUCT)
+    assert not got.errors, got.errors
+    assert got.counts["collector"] == {"exec": 1, "openat": 1, "read": 1}
+    lines = PRODUCT[:14] + [
+        '12 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], 0x0) = -1 EPERM (Operation not permitted)',
+        '12 +++ exited with 0 +++',
+        '11 clone(child_stack=NULL, flags=CLONE_THREAD|CLONE_VM) = 12',
+        '12 write(9</stage>, "x", 1) = 1',
+        '12 +++ exited with 0 +++',
+    ]
+    # A reused TID is now a helper thread. A failed exec kept the old role.
+    got = collector_attribute(lines, PINNED_PRODUCT)
+    assert not got.errors, got.errors
+    assert got.counts["collector"]["exec"] == 2
+    assert got.counts["helper"]["write"] == 1
+
+
+# 이것을 실패시키는 것: 문자열만으로 역할 승격·TSYNC 뒤 생성·collector 효과 또는 닫힌 fd를 허용하는 것.
+@pytest.mark.parametrize("old,new", [
+    ('11 clone(child_stack=NULL, flags=SIGCHLD', '10 clone(child_stack=NULL, flags=SIGCHLD'),
+    ('11 clone(child_stack=NULL, flags=SIGCHLD', '11 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {}) = 0\n11 clone(child_stack=NULL, flags=SIGCHLD'),
+    ('12 read(8</proc/12/statm>, "100 20", 64) = 6', '12 fork() = -1 EPERM (Operation not permitted)'),
+    ('12 read(8</proc/12/statm>, "100 20", 64) = 6', '12 socket(AF_INET, SOCK_STREAM, 0) = -1 EPERM (Operation not permitted)'),
+    ('12 read(8</proc/12/statm>, "100 20", 64) = 6', '12 write(9</stage>, "x", 1) = 1'),
+    ('12 read(8</proc/12/statm>, "100 20", 64) = 6', '12 openat(AT_FDCWD</>, "/etc/nsswitch.conf", O_RDONLY) = 9</etc/nsswitch.conf>'),
+    ('12 read(8</proc/12/statm>, "100 20", 64) = 6', '12 read(7</proc/12/statm>, "100 20", 64) = 6'),
+    ('12 read(8</proc/12/statm>, "100 20", 64) = 6', '12 mystery_read(8</proc/12/statm>, "100 20", 64) = 6'),
+    ('12 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], 0x0 /* 0 vars */) = 0', ''),
+])
+def test_collector_role_mutations_are_refused(old, new):
+    from fsbudget.attribute import collector_attribute
+    saved = list(PRODUCT)
+    changed = '\n'.join(saved).replace(old, new).splitlines()
+    assert collector_attribute(changed, PINNED_PRODUCT).errors
+    assert PRODUCT == saved
+
+
+# 이것을 실패시키는 것: helper의 dup 목적지 fd를 닫힘/재사용과 무관한 이름으로 다시 붙이는 것.
+def test_helper_duplicate_identity_cannot_be_relabelled():
+    from fsbudget.attribute import collector_attribute
+    saved = list(PRODUCT)
+    extra = [
+        '11 openat(AT_FDCWD</>, "/stage", O_RDONLY) = 7</stage>',
+        '11 dup(7</stage>) = 8</stage>',
+        '11 close(7</stage>) = 0',
+        '11 read(8</different>, "x", 1) = 1',
+    ]
+    assert collector_attribute(saved[:-2] + extra + saved[-2:], PINNED_PRODUCT).errors
+    assert PRODUCT == saved
