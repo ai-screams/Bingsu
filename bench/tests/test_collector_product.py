@@ -131,6 +131,43 @@ def test_prepared_pair_hashes_are_exact(tmp_path, changed):
         product.prepared(front)
 
 
+@pytest.fixture(scope="module")
+def security_tests():
+    spec = importlib.util.spec_from_file_location(
+        "collector_security", SOURCE.parents[1] / "tests/shell/test_collector_security.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# 이것을 실패시키는 것: 재빌드 뒤 오래된 준비를 증거로 인정하거나 CI에서 skip하는 것.
+@pytest.mark.parametrize("ci", [False, True])
+@pytest.mark.parametrize("changed", ["missing", "front", "collector", "fixture"])
+def test_security_preparation_missing_or_stale_is_explicit(security_tests, monkeypatch, tmp_path, ci, changed):
+    paths = {key: tmp_path / name for key, name in
+             (("front", "bingsu"), ("collector", "bingsu-collect"), ("fixture", "fixture"))}
+    for path in paths.values():
+        path.write_bytes(b"original")
+    if changed != "missing":
+        product.manifest_path(paths["front"]).write_text(json.dumps({
+            "fixture": str(paths["fixture"]),
+            "hashes": {key: product.digest(path) for key, path in paths.items()},
+        }))
+        paths[changed].write_bytes(b"rebuilt")
+    monkeypatch.setattr(security_tests, "real_bin", lambda: paths["front"])
+    if ci:
+        monkeypatch.setenv("CI", "true")
+    else:
+        monkeypatch.delenv("CI", raising=False)
+    outcome = pytest.fail.Exception if ci else pytest.skip.Exception
+    with pytest.raises(outcome) as caught:
+        security_tests.preparation.__wrapped__()
+    message = str(caught.value)
+    assert ("manifest missing" if changed == "missing" else f"stale or missing prepared {changed}") in message
+    assert f"--prepare {paths['front']}" in message
+    assert "After the last binary build" in message
+
+
 # 이것을 실패시키는 것: 제품 helper가 공유 계측 호출을 빼고 시험 fixture만 시간을 기록하는 것.
 @pytest.mark.parametrize("call", ["let mut verification = Verification::start();",
                                   "verification.verified();", "verification.attach(collector::spawn("])

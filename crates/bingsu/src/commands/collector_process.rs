@@ -464,6 +464,8 @@ mod tests {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
         assert!(fd >= 0);
         let child = OwnedChild {
+            spawn_enter: None,
+            spawn_return: None,
             signal: SignalChild {
                 // SAFETY: newly owned descriptor, transferred exactly once.
                 pidfd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd as i32) }),

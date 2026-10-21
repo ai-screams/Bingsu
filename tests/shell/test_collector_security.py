@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -25,7 +26,19 @@ SPEC.loader.exec_module(product)
 @pytest.fixture(scope="module")
 def preparation():
     # No auto-discovery, compiler or toolchain fallback in shell images.
-    return product.prepared(real_bin())
+    binary = real_bin()
+    try:
+        return product.prepared(binary)
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        message = (
+            f"M3b security preparation unavailable for {binary}: {error}. "
+            "After the last binary build, prepare this sibling pair on the host with "
+            f"`python3 bench/collector-product.py --prepare {shlex.quote(str(binary))}`, "
+            "then rerun pytest with the same BINGSU_BIN."
+        )
+        if os.environ.get("CI"):
+            pytest.fail(message, pytrace=False)
+        pytest.skip(message)
 
 
 def native_contract(preparation, group, name):
@@ -125,6 +138,12 @@ def assert_ci_contract(texts):
     for file, tokens in required.items():
         for token in tokens:
             assert token in texts[file], (file, token)
+    # Both full-suite jobs must exclude the unprepared security module. The
+    # Linux job applies the same invocation to all three container images.
+    for job in ("shell-linux", "shell-macos"):
+        block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [\w-]+:|\Z)", texts["shell.yml"])
+        assert block, job
+        assert "--ignore tests/shell/test_collector_security.py" in block[1], job
     ledger = (ROOT / "bench/probes/collector-acceptance.tsv").read_text()
     for case in ("X-02", "X-14", "X-16", "X-32"):
         assert case + "\t" in ledger, case
@@ -156,6 +175,17 @@ def test_missing_ci_cell_is_refused(file, token):
     with pytest.raises(AssertionError):
         assert_ci_contract(changed)
     assert saved[file] == (ROOT / ".github/workflows" / file).read_text()
+
+
+@pytest.mark.parametrize("job", ["shell-linux", "shell-macos"])
+def test_each_unprepared_shell_job_must_exclude_security(job):
+    texts = {name: (ROOT / ".github/workflows" / name).read_text()
+             for name in ("ci.yml", "shell.yml", "bench.yml")}
+    start = texts["shell.yml"].index(f"\n  {job}:")
+    before, block = texts["shell.yml"][:start], texts["shell.yml"][start:]
+    texts["shell.yml"] = before + block.replace("--ignore tests/shell/test_collector_security.py", "", 1)
+    with pytest.raises(AssertionError, match=job):
+        assert_ci_contract(texts)
 
 
 # 이것을 실패시키는 것: 실제 TEST_MASK worker의 파일 쓰기/자식/소켓 효과 또는 역할 누락을 놓치는 것.

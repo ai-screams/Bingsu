@@ -97,7 +97,8 @@ jobs:
       # changed by another user (Install.init fails on any init warning). A
       # root-owned copy in /usr/local/bin is what an installed bingsu looks
       # like; --user would need a passwd entry, which init reads for the home.
-      # M3b security runs with prebuilt fixtures in the native CI job.
+      # All three images exclude M3b security: no host preparation for the
+      # installed pair. The dedicated native collector job prepares and runs it.
       # The test folders live in /root, not in /tmp: init warns about the
       # world-writable /tmp above an executable symlink there as well.
       - name: PTY tests
@@ -132,6 +133,8 @@ jobs:
   # for each x86_64 libc and profile the release ships or tests run. The
   # binary runs natively on the runner (no container: the runner's own glibc).
   filter-calls:
+    # Selects individual shell modules below, never test_collector_security.py;
+    # the dedicated collector job owns host preparation and security evidence.
     name: Prompt filter calls (x86_64 ${{ matrix.libc }} ${{ matrix.profile }})
     needs: detect
     if: needs.detect.outputs.rust == 'true'
@@ -241,5 +244,6 @@ jobs:
         env:
           BINGSU_TEST_LOCALE: en_US.UTF-8
           BINGSU_TEST_SHELLS: zsh bash fish
-        # The prepared collector runtime harness runs in ci.yml's collector job.
+        # Exclude M3b security for this unprepared debug pair. ci.yml's native
+        # macOS collector job prepares its release siblings and runs the file.
         run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py ${BINGSU_RECORD_OBSERVATIONS:+-s}'

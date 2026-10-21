@@ -109,9 +109,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      # The shell workflow tests a static musl build; check it compiles here
-      # too, for pull requests where that workflow does not get that far.
-      - run: cargo check -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl -j 2
+      # Include Linux-only unit/integration test paths for both sibling crates.
+      - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+      - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-musl -- -D warnings
 
   collector:
     name: Dedicated collector (${{ matrix.os }})
@@ -227,6 +227,8 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends strace
           strace --version
       - name: Prepare M3b compiler-free product fixtures
+        # Native Linux (x86_64/arm64) and macOS: prepare the current release
+        # siblings after all builds; pytest below selects this exact pair.
         run: python3 bench/collector-product.py --prepare target/release/bingsu
       - name: M3b product security and measurements contracts
         run: |
