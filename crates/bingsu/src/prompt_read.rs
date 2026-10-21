@@ -889,6 +889,7 @@ pub(crate) mod tests {
     // 이것을 실패시키는 것: collections-v1 실패 뒤 추가 open 또는 facts를 수행하는 것.
     #[test]
     fn missing_collections_stops_after_one_enoent() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         for n in [1, 3841, 65_536] {
             let mut cwd = vec![b'a'; n];
             cwd[0] = b'/';
@@ -1022,10 +1023,12 @@ pub(crate) mod tests {
     // 이것을 실패시키는 것: 새 수집의 완료 또는 lock 해제를 현재 prompt가 기다리는 것.
     #[test]
     fn new_completion_never_blocks_the_current_prompt() {
+        // Share the guard with every child-spawning test in this binary,
+        // from fixture publication until the worker has dropped its store.
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         use crate::commands::{
             collection_store::CollectionStore, snapshot_store::CheckedContextFd, sys,
         };
-        let _inherited_fds = sys::test_inherited_fd_lock();
         let (f, b, _) = collection_fixture(b"/cwd");
         publish_fixture(&f, &b, 99, b"PREVIOUS");
         let runtime = fs::File::open(&f.base).unwrap();
@@ -1091,6 +1094,7 @@ pub(crate) mod tests {
         reason = "entry for the separate collection_reader test target"
     )]
     pub(crate) fn collection_trace_child() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         use std::io::Read;
         #[cfg(target_os = "linux")]
         // SAFETY: these identity queries have no pointer arguments.

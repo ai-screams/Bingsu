@@ -32,6 +32,44 @@ def poll_waits_for_collection(call):
     return not zero_timeout or any(int(fd) not in (0, 1, 2) for fd in fds)
 
 
+def helper_exec_status_reads(front, spawns):
+    """Identify only the parent's one-shot posix_spawn exec-status read.
+
+    prompt_spawn calls libc::posix_spawn directly. musl creates a CLOEXEC
+    pipe immediately before clone, closes the parent's writer, then reads an
+    int: EOF means exec succeeded; four bytes report the child's exec errno.
+    This is helper bootstrap, not a channel for collection results.
+    """
+    allowed = set()
+    for spawn in spawns:
+        index = front.index(spawn)
+        if not index:
+            continue
+        pipe = front[index - 1]
+        if pipe.name not in {"pipe", "pipe2"} or pipe.ret != "0":
+            continue
+        args = scan(pipe.args)[0]
+        if pipe.name == "pipe2" and (len(args) != 2 or args[1] != "O_CLOEXEC"):
+            continue
+        ends = re.fullmatch(r"\[(\d+<pipe:\[(\d+)\]>), (\d+<pipe:\[\2\]>)\]", args[0])
+        if not ends:
+            continue
+        reader, _, writer = ends.groups()
+        if any(int(fd.split("<", 1)[0]) < 3 for fd in (reader, writer)) or reader == writer:
+            continue
+        following = iter(front[index + 1:])
+        call = next(following, None)
+        if call and call.name == "close" and call.args == writer and call.ret == "0":
+            call = next(following, None)
+        if not call or call.name != "read":
+            continue
+        args = scan(call.args)[0]
+        if (len(args) == 3 and args[0] == reader and args[2] in {"1", "2", "3", "4"}
+                and (call.ret == "0" or (args[2] == "4" and call.ret == "4"))):
+            allowed.add(call.index)
+    return allowed
+
+
 def assert_no_collection_wait(text, *, deadline_empty=False):
     calls = parse_trace(text)
     assert not calls.errors, calls.errors
@@ -51,6 +89,7 @@ def assert_no_collection_wait(text, *, deadline_empty=False):
     assert len(spawns) == len(executions) - 1, spawns
     if spawns:
         assert int(spawns[0].ret) == executions[1].pid, spawns
+    exec_status_reads = helper_exec_status_reads(front, spawns)
     for call in front:
         assert call.name not in {"wait4", "waitid", "waitpid"} and not call.name.startswith("pidfd_"), (
             "front collection wait", call)
@@ -58,6 +97,8 @@ def assert_no_collection_wait(text, *, deadline_empty=False):
             assert not poll_waits_for_collection(call), ("front collection wait", call)
         if call.name in {"read", "readv", "pread64", "preadv", "preadv2",
                          "recvfrom", "recvmsg", "recvmmsg"}:
+            if call.index in exec_status_reads:
+                continue
             fd = scan(call.args)[0][0]
             # Files and standard fds are allowed. Nonstandard IPC can wait
             # for collection, even when an alarm cuts the call short or it
@@ -96,7 +137,7 @@ def test_four_hundred_product_prompts_never_wait_for_collection(tmp_path, capsys
         trace = tmp_path / f"lifecycle-{index}.trace"
         result = subprocess.run(
             [strace, "-f", "-q", "-y", "-s", "65536", "-e",
-             "trace=process,signal,pidfd_open,pidfd_send_signal,pidfd_getfd,waitid,"
+             "trace=process,signal,pipe,pipe2,close,pidfd_open,pidfd_send_signal,pidfd_getfd,waitid,"
              "read,readv,pread64,preadv,preadv2,recvfrom,recvmsg,recvmmsg,poll,ppoll,select,pselect6",
              "-o", str(trace), str(real_bin()), *session.prompt_args()],
             env=session.env, capture_output=True, timeout=4)
@@ -168,6 +209,80 @@ def test_lifecycle_trace_allows_rust_startup_ppoll():
     trace = lifecycle_trace(startup).replace('10 ', '3675 ')
     assert_no_collection_wait(trace)
     assert_no_collection_wait(trace, deadline_empty=True)
+
+
+def musl_spawn_trace(read='1829 read(3<pipe:[70689]>, "", 4) = 0\n', *, pipe="pipe2"):
+    creation = ('1829 pipe2([3<pipe:[70689]>, 4<pipe:[70689]>], O_CLOEXEC) = 0\n'
+                if pipe == "pipe2" else
+                '1829 pipe([3<pipe:[70689]>, 4<pipe:[70689]>]) = 0\n')
+    trace = lifecycle_trace().replace('10 ', '1829 ')
+    trace = trace.replace('1829 clone(', creation + '1829 clone(')
+    return trace.replace('1829 exit_group(',
+                         '1829 close(4<pipe:[70689]>) = 0\n' + read
+                         + '1829 close(3<pipe:[70689]>) = 0\n1829 exit_group(')
+
+
+# 이것을 실패시키는 것: musl의 helper exec 상태 pipe를 collection 대기로 오인하는 것.
+def test_lifecycle_trace_allows_musl_helper_exec_status_eof():
+    # Preserve the exact minimum-shell failure, including its PID, pipe and count.
+    trace = musl_spawn_trace()
+    assert '1829 read(3<pipe:[70689]>, "", 4) = 0\n' in trace
+    assert_no_collection_wait(trace)
+    assert_no_collection_wait(trace, deadline_empty=True)
+
+
+@pytest.mark.parametrize("pipe", ["pipe", "pipe2"])
+@pytest.mark.parametrize("read", [
+    '1829 read(3<pipe:[70689]>, "", 1) = 0\n',
+    '1829 read(3<pipe:[70689]>, "", 2) = 0\n',
+    '1829 read(3<pipe:[70689]>, "", 3) = 0\n',
+    '1829 read(3<pipe:[70689]>, "\\2\\0\\0\\0", 4) = 4\n',
+])
+def test_lifecycle_trace_allows_bounded_helper_exec_status(read, pipe):
+    assert_no_collection_wait(musl_spawn_trace(read, pipe=pipe))
+
+
+@pytest.mark.parametrize("read,error", [
+    ('1829 wait4(11, NULL, 0, NULL) = 11\n'
+     '1829 read(3<pipe:[70689]>, "", 4) = 0\n', "collection wait"),
+    ('1829 read(7<pipe:[123]>, "", 4) = 0\n', "collection read"),
+    ('1829 read(3<pipe:[123]>, "", 4) = 0\n', "collection read"),
+    ('1829 read(4<pipe:[70689]>, "", 4) = 0\n', "collection read"),
+    ('1829 read(3<pipe:[70689]>, "", 5) = 0\n', "collection read"),
+    ('1829 read(3<pipe:[70689]>, "", 0) = 0\n', "collection read"),
+    ('1829 read(3<pipe:[70689]>, "", 4) = -1 EAGAIN (Resource temporarily unavailable)\n',
+     "collection read"),
+    ('1829 readv(3<pipe:[70689]>, [], 0) = 0\n', "collection read"),
+    ('1829 read(3<pipe:[70689]>, "", 4) = 0\n'
+     '1829 read(3<pipe:[70689]>, "", 4) = 0\n', "collection read"),
+    ('1829 close(3<pipe:[70689]>) = 0\n'
+     '1829 read(3<pipe:[70689]>, "", 4) = 0\n', "collection read"),
+])
+def test_musl_spawn_exception_rejects_collection_wait_mutations(read, error):
+    with pytest.raises(AssertionError, match=error):
+        assert_no_collection_wait(musl_spawn_trace(read), deadline_empty=True)
+
+
+@pytest.mark.parametrize("extra,error", [
+    ('1829 wait4(11, NULL, 0, NULL) = 11\n', "collection wait"),
+    ('1829 read(7<pipe:[123]>, "", 4) = 0\n', "collection read"),
+])
+def test_musl_exec_status_read_does_not_exempt_later_collection_waits(extra, error):
+    trace = musl_spawn_trace().replace('1829 exit_group(', extra + '1829 exit_group(')
+    with pytest.raises(AssertionError, match=error):
+        assert_no_collection_wait(trace, deadline_empty=True)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('1829 pipe2(', '11 pipe2('),
+    (', O_CLOEXEC)', ', 0)'),
+    (' = 0\n1829 clone(', ' = -1 EMFILE (Too many open files)\n1829 clone('),
+    ('1829 clone(', '1829 read(7</file>, "x", 1) = 1\n1829 clone('),
+    ('1829 pipe2([3<pipe:[70689]>, 4<pipe:[70689]>], O_CLOEXEC) = 0\n', ''),
+])
+def test_musl_spawn_exception_requires_own_pipe_just_before_spawn(old, new):
+    with pytest.raises(AssertionError, match="collection read"):
+        assert_no_collection_wait(musl_spawn_trace().replace(old, new))
 
 
 @pytest.mark.parametrize("extra", [
