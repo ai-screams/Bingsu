@@ -880,6 +880,46 @@ fn open_at(
 mod open_at_tests {
     use super::*;
 
+    // 이것을 실패시키는 것: store/lock/dirfd 생성·재열기·복제에서 CLOEXEC를 빼는 것.
+    #[test]
+    fn store_files_and_directory_streams_are_cloexec() {
+        use std::os::fd::{AsFd, AsRawFd};
+        let path = std::env::temp_dir().join(format!("bingsu-cloexec-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let search = open_dir_at_search_nofollow(None, path.as_os_str()).unwrap();
+        let dir = open_dir_at_nofollow(search.as_fd(), std::ffi::OsStr::new(".")).unwrap();
+        let name = std::ffi::OsStr::new("data");
+        let created = create_file_at(dir.as_fd(), name, 0o600).unwrap();
+        let read = open_data_at_nofollow(dir.as_fd(), name).unwrap();
+        let append = open_append_at(dir.as_fd(), name).unwrap();
+        let lock_name = std::ffi::OsStr::new("lock");
+        let lock = open_lock_at(dir.as_fd(), lock_name).unwrap();
+        let reopened_lock = open_lock_at(dir.as_fd(), lock_name).unwrap();
+        let clone = read.try_clone().unwrap();
+        let cursor = DirectoryCursor::open(dir.as_fd()).unwrap();
+        let cloexec = |fd| {
+            // SAFETY: every queried descriptor is owned by this test and live.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "fd {fd}");
+        };
+        for file in [
+            &search,
+            &dir,
+            &created,
+            &read,
+            &append,
+            &lock,
+            &reopened_lock,
+            &clone,
+        ] {
+            cloexec(file.as_raw_fd());
+        }
+        // SAFETY: cursor owns a live directory stream for the duration of the query.
+        cloexec(unsafe { libc::dirfd(cursor.0) });
+        drop(cursor);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     // Without a folder only an absolute name may be opened; a relative one
     // would otherwise resolve against the current directory.
     // 이것을 실패시키는 것: `dir = None`의 상대 경로 가드를 빼는 것(AT_FDCWD로 cwd가 열린다).
@@ -939,6 +979,7 @@ mod facts_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn descriptor_acl_reports_write_permission() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let path = std::env::temp_dir().join(format!("bingsu-r2-acl-{}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         let dir = open_dir_at_search_nofollow(None, path.as_os_str()).unwrap();
@@ -1186,6 +1227,17 @@ pub fn try_lock(file: std::fs::File) -> std::io::Result<FileLock> {
     }
 }
 
+/// Serialize all child-spawning tests with fixtures owning close-only locks.
+#[cfg(test)]
+pub fn test_inherited_fd_lock() -> std::sync::MutexGuard<'static, ()> {
+    // Even Command/posix_spawn can retain another thread's CLOEXEC descriptors
+    // between fork and exec. Hold this for the whole test, before creating any
+    // fixtures, until children are reaped and close-only locks are dropped.
+    // Isolated --exact child tests have their own process-local mutex.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Keep inherited descriptors alive before exec without running Rust in the
 /// child of a multithreaded test process. SIGKILL also skips all destructors.
 #[cfg(test)]
@@ -1256,7 +1308,7 @@ thread_local! {
     static COLLECTION_METER: std::cell::RefCell<Option<MeterState>> = const { std::cell::RefCell::new(None) };
 }
 struct MeterState {
-    started: std::time::Instant,
+    started: Option<std::time::Instant>,
     max_ops: u32,
     max_ns: u64,
     used: u32,
@@ -1265,10 +1317,17 @@ struct MeterState {
 pub(super) struct CollectionMeter;
 impl CollectionMeter {
     pub(super) fn start(max_ops: u32, max_ns: u64) -> Self {
+        Self::start_inner(max_ops, max_ns, Some(std::time::Instant::now()))
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_operations(max_ops: u32) -> Self {
+        Self::start_inner(max_ops, 0, None)
+    }
+    fn start_inner(max_ops: u32, max_ns: u64, started: Option<std::time::Instant>) -> Self {
         COLLECTION_METER.with(|slot| {
             assert!(slot.borrow().is_none());
             *slot.borrow_mut() = Some(MeterState {
-                started: std::time::Instant::now(),
+                started,
                 max_ops,
                 max_ns,
                 used: 0,
@@ -1296,25 +1355,84 @@ pub(super) fn collection_ops(count: u32) -> std::io::Result<()> {
         let Some(meter) = slot.as_mut() else {
             return Ok(());
         };
-        let (ops, ns) = if meter.checkpoint {
-            (meter.max_ops, meter.max_ns)
+        let elapsed = meter.started.map(|started| started.elapsed().as_nanos());
+        meter.charge(count, elapsed)
+    })
+}
+impl MeterState {
+    fn charge(&mut self, count: u32, elapsed_ns: Option<u128>) -> std::io::Result<()> {
+        let (ops, ns) = if self.checkpoint {
+            (self.max_ops, self.max_ns)
         } else {
             (
-                meter.max_ops.saturating_sub(320),
-                meter.max_ns.saturating_sub(2_000_000),
+                self.max_ops.saturating_sub(320),
+                self.max_ns.saturating_sub(2_000_000),
             )
         };
-        if count > ops.saturating_sub(meter.used)
-            || meter.started.elapsed().as_nanos() >= u128::from(ns)
+        if count > ops.saturating_sub(self.used)
+            || elapsed_ns.is_some_and(|elapsed| elapsed >= u128::from(ns))
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "collection sweep budget",
             ));
         }
-        meter.used += count;
+        self.used += count;
         Ok(())
-    })
+    }
+}
+
+#[cfg(test)]
+mod collection_meter_tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: 18ms 작업 경계나 20ms checkpoint 경계를 넘겨 허용하는 것.
+    #[test]
+    fn elapsed_time_reserves_checkpoint_and_enforces_cap() {
+        let mut meter = MeterState {
+            started: None,
+            max_ops: 4_096,
+            max_ns: 20_000_000,
+            used: 0,
+            checkpoint: false,
+        };
+        // Inject elapsed time instead of sleeping: scheduling cannot change
+        // which side of either exact deadline this assertion exercises.
+        meter.charge(1, Some(17_999_999)).unwrap();
+        assert_eq!(
+            meter.charge(1, Some(18_000_000)).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(meter.used, 1);
+        meter.checkpoint = true;
+        meter.charge(1, Some(19_999_999)).unwrap();
+        assert_eq!(
+            meter.charge(1, Some(20_000_000)).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(meter.used, 2);
+    }
+
+    // 이것을 실패시키는 것: 기능 fixture에서 연산 한도나 checkpoint 예약까지 없애는 것.
+    #[test]
+    fn operation_only_fixture_keeps_checkpoint_reserve() {
+        let meter = CollectionMeter::fixture_operations(4_096);
+        collection_ops(3_776).unwrap();
+        assert_eq!(
+            collection_ops(1).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(meter.used(), 3_776);
+        meter.checkpoint();
+        collection_ops(320).unwrap();
+        assert_eq!(
+            collection_ops(1).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(meter.used(), 4_096);
+        drop(meter);
+        collection_ops(u32::MAX).unwrap();
+    }
 }
 
 /// One directory stream, never a vector of the directory's contents. A saved

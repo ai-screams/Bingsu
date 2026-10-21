@@ -129,6 +129,7 @@ mod tests {
     // 이것을 실패시키는 것: 쓰기 전에 guard를 버리거나 close에만 잠금 해제를 맡기는 것.
     #[test]
     fn log_guard_covers_write_and_unlocks_with_inherited_descriptors() {
+        let _inherited_fds = sys::test_inherited_fd_lock();
         let base = std::env::temp_dir().join(format!("bingsu-n3-log-lock-{}", std::process::id()));
         fs::create_dir(&base).unwrap();
         fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();

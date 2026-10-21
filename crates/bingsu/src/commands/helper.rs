@@ -78,9 +78,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut supervisor = None;
     let mut collection_runtime = None;
     let result = refresh::refresh_broker(request, &mut clock, &mut |context, display, now| {
-        collection_runtime = context.runtime.try_clone().ok();
         let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
         if let Some(request) = request {
+            collection_runtime = context
+                .runtime
+                .try_clone()
+                .ok()
+                .zip(context.dir.try_clone().ok());
             // Collection admission failure does not invalidate independent
             // snapshot publication. No product catalog grants a worker yet.
             supervisor = (|| {
@@ -119,8 +123,10 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let Some(handle) = supervisor {
         let _ = handle.finish();
     }
-    if let (Some(runtime), Ok(now)) = (collection_runtime, clock.observe()) {
-        let _ = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default());
+    if let Some((runtime, context)) = collection_runtime
+        && let Ok(now) = clock.observe()
+    {
+        let _ = collection_gc::reclaim(&runtime, &context, now, collection_gc::GcBudget::default());
     }
     if filter_failed {
         report(

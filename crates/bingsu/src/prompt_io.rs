@@ -451,6 +451,7 @@ mod tests {
     // 이것을 실패시키는 것: handler가 만료 플래그를 세우지 않거나 writer가 그것을 무시하는 것.
     #[test]
     fn early_alarm_flag_stops_before_the_clock_deadline() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",

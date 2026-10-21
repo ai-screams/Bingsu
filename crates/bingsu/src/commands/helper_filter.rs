@@ -302,6 +302,7 @@ mod tests {
     // 이것을 실패시키는 것: 필터 설치 실패를 무시하거나 실제 syscall 거부를 없애는 것.
     #[test]
     fn helper_filter_is_tsynced_and_cannot_spawn() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -324,6 +325,7 @@ mod tests {
     // 이것을 실패시키는 것: 실제 signal 행·/proc fd 거부 또는 자기 raise 허용 제거.
     #[test]
     fn live_signal_rows_and_self_raise() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -432,6 +434,7 @@ mod tests {
     // 이것을 실패시키는 것: 자기 tgkill까지 거부하여 libc abort 경로를 막는 것.
     #[test]
     fn self_abort_still_delivers_sigabrt() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         use std::os::unix::process::ExitStatusExt;
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([

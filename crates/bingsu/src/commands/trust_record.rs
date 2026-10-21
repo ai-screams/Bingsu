@@ -522,6 +522,7 @@ mod tests {
     // 이것을 실패시키는 것: 읽는 기록 또는 쓰기 완료 fd의 ACL 검사를 빼는 것.
     #[test]
     fn record_acl_is_checked_on_read_and_completed_write_fd() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let state = scratch("acl-fd");
         let me = sys::current_uid();
         write(&state, me, &mut RefuseGroupWrite, &rec()).unwrap();

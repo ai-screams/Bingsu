@@ -47,6 +47,7 @@ impl CollectionStore {
             now,
             bingsu_core::field::BUILTIN,
             None,
+            || collection_gc::GcBudget::default().start(),
             &mut |_| {},
         )
     }
@@ -59,7 +60,15 @@ impl CollectionStore {
         catalog: &'static [SegmentDecl],
         address: Option<String>,
     ) -> Result<Self, StoreError> {
-        Self::acquire_inner(context, binding, now, catalog, address, &mut |_| {})
+        Self::acquire_inner(
+            context,
+            binding,
+            now,
+            catalog,
+            address,
+            Self::fixture_inventory_meter,
+            &mut |_| {},
+        )
     }
     #[cfg(test)]
     #[allow(dead_code, reason = "native admission race fixture")]
@@ -70,7 +79,21 @@ impl CollectionStore {
         catalog: &'static [SegmentDecl],
         hook: &mut dyn FnMut(&str),
     ) -> Result<Self, StoreError> {
-        Self::acquire_inner(context, binding, now, catalog, None, hook)
+        Self::acquire_inner(
+            context,
+            binding,
+            now,
+            catalog,
+            None,
+            Self::fixture_inventory_meter,
+            hook,
+        )
+    }
+    #[cfg(test)]
+    fn fixture_inventory_meter() -> sys::CollectionMeter {
+        // Functional admission checks share the production operation budget,
+        // without depending on how long the test thread is descheduled.
+        sys::CollectionMeter::fixture_operations(collection_gc::GcBudget::default().max_ops)
     }
     fn acquire_inner(
         context: &CheckedContextFd,
@@ -78,6 +101,7 @@ impl CollectionStore {
         now: Clock,
         catalog: &'static [SegmentDecl],
         address: Option<String>,
+        start_inventory_meter: fn() -> sys::CollectionMeter,
         hook: &mut dyn FnMut(&str),
     ) -> Result<Self, StoreError> {
         // Encoding validates all raw paths and the context CRC before any mkdir.
@@ -106,13 +130,20 @@ impl CollectionStore {
             names[1] = address;
         }
         // This lock order also covers the gap before the collection flock.
-        let mut registration = collection_gc::Registration::open(&context.runtime, me)?;
+        let mut registration = collection_gc::Registration::open(
+            &context.runtime,
+            me,
+            now,
+            catalog,
+            start_inventory_meter,
+        )?;
         registration.reserve(context, binding, &names[1], now)?;
         hook("reserved_before_mkdir");
         let mut chain = vec![context.dir.try_clone()?];
+        let mut created = 0;
         for name in &names {
             let parent = chain.last().unwrap();
-            sys::mkdir_at(parent.as_fd(), OsStr::new(name), 0o700)?;
+            created += u64::from(sys::mkdir_at(parent.as_fd(), OsStr::new(name), 0o700)?);
             let child = sys::open_dir_at_nofollow(parent.as_fd(), OsStr::new(name))?;
             snapshot_store::check_directory(&child, me)?;
             snapshot_store::same_name(&child, parent.as_fd(), name)?;
@@ -120,7 +151,7 @@ impl CollectionStore {
         }
         let dir = chain.last().unwrap();
         let lock = close_only_lock(dir, LOCK, me, true)?;
-        registration.attach(dir)?;
+        registration.attach(dir, created)?;
         let store = Self {
             chain,
             names,
@@ -159,8 +190,13 @@ impl CollectionStore {
         let Some((file, bytes)) = read_checked(self.dir(), name, STREAM_MAX, self.me)? else {
             return Ok(None);
         };
-        let completed =
-            Completed::decode_with_catalog(&bytes, self.catalog).map_err(|_| StoreError::Unsafe)?;
+        let Ok(completed) = Completed::decode_with_catalog(&bytes, self.catalog) else {
+            // Only content damage is absence. read_checked already enforced
+            // safe metadata and immutable fd/name identity; we retain the lock.
+            snapshot_store::same_name(&file, self.dir().as_fd(), name)?;
+            sys::unlink_at(self.dir().as_fd(), OsStr::new(name))?;
+            return Ok(None);
+        };
         if completed.binding.config != self.binding.config
             || completed.binding.state != self.binding.state
             || completed.binding.cwd != self.binding.cwd
@@ -286,26 +322,13 @@ pub(crate) fn read_checked(
     let before = sys::file_stamp(&file)?;
     let len = snapshot_store::check_data(&file, cap, me)?;
     let mut bytes = Vec::new();
-    if matches!(name, RESPONSE | PREVIOUS) {
-        let mut header = [0u8; bingsu_core::collection::response::HEADER];
-        bounded_read(&mut file, &mut header)?;
-        let declared = bingsu_core::collection::response::declared_len(&header)
-            .map_err(|_| StoreError::Unsafe)?;
-        if declared != len {
-            return Err(StoreError::Unsafe);
-        }
-        bytes
-            .try_reserve_exact(len)
-            .map_err(|_| StoreError::Unsafe)?;
-        bytes.extend_from_slice(&header);
-    } else {
-        bytes
-            .try_reserve_exact(len)
-            .map_err(|_| StoreError::Unsafe)?;
-    }
-    let prefix = bytes.len();
+    // The trusted metadata length caps allocation and reads. Header/declared
+    // length errors belong to decoding, after all metadata/identity checks.
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| StoreError::Unsafe)?;
     bytes.resize(len, 0);
-    bounded_read(&mut file, &mut bytes[prefix..])?;
+    bounded_read(&mut file, &mut bytes)?;
     snapshot_store::check_data(&file, cap, me)?;
     if before != sys::file_stamp(&file)? {
         return Err(StoreError::Unsafe);

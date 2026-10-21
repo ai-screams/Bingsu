@@ -263,6 +263,7 @@ mod tests {
 
     #[test]
     fn deadline_exits_even_when_stderr_is_full() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         use std::io::Write;
         use std::os::fd::OwnedFd;
         use std::os::unix::net::UnixStream;
@@ -307,6 +308,7 @@ mod tests {
     // 이것을 실패시키는 것: 한도가 지나도 프로세스를 끝내지 않는 것(막힌 원본에서 명령이 멈춤), 종료 코드를 3이 아니게 내는 것, 문구를 빼는 것.
     #[test]
     fn deadline_ends_the_process_with_3() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let t = std::time::Instant::now();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([

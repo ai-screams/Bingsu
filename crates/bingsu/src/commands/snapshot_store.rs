@@ -470,6 +470,7 @@ mod tests {
     // 이것을 실패시키는 것: FIFO를 blocking으로 열거나 일반 파일 검사 전에 읽는 것.
     #[test]
     fn fifo_open_is_nonblocking() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

@@ -376,6 +376,7 @@ mod tests {
     // 이것을 실패시키는 것: parent bootstrap이 부모의 NOFILE soft를 바꾸는 것.
     #[test]
     fn n7_parent_nofile_unchanged() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let result = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -501,6 +502,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn watchdog_leaves_full_vm_headroom() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = child("commands::helper_limits::tests::headroom_child");
         assert!(
             out.status.success(),
@@ -540,6 +542,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn watchdog_waits_until_deadline() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = child("commands::helper_limits::tests::watchdog_wait_child");
         assert!(
             out.status.success(),
@@ -577,6 +580,7 @@ mod tests {
     // 이것을 실패시키는 것: 메모리 한도를 적용하지 않아 큰 할당이 계속되는 것.
     #[test]
     fn memory_is_enforced() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = child("commands::helper_limits::tests::memory_child");
         #[cfg(target_os = "macos")]
         assert_eq!(
@@ -608,6 +612,7 @@ mod tests {
     // 이것을 실패시키는 것: rlimit을 부모에 적용하거나 watchdog 시작 barrier·SIGKILL을 제거하는 것.
     #[test]
     fn limits_and_independent_lifetime() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let before = get(libc::RLIMIT_NOFILE).unwrap();
         let out = child("commands::helper_limits::tests::limits_child");
         assert!(

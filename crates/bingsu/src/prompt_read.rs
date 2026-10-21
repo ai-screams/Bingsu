@@ -1111,6 +1111,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn held_reader_under_real_seccomp() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -1157,6 +1158,7 @@ mod tests {
     // 이것을 실패시키는 것: 준비·각 스냅샷 읽기 전에 절대 마감을 검사하지 않는 것.
     #[test]
     fn expired_preparation_and_read_start_no_new_io() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         for name in ["expired_preparation_child", "expired_read_child"] {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([

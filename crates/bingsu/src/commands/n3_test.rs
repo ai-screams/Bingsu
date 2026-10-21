@@ -58,6 +58,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn n7_relative_executable_is_rejected() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let (base, exe) = super::probe("n7-relative");
         let relative = std::path::PathBuf::from(format!(".n7-relative-{}", std::process::id()));
         std::os::unix::fs::symlink(&exe, &relative).unwrap();

@@ -48,8 +48,8 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-// Unrelated fork fixtures must not inherit another test's close-only OFDs.
-static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Share the fork/spawn guard with all included command, prompt and sandbox
+// tests: even pre-exec children can retain close-only collection/GC OFDs.
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 static SCHEMA: [SegmentDecl; 32] = [const {
     SegmentDecl {
@@ -99,11 +99,12 @@ fn completed(binding: &Binding, value: &[u8]) -> Completed {
     }
 }
 struct Fixture {
-    _serial: std::sync::MutexGuard<'static, ()>,
     base: PathBuf,
     runtime: File,
     context: CheckedContextFd,
     binding: Binding,
+    // Fields drop in declaration order: release the guard after every fd.
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 impl Fixture {
     fn new(tag: &str) -> Self {
@@ -113,7 +114,7 @@ impl Fixture {
         )
     }
     fn new_in(root: PathBuf, tag: &str) -> Self {
-        let serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let serial = sys::test_inherited_fd_lock();
         let base = root.join(format!(
             "{tag}-{}-{}",
             std::process::id(),
@@ -159,7 +160,14 @@ impl Fixture {
         CollectionStore::fixture(&self.context, &self.binding, clock(), &SCHEMA, None)
     }
     fn gc(&self, now: Clock) -> collection_gc::GcReport {
-        collection_gc::fixture_reclaim(&self.runtime, now, GcBudget::default(), &SCHEMA).unwrap()
+        collection_gc::fixture_reclaim(
+            &self.runtime,
+            &self.context,
+            now,
+            GcBudget::default().max_ops,
+            &SCHEMA,
+        )
+        .unwrap()
     }
     fn publish(&self, value: &[u8]) {
         self.acquire()
@@ -187,12 +195,397 @@ fn raise_nofile_soft_limit() {
     };
     // SAFETY: getrlimit and setrlimit only read and write `limit`.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
-        && limit.rlim_cur < limit.rlim_max
+        && limit.rlim_cur < limit.rlim_max.min(65_536)
     {
         limit.rlim_cur = limit.rlim_max.min(65_536);
         // SAFETY: as above.
         unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
     }
+}
+
+fn catalog_counts(f: &Fixture) -> (u64, u64, u64) {
+    let raw = fs::read(f.base.join(".collections.catalog")).unwrap();
+    let u = |offset| u64::from_le_bytes(raw[offset..offset + 8].try_into().unwrap());
+    (u(28), u(36), u(44))
+}
+fn day(n: u64) -> Clock {
+    Clock {
+        now: 1_000 + n * 86_400_000_000_001,
+        ..clock()
+    }
+}
+fn directory_count(path: &std::path::Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+    1 + fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directory_count(&path)
+            } else {
+                0
+            }
+        })
+        .sum::<u64>()
+}
+
+// 이것을 실패시키는 것: attach에서 실제 mkdir 수로 +3 예약을 정산하지 않는 것.
+#[test]
+fn probe_node_drift() {
+    let f = Fixture::new("node-drift");
+    let keep = f.acquire().unwrap();
+    let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
+    for i in 0..40 {
+        let b = binding(format!("/cycle-{i}").as_bytes());
+        let mut store = CollectionStore::fixture(&f.context, &b, day(i), &SCHEMA, None).unwrap();
+        store.publish(&completed(&b, b"value")).unwrap();
+        assert_eq!(
+            catalog_counts(&f).1,
+            directory_count(&collections),
+            "attach {i}"
+        );
+        drop(store);
+        drop(CollectionStore::fixture(&f.context, &b, day(i), &SCHEMA, None).unwrap());
+        assert_eq!(
+            catalog_counts(&f).1,
+            directory_count(&collections),
+            "reattach {i}"
+        );
+        for _ in 0..4 {
+            f.gc(day(i + 1));
+        }
+        assert!(!f.path_for(&b).exists());
+        assert_eq!(
+            catalog_counts(&f).1,
+            directory_count(&collections),
+            "reclaim {i}"
+        );
+    }
+    drop(keep);
+}
+
+// 이것을 실패시키는 것: 공유 collections-v1 예약 1개를 매 수명마다 누적하는 것.
+#[test]
+fn probe_node_drift_lockout() {
+    let f = Fixture::new("node-lockout");
+    let keep = f.acquire().unwrap();
+    for i in 0..8_200 {
+        let b = binding(format!("/lifetime-{i}").as_bytes());
+        drop(
+            CollectionStore::fixture(&f.context, &b, day(i), &SCHEMA, None)
+                .unwrap_or_else(|error| panic!("admission {i}: {error:?}")),
+        );
+        for _ in 0..4 {
+            f.gc(day(i + 1));
+            if !f.path_for(&b).exists() {
+                break;
+            }
+        }
+        assert!(!f.path_for(&b).exists(), "reclaim {i}");
+    }
+    drop(keep);
+    for _ in 0..4 {
+        f.gc(day(8_201));
+    }
+    let b = binding(b"/fresh-after-8200");
+    assert!(CollectionStore::fixture(&f.context, &b, day(8_202), &SCHEMA, None).is_ok());
+    assert_eq!(catalog_counts(&f).1, 3);
+}
+
+// 이것을 실패시키는 것: CLOEXEC를 fork 상속 방지로 오해하거나 close-only 잠금을 조기 해제하는 것.
+#[test]
+fn cloexec_fork_retains_collection_and_gc_locks_until_exit() {
+    let f = Fixture::new("fork-cloexec");
+    let store = f.acquire().unwrap();
+    let worker_lock = store.worker_lock().unwrap();
+    for file in [&f.runtime, &worker_lock] {
+        // SAFETY: read-only flag query on a live fixture descriptor.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    }
+    drop(worker_lock);
+    let child = sys::PausedFork::new();
+    drop(store);
+    for _ in 0..4 {
+        f.gc(day(1));
+    }
+    assert!(
+        f.path().exists(),
+        "pre-exec child still owns the collection lock"
+    );
+    assert!(matches!(f.acquire(), Err(StoreError::Busy)));
+    drop(child);
+    for _ in 0..4 {
+        f.gc(day(1));
+    }
+    assert!(
+        !f.path().exists(),
+        "last inherited close permits reclamation"
+    );
+
+    let gc_lock = commands::collection_store::close_only_lock(
+        &f.runtime,
+        ".collections.gc.lock",
+        sys::current_uid(),
+        false,
+    )
+    .unwrap();
+    // SAFETY: read-only query of the live GC lock descriptor.
+    let flags = unsafe { libc::fcntl(gc_lock.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    let child = sys::PausedFork::new();
+    drop(gc_lock);
+    assert!(
+        matches!(f.acquire(), Err(StoreError::Busy)),
+        "inherited GC lock blocks admission"
+    );
+    drop(child);
+    assert!(f.acquire().is_ok());
+}
+
+fn damage_response(path: &std::path::Path, kind: u8) {
+    let mut bytes = fs::read(path).unwrap();
+    match kind {
+        0 => {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0xff;
+        }
+        1 => bytes.truncate(4),
+        2 => bytes.push(0),
+        _ => unreachable!(),
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+// 이것을 실패시키는 것: lock 아래 내용만 손상된 response/previous를 Unsafe로 반환하는 것.
+#[test]
+fn publication_replaces_corrupt_response_and_previous() {
+    for name in ["response", "previous"] {
+        for kind in 0..3 {
+            let f = Fixture::new("corrupt-acquire");
+            f.publish(b"first");
+            f.publish(b"second");
+            damage_response(&f.path().join(name), kind);
+            let mut store = f.acquire().expect("content damage must be absence");
+            assert!(!f.path().join(name).exists());
+            store.publish(&completed(&f.binding, b"recovered")).unwrap();
+            assert_eq!(
+                f.read("response").updates[0].value,
+                Some(Value::new(b"recovered", vec![]))
+            );
+        }
+    }
+}
+
+// 이것을 실패시키는 것: inspect/evict의 decode 실패를 중단 이유로 쓰거나 최근 손상 store를 남기는 것.
+#[test]
+fn probe_corrupt_response_wedges_gc() {
+    for rebuild in [false, true] {
+        for kind in 0..3 {
+            let f = Fixture::new("corrupt-gc");
+            let mut paths = vec![];
+            for i in 0..3 {
+                let b = binding(format!("/w-{i}").as_bytes());
+                let mut store =
+                    CollectionStore::fixture(&f.context, &b, clock(), &SCHEMA, None).unwrap();
+                let mut response = completed(&b, b"value");
+                response.completed_at_ns = 100 + i;
+                store.publish(&response).unwrap();
+                paths.push(f.path_for(&b));
+            }
+            damage_response(&paths[0].join("response"), kind);
+            if rebuild {
+                fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+            }
+            for _ in 0..8 {
+                f.gc(clock());
+            }
+            assert!(
+                !paths[0].exists(),
+                "recent corrupt store must be tombstoned"
+            );
+            assert!(paths[1].exists() && paths[2].exists());
+            for _ in 0..8 {
+                f.gc(day(5));
+            }
+            assert!(
+                paths.iter().all(|path| !path.exists()),
+                "later stores must still be reclaimed"
+            );
+            let b = binding(b"/w-0");
+            CollectionStore::fixture(&f.context, &b, day(5), &SCHEMA, None)
+                .unwrap()
+                .publish(&completed(&b, b"again"))
+                .unwrap();
+            assert!(paths[0].join("response").exists());
+        }
+    }
+}
+
+// 이것을 실패시키는 것: inventory가 cwd를 못 읽은 손상 store를 acquire에서 영구 Busy로 만드는 것.
+#[test]
+fn publication_recovers_corrupt_store_after_inventory() {
+    let f = Fixture::new("corrupt-inventory");
+    f.publish(b"value");
+    damage_response(&f.path().join("response"), 0);
+    fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+    for _ in 0..8 {
+        if !f.gc(clock()).incomplete {
+            break;
+        }
+    }
+    f.publish(b"recovered");
+    assert_eq!(
+        f.read("response").updates[0].value,
+        Some(Value::new(b"recovered", vec![]))
+    );
+}
+
+// 이것을 실패시키는 것: collections-v1 부재 뒤 catalog/lock을 열거나 만드는 것.
+#[test]
+fn gc_absent_namespace_only_attempts_one_open() {
+    let f = Fixture::new("absent");
+    for _ in 0..3 {
+        let report = f.gc(clock());
+        assert!(!report.incomplete);
+        // open_at conservatively charges open + eventual close even on ENOENT.
+        assert_eq!(report.ops, 2);
+        assert_eq!(
+            report.visited + report.removed_files + report.removed_dirs,
+            0
+        );
+        for name in [
+            ".collections.catalog",
+            ".collections.catalog.stage",
+            ".collections.gc.lock",
+        ] {
+            assert!(!f.base.join(name).exists(), "unexpected {name}");
+        }
+    }
+    f.publish(b"first admission initializes the catalog");
+    assert!(f.base.join(".collections.catalog").exists());
+}
+
+struct DeepChain {
+    dirs: Vec<File>,
+    names: Vec<String>,
+}
+impl DeepChain {
+    fn new(f: &Fixture) -> Self {
+        raise_nofile_soft_limit();
+        let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
+        let mut chain = Self {
+            dirs: vec![File::open(collections).unwrap()],
+            names: vec![],
+        };
+        // 180 components exceed the old ~151-level stall. Linux exercises
+        // full legacy chunks; macOS sandbox path checks require short names.
+        // Both use the traversed hex namespace; the Linux-only fixture below
+        // also exercises all 1,093 canonical chunks with live locks.
+        let mut cwd = vec![0xff; 60 * 180];
+        cwd[0] = b'/';
+        for chunk in cwd.chunks(60) {
+            #[cfg(not(target_os = "linux"))]
+            let chunk = &chunk[..1];
+            let name = chunk.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let parent = chain.dirs.last().unwrap();
+            sys::mkdir_at(parent.as_fd(), OsStr::new(&name), 0o700).unwrap();
+            let dir = sys::open_dir_at_nofollow(parent.as_fd(), OsStr::new(&name)).unwrap();
+            chain.dirs.push(dir);
+            chain.names.push(name);
+        }
+        chain
+    }
+}
+impl Drop for DeepChain {
+    fn drop(&mut self) {
+        while let Some(name) = self.names.pop() {
+            self.dirs.pop();
+            let _ = sys::remove_dir_at(self.dirs.last().unwrap().as_fd(), OsStr::new(&name));
+        }
+    }
+}
+fn rebuild_deep_inventory(f: &Fixture) {
+    fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+    let mut skipped = 0;
+    for _ in 0..32 {
+        let report = f.gc(clock());
+        assert!(report.ops <= 4_096);
+        skipped += report.skipped;
+        if !report.incomplete {
+            assert_eq!(
+                skipped, 1,
+                "one unfinished subtree must be skipped exactly once"
+            );
+            return;
+        }
+    }
+    panic!("deep inventory never completed or skipped its unfinished subtree");
+}
+
+// 이것을 실패시키는 것: 한 회차에 재검증할 수 없는 깊은 cursor를 계속 저장하는 것.
+#[test]
+fn probe_deep_chain_ever_completes() {
+    let f = Fixture::new("deep-skip");
+    f.publish(b"current");
+    let _chain = DeepChain::new(&f);
+    rebuild_deep_inventory(&f);
+    let counts = catalog_counts(&f);
+    assert_eq!(counts.0, 2, "one known store and one unknown occupation");
+    // Shared collections-v1, modern hash/store, 1,093 legacy chunks + store.
+    assert_eq!(counts.1, 1 + 2 + 1_093 + 1);
+    assert_eq!(
+        counts.2,
+        collection_gc::RESERVATION + fs::metadata(f.path().join("response")).unwrap().len()
+    );
+    for _ in 0..4 {
+        assert!(!f.gc(clock()).incomplete);
+        assert_eq!(
+            catalog_counts(&f),
+            counts,
+            "unknown must not accumulate each sweep"
+        );
+    }
+    assert!(f.acquire().is_ok());
+}
+
+// 이것을 실패시키는 것: unknown 하나로 runtime 전체 admission을 막거나 unknown bytes를 무시하는 것.
+#[test]
+fn gc_deep_chain_allows_other_cwd_until_real_budget_is_full() {
+    let f = Fixture::new("deep-admission");
+    f.publish(b"current");
+    let _chain = DeepChain::new(&f);
+    rebuild_deep_inventory(&f);
+    let before = catalog_counts(&f);
+    // Use another context as well as another cwd in the same runtime.
+    let mut b = binding(b"/other-cwd");
+    b.config = b"/other-config".to_vec();
+    b.snapshot.context = snapshot::context_crc(&b.config, &b.state).unwrap();
+    let context =
+        CheckedContextFd::under_runtime(&f.runtime, &b.config, &b.state, sys::current_uid(), true)
+            .unwrap();
+    let mut held = vec![];
+    for i in 0..16 {
+        b.cwd = format!("/other-cwd-{i}").into_bytes();
+        let expected =
+            before.2 + (i + 1) * collection_gc::RESERVATION + 2 * collection_gc::CATALOG_MAX as u64;
+        let acquired = CollectionStore::fixture(&context, &b, clock(), &SCHEMA, None);
+        if expected > collection_gc::MAX_BYTES {
+            assert!(matches!(acquired, Err(StoreError::Busy)));
+            assert!(!f.path_for(&b).exists(), "budget rejection precedes mkdir");
+            assert!(
+                !held.is_empty(),
+                "deep context must leave admission capacity"
+            );
+            return;
+        }
+        let mut store = acquired.expect("another context must use the remaining budget");
+        store.publish(&completed(&b, b"other context")).unwrap();
+        held.push(store);
+    }
+    panic!("unknown occupation was not charged against the byte budget");
 }
 
 // 이것을 실패시키는 것: staging의 동일 fd 바이트·stamp·binding 검사 중 하나를 생략하는 것.
@@ -250,7 +643,7 @@ fn publication_checks_same_fd_bytes_and_identity() {
     assert_eq!(fs::read(f.path().join("response")).unwrap(), original);
 }
 
-// 이것을 실패시키는 것: 응답 파일의 nofollow·0600·nlink·길이·CRC 판정을 빼는 것.
+// 이것을 실패시키는 것: 응답 파일의 nofollow·0600·nlink·크기 상한 판정을 빼는 것.
 #[test]
 fn publication_refuses_unsafe_existing_files() {
     let f = Fixture::new("unsafe");
@@ -286,9 +679,16 @@ fn publication_refuses_unsafe_existing_files() {
             let dir = File::open(&path).unwrap();
             assert!(sys::open_data_at_nofollow(dir.as_fd(), OsStr::new("previous")).is_err());
         }
-        assert!(f.acquire().is_err(), "unsafe case {case}");
+        if matches!(case, 4 | 6) {
+            assert!(f.acquire().is_ok(), "content damage is absence: {case}");
+            assert!(!previous.exists());
+        } else {
+            assert!(f.acquire().is_err(), "unsafe case {case}");
+        }
         assert_eq!(fs::read(path.join("response")).unwrap(), original);
-        fs::remove_file(&previous).unwrap();
+        if previous.exists() || previous.is_symlink() {
+            fs::remove_file(&previous).unwrap();
+        }
     }
     for mode in [0o755, 0o770] {
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
@@ -457,7 +857,7 @@ fn hash_collision_never_reuses_or_overwrites_other_cwd() {
 // 이것을 실패시키는 것: 발행 뒤 helper 사본을 닫을 때 worker의 공유 잠금을 푸는 것.
 #[test]
 fn lock_is_held_until_publication_and_worker_exit() {
-    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = sys::test_inherited_fd_lock();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -535,7 +935,7 @@ fn lock_is_held_until_publication_and_worker_exit_child() {
 // 이것을 실패시키는 것: helper teardown에 LOCK_UN을 넣는 것.
 #[test]
 fn helper_close_never_unlocks_live_worker() {
-    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = sys::test_inherited_fd_lock();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -591,7 +991,8 @@ fn gc_cannot_split_lock_inode_or_delete_inflight_store() {
                 Err(StoreError::Busy)
             ));
             let racing_gc = f.gc(clock());
-            assert!(racing_gc.incomplete);
+            assert!(!racing_gc.incomplete);
+            assert_eq!(racing_gc.removed_dirs, 0);
             assert_eq!(racing_gc.visited, 0);
             assert!(!f.path().exists());
             observed = true;
@@ -702,16 +1103,8 @@ fn gc_is_bounded_and_resumable() {
     let mut ops = 0;
     let mut visited = 0;
     for _ in 0..100 {
-        let r = collection_gc::fixture_reclaim(
-            &f.runtime,
-            clock(),
-            GcBudget {
-                max_ops: 900,
-                max_ns: 20_000_000,
-            },
-            &SCHEMA,
-        )
-        .unwrap();
+        let r =
+            collection_gc::fixture_reclaim(&f.runtime, &f.context, clock(), 900, &SCHEMA).unwrap();
         assert!(r.ops <= 900);
         ops += r.ops;
         visited += r.visited;
@@ -729,18 +1122,33 @@ fn gc_is_bounded_and_resumable() {
         "bounded inventory: stores_visited={visited} sweeps={} total_charged_operations={ops} per_sweep_limit=900",
         incomplete + 1
     );
-    let r = collection_gc::fixture_reclaim(
+}
+
+// 이것을 실패시키는 것: 제품 GC의 시간 제한까지 fixture의 연산 전용 예산으로 바꾸는 것.
+#[test]
+fn gc_time_cap_stops_before_filesystem_work() {
+    let f = Fixture::new("time-cap");
+    f.publish(b"keep");
+    let before = fs::read(f.base.join(".collections.catalog")).unwrap();
+    let path = f.path();
+    let context = File::open(path.ancestors().nth(3).unwrap()).unwrap();
+    let r = collection_gc::reclaim(
         &f.runtime,
+        &context,
         clock(),
         GcBudget {
             max_ops: u32::MAX,
             max_ns: 0,
         },
-        &SCHEMA,
     )
     .unwrap();
     assert!(r.incomplete);
     assert_eq!(r.ops, 0);
+    assert_eq!(
+        fs::read(f.base.join(".collections.catalog")).unwrap(),
+        before
+    );
+    assert!(f.path().join("response").exists());
 }
 
 // 이것을 실패시키는 것: 손상 catalog의 외부 경로·..·symlink를 삭제 권한으로 쓰거나 재구성 중 admission을 허용하는 것.
@@ -887,15 +1295,22 @@ fn deep_cwd_gc_preserves_shared_prefix_and_live_lock() {
         b"rebuild legacy inventory",
     )
     .unwrap();
-    let mut max_ops = 0;
-    for _ in 0..4 {
+    let mut skipped = 0;
+    let mut complete = false;
+    for _ in 0..32 {
         let report = f.gc(clock());
-        assert!(report.incomplete);
         assert!(report.ops <= 4_096);
-        max_ops = max_ops.max(report.ops);
+        skipped += report.skipped;
+        if !report.incomplete {
+            complete = true;
+            break;
+        }
     }
-    println!("legacy components=1093; bounded sweeps=4; max charged operations={max_ops}");
-    assert!(f.acquire().is_err());
+    assert!(
+        complete && skipped == 1,
+        "deep inventory must finish by skipping one subtree"
+    );
+    assert!(f.acquire().is_ok());
     assert_eq!(
         sys::at_stamp(leaf.as_fd(), OsStr::new("collection.lock"))
             .unwrap()
@@ -1020,11 +1435,14 @@ fn peer() -> PathBuf {
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 static unsigned char h[80], b[65536];
 static void exact(int fd, void *p, unsigned n) { while(n) { int k=read(fd,p,n); if(k<=0) _exit(31); p=(char*)p+k; n-=k; } }
 static void put(const void *p, unsigned n) { while(n) { int k=write(1,p,n); if(k<=0) _exit(32); p=(char*)p+k; n-=k; } }
 static void frame(unsigned kind, unsigned size) { memcpy(h,"BNGIPC02",8); h[8]=2; h[10]=kind; memcpy(h+12,&size,4); memset(h+16,7,32); put(h,80); if(size) put(b,size); }
 int main(int argc, char **argv) {
+  /* Only the spawn dup2 action makes the CLOEXEC source available as fd 5. */
+  if (fcntl(5, F_GETFD) != 0 || (fcntl(5, F_GETFL) & O_ACCMODE) != O_RDONLY) _exit(34);
   (void)argc; b[0]=3; b[11]=128; b[17]=16; frame(1,24);
   for(;;) { exact(3,h,80); unsigned n; memcpy(&n,h+12,4); if(n>65536) _exit(33); exact(3,b,n); if(h[10]==4) break; }
   memset(b,0,3); b[0]=31; frame(5,3);
@@ -1099,33 +1517,7 @@ fn supervisor_publishes_complete_and_partial_results() {
 // 이것을 실패시키는 것: store 삭제 뒤 예산 종료 때 빈 사슬 cursor를 버리는 것.
 #[test]
 fn gc_resumes_empty_suffix_cleanup() {
-    let f = Fixture::new("prune-cursor");
-    f.publish(b"seed");
-    let mut later = clock();
-    later.now += 86_400_000_000_001;
-    let parent = f.path().parent().unwrap().to_path_buf();
-    let mut interrupted = false;
-    for max_ops in (360..1_600).step_by(8) {
-        let report = collection_gc::fixture_reclaim(
-            &f.runtime,
-            later,
-            GcBudget {
-                max_ops,
-                max_ns: 20_000_000,
-            },
-            &SCHEMA,
-        )
-        .unwrap();
-        assert!(report.ops <= max_ops);
-        if report.removed_dirs > 0 {
-            interrupted = parent.exists();
-            break;
-        }
-    }
-    assert!(
-        interrupted,
-        "the fixture must stop between store and address cleanup"
-    );
+    let (f, parent, later) = interrupted_prune_fixture("prune-cursor");
     for _ in 0..8 {
         f.gc(later);
     }
@@ -1144,6 +1536,11 @@ fn gc_recovers_an_unregistered_empty_store() {
         directory = directory.parent().unwrap();
     }
     fs::write(f.base.join(".collections.catalog"), b"lost reservation").unwrap();
+    fs::set_permissions(
+        f.base.join(".collections.catalog"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     for _ in 0..8 {
         f.gc(clock());
     }
@@ -1208,7 +1605,8 @@ fn gc_recovers_interrupted_registration() {
             );
         }));
         assert!(aborted.is_err(), "the reservation hook must actually run");
-        assert!(f.acquire().is_err());
+        // With an absent namespace GC intentionally does no work. Admission
+        // recovers a pre-mkdir reservation lazily under the same global lock.
         for _ in 0..8 {
             f.gc(clock());
         }
@@ -1219,29 +1617,7 @@ fn gc_recovers_interrupted_registration() {
 // 이것을 실패시키는 것: rmdir 뒤 checkpoint 전 사망해서 사라진 prune 경로를 영구 재시도하는 것.
 #[test]
 fn gc_rebuilds_after_stale_prune_checkpoint() {
-    let f = Fixture::new("stale-prune");
-    f.publish(b"seed");
-    let mut later = clock();
-    later.now += 86_400_000_000_001;
-    let parent = f.path().parent().unwrap().to_path_buf();
-    let mut interrupted = false;
-    for max_ops in (360..1_600).step_by(8) {
-        let report = collection_gc::fixture_reclaim(
-            &f.runtime,
-            later,
-            GcBudget {
-                max_ops,
-                max_ns: 20_000_000,
-            },
-            &SCHEMA,
-        )
-        .unwrap();
-        if report.removed_dirs > 0 {
-            interrupted = parent.exists();
-            break;
-        }
-    }
-    assert!(interrupted, "the fixture must retain a prune checkpoint");
+    let (f, parent, later) = interrupted_prune_fixture("stale-prune");
     fs::remove_dir(&parent).unwrap();
     let mut finished = false;
     for _ in 0..8 {
@@ -1249,4 +1625,171 @@ fn gc_rebuilds_after_stale_prune_checkpoint() {
     }
     assert!(finished, "the stale prune path must not block every sweep");
     assert!(f.acquire().is_ok(), "stale accounting must be rebuilt");
+}
+
+// 이것을 실패시키는 것: 내용 손상 복구가 metadata/decoded binding 위반까지 허용하는 것.
+#[test]
+fn gc_still_stops_on_response_metadata_and_identity_violations() {
+    for wrong_identity in [false, true] {
+        let f = Fixture::new("corrupt-unsafe");
+        f.publish(b"keep");
+        let response = f.path().join("response");
+        if wrong_identity {
+            let other = completed(&binding(b"/other"), b"keep")
+                .encode_with_catalog(&SCHEMA)
+                .unwrap();
+            fs::write(&response, other).unwrap();
+        } else {
+            damage_response(&response, 0);
+            fs::set_permissions(&response, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(f.acquire().is_err());
+        let bytes = fs::read(&response).unwrap();
+        for _ in 0..3 {
+            let report = f.gc(day(5));
+            assert!(report.incomplete);
+            assert_eq!(report.removed_files, 0);
+            assert_eq!(fs::read(&response).unwrap(), bytes);
+        }
+    }
+}
+
+// 이것을 실패시키는 것: 재개 가능한 깊이를 넘어 cursor를 저장하거나 unknown 점유를 누락하는 것.
+#[test]
+fn gc_deep_inventory_progress_and_admission_portable() {
+    let f = Fixture::new("deep-portable");
+    f.publish(b"current");
+    let _chain = portable_deep_chain(&f);
+    let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
+    rebuild_deep_inventory(&f);
+    let counts = catalog_counts(&f);
+    assert!(
+        counts.1 >= directory_count(&collections),
+        "unknown nodes must cover the chain"
+    );
+    assert!(
+        counts.2 >= collection_gc::RESERVATION,
+        "unknown files must stay reserved"
+    );
+    for _ in 0..3 {
+        assert!(!f.gc(clock()).incomplete);
+        assert_eq!(
+            catalog_counts(&f),
+            counts,
+            "unknown charge must stay stable"
+        );
+    }
+    let b = binding(b"/other-cwd");
+    let mut store = CollectionStore::fixture(&f.context, &b, clock(), &SCHEMA, None).unwrap();
+    store.publish(&completed(&b, b"same context")).unwrap();
+    drop(store);
+    let mut b = binding(b"/other-context-cwd");
+    b.config = b"/other-config".to_vec();
+    b.snapshot.context = snapshot::context_crc(&b.config, &b.state).unwrap();
+    let context =
+        CheckedContextFd::under_runtime(&f.runtime, &b.config, &b.state, sys::current_uid(), true)
+            .unwrap();
+    let before = catalog_counts(&f);
+    let mut held = vec![];
+    for i in 0..16 {
+        b.cwd = format!("/other-{i}").into_bytes();
+        let expected =
+            before.2 + (i + 1) * collection_gc::RESERVATION + 2 * collection_gc::CATALOG_MAX as u64;
+        let acquired = CollectionStore::fixture(&context, &b, clock(), &SCHEMA, None);
+        if expected > collection_gc::MAX_BYTES {
+            assert!(matches!(acquired, Err(StoreError::Busy)));
+            assert!(!f.path_for(&b).exists());
+            assert!(!held.is_empty());
+            return;
+        }
+        let mut store = acquired.expect("another context must use the remaining budget");
+        store.publish(&completed(&b, b"other context")).unwrap();
+        held.push(store);
+    }
+    panic!("unknown occupation must consume the byte budget");
+}
+
+fn portable_deep_chain(f: &Fixture) -> DeepChain {
+    raise_nofile_soft_limit();
+    let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
+    let mut chain = DeepChain {
+        dirs: vec![File::open(&collections).unwrap()],
+        names: vec![],
+    };
+    // The traversal grammar permits hex prefixes. Short names exercise the
+    // same >151 ancestor replay on macOS without its full-path creation limit;
+    // the Linux tests above also exercise canonical 120-byte legacy chunks.
+    for _ in 0..192 {
+        let parent = chain.dirs.last().unwrap();
+        sys::mkdir_at(parent.as_fd(), OsStr::new("aa"), 0o700).unwrap();
+        chain
+            .dirs
+            .push(sys::open_dir_at_nofollow(parent.as_fd(), OsStr::new("aa")).unwrap());
+        chain.names.push("aa".into());
+    }
+    chain
+}
+
+// 이것을 실패시키는 것: 작은 회차 예산에서도 default의 고정 깊이까지 cursor를 저장하는 것.
+#[test]
+fn gc_deep_inventory_respects_smaller_sweep_budget() {
+    let f = Fixture::new("deep-small-budget");
+    f.publish(b"current");
+    let _chain = portable_deep_chain(&f);
+    fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+    let mut skipped = 0;
+    for _ in 0..64 {
+        let report =
+            collection_gc::fixture_reclaim(&f.runtime, &f.context, clock(), 900, &SCHEMA).unwrap();
+        assert!(report.ops <= 900);
+        skipped += report.skipped;
+        if !report.incomplete {
+            assert_eq!(skipped, 1);
+            assert!(catalog_counts(&f).1 >= 195);
+            assert!(f.acquire().is_ok());
+            return;
+        }
+    }
+    panic!("a smaller sweep budget must also skip the deep subtree");
+}
+
+// 이것을 실패시키는 것: 작은 예산에서 정상 hash store의 얕은 context를 unknown으로 영구 건너뛰는 것.
+#[test]
+fn gc_small_budget_keeps_shallow_store_reachable() {
+    let f = Fixture::new("small-budget-shallow");
+    f.publish(b"current");
+    fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+    for max_ops in (600..1_600).step_by(100) {
+        let report =
+            collection_gc::fixture_reclaim(&f.runtime, &f.context, clock(), max_ops, &SCHEMA)
+                .unwrap();
+        assert_eq!(
+            report.skipped, 0,
+            "a shallow store is resumable at budget {max_ops}"
+        );
+        assert!(report.ops <= max_ops);
+    }
+    assert_eq!(catalog_counts(&f).0, 1);
+    assert_eq!(catalog_counts(&f).1, 3);
+    assert!(f.acquire().is_ok());
+}
+
+fn interrupted_prune_fixture(tag: &str) -> (Fixture, PathBuf, Clock) {
+    // Each budget starts from the same filesystem state. Reusing the prior
+    // attempt can finish file removal and skip the intended directory boundary
+    // on the next sweep, depending on the cost of response validation.
+    for max_ops in (360..1_600).step_by(8) {
+        let f = Fixture::new(tag);
+        f.publish(b"seed");
+        let later = day(1);
+        let parent = f.path().parent().unwrap().to_path_buf();
+        let report =
+            collection_gc::fixture_reclaim(&f.runtime, &f.context, later, max_ops, &SCHEMA)
+                .unwrap();
+        assert!(report.ops <= max_ops);
+        if report.removed_dirs > 0 && parent.exists() {
+            return (f, parent, later);
+        }
+    }
+    panic!("the fixture must stop between store and address cleanup");
 }

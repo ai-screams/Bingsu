@@ -306,6 +306,7 @@ mod tests {
     // 이것을 실패시키는 것: spawn 실패·Blocked의 record 계약 또는 셸 파이프 EOF를 깨는 것.
     #[test]
     fn bootstrap_failure_and_blocked_do_not_delay_the_record() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("spawn_failure_child", b"<rendered>");
         let start = std::time::Instant::now();
         child("spawn_before_blocked_child", SANDBOX);
@@ -345,30 +346,35 @@ mod tests {
     // 폴백 레코드를 쓰지 않거나 다른 상태로 쓰는 것.
     #[test]
     fn panic_fallback_is_silent() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("core_panics_child", INTERNAL);
     }
 
     // 이것을 실패시키는 것: 필터 설치(BPF 생성 포함)를 panic 보호 밖에서 하는 것.
     #[test]
     fn a_panic_in_the_filter_is_guarded() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("filter_panics_child", INTERNAL);
     }
 
     // 이것을 실패시키는 것: 거부된 필터에서 core를 부르는 것, degraded:sandbox가 아닌 레코드, 0이 아닌 종료.
     #[test]
     fn no_sandbox_skips_the_core() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("refused_child", SANDBOX);
     }
 
     // 이것을 실패시키는 것: 거부된 필터의 레코드를 panic 보호 밖에서 만드는 것.
     #[test]
     fn a_panic_in_the_refused_record_is_guarded() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("refused_record_panics_child", INTERNAL);
     }
 
     // 이것을 실패시키는 것: 커널에 seccomp가 없을 때 core를 건너뛰는 것(WSL1·오래된 커널에서 렌더 안 됨).
     #[test]
     fn no_seccomp_in_the_kernel_renders() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("absent_child", b"<rendered>");
     }
     // 이것을 실패시키는 것: 부분 쓰기·EINTR 뒤 접두부 재출력, 오류·0-byte 재시도.
@@ -451,6 +457,7 @@ mod tests {
     // 이것을 실패시키는 것: 출력 시작 뒤 panic에서 after_panic 레코드를 추가하거나 stderr 출력.
     #[test]
     fn partial_panic_never_appends_another_record() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("partial_panic_child", b"B1\x1f");
     }
 }
