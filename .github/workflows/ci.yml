@@ -82,7 +82,7 @@ jobs:
       - name: Native probe and deliberately wrong expectation
         env:
           PROBE_CASE: ${{ matrix.probe }}
-        run: python3 bench/probes/run-collector-probes.py --case "$PROBE_CASE" --out target/collector-probes/result.json --ledger-out target/collector-probes/acceptance.tsv
+        run: python3 bench/probes/run-collector-probes.py --case "$PROBE_CASE" --allow-observed-platform-differences --out target/collector-probes/result.json --ledger-out target/collector-probes/acceptance.tsv
       - name: Preserve observations, including failures
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

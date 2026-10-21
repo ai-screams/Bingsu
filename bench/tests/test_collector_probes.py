@@ -288,3 +288,195 @@ def test_stale_observations_become_blocked_for_remeasurement(monkeypatch):
     assert len(rows) == 108
     assert all(row["outcome"] == "BLOCKED" for row in rows)
     assert sum(row["reason"] == "observed build_id is stale" for row in rows) == 6
+
+
+def x32_records(result=None):
+    return [json.loads(line) for line in (result or current_x32())["evidence"]["stdout"].splitlines()]
+
+
+def serialize_x32(records):
+    return "\n".join(map(json.dumps, records)) + "\n"
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires native Darwin spawn")
+@pytest.mark.parametrize("fault", [None, "same_fd", "child_exit", "session", "spawn_errno"])
+def test_x32_native_cells_survive_failures_and_fd3_collision(tmp_path, fault):
+    source = (SOURCE.parent / "x32-spawn.c").read_text()
+    # Keep the competing opener above fd 3 for this deterministic layout. It
+    # still races with spawn; the ordinary runner exercises unconstrained opens.
+    source = source.replace('open("/dev/null", O_RDONLY); /* deliberately not CLOEXEC */',
+                            'fcntl(1025, F_DUPFD, 16); /* deliberately not CLOEXEC */')
+    source = source.replace("    original_writer = p[1];", """
+    int reader = fcntl(p[0], F_DUPFD_CLOEXEC, 16);
+    int writer = fcntl(p[1], F_DUPFD_CLOEXEC, 16);
+    REQUIRE(reader >= 0 && writer >= 0);
+    REQUIRE(close(p[0]) == 0 && close(p[1]) == 0);
+    REQUIRE(dup2(writer, 3) == 3 && close(writer) == 0);
+    p[0] = reader; p[1] = 3;
+    original_writer = p[1];""")
+    if fault == "same_fd":
+        source = source.replace("if (p[1] == 3) {", "if (0) {")
+    elif fault == "child_exit":
+        source = source.replace("static void child_report(int bound) {", "static void child_report(int bound) {\n    _exit(97);")
+    elif fault == "session":
+        source = source.replace("struct report r = {getpid(), getsid(0),", "struct report r = {getpid(), getppid(),")
+    elif fault == "spawn_errno":
+        source = source.replace("error = posix_spawnattr_setflags(&attr, flags);", "error = EPERM;")
+    path, binary = tmp_path / "probe.c", tmp_path / "probe"
+    path.write_text(source)
+    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-pthread",
+                    "-mmacosx-version-min=11.0", str(path), "-o", str(binary)], check=True)
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    cells, outcomes = probe.x32_observations(result.stdout)
+    assert set(cells) == set(probe.CELLS["X-32"])
+    assert all(cells[cell]["pipe_write_fd"] == 3 for cell in probe.CELLS["X-32"][:-1])
+    if fault is None:
+        assert all(o["outcome"] == "PASS" for o in outcomes.values())
+        return
+    assert outcomes["race"]["outcome"] == "PASS"
+    failed_cells = probe.CELLS["X-32"][:3] if fault == "spawn_errno" else probe.CELLS["X-32"][:-1]
+    assert all(outcomes[cell]["outcome"] == "FAIL" for cell in failed_cells)
+    if fault == "same_fd":
+        for cell in probe.CELLS["X-32"][:-1]:
+            assert cells[cell]["report_bytes"] == 0 and cells[cell]["exit"] == 92
+            assert cells[cell]["read_errno"] == 0
+        assert "child report write errno=9" in result.stderr
+    elif fault == "child_exit":
+        assert cells["both"]["exit"] == 97 and cells["both"]["report_bytes"] == 0
+    elif fault == "spawn_errno":
+        assert cells["both"]["errno"] == 1 and cells["both"]["fallback"] == 0
+        # The two forced fallback cells never attempt posix_spawn.
+        assert cells["fallback_einval"]["exit"] == 0
+
+
+def x32_platform_difference():
+    """Synthetic policy input only; never copied into the observation ledger."""
+    saved = current_x32()
+    records = x32_records(saved)
+    records[2]["evidence"].update(sid=records[2]["evidence"]["parent_sid"], outcome="FAIL")
+    saved["outcome"] = "FAIL"
+    e = saved["evidence"]
+    e["stdout"] = serialize_x32(records)
+    e["cells"], e["cell_outcomes"] = probe.x32_observations(e["stdout"])
+    mutant = [json.loads(line) for line in e["mutation"]["stdout"].splitlines()]
+    mutant[2]["evidence"].update(sid=mutant[2]["evidence"]["parent_sid"], outcome="FAIL")
+    e["mutation"]["stdout"] = serialize_x32(mutant)
+    return saved
+
+
+@pytest.mark.parametrize("damage", [None, "unreviewed", "version", "build", "signal", "missing",
+                                    "transport", "new_failure", "mutation", "probe_error"])
+def test_x32_ci_waiver_requires_exact_reviewed_complete_observation(tmp_path, damage):
+    saved = x32_platform_difference()
+    evidence = tmp_path / "difference.json"
+    evidence.write_text(json.dumps({"results": [saved]}))
+    row = dict(case="X-32", environment="macos-current", arch=saved["arch"], cell="both",
+               status="observed", outcome="FAIL", reason="observed platform difference: session isolation",
+               evidence_file=str(evidence))
+    result = probe.ProbeResult(**copy.deepcopy(saved))
+    if damage == "unreviewed":
+        row["status"] = "failed"
+    elif damage == "version":
+        result.evidence["os_version"] = "26.6.2"
+    elif damage == "build":
+        result.build_id = "different"
+    elif damage == "signal":
+        result.evidence["returncode"] = -9
+    elif damage == "missing":
+        result.evidence["stdout"] = serialize_x32(x32_records(saved)[:-1])
+    elif damage in ("transport", "new_failure"):
+        records = x32_records(saved)
+        if damage == "transport":
+            records[2]["evidence"].update(report_bytes=0, exit=92, wait_status=92 << 8)
+        else:
+            records[1]["evidence"].update(leaks=1, outcome="FAIL")
+        result.evidence["stdout"] = serialize_x32(records)
+        _, result.evidence["cell_outcomes"] = probe.x32_observations(result.evidence["stdout"])
+    elif damage == "mutation":
+        result.evidence["mutation"]["stdout"] = ""
+    elif damage == "probe_error":
+        result.evidence["probe_error"] = True
+    assert probe.observed_platform_differences(result, [row]) == (["both"] if damage is None else [])
+
+
+def test_x32_main_keeps_independent_cells_in_ledger(monkeypatch, tmp_path, recorded_x32_build):
+    saved = x32_platform_difference()
+    monkeypatch.setattr(probe, "execute_case", lambda *_: probe.ProbeResult(**copy.deepcopy(saved)))
+    out, ledger = tmp_path / "result.json", tmp_path / "acceptance.tsv"
+    monkeypatch.setattr(sys, "argv", [str(SOURCE), "--case", "X-32", "--allow-observed-platform-differences",
+                                     "--out", str(out), "--ledger-out", str(ledger)])
+    assert probe.main() == 1  # No reviewed difference in the input ledger.
+    import csv
+    rows = [r for r in csv.DictReader(ledger.open(), delimiter="\t") if
+            (r["case"], r["environment"], r["arch"]) == ("X-32", "macos-current", saved["arch"])]
+    assert {r["cell"]: r["outcome"] for r in rows} == {
+        cell: "FAIL" if cell == "both" else "PASS" for cell in probe.CELLS["X-32"]}
+    assert json.loads(out.read_text())["results"][0]["outcome"] == "FAIL"
+
+
+@pytest.mark.parametrize("damage", [None, "unreviewed", "crash", "missing", "transport"])
+def test_ledger_validates_reviewed_x32_failures(monkeypatch, tmp_path, recorded_x32_build, damage):
+    import csv
+
+    saved = x32_platform_difference()
+    rows = list(csv.DictReader((SOURCE.parent / "collector-acceptance.tsv").open(), delimiter="\t"))
+    row = next(r for r in rows if (r["case"], r["environment"], r["arch"], r["cell"]) ==
+               ("X-32", "macos-current", saved["arch"], "both"))
+    row.update(outcome="FAIL", reason="observed platform difference: session isolation")
+    if damage == "unreviewed":
+        row["reason"] = "unexplained failure"
+    elif damage == "crash":
+        saved["evidence"]["returncode"] = 90
+    elif damage in ("missing", "transport"):
+        records = x32_records(saved)
+        if damage == "missing":
+            records.pop()
+        else:
+            records[2]["evidence"].update(report_bytes=0, exit=92, wait_status=92 << 8)
+        saved["evidence"]["stdout"] = serialize_x32(records)
+    with (tmp_path / "collector-acceptance.tsv").open("w") as stream:
+        writer = csv.DictWriter(stream, fieldnames=probe.FIELDS, delimiter="\t")
+        writer.writeheader(); writer.writerows(rows)
+    original = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path.name == "x32-macos-27.0.1-aarch64.json":
+            return json.dumps({"results": [saved]})
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(probe, "HERE", tmp_path)
+    if damage is None:
+        assert next(r for r in probe.ledger_rows() if r["case"] == "X-32" and
+                    r["cell"] == "both" and r["arch"] == saved["arch"] and
+                    r["environment"] == "macos-current")["outcome"] == "FAIL"
+    else:
+        with pytest.raises(ValueError):
+            probe.ledger_rows()
+
+
+def test_x32_main_tolerates_reviewed_cell_but_keeps_fail_artifacts(monkeypatch, tmp_path, recorded_x32_build):
+    saved = x32_platform_difference()
+    evidence = tmp_path / "reviewed.json"
+    evidence.write_text(json.dumps({"results": [saved]}))
+    rows = probe.ledger_rows()
+    for row in rows:
+        if (row["case"], row["environment"], row["arch"], row["cell"]) == (
+                "X-32", "macos-current", saved["arch"], "both"):
+            row.update(outcome="FAIL", reason="observed platform difference: session isolation",
+                       evidence_file=str(evidence))
+    monkeypatch.setattr(probe, "ledger_rows", lambda **_: rows)
+    monkeypatch.setattr(probe, "execute_case", lambda *_: probe.ProbeResult(**copy.deepcopy(saved)))
+    out, ledger = tmp_path / "result.json", tmp_path / "acceptance.tsv"
+    monkeypatch.setattr(sys, "argv", [str(SOURCE), "--case", "X-32", "--allow-observed-platform-differences",
+                                     "--out", str(out), "--ledger-out", str(ledger)])
+    assert probe.main() == 0
+    result = json.loads(out.read_text())["results"][0]
+    assert result["outcome"] == "FAIL"
+    assert result["evidence"]["ci_observed_platform_differences"] == ["both"]
+    import csv
+    row = next(r for r in csv.DictReader(ledger.open(), delimiter="\t") if
+               (r["case"], r["environment"], r["arch"], r["cell"]) ==
+               ("X-32", "macos-current", saved["arch"], "both"))
+    assert row["outcome"] == "FAIL" and row["status"] == "failed"

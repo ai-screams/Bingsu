@@ -150,23 +150,80 @@ def validate(case, stdout, mutate=False):
                 and e["merged_usr"] == 1, "merged-/usr walk")
         require(cells["refusals"] == dict.fromkeys(("relative", "relative_link", "env", "proc_missing", "replaced_link", "writable_chain", "writable_control", "relative_control", "replacement_control"), 1), "refusal fixtures")
     else:
-        for cell in CELLS[case][:-1]:
-            e = cells[cell]
-            require(e["errno"] in (0, 22) and e["missing"] in (0, 1) and e["exit"] == 0 and e["elapsed_us"] > 0, "spawn result")
-            require(e["fallback"] == int(bool(e["missing"] or e["errno"] == 22)), "unapproved fallback")
-            require(e["close_ns"] > 0 if e["fallback"] else e["close_ns"] == 0, "fallback fd-close timing")
-            if cell != "cloexec_default" or e["fallback"]:
-                require(e["sid"] == e["pid"] and e["sid"] != e["parent_sid"], "session isolation")
-            else:
-                require(e["sid"] == e["parent_sid"], "CLOEXEC-only session control")
-            if cell != "setsid" or e["fallback"]:
-                require(e["leaks"] == 0 and e["high_open"] == 0, "fd isolation")
-        require(cells["fallback_missing"]["missing"] == 1 and cells["fallback_einval"]["errno"] == 22, "fallback injection")
-        e = cells["race"]
-        require(e["opens"] > 0 and e["high_fd"] == 1025 and e["soft_limit"] == 256
-                and e["close_ceiling"] > 1025 and e["other_errno_rejected"] == 1, "race fixture")
+        cells, outcomes = x32_observations(stdout)
+        require(all(o["outcome"] == "PASS" for o in outcomes.values()), "failed X-32 cell")
         require(not mutate, "mutated session expectation")
     return cells
+
+
+def x32_observations(stdout):
+    """Keep complete failed cells; malformed/missing records remain probe errors."""
+    records = [json.loads(line) for line in stdout.splitlines()]
+    require(all(set(r) == {"cell", "evidence"} and isinstance(r["evidence"], dict)
+                for r in records), "invalid X-32 record schema")
+    cells = {r["cell"]: r["evidence"] for r in records}
+    require(len(records) == len(CELLS["X-32"]) and set(cells) == set(CELLS["X-32"]),
+            "missing/duplicate X-32 cell")
+    outcomes = {}
+    for cell, e in cells.items():
+        kind, reason = "observation", ""
+        if cell == "race":
+            require(e["opens"] > 0 and e["high_fd"] == 1025 and e["soft_limit"] == 256
+                    and e["close_ceiling"] > 1025 and e["other_errno_rejected"] == 1, "race fixture")
+        else:
+            fields = ("errno", "missing", "fallback", "pid", "child_pid", "sid", "parent_sid",
+                      "leaks", "high_open", "exit", "signal", "wait_status", "wait_errno",
+                      "setup_errno", "report_bytes", "read_errno", "timing_bytes",
+                      "pipe_write_fd", "elapsed_us", "close_ns")
+            require(all(type(e[k]) is int for k in fields) and isinstance(e["stage"], str),
+                    "invalid X-32 evidence types")
+            require(e["missing"] in (0, 1) and e["fallback"] in (0, 1), "invalid fallback fields")
+            if e["setup_errno"] or e["read_errno"] or e["wait_errno"]:
+                kind, reason = "probe_error", "setup/read/wait error"
+            elif e["errno"] not in (0, 22):
+                reason = "spawn errno (fallback forbidden)"
+            elif (e["report_bytes"] != 16 or e["exit"] != 0 or e["signal"] != 0
+                  or e["wait_status"] != 0 or e["child_pid"] != e["pid"]):
+                kind, reason = "probe_error", "child report/exit failure"
+            else:
+                try:
+                    require(e["elapsed_us"] > 0 and e["pid"] > 0, "spawn result")
+                    require(e["fallback"] == int(bool(e["missing"] or e["errno"] == 22)), "unapproved fallback")
+                    require((e["close_ns"] > 0 and e["timing_bytes"] == 8) if e["fallback"]
+                            else (e["close_ns"] == 0 and e["timing_bytes"] == 0), "fallback fd-close timing")
+                    if cell != "cloexec_default" or e["fallback"]:
+                        require(e["sid"] == e["pid"] and e["sid"] != e["parent_sid"], "session isolation")
+                    else:
+                        require(e["sid"] == e["parent_sid"], "CLOEXEC-only session control")
+                    if cell != "setsid" or e["fallback"]:
+                        require(e["leaks"] == 0 and e["high_open"] == 0, "fd isolation")
+                    if cell == "fallback_missing":
+                        require(e["missing"] == 1, "fallback missing injection")
+                    if cell == "fallback_einval":
+                        require(e["errno"] == 22, "fallback EINVAL injection")
+                except ValueError as error:
+                    reason = str(error)
+                    if reason not in ("session isolation", "CLOEXEC-only session control", "fd isolation"):
+                        kind = "probe_error"
+        outcome = "FAIL" if reason else "PASS"
+        require(e["outcome"] == outcome, "X-32 outcome contradicts evidence")
+        outcomes[cell] = dict(outcome=outcome, kind=kind, reason=reason)
+    return cells, outcomes
+
+
+def x32_mutation(evidence, baseline=None):
+    """A deliberate expectation failure must finish all cells, without a crash."""
+    require(evidence.get("returncode") == 90, "X-32 mutation exit missing")
+    records = [json.loads(line) for line in evidence.get("stdout", "").splitlines()]
+    require(len(records) == len(CELLS["X-32"]), "X-32 mutation cells missing")
+    baseline = baseline or {cell: dict(outcome="PASS", kind="observation", reason="") for cell in CELLS["X-32"]}
+    require(baseline["setsid"]["outcome"] == "PASS", "mutation needs a passing SETSID control")
+    expected = {cell: "FAIL" if cell == "setsid" else baseline[cell]["outcome"] for cell in CELLS["X-32"]}
+    require({r["cell"]: r["evidence"]["outcome"] for r in records} == expected, "X-32 mutation outcomes")
+    # Undo only the deliberate expectation change and validate the actual data.
+    next(r for r in records if r["cell"] == "setsid")["evidence"]["outcome"] = "PASS"
+    _, actual = x32_observations("\n".join(map(json.dumps, records)))
+    require(actual == baseline, "X-32 mutation changed actual evidence")
 
 
 def environment(case, result, check_acceptance=True):
@@ -219,11 +276,12 @@ def execute_case(case, target=None):
                 result.evidence["deployment_target"] = "11.0"
             if result.outcome == "PASS":
                 mutant = run_probe(case, [str(binary), "--mutate-expectation"], 120)
-                # Compilation errors, signals and timeouts do not kill this mutation.
-                result.evidence["mutation"] = {"returncode": mutant.evidence.get("returncode"),
-                                                "stderr": mutant.evidence.get("stderr", "")}
-                if mutant.evidence.get("returncode") != 90 or "assertion:" not in mutant.evidence.get("stderr", ""):
+                result.evidence["mutation"] = {key: mutant.evidence.get(key, "")
+                                                for key in ("returncode", "stdout", "stderr")}
+                if case == "X-02" and (mutant.evidence.get("returncode") != 90
+                                       or "assertion:" not in mutant.evidence.get("stderr", "")):
                     result.outcome = "FAIL"; result.evidence["reason"] = "expectation mutation survived"
+
         else:
             if case == "X-14":
                 command = ["cargo", "run", "--locked", "-j", "2", "--manifest-path", "bench/probes/collector-x14/Cargo.toml", "--release"]
@@ -245,7 +303,18 @@ def execute_case(case, target=None):
                     c_build = x16_build(result.evidence["stdout"], expected)
                     result.evidence["c_build"] = c_build
                     result.libc = c_build["libc"] + " (verified C ELF interpreter)"
-                result.evidence["cells"] = validate(case, result.evidence["stdout"])
+                if case == "X-32":
+                    cells, outcomes = x32_observations(result.evidence["stdout"])
+                    result.evidence.update(cells=cells, cell_outcomes=outcomes)
+                    failed = [cell for cell, o in outcomes.items() if o["outcome"] == "FAIL"]
+                    if failed:
+                        result.outcome = "FAIL"
+                        result.evidence["reason"] = "failed cells: " + ", ".join(failed)
+                    # A passing SETSID control still anchors mutation checking
+                    # when another cell has a real platform difference.
+                    x32_mutation(result.evidence["mutation"], outcomes)
+                else:
+                    result.evidence["cells"] = validate(case, result.evidence["stdout"])
                 if case in ("X-14", "X-16"):
                     try:
                         validate(case, result.evidence["stdout"], mutate=True)
@@ -258,6 +327,7 @@ def execute_case(case, target=None):
                     require(tuple(map(int, platform.libc_ver()[1].split(".")[:2])) >= (2, 35), "glibc >=2.35 required")
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
                 result.outcome = "FAIL"; result.evidence["reason"] = str(error)
+                result.evidence["probe_error"] = True
         return result
 
 
@@ -274,14 +344,14 @@ def ledger_rows(allow_stale=False):
     keys = [(r["case"], r["environment"], r["arch"], r["cell"]) for r in rows]
     require(len(keys) == len(set(keys)) and set(keys) == expected, "required ledger cells missing or duplicated")
     for row in rows:
-        require((row["status"], row["outcome"]) in (("observed", "PASS"), ("not observed", "BLOCKED"), ("failed", "FAIL")), "ledger status")
+        require((row["status"], row["outcome"]) in (("observed", "PASS"), ("observed", "FAIL"), ("not observed", "BLOCKED"), ("failed", "FAIL")), "ledger status")
         require(row["command"] and (row["reason"] or row["evidence_file"]), "ledger evidence/command missing")
-        if row["outcome"] == "PASS":
+        if row["status"] == "observed":
             evidence_path = ROOT / row["evidence_file"]
             require(not Path(row["evidence_file"]).is_absolute() and evidence_path.is_file(), "observed evidence unavailable")
             saved = json.loads(evidence_path.read_text())
             matches = [r for r in saved["results"] if r["case"] == row["case"] and r["arch"] == row["arch"]
-                       and r["outcome"] == "PASS" and r["evidence"]["environment"] == row["environment"]]
+                       and r["outcome"] in ("PASS", "FAIL") and r["evidence"]["environment"] == row["environment"]]
             require(len(matches) == 1, "observed evidence mismatch")
             result = matches[0]
             if allow_stale and result.get("build_id") != build_id(row["case"]):
@@ -294,7 +364,17 @@ def ledger_rows(allow_stale=False):
                 c_build = x16_build(result["evidence"]["stdout"], row["environment"].removeprefix("linux-"))
                 require(result["evidence"].get("c_build") == c_build, "X-16 C build record mismatch")
             require(result["platform"] == ("Darwin" if row["case"] == "X-32" else "Linux"), "wrong native platform")
-            require(row["cell"] in validate(row["case"], result["evidence"]["stdout"]), "observed cell missing")
+            if row["case"] == "X-32":
+                _, outcomes = x32_observations(result["evidence"]["stdout"])
+                require(outcomes[row["cell"]]["outcome"] == row["outcome"], "observed cell outcome mismatch")
+                require(not result["evidence"].get("probe_error"), "observed probe error")
+                if row["outcome"] == "FAIL":
+                    require(row["reason"].startswith("observed platform difference:")
+                            and outcomes[row["cell"]]["kind"] == "observation", "not an observed platform difference")
+                x32_mutation(result["evidence"].get("mutation", {}), outcomes)
+            else:
+                require(row["outcome"] == "PASS" and result["outcome"] == "PASS", "unexpected observed failure")
+                require(row["cell"] in validate(row["case"], result["evidence"]["stdout"]), "observed cell missing")
             if row["case"] == "X-32":
                 version = result["evidence"]["os_version"]
                 minimum = version == "11.0" or version.startswith("11.0.")
@@ -305,12 +385,51 @@ def ledger_rows(allow_stale=False):
     return rows
 
 
+def observed_platform_differences(result, rows):
+    """CI may tolerate only reviewed cells for the exact recorded host/build.
+
+    The aggregate result and output ledger stay FAIL. Crashes, missing records,
+    transport errors and unreviewed failures can never be waived.
+    """
+    e = result.evidence
+    if (result.case != "X-32" or result.outcome != "FAIL" or e.get("returncode") != 0
+            or e.get("probe_error")):
+        return []
+    try:
+        cells, outcomes = x32_observations(e["stdout"])
+        require(e.get("cell_outcomes") == outcomes, "unverified outcomes")
+        x32_mutation(e["mutation"], outcomes)
+        failures = [cell for cell, o in outcomes.items() if o["outcome"] == "FAIL"]
+        require(failures, "no failed cells")
+        for cell in failures:
+            require(outcomes[cell]["kind"] == "observation", "probe error cannot be waived")
+            matches = [row for row in rows if (row["case"], row["environment"], row["arch"], row["cell"],
+                       row["status"], row["outcome"]) == ("X-32", e["environment"], result.arch, cell, "observed", "FAIL")
+                       and row["reason"].startswith("observed platform difference:")]
+            require(len(matches) == 1, "unreviewed platform difference")
+            saved = json.loads((ROOT / matches[0]["evidence_file"]).read_text())
+            prior = next(r for r in saved["results"] if r["case"] == result.case and r["arch"] == result.arch
+                         and r["evidence"].get("environment") == e["environment"])
+            require(all(prior[k] == getattr(result, k) for k in ("platform", "kernel", "arch", "build_id")), "different host/build")
+            require(all(prior["evidence"][k] == e[k] for k in
+                        ("os_version", "os_build", "compiler", "sdk", "deployment_target", "compile_flags")), "different OS/toolchain")
+            old_cells, old_outcomes = x32_observations(prior["evidence"]["stdout"])
+            require(old_outcomes[cell] == outcomes[cell], "different failure")
+            require(all(old_cells[cell][k] == cells[cell][k] for k in
+                        ("errno", "missing", "fallback", "exit", "signal", "leaks", "high_open")), "different failure evidence")
+        return failures
+    except (ValueError, KeyError, TypeError, OSError, StopIteration):
+        return []
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=(*CELLS, "all"), required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--ledger-out", type=Path)
     parser.add_argument("--require-environment", help="fail if the measured environment differs")
+    parser.add_argument("--allow-observed-platform-differences", action="store_true",
+                        help="CI only: tolerate exact X-32 differences already reviewed in the input ledger")
     parser.add_argument("--target", help="native musl target for the existing X-14/X-16 harnesses")
     args = parser.parse_args()
     if args.ledger_out and args.ledger_out.resolve() == (HERE / "collector-acceptance.tsv").resolve():
@@ -327,8 +446,11 @@ def main():
                 result.evidence["environment"] = environment(result.case, result, check_acceptance=False)
             except (OSError, ValueError):
                 pass  # No environment is inferred without host metadata.
-        if args.require_environment and result.outcome == "PASS" and result.evidence["environment"] != args.require_environment:
+        if args.require_environment and result.outcome != "BLOCKED" and result.evidence.get("environment") != args.require_environment:
             result.outcome = "FAIL"; result.evidence["reason"] = "required environment not observed"
+            result.evidence["probe_error"] = True
+        if args.allow_observed_platform_differences:
+            result.evidence["ci_observed_platform_differences"] = observed_platform_differences(result, rows)
         print(result.case, result.outcome, result.evidence.get("environment", result.evidence.get("reason", "")))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # Strip temporary build paths from logs; committed evidence is portable.
@@ -340,15 +462,17 @@ def main():
     for row in rows:
         for r in results:
             if (row["case"], row["environment"], row["arch"]) == (r.case, r.evidence.get("environment"), r.arch):
-                row.update(status={"PASS": "observed", "FAIL": "failed", "BLOCKED": "not observed"}[r.outcome], outcome=r.outcome,
+                cell = r.evidence.get("cell_outcomes", {}).get(row["cell"])
+                outcome = cell["outcome"] if cell else r.outcome
+                row.update(status={"PASS": "observed", "FAIL": "failed", "BLOCKED": "not observed"}[outcome], outcome=outcome,
                            evidence_file=os.path.relpath(args.out, ROOT),
-                           reason=r.evidence.get("reason", "suite failed; no criterion accepted" if r.outcome == "FAIL" else ""))
+                           reason=cell["reason"] if cell else r.evidence.get("reason", "suite failed; no criterion accepted" if r.outcome == "FAIL" else ""))
     if args.ledger_out:
         args.ledger_out.parent.mkdir(parents=True, exist_ok=True)
         with args.ledger_out.open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=FIELDS, delimiter="\t", lineterminator="\n")
             writer.writeheader(); writer.writerows(rows)
-    if any(r.outcome == "FAIL" for r in results):
+    if any(r.outcome == "FAIL" and not r.evidence.get("ci_observed_platform_differences") for r in results):
         return 1
     if any(r.outcome == "BLOCKED" for r in results) or (args.case == "all" and any(r["outcome"] != "PASS" for r in rows)):
         return 2
