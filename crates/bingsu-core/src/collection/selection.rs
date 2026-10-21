@@ -31,6 +31,9 @@ pub(crate) fn references(lines: &[CompiledLine]) -> u32 {
         })
 }
 
+// Keep selection specialized for the caller's width even when the front and
+// collector share this entry point (notably the 4,096-band maximum-width scan).
+#[inline]
 pub fn builtin_mask(config: &CompiledConfig, width: u16) -> u32 {
     let lines = bands::select(&config.band_order, &config.bands, width)
         .and_then(|band| config.variants.get(band + 1))

@@ -93,12 +93,24 @@ static void header(int kind, uint32_t n) {
     memcpy(h+12,&n,4); memset(h+16,7,32);
 }
 static void frame(int kind, const void *p, uint32_t n) { header(kind,n); put(h,80); put(p,n); }
+static void grow_memory(void) {
+    char *memory=malloc(40*1024*1024);
+    if(!memory) _exit(40);
+    memset(memory,0x5a,40*1024*1024);
+    asm volatile("" : : "r"(memory) : "memory");
+    for(;;) pause();
+}
 int main(int argc, char **argv) {
     if(argc!=2) return 30;
     alarm(2);
     const char *mode=argv[1];
     if(!strcmp(mode,"exit")) return 0;
     if(!strcmp(mode,"idle")) { for(;;) pause(); }
+    if(!strcmp(mode,"sample-memory")) {
+        // Let the watchdog register its baseline before allocating.
+        exact(3,b,1);
+        grow_memory();
+    }
     if((fcntl(1,F_GETFL)&O_ACCMODE)!=O_WRONLY ||
        (fcntl(3,F_GETFL)&O_ACCMODE)!=O_RDONLY ||
        (fcntl(5,F_GETFL)&O_ACCMODE)!=O_RDONLY) return 33;
@@ -139,11 +151,7 @@ int main(int argc, char **argv) {
     frame(5,update,sizeof(update));
     if(!strcmp(mode,"timeout")) { for(;;) pause(); }
     if(!strncmp(mode,"memory",6)) {
-        char *memory=malloc(40*1024*1024);
-        if(!memory) return 40;
-        memset(memory,0x5a,40*1024*1024);
-        asm volatile("" : : "r"(memory) : "memory");
-        for(;;) pause();
+        grow_memory();
     }
     if(!strcmp(mode,"partial")) { header(5,11); put(h,17); return 0; }
     if(!strcmp(mode,"invalid-then-valid")) {
@@ -422,7 +430,7 @@ fn immediate_ready_child() {
     assert!(report.bytes > 0 && report.reaped);
 }
 
-// 이것을 실패시키는 것: confinement 대기의 마감을 spawn+100ms보다 늘리는 것.
+// 이것을 실패시키는 것: confinement 대기의 만료 또는 읽기 전 gate를 제거하는 것.
 #[test]
 fn stalled_confinement_expires_without_reading_ready() {
     let job_peer = peer();
@@ -439,16 +447,20 @@ fn stalled_confinement_expires_without_reading_ready() {
     let handle = job
         .start(Box::new(|_| panic!("unconfined publication")))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(150));
-    assert!(
-        handle.fixture_finished(),
-        "confinement wait exceeded the Ready deadline"
-    );
+    // The product still expires at spawn+100ms (also checked by the pure
+    // deadline tests). Allow scheduling and reaping to finish on a busy runner;
+    // permission stays Pending throughout, so finishing cannot cancel the wait.
+    let end = Instant::now() + Duration::from_secs(1);
+    while !handle.fixture_finished() {
+        assert!(Instant::now() < end, "unconfined supervisor did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     // Late confirmation must not restart the Ready deadline.
     handle.confirm_confinement().unwrap();
     let report = handle.finish();
     assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
     assert_eq!((report.bytes, report.frames), (0, 0));
+    assert_eq!((report.unconfined_reads, report.unconfined_decodes), (0, 0));
     assert!(report.kill_requested && report.reaped);
 }
 
@@ -690,7 +702,35 @@ fn macos_first_completed_overlimit_sample_terminates() {
     peer();
     for _ in 0..200 {
         let start = Instant::now();
-        let (report, values, observations) = run_peer_observed("memory", true);
+        // Exercise the real sampler/signal/reap path with its own finite
+        // registration budget. The protocol's 50ms request deadline can win
+        // before a loaded runner commits and samples 40MiB; it is tested
+        // separately and must not be extended for this measurement.
+        let watchdog = helper_limits::start(Instant::now()).unwrap();
+        let (read, write) = collector_process::pipe().unwrap();
+        let (input, output) = collector_process::pipe().unwrap();
+        let mut child = collector_process::spawn_args(
+            peer().as_os_str(),
+            &[OsStr::new("sample-memory")],
+            &read,
+            &output,
+            &lock("memory-sample"),
+            watchdog.expires_ns(),
+        )
+        .unwrap();
+        let registration = watchdog
+            .register_collector(&child, collector_process::now_ns().unwrap() + 1_000_000_000)
+            .unwrap();
+        assert_eq!(
+            commands::sys::write_fd(write.as_raw_fd(), &[1]),
+            commands::sys::WriteOutcome::Done
+        );
+        let end = Instant::now() + Duration::from_millis(1500);
+        while !child.reap().unwrap() {
+            assert!(Instant::now() < end, "overlimit worker was not reaped");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let observations = watchdog.observations.lock().unwrap().clone();
         let over = observations
             .iter()
             .find(|v| v.1 > 0)
@@ -706,10 +746,10 @@ fn macos_first_completed_overlimit_sample_terminates() {
                 .windows(2)
                 .map(|v| (v[1].0 - v[0].0) as u128 / 1000),
         );
-        assert_eq!(report.reason, EndReason::Resource, "{report:?}");
-        assert!(report.kill_requested && report.reaped);
-        assert_eq!(values.len(), 1);
+        assert_eq!(registration.reason(), Some(EndReason::Resource));
+        assert!(child.kill_requested());
         samples.push(start.elapsed().as_micros());
+        drop((registration, read, write, input, output));
     }
     distribution("spawn-to-termination us", &mut samples);
     distribution("footprint overshoot bytes", &mut overshoots);
