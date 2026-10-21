@@ -1,0 +1,11 @@
+2770  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_native_collector_trace_ha0/trace-store"], 0xffffdee63a48 /* 22 vars */) = 0
+2770  clone(child_stack=0xf01aa8fdd000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2771  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_native_collector_trace_ha0/trace-store", "--security-worker"], 0xb57510a910d0 /* 0 vars */) = 0
+2770  <... clone resumed>)              = 2771
+2771  openat(AT_FDCWD</home/tester/src>, "/proc/self/fd", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 42</proc/2771/fd>
+2771  close(42</proc/2771/fd>)          = 0
+2771  clone(child_stack=0xe74a6deaf000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2773  close(42)                         = -1 EBADF (Bad file descriptor)
+2773  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--security-worker"], 0xb6fccc42a440 /* 0 vars */ <unfinished ...>
+2771  <... clone resumed>)              = 2773
+2773  <... execve resumed>)             = 0

@@ -150,6 +150,21 @@ def collector_kind(c: Call) -> str | None:
     return kind(c)
 
 
+def collection_publication_kind(c: Call) -> str | None:
+    """Publication's held-file metadata query on glibc aarch64.
+
+    Rust File::metadata uses statx with AT_EMPTY_PATH here. Count that exact
+    fd-based shape as fstat without extending the historical prompt vocabulary
+    or allowing path-based/unnamed statx calls into this formula.
+    """
+    args = split_args(c.args)
+    if (c.name == "statx" and len(args) == 5 and args[1] == '""'
+            and "AT_EMPTY_PATH" in args[2].split("|")
+            and (identity := fd_identity(args[0])) and identity.startswith("file:")):
+        return "fstat"
+    return kind(c)
+
+
 def collector_bootstrap_kind(c: Call) -> str | None:
     """Collector-only vocabulary for the already reviewed bootstrap calls.
 
@@ -167,7 +182,8 @@ def collector_bootstrap_kind(c: Call) -> str | None:
     if c.name == "fcntl" and len(args) >= 2 and args[1] in {"F_GETFL", "F_GETFD"}:
         return "fd_query"
     if c.name == "open":
-        return "openat"
+        return ("openat" if args and args[0] in {'"/proc/self/statm"', f'"/proc/{c.pid}/statm"'}
+                else "unknown-fs")
     if c.name in {"newfstatat", "fstatat64", "statx"} and len(args) > 1 and args[1] == '""':
         return None if fd_identity(args[0]) == "none" else "fstat"
     return collector_kind(c)

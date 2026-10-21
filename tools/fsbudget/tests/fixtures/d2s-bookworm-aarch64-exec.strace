@@ -1,0 +1,36 @@
+2802  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_failure_modes_trace_colle3/store", "--exec-worker"], 0xffffe92e7340 /* 22 vars */) = 0
+2802  clone(child_stack=0xfe927a310000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2803  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_failure_modes_trace_colle3/store", "--exec-worker"], 0xbd16333351c0 /* 0 vars */ <unfinished ...>
+2802  <... clone resumed>)              = 2803
+2803  <... execve resumed>)             = 0
+2803  clone(child_stack=0xe3f323f0e960, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[2804], tls=0xe3f323f0f7e0, child_tidptr=0xe3f323f0f170) = 2804
+2803  clone(child_stack=0xe3f3240fb000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2805  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 0</dev/null>
+2805  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 2</dev/null>
+2805  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--exec-worker"], 0xc46a288ea440 /* 0 vars */ <unfinished ...>
+2803  <... clone resumed>)              = 2805
+2805  <... execve resumed>)             = 0
+2805  fcntl(1<pipe:[497451]>, F_GETFL <unfinished ...>
+2805  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+2805  fcntl(3<pipe:[497452]>, F_GETFL <unfinished ...>
+2805  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2805  fcntl(5</home/tester/pt/test_failure_modes_trace_colle3/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65332f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65332f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL) = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+2805  newfstatat(5</home/tester/pt/test_failure_modes_trace_colle3/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65332f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65332f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+2805  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2805  fgetxattr(5</home/tester/pt/test_failure_modes_trace_colle3/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65332f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65332f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+2805  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+2805  getcwd( <unfinished ...>
+2805  <... getcwd resumed>"/", 512)     = 2
+2805  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=284, filter=0xb7195a116610} <unfinished ...>
+2805  <... seccomp resumed>)            = 0
+2805  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+2805  <... openat resumed>)             = 4</proc/2805/statm>
+2805  read(4</proc/2805/statm>, "1444 677 599 809 0 93 0\n", 256) = 24
+2805  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=260, filter=0xb7195a116b80} <unfinished ...>
+2805  <... seccomp resumed>)            = 0
+2805  execve("/never-executed", ["/never-executed"], 0xb7193e05a440 /* 0 vars */ <unfinished ...>
+2805  <... execve resumed>)             = -1 EPERM (Operation not permitted)
+2805  +++ killed by SIGKILL +++
+2804  restart_syscall(<... resuming interrupted futex ...> <unfinished ...>
+2804  <... restart_syscall resumed>)    = 0
+2804  +++ exited with 0 +++

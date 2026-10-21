@@ -1,0 +1,37 @@
+2778  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_failure_modes_trace_colle0/store", "--cpu-worker"], 0xffffeb7170e0 /* 22 vars */) = 0
+2778  clone(child_stack=0xf674fff00000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2779  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_failure_modes_trace_colle0/store", "--cpu-worker"], 0xb3f98933e1c0 /* 0 vars */ <unfinished ...>
+2778  <... clone resumed>)              = 2779
+2779  <... execve resumed>)             = 0
+2779  clone(child_stack=0xe0edb316e960, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID <unfinished ...>
+2779  <... clone resumed>, parent_tid=[2780], tls=0xe0edb316f7e0, child_tidptr=0xe0edb316f170) = 2780
+2779  clone(child_stack=0xe0edb335b000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2781  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 0</dev/null>
+2781  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 2</dev/null>
+2781  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--cpu-worker"], 0xba251ca4a440 /* 0 vars */ <unfinished ...>
+2779  <... clone resumed>)              = 2781
+2781  <... execve resumed>)             = 0
+2781  fcntl(1<pipe:[496210]>, F_GETFL <unfinished ...>
+2781  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+2781  fcntl(3<pipe:[496211]>, F_GETFL <unfinished ...>
+2781  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2781  fcntl(5</home/tester/pt/test_failure_modes_trace_colle0/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65302f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65302f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+2781  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+2781  newfstatat(5</home/tester/pt/test_failure_modes_trace_colle0/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65302f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65302f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+2781  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2781  fgetxattr(5</home/tester/pt/test_failure_modes_trace_colle0/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65302f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65302f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+2781  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+2781  getcwd( <unfinished ...>
+2781  <... getcwd resumed>"/", 512)     = 2
+2781  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=284, filter=0xc1e691a1b610} <unfinished ...>
+2781  <... seccomp resumed>)            = 0
+2781  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+2781  <... openat resumed>)             = 4</proc/2781/statm>
+2781  read(4</proc/2781/statm>,  <unfinished ...>
+2781  <... read resumed>"1444 677 599 809 0 93 0\n", 256) = 24
+2781  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=260, filter=0xc1e691a1bb80} <unfinished ...>
+2781  <... seccomp resumed>)            = 0
+2781  +++ killed by SIGKILL +++
+2780  restart_syscall(<... resuming interrupted futex ...> <unfinished ...>
+2780  <... restart_syscall resumed>)    = 0
+2780  +++ exited with 0 +++

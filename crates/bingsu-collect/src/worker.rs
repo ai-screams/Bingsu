@@ -35,14 +35,7 @@ fn execute() -> std::io::Result<()> {
     std::hint::black_box(&mut buffer);
     let mut fds = sys::validate_worker_fds()?;
     sys::hygiene()?;
-    let (installed, landlock) = protect(
-        limits::install_base,
-        limits::drop_capabilities,
-        sys::no_new_privs,
-        sys::initial_filter,
-        limits::lower_as_under_filter,
-        sys::final_filter,
-    )?;
+    let (installed, landlock) = protected()?;
     exchange(
         &mut fds,
         &mut buffer,
@@ -51,6 +44,19 @@ fn execute() -> std::io::Result<()> {
         &PRODUCT,
         crate::build_id(),
         |_| Err(std::io::Error::other("no product workers")),
+    )
+}
+
+// The shipped and fixture entries share this exact installation sequence.
+#[cfg(unix)]
+fn protected() -> std::io::Result<(limits::InstalledLimits, u32)> {
+    protect(
+        limits::install_base,
+        limits::drop_capabilities,
+        sys::no_new_privs,
+        sys::initial_filter,
+        limits::lower_as_under_filter,
+        sys::final_filter,
     )
 }
 
@@ -233,14 +239,7 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
     let mut buffer = Box::new([0; wire::FRAME_MAX]);
     let mut fds = sys::validate_worker_fds()?;
     sys::hygiene()?;
-    let (installed, landlock) = protect(
-        limits::install_base,
-        limits::drop_capabilities,
-        sys::no_new_privs,
-        sys::initial_filter,
-        limits::lower_as_under_filter,
-        sys::final_filter,
-    )?;
+    let (installed, landlock) = protected()?;
     let catalog = collection::selection::Catalog {
         segments: &[const {
             SegmentDecl {

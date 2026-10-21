@@ -1,0 +1,30 @@
+2770  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_native_collector_trace_ha0/trace-store"], 0xffffdee63a48 /* 22 vars */) = 0
+2770  clone(child_stack=0xf01aa8fdd000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2771  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_native_collector_trace_ha0/trace-store", "--security-worker"], 0xb57510a910d0 /* 0 vars */) = 0
+2770  <... clone resumed>)              = 2771
+2771  fcntl(37<pipe:[496670]>, F_DUPFD_CLOEXEC, 6) = 39<pipe:[496670]>
+2771  fcntl(36<pipe:[496669]>, F_DUPFD_CLOEXEC, 6) = 40<pipe:[496669]>
+2771  fcntl(29</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_DUPFD_CLOEXEC, 6) = 41</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>
+2771  clone(child_stack=0xe74a6deaf000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2773  dup3(39<pipe:[496670]>, 3</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store>, 0) = 3<pipe:[496670]>
+2773  dup3(40<pipe:[496669]>, 1<pipe:[495731]>, 0) = 1<pipe:[496669]>
+2773  dup3(41</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, 5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/snapshot.lock>, 0) = 5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>
+2773  close(4</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime>) = 0
+2773  close(39<pipe:[496670]>)          = 0
+2773  close(40<pipe:[496669]>)          = 0
+2773  close(41</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>) = 0
+2773  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--security-worker"], 0xb6fccc42a440 /* 0 vars */ <unfinished ...>
+2771  <... clone resumed>)              = 2773
+2773  <... execve resumed>)             = 0
+2773  openat(AT_FDCWD</>, "/proc/self/maps", O_RDONLY|O_CLOEXEC <unfinished ...>
+2773  <... openat resumed>)             = 4</proc/2773/maps>
+2773  close(4</proc/2773/maps> <unfinished ...>
+2773  <... close resumed>)              = 0
+2773  close(4 <unfinished ...>
+2773  <... close resumed>)              = -1 EBADF (Bad file descriptor)
+2773  fcntl(1<pipe:[496669]>, F_GETFL <unfinished ...>
+2773  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+2773  fcntl(3<pipe:[496670]>, F_GETFL <unfinished ...>
+2773  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2773  fcntl(5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+2773  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)

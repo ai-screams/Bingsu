@@ -28,6 +28,9 @@ RESUMED = re.compile(r"^<\.\.\. (\w+) resumed>(.*)$")
 # strace 5.16 and 6.13 close a call cut short by death this way.
 CUT_SHORT = re.compile(r"^\s*<unfinished \.\.\.>\)\s+=\s+\?$")
 RESULT = re.compile(r"^\s+=\s+(\S.*)$")
+# strace's own annotation, not an fd or a syscall argument. Recognize it
+# only in restart_syscall, leaving angle-bracket validation strict elsewhere.
+RESTART_NOTE = re.compile(r"^<\.\.\. resuming interrupted \w+ \.\.\.>")
 SIGNAL = re.compile(r"^--- \S.* ---$")
 EXIT = re.compile(r"^\+\+\+ (exited with \d+|killed by \S+( \(core dumped\))?) \+\+\+$")
 # The event name of an exit record; never a syscall name.
@@ -113,9 +116,17 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
     return out, i
 
 
+def _call_scan(name: str, body: str, *, until_close: bool = False):
+    note = RESTART_NOTE.match(body) if name == "restart_syscall" else None
+    args, end = scan(body, note.end() if note else 0, until_close=until_close)
+    if note and args:
+        raise StructureError("arguments after restart_syscall annotation")
+    return args, end
+
+
 def _complete(name: str, body: str) -> tuple[str, str]:
     """`body` is everything after `name(`; returns (args, result)."""
-    _, end = scan(body, until_close=True)
+    _, end = _call_scan(name, body, until_close=True)
     r = RESULT.match(body[end:])
     if not r:
         raise StructureError(f"{name}: no result after the closing parenthesis")
@@ -152,7 +163,7 @@ def parse(text: str) -> Trace:
     def cut_short(n, pid, name, head):
         # The arguments printed before <unfinished ...> must be well formed too.
         try:
-            scan(head)
+            _call_scan(name, head)
         except StructureError as err:
             calls.errors.append(f"line {n}: pid {pid}: unparsed record: {name}: {err}")
             return

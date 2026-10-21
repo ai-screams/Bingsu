@@ -161,6 +161,8 @@ def collector_product_expected(case: str, *, body_bytes: int = 256,
         # file slots are still absent, so there are five opens and no reads.
         front = collection_front_expected(3, (None, None), ())
     publication = collection_expected(3, body_bytes, False, False) if publishes else {}
+    # collector-effects is the expected ceiling, not evidence. Linux failure
+    # traces supply measured counts; untraced cases are labelled in the ledger.
     return {"front-prefetch": front, "helper-publication": publication,
             "helper-gc": {"getdents": 2 * gc_directories, "unlinkat": gc_files,
                           "fsync": 0},

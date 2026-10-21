@@ -124,6 +124,43 @@ def test_call_cut_short_by_death_parses():
     assert [(c.name, c.ret) for c in calls] == [("read", "?"), (EXIT_EVENT, "")]
 
 
+# 이것을 실패시키는 것: strace의 restart 주석을 fd로 오해하거나 다른 syscall의 꺾쇠 인자도 허용하는 것.
+@pytest.mark.parametrize("ending,ret", [
+    ("2780  <... restart_syscall resumed>)    = 0", "0"),
+    ("2780  <... restart_syscall resumed> <unfinished ...>) = ?", "?"),
+    ("2780  +++ killed by SIGKILL +++", "?"),
+])
+def test_bookworm_restart_annotation(ending, ret):
+    # The first two lines of the completed form are from failure trace 0
+    # (also replayed with its real helper-thread parent in the shell tests).
+    head = "2780  restart_syscall(<... resuming interrupted futex ...> <unfinished ...>"
+    text = head + "\n" + ending + "\n"
+    calls = parse(text)
+    assert not calls.errors, calls.errors
+    assert (calls[0].name, calls[0].args, calls[0].ret) == (
+        "restart_syscall", "<... resuming interrupted futex ...>", ret)
+    assert parse(text.replace("restart_syscall", "read")).errors
+    assert parse(text.replace("futex ...>", "futex ...")).errors
+    assert parse(text.replace("futex ...>", "futex ...>, 9")).errors
+
+
+# 이것을 실패시키는 것: 발행의 fd 기반 statx를 누락하거나 경로/이름 없는 statx도 같은 공식으로 허용하는 것.
+def test_bookworm_publication_statx_is_held_file_metadata():
+    from pathlib import Path
+    from fsbudget.classify import collection_publication_kind
+    text = (Path(__file__).parent / "fixtures/d2s-bookworm-aarch64-publication-statx.strace").read_text()
+    calls = parse(text)
+    assert not calls.errors, calls.errors
+    call, = calls
+    assert collection_publication_kind(call) == "fstat"
+    assert kind(call) == "unknown-fs"  # Historical prompt vocabulary stays strict.
+    fd = split_args(call.args)[0]
+    for changed in (text.replace('""', '"child"'), text.replace("AT_EMPTY_PATH", "0"),
+                    text.replace(fd, "31"), text.replace(fd, "31<pipe:[1]>")):
+        mutant, = parse(changed)
+        assert collection_publication_kind(mutant) == "unknown-fs"
+
+
 # 이것을 실패시키는 것: 파이프·/dev/null 읽기를 파일 읽기로 세거나, close를 세거나, ACL이 아닌 xattr을 ACL로 세는 것,
 # 또는 공식 밖의 파일 시스템 호출에 종류를 주지 않는 것.
 def test_classify_counts_only_filesystem_calls():

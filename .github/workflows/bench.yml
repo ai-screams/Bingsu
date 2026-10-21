@@ -69,6 +69,8 @@ jobs:
       # is BLOCKED, rather than reusing B2 lower-bound numbers as product data.
       - name: Build both sibling pairs and main-thread fixtures
         run: |
+          cargo build --manifest-path base/Cargo.toml -j 2 --release -p bingsu -p bingsu-collect
+          cargo build --manifest-path candidate/Cargo.toml -j 2 --release -p bingsu -p bingsu-collect
           python3 candidate/bench/collector-product.py --prepare base/target/release/bingsu --out candidate/target/base-preparation.json
           python3 candidate/bench/collector-product.py --prepare candidate/target/release/bingsu --out candidate/target/candidate-preparation.json
       - name: Record 200 alternating warm observations and first-process cold

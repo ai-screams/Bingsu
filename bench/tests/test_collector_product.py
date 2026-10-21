@@ -235,3 +235,32 @@ def test_watchdog_distribution_requires_measured_samples(damage):
         broken = valid.replace("p95=2", "p95=unobserved", 1)
     with pytest.raises(ValueError):
         product.parse_watchdog_evidence(broken)
+
+
+# 이것을 실패시키는 것: worker 치환 대상이 없거나 중복되어도 준비를 통과시키는 것.
+@pytest.mark.parametrize("source,old,new", [("changed", "missing", "x"), ("xx", "x", "y"), ("x", "x", "x")])
+def test_worker_substitution_must_change_exactly_once(source, old, new):
+    with pytest.raises(AssertionError):
+        product.replace_required(source, old, new)
+    assert product.replace_required("before", "before", "after") == "after"
+
+
+# 이것을 실패시키는 것: CARGO_TARGET_DIR를 무시하고 바이너리 조상에서만 source를 찾거나 다른 사본을 준비하는 것.
+@pytest.mark.parametrize("triple", [None, "aarch64-unknown-linux-musl"])
+def test_prepare_accepts_external_cargo_target_and_names_expected_path(monkeypatch, tmp_path, triple):
+    from subprocess import CompletedProcess
+    source = tmp_path / "src"
+    source.mkdir()
+    target = tmp_path / "target"
+    binary = target / triple / "debug/bingsu" if triple else target / "debug/bingsu"
+    calls = []
+    def metadata(command, **kwargs):
+        calls.append((command, kwargs))
+        return CompletedProcess(command, 0, json.dumps({"workspace_root": str(source), "target_directory": str(target)}).encode())
+    monkeypatch.setattr(product, "ROOT", source)
+    monkeypatch.setattr(product, "run", metadata)
+    assert product.build_context(binary) == source
+    assert calls[0] == (["cargo", "metadata", "--no-deps", "--format-version=1"], {"cwd": source})
+    copied = tmp_path / "installed" / binary.relative_to(target)
+    with pytest.raises(ValueError, match=str(binary)):
+        product.build_context(copied)

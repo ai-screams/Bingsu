@@ -69,12 +69,14 @@ def test_security_table_resource_failures_preserve_front(preparation, tmp_path, 
     report = json.loads(failed.stdout)
     assert report["published"] and report["reaped"] and report["partial_values"] == 1, report
     assert report["reason"] in {"Protocol", "Deadline", "Resource"}, report
-    # Product catalog grants no worker. It must remain a silent exit0 B1 even
-    # after a failed fixture collection, with unknown/previous logical values.
-    front = product.run([real_bin(), "prompt", "--ctx", "1", "--record", "B1", "--width", "80",
-                         "--runtime-root=1:2:/unavailable"], env={})
-    assert front.stderr == b"" and front.stdout.startswith(b"B1\x1f") and front.stdout.endswith(b"\x1e")
-    assert front.stdout.count(b"\x1f") == 9
+    assert report["probe"] == f"probe-{mode}-pass", report
+    # 이것을 실패시키는 것: probe 성공 Update를 빼거나 실패 저장소 대신 별도 reader fixture를 읽는 것.
+    reader = product.run([preparation["fixture"], "--read", scratch], env={**os.environ, "TMPDIR": str(scratch)})
+    assert reader.returncode == 0 and reader.stderr == b""
+    record = bytes.fromhex(json.loads(reader.stdout)["record_hex"])
+    assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e") and record.count(b"\x1f") == 9
+    assert f"probe-{mode}-pass".encode() in record, record
+
 
 
 # 이것을 실패시키는 것: 실패·잠금·경쟁·고정 주소·회수의 실제 계약 시험을 선택만 하고 실행하지 않는 것.
@@ -124,6 +126,7 @@ def assert_ci_contract(texts):
     required = {
         "ci.yml": ("ubuntu-24.04-arm", "macos-latest", "M3b native musl lifecycle security",
                    "--prepare target/release/bingsu", "collector-tests/bin/python",
+                   "test_shipped_collector_ready_has_installed_limits", "test_failure_modes_trace_collector_effects",
                    "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]",
                    "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]",
                    "PASSED tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample",
@@ -158,6 +161,8 @@ def test_ci_has_no_silent_acceptance_skip():
 # 이것을 실패시키는 것: 필수 셀 하나를 삭제한 CI도 게이트가 수용하는 것.
 @pytest.mark.parametrize("file,token", [
     ("ci.yml", "M3b native musl lifecycle security"),
+    ("ci.yml", "test_shipped_collector_ready_has_installed_limits"),
+    ("ci.yml", "test_failure_modes_trace_collector_effects"),
     ("ci.yml", "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]"),
     ("ci.yml", "PASSED tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample"),
     ("ci.yml", "check_collector_symbols.py"),
@@ -188,23 +193,11 @@ def test_each_unprepared_shell_job_must_exclude_security(job):
         assert_ci_contract(texts)
 
 
-# 이것을 실패시키는 것: 실제 TEST_MASK worker의 파일 쓰기/자식/소켓 효과 또는 역할 누락을 놓치는 것.
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux native strace product filter")
-def test_native_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
-    import shutil
+def assert_native_trace(lines, fixture, body_bytes):
     sys.path.insert(0, str(ROOT / "tools/fsbudget"))
     from fsbudget.attribute import collector_attribute
     from fsbudget.gate import check
-    strace = shutil.which("strace")
-    assert strace, "the native Linux gate requires strace"
-    trace = tmp_path / "collector.trace"
-    scratch = tmp_path / "trace-store"
-    scratch.mkdir(mode=0o700)
-    fixture = preparation["fixture"]
-    result = product.run([strace, "-f", "-q", "-yy", "-s", "65536", "-e", "trace=all", "-o", trace,
-                          fixture, "--trace", scratch], env={**os.environ, "TMPDIR": str(scratch)})
-    assert json.loads(result.stdout.splitlines()[-1])["published"], result.stdout
-    observed = collector_attribute(trace.read_text().splitlines(),
+    observed = collector_attribute(lines,
                                    {"front": fixture, "helper": fixture, "collector": fixture,
                                     "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": "--security-worker"}})
     assert not observed.errors, observed.errors
@@ -218,17 +211,209 @@ def test_native_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
     # Validate the actual publisher window against the phase formula, rather
     # than reasserting the formula's own constants in a Rust fixture.
     from collections import Counter
-    from fsbudget.classify import kind
+    from fsbudget.classify import collection_publication_kind
     from fsbudget.formula import collection_expected
     from fsbudget.strace_parse import parse
-    calls = parse(trace.read_text())
+    calls = parse("\n".join(lines))
     assert not calls.errors, calls.errors
     begin, = [c for c in calls if c.name == "write" and '"D2-PUBLICATION-BEGIN\\n"' in c.args]
     end, = [c for c in calls if c.name == "write" and '"D2-PUBLICATION-END\\n"' in c.args]
     phase = [c for c in calls if c.pid == begin.pid and begin.index < c.index < end.index]
-    response, = (scratch / "runtime").rglob("response")
-    expected = collection_expected(3, response.stat().st_size - 64, False, False)
-    counts = Counter(k for c in phase if (k := kind(c)))
+    expected = collection_expected(3, body_bytes, False, False)
+    counts = Counter(k for c in phase if (k := collection_publication_kind(c)))
     measured = {key: counts[key] for key in expected}
     assert not check({"helper-publication": measured}, {"helper-publication": expected}, "exact", ["helper-publication"]), counts
     assert not any(c.name in {"clone", "clone3", "fork", "vfork", "execve", "execveat", "socket", "connect"} for c in phase)
+    return observed
+
+
+# 이것을 실패시키는 것: 실제 TEST_MASK worker의 파일 쓰기/자식/소켓 효과 또는 역할 누락을 놓치는 것.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux native strace product filter")
+def test_native_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
+    import shutil
+    strace = shutil.which("strace")
+    assert strace, "the native Linux gate requires strace"
+    trace = tmp_path / "collector.trace"
+    scratch = tmp_path / "trace-store"
+    scratch.mkdir(mode=0o700)
+    fixture = preparation["fixture"]
+    result = product.run([strace, "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", trace,
+                          fixture, "--trace", scratch], env={**os.environ, "TMPDIR": str(scratch)})
+    assert json.loads(result.stdout.splitlines()[-1])["published"], result.stdout
+    response, = (scratch / "runtime").rglob("response")
+    assert_native_trace(trace.read_text().splitlines(), fixture, response.stat().st_size - 64)
+
+
+# 이것을 실패시키는 것: 출하 execute()에서 base/AS 보호를 빼도 fixture만 검사하여 통과시키는 것.
+def test_shipped_collector_ready_has_installed_limits(preparation, tmp_path):
+    import fcntl
+    import select
+    import struct
+    lock = tmp_path / "shipped.lock"
+    lock.touch(mode=0o600)
+    request, writer = os.pipe()
+    lock_fd = os.open(lock, os.O_RDONLY)
+    copies = [fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 20) for fd in (request, lock_fd)]
+    def setup():
+        os.dup2(copies[0], 3)
+        os.dup2(copies[1], 5)
+    try:
+        with subprocess.Popen([real_bin().with_name("bingsu-collect"), "__collect-v1"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env={}, cwd="/", close_fds=False, preexec_fn=setup) as child:
+            try:
+                ready = bytearray()
+                while len(ready) < 104:
+                    assert select.select([child.stdout], [], [], 2)[0], "shipped collector did not reach Ready"
+                    chunk = os.read(child.stdout.fileno(), 104 - len(ready))
+                    assert chunk, "shipped collector exited before Ready"
+                    ready.extend(chunk)
+                assert ready[:8] == b"BNGIPC02" and ready[10] == 1, ready
+                baseline, = struct.unpack_from("<Q", ready, 96)
+                assert baseline > 0
+                if sys.platform == "linux":
+                    limits = Path(f"/proc/{child.pid}/limits").read_text()
+                    for name, ceiling in (("Max cpu time", 1), ("Max open files", 64),
+                                          ("Max file size", 0), ("Max core file size", 0),
+                                          ("Max address space", baseline + 33_554_432)):
+                        row = re.search(rf"(?m)^{name}\s+(\d+)\s+(\d+)\s", limits)
+                        assert row and 0 <= int(row[1]) <= int(row[2]) <= ceiling, (name, limits)
+            finally:
+                child.kill()
+                child.wait(timeout=3)
+    finally:
+        for fd in (request, writer, lock_fd, *copies):
+            os.close(fd)
+
+
+def assert_failure_trace(lines, fixture, mode):
+    from collections import Counter
+    sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+    from fsbudget.attribute import collector_attribute
+    from fsbudget.formula import collector_product_expected
+    from fsbudget.gate import check
+    from fsbudget.strace_parse import parse
+    from fsbudget.classify import split_args
+    observed = collector_attribute(lines, {"front": fixture, "helper": fixture, "collector": fixture,
+        "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": mode}})
+    calls = parse("\n".join(lines))
+    assert not calls.errors, calls.errors
+    # Front/helper pass mode as a later argument too. Only the successful
+    # pinned executable with the exact worker argv starts this worker.
+    workers = [c for c in calls if c.name == "execve" and c.ret == "0"
+               and split_args(c.args)[:2] == [json.dumps(fixture), json.dumps([fixture, mode])]]
+    assert len(workers) == 1, workers
+    worker_exec, = workers
+    worker = worker_exec.pid
+    # The NOFILE probe deliberately opens only /dev/null until EMFILE. Keep
+    # collector_attribute strict; account for precisely those probe diagnostics
+    # here, with all other errors still rejected. No product allowance changes.
+    # The same PID opens /dev/null for stdio in the vfork child while it is
+    # still a helper. Only calls after the worker exec are resource probes.
+    probes = [c for c in calls if c.pid == worker and c.index > worker_exec.index and c.name in {"open", "openat"}
+              and '"/dev/null"' in split_args(c.args)]
+    expected_errors = []
+    if mode == "--nofile-worker":
+        assert probes and 0 < sum(not c.ret.startswith("-1") for c in probes) < 64, probes
+        assert probes[-1].ret.startswith("-1 EMFILE"), probes[-1]
+        for c in probes:
+            args = split_args(c.args)
+            flags = set(args[1 if c.name == "open" else 2].split("|"))
+            assert {"O_RDONLY", "O_CLOEXEC"} <= flags <= {"O_RDONLY", "O_CLOEXEC", "O_LARGEFILE"}, c
+            # Legacy open remains unknown-fs except for absolute own statm.
+            reason = "collector forbidden effect" if c.name == "open" else "collector read outside the M3b bootstrap"
+            expected_errors.append(f"pid {worker} (collector): {reason}: {c.name}({c.args})")
+    else:
+        assert not probes, probes
+    assert Counter(observed.errors) == Counter(expected_errors), observed.errors
+    if mode == "--exec-worker":
+        attempts = [c for c in calls if c.pid == worker and c.name == "execve" and '"/never-executed"' in c.args]
+        assert len(attempts) == 1 and attempts[0].ret.startswith("-1 EPERM"), attempts
+    assert observed.counts["collector"]["exec"] == (2 if mode == "--exec-worker" else 1)
+    effects = collector_product_expected("partial")["collector-effects"]
+    measured = {key: observed.counts["collector"].get(key, 0) for key in effects}
+    assert not check({"collector-effects": measured}, {"collector-effects": effects}, "exact", ["collector-effects"]), measured
+    return observed
+
+
+# 이것을 실패시키는 것: mode를 전달하는 front/helper도 worker로 선택하거나 exec 전 stdio를 NOFILE 탐침으로 세는 것.
+# Source filenames and exact original line numbers are in the adjacent
+# d2s-bookworm-aarch64-sources.json; these fixtures contain verbatim excerpts.
+@pytest.mark.parametrize("mode", ["cpu", "nofile", "as", "exec", "ready-failure", "malformed"])
+def test_bookworm_failure_trace_replay(mode):
+    directory = ROOT / "tools/fsbudget/tests/fixtures"
+    lines = (directory / f"d2s-bookworm-aarch64-{mode}.strace").read_text().splitlines()
+    fixture = "/home/tester/target/debug/collector-product-fixture/collector-product"
+    assert_failure_trace(lines, fixture, f"--{mode}-worker")
+    # 이것을 실패시키는 것: 실제 재생에서도 collector의 금지 효과/잘못된 exec를 허용하는 것.
+    from fsbudget.strace_parse import parse
+    from fsbudget.classify import split_args
+    worker, = [c.pid for c in parse("\n".join(lines)) if c.name == "execve"
+               and split_args(c.args)[1] == json.dumps([fixture, f"--{mode}-worker"])]
+    for effect in ('write(9</forbidden>, "x", 1) = 1',
+                   'openat(AT_FDCWD</>, "/dev/null", O_RDWR) = 9</dev/null>',
+                   'execve("/never-executed", ["/never-executed"], 0x0) = 0'):
+        changed = list(lines)
+        # Insert before exit so the process still has its collector role.
+        at = next((i for i, line in enumerate(changed) if line.startswith(f"{worker}  +++")), len(changed))
+        changed.insert(at, f"{worker}  {effect}")
+        with pytest.raises(AssertionError):
+            assert_failure_trace(changed, fixture, f"--{mode}-worker")
+
+
+# 이것을 실패시키는 것: 실패 worker의 파일 쓰기/생성/소켓을 실제 trace 대신 상수 0으로 대조하는 것.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace failure-mode effects")
+@pytest.mark.parametrize("mode", ["--cpu-worker", "--nofile-worker", "--as-worker", "--exec-worker",
+                                  "--ready-failure-worker", "--malformed-worker"])
+def test_failure_modes_trace_collector_effects(preparation, tmp_path, mode):
+    import shutil
+    strace = shutil.which("strace")
+    assert strace, "the native Linux gate requires strace"
+    trace = tmp_path / "failure.trace"
+    scratch = tmp_path / "store"
+    scratch.mkdir(mode=0o700)
+    fixture = preparation["fixture"]
+    # -y keeps device annotations comparable on glibc and musl.
+    result = product.run([strace, "-f", "-q", "-y", "-s", "65536", "-o", trace,
+                          fixture, "--trace", scratch, mode], env={**os.environ, "TMPDIR": str(scratch)})
+    assert result.stderr == b""
+    report = json.loads(result.stdout.splitlines()[-1])
+    assert report["reaped"], report
+    assert report["published"] == (mode != "--ready-failure-worker"), report
+    if mode in {"--cpu-worker", "--nofile-worker", "--as-worker", "--exec-worker"}:
+        assert report["probe"] == "probe-" + mode[2:-7] + "-pass", report
+    assert_failure_trace(trace.read_text().splitlines(), fixture, mode)
+
+
+# 이것을 실패시키는 것: 실패 trace의 금지 효과를 분류해도 measured를 상수 0으로 덮는 것.
+def test_failure_trace_budget_uses_measured_effects(monkeypatch):
+    sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+    import fsbudget.attribute as attribution
+    fixture = "/fixture"
+    lines = [
+        '10 execve("/fixture", ["/fixture", "--trace"], 0x0) = 0',
+        '10 clone(flags=SIGCHLD) = 11',
+        '11 execve("/fixture", ["/fixture", "--trace-helper"], 0x0) = 0',
+        '11 clone(flags=SIGCHLD) = 12',
+        '12 execve("/fixture", ["/fixture", "--malformed-worker"], 0x0) = 0',
+    ]
+    assert_failure_trace(lines, fixture, "--malformed-worker")
+    # 이것을 실패시키는 것: libc가 더하는 O_LARGEFILE만으로 NOFILE 탐침을 거부하는 것.
+    nofile = [line.replace("--malformed-worker", "--nofile-worker") for line in lines]
+    for call in ("open", "openat"):
+        prefix = 'AT_FDCWD</>, ' if call == "openat" else ''
+        for flags in ("O_RDONLY|O_CLOEXEC", "O_RDONLY|O_LARGEFILE|O_CLOEXEC"):
+            probes = [f'12 {call}({prefix}"/dev/null", {flags}) = 7</dev/null>',
+                      f'12 {call}({prefix}"/dev/null", {flags}) = -1 EMFILE (Too many open files)']
+            assert_failure_trace(nofile + probes, fixture, "--nofile-worker")
+    real_attribute = attribution.collector_attribute
+    def counts_only(*args):
+        result = real_attribute(*args)
+        result.errors.clear()  # Isolate the independent formula comparison.
+        return result
+    monkeypatch.setattr(attribution, "collector_attribute", counts_only)
+    for effect in ('write(9</file>, "x", 1) = 1', 'socket(AF_INET, SOCK_STREAM, 0) = 9<socket:[1]>',
+                   'rename("/a", "/b") = 0', 'unlink("/a") = 0', 'fsync(9</file>) = 0',
+                   'fork() = -1 EPERM (Operation not permitted)'):
+        with pytest.raises(AssertionError):
+            assert_failure_trace(lines + ['12 ' + effect], fixture, "--malformed-worker")

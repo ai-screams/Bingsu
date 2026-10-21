@@ -430,3 +430,185 @@ def test_helper_duplicate_identity_cannot_be_relabelled():
     ]
     assert collector_attribute(saved[:-2] + extra + saved[-2:], PINNED_PRODUCT).errors
     assert PRODUCT == saved
+
+
+# 이것을 실패시키는 것: fcntl(F_DUPFD_CLOEXEC)가 만든 fd를 dup처럼 살리지 않아 닫힌 번호로 남기는 것
+# (helper가 경로 사슬 끝 fd를 낮은 번호로 옮긴 뒤 그 fd를 조회한다).
+def test_helper_fcntl_duplicate_reopens_a_closed_number():
+    from fsbudget.attribute import collector_attribute
+    saved = list(PRODUCT)
+    extra = [
+        '11 openat(AT_FDCWD</>, "/", O_RDONLY|O_PATH) = 3</>',
+        '11 openat(3</>, "run", O_RDONLY|O_PATH) = 9</run>',
+        '11 close(3</>) = 0',
+        '11 fcntl(9</run>, F_DUPFD_CLOEXEC, 3) = 3</run>',
+        '11 fcntl(3</run>, F_GETFD) = 0x1 (flags FD_CLOEXEC)',
+    ]
+    got = collector_attribute(saved[:-2] + extra + saved[-2:], PINNED_PRODUCT)
+    assert not got.errors, got.errors
+    relabel = extra[:-1] + ['11 fcntl(3</>, F_GETFD) = 0x1 (flags FD_CLOEXEC)']
+    assert collector_attribute(saved[:-2] + relabel + saved[-2:], PINNED_PRODUCT).errors
+    assert PRODUCT == saved
+
+
+# 이것을 실패시키는 것: 실제 bookworm helper의 fcntl 재생성 또는 staging rename 별칭을 잃는 것.
+def test_bookworm_helper_fd_trace_replay():
+    from pathlib import Path
+    from fsbudget.attribute import collector_attribute
+    lines = (Path(__file__).parent / "fixtures/d2-bookworm-aarch64-fds.strace").read_text().splitlines()
+    binary = "/home/tester/pt/test_prompt_binary_names_only_0/bin/bingsu"
+    got = collector_attribute(lines, {"front": binary, "helper": binary, "collectors": 0})
+    assert not got.errors, got.errors
+
+
+# 이것을 실패시키는 것: 이미 닫힌 fd의 거부된 close를 생애 위반으로 보거나 성공한 재사용까지 허용하는 것.
+@pytest.mark.parametrize("shape", [
+    # 이것을 실패시키는 것: helper가 닫은 42를 vfork 자식이 다시 닫다가 거부된 실제 호출을 오류로 세는 것.
+    "closed-42",
+    # 이것을 실패시키는 것: exec 뒤 maps가 재사용하고 닫은 4의 EBADF를 오류로 세거나 성공 close도 통과시키는 것.
+    "exec-closed-4",
+])
+@pytest.mark.parametrize("failure", ["-1 EBADF (Bad file descriptor)", "-1 EIO (Input/output error)",
+                                     "-1 EPERM (Operation not permitted)"])
+def test_bookworm_vfork_closed_fd_failures(shape, failure):
+    from pathlib import Path
+    from fsbudget.attribute import collector_attribute
+    text = (Path(__file__).parent / f"fixtures/d2s-bookworm-aarch64-{shape}.strace").read_text()
+    binary = "/home/tester/target/debug/collector-product-fixture/collector-product"
+    pinned = {"front": binary, "helper": binary, "collector": binary,
+              "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": "--security-worker"}}
+    denied = "-1 EBADF (Bad file descriptor)"
+    assert text.count(denied) == 1
+    got = collector_attribute(text.replace(denied, failure).splitlines(), pinned)
+    assert not got.errors, got.errors
+    # Same real call, but a successful use after close must still fail.
+    changed = collector_attribute(text.replace(denied, "0").splitlines(), pinned)
+    fd, role = (42, "helper") if shape == "closed-42" else (4, "collector")
+    assert changed.errors == [f"pid 2773 ({role}): descriptor lifetime/identity mismatch: close({fd})"]
+
+
+# 이것을 실패시키는 것: dup3(..., 0)가 원본의 CLOEXEC를 물려받거나 실패 호출의 이름 불일치를 숨기는 것.
+def test_bookworm_vfork_dup_exec_identity():
+    from pathlib import Path
+    from fsbudget.attribute import collector_attribute
+    text = (Path(__file__).parent / "fixtures/d2s-bookworm-aarch64-exec-closed-4.strace").read_text()
+    binary = "/home/tester/target/debug/collector-product-fixture/collector-product"
+    pinned = {"front": binary, "helper": binary, "collector": binary,
+              "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": "--security-worker"}}
+    assert not collector_attribute(text.splitlines(), pinned).errors
+    dup = 'dup3(40<pipe:[496669]>, 1<pipe:[495731]>, 0)'
+    assert dup in text
+    changed = text.replace(dup, dup.replace(", 0)", ", O_CLOEXEC)"))
+    assert any("lifetime/identity mismatch: fcntl(1" in e
+               for e in collector_attribute(changed.splitlines(), pinned).errors)
+    query = 'fcntl(1<pipe:[496669]>, F_GETFL'
+    assert query in text
+    changed = text.replace(query, query.replace("496669", "999999"))
+    for ret in ("0x1 (flags O_WRONLY)", "-1 EBADF (Bad file descriptor)"):
+        errors = collector_attribute(changed.replace("0x1 (flags O_WRONLY)", ret).splitlines(), pinned).errors
+        assert any("lifetime/identity mismatch: fcntl(1" in e for e in errors), errors
+
+
+# 이것을 실패시키는 것: fd 반환 호출을 생성 사건으로 세지 않거나 새 fd의 CLOEXEC를 잃는 것.
+@pytest.mark.parametrize("creation", [
+    'open("/new", O_RDONLY|O_CLOEXEC) = 7</new>',
+    'openat(AT_FDCWD</>, "/new", O_RDONLY|O_CLOEXEC) = 7</new>',
+    'openat2(AT_FDCWD</>, "/new", {flags=O_RDONLY|O_CLOEXEC}, 24) = 7</new>',
+    'creat("/new", 0600) = 7</new>',
+    'dup(9</new>) = 7</new>',
+    'dup2(9</new>, 7) = 7</new>',
+    'dup3(9</new>, 7, O_CLOEXEC) = 7</new>',
+    'fcntl(9</new>, F_DUPFD, 7) = 7</new>',
+    'fcntl(9</new>, F_DUPFD_CLOEXEC, 7) = 7</new>',
+    'pipe2([7<pipe:[1]>, 8<pipe:[1]>], O_CLOEXEC) = 0',
+    'socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, [7<socket:[1]>, 8<socket:[2]>]) = 0',
+    'pidfd_open(90, 0) = 7<anon_inode:[pidfd]>',
+    'memfd_create("new", MFD_CLOEXEC) = 7</memfd:new (deleted)>',
+    'eventfd2(0, EFD_CLOEXEC) = 7<anon_inode:[eventfd]>',
+])
+def test_every_fd_creation_reuses_closed_number(creation):
+    from fsbudget.attribute import collector_attribute, _Descriptors
+    import re
+    shown = re.search(r'7<([^>]+)>', creation)[1]
+    lines = [PRODUCT[0], '10 close(7</old>) = 0', '10 ' + creation,
+             f'10 read(7<{shown}>, "x", 1) = 1']
+    assert not collector_attribute(lines, {**PINNED_PRODUCT, "collectors": 0}).errors
+    tracker = _Descriptors()
+    tracker.start(10)
+    tracker.create(10, "7", "/same")
+    first = tracker.tables[10]["7"].creation
+    tracker.close(10, "7")
+    tracker.create(10, "7", "/same")
+    assert tracker.tables[10]["7"].creation != first
+
+
+# 이것을 실패시키는 것: rename/renameat2 성공 별칭 또는 unlink 뒤 deleted 이름을 잃거나 실패를 별칭으로 인정하는 것.
+@pytest.mark.parametrize("rename", [
+    'rename("/stage", "/marker")',
+    'renameat(3</>, "stage", 3</>, "marker")',
+    'renameat2(3</>, "stage", 3</>, "marker", RENAME_NOREPLACE)',
+])
+def test_dup_follows_only_successful_rename_and_unlink(rename):
+    from fsbudget.attribute import collector_attribute
+    base = [PRODUCT[0], '10 open("/stage", O_RDONLY) = 7</stage>', '10 dup(7</stage>) = 8</stage>']
+    tail = ['10 unlink("/marker") = 0', '10 read(8</marker (deleted)>, "x", 1) = 1']
+    pinned = {**PINNED_PRODUCT, "collectors": 0}
+    assert not collector_attribute(base + ['10 ' + rename + ' = 0'] + tail, pinned).errors
+    assert collector_attribute(base + ['10 ' + rename + ' = -1 EACCES (Permission denied)'] + tail, pinned).errors
+    assert collector_attribute(base + ['10 ' + rename + ' = 0', '10 read(8</unrelated>, "x", 1) = 1'], pinned).errors
+
+
+# 이것을 실패시키는 것: exec에서 CLOEXEC를 닫지 않거나 F_SETFD 변경·dup2의 CLOEXEC 초기화를 무시하는 것.
+@pytest.mark.parametrize("change,closed", [
+    ([], True),
+    (['10 fcntl(7</stage>, F_SETFD, 0) = 0'], False),
+    (['10 dup2(7</stage>, 8</old>) = 8</stage>'], False),
+    (['10 fcntl(7</stage>, F_SETFD, FD_CLOEXEC) = 0'], True),
+])
+def test_exec_closes_only_cloexec_descriptors(change, closed):
+    from fsbudget.attribute import collector_attribute
+    fd = 8 if any('dup2' in c for c in change) else 7
+    lines = ['10 open("/stage", O_RDONLY|O_CLOEXEC) = 7</stage>', *change,
+             PRODUCT[0], f'10 read({fd}</stage>, "x", 1) = 1']
+    errors = collector_attribute(lines, {**PINNED_PRODUCT, "collectors": 0}).errors
+    assert bool(errors) == closed, errors
+
+
+# 이것을 실패시키는 것: collector legacy open의 상대 경로/이름 없는 fd를 bootstrap openat으로 허용하는 것.
+@pytest.mark.parametrize("call", [
+    'open("proc/self/statm", O_RDONLY) = 7</proc/12/statm>',
+    'open("relative", O_RDONLY) = 7',
+    'open("/proc/99/statm", O_RDONLY) = 7</proc/99/statm>',
+])
+def test_legacy_open_requires_absolute_own_statm(call):
+    from fsbudget.attribute import collector_attribute
+    from fsbudget.classify import collector_bootstrap_kind
+    assert collector_bootstrap_kind(parse('12 ' + call)[0]) == "unknown-fs"
+    assert collector_attribute(PRODUCT[:9] + ['12 ' + call], PINNED_PRODUCT).errors
+    for path in ("/proc/self/statm", "/proc/12/statm"):
+        allowed = f'12 open("{path}", O_RDONLY) = 7</proc/12/statm>'
+        assert not collector_attribute(PRODUCT[:9] + [allowed], PINNED_PRODUCT).errors
+
+
+# 이것을 실패시키는 것: close_range의 닫힘/CLOEXEC 상태를 잃거나 실패한 close_range를 적용하는 것.
+@pytest.mark.parametrize("flags,result,closed_before,closed_after", [
+    ("0", "0", True, True),
+    ("CLOSE_RANGE_CLOEXEC", "0", False, True),
+    ("0", "-1 EINVAL (Invalid argument)", False, False),
+])
+def test_close_range_tracks_lifetime_and_exec(flags, result, closed_before, closed_after):
+    from fsbudget.attribute import collector_attribute
+    start = ['10 open("/stage", O_RDONLY) = 70</stage>', f'10 close_range(6, ~0U, {flags}) = {result}']
+    use = '10 read(70</stage>, "x", 1) = 1'
+    pinned = {**PINNED_PRODUCT, "collectors": 0}
+    assert bool(collector_attribute([PRODUCT[0], *start, use], pinned).errors) == closed_before
+    assert bool(collector_attribute([*start, PRODUCT[0], use], pinned).errors) == closed_after
+
+
+# 이것을 실패시키는 것: RENAME_EXCHANGE의 반대 방향 fd 별칭을 따라가지 않는 것.
+def test_rename_exchange_tracks_both_open_descriptions():
+    from fsbudget.attribute import collector_attribute
+    lines = [PRODUCT[0], '10 open("/a", O_RDONLY) = 7</a>', '10 open("/b", O_RDONLY) = 8</b>',
+             '10 renameat2(3</>, "a", 3</>, "b", RENAME_EXCHANGE) = 0',
+             '10 read(7</b>, "x", 1) = 1', '10 read(8</a>, "x", 1) = 1']
+    assert not collector_attribute(lines, {**PINNED_PRODUCT, "collectors": 0}).errors

@@ -1,0 +1,17 @@
+2810  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_failure_modes_trace_colle4/store", "--ready-failure-worker"], 0xffffc9a40600 /* 22 vars */) = 0
+2810  clone(child_stack=0xea3f91800000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2811  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_failure_modes_trace_colle4/store", "--ready-failure-worker"], 0xb229718b41c0 /* 0 vars */ <unfinished ...>
+2810  <... clone resumed>)              = 2811
+2811  <... execve resumed>)             = 0
+2811  clone(child_stack=0xeceb35fee960, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID <unfinished ...>
+2811  <... clone resumed>, parent_tid=[2812], tls=0xeceb35fef7e0, child_tidptr=0xeceb35fef170) = 2812
+2811  clone(child_stack=0xeceb361dc000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2813  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 0</dev/null>
+2813  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 2</dev/null>
+2813  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--ready-failure-worker"], 0xb0220a98a440 /* 0 vars */ <unfinished ...>
+2811  <... clone resumed>)              = 2813
+2813  <... execve resumed>)             = 0
+2813  +++ exited with 0 +++
+2812  restart_syscall(<... resuming interrupted futex ...> <unfinished ...>
+2812  <... restart_syscall resumed>)    = 0
+2812  +++ exited with 0 +++

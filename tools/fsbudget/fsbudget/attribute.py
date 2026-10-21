@@ -223,6 +223,138 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
     return Attribution({r: dict(v) for r, v in counts.items()}, errors)
 
 
+
+@dataclass
+class _Description:
+    # Names are evidence about an open description, never its identity.
+    aliases: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _Descriptor:
+    creation: tuple[int, str, int]
+    description: _Description
+    cloexec: bool
+
+
+class _Descriptors:
+    def __init__(self):
+        self.tables = {}
+        self.closed = {}
+        self.serial = defaultdict(int)
+
+    def start(self, process, parent=None):
+        self.tables[process] = dict(self.tables[parent]) if parent is not None else {}
+        self.closed[process] = set(self.closed[parent]) if parent is not None else set()
+
+    def create(self, process, fd, name, cloexec=False, description=None):
+        self.serial[process] += 1
+        self.tables[process][fd] = _Descriptor(
+            (process, fd, self.serial[process]),
+            description if description is not None else _Description({name} if name else set()),
+            cloexec,
+        )
+        self.closed[process].discard(fd)
+
+    def close(self, process, fd):
+        self.tables[process].pop(fd, None)
+        self.closed[process].add(fd)
+
+    def exec(self, process):
+        for fd, entry in list(self.tables[process].items()):
+            if entry.cloexec:
+                self.close(process, fd)
+
+    @staticmethod
+    def token(arg):
+        return re.fullmatch(r"(\d+)(?:<(.+)>)?", arg)
+
+    @staticmethod
+    def path(args, directory, path):
+        name = args[path].strip('"')
+        if name.startswith("/"):
+            return name
+        if directory is not None:
+            match = re.fullmatch(r"(?:\d+|AT_FDCWD)<(/.*)>", args[directory])
+            if match:
+                return match[1].rstrip("/") + "/" + name
+        return None
+
+    def observe(self, c, process, args, success, bad):
+        table = self.tables[process]
+        # Check uses before replacements (dup2 closes its destination).
+        uses = [arg for arg in args if re.fullmatch(r"\d+<.+>", arg)]
+        if args and c.name in {"read", "pread64", "readv", "write", "writev", "pwrite64",
+                               "fstat", "fcntl", "dup", "dup2", "dup3", "close"}:
+            uses = [args[0], *uses]
+        for arg in set(uses):
+            if not (match := self.token(arg)):
+                continue
+            fd, name = match.groups()
+            entry = table.get(fd)
+            # A refused use of a closed number is consistent with the kernel.
+            # Keep checking names even on failure: an annotation is still
+            # evidence about the live description, independent of the result.
+            if (success and fd in self.closed[process]) or (entry and name and entry.description.aliases
+                                                          and name not in entry.description.aliases):
+                bad(c, "descriptor lifetime/identity mismatch")
+            elif entry is None and fd not in self.closed[process]:
+                # Descriptors inherited from outside the trace have no observed
+                # creation. Bind their first observation so dup cannot relabel it.
+                self.create(process, fd, name)
+            elif entry and name and not entry.description.aliases:
+                entry.description.aliases.add(name)
+        if not success:
+            return
+        if c.name == "close" and args:
+            self.close(process, args[0].split('<')[0])
+        elif c.name == "close_range":
+            low, high = int(args[0]), int(args[1].replace('~0U', str(2**32 - 1)))
+            for fd, entry in list(table.items()):
+                if low <= int(fd) <= high:
+                    if "CLOSE_RANGE_CLOEXEC" in c.args:
+                        table[fd] = _Descriptor(entry.creation, entry.description, True)
+                    else:
+                        self.close(process, fd)
+        elif (c.name in {"dup", "dup2", "dup3"} or c.name == "fcntl" and len(args) >= 2
+              and args[1] in {"F_DUPFD", "F_DUPFD_CLOEXEC"}):
+            src, dst = args[0].split('<')[0], re.match(r"^\d+", c.ret)[0]
+            if c.name == "dup2" and src == dst:
+                return
+            source = table.get(src)
+            self.create(process, dst, None, "CLOEXEC" in c.args,
+                        source.description if source else None)
+        elif c.name == "fcntl" and len(args) >= 3 and args[1] == "F_SETFD":
+            fd = args[0].split('<')[0]
+            if fd in table:
+                entry = table[fd]
+                table[fd] = _Descriptor(entry.creation, entry.description, "FD_CLOEXEC" in args[2])
+        elif c.name in {"pipe", "pipe2", "socketpair"}:
+            pair = args[3] if c.name == "socketpair" else args[0]
+            for arg in split_args(pair.strip('[]')):
+                if match := self.token(arg):
+                    self.create(process, *match.groups(), "CLOEXEC" in c.args)
+        elif (c.name in {"open", "openat", "openat2", "creat", "pidfd_open", "memfd_create"}
+              or re.match(r"^\d+<", c.ret)):
+            match = re.match(r"^(\d+)(?:<(.+)>)?", c.ret)
+            self.create(process, *match.groups(), "CLOEXEC" in c.args or c.name == "pidfd_open")
+        elif c.name in {"rename", "renameat", "renameat2", "unlink", "unlinkat"}:
+            legacy = c.name in {"rename", "unlink"}
+            old = self.path(args, None if legacy else 0, 0 if legacy else 1)
+            new = (self.path(args, None if legacy else 2, 1 if legacy else 3)
+                   if c.name.startswith("rename") else None)
+            # Update all live descriptions, including inherited/duplicated fds.
+            descriptions = {id(e.description): e.description
+                            for fds in self.tables.values() for e in fds.values()}
+            for description in descriptions.values():
+                additions = set()
+                for alias in description.aliases:
+                    if old and (alias == old or alias.startswith(old + "/")):
+                        additions.add(new + alias[len(old):] if new else alias + " (deleted)")
+                    elif new and "RENAME_EXCHANGE" in c.args and (alias == new or alias.startswith(new + "/")):
+                        additions.add(old + alias[len(new):])
+                description.aliases.update(additions)
+
 def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
@@ -256,11 +388,13 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
             at = queue.popleft() if queue else len(lines)
         ordered.append((at, c))
     ordered.sort(key=lambda pair: pair[0])
-    roles, owner, fds, closed, confined = {}, {}, {}, {}, set()
+    roles, owner, confined = {}, {}, set()
+    descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
     root = trace.first_pid
     if root is not None:
-        roles[root], owner[root], fds[root], closed[root] = "front", root, {}, set()
+        roles[root], owner[root] = "front", root
+        descriptors.start(root)
     seen_exec = set()
     collector_execs = 0
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
@@ -272,15 +406,16 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
     for _, c in ordered:
         if c.pid not in roles:
             bad(c, "no live spawn parent")
-            roles[c.pid], owner[c.pid], fds[c.pid], closed[c.pid] = UNRESOLVED, c.pid, {}, set()
+            roles[c.pid], owner[c.pid] = UNRESOLVED, c.pid
+            descriptors.start(c.pid)
         role, process = roles[c.pid], owner[c.pid]
         if c.name == EXIT_EVENT:
             roles.pop(c.pid, None)
             owner.pop(c.pid, None)
             # State belongs to the process owner until its last thread exits.
             if process not in owner.values():
-                fds.pop(process, None)
-                closed.pop(process, None)
+                descriptors.tables.pop(process, None)
+                descriptors.closed.pop(process, None)
                 confined.discard(process)
                 seen_exec.discard(process)
             continue
@@ -296,11 +431,12 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
                 roles[child] = role
                 owner[child] = process if k == "thread" else child
                 if k != "thread":
-                    fds[child], closed[child] = dict(fds[process]), set(closed[process])
+                    descriptors.start(child, process)
             counts[role][k] += 1
             continue
         if k == "exec":
             if result == "0":
+                descriptors.exec(process)
                 new = None
                 for candidate in ("front", "helper", "collector"):
                     path = pinned.get(candidate)
@@ -323,23 +459,7 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
         if (c.name == "seccomp" and "SECCOMP_SET_MODE_FILTER" in c.args
                 or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
             confined.add(process)
-        if c.name == "close" and success and args:
-            fd = args[0].split('<')[0]
-            fds[process].pop(fd, None)
-            closed[process].add(fd)
-        elif c.name in {"dup", "dup2", "dup3"} and success and args:
-            src, dst = args[0].split('<')[0], re.match(r"^\d+", c.ret)[0]
-            fds[process][dst] = fds[process].get(src, fd_identity(args[0]))
-            closed[process].discard(dst)
-        elif c.name in {"openat", "open", "openat2", "creat"} and re.match(r"^\d+", c.ret):
-            fd = re.match(r"^(\d+)", c.ret)[1]
-            fds[process][fd] = fd_identity(c.ret)
-            closed[process].discard(fd)
-        elif args and c.name in {"read", "pread64", "readv", "write", "writev", "pwrite64", "fstat", "fcntl"}:
-            fd = args[0].split('<')[0]
-            identity = fd_identity(args[0])
-            if fd in closed[process] or fd in fds[process] and fds[process][fd] != identity:
-                bad(c, "descriptor lifetime/identity mismatch")
+        descriptors.observe(c, process, args, success, bad)
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
         if process not in confined and _prologue_call(c, target(c)):

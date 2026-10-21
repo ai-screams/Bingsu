@@ -5,6 +5,13 @@
 shell tests never build. Each sibling pair has a hash-bound preparation manifest.
 Absent evidence is BLOCKED (exit 2), never a passing skip. Cold here means the
 first process in this run, not a claim that OS caches were flushed.
+
+Run from the source checkout, keeping CARGO_TARGET_DIR unchanged if configured:
+  cargo build -j 2 -p bingsu -p bingsu-collect
+  python3 bench/collector-product.py --prepare <target-dir>/debug/bingsu
+  BINGSU_BIN=<target-dir>/debug/bingsu python3 -m pytest tests/shell/test_collector_security.py
+The default target-dir is target. The executable path must pass the existing
+trusted-ancestor checks; a world-writable /tmp ancestor is not an install root.
 """
 from __future__ import annotations
 
@@ -311,6 +318,7 @@ fn helper(base:&Path,mode:&str) {
     assert!(matches!(commands::refresh::refresh(request.clone(),&mut Fixed(now)),commands::refresh::RefreshResult::Published{..}|commands::refresh::RefreshResult::Revalidated{..}));
     let envelope=Envelope {config_root:Some(request.config_canonical.as_os_str().as_bytes().to_vec()),state_root:Some(request.state_root.as_os_str().as_bytes().to_vec()),pwd:Some(b"/repo".to_vec()),width:80,..Envelope::default()};
     let mut groups=commands::group_policy::SystemGroups::new(&request.user);
+    let probe=std::sync::Arc::new(std::sync::Mutex::new(String::new())); let observed_probe=probe.clone();
     let metrics=std::sync::Arc::new(std::sync::Mutex::new(None)); let observed=metrics.clone();
     let watchdog=commands::helper_limits::start(Instant::now()).unwrap();
     let mut verification=commands::helper::Verification::start();
@@ -335,7 +343,9 @@ fn helper(base:&Path,mode:&str) {
        let _=pin.executable()?;
        let job=verification.attach(CollectorJob::fixture(std::env::current_exe()?.as_os_str(),OsStr::new(mode),selected,lock,&watchdog,&SEGMENTS)?,&store);
        let observed=observed.clone();
+       let observed_probe=observed_probe.clone();
        let trace_publication=mode=="--security-worker";
+       let failure_case=mode!="--worker";
        handle=Some(job.start(Box::new(move |value| {
           let text=value.updates[0].value.as_ref().unwrap().text();
           if trace_publication {
@@ -345,6 +355,10 @@ fn helper(base:&Path,mode:&str) {
              let end=b"D2-PUBLICATION-END\n";
              unsafe{libc::write(1,end.as_ptr().cast(),end.len());}
              return result;
+          }
+          if failure_case {
+             *observed_probe.lock().unwrap()=text.to_owned();
+             return store.publish(&value);
           }
           let v:Vec<u64>=text.split(',').map(|v|v.parse().unwrap()).collect();
           *observed.lock().unwrap()=Some((v[0],v[1],v[2]));
@@ -363,7 +377,8 @@ fn helper(base:&Path,mode:&str) {
     }
     let report=handle.unwrap().finish();
     if mode!="--worker" {
-       println!("{{\"reason\":\"{:?}\",\"published\":{},\"reaped\":{},\"partial_values\":{}}}",report.reason,report.published,report.reaped,usize::from(metrics.lock().unwrap().is_some()));
+       let probe=probe.lock().unwrap();
+       println!("{{\"reason\":\"{:?}\",\"published\":{},\"reaped\":{},\"partial_values\":{},\"probe\":\"{}\"}}",report.reason,report.published,report.reaped,usize::from(!probe.is_empty()),*probe);
        return;
     }
     let metrics=metrics.lock().unwrap().take().unwrap();
@@ -390,12 +405,19 @@ fn worker_metrics()->String {
     format!("{},{},{}",WORKER_FILTER_NS.load(std::sync::atomic::Ordering::Relaxed),rss,as_bytes)
 }
 static FAILURE:std::sync::atomic::AtomicU8=std::sync::atomic::AtomicU8::new(0);
-fn fail_after_update()->std::io::Result<()> {
+fn fail_after_update(fds:&mut sys::WorkerFds,buffer:&mut [u8;collection::wire::FRAME_MAX],build_id:BuildId)->std::io::Result<()> {
+    use collection::wire::{self,Frame,Kind,M3B_REQUEST_ID};
     let mode=FAILURE.load(std::sync::atomic::Ordering::Relaxed);
     if mode==0{return Ok(());}
-    if mode==1 {loop {std::hint::black_box(17u64.wrapping_mul(11));}}
+    if mode==5 {fds.write_all(b"malformed frame after valid Update")?;return Err(std::io::Error::other("malformed"));}
     probe_limit(mode);
-    Err(std::io::Error::other("controlled collector failure after Update"))
+    // A validated second Update is emitted only after the mode's probe passes.
+    let text=match mode{1=>"probe-cpu-pass",2=>"probe-as-pass",3=>"probe-nofile-pass",4=>"probe-exec-pass",_=>unreachable!()};
+    let mut payload=vec![31,0,1];payload.extend((text.len() as u32).to_le_bytes());payload.extend(text.as_bytes());payload.extend(0u16.to_le_bytes());
+    let n=wire::encode_frame(Frame{kind:Kind::Update,build_id,request_id:M3B_REQUEST_ID,payload:&payload},buffer).unwrap();
+    fds.write_all(&buffer[..n])?;
+    if mode==1 {loop {std::hint::black_box(17u64.wrapping_mul(11));}}
+    Err(std::io::Error::other("controlled collector failure after verified probe"))
 }
 fn probe_limit(mode:u8) {
     unsafe {
@@ -404,7 +426,7 @@ fn probe_limit(mode:u8) {
        assert_eq!(libc::getrlimit(resource,&mut limit),0);
        assert_eq!(limit.rlim_cur,if mode==1{1}else{64});
        assert_eq!(limit.rlim_max,if mode==1{1}else{64});
-       if mode==1 {let marker=b"CPU1\n";libc::write(1,marker.as_ptr().cast(),marker.len());loop{std::hint::black_box(19u64.wrapping_mul(13));}}
+
        #[cfg(target_os="linux")]
        if mode==2 {
           let memory=libc::mmap(std::ptr::null_mut(),(limits::MEMORY_ALLOWANCE*2) as usize,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_PRIVATE|libc::MAP_ANONYMOUS,-1,0);
@@ -421,8 +443,9 @@ fn probe_limit(mode:u8) {
     }
 }
 fn limit(mode:u8) {
-    worker::protect(limits::install_base,limits::drop_capabilities,sys::no_new_privs,sys::initial_filter,limits::lower_as_under_filter,sys::final_filter).unwrap();
+    worker::protected().unwrap();
     probe_limit(mode);
+    if mode==1 {let marker=b"CPU1\n";unsafe{libc::write(1,marker.as_ptr().cast(),marker.len());}loop{std::hint::black_box(19u64.wrapping_mul(13));}}
     let marker=b"RESOURCE PASS\n";
     unsafe{assert_eq!(libc::write(1,marker.as_ptr().cast(),marker.len()),marker.len() as isize);libc::_exit(0);}
 }
@@ -438,17 +461,19 @@ fn main(){
   Some("--worker")=>worker::fixture_entry().unwrap(),
   Some("--security-worker")=>security_worker::fixture_entry().unwrap(),
   Some("--trace")=>{
-    let out=std::process::Command::new(std::env::current_exe().unwrap()).arg("--trace-helper").arg(&args[2]).env_clear().output().unwrap();
+    let out=std::process::Command::new(std::env::current_exe().unwrap()).arg("--trace-helper").arg(&args[2]).arg(args.get(3).map_or(OsStr::new("--security-worker"),|s|s.as_os_str())).env_clear().output().unwrap();
     assert!(out.status.success(),"{:?}",out);print!("{}",String::from_utf8(out.stdout).unwrap());
   },
-  Some("--trace-helper")=>helper(Path::new(&args[2]),"--security-worker"),
+  Some("--trace-helper")=>helper(Path::new(&args[2]),args[3].to_str().unwrap()),
   Some("--helper-product")=>helper(Path::new(&args[2]),"--product-zero"),
   Some("--helper")=>helper(Path::new(&args[2]),"--worker"),
   Some("--helper-case")=>helper(Path::new(&args[2]),args[3].to_str().unwrap()),
-  Some("--cpu-worker")=>{FAILURE.store(1,std::sync::atomic::Ordering::Relaxed);worker::fixture_entry().unwrap();},
-  Some("--as-worker")=>{FAILURE.store(2,std::sync::atomic::Ordering::Relaxed);worker::fixture_entry().unwrap();},
-  Some("--nofile-worker")=>{FAILURE.store(3,std::sync::atomic::Ordering::Relaxed);worker::fixture_entry().unwrap();},
-  Some("--exec-worker")=>{FAILURE.store(4,std::sync::atomic::Ordering::Relaxed);worker::fixture_entry().unwrap();},
+  Some("--cpu-worker")=>{FAILURE.store(1,std::sync::atomic::Ordering::Relaxed);security_worker::fixture_entry().unwrap();},
+  Some("--as-worker")=>{FAILURE.store(2,std::sync::atomic::Ordering::Relaxed);security_worker::fixture_entry().unwrap();},
+  Some("--nofile-worker")=>{FAILURE.store(3,std::sync::atomic::Ordering::Relaxed);security_worker::fixture_entry().unwrap();},
+  Some("--exec-worker")=>{FAILURE.store(4,std::sync::atomic::Ordering::Relaxed);security_worker::fixture_entry().unwrap();},
+  Some("--ready-failure-worker")=>{},
+  Some("--malformed-worker")=>{FAILURE.store(5,std::sync::atomic::Ordering::Relaxed);security_worker::fixture_entry().unwrap();},
   Some("--limit-cpu")=>limit(1),Some("--limit-as")=>limit(2),Some("--limit-nofile")=>limit(3),Some("--limit-exec")=>limit(4),
   Some("--read")=>prompt_read::tests::product_read_measure(Path::new(&args[2])),
   _=>panic!("fixture mode"),
@@ -459,12 +484,26 @@ fn main(){
 # Only visibility and measurement code are added to the test reader module in
 # the generated translation unit. The shipped TCB files remain byte-identical.
 READ_MEASUREMENT = r'''
-    pub(crate) fn product_read_measure(_base: &std::path::Path) {
+    fn product_reader_clock(deadline:Option<Deadline>)->ClockPins {
+        let mut pins=fixed_clock(deadline);
+        pins.identity=Some(crate::commands::collector_supervisor::fixture_clock().unwrap());
+        pins
+    }
+    pub(crate) fn product_read_measure(base: &std::path::Path) {
         let _guard=crate::commands::sys::test_inherited_fd_lock();
-        let (f,b,_) = collection_fixture(b"/cwd");
-        publish_fixture(&f,&b,98,b"PREVIOUS"); publish_fixture(&f,&b,99,b"CURRENT");
+        use std::os::unix::ffi::OsStrExt;
+        let root=base.join("runtime");let config=base.join("config");let state=base.join("state");
+        let meta=fs::metadata(&root).unwrap();
+        let store=snapshot::context_components(config.as_os_str().as_bytes(),state.as_os_str().as_bytes()).unwrap().into_iter().fold(root.clone(),|p,n|p.join(n));
+        let mut config_value=Snapshot::decode(&fs::read(store.join("snapshot")).unwrap()).unwrap().config;
+        config_value.bands.clear();config_value.band_order.clear();config_value.collect_mask=TEST_MASK;
+        config_value.variants=vec![bingsu_core::template::compile::compile("{fixture}",&crate::SEGMENTS).unwrap()];
+        let args=vec!["--ctx".to_owned(),"1".to_owned(),"--record".to_owned(),"B1".to_owned(),"--width".to_owned(),"80".to_owned(),"--shell".to_owned(),"bash".to_owned(),"--pwd".to_owned(),"/repo".to_owned(),format!("--runtime-root={}:{}:{}",meta.dev(),meta.ino(),root.display()),format!("--config-root={}",config.display()),format!("--state-root={}",state.display())];
+        let entry=crate::commands::collector_supervisor::fixture_clock().unwrap();
         let before=crate::prompt_io::monotonic_ns().unwrap();
-        let mut p=fixture_prepared(&f,100);
+        let mut p=prepare_with_clock(&args.iter().map(|s|s.as_bytes()).collect::<Vec<_>>(),product_reader_clock,None);
+        let build=bingsu_core::collection::wire::BuildId(bingsu_core::collection::cwd_hash::sha256(&[crate::build_id().0.as_slice(),b"test-worker"].concat()));
+        p.plan=p.plan.with_build_id(build).with_entry(entry).with_catalog(Catalog{segments:&crate::SEGMENTS,workers:TEST_MASK},config_value);
         let prefetched=crate::prompt_io::monotonic_ns().unwrap();
         let installed=crate::sandbox::enter();
         assert!(bingsu_core::front::runs_core(installed));
@@ -479,18 +518,38 @@ READ_MEASUREMENT = r'''
             }
           }
         };
-        assert!(record.windows(7).any(|w|w==b"CURRENT"));
-        let out=format!("{{\"front_read_ns\":{},\"front_prefetch_ns\":{}}}\n",elapsed.unwrap(),prefetched-before);
+        let hex:String=record.iter().map(|b|format!("{b:02x}")).collect();
+        let out=format!("{{\"front_read_ns\":{},\"front_prefetch_ns\":{},\"record_hex\":\"{}\"}}\n",elapsed.unwrap(),prefetched-before,hex);
         unsafe { libc::write(1,out.as_ptr().cast(),out.len());libc::_exit(0); }
     }
 '''
 
 
+def build_context(binary):
+    binary = Path(binary).resolve()
+    source = next((p for p in binary.parents if (p / "Cargo.toml").is_file()), ROOT)
+    metadata = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version=1"], cwd=source).stdout)
+    source = Path(metadata["workspace_root"])
+    target = Path(metadata["target_directory"])
+    profile = binary.parent.name
+    triple = binary.parent.parent.name
+    expected = target / triple if triple.endswith(("-linux-musl", "-linux-gnu")) else target
+    expected = (expected / profile / "bingsu").resolve()
+    if profile not in {"debug", "release"} or binary != expected:
+        raise ValueError(f"expected build-tree binary {expected}; build, prepare that exact sibling pair, then set BINGSU_BIN={expected} for pytest")
+    return source
+
+
+def replace_required(text, old, new):
+    assert text.count(old) == 1, f"worker.rs substitution expected exactly once: {old!r}"
+    changed = text.replace(old, new)
+    assert changed != text, f"worker.rs substitution did not change text: {old!r}"
+    return changed
+
+
 def prepare(binary):
     binary = Path(binary).resolve()
-    source = next((p for p in binary.parents if (p / "Cargo.toml").is_file()), None)
-    if source is None:
-        raise ValueError("prepare the build-tree sibling pair before copying installed binaries")
+    source = build_context(binary)
     # This operation is host-only and explicit, never called by measure_pair.
     profile = "release" if binary.parent.name == "release" else "debug"
     build = ["cargo", "build", "-j", "2", "-p", "bingsu", "-p", "bingsu-collect", "--message-format=json"]
@@ -517,8 +576,7 @@ def prepare(binary):
     modules = []
     for name, rel in {"commands": "crates/bingsu/src/commands/mod.rs", "prompt": "crates/bingsu/src/prompt.rs",
                       "prompt_io": "crates/bingsu/src/prompt_io.rs", "prompt_spawn": "crates/bingsu/src/prompt_spawn.rs",
-                      "limits": "crates/bingsu-collect/src/limits.rs", "sys": "crates/bingsu-collect/src/sys.rs",
-                      "security_worker": "crates/bingsu-collect/src/worker.rs"}.items():
+                      "limits": "crates/bingsu-collect/src/limits.rs", "sys": "crates/bingsu-collect/src/sys.rs"}.items():
         module_path = source / rel
         if name == "commands":
             # Preserve Rust's child-module paths while exposing the sibling
@@ -540,11 +598,16 @@ def prepare(binary):
     else:
         modules.append('mod sandbox {pub fn enter()->bingsu_core::front::Sandbox{bingsu_core::front::Sandbox::Absent}}')
     worker = (source / "crates/bingsu-collect/src/worker.rs").read_text()
-    worker = worker.replace("    let landlock = initial()?;", "    let initial_start = crate::stamp();\n    let landlock = initial()?;\n    let initial_ns = crate::stamp() - initial_start;")
-    worker = worker.replace("    final_filter()?;", "    let final_start = crate::stamp();\n    final_filter()?;\n    crate::WORKER_FILTER_NS.store(if cfg!(target_os=\"linux\"){initial_ns + crate::stamp() - final_start}else{0}, std::sync::atomic::Ordering::Relaxed);")
-    worker = worker.replace('            payload.extend(7u32.to_le_bytes());\n            payload.extend(b"fixture");', '            let metrics=crate::worker_metrics();\n            payload.extend((metrics.len() as u32).to_le_bytes());\n            payload.extend(metrics.as_bytes());')
-    worker = worker.replace("fn protect(", "pub(crate) fn protect(")
-    worker = worker.replace("                fds.write_all(&buffer[..n])?;", "                fds.write_all(&buffer[..n])?;\n                crate::fail_after_update()?;")
+    worker = replace_required(worker, "    let landlock = initial()?;", "    let initial_start = crate::stamp();\n    let landlock = initial()?;\n    let initial_ns = crate::stamp() - initial_start;")
+    worker = replace_required(worker, "    final_filter()?;", "    let final_start = crate::stamp();\n    final_filter()?;\n    crate::WORKER_FILTER_NS.store(if cfg!(target_os=\"linux\"){initial_ns + crate::stamp() - final_start}else{0}, std::sync::atomic::Ordering::Relaxed);")
+    worker = replace_required(worker, '            payload.extend(7u32.to_le_bytes());\n            payload.extend(b"fixture");', '            let metrics=crate::worker_metrics();\n            payload.extend((metrics.len() as u32).to_le_bytes());\n            payload.extend(metrics.as_bytes());')
+    worker = replace_required(worker, "fn protected()", "pub(crate) fn protected()")
+    worker = replace_required(worker, "                fds.write_all(&buffer[..n])?;", "                fds.write_all(&buffer[..n])?;\n                crate::fail_after_update(fds, buffer, build_id)?;")
+    security = (source / "crates/bingsu-collect/src/worker.rs").read_text()
+    security = replace_required(security, "                fds.write_all(&buffer[..n])?;", "                fds.write_all(&buffer[..n])?;\n                crate::fail_after_update(fds, buffer, build_id)?;")
+    security_path = directory / "security_worker.rs"
+    security_path.write_text(security)
+    modules.append(f'#[path={json.dumps(str(security_path))}] mod security_worker;')
     worker_path = directory / "worker.rs"
     worker_path.write_text(worker)
     modules.append(f'#[path={json.dumps(str(worker_path))}] mod worker;')

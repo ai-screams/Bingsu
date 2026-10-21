@@ -240,6 +240,11 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]' "$RUNNER_TEMP/m3b-security.txt"
             grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]' "$RUNNER_TEMP/m3b-security.txt"
+            # 이것을 실패시키는 것: 출하 Ready/limits 또는 실패 trace 행을 skip하는 것.
+            grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-security.txt"
+            for case in cpu nofile as exec ready-failure malformed; do
+              grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--$case-worker]" "$RUNNER_TEMP/m3b-security.txt"
+            done
             grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-security.txt"
           else
             grep -F 'PASSED tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample' "$RUNNER_TEMP/m3b-security.txt"
@@ -254,9 +259,14 @@ jobs:
         run: |
           set -o pipefail
           triple="$(uname -m)-unknown-linux-musl"
+          cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
           python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
           export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-musl.txt"
+          for case in cpu nofile as exec ready-failure malformed; do
+            grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--$case-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          done
           for case in cpu nofile as exec; do
             grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[$case]" "$RUNNER_TEMP/m3b-musl.txt"
           done
