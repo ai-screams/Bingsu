@@ -1,6 +1,8 @@
 //! Detached fixed refresh command. All NSS, source I/O and publication live here.
 use super::{
     clock::SystemClock,
+    collection_gc,
+    collection_store::CollectionStore,
     collector,
     group_policy::SystemGroups,
     helper_filter, helper_limits, log,
@@ -74,9 +76,11 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     };
     let mut filter_failed = false;
     let mut supervisor = None;
+    let mut collection_runtime = None;
     let result = refresh::refresh_broker(request, &mut clock, &mut |context, display, now| {
         let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
         if let Some(request) = request {
+            collection_runtime = context.runtime.try_clone().ok();
             // Collection admission failure does not invalidate independent
             // snapshot publication. No product catalog grants a worker yet.
             supervisor = (|| {
@@ -89,10 +93,12 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     sys::current_uid(),
                     &mut groups,
                 )?;
-                let lock = collector::acquire(context, &request.binding, sys::current_uid())?;
+                let mut store = CollectionStore::acquire(context, &request.binding, now)?;
+                let lock = store.worker_lock()?;
                 let job = collector::spawn(&pin, request, lock, &_watchdog)?;
-                // The storage task supplies the publisher at this boundary.
-                Ok::<_, super::snapshot_store::StoreError>(job.start(Box::new(|_| Ok(())))?)
+                Ok::<_, super::snapshot_store::StoreError>(
+                    job.start(Box::new(move |result| store.publish(&result)))?,
+                )
             })()
             .ok();
         }
@@ -112,6 +118,11 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // refresh_broker has released the snapshot lock and source descriptors.
     if let Some(handle) = supervisor {
         let _ = handle.finish();
+    }
+    if let Some(runtime) = collection_runtime
+        && let Ok(now) = clock.observe()
+    {
+        let _ = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default());
     }
     if filter_failed {
         report(

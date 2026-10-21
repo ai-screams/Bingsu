@@ -665,6 +665,7 @@ mod tests {
     // 효과를 내는 것, 목록 밖 호출에 프로세스를 죽이는 것.
     #[test]
     fn calls_outside_the_rules_fail_without_effect() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = run_child("sandbox::tests::outside_child");
         if reported_unsupported(&out) {
             return;
@@ -737,6 +738,7 @@ mod tests {
     // 이것을 실패시키는 것: tsv에서 행의 syscall 셀을 서로 맞바꾸는 것(집합은 같아도 행 대응이 틀림), 함수 행을 빠뜨리는 것.
     #[test]
     fn each_row_names_the_syscall_its_function_makes() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let funcs: Vec<String> = rows().into_iter().map(|(_, f)| f).collect();
         assert_eq!(funcs, ["write", "_exit"]);
         let support = run_child("sandbox::tests::outside_child");

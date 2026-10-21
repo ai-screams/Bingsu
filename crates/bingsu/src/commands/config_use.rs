@@ -231,6 +231,7 @@ mod tests {
 
     #[test]
     fn choice_vetting_preserves_emfile() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -270,6 +271,7 @@ mod tests {
 
     #[test]
     fn saved_selection_is_reported_at_the_hard_deadline() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

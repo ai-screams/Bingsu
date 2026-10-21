@@ -667,6 +667,7 @@ fn reserved_numbers_are_not_reused_after_failure() {
 // 이것을 실패시키는 것: CLOEXEC fd를 상속한 exec 전 자식이 종료할 때까지 정상 반환 뒤 잠금을 유지하는 것.
 #[test]
 fn inherited_descriptors_do_not_extend_a_refresh_lock() {
+    let _inherited_fds = sys::test_inherited_fd_lock();
     struct Expiring(Rc<Cell<bool>>);
     impl ClockSource for Expiring {
         fn observe(&mut self) -> Result<Clock, ClockError> {
@@ -720,6 +721,7 @@ fn inherited_descriptors_do_not_extend_a_refresh_lock() {
 // 이것을 실패시키는 것: 회수 중 symlink·hardlink·mode·FIFO·초과 크기를 지우거나 현재 파일까지 지우는 것.
 #[test]
 fn staging_recovery_checks_safety_before_unlink() {
+    let _inherited_fds = sys::test_inherited_fd_lock();
     for kind in 0..6 {
         let f = Fx::new(&format!("recover-{kind}"));
         f.put(COMMAND);
@@ -954,6 +956,7 @@ fn await_ready(f: &Fx, child: &mut std::process::Child) {
 // 이것을 실패시키는 것: 새 open-file description의 두 프로세스 lock을 동시에 허용하거나 Busy에서 파일을 바꾸는 것.
 #[test]
 fn two_processes_observe_nonblocking_snapshot_and_selection_locks() {
+    let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
     let f = Fx::new("process-lock");
     f.put(COMMAND);
     published(f.run());
@@ -978,6 +981,7 @@ fn two_processes_observe_nonblocking_snapshot_and_selection_locks() {
 // 이것을 실패시키는 것: 어느 rename 중단점에서든 잘못 짝지은 Valid를 허용하거나 SIGKILL 잔여를 회수하지 않는 것.
 #[test]
 fn sigkill_before_and_after_every_rename_recovers_fixed_slots() {
+    let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
     for slot in Slot::ALL {
         for before in [true, false] {
             let f = Fx::new(&format!("kill-{slot:?}-{before}"));
@@ -1259,6 +1263,7 @@ fn store_refuses_invalid_staged_wire_and_changed_fds() {
 // 이것을 실패시키는 것: 새 stage/lock fd의 fchmod를 빼서 umask가 0600에서 소유자 쓰기 비트를 지우게 하는 것.
 #[test]
 fn restrictive_umask_still_publishes_private_files() {
+    let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
     let f = Fx::new("umask");
     f.put(COMMAND);
     // Provision the private directory walk before changing the child's umask;
@@ -1671,6 +1676,7 @@ fn n7_measure_publish() {
 #[test]
 #[cfg(not(target_env = "musl"))]
 fn n7_runtime_publication_has_no_fsync() {
+    let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
     use std::process::Command;
     let f = Fx::new("n7-fsync-parent");
     let library = f.base.join("no-fsync.dylib");

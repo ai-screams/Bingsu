@@ -239,6 +239,7 @@ mod tests {
     // 이것을 실패시키는 것: 고정 생성의 fd 정리·자동 회수·실패 반환이 망가지는 것.
     #[test]
     fn fixed_spawn_fd_hygiene_and_reaping() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("spawn_child");
     }
 
@@ -246,6 +247,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn lowered_nofile_still_spawns_without_leaking_fds() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("lowered_nofile_child");
     }
 

@@ -767,6 +767,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn pin_refuses_non_local_file_system() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let mount = std::process::Command::new("/sbin/mount").output().unwrap();
         if !String::from_utf8_lossy(&mount.stdout).contains(" on /System/Volumes/Data/home (autofs")
         {
