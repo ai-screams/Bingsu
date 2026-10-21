@@ -33,7 +33,9 @@ fn main() {
         Some("--collection-trace") => prompt_read::tests::collection_trace_child(),
         // Ordinary cargo test must not wait for fixture input or install a
         // process-wide filter. pytest explicitly selects the isolated child.
+        // cargo test also forwards libtest flags such as --test-threads.
         None => {}
+        Some(arg) if arg.starts_with('-') => {}
         Some(arg) => panic!("unexpected collection_reader argument: {arg}"),
     }
 }
