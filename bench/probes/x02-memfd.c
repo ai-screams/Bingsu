@@ -121,12 +121,12 @@ static int proc_readable(int fd, const char *base) {
 struct result { int exit_code, exec_errno, canaries, leaks, high_fd, soft_limit; };
 static int leave_high_fd, high_fd;
 /* Enumerate the open set, including descriptors above a lowered soft limit. */
-static void close_unlisted(int script, int errors) {
+static void close_unlisted(int script, int executable, int errors) {
     DIR *fds = opendir("/proc/self/fd"); REQUIRE(fds != NULL);
     struct dirent *entry;
     while ((entry = readdir(fds))) {
         char *end; long fd = strtol(entry->d_name, &end, 10);
-        if (*end || fd < 3 || fd == dirfd(fds) || fd == script || fd == 100 || fd == errors) continue;
+        if (*end || fd < 3 || fd == dirfd(fds) || fd == script || fd == executable || fd == errors) continue;
         if (leave_high_fd && fd == high_fd) continue;
         REQUIRE(close((int)fd) == 0);
     }
@@ -154,7 +154,7 @@ static struct result execute(int interpreter, int script, int clear, int direct)
         /* An unrelated deliberately inheritable fd must be explicitly closed. */
         REQUIRE(dup2(interpreter, 101) == 101);
         limits.rlim_cur = soft_limit; REQUIRE(setrlimit(RLIMIT_NOFILE, &limits) == 0);
-        close_unlisted(script, errors[1]);
+        close_unlisted(script, 100, errors[1]);
         if (clear && script >= 0) REQUIRE(fcntl(script, F_SETFD, 0) == 0);
         char path[64]; snprintf(path, sizeof(path), "/proc/self/fd/%d", script);
         char *args[] = {"x02-interpreter", direct ? "-c" : path, direct ? "printf 'CANARY\\n'" : NULL, NULL};
@@ -204,6 +204,9 @@ static void handoff(const char *cell, int interp, const char *script, int mutate
     REQUIRE(close(fd) == 0);
 }
 int main(int argc, char **argv) {
+    /* Start from the worker's known fd set before creating fixture descriptors.
+     * Harness capture files/pipes must not become part of the leak fixture. */
+    close_unlisted(-1, -1, -1);
     REQUIRE(argc == 1 || argc == 2);
     int mutate = argc == 2 && !strcmp(argv[1], "--mutate-expectation");
     leave_high_fd = argc == 2 && !strcmp(argv[1], "--mutate-fd-close");
@@ -211,10 +214,12 @@ int main(int argc, char **argv) {
     REQUIRE(argc == 1 || mutate || leave_high_fd || python_leak);
     int bash = interpreter("/bin/bash"), python = interpreter("/usr/bin/python3");
     REQUIRE(bash >= 0 && python >= 0);
+    /* Bash's private script input fd is not always 255 under low RLIMIT_NOFILE.
+     * Exempt the script inode, never the deliberately leaked interpreter fd. */
     const char *sh = "leaks=0; script=${BASH_SOURCE[0]##*/}\n"
         "for f in /proc/$$/fd/*; do n=${f##*/}; case $n in 0|1|2) continue;; esac\n"
         "test \"$n\" = \"$script\" && continue\n"
-        "if test \"$n\" = 255 && test \"$f\" -ef \"/proc/$$/fd/$script\"; then continue; fi\n"
+        "if test \"$f\" -ef \"/proc/$$/fd/$script\"; then continue; fi\n"
         "test -L \"$f\" && leaks=$((leaks+1)); done\nprintf 'CANARY\\nLEAKS:%d\\n' \"$leaks\"\n";
     const char *py = "import os\nscript=int(__file__.rsplit('/',1)[1])\nleaks=0\n"
         "for name in os.listdir('/proc/self/fd'):\n fd=int(name)\n"

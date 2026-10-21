@@ -223,9 +223,10 @@ def test_x16_ledger_commands_configure_c_and_rust_musl(recorded_x32_build):
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="requires native Linux memfd/execveat")
+@pytest.mark.parametrize("inherited_fds", [False, True])
 @pytest.mark.parametrize("nofile", [128, 256, 1024])
 @pytest.mark.parametrize("mutation", [None, "fd", "python_fd", "replacement", "relative", "writable"])
-def test_x02_native_guards_kill_mutations(tmp_path, mutation, nofile):
+def test_x02_native_guards_kill_mutations(tmp_path, mutation, nofile, inherited_fds):
     import resource
 
     source = (SOURCE.parent / "x02-memfd.c").read_text()
@@ -235,7 +236,7 @@ def test_x02_native_guards_kill_mutations(tmp_path, mutation, nofile):
     elif mutation is not None:
         old, new = {
             "replacement": ("n <= 0 || !unchanged", "n <= 0 || (unchanged && 0)"),
-            "relative": ("!link_target_allowed(target, trusted)", "!link_target_allowed(target, 1)"),
+            "relative": ("!link_target_allowed(target, trusted)", "((void)trusted, !link_target_allowed(target, 1))"),
             "writable": ("s.st_uid != owner || (s.st_mode & 0022)", "s.st_uid != owner"),
         }[mutation]
         assert old in source
@@ -250,7 +251,17 @@ def test_x02_native_guards_kill_mutations(tmp_path, mutation, nofile):
         # Cap both limits: passing must not rely on raising the soft limit.
         resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
 
-    result = subprocess.run([str(binary), *arguments], capture_output=True, text=True, timeout=30,
+    command = [str(binary), *arguments]
+    if inherited_fds:
+        # Leave two slots for /proc enumeration, but too few to build the fixture
+        # until startup cleanup removes these harness fds (including 100/101).
+        command = [sys.executable, "-c", "import os, resource, sys\n"
+                   "fd = os.open('/dev/null', os.O_RDONLY)\n"
+                   "limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+                   "for target in range(3, limit - 2):\n"
+                   " os.dup2(fd, target, inheritable=True)\n"
+                   "os.execv(sys.argv[1], sys.argv[1:])\n", *command]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30,
                             preexec_fn=lower_nofile)
     if mutation is None:
         assert result.returncode == 0, result.stderr
