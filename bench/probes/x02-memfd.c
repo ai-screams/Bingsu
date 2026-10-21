@@ -160,7 +160,7 @@ static struct result execute(int interpreter, int script, int clear, int direct)
         char *args[] = {"x02-interpreter", direct ? "-c" : path, direct ? "printf 'CANARY\\n'" : NULL, NULL};
         char *env[] = {NULL};
         syscall(SYS_execveat, 100, "", args, env, AT_EMPTY_PATH);
-        int error = errno; (void)write(errors[1], &error, sizeof(error)); _exit(120);
+        int error = errno; _exit(write(errors[1], &error, sizeof(error)) == (ssize_t)sizeof(error) ? 120 : 121);
     }
     REQUIRE(close(high_fd) == 0);
     REQUIRE(close(out[1]) == 0 && close(errors[1]) == 0);
