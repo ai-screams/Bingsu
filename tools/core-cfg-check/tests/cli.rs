@@ -8,6 +8,54 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+// 이것을 실패시키는 것: no_std/unsafe 금지·정확한 include·모듈 없는 identity 경계를 빼는 것.
+#[test]
+fn identity_root_is_no_std_and_has_only_the_pinned_generated_input() {
+    let source = include_str!("../../../crates/bingsu-identity/src/lib.rs");
+    let run = |text: &str| {
+        Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+            .args(["--identity", fixture(text).to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    let good = run(source);
+    assert!(good.status.success(), "{:?}", good);
+    for (text, reason) in [
+        (
+            source.replace("#![no_std]", "// no_std"),
+            "crate root lacks #![no_std]",
+        ),
+        (
+            source.replace("forbid(unsafe_code)", "deny(unsafe_code)"),
+            "crate root lacks #![forbid",
+        ),
+        (
+            source.replace("/build_id.rs", "/other.rs"),
+            "identity requires exactly one build_id include",
+        ),
+        (
+            format!("{source}\ninclude!(concat!(env!(\"OUT_DIR\"), \"/build_id.rs\"));"),
+            "identity requires exactly one build_id include",
+        ),
+        (
+            format!("{source}\nfn hidden() {{ use gix_config::File; }}"),
+            "identity must not declare modules or imports",
+        ),
+        (
+            format!("{source}\nstatic EXTRA: u8 = 0;"),
+            "identity allows only constants",
+        ),
+    ] {
+        let bad = run(&text);
+        assert!(!bad.status.success());
+        assert!(
+            String::from_utf8_lossy(&bad.stderr).contains(reason),
+            "{:?}",
+            bad
+        );
+    }
+}
+
 fn fixture(source: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("core-cfg-check-{}", std::process::id()));

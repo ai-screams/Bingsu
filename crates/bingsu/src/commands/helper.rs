@@ -224,7 +224,7 @@ pub(crate) fn selected_request(
                     .methods
                     .contains(&bingsu_core::shorten::Method::Unique),
             ),
-            build_id: bingsu_collect::build_id(),
+            build_id: bingsu_identity::build_id(),
             snapshot: id,
             clock_kind: now.kind,
             domain: now.domain,

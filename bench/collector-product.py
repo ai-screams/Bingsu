@@ -69,7 +69,7 @@ def preparation_sources(source):
     # Bind the copied command modules, reader, native contracts, worker and M1
     # stub as well as the generator and build inputs. Membership is checked too.
     files = [source / name for name in ("Cargo.toml", "Cargo.lock", "bench/collector-product.py")]
-    for crate in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench"):
+    for crate in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench", "bingsu-identity"):
         directory = source / "crates" / crate
         files.append(directory / "Cargo.toml")
         files.extend(directory.rglob("*.rs"))
@@ -299,7 +299,7 @@ def measure_pair(base: str, candidate: str, rounds: int) -> dict:
 HARNESS = r'''
 #![allow(dead_code, unused_imports)]
 @MODULES@
-pub use bingsu_collect::build_id;
+pub use bingsu_identity::build_id;
 const PRODUCT_COLLECTOR:&str=@COLLECTOR@;
 use bingsu_core::{collection::{self, wire::{BuildId,EndReason}}, snapshot::{self,Clock,ClockSource}, envelope::Envelope};
 use commands::{collector_process as process, collector_supervisor::CollectorJob, collection_store::CollectionStore};
@@ -651,7 +651,7 @@ def prepare(binary):
         linker = os.environ.get("CARGO_TARGET_" + triple.upper().replace("-", "_") + "_LINKER")
         if linker:
             command += ["-C", "linker=" + linker]
-    for name in ("bingsu_core", "bingsu_collect", "libc"):
+    for name in ("bingsu_core", "bingsu_identity", "libc"):
         command += ["--extern", f"{name}={deps[name]}"]
     env = {**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": "0.0.0"}
     run(command, env=env, cwd=source, timeout=120)

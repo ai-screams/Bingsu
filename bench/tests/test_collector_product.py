@@ -122,8 +122,9 @@ def fake_preparation(tmp_path, monkeypatch):
     for path in paths.values():
         path.write_bytes(b"original")
     for name in ("Cargo.toml", "Cargo.lock", "bench/collector-product.py",
-                 *(f"crates/{crate}/Cargo.toml" for crate in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench")),
-                 "crates/bingsu/src/commands/collector_supervisor.rs"):
+                 *(f"crates/{crate}/Cargo.toml" for crate in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench", "bingsu-identity")),
+                 "crates/bingsu/src/commands/collector_supervisor.rs",
+                 "crates/bingsu-identity/src/lib.rs", "crates/bingsu-identity/build.rs"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"original source")
@@ -151,14 +152,16 @@ def test_prepared_pair_hashes_are_exact(tmp_path, monkeypatch, changed):
 
 
 # 이것을 실패시키는 것: prepare 뒤 소스 변경·추가·삭제 또는 해시 목록 누락을 검증하지 않는 것.
-@pytest.mark.parametrize("changed", ["modified", "added", "deleted", "missing-hashes"])
+@pytest.mark.parametrize("changed", ["modified", "added", "deleted", "missing-hashes", "identity", "identity-build"])
 def test_prepared_source_hashes_are_checked_at_use(tmp_path, monkeypatch, changed):
     paths, manifest = fake_preparation(tmp_path, monkeypatch)
     source = tmp_path / "crates/bingsu/src/commands/collector_supervisor.rs"
+    if changed.startswith("identity"):
+        source = tmp_path / "crates/bingsu-identity" / ("build.rs" if changed == "identity-build" else "src/lib.rs")
     saved = source.read_bytes()
     extra = source.with_name("new.rs")
     try:
-        if changed == "modified":
+        if changed in ("modified", "identity", "identity-build"):
             source.write_bytes(b"changed after prepare")
         elif changed == "added":
             extra.write_bytes(b"new source")

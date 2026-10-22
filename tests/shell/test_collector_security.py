@@ -214,7 +214,7 @@ LINUX_SECURITY_STEPS = {
     "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
     "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
 }
-MACOS_SECURITY_STEPS = {"Product imports and matching deployment pair", "Assert native macOS M3b security passes"}
+MACOS_SECURITY_STEPS = {"Both shipped Mach-O architectures", "Assert native macOS M3b security passes"}
 
 
 def security_steps(text):
@@ -226,7 +226,8 @@ def security_steps(text):
     assert [line.strip() for line in matrix.splitlines() if line.strip() and not line.lstrip().startswith("#")] == [
         "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]"]
     required_names = LINUX_SECURITY_STEPS | MACOS_SECURITY_STEPS | {
-        "Prepare M3b compiler-free product fixtures", "M3b product security and measurements contracts"}
+        "Prepare M3b compiler-free product fixtures", "M3b product security and measurements contracts",
+        "Product imports and matching deployment pair"}
     for name in required_names:
         assert sum(step.get("name") == name for step in steps) == 1, ("required security step", name)
     for step in steps:

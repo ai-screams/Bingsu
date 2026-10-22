@@ -15,10 +15,10 @@ mod limits;
 mod sys;
 mod worker;
 #[cfg(unix)]
-use bingsu_collect::build_id;
+use bingsu_identity::build_id;
 
 #[used]
-static ROLE_TAG: [u8; 49] = bingsu_collect::role_tag(bingsu_collect::COLLECTOR_ROLE);
+static ROLE_TAG: [u8; 49] = bingsu_identity::role_tag(bingsu_identity::COLLECTOR_ROLE);
 
 fn main() {
     std::hint::black_box(&ROLE_TAG);

@@ -116,12 +116,31 @@ jobs:
       - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
       - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-musl -- -D warnings
 
+  collector-msrv:
+    name: Collector deployment MSRV (1.88)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.88.0
+      # 이것을 실패시키는 것: 제품이나 전이 의존성이 MSRV보다 새 문법/API를 쓰는 것.
+      - run: cargo build --locked -j 2 -p bingsu -p bingsu-collect
+
   collector:
     name: Dedicated collector (${{ matrix.os }})
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      # Audit the real linked binaries, then strip those same files for shipping.
+      CARGO_PROFILE_RELEASE_STRIP: "none"
     strategy:
       fail-fast: false
       matrix:
@@ -234,9 +253,17 @@ jobs:
           sudo "$bin" --exact limits::tests::root_cannot_restore_limits_or_capabilities --ignored --test-threads=1 | tee "$RUNNER_TEMP/root-capabilities.txt"
           grep -F 'test limits::tests::root_cannot_restore_limits_or_capabilities ... ok' "$RUNNER_TEMP/root-capabilities.txt"
           grep -F 'test result: ok. 1 passed;' "$RUNNER_TEMP/root-capabilities.txt"
+      # 이것을 실패시키는 것: 출하 collector의 spawn/import 또는 앞단 gix 심벌 유입.
+      - name: Product imports and matching deployment pair
+        run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu --unstripped-dir target/release/symbol-audit --strip
       - if: runner.os == 'macOS'
-        name: Product imports and matching deployment pair
-        run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu
+        name: Both shipped Mach-O architectures
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --locked -j 2 --release -p bingsu -p bingsu-collect --target aarch64-apple-darwin
+          python3 scripts/check_collector_symbols.py target/aarch64-apple-darwin/release/bingsu-collect --sibling target/aarch64-apple-darwin/release/bingsu --unstripped-dir target/aarch64-apple-darwin/release/symbol-audit --strip
+          cargo build --locked -j 2 --release -p bingsu -p bingsu-collect --target x86_64-apple-darwin
+          python3 scripts/check_collector_symbols.py target/x86_64-apple-darwin/release/bingsu-collect --sibling target/x86_64-apple-darwin/release/bingsu --unstripped-dir target/x86_64-apple-darwin/release/symbol-audit --strip
       - name: Prepare Python audit tests
         run: |
           python3 -m venv "$RUNNER_TEMP/collector-tests"
@@ -313,6 +340,8 @@ jobs:
           set -o pipefail
           triple="$(uname -m)-unknown-linux-musl"
           cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
+          # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
+          python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
           python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
           export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
           mkdir -p "$RUNNER_TEMP/m3b-traces"
@@ -426,7 +455,8 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-          # The gate builds core for a target without std.
+          # The gate builds bingsu-core and bingsu-identity without std;
+          # the front graph remains pinned to 11 packages.
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28

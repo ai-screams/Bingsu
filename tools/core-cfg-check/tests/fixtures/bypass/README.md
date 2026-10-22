@@ -2,6 +2,7 @@
 
 | Fixture | Gate rule | Bypass shape | Expected verdict |
 | --- | --- | --- | --- |
+| `identity/worker.rs` | Identity isolation | A cfg-hidden worker module imports Git through the shared identity library. | Reject, even with updated TCB hash pins. |
 | `k24/decoy.rs` | K24 | A matching decoy `RULES` table hides extra syscall paths and a different rule consumer. | Reject, even with updated TCB hash pins. |
 | `k24/literal.rs` | K24 | `enter()` appends literal syscall number 59 to the table. | Reject, even with updated TCB hash pins. |
 | `k24/alias.rs` | K24 | A renamed libc import supplies an extra syscall to `enter()`. | Reject, even with updated TCB hash pins. |

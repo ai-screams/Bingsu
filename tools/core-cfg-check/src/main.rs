@@ -94,6 +94,8 @@
 //! `--rules SYSCALLS.tsv FILE.rs` checks the actual sandbox RULES initializer.
 //! `--prompt-io NAMES FILE.rs` scans every OS bridge branch for CLI forbidden
 //! calls; this supplements its binary scan, clippy forbid and TCB hash.
+//! `--identity FILE.rs` checks the shared no_std identity root. Its only
+//! generated input is the exact build_id.rs include from the pinned builder.
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
 //!
@@ -1236,6 +1238,25 @@ fn check_binary(source: &str) -> Vec<Finding> {
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--identity") {
+        let [_, path] = args.as_slice() else {
+            eprintln!("usage: core-cfg-check --identity FILE.rs");
+            return ExitCode::FAILURE;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            eprintln!("{path}: unreadable");
+            return ExitCode::FAILURE;
+        };
+        let findings = check_identity(&source);
+        for f in &findings {
+            eprintln!("{path}:{}: {}", f.line, f.reason);
+        }
+        return if findings.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     if args.first().is_some_and(|a| a == "--prompt-io") {
         let [_, forbidden, path] = args.as_slice() else {
             eprintln!("usage: core-cfg-check --prompt-io NAME,NAME,... FILE.rs");
@@ -1350,6 +1371,60 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn check_identity(source: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![Finding {
+            line: 1,
+            reason: "unparsable identity".into(),
+        }];
+    };
+    check_crate_root(&file.attrs, &mut out);
+    // Hash pins cover the implementation. Independently reject modules/imports
+    // in any branch and accept only the one reviewed generated constant input.
+    fn scan(stream: TokenStream, out: &mut Vec<Finding>) {
+        for token in stream {
+            match token {
+                TokenTree::Ident(i) if matches!(unraw(&i).as_str(), "mod" | "use" | "extern") => {
+                    out.push(Finding {
+                        line: line_of(i.span()),
+                        reason: "identity must not declare modules or imports".into(),
+                    });
+                }
+                TokenTree::Group(g) => scan(g.stream(), out),
+                _ => {}
+            }
+        }
+    }
+    let tokens = TokenStream::from_str(source).unwrap();
+    scan(tokens, &mut out);
+    let mut includes = 0;
+    for item in &file.items {
+        match item {
+            syn::Item::Const(_) | syn::Item::Fn(_) => {}
+            syn::Item::Macro(m)
+                if m.attrs.is_empty()
+                    && m.mac.path.is_ident("include")
+                    && m.mac.tokens.to_string()
+                        == "concat ! (env ! (\"OUT_DIR\") , \"/build_id.rs\")" =>
+            {
+                includes += 1;
+            }
+            _ => out.push(Finding {
+                line: 1,
+                reason: "identity allows only constants, functions and its build_id include".into(),
+            }),
+        }
+    }
+    if includes != 1 {
+        out.push(Finding {
+            line: 1,
+            reason: "identity requires exactly one build_id include".into(),
+        });
+    }
+    out
 }
 
 /// Which rules a file gets: core's library files all of them, its test

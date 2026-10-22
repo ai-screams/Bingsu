@@ -1,6 +1,10 @@
 # The prompt path never derives anything from the environment (spec 4
 # "runtime root" rule 7, F-01). Only init::trusted_env may read it, with an
 # explicit #[expect(clippy::disallowed_methods, reason = ...)].
+# The deployment MSRV is 1.88 for Git dependencies. Keep existing 1.85 source
+# idioms (including shared core/test code); do not rewrite the prompt TCB solely
+# for newer-syntax suggestions. All forbidden methods/types/macros still apply.
+msrv = "1.85"
 disallowed-methods = [
   { path = "std::env::var", reason = "paths are pinned by init; see init::trusted_env" },
   { path = "std::env::var_os", reason = "paths are pinned by init; see init::trusted_env" },

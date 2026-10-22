@@ -1,6 +1,6 @@
 //! Shared sibling identity only. Worker OS code belongs to the dedicated binary.
 #![no_std]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 

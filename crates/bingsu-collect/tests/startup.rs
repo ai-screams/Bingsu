@@ -32,7 +32,7 @@ mod sys;
 #[allow(dead_code)]
 #[path = "../src/worker.rs"]
 mod worker;
-pub use bingsu_collect::build_id;
+pub use bingsu_identity::build_id;
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_bingsu-collect")
@@ -397,7 +397,7 @@ fn sibling_build_id_is_exact() {
         .unwrap();
     let ready = wire::decode_frame(&ready).unwrap();
     assert_eq!(ready.kind, wire::Kind::Ready);
-    assert_eq!(ready.build_id, bingsu_collect::build_id());
+    assert_eq!(ready.build_id, bingsu_identity::build_id());
     assert_eq!(&ready.payload[8..12], &0u32.to_le_bytes());
     let mut mismatched = [0; wire::FRAME_MAX];
     let frame = wire::Frame {

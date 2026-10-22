@@ -64,7 +64,7 @@ fi
 # the policy phase); a rustc or sysroot replaced on the machine is out of
 # scope, as above. wasm32-unknown-unknown is not enough: it has a std whose
 # I/O returns errors at run time.
-cargo build --quiet -p bingsu-core --target wasm32v1-none
+cargo build --quiet -j 2 -p bingsu-core -p bingsu-identity --target wasm32v1-none
 # Exercise rustdoc under the same sanitized environment as rustc. The child
 # environment regression test observes this invocation, not just unset text.
 cargo doc --quiet -p bingsu-core --no-deps
@@ -100,6 +100,8 @@ if len(paths) != 1:
 print(paths[0])
 ')
 python3 scripts/check_core_cfg.py --phase tokens --checker "$checker"
+# 이것을 실패시키는 것: identity가 std/unsafe 또는 worker module을 가져오는 것.
+"$checker" --identity crates/bingsu-identity/src/lib.rs
 # Change these counts together with the clippy.toml lists.
 python3 scripts/check_core_purity.py crates/bingsu-core/purity-canary crates/bingsu-core/clippy.toml 190
 python3 scripts/check_core_purity.py crates/bingsu/purity-canary crates/bingsu/clippy.toml 7

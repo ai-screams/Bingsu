@@ -48,6 +48,12 @@ class BypassGates(unittest.TestCase):
         self.assertIn(reason, output.stderr)
         self.assertNotIn("sha256", output.stderr)
 
+    # 이것을 실패시키는 것: identity pin을 다시 써서 worker 모듈을 앞단으로 가져오는 것.
+    def test_identity_worker_after_hash_renewal(self):
+        self.replace_tcb("crates/bingsu-identity/src/lib.rs", "identity/worker.rs")
+        self.assert_rejected(self.run_gate("check_cli_prompt_forbid.py"),
+                             "identity must not declare modules or imports")
+
     # 이것을 실패시키는 것: RULES 소비·영역 검사를 제거하여 미끼 표를 허용하는 것.
     def test_k24_decoy_after_hash_renewal(self):
         self.replace_tcb("crates/bingsu/src/sandbox.rs", "k24/decoy.rs")

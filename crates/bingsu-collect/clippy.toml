@@ -1,0 +1,3 @@
+# Deployment needs 1.88, but shared core/test sources still support 1.85.
+# Avoid newer-syntax rewrites in those sources; this changes no forbidden lint.
+msrv = "1.85"

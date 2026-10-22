@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-LIB = Path("crates/bingsu-collect/src/lib.rs")
+LIB = Path("crates/bingsu-identity/src/lib.rs")
 TABLE = Path("crates/bingsu-collect/collector-syscalls.tsv")
 FILTER = Path("crates/bingsu-collect/src/filter.rs")
 LANDLOCK = Path("crates/bingsu-collect/src/landlock.rs")
@@ -67,8 +67,8 @@ def main():
         cases.append((name, path, old, new, test, target, binary))
 
     for module in ("filter", "landlock"):
-        add("library exposes " + module, LIB, "#![deny(unsafe_code)]",
-            "#![deny(unsafe_code)]\n#[cfg(target_os = \"linux\")]\nextern crate std;\n"
+        add("library exposes " + module, LIB, "#![forbid(unsafe_code)]",
+            "#![forbid(unsafe_code)]\n#[cfg(target_os = \"linux\")]\nextern crate std;\n"
             f"#[cfg(target_os = \"linux\")]\n#[allow(unsafe_code)]\npub mod {module};",
             "identity-only library", target=None)
 

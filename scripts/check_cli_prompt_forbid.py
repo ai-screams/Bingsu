@@ -55,15 +55,16 @@ MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 # K38: copying a new hash can self-approve a change; these pins are a change-detection
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
-    "crates/bingsu-collect/build.rs": "fadb31a93cd6238adc07e45a705b48ca9e96286a995c2ecbffe486bd41f006fd",
-    "crates/bingsu-collect/src/lib.rs": "ef97306d92420c2f69cdf0d4464eeefa6ff517fc7aa10caee0b9ce717b5904f3",
-    "crates/bingsu/src/prompt_read.rs": "d3310027876d9973a5f92401b1623c3429a085a5023ffad4a57e901c3ce1f783",
+    "crates/bingsu-identity/Cargo.toml": "1c6aeb48d7416df0d76252cf460c62af75c43da16cf834a227ac6cfef9ab336c",
+    "crates/bingsu-identity/build.rs": "4b91d1c9e8bbbe1453fbd3d5ec089525c725c0a33c468372ee6cdf23c2330aab",
+    "crates/bingsu-identity/src/lib.rs": "6af258f59e81c5bb33db541685b19c517bf10002a7ac56e4c7d05a7bddd2c925",
+    "crates/bingsu/src/prompt_read.rs": "fa5415c282b334abdffaba0187f97de76f73315b139d40d969efdc4e36ab3f74",
     "crates/bingsu/src/prompt_spawn.rs": "a5d9658ca752e05cf6056435a00106116f874556fd7b5a06302e6a2e4753d413",
     "crates/bingsu/src/prompt_io.rs": "1ce5d695c9d828da7f9ebdfda10b606219747029d6e2937af888cc3a79fb7e46",
     "crates/bingsu/src/prompt.rs": "a593d7d74425a29ee31f0f618ff4778463801ba3aa61bbfa9633e567663c5cb2",
     "crates/bingsu/src/main.rs": "2f4d0c5f7e49ef71721c499fb9b3f757bb07bd0d402116a9fc97f2262c08b3c1",
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
-    "crates/bingsu/Cargo.toml": "2343243f569366f307928f9f87ad367ac0f9dc26f78179536900149a015d861a",
+    "crates/bingsu/Cargo.toml": "8f0481d83e662b0792242456355a7b3127b0e1646548eb177a3facae8e62193a",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
 }
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
@@ -86,7 +87,7 @@ def check_product_fixture_isolation(binary=None):
     if len(targets) != 1 or targets[0][0] != "bingsu-core-tests" or targets[0][1]["kind"] != ["test"]:
         bad.append("collector fixture must be exactly one test target in bingsu-core-tests")
     for package in packages:
-        if package["name"] in {"bingsu", "bingsu-core", "bingsu-collect"}:
+        if package["name"] in {"bingsu", "bingsu-core", "bingsu-collect", "bingsu-identity"}:
             if any(d["name"] == "bingsu-core-tests" for d in package["dependencies"]):
                 bad.append("product dependency reaches the collector fixture package")
     if binary is not None:
@@ -111,7 +112,8 @@ def main():
         first = None if start < 0 else "".join(text[start:text.index("]", start) + 1].split())
         if first != "".join(WANT.split()):
             bad.append(f"{source.relative_to(ROOT)}: first inner attribute is {first!r}")
-    for argv in ([args.checker, "--adapter", str(SYSCALLS), str(ADAPTER)],
+    for argv in ([args.checker, "--identity", str(ROOT / "crates/bingsu-identity/src/lib.rs")],
+                 [args.checker, "--adapter", str(SYSCALLS), str(ADAPTER)],
                  [args.checker, "--rules", str(SYSCALLS), str(SANDBOX)],
                  [args.checker, "--binary", *sorted(str(p) for p in (ROOT / "crates/bingsu/src").rglob("*.rs"))]):
         out = subprocess.run(argv, capture_output=True, text=True)
