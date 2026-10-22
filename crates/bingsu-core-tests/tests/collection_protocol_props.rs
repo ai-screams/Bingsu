@@ -544,8 +544,112 @@ fn dir_transcript(r: &Request) -> Transcript {
     t.request_sent().unwrap();
     t
 }
+
+// Independent git encoder: deliberately permits contradictory field values.
+fn raw_git(value: &field::Value) -> Vec<u8> {
+    use field::{FieldValue, ValueState};
+    let mut out = vec![3, 0, 1];
+    out.extend((value.text().len() as u32).to_le_bytes());
+    out.extend(value.text().as_bytes());
+    out.extend((value.fields.len() as u16).to_le_bytes());
+    for (i, f) in value.fields.iter().enumerate() {
+        out.extend((i as u16).to_le_bytes());
+        out.push(u8::from(f.state == ValueState::Pending));
+        match &f.value {
+            FieldValue::Text(t) => {
+                out.push(0);
+                out.extend((t.as_str().len() as u32).to_le_bytes());
+                out.extend(t.as_str().as_bytes());
+            }
+            FieldValue::Bool(b) => out.extend([4, u8::from(*b)]),
+            FieldValue::Absent => out.push(5),
+            _ => unreachable!("git property only generates text, bool and absent"),
+        }
+    }
+    out.push(0); // no path facts
+    out
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 32, .. ProptestConfig::default() })]
+    // 이것을 실패시키는 것: 표식의 partial=true·branch 설정·branch/commit 동시 Known을 허용하거나 할당 상한·거부 시 상태 보존을 깨는 것.
+    #[test]
+    fn no_repo_conflicts_are_bounded_and_transactional(branch in "[a-zA-Z0-9/_-]{1,256}", detached in any::<bool>()) {
+        use bingsu_core::{collection::git, field::{Field, FieldValue}, width::WidthProfile};
+        let r = request();
+        let mut t = Transcript::new(&r);
+        t.accept(frame(&r, Kind::Ready, &ready())).unwrap();
+        t.request_sent().unwrap();
+        let decl = &field::BUILTIN[3];
+        let at = |name| decl.field_index(name).unwrap();
+        let marker = git::no_repo();
+        let good = raw_git(&marker);
+        t.accept(frame(&r, Kind::Update, &good)).unwrap();
+        let stored = t.clone().finish(EndReason::Deadline, clock()).unwrap().unwrap();
+        let encoded = stored.encode().unwrap();
+        let offset = encoded.len() - good.len();
+        for case in 0..4 {
+            let mut value = marker.clone();
+            if case == 0 || case == 2 { value.fields[at("partial")] = Field::known(FieldValue::Bool(true)); }
+            if case != 0 { value.fields[at("branch")] = Field::text(branch.as_bytes(), 256, WidthProfile::DEFAULT); }
+            if case == 3 {
+                value.fields[at("no_repo")] = Field::known(FieldValue::Bool(false));
+                value.fields[at("commit")] = Field::text(b"012345abcdef", 16, WidthProfile::DEFAULT);
+                value.fields[at("detached")] = Field::known(FieldValue::Bool(detached));
+            }
+            let payload = raw_git(&value);
+            let mut fresh = Transcript::new(&r);
+            fresh.accept(frame(&r, Kind::Ready, &ready())).unwrap();
+            fresh.request_sent().unwrap();
+            let before = fresh.clone();
+            let mut result = Ok(());
+            let counts = allocation::counted(|| result = fresh.accept(frame(&r, Kind::Update, &payload)));
+            prop_assert_eq!(result, Err(ProtocolError::Schema));
+            prop_assert_eq!(fresh, before);
+            prop_assert!(counts.0 <= 12 && counts.2 <= 8192, "allocation: {:?}", counts);
+            let mut invalid = stored.clone(); invalid.updates[0].value = Some(value);
+            prop_assert_eq!(invalid.updates[0].encode(&r.binding), Err(ProtocolError::Schema));
+            prop_assert_eq!(invalid.encode(), Err(ProtocolError::Schema));
+            let mut bytes = encoded[..offset].to_vec(); bytes.extend(payload);
+            let len = (bytes.len() - 64) as u32;
+            bytes[12..16].copy_from_slice(&len.to_le_bytes());
+            let crc = snapshot::crc32c(&[&bytes[64..]]); bytes[16..20].copy_from_slice(&crc);
+            prop_assert_eq!(Completed::decode(&bytes), Err(ProtocolError::Schema));
+        }
+    }
+
+    // 이것을 실패시키는 것: 표식 뒤 Progress 전후의 B–D/Hidden 전환을 허용하거나 거부된 Update가 A 증거·상태를 바꾸는 것.
+    #[test]
+    fn no_repo_cannot_transition_to_repository_stages(device in prop::option::of(any::<u64>())) {
+        use bingsu_core::{collection::{git, wire::Progress}, field::{Field, FieldValue}, width::WidthProfile};
+        let r = request();
+        let decl = &field::BUILTIN[3];
+        let at = |name| decl.field_index(name).unwrap();
+        for completed in [false, true] {
+            let mut t = Transcript::new(&r);
+            t.accept(frame(&r, Kind::Ready, &ready())).unwrap();
+            t.request_sent().unwrap();
+            t.accept(frame(&r, Kind::Update, &raw_git(&git::no_repo()))).unwrap();
+            let done = Progress { stage_a_complete: true, device }.encode();
+            if completed { t.accept(frame(&r, Kind::Progress, &done)).unwrap(); }
+            for stage in [b"A", b"B", b"C", b"D"] {
+                let mut repo = git::no_repo();
+                repo.fields[at("no_repo")] = Field::known(FieldValue::Bool(false));
+                repo.fields[at("branch")] = Field::text(b"main", 256, WidthProfile::DEFAULT);
+                repo.fields[at("detached")] = Field::known(FieldValue::Bool(false));
+                repo.fields[at("stage")] = Field::text(stage, 1, WidthProfile::DEFAULT);
+                for payload in [raw_git(&repo), vec![3, 0, 0, 0]] {
+                    let before = t.clone();
+                    prop_assert_eq!(t.accept(frame(&r, Kind::Update, &payload)), Err(ProtocolError::Order));
+                    prop_assert_eq!(&t, &before);
+                }
+            }
+            if !completed { t.accept(frame(&r, Kind::Progress, &done)).unwrap(); }
+            let c = t.finish(EndReason::Deadline, clock()).unwrap().unwrap();
+            prop_assert!(c.progress.stage_a_complete);
+            prop_assert_eq!(Completed::decode(&c.encode().unwrap()), Ok(c));
+        }
+    }
     // 이것을 실패시키는 것: 32/33 sets·256/257 names·이름/단계/전체 raw bytes·인코딩 bytes 상한이나 component 중복·순서·범위 검사를 제거하는 것.
     #[test]
     fn path_facts_boundaries_are_transactional_and_preflight_allocations_are_zero(byte in any::<u8>()) {

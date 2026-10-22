@@ -560,11 +560,12 @@ fn ready_mask(payload: &[u8]) -> Result<u32, ProtocolError> {
     r.end()?;
     Ok(mask)
 }
-/// Only type declarations are copied. No callbacks, capabilities or fixture
-/// behavior enter the codec; adapters supply their closed, active catalog.
+/// Copy type declarations and identify the fixed git schema for semantic checks.
+/// No callbacks, capabilities or fixture behavior enter the codec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Schema {
     fields: Vec<Vec<FieldType>>,
+    git: bool,
 }
 impl Schema {
     pub(crate) fn new(catalog: &[SegmentDecl]) -> Result<Self, ProtocolError> {
@@ -578,7 +579,10 @@ impl Schema {
             }
             fields.push(segment.fields.iter().map(|f| f.ty).collect());
         }
-        Ok(Self { fields })
+        let git = catalog
+            .get(usize::from(git::SEGMENT))
+            .is_some_and(|d| d.id == "git");
+        Ok(Self { fields, git })
     }
     fn segment(&self, segment: u16, mask: u32) -> Result<&[FieldType], ProtocolError> {
         let index = usize::from(segment);
@@ -675,6 +679,19 @@ impl Transcript {
                 let update = read_update(&mut r, &self.schema, &self.request.binding, TEXT_MAX)?;
                 r.end()?;
                 let index = usize::from(update.segment);
+                // A no-repository result is terminal for this discovery, even
+                // before its A-complete Progress arrives. Never replace it with
+                // a repository stage or erase its evidence with Hidden.
+                if self.schema.git
+                    && update.segment == git::SEGMENT
+                    && self.updates.iter().any(|old| {
+                        old.segment == git::SEGMENT
+                            && matches!(&old.value, Some(v) if git::is_no_repo(v))
+                    })
+                    && !matches!(&update.value, Some(v) if git::is_no_repo(v))
+                {
+                    return Err(ProtocolError::Order);
+                }
                 let evidence_segment = if self.request.binding.mask & (1 << git::SEGMENT) != 0 {
                     git::SEGMENT
                 } else {
@@ -889,6 +906,12 @@ pub(crate) fn update_len(
     binding: &Binding,
 ) -> Result<usize, ProtocolError> {
     let types = schema.segment(update.segment, binding.mask)?;
+    if schema.git
+        && update.segment == git::SEGMENT
+        && update.value.as_ref().is_some_and(|v| !git::valid(v))
+    {
+        return Err(ProtocolError::Schema);
+    }
     let facts_len = if let Some(facts) = &update.facts {
         if update.segment != 1 {
             return Err(ProtocolError::Schema);

@@ -16,6 +16,8 @@ pub struct Completed {
     pub binding: Binding,
     pub completed_at_ns: u64,
     pub reason: EndReason,
+    /// A completion claim requires retained HEAD evidence or a present, valid
+    /// no-repository marker; an absent/Hidden git value does not suffice.
     pub progress: Progress,
     pub updates: Vec<Update>,
 }
@@ -39,6 +41,8 @@ impl Completed {
         let mut len = base_len(&self.binding)?;
         let mut seen = 0u32;
         for update in &self.updates {
+            // Includes git marker shape and mutually exclusive HEAD fields,
+            // even when progress does not claim A completion.
             let n = wire::update_len(update, &schema, &self.binding)?;
             let bit = 1u32 << update.segment;
             if seen & bit != 0 {
@@ -120,6 +124,7 @@ impl Completed {
                 return Err(ProtocolError::Duplicate);
             }
             seen |= bit;
+            // Apply the same git semantic checks as encoding and Transcript.
             len = wire::add_budget(
                 len,
                 wire::update_len(&update, &schema, &binding)?,

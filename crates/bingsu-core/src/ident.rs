@@ -272,6 +272,7 @@ mod tests {
                     "detached",
                     "filtered",
                     "modified",
+                    "no_repo",
                     "operation",
                     "partial",
                     "stage",

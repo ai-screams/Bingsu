@@ -26,6 +26,7 @@ use core::fmt::Write as _;
 /// meaning, path anchors and field interpretation manually; bump this version
 /// when an older reader could misread the new meaning, even if the shape stays
 /// the same.
+// The unreleased M3c schema 2 includes git.no_repo; wire/response stay at v3.
 pub const FACT_SCHEMA_VERSION: u16 = 2;
 pub const FACT_SCHEMA: &str = "FieldType: Text{max_cells} Count Int Duration Bool; FieldValue: Text Count{n,saturated} Int Duration{ms} Bool Absent; ValueState: Known Pending; PathFacts: anchor steps repo_root unique readonly";
 /// Version of the config format (`version = 1`).

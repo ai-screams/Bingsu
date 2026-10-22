@@ -84,6 +84,216 @@ fn put(t: &mut Transcript, r: &Request, update: &Update) {
     t.accept(frame(r, Kind::Update, &update.encode(&r.binding).unwrap()))
         .unwrap();
 }
+// A trusted test catalog with identical wire types but no git semantics lets
+// malformed values reach the real decoder independently of its encoder checks.
+fn raw_completed(c: &Completed) -> Vec<u8> {
+    let catalog: Vec<_> = field::BUILTIN
+        .iter()
+        .map(|d| field::SegmentDecl {
+            id: if d.id == "git" { "fixture" } else { d.id },
+            role: d.role,
+            fields: d.fields,
+        })
+        .collect();
+    c.encode_with_catalog(&catalog).unwrap()
+}
+
+// 이것을 실패시키는 것: no_repo 생성자의 Known true·A·partial=false·나머지 Absent 계약을 바꾸거나 A 증거에서 표식을 제외하는 것.
+#[test]
+fn no_repo_marker_completes_a_and_roundtrips() {
+    use bingsu_core::collection::git::no_repo;
+    let r = request(8);
+    let value = no_repo();
+    assert_eq!(value.text(), "");
+    for (f, d) in value.fields.iter().zip(field::BUILTIN[3].fields) {
+        assert_eq!(
+            *f,
+            match d.name {
+                "no_repo" => Field::known(FieldValue::Bool(true)),
+                "partial" => Field::known(FieldValue::Bool(false)),
+                "stage" => Field::text(b"A", 1, WidthProfile::DEFAULT),
+                _ => Field::ABSENT,
+            },
+            "{}",
+            d.name
+        );
+    }
+    let update = Update {
+        segment: 3,
+        value: Some(value),
+        facts: None,
+    };
+    for started in [false, true] {
+        let mut t = transcript(&r);
+        if started {
+            t.accept(frame(&r, Kind::Progress, &Progress::default().encode()))
+                .unwrap();
+        }
+        put(&mut t, &r, &update);
+        assert!(!finish(t.clone()).unwrap().progress.stage_a_complete);
+        t.accept(frame(
+            &r,
+            Kind::Progress,
+            &Progress {
+                stage_a_complete: true,
+                device: None,
+            }
+            .encode(),
+        ))
+        .unwrap();
+        // Rechecking a repeated cumulative marker must retain A completion.
+        put(&mut t, &r, &update);
+        for complete in [false, true] {
+            let mut t = t.clone();
+            if complete {
+                t.accept(frame(&r, Kind::Complete, &[])).unwrap();
+            }
+            let c = finish(t).unwrap();
+            assert!(c.progress.stage_a_complete);
+            assert_eq!(c.updates, vec![update.clone()]);
+            assert_eq!(Completed::decode(&c.encode().unwrap()), Ok(c));
+        }
+    }
+}
+
+// 이것을 실패시키는 것: partial·stage·저장소 필드·표시 text가 섞인 표식 또는 branch/commit 동시 Known을 wire/저장 codec에서 허용하는 것.
+#[test]
+fn contradictory_git_values_are_refused_by_wire_and_response() {
+    use bingsu_core::collection::git::no_repo;
+    let r = request(8);
+    let decl = &field::BUILTIN[3];
+    let mut bad = vec![Value::new(b"visible", no_repo().fields)];
+    let mut pending_stage = no_repo();
+    pending_stage.fields[decl.field_index("stage").unwrap()].state = field::ValueState::Pending;
+    bad.push(pending_stage);
+    for d in decl.fields {
+        if d.name == "no_repo" {
+            continue;
+        }
+        let mut replacements = vec![Field::PENDING];
+        match d.name {
+            "partial" => replacements.extend([Field::known(FieldValue::Bool(true)), Field::ABSENT]),
+            "stage" => replacements
+                .extend([b"B", b"C", b"D"].map(|s| Field::text(s, 1, WidthProfile::DEFAULT))),
+            _ => replacements.push(match d.ty {
+                FieldType::Bool => Field::known(FieldValue::Bool(false)),
+                FieldType::Count => Field::known(FieldValue::Count {
+                    n: 0,
+                    saturated: false,
+                }),
+                FieldType::Text { max_cells } => {
+                    Field::text(b"x", max_cells, WidthProfile::DEFAULT)
+                }
+                _ => unreachable!(),
+            }),
+        }
+        for replacement in replacements {
+            let mut v = no_repo();
+            v.fields[decl.field_index(d.name).unwrap()] = replacement;
+            bad.push(v);
+        }
+    }
+    for detached in [false, true] {
+        let mut v = git(b"A");
+        v.fields[decl.field_index("commit").unwrap()] =
+            Field::text(b"012345abcdef", 16, WidthProfile::DEFAULT);
+        v.fields[decl.field_index("detached").unwrap()] = Field::known(FieldValue::Bool(detached));
+        bad.push(v);
+    }
+    let mut seed = transcript(&r);
+    put(
+        &mut seed,
+        &r,
+        &Update {
+            segment: 3,
+            value: Some(no_repo()),
+            facts: None,
+        },
+    );
+    let mut c = finish(seed).unwrap();
+    for value in bad {
+        c.updates[0].value = Some(value);
+        assert_eq!(c.updates[0].encode(&r.binding), Err(E::Schema));
+        assert_eq!(c.encode(), Err(E::Schema));
+        let bytes = raw_completed(&c); // Valid CRC, malformed git semantics.
+        assert_eq!(Completed::decode(&bytes), Err(E::Schema));
+        let mut empty = c.clone();
+        empty.updates.clear();
+        let offset = empty.encode().unwrap().len();
+        let mut t = transcript(&r);
+        let before = t.clone();
+        assert_eq!(
+            t.accept(frame(&r, Kind::Update, &bytes[offset..])),
+            Err(E::Schema)
+        );
+        assert_eq!(t, before);
+        c.progress.stage_a_complete = true;
+        assert_eq!(c.encode(), Err(E::Schema));
+        c.progress.stage_a_complete = false;
+    }
+}
+
+// 이것을 실패시키는 것: 앞단 merge가 no_repo 표식을 표시 슬롯에 남기거나 요청 mask·binding 확인 없이 숨기는 것.
+#[test]
+fn no_repo_marker_is_hidden_in_front() {
+    use bingsu_core::{collection, envelope, shell_values};
+    let r = request(8);
+    let mut t = transcript(&r);
+    put(
+        &mut t,
+        &r,
+        &Update {
+            segment: 3,
+            value: Some(collection::git::no_repo()),
+            facts: None,
+        },
+    );
+    let c = finish(t).unwrap();
+    let envelope = envelope::parse(&[
+        b"--ctx",
+        b"1",
+        b"--record",
+        b"B1",
+        b"--width",
+        b"80",
+        b"--shell",
+        b"bash",
+        b"--pwd",
+        b"/cwd",
+    ])
+    .unwrap();
+    let mut values = shell_values::collect(&envelope);
+    values.values[3] = Some(git(b"A"));
+    let before = values.values.clone();
+    for mask in [0, 2, 10] {
+        collection::merge(&mut values, Some(&c), mask);
+        assert_eq!(values.values, before);
+    }
+    for mask in [0, 2] {
+        let mut unrequested = c.clone();
+        unrequested.binding.mask = mask;
+        collection::merge(&mut values, Some(&unrequested), mask);
+        assert_eq!(values.values, before);
+    }
+    let mut repository = c.clone();
+    repository.updates[0].value = Some(git(b"A"));
+    collection::merge(&mut values, Some(&repository), 8);
+    assert_eq!(values.values, before);
+    let mut invalid = c.clone();
+    let d = &field::BUILTIN[3];
+    invalid.updates[0].value.as_mut().unwrap().fields[d.field_index("partial").unwrap()] =
+        Field::known(FieldValue::Bool(true));
+    collection::merge(&mut values, Some(&invalid), 8);
+    assert_eq!(values.values, before);
+    collection::merge(&mut values, Some(&c), 8);
+    assert_eq!(values.values[3], None);
+    for (i, v) in before.iter().enumerate() {
+        if i != 3 {
+            assert_eq!(&values.values[i], v);
+        }
+    }
+    assert!(c.updates[0].value.is_some());
+}
 fn facts() -> PathFactInput {
     PathFactInput {
         repo_component: Some(1),
@@ -111,6 +321,7 @@ fn git_field_names_types_and_order_are_fixed() {
         ("detached", Bool),
         ("filtered", Bool),
         ("modified", Count),
+        ("no_repo", Bool),
         ("operation", Text { max_cells: 16 }),
         ("partial", Bool),
         ("stage", Text { max_cells: 1 }),
@@ -306,7 +517,10 @@ fn progress_is_not_stage_a_success() {
     for value in [
         None,
         Some(git(b"B")),
-        Some(Value::new(b"", vec![Field::PENDING; 14])),
+        Some(Value::new(
+            b"",
+            vec![Field::PENDING; field::BUILTIN[3].fields.len()],
+        )),
     ] {
         put(
             &mut t,
