@@ -334,18 +334,46 @@ fn darwin_mount_and_devfd_are_refused() {
 }
 
 // 이것을 실패시키는 것: acquisition에도 mount 동일성 조건을 적용하거나 선택 root 아래 crossing을 허용하는 것.
+// 이것을 실패시키는 것: BINGSU_X11_MOUNT에 같은 mount의 일반 디렉터리를 지정해도 통과하는 것.
 #[test]
 fn cwd_on_other_mount_is_allowed() {
     use std::os::unix::fs::MetadataExt;
-    let volumes_device = fs::metadata("/Volumes").unwrap().dev();
-    let volume = fs::read_dir("/Volumes")
-        .unwrap()
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let metadata = fs::symlink_metadata(entry.path()).ok()?;
-            (metadata.is_dir() && metadata.dev() != volumes_device).then(|| entry.path())
+    let volume = std::env::var_os("BINGSU_X11_MOUNT")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let volumes_device = fs::metadata("/Volumes").ok()?.dev();
+            fs::read_dir("/Volumes")
+                .ok()?
+                .filter_map(Result::ok)
+                .find_map(|entry| {
+                    let metadata = fs::symlink_metadata(entry.path()).ok()?;
+                    (metadata.is_dir() && metadata.dev() != volumes_device).then(|| entry.path())
+                })
         })
-        .expect("BLOCKED: X-11 needs a real mounted directory under /Volumes");
+        .unwrap_or_else(|| {
+            if std::env::var_os("CI").is_some() {
+                panic!(
+                    "BLOCKED: X-11 CI requires a real mounted directory; create and attach a disk image and export BINGSU_X11_MOUNT (none found under /Volumes)"
+                );
+            }
+            panic!(
+                "BLOCKED: X-11 needs a real mounted directory; set BINGSU_X11_MOUNT or mount a volume under /Volumes"
+            );
+        });
+    assert!(
+        volume.is_absolute() && fs::symlink_metadata(&volume).is_ok_and(|m| m.is_dir()),
+        "BLOCKED: X-11 mount must be an absolute, real directory: {} (BINGSU_X11_MOUNT)",
+        volume.display()
+    );
+    let parent_device = fs::metadata(volume.parent().expect("X-11 mount must have a parent"))
+        .unwrap()
+        .dev();
+    assert_ne!(
+        fs::metadata(&volume).unwrap().dev(),
+        parent_device,
+        "BLOCKED: X-11 requires a different mount from its parent: {} (BINGSU_X11_MOUNT)",
+        volume.display()
+    );
     let root = acquire(
         volume.as_os_str().as_bytes(),
         DiscoveryQuery::default(),
@@ -354,9 +382,9 @@ fn cwd_on_other_mount_is_allowed() {
     .unwrap()
     .select_cwd()
     .unwrap();
-    assert_ne!(root.device(), volumes_device);
+    assert_ne!(root.device(), parent_device);
     println!(
-        "X11 volume={} device={} parent_device={volumes_device}",
+        "X11 volume={} device={} parent_device={parent_device}",
         volume.display(),
         root.device()
     );
