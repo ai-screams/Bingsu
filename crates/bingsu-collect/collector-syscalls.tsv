@@ -24,10 +24,10 @@ getpid	39	172	any	row_getpid_any	Obtain process identity for libc thread setup
 clone	56	220	thread	row_clone_thread	Create a thread sharing the existing process only
 exit	60	93	any	row_exit_any	Terminate a worker thread
 fcntl	72	25	fcntl	row_fcntl_fcntl	Query descriptor validity and access mode only
-getcwd	79	17	any	row_getcwd_any	Resolve the trusted status probe repository path
+getcwd	79	17	any	row_getcwd_any	Support the historical X-14 status probe only; product acquisition uses request bytes
 readlink	89	-	any	row_readlink_any	Read symbolic link targets on x86_64
 getrlimit	97	163	any	row_getrlimit_any	Read libc resource limits without changing them
-geteuid	107	175	any	row_geteuid_any	Check repository ownership in the status probe
+geteuid	107	175	any	row_geteuid_any	Validate selected gitdir and commondir ownership
 sigaltstack	131	132	any	row_sigaltstack_any	Set up and release Rust thread signal stacks
 prctl	157	167	nnp_query	row_prctl_nnp_query	Verify no_new_privs before filtered baseline measurement
 gettid	186	178	any	row_gettid_any	Obtain the current libc thread identity
@@ -35,8 +35,8 @@ futex	202	98	any	row_futex_any	Synchronize and join worker threads
 getdents64	217	61	any	row_getdents64_any	Enumerate repository directories read-only
 clock_gettime	228	113	clock	row_clock_gettime_clock	Read monotonic or boottime deadlines only
 exit_group	231	94	any	row_exit_group_any	Terminate the dedicated collector
-openat	257	56	openat	row_openat_openat	Open the fixed statm path and probe inputs read-only
-newfstatat	262	79	any	row_newfstatat_any	Read path metadata for the status probe
+openat	257	56	openat	row_openat_openat	Open fixed statm and capability probe paths, then held-fd repository components read-only
+newfstatat	262	79	any	row_newfstatat_any	Check repository component identity without following links
 readlinkat	267	78	any	row_readlinkat_any	Read symbolic link targets relative to a directory
 set_robust_list	273	99	any	row_set_robust_list_any	Register libc thread robust mutex cleanup
 prlimit64	302	261	query	row_prlimit64_query	Read resource limits with a full-width NULL new_limit
@@ -46,3 +46,9 @@ rseq	334	293	any	row_rseq_any	Register glibc per-thread restartable sequences
 clone3	435	435	enosys	row_clone3_enosys	Force libc to fall back to inspectable clone arguments
 prlimit64	302	261	bootstrap_as	row_prlimit64_bootstrap_as	Set the initial address-space ceiling before sealing
 seccomp	317	277	bootstrap_filter	row_seccomp_bootstrap_filter	Stack the final filter before Ready
+openat2	437	437	handled_write_set	row_openat2_handled_write_set	Read beneath selected roots only after installed write denial covers TRUNCATE; size must be 24
+fstatfs	138	44	read_root	row_fstatfs_read_root	Reject procfs and inspect the filesystem of already-held root descriptors
+faccessat2	439	439	readonly	row_faccessat2_readonly	Observe readonly with W_OK and AT_EACCESS only; no access fallback
+landlock_create_ruleset	444	444	read_layer_create	row_landlock_create_ruleset_read_layer_create	Query version or create an eight-byte filesystem ruleset to add read confinement
+landlock_add_rule	445	445	read_layer_add	row_landlock_add_rule_read_layer_add	Add only PATH_BENEATH rules with flags zero for selected content roots
+landlock_restrict_self	446	446	read_layer_restrict	row_landlock_restrict_self_read_layer_restrict	Stack a monotone read restriction with flags zero after discovery

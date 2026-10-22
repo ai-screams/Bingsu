@@ -211,7 +211,7 @@ for field, typ in [('cwd','Root'), ('ancestors','Vec<AncestorDir>'), ('logical',
 for typ in ['AncestorDir', "StageADir<'_>"]:
     REVIEW.append(('no_root_'+typ.split('<')[0], API_TEST, [('mod', 'struct Fd {', f'impl std::ops::Deref for {typ} {{ type Target = Root; fn deref(&self) -> &Root {{ &self.root }} }}\nstruct Fd {{')]))
 LINUX += [
- ('landlock_rule_error', 'linux_read_layer_failure_cannot_grant_access', [('landlock', '        {\n            return Err(io::Error::last_os_error());\n        }\n    }\n    // SAFETY: live ruleset fd;', '        { }\n    }\n    // SAFETY: live ruleset fd;')]),
+ ('landlock_rule_error', 'linux_read_layer_failure_cannot_grant_access', [('landlock', '        {\n            return Err(io::Error::last_os_error());\n        }\n        #[cfg(test)]', '        { }\n        #[cfg(test)]')]),
  ('probe_scope', 'access_probe_stepwise_has_no_guarantee', [('mod', 'if access.backend == Resolver::Openat2 {', 'if true {')]),
  ('no_magiclinks', 'safe_read::linux::tests::no_magiclinks_is_enforced_independently', [('linux', ' | libc::RESOLVE_NO_MAGICLINKS', '')]),
  ('procfs_type', 'root_procfs_is_refused', [('linux', 'if fs.f_type as u64 == 0x9fa0 {', 'if false {')]),

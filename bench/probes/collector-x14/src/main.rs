@@ -86,9 +86,9 @@ fn probe(path: &Path) {
     if std::env::var_os("BINGSU_REQUIRE_LANDLOCK").is_some() {
         assert!(matches!(state, landlock::LandlockState::Installed { .. }));
     }
-    filter::install_bootstrap().unwrap();
+    filter::install_bootstrap(filter::Openat2Policy::Deny).unwrap();
     let memory = limits::lower_as_under_filter().unwrap();
-    filter::seal_limits().unwrap();
+    filter::seal_limits(filter::Openat2Policy::Deny).unwrap();
     denied_processes();
     assert_eq!(
         std::thread::spawn(|| {

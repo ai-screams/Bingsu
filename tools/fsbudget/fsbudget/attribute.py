@@ -455,6 +455,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     collector_execs = 0
     previous_calls, cloexec_pairs = {}, []
     unknown_calls = defaultdict(int)
+    filters = defaultdict(int)
+    repository_probe = {}
+    request_started = set()
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
 
@@ -531,6 +534,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         if (c.name == "seccomp" and "SECCOMP_SET_MODE_FILTER" in c.args
                 or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
             confined.add(process)
+            filters[process] += 1
         descriptors.observe(c, process, args, success, bad, defer_open=deferred)
         if role == "collector" and _cloexec_pair(previous, c):
             cloexec_pairs.append({"pid": c.pid,
@@ -542,7 +546,30 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         if process not in confined and _prologue_call(c, target(c)):
             continue
         if role == "collector":
-            if c.name in {"open", "openat"} and any(flag in c.args for flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")):
+            if c.name == "uname" and process not in confined:
+                k = "kernel_release"
+            if c.name == "read" and args and args[0].split("<")[0] == "3":
+                request_started.add(process)
+            probe = repository_probe.get(process)
+            # Only the fixed post-seal, pre-request capability probe gets this
+            # vocabulary. Root content, getdents and later retries stay denied.
+            if (c.name == "openat" and len(args) >= 3 and args[1] == '\"/\"'
+                    and args[2] == "O_RDONLY|O_CLOEXEC|O_DIRECTORY"
+                    and filters[process] == 2 and process not in request_started and probe is None):
+                k = "probe_openat"
+                repository_probe[process] = {"fd": result.split("<")[0] if success else None, "seen": set()}
+            elif probe and process not in request_started and args and args[0] == f'{probe["fd"]}</>':
+                exact = None
+                if c.name == "fstat": exact = "fstat"
+                elif c.name in {"newfstatat", "fstatat64"} and args[1] == '\"\"' and args[3] == "AT_EMPTY_PATH": exact = "fstat"
+                elif c.name == "fstatfs": exact = "fstatfs"
+                elif c.name == "statx" and args[1:4] == ['\"\"', 'AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH', 'STATX_MNT_ID']: exact = "statx"
+                elif (c.name == "openat2" and len(args) == 4 and args[1] == '\".\"' and args[3] == "24"
+                      and args[2] == "{flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}"): exact = "openat2"
+                if exact and exact not in probe["seen"]:
+                    probe["seen"].add(exact)
+                    k = "probe_" + exact
+            if c.name in {"open", "openat", "openat2"} and any(flag in c.args for flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")):
                 bad(c, "collector writable open")
             if k in {"write", "renameat", "unlinkat", "network", "unknown-fs", "fsync"}:
                 bad(c, "collector forbidden effect")

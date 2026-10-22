@@ -616,6 +616,17 @@ fn probe_fd_cannot_become_repository_root() {
                 && p.extension().is_some_and(|e| e == "rlib")
         })
         .unwrap();
+    let core = fs::read_dir(&deps)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("libbingsu_core-")
+                && p.extension().is_some_and(|e| e == "rlib")
+        })
+        .unwrap();
     let f = Fixture::new();
     let prefix = format!(
         "#![allow(dead_code)]\n#[path={:?}] mod meter;\n#[path={:?}] mod safe_read;\n#[path={:?}] mod sys;\nuse safe_read::*;\n",
@@ -644,6 +655,8 @@ fn probe_fd_cannot_become_repository_root() {
             .arg(&f.runtime)
             .arg("--extern")
             .arg(format!("libc={}", libc.display()))
+            .arg("--extern")
+            .arg(format!("bingsu_core={}", core.display()))
             .arg("-L")
             .arg(format!("dependency={}", deps.display()))
             .output()

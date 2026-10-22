@@ -13,6 +13,8 @@ use std::{
 };
 
 use crate::meter::{Lease, Meter, Op, Phase, READ_CHUNK};
+// Compatibility spelling for B1 callers; the wire query is now the sole type.
+pub use bingsu_core::collection::path_facts::PathQuery as DiscoveryQuery;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -104,6 +106,21 @@ impl Access {
         }
         // Darwin requires B2's validated fixture fd; absent means stage A only.
         Ok(access)
+    }
+
+    /// Called after stage A and names-only discovery. Consuming Discovery in
+    /// root selection has already closed every unselected ancestor. C5 supplies
+    /// the selected worktree/gitdir/commondir, or cwd alone outside a repository.
+    #[cfg(target_os = "linux")]
+    pub fn restrict_to(&mut self, roots: &[&Root], meter: &mut Meter) -> Result<(), ReadError> {
+        meter.check()?;
+        // Never let the process-wide probe first run after read confinement.
+        resolver(meter)?;
+        let fds: Vec<_> = roots.iter().map(|root| root.read_rule_fd()).collect();
+        let proof = crate::landlock::restrict_reads(&fds)
+            .map_err(|error| ReadError::errno(error.raw_os_error().unwrap_or(libc::EACCES)))?;
+        self.landlock_reads_installed(proof);
+        Ok(())
     }
 
     pub fn guarantee(&self) -> Option<Guarantee> {
@@ -319,12 +336,6 @@ pub struct ReadCap {
     pub single_link: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DiscoveryQuery {
-    pub home_component: Option<u16>,
-    pub unique: bool,
-}
-
 pub struct Discovery {
     cwd: Root,
     /// Oldest to newest, at most 32; never reopen ".." for discovery.
@@ -464,6 +475,23 @@ pub struct Root {
     identity: Identity,
 }
 impl Root {
+    /// Observation only. No access(2) fallback if the exact query is unavailable.
+    #[cfg(target_os = "linux")]
+    pub fn readonly(&self, meter: &mut Meter) -> Result<Option<bool>, ReadError> {
+        meter.charge(Op::Readonly)?;
+        // SAFETY: held directory and fixed relative dot; no object is created.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_faccessat2,
+                self.fd.as_raw_fd(),
+                c".".as_ptr(),
+                libc::W_OK,
+                libc::AT_EACCESS,
+            )
+        };
+        readonly_status(if rc == 0 { Ok(()) } else { Err(errno()) })
+    }
+
     pub fn device(&self) -> u64 {
         self.identity.device
     }
@@ -806,4 +834,35 @@ fn identity_from(
 #[cfg(all(test, target_os = "linux"))]
 pub fn probe_for_test(meter: &mut Meter) -> Result<Resolver, ReadError> {
     linux::probe_for_test(meter)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn readonly_status(result: Result<(), i32>) -> Result<Option<bool>, ReadError> {
+    match result {
+        Ok(()) => Ok(Some(false)),
+        Err(libc::ENOSYS | libc::EPERM) => Ok(None),
+        Err(libc::EACCES | libc::EROFS) => Ok(Some(true)),
+        Err(error) => Err(ReadError::errno(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // 이것을 실패시키는 것: 미지원 readonly를 true/false로 만들거나 권한 거부를 쓰기 가능으로 보고하는 것.
+    #[test]
+    fn readonly_observation_preserves_unknown_and_errors() {
+        assert_eq!(readonly_status(Ok(())), Ok(Some(false)));
+        for error in [libc::ENOSYS, libc::EPERM] {
+            assert_eq!(readonly_status(Err(error)), Ok(None));
+        }
+        for error in [libc::EACCES, libc::EROFS] {
+            assert_eq!(readonly_status(Err(error)), Ok(Some(true)));
+        }
+        assert_eq!(readonly_status(Err(libc::ENOENT)), Err(ReadError::Missing));
+        assert_eq!(
+            readonly_status(Err(libc::EIO)),
+            Err(ReadError::Io(libc::EIO))
+        );
+    }
 }

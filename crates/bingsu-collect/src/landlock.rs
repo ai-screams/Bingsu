@@ -27,19 +27,38 @@ struct RulesetAttr {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LandlockState {
-    Installed { abi: u32 },
+    Installed { abi: u32, handled_access_fs: u64 },
     Absent,
+}
+
+impl LandlockState {
+    pub fn covers_openat2_writes(self) -> bool {
+        matches!(self, Self::Installed { handled_access_fs, .. }
+            if handled_access_fs & rights(3) == rights(3))
+    }
 }
 
 /// Only a successful read-layer installation can construct this evidence.
 /// Neither ABI detection nor the write-deny installer returns it. !Send/!Sync.
 #[cfg(target_os = "linux")]
 pub struct ReadLayerInstalled {
+    #[cfg(test)]
+    rules_added: usize,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code, reason = "integration-only rule-count observation")]
+impl ReadLayerInstalled {
+    pub fn rule_count(&self) -> usize {
+        self.rules_added
+    }
+}
+
 /// B3 supplies exactly the validated content root fds, after the openat2 probe.
-/// This entry point is not called by the product worker until B3 is wired.
+/// Duplicate inodes get one rule; empty, non-directory and filesystem-root
+/// capabilities fail before installation. Ancestor fds are never accepted by
+/// the safe-read adapter that calls this installer.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 pub fn restrict_reads(roots: &[std::os::fd::BorrowedFd<'_>]) -> io::Result<ReadLayerInstalled> {
@@ -48,6 +67,39 @@ pub fn restrict_reads(roots: &[std::os::fd::BorrowedFd<'_>]) -> io::Result<ReadL
     struct Beneath {
         allowed: u64,
         parent: i32,
+    }
+    if roots.is_empty() || roots.len() > 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "one to three content roots",
+        ));
+    }
+    let slash = std::fs::File::open("/")?;
+    let metadata = |fd| -> io::Result<libc::stat> {
+        // SAFETY: plain output record, live borrowed descriptor.
+        let mut out = unsafe { std::mem::zeroed() };
+        // SAFETY: writable record; fstat validates the descriptor.
+        if unsafe { libc::fstat(fd, &mut out) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(out)
+    };
+    let slash = metadata(slash.as_raw_fd())?;
+    let mut selected = Vec::new();
+    for root in roots {
+        let stat = metadata(root.as_raw_fd())?;
+        if (stat.st_dev, stat.st_ino) == (slash.st_dev, slash.st_ino) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "invalid content root",
+            ));
+        }
+        if !selected
+            .iter()
+            .any(|(_, dev, ino)| (*dev, *ino) == (stat.st_dev, stat.st_ino))
+        {
+            selected.push((*root, stat.st_dev, stat.st_ino));
+        }
     }
     let rights = (1 << 2) | (1 << 3); // READ_FILE | READ_DIR, ABI 1
     let rules = RulesetAttr {
@@ -67,7 +119,9 @@ pub fn restrict_reads(roots: &[std::os::fd::BorrowedFd<'_>]) -> io::Result<ReadL
     }
     // SAFETY: successful create returned a fresh, uniquely owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    for root in roots {
+    #[cfg(test)]
+    let mut rules_added = 0;
+    for (root, _, _) in selected {
         let beneath = Beneath {
             allowed: rights,
             parent: root.as_raw_fd(),
@@ -85,12 +139,18 @@ pub fn restrict_reads(roots: &[std::os::fd::BorrowedFd<'_>]) -> io::Result<ReadL
         {
             return Err(io::Error::last_os_error());
         }
+        #[cfg(test)]
+        {
+            rules_added += 1;
+        }
     }
     // SAFETY: live ruleset fd; startup has set NNP; restricts this thread.
     if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd.as_raw_fd(), 0u32) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(ReadLayerInstalled {
+        #[cfg(test)]
+        rules_added,
         _thread: std::marker::PhantomData,
     })
 }
@@ -115,10 +175,20 @@ fn rights(abi: u32) -> u64 {
     mask
 }
 
+#[cfg(test)]
 fn install_with<T>(
     query: impl FnOnce() -> io::Result<u32>,
     create: impl FnOnce(RulesetAttr) -> io::Result<T>,
     restrict: impl FnOnce(&T) -> io::Result<()>,
+) -> io::Result<LandlockState> {
+    install_mask_with(query, create, restrict, u64::MAX)
+}
+
+fn install_mask_with<T>(
+    query: impl FnOnce() -> io::Result<u32>,
+    create: impl FnOnce(RulesetAttr) -> io::Result<T>,
+    restrict: impl FnOnce(&T) -> io::Result<()>,
+    mask: u64,
 ) -> io::Result<LandlockState> {
     let abi = match query() {
         // Linux errno values, including when this logic is tested on another OS.
@@ -128,19 +198,26 @@ fn install_with<T>(
     if abi == 0 {
         return Err(io::Error::other("invalid Landlock ABI"));
     }
-    let fd = create(RulesetAttr {
-        handled_access_fs: rights(abi),
-    })?;
+    let handled_access_fs = rights(abi) & mask;
+    let fd = create(RulesetAttr { handled_access_fs })?;
     // Zero allow rules: every handled write right is denied everywhere. A
     // ruleset fd is closed on both success and failure by its unique owner.
     restrict(&fd)?;
-    Ok(LandlockState::Installed { abi })
+    Ok(LandlockState::Installed {
+        abi,
+        handled_access_fs,
+    })
 }
 
 #[cfg(target_os = "linux")]
 pub fn install_read_only() -> io::Result<LandlockState> {
+    install_read_only_mask(u64::MAX)
+}
+
+#[cfg(target_os = "linux")]
+fn install_read_only_mask(mask: u64) -> io::Result<LandlockState> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    install_with(
+    install_mask_with(
         || {
             // SAFETY: VERSION query has no attribute pointer or output storage.
             let n = unsafe {
@@ -177,7 +254,14 @@ pub fn install_read_only() -> io::Result<LandlockState> {
             }
             Ok(())
         },
+        mask,
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code, reason = "integration test injection only")]
+pub fn install_without_truncate_for_test() -> io::Result<LandlockState> {
+    install_read_only_mask(!TRUNCATE)
 }
 
 #[cfg(test)]
@@ -221,8 +305,33 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
-            assert_eq!(state, LandlockState::Installed { abi });
+            assert_eq!(
+                state,
+                LandlockState::Installed {
+                    abi,
+                    handled_access_fs: expected
+                }
+            );
         }
+        // 이것을 실패시키는 것: 설치에 사용한 mask 대신 ABI로 handled set을 보고하는 것.
+        let missing = install_mask_with(
+            || Ok(99),
+            |attr| {
+                assert_eq!(attr.handled_access_fs, 0x3ff2);
+                Ok(())
+            },
+            |_| Ok(()),
+            !TRUNCATE,
+        )
+        .unwrap();
+        assert_eq!(
+            missing,
+            LandlockState::Installed {
+                abi: 99,
+                handled_access_fs: 0x3ff2
+            }
+        );
+        assert!(!missing.covers_openat2_writes());
         for errno in [38, 95, 1, 22, 7, 5] {
             let result = install_with::<()>(
                 || Err(io::Error::from_raw_os_error(errno)),

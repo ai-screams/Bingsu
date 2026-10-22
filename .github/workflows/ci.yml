@@ -191,11 +191,29 @@ jobs:
           grep -F 'test runtime::x14_threads_and_status_survive_fork_is_refused ... ok' "$RUNNER_TEMP/filter-native.txt"
           grep -F 'test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok' "$RUNNER_TEMP/filter-native.txt"
       - if: runner.os == 'Linux'
+        name: Install native M3b trace tool
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends strace
+          strace --version
+      # 이것을 실패시키는 것: repository phase trace나 새 kernel 경계 시험을 생략하는 것.
+      - if: runner.os == 'Linux'
+        name: Repository read layer trace and acceptance
+        run: |
+          set -o pipefail
+          PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -B scripts/check_collector_filter.py --repository-trace
+          grep -F 'test runtime::openat2_never_bypasses_write_denial ... ok' "$RUNNER_TEMP/filter-native.txt"
+          grep -F 'test runtime::read_landlock_grants_only_selected_roots ... ok' "$RUNNER_TEMP/filter-native.txt"
+          grep -F 'test runtime::openat2_probe_precedes_read_layer ... ok' "$RUNNER_TEMP/filter-native.txt"
+          grep -F 'test runtime::resolver_is_selected_once_per_process ... ok' "$RUNNER_TEMP/filter-native.txt"
+          grep -F 'test runtime::linux_collection_floor_requires_capabilities ... ok' "$RUNNER_TEMP/filter-native.txt"
+          grep -F 'test runtime::repository_read_layer_cost_has_200_samples ... ok' "$RUNNER_TEMP/filter-native.txt"
+      - if: runner.os == 'Linux'
         name: Collector policy mutations, including real seal and fd rules
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_LANDLOCK: "1"
-        run: python3 scripts/check_collector_filter.py --mutations --runtime
+        run: PYTHONPYCACHEPREFIX=$(mktemp -d) python3 -B scripts/check_collector_filter.py --mutations --runtime
       - if: runner.os == 'Linux'
         name: Final filter refuses root limit and capability changes
         run: |
@@ -275,12 +293,6 @@ jobs:
       - name: Resource isolation; macOS interpose and descendant audit
         run: '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_no_spawn_macos.py -q -p no:cacheprovider'
 
-      - if: runner.os == 'Linux'
-        name: Install native M3b trace tool
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends strace
-          strace --version
       - name: Prepare M3b compiler-free product fixtures
         # Native Linux (x86_64/arm64) and macOS: prepare the current release
         # siblings after all builds; pytest below selects this exact pair.
@@ -306,6 +318,7 @@ jobs:
           grep -F 'PASSED bench/tests/test_collector_product.py::test_unavailable_normal_prompt_keeps_evidence_but_blocks_acceptance' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_acceptance_table_tests_exist_and_run_in_ci' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tools/fsbudget/tests/test_repository.py::test_repository_trace_checks_paths_counts_and_phases' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_ci_has_no_silent_acceptance_skip' "$RUNNER_TEMP/m3b-security.txt"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_prompt_trace_budget.py::test_collector_gate_keeps_role_and_kind_budgets_separate -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/m3b-trace-contract.txt"
           grep -F 'PASSED tests/shell/test_prompt_trace_budget.py::test_collector_gate_keeps_role_and_kind_budgets_separate' "$RUNNER_TEMP/m3b-trace-contract.txt"
@@ -375,6 +388,9 @@ jobs:
           path: |
             ${{ runner.temp }}/m3b-security.txt
             ${{ runner.temp }}/m3b-musl.txt
+            ${{ runner.temp }}/filter-native.txt
+            ${{ runner.temp }}/filter-musl.txt
+            target/b3-evidence/
           if-no-files-found: error
 
   test:

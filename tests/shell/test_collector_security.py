@@ -208,6 +208,7 @@ def assert_shell_settings(fields):
 LINUX_SECURITY_STEPS = {
     "Native collector kernel probes (required cells, no silent skip)",
     "Collector policy mutations, including real seal and fd rules",
+    "Repository read layer trace and acceptance",
     "Final filter refuses root limit and capability changes",
     "Native musl collector probes (both architectures)",
     "Independent gix 0.83.0 X-14 (locked, glibc and musl)",
@@ -764,7 +765,7 @@ def test_each_unprepared_shell_job_must_exclude_security(job):
         assert_ci_contract(texts)
 
 
-def assert_collector_roles(lines, fixture, collector=None, *, collector_debug_assertions=False):
+def assert_collector_roles(lines, fixture, collector=None, *, collector_debug_assertions=False, repository_probe=False):
     from fsbudget.attribute import collector_attribute
     from fsbudget.classify import split_args
     from fsbudget.formula import collector_success_expected
@@ -782,7 +783,9 @@ def assert_collector_roles(lines, fixture, collector=None, *, collector_debug_as
     worker = [c for c in calls if c.pid == entry.pid and c.index > entry.index]
     landlock = any(c.name == "landlock_restrict_self" and c.ret == "0" for c in worker)
     variant = "fixture" if collector is None else "shipped-debug" if collector_debug_assertions else "shipped-release"
-    want = {"collector": collector_success_expected(variant, landlock=landlock)}
+    openat2_succeeded = any(c.name == "openat2" and not c.ret.startswith("-1") for c in worker)
+    want = {"collector": collector_success_expected(variant, landlock=landlock,
+        repository_probe=repository_probe, openat2_succeeded=openat2_succeeded)}
     assert not check(observed.counts, want, "exact", ["collector"]), observed.counts
     assert {role for role in observed.counts} == {"front", "helper", "collector"}
 
@@ -791,6 +794,9 @@ def assert_collector_roles(lines, fixture, collector=None, *, collector_debug_as
     # arbitrary queries merely because their aggregate matches the formula.
     queries = [c for c in worker if c.name == "fcntl" and "F_GETFD" in c.args]
     expected_fds = ([4] if landlock else []) + [4, 1, 3, 5] if variant == "shipped-debug" else []
+    if repository_probe and variant == "shipped-debug":
+        # Probe opens root at 4, then openat2 dot at 6 (lock owns fd5).
+        expected_fds = ([4] if landlock else []) + [4] + ([6] if openat2_succeeded else []) + [4, 1, 3, 5]
     assert [int(split_args(c.args)[0].split("<")[0]) for c in queries] == expected_fds
     for query in queries:
         following = worker[worker.index(query) + 1]
@@ -806,7 +812,7 @@ def assert_collector_roles(lines, fixture, collector=None, *, collector_debug_as
 
 def assert_native_trace(lines, fixture, body_bytes):
     from fsbudget.gate import check
-    observed = assert_collector_roles(lines, fixture)
+    observed = assert_collector_roles(lines, fixture, repository_probe=True)
     # Validate the actual publisher window against the phase formula, rather
     # than reasserting the formula's own constants in a Rust fixture.
     from collections import Counter
@@ -929,7 +935,7 @@ def test_shipped_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
     report = json.loads(result.stdout.splitlines()[-1])
     assert report["reason"] == "Complete" and not report["published"] and report["reaped"], report
     assert_collector_roles(trace.read_text().splitlines(), fixture, shipped,
-                           collector_debug_assertions=preparation["collector_debug_assertions"])
+                           collector_debug_assertions=preparation["collector_debug_assertions"], repository_probe=True)
 
 
 # 이것을 실패시키는 것: 출하 경로 pin 대신 fixture exec를 수용하거나 쓰기 효과를 허용하는 것.

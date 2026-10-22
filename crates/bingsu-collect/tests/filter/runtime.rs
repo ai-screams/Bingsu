@@ -265,11 +265,11 @@ fn kernel_child() {
             assert!(matches!(state, landlock::LandlockState::Installed { .. }));
         }
         let after_landlock = std::time::Instant::now();
-        filter::install_bootstrap().unwrap();
+        filter::install_bootstrap(filter::Openat2Policy::Deny).unwrap();
         let after_initial = std::time::Instant::now();
         limits::lower_as_under_filter().unwrap();
         let before_final = std::time::Instant::now();
-        filter::seal_limits().unwrap();
+        filter::seal_limits(filter::Openat2Policy::Deny).unwrap();
         let end = std::time::Instant::now();
         println!(
             "B2 timing ns {} {} {} {} {}",
@@ -287,7 +287,7 @@ fn kernel_child() {
         } else {
             filter::AuditArch::X86_64
         };
-        let p = filter::program(other);
+        let p = filter::program(other, filter::Openat2Policy::Deny);
         let fp = libc::sock_fprog {
             len: p.len() as u16,
             filter: p.as_ptr().cast_mut(),
@@ -410,14 +410,22 @@ fn row_child() {
     limits::install_base().unwrap();
     limits::drop_capabilities().unwrap();
     nnp();
-    landlock::install_read_only().unwrap();
+    let state = landlock::install_read_only().unwrap();
+    let mode = if state.covers_openat2_writes() {
+        filter::Openat2Policy::WriteSetCovered
+    } else {
+        filter::Openat2Policy::Deny
+    };
+    if row.name == "openat2" {
+        assert!(state.covers_openat2_writes(), "BLOCKED: TRUNCATE required");
+    }
     if row.name == "exit" {
         exit_row_child(&row);
     }
-    filter::install_bootstrap().unwrap();
+    filter::install_bootstrap(mode).unwrap();
     limits::lower_as_under_filter().unwrap();
     if !row.condition.starts_with("bootstrap_") {
-        filter::seal_limits().unwrap();
+        filter::seal_limits(mode).unwrap();
     }
     println!("\nB2 ROW {} ENTER", row.probe);
     if row.name == "clone" {
@@ -462,8 +470,9 @@ fn exit_row_child(row: &filter::Row<'_>) -> ! {
     // Base limits, dropped capabilities, NNP and Landlock are inherited.
     // Prepare all allocation/formatting before fork; the child uses only raw
     // syscalls and _exit, never Rust locks, allocation or unwinding.
-    let bootstrap = filter::bootstrap_program(filter::AuditArch::native());
-    let final_filter = filter::program(filter::AuditArch::native());
+    let bootstrap =
+        filter::bootstrap_program(filter::AuditArch::native(), filter::Openat2Policy::Deny);
+    let final_filter = filter::program(filter::AuditArch::native(), filter::Openat2Policy::Deny);
     let programs = [&bootstrap, &final_filter].map(|p| libc::sock_fprog {
         len: p.len() as u16,
         filter: p.as_ptr().cast_mut(),
@@ -549,7 +558,7 @@ fn x16_all_mutations_are_denied_with_fsize_zero() {
     )
     .unwrap();
     let before = std::fs::metadata(&sentinel).unwrap();
-    let program = filter::program(filter::AuditArch::native());
+    let program = filter::program(filter::AuditArch::native(), filter::Openat2Policy::Deny);
     let bytes: Vec<_> = program
         .iter()
         .flat_map(|i| {
@@ -712,4 +721,444 @@ fn protection_installation_cost_has_200_samples() {
             col[99], col[189]
         );
     }
+}
+
+fn repository_case(case: &str) -> String {
+    use std::io::{BufRead, Write};
+    let dir = std::env::temp_dir().join(format!("b3-{}-{case}", std::process::id()));
+    std::fs::create_dir_all(dir.join("worktree/a")).unwrap();
+    for name in ["gitdir", "commondir", "outside", "home"] {
+        std::fs::create_dir(dir.join(name)).unwrap();
+        std::fs::write(dir.join(name).join("HEAD"), b"sentinel").unwrap();
+    }
+    std::fs::write(dir.join("worktree/HEAD"), b"sentinel").unwrap();
+    std::fs::write(dir.join("worktree/a/leaf"), b"EXTERNAL").unwrap();
+    std::os::unix::fs::symlink("../outside/HEAD", dir.join("worktree/escape")).unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "runtime::repository_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("BINGSU_B3_CASE", case)
+        .env("BINGSU_B3_PATH", &dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut report = String::new();
+    loop {
+        let mut line = String::new();
+        if output.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        if line.trim() == "B3 MOVE" {
+            std::fs::rename(dir.join("worktree/a"), dir.join("outside/a")).unwrap();
+            input.write_all(b"x").unwrap();
+        }
+        report.push_str(&line);
+    }
+    let status = child.wait().unwrap();
+    let sentinel = std::fs::read(dir.join("worktree/HEAD")).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(status.success(), "{case}: {report}");
+    assert_eq!(sentinel, b"sentinel");
+    assert!(
+        report.lines().any(|l| l == format!("B3 {case} PASS")),
+        "{report}"
+    );
+    report
+}
+
+// 이것을 실패시키는 것: 쓰기 집합 검사/설치를 없애거나 TRUNCATE 누락에도 openat2를 허용하는 것.
+#[test]
+fn openat2_never_bypasses_write_denial() {
+    for case in ["covered", "missing-truncate", "absent"] {
+        print!("{}", repository_case(case));
+    }
+}
+// 이것을 실패시키는 것: read layer 설치를 생략하거나 부모 root를 규칙에 더하는 것.
+#[test]
+fn read_landlock_grants_only_selected_roots() {
+    repository_case("roots");
+    repository_case("duplicate");
+}
+// 이것을 실패시키는 것: probe를 read layer 뒤로 옮겨 EACCES를 OnceLock에 저장하는 것.
+#[test]
+fn openat2_probe_precedes_read_layer() {
+    repository_case("ordered");
+    repository_case("reversed");
+}
+// 이것을 실패시키는 것: 개별 파일 EPERM 뒤 backend를 다시 탐침하는 것.
+#[test]
+fn resolver_is_selected_once_per_process() {
+    repository_case("once");
+}
+// 이것을 실패시키는 것: mount identity가 없어도 Ready/수집을 허용하는 것.
+#[test]
+fn linux_collection_floor_requires_capabilities() {
+    for case in ["no-mount", "no-pidfd", "no-close-range"] {
+        repository_case(case);
+    }
+}
+
+#[test]
+#[ignore = "isolated irreversible B3 child, invoked by its parent"]
+fn repository_child() {
+    use crate::{
+        meter::Meter,
+        safe_read::{self, Access, DiscoveryQuery, ReadCap, ReadError, Resolver},
+    };
+    use std::{
+        fs::File,
+        os::{
+            fd::{AsFd, AsRawFd},
+            unix::ffi::OsStrExt,
+        },
+        time::{Duration, Instant},
+    };
+    let case = std::env::var("BINGSU_B3_CASE").unwrap();
+    let dir = std::path::PathBuf::from(std::env::var_os("BINGSU_B3_PATH").unwrap());
+    // Bound failed mutations too; the parent never waits indefinitely.
+    // SAFETY: process-local alarm; no signal handler is installed for SIGALRM.
+    unsafe { libc::alarm(10) };
+    let mut meter = Meter::new(Instant::now() + Duration::from_secs(5));
+    if case.starts_with("no-") {
+        // Refuse exactly one real prerequisite before the normal startup path.
+        let nr = match case.as_str() {
+            "no-mount" => libc::SYS_statx,
+            "no-pidfd" => libc::SYS_pidfd_open,
+            _ => libc::SYS_close_range,
+        };
+        nnp();
+        let mut p = [
+            libc::sock_filter {
+                code: 0x20,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: 0x15,
+                jt: 0,
+                jf: 1,
+                k: nr as u32,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: filter::DENY,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: filter::ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: p.len() as u16,
+            filter: p.as_mut_ptr(),
+        };
+        assert_eq!(
+            raw(
+                libc::SYS_seccomp,
+                [1, 0, &program as *const _ as u64, 0, 0, 0]
+            ),
+            0
+        );
+        if case == "no-mount" {
+            protect();
+            assert!(matches!(Access::probe(&mut meter), Err(ReadError::Denied)));
+        } else {
+            assert!(sys::required_features_for_test().is_err());
+        }
+    } else if matches!(case.as_str(), "covered" | "missing-truncate" | "absent") {
+        let directory = File::open(dir.join("worktree")).unwrap();
+        // Positive O_TMPFILE control: filesystem support, independent of FSIZE.
+        // SAFETY: zero-initialized UAPI input record, including reserved bits.
+        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+        how.flags = (libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC) as u64;
+        how.mode = 0o600;
+        let tmp = raw(
+            libc::SYS_openat2,
+            [
+                directory.as_raw_fd() as u64,
+                c".".as_ptr() as u64,
+                &how as *const _ as u64,
+                24,
+                0,
+                0,
+            ],
+        );
+        assert!(
+            tmp >= 0,
+            "BLOCKED: filesystem must support O_TMPFILE: {}",
+            errno()
+        );
+        // SAFETY: fresh positive-control descriptor.
+        unsafe { libc::close(tmp as i32) };
+        limits::install_base().unwrap();
+        nnp();
+        let state = match case.as_str() {
+            "absent" => landlock::LandlockState::Absent,
+            "missing-truncate" => landlock::install_without_truncate_for_test().unwrap(),
+            _ => landlock::install_read_only().unwrap(),
+        };
+        if case != "absent" {
+            assert!(
+                matches!(state, landlock::LandlockState::Installed { abi: 3.., .. }),
+                "BLOCKED: ABI3 required"
+            );
+        }
+        let mode = if state.covers_openat2_writes() {
+            filter::Openat2Policy::WriteSetCovered
+        } else {
+            filter::Openat2Policy::Deny
+        };
+        filter::install_bootstrap(mode).unwrap();
+        limits::lower_as_under_filter().unwrap();
+        filter::seal_limits(mode).unwrap();
+        let selected = safe_read::resolver(&mut meter).unwrap();
+        assert_eq!(
+            selected,
+            if case == "covered" {
+                Resolver::Openat2
+            } else {
+                Resolver::Stepwise
+            }
+        );
+        println!("B3 write_state {state:?} resolver={selected:?}");
+        if case == "covered" {
+            how.flags = libc::O_RDONLY as u64;
+            how.mode = 0;
+            let file = raw(
+                libc::SYS_openat2,
+                [
+                    directory.as_raw_fd() as u64,
+                    c"HEAD".as_ptr() as u64,
+                    &how as *const _ as u64,
+                    24,
+                    0,
+                    0,
+                ],
+            );
+            assert!(file >= 0);
+            let mut bytes = [0u8; 8];
+            assert_eq!(
+                raw(
+                    libc::SYS_read,
+                    [file as u64, bytes.as_mut_ptr() as u64, 8, 0, 0, 0]
+                ),
+                8
+            );
+            assert_eq!(&bytes, b"sentinel");
+            // SAFETY: newly opened positive-control fd.
+            unsafe { libc::close(file as i32) };
+        }
+        // 이것을 실패시키는 것: write layer 설치 제거. TMPFILE을 먼저 검사해
+        // TRUNCATE 실패가 이 단언을 가리지 않으며 FSIZE=0만으로는 통과 못 한다.
+        for (flags, path, mode) in [
+            (libc::O_TMPFILE | libc::O_RDWR, c".", 0o600),
+            (libc::O_TRUNC, c"HEAD", 0),
+            (libc::O_CREAT | libc::O_WRONLY, c"created", 0o600),
+        ] {
+            how.flags = (flags | libc::O_CLOEXEC) as u64;
+            how.mode = mode;
+            denied(
+                libc::SYS_openat2,
+                [
+                    directory.as_raw_fd() as u64,
+                    path.as_ptr() as u64,
+                    &how as *const _ as u64,
+                    24,
+                    0,
+                    0,
+                ],
+                if case == "covered" {
+                    libc::EACCES
+                } else {
+                    libc::EPERM
+                },
+            );
+        }
+        assert_eq!(
+            std::fs::read(dir.join("worktree/HEAD")).unwrap(),
+            b"sentinel"
+        );
+    } else {
+        protect();
+        let mut roots = Vec::new();
+        for name in ["worktree", "gitdir", "commondir"] {
+            roots.push(
+                safe_read::acquire(
+                    dir.join(name).as_os_str().as_bytes(),
+                    DiscoveryQuery::default(),
+                    &mut meter,
+                )
+                .unwrap()
+                .select_cwd()
+                .unwrap(),
+            );
+        }
+        let root_fds: Vec<_> = roots.iter().map(|r| r.read_rule_fd()).collect();
+        let cap = ReadCap {
+            bytes: 64,
+            single_link: true,
+        };
+        if case == "trace" || case == "trace-stepwise" {
+            println!("\nB3_PHASE probe");
+            let mut access = Access::probe(&mut meter).unwrap();
+            println!("B3_PHASE end");
+            if case == "trace-stepwise" {
+                access = Access::stage_a_only();
+            }
+            println!("B3_PHASE read-layer");
+            access
+                .restrict_to(&roots.iter().collect::<Vec<_>>(), &mut meter)
+                .unwrap();
+            println!("B3_PHASE end");
+            println!("B3_PHASE content");
+            assert_eq!(
+                safe_read::read(&roots[0], b"HEAD", cap, &access, &mut meter).unwrap(),
+                b"sentinel"
+            );
+            assert_eq!(roots[0].readonly(&mut meter).unwrap(), Some(false));
+            println!("B3_PHASE end");
+        } else if case == "reversed" {
+            landlock::restrict_reads(&root_fds).unwrap();
+            assert!(matches!(Access::probe(&mut meter), Err(ReadError::Denied)));
+            let before = meter.counts;
+            assert!(matches!(Access::probe(&mut meter), Err(ReadError::Denied)));
+            assert_eq!(meter.counts, before); // the cached EACCES would block stage A
+        } else if case == "ordered" {
+            let mut access = Access::stage_a_only();
+            access
+                .restrict_to(&roots.iter().collect::<Vec<_>>(), &mut meter)
+                .unwrap();
+            Access::probe(&mut meter).unwrap(); // root probe was cached before confinement
+            assert_eq!(
+                safe_read::read(&roots[0], b"HEAD", cap, &access, &mut meter).unwrap(),
+                b"sentinel"
+            );
+        } else if case == "once" {
+            let choice = safe_read::ResolverChoice::default();
+            let access = Access::probe_with(&choice, &mut meter).unwrap();
+            meter.openat2_errors.push_back(libc::EPERM);
+            assert_eq!(
+                safe_read::read(&roots[0], b"HEAD", cap, &access, &mut meter),
+                Err(ReadError::Denied)
+            );
+            let before = meter.counts;
+            assert_eq!(choice.get(&mut meter), Ok(Resolver::Openat2));
+            assert_eq!(meter.counts, before);
+        } else {
+            let slash = File::open("/").unwrap();
+            assert!(landlock::restrict_reads(&[slash.as_fd()]).is_err());
+            assert!(landlock::restrict_reads(&[]).is_err());
+            assert!(landlock::restrict_reads(&[root_fds[0]; 4]).is_err());
+            let held = File::open(dir.join("worktree/a")).unwrap();
+            let mut access = Access::probe(&mut meter).unwrap();
+            let start = Instant::now();
+            let proof = if case == "duplicate" {
+                landlock::restrict_reads(&[root_fds[0], root_fds[0]]).unwrap()
+            } else {
+                landlock::restrict_reads(&root_fds).unwrap()
+            };
+            let elapsed = start.elapsed().as_nanos();
+            assert_eq!(proof.rule_count(), if case == "duplicate" { 1 } else { 3 });
+            access.landlock_reads_installed(proof);
+            for root in roots.iter().take(if case == "duplicate" { 1 } else { 3 }) {
+                assert_eq!(
+                    safe_read::read(root, b"HEAD", cap, &access, &mut meter).unwrap(),
+                    b"sentinel"
+                );
+            }
+            for name in ["outside", "home"] {
+                assert_eq!(
+                    File::open(dir.join(name).join("HEAD"))
+                        .unwrap_err()
+                        .raw_os_error(),
+                    Some(libc::EACCES)
+                );
+            }
+            assert!(safe_read::read(&roots[0], b"escape", cap, &access, &mut meter).is_err());
+            if case == "duplicate" {
+                assert_eq!(
+                    File::open(dir.join("gitdir/HEAD"))
+                        .unwrap_err()
+                        .raw_os_error(),
+                    Some(libc::EACCES)
+                );
+            }
+            println!("\nB3 MOVE");
+            let mut ack = [0u8];
+            assert_eq!(
+                raw(libc::SYS_read, [0, ack.as_mut_ptr() as u64, 1, 0, 0, 0]),
+                1
+            );
+            denied(
+                libc::SYS_openat,
+                [
+                    held.as_raw_fd() as u64,
+                    c"leaf".as_ptr() as u64,
+                    (libc::O_RDONLY | libc::O_CLOEXEC) as u64,
+                    0,
+                    0,
+                    0,
+                ],
+                libc::EACCES,
+            );
+            println!("B3 read_layer_ns {elapsed} external_reads=0");
+        }
+    }
+    println!("\nB3 {case} PASS");
+    // SAFETY: terminate the isolated child without returning to libtest.
+    unsafe { libc::_exit(0) };
+}
+
+// 이것을 실패시키는 것: fixture에서 read/map/query를 더 하거나 단계 경계를 섞는 것.
+#[test]
+fn repository_trace_has_exact_effects() {
+    for case in ["trace", "trace-stepwise"] {
+        print!("{}", repository_case(case));
+    }
+}
+
+// 이것을 실패시키는 것: read ruleset 비용 표본을 누락하거나 설치를 생략하는 것.
+#[test]
+fn repository_read_layer_cost_has_200_samples() {
+    let mut samples = Vec::new();
+    for _ in 0..=199 {
+        let report = repository_case("roots");
+        let value: u128 = report
+            .lines()
+            .find_map(|l| l.strip_prefix("B3 read_layer_ns "))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(value > 0);
+        println!("B3 raw_read_layer_ns {value}");
+        samples.push(value);
+    }
+    assert_eq!(samples.len(), 200);
+    samples.sort();
+    let mean = samples.iter().sum::<u128>() as f64 / 200.0;
+    let variance = samples
+        .iter()
+        .map(|n| (*n as f64 - mean).powi(2))
+        .sum::<f64>()
+        / 200.0;
+    println!(
+        "B3 read_layer_ns samples=200 p50={} p95={} variance={variance}",
+        samples[99], samples[189]
+    );
 }
