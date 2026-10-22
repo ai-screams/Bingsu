@@ -2548,9 +2548,18 @@ fn admission_eventually_progresses_after_budget_yields() {
 // 이것을 실패시키는 것: 512 ops·4ms 예약을 줄이거나 전체 마감 뒤 checkpoint I/O를 시작하는 것.
 #[test]
 fn gc_checkpoint_reserve_is_bounded() {
+    gc_checkpoint_reserve_case(None);
+    gc_checkpoint_reserve_case(Some(1));
+}
+
+fn gc_checkpoint_reserve_case(block: Option<usize>) {
     use collection_gc::GcStop;
     let f = Fixture::new("checkpoint-reserve");
     seed_inventory(&f, 12);
+    // Native listing order/cookies and metadata checks differ across OSes.
+    // One-entry blocks also exercise an in-work save on macOS before the
+    // final checkpoint hook. Keep the backend through the whole inventory.
+    let _reader = block.map(ordinal_reader);
     // Start inventory through admission, then exercise its actual GC checkpoint.
     let _ = CollectionStore::fixture_admit(
         &f.context,
@@ -2572,6 +2581,8 @@ fn gc_checkpoint_reserve_is_bounded() {
     );
     assert!(r.checkpoint_ops > 0 && r.checkpoint_ops <= 512);
     assert!(r.ops <= 1_200);
+    let catalog = f.base.join(".collections.catalog");
+    let before = fs::read(&catalog).unwrap();
     GC_CLOCK.with(|clock| clock.set((16_000_000, 0)));
     let r = collection_gc::fixture_timed_reclaim(
         &f.context,
@@ -2582,14 +2593,19 @@ fn gc_checkpoint_reserve_is_bounded() {
     )
     .unwrap();
     assert_eq!((r.stop, r.ops), (GcStop::YieldTime, 0));
-    let before = fs::read(f.base.join(".collections.catalog")).unwrap();
+    // 이것을 실패시키는 것: 첫 open에서 YieldTime이어도 catalog를 바꾸는 것.
+    assert_eq!(fs::read(&catalog).unwrap(), before);
     // Reach inventory first, cross its 16ms boundary during work, then
     // cross 20ms at checkpoint entry (not at the initial catalog open).
-    GC_CLOCK.with(|clock| clock.set((0, 100_000)));
-    let reached = std::rc::Rc::new(std::cell::Cell::new(false));
-    let observed = reached.clone();
+    let step = if block.is_some() { 50_000 } else { 100_000 };
+    GC_CLOCK.with(|clock| clock.set((0, step)));
+    let at_deadline = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed = at_deadline.clone();
+    let observed_catalog = catalog.clone();
     collection_gc::fixture_checkpoint_hook(Box::new(move || {
-        observed.set(true);
+        // Inventory saves each listing/entry batch under the 16ms work cap.
+        // Those writes are allowed: only I/O after this boundary is forbidden.
+        *observed.borrow_mut() = Some(fs::read(&observed_catalog).unwrap());
         GC_CLOCK.with(|clock| {
             assert!(clock.get().0 >= 16_000_000);
             clock.set((20_000_001, 0));
@@ -2603,14 +2619,28 @@ fn gc_checkpoint_reserve_is_bounded() {
         gc_tick,
     )
     .unwrap();
-    assert!(reached.get(), "must exercise checkpoint() after doing work");
+    let at_deadline = at_deadline.borrow();
+    let at_deadline = at_deadline
+        .as_ref()
+        .expect("must exercise checkpoint() after doing work");
+    // 이것을 실패시키는 것: 호출 전 catalog를 마감 시점의 비교 기준으로 사용하는 것.
+    if block.is_some() {
+        assert_ne!(*at_deadline, before, "must persist an earlier work batch");
+    }
     assert!(r.ops > 0);
     assert_eq!((r.stop, r.checkpoint_ops), (GcStop::YieldTime, 0));
     assert!(!r.checkpoint_saved);
-    assert_eq!(
-        fs::read(f.base.join(".collections.catalog")).unwrap(),
-        before
+    // 이것을 실패시키는 것: checkpoint 모드에서 20ms 검사를 우회해 새 I/O를 허용하는 것.
+    assert_eq!(fs::read(&catalog).unwrap(), *at_deadline);
+    eprintln!(
+        "GC_DEADLINE block={block:?} work_ops={} checkpoint_ops={} saved_before_deadline={}",
+        r.ops,
+        r.checkpoint_ops,
+        *at_deadline != before
     );
+    if block.is_some() {
+        return;
+    }
     let cold = std::time::Instant::now();
     collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
     let cold_ns = cold.elapsed().as_nanos();
