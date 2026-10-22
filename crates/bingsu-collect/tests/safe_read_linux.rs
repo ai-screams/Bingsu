@@ -2,6 +2,10 @@
 //! --exact --ignored --nocapture --test-threads=1. Landlock is irreversible.
 //! Two-uid parent needs root (SETUID/SETGID/CHOWN); no privileged mount required.
 #![cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/landlock.rs"]
+mod landlock;
 #[allow(dead_code)]
 #[path = "../src/meter.rs"]
 mod meter;
@@ -13,10 +17,7 @@ use safe_read::{Access, DiscoveryQuery, Guarantee, ReadCap, ReadError as E};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    os::{
-        fd::AsRawFd,
-        unix::{ffi::OsStrExt, fs::PermissionsExt, process::CommandExt},
-    },
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -46,7 +47,8 @@ fn root(path: &std::path::Path, meter: &mut Meter) -> safe_read::Root {
         meter,
     )
     .unwrap()
-    .cwd
+    .select_cwd()
+    .unwrap()
 }
 fn helper(path: &std::path::Path, mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -90,11 +92,15 @@ fn linux_landlock_backstop_blocks_held_fd_after_coarse_rename() {
     let root = root(&path.join("root"), &mut budget);
     let mut access = Access::stage_a_only();
     assert_eq!(access.guarantee(), None);
-    install_read_layer(&root);
-    // SAFETY: the preceding successful syscall installed READ_FILE|READ_DIR
-    // for exactly this held root on the current thread, before any content open.
-    unsafe { access.landlock_reads_installed() };
+    let proof = install_read_layer(&root);
+    access.landlock_reads_installed(proof);
     assert_eq!(access.guarantee(), Some(Guarantee::LandlockReadLayer));
+    // 이것을 실패시키는 것: READ_DIR handled right를 누락하는 것.
+    assert_eq!(
+        fs::read_dir(&path).unwrap_err().raw_os_error(),
+        Some(libc::EACCES)
+    );
+    assert!(fs::read_dir(path.join("root")).is_ok());
     assert_eq!(
         safe_read::read(&root, b"HEAD", cap(), &access, &mut budget).unwrap(),
         b"inside"
@@ -127,53 +133,13 @@ fn linux_landlock_backstop_blocks_held_fd_after_coarse_rename() {
     // The unconfined child cleans up; this thread cannot list outside root.
 }
 
-fn install_read_layer(root: &safe_read::Root) {
-    #[repr(C)]
-    struct Rules {
-        handled: u64,
-    }
-    #[repr(C, packed)]
-    struct Beneath {
-        allowed: u64,
-        parent: i32,
-    }
-    let rights = (1 << 2) | (1 << 3); // READ_FILE | READ_DIR, ABI 1
-    let rules = Rules { handled: rights };
-    // SAFETY: valid Linux UAPI record, fixed flags; creates a new ruleset fd.
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            &rules,
-            std::mem::size_of::<Rules>(),
-            0u32,
-        )
-    };
-    assert!(
-        fd >= 0,
-        "BLOCKED: Landlock ruleset: {}",
-        std::io::Error::last_os_error()
-    );
-    let beneath = Beneath {
-        allowed: rights,
-        parent: root.read_rule_fd().as_raw_fd(),
-    };
-    assert_eq!(
-        // SAFETY: live root/ruleset fds and valid packed UAPI record.
-        unsafe { libc::syscall(libc::SYS_landlock_add_rule, fd as i32, 1u32, &beneath, 0u32) },
-        0
-    );
+fn install_read_layer(root: &safe_read::Root) -> landlock::ReadLayerInstalled {
     assert_eq!(
         // SAFETY: monotonically removes privilege from this disposable child.
         unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) },
         0
     );
-    assert_eq!(
-        // SAFETY: live ruleset fd; NNP already set; restricts current test thread.
-        unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd as i32, 0u32) },
-        0
-    );
-    // SAFETY: this test uniquely owns the successful ruleset fd.
-    unsafe { libc::close(fd as i32) };
+    landlock::restrict_reads(&[root.read_rule_fd()]).expect("BLOCKED: Landlock read layer required")
 }
 
 // 이것을 실패시키는 것: root가 아닌 이동한 fd에서 openat2를 호출하거나 BENEATH를 생략하는 것.
@@ -255,6 +221,17 @@ fn linux_two_uid_victim_canaries_are_unreadable() {
     let root = root(&path.join("root"), &mut budget);
     let access = Access::probe(&mut budget).unwrap();
     assert_eq!(access.guarantee(), Some(Guarantee::Openat2));
+    // 이것을 실패시키는 것: 외부 metadata root의 동일 uid 조건을 제거하는 것.
+    assert!(matches!(
+        safe_read::acquire(
+            path.join("private").as_os_str().as_bytes(),
+            DiscoveryQuery::default(),
+            &mut budget
+        )
+        .unwrap()
+        .select_metadata(&root, &mut budget),
+        Err(E::Denied)
+    ));
     for dir in ["private", "sticky"] {
         for suffix in ["rename", "hard"] {
             assert_eq!(
@@ -338,4 +315,24 @@ fn linux_attacker_child() {
             .unwrap();
         }
     }
+}
+
+// 이것을 실패시키는 것: read-layer rule 추가 실패를 무시하고 성공 증거를 발급하는 것.
+#[test]
+fn linux_read_layer_failure_cannot_grant_access() {
+    use std::os::fd::AsFd;
+    let file = fs::File::open("/dev/null").unwrap();
+    // READ_DIR on a non-directory must fail before restrict_self; no NNP or
+    // irreversible restriction is needed for this error-path test.
+    let result = landlock::restrict_reads(&[file.as_fd()]);
+    let error = match result {
+        Ok(_) => panic!("failed rule must never mint installation evidence"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.raw_os_error(),
+        Some(libc::EINVAL),
+        "BLOCKED if Landlock unavailable"
+    );
+    assert_eq!(Access::stage_a_only().guarantee(), None);
 }

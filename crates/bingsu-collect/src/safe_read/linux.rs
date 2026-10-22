@@ -47,12 +47,7 @@ pub(super) fn open(
     })
 }
 
-fn open_raw(
-    root: RawFd,
-    path: &std::ffi::CStr,
-    is_dir: bool,
-    meter: &mut Meter,
-) -> Result<Fd, ReadError> {
+fn open_how(is_dir: bool) -> libc::open_how {
     // SAFETY: the UAPI requires zero initialization, including future fields.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
     how.flags = (libc::O_RDONLY
@@ -60,6 +55,16 @@ fn open_raw(
         | libc::O_CLOEXEC
         | if is_dir { libc::O_DIRECTORY } else { 0 }) as u64;
     how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_XDEV;
+    how
+}
+
+fn open_raw(
+    root: RawFd,
+    path: &std::ffi::CStr,
+    is_dir: bool,
+    meter: &mut Meter,
+) -> Result<Fd, ReadError> {
+    let how = open_how(is_dir);
     let lease = meter.lease()?;
     let mut interrupted = 0;
     let mut changed = 0;
@@ -150,7 +155,7 @@ fn mount_result(result: Result<(u32, u64), i32>) -> Result<[u64; 2], ReadError> 
 }
 
 pub(super) fn entries(
-    dir: &Directory,
+    root: &Root,
     raw_limit: u32,
     meter: &mut Meter,
 ) -> Result<Listing, ReadError> {
@@ -169,7 +174,7 @@ pub(super) fn entries(
             unsafe {
                 libc::syscall(
                     libc::SYS_getdents64,
-                    dir.root.fd.as_raw_fd(),
+                    root.fd.as_raw_fd(),
                     buffer.as_mut_ptr(),
                     buffer.len(),
                 ) as isize
@@ -222,4 +227,50 @@ pub(super) fn entries(
 #[cfg(test)]
 pub fn probe_for_test(meter: &mut Meter) -> Result<Resolver, ReadError> {
     probe(meter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // 이것을 실패시키는 것: production open_how에서 RESOLVE_NO_MAGICLINKS를 빼는 것.
+    #[test]
+    fn no_magiclinks_is_enforced_independently() {
+        use std::fs::File;
+        // BENEATH currently also blocks magic links, and NO_XDEV blocks fd
+        // jumps. Isolate this one production flag so neither masks its removal.
+        // The relative magic link really exists beneath the held proc fd dir.
+        let dir = File::open("/proc/self/fd").unwrap();
+        let target = File::open("/dev/null").unwrap();
+        let name = CString::new(target.as_raw_fd().to_string()).unwrap();
+        let mut how = open_how(false);
+        how.resolve &= !(libc::RESOLVE_BENEATH | libc::RESOLVE_NO_XDEV);
+        let attempt = |how: &libc::open_how| {
+            // SAFETY: live dirfd, terminated relative filename, valid open_how.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    how,
+                    std::mem::size_of_val(how),
+                )
+            };
+            if fd < 0 {
+                return Err(errno());
+            }
+            // SAFETY: successful syscall yielded a fresh descriptor.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+        };
+        let result = attempt(&how);
+        assert_eq!(
+            result.err(),
+            Some(libc::ELOOP),
+            "BLOCKED if openat2 unavailable"
+        );
+        how.resolve = 0;
+        assert!(
+            attempt(&how).is_ok(),
+            "positive control must follow the real magic link"
+        );
+    }
 }

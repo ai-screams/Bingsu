@@ -31,6 +31,70 @@ pub enum LandlockState {
     Absent,
 }
 
+/// Only a successful read-layer installation can construct this evidence.
+/// Neither ABI detection nor the write-deny installer returns it. !Send/!Sync.
+#[cfg(target_os = "linux")]
+pub struct ReadLayerInstalled {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+/// B3 supplies exactly the validated content root fds, after the openat2 probe.
+/// This entry point is not called by the product worker until B3 is wired.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn restrict_reads(roots: &[std::os::fd::BorrowedFd<'_>]) -> io::Result<ReadLayerInstalled> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    #[repr(C, packed)]
+    struct Beneath {
+        allowed: u64,
+        parent: i32,
+    }
+    let rights = (1 << 2) | (1 << 3); // READ_FILE | READ_DIR, ABI 1
+    let rules = RulesetAttr {
+        handled_access_fs: rights,
+    };
+    // SAFETY: initialized ABI 1 record; fixed flags; returns a new descriptor.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &rules,
+            std::mem::size_of::<RulesetAttr>(),
+            0u32,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful create returned a fresh, uniquely owned descriptor.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    for root in roots {
+        let beneath = Beneath {
+            allowed: rights,
+            parent: root.as_raw_fd(),
+        };
+        // SAFETY: live root/ruleset fds and initialized packed UAPI record.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                fd.as_raw_fd(),
+                1u32,
+                &beneath,
+                0u32,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // SAFETY: live ruleset fd; startup has set NNP; restricts this thread.
+    if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd.as_raw_fd(), 0u32) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ReadLayerInstalled {
+        _thread: std::marker::PhantomData,
+    })
+}
+
 fn rights(abi: u32) -> u64 {
     let mut mask = WRITE_FILE
         | REMOVE_DIR

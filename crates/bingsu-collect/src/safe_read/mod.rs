@@ -1,5 +1,12 @@
 //! Descriptor capabilities for hostile repository input. Not wired into the
 //! product worker until its repository sandbox is installed.
+//!
+//! Without kernel confinement, stage A opens only fixed, single components
+//! with O_NOFOLLOW from held, typed directories. Symlink means unknown, never
+//! a general walk. This reduced mode is NOT race-free: a held directory can
+//! move before its next fixed child is opened. Zero outside reads under rename
+//! races is an acceptance criterion only when a kernel guarantee exists.
+//! Discovery ancestors grant listing only; content roots require selection.
 use std::{
     ffi::CString,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -86,8 +93,12 @@ impl Access {
     }
 
     pub fn probe(meter: &mut Meter) -> Result<Self, ReadError> {
+        Self::probe_with(&SELECTED, meter)
+    }
+
+    pub fn probe_with(choice: &ResolverChoice, meter: &mut Meter) -> Result<Self, ReadError> {
         let mut access = Self::stage_a_only();
-        access.backend = resolver(meter)?;
+        access.backend = choice.get(meter)?;
         if access.backend == Resolver::Openat2 {
             access.guarantee = Some(Guarantee::Openat2);
         }
@@ -108,14 +119,10 @@ impl Access {
         self.guarantee.ok_or(ReadError::StageAOnly).map(|_| ())
     }
 
-    /// B3 hook; false by default, no environment/config switch can enable it.
-    ///
-    /// # Safety
-    /// The calling thread must have successfully installed READ_FILE|READ_DIR
-    /// Landlock rules for exactly the selected roots, before content opens.
-    /// Do not call on ABI detection, write-only rules, or a failed installation.
+    /// B3 hook; only landlock's successful read-layer installer can mint proof.
+    /// Both proof and Access stay on the installing thread. Default is false.
     #[cfg(target_os = "linux")]
-    pub unsafe fn landlock_reads_installed(&mut self) {
+    pub fn landlock_reads_installed(&mut self, _proof: crate::landlock::ReadLayerInstalled) {
         if self.guarantee.is_none() {
             self.guarantee = Some(Guarantee::LandlockReadLayer);
         }
@@ -159,6 +166,17 @@ pub fn read_stage_a(
     access: &Access,
     meter: &mut Meter,
 ) -> Result<Vec<u8>, ReadError> {
+    let operation = match file {
+        StageAFile::RebaseMergeHeadName => Some(StageADirectory::RebaseMerge),
+        StageAFile::RebaseApplyHeadName => Some(StageADirectory::RebaseApply),
+        _ => None,
+    };
+    if access.guarantee().is_none() {
+        if let Some(dir) = operation {
+            return directory_stage_a(root, dir, access, meter)?.read(file, access, meter);
+        }
+        return read_stage_a_component(root, file.path(), meter);
+    }
     read_inner(
         root,
         file.path(),
@@ -171,36 +189,112 @@ pub fn read_stage_a(
     )
 }
 
-/// Fixed discovery/operation directories; the returned Root grants no listing
-/// or arbitrary reads without a separate full Access.
-#[derive(Clone, Copy, Debug)]
+fn read_stage_a_component(
+    root: &Root,
+    name: &[u8],
+    meter: &mut Meter,
+) -> Result<Vec<u8>, ReadError> {
+    let Opened { fd, metadata, .. } = walk::one_component(root, name, false, meter)?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(ReadError::Special);
+    }
+    ReadFile { fd, metadata }.read(
+        ReadCap {
+            bytes: 65_536,
+            single_link: true,
+        },
+        meter,
+    )
+}
+
+/// Fixed discovery/operation directories. These cannot become content Roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StageADirectory {
     Git,
     RebaseMerge,
     RebaseApply,
 }
 
-pub fn directory_stage_a(
-    root: &Root,
+pub struct StageADir<'a> {
+    root: Root,
+    selected: &'a Root,
+    kind: StageADirectory,
+}
+
+impl StageADir<'_> {
+    pub fn read(
+        &self,
+        file: StageAFile,
+        access: &Access,
+        meter: &mut Meter,
+    ) -> Result<Vec<u8>, ReadError> {
+        if access.guarantee().is_some() {
+            // A moved held child must never become a new confinement root.
+            let prefix = match (self.kind, file) {
+                (StageADirectory::Git, _) => b".git/".as_slice(),
+                (StageADirectory::RebaseMerge, StageAFile::RebaseMergeHeadName)
+                | (StageADirectory::RebaseApply, StageAFile::RebaseApplyHeadName) => b"".as_slice(),
+                _ => return Err(ReadError::Denied),
+            };
+            let size = prefix.len() + file.path().len();
+            meter.allocation(size)?;
+            let mut path = Vec::new();
+            path.try_reserve_exact(size).map_err(|_| ReadError::Limit)?;
+            path.extend_from_slice(prefix);
+            path.extend_from_slice(file.path());
+            return read_inner(
+                self.selected,
+                &path,
+                ReadCap {
+                    bytes: 65_536,
+                    single_link: true,
+                },
+                access,
+                meter,
+            );
+        }
+        let name = match (self.kind, file) {
+            (StageADirectory::RebaseMerge, StageAFile::RebaseMergeHeadName)
+            | (StageADirectory::RebaseApply, StageAFile::RebaseApplyHeadName) => {
+                b"head-name".as_slice()
+            }
+            (StageADirectory::Git, _) => return read_stage_a(&self.root, file, access, meter),
+            _ => return Err(ReadError::Denied),
+        };
+        read_stage_a_component(&self.root, name, meter)
+    }
+}
+
+pub fn directory_stage_a<'a>(
+    root: &'a Root,
     dir: StageADirectory,
     access: &Access,
     meter: &mut Meter,
-) -> Result<Root, ReadError> {
+) -> Result<StageADir<'a>, ReadError> {
     let path: &[u8] = match dir {
         StageADirectory::Git => b".git",
         StageADirectory::RebaseMerge => b"rebase-merge",
         StageADirectory::RebaseApply => b"rebase-apply",
     };
-    let Opened { fd, identity, .. } = resolve(root, path, access, true, false, meter)?;
-    Ok(Root { fd, identity })
+    let Opened { fd, identity, .. } = if access.guarantee().is_none() {
+        walk::one_component(root, path, true, meter)?
+    } else {
+        resolve(root, path, access, true, false, meter)?
+    };
+    Ok(StageADir {
+        root: Root { fd, identity },
+        selected: root,
+        kind: dir,
+    })
 }
 
 /// Selected once, before repository acquisition. An individual denied open
 /// never changes this choice. B3 calls this only under the installed protection.
 pub fn resolver(meter: &mut Meter) -> Result<Resolver, ReadError> {
-    static SELECTED: ResolverChoice = ResolverChoice(std::sync::OnceLock::new());
     SELECTED.get(meter)
 }
+
+static SELECTED: ResolverChoice = ResolverChoice(std::sync::OnceLock::new());
 
 #[derive(Default)]
 pub struct ResolverChoice(std::sync::OnceLock<Result<Resolver, ReadError>>);
@@ -232,11 +326,120 @@ pub struct DiscoveryQuery {
 }
 
 pub struct Discovery {
-    pub cwd: Root,
+    cwd: Root,
     /// Oldest to newest, at most 32; never reopen ".." for discovery.
-    pub ancestors: Vec<Root>,
-    pub logical: bool,
-    pub query: DiscoveryQuery,
+    ancestors: Vec<AncestorDir>,
+    logical: bool,
+    query: DiscoveryQuery,
+    slash: Identity,
+}
+
+/// Names only: no conversion, raw fd, stage-A or content-read API.
+pub struct AncestorDir {
+    root: Root,
+}
+
+impl AncestorDir {
+    pub fn entries(&self, raw_limit: u32, meter: &mut Meter) -> Result<Listing, ReadError> {
+        entries_root(&self.root, raw_limit.min(256), meter)
+    }
+}
+
+impl Discovery {
+    pub fn ancestors(&self) -> &[AncestorDir] {
+        &self.ancestors
+    }
+    pub fn logical(&self) -> bool {
+        self.logical
+    }
+    pub fn query(&self) -> DiscoveryQuery {
+        self.query
+    }
+
+    fn validate(&self, root: &Root) -> Result<(), ReadError> {
+        if root.identity == self.slash {
+            return Err(ReadError::Escape);
+        }
+        Ok(())
+    }
+
+    /// The request's cwd is the only content root outside a repository.
+    pub fn select_cwd(self) -> Result<Root, ReadError> {
+        self.validate(&self.cwd)?;
+        Ok(self.cwd)
+    }
+
+    /// Select an already-held repository ancestor, never an arbitrary read
+    /// root. C5 still parses a gitfile and applies repository trust policy.
+    pub fn select_worktree(
+        mut self,
+        levels: usize,
+        access: &Access,
+        meter: &mut Meter,
+    ) -> Result<Root, ReadError> {
+        let root = if levels == 0 {
+            &self.cwd
+        } else {
+            &self
+                .ancestors
+                .get(
+                    self.ancestors
+                        .len()
+                        .checked_sub(levels)
+                        .ok_or(ReadError::Escape)?,
+                )
+                .ok_or(ReadError::Escape)?
+                .root
+        };
+        self.validate(root)?;
+        same_mount(root.identity, self.cwd.identity)?;
+        let marker = if access.guarantee().is_none() {
+            walk::one_component(root, b".git", false, meter)?
+        } else {
+            match resolve(root, b".git", access, true, false, meter) {
+                Ok(dir) => dir,
+                Err(ReadError::Missing) => resolve(root, b".git", access, false, true, meter)?,
+                Err(error) => return Err(error),
+            }
+        };
+        let kind = marker.metadata.st_mode & libc::S_IFMT;
+        if kind != libc::S_IFDIR && (kind != libc::S_IFREG || marker.metadata.st_nlink != 1) {
+            return Err(ReadError::Special);
+        }
+        if levels == 0 {
+            Ok(self.cwd)
+        } else {
+            Ok(self
+                .ancestors
+                .swap_remove(self.ancestors.len() - levels)
+                .root)
+        }
+    }
+
+    /// For an absolute gitdir/commondir pointer acquired separately by C5.
+    /// Only this directory, never its parents, becomes a content capability.
+    pub fn select_metadata(self, anchor: &Root, meter: &mut Meter) -> Result<Root, ReadError> {
+        self.validate(&self.cwd)?;
+        same_mount(self.cwd.identity, anchor.identity)?;
+        let metadata = stat(self.cwd.fd.as_raw_fd(), meter)?;
+        // SAFETY: reads the current process identity only.
+        if metadata.st_uid != unsafe { libc::geteuid() } {
+            return Err(ReadError::Denied);
+        }
+        Ok(self.cwd)
+    }
+
+    #[cfg(test)]
+    pub fn unchecked_cwd_for_test(self) -> Root {
+        self.cwd
+    }
+}
+
+fn same_mount(found: Identity, root: Identity) -> Result<(), ReadError> {
+    if found.device != root.device || found.mount != root.mount {
+        return Err(ReadError::Escape);
+    }
+    Ok(())
 }
 
 struct Fd {
@@ -476,13 +679,17 @@ pub fn unchecked_backend_for_test(backend: Resolver) -> Access {
 /// Names omit those two entries regardless of order; complete requires observing EOF
 /// before the cap is reached, so an exact-cap listing remains incomplete.
 pub fn entries(dir: &Directory, raw_limit: u32, meter: &mut Meter) -> Result<Listing, ReadError> {
+    entries_root(&dir.root, raw_limit, meter)
+}
+
+fn entries_root(root: &Root, raw_limit: u32, meter: &mut Meter) -> Result<Listing, ReadError> {
     #[cfg(target_os = "linux")]
     {
-        linux::entries(dir, raw_limit, meter)
+        linux::entries(root, raw_limit, meter)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (dir, raw_limit, meter);
+        let _ = (root, raw_limit, meter);
         Err(ReadError::Denied)
     }
 }

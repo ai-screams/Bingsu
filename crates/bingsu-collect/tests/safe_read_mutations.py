@@ -13,6 +13,7 @@ FILES = {key: ROOT / path for key, path in {
 "linux":"crates/bingsu-collect/src/safe_read/linux.rs",
 "meter":"crates/bingsu-collect/src/meter.rs",
 "linux_test":"crates/bingsu-collect/tests/safe_read_linux.rs",
+"landlock":"crates/bingsu-collect/src/landlock.rs",
 }.items()}
 SAVED = pathlib.Path(tempfile.mkdtemp(prefix="b1-redesign-saved-"))
 for key, path in FILES.items(): shutil.copyfile(path, SAVED/key)
@@ -171,8 +172,8 @@ LINUX = [('entries_dot_not_counted',
   [('linux', '                meter.allocation(name.len() + std::mem::size_of::<Vec<u8>>())?;', '')]),
  ('landlock_install',
   'linux_landlock_backstop_blocks_held_fd_after_coarse_rename',
-  [('linux_test',
-    'unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd as i32, 0u32) }',
+  [('landlock',
+    'unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd.as_raw_fd(), 0u32) }',
     '0')]),
  ('landlock_upgrade',
   'linux_landlock_backstop_blocks_held_fd_after_coarse_rename',
@@ -188,7 +189,42 @@ LINUX = [('entries_dot_not_counted',
     'libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_XDEV',
     'libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_XDEV')])]
 
-selected = CASES + (MAC if sys.platform == "darwin" else LINUX)
+# 이것을 실패시키는 것: 축소 stage A, 선택된 root, 비공개 capability와 실제 kernel flag 조건을 없애는 것.
+REVIEW = [
+ ('stage_a_selected_root', 'stage_a_held_directory_keeps_selected_root', [('mod', 'if access.guarantee().is_some() {', 'if false {')]),
+ ('stage_a_symlink', 'stage_a_symlink_head_is_unknown', [('mod', 'if access.guarantee().is_none() {', 'if false {')]),
+ ('stage_a_symlink_race', 'stage_a_symlink_coarse_rename_reads_zero_external_bytes', [('mod', 'if access.guarantee().is_none() {', 'if false {')]),
+ ('stage_a_nofollow', 'stage_a_nofollow_survives_leaf_and_directory_replacement', [('walk', 'libc::O_NOFOLLOW | ', '')]),
+ ('stage_a_directories', 'stage_a_operation_directories_are_typed_and_nofollow', [('mod', 'walk::one_component(root, path, true, meter)?', 'resolve(root, path, access, true, false, meter)?')]),
+ ('stage_a_directory_type', 'stage_a_operation_directories_are_typed_and_nofollow', [('mod', '_ => return Err(ReadError::Denied),', '_ => b"head-name".as_slice(),')]),
+ ('stage_a_component', 'safe_read::walk::tests::stage_a_component_rejects_paths_before_io', [('walk', 'name.is_empty() || name.contains(&b\'/\') || name == b"." || name == b".."', 'false')]),
+ ('stage_a_regular', 'stage_a_checks_file_kind_links_and_identity', [('mod', 'if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {', 'if false {')]),
+ ('stage_a_nlink', 'stage_a_checks_file_kind_links_and_identity', [('mod', 'if cap.single_link && self.metadata.st_nlink != 1 {', 'if false {')]),
+ ('stage_a_identity', 'stage_a_checks_file_kind_links_and_identity', [('walk', 'if !unchanged(&before, &opened.metadata) {', 'if false {')]),
+ ('selection_slash', 'content_roots_require_validated_selection', [('mod', 'if root.identity == self.slash {', 'if false {')]),
+ ('selection_marker', 'content_roots_require_validated_selection', [('mod', 'if kind != libc::S_IFDIR && (kind != libc::S_IFREG || marker.metadata.st_nlink != 1) {', 'if false {')]),
+ ('selection_mount', 'content_roots_require_validated_selection', [('mod', 'if found.device != root.device || found.mount != root.mount {', 'if false {')]),
+]
+API_TEST = 'capabilities_cannot_be_forged_or_read_as_roots'
+for field, typ in [('cwd','Root'), ('ancestors','Vec<AncestorDir>'), ('logical','bool'), ('query','DiscoveryQuery')]:
+    REVIEW.append(('private_'+field, API_TEST, [('mod', f'    {field}: {typ},\n' + ('    slash' if field == 'query' else ''), f'    pub {field}: {typ},\n' + ('    slash' if field == 'query' else ''))]))
+for typ in ['AncestorDir', "StageADir<'_>"]:
+    REVIEW.append(('no_root_'+typ.split('<')[0], API_TEST, [('mod', 'struct Fd {', f'impl std::ops::Deref for {typ} {{ type Target = Root; fn deref(&self) -> &Root {{ &self.root }} }}\nstruct Fd {{')]))
+LINUX += [
+ ('landlock_rule_error', 'linux_read_layer_failure_cannot_grant_access', [('landlock', '        {\n            return Err(io::Error::last_os_error());\n        }\n    }\n    // SAFETY: live ruleset fd;', '        { }\n    }\n    // SAFETY: live ruleset fd;')]),
+ ('probe_scope', 'access_probe_stepwise_has_no_guarantee', [('mod', 'if access.backend == Resolver::Openat2 {', 'if true {')]),
+ ('no_magiclinks', 'safe_read::linux::tests::no_magiclinks_is_enforced_independently', [('linux', ' | libc::RESOLVE_NO_MAGICLINKS', '')]),
+ ('procfs_type', 'root_procfs_is_refused', [('linux', 'if fs.f_type as u64 == 0x9fa0 {', 'if false {')]),
+ ('ancestor_cap', 'ancestors_only_list_bounded_names', [('mod', 'raw_limit.min(256)', 'raw_limit')]),
+ ('metadata_owner', 'linux_two_uid_victim_canaries_are_unreadable', [('mod', 'if metadata.st_uid != unsafe { libc::geteuid() } {', 'if false {')]),
+ ('landlock_read_dir', 'linux_landlock_backstop_blocks_held_fd_after_coarse_rename', [('landlock', 'let rights = (1 << 2) | (1 << 3);', 'let rights = 1 << 2;')]),
+ ('landlock_read_file', 'linux_landlock_backstop_blocks_held_fd_after_coarse_rename', [('landlock', 'let rights = (1 << 2) | (1 << 3);', 'let rights = 1 << 3;')]),
+ ('private_proof', API_TEST, [('landlock', '    _thread: std::marker::PhantomData<std::rc::Rc<()>>,', '    pub _thread: std::marker::PhantomData<std::rc::Rc<()>>,')]),
+ ('proof_required', API_TEST, [('mod', '&mut self, _proof: crate::landlock::ReadLayerInstalled', '&mut self')]),
+ ('proof_thread', API_TEST, [('landlock', 'std::marker::PhantomData<std::rc::Rc<()>>', 'std::marker::PhantomData<()>')]),
+]
+
+selected = CASES + REVIEW + (MAC if sys.platform == "darwin" else LINUX)
 results = []
 try:
     for label, test, mutations in selected:
@@ -198,10 +234,11 @@ try:
             source = path.read_text().replace("\r\n", "\n")
             assert old in source, (label, old)
             path.write_text(source.replace(old, new))
-        suite = "safe_read_linux" if test.startswith("linux_") else "safe_read"
+        suite = "safe_read_api" if test == API_TEST else ("safe_read_linux" if test.startswith("linux_") else "safe_read")
         args = ["cargo", "test", "-j", "2", "-p", "bingsu-collect", "--test", suite, test, "--", "--exact", "--test-threads=1"]
         security_output = test.startswith(("linux_landlock", "linux_two_uid"))
         if test == "resolver_observations" or security_output: args += ["--ignored"]
+        if "stage_a_symlink" in test: args += ["--nocapture"]
         if security_output: args += ["--nocapture"]
         run = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=50)
         (OUT/(label+".log")).write_text(run.stdout)

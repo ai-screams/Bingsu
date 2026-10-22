@@ -46,6 +46,32 @@ fn unchanged(before: &libc::stat, after: &libc::stat) -> bool {
     before.st_dev == after.st_dev && before.st_ino == after.st_ino
 }
 
+/// Reduced stage A: exactly one fixed name, never readlink or a path walk.
+pub(super) fn one_component(
+    root: &Root,
+    name: &[u8],
+    is_dir: bool,
+    meter: &mut Meter,
+) -> Result<Opened, ReadError> {
+    if name.is_empty() || name.contains(&b'/') || name == b"." || name == b".." {
+        return Err(ReadError::Escape);
+    }
+    let name = cstring(name, meter)?;
+    let before = lstat(root.fd.as_raw_fd(), &name, meter)?;
+    if before.st_mode & libc::S_IFMT == libc::S_IFLNK {
+        return Err(ReadError::Symlink);
+    }
+    meter.event("before_open_component");
+    let flags = if is_dir { DIR_FLAGS } else { FILE_FLAGS };
+    let opened = inspect(openat(root.fd.as_raw_fd(), &name, flags, meter)?, meter)?;
+    if !unchanged(&before, &opened.metadata) {
+        return Err(ReadError::Changed);
+    }
+    same_mount(opened.identity, root.identity)?;
+    meter.event("after_open_component");
+    Ok(opened)
+}
+
 fn target(
     parent: RawFd,
     name: &std::ffi::CStr,
@@ -98,6 +124,7 @@ pub(super) fn acquire(
         identity: identity(fd.as_raw_fd(), meter)?,
         fd,
     });
+    let slash = stack[0].identity;
     let mut dropped = 0;
     let mut visits = 0;
     let mut links = 0;
@@ -167,9 +194,10 @@ pub(super) fn acquire(
     meter.allocation(stack.len() * std::mem::size_of::<Root>())?;
     Ok(Discovery {
         cwd,
-        ancestors: stack.into_iter().collect(),
+        ancestors: stack.into_iter().map(|root| AncestorDir { root }).collect(),
         logical,
         query,
+        slash,
     })
 }
 
@@ -322,4 +350,26 @@ fn finish(
     }
     let _ = (root, stack, name, is_dir, access, single_link, meter);
     Ok(opened)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // 이것을 실패시키는 것: 단계 A primitive에 '/', '.', '..', 빈 이름을 허용하는 것.
+    #[test]
+    fn stage_a_component_rejects_paths_before_io() {
+        let mut meter = Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let root = super::super::acquire(b"/dev", DiscoveryQuery::default(), &mut meter)
+            .unwrap()
+            .select_cwd()
+            .unwrap();
+        let before = meter.counts;
+        for name in [b"".as_slice(), b".", b"..", b"./null", b"/null"] {
+            assert!(matches!(
+                one_component(&root, name, false, &mut meter),
+                Err(ReadError::Escape)
+            ));
+        }
+        assert_eq!(meter.counts, before);
+    }
 }

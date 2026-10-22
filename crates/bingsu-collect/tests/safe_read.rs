@@ -1,6 +1,10 @@
 //! Resolver tests deliberately run outside the product BPF. Linux mount tests
 //! require a separate child with CAP_SYS_ADMIN; unavailable hosts are BLOCKED.
 #![cfg(unix)]
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/landlock.rs"]
+mod landlock;
 #[allow(dead_code)]
 #[path = "../src/meter.rs"]
 mod meter;
@@ -36,7 +40,8 @@ impl Fixture {
             meter,
         )
         .unwrap()
-        .cwd
+        .select_cwd()
+        .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -154,7 +159,8 @@ fn x13_resolvers_share_static_verdicts() {
         let mut budget = meter();
         let dev = acquire(b"/dev", DiscoveryQuery::default(), &mut budget)
             .unwrap()
-            .cwd;
+            .select_cwd()
+            .unwrap();
         assert_eq!(result(&dev, b"null", backend, &mut budget), Err(E::Special));
         assert_eq!(budget.counts[Phase::Content as usize].read, 0);
     }
@@ -319,7 +325,8 @@ fn fifo_child() {
     let path = std::env::var_os("BINGSU_FIFO_ROOT").unwrap();
     let root = acquire(path.as_bytes(), DiscoveryQuery::default(), &mut budget)
         .unwrap()
-        .cwd;
+        .select_cwd()
+        .unwrap();
     let backend = match std::env::var("BINGSU_FIFO_FAST").unwrap().as_str() {
         "openat2" => Resolver::Openat2,
         "darwin" => Resolver::DarwinBeneath,
@@ -346,7 +353,7 @@ fn fd_budget_is_released_on_drop() {
             DiscoveryQuery::default(),
             &mut budget,
         ) {
-            Ok(discovery) => roots.push(discovery.cwd),
+            Ok(discovery) => roots.push(discovery.select_cwd().unwrap()),
             Err(E::Limit) => {
                 refused = true;
                 break;
@@ -392,7 +399,7 @@ fn acquisition_and_deadline_are_bounded() {
         &mut budget,
     )
     .unwrap();
-    assert_eq!(discovered.ancestors.len(), 32);
+    assert_eq!(discovered.ancestors().len(), 32);
     assert!(budget.peak_fds <= 34);
     let mut path = b"/".to_vec();
     path.extend(b"./".repeat(4097));
@@ -642,7 +649,8 @@ fn cwd_on_other_mount_is_allowed() {
     let outer = fixture.root(&mut budget);
     let inner = acquire(volume.as_bytes(), DiscoveryQuery::default(), &mut budget)
         .unwrap()
-        .cwd;
+        .select_cwd()
+        .unwrap();
     assert_ne!(outer.device(), inner.device());
     use std::os::unix::fs::MetadataExt;
     assert_eq!(
@@ -802,7 +810,7 @@ fn no_guarantee_exposes_only_stage_a() {
         safe_read::directory_stage_a(&root, safe_read::StageADirectory::Git, &access, &mut budget)
             .unwrap();
     assert_eq!(
-        safe_read::read_stage_a(&git, StageAFile::Head, &access, &mut budget).unwrap(),
+        git.read(StageAFile::Head, &access, &mut budget).unwrap(),
         b"nested head"
     );
     let before = budget.counts;
@@ -998,14 +1006,15 @@ fn darwin_flag_behavior_and_mount_backstop() {
     unsafe { libc::close(dev) };
     let slash = acquire(b"/", DiscoveryQuery::default(), &mut budget)
         .unwrap()
-        .cwd;
+        .unchecked_cwd_for_test();
     assert!(matches!(
         safe_read::directory(&slash, b"dev", &access, &mut budget),
         Err(E::Escape)
     ));
     let dev_root = acquire(b"/dev", DiscoveryQuery::default(), &mut budget)
         .unwrap()
-        .cwd;
+        .select_cwd()
+        .unwrap();
     assert!(safe_read::directory(&dev_root, b".", &access, &mut budget).is_ok());
 }
 
@@ -1026,7 +1035,8 @@ fn coarse_rename_with_guarantee_reads_zero_external_bytes() {
         &mut budget,
     )
     .unwrap()
-    .cwd;
+    .select_cwd()
+    .unwrap();
     let path = fixture.0.clone();
     let mut visits = 0;
     budget.hook = Some(Box::new(move |event| {
@@ -1137,4 +1147,354 @@ fn darwin_atomic_reopen_checks_identity() {
         Err(E::Changed)
     );
     assert_eq!(budget.counts[Phase::Content as usize].read_bytes, 0);
+}
+
+// 이것을 실패시키는 것: 보장 없는 HEAD를 일반 walk로 열어 index symlink를 따라가는 것.
+#[test]
+fn stage_a_symlink_head_is_unknown() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("index"), b"NOT_STAGE_A").unwrap();
+    symlink("index", fixture.0.join("HEAD")).unwrap();
+    let mut budget = meter();
+    let root = fixture.root(&mut budget);
+    let access = safe_read::Access::stage_a_only();
+    assert_eq!(
+        safe_read::read_stage_a(&root, safe_read::StageAFile::Head, &access, &mut budget),
+        Err(E::Symlink)
+    );
+    assert_eq!(budget.counts[Phase::Content as usize].read_bytes, 0);
+}
+
+// 이것을 실패시키는 것: 단계 A를 일반 walk로 돌려 HEAD의 상대 링크와 교대 rename으로 외부 canary를 읽는 것.
+#[test]
+fn stage_a_symlink_coarse_rename_reads_zero_external_bytes() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("root/a/b")).unwrap();
+    fs::write(fixture.0.join("canary"), b"EXTERNAL").unwrap();
+    symlink("a/b/value", fixture.0.join("root/HEAD")).unwrap();
+    let mut budget = meter();
+    let root = acquire(
+        fixture.0.join("root").as_os_str().as_bytes(),
+        DiscoveryQuery::default(),
+        &mut budget,
+    )
+    .unwrap()
+    .select_cwd()
+    .unwrap();
+    let path = fixture.0.clone();
+    let mut visits = 0;
+    budget.hook = Some(Box::new(move |event| {
+        if event == "after_open_component" {
+            visits += 1;
+            if visits == 2 {
+                fs::rename(path.join("root/a"), path.join("moved-a")).unwrap();
+                fs::rename(path.join("canary"), path.join("moved-a/b/value")).unwrap();
+            }
+            if visits == 3 {
+                fs::rename(path.join("moved-a/b"), path.join("moved-b")).unwrap();
+                fs::rename(path.join("moved-a"), path.join("root/a")).unwrap();
+            }
+        }
+    }));
+    let result = safe_read::read_stage_a(
+        &root,
+        safe_read::StageAFile::Head,
+        &safe_read::Access::stage_a_only(),
+        &mut budget,
+    );
+    println!(
+        "STAGE_A result={result:?} outside_bytes={}",
+        budget.counts[Phase::Content as usize].read_bytes
+    );
+    assert_eq!(budget.counts[Phase::Content as usize].read_bytes, 0);
+    assert_eq!(result, Err(E::Symlink));
+}
+
+// 이것을 실패시키는 것: 고정 파일·폴더 open의 O_NOFOLLOW를 빼서 lstat 뒤 symlink 교체를 허용하는 것.
+#[test]
+fn stage_a_nofollow_survives_leaf_and_directory_replacement() {
+    for directory in [false, true] {
+        let fixture = Fixture::new();
+        let name = if directory { ".git" } else { "HEAD" };
+        if directory {
+            fs::create_dir(fixture.0.join(name)).unwrap();
+        } else {
+            fs::write(fixture.0.join(name), b"inside").unwrap();
+        }
+        let mut budget = meter();
+        let root = fixture.root(&mut budget);
+        let path = fixture.0.clone();
+        budget.hook = Some(Box::new(move |event| {
+            if event == "before_open_component" {
+                fs::rename(path.join(name), path.join("moved")).unwrap();
+                symlink("moved", path.join(name)).unwrap();
+            }
+        }));
+        let access = safe_read::Access::stage_a_only();
+        let result = if directory {
+            safe_read::directory_stage_a(
+                &root,
+                safe_read::StageADirectory::Git,
+                &access,
+                &mut budget,
+            )
+            .map(|_| ())
+        } else {
+            safe_read::read_stage_a(&root, safe_read::StageAFile::Head, &access, &mut budget)
+                .map(|_| ())
+        };
+        assert!(matches!(result, Err(E::Symlink | E::Missing)), "{result:?}");
+        assert_eq!(budget.counts[Phase::Content as usize].read_bytes, 0);
+    }
+}
+
+// 이것을 실패시키는 것: 작업 폴더를 일반 walk로 열거나 typed 폴더와 다른 파일 enum을 허용하는 것.
+#[test]
+fn stage_a_operation_directories_are_typed_and_nofollow() {
+    use safe_read::{Access, StageADirectory as D, StageAFile as F};
+    let fixture = Fixture::new();
+    let mut budget = meter();
+    let root = fixture.root(&mut budget);
+    let access = Access::stage_a_only();
+    for (name, dir, file) in [
+        ("rebase-merge", D::RebaseMerge, F::RebaseMergeHeadName),
+        ("rebase-apply", D::RebaseApply, F::RebaseApplyHeadName),
+    ] {
+        fs::create_dir(fixture.0.join(name)).unwrap();
+        fs::write(fixture.0.join(name).join("head-name"), b"branch").unwrap();
+        assert_eq!(
+            safe_read::read_stage_a(&root, file, &access, &mut budget).unwrap(),
+            b"branch"
+        );
+        let held = safe_read::directory_stage_a(&root, dir, &access, &mut budget).unwrap();
+        assert_eq!(held.read(F::Head, &access, &mut budget), Err(E::Denied));
+        fs::rename(fixture.0.join(name), fixture.0.join("moved")).unwrap();
+        symlink("moved", fixture.0.join(name)).unwrap();
+        assert_eq!(
+            safe_read::read_stage_a(&root, file, &access, &mut budget),
+            Err(E::Symlink)
+        );
+        fs::remove_file(fixture.0.join(name)).unwrap();
+        fs::rename(fixture.0.join("moved"), fixture.0.join(name)).unwrap();
+    }
+    symlink("rebase-merge", fixture.0.join(".git")).unwrap();
+    assert!(matches!(
+        safe_read::directory_stage_a(&root, D::Git, &access, &mut budget),
+        Err(E::Symlink)
+    ));
+}
+
+// 이것을 실패시키는 것: '/'나 .git 없는 조상을 content root로 승격하거나 mount/owner 검증을 빼는 것.
+#[test]
+fn content_roots_require_validated_selection() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("child")).unwrap();
+    let discover = |budget: &mut Meter| {
+        acquire(
+            fixture.0.join("child").as_os_str().as_bytes(),
+            DiscoveryQuery::default(),
+            budget,
+        )
+        .unwrap()
+    };
+    let mut budget = meter();
+    assert!(matches!(
+        acquire(b"/", DiscoveryQuery::default(), &mut budget)
+            .unwrap()
+            .select_cwd(),
+        Err(E::Escape)
+    ));
+    let access = safe_read::Access::stage_a_only();
+    assert!(matches!(
+        discover(&mut budget).select_worktree(1, &access, &mut budget),
+        Err(E::Missing)
+    ));
+    assert!(matches!(
+        discover(&mut budget).select_worktree(usize::MAX, &access, &mut budget),
+        Err(E::Escape)
+    ));
+    fs::create_dir(fixture.0.join(".git")).unwrap();
+    for access in [access, test_access(backends()[1])] {
+        let selected = discover(&mut budget)
+            .select_worktree(1, &access, &mut budget)
+            .unwrap();
+        let meta = acquire(
+            fixture.0.join(".git").as_os_str().as_bytes(),
+            DiscoveryQuery::default(),
+            &mut budget,
+        )
+        .unwrap()
+        .select_metadata(&selected, &mut budget)
+        .unwrap();
+        assert_eq!(meta.device(), selected.device());
+    }
+    let selected = fixture.root(&mut budget);
+    // /dev is a different mount on both required hosts; the negative cell is mandatory.
+    assert!(matches!(
+        acquire(b"/dev", DiscoveryQuery::default(), &mut budget)
+            .unwrap()
+            .select_metadata(&selected, &mut budget),
+        Err(E::Escape)
+    ));
+    fs::remove_dir(fixture.0.join(".git")).unwrap();
+    fs::write(fixture.0.join(".git"), b"gitdir: metadata\n").unwrap();
+    assert!(
+        discover(&mut budget)
+            .select_worktree(1, &safe_read::Access::stage_a_only(), &mut budget)
+            .is_ok()
+    );
+    fs::hard_link(fixture.0.join(".git"), fixture.0.join("other")).unwrap();
+    assert!(matches!(
+        discover(&mut budget).select_worktree(1, &safe_read::Access::stage_a_only(), &mut budget),
+        Err(E::Special)
+    ));
+}
+
+// 이것을 실패시키는 것: ENOSYS의 Stepwise 결과를 Access::probe_with에서 커널 보장으로 승격하는 것.
+#[test]
+#[cfg(target_os = "linux")]
+fn access_probe_stepwise_has_no_guarantee() {
+    let mut budget = meter();
+    budget.openat2_errors.push_back(libc::ENOSYS);
+    let choice = safe_read::ResolverChoice::default();
+    let access = safe_read::Access::probe_with(&choice, &mut budget).unwrap();
+    assert_eq!(access.guarantee(), None);
+    assert_eq!(access.scope(), safe_read::ReadScope::StageAOnly);
+    assert_eq!(choice.get(&mut budget), Ok(Resolver::Stepwise));
+    assert!(budget.openat2_errors.is_empty());
+    let fixture = Fixture::new();
+    let root = fixture.root(&mut budget);
+    let before = budget.counts;
+    assert_eq!(
+        read_with(&root, b"index", cap(64), &access, &mut budget),
+        Err(E::StageAOnly)
+    );
+    assert_eq!(budget.counts, before);
+}
+
+// 이것을 실패시키는 것: ancestor 목록에 raw256 상한을 빼거나 entries 중 entry별 stat/read를 추가하는 것.
+#[test]
+#[cfg(target_os = "linux")]
+fn ancestors_only_list_bounded_names() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("child")).unwrap();
+    for i in 0..300 {
+        fs::write(fixture.0.join(format!("file-{i}")), b"x").unwrap();
+    }
+    let mut budget = meter();
+    let discovery = acquire(
+        fixture.0.join("child").as_os_str().as_bytes(),
+        DiscoveryQuery {
+            home_component: Some(2),
+            unique: true,
+        },
+        &mut budget,
+    )
+    .unwrap();
+    assert!(discovery.logical());
+    assert_eq!(discovery.query().home_component, Some(2));
+    assert!(discovery.query().unique);
+    let before = budget.counts[Phase::Content as usize];
+    let listing = discovery
+        .ancestors()
+        .last()
+        .unwrap()
+        .entries(999, &mut budget)
+        .unwrap();
+    let after = budget.counts[Phase::Content as usize];
+    assert!(!listing.complete);
+    assert_eq!(after.raw_entries - before.raw_entries, 256);
+    assert_eq!(after.stat, before.stat);
+    assert_eq!(after.read, before.read);
+}
+
+// 이것을 실패시키는 것: strict 단계 A의 regular/nlink 검사 또는 dev/ino 교체 검사를 빼는 것.
+#[test]
+fn stage_a_checks_file_kind_links_and_identity() {
+    let fixture = Fixture::new();
+    let mut budget = meter();
+    let root = fixture.root(&mut budget);
+    let access = safe_read::Access::stage_a_only();
+    fs::create_dir(fixture.0.join("HEAD")).unwrap();
+    assert_eq!(
+        safe_read::read_stage_a(&root, safe_read::StageAFile::Head, &access, &mut budget),
+        Err(E::Special)
+    );
+    fs::remove_dir(fixture.0.join("HEAD")).unwrap();
+    let fifo = std::ffi::CString::new(fixture.0.join("HEAD").as_os_str().as_bytes()).unwrap();
+    // SAFETY: fixed fixture path and mode; O_NONBLOCK prevents waiting for a writer.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    assert_eq!(
+        safe_read::read_stage_a(&root, safe_read::StageAFile::Head, &access, &mut budget),
+        Err(E::Special)
+    );
+    fs::remove_file(fixture.0.join("HEAD")).unwrap();
+    fs::write(fixture.0.join("HEAD"), b"inside").unwrap();
+    fs::hard_link(fixture.0.join("HEAD"), fixture.0.join("hard")).unwrap();
+    assert_eq!(
+        safe_read::read_stage_a(&root, safe_read::StageAFile::Head, &access, &mut budget),
+        Err(E::Special)
+    );
+    fs::remove_file(fixture.0.join("hard")).unwrap();
+    let path = fixture.0.clone();
+    budget.hook = Some(Box::new(move |event| {
+        if event == "before_open_component" {
+            fs::rename(path.join("HEAD"), path.join("old")).unwrap();
+            fs::write(path.join("HEAD"), b"changed").unwrap();
+        }
+    }));
+    assert_eq!(
+        safe_read::read_stage_a(&root, safe_read::StageAFile::Head, &access, &mut budget),
+        Err(E::Changed)
+    );
+    assert_eq!(budget.counts[Phase::Content as usize].read_bytes, 0);
+}
+
+// 이것을 실패시키는 것: 보장 있는 단계 A에서 이동된 작업 폴더 fd를 새 confinement root로 사용하는 것.
+#[test]
+fn stage_a_held_directory_keeps_selected_root() {
+    use safe_read::{StageADirectory as D, StageAFile as F};
+    #[cfg(target_os = "macos")]
+    let access = test_access(Resolver::DarwinBeneath);
+    #[cfg(target_os = "linux")]
+    let access = safe_read::Access::probe(&mut meter()).unwrap();
+    assert!(
+        access.guarantee().is_some(),
+        "BLOCKED: native confinement required"
+    );
+    for (name, dir, file, leaf) in [
+        (".git", D::Git, F::Head, "HEAD"),
+        (
+            "rebase-merge",
+            D::RebaseMerge,
+            F::RebaseMergeHeadName,
+            "head-name",
+        ),
+        (
+            "rebase-apply",
+            D::RebaseApply,
+            F::RebaseApplyHeadName,
+            "head-name",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("root").join(name)).unwrap();
+        fs::write(fixture.0.join("root").join(name).join(leaf), b"inside").unwrap();
+        let mut budget = meter();
+        let root = acquire(
+            fixture.0.join("root").as_os_str().as_bytes(),
+            DiscoveryQuery::default(),
+            &mut budget,
+        )
+        .unwrap()
+        .select_cwd()
+        .unwrap();
+        let held = safe_read::directory_stage_a(&root, dir, &access, &mut budget).unwrap();
+        assert_eq!(held.read(file, &access, &mut budget).unwrap(), b"inside");
+        fs::rename(fixture.0.join("root").join(name), fixture.0.join("moved")).unwrap();
+        fs::write(fixture.0.join("moved").join(leaf), b"EXTERNAL").unwrap();
+        let before = budget.counts[Phase::Content as usize].read_bytes;
+        assert_eq!(held.read(file, &access, &mut budget), Err(E::Missing));
+        assert_eq!(budget.counts[Phase::Content as usize].read_bytes, before);
+    }
 }
