@@ -620,13 +620,24 @@ def prepare(binary):
     else:
         modules.append('mod sandbox {pub fn enter()->bingsu_core::front::Sandbox{bingsu_core::front::Sandbox::Absent}}')
     worker = (source / "crates/bingsu-collect/src/worker.rs").read_text()
+    # Generated workers live outside the source directory; both must use the
+    # original sink implementation rather than resolve a sibling fixture file.
+    worker = replace_required(worker, '#[path = "update_sink.rs"]',
+                              f'#[path = {json.dumps(str(source / "crates/bingsu-collect/src/update_sink.rs"))}]')
+    # Collection has written the fixture Update through the sink. Release its
+    # borrows before the existing raw failure/probe frames, and never Complete
+    # a failure transcript. Mode zero retains the normal sink completion path.
+    worker = replace_required(worker, '                collect(&request, &mut sink)?;',
+                              '                collect(&request, &mut sink)?;\n'
+                              '                if crate::FAILURE.load(std::sync::atomic::Ordering::Relaxed) != 0 {\n'
+                              '                    drop(sink);\n'
+                              '                    return crate::fail_after_update(fds, buffer, build_id);\n'
+                              '                }')
+    security = worker
     worker = replace_required(worker, "    let landlock = initial()?;", "    let initial_start = crate::stamp();\n    let landlock = initial()?;\n    let initial_ns = crate::stamp() - initial_start;")
     worker = replace_required(worker, "    final_filter()?;", "    let final_start = crate::stamp();\n    final_filter()?;\n    crate::WORKER_FILTER_NS.store(if cfg!(target_os=\"linux\"){initial_ns + crate::stamp() - final_start}else{0}, std::sync::atomic::Ordering::Relaxed);")
     worker = replace_required(worker, '            payload.extend(7u32.to_le_bytes());\n            payload.extend(b"fixture");', '            let metrics=crate::worker_metrics();\n            payload.extend((metrics.len() as u32).to_le_bytes());\n            payload.extend(metrics.as_bytes());')
     worker = replace_required(worker, "fn protected()", "pub(crate) fn protected()")
-    worker = replace_required(worker, "                fds.write_all(&buffer[..n])?;", "                fds.write_all(&buffer[..n])?;\n                crate::fail_after_update(fds, buffer, build_id)?;")
-    security = (source / "crates/bingsu-collect/src/worker.rs").read_text()
-    security = replace_required(security, "                fds.write_all(&buffer[..n])?;", "                fds.write_all(&buffer[..n])?;\n                crate::fail_after_update(fds, buffer, build_id)?;")
     security_path = directory / "security_worker.rs"
     security_path.write_text(security)
     modules.append(f'#[path={json.dumps(str(security_path))}] mod security_worker;')

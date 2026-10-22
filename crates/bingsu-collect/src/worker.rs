@@ -1,5 +1,10 @@
 //! Fixed product entry and one bounded request. Every startup error precedes
 //! Ready and the first request read. Both Linux filters precede collection.
+// Keep the sink binary-local. The startup integration target includes worker.rs
+// directly and therefore exercises the same sink without linking it into lib.rs.
+#[cfg(unix)]
+#[path = "update_sink.rs"]
+mod update_sink;
 #[cfg(unix)]
 use crate::{limits, sys};
 #[cfg(unix)]
@@ -8,6 +13,10 @@ use bingsu_core::collection::{
     selection::PRODUCT,
     wire::{self, Frame, Kind, M3B_REQUEST_ID, RequestDecoder},
 };
+#[cfg(unix)]
+pub(crate) use update_sink::UpdateSink;
+#[cfg(unix)]
+use update_sink::WireSink;
 
 pub fn run() -> i32 {
     std::panic::set_hook(Box::new(|_| {}));
@@ -43,7 +52,7 @@ fn execute() -> std::io::Result<()> {
         landlock,
         &PRODUCT,
         crate::build_id(),
-        |_| Err(std::io::Error::other("no product workers")),
+        |_, _: &mut dyn UpdateSink| Err(std::io::Error::other("no product workers")),
     )
 }
 
@@ -86,7 +95,28 @@ fn exchange(
     landlock: u32,
     catalog: &collection::selection::Catalog<'_>,
     build_id: wire::BuildId,
-    collect: impl FnOnce(&wire::Request) -> std::io::Result<Vec<u8>>,
+    collect: impl FnOnce(&wire::Request, &mut dyn UpdateSink) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    exchange_with_sink(
+        fds,
+        buffer,
+        baseline,
+        landlock,
+        catalog,
+        build_id,
+        |request, sink| collect(request, sink),
+    )
+}
+
+#[cfg(unix)]
+fn exchange_with_sink(
+    fds: &mut sys::WorkerFds,
+    buffer: &mut [u8; wire::FRAME_MAX],
+    baseline: u64,
+    landlock: u32,
+    catalog: &collection::selection::Catalog<'_>,
+    build_id: wire::BuildId,
+    collect: impl FnOnce(&wire::Request, &mut WireSink<'_>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let bad = |_| std::io::Error::other("worker protocol");
     let mut payload = [0; 24];
@@ -114,30 +144,17 @@ fn exchange(
             // catalog is explicit; no argv, feature or environment selects it.
             let selected = collection::request(
                 catalog,
-                request.binding,
+                request.binding.clone(),
                 request.request_id,
                 request.budget_ms,
             )
             .map_err(bad)?;
+            let mut write = |bytes: &[u8]| fds.write_all(bytes);
+            let mut sink = WireSink::new(&request, catalog.segments, &payload, buffer, &mut write)?;
             if let Some(request) = selected {
-                let payload = collect(&request)?;
-                let update = Frame {
-                    kind: Kind::Update,
-                    build_id,
-                    request_id: M3B_REQUEST_ID,
-                    payload: &payload,
-                };
-                let n = wire::encode_frame(update, buffer).map_err(bad)?;
-                fds.write_all(&buffer[..n])?;
+                collect(&request, &mut sink)?;
             }
-            let complete = Frame {
-                kind: Kind::Complete,
-                build_id,
-                request_id: M3B_REQUEST_ID,
-                payload: &[],
-            };
-            let n = wire::encode_frame(complete, buffer).map_err(bad)?;
-            return fds.write_all(&buffer[..n]);
+            return sink.complete();
         }
     }
 }
@@ -253,20 +270,20 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
     let test_id = wire::BuildId(bingsu_core::collection::cwd_hash::sha256(
         &[crate::build_id().0.as_slice(), b"test-worker"].concat(),
     ));
-    exchange(
+    exchange_with_sink(
         &mut fds,
         &mut buffer,
         installed.baseline_bytes,
         landlock,
         &catalog,
         test_id,
-        |_| {
+        |_, sink| {
             let mut payload = vec![31, 0, 1];
             payload.extend(7u32.to_le_bytes());
             payload.extend(b"fixture");
             payload.extend(0u16.to_le_bytes());
             payload.push(0);
-            Ok(payload)
+            sink.fixture_update(&payload)
         },
     )
 }
