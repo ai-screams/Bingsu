@@ -483,6 +483,60 @@ fn startup_probe_is_closed_before_ready() {
     unsafe {
         cmd.pre_exec(setup);
     }
+    // 이것을 실패시키는 것: DYLD_INSERT_LIBRARIES 제거로 interposer가 로드되지 않는 것.
+    // The same command/setup must reject Ready when no probe was possible.
+    let mut absent = Command::new(cmd.get_program());
+    absent
+        .args(cmd.get_args())
+        .env_clear()
+        .envs(
+            cmd.get_envs()
+                .filter_map(|(key, value)| value.map(|value| (key, value))),
+        )
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped());
+    let input_fd = input.as_raw_fd();
+    let lock_fd = lock.as_raw_fd();
+    // SAFETY: duplicate sources before spawn; child only uses descriptor calls.
+    let absent_copies: Vec<_> = [input_fd, lock_fd]
+        .into_iter()
+        .map(|fd| {
+            // SAFETY: live sources, disjoint from child destinations.
+            let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+            assert!(copy >= 10);
+            // SAFETY: uniquely owned duplicate.
+            unsafe { OwnedFd::from_raw_fd(copy) }
+        })
+        .collect();
+    let absent_setup = move || {
+        for (fd, to) in absent_copies.iter().zip([3, 5]) {
+            // SAFETY: live duplicated source, reserved child slot.
+            if unsafe { libc::dup2(fd.as_raw_fd(), to) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        // SAFETY: intentionally remove the probe capability from this child.
+        unsafe {
+            libc::close(6);
+        }
+        Ok(())
+    };
+    // SAFETY: only async-signal-safe fd operations after fork.
+    unsafe {
+        absent.pre_exec(absent_setup);
+    }
+    let negative = absent.output().unwrap();
+    assert_eq!(
+        negative.status.code(),
+        Some(89),
+        "interposer must be active"
+    );
+    assert!(
+        negative.stdout.is_empty(),
+        "Ready must not escape the canary"
+    );
     let start = Instant::now();
     let mut child = cmd.spawn().unwrap();
     let mut bytes = [0; wire::HEADER + 24];
