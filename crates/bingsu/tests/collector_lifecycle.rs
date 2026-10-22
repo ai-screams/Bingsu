@@ -159,6 +159,7 @@ int main(int argc, char **argv) {
         update[2]=1; update[7]='n'; frame(5,update,sizeof(update));
     }
     frame(6,0,0);
+    if(!strcmp(mode,"complete-open")) { for(;;) pause(); }
     if(!strcmp(mode,"trailing")) put("x",1);
     if(!strcmp(mode,"complete-live")) { close(1); for(;;) pause(); }
     return 0;
@@ -330,6 +331,18 @@ fn partial_survives_only_after_validated_updates() {
             assert_eq!(value.updates[0].value.as_ref().unwrap().text(), "ok");
         }
     }
+}
+
+// 이것을 실패시키는 것: Complete 뒤 열린 pipe의 Deadline을 Complete로 보고하거나 저장하는 것.
+#[test]
+fn accepted_complete_without_eof_keeps_deadline_in_report_and_response() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
+    let (report, values) = run_peer("complete-open", true);
+    assert!(report.lifecycle.completed.is_some(), "{report:?}");
+    assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
+    assert!(report.reaped && report.kill_requested, "{report:?}");
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].reason, EndReason::Deadline);
 }
 
 // 이것을 실패시키는 것: 바이트마다 Ready 절대 마감을 재시작하는 것.

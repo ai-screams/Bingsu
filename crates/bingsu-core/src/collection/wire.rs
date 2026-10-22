@@ -290,7 +290,7 @@ pub struct Request {
     pub environment: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl Request {
-    pub fn encode_body(&self) -> Result<Vec<u8>, ProtocolError> {
+    fn body_len(&self) -> Result<usize, ProtocolError> {
         let n = add_budget(self.binding.encoded_len()? - 32, 6, STREAM_MAX)?;
         if !(1..=50).contains(&self.budget_ms) {
             return Err(ProtocolError::Budget);
@@ -298,12 +298,16 @@ impl Request {
         if !self.environment.is_empty() {
             return Err(ProtocolError::Schema);
         }
+        Ok(n)
+    }
+    pub fn encode_body(&self) -> Result<Vec<u8>, ProtocolError> {
+        let n = self.body_len()?;
         let mut out = Vec::with_capacity(n);
         self.binding.put_identity(&mut out);
         out.extend_from_slice(&self.budget_ms.to_le_bytes());
         self.binding.put_paths(&mut out);
         out.extend_from_slice(&0u16.to_le_bytes());
-        Ok(out)
+        checked_encoding(out, n)
     }
     pub fn decode_body(
         build_id: BuildId,
@@ -530,6 +534,16 @@ impl Transcript {
         Self::with_catalog(request, field::BUILTIN).expect("bounded builtin catalog")
     }
     pub fn with_catalog(request: &Request, catalog: &[SegmentDecl]) -> Result<Self, ProtocolError> {
+        // A request carries segment indices in its mask. Check them before
+        // copying declarations or paths, including the empty/full catalogs.
+        if catalog.len() > SEGMENTS_MAX {
+            return Err(ProtocolError::Budget);
+        }
+        let declared = u32::MAX.checked_shr(32 - catalog.len() as u32).unwrap_or(0);
+        if request.binding.mask & !declared != 0 {
+            return Err(ProtocolError::Schema);
+        }
+        request.body_len()?;
         let schema = Schema::new(catalog)?;
         Ok(Self {
             request: request.clone(),
@@ -639,6 +653,10 @@ impl Transcript {
         self.sent = true;
         Ok(())
     }
+    // Spec collector-message rule (line 672): violations terminate collection;
+    // deadline/publication rule 3 (line 709): the supervisor applies the deadline.
+    // Neither gives Complete priority over a later supervisor termination. Keep
+    // the supplied reason: Complete without EOF can still end at Deadline.
     pub fn finish(self, reason: EndReason, now: Clock) -> Result<Option<Completed>, ProtocolError> {
         if reason == EndReason::Complete && !self.complete {
             return Err(ProtocolError::Order);
@@ -806,6 +824,13 @@ pub(crate) fn put_update(out: &mut Vec<u8>, update: &Update) {
         }
     }
 }
+/// A size calculation is part of the release wire contract, not a debug hint.
+pub(crate) fn checked_encoding(out: Vec<u8>, expected: usize) -> Result<Vec<u8>, ProtocolError> {
+    if out.len() != expected {
+        return Err(ProtocolError::Length);
+    }
+    Ok(out)
+}
 pub(crate) fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
@@ -871,7 +896,19 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProtocolError, STREAM_MAX, add_budget, replace_budget};
+    use super::{ProtocolError, STREAM_MAX, add_budget, checked_encoding, replace_budget};
+    // 이것을 실패시키는 것: checked_encoding의 길이 검사를 debug_assert로 바꾸는 것.
+    // Run this test with --release as well; no debug assertion is involved.
+    #[test]
+    fn encoding_length_mismatch_is_a_release_error() {
+        for expected in [0, 2] {
+            assert_eq!(
+                checked_encoding(alloc::vec![1], expected),
+                Err(ProtocolError::Length)
+            );
+        }
+        assert_eq!(checked_encoding(alloc::vec![1], 1), Ok(alloc::vec![1]));
+    }
     // 이것을 실패시키는 것: 예산 덧셈 overflow 또는 교체 뺄셈 underflow를 wrap하는 것.
     #[test]
     fn budget_arithmetic_never_wraps() {

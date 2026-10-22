@@ -53,6 +53,7 @@ impl Completed {
         for update in &self.updates {
             wire::put_update(&mut out, update);
         }
+        let mut out = wire::checked_encoding(out, len)?;
         out[..8].copy_from_slice(b"BNGRES02");
         out[8..10].copy_from_slice(&2u16.to_le_bytes());
         out[10..12].copy_from_slice(&(HEADER as u16).to_le_bytes());

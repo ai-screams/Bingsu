@@ -254,6 +254,10 @@ impl CollectorJob {
         };
         let result = Transcript::with_catalog(&self.request, self.catalog);
         if let Ok(mut transcript) = result {
+            // Spec message rule line 672 and deadline/publication rule line 709
+            // do not give Complete priority over a later termination. A peer
+            // that sends Complete but keeps its pipe open can reach Deadline;
+            // retain that reason in both this report and Transcript::finish.
             report.reason = self.exchange(&mut transcript, &mut report, &barrier);
             if report.reason != EndReason::Complete {
                 report.reason = self.registration.reason().unwrap_or(report.reason);
