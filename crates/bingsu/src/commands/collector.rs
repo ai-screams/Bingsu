@@ -84,7 +84,7 @@ fn verify_build(file: &File) -> Result<(), StoreError> {
         return Err(StoreError::Unsafe);
     }
     let mut buffer = [0u8; 65_536];
-    let expected = bingsu_collect::build_id();
+    let expected = bingsu_identity::build_id();
     let mut found = 0;
     let mut roles = 0;
     let mut offset = 0;
@@ -102,14 +102,14 @@ fn verify_build(file: &File) -> Result<(), StoreError> {
         };
         for at in 0..end {
             let window = &buffer[at..length];
-            if window[..16] == bingsu_collect::manifest_tag()[..16] {
+            if window[..16] == bingsu_identity::manifest_tag()[..16] {
                 if window.get(16..48) != Some(expected.0.as_slice()) {
                     return Err(StoreError::Unsafe);
                 }
                 found += 1;
             }
             if window[..16] == std::hint::black_box(&super::ROLE_TAG)[..16] {
-                if window.get(16) != Some(&bingsu_collect::COLLECTOR_ROLE)
+                if window.get(16) != Some(&bingsu_identity::COLLECTOR_ROLE)
                     || window.get(17..49) != Some(expected.0.as_slice())
                 {
                     return Err(StoreError::Unsafe);
@@ -212,8 +212,8 @@ mod tests {
 
     fn collector_fixture() -> Vec<u8> {
         [
-            bingsu_collect::manifest_tag().as_slice(),
-            &bingsu_collect::role_tag(bingsu_collect::COLLECTOR_ROLE),
+            bingsu_identity::manifest_tag().as_slice(),
+            &bingsu_identity::role_tag(bingsu_identity::COLLECTOR_ROLE),
         ]
         .concat()
     }
@@ -249,15 +249,15 @@ mod tests {
             assert!(verify_build(&File::open(&path).unwrap()).is_err());
         }
         for bad in [
-            bingsu_collect::manifest_tag().to_vec(),
+            bingsu_identity::manifest_tag().to_vec(),
             [
                 valid.as_slice(),
-                &bingsu_collect::role_tag(bingsu_collect::BINGSU_ROLE),
+                &bingsu_identity::role_tag(bingsu_identity::BINGSU_ROLE),
             ]
             .concat(),
             [
                 valid.as_slice(),
-                &bingsu_collect::role_tag(bingsu_collect::COLLECTOR_ROLE),
+                &bingsu_identity::role_tag(bingsu_identity::COLLECTOR_ROLE),
             ]
             .concat(),
             valid[..96].to_vec(),

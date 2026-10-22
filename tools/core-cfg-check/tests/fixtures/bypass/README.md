@@ -2,6 +2,13 @@
 
 | Fixture | Gate rule | Bypass shape | Expected verdict |
 | --- | --- | --- | --- |
+| `identity/worker.rs` | Identity isolation | A cfg-hidden worker module imports Git through the shared identity library. | Reject, even with updated TCB hash pins. |
+| `identity/include.rs` | Identity input | A function body pulls in extra code with `include!`. | Reject, even with updated TCB hash pins. |
+| `identity/include_str.rs` | Identity input | A function body pulls in an external string with `include_str!`. | Reject, even with updated TCB hash pins. |
+| `identity/include_bytes.rs` | Identity input | A function body pulls in external bytes with `include_bytes!`. | Reject, even with updated TCB hash pins. |
+| `identity/env.rs` | Identity input | A function body reads a build environment value with `env!`. | Reject, even with updated TCB hash pins. |
+| `identity/option_env.rs` | Identity input | A function body reads an optional build environment value with `option_env!`. | Reject, even with updated TCB hash pins. |
+| `identity/macro_rules.rs` | Identity input | A function body defines a declarative macro that can generate tokens. | Reject, even with updated TCB hash pins. |
 | `k24/decoy.rs` | K24 | A matching decoy `RULES` table hides extra syscall paths and a different rule consumer. | Reject, even with updated TCB hash pins. |
 | `k24/literal.rs` | K24 | `enter()` appends literal syscall number 59 to the table. | Reject, even with updated TCB hash pins. |
 | `k24/alias.rs` | K24 | A renamed libc import supplies an extra syscall to `enter()`. | Reject, even with updated TCB hash pins. |

@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "Dedicated bounded collection worker"
 publish = false
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 
@@ -19,8 +19,17 @@ path = "src/main.rs"
 libc = "0.2"
 
 [dependencies]
+bingsu-identity = { path = "../bingsu-identity" }
 bingsu-core = { path = "../bingsu-core" }
+gix-index.workspace = true
+gix-pack.workspace = true
+gix-object.workspace = true
+gix-config.workspace = true
+gix-ref.workspace = true
+gix-ignore.workspace = true
+gix-attributes.workspace = true
+gix-revwalk.workspace = true
 
 [features]
 # Identity only: a measurement build cannot pair with a shipped binary.
-bench-build = []
+bench-build = ["bingsu-identity/bench-build"]

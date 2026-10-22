@@ -1,0 +1,20 @@
+[package]
+name = "bingsu-identity"
+version = "0.0.0"
+description = "Shared source-bound identity for the bingsu sibling binaries"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Reuse the protocol BuildId type; no worker, OS, Git or build dependencies.
+bingsu-core = { path = "../bingsu-core" }
+
+[features]
+# A measurement build cannot pair with a shipped binary.
+bench-build = []

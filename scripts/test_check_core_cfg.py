@@ -12,6 +12,25 @@ CHECKER = ROOT / "target/debug/core-cfg-check"
 
 
 class PromptIo(unittest.TestCase):
+    # 이것을 실패시키는 것: collector MSRV 설정으로 금지 lint 목록을 덮어쓰는 것.
+    def test_collector_clippy_config_is_msrv_only(self):
+        import check_core_cfg as gate
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:
+            root = pathlib.Path(temp)
+            config = root / "crates/bingsu-collect/clippy.toml"
+            config.parent.mkdir(parents=True)
+            for text, valid in [('msrv = "1.85"\n', True),
+                                ('msrv = "1.88"\n', False),
+                                ('msrv = "1.85"\ndisallowed-methods = []\n', False)]:
+                config.write_text(text)
+                with patch.object(gate.os, "walk", return_value=[
+                    (str(config.parent.relative_to(root)), [], [config.name])
+                ]), patch("builtins.open", side_effect=lambda p, mode: config.open(mode)):
+                    errors = []
+                    gate.check_repo_tree(errors)
+                self.assertEqual(not errors, valid, errors)
+
     # 이것을 실패시키는 것: prompt_io 호출 스캔 제거 또는 cfg 가지/별칭/매크로 인자 생략.
     def test_prompt_io_is_scanned_in_every_cfg_branch(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:

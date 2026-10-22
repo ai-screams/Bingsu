@@ -87,6 +87,45 @@ fn fixture_items(name: &str, names: &[&str]) -> String {
         .join("\n")
 }
 
+// 이것을 실패시키는 것: identity의 금지 토큰을 빼거나 함수·상수·속성·매크로 토큰을 건너뛰는 것.
+#[test]
+fn bypass_identity_generated_input_is_the_only_exception() {
+    let mode = ["--identity"];
+    let good = repo_source("crates/bingsu-identity/src/lib.rs");
+    accepts(&good, &mode);
+    accepts(
+        &format!(
+            "{good}\n// include! env! macro_rules!\nconst TEXT: &str = \"include_bytes! option_env! include_str!\";"
+        ),
+        &mode,
+    );
+    for token in [
+        "include",
+        "include_str",
+        "include_bytes",
+        "env",
+        "option_env",
+        "macro_rules",
+    ] {
+        let reason = format!("identity forbidden token {token} outside build_id include");
+        rejects(&fixture(&format!("identity/{token}.rs")), &mode, &reason);
+        for extra in [
+            format!("fn hidden() {{ m!((::core::r#{token})); }}"),
+            format!("#[cfg(any())] const HIDDEN: () = m!(r#{token});"),
+            format!("#[m(r#{token})] fn hidden() {{}}"),
+        ] {
+            rejects(&format!("{good}\n{extra}"), &mode, &reason);
+        }
+    }
+    rejects(
+        &format!(
+            "{good}\nfn hidden() {{ include!(concat!(env!(\"OUT_DIR\"), \"/build_id.rs\")); }}"
+        ),
+        &mode,
+        "identity forbidden token include outside build_id include",
+    );
+}
+
 // 이것을 실패시키는 것: enter 본문·DENY 초기식 고정이나 libc 별칭 금지를 제거하는 것.
 #[test]
 fn bypass_k24_entry_and_deny_are_pinned() {

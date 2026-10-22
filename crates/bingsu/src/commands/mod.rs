@@ -73,7 +73,7 @@ pub(crate) mod sys;
 mod trust_record;
 
 #[used]
-static ROLE_TAG: [u8; 49] = bingsu_collect::role_tag(bingsu_collect::BINGSU_ROLE);
+static ROLE_TAG: [u8; 49] = bingsu_identity::role_tag(bingsu_identity::BINGSU_ROLE);
 
 pub fn run(a: NonPromptArgs) -> ExitCode {
     std::hint::black_box(&ROLE_TAG);

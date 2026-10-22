@@ -66,7 +66,7 @@ fn prepare_with_clock(
     deadline: Option<Deadline>,
 ) -> Prepared {
     check_deadline(deadline);
-    let plan = staged::prepare(raw).with_build_id(bingsu_collect::build_id());
+    let plan = staged::prepare(raw).with_build_id(bingsu_identity::build_id());
     let plan = if let Some(d) = deadline {
         plan.with_deadline(d)
     } else {
@@ -767,7 +767,7 @@ pub(crate) mod tests {
         let c = fixed_clock(None).observe().unwrap();
         let b = Binding {
             path_query: Default::default(),
-            build_id: bingsu_collect::build_id(),
+            build_id: bingsu_identity::build_id(),
             snapshot: Marker::decode(&fs::read(f.store.join("marker")).unwrap())
                 .unwrap()
                 .id,

@@ -16,8 +16,8 @@ EDGES = {
     "bingsu-core": ["libm", "unicode-segmentation", "toml"],
     "toml": ["toml_parser", "toml_datetime", "serde_spanned", "winnow"],
     "toml_parser": ["winnow"],
-    "bingsu": ["bingsu-core", "bingsu-collect", "libc"],
-    "bingsu-collect": ["bingsu-core", "libc"],
+    "bingsu": ["bingsu-core", "bingsu-identity", "libc"],
+    "bingsu-identity": ["bingsu-core"],
 }
 
 
@@ -74,6 +74,16 @@ class Judge(unittest.TestCase):
     # 이것을 실패시키는 것: 깨끗한 그래프에서 무엇이든 잡는 것(아래 경우들이 엉뚱한 이유로 통과하지 않음을 보증).
     def test_clean_graph_passes(self):
         self.assertEqual(self.judged(clean()), [])
+
+    # 이것을 실패시키는 것: identity 분리를 핑계로 앞단 pin을 늘리거나 worker/Git edge를 허용하는 것.
+    def test_identity_split_does_not_expand_the_front(self):
+        self.assertEqual(len(gate.BINGSU_GRAPH), 11)
+        self.assertEqual(EDGES["bingsu-identity"], ["bingsu-core"])
+        for parent in ("bingsu", "bingsu-identity"):
+            for name in ("bingsu-collect", "gix-index"):
+                m = clean()
+                add_dep(m, parent, name, ["lib"])
+                self.fails_with(m, f"('{name}', '1.0.0', ")
 
     # 이것을 실패시키는 것: 버전을 키에서 빼는 것.
     def test_version(self):

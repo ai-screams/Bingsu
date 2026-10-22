@@ -39,7 +39,8 @@ anything). It fails on:
     a no_std crate, `--cap-lints allow` silences the forbid lints there)
     and the canaries, separate crates, would not notice;
   - a `.clippy.toml` anywhere in the repository, or a `clippy.toml` other than
-    crates/bingsu-core/clippy.toml and crates/bingsu/clippy.toml: a stray
+    crates/bingsu-core/clippy.toml, crates/bingsu/clippy.toml and the
+    MSRV-only collector config: a stray
     config can replace the rules clippy applies;
   - a file under crates/bingsu-core whose extension is `.rs` in another case
     (`.RS`, `.Rs`): on a case-insensitive file system rustc reads `up.RS`
@@ -76,7 +77,8 @@ SKIP = {"purity-canary", "target"}
 ALLOWED = {"src", "tests", "benches"}
 TARGET_TABLES = ("lib", "bin", "test", "bench", "example")
 AUTO_KEYS = ("autolib", "autobins", "autotests", "autobenches", "autoexamples")
-CLIPPY_CONFIGS = {"crates/bingsu-core/clippy.toml", "crates/bingsu/clippy.toml"}
+CLIPPY_CONFIGS = {"crates/bingsu-core/clippy.toml", "crates/bingsu/clippy.toml",
+                  "crates/bingsu-collect/clippy.toml"}
 REPO_SKIP = {"target", ".git"}
 
 
@@ -93,6 +95,11 @@ def check_repo_tree(errors):
             # The exact path, so `Clippy.toml` next to an allowed config fails.
             elif name == "clippy.toml" and path not in CLIPPY_CONFIGS:
                 errors.append(f"clippy config not allowed: {path}")
+            elif path == "crates/bingsu-collect/clippy.toml":
+                # 이것을 실패시키는 것: MSRV 전용 설정에 lint 완화 키를 더하는 것.
+                with open(path, "rb") as config:
+                    if tomllib.load(config) != {"msrv": "1.85"}:
+                        errors.append("collector clippy config must only set msrv = 1.85")
             elif name in ("rust-toolchain", "rust-toolchain.toml"):
                 errors.append(f"toolchain file not allowed: {path}")
             elif name == "cargo.toml" and os.path.isfile(path):

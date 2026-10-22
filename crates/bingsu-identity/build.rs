@@ -35,17 +35,32 @@ fn main() {
     let package = env::var_os("CARGO_MANIFEST_DIR").unwrap();
     let root = Path::new(&package).parent().unwrap().parent().unwrap();
     let mut manifest = b"bingsu-siblings-v1\0".to_vec();
-    for name in ["Cargo.toml", "Cargo.lock"] {
+    // The lock pins registry sources/checksums; the reviewed allowlist also pins
+    // licenses, unified features and edges. Policy-only edits invalidate both
+    // siblings even when the linked machine code would otherwise be unchanged.
+    // 이것을 실패시키는 것: 아래 정책 파일 하나를 identity 입력에서 제외하는 것.
+    for name in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/bingsu-collect/dependencies.allowlist.tsv",
+        "crates/bingsu-collect/collector-syscalls.tsv",
+    ] {
         inventory(root, &root.join(name), &mut manifest);
     }
-    for package in ["bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench"] {
+    for package in [
+        "bingsu",
+        "bingsu-core",
+        "bingsu-collect",
+        "bingsu-bench",
+        "bingsu-identity",
+    ] {
         let package = root.join("crates").join(package);
         inventory(root, &package.join("Cargo.toml"), &mut manifest);
         inventory(root, &package.join("src"), &mut manifest);
     }
     inventory(
         root,
-        &root.join("crates/bingsu-collect/build.rs"),
+        &root.join("crates/bingsu-identity/build.rs"),
         &mut manifest,
     );
     let mut settings: Vec<_> = env::vars()
