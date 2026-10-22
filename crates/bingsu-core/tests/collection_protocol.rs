@@ -260,13 +260,20 @@ fn stream_and_update_limits_include_framing() {
         Completed::decode_with_catalog(&c.encode_with_catalog(&CATALOG).unwrap(), &CATALOG),
         Ok(c)
     );
-    let mut short = Transcript::new(&r);
+    // 이것을 실패시키는 것: catalog 밖 Request를 생성 시점에 거부하지 않는 것.
+    assert_eq!(
+        Transcript::with_catalog(&r, bingsu_core::field::BUILTIN),
+        Err(E::Schema)
+    );
+    let mut local = r.clone();
+    local.binding.mask = 1 << 3;
+    let mut short = Transcript::new(&local);
     short
-        .accept(frame(&r, Kind::Ready, &ready(r.binding.mask)))
+        .accept(frame(&local, Kind::Ready, &ready(local.binding.mask)))
         .unwrap();
     short.request_sent().unwrap();
     assert_eq!(
-        short.accept(frame(&r, Kind::Update, &[31, 0, 0])),
+        short.accept(frame(&local, Kind::Update, &[31, 0, 0])),
         Err(E::Schema)
     );
     const BIG: [SegmentDecl; 33] = [const {
@@ -531,7 +538,7 @@ fn mixed_build_or_version_exits_without_reply() {
     let p = ready(r.binding.mask);
     let mut f = frame(&r, Kind::Ready, &p);
     f.build_id = BuildId([8; 32]);
-    let mut t = Transcript::new(&r);
+    let mut t = Transcript::with_catalog(&r, &CATALOG).unwrap();
     assert_eq!(t.accept(f), Err(E::Build));
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut t = transcript(&r);
@@ -545,7 +552,7 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(d.accept(f), Err(E::Build));
     let mut p = ready(r.binding.mask);
     p[0] = 2;
-    let mut t = Transcript::new(&r);
+    let mut t = Transcript::with_catalog(&r, &CATALOG).unwrap();
     assert_eq!(t.accept(frame(&r, Kind::Ready, &p)), Err(E::Feature));
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut bytes = [0; 65_536];
