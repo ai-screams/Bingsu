@@ -3,6 +3,8 @@ from copy import deepcopy
 import importlib.util
 import json
 from pathlib import Path
+import re
+import shutil
 
 import pytest
 
@@ -221,7 +223,7 @@ def test_security_preparation_missing_or_stale_is_explicit(security_tests, monke
 def test_product_helper_keeps_the_shared_observation_wiring(call):
     helper = (SOURCE.parents[1] / "crates/bingsu/src/commands/helper.rs").read_text()
     run = helper.split("pub fn run(", 1)[1].split("pub(crate) struct Verification", 1)[0]
-    assert call in run
+    assert re.sub(r"\s+", "", call) in re.sub(r"\s+", "", run)
 
 
 # 이것을 실패시키는 것: 정상 prompt 전제 실패를 fallback 수치나 passing skip으로 감추는 것.
@@ -290,6 +292,30 @@ def test_worker_substitution_must_change_exactly_once(source, old, new):
     with pytest.raises(AssertionError):
         product.replace_required(source, old, new)
     assert product.replace_required("before", "before", "after") == "after"
+
+
+# 이것을 실패시키는 것: main.rs의 meter/safe_read 또는 새 모듈·cfg를 fixture에서 누락하는 것.
+def test_fixture_modules_follow_collector_main(tmp_path):
+    root = tmp_path / "crates/bingsu-collect/src"
+    shutil.copytree(SOURCE.parents[1] / "crates/bingsu-collect/src", root)
+    main = root / "main.rs"
+    # A module unknown to the harness must also be picked up automatically.
+    extra = '#[cfg(unix)]\n#[allow(dead_code)]\nmod future_worker_dependency;\n'
+    main.write_text(main.read_text() + extra)
+    (root / "future_worker_dependency.rs").write_text("")
+    worker = tmp_path / "worker.rs"
+    worker.write_text("")
+    modules = product.collector_modules(tmp_path, worker)
+    names = re.findall(r"(?m)^mod (\w+);$", main.read_text())
+    assert len(modules) == len(names)
+    for name in names:
+        declaration, = [m for m in modules if m.endswith(f" mod {name};")]
+        path = worker if name == "worker" else root / f"{name}.rs"
+        if not path.is_file():
+            path = root / name / "mod.rs"
+        assert f'#[path={json.dumps(str(path))}] mod {name};' in declaration
+    assert '#[cfg(unix)]\n#[allow(dead_code)]\n' in modules[-1]
+    assert '#[cfg(target_os = "linux")]\n' in next(m for m in modules if m.endswith(" mod filter;"))
 
 
 # 이것을 실패시키는 것: CARGO_TARGET_DIR를 무시하고 바이너리 조상에서만 source를 찾거나 다른 사본을 준비하는 것.

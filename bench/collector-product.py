@@ -567,6 +567,24 @@ def replace_required(text, old, new):
     return changed
 
 
+def collector_modules(source, worker_path):
+    # main.rs uses external modules with one-line outer attributes. Preserve
+    # those attributes (especially cfg), and let Rust resolve child modules at
+    # their original paths, including directory modules such as safe_read/.
+    root = source / "crates/bingsu-collect/src"
+    declarations = re.findall(r"(?m)((?:(?:#\[[^\n]+\]|//[^\n]*)\n)*)mod (\w+);$",
+                              (root / "main.rs").read_text())
+    assert sum(name == "worker" for _, name in declarations) == 1, "expected one collector worker module"
+    modules = []
+    for attributes, name in declarations:
+        path = worker_path if name == "worker" else root / f"{name}.rs"
+        if name != "worker" and not path.is_file():
+            path = root / name / "mod.rs"
+        assert path.is_file(), f"collector module source missing: {path}"
+        modules.append(f'{attributes}#[path={json.dumps(str(path))}] mod {name};')
+    return modules
+
+
 def prepare(binary):
     binary = Path(binary).resolve()
     source = build_context(binary)
@@ -597,8 +615,7 @@ def prepare(binary):
     directory.mkdir(exist_ok=True)
     modules = []
     for name, rel in {"commands": "crates/bingsu/src/commands/mod.rs", "prompt": "crates/bingsu/src/prompt.rs",
-                      "prompt_io": "crates/bingsu/src/prompt_io.rs", "prompt_spawn": "crates/bingsu/src/prompt_spawn.rs",
-                      "limits": "crates/bingsu-collect/src/limits.rs", "sys": "crates/bingsu-collect/src/sys.rs"}.items():
+                      "prompt_io": "crates/bingsu/src/prompt_io.rs", "prompt_spawn": "crates/bingsu/src/prompt_spawn.rs"}.items():
         module_path = source / rel
         if name == "commands":
             # Preserve Rust's child-module paths while exposing the sibling
@@ -614,9 +631,7 @@ def prepare(binary):
             module_path.write_text(commands)
         modules.append(f'#[path={json.dumps(str(module_path))}] mod {name};')
     if platform.system() == "Linux":
-        for name, rel in {"sandbox": "crates/bingsu/src/sandbox.rs", "filter": "crates/bingsu-collect/src/filter.rs",
-                          "landlock": "crates/bingsu-collect/src/landlock.rs"}.items():
-            modules.append(f'#[path={json.dumps(str(source / rel))}] mod {name};')
+        modules.append(f'#[path={json.dumps(str(source / "crates/bingsu/src/sandbox.rs"))}] mod sandbox;')
     else:
         modules.append('mod sandbox {pub fn enter()->bingsu_core::front::Sandbox{bingsu_core::front::Sandbox::Absent}}')
     worker = (source / "crates/bingsu-collect/src/worker.rs").read_text()
@@ -643,7 +658,7 @@ def prepare(binary):
     modules.append(f'#[path={json.dumps(str(security_path))}] mod security_worker;')
     worker_path = directory / "worker.rs"
     worker_path.write_text(worker)
-    modules.append(f'#[path={json.dumps(str(worker_path))}] mod worker;')
+    modules.extend(collector_modules(source, worker_path))
     reader = (source / "crates/bingsu/src/prompt_read.rs").read_text()
     at = reader.rfind("}")
     reader = reader[:at] + READ_MEASUREMENT + reader[at:]
