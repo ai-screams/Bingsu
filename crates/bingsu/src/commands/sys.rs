@@ -1544,10 +1544,18 @@ pub(super) fn collection_meter_active() -> bool {
 /// One bounded native directory block. Unlike telldir's stream-local index,
 /// this position comes from lseek on the directory OFD and can be reopened.
 /// The caller must revalidate directory identity/change time before resuming.
-pub(super) fn directory_batch(
+pub(crate) fn directory_batch(
     dir: std::os::fd::BorrowedFd<'_>,
     position: u64,
 ) -> std::io::Result<(u64, Vec<OsString>)> {
+    #[cfg(test)]
+    if let Some(result) = DIRECTORY_READER.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .map(|reader| collection_ops(7).and_then(|()| reader(dir, position)))
+    }) {
+        return result;
+    }
     use std::os::fd::AsRawFd;
     let invalid = || std::io::Error::other("invalid directory block");
     let offset = libc::off_t::try_from(position).map_err(|_| invalid())?;
@@ -1571,8 +1579,18 @@ pub(super) fn directory_batch(
     };
     #[cfg(target_os = "macos")]
     let n = {
-        // Darwin's 64-bit inode entry point, also used by libc readdir:
-        // apple-oss-distributions/Libc gen/FreeBSD/readdir.c.
+        // Public alternatives do not cover bounded blocks across reopen:
+        // telldir/seekdir use a per-DIR table
+        // (apple-oss-distributions/Libc gen/FreeBSD/telldir.c); getdirentries
+        // is explicitly unavailable with 64-bit inodes (include/dirent.h).
+        // getattrlistbulk also keeps private per-OFD fv_offset/buffer state:
+        // XNU bsd/vfs/vfs_attrlist.c only imports a zero fg_offset (restart),
+        // not a saved nonzero lseek position into a freshly opened OFD.
+        // Deprecated getdirentriesattr supports only some volume formats
+        // (its man page); a native APFS probe returns ENOTSUP.
+        // Keep readdir's private entry point rather than persist libc cookies.
+        // The native reopen test exercises this symbol on every macOS CI run;
+        // its absence is a link failure, never silent empty-inventory success.
         unsafe extern "C" {
             fn __getdirentries64(
                 fd: libc::c_int,
@@ -1619,4 +1637,32 @@ pub(super) fn directory_batch(
         return Err(invalid());
     }
     Ok((next, names))
+}
+
+#[cfg(test)]
+type DirectoryReader =
+    dyn FnMut(std::os::fd::BorrowedFd<'_>, u64) -> std::io::Result<(u64, Vec<OsString>)>;
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_READER: std::cell::RefCell<Option<Box<DirectoryReader>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) struct FixtureDirectoryReader;
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+impl FixtureDirectoryReader {
+    pub(crate) fn install(reader: Box<DirectoryReader>) -> Self {
+        DIRECTORY_READER.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(reader);
+        });
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for FixtureDirectoryReader {
+    fn drop(&mut self) {
+        DIRECTORY_READER.with(|slot| *slot.borrow_mut() = None);
+    }
 }

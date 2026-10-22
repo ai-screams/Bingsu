@@ -110,6 +110,7 @@ struct Cursor {
     mtime: (i64, i64),
     position: u64,
     pending: Vec<String>,
+    prune: Vec<String>,
     finished: bool,
     stores: u64,
     nodes: u64,
@@ -138,6 +139,7 @@ impl Cursor {
             mtime: stamp.mtime,
             position: 0,
             pending: vec![],
+            prune: vec![],
             finished: false,
             stores: c.stores,
             nodes: c.nodes,
@@ -581,6 +583,12 @@ fn reclaim_inner(
         report.incomplete = !catalog.ready || catalog.unsafe_seen;
         #[cfg(test)]
         let before = meter.used();
+        #[cfg(test)]
+        BEFORE_CHECKPOINT.with(|hook| {
+            if let Some(mut hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
         let saved = meter
             .checkpoint()
             .map_err(StoreError::from)
@@ -839,7 +847,12 @@ fn inventory(
         }
         let stamp = sys::file_stamp(dirs.last().unwrap())?;
         if (stamp.dev, stamp.ino) != (cursor.dev, cursor.ino)
-            || (i > 0 && stamp.mtime != cursor.mtime)
+            // Publication renames snapshot files in an ancestor store. Once
+            // its descendable names have been consumed, keep the child walk;
+            // every saved child is still checked by name and dev/ino above.
+            || (i > 0
+                && stamp.mtime != cursor.mtime
+                && cursor.pending.iter().any(|name| descend(&path, name)))
         {
             restart(catalog, i, &stamp);
             #[cfg(test)]
@@ -865,28 +878,19 @@ fn inventory(
         }
         let name = catalog.cursor.last().unwrap().pending.last().cloned();
         let Some(name) = name else {
-            // A crash can leave only empty address directories. rmdir under
-            // the global lock cannot remove a live or unknown child entry.
-            if path.iter().any(|n| n == "collections-v1") {
-                let parent = &dirs[dirs.len() - 2];
-                let name = path.last().unwrap();
-                snapshot_store::check_directory(dir, me)?;
-                snapshot_store::same_name(dir, parent.as_fd(), name)?;
-                match sys::remove_dir_at(parent.as_fd(), OsStr::new(name)) {
-                    Ok(()) => {
-                        report.removed_dirs += 1;
-                        catalog.nodes = catalog.nodes.saturating_sub(1);
-                    }
-                    Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) => {}
-                    Err(e) => return Err(e.into()),
-                }
+            // Native positions can be ordinal offsets (old Linux tmpfs).
+            // Removing a child before this parent's EOF would shift unread
+            // entries past the saved position. Persist candidates until EOF.
+            if !prune_inventory(dir, me, catalog, report)? {
+                continue;
             }
+            let empty = path.iter().any(|n| n == "collections-v1") && first_name(dir)?.is_none();
             catalog.cursor.pop();
             dirs.pop();
-            path.pop();
-            if let Some(parent) = dirs.last() {
-                catalog.cursor.last_mut().unwrap().mtime = sys::file_stamp(parent)?.mtime;
+            if empty {
+                queue_prune(catalog, path.last().unwrap().clone());
             }
+            path.pop();
             continue;
         };
         if !descend(&path, &name) {
@@ -900,6 +904,11 @@ fn inventory(
         let child = match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)) {
             Ok(child) => child,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(e.into()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                catalog.cursor.last_mut().unwrap().pending.pop();
+                batch_entries += 1;
+                continue;
+            }
             Err(_) => {
                 catalog.unsafe_seen = true;
                 catalog.cursor.last_mut().unwrap().pending.pop();
@@ -937,12 +946,10 @@ fn inventory(
         }
         if location(&child_path).is_ok() {
             if first_name(&child)?.is_none() {
-                snapshot_store::same_name(&child, dir.as_fd(), &name)?;
-                sys::remove_dir_at(dir.as_fd(), OsStr::new(&name))?;
-                report.removed_dirs += 1;
+                queue_prune(catalog, name);
+                catalog.nodes = catalog.nodes.saturating_add(1);
                 catalog.cursor.last_mut().unwrap().pending.pop();
                 batch_entries += 1;
-                catalog.cursor.last_mut().unwrap().mtime = sys::file_stamp(dir)?.mtime;
                 continue;
             }
             let entry = inspect(&child, child_path.clone(), me, now, schema)?;
@@ -977,6 +984,60 @@ fn inventory(
     }
     catalog.ready = true;
     Ok(())
+}
+fn queue_prune(catalog: &mut Catalog, name: String) {
+    catalog.cursor.last_mut().unwrap().prune.push(name);
+    // Keep the catalog bounded even for a hostile tree of empty directories.
+    // Unqueued nodes remain charged and cannot authorize new admission.
+    if encode(catalog).is_err() {
+        catalog.cursor.last_mut().unwrap().prune.pop();
+        catalog.unsafe_seen = true;
+    }
+}
+fn prune_inventory(
+    dir: &File,
+    me: u32,
+    catalog: &mut Catalog,
+    report: &mut GcReport,
+) -> Result<bool, StoreError> {
+    let index = catalog.cursor.len() - 1;
+    while let Some(name) = catalog.cursor[index].prune.last().cloned() {
+        let before = sys::file_stamp(dir)?;
+        // Only our own removal may refresh the saved mtime. Never hide a
+        // concurrent edit behind rmdir's new timestamp, even at EOF.
+        if before.mtime != catalog.cursor[index].mtime {
+            restart(catalog, index, &before);
+            #[cfg(test)]
+            report.restarted_depths.push(index);
+            return Ok(false);
+        }
+        match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)) {
+            Ok(child) => {
+                snapshot_store::check_directory(&child, me)?;
+                snapshot_store::same_name(&child, dir.as_fd(), &name)?;
+                match sys::remove_dir_at(dir.as_fd(), OsStr::new(&name)) {
+                    Ok(()) => {
+                        report.removed_dirs += 1;
+                        catalog.nodes = catalog.nodes.saturating_sub(1);
+                        catalog.cursor[index].mtime = sys::file_stamp(dir)?.mtime;
+                    }
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) => {
+                        // A queued empty may have acquired contents while the
+                        // scan yielded. Charge those contents before admission.
+                        restart(catalog, index, &sys::file_stamp(dir)?);
+                        #[cfg(test)]
+                        report.restarted_depths.push(index);
+                        return Ok(false);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        catalog.cursor[index].prune.pop();
+    }
+    Ok(true)
 }
 fn restart(catalog: &mut Catalog, index: usize, stamp: &sys::Stamp) {
     let cursor = catalog.cursor[index].clone();
@@ -1310,7 +1371,7 @@ fn put_clock(out: &mut Vec<u8>, clock: Clock) {
     out.extend_from_slice(&clock.now.to_le_bytes());
 }
 fn encode(c: &Catalog) -> Result<Vec<u8>, StoreError> {
-    let mut out = b"BNGCGC03\0\0\0\0".to_vec();
+    let mut out = b"BNGCGC04\0\0\0\0".to_vec();
     for n in [c.dev, c.ino, c.stores, c.nodes, c.bytes] {
         out.extend_from_slice(&n.to_le_bytes());
     }
@@ -1353,6 +1414,10 @@ fn encode(c: &Catalog) -> Result<Vec<u8>, StoreError> {
         out.extend_from_slice(&[u8::from(cursor.finished), u8::from(cursor.unsafe_seen)]);
         out.extend_from_slice(&(cursor.pending.len() as u32).to_le_bytes());
         for name in &cursor.pending {
+            put_bytes(&mut out, name.as_bytes())?;
+        }
+        out.extend_from_slice(&(cursor.prune.len() as u32).to_le_bytes());
+        for name in &cursor.prune {
             put_bytes(&mut out, name.as_bytes())?;
         }
     }
@@ -1420,7 +1485,7 @@ impl<'a> Reader<'a> {
 fn decode(bytes: &[u8]) -> Result<Catalog, StoreError> {
     if bytes.len() < 12
         || bytes.len() > CATALOG_MAX
-        || &bytes[..8] != b"BNGCGC03"
+        || !matches!(&bytes[..8], b"BNGCGC03" | b"BNGCGC04")
         || snapshot::crc32c(&[&bytes[12..]]) != bytes[8..12]
     {
         return Err(StoreError::Unsafe);
@@ -1497,6 +1562,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog, StoreError> {
             finished: r.flag()?,
             unsafe_seen: r.flag()?,
             pending: vec![],
+            prune: vec![],
         };
         let count = r.count(512)?;
         let mut total = 0;
@@ -1527,6 +1593,16 @@ fn decode(bytes: &[u8]) -> Result<Catalog, StoreError> {
         }
         if i > 0 {
             path.push(cursor.name.clone());
+        }
+        if &bytes[..8] == b"BNGCGC04" {
+            let count = r.count(CATALOG_MAX / 4)?;
+            for _ in 0..count {
+                let name = r.string()?;
+                if !descend(&path, &name) {
+                    return Err(StoreError::Unsafe);
+                }
+                cursor.prune.push(name);
+            }
         }
         c.cursor.push(cursor);
     }

@@ -2120,6 +2120,369 @@ fn seed_inventory(f: &Fixture, stores: usize) {
     fs::remove_file(f.base.join(".collections.catalog")).unwrap();
 }
 
+fn snapshot_bytes(generation: u64) -> Vec<u8> {
+    use bingsu_core::{
+        color::palette::Mode,
+        config::{compile, merge::Merged},
+    };
+    let merged = Merged::default();
+    snapshot::Snapshot {
+        id: snapshot::Identity {
+            generation,
+            ..binding(b"/cwd").snapshot
+        },
+        config: compile::compile(&merged, &merged, Mode::Dark).unwrap().0,
+        metadata: snapshot::encode_metadata(b"fixture").unwrap(),
+    }
+    .encode(1, 0)
+    .unwrap()
+}
+
+fn publish_snapshot(context: &CheckedContextFd, generation: u64) {
+    use commands::snapshot_store::Slot;
+    let lock = context.try_lock().unwrap();
+    lock.stage(Slot::Snapshot, &snapshot_bytes(generation))
+        .unwrap();
+    lock.install(Slot::Snapshot).unwrap();
+}
+
+fn ordinal_reader(block: usize) -> sys::FixtureDirectoryReader {
+    sys::FixtureDirectoryReader::install(Box::new(move |dir, position| {
+        let mut names = sys::directory_names(dir)?;
+        names.sort();
+        let names: Vec<_> = names
+            .into_iter()
+            .skip(position as usize)
+            .take(block)
+            .collect();
+        Ok((position + names.len() as u64, names))
+    }))
+}
+
+// 이것을 실패시키는 것: snapshot rename으로 mtime이 바뀐 소진된 조상 cursor에서 하위 진도를 버리는 것.
+#[test]
+fn gc_snapshot_publication_preserves_active_subtree() {
+    use commands::collection_store::Admission;
+    let f = Fixture::new("publish-progress");
+    seed_inventory(&f, 24);
+    let mut yields = 0;
+    let mut active = 0;
+    for generation in 1..=128 {
+        let admission = CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget {
+                max_ops: 1_536,
+                ..GcBudget::default()
+            },
+            None,
+        )
+        .unwrap();
+        if matches!(admission, Admission::Admitted(_)) {
+            assert!(yields > 1 && active > 1);
+            assert_eq!(catalog_counts(&f).0, 25);
+            assert_eq!(catalog_counts(&f).1, 51);
+            eprintln!("snapshot publication progress: yields={yields} active={active}");
+            return;
+        }
+        yields += 1;
+        active += usize::from(collection_gc::fixture_cursor(&f.context).len() >= 8);
+        let dir = commands::snapshot_store::context_dir_for_test(&f.context);
+        let before = dir.metadata().unwrap().modified().unwrap();
+        publish_snapshot(&f.context, generation);
+        assert_ne!(dir.metadata().unwrap().modified().unwrap(), before);
+    }
+    panic!("snapshot publication stranded admission after {yields} yields");
+}
+
+fn inventory_with_empties(f: &Fixture, empty_stores: bool, count: usize, ordinal: bool) {
+    use commands::collection_store::Admission;
+    seed_inventory(f, 12);
+    let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
+    let mut empties = Vec::new();
+    if empty_stores {
+        for i in 0..12 {
+            let b = binding(format!("/inventory-{i}").as_bytes());
+            let empty = f.path_for(&b).parent().unwrap().join(".store.gc");
+            fs::create_dir(&empty).unwrap();
+            fs::set_permissions(&empty, fs::Permissions::from_mode(0o700)).unwrap();
+            empties.push(empty);
+        }
+    } else {
+        for i in 0..count {
+            // Sort a valid empty address immediately after each live one.
+            // Eager rmdir then skips the next live store with ordinal offsets.
+            let name = if i < 12 {
+                let b = binding(format!("/inventory-{i}").as_bytes());
+                format!(
+                    "{}00",
+                    f.path_for(&b)
+                        .parent()
+                        .unwrap()
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                )
+            } else {
+                format!("{i:064x}")
+            };
+            let empty = collections.join(name);
+            fs::create_dir(&empty).unwrap();
+            fs::set_permissions(&empty, fs::Permissions::from_mode(0o700)).unwrap();
+            empties.push(empty);
+        }
+    }
+    let bytes: u64 = (0..12)
+        .map(|i| {
+            fs::metadata(
+                f.path_for(&binding(format!("/inventory-{i}").as_bytes()))
+                    .join("response"),
+            )
+            .unwrap()
+            .len()
+        })
+        .sum();
+    let _reader = ordinal.then(|| ordinal_reader(1));
+    for _ in 0..256 {
+        let admission = CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget {
+                max_ops: 1_536,
+                ..GcBudget::default()
+            },
+            None,
+        )
+        .unwrap();
+        if matches!(admission, Admission::Admitted(_)) {
+            assert_eq!(
+                catalog_counts(f),
+                (13, 27, bytes + collection_gc::RESERVATION)
+            );
+            assert!(empties.iter().all(|path| !path.exists()));
+            return;
+        }
+    }
+    panic!("inventory with empty directories never completed");
+}
+
+// 이것을 실패시키는 것: 부모 EOF 전에 빈 address를 rmdir하여 다음 ordinal 항목을 건너뛰는 것.
+#[test]
+fn gc_ordinal_address_removal_waits_for_parent_eof() {
+    let f = Fixture::new("ordinal-address");
+    inventory_with_empties(&f, false, 12, true);
+}
+
+// 이것을 실패시키는 것: 부모 EOF 전에 빈 store를 rmdir하여 다음 store의 수·bytes를 누락하는 것.
+#[test]
+fn gc_ordinal_store_removal_waits_for_parent_eof() {
+    let f = Fixture::new("ordinal-store");
+    inventory_with_empties(&f, true, 0, true);
+}
+
+// 이것을 실패시키는 것: native tmpfs의 여러 block 사이에서 빈 주소를 지워 미열람 store를 누락하는 것.
+#[cfg(target_os = "linux")]
+#[test]
+fn gc_native_tmpfs_removal_waits_for_parent_eof() {
+    let f = Fixture::new_in(PathBuf::from("/dev/shm"), "native-tmpfs");
+    // SAFETY: statfs is a C output structure whose fields permit zero values.
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: live runtime fd and writable statfs storage.
+    let rc = unsafe { libc::fstatfs(f.runtime.as_raw_fd(), &mut stat) };
+    assert_eq!(rc, 0);
+    assert_eq!(stat.f_type as u64, libc::TMPFS_MAGIC as u64);
+    inventory_with_empties(&f, false, 512, false);
+}
+
+// 이것을 실패시키는 것: 목록에 있던 이름의 open ENOENT를 unsafe_seen으로 기록하는 것.
+#[test]
+fn gc_pending_name_disappearing_is_absent() {
+    let f = Fixture::new("pending-gone");
+    seed_inventory(&f, 1);
+    let collections = f.path().parent().unwrap().parent().unwrap().to_path_buf();
+    let gone = collections.join("00");
+    fs::create_dir(&gone).unwrap();
+    fs::set_permissions(&gone, fs::Permissions::from_mode(0o700)).unwrap();
+    let removed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = removed.clone();
+    let _reader = sys::FixtureDirectoryReader::install(Box::new(move |dir, position| {
+        let mut names = sys::directory_names(dir)?;
+        names.sort();
+        let block = if names.iter().any(|n| n == "00") {
+            512
+        } else {
+            1
+        };
+        if block == 512 && !observed.replace(true) {
+            fs::remove_dir(&gone)?;
+        }
+        let names: Vec<_> = names
+            .into_iter()
+            .skip(position as usize)
+            .take(block)
+            .collect();
+        Ok((position + names.len() as u64, names))
+    }));
+    for _ in 0..64 {
+        let admission = CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget::default(),
+            None,
+        )
+        .unwrap();
+        if matches!(
+            admission,
+            commands::collection_store::Admission::Admitted(_)
+        ) {
+            assert!(removed.get());
+            assert_eq!(catalog_counts(&f).0, 2);
+            return;
+        }
+    }
+    panic!("a vanished pending name must not poison admission");
+}
+
+// 이것을 실패시키는 것: 삭제 전 mtime 불일치를 무시하고 rmdir 뒤 시각으로 덮어 새 store를 누락하는 것.
+#[test]
+fn gc_prune_restarts_if_parent_changed_before_deletion() {
+    let f = Fixture::new("prune-mtime");
+    seed_inventory(&f, 2);
+    let address = f
+        .path_for(&binding(b"/inventory-1"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let collections = address.parent().unwrap();
+    let empty = collections.join("00");
+    fs::create_dir(&empty).unwrap();
+    fs::set_permissions(&empty, fs::Permissions::from_mode(0o700)).unwrap();
+    let ino = fs::metadata(collections).unwrap().ino();
+    let held = f.base.join("held");
+    fs::rename(&address, &held).unwrap();
+    let changed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = changed.clone();
+    let _reader = sys::FixtureDirectoryReader::install(Box::new(move |dir, position| {
+        let mut names = sys::directory_names(dir)?;
+        names.sort();
+        let names: Vec<_> = names.into_iter().skip(position as usize).take(1).collect();
+        if names.is_empty() && sys::fd_facts(dir)?.ino == ino && !observed.replace(true) {
+            fs::rename(&held, &address)?;
+        }
+        Ok((position + names.len() as u64, names))
+    }));
+    for _ in 0..64 {
+        let admission = CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget::default(),
+            None,
+        )
+        .unwrap();
+        if matches!(
+            admission,
+            commands::collection_store::Admission::Admitted(_)
+        ) {
+            assert!(changed.get());
+            assert_eq!(catalog_counts(&f).0, 3);
+            assert_eq!(catalog_counts(&f).1, 7);
+            assert!(!empty.exists());
+            return;
+        }
+    }
+    panic!("changed parent was not re-inventoried before deletion");
+}
+
+// 이것을 실패시키는 것: 큐에 든 빈 store가 채워져 rmdir이 ENOTEMPTY여도 재계수 없이 버리는 것.
+#[test]
+fn gc_queued_empty_store_is_rechecked_before_removal() {
+    let f = Fixture::new("prune-filled");
+    seed_inventory(&f, 1);
+    let path = f.path_for(&binding(b"/inventory-0"));
+    let ino = fs::metadata(path.parent().unwrap()).unwrap().ino();
+    let held = f.base.join("held");
+    fs::rename(&path, &held).unwrap();
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let filled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = filled.clone();
+    let _reader = sys::FixtureDirectoryReader::install(Box::new(move |dir, position| {
+        let mut names = sys::directory_names(dir)?;
+        names.sort();
+        let names: Vec<_> = names.into_iter().skip(position as usize).take(1).collect();
+        if names.is_empty() && sys::fd_facts(dir)?.ino == ino && !observed.replace(true) {
+            for entry in fs::read_dir(&held)? {
+                let entry = entry?;
+                fs::rename(entry.path(), path.join(entry.file_name()))?;
+            }
+        }
+        Ok((position + names.len() as u64, names))
+    }));
+    for _ in 0..64 {
+        let admission = CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget::default(),
+            None,
+        )
+        .unwrap();
+        if matches!(
+            admission,
+            commands::collection_store::Admission::Admitted(_)
+        ) {
+            assert!(filled.get());
+            assert_eq!(catalog_counts(&f).0, 2);
+            assert_eq!(catalog_counts(&f).1, 5);
+            return;
+        }
+    }
+    panic!("new contents of the queued store were not inventoried");
+}
+
+// 이것을 실패시키는 것: __getdirentries64 심벌이 없거나 닫힌 DIR의 telldir cookie로 재개하는 것.
+#[test]
+fn native_directory_blocks_resume_after_reopen() {
+    let f = Fixture::new("native-reopen");
+    let path = f.base.join("native");
+    fs::create_dir(&path).unwrap();
+    let expected: std::collections::BTreeSet<std::ffi::OsString> = (0..300)
+        .map(|i| format!("{i:04}-{}", "x".repeat(160)).into())
+        .collect();
+    for name in &expected {
+        fs::write(path.join(name), []).unwrap();
+    }
+    let mut position = 0;
+    let mut found = std::collections::BTreeSet::new();
+    let mut blocks = 0;
+    loop {
+        let dir = File::open(&path).unwrap();
+        let (next, names) = sys::directory_batch(dir.as_fd(), position).unwrap();
+        drop(dir);
+        for name in names {
+            assert!(found.insert(name), "repeated native entry");
+        }
+        if next == position {
+            break;
+        }
+        position = next;
+        blocks += 1;
+        assert!(blocks <= 300);
+    }
+    assert!(blocks > 1);
+    assert_eq!(found, expected);
+}
+
 // 이것을 실패시키는 것: 예산 양보 뒤 cursor/목록 위치를 버리거나 Deferred를 성공으로 바꾸는 것.
 #[test]
 fn admission_eventually_progresses_after_budget_yields() {
@@ -2220,7 +2583,18 @@ fn gc_checkpoint_reserve_is_bounded() {
     .unwrap();
     assert_eq!((r.stop, r.ops), (GcStop::YieldTime, 0));
     let before = fs::read(f.base.join(".collections.catalog")).unwrap();
-    GC_CLOCK.with(|clock| clock.set((20_000_000, 0)));
+    // Reach inventory first, cross its 16ms boundary during work, then
+    // cross 20ms at checkpoint entry (not at the initial catalog open).
+    GC_CLOCK.with(|clock| clock.set((0, 100_000)));
+    let reached = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = reached.clone();
+    collection_gc::fixture_checkpoint_hook(Box::new(move || {
+        observed.set(true);
+        GC_CLOCK.with(|clock| {
+            assert!(clock.get().0 >= 16_000_000);
+            clock.set((20_000_001, 0));
+        });
+    }));
     let r = collection_gc::fixture_timed_reclaim(
         &f.context,
         clock(),
@@ -2229,7 +2603,10 @@ fn gc_checkpoint_reserve_is_bounded() {
         gc_tick,
     )
     .unwrap();
-    assert_eq!((r.stop, r.ops, r.checkpoint_ops), (GcStop::YieldTime, 0, 0));
+    assert!(reached.get(), "must exercise checkpoint() after doing work");
+    assert!(r.ops > 0);
+    assert_eq!((r.stop, r.checkpoint_ops), (GcStop::YieldTime, 0));
+    assert!(!r.checkpoint_saved);
     assert_eq!(
         fs::read(f.base.join(".collections.catalog")).unwrap(),
         before
@@ -2325,7 +2702,7 @@ fn gc_changed_directory_restarts_only_its_cursor() {
 #[test]
 fn admission_errors_are_not_erased() {
     use collection_gc::GcStop;
-    use commands::{collection_store::Admission, helper::collection_result};
+    use commands::collection_store::Admission;
     let f = Fixture::new("admission-errors");
     f.publish(b"retained");
     let live = f.acquire().unwrap();
@@ -2340,28 +2717,26 @@ fn admission_errors_are_not_erased() {
         CollectionStore::admit(&f.context, &wrong, clock()),
         Err(StoreError::Unsafe)
     ));
-    for (result, expected) in [
-        (
-            Ok(Err(GcStop::YieldTime)),
-            "collection deferred: time budget",
-        ),
-        (
-            Ok(Err(GcStop::YieldOps)),
-            "collection deferred: operation budget",
-        ),
-        (Ok(Err(GcStop::Busy)), "collection busy"),
-        (Err(StoreError::Busy), "collection busy"),
-        (Err(StoreError::Unsafe), "collection unsafe"),
-        (
-            Err(StoreError::Io(std::io::Error::from_raw_os_error(libc::EIO))),
-            "collection I/O failure",
-        ),
-    ] {
-        let (store, report) = collection_result::<()>(result);
-        assert!(store.is_none());
-        assert_eq!(report.unwrap().1, expected);
+    for case in ["time", "ops", "deferred-busy", "busy", "unsafe", "io"] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "admission_run_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("A1_ADMISSION_CASE", case)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{case}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
     }
-    assert_eq!(collection_result(Ok(Ok(7))).0, Some(7));
     assert_eq!(f.read("response"), completed(&f.binding, b"retained"));
 
     // 이것을 실패시키는 것: 잘못된 이름을 검증하기 전에 목록 위치를 진행시켜 다음 admission에서 오류를 건너뛰는 것.
@@ -2393,6 +2768,112 @@ fn admission_errors_are_not_erased() {
         ),
         Err(StoreError::Unsafe)
     ));
+}
+
+// 이것을 실패시키는 것: helper::run에서 admission의 .ok()로 오류/Deferred를 버리거나 refresh 발행을 막는 것.
+#[test]
+#[ignore = "child isolates helper detach and its watchdog"]
+#[allow(clippy::disallowed_methods, reason = "isolated helper fixture case")]
+fn admission_run_child() {
+    use bingsu_core::envelope::LogLevel;
+    use collection_gc::GcStop;
+    use commands::helper;
+    let case = std::env::var("A1_ADMISSION_CASE").unwrap();
+    let (outcome, expected, level) = match case.as_str() {
+        "time" => (
+            Ok(Err(GcStop::YieldTime)),
+            "collection deferred: time budget",
+            LogLevel::DebugLog,
+        ),
+        "ops" => (
+            Ok(Err(GcStop::YieldOps)),
+            "collection deferred: operation budget",
+            LogLevel::DebugLog,
+        ),
+        "deferred-busy" => (Ok(Err(GcStop::Busy)), "collection busy", LogLevel::DebugLog),
+        "busy" => (Err(StoreError::Busy), "collection busy", LogLevel::DebugLog),
+        "unsafe" => (
+            Err(StoreError::Unsafe),
+            "collection unsafe",
+            LogLevel::Error,
+        ),
+        "io" => (
+            Err(StoreError::Io(std::io::Error::from_raw_os_error(libc::EIO))),
+            "collection I/O failure",
+            LogLevel::Error,
+        ),
+        _ => panic!("unknown admission case"),
+    };
+    let f = Fixture::new("helper-admission");
+    f.publish(b"retained");
+    let context = CheckedContextFd::under_runtime(
+        &f.runtime,
+        &f.binding.config,
+        &f.binding.state,
+        sys::current_uid(),
+        false,
+    )
+    .unwrap();
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let snapshot = snapshot_bytes(2);
+    helper::fixture_run(helper::FixtureRun {
+        context,
+        now: clock(),
+        admission: std::cell::RefCell::new(Some(outcome)),
+        snapshot: snapshot.clone(),
+        events: events.clone(),
+    });
+    let meta = f.runtime.metadata().unwrap();
+    let args = vec![
+        "--ctx".into(),
+        "1".into(),
+        "--record".into(),
+        "B1".into(),
+        "--width".into(),
+        "80".into(),
+        format!(
+            "--runtime-root={}:{}:{}",
+            meta.dev(),
+            meta.ino(),
+            f.base.display()
+        )
+        .into(),
+        "--config-root=/config".into(),
+        "--config-root-written=/config".into(),
+        "--state-root=/state".into(),
+        "--home=/".into(),
+    ];
+    let panic_hook = std::panic::take_hook();
+    bingsu_core::helper::validate(
+        &args
+            .iter()
+            .map(|a: &std::ffi::OsString| a.as_encoded_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let result = helper::run(std::env::current_exe().unwrap().as_os_str(), &args);
+    std::panic::set_hook(panic_hook);
+    assert_eq!(
+        result,
+        std::process::ExitCode::SUCCESS,
+        "events: {:?}",
+        events.borrow()
+    );
+    assert_eq!(
+        *events.borrow(),
+        [(level, expected), (LogLevel::Info, "refresh published")]
+    );
+    let dir = f
+        .path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert_eq!(fs::read(dir.join("snapshot")).unwrap(), snapshot);
+    assert_eq!(f.read("response"), completed(&f.binding, b"retained"));
 }
 
 // 이것을 실패시키는 것: 1MiB 근처 catalog checkpoint가 512 ops 예약을 넘거나 실제 staging을 생략하는 것.
