@@ -77,7 +77,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut filter_failed = false;
     let mut supervisor = None;
     let mut collection_runtime = None;
+    let mut verification = Verification::start();
     let result = refresh::refresh_broker(request, &mut clock, &mut |context, display, now| {
+        verification.verified();
         let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
         if let Some(request) = request {
             collection_runtime = context.runtime.try_clone().ok();
@@ -95,7 +97,8 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 )?;
                 let mut store = CollectionStore::acquire(context, &request.binding, now)?;
                 let lock = store.worker_lock()?;
-                let job = collector::spawn(&pin, request, lock, &_watchdog)?;
+                let job =
+                    verification.attach(collector::spawn(&pin, request, lock, &_watchdog)?, &store);
                 Ok::<_, super::snapshot_store::StoreError>(
                     job.start(Box::new(move |result| store.publish(&result)))?,
                 )
@@ -144,6 +147,36 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Observation-only seam shared with the test catalog. Neither a missing
+/// timestamp nor report consumption changes collection admission or deadlines.
+pub(crate) struct Verification {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+}
+impl Verification {
+    pub(crate) fn start() -> Self {
+        Self {
+            start: super::collector_process::now_ns().ok(),
+            end: None,
+        }
+    }
+    pub(crate) fn verified(&mut self) {
+        self.end = super::collector_process::now_ns().ok();
+    }
+    pub(crate) fn attach(
+        &self,
+        job: super::collector_supervisor::CollectorJob,
+        store: &CollectionStore,
+    ) -> super::collector_supervisor::CollectorJob {
+        job.observations(
+            self.start,
+            self.end,
+            store.lock_acquired,
+            store.response_renamed.clone(),
+        )
     }
 }
 

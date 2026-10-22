@@ -132,3 +132,39 @@ def collection_front_expected(directories: int, file_sizes: tuple[int | None, ..
     return {"openat": opens, "fstat": facts, "fstatfs": facts,
             "fgetxattr": facts, "getxattr": directories,
             "read": sum(1 + ceil_div(n, 16_384) for n in body_bytes)}
+
+
+def collector_product_expected(case: str, *, body_bytes: int = 256,
+                               previous_bytes: int = 256, cwd_bytes: int = 4,
+                               gc_directories: int = 0, gc_files: int = 0) -> dict:
+    """M3b phase increments, never total helper/path-walk C-axis costs.
+
+    Cases select observations/branches; byte and directory axes determine the
+    counts. GC inventory counts must be supplied from the controlled fixture,
+    not copied from an aggregate trace. M3d retains full role coefficients.
+    """
+    cases = {"product-mask0", "fixture", "ready-failure", "partial", "malformed-flood",
+             "current", "previous", "snapshot-change", "busy", "long-cwd", "collision",
+             "legacy-gc", "runtime-unsafe", "proc-absent", "nofile-lowered"}
+    if case not in cases or not 1 <= cwd_bytes <= 65536 or min(gc_directories, gc_files) < 0:
+        raise ValueError("invalid M3b case/axes")
+    # A fresh product runtime stops at its one absent namespace open. Unsafe runtime or
+    # unavailable spawn prerequisites stop before any response/store access.
+    stopped = case in {"runtime-unsafe", "proc-absent", "nofile-lowered"}
+    absent = case == "product-mask0"
+    front = ({} if stopped else collection_front_expected(0, (), (), absent=True) if absent
+             else collection_front_expected(3, (64 + body_bytes, 64 + previous_bytes),
+                                            (body_bytes, previous_bytes)))
+    publishes = case in {"fixture", "partial", "malformed-flood", "long-cwd", "legacy-gc"}
+    if case == "ready-failure":
+        # Admission created all three directories before startup failed. Both
+        # file slots are still absent, so there are five opens and no reads.
+        front = collection_front_expected(3, (None, None), ())
+    publication = collection_expected(3, body_bytes, False, False) if publishes else {}
+    # collector-effects is the expected ceiling, not evidence. Linux failure
+    # traces supply measured counts; untraced cases are labelled in the ledger.
+    return {"front-prefetch": front, "helper-publication": publication,
+            "helper-gc": {"getdents": 2 * gc_directories, "unlinkat": gc_files,
+                          "fsync": 0},
+            "collector-effects": {"spawn": 0, "network": 0, "write": 0,
+                                  "renameat": 0, "unlinkat": 0, "fsync": 0}}

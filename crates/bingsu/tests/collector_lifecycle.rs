@@ -389,17 +389,57 @@ fn helper_filter_failure_cannot_race_publication() {
     assert!(values.is_empty());
 }
 
-// 이것을 실패시키는 것: exchange의 confinement 대기를 제거하는 것.
+// 이것을 실패시키는 것: 허가 전 read/decode, 정상 완료 누락, Ready 전 마감이 아닌 실패를 재시도로 숨기는 것.
 #[test]
 fn immediate_ready_is_not_read_or_decoded_before_confinement() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    passed(&isolated("immediate_ready_child"));
+    let mut deadlines = 0;
+    // Limits and TSYNC are irreversible (Linux forbids the next spawn), so
+    // every attempt needs a fresh isolated process, including after Deadline.
+    for attempt in 1..=3 {
+        let out = isolated("immediate_ready_child");
+        eprintln!(
+            "immediate Ready attempt {attempt}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // A security assertion or any unexpected outcome fails immediately.
+        passed(&out);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout
+            .lines()
+            .any(|line| line == "immediate Ready: Complete")
+        {
+            eprintln!(
+                "immediate Ready: Complete after {attempt} attempt(s), {deadlines} Ready deadline(s)"
+            );
+            return;
+        }
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == "immediate Ready: Deadline"),
+            "{out:?}"
+        );
+        deadlines += 1;
+        eprintln!("immediate Ready: {deadlines} Ready deadline(s)");
+    }
+    panic!("immediate Ready: no Complete in 3 attempts ({deadlines} Ready deadlines)");
 }
 #[test]
 #[ignore = "installs irreversible helper limits and filter"]
 fn immediate_ready_child() {
     let job_peer = peer();
+    // Warm and reap this freshly built/copied executable before the measured
+    // spawn: first-exec loader/code-signing cost is unrelated to the read gate.
+    assert!(
+        Command::new(job_peer)
+            .arg("exit")
+            .status()
+            .unwrap()
+            .success()
+    );
     let watchdog = helper_limits::start(Instant::now()).unwrap();
+    let queued_until = Instant::now() + Duration::from_millis(100);
     let job = CollectorJob::fixture(
         job_peer.as_os_str(),
         OsStr::new("normal"),
@@ -415,25 +455,95 @@ fn immediate_ready_child() {
         events: libc::POLLIN,
         revents: 0,
     };
+    // Return as soon as Ready is queued. A cold/overloaded worker can exhaust
+    // the unchanged spawn+100ms budget here; validate that outcome below too.
     // SAFETY: live pipe and initialized pollfd; this observes but never reads.
-    assert_eq!(unsafe { libc::poll(&mut pollfd, 1, 50) }, 1);
-    assert_ne!(
-        pollfd.revents & libc::POLLIN,
-        0,
-        "Ready must already be queued"
-    );
+    assert!(unsafe { libc::poll(&mut pollfd, 1, 100) } >= 0);
+    let queued_bytes = || {
+        let mut bytes: libc::c_int = 0;
+        // SAFETY: live pipe and writable integer; FIONREAD never consumes data.
+        assert_eq!(
+            // SAFETY: live pipe and writable integer; no data is consumed.
+            unsafe { libc::ioctl(input.as_raw_fd(), libc::FIONREAD, &mut bytes) },
+            0
+        );
+        bytes
+    };
+    // POLLIN can arrive between the peer's header and payload writes.
+    let queued = loop {
+        let bytes = queued_bytes();
+        if bytes == 104 || Instant::now() >= queued_until {
+            break bytes;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
     let handle = job.start(Box::new(|_| Ok(()))).unwrap();
-    // Give the live supervisor time to attempt reading the already-ready pipe.
-    std::thread::sleep(Duration::from_millis(20));
+    // A full Ready (80-byte header + 24-byte payload) must remain untouched
+    // while the runnable supervisor gets two scheduling opportunities. Bound
+    // this observation to 2ms instead of spending a fixed 20ms of Ready's
+    // budget; the report counters also catch partial reads and decode attempts.
+    let mut untouched = true;
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(1));
+        if queued == 104 {
+            untouched &= queued_bytes() == queued;
+        }
+    }
     helper_limits::install(&watchdog).unwrap();
     commands::helper_filter::install(handle.child_pidfd()).unwrap();
+    if queued == 104 {
+        untouched &= queued_bytes() == queued;
+    }
+    let confirming_ns = collector_process::now_ns().unwrap();
     handle.confirm_confinement().unwrap();
     let report = handle.finish();
+    // These checks precede outcome classification on EVERY attempt: Deadline
+    // must never turn an unconfined read/decode into an acceptable retry.
     assert_eq!(report.unconfined_reads, 0, "{report:?}");
     assert_eq!(report.unconfined_decodes, 0, "{report:?}");
-    assert_eq!(report.reason, EndReason::Complete, "{report:?}");
-    assert_eq!(report.frames, 3);
-    assert!(report.bytes > 0 && report.reaped);
+    assert!(
+        untouched,
+        "Ready was read before confirm_confinement: {report:?}"
+    );
+    assert!(
+        report
+            .lifecycle
+            .ready
+            .is_none_or(|ready| ready >= confirming_ns),
+        "Ready decoded before confirm_confinement: {report:?}"
+    );
+    let spawn = report.lifecycle.spawn_enter.unwrap();
+    let ready_deadline = spawn + 100_000_000;
+    eprintln!(
+        "immediate Ready: reason={:?}, spawn_to_ready_ns={:?}, spawn_to_lock_close_ns={:?}, ready_deadline_ns={ready_deadline}",
+        report.reason,
+        report.lifecycle.ready.map(|ready| ready - spawn),
+        report.lifecycle.lock_closed.map(|closed| closed - spawn),
+    );
+    assert!(report.reaped, "{report:?}");
+    match report.reason {
+        EndReason::Complete => {
+            assert_eq!(
+                queued, 104,
+                "successful attempt must expose queued Ready before supervision"
+            );
+            assert_eq!(report.frames, 3, "{report:?}");
+            assert!(report.bytes > 0, "{report:?}");
+            println!("\nimmediate Ready: Complete");
+        }
+        EndReason::Deadline => {
+            assert!(
+                report
+                    .lifecycle
+                    .ready
+                    .is_none_or(|ready| ready > ready_deadline),
+                "Deadline after an on-time Ready is not a startup retry: {report:?}"
+            );
+            assert!(report.kill_requested, "{report:?}");
+            println!("\nimmediate Ready: Deadline");
+        }
+        _ => panic!("unexpected immediate Ready outcome: {report:?}"),
+    }
 }
 
 // 이것을 실패시키는 것: confinement 대기의 만료 또는 읽기 전 gate를 제거하는 것.

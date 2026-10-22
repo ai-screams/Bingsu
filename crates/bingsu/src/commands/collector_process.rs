@@ -26,6 +26,8 @@ pub(crate) struct SignalChild {
 }
 
 pub(crate) struct OwnedChild {
+    pub spawn_enter: Option<u64>,
+    pub spawn_return: Option<u64>,
     signal: SignalChild,
     expires_ns: u64,
 }
@@ -131,6 +133,8 @@ impl OwnedChild {
                     state: Arc::default(),
                 },
                 expires_ns,
+                spawn_enter: None,
+                spawn_return: None,
             })
         }
         #[cfg(target_os = "macos")]
@@ -141,6 +145,8 @@ impl OwnedChild {
                     state: Arc::default(),
                 },
                 expires_ns,
+                spawn_enter: None,
+                spawn_return: None,
             })
         }
     }
@@ -408,6 +414,7 @@ pub(crate) fn spawn_args(
             }
         }
         let mut pid = 0;
+        let spawn_enter = now_ns().ok();
         // SAFETY: initialized objects and live NUL-terminated arrays; empty environment.
         check(unsafe {
             libc::posix_spawn(
@@ -419,7 +426,11 @@ pub(crate) fn spawn_args(
                 [std::ptr::null_mut()].as_ptr(),
             )
         })?;
-        OwnedChild::attach(pid, expires_ns)
+        let spawn_return = now_ns().ok();
+        let mut child = OwnedChild::attach(pid, expires_ns)?;
+        child.spawn_enter = spawn_enter;
+        child.spawn_return = spawn_return;
+        Ok(child)
     })();
     // SAFETY: initialized actions, no longer used.
     unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };
@@ -453,6 +464,8 @@ mod tests {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
         assert!(fd >= 0);
         let child = OwnedChild {
+            spawn_enter: None,
+            spawn_return: None,
             signal: SignalChild {
                 // SAFETY: newly owned descriptor, transferred exactly once.
                 pidfd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd as i32) }),
@@ -481,6 +494,8 @@ mod tests {
         // Our own PID cannot be our child, so waitpid must return ECHILD.
         // Mark killed for panic-safe teardown even under the deliberate mutation.
         let mut child = OwnedChild {
+            spawn_enter: None,
+            spawn_return: None,
             signal: SignalChild {
                 // SAFETY: read-only own identity.
                 pid: unsafe { libc::getpid() },

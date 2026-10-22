@@ -29,3 +29,16 @@ def test_le_mode():
 def test_unresolved_calls_are_a_violation(mode):
     got = {"helper": {"openat": 2, "fstat": 2}, "unresolved": {"openat": 1}}
     assert check(got, WANT, mode, ["helper"]) == ["unresolved: {'openat': 1} (calls of a task with no known role)"]
+
+
+# 이것을 실패시키는 것: 역할·종류의 여유로 다른 초과를 상쇄하는 것.
+@pytest.mark.parametrize("role,kind", [("front", "spawn"), ("helper", "write"),
+                                       ("collector", "exec"), ("collector", "network")])
+def test_role_and_kind_surplus_is_never_hidden(role, kind):
+    from copy import deepcopy
+    expected = {r: {"openat": 10, "spawn": 0, "write": 0, "exec": 1, "network": 0}
+                for r in ("front", "helper", "collector")}
+    measured = deepcopy(expected)
+    measured[role][kind] += 1
+    measured[role]["openat"] = 0
+    assert any(f"{role}.{kind}:" in error for error in check(measured, expected, "le", expected))

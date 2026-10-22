@@ -17,7 +17,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from .classify import FD_DEPENDENT, fd_identity, kind, split_args
-from .strace_parse import EXIT_EVENT, Call
+from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call
 
 SPAWN = {"clone", "clone3", "fork", "vfork"}
 MARKERS = ('PR_SET_NAME, "fsb:begin"', 'PR_SET_NAME, "fsb:end"')
@@ -101,6 +101,7 @@ def target(c: Call) -> str | None:
 class Attribution:
     counts: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
+    cloexec_pairs: list = field(default_factory=list)
 
 
 def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
@@ -200,6 +201,9 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
                 window[c.pid] = False
             continue
         r = role[c.pid]
+        if c.name == UNKNOWN_SYSCALL:
+            errors.append(f"pid {c.pid} ({r}): unknown syscall outside collector helper kill path")
+            continue
         k = kind(c)
         if not k:
             continue
@@ -221,3 +225,305 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
             if open_:
                 errors.append(f"pid {pid}: window still open at the end of the trace")
     return Attribution({r: dict(v) for r, v in counts.items()}, errors)
+
+
+
+@dataclass
+class _Description:
+    # Names are evidence about an open description, never its identity.
+    aliases: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _Descriptor:
+    creation: tuple[int, str, int]
+    description: _Description
+    cloexec: bool
+
+
+class _Descriptors:
+    def __init__(self):
+        self.tables = {}
+        self.closed = {}
+        self.serial = defaultdict(int)
+
+    def start(self, process, parent=None):
+        self.tables[process] = dict(self.tables[parent]) if parent is not None else {}
+        self.closed[process] = set(self.closed[parent]) if parent is not None else set()
+
+    def create(self, process, fd, name, cloexec=False, description=None):
+        self.serial[process] += 1
+        self.tables[process][fd] = _Descriptor(
+            (process, fd, self.serial[process]),
+            description if description is not None else _Description({name} if name else set()),
+            cloexec,
+        )
+        self.closed[process].discard(fd)
+
+    def close(self, process, fd):
+        self.tables[process].pop(fd, None)
+        self.closed[process].add(fd)
+
+    def exec(self, process):
+        for fd, entry in list(self.tables[process].items()):
+            if entry.cloexec:
+                self.close(process, fd)
+
+    @staticmethod
+    def token(arg):
+        return re.fullmatch(r"(\d+)(?:<(.+)>)?", arg)
+
+    @staticmethod
+    def path(args, directory, path):
+        name = args[path].strip('"')
+        if name.startswith("/"):
+            return name
+        if directory is not None:
+            match = re.fullmatch(r"(?:\d+|AT_FDCWD)<(/.*)>", args[directory])
+            if match:
+                return match[1].rstrip("/") + "/" + name
+        return None
+
+    def observe(self, c, process, args, success, bad):
+        table = self.tables[process]
+        # Check uses before replacements (dup2 closes its destination).
+        uses = [arg for arg in args if re.fullmatch(r"\d+<.+>", arg)]
+        if args and c.name in {"read", "pread64", "readv", "write", "writev", "pwrite64",
+                               "fstat", "fcntl", "dup", "dup2", "dup3", "close"}:
+            uses = [args[0], *uses]
+        for arg in set(uses):
+            if not (match := self.token(arg)):
+                continue
+            fd, name = match.groups()
+            entry = table.get(fd)
+            # A refused use of a closed number is consistent with the kernel.
+            # Keep checking names even on failure: an annotation is still
+            # evidence about the live description, independent of the result.
+            if (success and fd in self.closed[process]) or (entry and name and entry.description.aliases
+                                                          and name not in entry.description.aliases):
+                bad(c, "descriptor lifetime/identity mismatch")
+            elif entry is None and fd not in self.closed[process]:
+                # Descriptors inherited from outside the trace have no observed
+                # creation. Bind their first observation so dup cannot relabel it.
+                self.create(process, fd, name)
+            elif entry and name and not entry.description.aliases:
+                entry.description.aliases.add(name)
+        if not success:
+            return
+        if c.name == "close" and args:
+            self.close(process, args[0].split('<')[0])
+        elif c.name == "close_range":
+            low, high = int(args[0]), int(args[1].replace('~0U', str(2**32 - 1)))
+            for fd, entry in list(table.items()):
+                if low <= int(fd) <= high:
+                    if "CLOSE_RANGE_CLOEXEC" in c.args:
+                        table[fd] = _Descriptor(entry.creation, entry.description, True)
+                    else:
+                        self.close(process, fd)
+        elif (c.name in {"dup", "dup2", "dup3"} or c.name == "fcntl" and len(args) >= 2
+              and args[1] in {"F_DUPFD", "F_DUPFD_CLOEXEC"}):
+            src, dst = args[0].split('<')[0], re.match(r"^\d+", c.ret)[0]
+            if c.name == "dup2" and src == dst:
+                return
+            source = table.get(src)
+            self.create(process, dst, None, "CLOEXEC" in c.args,
+                        source.description if source else None)
+        elif c.name == "fcntl" and len(args) >= 3 and args[1] == "F_SETFD":
+            fd = args[0].split('<')[0]
+            if fd in table:
+                entry = table[fd]
+                table[fd] = _Descriptor(entry.creation, entry.description, "FD_CLOEXEC" in args[2])
+        elif c.name in {"pipe", "pipe2", "socketpair"}:
+            pair = args[3] if c.name == "socketpair" else args[0]
+            for arg in split_args(pair.strip('[]')):
+                if match := self.token(arg):
+                    self.create(process, *match.groups(), "CLOEXEC" in c.args)
+        elif (c.name in {"open", "openat", "openat2", "creat", "pidfd_open", "memfd_create"}
+              or re.match(r"^\d+<", c.ret)):
+            match = re.match(r"^(\d+)(?:<(.+)>)?", c.ret)
+            self.create(process, *match.groups(), "CLOEXEC" in c.args or c.name == "pidfd_open")
+        elif c.name in {"rename", "renameat", "renameat2", "unlink", "unlinkat"}:
+            legacy = c.name in {"rename", "unlink"}
+            old = self.path(args, None if legacy else 0, 0 if legacy else 1)
+            new = (self.path(args, None if legacy else 2, 1 if legacy else 3)
+                   if c.name.startswith("rename") else None)
+            # Update all live descriptions, including inherited/duplicated fds.
+            descriptions = {id(e.description): e.description
+                            for fds in self.tables.values() for e in fds.values()}
+            for description in descriptions.values():
+                additions = set()
+                for alias in description.aliases:
+                    if old and (alias == old or alias.startswith(old + "/")):
+                        additions.add(new + alias[len(old):] if new else alias + " (deleted)")
+                    elif new and "RENAME_EXCHANGE" in c.args and (alias == new or alias.startswith(new + "/")):
+                        additions.add(old + alias[len(new):])
+                description.aliases.update(additions)
+
+
+def _cloexec_pair(previous: Call | None, current: Call) -> bool:
+    """musl open's redundant CLOEXEC: one immediate same-PID call, any result.
+
+    This is attribution of an existing open, not a new permitted fcntl kind.
+    The kernel policy still refuses F_SETFD; musl ignores that return value.
+    """
+    if previous is None or previous.pid != current.pid or previous.name not in {"open", "openat"}:
+        return False
+    opened = re.fullmatch(r"(\d+)(?:<.+>)?", previous.ret)
+    args, before = split_args(current.args), split_args(previous.args)
+    flag_at = 1 if previous.name == "open" else 2
+    fd = _Descriptors.token(args[0]) if args else None
+    return bool(current.name == "fcntl" and len(args) == 3
+                and args[1:] == ["F_SETFD", "FD_CLOEXEC"]
+                and opened and fd and int(opened[1]) == int(fd[1])
+                and len(before) > flag_at and "O_CLOEXEC" in before[flag_at].split("|"))
+
+
+def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False) -> Attribution:
+    """Product roles require a pinned exec AND its validated creation parent.
+
+    Work in syscall *entry* order. A vfork child's exec may precede its
+    parent's return. Reconstruct entries without changing the historical trace
+    parser/fixtures. Threads share role, filter boundary and descriptor table.
+    PID reuse starts a new lifetime; failed exec never changes the role.
+    `pinned` contains front/helper/collector paths and optional exact argv verbs.
+    `helper_kill` is explicit evidence from the caller's failure mode. Only
+    then may a collector's last call lack its syscall number before SIGKILL.
+    """
+    import json
+    from .classify import collector_kind, collector_bootstrap_kind
+    from .strace_parse import CALL_HEAD, LINE, UNKNOWN_HEAD, parse
+
+    trace = parse("\n".join(lines))
+    errors = list(trace.errors)
+    starts = defaultdict(deque)
+    exits = defaultdict(deque)
+    for i, line in enumerate(lines):
+        match = LINE.match(line)
+        if match and (head := CALL_HEAD.match(match[2])):
+            starts[int(match[1]), head[1]].append(i)
+        elif match and UNKNOWN_HEAD.match(match[2]):
+            starts[int(match[1]), UNKNOWN_SYSCALL].append(i)
+        elif match and match[2].startswith("+++ "):
+            exits[int(match[1])].append(i)
+    ordered = []
+    for c in trace:
+        if c.name == EXIT_EVENT:
+            # Exit records have no outstanding successor in the same lifetime.
+            at = exits[c.pid].popleft() if exits[c.pid] else len(lines)
+        else:
+            queue = starts[c.pid, c.name]
+            at = queue.popleft() if queue else len(lines)
+        ordered.append((at, c))
+    ordered.sort(key=lambda pair: pair[0])
+    roles, owner, confined = {}, {}, set()
+    descriptors = _Descriptors()
+    counts = defaultdict(lambda: defaultdict(int))
+    root = trace.first_pid
+    if root is not None:
+        roles[root], owner[root] = "front", root
+        descriptors.start(root)
+    seen_exec = set()
+    collector_execs = 0
+    previous_calls, cloexec_pairs = {}, []
+    unknown_calls = defaultdict(int)
+    verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
+    verbs.update(pinned.get("verbs", {}))
+
+    def bad(c, reason):
+        errors.append(f"pid {c.pid} ({roles.get(c.pid, UNRESOLVED)}): {reason}: {c.name}({c.args})")
+
+    for _, c in ordered:
+        if c.pid not in roles:
+            bad(c, "no live spawn parent")
+            roles[c.pid], owner[c.pid] = UNRESOLVED, c.pid
+            descriptors.start(c.pid)
+        role, process = roles[c.pid], owner[c.pid]
+        previous = previous_calls.pop(c.pid, None)
+        if c.name == EXIT_EVENT:
+            roles.pop(c.pid, None)
+            owner.pop(c.pid, None)
+            # State belongs to the process owner until its last thread exits.
+            if process not in owner.values():
+                descriptors.tables.pop(process, None)
+                descriptors.closed.pop(process, None)
+                confined.discard(process)
+                seen_exec.discard(process)
+                unknown_calls.pop(process, None)
+            continue
+        if unknown_calls[process]:
+            bad(c, "call after terminal unknown syscall")
+        previous_calls[c.pid] = c
+        if c.name == UNKNOWN_SYSCALL:
+            unknown_calls[process] += 1
+            counts[role][UNKNOWN_SYSCALL] += 1
+            if role != "collector" or not helper_kill or unknown_calls[process] > 1:
+                bad(c, "unknown syscall requires collector helper kill path, once per process")
+            continue
+        args = split_args(c.args)
+        result = c.ret.split()[0]
+        success = bool(re.match(r"^\d+", c.ret))
+        k = collector_bootstrap_kind(c) if role == "collector" else collector_kind(c)
+        if k in {"spawn", "thread"}:
+            if k == "spawn" and (role not in {"front", "helper"} or process in confined):
+                bad(c, "spawn outside the pre-filter creation site")
+            if success:
+                child = int(result)
+                roles[child] = role
+                owner[child] = process if k == "thread" else child
+                if k != "thread":
+                    descriptors.start(child, process)
+            counts[role][k] += 1
+            continue
+        if k == "exec":
+            if result == "0":
+                descriptors.exec(process)
+                new = None
+                for candidate in ("front", "helper", "collector"):
+                    path = pinned.get(candidate)
+                    if path and len(args) >= 2 and args[0] == json.dumps(path):
+                        prefix = '[' + json.dumps(path) + ', ' + json.dumps(verbs[candidate])
+                        if args[1].startswith(prefix + (']' if candidate == "collector" else ',')) or args[1] == prefix + ']':
+                            new = candidate
+                            break
+                expected_parent = {"front": "front", "helper": "front", "collector": "helper"}
+                if (new is None or role != expected_parent.get(new)
+                        or process in seen_exec or process in confined
+                        or (new == "front") != (c.pid == root)):
+                    bad(c, "exec lacks pinned identity and creation parent")
+                else:
+                    roles[c.pid] = role = new
+                    seen_exec.add(process)
+                    collector_execs += int(new == "collector")
+            counts[role]["exec"] += 1
+            continue
+        if (c.name == "seccomp" and "SECCOMP_SET_MODE_FILTER" in c.args
+                or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
+            confined.add(process)
+        descriptors.observe(c, process, args, success, bad)
+        if role == "collector" and _cloexec_pair(previous, c):
+            cloexec_pairs.append({"pid": c.pid,
+                                  "open": f"{previous.name}({previous.args})", "open_ret": previous.ret,
+                                  "fcntl": f"fcntl({c.args})", "fcntl_ret": c.ret})
+            continue
+        # Only the exact existing loader pairs may be excluded, before the
+        # process's first filter. A collector never borrows helper NSS paths.
+        if process not in confined and _prologue_call(c, target(c)):
+            continue
+        if role == "collector":
+            if c.name in {"open", "openat"} and any(flag in c.args for flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")):
+                bad(c, "collector writable open")
+            if k in {"write", "renameat", "unlinkat", "network", "unknown-fs", "fsync"}:
+                bad(c, "collector forbidden effect")
+            if k == "cwd" and (not args or args[0] != '"/"'):
+                bad(c, "collector cwd is not neutral root")
+            where = target(c)
+            if where and k in {"openat", "read"} and where not in {"/proc/self/statm", f"/proc/{process}/statm"}:
+                bad(c, "collector read outside the M3b bootstrap")
+        if k:
+            counts[role][k] += 1
+    if not seen_exec and not counts:
+        errors.append("no product process observed")
+    required = pinned.get("collectors", 1)
+    if collector_execs != required:
+        errors.append(f"collector execs: measured {collector_execs}, expected {required}")
+    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs)

@@ -233,6 +233,15 @@ fn front_collection(mut fixture: front_fixture::Harness) -> (front_fixture::Harn
     let record = black_box(fixture.run().record);
     (fixture, record)
 }
+// Product policy remains empty even when a compiled display requests builtins.
+// Keep selection cost separate from the test-catalog completed-file continuation.
+#[library_benchmark]
+#[bench::bands4096(setup=selected_config)]
+fn product_mask_zero(c: CompiledConfig) -> (CompiledConfig, u32) {
+    let mask = black_box(selection::PRODUCT.worker_mask(black_box(&c), 65535, false));
+    assert_eq!(mask, 0);
+    (c, mask)
+}
 library_benchmark_group!(
     name = collection,
     benchmarks = [
@@ -244,7 +253,8 @@ library_benchmark_group!(
         cwd_sha256,
         rejected_prefix,
         selected_variant,
-        front_collection
+        front_collection,
+        product_mask_zero
     ]
 );
 main!(library_benchmark_groups = collection);

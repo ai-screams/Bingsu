@@ -15,7 +15,7 @@ reason, never silently.
 """
 import re
 
-from .strace_parse import EXIT_EVENT, Call, StructureError, scan
+from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call, StructureError, scan
 
 NAMES = {
     "openat": {"openat"},
@@ -117,7 +117,7 @@ def _placed(c: Call, args: list[str]) -> bool:
 
 
 def kind(c: Call) -> str | None:
-    if c.name in NON_FS or c.name == EXIT_EVENT:
+    if c.name in NON_FS or c.name in {EXIT_EVENT, UNKNOWN_SYSCALL}:
         return None
     args = split_args(c.args)
     if c.name == "mmap" and len(args) > MMAP_FLAGS and "MAP_ANONYMOUS" in args[MMAP_FLAGS].split("|"):
@@ -135,3 +135,59 @@ def kind(c: Call) -> str | None:
     if k and not _placed(c, args):
         return "unknown-fs"
     return k or "unknown-fs"
+
+
+# Separate product lifecycle vocabulary. The generic M1 scaffold deliberately
+# keeps its historical formula kinds; these calls cannot disappear as NON_FS
+# in the collector gate. Attempts count even when the kernel refuses them.
+def collector_kind(c: Call) -> str | None:
+    if c.name in {"clone", "clone3", "fork", "vfork"}:
+        return "thread" if "CLONE_THREAD" in c.args else "spawn"
+    if c.name in {"execve", "execveat"}:
+        return "exec"
+    if c.name in {"socket", "socketpair", "connect", "sendto", "sendmsg", "sendmmsg"}:
+        return "network"
+    return kind(c)
+
+
+def collection_publication_kind(c: Call) -> str | None:
+    """Publication's held-file metadata query on glibc aarch64.
+
+    Rust File::metadata uses statx with AT_EMPTY_PATH here. Count that exact
+    fd-based shape as fstat without extending the historical prompt vocabulary
+    or allowing path-based/unnamed statx calls into this formula.
+    """
+    args = split_args(c.args)
+    if (c.name == "statx" and len(args) == 5 and args[1] == '""'
+            and "AT_EMPTY_PATH" in args[2].split("|")
+            and (identity := fd_identity(args[0])) and identity.startswith("file:")):
+        return "fstat"
+    return kind(c)
+
+
+def collector_bootstrap_kind(c: Call) -> str | None:
+    """Collector-only vocabulary for the already reviewed bootstrap calls.
+
+    This does not extend either kernel policy or the historical prompt gate.
+    Timer, limit, capability and Landlock operations have no file path. Query
+    fcntl never changes fd flags. libc's empty-path metadata aliases retain the
+    same fd classification; unknown names still fail closed.
+    """
+    args = split_args(c.args)
+    if c.name in {"alarm", "setitimer", "getitimer", "setrlimit", "getrlimit",
+                  "capget", "capset", "landlock_create_ruleset", "landlock_restrict_self", "umask"}:
+        return None
+    if c.name == "getcwd":
+        return "cwd"
+    if c.name == "fcntl" and len(args) >= 2 and args[1] in {"F_GETFL", "F_GETFD"}:
+        return "fd_query"
+    if c.name == "fcntl" and len(args) >= 2 and args[1] == "F_SETFD":
+        # Device/pipe fd annotations must not hide an unpaired flag change.
+        # Only collector_attribute can fold the exact immediate open pair.
+        return "unknown-fs"
+    if c.name == "open":
+        return ("openat" if args and args[0] in {'"/proc/self/statm"', f'"/proc/{c.pid}/statm"'}
+                else "unknown-fs")
+    if c.name in {"newfstatat", "fstatat64", "statx"} and len(args) > 1 and args[1] == '""':
+        return None if fd_identity(args[0]) == "none" else "fstat"
+    return collector_kind(c)

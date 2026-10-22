@@ -1,0 +1,138 @@
+2786  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_failure_modes_trace_colle1/store", "--nofile-worker"], 0xfffff634a850 /* 22 vars */) = 0
+2786  clone(child_stack=0xe80e2b11d000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2787  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_failure_modes_trace_colle1/store", "--nofile-worker"], 0xbb1edbd371c0 /* 0 vars */ <unfinished ...>
+2786  <... clone resumed>)              = 2787
+2787  <... execve resumed>)             = 0
+2787  clone(child_stack=0xf67eb3c0f000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2789  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 0</dev/null>
+2789  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 2</dev/null>
+2789  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--nofile-worker"], 0xba747985a440 /* 0 vars */ <unfinished ...>
+2787  <... clone resumed>)              = 2789
+2789  <... execve resumed>)             = 0
+2789  fcntl(1<pipe:[496303]>, F_GETFL <unfinished ...>
+2789  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+2789  fcntl(3<pipe:[496304]>, F_GETFL <unfinished ...>
+2789  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2789  fcntl(5</home/tester/pt/test_failure_modes_trace_colle1/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65312f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65312f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+2789  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+2789  newfstatat(5</home/tester/pt/test_failure_modes_trace_colle1/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65312f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65312f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+2789  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2789  fgetxattr(5</home/tester/pt/test_failure_modes_trace_colle1/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65312f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65312f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+2789  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+2789  getcwd( <unfinished ...>
+2789  <... getcwd resumed>"/", 512)     = 2
+2789  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=284, filter=0xc81e00c4c610} <unfinished ...>
+2789  <... seccomp resumed>)            = 0
+2789  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 4</proc/2789/statm>
+2789  read(4</proc/2789/statm>,  <unfinished ...>
+2789  <... read resumed>"1444 677 599 809 0 93 0\n", 256) = 24
+2789  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=260, filter=0xc81e00c4cb80} <unfinished ...>
+2789  <... seccomp resumed>)            = 0
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 4</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 6</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 7</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 8</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 9</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 10</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 11</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 12</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 13</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 14</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 15</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 16</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 17</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 18</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 19</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 20</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 21</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 22</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 23</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 24</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 25</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 26</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 27</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 28</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 29</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 30</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 31</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 32</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 33</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 34</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 35</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 36</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 37</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 38</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 39</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 40</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 41</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 42</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 43</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 44</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 45</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 46</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 47</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 48</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 49</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 50</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 51</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 52</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 53</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 54</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 55</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 56</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC <unfinished ...>
+2789  <... openat resumed>)             = 57</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 58</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 59</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 60</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 61</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 62</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 63</dev/null>
+2789  openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = -1 EMFILE (Too many open files)
+2789  +++ killed by SIGKILL +++

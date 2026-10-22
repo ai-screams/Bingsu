@@ -1,0 +1,16 @@
+13791 execve("/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product", ["/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product", "--trace", "/home/runner/work/_temp/m3b-traces/native/test_failure_modes_trace_colle2/store", "--as-worker"], 0xffffcc9e2870 /* 113 vars */) = 0
+13791 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0xffcbd3867000, stack_size=0x9000}, 88 <unfinished ...>
+13792 execve("/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product", ["/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product", "--trace-helper", "/home/runner/work/_temp/m3b-traces/native/test_failure_modes_trace_colle2/store", "--as-worker"], 0xaacde331a1f0 /* 0 vars */ <unfinished ...>
+13791 <... clone3 resumed>)             = 13792
+13792 <... execve resumed>)             = 0
+13792 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0xff8caab75000, stack_size=0x9000}, 88 <unfinished ...>
+13794 execve("/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product", ["/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product", "--as-worker"], 0xab7a0ca90c28 /* 0 vars */ <unfinished ...>
+13792 <... clone3 resumed>)             = 13794
+13794 <... execve resumed>)             = 0
+13794 close(3<pipe:[40119]> <unfinished ...>
+13794 <... close resumed>)              = 0
+13794 ???( <unfinished ...>
+13794 <... ??? resumed>)                = ?
+13794 +++ killed by SIGKILL +++
+13792 +++ exited with 0 +++
+13791 +++ exited with 0 +++

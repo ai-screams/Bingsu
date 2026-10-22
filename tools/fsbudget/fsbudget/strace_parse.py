@@ -13,6 +13,10 @@ Exit records become `EXIT` events in the call list, so attribution can close
 a TID's state before the kernel hands the number to another task. A call
 still unfinished at its process's exit record is kept as a call with result
 `?` (it was made; it counts).
+
+The exact argument-free `???() = ?` record (whole or unfinished/resumed) is
+an `unknown-syscall` with empty args/result only when that PID's next record
+is SIGKILL death. Attribution must separately authorize this terminal event.
 """
 import re
 from dataclasses import dataclass
@@ -28,12 +32,26 @@ RESUMED = re.compile(r"^<\.\.\. (\w+) resumed>(.*)$")
 # strace 5.16 and 6.13 close a call cut short by death this way.
 CUT_SHORT = re.compile(r"^\s*<unfinished \.\.\.>\)\s+=\s+\?$")
 RESULT = re.compile(r"^\s+=\s+(\S.*)$")
+# strace's own annotation, not an fd or a syscall argument. Recognize it
+# only in restart_syscall, leaving angle-bracket validation strict elsewhere.
+RESTART_NOTE = re.compile(r"^<\.\.\. resuming interrupted \w+ \.\.\.>")
 SIGNAL = re.compile(r"^--- \S.* ---$")
 EXIT = re.compile(r"^\+\+\+ (exited with \d+|killed by \S+( \(core dumped\))?) \+\+\+$")
 # The event name of an exit record; never a syscall name.
 EXIT_EVENT = "+++exit"
+# strace can lose the syscall number as SIGKILL reaps a task. These exact
+# argument/result-free shapes need the next record of that PID to prove death.
+UNKNOWN_SYSCALL = "unknown-syscall"
+UNKNOWN_HEAD = re.compile(r"^\?\?\?\(")
+UNKNOWN_WHOLE = re.compile(r"^\?\?\?\(\)\s+=\s+\?$")
+UNKNOWN_UNFINISHED = re.compile(r"^\?\?\?\(\s+<unfinished \.\.\.>$")
+UNKNOWN_RESUMED = re.compile(r"^<\.\.\. \?\?\? resumed>\)\s+=\s+\?$")
+SIGKILL_EXIT = "+++ killed by SIGKILL +++"
 # An fd that strace -y names: a number (also `fd=3` in a struct) or AT_FDCWD.
 FD_BEFORE_NAME = re.compile(r"(?:^|[^\w])(?:\d+|AT_FDCWD)$")
+# strace's value-changed annotation between input and output structs. This
+# belongs to the argument grammar, not a clone3-only syscall exception.
+STRUCT_UPDATE = re.compile(r"=>\s*(?=\{)")
 CLOSE = {")": "(", "]": "[", "}": "{"}
 
 
@@ -48,7 +66,8 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
     truncated) and `/* comments */` are opaque. `<...>` is an fd name and is
     allowed only right after an fd number or AT_FDCWD; strace -y escapes `<`
     and `>` inside it (\\74, \\76), so the first `>` closes it. Brackets must
-    nest by type. Anything else is a StructureError.
+    nest by type. `} => {` joins input/output structs within one argument;
+    both structs are still checked. Other bare angle brackets remain errors.
 
     With until_close the scan stops at the `)` that closes the call and
     returns the index after it; otherwise the whole text must be balanced.
@@ -76,6 +95,11 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
             cur.append(text[i:j + 2])
             i = j + 2
             continue
+        if ch == "=" and "".join(cur).rstrip().endswith("}"):
+            if update := STRUCT_UPDATE.match(text, i):
+                cur.append(update.group())
+                i = update.end()
+                continue
         if ch == "<":
             if not FD_BEFORE_NAME.search("".join(cur)):
                 raise StructureError(f"'<' not after an fd at {i}")
@@ -113,9 +137,17 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
     return out, i
 
 
+def _call_scan(name: str, body: str, *, until_close: bool = False):
+    note = RESTART_NOTE.match(body) if name == "restart_syscall" else None
+    args, end = scan(body, note.end() if note else 0, until_close=until_close)
+    if note and args:
+        raise StructureError("arguments after restart_syscall annotation")
+    return args, end
+
+
 def _complete(name: str, body: str) -> tuple[str, str]:
     """`body` is everything after `name(`; returns (args, result)."""
-    _, end = scan(body, until_close=True)
+    _, end = _call_scan(name, body, until_close=True)
     r = RESULT.match(body[end:])
     if not r:
         raise StructureError(f"{name}: no result after the closing parenthesis")
@@ -145,6 +177,14 @@ class Trace(list):
 def parse(text: str) -> Trace:
     calls = Trace()
     pending: dict[int, tuple[str, str]] = {}
+    lines = text.splitlines()
+    next_record, last_record = {}, {}
+    for n, raw in reversed(list(enumerate(lines, 1))):
+        if m := LINE.match(raw):
+            pid = int(m[1])
+            next_record[n] = last_record.get(pid, (0, ""))
+            last_record[pid] = (n, m[2])
+    consumed = set()
 
     def add(pid, name, args, ret):
         calls.append(Call(pid, name, args, ret, len(calls)))
@@ -152,14 +192,14 @@ def parse(text: str) -> Trace:
     def cut_short(n, pid, name, head):
         # The arguments printed before <unfinished ...> must be well formed too.
         try:
-            scan(head)
+            _call_scan(name, head)
         except StructureError as err:
             calls.errors.append(f"line {n}: pid {pid}: unparsed record: {name}: {err}")
             return
         add(pid, name, head, "?")
 
-    for n, raw in enumerate(text.splitlines(), 1):
-        if not raw.strip():
+    for n, raw in enumerate(lines, 1):
+        if not raw.strip() or n in consumed:
             continue
         m = LINE.match(raw)
         if not m:
@@ -168,6 +208,18 @@ def parse(text: str) -> Trace:
         pid, rest = int(m.group(1)), m.group(2)
         if calls.first_pid is None:
             calls.first_pid = pid
+        if UNKNOWN_HEAD.match(rest):
+            following, tail = next_record[n]
+            resumed = UNKNOWN_UNFINISHED.fullmatch(rest) and UNKNOWN_RESUMED.fullmatch(tail)
+            ending = next_record[following][1] if resumed else tail
+            if (pid not in pending and (UNKNOWN_WHOLE.fullmatch(rest) or resumed)
+                    and ending == SIGKILL_EXIT):
+                add(pid, UNKNOWN_SYSCALL, "", "")
+                if resumed:
+                    consumed.add(following)
+                continue
+            calls.errors.append(f"line {n}: pid {pid}: unparsed record: {rest[:80]}")
+            continue
         if SIGNAL.match(rest):
             continue
         if e := EXIT.match(rest):

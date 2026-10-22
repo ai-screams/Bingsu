@@ -1,12 +1,14 @@
 """Real strace (Linux): a child killed while blocked in a syscall must leave
 a trace the parser accounts for, using the same flags the scaffold uses."""
+import os
 import shutil
 import subprocess
 import sys
 
 import pytest
 
-from conftest import REQUIRE_STRACE
+# 이것을 실패시키는 것: conftest를 직접 import하여 통합 pytest 수집 순서에 의존하는 것.
+REQUIRE_STRACE = os.environ.get("FSB_REQUIRE_STRACE") == "1"
 from fsbudget.strace_parse import STRACE_FLAGS, parse
 
 PROG = """

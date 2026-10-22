@@ -39,6 +39,8 @@ pub(crate) struct CollectorJob {
     _lock: File,
     registration: CollectorRegistration,
     started_ns: u64,
+    lifecycle: Lifecycle,
+    publication_clock: Option<Arc<std::sync::atomic::AtomicU64>>,
     life_ns: u64,
     helper_ns: u64,
     catalog: &'static [SegmentDecl],
@@ -46,6 +48,26 @@ pub(crate) struct CollectorJob {
     fixture_clock: bool,
     #[cfg(test)]
     ready_ns: Option<u64>,
+}
+
+/// Helper-local monotonic observations, never timestamps subtracted across processes.
+/// Missing events stay None on failure; observation cannot admit work or extend a deadline.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code, reason = "M3b lifecycle measurement report")]
+pub(crate) struct Lifecycle {
+    pub verify_start: Option<u64>,
+    pub verify_end: Option<u64>,
+    pub spawn_enter: Option<u64>,
+    pub spawn_return: Option<u64>,
+    pub ready: Option<u64>,
+    pub request_sent: Option<u64>,
+    pub completed: Option<u64>,
+    pub response_renamed: Option<u64>,
+    pub lock_acquired: Option<u64>,
+    pub lock_closed: Option<u64>,
+    pub request_deadline: Option<u64>,
+    pub landlock_abi: Option<u32>,
+    pub as_baseline: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -56,6 +78,7 @@ pub(crate) struct SupervisionReport {
     pub kill_requested: bool,
     pub reaped: bool,
     pub published: bool,
+    pub lifecycle: Lifecycle,
     #[cfg(test)]
     pub unconfined_reads: u32,
     #[cfg(test)]
@@ -158,6 +181,11 @@ impl CollectorJob {
         }
         let child = spawn(&request_read, &response, &lock, watchdog.expires_ns())?;
         let registration = watchdog.register_collector(&child, ready_ns)?;
+        let lifecycle = Lifecycle {
+            spawn_enter: child.spawn_enter,
+            spawn_return: child.spawn_return,
+            ..Lifecycle::default()
+        };
         Ok(Self {
             child,
             request,
@@ -166,6 +194,8 @@ impl CollectorJob {
             _lock: lock,
             registration,
             started_ns,
+            lifecycle,
+            publication_clock: None,
             life_ns,
             helper_ns: watchdog.expires_ns(),
             catalog,
@@ -174,6 +204,20 @@ impl CollectorJob {
             #[cfg(test)]
             ready_ns: None,
         })
+    }
+
+    pub(crate) fn observations(
+        mut self,
+        verify_start: Option<u64>,
+        verify_end: Option<u64>,
+        lock_acquired: Option<u64>,
+        publication_clock: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.lifecycle.verify_start = verify_start;
+        self.lifecycle.verify_end = verify_end;
+        self.lifecycle.lock_acquired = lock_acquired;
+        self.publication_clock = Some(publication_clock);
+        self
     }
 
     pub fn start(self, publish: Publisher) -> io::Result<SupervisorHandle> {
@@ -202,6 +246,7 @@ impl CollectorJob {
             kill_requested: false,
             reaped: false,
             published: false,
+            lifecycle: self.lifecycle.clone(),
             #[cfg(test)]
             unconfined_reads: 0,
             #[cfg(test)]
@@ -247,6 +292,11 @@ impl CollectorJob {
                     // Serialize cancellation with the publication admission.
                     drop(permission);
                     report.published = publish(completed).is_ok();
+                    report.lifecycle.response_renamed =
+                        self.publication_clock.as_ref().and_then(|stamp| {
+                            let value = stamp.load(std::sync::atomic::Ordering::Acquire);
+                            (value != 0).then_some(value)
+                        });
                 }
             }
             // EOF is not proof of process death. Complete workers that keep
@@ -269,6 +319,7 @@ impl CollectorJob {
         }
         report.kill_requested = self.child.kill_requested();
         drop(self._lock);
+        report.lifecycle.lock_closed = now_ns().ok();
         #[cfg(test)]
         if self.fixture_clock {
             eprintln!(
@@ -335,8 +386,11 @@ impl CollectorJob {
                     Ok(0) => return EndReason::WorkerExit,
                     Ok(n) => {
                         sent += n;
-                        if sent == outgoing.len() && transcript.request_sent().is_err() {
-                            return EndReason::Protocol;
+                        if sent == outgoing.len() {
+                            if transcript.request_sent().is_err() {
+                                return EndReason::Protocol;
+                            }
+                            report.lifecycle.request_sent = now_ns().ok();
                         }
                     }
                     Err(e)
@@ -397,6 +451,9 @@ impl CollectorJob {
                             return EndReason::Protocol;
                         }
                         complete = frame.kind == Kind::Complete;
+                        if complete {
+                            report.lifecycle.completed = now_ns().ok();
+                        }
                         if !ready {
                             ready = true;
                             let Ok(start) = now_ns() else {
@@ -406,6 +463,13 @@ impl CollectorJob {
                             {
                                 self.ready_ns = Some(start);
                             }
+                            report.lifecycle.ready = Some(start);
+                            report.lifecycle.landlock_abi = Some(u32::from_le_bytes(
+                                frame.payload[12..16].try_into().unwrap(),
+                            ));
+                            report.lifecycle.as_baseline = Some(u64::from_le_bytes(
+                                frame.payload[16..24].try_into().unwrap(),
+                            ));
                             let budget =
                                 request_budget(self.life_ns, start, self.request.budget_ms);
                             if budget == 0 {
@@ -418,6 +482,7 @@ impl CollectorJob {
                             // The watchdog starts with Ready's tighter bound;
                             // after Ready its bound becomes the request end.
                             self.registration.set_deadline(deadline);
+                            report.lifecycle.request_deadline = Some(deadline);
                             let Ok(bytes) = request_bytes(&self.request, &mut buffer) else {
                                 return EndReason::Protocol;
                             };
@@ -583,6 +648,7 @@ impl SupervisorHandle {
                 kill_requested: self.signal.signal(libc::SIGKILL).is_ok(),
                 reaped: self.signal.reaped(),
                 published: false,
+                lifecycle: Lifecycle::default(),
                 #[cfg(test)]
                 unconfined_reads: 0,
                 #[cfg(test)]

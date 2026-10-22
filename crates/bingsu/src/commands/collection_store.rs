@@ -34,6 +34,8 @@ pub(crate) struct CollectionStore {
     binding: Binding,
     catalog: &'static [SegmentDecl],
     me: u32,
+    pub(crate) lock_acquired: Option<u64>,
+    pub(crate) response_renamed: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 impl CollectionStore {
     pub(crate) fn acquire(
@@ -151,6 +153,7 @@ impl CollectionStore {
         }
         let dir = chain.last().unwrap();
         let lock = close_only_lock(dir, LOCK, me, true)?;
+        let lock_acquired = super::collector_process::now_ns().ok();
         registration.attach(dir, created)?;
         let store = Self {
             chain,
@@ -159,6 +162,8 @@ impl CollectionStore {
             binding: binding.clone(),
             catalog,
             me,
+            lock_acquired,
+            response_renamed: std::sync::Arc::default(),
         };
         store.verify()?;
         // Check raw cwd even when a catalog entry points to the right hash.
@@ -284,6 +289,10 @@ impl CollectionStore {
         self.verify()?;
         hook("before_install");
         staged.install(self.dir(), self.me, STAGE, RESPONSE, STREAM_MAX)?;
+        if let Ok(now) = super::collector_process::now_ns() {
+            self.response_renamed
+                .store(now, std::sync::atomic::Ordering::Release);
+        }
         hook("after_install");
         Ok(())
     }

@@ -1,0 +1,32 @@
+2818  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_failure_modes_trace_colle5/store", "--malformed-worker"], 0xffffc5f04de0 /* 22 vars */) = 0
+2818  clone(child_stack=0xe3dae95da000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2819  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_failure_modes_trace_colle5/store", "--malformed-worker"], 0xadbdea2c51c0 /* 0 vars */ <unfinished ...>
+2818  <... clone resumed>)              = 2819
+2819  <... execve resumed>)             = 0
+2819  clone(child_stack=0xe59b0f7be000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2821  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 0</dev/null>
+2821  openat(AT_FDCWD</home/tester/src>, "/dev/null", O_RDWR) = 2</dev/null>
+2821  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--malformed-worker"], 0xb19023f9a440 /* 0 vars */ <unfinished ...>
+2819  <... clone resumed>)              = 2821
+2821  <... execve resumed>)             = 0
+2821  fcntl(1<pipe:[500006]>, F_GETFL <unfinished ...>
+2821  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+2821  fcntl(3<pipe:[500007]>, F_GETFL <unfinished ...>
+2821  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2821  fcntl(5</home/tester/pt/test_failure_modes_trace_colle5/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65352f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65352f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+2821  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+2821  newfstatat(5</home/tester/pt/test_failure_modes_trace_colle5/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65352f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65352f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+2821  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2821  fgetxattr(5</home/tester/pt/test_failure_modes_trace_colle5/store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65352f73746f72652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6661696c7572655f6d6f6465735f74726163655f636f6c6c65352f73746f72652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+2821  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+2821  getcwd( <unfinished ...>
+2821  <... getcwd resumed>"/", 512)     = 2
+2821  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=284, filter=0xac6a5f96c610} <unfinished ...>
+2821  <... seccomp resumed>)            = 0
+2821  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+2821  <... openat resumed>)             = 4</proc/2821/statm>
+2821  read(4</proc/2821/statm>,  <unfinished ...>
+2821  <... read resumed>"1444 677 599 809 0 93 0\n", 256) = 24
+2821  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=260, filter=0xac6a5f96cb80} <unfinished ...>
+2821  <... seccomp resumed>)            = 0
+2821  +++ killed by SIGKILL +++

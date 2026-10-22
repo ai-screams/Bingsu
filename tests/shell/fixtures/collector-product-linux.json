@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "milestone": "M3b",
+  "evidence": "controlled phase axes; not a captured syscall total",
+  "read_chunk": 16384,
+  "cases": {
+    "product-mask0": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "fixture": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "ready-failure": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "partial": {
+      "cwd_bytes": 4,
+      "body_bytes": 17000,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "malformed-flood": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "current": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "previous": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "snapshot-change": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "busy": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "long-cwd": {
+      "cwd_bytes": 65536,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "collision": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "legacy-gc": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 2,
+      "gc_files": 1
+    },
+    "runtime-unsafe": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "proc-absent": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    },
+    "nofile-lowered": {
+      "cwd_bytes": 4,
+      "body_bytes": 256,
+      "previous_bytes": 256,
+      "gc_directories": 0,
+      "gc_files": 0
+    }
+  }
+}
