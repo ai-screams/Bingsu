@@ -85,9 +85,14 @@ fn ack(reader: &mut impl BufRead, expected: &str) {
 fn linux_landlock_backstop_blocks_held_fd_after_coarse_rename() {
     let path = fixture("landlock");
     let mut attacker = helper(&path, "rename").spawn().unwrap();
-    let mut reader = BufReader::new(attacker.stdout.take().unwrap());
+    // The parent keeps the attacker's stdout open until the child exits; a
+    // dropped pipe makes the child's own libtest output fail with EPIPE.
+    let reader = std::rc::Rc::new(std::cell::RefCell::new(BufReader::new(
+        attacker.stdout.take().unwrap(),
+    )));
     let mut writer = attacker.stdin.take().unwrap();
-    ack(&mut reader, "READY");
+    ack(&mut *reader.borrow_mut(), "READY");
+    let hook_reader = reader.clone();
     let mut budget = meter();
     let root = root(&path.join("root"), &mut budget);
     let mut access = Access::stage_a_only();
@@ -113,7 +118,7 @@ fn linux_landlock_backstop_blocks_held_fd_after_coarse_rename() {
             if visits == 2 {
                 writeln!(writer, "MOVE").unwrap();
                 writer.flush().unwrap();
-                ack(&mut reader, "MOVED");
+                ack(&mut *hook_reader.borrow_mut(), "MOVED");
             }
         }
     }));
@@ -129,6 +134,7 @@ fn linux_landlock_backstop_blocks_held_fd_after_coarse_rename() {
     );
     assert_eq!(budget.counts[Phase::Content as usize].read_bytes, before);
     budget.hook = None;
+    std::io::copy(&mut *reader.borrow_mut(), &mut std::io::sink()).unwrap();
     assert!(attacker.wait().unwrap().success());
     // The unconfined child cleans up; this thread cannot list outside root.
 }
