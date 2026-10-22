@@ -1,4 +1,5 @@
 //! Dedicated entry; the helper links only the identity library.
+//! The worker owns its bounded UpdateSink, including in startup test targets.
 #![deny(unsafe_code)]
 #[cfg(target_os = "linux")]
 // The other ABI and row metadata are exercised by tests/filter.rs.
