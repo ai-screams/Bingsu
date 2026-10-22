@@ -1313,7 +1313,17 @@ struct MeterState {
     max_ns: u64,
     used: u32,
     checkpoint: bool,
+    stop: Option<CollectionLimit>,
+    #[cfg(test)]
+    clock: Option<fn() -> u64>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CollectionLimit {
+    Time,
+    Ops,
+}
+pub(super) const CHECKPOINT_OPS: u32 = 512;
+pub(super) const CHECKPOINT_NS: u64 = 4_000_000;
 pub(super) struct CollectionMeter;
 impl CollectionMeter {
     pub(super) fn start(max_ops: u32, max_ns: u64) -> Self {
@@ -1332,12 +1342,33 @@ impl CollectionMeter {
                 max_ns,
                 used: 0,
                 checkpoint: false,
+                stop: None,
+                #[cfg(test)]
+                clock: None,
             });
         });
         Self
     }
-    pub(super) fn checkpoint(&self) {
-        COLLECTION_METER.with(|slot| slot.borrow_mut().as_mut().unwrap().checkpoint = true);
+    pub(super) fn checkpoint(&self) -> std::io::Result<()> {
+        COLLECTION_METER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let meter = slot.as_mut().unwrap();
+            meter.checkpoint = true;
+            // The caller retained the work stop. A real checkpoint I/O error
+            // must not inherit an earlier budget classification.
+            meter.stop = None;
+        });
+        // Even the first checkpoint open is forbidden after the total deadline.
+        collection_ops(0)
+    }
+    pub(super) fn stop(&self) -> Option<CollectionLimit> {
+        COLLECTION_METER.with(|slot| slot.borrow().as_ref().unwrap().stop)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_clock(max_ops: u32, max_ns: u64, clock: fn() -> u64) -> Self {
+        let meter = Self::start_inner(max_ops, max_ns, None);
+        COLLECTION_METER.with(|slot| slot.borrow_mut().as_mut().unwrap().clock = Some(clock));
+        meter
     }
     #[cfg(test)]
     pub(super) fn used(&self) -> u32 {
@@ -1356,6 +1387,8 @@ pub(super) fn collection_ops(count: u32) -> std::io::Result<()> {
             return Ok(());
         };
         let elapsed = meter.started.map(|started| started.elapsed().as_nanos());
+        #[cfg(test)]
+        let elapsed = meter.clock.map(|clock| u128::from(clock())).or(elapsed);
         meter.charge(count, elapsed)
     })
 }
@@ -1365,13 +1398,19 @@ impl MeterState {
             (self.max_ops, self.max_ns)
         } else {
             (
-                self.max_ops.saturating_sub(320),
-                self.max_ns.saturating_sub(2_000_000),
+                self.max_ops.saturating_sub(CHECKPOINT_OPS),
+                self.max_ns.saturating_sub(CHECKPOINT_NS),
             )
         };
-        if count > ops.saturating_sub(self.used)
-            || elapsed_ns.is_some_and(|elapsed| elapsed >= u128::from(ns))
-        {
+        let stop = if elapsed_ns.is_some_and(|elapsed| elapsed >= u128::from(ns)) {
+            Some(CollectionLimit::Time)
+        } else if count > ops.saturating_sub(self.used) {
+            Some(CollectionLimit::Ops)
+        } else {
+            None
+        };
+        if let Some(stop) = stop {
+            self.stop = Some(stop);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "collection sweep budget",
@@ -1386,7 +1425,7 @@ impl MeterState {
 mod collection_meter_tests {
     use super::*;
 
-    // 이것을 실패시키는 것: 18ms 작업 경계나 20ms checkpoint 경계를 넘겨 허용하는 것.
+    // 이것을 실패시키는 것: 16ms 작업 경계나 20ms checkpoint 경계를 넘겨 허용하는 것.
     #[test]
     fn elapsed_time_reserves_checkpoint_and_enforces_cap() {
         let mut meter = MeterState {
@@ -1395,12 +1434,14 @@ mod collection_meter_tests {
             max_ns: 20_000_000,
             used: 0,
             checkpoint: false,
+            stop: None,
+            clock: None,
         };
         // Inject elapsed time instead of sleeping: scheduling cannot change
         // which side of either exact deadline this assertion exercises.
-        meter.charge(1, Some(17_999_999)).unwrap();
+        meter.charge(1, Some(15_999_999)).unwrap();
         assert_eq!(
-            meter.charge(1, Some(18_000_000)).unwrap_err().kind(),
+            meter.charge(1, Some(16_000_000)).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
         assert_eq!(meter.used, 1);
@@ -1411,20 +1452,27 @@ mod collection_meter_tests {
             std::io::ErrorKind::TimedOut
         );
         assert_eq!(meter.used, 2);
+        // 이것을 실패시키는 것: 마감 뒤 checkpoint 진입 검사를 생략하는 것.
+        let meter = CollectionMeter::fixture_clock(4_096, 20_000_000, || 20_000_000);
+        assert_eq!(
+            meter.checkpoint().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(meter.used(), 0);
     }
 
     // 이것을 실패시키는 것: 기능 fixture에서 연산 한도나 checkpoint 예약까지 없애는 것.
     #[test]
     fn operation_only_fixture_keeps_checkpoint_reserve() {
         let meter = CollectionMeter::fixture_operations(4_096);
-        collection_ops(3_776).unwrap();
+        collection_ops(3_584).unwrap();
         assert_eq!(
             collection_ops(1).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
-        assert_eq!(meter.used(), 3_776);
-        meter.checkpoint();
-        collection_ops(320).unwrap();
+        assert_eq!(meter.used(), 3_584);
+        meter.checkpoint().unwrap();
+        collection_ops(512).unwrap();
         assert_eq!(
             collection_ops(1).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
@@ -1491,4 +1539,84 @@ impl Drop for DirectoryCursor {
 }
 pub(super) fn collection_meter_active() -> bool {
     COLLECTION_METER.with(|slot| slot.borrow().is_some())
+}
+
+/// One bounded native directory block. Unlike telldir's stream-local index,
+/// this position comes from lseek on the directory OFD and can be reopened.
+/// The caller must revalidate directory identity/change time before resuming.
+pub(super) fn directory_batch(
+    dir: std::os::fd::BorrowedFd<'_>,
+    position: u64,
+) -> std::io::Result<(u64, Vec<OsString>)> {
+    use std::os::fd::AsRawFd;
+    let invalid = || std::io::Error::other("invalid directory block");
+    let offset = libc::off_t::try_from(position).map_err(|_| invalid())?;
+    let file = open_dir_at_nofollow(dir, std::ffi::OsStr::new("."))?;
+    collection_ops(1)?;
+    // SAFETY: own directory OFD; position is an opaque, checked native offset.
+    if unsafe { libc::lseek(file.as_raw_fd(), offset, libc::SEEK_SET) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut bytes = [0u8; 8_192];
+    collection_ops(1)?;
+    #[cfg(target_os = "linux")]
+    // SAFETY: Linux getdents64 writes at most the provided buffer length.
+    let n = unsafe {
+        libc::syscall(
+            libc::SYS_getdents64,
+            file.as_raw_fd(),
+            bytes.as_mut_ptr(),
+            bytes.len(),
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let n = {
+        // Darwin's 64-bit inode entry point, also used by libc readdir:
+        // apple-oss-distributions/Libc gen/FreeBSD/readdir.c.
+        unsafe extern "C" {
+            fn __getdirentries64(
+                fd: libc::c_int,
+                buf: *mut u8,
+                len: usize,
+                base: *mut libc::off_t,
+            ) -> libc::ssize_t;
+        }
+        let mut base = 0;
+        // SAFETY: live fd, writable bounded buffer and initialized offset.
+        unsafe { __getdirentries64(file.as_raw_fd(), bytes.as_mut_ptr(), bytes.len(), &mut base) }
+    };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    collection_ops(1)?;
+    // SAFETY: query the next native block position of the same live OFD.
+    let next = unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_CUR) };
+    let next = u64::try_from(next).map_err(|_| invalid())?;
+    let mut block = bytes.get(..n as usize).ok_or_else(invalid)?;
+    let mut names = Vec::new();
+    while !block.is_empty() {
+        #[cfg(target_os = "linux")]
+        const NAME: usize = 19;
+        #[cfg(target_os = "macos")]
+        const NAME: usize = 21;
+        if block.len() < NAME + 1 {
+            return Err(invalid());
+        }
+        let len = usize::from(u16::from_ne_bytes([block[16], block[17]]));
+        if len < NAME + 1 || len > block.len() {
+            return Err(invalid());
+        }
+        let name = &block[NAME..len];
+        let end = name.iter().position(|b| *b == 0).ok_or_else(invalid)?;
+        if block[..8] != [0; 8] && &name[..end] != b"." && &name[..end] != b".." {
+            names.push(OsString::from_vec(name[..end].to_vec()));
+        }
+        block = &block[len..];
+    }
+    // An empty non-EOF block still advances. The caller uses the offset, not
+    // the number of filtered names, to decide whether another block exists.
+    if n > 0 && next == position {
+        return Err(invalid());
+    }
+    Ok((next, names))
 }

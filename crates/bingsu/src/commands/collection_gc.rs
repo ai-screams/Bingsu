@@ -54,11 +54,28 @@ impl GcBudget {
         // Allow two checked ancestor walks plus fixed inspection/checkpoint work.
         // Smaller test/maintenance budgets must not save an unreopenable cursor.
         // Keep the short context/hash/store grammar reachable after a tiny sweep.
-        (self.max_ops.saturating_sub(440) / 44).clamp(10, MAX_SCAN_DEPTH as u32) as usize
+        (self.max_ops.saturating_sub(632) / 44).clamp(10, MAX_SCAN_DEPTH as u32) as usize
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum GcStop {
+    #[default]
+    Complete,
+    YieldTime,
+    YieldOps,
+    Busy,
+}
+impl From<sys::CollectionLimit> for GcStop {
+    fn from(value: sys::CollectionLimit) -> Self {
+        match value {
+            sys::CollectionLimit::Time => Self::YieldTime,
+            sys::CollectionLimit::Ops => Self::YieldOps,
+        }
     }
 }
 #[derive(Debug, Default)]
 pub(crate) struct GcReport {
+    pub stop: GcStop,
     pub visited: u32,
     pub removed_files: u32,
     pub removed_dirs: u32,
@@ -66,6 +83,12 @@ pub(crate) struct GcReport {
     pub skipped: u32,
     #[cfg(test)]
     pub ops: u32,
+    #[cfg(test)]
+    pub checkpoint_ops: u32,
+    #[cfg(test)]
+    pub checkpoint_saved: bool,
+    #[cfg(test)]
+    pub restarted_depths: Vec<usize>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
@@ -77,12 +100,53 @@ struct Entry {
     reserved: bool,
     used: Clock,
 }
+// A cursor owns a bounded directory block and its unprocessed entries. Counts
+// at entry allow only a replaced subtree to restart without double charging it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cursor {
     name: String,
-    after: String,
     dev: u64,
     ino: u64,
+    mtime: (i64, i64),
+    position: u64,
+    pending: Vec<String>,
+    finished: bool,
+    stores: u64,
+    nodes: u64,
+    bytes: u64,
+    entries: usize,
+    unknown: usize,
+    unsafe_seen: bool,
+}
+impl Cursor {
+    fn listed(&mut self, next: u64, names: Vec<std::ffi::OsString>) -> Result<(), StoreError> {
+        let mut pending: Vec<_> = names
+            .into_iter()
+            .map(|name| name.into_string().map_err(|_| StoreError::Unsafe))
+            .collect::<Result<_, _>>()?;
+        pending.reverse();
+        self.finished = next == self.position;
+        self.position = next;
+        self.pending = pending;
+        Ok(())
+    }
+    fn new(name: String, stamp: &sys::Stamp, c: &Catalog) -> Self {
+        Self {
+            name,
+            dev: stamp.dev,
+            ino: stamp.ino,
+            mtime: stamp.mtime,
+            position: 0,
+            pending: vec![],
+            finished: false,
+            stores: c.stores,
+            nodes: c.nodes,
+            bytes: c.bytes,
+            entries: c.entries.len(),
+            unknown: c.unknown.len(),
+            unsafe_seen: c.unsafe_seen,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Catalog {
@@ -102,7 +166,7 @@ struct Catalog {
 impl Catalog {
     fn empty(runtime: &File) -> Result<Self, StoreError> {
         let stamp = sys::file_stamp(runtime)?;
-        Ok(Self {
+        let mut catalog = Self {
             dev: stamp.dev,
             ino: stamp.ino,
             ready: false,
@@ -114,14 +178,14 @@ impl Catalog {
             entries: vec![],
             prune: vec![],
             unknown: vec![],
-            cursor: vec![Cursor {
-                name: String::new(),
-                after: String::new(),
-                dev: stamp.dev,
-                ino: stamp.ino,
-            }],
-        })
+            cursor: vec![],
+        };
+        catalog
+            .cursor
+            .push(Cursor::new(String::new(), &stamp, &catalog));
+        Ok(catalog)
     }
+
     fn capacity(&self, stores: u64, nodes: u64, bytes: u64) -> bool {
         capacity(
             self.stores.saturating_add(stores),
@@ -149,8 +213,23 @@ impl<'a> Registration<'a> {
         me: u32,
         now: Clock,
         schema: &[SegmentDecl],
-        start_meter: fn() -> sys::CollectionMeter,
-    ) -> Result<Self, StoreError> {
+        start_meter: impl FnOnce() -> sys::CollectionMeter,
+    ) -> Result<Result<Self, GcStop>, StoreError> {
+        let meter = start_meter();
+        let result = Self::open_metered(runtime, me, now, schema, &meter);
+        match (result, meter.stop()) {
+            (Err(_), Some(stop)) => Ok(Err(stop.into())),
+            (Err(StoreError::Busy), None) => Ok(Err(GcStop::Busy)),
+            (result, _) => result,
+        }
+    }
+    fn open_metered(
+        runtime: &'a File,
+        me: u32,
+        now: Clock,
+        schema: &[SegmentDecl],
+        meter: &sys::CollectionMeter,
+    ) -> Result<Result<Self, GcStop>, StoreError> {
         snapshot_store::check_directory(runtime, me)?;
         let lock = collection_store::close_only_lock(runtime, GC_LOCK, me, true)?;
         let mut catalog = match load(runtime, me)? {
@@ -167,7 +246,6 @@ impl<'a> Registration<'a> {
             // The first actual admission initializes the runtime catalog.
             // An empty product selection never needs this filesystem work.
             let budget = GcBudget::default();
-            let meter = start_meter();
             let result = inventory(
                 runtime,
                 me,
@@ -177,20 +255,33 @@ impl<'a> Registration<'a> {
                 &mut catalog,
                 &mut GcReport::default(),
             );
-            meter.checkpoint();
+            let stop = meter.stop();
+            #[cfg(test)]
+            BEFORE_CHECKPOINT.with(|hook| {
+                if let Some(mut hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
+            meter.checkpoint()?;
             save(runtime, me, &catalog)?;
+            if let Some(stop) = stop {
+                return Ok(Err(stop.into()));
+            }
             result?;
         }
-        if !catalog.ready || catalog.unsafe_seen {
-            return Err(StoreError::Busy);
+        if catalog.unsafe_seen {
+            return Err(StoreError::Unsafe);
         }
-        Ok(Self {
+        if !catalog.ready {
+            return Ok(Err(GcStop::Busy));
+        }
+        Ok(Ok(Self {
             runtime,
             _lock: lock,
             catalog,
             me,
             selected: None,
-        })
+        }))
     }
     pub(super) fn reserve(
         &mut self,
@@ -329,6 +420,79 @@ pub(crate) fn fixture_reclaim(
         sys::CollectionMeter::fixture_operations(budget.max_ops),
     )
 }
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) fn fixture_timed_reclaim(
+    context: &CheckedContextFd,
+    now: Clock,
+    budget: GcBudget,
+    schema: &[SegmentDecl],
+    clock: fn() -> u64,
+) -> Result<GcReport, StoreError> {
+    reclaim_inner(
+        &context.runtime,
+        now,
+        budget,
+        schema,
+        sys::CollectionMeter::fixture_clock(budget.max_ops, budget.max_ns, clock),
+    )
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) fn fixture_cursor(context: &CheckedContextFd) -> Vec<(String, u64, u64)> {
+    load(&context.runtime, sys::current_uid())
+        .unwrap()
+        .unwrap()
+        .cursor
+        .iter()
+        .map(|c| (c.name.clone(), c.position, c.stores))
+        .collect()
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) fn fixture_invalid_listing(context: &CheckedContextFd) {
+    use std::os::unix::ffi::OsStringExt;
+    let catalog = Catalog::empty(&context.runtime).unwrap();
+    let mut cursor = catalog.cursor[0].clone();
+    let before = cursor.clone();
+    assert!(matches!(
+        cursor.listed(100, vec![std::ffi::OsString::from_vec(vec![0xff])]),
+        Err(StoreError::Unsafe)
+    ));
+    assert_eq!(cursor, before);
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) fn fixture_large_checkpoint(context: &CheckedContextFd) -> (usize, u32) {
+    let me = sys::current_uid();
+    let mut catalog = load(&context.runtime, me).unwrap().unwrap();
+    let template = catalog.entries[0].clone();
+    catalog.entries.clear();
+    for i in 0..MAX_STORES {
+        let mut entry = template.clone();
+        entry.cwd = vec![b'x'; 65_536];
+        entry.cwd[0] = b'/';
+        entry.cwd[1] = b'a' + i as u8;
+        let last = entry.path.len() - 2;
+        entry.path[last] = cwd_hash::address(&entry.cwd);
+        catalog.entries.push(entry);
+        if encode(&catalog).is_err() {
+            catalog.entries.pop();
+            break;
+        }
+    }
+    catalog.stores = catalog.entries.len() as u64;
+    catalog.nodes = catalog.stores * 2 + 1;
+    catalog.bytes = catalog.entries.iter().map(|entry| entry.bytes).sum();
+    let size = encode(&catalog).unwrap().len();
+    let meter = sys::CollectionMeter::fixture_operations(4_096);
+    sys::collection_ops(3_584).unwrap();
+    meter.checkpoint().unwrap();
+    eprintln!("GC_CHECKPOINT_BEGIN");
+    save(&context.runtime, me, &catalog).unwrap();
+    eprintln!("GC_CHECKPOINT_END");
+    (size, meter.used() - 3_584)
+}
 fn reclaim_inner(
     runtime: &File,
     now: Clock,
@@ -349,7 +513,12 @@ fn reclaim_inner(
             }
             return Ok(report);
         }
-        Err(_) => {
+        Err(error) => {
+            if let Some(stop) = meter.stop() {
+                report.stop = stop.into();
+            } else {
+                return Err(error.into());
+            }
             report.incomplete = true;
             #[cfg(test)]
             {
@@ -360,6 +529,11 @@ fn reclaim_inner(
     }
     if sys::collection_ops(1).is_err() {
         report.incomplete = true;
+        report.stop = meter.stop().unwrap().into();
+        #[cfg(test)]
+        {
+            report.ops = meter.used();
+        }
         return Ok(report);
     }
     let me = sys::current_uid();
@@ -387,19 +561,49 @@ fn reclaim_inner(
             && matches!(&result, Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound)
         {
             catalog = Catalog::empty(runtime)?;
+            state = Some(catalog);
+            return Ok(());
         }
         state = Some(catalog);
         result
     })();
-    if work.is_err() {
-        report.incomplete = true;
-    }
-    if let Some(catalog) = state {
-        report.incomplete |= !catalog.ready || catalog.unsafe_seen;
-        meter.checkpoint();
-        if save(runtime, me, &catalog).is_err() {
-            report.incomplete = true;
+    let mut error = None;
+    report.stop = match (work, meter.stop()) {
+        (_, Some(stop)) => stop.into(),
+        (Err(StoreError::Busy), None) => GcStop::Busy,
+        (Err(e), None) => {
+            error = Some(e);
+            GcStop::Complete
         }
+        (Ok(()), None) => GcStop::Complete,
+    };
+    if let Some(catalog) = state {
+        report.incomplete = !catalog.ready || catalog.unsafe_seen;
+        #[cfg(test)]
+        let before = meter.used();
+        let saved = meter
+            .checkpoint()
+            .map_err(StoreError::from)
+            .and_then(|()| save(runtime, me, &catalog));
+        #[cfg(test)]
+        {
+            report.checkpoint_saved = saved.is_ok();
+        }
+        if let Err(e) = saved {
+            if let Some(stop) = meter.stop() {
+                report.stop = stop.into();
+            } else {
+                error = Some(e);
+            }
+        }
+        #[cfg(test)]
+        {
+            report.checkpoint_ops = meter.used() - before;
+        }
+    }
+    report.incomplete |= report.stop != GcStop::Complete || error.is_some();
+    if report.incomplete && report.stop == GcStop::Complete {
+        report.stop = GcStop::Busy;
     }
     #[cfg(test)]
     {
@@ -408,6 +612,9 @@ fn reclaim_inner(
     // Release the global lock before ending the accounting scope. Neither
     // lock owner explicitly unlocks an OFD that another owner may retain.
     drop(held_lock);
+    if let Some(error) = error {
+        return Err(error);
+    }
     Ok(report)
 }
 
@@ -576,9 +783,8 @@ fn descend(path: &[String], name: &str) -> bool {
     }
     hex(name) || name == "state"
 }
-fn next_name(dir: &File, after: &str) -> Result<Option<String>, StoreError> {
+fn first_name(dir: &File) -> Result<Option<String>, StoreError> {
     let mut stream = sys::DirectoryCursor::open(dir.as_fd())?;
-    let mut best: Option<String> = None;
     while let Some(name) = stream.next()? {
         if name == "." || name == ".." {
             continue;
@@ -587,11 +793,9 @@ fn next_name(dir: &File, after: &str) -> Result<Option<String>, StoreError> {
         let Some(name) = name.to_str() else {
             return Err(StoreError::Unsafe);
         };
-        if name > after && best.as_ref().is_none_or(|b| name < b.as_str()) {
-            best = Some(name.to_owned());
-        }
+        return Ok(Some(name.to_owned()));
     }
-    Ok(best)
+    Ok(None)
 }
 fn inventory(
     runtime: &File,
@@ -608,7 +812,8 @@ fn inventory(
     let mut dirs = Vec::new();
     sys::collection_ops(2)?;
     dirs.push(runtime.try_clone()?);
-    for (i, cursor) in catalog.cursor.iter().enumerate() {
+    for i in 0..catalog.cursor.len() {
+        let cursor = catalog.cursor[i].clone();
         if i > 0 {
             if !descend(&path, &cursor.name) {
                 return Err(StoreError::Unsafe);
@@ -619,8 +824,11 @@ fn inventory(
             ) {
                 Ok(dir) => dir,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    *catalog = Catalog::empty(runtime)?;
-                    return Err(StoreError::Busy);
+                    let parent = dirs.last().unwrap();
+                    restart(catalog, i - 1, &sys::file_stamp(parent)?);
+                    #[cfg(test)]
+                    report.restarted_depths.push(i - 1);
+                    return Ok(());
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -630,15 +838,32 @@ fn inventory(
             dirs.push(dir);
         }
         let stamp = sys::file_stamp(dirs.last().unwrap())?;
-        if (stamp.dev, stamp.ino) != (cursor.dev, cursor.ino) {
-            *catalog = Catalog::empty(runtime)?;
-            return Err(StoreError::Busy);
+        if (stamp.dev, stamp.ino) != (cursor.dev, cursor.ino)
+            || (i > 0 && stamp.mtime != cursor.mtime)
+        {
+            restart(catalog, i, &stamp);
+            #[cfg(test)]
+            report.restarted_depths.push(i);
+            break;
         }
     }
+    let mut batch_entries = 0;
     while !catalog.cursor.is_empty() {
+        sys::collection_ops(1)?;
         let dir = dirs.last().unwrap();
-        let after = catalog.cursor.last().unwrap().after.clone();
-        let name = next_name(dir, &after)?;
+        let cursor = catalog.cursor.last_mut().unwrap();
+        if cursor.pending.is_empty() && !cursor.finished {
+            let (next, names) = sys::directory_batch(dir.as_fd(), cursor.position)?;
+            cursor.listed(next, names)?;
+            // Listing itself is progress, including blocks of irrelevant names.
+            save(runtime, me, catalog)?;
+            continue;
+        }
+        if batch_entries == 32 {
+            save(runtime, me, catalog)?;
+            batch_entries = 0;
+        }
+        let name = catalog.cursor.last().unwrap().pending.last().cloned();
         let Some(name) = name else {
             // A crash can leave only empty address directories. rmdir under
             // the global lock cannot remove a live or unknown child entry.
@@ -659,13 +884,17 @@ fn inventory(
             catalog.cursor.pop();
             dirs.pop();
             path.pop();
+            if let Some(parent) = dirs.last() {
+                catalog.cursor.last_mut().unwrap().mtime = sys::file_stamp(parent)?.mtime;
+            }
             continue;
         };
         if !descend(&path, &name) {
             if path.iter().any(|n| n == "collections-v1") {
                 catalog.unsafe_seen = true;
             }
-            catalog.cursor.last_mut().unwrap().after = name;
+            catalog.cursor.last_mut().unwrap().pending.pop();
+            batch_entries += 1;
             continue;
         }
         let child = match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)) {
@@ -673,7 +902,8 @@ fn inventory(
             Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(e.into()),
             Err(_) => {
                 catalog.unsafe_seen = true;
-                catalog.cursor.last_mut().unwrap().after = name;
+                catalog.cursor.last_mut().unwrap().pending.pop();
+                batch_entries += 1;
                 continue;
             }
         };
@@ -701,15 +931,18 @@ fn inventory(
                 catalog.unknown.push(child_path);
             }
             report.skipped += 1;
-            catalog.cursor.last_mut().unwrap().after = name;
+            catalog.cursor.last_mut().unwrap().pending.pop();
+            batch_entries += 1;
             continue;
         }
         if location(&child_path).is_ok() {
-            if next_name(&child, "")?.is_none() {
+            if first_name(&child)?.is_none() {
                 snapshot_store::same_name(&child, dir.as_fd(), &name)?;
                 sys::remove_dir_at(dir.as_fd(), OsStr::new(&name))?;
                 report.removed_dirs += 1;
-                catalog.cursor.last_mut().unwrap().after = name;
+                catalog.cursor.last_mut().unwrap().pending.pop();
+                batch_entries += 1;
+                catalog.cursor.last_mut().unwrap().mtime = sys::file_stamp(dir)?.mtime;
                 continue;
             }
             let entry = inspect(&child, child_path.clone(), me, now, schema)?;
@@ -726,16 +959,12 @@ fn inventory(
                 catalog.unsafe_seen = true;
             }
         } else {
-            catalog.cursor.last_mut().unwrap().after = name.clone();
-            catalog.cursor.push(Cursor {
-                name,
-                after: String::new(),
-                dev: stamp.dev,
-                ino: stamp.ino,
-            });
+            catalog.cursor.last_mut().unwrap().pending.pop();
+            batch_entries += 1;
             if child_path.iter().any(|n| n == "collections-v1") {
                 catalog.nodes = catalog.nodes.saturating_add(1);
             }
+            catalog.cursor.push(Cursor::new(name, &stamp, catalog));
             dirs.push(child);
             path = child_path;
             continue;
@@ -743,10 +972,24 @@ fn inventory(
         if child_path.iter().any(|n| n == "collections-v1") {
             catalog.nodes = catalog.nodes.saturating_add(1);
         }
-        catalog.cursor.last_mut().unwrap().after = name;
+        catalog.cursor.last_mut().unwrap().pending.pop();
+        batch_entries += 1;
     }
     catalog.ready = true;
     Ok(())
+}
+fn restart(catalog: &mut Catalog, index: usize, stamp: &sys::Stamp) {
+    let cursor = catalog.cursor[index].clone();
+    catalog.stores = cursor.stores;
+    catalog.nodes = cursor.nodes;
+    catalog.bytes = cursor.bytes;
+    catalog.entries.truncate(cursor.entries);
+    catalog.unknown.truncate(cursor.unknown);
+    catalog.unsafe_seen = cursor.unsafe_seen;
+    catalog.cursor.truncate(index);
+    catalog
+        .cursor
+        .push(Cursor::new(cursor.name, stamp, catalog));
 }
 fn inspect(
     dir: &File,
@@ -880,6 +1123,10 @@ fn evict(
         let stamp = sys::file_stamp(&dir)?;
         if (stamp.dev, stamp.ino) != (entry.dev, entry.ino) {
             *catalog = Catalog::empty(runtime)?;
+            // A pre-attach reservation has no inode yet; rebuild its counts.
+            if entry.ino == 0 {
+                return Ok(());
+            }
             return Err(StoreError::Unsafe);
         }
         let lock = match collection_store::close_only_lock(&dir, LOCK, me, false) {
@@ -1063,7 +1310,7 @@ fn put_clock(out: &mut Vec<u8>, clock: Clock) {
     out.extend_from_slice(&clock.now.to_le_bytes());
 }
 fn encode(c: &Catalog) -> Result<Vec<u8>, StoreError> {
-    let mut out = b"BNGCGC02\0\0\0\0".to_vec();
+    let mut out = b"BNGCGC03\0\0\0\0".to_vec();
     for n in [c.dev, c.ino, c.stores, c.nodes, c.bytes] {
         out.extend_from_slice(&n.to_le_bytes());
     }
@@ -1089,9 +1336,25 @@ fn encode(c: &Catalog) -> Result<Vec<u8>, StoreError> {
     out.extend_from_slice(&(c.cursor.len() as u32).to_le_bytes());
     for cursor in &c.cursor {
         put_bytes(&mut out, cursor.name.as_bytes())?;
-        put_bytes(&mut out, cursor.after.as_bytes())?;
-        out.extend_from_slice(&cursor.dev.to_le_bytes());
-        out.extend_from_slice(&cursor.ino.to_le_bytes());
+        for n in [
+            cursor.dev,
+            cursor.ino,
+            cursor.mtime.0 as u64,
+            cursor.mtime.1 as u64,
+            cursor.position,
+            cursor.stores,
+            cursor.nodes,
+            cursor.bytes,
+            cursor.entries as u64,
+            cursor.unknown as u64,
+        ] {
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        out.extend_from_slice(&[u8::from(cursor.finished), u8::from(cursor.unsafe_seen)]);
+        out.extend_from_slice(&(cursor.pending.len() as u32).to_le_bytes());
+        for name in &cursor.pending {
+            put_bytes(&mut out, name.as_bytes())?;
+        }
     }
     out.extend_from_slice(&(c.unknown.len() as u32).to_le_bytes());
     for path in &c.unknown {
@@ -1157,7 +1420,7 @@ impl<'a> Reader<'a> {
 fn decode(bytes: &[u8]) -> Result<Catalog, StoreError> {
     if bytes.len() < 12
         || bytes.len() > CATALOG_MAX
-        || &bytes[..8] != b"BNGCGC02"
+        || &bytes[..8] != b"BNGCGC03"
         || snapshot::crc32c(&[&bytes[12..]]) != bytes[8..12]
     {
         return Err(StoreError::Unsafe);
@@ -1220,15 +1483,45 @@ fn decode(bytes: &[u8]) -> Result<Catalog, StoreError> {
     let count = r.count(MAX_DEPTH)?;
     let mut path = Vec::new();
     for i in 0..count {
-        let cursor = Cursor {
+        let mut cursor = Cursor {
             name: r.string()?,
-            after: r.string()?,
             dev: r.u64()?,
             ino: r.u64()?,
+            mtime: (r.u64()? as i64, r.u64()? as i64),
+            position: r.u64()?,
+            stores: r.u64()?,
+            nodes: r.u64()?,
+            bytes: r.u64()?,
+            entries: usize::try_from(r.u64()?).map_err(|_| StoreError::Unsafe)?,
+            unknown: usize::try_from(r.u64()?).map_err(|_| StoreError::Unsafe)?,
+            finished: r.flag()?,
+            unsafe_seen: r.flag()?,
+            pending: vec![],
         };
+        let count = r.count(512)?;
+        let mut total = 0;
+        for _ in 0..count {
+            let bytes = r.bytes(255)?;
+            total += bytes.len();
+            let name = String::from_utf8(bytes).map_err(|_| StoreError::Unsafe)?;
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains(['/', '\0'])
+                || total > 8192
+            {
+                return Err(StoreError::Unsafe);
+            }
+            cursor.pending.push(name);
+        }
         if (i == 0 && !cursor.name.is_empty())
             || (i > 0 && !descend(&path, &cursor.name))
-            || (!cursor.after.is_empty() && !component(&cursor.after))
+            || cursor.position > i64::MAX as u64
+            || cursor.entries > c.entries.len()
+            || cursor.unknown > MAX_STORES as usize
+            || cursor.stores > c.stores
+            || cursor.nodes > c.nodes
+            || cursor.bytes > c.bytes
         {
             return Err(StoreError::Unsafe);
         }
@@ -1267,6 +1560,12 @@ fn decode(bytes: &[u8]) -> Result<Catalog, StoreError> {
 #[cfg(test)]
 thread_local! {
     static BEFORE_EVICTION: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_CHECKPOINT: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "native collection_store integration target")]
+pub(crate) fn fixture_checkpoint_hook(hook: Box<dyn FnMut()>) {
+    BEFORE_CHECKPOINT.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 #[cfg(test)]
 #[allow(dead_code, reason = "native parent/name replacement fixture")]

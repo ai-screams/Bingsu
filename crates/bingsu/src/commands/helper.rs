@@ -2,7 +2,7 @@
 use super::{
     clock::SystemClock,
     collection_gc,
-    collection_store::CollectionStore,
+    collection_store::{Admission, CollectionStore},
     collector,
     group_policy::SystemGroups,
     helper_filter, helper_limits, log,
@@ -77,15 +77,16 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut filter_failed = false;
     let mut supervisor = None;
     let mut collection_runtime = None;
+    let mut collection_outcome = None;
     let mut verification = Verification::start();
     let result = refresh::refresh_broker(request, &mut clock, &mut |context, display, now| {
         verification.verified();
         let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
         if let Some(request) = request {
-            collection_runtime = context.runtime.try_clone().ok();
             // Collection admission failure does not invalidate independent
             // snapshot publication. No product catalog grants a worker yet.
-            supervisor = (|| {
+            let admission = (|| {
+                collection_runtime = Some(context.runtime.try_clone()?);
                 let path = e
                     .collector_exe
                     .as_deref()
@@ -95,15 +96,18 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     sys::current_uid(),
                     &mut groups,
                 )?;
-                let mut store = CollectionStore::acquire(context, &request.binding, now)?;
+                let mut store = match CollectionStore::admit(context, &request.binding, now)? {
+                    Admission::Admitted(store) => store,
+                    Admission::Deferred(stop) => return Ok(Err(stop)),
+                };
                 let lock = store.worker_lock()?;
                 let job =
                     verification.attach(collector::spawn(&pin, request, lock, &_watchdog)?, &store);
-                Ok::<_, super::snapshot_store::StoreError>(
-                    job.start(Box::new(move |result| store.publish(&result)))?,
-                )
-            })()
-            .ok();
+                Ok::<_, super::snapshot_store::StoreError>(Ok(
+                    job.start(Box::new(move |result| store.publish(&result)))?
+                ))
+            })();
+            (supervisor, collection_outcome) = collection_result(admission);
         }
         let child_pidfd = supervisor.as_ref().and_then(|handle| handle.child_pidfd());
         let confinement =
@@ -125,7 +129,18 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let Some(runtime) = collection_runtime
         && let Ok(now) = clock.observe()
     {
-        let _ = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default());
+        let outcome = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default())
+            .map(|gc| match gc.stop {
+                collection_gc::GcStop::Complete => Ok(()),
+                stop => Err(stop),
+            });
+        let (_, message) = collection_result(outcome);
+        if let Some((severity, text)) = message {
+            report(&mut groups, severity, text);
+        }
+    }
+    if let Some((severity, text)) = collection_outcome {
+        report(&mut groups, severity, text);
     }
     if filter_failed {
         report(
@@ -148,6 +163,25 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+// Collection observations never become refresh trust/publication results.
+pub(crate) fn collection_result<T>(
+    result: Result<Result<T, collection_gc::GcStop>, super::snapshot_store::StoreError>,
+) -> (Option<T>, Option<(LogLevel, &'static str)>) {
+    use super::snapshot_store::StoreError;
+    use collection_gc::GcStop;
+    let (level, text) = match result {
+        Ok(Ok(value)) => return (Some(value), None),
+        Ok(Err(GcStop::YieldTime)) => (LogLevel::DebugLog, "collection deferred: time budget"),
+        Ok(Err(GcStop::YieldOps)) => (LogLevel::DebugLog, "collection deferred: operation budget"),
+        Ok(Err(GcStop::Busy)) | Err(StoreError::Busy) => (LogLevel::DebugLog, "collection busy"),
+        Ok(Err(GcStop::Complete)) => (LogLevel::Error, "collection invalid deferred state"),
+        Err(StoreError::Unsafe | StoreError::Root(_)) => (LogLevel::Error, "collection unsafe"),
+        Err(StoreError::Io(_)) => (LogLevel::Error, "collection I/O failure"),
+        Err(_) => (LogLevel::Error, "collection invalid data"),
+    };
+    (None, Some((level, text)))
 }
 
 /// Observation-only seam shared with the test catalog. Neither a missing

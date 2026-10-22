@@ -1102,8 +1102,8 @@ fn gc_is_bounded_and_resumable() {
     let mut ops = 0;
     let mut visited = 0;
     for _ in 0..100 {
-        let r = collection_gc::fixture_reclaim(&f.context, clock(), 900, &SCHEMA).unwrap();
-        assert!(r.ops <= 900);
+        let r = collection_gc::fixture_reclaim(&f.context, clock(), 1_200, &SCHEMA).unwrap();
+        assert!(r.ops <= 1_200);
         ops += r.ops;
         visited += r.visited;
         if !r.incomplete {
@@ -1117,7 +1117,7 @@ fn gc_is_bounded_and_resumable() {
         "bounded cursor did not make progress"
     );
     eprintln!(
-        "bounded inventory: stores_visited={visited} sweeps={} total_charged_operations={ops} per_sweep_limit=900",
+        "bounded inventory: stores_visited={visited} sweeps={} total_charged_operations={ops} per_sweep_limit=1_200",
         incomplete + 1
     );
 }
@@ -1650,11 +1650,9 @@ fn gc_rechecks_parent_identity_before_eviction() {
     }));
     let mut later = clock();
     later.now += 86_400_000_000_001;
-    let report = f.gc(later);
+    let report = collection_gc::fixture_reclaim(&f.context, later, 4_096, &SCHEMA);
     assert!(ran.load(Ordering::SeqCst));
-    assert!(report.incomplete);
-    assert_eq!(report.removed_files, 0);
-    assert_eq!(report.removed_dirs, 0);
+    assert!(matches!(report, Err(StoreError::Unsafe)));
     let bytes = fs::read(displaced.join("store/response")).unwrap();
     assert_eq!(
         Completed::decode_with_catalog(&bytes, &SCHEMA).unwrap(),
@@ -1730,9 +1728,8 @@ fn gc_still_stops_on_response_metadata_and_identity_violations() {
         assert!(f.acquire().is_err());
         let bytes = fs::read(&response).unwrap();
         for _ in 0..3 {
-            let report = f.gc(day(5));
-            assert!(report.incomplete);
-            assert_eq!(report.removed_files, 0);
+            let report = collection_gc::fixture_reclaim(&f.context, day(5), 4_096, &SCHEMA);
+            assert!(matches!(report, Err(StoreError::Unsafe)));
             assert_eq!(fs::read(&response).unwrap(), bytes);
         }
     }
@@ -1823,8 +1820,8 @@ fn gc_deep_inventory_respects_smaller_sweep_budget() {
     fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
     let mut skipped = 0;
     for _ in 0..64 {
-        let report = collection_gc::fixture_reclaim(&f.context, clock(), 900, &SCHEMA).unwrap();
-        assert!(report.ops <= 900);
+        let report = collection_gc::fixture_reclaim(&f.context, clock(), 1_200, &SCHEMA).unwrap();
+        assert!(report.ops <= 1_200);
         skipped += report.skipped;
         if !report.incomplete {
             assert_eq!(skipped, 1);
@@ -2099,4 +2096,318 @@ fn reserve_depth_boundary_matches_inventory() {
             );
         }
     }
+}
+
+thread_local! {
+    static GC_CLOCK: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+fn gc_tick() -> u64 {
+    GC_CLOCK.with(|clock| {
+        let (now, step) = clock.get();
+        clock.set((now + step, step));
+        now
+    })
+}
+fn seed_inventory(f: &Fixture, stores: usize) {
+    for i in 0..stores {
+        let b = binding(format!("/inventory-{i}").as_bytes());
+        CollectionStore::fixture(&f.context, &b, clock(), &SCHEMA, None)
+            .unwrap()
+            .publish(&completed(&b, b"v"))
+            .unwrap();
+        f.gc(clock());
+    }
+    fs::remove_file(f.base.join(".collections.catalog")).unwrap();
+}
+
+// 이것을 실패시키는 것: 예산 양보 뒤 cursor/목록 위치를 버리거나 Deferred를 성공으로 바꾸는 것.
+#[test]
+fn admission_eventually_progresses_after_budget_yields() {
+    use collection_gc::GcStop;
+    use commands::collection_store::Admission;
+    for timed in [false, true] {
+        let f = Fixture::new("admission-progress");
+        seed_inventory(&f, 12);
+        // A raw directory larger than any sweep: listing must not restart at 0.
+        for i in 0..2_048 {
+            fs::write(f.base.join(format!("ignored-{i:04}")), []).unwrap();
+        }
+        let budget = if timed {
+            GcBudget {
+                max_ops: 4_096,
+                max_ns: 6_000_000,
+            }
+        } else {
+            GcBudget {
+                max_ops: 1_536,
+                max_ns: 20_000_000,
+            }
+        };
+        let mut yields = 0;
+        let mut admitted = false;
+        for _ in 0..128 {
+            GC_CLOCK.with(|clock| clock.set((0, 10_000)));
+            match CollectionStore::fixture_admit(
+                &f.context,
+                &f.binding,
+                clock(),
+                &SCHEMA,
+                budget,
+                timed.then_some(gc_tick),
+            )
+            .unwrap()
+            {
+                Admission::Deferred(stop) => {
+                    assert_eq!(
+                        stop,
+                        if timed {
+                            GcStop::YieldTime
+                        } else {
+                            GcStop::YieldOps
+                        }
+                    );
+                    assert!(!f.path().exists());
+                    yields += 1;
+                }
+                Admission::Admitted(_) => {
+                    admitted = true;
+                    break;
+                }
+            }
+        }
+        assert!(admitted && yields > 1, "timed={timed}, yields={yields}");
+        assert_eq!(catalog_counts(&f).0, 13);
+        assert_eq!(catalog_counts(&f).1, 27);
+        eprintln!("admission progress: timed={timed} yields={yields} stores=13 nodes=27");
+    }
+}
+
+// 이것을 실패시키는 것: 512 ops·4ms 예약을 줄이거나 전체 마감 뒤 checkpoint I/O를 시작하는 것.
+#[test]
+fn gc_checkpoint_reserve_is_bounded() {
+    use collection_gc::GcStop;
+    let f = Fixture::new("checkpoint-reserve");
+    seed_inventory(&f, 12);
+    // Start inventory through admission, then exercise its actual GC checkpoint.
+    let _ = CollectionStore::fixture_admit(
+        &f.context,
+        &f.binding,
+        clock(),
+        &SCHEMA,
+        GcBudget {
+            max_ops: 1_200,
+            max_ns: 20_000_000,
+        },
+        None,
+    )
+    .unwrap();
+    let r = collection_gc::fixture_reclaim(&f.context, clock(), 1_200, &SCHEMA).unwrap();
+    assert_eq!(r.stop, GcStop::YieldOps);
+    assert!(
+        r.checkpoint_saved,
+        "the reserved operations must install the checkpoint"
+    );
+    assert!(r.checkpoint_ops > 0 && r.checkpoint_ops <= 512);
+    assert!(r.ops <= 1_200);
+    GC_CLOCK.with(|clock| clock.set((16_000_000, 0)));
+    let r = collection_gc::fixture_timed_reclaim(
+        &f.context,
+        clock(),
+        GcBudget::default(),
+        &SCHEMA,
+        gc_tick,
+    )
+    .unwrap();
+    assert_eq!((r.stop, r.ops), (GcStop::YieldTime, 0));
+    let before = fs::read(f.base.join(".collections.catalog")).unwrap();
+    GC_CLOCK.with(|clock| clock.set((20_000_000, 0)));
+    let r = collection_gc::fixture_timed_reclaim(
+        &f.context,
+        clock(),
+        GcBudget::default(),
+        &SCHEMA,
+        gc_tick,
+    )
+    .unwrap();
+    assert_eq!((r.stop, r.ops, r.checkpoint_ops), (GcStop::YieldTime, 0, 0));
+    assert_eq!(
+        fs::read(f.base.join(".collections.catalog")).unwrap(),
+        before
+    );
+    let cold = std::time::Instant::now();
+    collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
+    let cold_ns = cold.elapsed().as_nanos();
+    let mut samples = Vec::new();
+    let mut max_checkpoint = 0;
+    for _ in 0..200 {
+        let start = std::time::Instant::now();
+        let r = collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
+        samples.push(start.elapsed().as_nanos());
+        assert!(r.ops <= 4_096 && r.checkpoint_ops <= 512);
+        max_checkpoint = max_checkpoint.max(r.checkpoint_ops);
+    }
+    samples.sort_unstable();
+    let mean = samples.iter().sum::<u128>() / samples.len() as u128;
+    let variance = samples
+        .iter()
+        .map(|n| n.abs_diff(mean).pow(2))
+        .sum::<u128>()
+        / samples.len() as u128;
+    eprintln!(
+        "GC cold_ns={cold_ns} warm: samples=200 p50_ns={} p95_ns={} max_ns={} variance_ns2={variance} max_checkpoint_ops={max_checkpoint}",
+        samples[100], samples[190], samples[199]
+    );
+}
+
+// 이것을 실패시키는 것: directory 정체 변경 때 전체 catalog를 초기화하거나 같은 subtree를 중복 계수하는 것.
+#[test]
+fn gc_changed_directory_restarts_only_its_cursor() {
+    let f = Fixture::new("changed-cursor");
+    seed_inventory(&f, 12);
+    let mut selected = None;
+    for _ in 0..64 {
+        let _ = CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget {
+                max_ops: 1_200,
+                max_ns: 20_000_000,
+            },
+            None,
+        )
+        .unwrap();
+        let cursor = collection_gc::fixture_cursor(&f.context);
+        if cursor.len() == 9 && cursor.last().unwrap().2 > 0 {
+            selected = Some(cursor);
+            break;
+        }
+    }
+    let cursor = selected.expect("stop after an earlier sibling was inventoried");
+    let path = cursor
+        .iter()
+        .skip(1)
+        .fold(f.base.clone(), |p, c| p.join(&c.0));
+    let displaced = f.base.join("displaced-cursor");
+    let parent = File::open(path.parent().unwrap()).unwrap();
+    let modified = parent.metadata().unwrap().modified().unwrap();
+    fs::rename(&path, &displaced).unwrap();
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    // Keep the same contents under a different directory inode.
+    fs::rename(displaced.join("store"), path.join("store")).unwrap();
+    // Isolate replacement of this inode from a separate parent-list change.
+    parent.set_modified(modified).unwrap();
+    let prior = cursor.last().unwrap().2;
+    let r = collection_gc::fixture_reclaim(&f.context, clock(), 1_200, &SCHEMA).unwrap();
+    assert!(r.incomplete);
+    assert_eq!(r.restarted_depths, vec![8]);
+    assert!(
+        catalog_counts(&f).0 >= prior,
+        "unrelated completed stores were discarded"
+    );
+    let resumed = collection_gc::fixture_cursor(&f.context);
+    assert_eq!(
+        resumed[1].1, cursor[1].1,
+        "unrelated ancestor listing restarted"
+    );
+    for _ in 0..64 {
+        if !f.gc(clock()).incomplete {
+            break;
+        }
+    }
+    assert_eq!(catalog_counts(&f).0, 12);
+    assert_eq!(catalog_counts(&f).1, 25);
+}
+
+// 이것을 실패시키는 것: helper가 admission 결과를 .ok()로 버리거나 collection 실패를 refresh 실패로 바꾸는 것.
+#[test]
+fn admission_errors_are_not_erased() {
+    use collection_gc::GcStop;
+    use commands::{collection_store::Admission, helper::collection_result};
+    let f = Fixture::new("admission-errors");
+    f.publish(b"retained");
+    let live = f.acquire().unwrap();
+    assert!(matches!(
+        CollectionStore::admit(&f.context, &f.binding, clock()).unwrap(),
+        Admission::Deferred(GcStop::Busy)
+    ));
+    drop(live);
+    let mut wrong = f.binding.clone();
+    wrong.config = b"/other".to_vec();
+    assert!(matches!(
+        CollectionStore::admit(&f.context, &wrong, clock()),
+        Err(StoreError::Unsafe)
+    ));
+    for (result, expected) in [
+        (
+            Ok(Err(GcStop::YieldTime)),
+            "collection deferred: time budget",
+        ),
+        (
+            Ok(Err(GcStop::YieldOps)),
+            "collection deferred: operation budget",
+        ),
+        (Ok(Err(GcStop::Busy)), "collection busy"),
+        (Err(StoreError::Busy), "collection busy"),
+        (Err(StoreError::Unsafe), "collection unsafe"),
+        (
+            Err(StoreError::Io(std::io::Error::from_raw_os_error(libc::EIO))),
+            "collection I/O failure",
+        ),
+    ] {
+        let (store, report) = collection_result::<()>(result);
+        assert!(store.is_none());
+        assert_eq!(report.unwrap().1, expected);
+    }
+    assert_eq!(collection_result(Ok(Ok(7))).0, Some(7));
+    assert_eq!(f.read("response"), completed(&f.binding, b"retained"));
+
+    // 이것을 실패시키는 것: 잘못된 이름을 검증하기 전에 목록 위치를 진행시켜 다음 admission에서 오류를 건너뛰는 것.
+    collection_gc::fixture_invalid_listing(&f.context);
+    fs::remove_file(f.base.join(".collections.catalog")).unwrap();
+
+    // 이것을 실패시키는 것: 작업 예산 소진 원인이 뒤따른 checkpoint의 실제 Unsafe 오류를 덮는 것.
+    for i in 0..512 {
+        fs::write(f.base.join(format!("ignored-{i}")), []).unwrap();
+    }
+    let stage = f.base.join(".collections.catalog.stage");
+    collection_gc::fixture_checkpoint_hook(Box::new(move || {
+        if stage.exists() {
+            fs::remove_file(&stage).unwrap();
+        }
+        fs::create_dir(&stage).unwrap();
+    }));
+    assert!(matches!(
+        CollectionStore::fixture_admit(
+            &f.context,
+            &f.binding,
+            clock(),
+            &SCHEMA,
+            GcBudget {
+                max_ops: 1_200,
+                max_ns: 20_000_000
+            },
+            None
+        ),
+        Err(StoreError::Unsafe)
+    ));
+}
+
+// 이것을 실패시키는 것: 1MiB 근처 catalog checkpoint가 512 ops 예약을 넘거나 실제 staging을 생략하는 것.
+#[test]
+fn gc_large_catalog_checkpoint_cost() {
+    let f = Fixture::new("large-checkpoint");
+    f.publish(b"seed");
+    let (bytes, ops) = collection_gc::fixture_large_checkpoint(&f.context);
+    assert!((980_000..=1_048_576).contains(&bytes));
+    assert!(ops > 0 && ops <= 512);
+    assert_eq!(
+        fs::metadata(f.base.join(".collections.catalog"))
+            .unwrap()
+            .len(),
+        bytes as u64
+    );
+    eprintln!("GC_CHECKPOINT bytes={bytes} ops={ops}");
 }
