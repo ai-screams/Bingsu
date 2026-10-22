@@ -2,7 +2,7 @@
 use super::{
     clock::SystemClock,
     collection_gc,
-    collection_store::CollectionStore,
+    collection_store::{Admission, CollectionStore},
     collector,
     group_policy::SystemGroups,
     helper_filter, helper_limits, log,
@@ -19,6 +19,8 @@ use std::{
 };
 
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
+    #[cfg(test)]
+    let fixture = FIXTURE_RUN.with(|slot| slot.borrow_mut().take());
     let started = Instant::now();
     std::panic::set_hook(Box::new(|_| {}));
     if detach().is_err() {
@@ -32,7 +34,10 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         return ExitCode::from(1);
     };
     // Capture clock identity before the first trust observation (including NSS).
+    #[cfg(not(test))]
     let mut clock = SystemClock;
+    #[cfg(test)]
+    let mut clock = FixtureClock(fixture.as_ref().map(|f| f.now));
     let process_started = clock.observe();
     let Some(user) = sys::passwd_entry(sys::current_uid()) else {
         return ExitCode::from(1);
@@ -42,7 +47,12 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         .log_root
         .as_deref()
         .map(|b| Path::new(OsStr::from_bytes(b)));
-    let report = |groups: &mut SystemGroups, severity, text| {
+    let report = |groups: &mut SystemGroups, severity, text: &'static str| {
+        #[cfg(test)]
+        if let Some(fixture) = &fixture {
+            fixture.events.borrow_mut().push((severity, text));
+            return;
+        }
         log::event(
             e.log_level,
             log_root,
@@ -77,15 +87,34 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut filter_failed = false;
     let mut supervisor = None;
     let mut collection_runtime = None;
+    let mut collection_outcome = None;
     let mut verification = Verification::start();
-    let result = refresh::refresh_broker(request, &mut clock, &mut |context, display, now| {
+    let mut broker = |context: &super::snapshot_store::CheckedContextFd,
+                      display: Option<(
+        &bingsu_core::config::compile::CompiledConfig,
+        bingsu_core::snapshot::Identity,
+    )>,
+                      now| {
         verification.verified();
         let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
-        if let Some(request) = request {
-            collection_runtime = context.runtime.try_clone().ok();
+        let selected = request.is_some();
+        #[cfg(test)]
+        let selected = selected || fixture.is_some();
+        if selected {
             // Collection admission failure does not invalidate independent
             // snapshot publication. No product catalog grants a worker yet.
-            supervisor = (|| {
+            let admission = (|| {
+                #[cfg(test)]
+                if let Some(fixture) = &fixture {
+                    return fixture
+                        .admission
+                        .borrow_mut()
+                        .take()
+                        .unwrap()
+                        .map(|result| result.map(|()| unreachable!("fixture has no worker")));
+                }
+                let request = request.unwrap();
+                collection_runtime = Some(context.runtime.try_clone()?);
                 let path = e
                     .collector_exe
                     .as_deref()
@@ -95,15 +124,22 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     sys::current_uid(),
                     &mut groups,
                 )?;
-                let mut store = CollectionStore::acquire(context, &request.binding, now)?;
+                let mut store = match CollectionStore::admit(context, &request.binding, now)? {
+                    Admission::Admitted(store) => store,
+                    Admission::Deferred(stop) => return Ok(Err(stop)),
+                };
                 let lock = store.worker_lock()?;
                 let job =
                     verification.attach(collector::spawn(&pin, request, lock, &_watchdog)?, &store);
-                Ok::<_, super::snapshot_store::StoreError>(
-                    job.start(Box::new(move |result| store.publish(&result)))?,
-                )
-            })()
-            .ok();
+                Ok::<_, super::snapshot_store::StoreError>(Ok(
+                    job.start(Box::new(move |result| store.publish(&result)))?
+                ))
+            })();
+            (supervisor, collection_outcome) = collection_result(admission);
+        }
+        #[cfg(test)]
+        if fixture.is_some() {
+            return Ok(());
         }
         let child_pidfd = supervisor.as_ref().and_then(|handle| handle.child_pidfd());
         let confinement =
@@ -117,7 +153,29 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             handle.confirm_confinement()?;
         }
         Ok(())
-    });
+    };
+    #[cfg(not(test))]
+    let result = refresh::refresh_broker(request, &mut clock, &mut broker);
+    #[cfg(test)]
+    let result = if let Some(fixture) = &fixture {
+        // Only the external refresh/admission inputs are injected. The run
+        // path above and reporting/exit below are shared with production.
+        let published = broker(&fixture.context, None, fixture.now).and_then(|()| {
+            let lock = fixture.context.try_lock()?;
+            lock.stage(super::snapshot_store::Slot::Snapshot, &fixture.snapshot)?;
+            lock.install(super::snapshot_store::Slot::Snapshot)
+        });
+        if published.is_ok() {
+            RefreshResult::Published {
+                generation: 1,
+                left_out: vec![],
+            }
+        } else {
+            RefreshResult::Incomplete
+        }
+    } else {
+        refresh::refresh_broker(request, &mut clock, &mut broker)
+    };
     // refresh_broker has released the snapshot lock and source descriptors.
     if let Some(handle) = supervisor {
         let _ = handle.finish();
@@ -125,7 +183,18 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let Some(runtime) = collection_runtime
         && let Ok(now) = clock.observe()
     {
-        let _ = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default());
+        let outcome = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default())
+            .map(|gc| match gc.stop {
+                collection_gc::GcStop::Complete => Ok(()),
+                stop => Err(stop),
+            });
+        let (_, message) = collection_result(outcome);
+        if let Some((severity, text)) = message {
+            report(&mut groups, severity, text);
+        }
+    }
+    if let Some((severity, text)) = collection_outcome {
+        report(&mut groups, severity, text);
     }
     if filter_failed {
         report(
@@ -148,6 +217,58 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+#[cfg(test)]
+pub(crate) struct FixtureRun {
+    pub context: super::snapshot_store::CheckedContextFd,
+    pub now: bingsu_core::snapshot::Clock,
+    pub admission: std::cell::RefCell<
+        Option<Result<Result<(), collection_gc::GcStop>, super::snapshot_store::StoreError>>,
+    >,
+    pub snapshot: Vec<u8>,
+    pub events: std::rc::Rc<std::cell::RefCell<Vec<(LogLevel, &'static str)>>>,
+}
+#[cfg(test)]
+thread_local! {
+    static FIXTURE_RUN: std::cell::RefCell<Option<FixtureRun>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "native helper run integration test")]
+pub(crate) fn fixture_run(fixture: FixtureRun) {
+    FIXTURE_RUN.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(fixture);
+    });
+}
+#[cfg(test)]
+struct FixtureClock(Option<bingsu_core::snapshot::Clock>);
+#[cfg(test)]
+impl ClockSource for FixtureClock {
+    fn observe(
+        &mut self,
+    ) -> Result<bingsu_core::snapshot::Clock, bingsu_core::snapshot::ClockError> {
+        self.0.map_or_else(|| SystemClock.observe(), Ok)
+    }
+}
+
+// Collection observations never become refresh trust/publication results.
+pub(crate) fn collection_result<T>(
+    result: Result<Result<T, collection_gc::GcStop>, super::snapshot_store::StoreError>,
+) -> (Option<T>, Option<(LogLevel, &'static str)>) {
+    use super::snapshot_store::StoreError;
+    use collection_gc::GcStop;
+    let (level, text) = match result {
+        Ok(Ok(value)) => return (Some(value), None),
+        Ok(Err(GcStop::YieldTime)) => (LogLevel::DebugLog, "collection deferred: time budget"),
+        Ok(Err(GcStop::YieldOps)) => (LogLevel::DebugLog, "collection deferred: operation budget"),
+        Ok(Err(GcStop::Busy)) | Err(StoreError::Busy) => (LogLevel::DebugLog, "collection busy"),
+        Ok(Err(GcStop::Complete)) => (LogLevel::Error, "collection invalid deferred state"),
+        Err(StoreError::Unsafe | StoreError::Root(_)) => (LogLevel::Error, "collection unsafe"),
+        Err(StoreError::Io(_)) => (LogLevel::Error, "collection I/O failure"),
+        Err(_) => (LogLevel::Error, "collection invalid data"),
+    };
+    (None, Some((level, text)))
 }
 
 /// Observation-only seam shared with the test catalog. Neither a missing

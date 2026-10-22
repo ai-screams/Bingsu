@@ -27,6 +27,24 @@ pub(crate) const LOCK: &str = "collection.lock";
 pub(crate) const LEGACY_REQUEST: &str = ".stage-request";
 pub(crate) const FILES: [&str; 5] = [RESPONSE, PREVIOUS, STAGE, LEGACY_REQUEST, LOCK];
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "admission transfers the owned store without a second allocation"
+)]
+pub(crate) enum Admission {
+    Admitted(CollectionStore),
+    Deferred(collection_gc::GcStop),
+}
+#[cfg(test)]
+impl Admission {
+    fn into_store(self) -> Result<CollectionStore, StoreError> {
+        match self {
+            Self::Admitted(store) => Ok(store),
+            Self::Deferred(_) => Err(StoreError::Busy),
+        }
+    }
+}
+
 pub(crate) struct CollectionStore {
     chain: Vec<File>,
     names: [String; 3],
@@ -38,12 +56,12 @@ pub(crate) struct CollectionStore {
     pub(crate) response_renamed: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 impl CollectionStore {
-    pub(crate) fn acquire(
+    pub(crate) fn admit(
         context: &CheckedContextFd,
         binding: &Binding,
         now: Clock,
-    ) -> Result<Self, StoreError> {
-        Self::acquire_inner(
+    ) -> Result<Admission, StoreError> {
+        Self::admit_inner(
             context,
             binding,
             now,
@@ -62,7 +80,7 @@ impl CollectionStore {
         catalog: &'static [SegmentDecl],
         address: Option<String>,
     ) -> Result<Self, StoreError> {
-        Self::acquire_inner(
+        Self::admit_inner(
             context,
             binding,
             now,
@@ -70,7 +88,8 @@ impl CollectionStore {
             address,
             Self::fixture_inventory_meter,
             &mut |_| {},
-        )
+        )?
+        .into_store()
     }
     #[cfg(test)]
     #[allow(dead_code, reason = "native admission race fixture")]
@@ -81,7 +100,7 @@ impl CollectionStore {
         catalog: &'static [SegmentDecl],
         hook: &mut dyn FnMut(&str),
     ) -> Result<Self, StoreError> {
-        Self::acquire_inner(
+        Self::admit_inner(
             context,
             binding,
             now,
@@ -89,7 +108,8 @@ impl CollectionStore {
             None,
             Self::fixture_inventory_meter,
             hook,
-        )
+        )?
+        .into_store()
     }
     #[cfg(test)]
     fn fixture_inventory_meter() -> sys::CollectionMeter {
@@ -97,15 +117,63 @@ impl CollectionStore {
         // without depending on how long the test thread is descheduled.
         sys::CollectionMeter::fixture_operations(collection_gc::GcBudget::default().max_ops)
     }
-    fn acquire_inner(
+    #[cfg(test)]
+    #[allow(dead_code, reason = "native collection_store integration target")]
+    pub(crate) fn fixture_admit(
+        context: &CheckedContextFd,
+        binding: &Binding,
+        now: Clock,
+        catalog: &'static [SegmentDecl],
+        budget: collection_gc::GcBudget,
+        clock: Option<fn() -> u64>,
+    ) -> Result<Admission, StoreError> {
+        Self::admit_inner(
+            context,
+            binding,
+            now,
+            catalog,
+            None,
+            || match clock {
+                Some(clock) => {
+                    sys::CollectionMeter::fixture_clock(budget.max_ops, budget.max_ns, clock)
+                }
+                None => sys::CollectionMeter::fixture_operations(budget.max_ops),
+            },
+            &mut |_| {},
+        )
+    }
+    fn admit_inner(
         context: &CheckedContextFd,
         binding: &Binding,
         now: Clock,
         catalog: &'static [SegmentDecl],
         address: Option<String>,
-        start_inventory_meter: fn() -> sys::CollectionMeter,
+        start_inventory_meter: impl FnOnce() -> sys::CollectionMeter,
         hook: &mut dyn FnMut(&str),
-    ) -> Result<Self, StoreError> {
+    ) -> Result<Admission, StoreError> {
+        let result = Self::admit_work(
+            context,
+            binding,
+            now,
+            catalog,
+            address,
+            start_inventory_meter,
+            hook,
+        );
+        match result {
+            Err(StoreError::Busy) => Ok(Admission::Deferred(collection_gc::GcStop::Busy)),
+            other => other,
+        }
+    }
+    fn admit_work(
+        context: &CheckedContextFd,
+        binding: &Binding,
+        now: Clock,
+        catalog: &'static [SegmentDecl],
+        address: Option<String>,
+        start_inventory_meter: impl FnOnce() -> sys::CollectionMeter,
+        hook: &mut dyn FnMut(&str),
+    ) -> Result<Admission, StoreError> {
         // Encoding validates all raw paths and the context CRC before any mkdir.
         let probe = Completed {
             progress: Default::default(),
@@ -133,13 +201,16 @@ impl CollectionStore {
             names[1] = address;
         }
         // This lock order also covers the gap before the collection flock.
-        let mut registration = collection_gc::Registration::open(
+        let mut registration = match collection_gc::Registration::open(
             &context.runtime,
             me,
             now,
             catalog,
             start_inventory_meter,
-        )?;
+        )? {
+            Ok(registration) => registration,
+            Err(stop) => return Ok(Admission::Deferred(stop)),
+        };
         registration.reserve(context, binding, &names[1], now)?;
         hook("reserved_before_mkdir");
         let mut chain = vec![context.dir.try_clone()?];
@@ -172,7 +243,7 @@ impl CollectionStore {
             store.read_response(name)?;
         }
         store.recover_stage()?;
-        Ok(store)
+        Ok(Admission::Admitted(store))
     }
     pub(crate) fn worker_lock(&self) -> io::Result<File> {
         self.lock.try_clone()

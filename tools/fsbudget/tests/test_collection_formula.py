@@ -56,3 +56,69 @@ def test_front_axes_fail_closed():
             front(directories, sizes, bodies)
     with pytest.raises(ValueError):
         front(1, (), (), absent=True)
+
+
+@pytest.fixture(scope="module")
+def gc_test_binary():
+    import json
+    import pathlib
+    import subprocess
+    root = pathlib.Path(__file__).resolve().parents[3]
+    build = subprocess.run(
+        ["cargo", "test", "-j", "2", "-p", "bingsu", "--test", "collection_store",
+         "--no-run", "--message-format=json"], cwd=root, text=True, capture_output=True, check=True)
+    binaries = [row["executable"] for line in build.stdout.splitlines()
+                if (row := json.loads(line)).get("reason") == "compiler-artifact"
+                and row["target"]["name"] == "collection_store" and row.get("executable")]
+    assert len(binaries) == 1
+    return binaries[0]
+
+
+# 이것을 실패시키는 것: 실제 catalog checkpoint 비용이 512 ops를 넘거나 큰 catalog 시험이 실행되지 않는 것.
+def test_gc_checkpoint_measures_real_phase(gc_test_binary):
+    import re
+    import subprocess
+    run = subprocess.run([gc_test_binary, "--exact", "gc_large_catalog_checkpoint_cost",
+                          "--test-threads=1", "--nocapture"], text=True, capture_output=True, check=True)
+    assert "1 passed; 0 failed" in run.stdout
+    sample = re.search(r"GC_CHECKPOINT bytes=(\d+) ops=(\d+)", run.stderr)
+    assert sample, run.stderr
+    size, ops = map(int, sample.groups())
+    assert 980_000 <= size <= 1_048_576 and 0 < ops <= 512
+
+
+# 이것을 실패시키는 것: checkpoint에서 목록을 다시 읽거나 checkpoint 예약보다 많은 syscall을 실행하는 것.
+def test_gc_checkpoint_linux_syscalls(gc_test_binary, tmp_path):
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from fsbudget.strace_parse import STRACE_FLAGS, parse
+    if sys.platform != "linux" or not shutil.which("strace"):
+        if os.environ.get("FSB_REQUIRE_STRACE") == "1":
+            pytest.fail("GC checkpoint trace requires a Linux host with strace")
+        pytest.skip("BLOCKED: Linux strace host required for actual checkpoint syscalls")
+    trace_path = tmp_path / "gc-checkpoint.strace"
+    run = subprocess.run(["strace", *STRACE_FLAGS, "-o", str(trace_path),
+                          gc_test_binary, "--exact", "gc_large_catalog_checkpoint_cost",
+                          "--test-threads=1", "--nocapture"], text=True, capture_output=True, check=True)
+    assert "1 passed; 0 failed" in run.stdout
+    trace = parse(trace_path.read_text())
+    assert not trace.errors
+    active_pid = None
+    phase = []
+    ended = False
+    for call in trace:
+        if call.name == "write" and 'GC_CHECKPOINT_BEGIN' in call.args:
+            assert active_pid is None
+            active_pid = call.pid
+        elif call.name == "write" and 'GC_CHECKPOINT_END' in call.args:
+            assert call.pid == active_pid
+            ended = True
+            break
+        elif active_pid == call.pid:
+            phase.append(call)
+    names = [call.name for call in phase]
+    assert ended and 0 < len(phase) <= 512
+    assert "renameat" in names and "read" in names and "write" in names
+    assert not ({"getdents", "getdents64", "fsync", "execve", "clone"} & set(names))
