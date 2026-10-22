@@ -943,7 +943,7 @@ def collection_trace(*, absent=False, previous=False):
     if not absent:
         for i in ([3, 4] if previous else [3]):
             path = paths[i]; fd = i + 20
-            header = b"BNGRES02" + struct.pack("<HHII", 2, 64, 36, 0) + bytes(44)
+            header = b"BNGRES03" + struct.pack("<HHII", 3, 64, 36, 0) + bytes(44)
             encoded = ''.join(chr(b) if 32 <= b < 127 and b not in (34,92) else f'\\{b:03o}' for b in header)
             lines.append(f'77 read({fd}<{path}>, "{encoded}", 64) = 64')
             lines.append(f'77 read({fd}<{path}>, "' + 'a'*36 + '", 36) = 36')

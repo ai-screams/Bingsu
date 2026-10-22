@@ -984,7 +984,7 @@ def test_shipped_collector_ready_has_installed_limits(preparation, tmp_path):
                     chunk = os.read(child.stdout.fileno(), 104 - len(ready))
                     assert chunk, "shipped collector exited before Ready"
                     ready.extend(chunk)
-                assert ready[:8] == b"BNGIPC02" and ready[10] == 1, ready
+                assert ready[:8] == b"BNGIPC03" and ready[10] == 1, ready
                 baseline, = struct.unpack_from("<Q", ready, 96)
                 assert baseline > 0
                 if sys.platform == "linux":

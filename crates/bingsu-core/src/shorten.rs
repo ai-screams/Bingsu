@@ -45,6 +45,7 @@ pub struct PathFacts {
     /// collected or a cap was hit (`abbrev 1`); the whole name when a
     /// sibling sanitizes to the same text.
     unique: Vec<usize>,
+    readonly: Option<bool>,
 }
 
 impl PathFacts {
@@ -94,7 +95,17 @@ impl PathFacts {
             steps: kept,
             repo_root,
             unique,
+            readonly: None,
         }
+    }
+
+    pub fn with_readonly(mut self, readonly: Option<bool>) -> Self {
+        self.readonly = readonly;
+        self
+    }
+
+    pub fn readonly(&self) -> Option<bool> {
+        self.readonly
     }
 
     pub fn display(&self) -> String {
@@ -411,10 +422,11 @@ mod tests {
             steps: _,
             repo_root: _,
             unique: _,
+            readonly: _,
         } = p;
         assert!(
             crate::config::schema::FACT_SCHEMA
-                .ends_with("PathFacts: anchor steps repo_root unique")
+                .ends_with("PathFacts: anchor steps repo_root unique readonly")
         );
     }
     use alloc::vec;

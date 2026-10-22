@@ -34,6 +34,7 @@ fn request(max: bool) -> Request {
     Request {
         request_id: M3B_REQUEST_ID,
         binding: Binding {
+            path_query: Default::default(),
             build_id: BuildId([7; 32]),
             snapshot: Identity {
                 boot: [1; 16],
@@ -116,6 +117,7 @@ fn update(segment: u16, text: &[u8], fields: &[(u16, u8, u8, Vec<u8>)]) -> Vec<u
         p.push(*tag);
         p.extend(value);
     }
+    p.push(0);
     p
 }
 fn text_field(i: u16, b: &[u8]) -> (u16, u8, u8, Vec<u8>) {
@@ -124,8 +126,8 @@ fn text_field(i: u16, b: &[u8]) -> (u16, u8, u8, Vec<u8>) {
     (i, 0, 0, p)
 }
 fn sized_update(n: usize) -> Vec<u8> {
-    assert!((265..=265 + 32 * 4096).contains(&n));
-    let mut rest = n - 265;
+    assert!((266..=266 + 32 * 4096).contains(&n));
+    let mut rest = n - 266;
     let mut fields = vec![];
     for i in 0..32 {
         let len = rest.min(4096);
@@ -171,15 +173,15 @@ fn frame_length_is_checked_before_allocation() {
     // 이것을 실패시키는 것: 동시 위반에서 length/magic/version/kind/flags 우선순위를 바꾸는 것.
     let mut bad = out[..80].to_vec();
     bad[..8].fill(0);
-    bad[8] = 3;
-    bad[10] = 7;
+    bad[8] = 2;
+    bad[10] = 8;
     bad[11] = 1;
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].fill(0);
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC02");
+    bad[..8].copy_from_slice(b"BNGIPC03");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 2;
+    bad[8] = 3;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -210,16 +212,16 @@ fn stream_and_update_limits_include_framing() {
     }
     let mut t = transcript(&r);
     for n in 0..63 {
-        let p = [(n / 16) as u8, 0, 0];
+        let p = [(n / 16) as u8, 0, 0, 0];
         t.accept(frame(&r, Kind::Update, &p)).unwrap();
     }
     assert_eq!(t.accept(frame(&r, Kind::Complete, &[])), Err(E::Budget)); // frame 65
     let mut t = transcript(&r);
     for _ in 0..16 {
-        t.accept(frame(&r, Kind::Update, &[31, 0, 0])).unwrap();
+        t.accept(frame(&r, Kind::Update, &[31, 0, 0, 0])).unwrap();
     }
     assert_eq!(
-        t.accept(frame(&r, Kind::Update, &[31, 0, 0])),
+        t.accept(frame(&r, Kind::Update, &[31, 0, 0, 0])),
         Err(E::Budget)
     );
     for n in [4096, 4097] {
@@ -249,7 +251,8 @@ fn stream_and_update_limits_include_framing() {
     // 이것을 실패시키는 것: 활성 catalog 밖 segment 또는 33개 segment를 허용하는 것.
     let mut t = transcript(&r);
     for segment in 0..32 {
-        t.accept(frame(&r, Kind::Update, &[segment, 0, 0])).unwrap();
+        t.accept(frame(&r, Kind::Update, &[segment, 0, 0, 0]))
+            .unwrap();
     }
     let c = t
         .finish(EndReason::Deadline, clock(&r, 99))
@@ -273,7 +276,7 @@ fn stream_and_update_limits_include_framing() {
         .unwrap();
     short.request_sent().unwrap();
     assert_eq!(
-        short.accept(frame(&local, Kind::Update, &[31, 0, 0])),
+        short.accept(frame(&local, Kind::Update, &[31, 0, 0, 0])),
         Err(E::Schema)
     );
     const BIG: [SegmentDecl; 33] = [const {
@@ -327,13 +330,13 @@ fn stream_and_update_limits_include_framing() {
 fn response_budget_includes_max_binding_and_last_values() {
     let r = request(true);
     let mut t = transcript(&r);
-    t.accept(frame(&r, Kind::Update, &sized_update(265)))
+    t.accept(frame(&r, Kind::Update, &sized_update(266)))
         .unwrap();
-    t.accept(frame(&r, Kind::Update, &sized_update(65_308)))
+    t.accept(frame(&r, Kind::Update, &sized_update(65_294)))
         .unwrap();
     let previous = t.clone();
     assert_eq!(
-        t.accept(frame(&r, Kind::Update, &sized_update(65_309))),
+        t.accept(frame(&r, Kind::Update, &sized_update(65_295))),
         Err(E::Budget)
     );
     assert_eq!(t, previous);
@@ -346,7 +349,7 @@ fn response_budget_includes_max_binding_and_last_values() {
     assert_eq!(encoded.len(), 262_144);
     // 이것을 실패시키는 것: 저장 파일 decode 뒤 재정제로 늘어난 길이를 예산에서 제외하는 것.
     let mut expanded = encoded.clone();
-    expanded[64 + 32 + 196_729 + 8 + 1 + 2 + 17] = 0xff;
+    expanded[64 + 32 + 196_733 + 8 + 1 + 2 + 10 + 17] = 0xff;
     fix_crc(&mut expanded);
     assert_eq!(
         Completed::decode_with_catalog(&expanded, &CATALOG),
@@ -359,7 +362,7 @@ fn response_budget_includes_max_binding_and_last_values() {
     assert_eq!(too_large.encode_with_catalog(&CATALOG), Err(E::Budget));
 
     assert_eq!(Completed::decode_with_catalog(&encoded, &CATALOG), Ok(c));
-    t.accept(frame(&r, Kind::Update, &sized_update(265)))
+    t.accept(frame(&r, Kind::Update, &sized_update(266)))
         .unwrap();
     assert!(
         t.finish(EndReason::Deadline, clock(&r, 99))
@@ -375,9 +378,9 @@ fn response_budget_includes_max_binding_and_last_values() {
         .collect::<Vec<_>>();
     fields[15] = text_field(15, &vec![0xff; 1202]); // 3606 bytes after replacement, 65311 total.
     let p = update(31, b"", &fields);
-    assert!(p.len() < 65_308);
+    assert!(p.len() < 65_294);
     let mut t = transcript(&r);
-    t.accept(frame(&r, Kind::Update, &[31, 0, 0])).unwrap();
+    t.accept(frame(&r, Kind::Update, &[31, 0, 0, 0])).unwrap();
     let old = t.clone();
     assert_eq!(t.accept(frame(&r, Kind::Update, &p)), Err(E::Budget));
     assert_eq!(t, old);
@@ -397,7 +400,7 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     let r = request(false);
     let mut t = Transcript::with_catalog(&r, &CATALOG).unwrap();
     assert_eq!(
-        t.accept(frame(&r, Kind::Update, &[31, 0, 0])),
+        t.accept(frame(&r, Kind::Update, &[31, 0, 0, 0])),
         Err(E::Order)
     );
     assert_eq!(t.request_sent(), Err(E::Order));
@@ -407,7 +410,7 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     duplicate.build_id = BuildId([0; 32]);
     assert_eq!(t.accept(duplicate), Err(E::Duplicate));
     assert_eq!(
-        t.accept(frame(&r, Kind::Update, &[31, 0, 0])),
+        t.accept(frame(&r, Kind::Update, &[31, 0, 0, 0])),
         Err(E::Order)
     );
     t.request_sent().unwrap();
@@ -420,7 +423,7 @@ fn protocol_rejects_duplicate_id_field_and_order() {
         t.accept(frame(&r, Kind::Update, &[0, 0, 0])),
         Err(E::Schema)
     );
-    let mut wrong = frame(&r, Kind::Update, &[31, 0, 0]);
+    let mut wrong = frame(&r, Kind::Update, &[31, 0, 0, 0]);
     wrong.request_id = RequestId([3; 32]);
     assert_eq!(t.accept(wrong), Err(E::Id));
     let p = update(31, b"", &[(0, 0, 4, vec![1])]);
@@ -445,7 +448,7 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     assert_eq!(d.accept(frame(&r, Kind::RequestBegin, &p)), Err(E::Feature));
     let mut bytes = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::Complete, &[]), &mut bytes).unwrap();
-    for (at, value, error) in [(10, 0, E::Kind), (10, 7, E::Kind), (11, 1, E::Flags)] {
+    for (at, value, error) in [(10, 0, E::Kind), (10, 8, E::Kind), (11, 1, E::Flags)] {
         let mut b = bytes[..n].to_vec();
         b[at] = value;
         assert_eq!(wire::decode_frame(&b), Err(error));
@@ -477,9 +480,9 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC02");
+    bad[..8].copy_from_slice(b"BNGIPC03");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 2;
+    bad[8] = 3;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -501,7 +504,7 @@ fn protocol_rejects_duplicate_id_field_and_order() {
 fn empty_eof_after_complete_is_ok() {
     let r = request(false);
     let mut t = transcript(&r);
-    t.accept(frame(&r, Kind::Update, &[31, 0, 0])).unwrap();
+    t.accept(frame(&r, Kind::Update, &[31, 0, 0, 0])).unwrap();
     t.accept(frame(&r, Kind::Complete, &[])).unwrap();
     let before = t.clone();
     assert_eq!(t.accept_bytes(&[]), Ok(()));
@@ -520,7 +523,7 @@ fn empty_eof_before_complete_is_truncated() {
     let sent = transcript(&r);
     let mut updated = sent.clone();
     updated
-        .accept(frame(&r, Kind::Update, &[31, 0, 0]))
+        .accept(frame(&r, Kind::Update, &[31, 0, 0, 0]))
         .unwrap();
 
     assert_eq!(wire::decode_eof(&[]), Err(E::Truncated));
@@ -542,7 +545,7 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(t.accept(f), Err(E::Build));
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut t = transcript(&r);
-    let mut f = frame(&r, Kind::Update, &[31, 0, 0]);
+    let mut f = frame(&r, Kind::Update, &[31, 0, 0, 0]);
     f.build_id = BuildId([8; 32]);
     assert_eq!(t.accept(f), Err(E::Build));
     let mut d = decoder(&r);
@@ -557,7 +560,7 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut bytes = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::Ready, &ready(r.binding.mask)), &mut bytes).unwrap();
-    for v in [1u16, 3] {
+    for v in [1u16, 2, 4] {
         let mut b = bytes[..n].to_vec();
         b[8..10].copy_from_slice(&v.to_le_bytes());
         assert_eq!(wire::decode_frame(&b), Err(E::Version));
@@ -571,7 +574,7 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(wire::decode_eof(&bytes[..n - 1]), Err(E::Truncated));
     // The pure acceptance API returns no outbound frame; failed Ready cannot
     // enable request_sent. There is no Reject kind or negotiation state.
-    for tag in [0, 7] {
+    for tag in [0, 8] {
         b = bytes[..n].to_vec();
         b[10] = tag;
         assert_eq!(wire::decode_frame(&b), Err(E::Kind));
@@ -629,7 +632,7 @@ fn large_request_is_chunked_without_reducing_path_limit() {
         q.budget_ms = budget;
         assert_eq!(q.encode_body(), Err(E::Budget));
         let mut b = body.clone();
-        b[77..81].copy_from_slice(&budget.to_le_bytes());
+        b[81..85].copy_from_slice(&budget.to_le_bytes());
         assert_eq!(
             Request::decode_body(r.binding.build_id, r.request_id, &b),
             Err(E::Budget)
@@ -657,7 +660,7 @@ fn large_request_is_chunked_without_reducing_path_limit() {
         Err(E::Checksum)
     );
     // 이것을 실패시키는 것: decode의 경로 길이·절대성·NUL·context·시계 검사를 생략하는 것.
-    for length_at in [81, 81 + 4 + 65536, 81 + 2 * (4 + 65536)] {
+    for length_at in [85, 85 + 4 + 65536, 85 + 2 * (4 + 65536)] {
         for (at, value) in [(length_at + 4, b'x'), (length_at + 5, 0)] {
             let mut b = body.clone();
             b[at] = value;
@@ -702,7 +705,7 @@ fn large_request_is_chunked_without_reducing_path_limit() {
 #[test]
 fn response_binding_and_build_id_are_exact() {
     let r = request(false);
-    let c = completed(&r, &[31, 0, 0]);
+    let c = completed(&r, &[31, 0, 0, 0]);
     assert!(c.eligible(&r.binding, clock(&r, 100)));
     for change in 0..13 {
         let mut b = r.binding.clone();
@@ -761,7 +764,7 @@ fn response_binding_and_build_id_are_exact() {
         snapshot::context_crc(&b.binding.config, &b.binding.state).unwrap();
     assert_eq!(a.binding.snapshot.context, b.binding.snapshot.context);
     assert!(!a.binding.matches(&b.binding));
-    assert!(!completed(&a, &[31, 0, 0]).eligible(&b.binding, clock(&b, 100)));
+    assert!(!completed(&a, &[31, 0, 0, 0]).eligible(&b.binding, clock(&b, 100)));
 }
 // 이것을 실패시키는 것: 잘린 Update의 일부 필드를 축적하거나 Hidden/무결과를 혼동하는 것.
 #[test]
@@ -803,7 +806,7 @@ fn logical_partial_is_not_a_torn_file() {
         transcript(&r).finish(EndReason::WorkerExit, clock(&r, 99)),
         Ok(None)
     );
-    assert!(completed(&r, &[31, 0, 0]).updates[0].value.is_none());
+    assert!(completed(&r, &[31, 0, 0, 0]).updates[0].value.is_none());
     let mut t = transcript(&r);
     t.accept(frame(&r, Kind::Complete, &[])).unwrap();
     assert_eq!(t.finish(EndReason::Complete, clock(&r, 99)), Ok(None));
@@ -899,13 +902,14 @@ fn untrusted_text_is_resanitized() {
     let mut stored = c.encode_with_catalog(&CATALOG).unwrap();
     let first_update = 64
         + 32
-        + 121
+        + 125
         + r.binding.config.len()
         + r.binding.state.len()
         + r.binding.cwd.len()
         + 8
         + 1
-        + 2;
+        + 2
+        + 10;
     stored[first_update + 7] = 27;
     stored[first_update + 8] = 0xff;
     fix_crc(&mut stored);
@@ -922,20 +926,20 @@ fn untrusted_text_is_resanitized() {
         (EndReason::Resource, 3),
         (EndReason::WorkerExit, 4),
     ] {
-        let mut c = completed(&r, &[31, 0, 0]);
+        let mut c = completed(&r, &[31, 0, 0, 0]);
         c.reason = reason;
         let mut b = c.encode_with_catalog(&CATALOG).unwrap();
-        let at = b.len() - 6;
+        let at = b.len() - 17;
         assert_eq!(b[at], tag);
         assert_eq!(Completed::decode_with_catalog(&b, &CATALOG), Ok(c));
         b[at] = 5;
         fix_crc(&mut b);
         assert_eq!(Completed::decode_with_catalog(&b, &CATALOG), Err(E::Schema));
     }
-    let c = completed(&r, &[31, 0, 0]);
+    let c = completed(&r, &[31, 0, 0, 0]);
     let b = c.encode_with_catalog(&CATALOG).unwrap();
     // 이것을 실패시키는 것: 저장 magic/version/header 길이 및 잘린 본문을 허용하는 것.
-    for (at, value, error) in [(0, 0, E::Magic), (8, 3, E::Version), (10, 63, E::Schema)] {
+    for (at, value, error) in [(0, 0, E::Magic), (8, 2, E::Version), (10, 63, E::Schema)] {
         let mut bad = b.clone();
         bad[at] = value;
         assert_eq!(Completed::decode_with_catalog(&bad, &CATALOG), Err(error));
@@ -968,8 +972,8 @@ fn untrusted_text_is_resanitized() {
     );
     let mut bad = b.clone();
     let end = bad.len();
-    bad[end - 5..end - 3].copy_from_slice(&2u16.to_le_bytes());
-    bad.extend([31, 0, 0]);
+    bad[end - 16..end - 14].copy_from_slice(&2u16.to_le_bytes());
+    bad.extend([31, 0, 0, 0]);
     let body_len = (bad.len() - 64) as u32;
     bad[12..16].copy_from_slice(&body_len.to_le_bytes());
     fix_crc(&mut bad);

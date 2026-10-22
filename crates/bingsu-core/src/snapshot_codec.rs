@@ -1,4 +1,4 @@
-//! BNGCFG02: explicit little-endian, bounded, owned CompiledConfig codec.
+//! BNGCFG03: bounded CompiledConfig codec with an explicit fact schema version.
 use crate::{
     bands::Band,
     color::{
@@ -8,6 +8,7 @@ use crate::{
     config::{
         compile::{CompiledConfig, ExecPolicy, ExecUnit, LayoutRef, NotRun, Setup, Side},
         merge::Origin,
+        schema::FACT_SCHEMA_VERSION,
         source::Trust,
     },
     diag::SourceId,
@@ -902,8 +903,9 @@ pub fn encode_compiled(c: &CompiledConfig) -> Result<Vec<u8>, Error> {
         len: 0,
         error: None,
     };
-    size.extend_from_slice(b"BNGCFG02");
-    2u16.put(&mut size);
+    size.extend_from_slice(b"BNGCFG03");
+    3u16.put(&mut size);
+    FACT_SCHEMA_VERSION.put(&mut size);
     c.put(&mut size);
     if let Some(e) = size.error {
         return Err(e);
@@ -918,8 +920,9 @@ pub fn encode_compiled(c: &CompiledConfig) -> Result<Vec<u8>, Error> {
         len: 0,
         error: None,
     };
-    out.extend_from_slice(b"BNGCFG02");
-    2u16.put(&mut out);
+    out.extend_from_slice(b"BNGCFG03");
+    3u16.put(&mut out);
+    FACT_SCHEMA_VERSION.put(&mut out);
     c.put(&mut out);
     if let Some(e) = out.error {
         return Err(e);
@@ -934,7 +937,12 @@ pub fn decode_compiled(bytes: &[u8]) -> Result<CompiledConfig, Error> {
         rest: bytes,
         budget: MAX_ALLOC,
     };
-    if r.take(8)? != b"BNGCFG02" || u16::get(&mut r)? != 2 {
+    if r.take(8)? != b"BNGCFG03" || u16::get(&mut r)? != 3 {
+        return Err(Error::Tag);
+    }
+    // Field nodes store indices. Reject before decoding any nodes so an older
+    // schema takes the caller's existing snapshot miss/recompile path.
+    if u16::get(&mut r)? != FACT_SCHEMA_VERSION {
         return Err(Error::Tag);
     }
     let c = CompiledConfig::get(&mut r)?;

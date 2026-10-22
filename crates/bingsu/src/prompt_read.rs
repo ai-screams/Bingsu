@@ -766,6 +766,7 @@ pub(crate) mod tests {
         f.args.extend([b"--pwd".to_vec(), cwd.to_vec()]);
         let c = fixed_clock(None).observe().unwrap();
         let b = Binding {
+            path_query: Default::default(),
             build_id: bingsu_collect::build_id(),
             snapshot: Marker::decode(&fs::read(f.store.join("marker")).unwrap())
                 .unwrap()
@@ -808,11 +809,13 @@ pub(crate) mod tests {
         let mut store =
             CollectionStore::fixture(&context, b, now, &COLLECTION_CATALOG, None).unwrap();
         let r = Completed {
+            progress: Default::default(),
             request_id: M3B_REQUEST_ID,
             binding: b.clone(),
             completed_at_ns: at,
             reason: EndReason::Deadline,
             updates: vec![Update {
+                facts: None,
                 segment: 31,
                 value: Some(Value::new(
                     text,
@@ -1056,11 +1059,13 @@ pub(crate) mod tests {
             if released.is_ok() {
                 store
                     .publish(&Completed {
+                        progress: Default::default(),
                         request_id: M3B_REQUEST_ID,
                         binding: b,
                         completed_at_ns: 101,
                         reason: EndReason::Complete,
                         updates: vec![Update {
+                            facts: None,
                             segment: 31,
                             value: Some(Value::new(
                                 b"CURRENT",

@@ -31,6 +31,7 @@ fn request() -> Request {
     Request {
         request_id: M3B_REQUEST_ID,
         binding: Binding {
+            path_query: Default::default(),
             build_id: BuildId([7; 32]),
             snapshot: Identity {
                 boot: [1; 16],
@@ -56,7 +57,7 @@ fn request_bytes() -> Vec<u8> {
 }
 fn completed() -> Completed {
     let r = request();
-    let mut rest = 65_308 - 265;
+    let mut rest = 65_294 - 266;
     let mut fields = vec![];
     for _ in 0..32 {
         let n = rest.min(4096);
@@ -64,11 +65,13 @@ fn completed() -> Completed {
         fields.push(Field::text(&vec![b'a'; n], 4096, WidthProfile::DEFAULT));
     }
     Completed {
+        progress: Default::default(),
         request_id: r.request_id,
         binding: r.binding,
         completed_at_ns: 99,
         reason: EndReason::Deadline,
         updates: vec![Update {
+            facts: None,
             segment: 31,
             value: Some(Value::new(b"", fields)),
         }],
@@ -90,7 +93,7 @@ fn cwd(n: usize) -> Vec<u8> {
 }
 fn prefix() -> [u8; 80] {
     let mut p = [0; 80];
-    p[..8].copy_from_slice(b"BNGIPC02");
+    p[..8].copy_from_slice(b"BNGIPC03");
     p[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     p
 }
@@ -242,6 +245,51 @@ fn product_mask_zero(c: CompiledConfig) -> (CompiledConfig, u32) {
     assert_eq!(mask, 0);
     (c, mask)
 }
+fn maximum_facts() -> (Vec<u8>, Vec<u8>) {
+    use bingsu_core::collection::path_facts::{PathFactInput, SiblingSet};
+    let cwd = "/x".repeat(32).into_bytes();
+    let mut siblings: Vec<_> = (0..32)
+        .map(|component| SiblingSet {
+            component,
+            complete: true,
+            names: vec![vec![b'a'; 2]; 256],
+        })
+        .collect();
+    for name in &mut siblings[0].names[..167] {
+        name.pop();
+    }
+    let facts = PathFactInput {
+        siblings,
+        ..Default::default()
+    }
+    .encode(&cwd)
+    .unwrap();
+    assert_eq!(facts.len(), 32_768);
+    (facts, cwd)
+}
+#[inline(never)]
+fn decode_facts(bytes: &[u8], cwd: &[u8]) -> bingsu_core::collection::path_facts::PathFactInput {
+    bingsu_core::collection::path_facts::PathFactInput::decode(bytes, cwd).unwrap()
+}
+#[library_benchmark]
+#[bench::maximum(setup=maximum_facts)]
+fn facts_decode(input: (Vec<u8>, Vec<u8>)) -> bingsu_core::collection::path_facts::PathFactInput {
+    black_box(decode_facts(black_box(&input.0), black_box(&input.1)))
+}
+#[inline(never)]
+fn charge_axes() -> bingsu_core::collection::budget::BudgetCounters {
+    use bingsu_core::collection::budget::{Axis, BudgetCounters};
+    let mut counters = BudgetCounters::default();
+    for axis in black_box(Axis::ALL) {
+        counters.charge(axis, black_box(axis.limit())).unwrap();
+        black_box(counters.charge(axis, 1)).unwrap_err();
+    }
+    counters
+}
+#[library_benchmark]
+fn budget_charge() -> bingsu_core::collection::budget::BudgetCounters {
+    black_box(charge_axes())
+}
 library_benchmark_group!(
     name = collection,
     benchmarks = [
@@ -254,7 +302,9 @@ library_benchmark_group!(
         rejected_prefix,
         selected_variant,
         front_collection,
-        product_mask_zero
+        product_mask_zero,
+        facts_decode,
+        budget_charge
     ]
 );
 main!(library_benchmark_groups = collection);

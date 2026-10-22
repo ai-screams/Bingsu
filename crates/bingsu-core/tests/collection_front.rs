@@ -77,6 +77,7 @@ fn identity() -> Identity {
 }
 fn binding() -> Binding {
     Binding {
+        path_query: Default::default(),
         build_id: BUILD,
         snapshot: identity(),
         clock_kind: 1,
@@ -90,11 +91,13 @@ fn binding() -> Binding {
 }
 fn completed(at: u64, text: &[u8]) -> Completed {
     Completed {
+        progress: Default::default(),
         request_id: M3B_REQUEST_ID,
         binding: binding(),
         completed_at_ns: at,
         reason: EndReason::Deadline,
         updates: vec![Update {
+            facts: None,
             segment: 31,
             value: Some(Value::new(
                 text,
@@ -109,6 +112,39 @@ fn completed(at: u64, text: &[u8]) -> Completed {
 }
 fn wire(r: &Completed) -> Vec<u8> {
     r.encode_with_catalog(&CATALOG).unwrap()
+}
+// 이것을 실패시키는 것: 앞단 expected binding에서 envelope home 또는 compiled unique 정책을 버리는 것.
+#[test]
+fn expected_path_query_uses_the_selected_display_and_home() {
+    use bingsu_core::{collection::path_facts::PathQuery, shorten::Method};
+    for home in [false, true] {
+        for unique in [false, true] {
+            let mut h = Harness::new(None, None);
+            let mut s = snapshot();
+            if unique {
+                s.config.setup[1].methods = vec![Method::Unique];
+            }
+            h.render_config.setup[1].methods = s.config.setup[1].methods.clone();
+            h.snapshot = s.encode(1, 0).unwrap();
+            if home {
+                h.args.push(b"--home=/cwd".to_vec());
+            }
+            let mut c = completed(99, b"QUERY");
+            c.binding.path_query = PathQuery {
+                home_component: home.then_some(0),
+                unique,
+            };
+            h.responses[0] = Some(wire(&c));
+            let shown = h.text();
+            assert!(
+                shown.contains("QUERY"),
+                "home={home}, unique={unique}: {shown}"
+            );
+            c.binding.path_query.unique = !unique;
+            h.responses[0] = Some(wire(&c));
+            assert!(!h.text().contains("QUERY"));
+        }
+    }
 }
 fn args() -> Vec<Vec<u8>> {
     [
@@ -550,6 +586,7 @@ fn collected_values_do_not_override_shell_values() {
     let mut r = completed(99, b"\x1b]0;ATTACK\x07\nVALUE");
     for i in 0..field::BUILTIN.len() {
         r.updates.push(Update {
+            facts: None,
             segment: i as u16,
             value: Some(Value::new(b"OVERRIDE", vec![])),
         });

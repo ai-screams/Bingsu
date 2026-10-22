@@ -1,6 +1,9 @@
 //! Bounded collector protocol and fixed catalog admission.
 use alloc::vec::Vec;
+pub mod budget;
 pub mod cwd_hash;
+pub mod git;
+pub mod path_facts;
 pub mod response;
 pub mod selection;
 pub mod wire;

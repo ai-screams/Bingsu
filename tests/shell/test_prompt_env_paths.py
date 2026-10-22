@@ -1024,7 +1024,7 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None):
                 header = ast.literal_eval("b" + args[1])
                 assert len(header) == 64, ("collection header bytes", c)
                 total = int.from_bytes(header[12:16], "little") + 64
-                valid_headers[path] = (header[:8] == b"BNGRES02" and header[8:12] == bytes([2,0,64,0])
+                valid_headers[path] = (header[:8] == b"BNGRES03" and header[8:12] == bytes([3,0,64,0])
                                        and header[20:] == bytes(44) and total == sizes[path] and total <= 262144)
             else:
                 assert valid_headers[path], ("collection body after invalid header", c)

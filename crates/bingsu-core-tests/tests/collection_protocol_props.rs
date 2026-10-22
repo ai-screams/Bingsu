@@ -18,6 +18,7 @@ fn request() -> Request {
     Request {
         request_id: M3B_REQUEST_ID,
         binding: Binding {
+            path_query: Default::default(),
             build_id: BuildId([7; 32]),
             snapshot: Identity {
                 boot: [1; 16],
@@ -96,11 +97,11 @@ proptest! {
     fn protocol_proptest_is_bounded_and_transactional(
         raw in prop::collection::vec(any::<u8>(),0..2048),
         length in prop_oneof![0usize..1024,Just(65_535),Just(65_536),Just(65_537),Just(262_144),Just(262_145)],
-        changes in prop::collection::vec((any::<usize>(),any::<u8>(),0u8..6),1..12),
+        changes in prop::collection::vec((any::<usize>(),any::<u8>(),0u8..7),1..12),
     ) {
         let r=request();let p=ready();let mut d=RequestDecoder::new();let mut t=Transcript::new(&r);
         d.accept(frame(&r,Kind::Ready,&p)).unwrap();t.accept(frame(&r,Kind::Ready,&p)).unwrap();t.request_sent().unwrap();
-        t.accept(frame(&r,Kind::Update,&[3,0,0])).unwrap();
+        t.accept(frame(&r,Kind::Update,&[3, 0, 0, 0])).unwrap();
         let original=t.clone().finish(EndReason::Deadline,clock()).unwrap().unwrap();
         let body=r.encode_body().unwrap();let mut begin=(body.len() as u32).to_le_bytes().to_vec();begin.extend(3u64.to_le_bytes());
         d.accept(frame(&r,Kind::RequestBegin,&begin)).unwrap();
@@ -127,8 +128,8 @@ proptest! {
         // all payload kinds against a fully valid prefix below.
         d=saved_d;t=saved_t;
         for (offset,byte,kind) in changes {
-            let kind=match kind {0=>Kind::Ready,1=>Kind::RequestBegin,2=>Kind::RequestChunk,3=>Kind::RequestEnd,4=>Kind::Update,_=>Kind::Complete};
-            let mut payload=match kind {Kind::Ready=>ready(),Kind::RequestBegin=>begin.clone(),Kind::RequestChunk=>chunk.clone(),Kind::RequestEnd=>snapshot::crc32c(&[&body]).to_vec(),Kind::Update=>vec![3,0,1,0,0,0,0,1,0,0,0,0,1,4,0,0,0,1],Kind::Complete=>vec![]};
+            let kind=match kind {0=>Kind::Ready,1=>Kind::RequestBegin,2=>Kind::RequestChunk,3=>Kind::RequestEnd,4=>Kind::Update,5=>Kind::Complete,_=>Kind::Progress};
+            let mut payload=match kind {Kind::Ready=>ready(),Kind::RequestBegin=>begin.clone(),Kind::RequestChunk=>chunk.clone(),Kind::RequestEnd=>snapshot::crc32c(&[&body]).to_vec(),Kind::Update=>vec![3,0,1,0,0,0,0,1,0,0,0,0,1,4,0,0,0,1,0],Kind::Complete=>vec![],Kind::Progress=>vec![0;10]};
             if !payload.is_empty() {let i=offset%payload.len();payload[i]^=byte;} else if byte!=0 {payload.push(byte);}
             let f=frame(&r,kind,&payload);let before_d=d.clone();let before_t=t.clone();
             let mut dr=Ok(None);let mut tr=Ok(());
@@ -290,7 +291,7 @@ proptest! {
         }
         // A valid RequestEnd checksum must not hide an invalid binding. All
         // read_paths validation precedes copying, hence the exact zero bound.
-        for at in [44, 48, 85, 91, 97] { // context, clock kind, path starts
+        for at in [44, 48, 89, 95, 101] { // context, clock kind, path starts
             let mut bad = body.clone(); bad[at] = if at == 48 { 0 } else { bad[at] ^ delta };
             let mut d = RequestDecoder::new();
             d.accept(frame(&r, Kind::Ready, &p)).unwrap();
@@ -304,13 +305,13 @@ proptest! {
     fn transcript_intermediate_refusals_are_transactional_and_allocation_free(delta in 1u8..=255) {
         let r = request(); let p = ready(); let mut t = Transcript::new(&r);
         for state in 0..5 {
-            let wrong = if state < 2 { frame(&r, Kind::Update, &[3,0,0]) }
+            let wrong = if state < 2 { frame(&r, Kind::Update, &[3, 0, 0, 0]) }
                 else { frame(&r, Kind::RequestBegin, &[]) };
             refuse_transcript(&t, &encoded(wrong), ProtocolError::Order);
             if state < 4 {
                 let valid = if state == 0 { frame(&r, Kind::Ready, &p) }
                     else if state == 1 { frame(&r, Kind::Complete, &[]) }
-                    else { frame(&r, Kind::Update, &[3,0,0]) };
+                    else { frame(&r, Kind::Update, &[3, 0, 0, 0]) };
                 if state != 1 {
                     let mut bad = valid; bad.build_id.0[0] ^= delta;
                     refuse_transcript(&t, &encoded(bad), ProtocolError::Build);
@@ -332,7 +333,7 @@ proptest! {
                 refuse_transcript(&t, &encoded(frame(&r, Kind::Ready, &bad)), ProtocolError::Schema);
             }
             if state == 2 || state == 3 {
-                for bad in [&[32,0,0][..], &[3,0,2], &[3,0,0,0]] {
+                for bad in [&[32,0,0][..], &[3,0,2], &[3,0,0,0,0]] {
                     refuse_transcript(&t, &encoded(frame(&r, Kind::Update, bad)), ProtocolError::Schema);
                 }
                 refuse_transcript(&t, &encoded(frame(&r, Kind::Complete, &[delta])), ProtocolError::Schema);
@@ -340,7 +341,7 @@ proptest! {
             match state {
                 0 => t.accept(frame(&r, Kind::Ready, &p)).unwrap(),
                 1 => t.request_sent().unwrap(),
-                2 => t.accept(frame(&r, Kind::Update, &[3,0,0])).unwrap(),
+                2 => t.accept(frame(&r, Kind::Update, &[3, 0, 0, 0])).unwrap(),
                 3 => t.accept(frame(&r, Kind::Complete, &[])).unwrap(),
                 _ => {}
             }
@@ -352,9 +353,9 @@ proptest! {
         path_extra in 0usize..128, delta in 1u8..=255,
     ) {
         let mut r = request(); r.binding.cwd.extend(vec![b'w'; path_extra]);
-        let c = Completed { request_id:r.request_id, binding:r.binding.clone(),
+        let c = Completed {progress: Default::default(), request_id:r.request_id, binding:r.binding.clone(),
             completed_at_ns:98, reason:EndReason::Deadline,
-            updates:vec![wire::Update {segment:3,value:None}] };
+            updates:vec![wire::Update {facts: None,segment:3,value:None}] };
         let good = c.encode().unwrap();
         prop_assert_eq!(Completed::decode(&good), Ok(c));
         // Recomputed length AND CRC force every cut through the body parser.
@@ -364,11 +365,11 @@ proptest! {
             refuse_response(&bad, &r, if cut < 64 { ProtocolError::Truncated } else { ProtocolError::Schema });
         }
         // Binding's context/clock/path starts are wrong but CRC is valid.
-        for at in [128+44, 128+48, 128+81, 128+87, 128+93] {
+        for at in [128+44, 128+48, 128+85, 128+91, 128+97] {
             let mut bad = good.clone(); bad[at] = if at == 176 { 0 } else { bad[at] ^ delta }; fix_response(&mut bad);
             refuse_response(&bad, &r, ProtocolError::Schema);
         }
-        let mut bad = good.clone(); bad[good.len()-3..good.len()-1].copy_from_slice(&32u16.to_le_bytes());
+        let mut bad = good.clone(); bad[good.len()-4..good.len()-2].copy_from_slice(&32u16.to_le_bytes());
         fix_response(&mut bad); refuse_response(&bad, &r, ProtocolError::Schema);
         // Same allocation bound is actually reached: all declared storage is
         // allocated before trailing bytes/invalid present are refused.
@@ -379,8 +380,8 @@ proptest! {
         prop_assert_eq!(refuse_response(&bad, &r, ProtocolError::Schema), (allocs,0,peak));
         // Structurally valid but foreign bindings must be refused at eligibility,
         // rather than mistaken for corrupt encodings. CRC is recomputed here too.
-        for at in [96, 128, 144, 160, 168, 177, 193, 222] {
-            let mut bad=good.clone(); bad[at] = if at == 222 { b'x' } else { bad[at]^delta }; fix_response(&mut bad);
+        for at in [96, 128, 144, 160, 168, 177, 193, 226] {
+            let mut bad=good.clone(); bad[at] = if at == 226 { b'x' } else { bad[at]^delta }; fix_response(&mut bad);
             let mut result=Ok(None);
             let counts=allocation::counted(|| {
                 result=Completed::decode(&bad).map(|c| c.eligible(&r.binding,clock()).then_some(c));
@@ -409,9 +410,9 @@ proptest! {
         prop_assert_eq!(result,Err(ProtocolError::Duplicate));
         prop_assert_eq!(t,saved);
         prop_assert_eq!(counts,(2,0,fields_bytes+n));
-        let c=Completed {request_id:r.request_id,binding:r.binding.clone(), completed_at_ns:98,
-            reason:EndReason::Deadline, updates:vec![wire::Update {segment:3,value:None}]};
-        let mut bad=c.encode().unwrap(); bad.truncate(bad.len()-3); bad.extend(payload); fix_response(&mut bad);
+        let c=Completed {progress: Default::default(),request_id:r.request_id,binding:r.binding.clone(), completed_at_ns:98,
+            reason:EndReason::Deadline, updates:vec![wire::Update {facts: None,segment:3,value:None}]};
+        let mut bad=c.encode().unwrap(); bad.truncate(bad.len()-4); bad.extend(payload); fix_response(&mut bad);
         let mut result=Ok(None);
         let counts=allocation::counted(|| result=Completed::decode(&bad).map(Some));
         prop_assert_eq!(result,Err(ProtocolError::Duplicate));
@@ -487,7 +488,7 @@ fn complete_then_deadline_keeps_supervisor_reason() {
     let mut t = Transcript::new(&r);
     t.accept(frame(&r, Kind::Ready, &ready())).unwrap();
     t.request_sent().unwrap();
-    t.accept(frame(&r, Kind::Update, &[3, 0, 0])).unwrap();
+    t.accept(frame(&r, Kind::Update, &[3, 0, 0, 0])).unwrap();
     t.accept(frame(&r, Kind::Complete, &[])).unwrap();
     let completed = t.finish(EndReason::Deadline, clock()).unwrap().unwrap();
     assert_eq!(completed.reason, EndReason::Deadline);
@@ -497,4 +498,154 @@ fn complete_then_deadline_keeps_supervisor_reason() {
             .reason,
         EndReason::Deadline
     );
+}
+
+// Independent encoder deliberately permits invalid counts, indices and lengths.
+fn raw_facts(f: &bingsu_core::collection::path_facts::PathFactInput) -> Vec<u8> {
+    let mut out = vec![u8::from(f.repo_component.is_some())];
+    out.extend(f.repo_component.unwrap_or(0).to_le_bytes());
+    for b in [f.in_repo, f.readonly] {
+        out.push(match b {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        });
+    }
+    out.push(u8::from(f.partial));
+    out.push(f.siblings.len() as u8);
+    for set in &f.siblings {
+        out.extend(set.component.to_le_bytes());
+        out.push(u8::from(set.complete));
+        out.extend((set.names.len() as u16).to_le_bytes());
+        for name in &set.names {
+            out.extend((name.len() as u16).to_le_bytes());
+            out.extend(name);
+        }
+    }
+    out
+}
+fn facts_update(bytes: &[u8]) -> Vec<u8> {
+    let mut out = vec![1, 0, 0, 1];
+    out.extend((bytes.len() as u32).to_le_bytes());
+    out.extend(bytes);
+    out
+}
+fn dir_request() -> Request {
+    let mut r = request();
+    r.binding.mask = 2;
+    r.binding.cwd = "/x".repeat(40).into_bytes();
+    r
+}
+fn dir_transcript(r: &Request) -> Transcript {
+    let mut t = Transcript::new(r);
+    let mut p = ready();
+    p[8..12].copy_from_slice(&2u32.to_le_bytes());
+    t.accept(frame(r, Kind::Ready, &p)).unwrap();
+    t.request_sent().unwrap();
+    t
+}
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, .. ProptestConfig::default() })]
+    // 이것을 실패시키는 것: 32/33 sets·256/257 names·이름/단계/전체 raw bytes·인코딩 bytes 상한이나 component 중복·순서·범위 검사를 제거하는 것.
+    #[test]
+    fn path_facts_boundaries_are_transactional_and_preflight_allocations_are_zero(byte in any::<u8>()) {
+        use bingsu_core::collection::path_facts::{PathFactInput, SiblingSet};
+        let r = dir_request();
+        let base = PathFactInput { in_repo: Some(true), repo_component: Some(0), ..Default::default() };
+        let set = |component, n, len| SiblingSet { component, complete: true, names: vec![vec![byte; len]; n] };
+        let mut cases = vec![(base.clone(), Ok(()))];
+        for (n, result) in [(32, Ok(())), (33, Err(ProtocolError::Budget))] {
+            cases.push((PathFactInput { siblings: (0..n).map(|i| set(i, 0, 0)).collect(), ..base.clone() }, result));
+        }
+        for (n, result) in [(256, Ok(())), (257, Err(ProtocolError::Budget))] {
+            cases.push((PathFactInput { siblings: vec![set(0,n,1)], ..base.clone() }, result));
+        }
+        for (len, result) in [(1024, Ok(())), (1025, Err(ProtocolError::Budget))] {
+            cases.push((PathFactInput { siblings: vec![set(0,1,len)], ..base.clone() }, result));
+        }
+        for (extra, result) in [(0, Ok(())), (1, Err(ProtocolError::Budget))] {
+            let mut step = set(0,8,1024); step.names.push(vec![byte;extra]);
+            cases.push((PathFactInput { siblings: vec![step], ..base.clone() }, result));
+            cases.push((PathFactInput { siblings: vec![set(0,8,1024),set(1,8,1024),set(2,1,extra)], ..base.clone() }, result));
+            let mut sets: Vec<_> = (0..32).map(|i| set(i,256,2)).collect();
+            for name in &mut sets[0].names[..167-extra] { name.pop(); }
+            let f = PathFactInput { siblings: sets, ..base.clone() };
+            prop_assert_eq!(raw_facts(&f).len(), 32_768+extra);
+            cases.push((f, result));
+        }
+        for indices in [[0,0], [1,0], [0,40]] {
+            cases.push((PathFactInput { siblings: indices.map(|i|set(i,0,0)).to_vec(), ..base.clone() }, Err(ProtocolError::Schema)));
+        }
+        cases.push((PathFactInput { repo_component: Some(40), ..base.clone() }, Err(ProtocolError::Schema)));
+        cases.push((PathFactInput { in_repo: Some(false), ..base.clone() }, Err(ProtocolError::Schema)));
+        // in_repo=true with no logical repo index is a supported mismatch.
+        cases.push((PathFactInput { repo_component: None, ..base }, Ok(())));
+        for (facts, expected) in cases {
+            let bytes = raw_facts(&facts); let payload = facts_update(&bytes);
+            prop_assert_eq!(facts.validate(&r.binding.cwd), expected);
+            let mut decoded = Ok(None);
+            let counts = allocation::counted(|| decoded = PathFactInput::decode(&bytes, &r.binding.cwd).map(Some));
+            if let Err(error) = expected {
+                prop_assert_eq!(decoded, Err(error)); prop_assert_eq!(counts, (0,0,0));
+                prop_assert_eq!(facts.encode(&r.binding.cwd), Err(error));
+            } else {
+                prop_assert_eq!(decoded, Ok(Some(facts.clone())));
+                prop_assert_eq!(facts.encode(&r.binding.cwd), Ok(bytes));
+                prop_assert!(counts.0 <= 1 + 32 + 8192); prop_assert_eq!(counts.1, 0);
+                prop_assert!(counts.2 <= 32 * size_of::<SiblingSet>() + 8192 * size_of::<Vec<u8>>() + 16_384);
+            }
+            let mut t = dir_transcript(&r); let before = t.clone(); let mut result = Ok(());
+            let counts = allocation::counted(|| result = t.accept(frame(&r, Kind::Update, &payload)));
+            prop_assert_eq!(result, expected);
+            if expected.is_err() { prop_assert_eq!(t, before); prop_assert_eq!(counts, (0,0,0)); }
+            else { let c = t.finish(EndReason::Deadline,clock()).unwrap().unwrap();
+                prop_assert_eq!(&c.updates[0].facts, &Some(facts));
+                prop_assert_eq!(Completed::decode(&c.encode().unwrap()), Ok(c)); }
+        }
+    }
+    // 이것을 실패시키는 것: facts/query/Progress의 비정규 bool·tag·absent payload·trailing bytes 또는 구 wire/response 버전을 허용하는 것.
+    #[test]
+    fn v3_tags_versions_and_progress_order_are_closed(invalid in 3u8..=255) {
+        use bingsu_core::collection::{path_facts::{PathFactInput, SiblingSet}, wire::Progress};
+        let r = dir_request();
+        let facts = PathFactInput { siblings: vec![SiblingSet { component:0, complete:true, names:vec![vec![b'a']] }], ..Default::default() };
+        let good = raw_facts(&facts);
+        for (at,b) in [(0,invalid), (1,1), (3,invalid), (4,invalid), (5,invalid), (9,invalid)] {
+            let mut bad=good.clone();bad[at]=b;
+            let mut result=Ok(None); let counts=allocation::counted(|| result=PathFactInput::decode(&bad,&r.binding.cwd).map(Some));
+            prop_assert_eq!(result,Err(ProtocolError::Schema));prop_assert_eq!(counts,(0,0,0));
+        }
+        for cut in 0..good.len() { prop_assert_eq!(PathFactInput::decode(&good[..cut],&r.binding.cwd),Err(ProtocolError::Schema)); }
+        let mut bad=good.clone();bad.push(0);prop_assert_eq!(PathFactInput::decode(&bad,&r.binding.cwd),Err(ProtocolError::Schema));
+        for (at,b) in [(0,invalid),(1,invalid),(2,1)] {
+            let mut p=[0;10];p[at]=b;
+            prop_assert_eq!(Progress::decode(&p),Err(ProtocolError::Schema));
+            let t=dir_transcript(&r);refuse_transcript(&t,&encoded(frame(&r,Kind::Progress,&p)),ProtocolError::Schema);
+        }
+        for size in [0,9,11] { prop_assert_eq!(Progress::decode(&vec![0;size]),Err(ProtocolError::Schema)); }
+        let mut t=dir_transcript(&r);
+        let mut closed=t.clone(); closed.accept(frame(&r,Kind::Complete,&[])).unwrap();
+        refuse_transcript(&closed,&encoded(frame(&r,Kind::Progress,&[0;10])),ProtocolError::Order);
+        let before=closed.clone();
+        prop_assert_eq!(closed.accept(frame(&r,Kind::Progress,&[0;10])),Err(ProtocolError::Order));
+        prop_assert_eq!(closed,before);
+        t.accept(frame(&r,Kind::Update,&facts_update(&good))).unwrap();
+        let c=t.clone().finish(EndReason::Deadline,clock()).unwrap().unwrap();
+        for magic in [false,true] {
+            let mut bytes=encoded(frame(&r,Kind::Complete,&[]));
+            if magic { bytes[7]=b'2'; } else { bytes[8]=2; }
+            refuse_transcript(&t,&bytes,if magic {ProtocolError::Magic}else{ProtocolError::Version});
+            let mut bytes=c.encode().unwrap();if magic {bytes[7]=b'2';}else{bytes[8]=2;}
+            prop_assert_eq!(Completed::decode(&bytes),Err(if magic{ProtocolError::Magic}else{ProtocolError::Version}));
+        }
+        // Observed dir-only discovery is required; an empty/unknown dir fact is not enough.
+        let done=Progress {stage_a_complete:true,device:None}.encode();
+        refuse_transcript(&t,&encoded(frame(&r,Kind::Progress,&done)),ProtocolError::Order);
+        let mut observed=facts; observed.in_repo=Some(false);
+        t.accept(frame(&r,Kind::Update,&facts_update(&raw_facts(&observed)))).unwrap();
+        t.accept(frame(&r,Kind::Progress,&done)).unwrap();
+        refuse_transcript(&t,&encoded(frame(&r,Kind::Progress,&done)),ProtocolError::Order);
+        t.accept(frame(&r,Kind::Complete,&[])).unwrap();
+        refuse_transcript(&t,&encoded(frame(&r,Kind::Progress,&done)),ProtocolError::Order);
+    }
 }

@@ -108,6 +108,7 @@ impl CollectionStore {
     ) -> Result<Self, StoreError> {
         // Encoding validates all raw paths and the context CRC before any mkdir.
         let probe = Completed {
+            progress: Default::default(),
             request_id: bingsu_core::collection::wire::M3B_REQUEST_ID,
             binding: binding.clone(),
             completed_at_ns: now.now,
