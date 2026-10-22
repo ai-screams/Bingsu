@@ -10,6 +10,13 @@ mod landlock;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod limits;
+// B1 compiles the capability layer without activating product collection.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod meter;
+#[cfg(unix)]
+#[allow(dead_code, unsafe_code)]
+mod safe_read;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;

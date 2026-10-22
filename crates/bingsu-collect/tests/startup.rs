@@ -27,6 +27,12 @@ mod landlock;
 #[path = "../src/limits.rs"]
 mod limits;
 #[allow(dead_code)]
+#[path = "../src/meter.rs"]
+mod meter;
+#[allow(dead_code)]
+#[path = "../src/safe_read/mod.rs"]
+mod safe_read;
+#[allow(dead_code)]
 #[path = "../src/sys.rs"]
 mod sys;
 #[allow(dead_code)]
