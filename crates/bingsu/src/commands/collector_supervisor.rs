@@ -147,6 +147,7 @@ impl CollectorJob {
         lock: File,
         watchdog: &Watchdog,
         started_ns: u64,
+        probe: Option<&super::collector::CollectorProbeFd>,
     ) -> io::Result<Self> {
         Self::launch(
             request,
@@ -155,7 +156,7 @@ impl CollectorJob {
             started_ns,
             PRODUCT.segments,
             |read, write, lock, deadline| {
-                collector_process::spawn(exe, read, write, lock, deadline)
+                collector_process::spawn(exe, read, write, lock, deadline, probe)
             },
         )
     }

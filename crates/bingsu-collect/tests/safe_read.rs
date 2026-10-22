@@ -73,7 +73,8 @@ fn test_access(backend: Resolver) -> safe_read::Access {
     if backend == Resolver::DarwinBeneath {
         use std::os::fd::AsFd;
         let (_fixture, fd) = darwin_fixture();
-        let access = safe_read::macos::probe(Some(fd.as_fd()), &mut meter()).unwrap();
+        let access =
+            safe_read::macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut meter()).unwrap();
         assert_eq!(
             access.guarantee(),
             Some(safe_read::Guarantee::DarwinBeneath)
@@ -884,7 +885,7 @@ fn darwin_each_flag_requires_negative_semantics() {
     use safe_read::macos::{self, BENEATH, DarwinCaps, NOFOLLOW_ANY, UNIQUE};
     use std::os::fd::AsFd;
     let (_fixture, fd) = darwin_fixture();
-    let access = macos::probe(Some(fd.as_fd()), &mut meter()).unwrap();
+    let access = macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut meter()).unwrap();
     assert_eq!(
         access.darwin_caps(),
         DarwinCaps {
@@ -899,7 +900,9 @@ fn darwin_each_flag_requires_negative_semantics() {
         Some(safe_read::Guarantee::DarwinBeneath)
     );
     assert_eq!(
-        macos::probe(None, &mut meter()).unwrap().scope(),
+        macos::probe_unvalidated_for_test(None, &mut meter())
+            .unwrap()
+            .scope(),
         safe_read::ReadScope::StageAOnly
     );
     for flags in [
@@ -961,7 +964,7 @@ fn darwin_flag_behavior_and_mount_backstop() {
         println!("DARWIN path={path} flags={flags:#x} errno={actual:?}");
         assert_eq!(actual, error, "{path}");
     }
-    let access = macos::probe(Some(fd.as_fd()), &mut meter()).unwrap();
+    let access = macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut meter()).unwrap();
     let mut budget = meter();
     let root = fixture.root(&mut budget);
     for path in [
@@ -1024,7 +1027,8 @@ fn darwin_flag_behavior_and_mount_backstop() {
 fn coarse_rename_with_guarantee_reads_zero_external_bytes() {
     use std::os::fd::AsFd;
     let (fixture, probe_fd) = darwin_fixture();
-    let access = safe_read::macos::probe(Some(probe_fd.as_fd()), &mut meter()).unwrap();
+    let access =
+        safe_read::macos::probe_unvalidated_for_test(Some(probe_fd.as_fd()), &mut meter()).unwrap();
     assert!(access.guarantee().is_some());
     fs::create_dir_all(fixture.0.join("root/a/b")).unwrap();
     fs::write(fixture.0.join("canary"), b"EXTERNAL").unwrap();
@@ -1104,7 +1108,7 @@ fn darwin_optional_flags_are_used_only_when_probed() {
         safe_read::read(&root, b"dir/inner", cap(64), &access, &mut budget).unwrap(),
         b"inside"
     );
-    let access = macos::probe(Some(fd.as_fd()), &mut budget).unwrap();
+    let access = macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut budget).unwrap();
     let path = fixture.0.clone();
     budget.hook = Some(Box::new(move |event| {
         if event == "before_beneath_open" {
@@ -1133,7 +1137,8 @@ fn darwin_atomic_reopen_checks_identity() {
     use std::os::fd::AsFd;
     let (fixture, fd) = darwin_fixture();
     let mut budget = meter();
-    let access = safe_read::macos::probe(Some(fd.as_fd()), &mut budget).unwrap();
+    let access =
+        safe_read::macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut budget).unwrap();
     let root = fixture.root(&mut budget);
     let path = fixture.0.clone();
     budget.hook = Some(Box::new(move |event| {

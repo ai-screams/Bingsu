@@ -52,13 +52,32 @@ pub struct WorkerFds {
     result: File,
     request: File,
     _lock: File,
+    #[cfg(target_os = "macos")]
+    probe: Option<CollectorProbeFd>,
 }
+
+/// Owns only the optional startup fd 6. It cannot be converted to a content Root.
+#[cfg(target_os = "macos")]
+pub(crate) struct CollectorProbeFd(File);
+
 impl WorkerFds {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn take_probe(&mut self) -> Option<CollectorProbeFd> {
+        self.probe.take()
+    }
     pub(crate) fn read_exact(&mut self, bytes: &mut [u8]) -> io::Result<()> {
         self.request.read_exact(bytes)
     }
     pub(crate) fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.result.write_all(bytes)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl CollectorProbeFd {
+    pub(crate) fn fixture(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        self.0.as_fd()
     }
 }
 fn stat(fd: i32) -> io::Result<libc::stat> {
@@ -137,7 +156,9 @@ fn close_extras() -> io::Result<()> {
             return Err(io::Error::other("descriptor census"));
         }
         for record in &records[..n / std::mem::size_of::<libc::proc_fdinfo>()] {
-            if record.proc_fd >= 6 {
+            let probe_directory = record.proc_fd == 6
+                && stat(6).is_ok_and(|s| s.st_mode & libc::S_IFMT == libc::S_IFDIR);
+            if record.proc_fd >= 6 && !probe_directory {
                 // SAFETY: inherited descriptor from the single-threaded census.
                 if unsafe { libc::close(record.proc_fd) } != 0 {
                     return Err(io::Error::last_os_error());
@@ -220,10 +241,20 @@ pub fn validate_worker_fds() -> io::Result<WorkerFds> {
     let request = unsafe { File::from_raw_fd(3) };
     // SAFETY: checked descriptor; close-only ownership, never flock unlock.
     let lock = unsafe { File::from_raw_fd(5) };
+    #[cfg(target_os = "macos")]
+    let probe = match stat(6) {
+        // Only ownership is taken here. Fixture IO and validation follow protection.
+        // SAFETY: entry owns this checked inherited descriptor exactly once.
+        Ok(_) => Some(CollectorProbeFd(unsafe { File::from_raw_fd(6) })),
+        Err(e) if e.raw_os_error() == Some(libc::EBADF) => None,
+        Err(e) => return Err(e),
+    };
     Ok(WorkerFds {
         result,
         request,
         _lock: lock,
+        #[cfg(target_os = "macos")]
+        probe,
     })
 }
 

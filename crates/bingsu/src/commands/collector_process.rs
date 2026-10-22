@@ -297,14 +297,16 @@ pub(crate) fn spawn(
     response: &File,
     lock: &File,
     expires_ns: u64,
+    probe: Option<&super::collector::CollectorProbeFd>,
 ) -> io::Result<OwnedChild> {
-    spawn_args(
+    spawn_args_with_probe(
         path,
         &[OsStr::new("__collect-v1")],
         request,
         response,
         lock,
         expires_ns,
+        probe,
     )
 }
 
@@ -316,6 +318,7 @@ fn check(rc: i32) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_args(
     path: &OsStr,
     args: &[&OsStr],
@@ -324,6 +327,22 @@ pub(crate) fn spawn_args(
     lock: &File,
     expires_ns: u64,
 ) -> io::Result<OwnedChild> {
+    spawn_args_with_probe(path, args, request, response, lock, expires_ns, None)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit, separately typed startup-only descriptor"
+)]
+fn spawn_args_with_probe(
+    path: &OsStr,
+    args: &[&OsStr],
+    request: &File,
+    response: &File,
+    lock: &File,
+    expires_ns: u64,
+    probe: Option<&super::collector::CollectorProbeFd>,
+) -> io::Result<OwnedChild> {
     let path = CString::new(path.as_bytes())?;
     let words = std::iter::once(Ok(path.clone()))
         .chain(args.iter().map(|v| CString::new(v.as_bytes())))
@@ -331,9 +350,14 @@ pub(crate) fn spawn_args(
     let mut argv: Vec<_> = words.iter().map(|v| v.as_ptr().cast_mut()).collect();
     argv.push(std::ptr::null_mut());
     let mut copies = Vec::new();
-    for file in [request, response, lock] {
+    let sources = [request, response, lock];
+    #[cfg(target_os = "macos")]
+    let sources = sources.into_iter().chain(probe.map(|p| p.spawn_source()));
+    #[cfg(not(target_os = "macos"))]
+    let _ = probe;
+    for file in sources {
         // SAFETY: duplicate live sources above every reserved child slot.
-        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 6) };
+        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 7) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -390,7 +414,7 @@ pub(crate) fn spawn_args(
                 )
             })?;
         }
-        for (source, target) in copies.iter().zip([3, 1, 5]) {
+        for (source, target) in copies.iter().zip([3, 1, 5, 6]) {
             // SAFETY: sources are disjoint from all destinations.
             check(unsafe {
                 libc::posix_spawn_file_actions_adddup2(&mut actions, source.as_raw_fd(), target)
@@ -514,5 +538,102 @@ mod tests {
         copy.signal(0).unwrap();
         assert!(!child.kill_requested());
         assert!(child.reap().unwrap());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod probe_tests {
+    use super::*;
+    use std::{io::Read, os::unix::fs::PermissionsExt};
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // 이것을 실패시키는 것: helper의 probe source를 fd6에 dup2하지 않거나 임시 복사 fd를 상속하는 것.
+    #[test]
+    fn probe_spawn_targets_only_fd_six() {
+        let _guard = crate::commands::sys::test_inherited_fd_lock();
+        let path = std::env::temp_dir().join(format!("b2-spawn-probe-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let _cleanup = Cleanup(path.clone());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let probe = super::super::collector::CollectorProbeFd::prepare(&File::open(&path).unwrap())
+            .unwrap();
+        let lock = File::create(path.join("lock")).unwrap();
+        for (name, fixture) in [
+            ("probe_spawn_child", Some(&probe)),
+            ("probe_absent_child", None),
+        ] {
+            let (request, _write) = pipe().unwrap();
+            let (mut response, write) = pipe().unwrap();
+            let test = format!("commands::collector_process::probe_tests::{name}");
+            let mut child = spawn_args_with_probe(
+                std::env::current_exe().unwrap().as_os_str(),
+                &[
+                    OsStr::new("--exact"),
+                    OsStr::new(&test),
+                    OsStr::new("--ignored"),
+                    OsStr::new("--nocapture"),
+                    OsStr::new("--test-threads=1"),
+                ],
+                &request,
+                &write,
+                &lock,
+                now_ns().unwrap() + 1_000_000_000,
+                fixture,
+            )
+            .unwrap();
+            drop(write);
+            let mut bytes = String::new();
+            response.read_to_string(&mut bytes).unwrap();
+            while !child.reap().unwrap() {
+                std::thread::yield_now();
+            }
+            assert!(bytes.contains("probe handoff passed"), "{bytes}");
+        }
+    }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "isolated test child verifies the empty spawn environment"
+    )]
+    fn child_census(probe: bool) {
+        assert!(std::env::vars_os().next().is_none());
+        assert_eq!(std::env::current_dir().unwrap(), std::path::Path::new("/"));
+        for fd in 0..64 {
+            // SAFETY: read-only descriptor query, invalid slots are expected.
+            let open = unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
+            assert_eq!(
+                open,
+                [0, 1, 2, 3, 5].contains(&fd) || (probe && fd == 6),
+                "fd {fd}"
+            );
+        }
+        if probe {
+            // SAFETY: inherited fixture dir, fixed no-follow read-only name.
+            let fd =
+                unsafe { libc::openat(6, c"value".as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW) };
+            assert!(fd >= 0);
+            // SAFETY: newly owned descriptor.
+            let mut file = unsafe { File::from_raw_fd(fd) };
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"inside");
+        }
+        println!("probe handoff passed");
+    }
+    // 이것을 실패시키는 것: probe source·fd6 dup2 누락 (상위 시험이 실행하고 실패를 확인).
+    #[test]
+    #[ignore = "isolated child of probe_spawn_targets_only_fd_six"]
+    fn probe_spawn_child() {
+        child_census(true);
+    }
+    // 이것을 실패시키는 것: probe 부재에도 fd6이나 spawn 임시 fd를 남기는 것.
+    #[test]
+    #[ignore = "isolated child of probe_spawn_targets_only_fd_six"]
+    fn probe_absent_child() {
+        child_census(false);
     }
 }

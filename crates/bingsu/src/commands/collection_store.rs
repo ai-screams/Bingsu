@@ -502,3 +502,190 @@ mod tests {
         );
     }
 }
+
+/// A fixed, tiny namespace beside contexts-v2, outside collection accounting.
+/// Never repairs an existing object in place: an unsafe/incomplete fixture
+/// simply leaves the worker in StageAOnly. Concurrent creators may safely lose.
+#[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "fixed private fixture linkat/symlinkat, helper only"
+)]
+pub(super) fn prepare_collector_probe(runtime: &File) -> Result<File, StoreError> {
+    use std::{ffi::CStr, os::fd::AsRawFd, os::unix::fs::MetadataExt};
+    let me = sys::current_uid();
+    snapshot_store::check_directory(runtime, me)?;
+    let directory = |parent: &File, name: &str| -> Result<File, StoreError> {
+        sys::mkdir_at(parent.as_fd(), OsStr::new(name), 0o700)?;
+        let child = sys::open_dir_at_nofollow(parent.as_fd(), OsStr::new(name))?;
+        snapshot_store::check_directory(&child, me)?;
+        snapshot_store::same_name(&child, parent.as_fd(), name)?;
+        Ok(child)
+    };
+    let namespace = directory(runtime, "collector-probes-v1")?;
+    let parent = directory(&namespace, "open-flags")?;
+    let root = directory(&parent, "root")?;
+    let _outside = directory(&parent, "outside")?;
+    let dir = directory(&root, "dir")?;
+    let data = |parent: &File, name: &str, bytes: &[u8]| -> Result<(), StoreError> {
+        match sys::create_file_at(parent.as_fd(), OsStr::new(name), 0o600) {
+            Ok(file) => {
+                if sys::write_fd(file.as_raw_fd(), bytes) != sys::WriteOutcome::Done {
+                    return Err(io::Error::other("probe sentinel write").into());
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    };
+    data(&root, "value", b"inside")?;
+    data(&dir, "file", b"inside")?;
+    data(&root, "hard", b"linked")?;
+    // SAFETY: held private directory, fixed single-component names; no follow.
+    if unsafe {
+        libc::linkat(
+            root.as_raw_fd(),
+            c"hard".as_ptr(),
+            root.as_raw_fd(),
+            c"hard2".as_ptr(),
+            0,
+        )
+    } != 0
+        && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    for (base, name, target) in [
+        (&dir, c"inner", c"../value"),
+        (&dir, c"up", c"../../outside"),
+        (&root, c"linkdir", c"dir"),
+        (&root, c"absolute", c"/"),
+        (&root, c"escape", c"../outside"),
+    ] {
+        let (name, target): (&CStr, &CStr) = (name, target);
+        // SAFETY: fixed bounded targets and held private parent; existing entries
+        // are never overwritten and are checked below.
+        if unsafe { libc::symlinkat(target.as_ptr(), base.as_raw_fd(), name.as_ptr()) } != 0
+            && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        use std::os::unix::ffi::OsStrExt;
+        if sys::read_link_at(base.as_fd(), OsStr::from_bytes(name.to_bytes()))?
+            .as_os_str()
+            .as_bytes()
+            != target.to_bytes()
+        {
+            return Err(StoreError::Unsafe);
+        }
+    }
+    // Fixed SHA-256 sentinels; total file contents + link targets are < 4 KiB.
+    // Hash on the same no-follow fd after metadata validation, including nlink.
+    for (base, name, expected, links) in [
+        (&root, "value", b"inside".as_slice(), 1),
+        (&dir, "file", b"inside".as_slice(), 1),
+        (&root, "hard", b"linked".as_slice(), 2),
+        (&root, "hard2", b"linked".as_slice(), 2),
+    ] {
+        let mut file = sys::open_data_at_nofollow(base.as_fd(), OsStr::new(name))?;
+        let md = file.metadata()?;
+        let facts = sys::fd_facts(file.as_fd())?;
+        if !md.is_file()
+            || md.uid() != me
+            || md.mode() & 0o7777 != 0o600
+            || md.nlink() != links
+            || md.len() != expected.len() as u64
+            || facts.acl != bingsu_core::fs_trust::AclFacts::None
+            || sys::fd_is_local(file.as_raw_fd()) != Some(true)
+        {
+            return Err(StoreError::Unsafe);
+        }
+        let mut bytes = [0; 7];
+        let n = file.read(&mut bytes)?;
+        if bingsu_core::collection::cwd_hash::sha256(&bytes[..n])
+            != bingsu_core::collection::cwd_hash::sha256(expected)
+        {
+            return Err(StoreError::Unsafe);
+        }
+        snapshot_store::same_name(&file, base.as_fd(), name)?;
+    }
+    for (child, base, name) in [
+        (&namespace, runtime, "collector-probes-v1"),
+        (&parent, &namespace, "open-flags"),
+        (&root, &parent, "root"),
+        (&dir, &root, "dir"),
+    ] {
+        snapshot_store::check_directory(child, me)?;
+        snapshot_store::same_name(child, base.as_fd(), name)?;
+    }
+    Ok(root)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod probe_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    // 이것을 실패시키는 것: helper가 기존 symlink·불안전 부모·변조 sentinel을 고치거나 신뢰하는 것.
+    #[test]
+    fn probe_fixture_is_private_bounded_and_reusable() {
+        let runtime = std::env::temp_dir().join(format!("b2-helper-probe-{}", std::process::id()));
+        std::fs::create_dir(&runtime).unwrap();
+        let _cleanup = Cleanup(runtime.clone());
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fd = File::open(&runtime).unwrap();
+        let first = prepare_collector_probe(&fd).unwrap();
+        let second = prepare_collector_probe(&fd).unwrap();
+        assert_eq!(
+            first.metadata().unwrap().ino(),
+            second.metadata().unwrap().ino()
+        );
+        let root = runtime.join("collector-probes-v1/open-flags/root");
+        let mut bytes = 0;
+        for path in [
+            "value",
+            "dir/file",
+            "hard",
+            "hard2",
+            "dir/inner",
+            "dir/up",
+            "linkdir",
+            "absolute",
+            "escape",
+        ] {
+            bytes += std::fs::symlink_metadata(root.join(path)).unwrap().len();
+        }
+        assert!(bytes <= 4096);
+        assert!(!runtime.join("contexts-v2").exists());
+        std::fs::write(root.join("value"), b"spoof!").unwrap();
+        assert!(prepare_collector_probe(&fd).is_err());
+        assert_eq!(std::fs::read(root.join("value")).unwrap(), b"spoof!");
+        std::fs::write(root.join("value"), b"inside").unwrap();
+        std::fs::remove_file(root.join("dir/inner")).unwrap();
+        symlink("../hard", root.join("dir/inner")).unwrap();
+        assert!(prepare_collector_probe(&fd).is_err());
+        std::fs::remove_file(root.join("dir/inner")).unwrap();
+        symlink("../value", root.join("dir/inner")).unwrap();
+        std::fs::set_permissions(
+            root.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(prepare_collector_probe(&fd).is_err());
+        std::fs::set_permissions(
+            root.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("value")).unwrap();
+        symlink("hard", root.join("value")).unwrap();
+        assert!(prepare_collector_probe(&fd).is_err());
+        std::fs::remove_dir_all(runtime).unwrap();
+    }
+}

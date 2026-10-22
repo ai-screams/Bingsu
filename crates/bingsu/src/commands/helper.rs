@@ -129,8 +129,10 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     Admission::Deferred(stop) => return Ok(Err(stop)),
                 };
                 let lock = store.worker_lock()?;
-                let job =
-                    verification.attach(collector::spawn(&pin, request, lock, &_watchdog)?, &store);
+                let job = verification.attach(
+                    collector::spawn(&pin, request, lock, &_watchdog, context)?,
+                    &store,
+                );
                 Ok::<_, super::snapshot_store::StoreError>(Ok(
                     job.start(Box::new(move |result| store.publish(&result)))?
                 ))

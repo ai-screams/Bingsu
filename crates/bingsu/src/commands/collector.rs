@@ -9,6 +9,25 @@ use std::{
     os::unix::fs::MetadataExt,
 };
 
+/// Only the startup fixture may occupy child fd 6. No repository capability,
+/// raw-fd conversion, or general path constructor is exposed.
+pub(crate) struct CollectorProbeFd {
+    #[cfg(target_os = "macos")]
+    file: File,
+}
+impl CollectorProbeFd {
+    #[cfg(target_os = "macos")]
+    pub(super) fn prepare(runtime: &File) -> Result<Self, StoreError> {
+        Ok(Self {
+            file: super::collection_store::prepare_collector_probe(runtime)?,
+        })
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn spawn_source(&self) -> &File {
+        &self.file
+    }
+}
+
 /// Held evidence for the canonical dedicated executable. This does not select
 /// a worker from PATH, nor authorize any configured command. C1 consumes it
 /// immediately before spawning the dedicated worker.
@@ -133,7 +152,16 @@ pub fn spawn(
     request: bingsu_core::collection::wire::Request,
     lock: File,
     watchdog: &super::helper_limits::Watchdog,
+    context: &super::snapshot_store::CheckedContextFd,
 ) -> Result<super::collector_supervisor::CollectorJob, StoreError> {
+    // A damaged or unavailable probe disables capabilities, not the prompt.
+    #[cfg(target_os = "macos")]
+    let probe = CollectorProbeFd::prepare(&context.runtime).ok();
+    #[cfg(not(target_os = "macos"))]
+    let probe = {
+        let _ = context;
+        None
+    };
     let started_ns = super::collector_process::now_ns()?;
     Ok(super::collector_supervisor::CollectorJob::new(
         exe.executable()?,
@@ -141,6 +169,7 @@ pub fn spawn(
         lock,
         watchdog,
         started_ns,
+        probe.as_ref(),
     )?)
 }
 
