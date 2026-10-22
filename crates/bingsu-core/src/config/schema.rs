@@ -26,8 +26,9 @@ use core::fmt::Write as _;
 /// meaning, path anchors and field interpretation manually; bump this version
 /// when an older reader could misread the new meaning, even if the shape stays
 /// the same.
-pub const FACT_SCHEMA_VERSION: u16 = 1;
-pub const FACT_SCHEMA: &str = "FieldType: Text{max_cells} Count Int Duration Bool; FieldValue: Text Count{n,saturated} Int Duration{ms} Bool Absent; ValueState: Known Pending; PathFacts: anchor steps repo_root unique";
+// The unreleased M3c schema 2 includes git.no_repo; wire/response stay at v3.
+pub const FACT_SCHEMA_VERSION: u16 = 2;
+pub const FACT_SCHEMA: &str = "FieldType: Text{max_cells} Count Int Duration Bool; FieldValue: Text Count{n,saturated} Int Duration{ms} Bool Absent; ValueState: Known Pending; PathFacts: anchor steps repo_root unique readonly";
 /// Version of the config format (`version = 1`).
 pub const CONFIG_VERSION: i64 = 1;
 
@@ -601,13 +602,13 @@ mod tests {
             FieldValue::Absent,
         ];
         let text = alloc::format!(
-            "FieldType: {}; FieldValue: {}; ValueState: {} {}; PathFacts: anchor steps repo_root unique",
+            "FieldType: {}; FieldValue: {}; ValueState: {} {}; PathFacts: anchor steps repo_root unique readonly",
             types.map(ty).join(" "),
             values.iter().map(value).collect::<Vec<_>>().join(" "),
             state(ValueState::Known),
             state(ValueState::Pending),
         );
-        assert_eq!((text.as_str(), FACT_SCHEMA_VERSION), (FACT_SCHEMA, 1));
+        assert_eq!((text.as_str(), FACT_SCHEMA_VERSION), (FACT_SCHEMA, 2));
     }
 
     // 이것을 실패시키는 것: 테마 스키마에 실행 키·`extends`·`theme`이 들어가거나, 설정 스키마에서 실행 표시가 빠지는 것.

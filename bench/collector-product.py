@@ -433,7 +433,7 @@ fn fail_after_update(fds:&mut sys::WorkerFds,buffer:&mut [u8;collection::wire::F
     probe_limit(mode);
     // A validated second Update is emitted only after the mode's probe passes.
     let text=match mode{1=>"probe-cpu-pass",2=>"probe-as-pass",3=>"probe-nofile-pass",4=>"probe-exec-pass",_=>unreachable!()};
-    let mut payload=vec![31,0,1];payload.extend((text.len() as u32).to_le_bytes());payload.extend(text.as_bytes());payload.extend(0u16.to_le_bytes());
+    let mut payload=vec![31,0,1];payload.extend((text.len() as u32).to_le_bytes());payload.extend(text.as_bytes());payload.extend(0u16.to_le_bytes());payload.push(0);
     let n=wire::encode_frame(Frame{kind:Kind::Update,build_id,request_id:M3B_REQUEST_ID,payload:&payload},buffer).unwrap();
     fds.write_all(&buffer[..n])?;
     if mode==1 {loop {std::hint::black_box(17u64.wrapping_mul(11));}}

@@ -94,13 +94,18 @@ pub fn update(sample: Sample) -> Update {
             Some(Value::new(b"partial", fields))
         }
     };
-    Update { segment: 31, value }
+    Update {
+        segment: 31,
+        value,
+        facts: None,
+    }
 }
 
 fn request() -> Request {
     collection::request(
         &CATALOG,
         Binding {
+            path_query: Default::default(),
             build_id: BuildId([0x71; 32]),
             snapshot: Identity {
                 boot: [1; 16],
@@ -150,7 +155,7 @@ fn put_text(out: &mut Vec<u8>, text: &[u8]) {
 fn payload(u: &Update) -> Vec<u8> {
     let mut p = u.segment.to_le_bytes().to_vec();
     let Some(v) = &u.value else {
-        p.push(0);
+        p.extend([0, 0]);
         return p;
     };
     p.push(1);
@@ -168,6 +173,7 @@ fn payload(u: &Update) -> Vec<u8> {
             _ => panic!("fixture has only text or absent fields"),
         }
     }
+    p.push(0);
     p
 }
 fn hostile_payload() -> Vec<u8> {
@@ -180,6 +186,7 @@ fn hostile_payload() -> Vec<u8> {
         p.extend([0, 0]);
         put_text(&mut p, b"x\x1b[31m\x00\xff");
     }
+    p.push(0);
     p
 }
 fn supervisor(r: &Request) -> Transcript {

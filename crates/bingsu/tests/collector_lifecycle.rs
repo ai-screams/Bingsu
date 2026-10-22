@@ -89,7 +89,7 @@ static void put(const void *p, size_t n) {
     while(n) { ssize_t k=write(1,p,n); if(k<=0) _exit(32); p=(char*)p+k; n-=k; }
 }
 static void header(int kind, uint32_t n) {
-    memset(h,0,80); memcpy(h,"BNGIPC02",8); h[8]=2; h[10]=kind;
+    memset(h,0,80); memcpy(h,"BNGIPC03",8); h[8]=3; h[10]=kind;
     memcpy(h+12,&n,4); memset(h+16,7,32);
 }
 static void frame(int kind, const void *p, uint32_t n) { header(kind,n); put(h,80); put(p,n); }
@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
     }
     if(!strcmp(mode,"large") && body<=65536) return 38;
     if(!strcmp(mode,"empty")) { frame(6,0,0); return 0; }
-    unsigned char update[]={31,0,1,2,0,0,0,'o','k',0,0};
+    unsigned char update[]={31,0,1,2,0,0,0,'o','k',0,0,0};
     if(!strcmp(mode,"first-invalid")) update[2]=2;
     frame(5,update,sizeof(update));
     if(!strcmp(mode,"timeout")) { for(;;) pause(); }
@@ -222,6 +222,7 @@ fn request(large: bool) -> collection::wire::Request {
     };
     let state = b"/s".to_vec();
     let binding = Binding {
+        path_query: Default::default(),
         build_id: BuildId([7; 32]),
         snapshot: snapshot::Identity {
             boot: now.boot,
@@ -304,7 +305,80 @@ fn request_waits_for_ready_and_pipes_are_backpressured() {
     let (report, values) = run_peer("large", true);
     assert_eq!(report.reason, EndReason::Complete);
     assert!(report.reaped && !report.kill_requested, "{report:?}");
-    assert_eq!((report.frames, report.bytes, values.len()), (3, 275, 1));
+    assert_eq!((report.frames, report.bytes, values.len()), (3, 276, 1));
+}
+
+// 이것을 실패시키는 것: helper가 envelope home·compiled unique를 요청에 넣지 않거나 환경 항목으로 복원하는 것.
+#[test]
+fn helper_path_query_uses_envelope_and_compiled_policy() {
+    use bingsu_core::{
+        collection::{path_facts::PathQuery, selection::Catalog},
+        color::palette::Mode,
+        config::{
+            compile::BUILTIN_TOML,
+            report::report,
+            source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust},
+        },
+        envelope::Envelope,
+        shorten::Method,
+    };
+    struct NoSources;
+    impl Resolver for NoSources {
+        fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
+            unreachable!()
+        }
+    }
+    let mut config = report(
+        vec![Opened {
+            key: FileKey { dev: 1, ino: 1 },
+            bytes: BUILTIN_TOML.as_bytes().to_vec(),
+            trust: Trust::Executable,
+            display: vec![],
+        }],
+        &mut NoSources,
+        [0, 3, 0],
+        Mode::Dark,
+    )
+    .snapshot
+    .unwrap();
+    let r = request(false);
+    let catalog = Catalog {
+        segments: bingsu_core::field::BUILTIN,
+        workers: 2,
+    };
+    let mut envelope = Envelope {
+        config_root: Some(r.binding.config.clone()),
+        state_root: Some(r.binding.state.clone()),
+        pwd: Some(b"/home/me/repo".to_vec()),
+        width: 80,
+        ..Envelope::default()
+    };
+    for home in [false, true] {
+        for unique in [false, true] {
+            envelope.home = home.then(|| b"/home/me".to_vec());
+            config.setup[1].methods = if unique {
+                vec![Method::Unique]
+            } else {
+                vec![Method::Abbrev(1)]
+            };
+            let selected = commands::helper::selected_request(
+                &catalog,
+                &envelope,
+                Some((&config, r.binding.snapshot)),
+                commands::collector_supervisor::fixture_clock().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                selected.binding.path_query,
+                PathQuery {
+                    home_component: home.then_some(1),
+                    unique
+                }
+            );
+            assert!(selected.environment.is_empty());
+        }
+    }
 }
 
 // 이것을 실패시키는 것: 첫 codec Err 뒤 계속 읽어 나중의 Update를 반영하는 것.

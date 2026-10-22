@@ -69,6 +69,7 @@ fn clock() -> Clock {
 }
 fn binding(cwd: &[u8]) -> Binding {
     Binding {
+        path_query: Default::default(),
         build_id: BuildId([7; 32]),
         snapshot: snapshot::Identity {
             boot: [1; 16],
@@ -88,11 +89,13 @@ fn binding(cwd: &[u8]) -> Binding {
 }
 fn completed(binding: &Binding, value: &[u8]) -> Completed {
     Completed {
+        progress: Default::default(),
         binding: binding.clone(),
         request_id: M3B_REQUEST_ID,
         completed_at_ns: 900,
         reason: EndReason::Complete,
         updates: vec![Update {
+            facts: None,
             segment: 31,
             value: Some(Value::new(value, vec![])),
         }],
@@ -1431,13 +1434,13 @@ fn peer() -> PathBuf {
 static unsigned char h[80], b[65536];
 static void exact(int fd, void *p, unsigned n) { while(n) { int k=read(fd,p,n); if(k<=0) _exit(31); p=(char*)p+k; n-=k; } }
 static void put(const void *p, unsigned n) { while(n) { int k=write(1,p,n); if(k<=0) _exit(32); p=(char*)p+k; n-=k; } }
-static void frame(unsigned kind, unsigned size) { memcpy(h,"BNGIPC02",8); h[8]=2; h[10]=kind; memcpy(h+12,&size,4); memset(h+16,7,32); put(h,80); if(size) put(b,size); }
+static void frame(unsigned kind, unsigned size) { memcpy(h,"BNGIPC03",8); h[8]=3; h[10]=kind; memcpy(h+12,&size,4); memset(h+16,7,32); put(h,80); if(size) put(b,size); }
 int main(int argc, char **argv) {
   /* Only the spawn dup2 action makes the CLOEXEC source available as fd 5. */
   if (fcntl(5, F_GETFD) != 0 || (fcntl(5, F_GETFL) & O_ACCMODE) != O_RDONLY) _exit(34);
   (void)argc; b[0]=3; b[11]=128; b[17]=16; frame(1,24);
   for(;;) { exact(3,h,80); unsigned n; memcpy(&n,h+12,4); if(n>65536) _exit(33); exact(3,b,n); if(h[10]==4) break; }
-  memset(b,0,3); b[0]=31; frame(5,3);
+  memset(b,0,4); b[0]=31; frame(5,4);
   if(argv[1][0]=='c') frame(6,0);
   else if(argv[1][0]=='d') for(;;) pause();
   return 0;
@@ -1493,6 +1496,7 @@ fn supervisor_publishes_complete_and_partial_results() {
         assert_eq!(
             result.updates,
             vec![Update {
+                facts: None,
                 segment: 31,
                 value: None
             }]

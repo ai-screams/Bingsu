@@ -94,6 +94,7 @@ fn mask(c: &CompiledConfig, width: u16, redraw: bool) -> u32 {
 }
 fn binding(mask: u32) -> Binding {
     Binding {
+        path_query: Default::default(),
         build_id: BuildId([7; 32]),
         snapshot: Identity {
             boot: [1; 16],

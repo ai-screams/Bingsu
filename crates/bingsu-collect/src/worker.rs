@@ -265,6 +265,7 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
             payload.extend(7u32.to_le_bytes());
             payload.extend(b"fixture");
             payload.extend(0u16.to_le_bytes());
+            payload.push(0);
             Ok(payload)
         },
     )

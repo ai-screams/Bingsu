@@ -1,5 +1,5 @@
 //! Field types and value states (spec section 4 "필드 타입과 값 상태", M2
-//! types; the versioned schema is M3) and the provisional public field names
+//! types; the versioned schema is M3) and the public field names
 //! of the built-in segments (spec section 4 "세그먼트 선언", confirmed in M3).
 use crate::sanitize::sanitize_into_capped;
 use crate::width::{WidthProfile, ellipsis, grapheme_width, str_width};
@@ -247,10 +247,14 @@ const fn t(max_cells: u16) -> FieldType {
 }
 use FieldType::{Bool, Count, Duration, Int};
 
-/// Provisional public field names (M2), confirmed by the M3 declaration.
+/// Public builtin field names, including the git stage schema.
 /// Names follow one rule: one concept of another tool, one field (starship
 /// `git_status` variables ahead, behind, staged, modified, untracked,
 /// conflicted, stashed). Sorted by id; fields sorted by name.
+/// `git.no_repo` is a Known true discovery marker, with stage=A, partial=false,
+/// empty display text and all repository fields Known Absent. It completes A
+/// without a visible git segment. Hidden/None is not successful discovery.
+/// Known branch text and Known commit text are mutually exclusive.
 pub const BUILTIN: &[SegmentDecl] = &[
     SegmentDecl {
         id: "char",
@@ -279,9 +283,12 @@ pub const BUILTIN: &[SegmentDecl] = &[
             f("detached", Bool),
             f("filtered", Bool),
             f("modified", Count),
+            f("no_repo", Bool),
+            f("operation", t(16)),
+            f("partial", Bool),
+            f("stage", t(1)),
             f("staged", Count),
             f("stash", Count),
-            f("state", t(16)),
             f("untracked", Count),
         ],
     },
@@ -523,7 +530,7 @@ mod tests {
         }
         let git = segment("git").unwrap();
         assert_eq!(git.field_index("ahead"), Some(0));
-        assert_eq!(git.field_index("untracked"), Some(11));
+        assert_eq!(git.field_index("untracked"), Some(14));
         assert_eq!(git.field_index("stashed"), None);
         assert_eq!(segment("venv").map(|d| d.id), Some("venv"));
         assert!(segment("custom/kube").is_none());
@@ -535,7 +542,7 @@ mod tests {
         v.fields.pop();
         assert_eq!(
             v.check(git),
-            Err(ValueError::FieldCount { want: 12, got: 11 })
+            Err(ValueError::FieldCount { want: 15, got: 14 })
         );
     }
 
@@ -667,7 +674,7 @@ char prompt.ok: failed=Bool vicmd=Bool
 dir path: in_repo=Bool path=Text { max_cells: 4096 } readonly=Bool
 duration duration: ms=Duration
 git git.branch: ahead=Count behind=Count branch=Text { max_cells: 256 } commit=Text { max_cells: 16 } \
-conflicted=Count detached=Bool filtered=Bool modified=Count staged=Count stash=Count state=Text { max_cells: 16 } \
+conflicted=Count detached=Bool filtered=Bool modified=Count no_repo=Bool operation=Text { max_cells: 16 } partial=Bool stage=Text { max_cells: 1 } staged=Count stash=Count \
 untracked=Count
 host host: name=Text { max_cells: 64 } root=Bool ssh=Bool user=Text { max_cells: 64 }
 jobs jobs: count=Count

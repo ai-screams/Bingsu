@@ -1,6 +1,7 @@
 //! Complete immutable records, including logically partial collection results.
 use super::wire::{
-    self, Binding, BuildId, EndReason, ProtocolError, Reader, RequestId, STREAM_MAX, Schema, Update,
+    self, Binding, BuildId, EndReason, Progress, ProtocolError, Reader, RequestId, STREAM_MAX,
+    Schema, Update,
 };
 use crate::{
     field::{self, SegmentDecl},
@@ -15,11 +16,18 @@ pub struct Completed {
     pub binding: Binding,
     pub completed_at_ns: u64,
     pub reason: EndReason,
+    /// A completion claim requires retained HEAD evidence or a present, valid
+    /// no-repository marker; an absent/Hidden git value does not suffice.
+    pub progress: Progress,
     pub updates: Vec<Update>,
 }
 /// File header plus request id, binding, completion clock, reason and count.
 pub(crate) fn base_len(binding: &Binding) -> Result<usize, ProtocolError> {
-    wire::add_budget(HEADER + 32 + 8 + 1 + 2, binding.encoded_len()?, STREAM_MAX)
+    wire::add_budget(
+        HEADER + 32 + 8 + 1 + 2 + 10,
+        binding.encoded_len()?,
+        STREAM_MAX,
+    )
 }
 impl Completed {
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
@@ -33,13 +41,20 @@ impl Completed {
         let mut len = base_len(&self.binding)?;
         let mut seen = 0u32;
         for update in &self.updates {
-            let n = wire::update_len(update, &schema, self.binding.mask)?;
+            // Includes git marker shape and mutually exclusive HEAD fields,
+            // even when progress does not claim A completion.
+            let n = wire::update_len(update, &schema, &self.binding)?;
             let bit = 1u32 << update.segment;
             if seen & bit != 0 {
                 return Err(ProtocolError::Duplicate);
             }
             seen |= bit;
             len = wire::add_budget(len, n, STREAM_MAX)?;
+        }
+        if self.progress.stage_a_complete
+            && !wire::stage_a_evidence(&self.binding, &self.updates, true)
+        {
+            return Err(ProtocolError::Schema);
         }
         let mut out = Vec::with_capacity(len);
         out.resize(HEADER, 0);
@@ -50,12 +65,13 @@ impl Completed {
         out.extend_from_slice(&self.completed_at_ns.to_le_bytes());
         out.push(self.reason.tag());
         out.extend_from_slice(&(self.updates.len() as u16).to_le_bytes());
+        out.extend_from_slice(&self.progress.encode());
         for update in &self.updates {
             wire::put_update(&mut out, update);
         }
         let mut out = wire::checked_encoding(out, len)?;
-        out[..8].copy_from_slice(b"BNGRES02");
-        out[8..10].copy_from_slice(&2u16.to_le_bytes());
+        out[..8].copy_from_slice(b"BNGRES03");
+        out[8..10].copy_from_slice(&3u16.to_le_bytes());
         out[10..12].copy_from_slice(&(HEADER as u16).to_le_bytes());
         out[12..16].copy_from_slice(&((len - HEADER) as u32).to_le_bytes());
         let crc = snapshot::crc32c(&[&out[HEADER..]]);
@@ -90,6 +106,7 @@ impl Completed {
         if count > wire::SEGMENTS_MAX {
             return Err(ProtocolError::Budget);
         }
+        let progress = Progress::read(&mut r)?;
         let mut updates = Vec::with_capacity(count);
         let mut seen = 0u32;
         let mut len = base_len(&binding)?;
@@ -99,7 +116,7 @@ impl Completed {
             let update = wire::read_update(
                 &mut r,
                 &schema,
-                binding.mask,
+                &binding,
                 usize::from(field::VALUE_MAX_CELLS) * 4,
             )?;
             let bit = 1u32 << update.segment;
@@ -107,19 +124,24 @@ impl Completed {
                 return Err(ProtocolError::Duplicate);
             }
             seen |= bit;
+            // Apply the same git semantic checks as encoding and Transcript.
             len = wire::add_budget(
                 len,
-                wire::update_len(&update, &schema, binding.mask)?,
+                wire::update_len(&update, &schema, &binding)?,
                 STREAM_MAX,
             )?;
             updates.push(update);
         }
         r.end()?;
+        if progress.stage_a_complete && !wire::stage_a_evidence(&binding, &updates, true) {
+            return Err(ProtocolError::Schema);
+        }
         Ok(Self {
             request_id,
             binding,
             completed_at_ns,
             reason,
+            progress,
             updates,
         })
     }
@@ -146,10 +168,10 @@ pub fn declared_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if bytes.len() > STREAM_MAX {
         return Err(ProtocolError::Budget);
     }
-    if &bytes[..8] != b"BNGRES02" {
+    if &bytes[..8] != b"BNGRES03" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 2u16.to_le_bytes() {
+    if bytes[8..10] != 3u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
     if bytes[10..12] != (HEADER as u16).to_le_bytes() || bytes[20..HEADER].iter().any(|b| *b != 0) {

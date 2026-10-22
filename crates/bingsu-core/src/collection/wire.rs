@@ -1,5 +1,9 @@
 //! Bounded, single-exchange wire protocol. Errors never produce reply bytes.
-use super::{cwd_hash, response::Completed};
+use super::{
+    cwd_hash, git,
+    path_facts::{PathFactInput, PathQuery},
+    response::Completed,
+};
 use crate::{
     field::{self, Field, FieldType, FieldValue, SegmentDecl, Value, ValueState},
     snapshot::{self, Clock, Identity},
@@ -30,6 +34,7 @@ pub enum Kind {
     RequestEnd,
     Update,
     Complete,
+    Progress,
 }
 impl Kind {
     fn tag(self) -> u8 {
@@ -40,6 +45,7 @@ impl Kind {
             Self::RequestEnd => 4,
             Self::Update => 5,
             Self::Complete => 6,
+            Self::Progress => 7,
         }
     }
 }
@@ -77,13 +83,13 @@ pub fn frame_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if total > FRAME_MAX {
         return Err(ProtocolError::Length);
     }
-    if &bytes[..8] != b"BNGIPC02" {
+    if &bytes[..8] != b"BNGIPC03" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 2u16.to_le_bytes() {
+    if bytes[8..10] != 3u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
-    if !(1..=6).contains(&bytes[10]) {
+    if !(1..=7).contains(&bytes[10]) {
         return Err(ProtocolError::Kind);
     }
     if bytes[11] != 0 {
@@ -108,6 +114,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
         4 => Kind::RequestEnd,
         5 => Kind::Update,
         6 => Kind::Complete,
+        7 => Kind::Progress,
         _ => return Err(ProtocolError::Kind),
     };
     Ok(Frame {
@@ -135,8 +142,8 @@ pub fn decode_eof(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
 }
 pub fn encode_frame(frame: Frame<'_>, out: &mut [u8; FRAME_MAX]) -> Result<usize, ProtocolError> {
     let len = frame_size(frame)?;
-    out[..8].copy_from_slice(b"BNGIPC02");
-    out[8..10].copy_from_slice(&2u16.to_le_bytes());
+    out[..8].copy_from_slice(b"BNGIPC03");
+    out[8..10].copy_from_slice(&3u16.to_le_bytes());
     out[10] = frame.kind.tag();
     out[11] = 0;
     out[12..16].copy_from_slice(&(frame.payload.len() as u32).to_le_bytes());
@@ -184,6 +191,7 @@ pub struct Binding {
     pub state: Vec<u8>,
     pub cwd: Vec<u8>,
     pub mask: u32,
+    pub path_query: PathQuery,
 }
 impl Binding {
     pub fn components(&self) -> [String; 3] {
@@ -200,6 +208,7 @@ impl Binding {
         for path in [&self.config, &self.state, &self.cwd] {
             validate_path(path)?;
         }
+        self.path_query.validate(&self.cwd)?;
         if !matches!(self.clock_kind, 1 | 2)
             || snapshot::context_crc(&self.config, &self.state)
                 .map_err(|_| ProtocolError::Schema)?
@@ -211,7 +220,7 @@ impl Binding {
     }
     pub(crate) fn encoded_len(&self) -> Result<usize, ProtocolError> {
         self.validate()?;
-        let mut n = 121;
+        let mut n = 125;
         for path in [&self.config, &self.state, &self.cwd] {
             n = add_budget(n, path.len(), STREAM_MAX)?;
         }
@@ -227,6 +236,7 @@ impl Binding {
         out.extend_from_slice(&self.domain);
         out.extend_from_slice(&self.resume.to_le_bytes());
         out.extend_from_slice(&self.mask.to_le_bytes());
+        self.path_query.put(out);
     }
     pub(crate) fn put_paths(&self, out: &mut Vec<u8>) {
         for path in [&self.config, &self.state, &self.cwd] {
@@ -250,6 +260,7 @@ impl Binding {
             domain: r.array()?,
             resume: r.u64()?,
             mask: r.u32()?,
+            path_query: PathQuery::read(r)?,
             config: Vec::new(),
             state: Vec::new(),
             cwd: Vec::new(),
@@ -269,6 +280,7 @@ impl Binding {
         {
             return Err(ProtocolError::Schema);
         }
+        self.path_query.validate(cwd)?;
         self.config = config.to_vec();
         self.state = state.to_vec();
         self.cwd = cwd.to_vec();
@@ -369,6 +381,70 @@ impl EndReason {
 pub struct Update {
     pub segment: u16,
     pub value: Option<Value>,
+    pub facts: Option<PathFactInput>,
+}
+impl Update {
+    pub fn encode(&self, binding: &Binding) -> Result<Vec<u8>, ProtocolError> {
+        let schema = Schema::new(field::BUILTIN)?;
+        let len = update_len(self, &schema, binding)?;
+        if len > PAYLOAD_MAX {
+            return Err(ProtocolError::Length);
+        }
+        let mut out = Vec::with_capacity(len);
+        put_update(&mut out, self);
+        checked_encoding(out, len)
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub stage_a_complete: bool,
+    pub device: Option<u64>,
+}
+impl Progress {
+    pub fn encode(self) -> [u8; 10] {
+        let mut out = [0; 10];
+        out[0] = u8::from(self.stage_a_complete);
+        out[1] = u8::from(self.device.is_some());
+        out[2..].copy_from_slice(&self.device.unwrap_or(0).to_le_bytes());
+        out
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let mut r = Reader::new(bytes);
+        let value = Self::read(&mut r)?;
+        r.end()?;
+        Ok(value)
+    }
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self, ProtocolError> {
+        let stage_a_complete = r.boolean()?;
+        let present = r.boolean()?;
+        let device = r.u64()?;
+        if !present && device != 0 {
+            return Err(ProtocolError::Schema);
+        }
+        Ok(Self {
+            stage_a_complete,
+            device: present.then_some(device),
+        })
+    }
+}
+/// The codec proves a valid A result preceded completion. For dir-only requests,
+/// an observed discovery outcome is evidence even if sibling enumeration is partial.
+pub(crate) fn stage_a_evidence(binding: &Binding, updates: &[Update], later: bool) -> bool {
+    if binding.mask & (1 << git::SEGMENT) != 0 {
+        updates
+            .iter()
+            .find(|u| u.segment == git::SEGMENT)
+            .and_then(|u| u.value.as_ref())
+            .is_some_and(|v| git::stage_a_evidence(v, later))
+    } else if binding.mask & (1 << 1) != 0 {
+        updates
+            .iter()
+            .find(|u| u.segment == 1)
+            .and_then(|u| u.facts.as_ref())
+            .is_some_and(|f| f.in_repo.is_some())
+    } else {
+        false
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct RequestDecoder {
@@ -484,11 +560,12 @@ fn ready_mask(payload: &[u8]) -> Result<u32, ProtocolError> {
     r.end()?;
     Ok(mask)
 }
-/// Only type declarations are copied. No callbacks, capabilities or fixture
-/// behavior enter the codec; adapters supply their closed, active catalog.
+/// Copy type declarations and identify the fixed git schema for semantic checks.
+/// No callbacks, capabilities or fixture behavior enter the codec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Schema {
     fields: Vec<Vec<FieldType>>,
+    git: bool,
 }
 impl Schema {
     pub(crate) fn new(catalog: &[SegmentDecl]) -> Result<Self, ProtocolError> {
@@ -502,7 +579,10 @@ impl Schema {
             }
             fields.push(segment.fields.iter().map(|f| f.ty).collect());
         }
-        Ok(Self { fields })
+        let git = catalog
+            .get(usize::from(git::SEGMENT))
+            .is_some_and(|d| d.id == "git");
+        Ok(Self { fields, git })
     }
     fn segment(&self, segment: u16, mask: u32) -> Result<&[FieldType], ProtocolError> {
         let index = usize::from(segment);
@@ -527,6 +607,8 @@ pub struct Transcript {
     counts: [u8; 32],
     lengths: [usize; 32],
     stored: usize,
+    progress: Progress,
+    progress_seen: bool,
     updates: Vec<Update>,
 }
 impl Transcript {
@@ -556,6 +638,8 @@ impl Transcript {
             counts: [0; 32],
             lengths: [0; 32],
             stored: 0,
+            progress: Progress::default(),
+            progress_seen: false,
             updates: Vec::new(),
         })
     }
@@ -568,7 +652,9 @@ impl Transcript {
             return Err(ProtocolError::Duplicate);
         }
         if (!self.ready && frame.kind != Kind::Ready)
-            || (self.ready && (!self.sent || !matches!(frame.kind, Kind::Update | Kind::Complete)))
+            || (self.ready
+                && (!self.sent
+                    || !matches!(frame.kind, Kind::Update | Kind::Complete | Kind::Progress)))
         {
             return Err(ProtocolError::Order);
         }
@@ -590,17 +676,44 @@ impl Transcript {
             }
             Kind::Update => {
                 let mut r = Reader::new(frame.payload);
-                let update =
-                    read_update(&mut r, &self.schema, self.request.binding.mask, TEXT_MAX)?;
+                let update = read_update(&mut r, &self.schema, &self.request.binding, TEXT_MAX)?;
                 r.end()?;
                 let index = usize::from(update.segment);
+                // A no-repository result is terminal for this discovery, even
+                // before its A-complete Progress arrives. Never replace it with
+                // a repository stage or erase its evidence with Hidden.
+                if self.schema.git
+                    && update.segment == git::SEGMENT
+                    && self.updates.iter().any(|old| {
+                        old.segment == git::SEGMENT
+                            && matches!(&old.value, Some(v) if git::is_no_repo(v))
+                    })
+                    && !matches!(&update.value, Some(v) if git::is_no_repo(v))
+                {
+                    return Err(ProtocolError::Order);
+                }
+                let evidence_segment = if self.request.binding.mask & (1 << git::SEGMENT) != 0 {
+                    git::SEGMENT
+                } else {
+                    1
+                };
+                if self.progress.stage_a_complete
+                    && update.segment == evidence_segment
+                    && !stage_a_evidence(
+                        &self.request.binding,
+                        core::slice::from_ref(&update),
+                        true,
+                    )
+                {
+                    return Err(ProtocolError::Order);
+                }
                 let count = self.counts[index]
                     .checked_add(1)
                     .ok_or(ProtocolError::Budget)?;
                 if count > UPDATES_MAX {
                     return Err(ProtocolError::Budget);
                 }
-                let len = update_len(&update, &self.schema, self.request.binding.mask)?;
+                let len = update_len(&update, &self.schema, &self.request.binding)?;
                 let base = super::response::base_len(&self.request.binding)?;
                 let limit = STREAM_MAX.checked_sub(base).ok_or(ProtocolError::Budget)?;
                 let stored = replace_budget(self.stored, self.lengths[index], len, limit)?;
@@ -616,6 +729,23 @@ impl Transcript {
                 self.stored = stored;
                 self.lengths[index] = len;
                 self.counts[index] = count;
+            }
+            Kind::Progress => {
+                let next = Progress::decode(frame.payload)?;
+                if self.progress_seen && (self.progress.stage_a_complete || !next.stage_a_complete)
+                {
+                    return Err(ProtocolError::Order);
+                }
+                if self.progress_seen && next.device != self.progress.device {
+                    return Err(ProtocolError::Schema);
+                }
+                if next.stage_a_complete
+                    && !stage_a_evidence(&self.request.binding, &self.updates, false)
+                {
+                    return Err(ProtocolError::Order);
+                }
+                self.progress = next;
+                self.progress_seen = true;
             }
             Kind::Complete => {
                 if !frame.payload.is_empty() {
@@ -678,6 +808,7 @@ impl Transcript {
             binding: self.request.binding,
             completed_at_ns: now.now,
             reason,
+            progress: self.progress,
             updates: self.updates,
         }))
     }
@@ -685,17 +816,37 @@ impl Transcript {
 pub(crate) fn read_update(
     r: &mut Reader<'_>,
     schema: &Schema,
-    mask: u32,
+    binding: &Binding,
     text_limit: usize,
 ) -> Result<Update, ProtocolError> {
     let segment = r.u16()?;
-    let types = schema.segment(segment, mask)?;
+    let types = schema.segment(segment, binding.mask)?;
+    let value = read_value(r, types, text_limit)?;
+    let facts = if r.boolean()? {
+        if segment != 1 {
+            return Err(ProtocolError::Schema);
+        }
+        Some(PathFactInput::decode(
+            r.bytes(super::path_facts::ENCODED_MAX, ProtocolError::Budget)?,
+            &binding.cwd,
+        )?)
+    } else {
+        None
+    };
+    Ok(Update {
+        segment,
+        value,
+        facts,
+    })
+}
+fn read_value(
+    r: &mut Reader<'_>,
+    types: &[FieldType],
+    text_limit: usize,
+) -> Result<Option<Value>, ProtocolError> {
     let present = r.u8()?;
     if present == 0 {
-        return Ok(Update {
-            segment,
-            value: None,
-        });
+        return Ok(None);
     }
     if present != 1 {
         return Err(ProtocolError::Schema);
@@ -747,18 +898,36 @@ pub(crate) fn read_update(
         }
         fields[index] = field;
     }
-    Ok(Update {
-        segment,
-        value: Some(Value::new(raw, fields)),
-    })
+    Ok(Some(Value::new(raw, fields)))
 }
 pub(crate) fn update_len(
     update: &Update,
     schema: &Schema,
-    mask: u32,
+    binding: &Binding,
 ) -> Result<usize, ProtocolError> {
-    let types = schema.segment(update.segment, mask)?;
-    let Some(value) = &update.value else {
+    let types = schema.segment(update.segment, binding.mask)?;
+    if schema.git
+        && update.segment == git::SEGMENT
+        && update.value.as_ref().is_some_and(|v| !git::valid(v))
+    {
+        return Err(ProtocolError::Schema);
+    }
+    let facts_len = if let Some(facts) = &update.facts {
+        if update.segment != 1 {
+            return Err(ProtocolError::Schema);
+        }
+        5 + facts.encoded_len(&binding.cwd)?
+    } else {
+        1
+    };
+    add_budget(
+        value_len(update.value.as_ref(), types)?,
+        facts_len,
+        STREAM_MAX,
+    )
+}
+fn value_len(value: Option<&Value>, types: &[FieldType]) -> Result<usize, ProtocolError> {
+    let Some(value) = value else {
         return Ok(3);
     };
     if value.fields.len() > FIELDS_MAX {
@@ -785,7 +954,18 @@ pub(crate) fn update_len(
 }
 pub(crate) fn put_update(out: &mut Vec<u8>, update: &Update) {
     out.extend_from_slice(&update.segment.to_le_bytes());
-    let Some(value) = &update.value else {
+    put_value(out, update.value.as_ref());
+    out.push(u8::from(update.facts.is_some()));
+    if let Some(facts) = &update.facts {
+        let at = out.len();
+        out.extend_from_slice(&[0; 4]);
+        facts.put(out);
+        let len = (out.len() - at - 4) as u32;
+        out[at..at + 4].copy_from_slice(&len.to_le_bytes());
+    }
+}
+fn put_value(out: &mut Vec<u8>, value: Option<&Value>) {
+    let Some(value) = value else {
         out.push(0);
         return;
     };

@@ -244,6 +244,32 @@ fn same_version_different_build_recompiles() {
     }
 }
 
+// 이것을 실패시키는 것: snapshot의 fact schema 불일치를 허용해 기존 field index를 재사용하는 것.
+#[test]
+fn fact_schema_mismatch_recompiles_with_unchanged_source_and_build() {
+    let f = Fx::new("fact-schema");
+    f.put("[style]\ntemplate='{git.operation}{git.staged}{git.stash}{char}'\n");
+    assert_eq!(published(f.run()), 1);
+    let expected = f.snap().config;
+    for (version, generation) in [(1u16, 2), (3, 3)] {
+        let mut bytes = f.bytes("snapshot");
+        let end = bytes.len() - f.snap().metadata.len();
+        assert_eq!(&bytes[192..204], b"BNGCFG03\x03\0\x02\0");
+        bytes[202..204].copy_from_slice(&version.to_le_bytes());
+        let crc = snapshot::crc32c(&[b"bingsu-snapshot-v2\0", &bytes[..160], &bytes[192..end]]);
+        bytes[160..164].copy_from_slice(&crc);
+        put(&f.dir().join("snapshot"), &bytes);
+        assert_eq!(published(f.run()), generation);
+        assert_eq!(f.snap().config, expected);
+        assert_eq!(f.bytes("last-good"), f.bytes("snapshot"));
+        assert_eq!(
+            Snapshot::decode_front(&bytes[..end], bytes.len()),
+            Err(bingsu_core::snapshot_codec::Error::Tag)
+        );
+        assert_eq!(f.run(), RefreshResult::Revalidated { generation });
+    }
+}
+
 // 이것을 실패시키는 것: 빌드 식별값을 읽지 못한 두 요청을 같다고 보고 재사용하는 것.
 #[test]
 fn unavailable_build_identity_always_recompiles() {

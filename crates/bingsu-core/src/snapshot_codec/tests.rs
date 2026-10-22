@@ -246,7 +246,7 @@ mod cases {
     }
 
     fn raw_config(c: &CompiledConfig) -> Vec<u8> {
-        let mut b = b"BNGCFG02\x02\0".to_vec();
+        let mut b = b"BNGCFG03\x03\0\x02\0".to_vec();
         b.extend(bytes(c));
         b
     }

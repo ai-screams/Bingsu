@@ -217,6 +217,13 @@ pub(crate) fn selected_request(
     collection::request(
         catalog,
         collection::wire::Binding {
+            path_query: collection::path_facts::PathQuery::for_path(
+                cwd,
+                e.home.as_deref(),
+                config.setup[1]
+                    .methods
+                    .contains(&bingsu_core::shorten::Method::Unique),
+            ),
             build_id: bingsu_collect::build_id(),
             snapshot: id,
             clock_kind: now.kind,
