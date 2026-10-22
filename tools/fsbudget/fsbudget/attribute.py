@@ -17,7 +17,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from .classify import FD_DEPENDENT, fd_identity, kind, split_args
-from .strace_parse import EXIT_EVENT, Call
+from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call
 
 SPAWN = {"clone", "clone3", "fork", "vfork"}
 MARKERS = ('PR_SET_NAME, "fsb:begin"', 'PR_SET_NAME, "fsb:end"')
@@ -201,6 +201,9 @@ def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
                 window[c.pid] = False
             continue
         r = role[c.pid]
+        if c.name == UNKNOWN_SYSCALL:
+            errors.append(f"pid {c.pid} ({r}): unknown syscall outside collector helper kill path")
+            continue
         k = kind(c)
         if not k:
             continue
@@ -375,7 +378,7 @@ def _cloexec_pair(previous: Call | None, current: Call) -> bool:
                 and len(before) > flag_at and "O_CLOEXEC" in before[flag_at].split("|"))
 
 
-def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
+def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
     Work in syscall *entry* order. A vfork child's exec may precede its
@@ -383,10 +386,12 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
     parser/fixtures. Threads share role, filter boundary and descriptor table.
     PID reuse starts a new lifetime; failed exec never changes the role.
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
+    `helper_kill` is explicit evidence from the caller's failure mode. Only
+    then may a collector's last call lack its syscall number before SIGKILL.
     """
     import json
     from .classify import collector_kind, collector_bootstrap_kind
-    from .strace_parse import CALL_HEAD, LINE, parse
+    from .strace_parse import CALL_HEAD, LINE, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
     errors = list(trace.errors)
@@ -396,6 +401,8 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
         match = LINE.match(line)
         if match and (head := CALL_HEAD.match(match[2])):
             starts[int(match[1]), head[1]].append(i)
+        elif match and UNKNOWN_HEAD.match(match[2]):
+            starts[int(match[1]), UNKNOWN_SYSCALL].append(i)
         elif match and match[2].startswith("+++ "):
             exits[int(match[1])].append(i)
     ordered = []
@@ -418,6 +425,7 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
     seen_exec = set()
     collector_execs = 0
     previous_calls, cloexec_pairs = {}, []
+    unknown_calls = defaultdict(int)
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
 
@@ -440,8 +448,17 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
                 descriptors.closed.pop(process, None)
                 confined.discard(process)
                 seen_exec.discard(process)
+                unknown_calls.pop(process, None)
             continue
+        if unknown_calls[process]:
+            bad(c, "call after terminal unknown syscall")
         previous_calls[c.pid] = c
+        if c.name == UNKNOWN_SYSCALL:
+            unknown_calls[process] += 1
+            counts[role][UNKNOWN_SYSCALL] += 1
+            if role != "collector" or not helper_kill or unknown_calls[process] > 1:
+                bad(c, "unknown syscall requires collector helper kill path, once per process")
+            continue
         args = split_args(c.args)
         result = c.ret.split()[0]
         success = bool(re.match(r"^\d+", c.ret))

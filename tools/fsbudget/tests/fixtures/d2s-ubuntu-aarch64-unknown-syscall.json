@@ -1,0 +1,21 @@
+{
+  "source": "arm4/native/test_failure_modes_trace_colle2/failure.trace",
+  "lines": [
+    1,
+    74,
+    81,
+    82,
+    85,
+    3489,
+    3610,
+    3611,
+    3614,
+    4515,
+    4518,
+    4521,
+    4525,
+    4546,
+    5394,
+    5403
+  ]
+}

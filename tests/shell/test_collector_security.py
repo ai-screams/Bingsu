@@ -308,8 +308,11 @@ def assert_failure_trace(lines, fixture, mode):
     from fsbudget.strace_parse import parse
     from fsbudget.classify import split_args
     observed = collector_attribute(lines, {"front": fixture, "helper": fixture, "collector": fixture,
-        "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": mode}})
+        "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": mode}},
+        helper_kill=mode in {"--cpu-worker", "--nofile-worker", "--as-worker", "--exec-worker",
+                             "--ready-failure-worker", "--malformed-worker"})
     print("collector CLOEXEC open pairs:", json.dumps(observed.cloexec_pairs))
+    print("collector unknown syscalls:", observed.counts.get("collector", {}).get("unknown-syscall", 0))
     calls = parse("\n".join(lines))
     assert not calls.errors, calls.errors
     # Front/helper pass mode as a later argument too. Only the successful
@@ -391,6 +394,20 @@ def test_bookworm_failure_trace_replay(mode):
             assert_failure_trace(changed, fixture, f"--{mode}-worker")
 
 
+# 이것을 실패시키는 것: 실제 AS 실패 trace의 terminal ???를 거부하거나 success/알 수 없는 mode에도 허용하는 것.
+def test_ubuntu_as_failure_trace_replay():
+    path = ROOT / "tools/fsbudget/tests/fixtures/d2s-ubuntu-aarch64-unknown-syscall.strace"
+    lines = path.read_text().splitlines()
+    fixture = "/home/runner/work/Bingsu/Bingsu/target/release/collector-product-fixture/collector-product"
+    observed = assert_failure_trace(lines, fixture, "--as-worker")
+    assert observed.counts["collector"]["unknown-syscall"] == 1
+    # Mutation: preserve the trace shape while relabeling it as the success mode.
+    for mode in ("--security-worker", "--unreviewed-worker"):
+        changed = [line.replace("--as-worker", mode) for line in lines]
+        with pytest.raises(AssertionError, match="unknown syscall requires"):
+            assert_failure_trace(changed, fixture, mode)
+
+
 # 이것을 실패시키는 것: 실패 worker의 파일 쓰기/생성/소켓을 실제 trace 대신 상수 0으로 대조하는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace failure-mode effects")
 @pytest.mark.parametrize("mode", ["--cpu-worker", "--nofile-worker", "--as-worker", "--exec-worker",
@@ -437,8 +454,8 @@ def test_failure_trace_budget_uses_measured_effects(monkeypatch):
                       f'12 {call}({prefix}"/dev/null", {flags}) = -1 EMFILE (Too many open files)']
             assert_failure_trace(nofile + probes, fixture, "--nofile-worker")
     real_attribute = attribution.collector_attribute
-    def counts_only(*args):
-        result = real_attribute(*args)
+    def counts_only(*args, **kwargs):
+        result = real_attribute(*args, **kwargs)
         result.errors.clear()  # Isolate the independent formula comparison.
         return result
     monkeypatch.setattr(attribution, "collector_attribute", counts_only)

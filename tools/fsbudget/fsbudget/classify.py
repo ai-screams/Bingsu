@@ -15,7 +15,7 @@ reason, never silently.
 """
 import re
 
-from .strace_parse import EXIT_EVENT, Call, StructureError, scan
+from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call, StructureError, scan
 
 NAMES = {
     "openat": {"openat"},
@@ -117,7 +117,7 @@ def _placed(c: Call, args: list[str]) -> bool:
 
 
 def kind(c: Call) -> str | None:
-    if c.name in NON_FS or c.name == EXIT_EVENT:
+    if c.name in NON_FS or c.name in {EXIT_EVENT, UNKNOWN_SYSCALL}:
         return None
     args = split_args(c.args)
     if c.name == "mmap" and len(args) > MMAP_FLAGS and "MAP_ANONYMOUS" in args[MMAP_FLAGS].split("|"):
