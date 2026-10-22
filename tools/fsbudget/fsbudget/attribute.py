@@ -101,6 +101,7 @@ def target(c: Call) -> str | None:
 class Attribution:
     counts: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
+    cloexec_pairs: list = field(default_factory=list)
 
 
 def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
@@ -355,6 +356,25 @@ class _Descriptors:
                         additions.add(old + alias[len(new):])
                 description.aliases.update(additions)
 
+
+def _cloexec_pair(previous: Call | None, current: Call) -> bool:
+    """musl open's redundant CLOEXEC: one immediate same-PID call, any result.
+
+    This is attribution of an existing open, not a new permitted fcntl kind.
+    The kernel policy still refuses F_SETFD; musl ignores that return value.
+    """
+    if previous is None or previous.pid != current.pid or previous.name not in {"open", "openat"}:
+        return False
+    opened = re.fullmatch(r"(\d+)(?:<.+>)?", previous.ret)
+    args, before = split_args(current.args), split_args(previous.args)
+    flag_at = 1 if previous.name == "open" else 2
+    fd = _Descriptors.token(args[0]) if args else None
+    return bool(current.name == "fcntl" and len(args) == 3
+                and args[1:] == ["F_SETFD", "FD_CLOEXEC"]
+                and opened and fd and int(opened[1]) == int(fd[1])
+                and len(before) > flag_at and "O_CLOEXEC" in before[flag_at].split("|"))
+
+
 def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
@@ -397,6 +417,7 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
         descriptors.start(root)
     seen_exec = set()
     collector_execs = 0
+    previous_calls, cloexec_pairs = {}, []
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
 
@@ -409,6 +430,7 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
             roles[c.pid], owner[c.pid] = UNRESOLVED, c.pid
             descriptors.start(c.pid)
         role, process = roles[c.pid], owner[c.pid]
+        previous = previous_calls.pop(c.pid, None)
         if c.name == EXIT_EVENT:
             roles.pop(c.pid, None)
             owner.pop(c.pid, None)
@@ -419,6 +441,7 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
                 confined.discard(process)
                 seen_exec.discard(process)
             continue
+        previous_calls[c.pid] = c
         args = split_args(c.args)
         result = c.ret.split()[0]
         success = bool(re.match(r"^\d+", c.ret))
@@ -460,6 +483,11 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
                 or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
             confined.add(process)
         descriptors.observe(c, process, args, success, bad)
+        if role == "collector" and _cloexec_pair(previous, c):
+            cloexec_pairs.append({"pid": c.pid,
+                                  "open": f"{previous.name}({previous.args})", "open_ret": previous.ret,
+                                  "fcntl": f"fcntl({c.args})", "fcntl_ret": c.ret})
+            continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
         if process not in confined and _prologue_call(c, target(c)):
@@ -481,4 +509,4 @@ def collector_attribute(lines: list[str], pinned: dict) -> Attribution:
     required = pinned.get("collectors", 1)
     if collector_execs != required:
         errors.append(f"collector execs: measured {collector_execs}, expected {required}")
-    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors)
+    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs)

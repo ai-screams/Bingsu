@@ -181,6 +181,10 @@ def collector_bootstrap_kind(c: Call) -> str | None:
         return "cwd"
     if c.name == "fcntl" and len(args) >= 2 and args[1] in {"F_GETFL", "F_GETFD"}:
         return "fd_query"
+    if c.name == "fcntl" and len(args) >= 2 and args[1] == "F_SETFD":
+        # Device/pipe fd annotations must not hide an unpaired flag change.
+        # Only collector_attribute can fold the exact immediate open pair.
+        return "unknown-fs"
     if c.name == "open":
         return ("openat" if args and args[0] in {'"/proc/self/statm"', f'"/proc/{c.pid}/statm"'}
                 else "unknown-fs")

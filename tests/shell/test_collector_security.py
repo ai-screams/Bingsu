@@ -141,6 +141,13 @@ def assert_ci_contract(texts):
     for file, tokens in required.items():
         for token in tokens:
             assert token in texts[file], (file, token)
+    collector = re.search(r"(?ms)^  collector:\n(.*?)(?=^  [\w-]+:|\Z)", texts["ci.yml"])[1]
+    for libc in ("native", "musl"):
+        assert f'--basetemp="$RUNNER_TEMP/m3b-traces/{libc}"' in collector
+    artifact = collector.split("      - name: Preserve M3b raw security traces on failure\n")[1].split("      - name:")[0]
+    for token in ("if: failure()", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+                  "name: m3b-security-traces-${{ matrix.os }}", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"):
+        assert token in artifact, token
     # Both full-suite jobs must exclude the unprepared security module. The
     # Linux job applies the same invocation to all three container images.
     for job in ("shell-linux", "shell-macos"):
@@ -170,6 +177,11 @@ def test_ci_has_no_silent_acceptance_skip():
     ("ci.yml", "root_cannot_restore_limits_or_capabilities"),
     ("ci.yml", "test runtime::x14_threads_and_status_survive_fork_is_refused ... ok"),
     ("ci.yml", "test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok"),
+    ("ci.yml", '--basetemp="$RUNNER_TEMP/m3b-traces/native"'),
+    ("ci.yml", '--basetemp="$RUNNER_TEMP/m3b-traces/musl"'),
+    ("ci.yml", "if: failure()"),
+    ("ci.yml", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"),
+    ("ci.yml", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"),
     ("bench.yml", "--rounds 200"),
 ])
 def test_missing_ci_cell_is_refused(file, token):
@@ -200,6 +212,7 @@ def assert_native_trace(lines, fixture, body_bytes):
     observed = collector_attribute(lines,
                                    {"front": fixture, "helper": fixture, "collector": fixture,
                                     "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": "--security-worker"}})
+    print("collector CLOEXEC open pairs:", json.dumps(observed.cloexec_pairs))
     assert not observed.errors, observed.errors
     # One descriptor contract: three F_GETFL, one regular lock stat/ACL;
     # one fixed bootstrap statm open/read, one neutral-root cwd query.
@@ -296,6 +309,7 @@ def assert_failure_trace(lines, fixture, mode):
     from fsbudget.classify import split_args
     observed = collector_attribute(lines, {"front": fixture, "helper": fixture, "collector": fixture,
         "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": mode}})
+    print("collector CLOEXEC open pairs:", json.dumps(observed.cloexec_pairs))
     calls = parse("\n".join(lines))
     assert not calls.errors, calls.errors
     # Front/helper pass mode as a later argument too. Only the successful
@@ -314,6 +328,8 @@ def assert_failure_trace(lines, fixture, mode):
               and '"/dev/null"' in split_args(c.args)]
     expected_errors = []
     if mode == "--nofile-worker":
+        worker_calls = [c for c in calls if c.pid == worker and c.index > worker_exec.index]
+        expected_pairs = []
         assert probes and 0 < sum(not c.ret.startswith("-1") for c in probes) < 64, probes
         assert probes[-1].ret.startswith("-1 EMFILE"), probes[-1]
         for c in probes:
@@ -323,6 +339,20 @@ def assert_failure_trace(lines, fixture, mode):
             # Legacy open remains unknown-fs except for absolute own statm.
             reason = "collector forbidden effect" if c.name == "open" else "collector read outside the M3b bootstrap"
             expected_errors.append(f"pid {worker} (collector): {reason}: {c.name}({c.args})")
+            # musl's immediate redundant F_SETFD belongs to this successful
+            # O_CLOEXEC open, even on EPERM. It adds no expected diagnostic;
+            # check its attribution independently and keep every other error.
+            at = worker_calls.index(c)
+            following = worker_calls[at + 1] if at + 1 < len(worker_calls) else None
+            following_args = split_args(following.args) if following else []
+            opened_fd = re.match(r"^\d+", c.ret)
+            paired_fd = re.fullmatch(r"(\d+)(?:<.+>)?", following_args[0]) if following_args else None
+            if (not c.ret.startswith("-1") and following and following.name == "fcntl"
+                    and following_args[1:] == ["F_SETFD", "FD_CLOEXEC"]
+                    and opened_fd and paired_fd and int(opened_fd[0]) == int(paired_fd[1])):
+                expected_pairs.append({"pid": worker, "open": f"{c.name}({c.args})", "open_ret": c.ret,
+                                       "fcntl": f"fcntl({following.args})", "fcntl_ret": following.ret})
+        assert [pair for pair in observed.cloexec_pairs if '"/dev/null"' in pair["open"]] == expected_pairs
     else:
         assert not probes, probes
     assert Counter(observed.errors) == Counter(expected_errors), observed.errors
@@ -417,3 +447,37 @@ def test_failure_trace_budget_uses_measured_effects(monkeypatch):
                    'fork() = -1 EPERM (Operation not permitted)'):
         with pytest.raises(AssertionError):
             assert_failure_trace(lines + ['12 ' + effect], fixture, "--malformed-worker")
+
+
+# 이것을 실패시키는 것: NOFILE의 musl 짝을 추가 오류로 세거나 다른 F_SETFD 오류도 함께 지우는 것.
+@pytest.mark.parametrize("call", ["open", "openat"])
+@pytest.mark.parametrize("result", ["0", "-1 EPERM (Operation not permitted)"])
+@pytest.mark.parametrize("fd", ["4</dev/null>", "4"], ids=["named-fd", "bare-fd"])
+def test_nofile_musl_pairs_preserve_all_other_errors(call, result, fd):
+    fixture = "/fixture"
+    lines = [
+        '10 execve("/fixture", ["/fixture", "--trace"], 0x0) = 0',
+        '10 clone(flags=SIGCHLD) = 11',
+        '11 execve("/fixture", ["/fixture", "--trace-helper"], 0x0) = 0',
+        '11 clone(flags=SIGCHLD) = 15532',
+        '15532 execve("/fixture", ["/fixture", "--nofile-worker"], 0x0) = 0',
+    ]
+    prefix = 'AT_FDCWD</>, ' if call == "openat" else ''
+    opening = f'15532 {call}({prefix}"/dev/null", O_RDONLY|O_LARGEFILE|O_CLOEXEC)'
+    paired = f'15532 fcntl({fd}, F_SETFD, FD_CLOEXEC) = ' + result
+    probes = [opening + ' = 4</dev/null>', paired,
+              opening + ' = -1 EMFILE (Too many open files)']
+    got = assert_failure_trace(lines + probes, fixture, "--nofile-worker")
+    assert len(got.errors) == 2 and len(got.cloexec_pairs) == 1
+    assert got.cloexec_pairs[0]["fcntl_ret"] == result
+    for changed in (
+        [probes[0], paired.replace(f'({fd}', '(5</dev/null>'), probes[2]],
+        [probes[0], paired.replace('FD_CLOEXEC', '0'), probes[2]],
+        [probes[0], '15532 getpid() = 15532', paired, probes[2]],
+        [probes[0], paired, paired, probes[2]],
+        [probes[0].replace('|O_CLOEXEC', ''), paired, probes[2]],
+        [*probes, paired],
+        [*probes, '15532 write(9</forbidden>, "x", 1) = 1'],
+    ):
+        with pytest.raises(AssertionError):
+            assert_failure_trace(lines + changed, fixture, "--nofile-worker")
