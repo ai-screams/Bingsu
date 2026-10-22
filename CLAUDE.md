@@ -10,10 +10,11 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: M3a (config, snapshot, refresh helper) is done; M3b (collection: git and other built-in data) is next.
-  `bingsu prompt` renders the built-in default theme or the user's TOML config through a snapshot the refresh helper
-  publishes; command segments are checked but not run yet (M6); there is no release. `README.md` lists features as
-  planned until they ship and records working behavior in its Status table.
+- **Stage**: M3a (config, snapshot, refresh helper) and M3b (collector process protocol, supervision, publication) are done;
+  M3c (git, path facts, safe reads) is next. `bingsu prompt` renders the built-in default theme or the user's TOML config
+  through a snapshot the refresh helper publishes; the helper can run the pinned `bingsu-collect` worker under its sandbox,
+  but no product segment collects data yet, so there is no git segment; command segments are checked but not run (M6);
+  there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout
@@ -21,13 +22,14 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 | Path | What |
 | -- | -- |
 | `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments; `config` (merge, check, compile, edit, schema), `template`, `layout`/`render`/`bands`, `snapshot`/`snapshot_codec` (helper to prompt hand-off), `diag*`; status grammar, B1 record encoder, shell words, sanitize, width, icons, color, built-in default theme |
-| `crates/bingsu` | CLI: `src/prompt.rs` renders a record from the envelope and the published snapshot (`prompt_read.rs` reads it, `prompt_spawn.rs` starts the refresh helper before the filter, `prompt_io.rs` writes under the deadline; these and `sandbox.rs` are hash-pinned); `src/commands/` holds `init` (pins the binary path and four roots), `config`/`reload`/`refresh`/`helper` (load, trust, publish), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `crates/bingsu` | CLI: `src/prompt.rs` renders a record from the envelope and the published snapshot (`prompt_read.rs` reads it, `prompt_spawn.rs` starts the refresh helper before the filter, `prompt_io.rs` writes under the deadline; these and `sandbox.rs` are hash-pinned); `src/commands/` holds `init` (pins the binary path and four roots), `config`/`reload`/`refresh`/`helper` (load, trust, publish), `collector_process`/`collector_supervisor` (spawn, pidfd supervision, deadlines), `collection_store`/`collection_gc` (per-folder responses, reclaim), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
 | `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
 | `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
 | `crates/bingsu-golden` | Prints render output for fixed inputs; native (its test) and wasm32-wasip1 (CI) must equal `tests/golden/render/render.tsv` byte for byte; regenerate with `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv` and review the diff |
-| `crates/bingsu-bench`, `crates/bingsu-collect` | M1 measurement code and collector stub |
+| `crates/bingsu-collect` | Collector worker binary pinned by `init`: startup limits, then on Linux Landlock and seccomp (`collector-syscalls.tsv`), then one request/response exchange with the helper; the product and bench dependency graphs are pinned in `dependencies.allowlist.tsv` (`scripts/check_collector_dependencies.py`) |
+| `crates/bingsu-bench` | M1 measurement code |
 | `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
-| `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes |
+| `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes; `test_collector_security.py` maps the collector security rows (`tests/collector-acceptance.tsv`) to tests |
 | `tests/hostile` | Hostile-value matrix shared by core, golden and PTY tests |
 | `scripts/`, `tools/core-cfg-check` | Purity, prompt-forbid and diagnostic-code gates; `scripts/pin_tcb.py` re-pins TCB hashes |
 | `tools/fsbudget`, `tools/gen-ucd-tables` | strace filesystem budget check; generator for `src/ucd.rs` |
