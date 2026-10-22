@@ -96,6 +96,8 @@
 //! calls; this supplements its binary scan, clippy forbid and TCB hash.
 //! `--identity FILE.rs` checks the shared no_std identity root. Its only
 //! generated input is the exact build_id.rs include from the pinned builder.
+//! Outside that include, the identifiers `include`, `include_str`,
+//! `include_bytes`, `env`, `option_env` and `macro_rules` are refused everywhere.
 //! Raw identifiers (`r#cfg`) are compared without the `r#` prefix, since
 //! rustc treats `#[r#cfg(..)]` and `#[r#path = ..]` as the real attributes.
 //!
@@ -1374,6 +1376,8 @@ fn main() -> ExitCode {
 }
 
 fn check_identity(source: &str) -> Vec<Finding> {
+    use syn::spanned::Spanned;
+
     let mut out = Vec::new();
     let Ok(file) = syn::parse_file(source) else {
         return vec![Finding {
@@ -1384,8 +1388,15 @@ fn check_identity(source: &str) -> Vec<Finding> {
     check_crate_root(&file.attrs, &mut out);
     // Hash pins cover the implementation. Independently reject modules/imports
     // in any branch and accept only the one reviewed generated constant input.
-    fn scan(stream: TokenStream, out: &mut Vec<Finding>) {
+    fn scan(stream: TokenStream, generated_input: Option<Span>, out: &mut Vec<Finding>) {
         for token in stream {
+            // Only tokens of the reviewed top-level include are exempt. A
+            // matching include nested in a function or macro still fails.
+            if generated_input.is_some_and(|span| {
+                token.span().start() >= span.start() && token.span().end() <= span.end()
+            }) {
+                continue;
+            }
             match token {
                 TokenTree::Ident(i) if matches!(unraw(&i).as_str(), "mod" | "use" | "extern") => {
                     out.push(Finding {
@@ -1393,14 +1404,32 @@ fn check_identity(source: &str) -> Vec<Finding> {
                         reason: "identity must not declare modules or imports".into(),
                     });
                 }
-                TokenTree::Group(g) => scan(g.stream(), out),
+                TokenTree::Ident(i)
+                    if matches!(
+                        unraw(&i).as_str(),
+                        "include"
+                            | "include_str"
+                            | "include_bytes"
+                            | "env"
+                            | "option_env"
+                            | "macro_rules"
+                    ) =>
+                {
+                    out.push(Finding {
+                        line: line_of(i.span()),
+                        reason: format!(
+                            "identity forbidden token {} outside build_id include",
+                            unraw(&i)
+                        ),
+                    });
+                }
+                TokenTree::Group(g) => scan(g.stream(), None, out),
                 _ => {}
             }
         }
     }
-    let tokens = TokenStream::from_str(source).unwrap();
-    scan(tokens, &mut out);
     let mut includes = 0;
+    let mut generated_input = None;
     for item in &file.items {
         match item {
             syn::Item::Const(_) | syn::Item::Fn(_) => {}
@@ -1411,6 +1440,7 @@ fn check_identity(source: &str) -> Vec<Finding> {
                         == "concat ! (env ! (\"OUT_DIR\") , \"/build_id.rs\")" =>
             {
                 includes += 1;
+                generated_input = Some(item.span());
             }
             _ => out.push(Finding {
                 line: 1,
@@ -1419,11 +1449,14 @@ fn check_identity(source: &str) -> Vec<Finding> {
         }
     }
     if includes != 1 {
+        generated_input = None;
         out.push(Finding {
             line: 1,
             reason: "identity requires exactly one build_id include".into(),
         });
     }
+    let tokens = TokenStream::from_str(source).unwrap();
+    scan(tokens, generated_input, &mut out);
     out
 }
 

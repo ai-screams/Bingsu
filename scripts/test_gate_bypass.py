@@ -54,6 +54,15 @@ class BypassGates(unittest.TestCase):
         self.assert_rejected(self.run_gate("check_cli_prompt_forbid.py"),
                              "identity must not declare modules or imports")
 
+    # 이것을 실패시키는 것: 각 fixture의 금지 토큰 하나를 identity 검사에서 빼는 것.
+    def test_identity_inputs_after_hash_renewal(self):
+        for token in ["include", "include_str", "include_bytes", "env", "option_env",
+                      "macro_rules"]:
+            with self.subTest(token=token):
+                self.replace_tcb("crates/bingsu-identity/src/lib.rs", f"identity/{token}.rs")
+                self.assert_rejected(self.run_gate("check_cli_prompt_forbid.py"),
+                                     f"identity forbidden token {token} outside build_id include")
+
     # 이것을 실패시키는 것: RULES 소비·영역 검사를 제거하여 미끼 표를 허용하는 것.
     def test_k24_decoy_after_hash_renewal(self):
         self.replace_tcb("crates/bingsu/src/sandbox.rs", "k24/decoy.rs")
