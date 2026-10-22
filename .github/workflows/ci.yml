@@ -234,6 +234,7 @@ jobs:
         run: |
           set -o pipefail
           export BINGSU_BIN="$PWD/target/release/bingsu"
+          mkdir -p "$RUNNER_TEMP/m3b-traces"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py bench/tests/test_collector_product.py tools/fsbudget/tests -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/native" | tee "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]' "$RUNNER_TEMP/m3b-security.txt"
@@ -262,6 +263,7 @@ jobs:
           cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
           python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
           export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
+          mkdir -p "$RUNNER_TEMP/m3b-traces"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/musl" | tee "$RUNNER_TEMP/m3b-musl.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-musl.txt"
           for case in cpu nofile as exec ready-failure malformed; do
