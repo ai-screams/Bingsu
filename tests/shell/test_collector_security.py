@@ -12,6 +12,7 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools/fsbudget"))
 
 
 def real_bin():
@@ -52,7 +53,9 @@ def native_contract(preparation, group, name):
 
 
 # 이것을 실패시키는 것: 한도/exec 실패를 실제 공유 보호·감독·발행 경로에 연결하지 않는 것.
-@pytest.mark.parametrize("mode", ["cpu", "nofile"] + (["as", "exec"] if sys.platform == "linux" else []))
+@pytest.mark.parametrize("mode", ["cpu", "nofile", *(
+    pytest.param(mode, marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux resource filter"))
+    for mode in ("as", "exec"))])
 def test_security_table_resource_failures_preserve_front(preparation, tmp_path, mode):
     result = subprocess.run([preparation["fixture"], "--limit-" + mode], capture_output=True, timeout=30)
     if mode == "cpu":
@@ -122,6 +125,555 @@ def test_b2_lower_bound_is_replaced_by_product_filter_evidence(preparation, tmp_
     assert sample["m1_stub_exit_ns"] > 0 and sample["m1_stub_limits_ns"] > 0
 
 
+def workflow_job(text, job):
+    """Conservative structural subset, not a general YAML loader.
+
+    No YAML parser is hash-pinned in the test requirements. The gate accepts
+    only our block-mapping job/step layout, literal run blocks or quoted/plain
+    single-line runs. Duplicate keys, anchors, aliases, merges, folded scalars
+    and multiline conditions fail closed. actionlint validates the full YAML.
+    Comments and metadata can never supply executable evidence.
+    """
+    header = text.split("\njobs:\n", 1)[0]
+    assert not re.search(r"(?m)^defaults:", header), "workflow shell defaults"
+    assert not re.search(r"\b(?:BASH_ENV|SHELLOPTS)\b", header), "workflow shell startup env"
+    matches = re.findall(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [\w-]+:|\Z)", text)
+    assert len(matches) == 1, job
+    block, = matches
+    assert not re.search(r"(?m)^\s*(?:<<:|[^#\n]*: [*&])", block), "YAML indirection"
+
+    def fields(lines, indent):
+        result = {}
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip() or line.lstrip().startswith("#"):
+                i += 1
+                continue
+            match = re.fullmatch(r" {" + str(indent) + r"}([\w-]+):(?: (.*))?", line)
+            assert match, (job, "unsupported structural YAML", line)
+            key, value = match[1], match[2] or ""
+            assert key not in result, (job, "duplicate YAML key", key)
+            i += 1
+            nested = []
+            while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                nested.append(lines[i])
+                i += 1
+            if key == "run":
+                if value == "|":
+                    assert all(not v.strip() or v.startswith(" " * (indent + 2)) for v in nested)
+                    value = "\n".join(v[indent + 2:] for v in nested)
+                else:
+                    assert not nested or not any(v.strip() for v in nested)
+                    assert value and value[0] not in "|>&*!", (key, value)
+                    if value.startswith("'"):
+                        assert value.endswith("'")
+                        value = value[1:-1].replace("''", "'")
+                    elif value.startswith('"'):
+                        value = json.loads(value)
+            elif key == "if":
+                assert not any(v.strip() for v in nested) and value and value[0] not in "|>&*!", value
+            result[key] = (value, nested)
+        return result
+
+    split = block.split("    steps:\n")
+    assert len(split) == 2, (job, "steps")
+    meta = fields(split[0].splitlines(), 4)
+    chunks = re.split(r"(?m)^      - ", split[1])
+    assert not chunks[0].strip(), chunks[0]
+    steps = []
+    for chunk in chunks[1:]:
+        lines = chunk.splitlines()
+        lines[0] = "        " + lines[0]
+        parsed = fields(lines, 8)
+        assert_shell_settings(parsed)
+        steps.append({key: value for key, (value, _) in parsed.items()})
+    assert_shell_settings(meta)
+    return meta, steps
+
+
+def assert_shell_settings(fields):
+    # 이것을 실패시키는 것: shell/defaults/startup 환경으로 errexit 계약을 바꾸는 것.
+    assert "defaults" not in fields, "shell defaults override"
+    if "shell" in fields:
+        value, nested = fields["shell"]
+        assert not any(v.strip() for v in nested)
+        assert re.fullmatch(r"bash(?: --noprofile)?(?: --norc)? (?:-e|-e(?:u)?o pipefail) \{0\}", value), value
+    if "env" in fields:
+        value, nested = fields["env"]
+        assert not value, "inline env is unsupported"
+        assert not re.search(r"\b(?:BASH_ENV|SHELLOPTS)\b", "\n".join(nested)), "shell startup env"
+
+
+LINUX_SECURITY_STEPS = {
+    "Native collector kernel probes (required cells, no silent skip)",
+    "Collector policy mutations, including real seal and fd rules",
+    "Final filter refuses root limit and capability changes",
+    "Native musl collector probes (both architectures)",
+    "Independent gix 0.83.0 X-14 (locked, glibc and musl)",
+    "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
+    "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
+}
+MACOS_SECURITY_STEPS = {"Product imports and matching deployment pair", "Assert native macOS M3b security passes"}
+
+
+def security_steps(text):
+    meta, steps = workflow_job(text, "collector")
+    assert "continue-on-error" not in meta
+    assert meta["if"][0] == "needs.detect.outputs.rust == 'true'"
+    assert meta["needs"][0] == "detect"
+    matrix = "\n".join(meta["strategy"][1])
+    assert [line.strip() for line in matrix.splitlines() if line.strip() and not line.lstrip().startswith("#")] == [
+        "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]"]
+    required_names = LINUX_SECURITY_STEPS | MACOS_SECURITY_STEPS | {
+        "Prepare M3b compiler-free product fixtures", "M3b product security and measurements contracts"}
+    for name in required_names:
+        assert sum(step.get("name") == name for step in steps) == 1, ("required security step", name)
+    for step in steps:
+        if "run" not in step:
+            continue
+        name = step.get("name", "")
+        assert "continue-on-error" not in step, name
+        condition = ("runner.os == 'Linux'" if name in LINUX_SECURITY_STEPS else
+                     "runner.os == 'macOS'" if name in MACOS_SECURITY_STEPS else None)
+        assert step.get("if") == condition, (name, "skippable security step", step.get("if"))
+        assert_run_unconditional(step)
+    return steps
+
+
+def run_commands(step):
+    return [tokens for line in step.get("run", "").splitlines()
+            if (tokens := shlex.split(line, comments=True))]
+
+
+def assert_run_unconditional(step):
+    # 이것을 실패시키는 것: 옵션 해제·동적 실행·heredoc·성공 명령으로 grep 실패를 숨기는 것.
+    for command in run_commands(step):
+        assert command[0] not in {
+            "if", "for", "while", "until", "case", "exit", ":", "!", "true",
+            "trap", "exec", "return", "eval", "source", ".",
+        }, command
+        assert not any("<<" in token for token in command), command
+        assert not set(command) & {"||", "&&", ";"}, command
+        if command[0] == "set":
+            assert command in (["set", "-o", "pipefail"], ["set", "-euo", "pipefail"],
+                               ["set", "-eo", "pipefail"]), command
+        if command[0] == "grep":
+            # One literal pattern and one log only: no pipeline, redirection,
+            # command suffix or background operator may replace grep's status.
+            assert len(command) == 4 and command[1] in {"-F", "-Fx"}, command
+            assert not any(c in command[3] for c in ";&|<>`"), command
+
+
+def rust_cfg_holds(expression, platform):
+    """Fail closed outside the cfg predicates used by these native rows."""
+    tokens = re.findall(r'"[^"\n]*"|[A-Za-z_]\w*|[(),=]|\S', expression)
+    index = 0
+
+    def predicate():
+        nonlocal index
+        assert index < len(tokens), expression
+        key = tokens[index]
+        index += 1
+        if key in {"all", "any", "not"}:
+            assert tokens[index:index + 1] == ["("], expression
+            index += 1
+            values = []
+            while tokens[index:index + 1] != [")"]:
+                values.append(predicate())
+                if tokens[index:index + 1] != [","]:
+                    break
+                index += 1
+            assert tokens[index:index + 1] == [")"], expression
+            index += 1
+            if key == "not":
+                assert len(values) == 1, expression
+                return not values[0]
+            return all(values) if key == "all" else any(values)
+        if key == "target_os":
+            assert tokens[index:index + 1] == ["="], expression
+            index += 1
+            value = tokens[index]
+            index += 1
+            assert value in {'"linux"', '"macos"'}, expression
+            return value == '"' + platform + '"'
+        assert key in {"unix", "test"}, ("unsupported cfg", expression)
+        return True
+
+    result = predicate()
+    if tokens[index:] == [","]:
+        index += 1
+    assert index == len(tokens), expression
+    return result
+
+
+def ci_test_evidence(text):
+    steps = security_steps(text)
+    meta, probes = workflow_job(text, "collector-probes")
+    assert "if" not in meta and "continue-on-error" not in meta
+    for step in probes:
+        if "run" in step:
+            assert "if" not in step and "continue-on-error" not in step
+            assert_run_unconditional(step)
+    for job, entries in (("collector", steps), ("collector-probes", probes)):
+        for step in entries:
+            step["_job"] = job
+    return steps + probes
+
+
+def assert_acceptance_table(table, workflow, *, read=lambda name: (ROOT / name).read_text(), collected=None):
+    import ast
+    import csv
+    import io
+    rows = list(csv.DictReader(io.StringIO(table), delimiter="\t"))
+    assert rows and len({r["id"] for r in rows}) == len(rows)
+    assert {"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT"} <= {r["id"] for r in rows}
+    steps = ci_test_evidence(workflow)
+    commands = [(step, command) for step in steps for command in run_commands(step)]
+    for row in rows:
+        path, name = row["test"].split("::", 1)
+        source = read(path)
+        base = name.split("[", 1)[0]
+        if path.endswith(".py"):
+            found = [node for node in ast.walk(ast.parse(source))
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == base]
+            assert len(found) == 1, (row["id"], "test declaration", path, base)
+            if collected is not None:
+                nodes = [node for node in collected if node == row["test"] or
+                         ("[" not in name and node.startswith(row["test"] + "["))]
+                assert nodes and len(nodes) == len(set(nodes)), (row["id"], "pytest collection", row["test"])
+            evidence = []
+            for step, command in commands:
+                if command[:2] != ["grep", "-F"] or command[2:3] != ["PASSED " + row["test"]]:
+                    continue
+                log = command[3:]
+                # The corresponding pytest must produce this asserted log in
+                # the same matrix job, and actually select the file/directory.
+                for run_step, run in commands:
+                    if (run_step["_job"] != step["_job"] or run[1:3] != ["-m", "pytest"] or
+                            run[0] not in {"$RUNNER_TEMP/collector-tests/bin/python", "$RUNNER_TEMP/probe-tests/bin/python"} or
+                            "tee" not in run or run[run.index("tee") + 1:] != log):
+                        continue
+                    selected = run[run.index("pytest") + 1:run.index("|")]
+                    assert not any(token in {"-k", "-m"} or token.startswith(("--ignore", "--deselect")) for token in selected), (row["id"], "pytest selection filter")
+                    required_if = ("runner.os == 'Linux'" if row["platform"].startswith("Linux") else
+                                   "runner.os == 'macOS'" if row["platform"] == "macOS" else None)
+                    if any(entry.get("if") not in (None, required_if) for entry in (step, run_step)):
+                        continue
+                    if any(token in {path, row["test"]} or path.startswith(token.rstrip("/") + "/") for token in selected):
+                        evidence.append((step, run_step))
+            assert evidence, (row["id"], "no asserted CI pytest", row["test"])
+        else:
+            # Read the entire contiguous outer attribute group, irrespective
+            # of #[test]/#[ignore]/#[cfg] order, including multiline cfgs.
+            found = re.findall(r"((?:^[ \t]*#\[[^\]]*\](?:\s|//[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*)+)"
+                               r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(",
+                               source, re.M)
+            assert len(found) == 1, (row["id"], "test declaration", path, base)
+            attributes = re.findall(r"#\[([^\]]*)\]", found[0])
+            assert "test" in [a.strip() for a in attributes], (row["id"], "not a test")
+            platforms = ["linux"] if row["platform"].startswith("Linux") else (
+                ["macos"] if row["platform"] == "macOS" else ["linux", "macos"])
+            for attr in attributes:
+                assert not re.match(r"\s*cfg_attr\b", attr), (row["id"], "conditional attributes")
+                cfg = re.fullmatch(r"\s*cfg\s*\((.*)\)\s*", attr, re.S)
+                if cfg:
+                    assert all(rust_cfg_holds(cfg[1], platform) for platform in platforms), (row["id"], "disabled cfg", attr)
+            ignored = any(re.match(r"\s*ignore\b", attr) for attr in attributes)
+            # The pre-existing privileged root fixture is deliberately isolated.
+            # No other acceptance row may become ignored, in either order.
+            assert not ignored or (row["id"], path, base) == (
+                "SEC-ROOT", "crates/bingsu-collect/src/limits.rs", "root_cannot_restore_limits_or_capabilities"
+            ), (row["id"], "ignored test")
+            crate = path.split("/")[1]
+            # These paths are included by an explicit native test target.
+            target = {"crates/bingsu-collect/src/limits.rs": "startup",
+                      "crates/bingsu-collect/src/landlock.rs": "startup",
+                      "crates/bingsu-collect/tests/filter/runtime.rs": "filter",
+                      "crates/bingsu/src/prompt_read.rs": "collector_lifecycle"}.get(path, Path(path).stem)
+            target_path = f"crates/{crate}/tests/{target}.rs"
+            if path != target_path:
+                target_source = read(target_path)
+                if path.endswith("/runtime.rs"):
+                    assert "mod runtime;" in target_source
+                else:
+                    includes = re.findall(r'#\[path = "([^"\n]+)"\]', target_source)
+                    assert path in {str((ROOT / target_path).parent.joinpath(include).resolve().relative_to(ROOT)) for include in includes}, (row["id"], "target module inclusion")
+            runnable = [run for _, run in commands if run[:2] == ["cargo", "test"] and "--no-run" not in run
+                        and ["-p", crate] in [run[i:i+2] for i in range(len(run))]
+                        and ["--test", target] in [run[i:i+2] for i in range(len(run))]
+                        and not any(v in run for v in ("--skip", "--list", "--exact", "--ignored"))
+                        and ("--" not in run or all(v == "--nocapture" or v.startswith("--test-threads=") for v in run[run.index("--") + 1:run.index("|") if "|" in run else len(run)]))]
+            assert runnable, (row["id"], "no CI cargo target", crate, target)
+            module = {"crates/bingsu-collect/src/limits.rs": "limits::tests::",
+                      "crates/bingsu-collect/src/landlock.rs": "landlock::tests::",
+                      "crates/bingsu-collect/tests/filter/runtime.rs": "runtime::",
+                      "crates/bingsu/src/prompt_read.rs": "prompt_read::tests::"}.get(path, "")
+            label = "test " + module + base + " ... ok"
+            evidence = []
+            for step, grep in commands:
+                if grep[:3] != ["grep", "-F", label]:
+                    continue
+                for run_step, run in commands:
+                    if run_step["_job"] != step["_job"] or "tee" not in run or run[run.index("tee") + 1:] != grep[3:]:
+                        continue
+                    required_if = ("runner.os == 'Linux'" if row["platform"].startswith("Linux") else
+                                   "runner.os == 'macOS'" if row["platform"] == "macOS" else None)
+                    if any(entry.get("if") not in (None, required_if) for entry in (step, run_step)):
+                        continue
+                    if ignored:
+                        if not ("sudo" == run[0] and "$bin" in run and "--exact" in run and
+                                module + base in run and "--ignored" in run):
+                            continue
+                        # Tie the selected privileged binary to this cargo target.
+                        if not any("--no-run" in c and ["--test", target] in [c[i:i+2] for i in range(len(c))]
+                                   and ["-p", crate] in [c[i:i+2] for i in range(len(c))]
+                                   for c in run_commands(run_step)):
+                            continue
+                    elif run not in runnable:
+                        continue
+                    evidence.append((step, run_step))
+            assert evidence, (row["id"], "no asserted CI Rust pass", label)
+
+
+# 이것을 실패시키는 것: TSV의 오타·중복 선언·미수집 매개변수·CI에서 실행/단언하지 않는 행.
+def test_acceptance_table_tests_exist_and_run_in_ci():
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    files = sorted({line.split("\t")[3].split("::")[0] for line in table.splitlines()[1:] if ".py::" in line})
+    collected = []
+    # These historical test directories both expose a top-level conftest;
+    # isolate collection so their helpers cannot shadow each other.
+    for file in files:
+        result = subprocess.run([sys.executable, "-B", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", file],
+                                cwd=ROOT, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, (file, result.stdout, result.stderr)
+        collected.extend(result.stdout.splitlines())
+    assert_acceptance_table(table, (ROOT / ".github/workflows/ci.yml").read_text(), collected=collected)
+
+
+# 이것을 실패시키는 것: 빠진 선언·중복 선언 또는 주석뿐인 CI 단언을 수용하는 것.
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "uncollected", "not-run", "comment", "cargo-target", "cargo-filter", "removed-row", "module"])
+def test_acceptance_table_rejects_mutations(damage):
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    path = "bench/tests/test_collector_product.py"
+    name = "test_latency_measures_verification_spawn_ready_and_read_separately"
+    sources = {}
+    collected = None
+    if damage == "removed-row":
+        table = "\n".join(line for line in table.splitlines() if not line.startswith("SEC-FSIZE\t")) + "\n"
+    elif damage == "module":
+        target = "crates/bingsu-collect/tests/startup.rs"
+        sources[target] = (ROOT / target).read_text().replace('#[path = "../src/landlock.rs"]', '#[path = "../src/absent.rs"]')
+    elif damage == "cargo-filter":
+        workflow = workflow.replace("--test collector_lifecycle --test collection_store --bin bingsu -- --test-threads=2", "--test collector_lifecycle --test collection_store --bin bingsu -- --exact absent")
+    elif damage == "missing":
+        table = table.replace(name, "test_absent")
+    elif damage == "duplicate":
+        sources[path] = (ROOT / path).read_text() + f"\ndef {name}(): pass\n"
+    elif damage == "uncollected":
+        collected = []
+    elif damage == "cargo-target":
+        workflow = workflow.replace("--test collector_lifecycle", "--test absent")
+    elif damage == "not-run":
+        workflow = workflow.replace("bench/tests/test_collector_product.py ", "")
+    else:
+        workflow = workflow.replace("          grep -F 'PASSED " + path + "::" + name, "          # grep -F 'PASSED " + path + "::" + name)
+    with pytest.raises(AssertionError):
+        assert_acceptance_table(table, workflow, read=lambda p: sources.get(p, (ROOT / p).read_text()), collected=collected)
+
+
+# 이것을 실패시키는 것: #[test] 앞/뒤 ignore·플랫폼 불일치/거짓 cfg·조건부 ignore로 행을 없애는 것.
+@pytest.mark.parametrize("attribute", [
+    "#[ignore]", "#[ignore]\n/* attribute order must include comments */", '#[ignore = "hidden"]', "#[cfg(any())]", '#[cfg(target_os = "macos")]',
+    '#[cfg(all(unix, not(test)))]', '#[cfg(\n    any(),\n)]', '#[cfg_attr(test, ignore)]',
+])
+@pytest.mark.parametrize("before", [True, False], ids=["before-test", "after-test"])
+def test_acceptance_table_refuses_disabled_rust_attributes(attribute, before):
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    path = "crates/bingsu/tests/collector_lifecycle.rs"
+    source = (ROOT / path).read_text()
+    anchor = "#[test]\nfn early_exit_never_signals_recycled_pid"
+    replacement = (attribute + "\n#[test]" if before else "#[test]\n" + attribute)
+    changed = source.replace(anchor, replacement + "\nfn early_exit_never_signals_recycled_pid")
+    assert changed != source
+    with pytest.raises(AssertionError, match="SEC-PIDFD"):
+        assert_acceptance_table(table, workflow, read=lambda p: changed if p == path else (ROOT / p).read_text())
+
+
+# 이것을 실패시키는 것: row 플랫폼에서 참인 복합 cfg까지 거부하는 것.
+@pytest.mark.parametrize("attribute", ["#[cfg(all(unix, test))]", "#[cfg(not(any()))]",
+                                        '#[cfg(any(target_os = "linux", target_os = "macos"))]'])
+def test_acceptance_table_accepts_enabled_rust_attributes(attribute):
+    path = "crates/bingsu/tests/collector_lifecycle.rs"
+    source = (ROOT / path).read_text()
+    anchor = "#[test]\nfn early_exit_never_signals_recycled_pid"
+    changed = source.replace(anchor, attribute + "\n" + anchor)
+    assert changed != source
+    assert_acceptance_table((ROOT / "tests/collector-acceptance.tsv").read_text(),
+                            (ROOT / ".github/workflows/ci.yml").read_text(),
+                            read=lambda p: changed if p == path else (ROOT / p).read_text())
+
+
+# 이것을 실패시키는 것: Rust 행 하나의 ... ok 증거를 삭제/주석 처리하거나 다른 로그에서 가져오는 것.
+@pytest.mark.parametrize("row", [line.split("\t") for line in (ROOT / "tests/collector-acceptance.tsv").read_text().splitlines()[1:]
+                                 if ".rs::" in line], ids=lambda row: row[0])
+@pytest.mark.parametrize("damage", ["comment", "wrong-log"])
+def test_acceptance_table_requires_each_rust_pass(row, damage):
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    name = row[3].split("::", 1)[1]
+    lines = workflow.splitlines(True)
+    changed = []
+    count = 0
+    for line in lines:
+        if "grep -F 'test " in line and name + " ... ok'" in line:
+            count += 1
+            line = (line.replace("grep -F", "# grep -F") if damage == "comment" else
+                    re.sub(r'"\$RUNNER_TEMP/[^"\n]+"', '"$RUNNER_TEMP/absent.txt"', line))
+        changed.append(line)
+    assert count
+    with pytest.raises(AssertionError, match="no asserted CI Rust pass"):
+        assert_acceptance_table(table, "".join(changed))
+
+
+# 이것을 실패시키는 것: PERF-NORMAL의 PASS 하나 또는 괄호 없는 grep으로 누락된 매개변수를 숨기는 것.
+@pytest.mark.parametrize("parameter", ["degraded", "version", "field-count", "stderr", "exit"])
+@pytest.mark.parametrize("damage", ["comment", "unparameterized"])
+def test_acceptance_table_requires_each_normal_parameter(parameter, damage):
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    anchor = f"          grep -F 'PASSED bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[{parameter}]'"
+    assert anchor in workflow
+    replacement = anchor.replace("grep -F", "# grep -F") if damage == "comment" else anchor.replace(f"[{parameter}]", "")
+    with pytest.raises(AssertionError, match="PERF-NORMAL-" + parameter.upper()):
+        assert_acceptance_table(table, workflow.replace(anchor, replacement))
+
+
+# 이것을 실패시키는 것: 보안 단계 하나에 continue-on-error 또는 필수 행을 건너뛰는 if를 붙이는 것.
+@pytest.mark.parametrize("control", ["continue-on-error: true", "continue-on-error: false", "if: false"])
+def test_every_security_step_rejects_skip_controls(control):
+    saved = {name: (ROOT / ".github/workflows" / name).read_text()
+             for name in ("ci.yml", "shell.yml", "bench.yml")}
+    for job in ("collector", "collector-probes"):
+        _, steps = workflow_job(saved["ci.yml"], job)
+        job_text = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [\w-]+:|\Z)", saved["ci.yml"])[1]
+        blocks = re.findall(r"(?ms)^      - .*?(?=^      - |\Z)", job_text)
+        assert len(blocks) == len(steps)
+        for index, step in enumerate(steps):
+            if "run" not in step:
+                continue
+            block = blocks[index]
+            before, after = saved["ci.yml"].split(block, 1)
+            if control.startswith("if:") and "if" in step:
+                block = block.replace("if: " + step["if"], control, 1)
+            else:
+                lines = block.splitlines()
+                lines.insert(1, "        " + control)
+                block = "\n".join(lines) + "\n"
+            changed = dict(saved)
+            changed["ci.yml"] = before + block + after
+            with pytest.raises(AssertionError):
+                assert_ci_contract(changed)
+    assert saved["ci.yml"] == (ROOT / ".github/workflows/ci.yml").read_text()
+
+
+# 이것을 실패시키는 것: job 우회·중복 YAML 키·간접 참조·run 주석·셸 조건으로 단언을 숨기는 것.
+@pytest.mark.parametrize("damage", ["job-continue", "job-if", "duplicate-run", "alias", "folded-if",
+                                        "comment-assertions", "shell-if", "comment-basetemp", "matrix-exclude",
+                                        # 이것을 실패시키는 것: workflow 기본 셸·startup env와 inline env로 검사를 우회하는 것.
+                                        "workflow-defaults", "workflow-BASH_ENV", "workflow-SHELLOPTS", "inline-env",
+                                        # 이것을 실패시키는 것: step/job의 shell·defaults·BASH_ENV·SHELLOPTS 우회.
+                                        *[f"{job}-{scope}-{setting}" for job in ("collector", "collector-probes")
+                                          for scope in ("job", "step")
+                                          for setting in ("shell", "defaults", "BASH_ENV", "SHELLOPTS")],
+                                        # 이것을 실패시키는 것: set +e/옵션 해제, trap/exec/return/eval/source/. 실행 우회.
+                                        "set+e", "set+o", "set-args", "trap", "exec", "return", "eval", "source", "dot",
+                                        # 이것을 실패시키는 것: heredoc/here-string 속 grep과 후행 true/상태 대체 구문.
+                                        "heredoc", "here-string", "trailing-true", "grep-pipe", "grep-and", "grep-semicolon", "grep-background"])
+def test_ci_structural_mutations_are_refused(damage):
+    texts = {name: (ROOT / ".github/workflows" / name).read_text()
+             for name in ("ci.yml", "shell.yml", "bench.yml")}
+    saved = texts["ci.yml"]
+    anchor = '          grep -F \'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect\' "$RUNNER_TEMP/m3b-security.txt"\n'
+    shell_commands = {
+        "set+e": "set +e", "set+o": "set +o errexit", "set-args": "set -- ignored",
+        "trap": "trap 'exit 0' ERR", "exec": "exec true", "return": "return 0",
+        "eval": "eval 'set +e'", "source": "source /dev/null", "dot": ". /dev/null",
+    }
+    if damage.startswith("workflow-"):
+        setting = damage.removeprefix("workflow-")
+        value = ("defaults:\n  run:\n    shell: bash {0}\n" if setting == "defaults" else
+                 "env:\n  " + setting + ": /tmp/override\n")
+        changed = saved.replace("\njobs:\n", "\n" + value + "\njobs:\n", 1)
+    elif damage == "inline-env":
+        changed = saved.replace("        name: Assert native Linux M3b security passes\n",
+                                '        name: Assert native Linux M3b security passes\n        env: {BASH_ENV: /tmp/override}\n', 1)
+    elif damage.startswith(("collector-job-", "collector-step-", "collector-probes-")):
+        job, scope, setting = damage.rsplit("-", 2)
+        start = saved.index(f"  {job}:\n")
+        end_match = re.search(r"(?m)^  [\w-]+:", saved[start + len(f"  {job}:\n"):])
+        end = start + len(f"  {job}:\n") + end_match.start() if end_match else len(saved)
+        block = saved[start:end]
+        indent = "    " if scope == "job" else "        "
+        value = ({"shell": "shell: bash {0}\n", "defaults": "defaults:\n" + indent + "  run:\n" + indent + "    shell: bash {0}\n"}
+                 .get(setting, "env:\n" + indent + "  " + setting + ": /tmp/override\n"))
+        if scope == "job":
+            block = block.replace(f"  {job}:\n", f"  {job}:\n" + indent + value, 1)
+        else:
+            block = block.replace("        run:", indent + value + "        run:", 1)
+        changed = saved[:start] + block + saved[end:]
+    elif damage in shell_commands:
+        changed = saved.replace(anchor, "          " + shell_commands[damage] + "\n" + anchor, 1)
+    elif damage == "heredoc":
+        changed = saved.replace(anchor, "          cat > /dev/null <<'EOF'\n" + anchor + "          EOF\n", 1)
+    elif damage == "here-string":
+        changed = saved.replace(anchor, "          cat <<<ignored\n" + anchor, 1)
+    elif damage == "trailing-true":
+        changed = saved.replace(anchor, anchor + "          true\n", 1)
+    elif damage.startswith("grep-"):
+        suffix = {"grep-pipe": " | true", "grep-and": " && true", "grep-semicolon": ";true", "grep-background": " & true"}[damage]
+        changed = saved.replace(anchor, anchor.rstrip("\n") + suffix + "\n", 1)
+    elif damage == "job-continue":
+        changed = saved.replace("  collector:\n", "  collector:\n    continue-on-error: true\n")
+    elif damage == "job-if":
+        start = saved.index("  collector:\n")
+        changed = saved[:start] + saved[start:].replace("if: needs.detect.outputs.rust == 'true'", "if: false", 1)
+    elif damage == "duplicate-run":
+        changed = saved.replace("        run: python3 scripts/check_collector_filter.py\n", "        run: echo ignored\n        run: python3 scripts/check_collector_filter.py\n", 1)
+    elif damage == "alias":
+        changed = saved.replace("if: runner.os == 'Linux'", "if: *skip", 1)
+    elif damage == "folded-if":
+        changed = saved.replace("if: runner.os == 'Linux'", "if: >\n          false", 1)
+    elif damage == "matrix-exclude":
+        changed = saved.replace("        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]", "        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]\n        exclude: [{os: ubuntu-24.04-arm}]")
+    elif damage == "comment-assertions":
+        changed = re.sub(r"(?m)^(\s*)grep -F", r"\1# grep -F", saved)
+    elif damage == "comment-basetemp":
+        changed = saved.replace(' --basetemp="$RUNNER_TEMP/m3b-traces/native"', '')
+        changed += '\n# --basetemp="$RUNNER_TEMP/m3b-traces/native"\n'
+    else:
+        changed = saved.replace("          grep -F 'PASSED", "          if false; then\n            grep -F 'PASSED", 1)
+    assert changed != saved
+    texts["ci.yml"] = changed
+    with pytest.raises(AssertionError):
+        assert_ci_contract(texts)
+
+
+# 이것을 실패시키는 것: 허용한 errexit 셸과 옵션 추가만 하는 set까지 잘못 거부하는 것.
+@pytest.mark.parametrize("shell", ["bash -e {0}", "bash --noprofile --norc -eo pipefail {0}"])
+@pytest.mark.parametrize("options", ["set -o pipefail", "set -eo pipefail", "set -euo pipefail"])
+def test_ci_accepts_shells_and_options_that_keep_errexit(shell, options):
+    texts = {name: (ROOT / ".github/workflows" / name).read_text()
+             for name in ("ci.yml", "shell.yml", "bench.yml")}
+    anchor = "        name: Assert native Linux M3b security passes\n        run: |\n"
+    assert anchor in texts["ci.yml"]
+    texts["ci.yml"] = texts["ci.yml"].replace(anchor, "        name: Assert native Linux M3b security passes\n        shell: " + shell + "\n        run: |\n          " + options + "\n", 1)
+    assert_ci_contract(texts)
+    assert_acceptance_table((ROOT / "tests/collector-acceptance.tsv").read_text(), texts["ci.yml"])
+
+
 def assert_ci_contract(texts):
     required = {
         "ci.yml": ("ubuntu-24.04-arm", "macos-latest", "M3b native musl lifecycle security",
@@ -138,12 +690,18 @@ def assert_ci_contract(texts):
         "bench.yml": ("base_ref:", "--rounds 200", "--base base/target/release/bingsu", "--out candidate/target/m3b-product.json",
                       "if: always()", "if-no-files-found: error"),
     }
+    steps = ci_test_evidence(texts["ci.yml"])
+    executable = "\n".join(" ".join(command) for step in steps for command in run_commands(step))
     for file, tokens in required.items():
         for token in tokens:
-            assert token in texts[file], (file, token)
+            if file == "ci.yml" and token not in {"ubuntu-24.04-arm", "macos-latest", "M3b native musl lifecycle security", "X-14", "X-02", "X-32"}:
+                assert token in executable, (file, "run evidence", token)
+            else:
+                assert token in texts[file], (file, token)
+    assert any(step.get("name") == "M3b native musl lifecycle security" for step in steps)
     collector = re.search(r"(?ms)^  collector:\n(.*?)(?=^  [\w-]+:|\Z)", texts["ci.yml"])[1]
     for libc in ("native", "musl"):
-        assert f'--basetemp="$RUNNER_TEMP/m3b-traces/{libc}"' in collector
+        assert f'--basetemp=$RUNNER_TEMP/m3b-traces/{libc}' in executable
     artifact = collector.split("      - name: Preserve M3b raw security traces on failure\n")[1].split("      - name:")[0]
     for token in ("if: failure()", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
                   "name: m3b-security-traces-${{ matrix.os }}", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"):
@@ -205,22 +763,49 @@ def test_each_unprepared_shell_job_must_exclude_security(job):
         assert_ci_contract(texts)
 
 
-def assert_native_trace(lines, fixture, body_bytes):
-    sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+def assert_collector_roles(lines, fixture, collector=None, *, collector_debug_assertions=False):
     from fsbudget.attribute import collector_attribute
+    from fsbudget.classify import split_args
+    from fsbudget.formula import collector_success_expected
     from fsbudget.gate import check
+    from fsbudget.strace_parse import parse
     observed = collector_attribute(lines,
-                                   {"front": fixture, "helper": fixture, "collector": fixture,
-                                    "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": "--security-worker"}})
+                                   {"front": fixture, "helper": fixture, "collector": collector or fixture,
+                                    "verbs": {"front": "--trace", "helper": "--trace-helper", "collector": "__collect-v1" if collector else "--security-worker"}})
     print("collector CLOEXEC open pairs:", json.dumps(observed.cloexec_pairs))
     assert not observed.errors, observed.errors
-    # One descriptor contract: three F_GETFL, one regular lock stat/ACL;
-    # one fixed bootstrap statm open/read, one neutral-root cwd query.
-    want = {"collector": {"exec": 1, "fd_query": 3, "fstat": 1, "acl": 1,
-                           "cwd": 1, "openat": 1, "read": 1}}
+    calls = parse("\n".join(lines))
+    entry, = [c for c in calls if c.name == "execve" and
+              split_args(c.args)[:1] == [json.dumps(collector or fixture)] and
+              split_args(c.args)[1] == json.dumps([collector or fixture, "__collect-v1" if collector else "--security-worker"])]
+    worker = [c for c in calls if c.pid == entry.pid and c.index > entry.index]
+    landlock = any(c.name == "landlock_restrict_self" and c.ret == "0" for c in worker)
+    variant = "fixture" if collector is None else "shipped-debug" if collector_debug_assertions else "shipped-release"
+    want = {"collector": collector_success_expected(variant, landlock=landlock)}
     assert not check(observed.counts, want, "exact", ["collector"]), observed.counts
     assert {role for role in observed.counts} == {"front", "helper", "collector"}
 
+    # Each extra query has a reviewed owner and immediately precedes its close
+    # in this PID (other traced threads may interleave). Do not accept eight
+    # arbitrary queries merely because their aggregate matches the formula.
+    queries = [c for c in worker if c.name == "fcntl" and "F_GETFD" in c.args]
+    expected_fds = ([4] if landlock else []) + [4, 1, 3, 5] if variant == "shipped-debug" else []
+    assert [int(split_args(c.args)[0].split("<")[0]) for c in queries] == expected_fds
+    for query in queries:
+        following = worker[worker.index(query) + 1]
+        assert following.name == "close" and following.args == split_args(query.args)[0]
+        assert not query.ret.startswith("-1") and following.ret == "0"
+    if variant == "shipped-debug":
+        if landlock:
+            assert "<anon_inode:[landlock-ruleset]>" in queries[0].args
+        assert f"</proc/{entry.pid}/statm>" in queries[int(landlock)].args
+
+    return observed
+
+
+def assert_native_trace(lines, fixture, body_bytes):
+    from fsbudget.gate import check
+    observed = assert_collector_roles(lines, fixture)
     # Validate the actual publisher window against the phase formula, rather
     # than reasserting the formula's own constants in a Rust fixture.
     from collections import Counter
@@ -240,6 +825,65 @@ def assert_native_trace(lines, fixture, body_bytes):
     return observed
 
 
+def recorded_success_trace(worker):
+    directory = ROOT / "tools/fsbudget/tests/fixtures"
+    lines = (directory / f"m3b-bookworm-aarch64-{worker}-fd-queries.strace").read_text().splitlines()
+    fixture = "/home/tester/target/debug/collector-product-fixture/collector-product"
+    shipped = "/home/tester/target/debug/bingsu-collect" if worker == "shipped-debug" else None
+    return lines, fixture, shipped
+
+
+# 실제 Bookworm/aarch64 발췌: -O fixture 3회, 출하 debug 3+5회.
+@pytest.mark.parametrize("worker,queries", [("fixture", 3), ("shipped-debug", 8)])
+def test_recorded_success_trace_fd_queries(worker, queries):
+    lines, fixture, shipped = recorded_success_trace(worker)
+    got = assert_collector_roles(lines, fixture, shipped, collector_debug_assertions=bool(shipped))
+    assert got.errors == [] and got.counts["collector"]["fd_query"] == queries
+
+
+# 각 OwnedFd의 검사 누락/중복 및 같은 합계의 엉뚱한 조회를 개별적으로 거부한다.
+@pytest.mark.parametrize("query", range(5), ids=["ruleset", "statm", "result", "request", "lock"])
+@pytest.mark.parametrize("damage", ["removed", "duplicate", "wrong-command", "before-close"])
+def test_shipped_fd_drop_checks_are_exact(query, damage):
+    lines, fixture, shipped = recorded_success_trace("shipped-debug")
+    indices = [i for i, line in enumerate(lines) if " F_GETFD" in line]
+    index = indices[query]
+    group = [index]
+    if "<unfinished ...>" in lines[index]:
+        group.append(next(i for i in range(index + 1, len(lines)) if "<... fcntl resumed>" in lines[i]))
+    changed = lines.copy()
+    if damage == "removed":
+        changed = [line for i, line in enumerate(changed) if i not in group]
+    elif damage == "duplicate":
+        changed[group[-1] + 1:group[-1] + 1] = [lines[i] for i in group]
+    elif damage == "wrong-command":
+        changed[index] = changed[index].replace("F_GETFD", "F_GETFL")
+    else:
+        # Preserve the exact aggregate and fd identity, but break the reviewed
+        # query/close adjacency in the collector's own syscall sequence.
+        changed.insert(group[-1] + 1, "2783 getpid() = 2783")
+    with pytest.raises(AssertionError):
+        assert_collector_roles(changed, fixture, shipped, collector_debug_assertions=True)
+
+
+# fsbudget conftest나 선행 테스트 없이 이 모듈만 읽어도 import가 성공해야 한다.
+def test_native_trace_import_is_independent():
+    code = """
+import importlib.util
+spec = importlib.util.spec_from_file_location('security', 'tests/shell/test_collector_security.py')
+security = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(security)
+try:
+    security.assert_native_trace([], '/fixture', 0)
+except AssertionError:
+    pass
+else:
+    raise AssertionError('empty trace was accepted')
+"""
+    result = subprocess.run([sys.executable, "-B", "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
 # 이것을 실패시키는 것: 실제 TEST_MASK worker의 파일 쓰기/자식/소켓 효과 또는 역할 누락을 놓치는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux native strace product filter")
 def test_native_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
@@ -255,6 +899,65 @@ def test_native_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
     assert json.loads(result.stdout.splitlines()[-1])["published"], result.stdout
     response, = (scratch / "runtime").rglob("response")
     assert_native_trace(trace.read_text().splitlines(), fixture, response.stat().st_size - 64)
+
+
+# 이것을 실패시키는 것: 출하 실행 파일 대신 fixture를 부르거나 빈 제품 요청을 완료하지 못하는 것.
+def test_shipped_collector_empty_request_completes(preparation, tmp_path):
+    result = product.run([preparation["fixture"], "--helper-case", tmp_path, "--shipped-worker"],
+                         env={**os.environ, "TMPDIR": str(tmp_path)})
+    report = json.loads(result.stdout.splitlines()[-1])
+    # PRODUCT has no workers in M3b: Ready -> empty Request -> Complete is a
+    # successful exchange, with no Update or response to publish.
+    assert report == {"reason": "Complete", "published": False, "reaped": True, "partial_values": 0, "probe": ""}
+
+
+# 이것을 실패시키는 것: 성공 trace가 fixture만 실행하거나 출하 collector의 금지 효과를 놓치는 것.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux native strace shipped collector")
+def test_shipped_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
+    import shutil
+    strace = shutil.which("strace")
+    assert strace, "the native Linux gate requires strace"
+    trace = tmp_path / "shipped-collector.trace"
+    scratch = tmp_path / "shipped-store"
+    scratch.mkdir(mode=0o700)
+    fixture = preparation["fixture"]
+    shipped = str(real_bin().with_name("bingsu-collect"))
+    result = product.run([strace, "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", trace,
+                          fixture, "--trace", scratch, "--shipped-worker"],
+                         env={**os.environ, "TMPDIR": str(scratch)})
+    report = json.loads(result.stdout.splitlines()[-1])
+    assert report["reason"] == "Complete" and not report["published"] and report["reaped"], report
+    assert_collector_roles(trace.read_text().splitlines(), fixture, shipped,
+                           collector_debug_assertions=preparation["collector_debug_assertions"])
+
+
+# 이것을 실패시키는 것: 출하 경로 pin 대신 fixture exec를 수용하거나 쓰기 효과를 허용하는 것.
+@pytest.mark.parametrize("damage", ["fixture-exec", "write"])
+def test_shipped_trace_gate_rejects_mutations(damage):
+    lines = [
+        '10 execve("/fixture", ["/fixture", "--trace"], 0x0) = 0',
+        '10 clone(flags=SIGCHLD) = 11',
+        '11 execve("/fixture", ["/fixture", "--trace-helper"], 0x0) = 0',
+        '11 clone(flags=SIGCHLD) = 12',
+        '12 execve("/shipped/bingsu-collect", ["/shipped/bingsu-collect", "__collect-v1"], 0x0) = 0',
+        '12 seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=12}) = 0',
+        '12 fcntl(3, F_GETFL) = 0', '12 fcntl(1, F_GETFL) = 0', '12 fcntl(5, F_GETFL) = 0',
+        '12 newfstatat(5, "", {st_mode=S_IFREG|0600}, AT_EMPTY_PATH) = 0',
+        '12 fgetxattr(5, "system.posix_acl_access", 0x0, 132) = -1 ENODATA',
+        '12 getcwd("/", 512) = 2',
+        '12 openat(AT_FDCWD, "/proc/self/statm", O_RDONLY|O_CLOEXEC) = 4</proc/12/statm>',
+        '12 read(4</proc/12/statm>, "100 10", 128) = 6',
+    ]
+    assert_collector_roles(lines, "/fixture", "/shipped/bingsu-collect")
+    saved = lines.copy()
+    if damage == "fixture-exec":
+        lines[4] = lines[4].replace("/shipped/bingsu-collect", "/fixture")
+    else:
+        lines.append('12 openat(AT_FDCWD, "/repo/escape", O_WRONLY|O_CREAT, 0600) = 6</repo/escape>')
+    with pytest.raises(AssertionError):
+        assert_collector_roles(lines, "/fixture", "/shipped/bingsu-collect")
+    lines[:] = saved
+    assert_collector_roles(lines, "/fixture", "/shipped/bingsu-collect")
 
 
 # 이것을 실패시키는 것: 출하 execute()에서 base/AS 보호를 빼도 fixture만 검사하여 통과시키는 것.
