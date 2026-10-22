@@ -1,0 +1,54 @@
+2780  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_shipped_collector_trace_h0/shipped-store", "--shipped-worker"], 0xfffffb047f70 /* 22 vars */) = 0
+2780  clone(child_stack=0xec77e1240000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2781  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_shipped_collector_trace_h0/shipped-store", "--shipped-worker"], 0xb388b1cb7160 /* 0 vars */ <unfinished ...>
+2780  <... clone resumed>)              = 2781
+2781  <... execve resumed>)             = 0
+2781  clone(child_stack=0xeb13fbb6a000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2783  execve("/home/tester/target/debug/bingsu-collect", ["/home/tester/target/debug/bingsu-collect", "__collect-v1"], 0xc6c1e8e1b418 /* 0 vars */ <unfinished ...>
+2781  <... clone resumed>)              = 2783
+2783  <... execve resumed>)             = 0
+2783  fcntl(1<pipe:[601543]>, F_GETFL <unfinished ...>
+2783  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+2783  fcntl(3<pipe:[601544]>, F_GETFL <unfinished ...>
+2783  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2783  fcntl(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+2783  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+2783  newfstatat(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+2783  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2783  fgetxattr(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+2783  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+2783  getcwd( <unfinished ...>
+2783  <... getcwd resumed>"/", 512)     = 2
+2783  landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION <unfinished ...>
+2783  <... landlock_create_ruleset resumed>) = 4
+2783  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_REMOVE_DIR|LANDLOCK_ACCESS_FS_REMOVE_FILE|LANDLOCK_ACCESS_FS_MAKE_CHAR|LANDLOCK_ACCESS_FS_MAKE_DIR|LANDLOCK_ACCESS_FS_MAKE_REG|LANDLOCK_ACCESS_FS_MAKE_SOCK|LANDLOCK_ACCESS_FS_MAKE_FIFO|LANDLOCK_ACCESS_FS_MAKE_BLOCK|LANDLOCK_ACCESS_FS_MAKE_SYM|LANDLOCK_ACCESS_FS_REFER|0x4000}, 8, 0 <unfinished ...>
+2783  <... landlock_create_ruleset resumed>) = 4<anon_inode:[landlock-ruleset]>
+2783  landlock_restrict_self(4<anon_inode:[landlock-ruleset]>, 0 <unfinished ...>
+2783  <... landlock_restrict_self resumed>) = 0
+2783  fcntl(4<anon_inode:[landlock-ruleset]>, F_GETFD <unfinished ...>
+2783  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
+2783  close(4<anon_inode:[landlock-ruleset]> <unfinished ...>
+2783  <... close resumed>)              = 0
+2783  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=284, filter=0xb6715ea0d570} <unfinished ...>
+2783  <... seccomp resumed>)            = 0
+2783  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+2783  <... openat resumed>)             = 4</proc/2783/statm>
+2783  read(4</proc/2783/statm>,  <unfinished ...>
+2783  <... read resumed>"736 501 435 129 0 93 0\n", 256) = 23
+2783  fcntl(4</proc/2783/statm>, F_GETFD <unfinished ...>
+2783  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
+2783  close(4</proc/2783/statm> <unfinished ...>
+2783  <... close resumed>)              = 0
+2783  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=260, filter=0xb6715ea0dae0} <unfinished ...>
+2783  <... seccomp resumed>)            = 0
+2783  fcntl(1<pipe:[601543]>, F_GETFD)  = 0
+2783  close(1<pipe:[601543]> <unfinished ...>
+2783  <... close resumed>)              = 0
+2783  fcntl(3<pipe:[601544]>, F_GETFD <unfinished ...>
+2783  <... fcntl resumed>)              = 0
+2783  close(3<pipe:[601544]> <unfinished ...>
+2783  <... close resumed>)              = 0
+2783  fcntl(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFD <unfinished ...>
+2783  <... fcntl resumed>)              = 0
+2783  close(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock> <unfinished ...>
+2783  <... close resumed>)              = 0

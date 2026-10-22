@@ -116,19 +116,65 @@ def test_product_budgets_cover_success_failure_and_gc():
     assert collector_product_expected("legacy-gc", gc_directories=2, gc_files=1)["helper-gc"] == {"getdents": 4, "unlinkat": 1, "fsync": 0}
 
 
-# 이것을 실패시키는 것: 실행 파일 교체 뒤 과거 fixture/측정을 다시 수용하는 것.
-@pytest.mark.parametrize("changed", ["front", "collector", "fixture"])
-def test_prepared_pair_hashes_are_exact(tmp_path, changed):
-    front, collector, fixture = (tmp_path / name for name in ("bingsu", "bingsu-collect", "fixture"))
-    for path in (front, collector, fixture):
+def fake_preparation(tmp_path, monkeypatch):
+    paths = {key: tmp_path / name for key, name in
+             (("front", "bingsu"), ("collector", "bingsu-collect"), ("fixture", "fixture"), ("stub", "m1-collect-stub"))}
+    for path in paths.values():
         path.write_bytes(b"original")
-    manifest = {"fixture": str(fixture), "hashes": {key: product.digest(path) for key, path in
-                 (("front", front), ("collector", collector), ("fixture", fixture))}}
-    product.manifest_path(front).write_text(json.dumps(manifest))
-    assert product.prepared(front) == manifest
-    {"front": front, "collector": collector, "fixture": fixture}[changed].write_bytes(b"mutated")
-    with pytest.raises(ValueError, match="stale"):
-        product.prepared(front)
+    for name in ("Cargo.toml", "Cargo.lock", "bench/collector-product.py",
+                 *(f"crates/{crate}/Cargo.toml" for crate in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench")),
+                 "crates/bingsu/src/commands/collector_supervisor.rs"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"original source")
+    monkeypatch.setattr(product, "ROOT", tmp_path)
+    manifest = {"fixture": str(paths["fixture"]), "stub": str(paths["stub"]),
+                "hashes": {key: product.digest(path) for key, path in paths.items()},
+                "source_hashes": product.preparation_sources(tmp_path)}
+    product.manifest_path(paths["front"]).write_text(json.dumps(manifest))
+    return paths, manifest
+
+
+# 이것을 실패시키는 것: M1 stub을 포함한 실행 파일 교체 뒤 과거 준비를 다시 수용하는 것.
+@pytest.mark.parametrize("changed", ["front", "collector", "fixture", "stub"])
+def test_prepared_pair_hashes_are_exact(tmp_path, monkeypatch, changed):
+    paths, manifest = fake_preparation(tmp_path, monkeypatch)
+    assert product.prepared(paths["front"]) == manifest
+    saved = paths[changed].read_bytes()
+    try:
+        paths[changed].write_bytes(b"mutated")
+        with pytest.raises(ValueError, match="stale"):
+            product.prepared(paths["front"])
+    finally:
+        paths[changed].write_bytes(saved)
+    assert product.prepared(paths["front"]) == manifest
+
+
+# 이것을 실패시키는 것: prepare 뒤 소스 변경·추가·삭제 또는 해시 목록 누락을 검증하지 않는 것.
+@pytest.mark.parametrize("changed", ["modified", "added", "deleted", "missing-hashes"])
+def test_prepared_source_hashes_are_checked_at_use(tmp_path, monkeypatch, changed):
+    paths, manifest = fake_preparation(tmp_path, monkeypatch)
+    source = tmp_path / "crates/bingsu/src/commands/collector_supervisor.rs"
+    saved = source.read_bytes()
+    extra = source.with_name("new.rs")
+    try:
+        if changed == "modified":
+            source.write_bytes(b"changed after prepare")
+        elif changed == "added":
+            extra.write_bytes(b"new source")
+        elif changed == "deleted":
+            source.unlink()
+        else:
+            broken = deepcopy(manifest)
+            broken.pop("source_hashes")
+            product.manifest_path(paths["front"]).write_text(json.dumps(broken))
+        with pytest.raises((ValueError, OSError), match="stale|No such file"):
+            product.prepared(paths["front"])
+    finally:
+        source.write_bytes(saved)
+        extra.unlink(missing_ok=True)
+        product.manifest_path(paths["front"]).write_text(json.dumps(manifest))
+    assert product.prepared(paths["front"]) == manifest
 
 
 @pytest.fixture(scope="module")
@@ -142,17 +188,15 @@ def security_tests():
 
 # 이것을 실패시키는 것: 재빌드 뒤 오래된 준비를 증거로 인정하거나 CI에서 skip하는 것.
 @pytest.mark.parametrize("ci", [False, True])
-@pytest.mark.parametrize("changed", ["missing", "front", "collector", "fixture"])
+@pytest.mark.parametrize("changed", ["missing", "front", "collector", "fixture", "stub", "source"])
 def test_security_preparation_missing_or_stale_is_explicit(security_tests, monkeypatch, tmp_path, ci, changed):
-    paths = {key: tmp_path / name for key, name in
-             (("front", "bingsu"), ("collector", "bingsu-collect"), ("fixture", "fixture"))}
-    for path in paths.values():
-        path.write_bytes(b"original")
-    if changed != "missing":
-        product.manifest_path(paths["front"]).write_text(json.dumps({
-            "fixture": str(paths["fixture"]),
-            "hashes": {key: product.digest(path) for key, path in paths.items()},
-        }))
+    paths, _ = fake_preparation(tmp_path, monkeypatch)
+    monkeypatch.setattr(security_tests.product, "ROOT", tmp_path)
+    if changed == "missing":
+        product.manifest_path(paths["front"]).unlink()
+    elif changed == "source":
+        (tmp_path / "crates/bingsu/src/commands/collector_supervisor.rs").write_bytes(b"changed")
+    else:
         paths[changed].write_bytes(b"rebuilt")
     monkeypatch.setattr(security_tests, "real_bin", lambda: paths["front"])
     if ci:
@@ -163,7 +207,7 @@ def test_security_preparation_missing_or_stale_is_explicit(security_tests, monke
     with pytest.raises(outcome) as caught:
         security_tests.preparation.__wrapped__()
     message = str(caught.value)
-    assert ("manifest missing" if changed == "missing" else f"stale or missing prepared {changed}") in message
+    assert ("manifest missing" if changed == "missing" else "stale prepared source_hashes" if changed == "source" else f"stale or missing prepared {changed}") in message
     assert f"--prepare {paths['front']}" in message
     assert "After the last binary build" in message
 

@@ -65,6 +65,17 @@ def manifest_path(binary):
     return Path(binary).resolve().with_name("collector-product.json")
 
 
+def preparation_sources(source):
+    # Bind the copied command modules, reader, native contracts, worker and M1
+    # stub as well as the generator and build inputs. Membership is checked too.
+    files = [source / name for name in ("Cargo.toml", "Cargo.lock", "bench/collector-product.py")]
+    for crate in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench"):
+        directory = source / "crates" / crate
+        files.append(directory / "Cargo.toml")
+        files.extend(directory.rglob("*.rs"))
+    return {str(p.relative_to(source)): digest(p) for p in sorted(files)}
+
+
 def prepared(binary):
     binary = Path(binary).resolve()
     path = manifest_path(binary)
@@ -72,9 +83,12 @@ def prepared(binary):
         raise ValueError("host preparation manifest missing; run --prepare for this sibling pair")
     result = json.loads(path.read_text())
     for key, file in (("front", binary), ("collector", binary.with_name("bingsu-collect")),
-                      ("fixture", Path(result["fixture"]))):
+                      ("fixture", Path(result["fixture"])), ("stub", Path(result["stub"]))):
         if not file.is_file() or result["hashes"][key] != digest(file):
             raise ValueError(f"stale or missing prepared {key}")
+    source = next((p for p in binary.parents if (p / "Cargo.toml").is_file()), ROOT)
+    if not result.get("source_hashes") or result["source_hashes"] != preparation_sources(source):
+        raise ValueError("stale prepared source_hashes; run --prepare after the last source change")
     return result
 
 
@@ -338,15 +352,21 @@ fn helper(base:&Path,mode:&str) {
        // measured interval; only the executable/catalog used for collection is
        // test-only. Product mask0 correctly skips this entire branch.
        let pin=commands::collector::PinnedCollector::verify(OsStr::new(PRODUCT_COLLECTOR),commands::sys::current_uid(),&mut groups)?;
-       let mut store=CollectionStore::fixture(context,&selected.binding,clock,&SEGMENTS,None)?;
+       let shipped=mode=="--shipped-worker";
+       if shipped {selected.binding.build_id=build_id();selected.binding.mask=0;}
+       let segments=if shipped {collection::selection::PRODUCT.segments}else{&SEGMENTS};
+       let mut store=CollectionStore::fixture(context,&selected.binding,clock,segments,None)?;
        let lock=store.worker_lock()?;
        let _=pin.executable()?;
-       let job=verification.attach(CollectorJob::fixture(std::env::current_exe()?.as_os_str(),OsStr::new(mode),selected,lock,&watchdog,&SEGMENTS)?,&store);
+       let executable=if shipped {std::path::PathBuf::from(PRODUCT_COLLECTOR)}else{std::env::current_exe()?};
+       let verb=if shipped {"__collect-v1"}else{mode};
+       let job=verification.attach(CollectorJob::fixture(executable.as_os_str(),OsStr::new(verb),selected,lock,&watchdog,segments)?,&store);
        let observed=observed.clone();
        let observed_probe=observed_probe.clone();
        let trace_publication=mode=="--security-worker";
        let failure_case=mode!="--worker";
        handle=Some(job.start(Box::new(move |value| {
+          if shipped {return store.publish(&value);}
           let text=value.updates[0].value.as_ref().unwrap().text();
           if trace_publication {
              let begin=b"D2-PUBLICATION-BEGIN\n";
@@ -559,6 +579,8 @@ def prepare(binary):
     if triple.endswith(("-linux-musl", "-linux-gnu")):
         build += ["--target", triple]
     artifacts = [json.loads(line) for line in run(build, cwd=source, timeout=120).stdout.splitlines()]
+    collector_artifact, = [a for a in artifacts if a.get("reason") == "compiler-artifact"
+                          and a["target"]["name"] == "bingsu-collect" and a.get("executable")]
     deps = {}
     for a in artifacts:
         if a.get("reason") == "compiler-artifact":
@@ -647,16 +669,15 @@ def prepare(binary):
         stub_build += ["--target", triple]
     run(stub_build, cwd=source, timeout=120)
     policy = json.loads(run([fixture, "--policy"]).stdout)
-    result = {"fixture": str(fixture), "stub": str(binary.with_name("m1-collect-stub")), "hashes": {"front": digest(binary), "collector": digest(binary.with_name("bingsu-collect")), "fixture": digest(fixture)},
+    result = {"fixture": str(fixture), "stub": str(binary.with_name("m1-collect-stub")),
+              "collector_debug_assertions": collector_artifact["profile"]["debug_assertions"],
+              "hashes": {"front": digest(binary), "collector": digest(binary.with_name("bingsu-collect")), "fixture": digest(fixture), "stub": digest(binary.with_name("m1-collect-stub"))},
               "sibling_build_id": sibling_id.hex(), "compiler": run(["rustc", "-vV"]).stdout.decode(), "stripped_bytes": sizes, "policy": {"table_sha256": digest(table), "product_mask": 0,
                "fixture_mask": 1 << 31, "formal": False, "product_target": triple if triple.endswith(("-linux-musl", "-linux-gnu")) else next(line.split(": ",1)[1] for line in run(["rustc", "-vV"]).stdout.decode().splitlines() if line.startswith("host: ")), **policy,
                "filter_kind": "seccomp-bootstrap+final+Landlock" if platform.system() == "Linux" else "absent",
                "as_baseline_kind": "virtual address space" if platform.system() == "Linux" else "sampled footprint",
                "diagnostic_only_worker_reads": ["/proc/self/status"] if platform.system() == "Linux" else ["getrusage", "task_info"]}}
-    result["source_hashes"] = {str(p.relative_to(source)): digest(p) for p in
-                               (source / "crates/bingsu/src/commands").glob("collector*.rs")}
-    result["source_hashes"].update({str(p.relative_to(source)): digest(p) for p in
-                                  (source / "crates/bingsu-collect/src").glob("*.rs")})
+    result["source_hashes"] = preparation_sources(source)
     result["contracts"] = prepare_contracts(source, directory, command, env)
     result["contract_hashes"] = {name: digest(path) for name, path in result["contracts"].items()}
     manifest_path(binary).write_text(json.dumps(result, indent=2) + "\n")

@@ -1,0 +1,41 @@
+2772  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_native_collector_trace_ha0/trace-store"], 0xffffeea22758 /* 22 vars */) = 0
+2772  clone(child_stack=0xe2458959c000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2773  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_native_collector_trace_ha0/trace-store", "--security-worker"], 0xb3d6ec21f0d0 /* 0 vars */ <unfinished ...>
+2772  <... clone resumed>)              = 2773
+2773  <... execve resumed>)             = 0
+2773  clone(child_stack=0xef379b92a000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+2775  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--security-worker"], 0xbaac2fe8b418 /* 0 vars */ <unfinished ...>
+2773  <... clone resumed>)              = 2775
+2775  <... execve resumed>)             = 0
+2775  fcntl(1<pipe:[601435]>, F_GETFL)  = 0x1 (flags O_WRONLY)
+2775  fcntl(3<pipe:[601436]>, F_GETFL <unfinished ...>
+2775  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+2775  fcntl(5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+2775  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+2775  newfstatat(5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+2775  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2775  fgetxattr(5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+2775  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+2775  getcwd( <unfinished ...>
+2775  <... getcwd resumed>"/", 512)     = 2
+2775  landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION <unfinished ...>
+2775  <... landlock_create_ruleset resumed>) = 4
+2775  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_REMOVE_DIR|LANDLOCK_ACCESS_FS_REMOVE_FILE|LANDLOCK_ACCESS_FS_MAKE_CHAR|LANDLOCK_ACCESS_FS_MAKE_DIR|LANDLOCK_ACCESS_FS_MAKE_REG|LANDLOCK_ACCESS_FS_MAKE_SOCK|LANDLOCK_ACCESS_FS_MAKE_FIFO|LANDLOCK_ACCESS_FS_MAKE_BLOCK|LANDLOCK_ACCESS_FS_MAKE_SYM|LANDLOCK_ACCESS_FS_REFER|0x4000}, 8, 0 <unfinished ...>
+2775  <... landlock_create_ruleset resumed>) = 4<anon_inode:[landlock-ruleset]>
+2775  landlock_restrict_self(4<anon_inode:[landlock-ruleset]>, 0) = 0
+2775  close(4<anon_inode:[landlock-ruleset]> <unfinished ...>
+2775  <... close resumed>)              = 0
+2775  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=284, filter=0xb22ddb526610} <unfinished ...>
+2775  <... seccomp resumed>)            = 0
+2775  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+2775  <... openat resumed>)             = 4</proc/2775/statm>
+2775  read(4</proc/2775/statm>, "1444 677 599 809 0 93 0\n", 256) = 24
+2775  close(4</proc/2775/statm> <unfinished ...>
+2775  <... close resumed>)              = 0
+2775  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=260, filter=0xb22ddb526b80} <unfinished ...>
+2775  <... seccomp resumed>)            = 0
+2775  close(1<pipe:[601435]> <unfinished ...>
+2775  <... close resumed>)              = 0
+2775  close(3<pipe:[601436]>)           = 0
+2775  close(5</home/tester/pt/test_native_collector_trace_ha0/trace-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f6e61746976655f636f6c6c6563746f725f74726163655f6861302f74726163652d73746f72652f/7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock> <unfinished ...>
+2775  <... close resumed>)              = 0

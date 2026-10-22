@@ -5,6 +5,20 @@ caller-provided coefficients (all 1 for the synthetic program)."""
 from dataclasses import dataclass, field
 
 
+def collector_success_expected(worker: str, *, landlock: bool = False) -> dict[str, int]:
+    """Exact Linux success budgets, with a separate shipped debug entry.
+
+    The -O fixture and shipped release have three access-mode queries. Rust's
+    OwnedFd drop checks in the shipped debug build add F_GETFD for statm and
+    WorkerFds' result/request/lock, plus the ruleset when Landlock is installed.
+    Build configuration selects the entry; measured fd_query never selects it.
+    """
+    queries = {"fixture": 3, "shipped-release": 3,
+               "shipped-debug": 7 + int(landlock)}[worker]
+    return {"exec": 1, "fd_query": queries, "fstat": 1, "acl": 1,
+            "cwd": 1, "openat": 1, "read": 1}
+
+
 def ceil_div(a: int, b: int) -> int:
     return -(-a // b)
 

@@ -1506,6 +1506,94 @@ fn supervisor_publishes_complete_and_partial_results() {
     }
 }
 
+// 이것을 실패시키는 것: 호출되지 않은 publisher가 store 잠금을 가진 채 lock_closed를 먼저 찍는 것.
+#[test]
+fn lock_clock_includes_store_close_without_publication() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    struct PublisherStore {
+        store: Option<CollectionStore>,
+        closed: Arc<AtomicU64>,
+    }
+    impl PublisherStore {
+        fn publish(
+            &mut self,
+            result: &Completed,
+        ) -> Result<(), commands::snapshot_store::StoreError> {
+            self.store.as_mut().unwrap().publish(result)
+        }
+    }
+    impl Drop for PublisherStore {
+        fn drop(&mut self) {
+            drop(self.store.take());
+            self.closed.store(
+                commands::collector_process::now_ns().unwrap(),
+                Ordering::Release,
+            );
+        }
+    }
+    for confined in [true, false] {
+        let f = Fixture::new(if confined {
+            "clock-publish"
+        } else {
+            "clock-no-publish"
+        });
+        let store = f.acquire().unwrap();
+        let acquired = store.lock_acquired;
+        let renamed = store.response_renamed.clone();
+        let request = bingsu_core::collection::request(
+            &bingsu_core::collection::selection::Catalog {
+                segments: &SCHEMA,
+                workers: 1 << 31,
+            },
+            f.binding.clone(),
+            M3B_REQUEST_ID,
+            50,
+        )
+        .unwrap()
+        .unwrap();
+        let watchdog = commands::helper_limits::start(std::time::Instant::now()).unwrap();
+        let job = commands::collector_supervisor::CollectorJob::fixture(
+            peer().as_os_str(),
+            OsStr::new("complete"),
+            request,
+            store.worker_lock().unwrap(),
+            &watchdog,
+            &SCHEMA,
+        )
+        .unwrap()
+        .observations(None, None, acquired, renamed);
+        let closed = Arc::new(AtomicU64::new(0));
+        let mut publisher = PublisherStore {
+            store: Some(store),
+            closed: closed.clone(),
+        };
+        let handle = job
+            .start(Box::new(move |result| publisher.publish(&result)))
+            .unwrap();
+        if confined {
+            handle.confirm_confinement().unwrap();
+        }
+        let report = handle.finish();
+        assert_eq!(report.published, confined, "{report:?}");
+        let actual = closed.load(Ordering::Acquire);
+        assert!(actual > 0, "store was not closed");
+        assert!(
+            report
+                .lifecycle
+                .lock_closed
+                .is_some_and(|stamp| stamp >= actual),
+            "{report:?}; actual store close={actual}"
+        );
+        assert!(
+            f.acquire().is_ok(),
+            "finished helper still holds the store lock"
+        );
+    }
+}
+
 // 이것을 실패시키는 것: store 삭제 뒤 예산 종료 때 빈 사슬 cursor를 버리는 것.
 #[test]
 fn gc_resumes_empty_suffix_cleanup() {

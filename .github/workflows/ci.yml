@@ -76,7 +76,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/probe-tests"
           "$RUNNER_TEMP/probe-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
       - name: Required ledger cells and evidence mutations
-        run: '"$RUNNER_TEMP/probe-tests/bin/python" -m pytest bench/tests/test_collector_probes.py -q -p no:cacheprovider'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/probe-tests/bin/python" -m pytest bench/tests/test_collector_probes.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/probe-tests.txt"
+          grep -F 'PASSED bench/tests/test_collector_probes.py::test_ledger_requires_every_acceptance_cell' "$RUNNER_TEMP/probe-tests.txt"
       # Only read the default sysctl value. Other values require disposable VMs.
       # The actual macOS version is recorded; this is not minimum-VM evidence.
       - name: Native probe and deliberately wrong expectation
@@ -131,7 +134,30 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test -j 2 -p bingsu-collect --test startup -- --test-threads=2
+      # 이것을 실패시키는 것: Rust 행이 미실행/ignored여도 cargo 종료 코드만으로 통과하는 것.
+      - run: |
+          set -o pipefail
+          cargo test -j 2 -p bingsu-collect --test startup -- --test-threads=2 | tee "$RUNNER_TEMP/startup-native.txt"
+      - run: |
+          set -o pipefail
+          cargo test -j 2 -p bingsu --test collector_lifecycle --test collection_store --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test partial_survives_only_after_validated_updates ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test slow_drip_does_not_extend_spawn_deadline ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test immediate_ready_is_not_read_or_decoded_before_confinement ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test verified_screen_spawns_once_before_helper_tsync ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test publication_checks_same_fd_bytes_and_identity ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test helper_close_never_unlocks_live_worker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test hash_collision_never_reuses_or_overwrites_other_cwd ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test gc_cannot_split_lock_inode_or_delete_inflight_store ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test legacy_gc_prunes_only_empty_suffixes ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test gc_time_cap_stops_before_filesystem_work ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test early_exit_never_signals_recycled_pid ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test lock_clock_includes_store_close_without_publication ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test prompt_read::tests::new_completion_never_blocks_the_current_prompt ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+      - run: |
+          set -o pipefail
+          cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"
+          grep -F 'test product_mask_is_zero_and_fixture_is_unreachable ... ok' "$RUNNER_TEMP/selection-native.txt"
       - name: Collector policy evaluator and table correspondence
         run: python3 scripts/check_collector_filter.py
       - if: runner.os == 'Linux'
@@ -142,6 +168,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -j 2 -p bingsu-collect --test filter -- --nocapture --test-threads=2 | tee "$RUNNER_TEMP/filter-native.txt"
+          grep -F 'test landlock::tests::landlock_abi_and_failure_matrix ... ok' "$RUNNER_TEMP/startup-native.txt"
           grep -F 'test runtime::x14_threads_and_status_survive_fork_is_refused ... ok' "$RUNNER_TEMP/filter-native.txt"
           grep -F 'test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok' "$RUNNER_TEMP/filter-native.txt"
       - if: runner.os == 'Linux'
@@ -205,6 +232,7 @@ jobs:
           cargo test -j 2 -p bingsu-collect --test startup --no-run --message-format=json > "$RUNNER_TEMP/startup.json"
           bin=$(python3 -c 'import json,sys; print(next(v["executable"] for line in open(sys.argv[1]) if (v:=json.loads(line)).get("reason")=="compiler-artifact" and v["target"]["name"]=="startup" and v.get("executable")))' "$RUNNER_TEMP/startup.json")
           sudo "$bin" --exact limits::tests::root_cannot_restore_limits_or_capabilities --ignored --test-threads=1 | tee "$RUNNER_TEMP/root-capabilities.txt"
+          grep -F 'test limits::tests::root_cannot_restore_limits_or_capabilities ... ok' "$RUNNER_TEMP/root-capabilities.txt"
           grep -F 'test result: ok. 1 passed;' "$RUNNER_TEMP/root-capabilities.txt"
       - if: runner.os == 'macOS'
         name: Product imports and matching deployment pair
@@ -238,19 +266,43 @@ jobs:
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py bench/tests/test_collector_product.py tools/fsbudget/tests -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/native" | tee "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]' "$RUNNER_TEMP/m3b-security.txt"
-          if [ "$RUNNER_OS" = Linux ]; then
-            grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]' "$RUNNER_TEMP/m3b-security.txt"
-            grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]' "$RUNNER_TEMP/m3b-security.txt"
-            # 이것을 실패시키는 것: 출하 Ready/limits 또는 실패 trace 행을 skip하는 것.
-            grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-security.txt"
-            for case in cpu nofile as exec ready-failure malformed; do
-              grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--$case-worker]" "$RUNNER_TEMP/m3b-security.txt"
-            done
-            grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-security.txt"
-          else
-            grep -F 'PASSED tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample' "$RUNNER_TEMP/m3b-security.txt"
-          fi
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_latency_measures_verification_spawn_ready_and_read_separately' "$RUNNER_TEMP/m3b-security.txt"
+          # 이것을 실패시키는 것: 매개변수 하나의 PASS로 다른 매개변수의 skip을 숨기는 것.
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[degraded]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[version]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[field-count]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[stderr]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[exit]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_pair_alternates_and_preserves_raw_observations' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_product_budgets_cover_success_failure_and_gc' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_product_helper_keeps_the_shared_observation_wiring' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_collector_product.py::test_unavailable_normal_prompt_keeps_evidence_but_blocks_acceptance' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_acceptance_table_tests_exist_and_run_in_ci' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_ci_has_no_silent_acceptance_skip' "$RUNNER_TEMP/m3b-security.txt"
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_prompt_trace_budget.py::test_collector_gate_keeps_role_and_kind_budgets_separate -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/m3b-trace-contract.txt"
+          grep -F 'PASSED tests/shell/test_prompt_trace_budget.py::test_collector_gate_keeps_role_and_kind_budgets_separate' "$RUNNER_TEMP/m3b-trace-contract.txt"
+          grep -F 'PASSED tools/fsbudget/tests/test_attribute.py::test_collector_role_mutations_are_refused' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tools/fsbudget/tests/test_attribute.py::test_trace_attributes_spawn_sites_and_fd_lifetimes' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tools/fsbudget/tests/test_gate.py::test_role_and_kind_surplus_is_never_hidden' "$RUNNER_TEMP/m3b-security.txt"
+      - if: runner.os == 'Linux'
+        name: Assert native Linux M3b security passes
+        run: |
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--cpu-worker]" "$RUNNER_TEMP/m3b-security.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--nofile-worker]" "$RUNNER_TEMP/m3b-security.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--as-worker]" "$RUNNER_TEMP/m3b-security.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--exec-worker]" "$RUNNER_TEMP/m3b-security.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--ready-failure-worker]" "$RUNNER_TEMP/m3b-security.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--malformed-worker]" "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-security.txt"
+      - if: runner.os == 'macOS'
+        name: Assert native macOS M3b security passes
+        run: |
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample' "$RUNNER_TEMP/m3b-security.txt"
       - if: runner.os == 'Linux'
         name: M3b native musl lifecycle security
         env:
@@ -266,14 +318,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/m3b-traces"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/musl" | tee "$RUNNER_TEMP/m3b-musl.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-musl.txt"
-          for case in cpu nofile as exec ready-failure malformed; do
-            grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--$case-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          done
-          for case in cpu nofile as exec; do
-            grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[$case]" "$RUNNER_TEMP/m3b-musl.txt"
-          done
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--cpu-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--nofile-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--as-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--exec-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--ready-failure-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--malformed-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]" "$RUNNER_TEMP/m3b-musl.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-musl.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
       - name: Preserve M3b raw security traces on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

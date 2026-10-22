@@ -239,6 +239,7 @@ impl CollectorJob {
     }
 
     fn run(mut self, publish: Publisher, barrier: Arc<Barrier>) -> SupervisionReport {
+        let mut publish = Some(publish);
         let mut report = SupervisionReport {
             reason: EndReason::Resource,
             bytes: 0,
@@ -295,7 +296,7 @@ impl CollectorJob {
                 {
                     // Serialize cancellation with the publication admission.
                     drop(permission);
-                    report.published = publish(completed).is_ok();
+                    report.published = publish.take().unwrap()(completed).is_ok();
                     report.lifecycle.response_renamed =
                         self.publication_clock.as_ref().and_then(|stamp| {
                             let value = stamp.load(std::sync::atomic::Ordering::Acquire);
@@ -323,6 +324,10 @@ impl CollectorJob {
         }
         report.kill_requested = self.child.kill_requested();
         drop(self._lock);
+        // An uncalled publisher still owns CollectionStore and its lock copy.
+        // Preserve close order (job copy, then captured store), and timestamp
+        // only after both have closed, including the no-publication path.
+        drop(publish);
         report.lifecycle.lock_closed = now_ns().ok();
         #[cfg(test)]
         if self.fixture_clock {
