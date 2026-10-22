@@ -472,6 +472,9 @@ pub fn unchecked_backend_for_test(backend: Resolver) -> Access {
     access
 }
 
+/// Count every raw dirent (including `.` and `..`) against the cap before allocating names.
+/// Names omit those two entries regardless of order; complete requires observing EOF
+/// before the cap is reached, so an exact-cap listing remains incomplete.
 pub fn entries(dir: &Directory, raw_limit: u32, meter: &mut Meter) -> Result<Listing, ReadError> {
     #[cfg(target_os = "linux")]
     {

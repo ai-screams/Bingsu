@@ -148,7 +148,28 @@ MAC = [('darwin_atomic_root',
  ('darwin_reopen_identity',
   'darwin_atomic_reopen_checks_identity',
   [('walk', 'if atomic.identity != opened.identity {', 'if false {')])]
-LINUX = [('landlock_install',
+# 이것을 실패시키는 것: dot을 raw 계수에서 제외·names에 포함하거나 cap 이후 할당·EOF 추정을 허용하는 것.
+LINUX = [('entries_dot_not_counted',
+  'entries_limit_precedes_filtering_and_allocation',
+  [('linux', '            meter.raw_entry()?;\n            raw += 1;\n', ''),
+   ('linux', '            if name != b"." && name != b".." {',
+    '            if name != b"." && name != b".." {\n                meter.raw_entry()?;\n                raw += 1;')]),
+ ('entries_dot_in_names',
+  'entries_limit_precedes_filtering_and_allocation',
+  [('linux', 'if name != b"." && name != b".." {', 'if true {')]),
+ ('entries_allocate_past_cap',
+  'entries_limit_precedes_filtering_and_allocation',
+  [('linux', '            if raw >= raw_limit {', '            if false {')]),
+ ('entries_exact_cap_complete',
+  'entries_limit_precedes_filtering_and_allocation',
+  [('linux', 'complete: false,', 'complete: raw_limit == 302,')]),
+ ('entries_extra_getdents',
+  'entries_limit_precedes_filtering_and_allocation',
+  [('linux', '\n        if raw >= raw_limit {', '\n        if raw > raw_limit {')]),
+ ('entries_allocation_unmetered',
+  'entries_limit_precedes_filtering_and_allocation',
+  [('linux', '                meter.allocation(name.len() + std::mem::size_of::<Vec<u8>>())?;', '')]),
+ ('landlock_install',
   'linux_landlock_backstop_blocks_held_fd_after_coarse_rename',
   [('linux_test',
     'unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd as i32, 0u32) }',
@@ -179,9 +200,12 @@ try:
             path.write_text(source.replace(old, new))
         suite = "safe_read_linux" if test.startswith("linux_") else "safe_read"
         args = ["cargo", "test", "-j", "2", "-p", "bingsu-collect", "--test", suite, test, "--", "--exact", "--test-threads=1"]
-        if test == "resolver_observations" or test.startswith(("linux_landlock", "linux_two_uid")): args += ["--ignored"]
+        security_output = test.startswith(("linux_landlock", "linux_two_uid"))
+        if test == "resolver_observations" or security_output: args += ["--ignored"]
+        if security_output: args += ["--nocapture"]
         run = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=50)
         (OUT/(label+".log")).write_text(run.stdout)
+        if security_output: print(run.stdout, end="", flush=True)
         killed = run.returncode != 0 and "test result: FAILED." in run.stdout
         row = dict(mutation=label, test=test, exit=run.returncode, killed=killed)
         results.append(row)

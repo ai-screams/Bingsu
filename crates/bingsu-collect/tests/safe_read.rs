@@ -505,7 +505,8 @@ fn retries_are_finite() {
     }
 }
 
-// 이것을 실패시키는 것: raw cap 전에 이름을 필터링하거나 상한 도달 뒤 getdents를 추가 호출하는 것.
+// 이것을 실패시키는 것: dot 항목을 raw cap에서 빼거나 names에 넣는 것,
+// cap 밖 이름을 할당·getdents를 추가 호출하거나 EOF 확인 없이 complete로 만드는 것.
 #[test]
 #[cfg(target_os = "linux")]
 fn entries_limit_precedes_filtering_and_allocation() {
@@ -513,19 +514,61 @@ fn entries_limit_precedes_filtering_and_allocation() {
     for n in 0..300 {
         fs::write(fixture.0.join(format!("f{n}")), b"").unwrap();
     }
-    for limit in [0, 2, 256, 512] {
+    // Use libc's independent iterator as the raw-order oracle, including dots.
+    // The fixture stays unchanged: ext4/overlay may put dots anywhere in this order.
+    let path = std::ffi::CString::new(fixture.0.as_os_str().as_bytes()).unwrap();
+    // SAFETY: NUL-terminated path to the fixture directory.
+    let stream = unsafe { libc::opendir(path.as_ptr()) };
+    assert!(!stream.is_null());
+    let mut raw_names = Vec::new();
+    loop {
+        // SAFETY: live directory stream, used only by this test thread.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: readdir supplies a NUL-terminated name valid until the next call.
+        let name_ptr = unsafe { (*entry).d_name.as_ptr() };
+        // SAFETY: name_ptr is the terminated name provided by readdir.
+        let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+        raw_names.push(name.to_bytes().to_vec());
+    }
+    // SAFETY: close this stream exactly once after the last readdir.
+    assert_eq!(unsafe { libc::closedir(stream) }, 0);
+    let mut all_names = raw_names.clone();
+    all_names.sort();
+    let mut expected_all = vec![b".".to_vec(), b"..".to_vec()];
+    expected_all.extend((0..300).map(|n| format!("f{n}").into_bytes()));
+    expected_all.sort();
+    assert_eq!(all_names, expected_all);
+
+    for limit in [0, 1, 2, 256, 301, 302, 303, 512] {
         let mut budget = meter();
         let root = fixture.root(&mut budget);
         let dir =
             safe_read::directory_with(&root, b".", &test_access(Resolver::Stepwise), &mut budget)
                 .unwrap();
+        let before = budget.counts[Phase::Content as usize];
         let listing = safe_read::entries(&dir, limit, &mut budget).unwrap();
         let counts = budget.counts[Phase::Content as usize];
-        assert_eq!(counts.raw_entries, u64::from(limit.min(302)));
-        assert_eq!(listing.complete, limit > 302);
+        let expected: Vec<_> = raw_names
+            .iter()
+            .take(limit as usize)
+            .filter(|name| name.as_slice() != b"." && name.as_slice() != b"..")
+            .cloned()
+            .collect();
         assert_eq!(
-            listing.names.len(),
-            limit.min(302).saturating_sub(2) as usize
+            counts.raw_entries,
+            u64::from(limit).min(raw_names.len() as u64)
+        );
+        assert_eq!(listing.complete, limit as usize > raw_names.len());
+        assert_eq!(listing.names, expected, "raw cap {limit}");
+        assert_eq!(
+            counts.allocated - before.allocated,
+            expected
+                .iter()
+                .map(|name| (name.len() + std::mem::size_of::<Vec<u8>>()) as u64)
+                .sum::<u64>()
         );
         if limit == 0 {
             assert_eq!(counts.list, 0);
