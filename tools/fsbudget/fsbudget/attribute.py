@@ -394,6 +394,66 @@ def _cloexec_pair(previous: Call | None, current: Call) -> bool:
                 and len(before) > flag_at and "O_CLOEXEC" in before[flag_at].split("|"))
 
 
+def _probe_flags(text, required, optional=frozenset()):
+    flags = text.split("|")
+    return len(flags) == len(set(flags)) and required <= set(flags) <= required | optional
+
+
+def _probe_root(c, args):
+    if c.name == "openat" and len(args) == 3 and re.fullmatch(r"AT_FDCWD(?:</.*>)?", args[0]):
+        args = args[1:]
+    elif c.name != "open" or len(args) != 2:
+        return False
+    # musl adds O_LARGEFILE; O_PATH is the fixed-root capability variant.
+    return args[0] == '"/"' and bool({"O_RDONLY", "O_PATH"} & set(args[1].split("|"))) and _probe_flags(
+        args[1], {"O_CLOEXEC", "O_DIRECTORY"}, {"O_RDONLY", "O_LARGEFILE", "O_PATH"})
+
+
+@dataclass
+class _RepositoryProbe:
+    opens: dict = field(default_factory=dict)
+    entries: dict = field(default_factory=dict)
+    seen: set = field(default_factory=set)
+
+    def owner(self, entry):
+        return next((name for name, held in self.entries.items()
+                     if entry is not None and held.creation == entry.creation), None)
+
+    def opened(self, c, table):
+        # Bind the returned descriptor lifetime, including unfinished opens.
+        for name, call in self.opens.items():
+            if call is c and (fd := _Descriptors.token(c.ret)):
+                self.entries[name] = table[fd[1]]
+
+    def kind(self, c, args, entry):
+        from .repository import held_metadata_kind
+
+        if not args or not re.fullmatch(r"\d+</>", args[0]) or entry is None:
+            return "unknown-fs"
+        name = self.owner(entry)
+        if name is None:
+            return "unknown-fs"
+        if c.name == "close" and len(args) == 1 and "close_" + name not in self.seen:
+            self.seen.add("close_" + name)
+            return None  # ownership cleanup is outside the formula
+        if name != "root":
+            return "unknown-fs"
+        exact = held_metadata_kind(c, args)
+        if c.name == "fstatfs" and len(args) == 2:
+            exact = "fstatfs"
+        elif c.name == "openat2" and len(args) == 4 and args[1] == '"."' and args[3] == "24":
+            how = re.fullmatch(r"\{flags=([^,]+), resolve=([^,]+)\}", args[2])
+            if (how and _probe_flags(how[1], {"O_RDONLY", "O_NONBLOCK", "O_CLOEXEC", "O_DIRECTORY"})
+                    and _probe_flags(how[2], {"RESOLVE_NO_XDEV", "RESOLVE_NO_MAGICLINKS", "RESOLVE_BENEATH"})):
+                exact = "openat2"
+        if exact and exact not in self.seen:
+            self.seen.add(exact)
+            if exact == "openat2":
+                self.opens["child"] = c
+            return "probe_" + exact
+        return "unknown-fs"
+
+
 def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
@@ -410,7 +470,6 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     """
     import json
     from .classify import collector_kind, collector_bootstrap_kind
-    from .repository import held_metadata_kind
     from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
@@ -458,7 +517,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     unknown_calls = defaultdict(int)
     filters = defaultdict(int)
     repository_probe = {}
-    request_started = set()
+    bootstrap_ended = set()
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
 
@@ -468,6 +527,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     for _, c, open_result, deferred in ordered:
         if open_result:
             descriptors.opened(c, owner[c.pid], bad)
+            if probe := repository_probe.get(owner[c.pid]):
+                probe.opened(c, descriptors.tables[owner[c.pid]])
             continue
         if c.pid not in roles:
             bad(c, "no live spawn parent")
@@ -485,6 +546,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 confined.discard(process)
                 seen_exec.discard(process)
                 unknown_calls.pop(process, None)
+                filters.pop(process, None)
+                repository_probe.pop(process, None)
+                bootstrap_ended.discard(process)
             continue
         if unknown_calls[process]:
             bad(c, "call after terminal unknown syscall")
@@ -536,6 +600,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
             confined.add(process)
             filters[process] += 1
+        entry = descriptors.tables[process].get(args[0].split("<")[0]) if args else None
         descriptors.observe(c, process, args, success, bad, defer_open=deferred)
         if role == "collector" and _cloexec_pair(previous, c):
             cloexec_pairs.append({"pid": c.pid,
@@ -549,24 +614,27 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         if role == "collector":
             if c.name == "uname" and process not in confined:
                 k = "kernel_release"
-            if c.name == "read" and args and args[0].split("<")[0] == "3":
-                request_started.add(process)
+            # The first result write is Ready (even a failed attempt ends the
+            # window). Do not wait for the subsequent request read. A read
+            # ruleset or post-seal restriction also ends it before read-layer IO.
+            if (args and (c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
+                          or c.name in {"read", "readv"} and args[0].split("<")[0] == "3")
+                    or c.name in {"landlock_create_ruleset", "landlock_add_rule"}
+                    and any(flag in c.args for flag in ("LANDLOCK_ACCESS_FS_READ_FILE", "LANDLOCK_ACCESS_FS_READ_DIR"))
+                    or c.name == "landlock_restrict_self" and filters[process] >= 2):
+                bootstrap_ended.add(process)
             probe = repository_probe.get(process)
-            # Only the fixed post-seal, pre-request capability probe gets this
-            # vocabulary. Root content, getdents and later retries stay denied.
-            if (c.name == "openat" and len(args) >= 3 and args[1] == '\"/\"'
-                    and args[2] == "O_RDONLY|O_CLOEXEC|O_DIRECTORY"
-                    and filters[process] == 2 and process not in request_started and probe is None):
+            probe_window = filters[process] == 2 and process not in bootstrap_ended
+            # Linux only: two successful seccomp installs are required. Never
+            # extend the macOS vocabulary or treat an fd number as its lifetime.
+            if _probe_root(c, args) and probe_window and probe is None:
                 k = "probe_openat"
-                repository_probe[process] = {"fd": result.split("<")[0] if success else None, "seen": set()}
-            elif probe and process not in request_started and args and args[0] == f'{probe["fd"]}</>':
-                exact = held_metadata_kind(c, args)
-                if c.name == "fstatfs": exact = "fstatfs"
-                elif (c.name == "openat2" and len(args) == 4 and args[1] == '\".\"' and args[3] == "24"
-                      and args[2] == "{flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}"): exact = "openat2"
-                if exact and exact not in probe["seen"]:
-                    probe["seen"].add(exact)
-                    k = "probe_" + exact
+                probe = repository_probe[process] = _RepositoryProbe(opens={"root": c})
+            elif (probe and args and (probe.owner(entry) is not None and c.name != "fcntl"
+                  or target(c) == "/" and c.name in {"openat2", "fstat", "fstat64", "newfstatat", "fstatat64", "fstatfs", "statx", "close"})):
+                k = probe.kind(c, args, entry) if probe_window else "unknown-fs"
+            if probe and success and not deferred and c.name in OPEN:
+                probe.opened(c, descriptors.tables[process])
             if c.name in {"open", "openat", "openat2"} and any(flag in c.args for flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")):
                 bad(c, "collector writable open")
             if k in {"write", "renameat", "unlinkat", "network", "unknown-fs", "fsync"}:
