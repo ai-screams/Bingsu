@@ -629,6 +629,11 @@ fn read_inner(
 }
 
 impl ReadFile {
+    /// Metadata of the already validated, held regular file; never reopens a path.
+    pub fn metadata(&self) -> libc::stat {
+        self.metadata
+    }
+
     pub fn read(self, cap: ReadCap, meter: &mut Meter) -> Result<Vec<u8>, ReadError> {
         if cap.single_link && self.metadata.st_nlink != 1 {
             return Err(ReadError::Special);

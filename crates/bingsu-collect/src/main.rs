@@ -5,6 +5,10 @@
 // The other ABI and row metadata are exercised by tests/filter.rs.
 #[allow(dead_code, unsafe_code)]
 mod filter;
+// C2 compiles the bytes-only git boundary; C5/E4 connect collection later.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod git;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod landlock;
