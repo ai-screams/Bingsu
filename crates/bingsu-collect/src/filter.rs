@@ -41,6 +41,12 @@ impl AuditArch {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Openat2Policy {
+    Deny,
+    WriteSetCovered,
+}
+
 pub const TABLE: &str = include_str!("../collector-syscalls.tsv");
 pub const ALLOW: u32 = 0x7fff_0000;
 pub const DENY: u32 = 0x0005_0001; // ERRNO | EPERM (Linux)
@@ -113,7 +119,16 @@ fn high(arg: u32, want: u32) -> Cond {
 fn conditions(kind: &str) -> Vec<Vec<Cond>> {
     let eq = |arg, want| low(arg, u32::MAX, want);
     match kind {
-        "any" | "enosys" => vec![vec![]],
+        "any" | "enosys" | "read_root" => vec![vec![]],
+        // open_how is opaque to BPF. Only the successfully installed write
+        // deny set can authorize this row; size is a full-width size_t.
+        "handled_write_set" => vec![vec![eq(3, 24), high(3, 0)]],
+        "readonly" => vec![vec![eq(2, 2), eq(3, 0x200)]], // W_OK, AT_EACCESS
+        // The VERSION query runs before filtering; sealed code only creates
+        // the eight-byte filesystem ruleset used for read confinement.
+        "read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)]],
+        "read_layer_add" => vec![vec![eq(1, 1), eq(3, 0)]], // PATH_BENEATH
+        "read_layer_restrict" => vec![vec![eq(1, 0)]],
         "response" => vec![vec![eq(0, 1)]],
         "open" => vec![vec![low(1, WRITE_OPEN, 0)]],
         "openat" => vec![vec![low(2, WRITE_OPEN, 0)]],
@@ -144,16 +159,21 @@ fn op(code: u16, jt: u8, jf: u8, k: u32) -> Instruction {
 
 /// Final allowlist. Installation stacks it on the bootstrap policy; neither
 /// layer can grant what the other layer refuses.
-pub fn program(arch: AuditArch) -> Vec<Instruction> {
-    build(arch, false)
+pub fn program(arch: AuditArch, mode: Openat2Policy) -> Vec<Instruction> {
+    build(arch, false, mode)
 }
-pub fn bootstrap_program(arch: AuditArch) -> Vec<Instruction> {
-    build(arch, true)
+pub fn bootstrap_program(arch: AuditArch, mode: Openat2Policy) -> Vec<Instruction> {
+    build(arch, true, mode)
 }
-fn build(arch: AuditArch, bootstrap: bool) -> Vec<Instruction> {
-    build_rows(arch, bootstrap, &rows(arch))
+fn build(arch: AuditArch, bootstrap: bool, mode: Openat2Policy) -> Vec<Instruction> {
+    build_rows(arch, bootstrap, mode, &rows(arch))
 }
-fn build_rows(arch: AuditArch, bootstrap: bool, rows: &[Row<'_>]) -> Vec<Instruction> {
+fn build_rows(
+    arch: AuditArch,
+    bootstrap: bool,
+    mode: Openat2Policy,
+    rows: &[Row<'_>],
+) -> Vec<Instruction> {
     let mut p = vec![
         op(LD, 0, 0, 4),
         op(JEQ, 1, 0, arch.value()),
@@ -170,6 +190,9 @@ fn build_rows(arch: AuditArch, bootstrap: bool, rows: &[Row<'_>]) -> Vec<Instruc
         ]);
     }
     for row in rows {
+        if row.condition == "handled_write_set" && mode == Openat2Policy::Deny {
+            continue;
+        }
         if row.condition.starts_with("bootstrap_") && !bootstrap {
             continue;
         }
@@ -223,12 +246,12 @@ fn install(p: &[Instruction]) -> std::io::Result<()> {
     }
 }
 #[cfg(target_os = "linux")]
-pub fn install_bootstrap() -> std::io::Result<()> {
-    install(&bootstrap_program(AuditArch::native()))
+pub fn install_bootstrap(mode: Openat2Policy) -> std::io::Result<()> {
+    install(&bootstrap_program(AuditArch::native(), mode))
 }
 #[cfg(target_os = "linux")]
-pub fn seal_limits() -> std::io::Result<()> {
-    install(&program(AuditArch::native()))
+pub fn seal_limits(mode: Openat2Policy) -> std::io::Result<()> {
+    install(&program(AuditArch::native(), mode))
 }
 
 // Used by the host evaluator's row-removal mutations, never shipped.
@@ -239,5 +262,5 @@ pub fn without_row(arch: AuditArch, probe: &str) -> Vec<Instruction> {
         .into_iter()
         .filter(|r| r.probe != probe)
         .collect();
-    build_rows(arch, true, &kept)
+    build_rows(arch, true, Openat2Policy::WriteSetCovered, &kept)
 }

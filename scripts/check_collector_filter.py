@@ -6,6 +6,9 @@ on failure. Compilation errors do not count as killed mutations. Runtime-only
 mutations additionally require --runtime on a native Linux host.
 """
 import argparse
+import json
+import os
+import sys
 import csv
 from pathlib import Path
 import re
@@ -31,8 +34,9 @@ def check_identity_only():
 
 
 def host_tests_passed(result):
+    count = 10 if sys.platform == "linux" else 9
     return result.returncode == 0 and re.search(
-        r"^test result: ok\. 8 passed; 0 failed; 0 ignored; 0 measured; "
+        rf"^test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; "
         r"\d+ filtered out; finished in \d+\.\d+s$", result.stdout, re.MULTILINE) is not None
 
 
@@ -42,7 +46,7 @@ def run(test=None, target="filter", binary=False):
     if test:
         command += [test, "--", "--exact", "--test-threads=2"]
     else:
-        command += ["--", "--skip", "runtime::", "--test-threads=2"]
+        command += ["--", "--skip", "runtime::", "--skip", "safe_read::", "--skip", "meter::", "--test-threads=2"]
     return subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=180)
 
 
@@ -50,15 +54,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mutations", action="store_true")
     parser.add_argument("--runtime", action="store_true")
+    parser.add_argument("--repository-trace", action="store_true")
     args = parser.parse_args()
     check_identity_only()
     rows = list(csv.DictReader((line for line in (ROOT / TABLE).read_text().splitlines()
                               if not line.startswith("#")), delimiter="\t"))
-    assert len(rows) == 45 and len({r["probe"] for r in rows}) == len(rows)
+    assert len(rows) == 51 and len({r["probe"] for r in rows}) == len(rows)
     assert all(r["why"].strip() and r["probe"] == f'row_{r["syscall"]}_{r["condition"]}' for r in rows)
     result = run()
     assert host_tests_passed(result), result.stdout + result.stderr
-    print("collector identity/table/program/probes PASS: identity-only lib, 45 rows, both ABIs, 8 host tests")
+    print(f"collector identity/table/program/probes PASS: identity-only lib, 51 rows, both ABIs, {10 if sys.platform == 'linux' else 9} host tests")
+    if args.repository_trace:
+        repository_trace()
     if not args.mutations:
         return
     cases = []
@@ -89,7 +96,7 @@ def main():
         ("legacy x32 upper", "op(JGT, 1, 0, 547)", "op(JGT, 1, 0, 546)", arch),
         ("default denial", "p.push(op(RET, 0, 0, DENY));", "p.push(op(RET, 0, 0, ALLOW));", write),
         ("clone3 fallback", "{\n                    ENOSYS\n", "{\n                    DENY\n", clone),
-        ("clone high word", "high(0, 0),", "low(0, 0, 0),", clone),
+        ("clone high word", '"thread" => vec![vec![\n            high(0, 0),', '"thread" => vec![vec![\n            low(0, 0, 0),', clone),
         ("clone forbidden flags", "low(0, !THREAD_FLAGS, 0)", "low(0, 0, 0)", clone),
         ("clone required flags", "low(0, THREAD_REQUIRED, THREAD_REQUIRED)", "low(0, 0, 0)", clone),
         ("response fd", '"response" => vec![vec![eq(0, 1)]]', '"response" => vec![vec![]]', memory),
@@ -134,12 +141,74 @@ def main():
         add(name, LANDLOCK, old, new, "landlock::tests::landlock_uapi_constants_and_layout_are_pinned" if name=="ruleset layout" else "landlock::tests::landlock_abi_and_failure_matrix")
     add("startup seal stage", WORKER, "    final_filter()?;", "    let _ = final_filter;",
         "worker::tests::filter_installed_before_threads_and_ready", "bingsu-collect", True)
+    # 이것을 실패시키는 것: 새 syscall 조건/handled set/counter 연결의 검사 제거.
+    repository = "repository_rows_require_exact_arguments_and_handled_write_set"
+    for old in ["eq(3, 24)", "high(3, 0)", "eq(2, 2)", "eq(3, 0x200)",
+                "eq(1, 8)", "high(1, 0)", "eq(2, 0)"]:
+        source = (ROOT / FILTER).read_text()
+        section = source[source.index('"handled_write_set" =>'):source.index('"response" =>')]
+        line = next(line for line in section.splitlines() if old in line)
+        add("repository condition " + old, FILTER, line, line.replace(old, "low(0, 0, 0)", 1), repository)
+    add("post-seal VERSION query", FILTER,
+        '"read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)]]',
+        '"read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)], vec![eq(0, 0), high(0, 0), eq(1, 0), high(1, 0), eq(2, 1)]]', repository)
+    tmpfile = Path("crates/bingsu-collect/tests/filter/tmpfile.rs")
+    selection = "tmpfile::selection_probes_candidates_and_reports_all_failures"
+    if sys.platform == "linux":
+        add("tmpfile probe omitted", tmpfile, 'match probe(&directory)', 'match { let _ = &mut probe; Ok::<(), std::io::Error>(()) }', selection)
+        add("tmpfile fallback omitted", tmpfile, '.flatten()', '.flatten().take(1)', selection)
+    for kind, old in [("read_layer_add", "eq(1, 1), eq(3, 0)"), ("read_layer_restrict", "eq(1, 0)")]:
+        add("repository " + kind, FILTER, f'"{kind}" => vec![vec![{old}]]', f'"{kind}" => vec![vec![]]', repository)
+    add("openat2 deny mode", FILTER, 'mode == Openat2Policy::Deny', 'mode != Openat2Policy::Deny', repository)
+    add("handled set not ABI", LANDLOCK, 'handled_access_fs & rights(3) == rights(3)', 'handled_access_fs != 0', repository)
+    for axis, old in [("stats", 'self.charge_axis(Axis::Stats, 1)?;'),
+                      ("bytes", 'self.charge_axis(Axis::WorktreeReadBytes, bytes as u64)?;'),
+                      ("entries", 'self.charge_axis(Axis::WorktreeEntries, 1)?;')]:
+        add("pure budget " + axis, Path("crates/bingsu-collect/src/meter.rs"), old, '',
+            "meter::tests::pure_budget_precedes_io_across_phases", "safe_read")
+    add("installed handled set", LANDLOCK, '        handled_access_fs,\n    })', '        handled_access_fs: rights(abi),\n    })',
+        "landlock::tests::landlock_abi_and_failure_matrix")
+    for old, new in [
+        ('Ok(()) => Ok(Some(false))', 'Ok(()) => Ok(Some(true))'),
+        ('Err(libc::ENOSYS | libc::EPERM) => Ok(None)', 'Err(libc::ENOSYS | libc::EPERM) => Ok(Some(false))'),
+        ('Err(libc::EACCES | libc::EROFS) => Ok(Some(true))', 'Err(libc::EACCES | libc::EROFS) => Ok(Some(false))'),
+        ('Err(error) => Err(ReadError::errno(error))', 'Err(error) => Err(ReadError::Denied)'),
+    ]:
+        add("readonly status " + old, Path("crates/bingsu-collect/src/safe_read/mod.rs"), old, new,
+            "safe_read::tests::readonly_observation_preserves_unknown_and_errors", "safe_read")
+    add("Linux floor", SYS, '(major, minor) >= (5, 9)', '(major, minor) >= (5, 8)',
+        "sys::floor_tests::linux_collection_floor_requires_capabilities", "startup")
     if args.runtime:
-        add("kernel seal omitted", SYS, "crate::filter::seal_limits()", "Ok(())",
+        add("kernel seal omitted", FILTER, "install(&program(AuditArch::native(), mode))", "Ok(())",
             "runtime::filter_installed_before_threads_and_ready")
         add("writable inherited lock", SYS, "access(5, libc::O_RDONLY)?;", "let _ = 5;",
             "writable_lock_is_rejected_on_linux", "startup")
-    report = ROOT / "target/b2-mutations.tsv"
+    if args.runtime:
+        add("repository fixture reused", Path("crates/bingsu-collect/tests/filter/runtime.rs"),
+            'NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)', 'NEXT_FIXTURE.load(Ordering::Relaxed)',
+            "runtime::repository_fixtures_do_not_share_paths")
+        safe = Path("crates/bingsu-collect/src/safe_read/mod.rs")
+        add("probe moved after layer", safe, '        resolver(meter)?;', '',
+            "runtime::openat2_probe_precedes_read_layer")
+        add("read layer omitted", LANDLOCK,
+            'if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd.as_raw_fd(), 0u32) } != 0 {',
+            'if false {', "runtime::read_landlock_grants_only_selected_roots")
+        add("read root count bound", LANDLOCK, 'roots.len() > 3', 'roots.len() > 4',
+            "runtime::read_landlock_grants_only_selected_roots")
+        add("duplicate read roots", LANDLOCK, '.any(|(_, dev, ino)| (*dev, *ino) == (stat.st_dev, stat.st_ino))',
+            '.any(|(_, _, _)| false)', "runtime::read_landlock_grants_only_selected_roots")
+        add("slash root allowed", LANDLOCK,
+            '(stat.st_dev, stat.st_ino) == (slash.st_dev, slash.st_ino)', 'false',
+            "runtime::read_landlock_grants_only_selected_roots")
+        add("write layer omitted", LANDLOCK, '    restrict(&fd)?;', '    let _ = &restrict;',
+            "runtime::openat2_never_bypasses_write_denial")
+        add("cached resolver cleared", safe, '*self.0.get_or_init(|| linux::probe(meter))',
+            'linux::probe(meter)', "runtime::resolver_is_selected_once_per_process")
+        add("mount probe omitted", Path("crates/bingsu-collect/src/safe_read/linux.rs"),
+            'identity(root.as_raw_fd(), meter)?;', '', "runtime::linux_collection_floor_requires_capabilities")
+        add("read layer sample missing", Path("crates/bingsu-collect/tests/filter/runtime.rs"),
+            'for _ in 0..=199', 'for _ in 0..=198', "runtime::repository_read_layer_cost_has_200_samples")
+    report = ROOT / "target/b3-evidence/mutations.tsv"
     report.parent.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="collector-mutations-", dir=report.parent) as saved:
         with report.open("w") as ledger:
@@ -172,6 +241,46 @@ def main():
     result=run()
     assert host_tests_passed(result),result.stdout+result.stderr
     print(f"mutations PASS: {len(cases)} killed; saved copies restored; host tests green")
+
+
+def filter_test_binary(build_output):
+    artifacts = [json.loads(line) for line in build_output.splitlines()]
+    binaries = [v["executable"] for v in artifacts
+                if v.get("reason") == "compiler-artifact"
+                and v["target"]["name"] == "filter" and v["target"]["kind"] == ["test"]
+                and v["profile"]["test"] and v.get("executable")]
+    assert len(binaries) == 1, f"expected one filter test executable, found {binaries!r}"
+    return binaries[0]
+
+
+def repository_trace():
+    assert sys.platform == "linux", "BLOCKED: native Linux strace required"
+    strace = shutil.which("strace")
+    assert strace is not None, "BLOCKED: install strace before running --repository-trace"
+    sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+    from fsbudget.repository import check_repository_trace
+    build = subprocess.run(["cargo", "test", "--offline", "-j", "2", "-p", "bingsu-collect", "--test", "filter", "--no-run", "--message-format=json"], cwd=ROOT, capture_output=True, text=True, check=True)
+    binary = filter_test_binary(build.stdout)
+    evidence = ROOT / "target/b3-evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="b3-trace-") as directory:
+        root = Path(directory)
+        for name in ("worktree", "gitdir", "commondir"):
+            (root / name).mkdir()
+            (root / name / "HEAD").write_bytes(b"sentinel")
+        for backend, case in [("openat2", "trace"), ("stepwise", "trace-stepwise")]:
+            trace = evidence / f"repository-{backend}.strace"
+            command = [strace, "-f", "-yy", "-s", "4096", "-o", str(trace), binary,
+                       "--exact", "runtime::repository_child", "--ignored", "--nocapture", "--test-threads=1"]
+            result = subprocess.run(command,
+                env={**os.environ, "BINGSU_B3_CASE": case, "BINGSU_B3_PATH": str(root), "BINGSU_REQUIRE_LANDLOCK": "1"},
+                cwd=ROOT, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0 and f"B3 {case} PASS" in result.stdout.splitlines(), (
+                f"command={command!r} cwd={str(ROOT)!r} returncode={result.returncode} "
+                f"stdout={result.stdout!r} stderr={result.stderr!r} trace={str(trace)!r}")
+            counts = check_repository_trace(trace.read_text(), str(root), backend)
+            (evidence / f"repository-{backend}.json").write_text(json.dumps(counts, indent=2))
+            print(f"B3 repository trace {backend} PASS: {counts}")
 
 
 if __name__ == "__main__":

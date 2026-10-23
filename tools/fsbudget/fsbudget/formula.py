@@ -5,7 +5,8 @@ caller-provided coefficients (all 1 for the synthetic program)."""
 from dataclasses import dataclass, field
 
 
-def collector_success_expected(worker: str, *, landlock: bool = False) -> dict[str, int]:
+def collector_success_expected(worker: str, *, landlock: bool = False,
+                               repository_probe: bool = False, openat2_succeeded: bool = True) -> dict[str, int]:
     """Exact Linux success budgets, with a separate shipped debug entry.
 
     The -O fixture and shipped release have three access-mode queries. Rust's
@@ -15,8 +16,17 @@ def collector_success_expected(worker: str, *, landlock: bool = False) -> dict[s
     """
     queries = {"fixture": 3, "shipped-release": 3,
                "shipped-debug": 7 + int(landlock)}[worker]
-    return {"exec": 1, "fd_query": queries, "fstat": 1, "acl": 1,
-            "cwd": 1, "openat": 1, "read": 1}
+    result = {"exec": 1, "fd_query": queries, "fstat": 1, "acl": 1,
+              "cwd": 1, "openat": 1, "read": 1}
+    if repository_probe:
+        # fstat is one held-fd metadata primitive on every libc (fstat,
+        # newfstatat or statx by shape); statx is the separate MNT_ID query.
+        result.update({"probe_openat": 1, "probe_openat2": 1,
+                       "probe_fstat": 1, "probe_fstatfs": 1, "probe_statx": 1,
+                       "kernel_release": 1})
+        if worker == "shipped-debug":
+            result["fd_query"] += 1 + int(openat2_succeeded)
+    return result
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -182,3 +192,69 @@ def collector_product_expected(case: str, *, body_bytes: int = 256,
                           "fsync": 0},
             "collector-effects": {"spawn": 0, "network": 0, "write": 0,
                                   "renameat": 0, "unlinkat": 0, "fsync": 0}}
+
+
+@dataclass
+class CollectorAxes:
+    # Fixture-defined axes, never fitted from the trace total. Components are
+    # successful ordinary edges; candidates are failed leaf open attempts.
+    components: int = 0
+    candidates: int = 0
+    symlinks: int = 0
+    directories: int = 0
+    raw_entries: int = 0
+    dir_bytes: tuple[int, ...] = ()
+    files: int = 0
+    read_bytes: tuple[int, ...] = ()
+    maps: int = 0
+    probes: int = 0
+    retries: int = 0
+    backend: str = "openat2"
+    phase: str = "content"
+    roots: int = 0
+    root_inputs: int = 0
+    readonly: int = 0
+    capped_directories: int = 0
+
+
+def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
+    """Primitive table from safe_read/linux.rs; phase windows stay separate.
+
+    Acquisition root: open/fstat/fstatfs/statx. fstat includes libc's held-fd
+    newfstatat/statx metadata shapes; statx counts only the MNT_ID primitive.
+    Ordinary edge adds lstat too.
+    Content fast: openat2/fstat/fstatfs/statx per file or directory; stepwise
+    uses components and their lstat instead. Each followed link adds two lstat
+    observations and readlink. Mutable reads include one EOF/cap+1 observation.
+    Read-layer validation: open+fstat slash, fstat each supplied root (including
+    duplicates), then create + one add per distinct root + restrict.
+    Retry axes count extra open attempts only; other retries need their own
+    fixture phase instead of being hidden in a total allowance.
+    """
+    scalars = [ax.components, ax.candidates, ax.symlinks, ax.directories,
+               ax.raw_entries, ax.files, ax.maps, ax.probes, ax.retries,
+               ax.roots, ax.root_inputs, ax.readonly, ax.capped_directories]
+    if min(scalars + list(ax.dir_bytes) + list(ax.read_bytes)) < 0:
+        raise ValueError("negative repository axis")
+    if ax.backend not in {"openat2", "stepwise"} or ax.phase not in {"acquisition", "content", "read-layer", "probe"}:
+        raise ValueError("unreviewed repository primitive table")
+    if ax.phase == "read-layer":
+        if not 1 <= ax.roots <= ax.root_inputs <= 3:
+            raise ValueError("selected roots only")
+        return {"openat": 1, "fstat": 1 + ax.root_inputs,
+                "landlock_create_ruleset": 1, "landlock_add_rule": ax.roots,
+                "landlock_restrict_self": 1}
+    if ax.phase == "probe":
+        return {"openat": ax.probes, "openat2": ax.probes,
+                "fstat": ax.probes, "fstatfs": ax.probes, "statx": ax.probes}
+    if len(ax.read_bytes) != ax.files or len(ax.dir_bytes) != ax.directories or ax.capped_directories > ax.directories:
+        raise ValueError("per-file and per-directory axes required")
+    acquisition = ax.phase == "acquisition"
+    opened = ax.components + 1 if acquisition else ax.files + ax.directories if ax.backend == "openat2" else ax.components
+    stepwise = acquisition or ax.backend == "stepwise"
+    return {"openat" if stepwise else "openat2": opened + ax.candidates + ax.retries,
+            "fstat": opened, "newfstatat": (ax.components if stepwise else 0) + 2 * ax.symlinks,
+            "fstatfs": opened, "statx": opened, "readlinkat": ax.symlinks,
+            "read": sum(ceil_div(n, 16384) + 1 for n in ax.read_bytes),
+            "getdents64": sum(ceil_div(n, 8192) + 1 for n in ax.dir_bytes) - ax.capped_directories,
+            "mmap": ax.maps, "faccessat2": ax.readonly}

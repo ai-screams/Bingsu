@@ -47,6 +47,8 @@ fn execute() -> std::io::Result<()> {
     let (installed, landlock) = protected()?;
     #[cfg(target_os = "macos")]
     let _access = probe_before_ready(&mut fds)?;
+    #[cfg(target_os = "linux")]
+    let _access = probe_before_ready()?;
     exchange(
         &mut fds,
         &mut buffer,
@@ -56,6 +58,14 @@ fn execute() -> std::io::Result<()> {
         crate::build_id(),
         |_, _: &mut dyn UpdateSink| Err(std::io::Error::other("no product workers")),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn probe_before_ready() -> std::io::Result<crate::safe_read::Access> {
+    use std::time::{Duration, Instant};
+    let mut meter = crate::meter::Meter::new(Instant::now() + Duration::from_millis(100));
+    crate::safe_read::Access::probe(&mut meter)
+        .map_err(|_| std::io::Error::other("collector capability probe"))
 }
 
 #[cfg(target_os = "macos")]
@@ -272,6 +282,8 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
     let (installed, landlock) = protected()?;
     #[cfg(target_os = "macos")]
     let _access = probe_before_ready(&mut fds)?;
+    #[cfg(target_os = "linux")]
+    let _access = probe_before_ready()?;
     let catalog = collection::selection::Catalog {
         segments: &[const {
             SegmentDecl {

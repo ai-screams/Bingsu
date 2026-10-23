@@ -57,12 +57,24 @@ fn nr(arch: AuditArch, name: &str) -> u32 {
         .nr
 }
 fn verdict(arch: AuditArch, name: &str, args: [u64; 6]) -> u32 {
-    eval(&policy::program(arch), arch.value(), nr(arch, name), args)
+    eval(
+        &policy::program(arch, filter::Openat2Policy::Deny),
+        arch.value(),
+        nr(arch, name),
+        args,
+    )
 }
 fn positive(condition: &str) -> [u64; 6] {
     let mut a = [0; 6];
     match condition {
-        "any" | "enosys" | "query" | "open" | "openat" => {}
+        "any" | "enosys" | "query" | "open" | "openat" | "read_root" | "read_layer_restrict" => {}
+        "handled_write_set" => a[3] = 24,
+        "readonly" => {
+            a[2] = 2;
+            a[3] = 0x200;
+        }
+        "read_layer_create" => a[1] = 8,
+        "read_layer_add" => a[1] = 1,
         "response" => a[0] = 1,
         "thread" => a[0] = 0x10900,
         "mapping" => {
@@ -132,6 +144,12 @@ fn table_program_and_row_removal_probes_agree() {
         ("clone3", 435, Some(435)),
         ("prlimit64", 302, Some(261)),
         ("seccomp", 317, Some(277)),
+        ("openat2", 437, Some(437)),
+        ("fstatfs", 138, Some(44)),
+        ("faccessat2", 439, Some(439)),
+        ("landlock_create_ruleset", 444, Some(444)),
+        ("landlock_add_rule", 445, Some(445)),
+        ("landlock_restrict_self", 446, Some(446)),
     ];
     for arch in ARCHES {
         let rows = policy::rows(arch);
@@ -162,7 +180,12 @@ fn table_program_and_row_removal_probes_agree() {
                 ALLOW
             };
             assert_eq!(
-                eval(&policy::bootstrap_program(arch), arch.value(), row.nr, args),
+                eval(
+                    &policy::bootstrap_program(arch, filter::Openat2Policy::WriteSetCovered),
+                    arch.value(),
+                    row.nr,
+                    args
+                ),
                 expected,
                 "{}",
                 row.probe
@@ -179,7 +202,10 @@ fn table_program_and_row_removal_probes_agree() {
                 row.probe
             );
         }
-        for p in [policy::program(arch), policy::bootstrap_program(arch)] {
+        for p in [
+            policy::program(arch, filter::Openat2Policy::Deny),
+            policy::bootstrap_program(arch, filter::Openat2Policy::Deny),
+        ] {
             assert!(p.len() <= 4096);
             // Every branch is forward, in bounds and reaches a RET. No loop or
             // falling off the end can hide in an unexercised argument branch.
@@ -213,7 +239,10 @@ fn bpf_arch_x32_and_64bit_arguments_are_exact() {
     assert_eq!(AuditArch::X86_64.value(), 0xc000003e);
     assert_eq!(AuditArch::Aarch64.value(), 0xc00000b7);
     for arch in ARCHES {
-        for p in [policy::program(arch), policy::bootstrap_program(arch)] {
+        for p in [
+            policy::program(arch, filter::Openat2Policy::Deny),
+            policy::bootstrap_program(arch, filter::Openat2Policy::Deny),
+        ] {
             for wrong in [0, 0x40000003, arch.value() ^ 1] {
                 assert_eq!(eval(&p, wrong, 0, [0; 6]), KILL);
             }
@@ -258,7 +287,7 @@ fn bpf_clone_allows_threads_only() {
     for n in [57, 58] {
         assert_eq!(
             eval(
-                &policy::program(AuditArch::X86_64),
+                &policy::program(AuditArch::X86_64, filter::Openat2Policy::Deny),
                 AuditArch::X86_64.value(),
                 n,
                 [0; 6]
@@ -338,7 +367,12 @@ fn bpf_write_paths_have_no_alias_bypass() {
                 a
             } {
                 assert_eq!(
-                    eval(&policy::program(arch), arch.value(), n, [0; 6]),
+                    eval(
+                        &policy::program(arch, filter::Openat2Policy::Deny),
+                        arch.value(),
+                        n,
+                        [0; 6]
+                    ),
                     DENY,
                     "{name}"
                 );
@@ -393,7 +427,15 @@ fn bpf_fd_and_mapping_rules_cannot_write_files() {
             66, 68, 70, 287, 71, 76, 75, 285, 425, 426, 427, 23, 24, 24, 29, 117, 270, 271, 280, 40,
         ];
         for n in if arch == AuditArch::X86_64 { x } else { a } {
-            assert_eq!(eval(&policy::program(arch), arch.value(), n, [0; 6]), DENY);
+            assert_eq!(
+                eval(
+                    &policy::program(arch, filter::Openat2Policy::Deny),
+                    arch.value(),
+                    n,
+                    [0; 6]
+                ),
+                DENY
+            );
         }
         for clock in [0, 2, 3, 4, 5, 6, 8, u64::MAX] {
             assert_eq!(verdict(arch, "clock_gettime", [clock, 0, 0, 0, 0, 0]), DENY);
@@ -410,7 +452,7 @@ fn bpf_fd_and_mapping_rules_cannot_write_files() {
 #[test]
 fn bpf_final_filter_refuses_limit_changes() {
     for arch in ARCHES {
-        let p = policy::bootstrap_program(arch);
+        let p = policy::bootstrap_program(arch, filter::Openat2Policy::Deny);
         for pointer in [1, 1 << 32, u64::MAX] {
             assert_eq!(verdict(arch, "prlimit64", [0, 9, pointer, 0, 0, 0]), DENY);
             assert_eq!(
@@ -468,7 +510,7 @@ fn bpf_final_filter_refuses_limit_changes() {
         } else {
             [164, 91, 146, 144]
         } {
-            for p in [&p, &policy::program(arch)] {
+            for p in [&p, &policy::program(arch, filter::Openat2Policy::Deny)] {
                 assert_eq!(eval(p, arch.value(), n, [0; 6]), DENY);
             }
         }
@@ -478,3 +520,116 @@ fn bpf_final_filter_refuses_limit_changes() {
 #[cfg(target_os = "linux")]
 #[path = "filter/runtime.rs"]
 mod runtime;
+
+#[cfg(target_os = "linux")]
+#[path = "filter/tmpfile.rs"]
+mod tmpfile;
+
+// 이것을 실패시키는 것: TRUNCATE 대신 ABI 번호로 허용하거나 새 행의 인자 검사를 제거하는 것.
+#[test]
+fn repository_rows_require_exact_arguments_and_handled_write_set() {
+    use filter::Openat2Policy::{Deny, WriteSetCovered};
+    assert!(!landlock::LandlockState::Absent.covers_openat2_writes());
+    for missing in (0..15).filter(|bit| 0x7ff2 & (1 << bit) != 0) {
+        assert!(
+            !landlock::LandlockState::Installed {
+                abi: 99,
+                handled_access_fs: 0x7ff2 & !(1 << missing),
+            }
+            .covers_openat2_writes()
+        );
+    }
+    assert!(
+        landlock::LandlockState::Installed {
+            abi: 3,
+            handled_access_fs: 0x7ff2
+        }
+        .covers_openat2_writes()
+    );
+    for arch in ARCHES {
+        for mode in [Deny, WriteSetCovered] {
+            let p = policy::program(arch, mode);
+            for size in [0, 23, 24, 25, 24 | (1 << 32)] {
+                assert_eq!(
+                    eval(&p, arch.value(), 437, [0, 0, 1, size, 0, 0]),
+                    if size == 24 && mode == WriteSetCovered {
+                        ALLOW
+                    } else {
+                        DENY
+                    }
+                );
+            }
+            for (name, good, invalid) in [
+                (
+                    "faccessat2",
+                    [0, 0, 2, 0x200, 0, 0],
+                    vec![(2, 0), (2, 4), (2, 6), (3, 0), (3, 0x100)],
+                ),
+                (
+                    "landlock_create_ruleset",
+                    [1, 8, 0, 0, 0, 0],
+                    vec![(1, 0), (1, 16), (1, 8 | (1 << 32)), (2, 1), (2, 2)],
+                ),
+                (
+                    "landlock_add_rule",
+                    [0, 1, 1, 0, 0, 0],
+                    vec![(1, 0), (1, 2), (3, 1)],
+                ),
+                ("landlock_restrict_self", [0; 6], vec![(1, 1)]),
+            ] {
+                assert_eq!(
+                    eval(&p, arch.value(), nr(arch, name), good),
+                    ALLOW,
+                    "{name}"
+                );
+                for (arg, bad) in invalid {
+                    let mut args = good;
+                    args[arg] = bad;
+                    assert_eq!(
+                        eval(&p, arch.value(), nr(arch, name), args),
+                        DENY,
+                        "{name} arg {arg}"
+                    );
+                }
+            }
+            // 이것을 실패시키는 것: 봉인 뒤 미사용 VERSION 조회를 다시 허용하는 것.
+            assert_eq!(
+                eval(
+                    &p,
+                    arch.value(),
+                    nr(arch, "landlock_create_ruleset"),
+                    [0, 0, 1, 0, 0, 0]
+                ),
+                DENY
+            );
+            if arch == AuditArch::X86_64 {
+                for n in [437, 138, 439, 444, 445, 446] {
+                    assert_eq!(eval(&p, arch.value(), n | 0x4000_0000, [0; 6]), KILL);
+                }
+            }
+            let bytes: Vec<_> = p
+                .iter()
+                .flat_map(|i| {
+                    let mut b = Vec::from(i.code.to_le_bytes());
+                    b.extend([i.jt, i.jf]);
+                    b.extend(i.k.to_le_bytes());
+                    b
+                })
+                .collect();
+            println!(
+                "B3 BPF {arch:?} {mode:?} instructions={} sha256={:02x?}",
+                p.len(),
+                bingsu_core::collection::cwd_hash::sha256(&bytes)
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/meter.rs"]
+mod meter;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/safe_read/mod.rs"]
+mod safe_read;

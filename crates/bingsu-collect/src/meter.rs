@@ -1,11 +1,12 @@
-//! OS-side budget port. Pure collection counters are connected in the next stage.
+//! OS deadlines and syscall observations around the shared pure budget counters.
 use std::{cell::Cell, rc::Rc, time::Instant};
 
 use crate::safe_read::ReadError;
+use bingsu_core::collection::budget::{self, Axis, BudgetCounters};
 
-pub const READ_CHUNK: usize = 16_384;
-pub const DIRENT_CHUNK: usize = 8_192;
-pub const LIVE_FDS: u32 = 56;
+pub const READ_CHUNK: usize = budget::READ_CHUNK as usize;
+pub const DIRENT_CHUNK: usize = budget::DIRENT_CHUNK as usize;
+pub const LIVE_FDS: u32 = budget::LIVE_FDS as u32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
@@ -29,6 +30,7 @@ pub struct Counters {
     pub raw_entries: u64,
     pub allocated: u64,
     pub retries: u64,
+    pub readonly: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +44,7 @@ pub enum Op {
     List,
     Component,
     Retry,
+    Readonly,
 }
 
 #[cfg(test)]
@@ -49,6 +52,7 @@ type Hook = Box<dyn FnMut(&str)>;
 
 pub struct Meter {
     deadline: Instant,
+    pub budget: BudgetCounters,
     pub phase: Phase,
     pub counts: [Counters; 3],
     pub byte_limit: u64,
@@ -77,6 +81,7 @@ impl Meter {
     pub fn new(deadline: Instant) -> Self {
         Self {
             deadline,
+            budget: BudgetCounters::default(),
             phase: Phase::Content,
             counts: [Counters::default(); 3],
             byte_limit: 8_388_608,
@@ -103,10 +108,20 @@ impl Meter {
         }
     }
 
+    pub fn charge_axis(&mut self, axis: Axis, amount: u64) -> Result<(), ReadError> {
+        self.check()?;
+        self.budget
+            .charge(axis, amount)
+            .map_err(|_| ReadError::Limit)
+    }
+
     pub fn charge(&mut self, op: Op) -> Result<(), ReadError> {
         self.check()?;
         if self.operations >= 100_000 {
             return Err(ReadError::Limit);
+        }
+        if matches!(op, Op::Stat) {
+            self.charge_axis(Axis::Stats, 1)?;
         }
         self.operations += 1;
         let count = &mut self.counts[self.phase as usize];
@@ -120,6 +135,7 @@ impl Meter {
             Op::List => &mut count.list,
             Op::Component => &mut count.components,
             Op::Retry => &mut count.retries,
+            Op::Readonly => &mut count.readonly,
         };
         *axis += 1;
         Ok(())
@@ -149,6 +165,7 @@ impl Meter {
         if next > self.byte_limit {
             return Err(ReadError::Limit);
         }
+        self.charge_axis(Axis::WorktreeReadBytes, bytes as u64)?;
         self.allocation(bytes)?;
         self.bytes = next;
         Ok(())
@@ -160,6 +177,7 @@ impl Meter {
 
     pub fn raw_entry(&mut self) -> Result<(), ReadError> {
         self.check()?;
+        self.charge_axis(Axis::WorktreeEntries, 1)?;
         let counter = &mut self.counts[self.phase as usize].raw_entries;
         if *counter >= 65_536 {
             return Err(ReadError::Limit);
@@ -184,5 +202,31 @@ impl Meter {
         if let Some(hook) = self.hook.as_mut() {
             hook(_event);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // 이것을 실패시키는 것: OS port에서 core 사전 charge를 빼거나 phase마다 예산을 초기화하는 것.
+    #[test]
+    fn pure_budget_precedes_io_across_phases() {
+        let mut m = Meter::new(Instant::now() + std::time::Duration::from_secs(30));
+        m.budget.charge(Axis::Stats, budget::STATS).unwrap();
+        assert_eq!(m.charge(Op::Stat), Err(ReadError::Limit));
+        assert_eq!(m.counts[Phase::Content as usize].stat, 0);
+        m.budget
+            .charge(Axis::WorktreeReadBytes, budget::WORKTREE_READ_BYTES)
+            .unwrap();
+        assert_eq!(m.read_capacity(1), Err(ReadError::Limit));
+        assert_eq!(m.allocated, 0);
+        m.budget
+            .charge(Axis::WorktreeEntries, budget::WORKTREE_ENTRIES - 1)
+            .unwrap();
+        m.phase = Phase::Acquisition;
+        m.raw_entry().unwrap();
+        m.phase = Phase::Content;
+        assert_eq!(m.raw_entry(), Err(ReadError::Limit));
+        assert_eq!(m.counts[Phase::Content as usize].raw_entries, 0);
     }
 }

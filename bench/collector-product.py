@@ -474,7 +474,12 @@ fn main(){
  match args.get(1).and_then(|s|s.to_str()) {
   Some("--policy")=>{
     #[cfg(target_os="linux")]
-    println!("{{\"initial_bpf_instructions\":{},\"final_bpf_instructions\":{}}}",filter::bootstrap_program(filter::AuditArch::native()).len(),filter::program(filter::AuditArch::native()).len());
+    {
+      sys::no_new_privs().unwrap();
+      let state=landlock::install_read_only().unwrap();
+      let mode=if state.covers_openat2_writes(){filter::Openat2Policy::WriteSetCovered}else{filter::Openat2Policy::Deny};
+      println!("{{\"initial_bpf_instructions\":{},\"final_bpf_instructions\":{},\"openat2_policy\":\"{:?}\"}}",filter::bootstrap_program(filter::AuditArch::native(), mode).len(),filter::program(filter::AuditArch::native(), mode).len(),mode);
+    }
     #[cfg(not(target_os="linux"))]
     println!("{{\"initial_bpf_instructions\":0,\"final_bpf_instructions\":0}}");
   },

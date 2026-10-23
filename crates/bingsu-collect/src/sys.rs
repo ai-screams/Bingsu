@@ -121,6 +121,8 @@ fn null_device(fd: i32) -> io::Result<()> {
 
 /// Close unwanted descriptors before NOFILE falls. No /proc path observation.
 fn close_extras() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    linux_floor()?;
     // SAFETY: fd4 is forbidden and not owned by a Rust object in this entry.
     unsafe { libc::close(4) };
     #[cfg(target_os = "linux")]
@@ -278,14 +280,25 @@ pub(crate) fn no_new_privs() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+static WRITE_POLICY: std::sync::OnceLock<crate::filter::Openat2Policy> = std::sync::OnceLock::new();
+
 /// Landlock precedes the initial filter; any protection error prevents Ready.
 pub(crate) fn initial_filter() -> io::Result<u32> {
     #[cfg(target_os = "linux")]
     {
         let state = crate::landlock::install_read_only()?;
-        crate::filter::install_bootstrap()?;
+        let mode = if state.covers_openat2_writes() {
+            crate::filter::Openat2Policy::WriteSetCovered
+        } else {
+            crate::filter::Openat2Policy::Deny
+        };
+        crate::filter::install_bootstrap(mode)?;
+        WRITE_POLICY
+            .set(mode)
+            .map_err(|_| io::Error::other("filter already installed"))?;
         Ok(match state {
-            crate::landlock::LandlockState::Installed { abi } => abi,
+            crate::landlock::LandlockState::Installed { abi, .. } => abi,
             crate::landlock::LandlockState::Absent => 0,
         })
     }
@@ -301,7 +314,11 @@ pub(crate) fn initial_filter() -> io::Result<u32> {
 pub(crate) fn final_filter() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        crate::filter::seal_limits()
+        crate::filter::seal_limits(
+            *WRITE_POLICY
+                .get()
+                .ok_or_else(|| io::Error::other("missing write policy"))?,
+        )
     }
     #[cfg(target_os = "macos")]
     {
@@ -318,4 +335,68 @@ unsafe extern "C" {
     fn acl_get_fd_np(fd: i32, kind: i32) -> *mut libc::c_void;
     fn acl_get_entry(acl: *mut libc::c_void, id: i32, entry: *mut *mut libc::c_void) -> i32;
     fn acl_free(acl: *mut libc::c_void) -> i32;
+}
+
+// The floor is a deployment policy, never a substitute for probing features.
+#[cfg(any(test, target_os = "linux"))]
+fn supported_release(release: &[u8]) -> bool {
+    let mut parts = release.split(|b| *b == b'.');
+    let number = |part: Option<&[u8]>| {
+        part.and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|p| p.parse::<u32>().ok())
+    };
+    matches!((number(parts.next()), number(parts.next())), (Some(major), Some(minor))
+        if (major, minor) >= (5, 9))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_floor() -> io::Result<()> {
+    // SAFETY: plain output record; uname initializes every string field.
+    let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+    // SAFETY: writable uname record.
+    if unsafe { libc::uname(&mut name) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: uname release is a NUL-terminated fixed array on success.
+    let release = unsafe { std::ffi::CStr::from_ptr(name.release.as_ptr()) };
+    if !supported_release(release.to_bytes()) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Linux 5.9 required",
+        ));
+    }
+    // The helper also requires pidfd supervision; verify actual availability
+    // before seccomp. close_range is checked by close_extras; STATX_MNT_ID is
+    // checked by the protected fixed-root probe before Ready.
+    // SAFETY: read-only process identity.
+    let pid = unsafe { libc::getpid() };
+    // SAFETY: read-only handle to our own process, flags zero.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fresh descriptor, closed once without releasing any lock.
+    unsafe { libc::close(fd as i32) };
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code, reason = "integration test injection only")]
+pub fn required_features_for_test() -> io::Result<()> {
+    close_extras()
+}
+
+#[cfg(test)]
+mod floor_tests {
+    use super::*;
+    // 이것을 실패시키는 것: 커널 하한을 5.8로 낮추거나 잘못된 버전을 허용하는 것.
+    #[test]
+    fn linux_collection_floor_requires_capabilities() {
+        for old in [b"5.8.18".as_slice(), b"4.19.0", b"5", b"unknown", b"5.x.0"] {
+            assert!(!supported_release(old));
+        }
+        for supported in [b"5.9.0".as_slice(), b"6.1.0-vendor", b"7.0.0"] {
+            assert!(supported_release(supported));
+        }
+    }
 }

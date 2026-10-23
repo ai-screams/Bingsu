@@ -1,5 +1,5 @@
 //! Linux primitive counts (close is ownership cleanup, outside the budget):
-//! - probe: one openat("/") and one openat2(".") per attempt;
+//! - probe: openat("/")/fstat/fstatfs/statx and one openat2(".") per attempt;
 //! - acquisition: root open/fstat/fstatfs/statx; each ordinary component adds
 //!   lstat/openat/fstat/fstatfs/statx, without a cross-mount comparison;
 //! - fast content: openat2/fstat/fstatfs/statx, then bounded 16KiB reads + EOF;
@@ -22,6 +22,7 @@ pub(super) fn probe(meter: &mut Meter) -> Result<Resolver, ReadError> {
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             meter,
         )?;
+        identity(root.as_raw_fd(), meter)?; // required mount-id/procfs capability, even in A-only mode
         match open_raw(root.as_raw_fd(), c".", true, meter) {
             Ok(_) => Ok(Resolver::Openat2),
             Err(ReadError::Io(libc::ENOSYS | libc::EPERM)) => Ok(Resolver::Stepwise),

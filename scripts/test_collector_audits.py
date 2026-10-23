@@ -1,5 +1,6 @@
 """Host-only collector dependency, import and shared manifest audit tests."""
 import importlib.util
+import json
 import pathlib
 import shutil
 import subprocess
@@ -15,6 +16,34 @@ def load(name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# 이것을 실패시키는 것: Cargo의 첫 실행 파일(제품 collector)을 filter 테스트로 실행하는 것.
+def test_repository_trace_selects_only_filter_test_artifact():
+    audit = load("check_collector_filter")
+    def artifact(name, kind, test, executable):
+        return json.dumps({"reason": "compiler-artifact", "target": {"name": name, "kind": [kind]},
+                           "profile": {"test": test}, "executable": executable})
+    product = artifact("bingsu-collect", "bin", False, "/target/debug/bingsu-collect")
+    probe = artifact("filter", "test", True, "/target/debug/deps/filter-1234")
+    assert audit.filter_test_binary(product + "\n" + probe) == "/target/debug/deps/filter-1234"
+    for bad in (product, probe + "\n" + probe,
+                artifact("filter", "bin", True, "/wrong"),
+                artifact("filter", "test", False, "/wrong"),
+                artifact("filter", "test", True, None)):
+        with pytest.raises(AssertionError, match="expected one filter test executable"):
+            audit.filter_test_binary(bad)
+
+
+# 이것을 실패시키는 것: Linux 전용 선택 테스트를 다른 호스트에서도 실행하거나 0개 실행을 통과시키는 것.
+@pytest.mark.parametrize("platform,count", [("linux", 10), ("darwin", 9), ("win32", 9)])
+def test_filter_host_test_count_matches_linux_cfg(monkeypatch, platform, count):
+    audit = load("check_collector_filter")
+    monkeypatch.setattr(audit.sys, "platform", platform)
+    for observed in (0, 9, 10):
+        result = subprocess.CompletedProcess([], 0,
+            f"test result: ok. {observed} passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.01s\n")
+        assert audit.host_tests_passed(result) == (observed == count)
 
 
 # 이것을 실패시키는 것: 금지된 exec/spawn/fork 계열 또는 dlsym을 감사에서 허용하는 것.

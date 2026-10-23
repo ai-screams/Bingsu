@@ -1,0 +1,364 @@
+2011  execve("/tmp/t/debug/deps/filter-44e165c11ed1856d", ["/tmp/t/debug/deps/filter-44e165c11ed1856d", "--exact", "runtime::repository_child", "--ignored", "--nocapture", "--test-threads=1"], 0xffffcad6c088 /* 15 vars */) = 0
+2011  brk(NULL)                         = 0xacca83c83000
+2011  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xee9047aed000
+2011  faccessat(AT_FDCWD</tmp/src>, "/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+2011  openat(AT_FDCWD</tmp/src>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+2011  newfstatat(3</etc/ld.so.cache>, "", {st_mode=S_IFREG|0644, st_size=7619, ...}, AT_EMPTY_PATH) = 0
+2011  mmap(NULL, 7619, PROT_READ, MAP_PRIVATE, 3</etc/ld.so.cache>, 0) = 0xee9047aeb000
+2011  close(3</etc/ld.so.cache>)        = 0
+2011  openat(AT_FDCWD</tmp/src>, "/lib/aarch64-linux-gnu/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>
+2011  read(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\310\2\2\0\0\0\0\0\0\0\0\0@\08\0\7\0@\0\32\0\31\0\1\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0h2\1\0\0\0\0\0h2\1\0\0\0\0\0\0\0\1\0\0\0\0\0\1\0\0\0\6\0\0\0\270\375\1\0\0\0\0\0\270\375\2\0\0\0\0\0\270\375\2\0\0\0\0\0\350\3\0\0\0\0\0\0\20\5\0\0\0\0\0\0\0\0\1\0\0\0\0\0\2\0\0\0\6\0\0\0\310\375\1\0\0\0\0\0\310\375\2\0\0\0\0\0\310\375\2\0\0\0\0\0\360\1\0\0\0\0\0\0\360\1\0\0\0\0\0\0\10\0\0\0\0\0\0\0\4\0\0\0\4\0\0\0\310\1\0\0\0\0\0\0\310\1\0\0\0\0\0\0\310\1\0\0\0\0\0\0$\0\0\0\0\0\0\0$\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0P\345td\4\0\0\0 \22\1\0\0\0\0\0 \22\1\0\0\0\0\0 \22\1\0\0\0\0\0\34\5\0\0\0\0\0\0\34\5\0\0\0\0\0\0\4\0\0\0\0\0\0\0Q\345td\6\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0R\345td\4\0\0\0\270\375\1\0\0\0\0\0\270\375\2\0\0\0\0\0\270\375\2\0\0\0\0\0H\2\0\0\0\0\0\0H\2\0\0\0\0\0\0\1\0\0\0\0\0\0\0\4\0\0\0\24\0\0\0\3\0\0\0GNU\0\25\31\333\376\301\3\245\2j\306u\200\264\n,`\26\213\25\f\0\0\0\0\203\0\0\0\30\0\0\0\20\0\0\0\n\0\0\0\23\34\3\30\4$\0\1\1\201\0T\4\2\10\20\200\204\0\0\0\f\5\200\2\0`\20\4\222\0\24\22\200\300 \300\0\200\2t\1\0\0\10(\300\2H\1+ \320\1\2(\23\265$`l\322\0!#pB@r\204\30`@@\1\0\200\v\0\0\22$\0\0\21\2\10A\300\1$\t\21(  \10C\v\246\222\10\tH\10\3@\f\n\34\22O\306\1\207\vA\204\226\315\4\302\305\4\242\333\16\314\30\0\0\0\31\0\0\0\34\0\0\0\0\0\0\0\36\0\0\0\0\0\0\0!\0\0\0\"\0\0\0%\0\0\0(\0\0\0*\0\0\0\0\0\0\0+\0\0\0-\0\0\0.\0\0\0001\0\0\0002\0\0\0005\0\0\0006\0\0\08\0\0\0\0\0\0\09\0\0\0:\0\0\0\0\0\0\0>\0\0\0@\0\0\0A\0\0\0B\0\0\0C\0\0\0D\0\0\0F\0\0\0G\0\0\0\0\0\0\0\0\0\0\0H\0\0\0\0\0\0\0I\0\0\0J\0\0\0K\0\0\0L\0\0\0M\0\0\0N\0\0\0\0\0\0\0\0\0\0\0P\0\0\0\0\0\0\0\0\0\0\0R\0\0\0", 832) = 832
+2011  newfstatat(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "", {st_mode=S_IFREG|0644, st_size=133448, ...}, AT_EMPTY_PATH) = 0
+2011  mmap(NULL, 262856, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xee9047a73000
+2011  mmap(0xee9047a80000, 197320, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0) = 0xee9047a80000
+2011  munmap(0xee9047a73000, 53248)     = 0
+2011  munmap(0xee9047ab1000, 8904)      = 0
+2011  mprotect(0xee9047a94000, 110592, PROT_NONE) = 0
+2011  mmap(0xee9047aaf000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0x1f000) = 0xee9047aaf000
+2011  close(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>) = 0
+2011  openat(AT_FDCWD</tmp/src>, "/lib/aarch64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/aarch64-linux-gnu/libc.so.6>
+2011  read(3</usr/lib/aarch64-linux-gnu/libc.so.6>, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0000y\2\0\0\0\0\0@\0\0\0\0\0\0\0\20#\31\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0?\0>\0\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0000\2\0\0\0\0\0\0000\2\0\0\0\0\0\0\10\0\0\0\0\0\0\0\3\0\0\0\4\0\0\08\326\25\0\0\0\0\08\326\25\0\0\0\0\08\326\25\0\0\0\0\0\33\0\0\0\0\0\0\0\33\0\0\0\0\0\0\0\10\0\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\234\270\30\0\0\0\0\0\234\270\30\0\0\0\0\0\0\0\1\0\0\0\0\0\1\0\0\0\6\0\0\0\300\315\30\0\0\0\0\0\300\315\31\0\0\0\0\0\300\315\31\0\0\0\0\0\10I\0\0\0\0\0\0\240\22\1\0\0\0\0\0\0\0\1\0\0\0\0\0\2\0\0\0\6\0\0\0\260\373\30\0\0\0\0\0\260\373\31\0\0\0\0\0\260\373\31\0\0\0\0\0\260\1\0\0\0\0\0\0\260\1\0\0\0\0\0\0\10\0\0\0\0\0\0\0\4\0\0\0\4\0\0\0p\2\0\0\0\0\0\0p\2\0\0\0\0\0\0p\2\0\0\0\0\0\0D\0\0\0\0\0\0\0D\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\7\0\0\0\4\0\0\0\300\315\30\0\0\0\0\0\300\315\31\0\0\0\0\0\300\315\31\0\0\0\0\0\20\0\0\0\0\0\0\0\220\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0P\345td\4\0\0\0T\326\25\0\0\0\0\0T\326\25\0\0\0\0\0T\326\25\0\0\0\0\0lh\0\0\0\0\0\0lh\0\0\0\0\0\0\4\0\0\0\0\0\0\0Q\345td\6\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0R\345td\4\0\0\0\300\315\30\0\0\0\0\0\300\315\31\0\0\0\0\0\300\315\31\0\0\0\0\0@2\0\0\0\0\0\0@2\0\0\0\0\0\0\1\0\0\0\0\0\0\0\4\0\0\0\24\0\0\0\3\0\0\0GNU\0o&\217\365F\305m\177\24\351P\32Ui\214\302\320\253G2\4\0\0\0\20\0\0\0\1\0\0\0GNU\0\0\0\0\0\3\0\0\0\7\0\0\0\0\0\0\0\0\0\0\0\361\3\0\0\27\0\0\0\0\1\0\0\16\0\0\0@0\22\\\250 \23\1\210\3\346\220\305E\214\0\304\0X\0\7\204 p\302\200\1\r\212\34\301\24\21\200\310D2\10*@\210V<- N\262H&\204\320\216\4\f\0\3\2\16\261\254:\17f\310\200\3003\0\300\fP\t \201\t\224\v$ ($\0\204$Z0\20X\200\312DB(\0\6\200\20\32C\0\250T\200\0IP\4Q\212P\22\4\0$\0\10  \21\20", 832) = 832
+2011  newfstatat(3</usr/lib/aarch64-linux-gnu/libc.so.6>, "", {st_mode=S_IFREG|0755, st_size=1651408, ...}, AT_EMPTY_PATH) = 0
+2011  mmap(NULL, 1826912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xee90478c1000
+2011  mmap(0xee90478d0000, 1761376, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libc.so.6>, 0) = 0xee90478d0000
+2011  munmap(0xee90478c1000, 61440)     = 0
+2011  munmap(0xee9047a7f000, 96)        = 0
+2011  mprotect(0xee9047a5c000, 65536, PROT_NONE) = 0
+2011  mmap(0xee9047a6c000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libc.so.6>, 0x18c000) = 0xee9047a6c000
+2011  mmap(0xee9047a72000, 49248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0xee9047a72000
+2011  close(3</usr/lib/aarch64-linux-gnu/libc.so.6>) = 0
+2011  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xee9047ae9000
+2011  set_tid_address(0xee9047ae90f0)   = 2011
+2011  set_robust_list(0xee9047ae9100, 24) = 0
+2011  rseq(0xee9047ae9740, 0x20, 0, 0xd428bc00) = 0
+2011  mprotect(0xee9047a6c000, 16384, PROT_READ) = 0
+2011  mprotect(0xee9047aaf000, 4096, PROT_READ) = 0
+2011  mprotect(0xacca44cbf000, 69632, PROT_READ) = 0
+2011  mprotect(0xee9047af2000, 8192, PROT_READ) = 0
+2011  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+2011  munmap(0xee9047aeb000, 7619)      = 0
+2011  ppoll([{fd=0</dev/null<char 1:3>>, events=0}, {fd=1<pipe:[1586202]>, events=0}, {fd=2<pipe:[1586203]>, events=0}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0) = 0 (Timeout)
+2011  rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+2011  getrandom("\x1f\xef\x8b\x19\xe9\x21\x5d\x03", 8, GRND_NONBLOCK) = 8
+2011  brk(NULL)                         = 0xacca83c83000
+2011  brk(0xacca83ca4000)               = 0xacca83ca4000
+2011  openat(AT_FDCWD</tmp/src>, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 3</proc/2011/maps>
+2011  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+2011  newfstatat(3</proc/2011/maps>, "", {st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
+2011  read(3</proc/2011/maps>, "acca44b30000-acca44cae000 r-xp 00000000 00:2e 6169541                    /tmp/t/debug/deps/filter-44e165c11ed1856d\nacca44cbf000-acca44cd0000 r--p 0017f000 00:2e 6169541                    /tmp/t/debug/deps/filter-44e165c11ed1856d\nacca44cd0000-acca44cd1000 rw-p 00190000 00:2e 6169541                    /tmp/t/debug/deps/filter-44e165c11ed1856d\nacca83c83000-acca83ca4000 rw-p 00000000 00:00 0                          [heap]\nee90478d0000-ee9047a5c000 r-xp 00000000 00:2e 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nee9047a5c000-ee9047a6c000 ---p 0018c000 00:2e 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nee9047a6c000-ee9047a70000 r--p 0018c000 00:2e 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nee9047a70000-ee9047a72000 rw-p 00190000 00:2e 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nee9047a72000-ee9047a7f000 rw-p 00000000 00:00 0 \nee9047a80000-ee9047a94000 r-xp 00000000 00:2e 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.s", 1024) = 1024
+2011  read(3</proc/2011/maps>, "o.1\nee9047a94000-ee9047aaf000 ---p 00014000 00:2e 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\nee9047aaf000-ee9047ab0000 r--p 0001f000 00:2e 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\nee9047ab0000-ee9047ab1000 rw-p 00020000 00:2e 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\nee9047ab4000-ee9047adb000 r-xp 00000000 00:2e 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nee9047ae9000-ee9047aeb000 rw-p 00000000 00:00 0 \nee9047aed000-ee9047aef000 rw-p 00000000 00:00 0 \nee9047aef000-ee9047af1000 r--p 00000000 00:00 0                          [vvar]\nee9047af1000-ee9047af2000 r-xp 00000000 00:00 0                          [vdso]\nee9047af2000-ee9047af4000 r--p 0002e000 00:2e 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nee9047af4000-ee9047af6000 rw-p 00030000 00:2e 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nffffd85d1000-ffffd85f2000 rw-p 00000000 00:00 0       ", 1024) = 1024
+2011  read(3</proc/2011/maps>, "                   [stack]\n", 1024) = 27
+2011  close(3</proc/2011/maps>)         = 0
+2011  sched_getaffinity(2011, 32, [0 1 2 3]) = 8
+2011  rt_sigaction(SIGSEGV, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+2011  sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+2011  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0xee9047ae4000
+2011  mprotect(0xee9047ae4000, 4096, PROT_NONE) = 0
+2011  sigaltstack({ss_sp=0xee9047ae5000, ss_flags=0, ss_size=16384}, NULL) = 0
+2011  gettid()                          = 2011
+2011  rt_sigaction(SIGSEGV, {sa_handler=0xacca44c32df8, sa_mask=[], sa_flags=SA_ONSTACK|SA_SIGINFO}, NULL, 8) = 0
+2011  rt_sigaction(SIGBUS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+2011  rt_sigaction(SIGBUS, {sa_handler=0xacca44c32df8, sa_mask=[], sa_flags=SA_ONSTACK|SA_SIGINFO}, NULL, 8) = 0
+2011  write(1<pipe:[1586202]>, "\nrunning 1 test\n", 16) = 16
+2011  write(1<pipe:[1586202]>, "test runtime::repository_child ... ", 35) = 35
+2011  rt_sigaction(SIGRT_1, {sa_handler=0xee904794f1e0, sa_mask=[], sa_flags=SA_ONSTACK|SA_RESTART|SA_SIGINFO}, NULL, 8) = 0
+2011  rt_sigprocmask(SIG_UNBLOCK, [RTMIN RT_1], NULL, 8) = 0
+2011  mmap(NULL, 2162688, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0xee90476c0000
+2011  mprotect(0xee90476d0000, 2097152, PROT_READ|PROT_WRITE) = 0
+2011  rt_sigprocmask(SIG_BLOCK, ~[], [], 8) = 0
+2011  clone(child_stack=0xee90478ce9c0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[2012], tls=0xee90478cf840, child_tidptr=0xee90478cf1d0) = 2012
+2011  rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+2012  rseq(0xee90478cf820, 0x20, 0, 0xd428bc00 <unfinished ...>
+2011  <... rt_sigprocmask resumed>NULL, 8) = 0
+2012  <... rseq resumed>)               = 0
+2011  futex(0xacca83c85688, FUTEX_WAIT_BITSET_PRIVATE, 4294967295, NULL, FUTEX_BITSET_MATCH_ANY <unfinished ...>
+2012  set_robust_list(0xee90478cf1e0, 24) = 0
+2012  rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+2012  prctl(PR_SET_NAME, "runtime::reposi"...) = 0
+2012  mmap(NULL, 134217728, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0) = 0xee903f600000
+2012  munmap(0xee903f600000, 10485760)  = 0
+2012  munmap(0xee9044000000, 56623104)  = 0
+2012  mprotect(0xee9040000000, 135168, PROT_READ|PROT_WRITE) = 0
+2012  sched_getaffinity(2012, 32, [0 1 2 3]) = 8
+2012  gettid()                          = 2012
+2012  sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+2012  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0xee9047adf000
+2012  mprotect(0xee9047adf000, 4096, PROT_NONE) = 0
+2012  sigaltstack({ss_sp=0xee9047ae0000, ss_flags=0, ss_size=16384}, NULL) = 0
+2012  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=10, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=0, tv_usec=0}}) = 0
+2012  rt_sigaction(SIGXCPU, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+2012  rt_sigaction(SIGXFSZ, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+2012  rt_sigaction(SIGALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+2012  rt_sigprocmask(SIG_UNBLOCK, [ALRM XCPU XFSZ], NULL, 8) = 0
+2012  prlimit64(0, RLIMIT_CPU, NULL, {rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+2012  prlimit64(0, RLIMIT_CPU, {rlim_cur=1, rlim_max=1}, NULL) = 0
+2012  prlimit64(0, RLIMIT_CPU, NULL, {rlim_cur=1, rlim_max=1}) = 0
+2012  prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=512*1024}) = 0
+2012  prlimit64(0, RLIMIT_NOFILE, {rlim_cur=64, rlim_max=64}, NULL) = 0
+2012  prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=64, rlim_max=64}) = 0
+2012  prlimit64(0, RLIMIT_FSIZE, NULL, {rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+2012  prlimit64(0, RLIMIT_FSIZE, {rlim_cur=0, rlim_max=0}, NULL) = 0
+2012  prlimit64(0, RLIMIT_FSIZE, NULL, {rlim_cur=0, rlim_max=0}) = 0
+2012  prlimit64(0, RLIMIT_CORE, NULL, {rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+2012  prlimit64(0, RLIMIT_CORE, {rlim_cur=0, rlim_max=0}, NULL) = 0
+2012  prlimit64(0, RLIMIT_CORE, NULL, {rlim_cur=0, rlim_max=0}) = 0
+2012  capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=1<<CAP_CHOWN|1<<CAP_DAC_OVERRIDE|1<<CAP_FOWNER|1<<CAP_FSETID|1<<CAP_KILL|1<<CAP_SETGID|1<<CAP_SETUID|1<<CAP_SETPCAP|1<<CAP_NET_BIND_SERVICE|1<<CAP_NET_RAW|1<<CAP_SYS_CHROOT|1<<CAP_SYS_PTRACE|1<<CAP_SYS_ADMIN|1<<CAP_MKNOD|1<<CAP_AUDIT_WRITE|1<<CAP_SETFCAP, permitted=1<<CAP_CHOWN|1<<CAP_DAC_OVERRIDE|1<<CAP_FOWNER|1<<CAP_FSETID|1<<CAP_KILL|1<<CAP_SETGID|1<<CAP_SETUID|1<<CAP_SETPCAP|1<<CAP_NET_BIND_SERVICE|1<<CAP_NET_RAW|1<<CAP_SYS_CHROOT|1<<CAP_SYS_PTRACE|1<<CAP_SYS_ADMIN|1<<CAP_MKNOD|1<<CAP_AUDIT_WRITE|1<<CAP_SETFCAP, inheritable=0}) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_CHOWN) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_CHOWN) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_CHOWN) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_DAC_OVERRIDE) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_DAC_OVERRIDE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_DAC_OVERRIDE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_DAC_READ_SEARCH) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_FOWNER) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_FOWNER) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_FOWNER) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_FSETID) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_FSETID) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_FSETID) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_KILL)  = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_KILL)  = 0
+2012  prctl(PR_CAPBSET_READ, CAP_KILL)  = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETGID) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SETGID) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETGID) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETUID) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SETUID) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETUID) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETPCAP) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SETPCAP) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETPCAP) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_LINUX_IMMUTABLE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_NET_BIND_SERVICE) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_NET_BIND_SERVICE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_NET_BIND_SERVICE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_NET_BROADCAST) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_NET_ADMIN) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_NET_RAW) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_NET_RAW) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_NET_RAW) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_IPC_LOCK) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_IPC_OWNER) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_MODULE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_RAWIO) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_CHROOT) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SYS_CHROOT) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_CHROOT) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_PTRACE) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SYS_PTRACE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_PTRACE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_PACCT) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_BOOT) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_NICE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_RESOURCE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_TIME) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYS_TTY_CONFIG) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_MKNOD) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_MKNOD) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_MKNOD) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_LEASE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_AUDIT_WRITE) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_AUDIT_WRITE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_AUDIT_WRITE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_AUDIT_CONTROL) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETFCAP) = 1
+2012  prctl(PR_CAPBSET_DROP, CAP_SETFCAP) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SETFCAP) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_MAC_OVERRIDE) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_MAC_ADMIN) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_SYSLOG) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_WAKE_ALARM) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_BLOCK_SUSPEND) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_AUDIT_READ) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_PERFMON) = 0
+2012  prctl(PR_CAPBSET_READ, CAP_BPF)   = 0
+2012  prctl(PR_CAPBSET_READ, CAP_CHECKPOINT_RESTORE) = 0
+2012  prctl(PR_CAPBSET_READ, 0x29 /* CAP_??? */) = -1 EINVAL (Invalid argument)
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) = 0
+2012  capset({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=0, permitted=0, inheritable=0}) = 0
+2012  capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=0, permitted=0, inheritable=0}) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHOWN, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_DAC_OVERRIDE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_DAC_READ_SEARCH, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_FOWNER, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_FSETID, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_KILL, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETGID, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETUID, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETPCAP, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_LINUX_IMMUTABLE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_BIND_SERVICE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_BROADCAST, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_ADMIN, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_RAW, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_IPC_LOCK, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_IPC_OWNER, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_MODULE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_RAWIO, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_CHROOT, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_PTRACE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_PACCT, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_ADMIN, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_BOOT, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_NICE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_RESOURCE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_TIME, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_TTY_CONFIG, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MKNOD, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_LEASE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_WRITE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_CONTROL, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETFCAP, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MAC_OVERRIDE, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MAC_ADMIN, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYSLOG, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_WAKE_ALARM, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_BLOCK_SUSPEND, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_READ, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_PERFMON, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_BPF, 0, 0) = 0
+2012  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHECKPOINT_RESTORE, 0, 0) = 0
+2012  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) = 0
+2012  landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) = 4
+2012  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_REMOVE_DIR|LANDLOCK_ACCESS_FS_REMOVE_FILE|LANDLOCK_ACCESS_FS_MAKE_CHAR|LANDLOCK_ACCESS_FS_MAKE_DIR|LANDLOCK_ACCESS_FS_MAKE_REG|LANDLOCK_ACCESS_FS_MAKE_SOCK|LANDLOCK_ACCESS_FS_MAKE_FIFO|LANDLOCK_ACCESS_FS_MAKE_BLOCK|LANDLOCK_ACCESS_FS_MAKE_SYM|LANDLOCK_ACCESS_FS_REFER|0x4000}, 8, 0) = 3<anon_inode:[landlock-ruleset]>
+2012  landlock_restrict_self(3<anon_inode:[landlock-ruleset]>, 0) = 0
+2012  fcntl(3<anon_inode:[landlock-ruleset]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(3<anon_inode:[landlock-ruleset]>) = 0
+2012  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=348, filter=0xee9040003320}) = 0
+2012  prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) = 1
+2012  openat(AT_FDCWD</tmp/src>, "/proc/self/statm", O_RDONLY|O_CLOEXEC) = 3</proc/2011/statm>
+2012  read(3</proc/2011/statm>, "17918 705 647 382 0 642 0\n", 256) = 26
+2012  prlimit64(0, RLIMIT_AS, NULL, {rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+2012  prlimit64(0, RLIMIT_AS, {rlim_cur=104440*1024, rlim_max=104440*1024}, NULL) = 0
+2012  prlimit64(0, RLIMIT_AS, NULL, {rlim_cur=104440*1024, rlim_max=104440*1024}) = 0
+2012  fcntl(3</proc/2011/statm>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(3</proc/2011/statm>)        = 0
+2012  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=324, filter=0xee9040003890}) = 0
+2012  openat(AT_FDCWD</tmp/src>, "/", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3</>
+2012  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(3</>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824051, f_bavail=22509261, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(3</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  newfstatat(3</>, "tmp", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(3</>, "tmp", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</tmp>
+2012  newfstatat(4</tmp>, "", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(4</tmp>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824051, f_bavail=22509261, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(4</tmp>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|S_ISVTX|0777, stx_size=4096, ...}) = 0
+2012  newfstatat(4</tmp>, "b3-trace-upxabt_2", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(4</tmp>, "b3-trace-upxabt_2", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 5</tmp/b3-trace-upxabt_2>
+2012  newfstatat(5</tmp/b3-trace-upxabt_2>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(5</tmp/b3-trace-upxabt_2>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824050, f_bavail=22509260, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(5</tmp/b3-trace-upxabt_2>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+2012  newfstatat(5</tmp/b3-trace-upxabt_2>, "worktree", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(5</tmp/b3-trace-upxabt_2>, "worktree", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 6</tmp/b3-trace-upxabt_2/worktree>
+2012  newfstatat(6</tmp/b3-trace-upxabt_2/worktree>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(6</tmp/b3-trace-upxabt_2/worktree>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824050, f_bavail=22509260, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(6</tmp/b3-trace-upxabt_2/worktree>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  fcntl(3</>, F_GETFD)              = 0x1 (flags FD_CLOEXEC)
+2012  close(3</>)                       = 0
+2012  fcntl(4</tmp>, F_GETFD)           = 0x1 (flags FD_CLOEXEC)
+2012  close(4</tmp>)                    = 0
+2012  fcntl(5</tmp/b3-trace-upxabt_2>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(5</tmp/b3-trace-upxabt_2>)  = 0
+2012  openat(AT_FDCWD</tmp/src>, "/", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3</>
+2012  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(3</>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824050, f_bavail=22509260, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(3</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  newfstatat(3</>, "tmp", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(3</>, "tmp", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</tmp>
+2012  newfstatat(4</tmp>, "", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(4</tmp>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824050, f_bavail=22509260, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(4</tmp>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|S_ISVTX|0777, stx_size=4096, ...}) = 0
+2012  newfstatat(4</tmp>, "b3-trace-upxabt_2", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(4</tmp>, "b3-trace-upxabt_2", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 5</tmp/b3-trace-upxabt_2>
+2012  newfstatat(5</tmp/b3-trace-upxabt_2>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(5</tmp/b3-trace-upxabt_2>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824050, f_bavail=22509260, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(5</tmp/b3-trace-upxabt_2>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+2012  newfstatat(5</tmp/b3-trace-upxabt_2>, "gitdir", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(5</tmp/b3-trace-upxabt_2>, "gitdir", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 7</tmp/b3-trace-upxabt_2/gitdir>
+2012  newfstatat(7</tmp/b3-trace-upxabt_2/gitdir>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(7</tmp/b3-trace-upxabt_2/gitdir>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824049, f_bavail=22509259, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(7</tmp/b3-trace-upxabt_2/gitdir>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  fcntl(3</>, F_GETFD)              = 0x1 (flags FD_CLOEXEC)
+2012  close(3</>)                       = 0
+2012  fcntl(4</tmp>, F_GETFD)           = 0x1 (flags FD_CLOEXEC)
+2012  close(4</tmp>)                    = 0
+2012  fcntl(5</tmp/b3-trace-upxabt_2>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(5</tmp/b3-trace-upxabt_2>)  = 0
+2012  openat(AT_FDCWD</tmp/src>, "/", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3</>
+2012  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(3</>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824049, f_bavail=22509259, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(3</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  newfstatat(3</>, "tmp", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(3</>, "tmp", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</tmp>
+2012  newfstatat(4</tmp>, "", {st_mode=S_IFDIR|S_ISVTX|0777, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(4</tmp>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824049, f_bavail=22509259, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(4</tmp>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|S_ISVTX|0777, stx_size=4096, ...}) = 0
+2012  newfstatat(4</tmp>, "b3-trace-upxabt_2", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(4</tmp>, "b3-trace-upxabt_2", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 5</tmp/b3-trace-upxabt_2>
+2012  newfstatat(5</tmp/b3-trace-upxabt_2>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(5</tmp/b3-trace-upxabt_2>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824049, f_bavail=22509259, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(5</tmp/b3-trace-upxabt_2>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+2012  newfstatat(5</tmp/b3-trace-upxabt_2>, "commondir", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+2012  openat(5</tmp/b3-trace-upxabt_2>, "commondir", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 8</tmp/b3-trace-upxabt_2/commondir>
+2012  newfstatat(8</tmp/b3-trace-upxabt_2/commondir>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(8</tmp/b3-trace-upxabt_2/commondir>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824048, f_bavail=22509258, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(8</tmp/b3-trace-upxabt_2/commondir>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  fcntl(3</>, F_GETFD)              = 0x1 (flags FD_CLOEXEC)
+2012  close(3</>)                       = 0
+2012  fcntl(4</tmp>, F_GETFD)           = 0x1 (flags FD_CLOEXEC)
+2012  close(4</tmp>)                    = 0
+2012  fcntl(5</tmp/b3-trace-upxabt_2>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(5</tmp/b3-trace-upxabt_2>)  = 0
+2012  write(1<pipe:[1586202]>, "\nB3_PHASE probe\n", 16) = 16
+2012  openat(AT_FDCWD</tmp/src>, "/", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3</>
+2012  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(3</>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824048, f_bavail=22509258, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(3</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+2012  openat2(3</>, ".", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24) = 4</>
+2012  fcntl(4</>, F_GETFD)              = 0x1 (flags FD_CLOEXEC)
+2012  close(4</>)                       = 0
+2012  fcntl(3</>, F_GETFD)              = 0x1 (flags FD_CLOEXEC)
+2012  close(3</>)                       = 0
+2012  write(1<pipe:[1586202]>, "B3_PHASE end\n", 13) = 13
+2012  write(1<pipe:[1586202]>, "B3_PHASE read-layer\n", 20) = 20
+2012  openat(AT_FDCWD</tmp/src>, "/", O_RDONLY|O_CLOEXEC) = 3</>
+2012  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  newfstatat(6</tmp/b3-trace-upxabt_2/worktree>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  newfstatat(7</tmp/b3-trace-upxabt_2/gitdir>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  newfstatat(8</tmp/b3-trace-upxabt_2/commondir>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+2012  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR}, 8, 0) = 4<anon_inode:[landlock-ruleset]>
+2012  landlock_add_rule(4<anon_inode:[landlock-ruleset]>, LANDLOCK_RULE_PATH_BENEATH, {allowed_access=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR, parent_fd=6</tmp/b3-trace-upxabt_2/worktree>}, 0) = 0
+2012  landlock_add_rule(4<anon_inode:[landlock-ruleset]>, LANDLOCK_RULE_PATH_BENEATH, {allowed_access=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR, parent_fd=7</tmp/b3-trace-upxabt_2/gitdir>}, 0) = 0
+2012  landlock_add_rule(4<anon_inode:[landlock-ruleset]>, LANDLOCK_RULE_PATH_BENEATH, {allowed_access=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR, parent_fd=8</tmp/b3-trace-upxabt_2/commondir>}, 0) = 0
+2012  landlock_restrict_self(4<anon_inode:[landlock-ruleset]>, 0) = 0
+2012  fcntl(4<anon_inode:[landlock-ruleset]>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(4<anon_inode:[landlock-ruleset]>) = 0
+2012  fcntl(3</>, F_GETFD)              = 0x1 (flags FD_CLOEXEC)
+2012  close(3</>)                       = 0
+2012  write(1<pipe:[1586202]>, "B3_PHASE end\n", 13) = 13
+2012  write(1<pipe:[1586202]>, "B3_PHASE content\n", 17) = 17
+2012  openat2(6</tmp/b3-trace-upxabt_2/worktree>, "HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24) = 3</tmp/b3-trace-upxabt_2/worktree/HEAD>
+2012  newfstatat(3</tmp/b3-trace-upxabt_2/worktree/HEAD>, "", {st_mode=S_IFREG|0644, st_size=8, ...}, AT_EMPTY_PATH) = 0
+2012  fstatfs(3</tmp/b3-trace-upxabt_2/worktree/HEAD>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23824047, f_bavail=22509257, f_files=6553600, f_ffree=6432557, f_fsid={val=[0x5fa964dc, 0xa1076ea6]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+2012  statx(3</tmp/b3-trace-upxabt_2/worktree/HEAD>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=8, ...}) = 0
+2012  read(3</tmp/b3-trace-upxabt_2/worktree/HEAD>, "sentinel", 65) = 8
+2012  read(3</tmp/b3-trace-upxabt_2/worktree/HEAD>, "", 57) = 0
+2012  fcntl(3</tmp/b3-trace-upxabt_2/worktree/HEAD>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(3</tmp/b3-trace-upxabt_2/worktree/HEAD>) = 0
+2012  faccessat2(6</tmp/b3-trace-upxabt_2/worktree>, ".", W_OK, AT_EACCESS) = 0
+2012  write(1<pipe:[1586202]>, "B3_PHASE end\n", 13) = 13
+2012  fcntl(6</tmp/b3-trace-upxabt_2/worktree>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(6</tmp/b3-trace-upxabt_2/worktree>) = 0
+2012  fcntl(7</tmp/b3-trace-upxabt_2/gitdir>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(7</tmp/b3-trace-upxabt_2/gitdir>) = 0
+2012  fcntl(8</tmp/b3-trace-upxabt_2/commondir>, F_GETFD) = 0x1 (flags FD_CLOEXEC)
+2012  close(8</tmp/b3-trace-upxabt_2/commondir>) = 0
+2012  write(1<pipe:[1586202]>, "\n", 1) = 1
+2012  write(1<pipe:[1586202]>, "B3 trace PASS\n", 14) = 14
+2012  exit_group(0)                     = ?
+2011  <... futex resumed>)              = ?
+2012  +++ exited with 0 +++
+2011  +++ exited with 0 +++

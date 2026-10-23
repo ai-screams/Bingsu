@@ -22,6 +22,17 @@ fn capabilities_cannot_be_forged_or_read_as_roots() {
                 && p.extension().is_some_and(|e| e == "rlib")
         })
         .expect("cargo-built libc rlib");
+    let core = fs::read_dir(&deps)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("libbingsu_core-")
+                && p.extension().is_some_and(|e| e == "rlib")
+        })
+        .expect("cargo-built core rlib");
     let temp = std::env::temp_dir().join(format!("bingsu-api-{}", std::process::id()));
     fs::create_dir_all(&temp).unwrap();
     let prefix = format!(
@@ -40,6 +51,8 @@ fn capabilities_cannot_be_forged_or_read_as_roots() {
             .arg(&temp)
             .arg("--extern")
             .arg(format!("libc={}", libc.display()))
+            .arg("--extern")
+            .arg(format!("bingsu_core={}", core.display()))
             .arg("-L")
             .arg(format!("dependency={}", deps.display()))
             .output()

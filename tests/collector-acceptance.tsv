@@ -60,3 +60,10 @@ SEC-PIDFD	Early exit never signals a recycled PID	Unix	crates/bingsu/tests/colle
 SEC-NOWAIT	Current prompt never waits for a new completion	Unix	crates/bingsu/src/prompt_read.rs::new_completion_never_blocks_the_current_prompt	M3b
 SEC-STORE-CLOCK	Lock interval includes the captured store close even without publication	Unix	crates/bingsu/tests/collection_store.rs::lock_clock_includes_store_close_without_publication	M3b
 TRACE-SHIPPED	Shipped mask0 collector completes under the same role and effect gate	Linux	tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect	M3b Linux strace gate; native execution required
+B3-OPENAT2	Actual handled write set including TRUNCATE; readonly truncate/create/tmpfile refused independently of FSIZE	Linux	crates/bingsu-collect/tests/filter/runtime.rs::openat2_never_bypasses_write_denial	M3c; native Linux evidence required
+B3-ROOTS	Only selected roots; duplicate and slash handling; moved held fd cannot open leaf	Linux	crates/bingsu-collect/tests/filter/runtime.rs::read_landlock_grants_only_selected_roots	M3c; native Linux evidence required
+B3-ORDER	Probe after seccomp and before read layer; reversed ordering caches EACCES	Linux	crates/bingsu-collect/tests/filter/runtime.rs::openat2_probe_precedes_read_layer	M3c; native Linux evidence required
+B3-ONCE	File denial never reselects backend	Linux	crates/bingsu-collect/tests/filter/runtime.rs::resolver_is_selected_once_per_process	M3c; native Linux evidence required
+B3-FLOOR	Missing mount identity close_range or pidfd prevents collection	Linux	crates/bingsu-collect/tests/filter/runtime.rs::linux_collection_floor_requires_capabilities	M3c; native Linux evidence required
+B3-COST	200 raw read-layer installation samples with p50 p95 variance	Linux	crates/bingsu-collect/tests/filter/runtime.rs::repository_read_layer_cost_has_200_samples	M3c observation; native Linux evidence required
+B3-TRACE	Independent syscall coefficients and phase/path boundaries	portable	tools/fsbudget/tests/test_repository.py::test_repository_trace_checks_paths_counts_and_phases	M3c; --repository-trace supplies Linux raw evidence
