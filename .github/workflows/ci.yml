@@ -410,6 +410,14 @@ jobs:
           subprocess.run([str(python), "-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r", "scripts/schema-requirements.txt"], check=True)
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               env.write(f"BINGSU_SCHEMA_PY={python}\n")
+      - name: Mount a real filesystem for X-11 (no silent skip)
+        if: runner.os == 'macOS'
+        run: |
+          mount_path="$RUNNER_TEMP/bingsu-x11-mount"
+          mkdir -p "$mount_path"
+          hdiutil create -size 8m -fs APFS -volname BingsuX11 "$RUNNER_TEMP/bingsu-x11.dmg"
+          hdiutil attach -nobrowse -mountpoint "$mount_path" "$RUNNER_TEMP/bingsu-x11.dmg"
+          echo "BINGSU_X11_MOUNT=$mount_path" >> "$GITHUB_ENV"
       # The runners are not in a container, so clone3 must reach the kernel
       # (EINVAL) without the stub's filter; the clone3 test fails otherwise.
       # They also run as a non-root user, so the tests that skip as root must
@@ -418,6 +426,11 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+      - name: Detach the X-11 filesystem
+        if: always() && runner.os == 'macOS' && env.BINGSU_X11_MOUNT != ''
+        run: |
+          hdiutil detach "$BINGSU_X11_MOUNT"
+          rm -f "$RUNNER_TEMP/bingsu-x11.dmg"
       # The cgroup spawn tests and the X-04 probe test (probe_shapes
       # x04_delegated) skip without a delegated cgroup v2 area. Here they must
       # run: a lingering user manager gives this user a scope with

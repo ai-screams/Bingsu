@@ -45,6 +45,8 @@ fn execute() -> std::io::Result<()> {
     let mut fds = sys::validate_worker_fds()?;
     sys::hygiene()?;
     let (installed, landlock) = protected()?;
+    #[cfg(target_os = "macos")]
+    let _access = probe_before_ready(&mut fds)?;
     exchange(
         &mut fds,
         &mut buffer,
@@ -54,6 +56,17 @@ fn execute() -> std::io::Result<()> {
         crate::build_id(),
         |_, _: &mut dyn UpdateSink| Err(std::io::Error::other("no product workers")),
     )
+}
+
+#[cfg(target_os = "macos")]
+fn probe_before_ready(fds: &mut sys::WorkerFds) -> std::io::Result<crate::safe_read::Access> {
+    use std::time::{Duration, Instant};
+    let probe = fds.take_probe();
+    let mut meter = crate::meter::Meter::new(Instant::now() + Duration::from_millis(100));
+    let result = crate::safe_read::macos::probe(probe.as_ref().map(|p| p.fixture()), &mut meter);
+    // Close fd 6 and every probe-owned temporary before Ready/request IO.
+    drop(probe);
+    result.map_err(|_| std::io::Error::other("collector capability probe"))
 }
 
 // The shipped and fixture entries share this exact installation sequence.
@@ -257,6 +270,8 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
     let mut fds = sys::validate_worker_fds()?;
     sys::hygiene()?;
     let (installed, landlock) = protected()?;
+    #[cfg(target_os = "macos")]
+    let _access = probe_before_ready(&mut fds)?;
     let catalog = collection::selection::Catalog {
         segments: &[const {
             SegmentDecl {
