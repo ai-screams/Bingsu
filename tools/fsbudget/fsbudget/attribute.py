@@ -287,8 +287,13 @@ class _Descriptors:
 
     def opened(self, c, process, bad):
         match = re.match(r"^(\d+)(?:<(.+)>)?", c.ret)
-        # open allocates a free slot; unlike dup2 it cannot replace a live fd.
-        if match[1] in self.tables[process]:
+        entry = self.tables[process].get(match[1])
+        # An abbreviated trace may omit a close or inherit a stale entry from
+        # another process. Refuse reuse only with local, named evidence of the
+        # same live description. A different/absent name is not that evidence.
+        # Observed close and exec-CLOEXEC already remove entries from this table.
+        if (entry and entry.creation[0] == process and match[2]
+                and match[2] in entry.description.aliases):
             bad(c, "open returned a live descriptor")
         self.create(process, *match.groups(), "CLOEXEC" in c.args)
 

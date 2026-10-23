@@ -425,6 +425,9 @@ def clone_prompt_reference(historical):
     lines = valid_trace()
     if not historical:
         lines = [line for line in lines if not line.startswith(("13 ", "14 ", "11 clone(child_stack=0x2"))]
+        # Keep the abbreviated fd 3 lifetime: inherited /proc/10/fd, then
+        # passwd, statm and boot_id with no close records between them. Those
+        # stale/differently named entries are not proof of a live collision.
         # The archived fixture abbreviates held directory opens, reusing 3
         # for unrelated names. Give those implicit inherited fds distinct
         # numbers for the current gate's descriptor-lifetime validation.

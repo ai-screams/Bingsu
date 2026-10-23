@@ -12,7 +12,8 @@ import sys
 
 import pytest
 
-from conftest import ROOT, SHELL_CMD, Install, minimal_record, real_bin, short_dir, trusted_env
+# 이것을 실패시키는 것: 여러 테스트 모음의 conftest 이름 충돌로 통합 수집이 실패하는 것.
+from shell_support import ROOT, SHELL_CMD, Install, minimal_record, real_bin, short_dir, trusted_env
 from pty_session import Session
 
 sys.path.insert(0, str(ROOT / "tools/fsbudget"))
