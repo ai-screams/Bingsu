@@ -723,9 +723,14 @@ fn protection_installation_cost_has_200_samples() {
     }
 }
 
-fn repository_case(case: &str) -> String {
-    use std::io::{BufRead, Write};
-    let name = format!("b3-{}-{case}", std::process::id());
+fn repository_fixture(case: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+    let name = format!(
+        "b3-{}-{}-{case}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    );
     let dir = if matches!(case, "covered" | "missing-truncate" | "absent") {
         super::tmpfile::select(
             &name,
@@ -759,6 +764,22 @@ fn repository_case(case: &str) -> String {
     std::fs::write(dir.join("worktree/HEAD"), b"sentinel").unwrap();
     std::fs::write(dir.join("worktree/a/leaf"), b"EXTERNAL").unwrap();
     std::os::unix::fs::symlink("../outside/HEAD", dir.join("worktree/escape")).unwrap();
+    dir
+}
+
+// 이것을 실패시키는 것: 같은 case의 표본/병렬 테스트가 PID만으로 fixture를 공유하는 것.
+#[test]
+fn repository_fixtures_do_not_share_paths() {
+    let first = repository_fixture("roots");
+    let second = repository_fixture("roots");
+    assert_ne!(first, second);
+    std::fs::remove_dir_all(first).unwrap();
+    std::fs::remove_dir_all(second).unwrap();
+}
+
+fn repository_case(case: &str) -> String {
+    use std::io::{BufRead, Write};
+    let dir = repository_fixture(case);
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args([
@@ -1157,6 +1178,10 @@ fn repository_trace_has_exact_effects() {
 }
 
 // 이것을 실패시키는 것: read ruleset 비용 표본을 누락하거나 설치를 생략하는 것.
+// Observation only: this times one three-root installation on shared CI hosts,
+// not product latency. No calibrated cross-runner performance budget exists;
+// retain all 200 raw samples, p50/p95 and variance for comparison, without an
+// arbitrary wall-clock gate. Successful installation and confinement are gated.
 #[test]
 fn repository_read_layer_cost_has_200_samples() {
     let mut samples = Vec::new();

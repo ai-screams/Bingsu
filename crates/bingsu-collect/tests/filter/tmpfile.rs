@@ -1,4 +1,4 @@
-//! Keep fixture selection testable on hosts without Linux O_TMPFILE.
+//! Linux fixture selection, including filesystems without O_TMPFILE support.
 use std::path::{Path, PathBuf};
 
 pub(super) fn select(

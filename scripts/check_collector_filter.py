@@ -34,8 +34,9 @@ def check_identity_only():
 
 
 def host_tests_passed(result):
+    count = 10 if sys.platform == "linux" else 9
     return result.returncode == 0 and re.search(
-        r"^test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; "
+        rf"^test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; "
         r"\d+ filtered out; finished in \d+\.\d+s$", result.stdout, re.MULTILINE) is not None
 
 
@@ -62,7 +63,7 @@ def main():
     assert all(r["why"].strip() and r["probe"] == f'row_{r["syscall"]}_{r["condition"]}' for r in rows)
     result = run()
     assert host_tests_passed(result), result.stdout + result.stderr
-    print("collector identity/table/program/probes PASS: identity-only lib, 51 rows, both ABIs, 10 host tests")
+    print(f"collector identity/table/program/probes PASS: identity-only lib, 51 rows, both ABIs, {10 if sys.platform == 'linux' else 9} host tests")
     if args.repository_trace:
         repository_trace()
     if not args.mutations:
@@ -153,8 +154,9 @@ def main():
         '"read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)], vec![eq(0, 0), high(0, 0), eq(1, 0), high(1, 0), eq(2, 1)]]', repository)
     tmpfile = Path("crates/bingsu-collect/tests/filter/tmpfile.rs")
     selection = "tmpfile::selection_probes_candidates_and_reports_all_failures"
-    add("tmpfile probe omitted", tmpfile, 'match probe(&directory)', 'match { let _ = &mut probe; Ok::<(), std::io::Error>(()) }', selection)
-    add("tmpfile fallback omitted", tmpfile, '.flatten()', '.flatten().take(1)', selection)
+    if sys.platform == "linux":
+        add("tmpfile probe omitted", tmpfile, 'match probe(&directory)', 'match { let _ = &mut probe; Ok::<(), std::io::Error>(()) }', selection)
+        add("tmpfile fallback omitted", tmpfile, '.flatten()', '.flatten().take(1)', selection)
     for kind, old in [("read_layer_add", "eq(1, 1), eq(3, 0)"), ("read_layer_restrict", "eq(1, 0)")]:
         add("repository " + kind, FILTER, f'"{kind}" => vec![vec![{old}]]', f'"{kind}" => vec![vec![]]', repository)
     add("openat2 deny mode", FILTER, 'mode == Openat2Policy::Deny', 'mode != Openat2Policy::Deny', repository)
@@ -182,6 +184,9 @@ def main():
         add("writable inherited lock", SYS, "access(5, libc::O_RDONLY)?;", "let _ = 5;",
             "writable_lock_is_rejected_on_linux", "startup")
     if args.runtime:
+        add("repository fixture reused", Path("crates/bingsu-collect/tests/filter/runtime.rs"),
+            'NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)', 'NEXT_FIXTURE.load(Ordering::Relaxed)',
+            "runtime::repository_fixtures_do_not_share_paths")
         safe = Path("crates/bingsu-collect/src/safe_read/mod.rs")
         add("probe moved after layer", safe, '        resolver(meter)?;', '',
             "runtime::openat2_probe_precedes_read_layer")
@@ -238,13 +243,24 @@ def main():
     print(f"mutations PASS: {len(cases)} killed; saved copies restored; host tests green")
 
 
+def filter_test_binary(build_output):
+    artifacts = [json.loads(line) for line in build_output.splitlines()]
+    binaries = [v["executable"] for v in artifacts
+                if v.get("reason") == "compiler-artifact"
+                and v["target"]["name"] == "filter" and v["target"]["kind"] == ["test"]
+                and v["profile"]["test"] and v.get("executable")]
+    assert len(binaries) == 1, f"expected one filter test executable, found {binaries!r}"
+    return binaries[0]
+
+
 def repository_trace():
     assert sys.platform == "linux", "BLOCKED: native Linux strace required"
+    strace = shutil.which("strace")
+    assert strace is not None, "BLOCKED: install strace before running --repository-trace"
     sys.path.insert(0, str(ROOT / "tools/fsbudget"))
     from fsbudget.repository import check_repository_trace
     build = subprocess.run(["cargo", "test", "--offline", "-j", "2", "-p", "bingsu-collect", "--test", "filter", "--no-run", "--message-format=json"], cwd=ROOT, capture_output=True, text=True, check=True)
-    binary = next(v["executable"] for line in build.stdout.splitlines()
-                  if (v := json.loads(line)).get("reason") == "compiler-artifact" and v.get("executable"))
+    binary = filter_test_binary(build.stdout)
     evidence = ROOT / "target/b3-evidence"
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="b3-trace-") as directory:
@@ -254,11 +270,14 @@ def repository_trace():
             (root / name / "HEAD").write_bytes(b"sentinel")
         for backend, case in [("openat2", "trace"), ("stepwise", "trace-stepwise")]:
             trace = evidence / f"repository-{backend}.strace"
-            result = subprocess.run(["strace", "-f", "-yy", "-s", "4096", "-o", str(trace), binary,
-                "--exact", "runtime::repository_child", "--ignored", "--nocapture", "--test-threads=1"],
+            command = [strace, "-f", "-yy", "-s", "4096", "-o", str(trace), binary,
+                       "--exact", "runtime::repository_child", "--ignored", "--nocapture", "--test-threads=1"]
+            result = subprocess.run(command,
                 env={**os.environ, "BINGSU_B3_CASE": case, "BINGSU_B3_PATH": str(root), "BINGSU_REQUIRE_LANDLOCK": "1"},
                 cwd=ROOT, capture_output=True, text=True, timeout=30)
-            assert result.returncode == 0 and f"B3 {case} PASS" in result.stdout, result.stdout + result.stderr
+            assert result.returncode == 0 and f"B3 {case} PASS" in result.stdout.splitlines(), (
+                f"command={command!r} cwd={str(ROOT)!r} returncode={result.returncode} "
+                f"stdout={result.stdout!r} stderr={result.stderr!r} trace={str(trace)!r}")
             counts = check_repository_trace(trace.read_text(), str(root), backend)
             (evidence / f"repository-{backend}.json").write_text(json.dumps(counts, indent=2))
             print(f"B3 repository trace {backend} PASS: {counts}")

@@ -521,6 +521,7 @@ fn bpf_final_filter_refuses_limit_changes() {
 #[path = "filter/runtime.rs"]
 mod runtime;
 
+#[cfg(target_os = "linux")]
 #[path = "filter/tmpfile.rs"]
 mod tmpfile;
 
