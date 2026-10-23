@@ -184,7 +184,7 @@ def test_collector_git_dependency_features_are_exact(tmp_path):
     for feature in (*audit.FORBIDDEN_FEATURES, "parallel-walkdir"):
         assert audit.git_policy({f"node\tgix-features@0.50.0\t{feature}\t-"}), feature
     for name, version in audit.GIT_PINS.items():
-        features = "sha1" if name == "gix-object" else "-"
+        features = {"gix-object": "sha1", "gix-utils": "bstr"}.get(name, "-")
         good = f"node\t{name}@{version}\t{features}\t-"
         assert not audit.git_policy({good})
         assert audit.git_policy({good}, front=True)

@@ -7,7 +7,11 @@ const DIR_FLAGS: i32 =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 const FILE_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 
-fn components(path: &[u8], meter: &mut Meter) -> Result<VecDeque<Vec<u8>>, ReadError> {
+fn components(
+    path: &[u8],
+    scratch: &mut PathAllocation,
+    meter: &mut Meter,
+) -> Result<VecDeque<Vec<u8>>, ReadError> {
     if path.len() > 65_536 || path.contains(&0) {
         return Err(ReadError::Escape);
     }
@@ -18,7 +22,10 @@ fn components(path: &[u8], meter: &mut Meter) -> Result<VecDeque<Vec<u8>>, ReadE
     if count > 4096 {
         return Err(ReadError::Limit);
     }
-    meter.allocation(path.len() + 1 + (count + 1) * std::mem::size_of::<Vec<u8>>())?;
+    scratch.reserve(
+        path.len() + 1 + (count + 1) * std::mem::size_of::<Vec<u8>>(),
+        meter,
+    )?;
     let mut result: VecDeque<_> = path
         .split(|&b| b == b'/')
         .filter(|part| !part.is_empty())
@@ -30,7 +37,11 @@ fn components(path: &[u8], meter: &mut Meter) -> Result<VecDeque<Vec<u8>>, ReadE
     Ok(result)
 }
 
-fn lstat(parent: RawFd, name: &std::ffi::CStr, meter: &mut Meter) -> Result<libc::stat, ReadError> {
+pub(super) fn lstat(
+    parent: RawFd,
+    name: &std::ffi::CStr,
+    meter: &mut Meter,
+) -> Result<libc::stat, ReadError> {
     // SAFETY: stat is a plain C output record.
     let mut out = unsafe { std::mem::zeroed() };
     retry(meter, Op::Stat, || {
@@ -72,10 +83,59 @@ pub(super) fn one_component(
     Ok(opened)
 }
 
+/// Worktree cache edge: exactly one component from a verified parent. The
+/// same lstat/open/fstat/device/mount checks as the full component walk apply.
+/// This is a metadata capability; it does not prove atomic root ancestry.
+pub(super) fn worktree_component(
+    parent: &Root,
+    name: &std::ffi::CStr,
+    is_dir: bool,
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<Opened, ReadError> {
+    meter.charge(Op::Component)?;
+    let before = lstat(parent.fd.as_raw_fd(), name, meter)?;
+    match before.st_mode & libc::S_IFMT {
+        libc::S_IFLNK => return Err(ReadError::Missing),
+        libc::S_IFDIR if is_dir => {}
+        libc::S_IFREG if !is_dir => {}
+        _ => {
+            return Err(if is_dir {
+                ReadError::Missing
+            } else {
+                ReadError::Special
+            });
+        }
+    }
+    meter.event("before_open_component");
+    let fd = match access.backend {
+        #[cfg(target_os = "linux")]
+        Resolver::Openat2 => linux::open_nofollow(parent, name.to_bytes(), is_dir, meter)?,
+        _ => {
+            let flags = if is_dir { DIR_FLAGS } else { FILE_FLAGS };
+            #[cfg(target_os = "macos")]
+            let flags = if access.darwin.nofollow_any {
+                (flags & !libc::O_NOFOLLOW) | macos::NOFOLLOW_ANY
+            } else {
+                flags
+            };
+            openat(parent.fd.as_raw_fd(), name, flags, meter)?
+        }
+    };
+    let opened = inspect(fd, meter)?;
+    if !unchanged(&before, &opened.metadata) {
+        return Err(ReadError::Changed);
+    }
+    same_mount(opened.identity, parent.identity)?;
+    meter.event("after_open_component");
+    Ok(opened)
+}
+
 fn target(
     parent: RawFd,
     name: &std::ffi::CStr,
     before: &libc::stat,
+    scratch: &mut PathAllocation,
     meter: &mut Meter,
 ) -> Result<Vec<u8>, ReadError> {
     let mut buffer = [0; 4097];
@@ -96,7 +156,7 @@ fn target(
     if !unchanged(before, &lstat(parent, name, meter)?) {
         return Err(ReadError::Changed);
     }
-    meter.allocation(size)?;
+    scratch.reserve(size, meter)?;
     Ok(buffer[..size].to_vec())
 }
 
@@ -116,7 +176,8 @@ pub(super) fn acquire(
     if !cwd.starts_with(b"/") || cwd.contains(&0) {
         return Err(ReadError::Escape);
     }
-    let mut pending = components(cwd, meter)?;
+    let mut scratch = meter.path_allocation();
+    let mut pending = components(cwd, &mut scratch, meter)?;
     let fd = openat(libc::AT_FDCWD, c"/", DIR_FLAGS, meter)?;
     meter.allocation(34 * std::mem::size_of::<Root>())?;
     let mut stack = VecDeque::with_capacity(34);
@@ -154,7 +215,7 @@ pub(super) fn acquire(
             if links > 40 {
                 return Err(ReadError::Symlink);
             }
-            let path = target(parent, &name, &before, meter)?;
+            let path = target(parent, &name, &before, &mut scratch, meter)?;
             if path.starts_with(b"/") {
                 // Absolute links are permitted only during acquisition, reset
                 // to the fixed / capability rather than an ambient cwd.
@@ -166,7 +227,7 @@ pub(super) fn acquire(
                 });
                 dropped = 0;
             }
-            let mut expanded = components(&path, meter)?;
+            let mut expanded = components(&path, &mut scratch, meter)?;
             expanded.append(&mut pending);
             pending = expanded;
             continue;
@@ -203,7 +264,7 @@ pub(super) fn acquire(
 
 struct Step {
     fd: Fd,
-    name: CString,
+    name: PathCString,
 }
 
 pub(super) fn resolve(
@@ -214,7 +275,31 @@ pub(super) fn resolve(
     single_link: bool,
     meter: &mut Meter,
 ) -> Result<Opened, ReadError> {
-    let mut pending = components(path, meter)?;
+    resolve_inner(root, path, is_dir, access, single_link, false, meter)
+}
+
+pub(super) fn resolve_nofollow(
+    root: &Root,
+    path: &[u8],
+    is_dir: bool,
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<Opened, ReadError> {
+    resolve_inner(root, path, is_dir, access, false, true, meter)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_inner(
+    root: &Root,
+    path: &[u8],
+    is_dir: bool,
+    access: &Access,
+    single_link: bool,
+    nofollow: bool,
+    meter: &mut Meter,
+) -> Result<Opened, ReadError> {
+    let mut scratch = meter.path_allocation();
+    let mut pending = components(path, &mut scratch, meter)?;
     let mut stack: Vec<Step> = Vec::new();
     let mut links = 0;
     let mut visits = 0;
@@ -246,15 +331,18 @@ pub(super) fn resolve(
         let before = lstat(parent, &name, meter)?;
         let kind = before.st_mode & libc::S_IFMT;
         if kind == libc::S_IFLNK {
+            if nofollow {
+                return Err(ReadError::Symlink);
+            }
             links += 1;
             if links > 40 {
                 return Err(ReadError::Symlink);
             }
-            let path = target(parent, &name, &before, meter)?;
+            let path = target(parent, &name, &before, &mut scratch, meter)?;
             if path.starts_with(b"/") {
                 return Err(ReadError::Escape);
             }
-            let mut expanded = components(&path, meter)?;
+            let mut expanded = components(&path, &mut scratch, meter)?;
             expanded.append(&mut pending);
             pending = expanded;
             continue;
@@ -305,7 +393,7 @@ pub(super) fn resolve(
                 meter,
             );
         }
-        meter.allocation(std::mem::size_of::<Step>())?;
+        scratch.reserve(std::mem::size_of::<Step>(), meter)?;
         stack.try_reserve_exact(1).map_err(|_| ReadError::Limit)?;
         stack.push(Step {
             fd: opened.fd,
@@ -331,13 +419,14 @@ fn finish(
         // relative to a moved intermediate fd would not confine to this root.
         let size = stack
             .iter()
-            .map(|s| s.name.as_bytes().len() + 1)
+            .map(|s| s.name.to_bytes().len() + 1)
             .sum::<usize>()
             + name.to_bytes().len();
-        meter.allocation(size)?;
+        let mut scratch = meter.path_allocation();
+        scratch.reserve(size, meter)?;
         let mut canonical = Vec::with_capacity(size);
         for step in stack {
-            canonical.extend_from_slice(step.name.as_bytes());
+            canonical.extend_from_slice(step.name.to_bytes());
             canonical.push(b'/');
         }
         canonical.extend_from_slice(name.to_bytes());

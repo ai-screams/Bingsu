@@ -4,15 +4,16 @@ use crate::{
     safe_read::{self, Access, Listing, ReadCap, ReadError, Root},
 };
 use bingsu_core::collection::budget::Axis;
-use std::{
-    cell::{Cell, RefCell},
-    time::Instant,
-};
+use std::cell::{Cell, RefCell};
 
 #[path = "index.rs"]
 pub mod index;
 #[path = "objects.rs"]
 pub mod objects;
+#[path = "policy.rs"]
+pub mod policy;
+#[path = "worktree.rs"]
+pub mod worktree;
 
 pub const UNSUPPORTED: ReadError = ReadError::Io(libc::ENOTSUP);
 
@@ -49,6 +50,7 @@ pub struct RepoIo<'a> {
     access: &'a Access,
     meter: &'a RefCell<Meter>,
     stopped: Cell<Option<ReadError>>,
+    worktree_stats: RefCell<Option<safe_read::WorktreeStats>>,
 }
 
 /// Owned, immutable bounded-read backing for the bytes-only pack constructors.
@@ -84,6 +86,7 @@ impl<'a> RepoIo<'a> {
             access,
             meter,
             stopped: Cell::new(None),
+            worktree_stats: RefCell::new(None),
         }
     }
 
@@ -105,7 +108,8 @@ impl<'a> RepoIo<'a> {
         let value = {
             let mut slot = self.meter.try_borrow_mut().map_err(|_| ReadError::Denied)?;
             slot.check()?;
-            std::mem::replace(&mut *slot, Meter::new(Instant::now()))
+            let placeholder = slot.expired_placeholder();
+            std::mem::replace(&mut *slot, placeholder)
         };
         let mut loan = MeterLoan {
             slot: self.meter,
@@ -120,7 +124,7 @@ impl<'a> RepoIo<'a> {
 
     pub fn read(&self, path: RepoPath, cap: ReadCap) -> Result<Vec<u8>, ReadError> {
         if path.root != RootId::Worktree {
-            return self.read_sized_with_cap(path, cap, None);
+            return self.read_sized_with_cap(path, cap, None, None);
         }
         self.metered(|meter| {
             safe_read::read(
@@ -170,6 +174,160 @@ impl<'a> RepoIo<'a> {
         })
     }
 
+    pub fn worktree_metadata(&self, relative: &[u8]) -> Result<libc::stat, ReadError> {
+        self.metered(|meter| {
+            let mut scan = self
+                .worktree_stats
+                .try_borrow_mut()
+                .map_err(|_| ReadError::Denied)?;
+            if let Some(scan) = scan.as_mut() {
+                return scan.metadata(self.roots.worktree, relative, self.access, meter);
+            }
+            safe_read::worktree_metadata(self.roots.worktree, relative, self.access, meter)
+        })
+    }
+
+    /// Reuse verified directory fds across an index-order loop. The callback's
+    /// observations must not be published until this returns Ok: directory
+    /// transitions and finalization revalidate each edge against its held parent.
+    /// Errors and unwind discard the cache. Nested scans are not allowed.
+    pub fn with_worktree_stats<T>(
+        &self,
+        scan: impl FnOnce() -> Result<T, ReadError>,
+    ) -> Result<T, ReadError> {
+        if self.worktree_stats.borrow().is_some() {
+            return Err(ReadError::Denied);
+        }
+        struct Clear<'a>(&'a RefCell<Option<safe_read::WorktreeStats>>);
+        impl Drop for Clear<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().take();
+            }
+        }
+        let _clear = Clear(&self.worktree_stats);
+        self.worktree_stats
+            .replace(Some(safe_read::WorktreeStats::default()));
+        let result = scan()?;
+        let mut stats = self
+            .worktree_stats
+            .borrow_mut()
+            .take()
+            .expect("active scan");
+        self.metered(|meter| stats.finish(self.roots.worktree, self.access, meter))?;
+        Ok(result)
+    }
+
+    /// Batch stat for one sorted index directory. macOS uses getattrlistbulk;
+    /// Linux keeps one fstatat per leaf. See worktree::directory_stats for the
+    /// provisional-callback contract. Single-leaf worktree_metadata/compare
+    /// retain fstatat on both systems; bulk failures never fall back to it.
+    pub fn worktree_directory_stats(
+        &self,
+        parent: &[u8],
+        leaves: &[&[u8]],
+        names: policy::NamePolicy,
+        visitor: impl FnMut(usize, Result<&libc::stat, ReadError>) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
+        self.metered(|meter| {
+            let mut cached = self
+                .worktree_stats
+                .try_borrow_mut()
+                .map_err(|_| ReadError::Denied)?;
+            let mut local = safe_read::WorktreeStats::default();
+            let scan = cached.as_mut().unwrap_or(&mut local);
+            worktree::directory_stats(
+                scan,
+                self.roots.worktree,
+                parent,
+                leaves,
+                names,
+                self.access,
+                meter,
+                visitor,
+            )?;
+            if cached.is_none() {
+                local.finish(self.roots.worktree, self.access, meter)?;
+            }
+            Ok(())
+        })
+    }
+
+    // Darwin dev_t is signed 32-bit; Linux dev_t is already u64.
+    #[allow(clippy::unnecessary_cast)]
+    pub(super) fn worktree_device(&self) -> libc::dev_t {
+        self.roots.worktree.device() as libc::dev_t
+    }
+
+    /// Hash only bytes from the same validated fd. Worktree bytes are charged
+    /// independently of repository snapshots; scratch is released each call.
+    pub fn worktree_hash(
+        &self,
+        relative: &[u8],
+        expected: &libc::stat,
+    ) -> Result<gix_index::hash::ObjectId, ReadError> {
+        use bingsu_core::collection::budget::OBJECT_ALLOC;
+        self.metered(|meter| {
+            if expected.st_dev != self.worktree_device() {
+                return Err(ReadError::Changed);
+            }
+            if meter.budget.used(Axis::WorktreeReadBytes) == Axis::WorktreeReadBytes.limit() {
+                return Err(ReadError::Limit);
+            }
+            let file = {
+                let mut cached = self
+                    .worktree_stats
+                    .try_borrow_mut()
+                    .map_err(|_| ReadError::Denied)?;
+                let mut local = safe_read::WorktreeStats::default();
+                let scan = cached.as_mut().unwrap_or(&mut local);
+                let file = scan
+                    .open_file(self.roots.worktree, relative, self.access, meter)
+                    .map_err(|e| {
+                        if e == ReadError::Symlink {
+                            ReadError::Missing
+                        } else {
+                            e
+                        }
+                    })?;
+                if cached.is_none() {
+                    local.finish(self.roots.worktree, self.access, meter)?;
+                }
+                file
+            };
+            if !safe_read::same_worktree_stat(expected, &file.metadata()) {
+                return Err(ReadError::Changed);
+            }
+            let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
+            if size > OBJECT_ALLOC {
+                return Err(ReadError::Limit);
+            }
+            meter.charge_axis(Axis::WorktreeReadBytes, size)?;
+            // Reserve the blob before allocation. The EOF/growth probe uses
+            // one stack byte and does not consume another content byte.
+            let mut scratch = meter.object_allocation();
+            scratch.reserve(size as usize, meter)?;
+            let bytes = file.read_worktree(
+                ReadCap {
+                    bytes: size,
+                    single_link: false,
+                },
+                meter,
+            )?;
+            if bytes.len() as u64 != size {
+                return Err(ReadError::Changed);
+            }
+            meter.event("before_worktree_hash");
+            let id = gix_object::compute_hash(
+                gix_index::hash::Kind::Sha1,
+                gix_object::Kind::Blob,
+                &bytes,
+            )
+            .map_err(|_| ReadError::Io(libc::EINVAL))?;
+            meter.check()?;
+            Ok(id)
+        })
+    }
+
     pub fn list(&self, path: RepoPath, raw_limit: u32) -> Result<Listing, ReadError> {
         self.metered(|meter| {
             let dir =
@@ -198,6 +356,23 @@ impl<'a> RepoIo<'a> {
         self.read_sized(path, cap, Some(axis))
     }
 
+    pub(super) fn read_patterns(
+        &self,
+        path: RepoPath,
+        files: Axis,
+        bytes: Axis,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.read_sized_with_cap(
+            path,
+            ReadCap {
+                bytes: bingsu_core::collection::budget::SMALL_FILE_BYTES,
+                single_link: true,
+            },
+            Some(bytes),
+            Some(files),
+        )
+    }
+
     pub(crate) fn read_sized(
         &self,
         path: RepoPath,
@@ -211,6 +386,7 @@ impl<'a> RepoIo<'a> {
                 single_link: true,
             },
             axis,
+            None,
         )
     }
 
@@ -219,9 +395,12 @@ impl<'a> RepoIo<'a> {
         path: RepoPath,
         cap: ReadCap,
         axis: Option<Axis>,
+        files: Option<Axis>,
     ) -> Result<Vec<u8>, ReadError> {
         self.metered(|meter| {
-            if axis.is_some_and(|axis| meter.budget.used(axis) == axis.limit()) {
+            if axis.is_some_and(|axis| meter.budget.used(axis) == axis.limit())
+                || files.is_some_and(|axis| meter.budget.used(axis) == axis.limit())
+            {
                 return Err(ReadError::Limit);
             }
             let file =
@@ -229,6 +408,9 @@ impl<'a> RepoIo<'a> {
             let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
             if size > cap.bytes {
                 return Err(ReadError::Limit);
+            }
+            if let Some(files) = files {
+                meter.charge_axis(files, 1)?;
             }
             if let Some(axis) = axis {
                 meter.charge_axis(axis, size)?;

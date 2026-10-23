@@ -215,6 +215,9 @@ class CollectorAxes:
     root_inputs: int = 0
     readonly: int = 0
     capped_directories: int = 0
+    stat_leaves: int = 0
+    stat_directory_groups: int = 0  # distinct cached directory edges, including shared ancestors
+    worktree_hash_bytes: tuple[int, ...] = ()
 
 
 def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
@@ -230,11 +233,17 @@ def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
     duplicates), then create + one add per distinct root + restrict.
     Retry axes count extra open attempts only; other retries need their own
     fixture phase instead of being hidden in a total allowance.
+    Index stats: one no-follow newfstatat per leaf, no file open. Each non-root
+    cached edge is opened once with lstat/fstat/mount checks and an exit lstat.
+    Shared ancestors are counted once in stat_directory_groups, separately from
+    non-cache components. Hashes use one original-root openat2 or one stepwise
+    leaf open, then EOF and same-fd post-read fstat. No directory re-resolution.
     """
     scalars = [ax.components, ax.candidates, ax.symlinks, ax.directories,
                ax.raw_entries, ax.files, ax.maps, ax.probes, ax.retries,
-               ax.roots, ax.root_inputs, ax.readonly, ax.capped_directories]
-    if min(scalars + list(ax.dir_bytes) + list(ax.read_bytes)) < 0:
+               ax.roots, ax.root_inputs, ax.readonly, ax.capped_directories,
+               ax.stat_leaves, ax.stat_directory_groups]
+    if min(scalars + list(ax.dir_bytes) + list(ax.read_bytes) + list(ax.worktree_hash_bytes)) < 0:
         raise ValueError("negative repository axis")
     if ax.backend not in {"openat2", "stepwise"} or ax.phase not in {"acquisition", "content", "read-layer", "probe"}:
         raise ValueError("unreviewed repository primitive table")
@@ -252,9 +261,12 @@ def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
     acquisition = ax.phase == "acquisition"
     opened = ax.components + 1 if acquisition else ax.files + ax.directories if ax.backend == "openat2" else ax.components
     stepwise = acquisition or ax.backend == "stepwise"
+    hashes = len(ax.worktree_hash_bytes)
+    opened += ax.stat_directory_groups + hashes
     return {"openat" if stepwise else "openat2": opened + ax.candidates + ax.retries,
-            "fstat": opened, "newfstatat": (ax.components if stepwise else 0) + 2 * ax.symlinks,
+            "fstat": opened + hashes,
+            "newfstatat": (ax.components + hashes if stepwise else 0) + 2 * ax.symlinks + ax.stat_leaves + 2 * ax.stat_directory_groups,
             "fstatfs": opened, "statx": opened, "readlinkat": ax.symlinks,
-            "read": sum(ceil_div(n, 16384) + 1 for n in ax.read_bytes),
+            "read": sum(ceil_div(n, 16384) + 1 for n in ax.read_bytes + ax.worktree_hash_bytes),
             "getdents64": sum(ceil_div(n, 8192) + 1 for n in ax.dir_bytes) - ax.capped_directories,
             "mmap": ax.maps, "faccessat2": ax.readonly}

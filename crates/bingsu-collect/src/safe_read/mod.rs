@@ -12,7 +12,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
-use crate::meter::{Lease, Meter, Op, Phase, READ_CHUNK};
+use crate::meter::{Lease, Meter, Op, PathAllocation, Phase, READ_CHUNK};
 // Compatibility spelling for B1 callers; the wire query is now the sole type.
 pub use bingsu_core::collection::path_facts::PathQuery as DiscoveryQuery;
 
@@ -21,6 +21,10 @@ mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 mod walk;
+mod worktree;
+pub use worktree::WorktreeStats;
+#[cfg(target_os = "macos")]
+mod bulk;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadError {
@@ -590,6 +594,97 @@ fn resolve(
     Ok(fd)
 }
 
+/// One-shot worktree observation. Bulk callers use WorktreeStats and finish
+/// the directory validation before publishing any observations.
+pub fn worktree_metadata(
+    root: &Root,
+    path: &[u8],
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<libc::stat, ReadError> {
+    let mut stats = WorktreeStats::default();
+    let metadata = stats.metadata(root, path, access, meter)?;
+    stats.finish(root, access, meter)?;
+    Ok(metadata)
+}
+
+/// No-follow regular-file open for raw worktree hashing. The final root-based
+/// open remains atomic on the fast backends; stepwise needs Landlock as before.
+pub fn resolve_nofollow(
+    root: &Root,
+    path: &[u8],
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<ReadFile, ReadError> {
+    let opened = resolve_worktree(root, path, false, access, meter)?;
+    if opened.metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(ReadError::Special);
+    }
+    Ok(ReadFile {
+        fd: opened.fd,
+        metadata: opened.metadata,
+    })
+}
+
+/// Index paths must never resolve through any symlink, even within the root.
+/// General repository reads continue to use `resolve` and allow confined links.
+fn resolve_worktree(
+    root: &Root,
+    path: &[u8],
+    is_dir: bool,
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<Opened, ReadError> {
+    access.full()?;
+    relative(path)?;
+    if path.split(|b| *b == b'/').any(|p| p == b"..") {
+        return Err(ReadError::Escape);
+    }
+    let opened = match access.backend {
+        #[cfg(target_os = "linux")]
+        Resolver::Openat2 => {
+            linux::open_nofollow(root, path, is_dir, meter).and_then(|fd| inspect(fd, meter))
+        }
+        Resolver::Stepwise | Resolver::DarwinBeneath => {
+            walk::resolve_nofollow(root, path, is_dir, access, meter)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Resolver::Openat2 => Err(ReadError::Denied),
+    }
+    .map_err(|error| match error {
+        ReadError::Symlink => ReadError::Missing,
+        other => other,
+    })?;
+    same_mount(opened.identity, root.identity)?;
+    Ok(opened)
+}
+
+#[cfg(target_os = "macos")]
+fn worktree_directory(
+    root: &Root,
+    path: &[u8],
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<Directory, ReadError> {
+    let Opened { fd, identity, .. } = resolve_worktree(root, path, true, access, meter)?;
+    Ok(Directory {
+        root: Root { fd, identity },
+    })
+}
+
+/// Identity and content-change check, using full-width kernel fields. This is
+/// not an ancestry guarantee; that comes from Access and the resolver.
+pub fn same_worktree_stat(a: &libc::stat, b: &libc::stat) -> bool {
+    a.st_dev == b.st_dev
+        && a.st_ino == b.st_ino
+        && a.st_mode == b.st_mode
+        && a.st_size == b.st_size
+        && a.st_mtime == b.st_mtime
+        && a.st_mtime_nsec == b.st_mtime_nsec
+        && a.st_ctime == b.st_ctime
+        && a.st_ctime_nsec == b.st_ctime_nsec
+}
+
 pub fn read(
     root: &Root,
     relative: &[u8],
@@ -638,6 +733,58 @@ impl ReadFile {
         self.read_with_charge(cap, meter, |capacity, meter| meter.read_capacity(capacity))
     }
 
+    pub(crate) fn read_worktree(
+        self,
+        cap: ReadCap,
+        meter: &mut Meter,
+    ) -> Result<Vec<u8>, ReadError> {
+        let size = usize::try_from(cap.bytes).map_err(|_| ReadError::Limit)?;
+        if self.metadata.st_size < 0 || self.metadata.st_size as u64 != cap.bytes {
+            return Err(ReadError::Changed);
+        }
+        // Caller reserved size bytes of live scratch and WorktreeReadBytes.
+        // The growth probe is a stack byte, allowing an exact OBJECT_ALLOC blob.
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size)
+            .map_err(|_| ReadError::Limit)?;
+        bytes.resize(size, 0);
+        let mut used = 0;
+        while used < size {
+            meter.event("before_read");
+            let chunk = (size - used).min(READ_CHUNK);
+            let n = retry(meter, Op::Read, || {
+                // SAFETY: validated readable fd and bounded writable slice.
+                unsafe {
+                    libc::read(
+                        self.fd.as_raw_fd(),
+                        bytes[used..used + chunk].as_mut_ptr().cast(),
+                        chunk,
+                    )
+                }
+            })? as usize;
+            meter.returned_bytes(n);
+            if n == 0 {
+                return Err(ReadError::Changed);
+            }
+            used += n;
+        }
+        let mut probe = 0u8;
+        meter.event("before_read");
+        let n = retry(meter, Op::Read, || {
+            // SAFETY: held fd, one writable stack byte.
+            unsafe { libc::read(self.fd.as_raw_fd(), (&mut probe as *mut u8).cast(), 1) }
+        })?;
+        meter.returned_bytes(n as usize);
+        if n != 0 {
+            return Err(ReadError::Limit);
+        }
+        if !same_worktree_stat(&self.metadata, &stat(self.fd.as_raw_fd(), meter)?) {
+            return Err(ReadError::Changed);
+        }
+        Ok(bytes)
+    }
+
     /// The repository adapter has checked the same-fd size against its file
     /// cap and charged its own axis before reaching this allocation. The extra
     /// byte detects growth; it is not worktree content or another file byte.
@@ -654,7 +801,7 @@ impl ReadFile {
     }
 
     fn read_with_charge(
-        self,
+        &self,
         cap: ReadCap,
         meter: &mut Meter,
         charge: impl FnOnce(usize, &mut Meter) -> Result<(), ReadError>,
@@ -768,9 +915,23 @@ fn relative(path: &[u8]) -> Result<(), ReadError> {
     Ok(())
 }
 
-fn cstring(path: &[u8], meter: &mut Meter) -> Result<CString, ReadError> {
-    meter.allocation(path.len().checked_add(1).ok_or(ReadError::Limit)?)?;
-    CString::new(path).map_err(|_| ReadError::Escape)
+struct PathCString {
+    value: CString,
+    _allocation: PathAllocation,
+}
+impl std::ops::Deref for PathCString {
+    type Target = std::ffi::CStr;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+fn cstring(path: &[u8], meter: &mut Meter) -> Result<PathCString, ReadError> {
+    let mut allocation = meter.path_allocation();
+    allocation.reserve(path.len().checked_add(1).ok_or(ReadError::Limit)?, meter)?;
+    Ok(PathCString {
+        value: CString::new(path).map_err(|_| ReadError::Escape)?,
+        _allocation: allocation,
+    })
 }
 
 fn errno() -> i32 {
@@ -782,11 +943,14 @@ fn errno() -> i32 {
 fn retry(meter: &mut Meter, op: Op, mut call: impl FnMut() -> isize) -> Result<isize, ReadError> {
     for attempt in 0..=8 {
         meter.charge(op)?;
+        meter.event("before_safe_syscall");
         let result = call();
+        let saved_errno = errno();
+        meter.event("after_safe_syscall");
         if result >= 0 {
             return Ok(result);
         }
-        let error = errno();
+        let error = saved_errno;
         if error != libc::EINTR {
             return Err(ReadError::errno(error));
         }
@@ -882,6 +1046,25 @@ fn readonly_status(result: Result<(), i32>) -> Result<Option<bool>, ReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 이것을 실패시키는 것: CString의 선예약 또는 drop 시 live 예약 반환을 생략하는 것.
+    #[test]
+    fn path_cstring_reservation_is_live_and_precharged() {
+        let mut meter = Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        meter.allocation(17).unwrap();
+        let baseline = meter.live_allocated();
+        meter.allocation_limit = baseline + 5;
+        for _ in 0..4096 {
+            let name = cstring(b"name", &mut meter).unwrap();
+            assert_eq!(name.to_bytes(), b"name");
+            assert_eq!(meter.live_allocated(), baseline + 5);
+            assert_eq!(cstring(b"x", &mut meter).err(), Some(ReadError::Limit));
+            drop(name);
+            assert_eq!(meter.live_allocated(), baseline);
+        }
+        assert_eq!(cstring(b"bad\0", &mut meter).err(), Some(ReadError::Escape));
+        assert_eq!(meter.live_allocated(), baseline);
+    }
+
     // 이것을 실패시키는 것: 미지원 readonly를 true/false로 만들거나 권한 거부를 쓰기 가능으로 보고하는 것.
     #[test]
     fn readonly_observation_preserves_unknown_and_errors() {

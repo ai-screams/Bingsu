@@ -302,7 +302,8 @@ class _Descriptors:
         # Check uses before replacements (dup2 closes its destination).
         uses = [arg for arg in args if re.fullmatch(r"\d+<.+>", arg)]
         if args and c.name in {"read", "pread64", "readv", "write", "writev", "pwrite64",
-                               "fstat", "fcntl", "dup", "dup2", "dup3", "close"}:
+                               "fstat", "newfstatat", "fstatat64", "statx",
+                               "fcntl", "dup", "dup2", "dup3", "close"}:
             uses = [args[0], *uses]
         for arg in set(uses):
             if not (match := self.token(arg)):

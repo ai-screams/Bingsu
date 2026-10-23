@@ -67,6 +67,8 @@ pub struct Meter {
     #[cfg(test)]
     pub mount_fault: Option<i32>,
     #[cfg(test)]
+    pub worktree_device: Option<u64>,
+    #[cfg(test)]
     pub openat2_errors: std::collections::VecDeque<i32>,
 }
 
@@ -104,6 +106,29 @@ impl Drop for ObjectAllocation {
     }
 }
 
+/// Path scratch lives only as long as its resolution or cached directory.
+/// Unlike object buffers it has no per-object cap; it shares the live limit.
+pub struct PathAllocation {
+    live: Rc<Cell<u64>>,
+    bytes: u64,
+}
+impl PathAllocation {
+    pub fn reserve(&mut self, bytes: usize, meter: &mut Meter) -> Result<(), ReadError> {
+        let next = self
+            .bytes
+            .checked_add(bytes as u64)
+            .ok_or(ReadError::Limit)?;
+        meter.allocation(bytes)?;
+        self.bytes = next;
+        Ok(())
+    }
+}
+impl Drop for PathAllocation {
+    fn drop(&mut self) {
+        self.live.set(self.live.get() - self.bytes);
+    }
+}
+
 impl Meter {
     pub fn new(deadline: Instant) -> Self {
         Self {
@@ -123,6 +148,8 @@ impl Meter {
             #[cfg(test)]
             mount_fault: None,
             #[cfg(test)]
+            worktree_device: None,
+            #[cfg(test)]
             openat2_errors: Default::default(),
         }
     }
@@ -132,6 +159,32 @@ impl Meter {
             Err(ReadError::Deadline)
         } else {
             Ok(())
+        }
+    }
+
+    /// Reentry sentinel for RepoIo's loan. Sharing the live counters avoids
+    /// two heap allocations per leaf; its expired deadline rejects all work.
+    pub(crate) fn expired_placeholder(&self) -> Self {
+        Self {
+            deadline: Instant::now(),
+            budget: BudgetCounters::default(),
+            phase: self.phase,
+            counts: [Counters::default(); 3],
+            byte_limit: 0,
+            allocation_limit: 0,
+            operations: 0,
+            bytes: 0,
+            allocated: Rc::clone(&self.allocated),
+            live: Rc::clone(&self.live),
+            peak_fds: 0,
+            #[cfg(test)]
+            hook: None,
+            #[cfg(test)]
+            mount_fault: None,
+            #[cfg(test)]
+            worktree_device: None,
+            #[cfg(test)]
+            openat2_errors: Default::default(),
         }
     }
 
@@ -148,7 +201,9 @@ impl Meter {
             return Err(ReadError::Limit);
         }
         if matches!(op, Op::Stat) {
-            self.charge_axis(Axis::Stats, 1)?;
+            self.budget
+                .charge(Axis::Stats, 1)
+                .map_err(|_| ReadError::Limit)?;
         }
         self.operations += 1;
         let count = &mut self.counts[self.phase as usize];
@@ -190,6 +245,18 @@ impl Meter {
         }
     }
 
+    pub fn path_allocation(&self) -> PathAllocation {
+        PathAllocation {
+            live: Rc::clone(&self.allocated),
+            bytes: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn operations(&self) -> u64 {
+        self.operations
+    }
+
     #[cfg(test)]
     pub fn live_allocated(&self) -> u64 {
         self.allocated.get()
@@ -222,13 +289,20 @@ impl Meter {
     }
 
     pub fn raw_entry(&mut self) -> Result<(), ReadError> {
+        self.raw_entries(1)
+    }
+
+    pub fn raw_entries(&mut self, amount: u64) -> Result<(), ReadError> {
         self.check()?;
-        self.charge_axis(Axis::WorktreeEntries, 1)?;
+        self.budget
+            .charge(Axis::WorktreeEntries, amount)
+            .map_err(|_| ReadError::Limit)?;
         let counter = &mut self.counts[self.phase as usize].raw_entries;
-        if *counter >= 65_536 {
+        let next = counter.checked_add(amount).ok_or(ReadError::Limit)?;
+        if next > 65_536 {
             return Err(ReadError::Limit);
         }
-        *counter += 1;
+        *counter = next;
         Ok(())
     }
 

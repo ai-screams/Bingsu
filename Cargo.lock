@@ -57,6 +57,7 @@ dependencies = [
  "gix-pack",
  "gix-ref",
  "gix-revwalk",
+ "gix-utils",
  "gix-zlib",
  "libc",
 ]

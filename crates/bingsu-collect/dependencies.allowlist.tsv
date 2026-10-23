@@ -108,6 +108,7 @@ aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-object	gix-obje
 aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-apple-darwin	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -411,6 +412,7 @@ aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-object	gix-ob
 aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-apple-darwin	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -716,6 +718,7 @@ aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-object	gix-
 aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-apple-darwin	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -1019,6 +1022,7 @@ aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-object	gix-ob
 aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-apple-darwin	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -1379,6 +1383,7 @@ aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-object	gix
 aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-gnu	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -1680,6 +1685,7 @@ aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-object	g
 aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-gnu	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -1983,6 +1989,7 @@ aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-object
 aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-gnu	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -2284,6 +2291,7 @@ aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-object	g
 aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-gnu	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -2645,6 +2653,7 @@ aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-object	gi
 aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-musl	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -2946,6 +2955,7 @@ aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-object	
 aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-musl	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -3249,6 +3259,7 @@ aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-objec
 aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-musl	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -3550,6 +3561,7 @@ aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-object	
 aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 aarch64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 aarch64-unknown-linux-musl	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -3908,6 +3920,7 @@ x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-object	gix-objec
 x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-apple-darwin	collector-all	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-apple-darwin	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -4211,6 +4224,7 @@ x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-object	gix-obj
 x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-apple-darwin	collector-build	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-apple-darwin	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -4516,6 +4530,7 @@ x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-object	gix-o
 x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-apple-darwin	collector-default	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-apple-darwin	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -4819,6 +4834,7 @@ x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-object	gix-obj
 x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-apple-darwin	collector-tests	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-apple-darwin	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -5174,6 +5190,7 @@ x86_64-pc-windows-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-object	gix-obj
 x86_64-pc-windows-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-pc-windows-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-pc-windows-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-pc-windows-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-pc-windows-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-pc-windows-gnu	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
 x86_64-pc-windows-gnu	collector-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.1.0
@@ -5474,6 +5491,7 @@ x86_64-pc-windows-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-object	gix-o
 x86_64-pc-windows-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-pc-windows-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-pc-windows-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-pc-windows-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-pc-windows-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-pc-windows-gnu	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
 x86_64-pc-windows-gnu	collector-build	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.1.0
@@ -5776,6 +5794,7 @@ x86_64-pc-windows-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-object	gix
 x86_64-pc-windows-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-pc-windows-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-pc-windows-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-pc-windows-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-pc-windows-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-pc-windows-gnu	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
 x86_64-pc-windows-gnu	collector-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.1.0
@@ -6076,6 +6095,7 @@ x86_64-pc-windows-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-object	gix-o
 x86_64-pc-windows-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-pc-windows-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-pc-windows-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-pc-windows-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-pc-windows-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-pc-windows-gnu	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
 x86_64-pc-windows-gnu	collector-tests	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.1.0
@@ -6428,6 +6448,7 @@ x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-object	gix-
 x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-gnu	collector-all	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-gnu	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -6729,6 +6750,7 @@ x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-object	gi
 x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-gnu	collector-build	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-gnu	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -7032,6 +7054,7 @@ x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-object	
 x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-gnu	collector-default	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-gnu	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -7333,6 +7356,7 @@ x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-object	gi
 x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-gnu	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -7694,6 +7718,7 @@ x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-object	gix
 x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-musl	collector-all	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-musl	collector-all	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -7995,6 +8020,7 @@ x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-object	g
 x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-musl	collector-build	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-musl	collector-build	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -8298,6 +8324,7 @@ x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-object
 x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-musl	collector-default	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-musl	collector-default	edge	bingsu-core@0.0.0	libm	libm@0.2.16
@@ -8599,6 +8626,7 @@ x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-object	g
 x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-pack	gix-pack@0.75.0
 x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-ref	gix-ref@0.68.0
 x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-revwalk	gix-revwalk@0.36.0
+x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-utils	gix-utils@0.4.0
 x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	gix-zlib	gix-zlib@0.2.0
 x86_64-unknown-linux-musl	collector-tests	edge	bingsu-collect@0.0.0	libc	libc@0.2.190
 x86_64-unknown-linux-musl	collector-tests	edge	bingsu-core@0.0.0	libm	libm@0.2.16
