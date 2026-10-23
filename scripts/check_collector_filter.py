@@ -161,10 +161,13 @@ def main():
         add("repository " + kind, FILTER, f'"{kind}" => vec![vec![{old}]]', f'"{kind}" => vec![vec![]]', repository)
     add("openat2 deny mode", FILTER, 'mode == Openat2Policy::Deny', 'mode != Openat2Policy::Deny', repository)
     add("handled set not ABI", LANDLOCK, 'handled_access_fs & rights(3) == rights(3)', 'handled_access_fs != 0', repository)
-    for axis, old in [("stats", 'self.charge_axis(Axis::Stats, 1)?;'),
-                      ("bytes", 'self.charge_axis(Axis::WorktreeReadBytes, bytes as u64)?;'),
-                      ("entries", 'self.charge_axis(Axis::WorktreeEntries, 1)?;')]:
-        add("pure budget " + axis, Path("crates/bingsu-collect/src/meter.rs"), old, '',
+    for axis, old, new in [
+            ("stats", '            self.budget\n                .charge(Axis::Stats, 1)\n                .map_err(|_| ReadError::Limit)?;',
+             '            let _ = &self.budget;'),
+            ("bytes", 'self.charge_axis(Axis::WorktreeReadBytes, bytes as u64)?;', ''),
+            ("entries", '        self.budget\n            .charge(Axis::WorktreeEntries, amount)\n            .map_err(|_| ReadError::Limit)?;',
+             '        let _ = &self.budget;')]:
+        add("pure budget " + axis, Path("crates/bingsu-collect/src/meter.rs"), old, new,
             "meter::tests::pure_budget_precedes_io_across_phases", "safe_read")
     add("installed handled set", LANDLOCK, '        handled_access_fs,\n    })', '        handled_access_fs: rights(abi),\n    })',
         "landlock::tests::landlock_abi_and_failure_matrix")
