@@ -1,12 +1,17 @@
 //! Bounded loose refs and an in-memory packed-refs snapshot. No ref store.
 use super::io::{RepoIo, RepoPath, RootId};
-use crate::safe_read::ReadError;
+use crate::{meter::Meter, safe_read::ReadError};
 use bingsu_core::collection::budget::{Axis, REF_BYTES, SMALL_FILE_BYTES};
 use gix_ref::bstr::ByteSlice;
 
 pub type ObjectId = gix_index::hash::ObjectId;
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
+// At most 40 reads (39 symbolic hops followed by an object).
 pub const SYMREF_LIMIT: usize = 40;
+// gix-ref 0.68.0: counted peak 1,139,975 B (4.35 * 256 KiB), including
+// unsorted entries, sort scratch and overlapping serialized Vec growth.
+// Round up to 5 * 256 KiB; the allocator corpus guards this pinned envelope.
+pub const PARSER_ALLOCATION: usize = REF_BYTES as usize * 5;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Target {
@@ -14,47 +19,62 @@ pub enum Target {
     Symbolic(Vec<u8>),
 }
 
-#[derive(Default)]
 pub struct Refs {
     packed: Option<gix_ref::packed::Buffer>,
 }
 
 impl Refs {
     pub fn load(io: &RepoIo<'_>) -> Result<Self, ReadError> {
+        let config = super::config::Config::load(io)?;
+        Self::load_with_config(io, &config)
+    }
+
+    pub(super) fn load_with_config(
+        io: &RepoIo<'_>,
+        config: &super::config::Config,
+    ) -> Result<Self, ReadError> {
+        config.ensure_supported(io)?;
         let bytes = match io.read_ref(RepoPath::new(RootId::CommonDir, b"packed-refs"), REF_BYTES) {
             Ok(bytes) => bytes,
-            Err(ReadError::Missing) => return Ok(Self::default()),
+            Err(ReadError::Missing) => return Ok(Self { packed: None }),
             Err(error) => return Err(error),
         };
-        io.metered(|meter| {
-            // Validate and charge BEFORE Buffer's optional unsorted-input sort.
-            let iter = gix_ref::packed::Iter::new(&bytes, gix_index::hash::Kind::Sha1)
-                .map_err(|_| INVALID)?;
-            for entry in iter {
-                meter.charge_axis(Axis::RefEntries, 1)?;
-                let entry = entry.map_err(|_| INVALID)?;
-                validate_name(entry.name.as_bstr())?;
+        io.metered(|meter| Self::parse(&bytes, meter))
+    }
+
+    pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Self, ReadError> {
+        if bytes.len() > REF_BYTES as usize {
+            return Err(ReadError::Limit);
+        }
+        meter.allocation(PARSER_ALLOCATION)?;
+        // Validate and charge BEFORE Buffer's optional unsorted-input sort.
+        let iter =
+            gix_ref::packed::Iter::new(bytes, gix_index::hash::Kind::Sha1).map_err(|_| INVALID)?;
+        for entry in iter {
+            meter.charge_axis(Axis::RefEntries, 1)?;
+            let entry = entry.map_err(|_| INVALID)?;
+            validate_name(entry.name.as_bstr())?;
+        }
+        meter.event("before_packed_parse");
+        let packed = gix_ref::packed::Buffer::from_bytes(bytes, gix_index::hash::Kind::Sha1)
+            .map_err(|_| INVALID)?;
+        // A hostile "sorted" header is not evidence of ordering/uniqueness.
+        let mut previous = None;
+        for entry in packed.iter().map_err(|_| INVALID)? {
+            meter.check()?;
+            let entry = entry.map_err(|_| INVALID)?;
+            let name = entry.name.as_bstr();
+            if previous.is_some_and(|old| old >= name) {
+                return Err(INVALID);
             }
-            meter.allocation(bytes.len())?;
-            let packed = gix_ref::packed::Buffer::from_bytes(&bytes, gix_index::hash::Kind::Sha1)
-                .map_err(|_| INVALID)?;
-            // A hostile "sorted" header is not evidence of ordering/uniqueness.
-            let mut previous = None;
-            for entry in packed.iter().map_err(|_| INVALID)? {
-                meter.check()?;
-                let entry = entry.map_err(|_| INVALID)?;
-                let name = entry.name.as_bstr();
-                if previous.is_some_and(|old| old >= name) {
-                    return Err(INVALID);
-                }
-                previous = Some(name);
-            }
-            Ok(Self {
-                packed: Some(packed),
-            })
+            previous = Some(name);
+        }
+        Ok(Self {
+            packed: Some(packed),
         })
     }
 
+    /// Packed refs only. C5 preflight checks loose refs/replace separately.
     pub fn contains_replace(&self) -> bool {
         self.packed.as_ref().is_some_and(|packed| {
             packed.iter().expect("validated buffer").any(|entry| {

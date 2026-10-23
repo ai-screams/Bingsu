@@ -72,7 +72,7 @@ impl<'a> RepoIo<'a> {
         }
     }
 
-    pub(super) fn metered<T>(
+    pub(crate) fn metered<T>(
         &self,
         operation: impl FnOnce(&mut Meter) -> Result<T, ReadError>,
     ) -> Result<T, ReadError> {
@@ -142,6 +142,17 @@ impl<'a> RepoIo<'a> {
             let dir =
                 safe_read::directory(self.root(path.root), &path.relative, self.access, meter)?;
             safe_read::entries(&dir, raw_limit, meter)
+        })
+    }
+
+    /// Fixed repository-format markers need an open, not a directory listing.
+    pub(super) fn has_directory(&self, path: RepoPath) -> Result<bool, ReadError> {
+        self.metered(|meter| {
+            match safe_read::directory(self.root(path.root), &path.relative, self.access, meter) {
+                Ok(_) => Ok(true),
+                Err(ReadError::Missing) => Ok(false),
+                Err(error) => Err(error),
+            }
         })
     }
 

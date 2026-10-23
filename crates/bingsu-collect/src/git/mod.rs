@@ -24,12 +24,10 @@ pub struct GuardedRepository<'a> {
 }
 
 impl<'a> GuardedRepository<'a> {
-    pub fn new(io: io::RepoIo<'a>) -> Self {
-        Self {
-            io,
-            config: config::Config::default(),
-            refs: refs::Refs::default(),
-        }
+    pub fn new(io: io::RepoIo<'a>) -> Result<Self, ReadError> {
+        let config = config::Config::load(&io)?;
+        let refs = refs::Refs::load_with_config(&io, &config)?;
+        Ok(Self { io, config, refs })
     }
 
     /// C3 supplies the object adapter. Never fall back to a path-based store.
