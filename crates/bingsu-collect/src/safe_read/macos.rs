@@ -8,6 +8,96 @@ pub const BENEATH: i32 = 0x0000_1000;
 pub const UNIQUE: i32 = 0x0000_2000;
 pub const NOFOLLOW_ANY: i32 = 0x2000_0000;
 
+// Same native block interface as commands/sys.rs::directory_batch (A1):
+// public getdirentries is unavailable with 64-bit inodes; telldir/seekdir
+// cookies belong to a libc DIR table, and getattrlistbulk has private OFD
+// buffering. getdirentriesattr is deprecated and returns ENOTSUP on APFS.
+// Calling readdir's native entry point keeps the 8 KiB block and raw-entry
+// budgets under our control, with no libc read-ahead/allocation or path reopen.
+// The native enumeration test directly links and calls this symbol: removal
+// fails linking instead of reporting a successful empty inventory.
+unsafe extern "C" {
+    fn __getdirentries64(
+        fd: libc::c_int,
+        buf: *mut u8,
+        len: usize,
+        base: *mut libc::off_t,
+    ) -> libc::ssize_t;
+}
+
+pub(super) fn entries(
+    root: &Root,
+    raw_limit: u32,
+    meter: &mut Meter,
+) -> Result<Listing, ReadError> {
+    let mut names = Vec::new();
+    let mut raw = 0;
+    let mut buffer = [0u8; crate::meter::DIRENT_CHUNK];
+    loop {
+        if raw >= raw_limit {
+            return Ok(Listing {
+                names,
+                complete: false,
+            });
+        }
+        let size = retry(meter, Op::List, || {
+            let mut base = 0;
+            // SAFETY: owned directory fd, bounded writable buffer, valid base.
+            unsafe {
+                __getdirentries64(
+                    root.fd.as_raw_fd(),
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut base,
+                )
+            }
+        })? as usize;
+        if size == 0 {
+            return Ok(Listing {
+                names,
+                complete: true,
+            });
+        }
+        let mut block = buffer.get(..size).ok_or(ReadError::Io(libc::EIO))?;
+        while !block.is_empty() {
+            if raw >= raw_limit {
+                return Ok(Listing {
+                    names,
+                    complete: false,
+                });
+            }
+            let (name, length, live) = dirent(block)?;
+            meter.raw_entry()?;
+            raw += 1;
+            if live && name != b"." && name != b".." {
+                meter.allocation(name.len() + std::mem::size_of::<Vec<u8>>())?;
+                names.try_reserve_exact(1).map_err(|_| ReadError::Limit)?;
+                names.push(name.to_vec());
+            }
+            block = &block[length..];
+        }
+    }
+}
+
+fn dirent(block: &[u8]) -> Result<(&[u8], usize, bool), ReadError> {
+    // Darwin dirent64: ino(8), seekoff(8), reclen(2), namlen(2), type(1), name.
+    const NAME: usize = 21;
+    let invalid = ReadError::Io(libc::EIO);
+    if block.len() < NAME + 1 {
+        return Err(invalid);
+    }
+    let length = usize::from(u16::from_ne_bytes([block[16], block[17]]));
+    let namesize = usize::from(u16::from_ne_bytes([block[18], block[19]]));
+    if length < NAME + 1 || length > block.len() || namesize >= length - NAME {
+        return Err(invalid);
+    }
+    let name = &block[NAME..NAME + namesize];
+    if block[NAME + namesize] != 0 || name.is_empty() || name.contains(&0) || name.contains(&b'/') {
+        return Err(invalid);
+    }
+    Ok((name, length, block[..8] != [0; 8]))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DarwinCaps {
     pub beneath: bool,
@@ -308,4 +398,42 @@ fn validate_fixture(fixture: BorrowedFd<'_>, meter: &mut Meter) -> Result<(), Re
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod c3_listing_tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: Darwin record 길이·namlen·NUL·이름 검사 또는 inode-zero 구분 제거.
+    #[test]
+    fn darwin_dirent_frames_reject_malformed_records() {
+        let mut record = [0u8; 32];
+        record[0] = 1;
+        record[16..18].copy_from_slice(&32u16.to_ne_bytes());
+        record[18..20].copy_from_slice(&4u16.to_ne_bytes());
+        record[21..25].copy_from_slice(b"name");
+        assert_eq!(dirent(&record).unwrap(), (b"name".as_slice(), 32, true));
+        record[0] = 0;
+        assert!(!dirent(&record).unwrap().2);
+        let mut empty = record;
+        empty[18..20].fill(0);
+        empty[21] = 0;
+        assert!(dirent(&empty).is_err());
+        for n in 0..32 {
+            assert!(dirent(&record[..n]).is_err(), "truncation {n}");
+        }
+        for (at, value) in [
+            (16, 21),
+            (16, 33),
+            (18, 11),
+            (18, 0),
+            (21, 0),
+            (21, b'/'),
+            (25, 1),
+        ] {
+            let mut broken = record;
+            broken[at] = value;
+            assert!(dirent(&broken).is_err(), "field {at}={value}");
+        }
+    }
 }

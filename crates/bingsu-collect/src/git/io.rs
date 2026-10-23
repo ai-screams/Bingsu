@@ -4,7 +4,15 @@ use crate::{
     safe_read::{self, Access, Listing, ReadCap, ReadError, Root},
 };
 use bingsu_core::collection::budget::Axis;
-use std::{cell::RefCell, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    time::Instant,
+};
+
+#[path = "index.rs"]
+pub mod index;
+#[path = "objects.rs"]
+pub mod objects;
 
 pub const UNSUPPORTED: ReadError = ReadError::Io(libc::ENOTSUP);
 
@@ -40,6 +48,20 @@ pub struct RepoIo<'a> {
     roots: RepoRoots<'a>,
     access: &'a Access,
     meter: &'a RefCell<Meter>,
+    stopped: Cell<Option<ReadError>>,
+}
+
+/// Owned, immutable bounded-read backing for the bytes-only pack constructors.
+/// We deliberately use the plan's Vec alternative: hostile truncation cannot
+/// SIGBUS a file mapping. No file mmap is made (MappedBytes remains zero), and
+/// the safe-read fd is closed before this snapshot can escape its checks.
+#[derive(Debug)]
+pub struct ReadMap(Vec<u8>);
+impl std::ops::Deref for ReadMap {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 // Move the ONE meter out for a syscall sequence, releasing the RefCell borrow.
@@ -61,6 +83,7 @@ impl<'a> RepoIo<'a> {
             roots,
             access,
             meter,
+            stopped: Cell::new(None),
         }
     }
 
@@ -76,6 +99,9 @@ impl<'a> RepoIo<'a> {
         &self,
         operation: impl FnOnce(&mut Meter) -> Result<T, ReadError>,
     ) -> Result<T, ReadError> {
+        if let Some(error) = self.stopped.get() {
+            return Err(error);
+        }
         let value = {
             let mut slot = self.meter.try_borrow_mut().map_err(|_| ReadError::Denied)?;
             slot.check()?;
@@ -85,10 +111,17 @@ impl<'a> RepoIo<'a> {
             slot: self.meter,
             value: Some(value),
         };
-        operation(loan.value.as_mut().expect("owned meter"))
+        let result = operation(loan.value.as_mut().expect("owned meter"));
+        if let Err(error @ (ReadError::Limit | ReadError::Deadline)) = result {
+            self.stopped.set(Some(error));
+        }
+        result
     }
 
     pub fn read(&self, path: RepoPath, cap: ReadCap) -> Result<Vec<u8>, ReadError> {
+        if path.root != RootId::Worktree {
+            return self.read_sized_with_cap(path, cap, None);
+        }
         self.metered(|meter| {
             safe_read::read(
                 self.root(path.root),
@@ -116,7 +149,7 @@ impl<'a> RepoIo<'a> {
                 return Err(ReadError::Limit);
             }
             meter.charge_axis(Axis::RefBytes, size)?;
-            file.read(
+            file.read_reserved(
                 ReadCap {
                     bytes: size,
                     single_link: true,
@@ -156,9 +189,65 @@ impl<'a> RepoIo<'a> {
         })
     }
 
-    /// C3 will implement bounded read-only maps. Unconnected means unsupported,
-    /// not an empty successful map and not a filesystem fallback.
-    pub fn map(&self, _path: RepoPath, _cap: u64) -> Result<Vec<u8>, ReadError> {
-        Err(UNSUPPORTED)
+    pub(crate) fn read_budgeted(
+        &self,
+        path: RepoPath,
+        cap: u64,
+        axis: Axis,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.read_sized(path, cap, Some(axis))
+    }
+
+    pub(crate) fn read_sized(
+        &self,
+        path: RepoPath,
+        cap: u64,
+        axis: Option<Axis>,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.read_sized_with_cap(
+            path,
+            ReadCap {
+                bytes: cap,
+                single_link: true,
+            },
+            axis,
+        )
+    }
+
+    fn read_sized_with_cap(
+        &self,
+        path: RepoPath,
+        cap: ReadCap,
+        axis: Option<Axis>,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.metered(|meter| {
+            if axis.is_some_and(|axis| meter.budget.used(axis) == axis.limit()) {
+                return Err(ReadError::Limit);
+            }
+            let file =
+                safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?;
+            let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
+            if size > cap.bytes {
+                return Err(ReadError::Limit);
+            }
+            if let Some(axis) = axis {
+                meter.charge_axis(axis, size)?;
+            }
+            let bytes = file.read_reserved(
+                ReadCap {
+                    bytes: size,
+                    single_link: cap.single_link,
+                },
+                meter,
+            )?;
+            if bytes.len() as u64 != size {
+                return Err(ReadError::Changed);
+            }
+            Ok(bytes)
+        })
+    }
+
+    pub fn map(&self, path: RepoPath, cap: u64) -> Result<ReadMap, ReadError> {
+        self.read_budgeted(path, cap, Axis::PackBytes).map(ReadMap)
     }
 }
