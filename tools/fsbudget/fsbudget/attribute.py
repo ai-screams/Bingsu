@@ -20,6 +20,7 @@ from .classify import FD_DEPENDENT, fd_identity, kind, split_args
 from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call
 
 SPAWN = {"clone", "clone3", "fork", "vfork"}
+OPEN = {"open", "openat", "openat2", "creat"}
 MARKERS = ('PR_SET_NAME, "fsb:begin"', 'PR_SET_NAME, "fsb:end"')
 # What a process may do between a successful exec and its first fsb:begin:
 # exact (syscalls, path) pairs for the dynamic loader and the C runtime.
@@ -284,7 +285,14 @@ class _Descriptors:
                 return match[1].rstrip("/") + "/" + name
         return None
 
-    def observe(self, c, process, args, success, bad):
+    def opened(self, c, process, bad):
+        match = re.match(r"^(\d+)(?:<(.+)>)?", c.ret)
+        # open allocates a free slot; unlike dup2 it cannot replace a live fd.
+        if match[1] in self.tables[process]:
+            bad(c, "open returned a live descriptor")
+        self.create(process, *match.groups(), "CLOEXEC" in c.args)
+
+    def observe(self, c, process, args, success, bad, *, defer_open=False):
         table = self.tables[process]
         # Check uses before replacements (dup2 closes its destination).
         uses = [arg for arg in args if re.fullmatch(r"\d+<.+>", arg)]
@@ -338,7 +346,10 @@ class _Descriptors:
             for arg in split_args(pair.strip('[]')):
                 if match := self.token(arg):
                     self.create(process, *match.groups(), "CLOEXEC" in c.args)
-        elif (c.name in {"open", "openat", "openat2", "creat", "pidfd_open", "memfd_create"}
+        elif c.name in OPEN:
+            if not defer_open:
+                self.opened(c, process, bad)
+        elif (c.name in {"pidfd_open", "memfd_create"}
               or re.match(r"^\d+<", c.ret)):
             match = re.match(r"^(\d+)(?:<(.+)>)?", c.ret)
             self.create(process, *match.groups(), "CLOEXEC" in c.args or c.name == "pidfd_open")
@@ -385,26 +396,36 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     parent's return. Reconstruct entries without changing the historical trace
     parser/fixtures. Threads share role, filter boundary and descriptor table.
     PID reuse starts a new lifetime; failed exec never changes the role.
+    Only open's returned fd is installed at its return record: another
+    thread can close the previous occupant between open's entry and return.
+    Input descriptors are still checked at entry, including openat's dirfd.
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
     """
     import json
     from .classify import collector_kind, collector_bootstrap_kind
-    from .strace_parse import CALL_HEAD, LINE, UNKNOWN_HEAD, parse
+    from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
     errors = list(trace.errors)
     starts = defaultdict(deque)
     exits = defaultdict(deque)
+    pending_open, open_ends = {}, {}
     for i, line in enumerate(lines):
         match = LINE.match(line)
         if match and (head := CALL_HEAD.match(match[2])):
             starts[int(match[1]), head[1]].append(i)
+            if head[1] in OPEN and match[2].endswith("<unfinished ...>"):
+                pending_open[int(match[1])] = i
+        elif match and (resumed := RESUMED.match(match[2])) and resumed[1] in OPEN:
+            if (start := pending_open.pop(int(match[1]), None)) is not None:
+                open_ends[start] = i
         elif match and UNKNOWN_HEAD.match(match[2]):
             starts[int(match[1]), UNKNOWN_SYSCALL].append(i)
         elif match and match[2].startswith("+++ "):
             exits[int(match[1])].append(i)
+            pending_open.pop(int(match[1]), None)
     ordered = []
     for c in trace:
         if c.name == EXIT_EVENT:
@@ -413,7 +434,10 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         else:
             queue = starts[c.pid, c.name]
             at = queue.popleft() if queue else len(lines)
-        ordered.append((at, c))
+        deferred = c.name in OPEN and at in open_ends and bool(re.match(r"^\d+", c.ret))
+        ordered.append((at, c, False, deferred))
+        if deferred:
+            ordered.append((open_ends[at], c, True, False))
     ordered.sort(key=lambda pair: pair[0])
     roles, owner, confined = {}, {}, set()
     descriptors = _Descriptors()
@@ -432,7 +456,10 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     def bad(c, reason):
         errors.append(f"pid {c.pid} ({roles.get(c.pid, UNRESOLVED)}): {reason}: {c.name}({c.args})")
 
-    for _, c in ordered:
+    for _, c, open_result, deferred in ordered:
+        if open_result:
+            descriptors.opened(c, owner[c.pid], bad)
+            continue
         if c.pid not in roles:
             bad(c, "no live spawn parent")
             roles[c.pid], owner[c.pid] = UNRESOLVED, c.pid
@@ -499,7 +526,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         if (c.name == "seccomp" and "SECCOMP_SET_MODE_FILTER" in c.args
                 or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
             confined.add(process)
-        descriptors.observe(c, process, args, success, bad)
+        descriptors.observe(c, process, args, success, bad, defer_open=deferred)
         if role == "collector" and _cloexec_pair(previous, c):
             cloexec_pairs.append({"pid": c.pid,
                                   "open": f"{previous.name}({previous.args})", "open_ret": previous.ret,

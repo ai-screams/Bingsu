@@ -1,0 +1,19 @@
+10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], 0x0 /* 0 vars */) = 0
+10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], 0x0 /* 0 vars */) = 0
+10 <... clone resumed>) = 11
+11 openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_CLOEXEC) = 47</proc/sys/kernel/random/boot_id>
+11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 21
+11 openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+21 close(47</proc/sys/kernel/random/boot_id>) = 0
+11 <... openat resumed>) = 47</>
+11 fstat(47</>, {st_mode=S_IFDIR|0755, ...}) = 0
+11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+12 close(47</>) = 0
+12 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], 0x0 /* 0 vars */) = 0
+11 <... clone resumed>) = 12
+11 close(47</>) = 0
+21 +++ exited with 0 +++
+12 +++ exited with 0 +++
+11 +++ exited with 0 +++
+10 +++ exited with 0 +++
