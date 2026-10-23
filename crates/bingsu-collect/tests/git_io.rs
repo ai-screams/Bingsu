@@ -1476,15 +1476,21 @@ fn loose_objects_validate_all_bytes() {
     ] {
         f.write(&name, zip(raw));
         let db = SafeObjectDb::new(&port);
-        assert!(db.find(&id, &mut out).is_err(), "{raw:?}");
+        assert!(matches!(db.find(&id, &mut out), Err(INVALID)), "{raw:?}");
     }
     let mut bytes = zip(b"blob 7\0payload");
     bytes.push(0);
     f.write(&name, &bytes);
-    assert!(SafeObjectDb::new(&port).find(&id, &mut out).is_err());
+    assert!(matches!(
+        SafeObjectDb::new(&port).find(&id, &mut out),
+        Err(INVALID)
+    ));
     bytes.truncate(bytes.len() - 3);
     f.write(&name, bytes);
-    assert!(SafeObjectDb::new(&port).find(&id, &mut out).is_err());
+    assert!(matches!(
+        SafeObjectDb::new(&port).find(&id, &mut out),
+        Err(INVALID)
+    ));
 }
 
 // 이것을 실패시키는 것: produced-length 검사만 제거해 부족한 payload를 0으로 채우는 것.
@@ -1540,6 +1546,206 @@ fn object_limit_and_total_inflate_limit_are_independent() {
         Err(E::Limit)
     ));
     assert_eq!(m.borrow().counts, before);
+}
+
+// 이것을 실패시키는 것: 매 find의 scratch/parser 예약을 누적하거나 loose 읽기를 worktree 예산에 넣는 것.
+#[test]
+fn thousands_of_loose_trees_share_one_meter() {
+    let f = Fixture::new();
+    let blob = loose_fixture(&f, Kind::Blob, b"payload");
+    let mut root_body = Vec::new();
+    for n in 0..2047 {
+        let mut body = format!("100644 file-{n:04}\0").into_bytes();
+        body.extend_from_slice(blob.as_slice());
+        let child = loose_fixture(&f, Kind::Tree, &body);
+        root_body.extend_from_slice(format!("40000 dir-{n:04}\0").as_bytes());
+        root_body.extend_from_slice(child.as_slice());
+    }
+    let tree = loose_fixture(&f, Kind::Tree, &root_body);
+    let head = loose_fixture(
+        &f,
+        Kind::Commit,
+        format!("tree {tree}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nwalk\n")
+            .as_bytes(),
+    );
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    m.borrow_mut().byte_limit = 0;
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    assert_eq!(db.head_tree(&head).unwrap(), tree);
+    let mut buffer = Vec::new();
+    let children: Vec<_> = db
+        .tree(&tree, &mut buffer)
+        .unwrap()
+        .map(|entry| entry.unwrap().oid.to_owned())
+        .collect();
+    let mut visited = 1;
+    for child in children {
+        assert_eq!(db.tree(&child, &mut buffer).unwrap().count(), 1);
+        visited += 1;
+    }
+    assert_eq!(visited, 2048);
+    assert_eq!(m.borrow().budget.used(Axis::IndexEntries), 4094);
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    assert!(m.borrow().budget.used(Axis::DecompressedBytes) < budget::DECOMPRESSED_BYTES);
+    // Cumulative diagnostics can exceed the live allocation limit many times.
+    assert!(m.borrow().counts[Phase::Content as usize].allocated > 256 * 1024 * 1024);
+}
+
+// 이것을 실패시키는 것: packed find 예약의 다음 find/drop 해제 또는 단일 객체의 OBJECT_ALLOC 검사를 제거하는 것.
+#[test]
+fn thousands_of_packed_objects_keep_live_scratch_bounded() {
+    let f = Fixture::new();
+    let bodies: Vec<_> = (0..4096)
+        .map(|n| format!("object-{n:04}").into_bytes())
+        .collect();
+    let p = packed(&bodies, false);
+    install_pack(&f, &p);
+    f.write("objects/pack/multi-pack-index", midx(&[&p]));
+    let large = loose_fixture(
+        &f,
+        Kind::Blob,
+        &vec![b'x'; budget::OBJECT_ALLOC as usize + 1],
+    );
+    let small = loose_fixture(&f, Kind::Blob, b"loose");
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    m.borrow_mut().byte_limit = 0;
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    let mut buffer = Vec::new();
+    for (n, (id, body)) in p.ids.iter().zip(&bodies).enumerate() {
+        assert_eq!(db.find(id, &mut buffer).unwrap().unwrap().data, body);
+        if n == 0 {
+            // All following packed finds fit exactly the current live usage;
+            // the previous reservation must go before the next one is made.
+            let live = m.borrow().live_allocated();
+            m.borrow_mut().allocation_limit = live;
+        }
+    }
+    assert_eq!(
+        m.borrow().budget.used(Axis::DecompressedBytes),
+        bodies.iter().map(|b| b.len() as u64).sum()
+    );
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    m.borrow_mut().allocation_limit = 8_388_608;
+    let before_drop = m.borrow().live_allocated();
+    drop(db);
+    assert_eq!(
+        before_drop - m.borrow().live_allocated(),
+        (objects::DECODER_OVERHEAD + bodies[0].len()) as u64
+    );
+    // Drop must return the last reservation even without another find. This
+    // remaining allocation would fail if every dropped adapter leaked scratch.
+    for _ in 0..64 {
+        let db = SafeObjectDb::new(&port);
+        assert_eq!(
+            db.find(&small, &mut buffer).unwrap().unwrap().data,
+            b"loose"
+        );
+    }
+    assert!(matches!(
+        SafeObjectDb::new(&port).find(&large, &mut buffer),
+        Err(E::Limit)
+    ));
+    assert_eq!(buffer.capacity(), 0);
+    assert!(m.borrow().budget.used(Axis::DecompressedBytes) < budget::DECOMPRESSED_BYTES);
+}
+
+// 이것을 실패시키는 것: 저장소 snapshot을 worktree 예산으로 다시 차감하거나 호출자의 single_link 정책을 무시하는 것.
+#[test]
+fn repository_snapshots_use_their_own_byte_axes() {
+    let f = Fixture::new();
+    let index = idx_fixture(1, 2);
+    f.write("index", &index);
+    f.write("config", b"[core]\nfilemode=true\n");
+    f.write("HEAD", format!("{A}\n"));
+    f.write("metadata", b"x");
+    fs::hard_link(f.0.join("metadata"), f.0.join("alias")).unwrap();
+    f.write("pack", vec![0; budget::PACK_BYTES as usize]);
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    m.borrow_mut().byte_limit = 0;
+    m.borrow_mut()
+        .budget
+        .charge(Axis::WorktreeReadBytes, budget::WORKTREE_READ_BYTES)
+        .unwrap();
+    let port = io(&root, &access, &m);
+    assert_eq!(
+        port.read(
+            path(RootId::GitDir, b"metadata"),
+            ReadCap {
+                bytes: 1,
+                single_link: false
+            }
+        )
+        .unwrap(),
+        b"x"
+    );
+    assert_eq!(
+        port.read(path(RootId::GitDir, b"metadata"), cap(1)),
+        Err(E::Special)
+    );
+    let refs = Refs::load(&port).unwrap();
+    assert_eq!(
+        refs.resolve(&port, b"HEAD").unwrap().unwrap().to_string(),
+        A
+    );
+    assert_eq!(m.borrow().budget.used(Axis::RefBytes), 41);
+    assert_eq!(safe_index::load(&port).unwrap().entries().len(), 1);
+    assert_eq!(
+        m.borrow().budget.used(Axis::IndexBytes),
+        index.len() as u64 + 10
+    );
+    assert_eq!(
+        port.map(path(RootId::CommonDir, b"pack"), budget::PACK_BYTES)
+            .unwrap()
+            .len() as u64,
+        budget::PACK_BYTES
+    );
+    assert_eq!(m.borrow().budget.used(Axis::PackBytes), budget::PACK_BYTES);
+    let before = m.borrow().counts;
+    assert!(matches!(
+        port.map(path(RootId::CommonDir, b"pack"), budget::PACK_BYTES),
+        Err(E::Limit)
+    ));
+    assert_eq!(m.borrow().counts, before);
+}
+
+// 이것을 실패시키는 것: .idx 대신 .pack을 열거해 작성 중인 pack의 Missing/손상을 캐시하는 것.
+#[test]
+fn unfinished_pack_without_index_does_not_poison_lookup() {
+    let f = Fixture::new();
+    let p = packed(&[b"published".to_vec()], false);
+    install_pack(&f, &p);
+    f.write(
+        "objects/pack/pack-0000000000000000000000000000000000000000.pack",
+        b"PACK incomplete",
+    );
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    let mut buffer = Vec::new();
+    assert_eq!(
+        db.find(&p.ids[0], &mut buffer).unwrap().unwrap().data,
+        b"published"
+    );
+    assert_eq!(m.borrow().budget.used(Axis::Packs), 1);
+    assert_eq!(
+        m.borrow().budget.used(Axis::PackBytes),
+        (p.pack.len() + p.index.len()) as u64
+    );
+    assert!(
+        db.find(&ObjectId::null(Hash::Sha1), &mut buffer)
+            .unwrap()
+            .is_none()
+    );
 }
 
 // 이것을 실패시키는 것: pack을 객체 접근 전에 읽거나 캐시 후 경로를 재열기·delta 복원 제거.
@@ -3116,7 +3322,7 @@ fn loose_input_and_output_share_the_object_allocation_cap() {
     assert_eq!(out.capacity(), 0);
     assert_eq!(
         m.counts[Phase::Content as usize].allocated,
-        objects::DECODER_OVERHEAD as u64
+        (objects::DECODER_OVERHEAD + compressed.len() + 1) as u64
     );
 }
 
@@ -3236,7 +3442,7 @@ fn midx_unused_pack_names_are_validated() {
         let db = SafeObjectDb::new(&port);
         let result = db.find(&other.ids[0], &mut buffer);
         if hostile {
-            assert!(result.is_err());
+            assert!(matches!(result, Err(INVALID)));
         } else {
             assert_eq!(result.unwrap().unwrap().data, b"newer pack");
         }

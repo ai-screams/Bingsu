@@ -635,6 +635,30 @@ impl ReadFile {
     }
 
     pub fn read(self, cap: ReadCap, meter: &mut Meter) -> Result<Vec<u8>, ReadError> {
+        self.read_with_charge(cap, meter, |capacity, meter| meter.read_capacity(capacity))
+    }
+
+    /// The repository adapter has checked the same-fd size against its file
+    /// cap and charged its own axis before reaching this allocation. The extra
+    /// byte detects growth; it is not worktree content or another file byte.
+    pub(crate) fn read_reserved(
+        self,
+        cap: ReadCap,
+        meter: &mut Meter,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.read_with_charge(cap, meter, |capacity, meter| {
+            meter.check()?;
+            meter.record_allocation(capacity);
+            Ok(())
+        })
+    }
+
+    fn read_with_charge(
+        self,
+        cap: ReadCap,
+        meter: &mut Meter,
+        charge: impl FnOnce(usize, &mut Meter) -> Result<(), ReadError>,
+    ) -> Result<Vec<u8>, ReadError> {
         if cap.single_link && self.metadata.st_nlink != 1 {
             return Err(ReadError::Special);
         }
@@ -643,7 +667,7 @@ impl ReadFile {
         if self.metadata.st_size < 0 || self.metadata.st_size as u64 > cap.bytes {
             return Err(ReadError::Limit);
         }
-        meter.read_capacity(capacity)?;
+        charge(capacity, meter)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(capacity)

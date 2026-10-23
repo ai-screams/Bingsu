@@ -59,7 +59,7 @@ pub struct Meter {
     pub allocation_limit: u64,
     operations: u64,
     bytes: u64,
-    allocated: u64,
+    allocated: Rc<Cell<u64>>,
     live: Rc<Cell<u32>>,
     pub peak_fds: u32,
     #[cfg(test)]
@@ -77,6 +77,33 @@ impl Drop for Lease {
     }
 }
 
+/// A single object's live scratch reservation. The caller keeps this through
+/// the returned buffer's use, then releases it on the next find or adapter drop.
+#[derive(Debug)]
+pub struct ObjectAllocation {
+    live: Rc<Cell<u64>>,
+    bytes: u64,
+}
+impl ObjectAllocation {
+    pub fn reserve(&mut self, bytes: usize, meter: &mut Meter) -> Result<(), ReadError> {
+        let next = self
+            .bytes
+            .checked_add(bytes as u64)
+            .ok_or(ReadError::Limit)?;
+        if next > budget::OBJECT_ALLOC {
+            return Err(ReadError::Limit);
+        }
+        meter.allocation(bytes)?;
+        self.bytes = next;
+        Ok(())
+    }
+}
+impl Drop for ObjectAllocation {
+    fn drop(&mut self) {
+        self.live.set(self.live.get() - self.bytes);
+    }
+}
+
 impl Meter {
     pub fn new(deadline: Instant) -> Self {
         Self {
@@ -88,7 +115,7 @@ impl Meter {
             allocation_limit: 8_388_608,
             operations: 0,
             bytes: 0,
-            allocated: 0,
+            allocated: Rc::new(Cell::new(0)),
             live: Rc::new(Cell::new(0)),
             peak_fds: 0,
             #[cfg(test)]
@@ -145,14 +172,33 @@ impl Meter {
         self.check()?;
         let next = self
             .allocated
+            .get()
             .checked_add(bytes as u64)
             .ok_or(ReadError::Limit)?;
         if next > self.allocation_limit {
             return Err(ReadError::Limit);
         }
-        self.allocated = next;
-        self.counts[self.phase as usize].allocated += bytes as u64;
+        self.allocated.set(next);
+        self.record_allocation(bytes);
         Ok(())
+    }
+
+    pub fn object_allocation(&self) -> ObjectAllocation {
+        ObjectAllocation {
+            live: Rc::clone(&self.allocated),
+            bytes: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn live_allocated(&self) -> u64 {
+        self.allocated.get()
+    }
+
+    /// Observation only: repository snapshots have already reserved their own
+    /// file/axis budget, independently of the generic worktree allocation cap.
+    pub(crate) fn record_allocation(&mut self, bytes: usize) {
+        self.counts[self.phase as usize].allocated += bytes as u64;
     }
 
     /// Reserve the entire cap+1 before allocating or issuing a content read.
@@ -208,6 +254,23 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 이것을 실패시키는 것: 객체 예약의 drop 반환 또는 객체별 OBJECT_ALLOC 검사를 제거하는 것.
+    #[test]
+    fn object_reservations_are_live_and_individually_bounded() {
+        let mut m = Meter::new(Instant::now() + std::time::Duration::from_secs(30));
+        for _ in 0..4096 {
+            let mut reservation = m.object_allocation();
+            reservation
+                .reserve(budget::OBJECT_ALLOC as usize, &mut m)
+                .unwrap();
+            assert_eq!(m.allocated.get(), budget::OBJECT_ALLOC);
+            assert_eq!(reservation.reserve(1, &mut m), Err(ReadError::Limit));
+            drop(reservation);
+            assert_eq!(m.allocated.get(), 0);
+        }
+        assert_eq!(m.budget.used(Axis::DecompressedBytes), 0);
+    }
+
     // 이것을 실패시키는 것: OS port에서 core 사전 charge를 빼거나 phase마다 예산을 초기화하는 것.
     #[test]
     fn pure_budget_precedes_io_across_phases() {
@@ -219,7 +282,7 @@ mod tests {
             .charge(Axis::WorktreeReadBytes, budget::WORKTREE_READ_BYTES)
             .unwrap();
         assert_eq!(m.read_capacity(1), Err(ReadError::Limit));
-        assert_eq!(m.allocated, 0);
+        assert_eq!(m.allocated.get(), 0);
         m.budget
             .charge(Axis::WorktreeEntries, budget::WORKTREE_ENTRIES - 1)
             .unwrap();

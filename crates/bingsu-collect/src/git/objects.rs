@@ -1,7 +1,10 @@
 //! Read-only SHA-1 object access. No alternates, replacement refs, commit-graph,
 //! path-opening gix constructors, or ambient repository state exists here.
 use super::{ReadMap, RepoIo, RepoPath, RootId, UNSUPPORTED, index::checksum};
-use crate::{meter::Meter, safe_read::ReadError};
+use crate::{
+    meter::{Meter, ObjectAllocation},
+    safe_read::ReadError,
+};
 use bingsu_core::collection::budget::{self, Axis};
 use gix_error::ErrorExt;
 use gix_index::hash::{self, ObjectId, oid};
@@ -29,12 +32,14 @@ pub(crate) struct Pack {
 pub struct SafeObjectDb<'a> {
     io: &'a RepoIo<'a>,
     packs: RefCell<Option<Result<Vec<Pack>, ReadError>>>,
+    scratch: RefCell<Option<ObjectAllocation>>,
 }
 impl<'a> SafeObjectDb<'a> {
     pub fn new(io: &'a RepoIo<'a>) -> Self {
         Self {
             io,
             packs: RefCell::new(None),
+            scratch: RefCell::new(None),
         }
     }
 
@@ -43,10 +48,11 @@ impl<'a> SafeObjectDb<'a> {
         id: &oid,
         buffer: &'b mut Vec<u8>,
     ) -> Result<Option<Data<'b>>, ReadError> {
-        self.io.metered(|meter| meter.check())?;
         // A previous object's capacity must not overlap the next loose input.
         // Drop it before safe-read allocates its compressed snapshot.
         *buffer = Vec::new();
+        self.scratch.borrow_mut().take();
+        self.io.metered(|meter| meter.check())?;
         // SHA-256 repositories are rejected by preflight; don't reinterpret IDs.
         if id.kind() != hash::Kind::Sha1 {
             return Err(UNSUPPORTED);
@@ -70,7 +76,7 @@ impl<'a> SafeObjectDb<'a> {
                     return self
                         .io
                         .metered(|meter| loose(&bytes, id, buffer, meter))
-                        .map(Some);
+                        .map(|decoded| self.retain(decoded));
                 }
                 Err(ReadError::Missing) => {}
                 Err(error) => return Err(error),
@@ -89,7 +95,7 @@ impl<'a> SafeObjectDb<'a> {
                 return self
                     .io
                     .metered(|meter| decode(&pack.data, &pack.index, offset, id, buffer, meter))
-                    .map(Some);
+                    .map(|decoded| self.retain(decoded));
             }
         }
         // A packed miss can still be loose, including objects added after pack
@@ -103,10 +109,15 @@ impl<'a> SafeObjectDb<'a> {
             Ok(bytes) => self
                 .io
                 .metered(|meter| loose(&bytes, id, buffer, meter))
-                .map(Some),
+                .map(|decoded| self.retain(decoded)),
             Err(ReadError::Missing) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn retain<'b>(&self, decoded: Decoded<'b>) -> Option<Data<'b>> {
+        *self.scratch.borrow_mut() = Some(decoded.allocation);
+        Some(decoded.object)
     }
 
     fn load_packs(&self) -> Result<Vec<Pack>, ReadError> {
@@ -130,20 +141,18 @@ impl<'a> SafeObjectDb<'a> {
         let count = listing
             .names
             .iter()
-            .filter(|n| pack_name(n, b".pack"))
+            .filter(|n| pack_name(n, b".idx"))
             .count();
         self.io
             .metered(|meter| meter.charge_axis(Axis::Packs, count as u64))?;
         let mut packs = Vec::with_capacity(count);
-        for mut name in listing.names.into_iter().filter(|n| pack_name(n, b".pack")) {
-            let data = self.io.map(pack_path(&name), budget::PACK_BYTES)?;
-            self.io.metered(|meter| {
-                meter.check()?;
-                checksum(&data)
-            })?;
-            name.truncate(45);
-            name.extend_from_slice(b".idx");
+        // Git publishes the index after its pack. Ignore incomplete pack files
+        // instead of caching a Missing error for the whole object database.
+        for name in listing.names.into_iter().filter(|n| pack_name(n, b".idx")) {
             let bytes = self.io.map(pack_path(&name), budget::PACK_BYTES)?;
+            let mut data_name = name[..45].to_vec();
+            data_name.extend_from_slice(b".pack");
+            let data = self.io.map(pack_path(&data_name), budget::PACK_BYTES)?;
             let pack = self
                 .io
                 .metered(|meter| Pack::from_bytes(name, data, bytes, meter))?;
@@ -168,7 +177,11 @@ impl<'a> SafeObjectDb<'a> {
         let mut buffer = Vec::new();
         let data = self.find(head, &mut buffer)?.ok_or(ReadError::Missing)?;
         self.io.metered(|meter| {
-            meter.allocation(PARSER_OVERHEAD)?;
+            self.scratch
+                .borrow_mut()
+                .as_mut()
+                .expect("found object")
+                .reserve(PARSER_OVERHEAD, meter)?;
             if data.kind != Kind::Commit {
                 return Err(INVALID);
             }
@@ -187,7 +200,11 @@ impl<'a> SafeObjectDb<'a> {
     ) -> Result<gix_object::TreeRefIter<'b>, ReadError> {
         let data = self.find(id, buffer)?.ok_or(ReadError::Missing)?;
         self.io.metered(|meter| {
-            meter.allocation(PARSER_OVERHEAD)?;
+            self.scratch
+                .borrow_mut()
+                .as_mut()
+                .expect("found object")
+                .reserve(PARSER_OVERHEAD, meter)?;
             if data.kind != Kind::Tree {
                 return Err(INVALID);
             }
@@ -239,14 +256,19 @@ fn pack_path(name: &[u8]) -> RepoPath {
     path.extend_from_slice(name);
     RepoPath::new(RootId::CommonDir, &path)
 }
-fn reserve(buffer: &mut Vec<u8>, size: usize, meter: &mut Meter) -> Result<(), ReadError> {
+fn reserve(
+    buffer: &mut Vec<u8>,
+    size: usize,
+    allocation: &mut ObjectAllocation,
+    meter: &mut Meter,
+) -> Result<(), ReadError> {
     if size > OBJECT_BUFFER {
         return Err(ReadError::Limit);
     }
     // Replace a too-small Vec, avoiding unbounded growth and retaining the
     // caller's previous buffer only until the exact reservation has succeeded.
     if buffer.capacity() < size {
-        meter.allocation(size)?;
+        allocation.reserve(size, meter)?;
         *buffer = Vec::new();
         buffer
             .try_reserve_exact(size)
@@ -254,6 +276,18 @@ fn reserve(buffer: &mut Vec<u8>, size: usize, meter: &mut Meter) -> Result<(), R
     }
     buffer.clear();
     Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct Decoded<'a> {
+    object: Data<'a>,
+    allocation: ObjectAllocation,
+}
+impl<'a> std::ops::Deref for Decoded<'a> {
+    type Target = Data<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.object
+    }
 }
 fn verify(id: &oid, kind: Kind, buffer: &[u8]) -> Result<(), ReadError> {
     if gix_object::compute_hash(hash::Kind::Sha1, kind, buffer)
@@ -271,14 +305,15 @@ pub(crate) fn loose<'b>(
     id: &oid,
     buffer: &'b mut Vec<u8>,
     meter: &mut Meter,
-) -> Result<Data<'b>, ReadError> {
+) -> Result<Decoded<'b>, ReadError> {
     // Reserve room for safe-read's cap+1 allocation before constructing zlib.
     if bytes.len() >= OBJECT_BUFFER {
         return Err(ReadError::Limit);
     }
     // Direct bytes-parser callers obey the same live-capacity bound as Find.
     *buffer = Vec::new();
-    meter.allocation(DECODER_OVERHEAD)?;
+    let mut allocation = meter.object_allocation();
+    allocation.reserve(DECODER_OVERHEAD + bytes.len() + 1, meter)?;
     let mut inflate = gix_zlib::Inflate::default();
     let mut header = [0u8; 64];
     // The first probe is bounded even for a zip bomb, and its duplicated output
@@ -324,7 +359,7 @@ pub(crate) fn loose<'b>(
         return Err(ReadError::Limit);
     }
     meter.charge_axis(Axis::DecompressedBytes, total as u64)?;
-    reserve(buffer, total, meter)?;
+    reserve(buffer, total, &mut allocation, meter)?;
     buffer.resize(total, 0);
     inflate.reset();
     let (status, consumed, produced) = inflate.once(bytes, buffer).map_err(|_| INVALID)?;
@@ -334,10 +369,13 @@ pub(crate) fn loose<'b>(
     buffer.copy_within(end + 1.., 0);
     buffer.truncate(size);
     verify(id, kind, buffer)?;
-    Ok(Data {
-        kind,
-        object_hash: hash::Kind::Sha1,
-        data: buffer,
+    Ok(Decoded {
+        object: Data {
+            kind,
+            object_hash: hash::Kind::Sha1,
+            data: buffer,
+        },
+        allocation,
     })
 }
 
@@ -359,10 +397,11 @@ pub(crate) fn decode<'b>(
     id: &oid,
     buffer: &'b mut Vec<u8>,
     meter: &mut Meter,
-) -> Result<Data<'b>, ReadError> {
+) -> Result<Decoded<'b>, ReadError> {
     // Do not retain a caller capacity larger than this object's reservation.
     *buffer = Vec::new();
-    meter.allocation(DECODER_OVERHEAD)?;
+    let mut allocation = meter.object_allocation();
+    allocation.reserve(DECODER_OVERHEAD, meter)?;
     let file = gix_pack::data::File::from_data(data, PathBuf::new(), hash::Kind::Sha1)
         .map_err(|_| INVALID)?
         .with_alloc_limit_bytes(Some(OBJECT_BUFFER));
@@ -422,7 +461,7 @@ pub(crate) fn decode<'b>(
             .and_then(|n| n.checked_add(delta_bytes))
             .ok_or(ReadError::Limit)?
     };
-    reserve(buffer, capacity, meter)?;
+    reserve(buffer, capacity, &mut allocation, meter)?;
     // Every in-pack base has already been walked, charged and bounded above.
     // A thin pack with an external base is unsupported (Partial); it must never
     // trigger a recursive path lookup, alternate, or unmetered allocation.
@@ -441,10 +480,13 @@ pub(crate) fn decode<'b>(
         )
         .map_err(|_| INVALID)?;
     verify(id, outcome.kind, buffer)?;
-    Ok(Data {
-        kind: outcome.kind,
-        object_hash: hash::Kind::Sha1,
-        data: buffer,
+    Ok(Decoded {
+        object: Data {
+            kind: outcome.kind,
+            object_hash: hash::Kind::Sha1,
+            data: buffer,
+        },
+        allocation,
     })
 }
 

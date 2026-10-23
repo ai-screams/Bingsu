@@ -119,6 +119,9 @@ impl<'a> RepoIo<'a> {
     }
 
     pub fn read(&self, path: RepoPath, cap: ReadCap) -> Result<Vec<u8>, ReadError> {
+        if path.root != RootId::Worktree {
+            return self.read_sized_with_cap(path, cap, None);
+        }
         self.metered(|meter| {
             safe_read::read(
                 self.root(path.root),
@@ -146,7 +149,7 @@ impl<'a> RepoIo<'a> {
                 return Err(ReadError::Limit);
             }
             meter.charge_axis(Axis::RefBytes, size)?;
-            file.read(
+            file.read_reserved(
                 ReadCap {
                     bytes: size,
                     single_link: true,
@@ -201,6 +204,22 @@ impl<'a> RepoIo<'a> {
         cap: u64,
         axis: Option<Axis>,
     ) -> Result<Vec<u8>, ReadError> {
+        self.read_sized_with_cap(
+            path,
+            ReadCap {
+                bytes: cap,
+                single_link: true,
+            },
+            axis,
+        )
+    }
+
+    fn read_sized_with_cap(
+        &self,
+        path: RepoPath,
+        cap: ReadCap,
+        axis: Option<Axis>,
+    ) -> Result<Vec<u8>, ReadError> {
         self.metered(|meter| {
             if axis.is_some_and(|axis| meter.budget.used(axis) == axis.limit()) {
                 return Err(ReadError::Limit);
@@ -208,16 +227,16 @@ impl<'a> RepoIo<'a> {
             let file =
                 safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?;
             let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
-            if size > cap {
+            if size > cap.bytes {
                 return Err(ReadError::Limit);
             }
             if let Some(axis) = axis {
                 meter.charge_axis(axis, size)?;
             }
-            let bytes = file.read(
+            let bytes = file.read_reserved(
                 ReadCap {
                     bytes: size,
-                    single_link: true,
+                    single_link: cap.single_link,
                 },
                 meter,
             )?;
