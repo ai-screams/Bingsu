@@ -682,7 +682,8 @@ def prepare(binary):
         linker = os.environ.get("CARGO_TARGET_" + triple.upper().replace("-", "_") + "_LINKER")
         if linker:
             command += ["-C", "linker=" + linker]
-    for name in ("bingsu_core", "bingsu_identity", "libc"):
+    # 이것을 실패시키는 것: collector git 모듈의 bytes-parser extern을 누락하는 것 (--prepare).
+    for name in ("bingsu_core", "bingsu_identity", "libc", "gix_config", "gix_ref", "gix_index"):
         command += ["--extern", f"{name}={deps[name]}"]
     env = {**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": "0.0.0"}
     run(command, env=env, cwd=source, timeout=120)
