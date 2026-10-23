@@ -410,6 +410,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     """
     import json
     from .classify import collector_kind, collector_bootstrap_kind
+    from .repository import held_metadata_kind
     from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
@@ -559,11 +560,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 k = "probe_openat"
                 repository_probe[process] = {"fd": result.split("<")[0] if success else None, "seen": set()}
             elif probe and process not in request_started and args and args[0] == f'{probe["fd"]}</>':
-                exact = None
-                if c.name == "fstat": exact = "fstat"
-                elif c.name in {"newfstatat", "fstatat64"} and args[1] == '\"\"' and args[3] == "AT_EMPTY_PATH": exact = "fstat"
-                elif c.name == "fstatfs": exact = "fstatfs"
-                elif c.name == "statx" and args[1:4] == ['\"\"', 'AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH', 'STATX_MNT_ID']: exact = "statx"
+                exact = held_metadata_kind(c, args)
+                if c.name == "fstatfs": exact = "fstatfs"
                 elif (c.name == "openat2" and len(args) == 4 and args[1] == '\".\"' and args[3] == "24"
                       and args[2] == "{flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}"): exact = "openat2"
                 if exact and exact not in probe["seen"]:

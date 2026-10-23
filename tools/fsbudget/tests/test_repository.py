@@ -36,6 +36,50 @@ PROBE = '''12 openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 4</>
 12 close(4</>) = 0
 '''
 
+METADATA = [
+    'fstat(4</>, {st_mode=S_IFDIR|0755})',
+    'fstat64(4</>, {st_mode=S_IFDIR|0755})',
+    'newfstatat(4</>, "", {st_mode=S_IFDIR|0755}, AT_EMPTY_PATH)',
+    'fstatat64(4</>, "", {st_mode=S_IFDIR|0755}, AT_EMPTY_PATH)',
+    'statx(4</>, "", AT_EMPTY_PATH, STATX_BASIC_STATS, {stx_mask=STATX_BASIC_STATS})',
+    'statx(4</>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID})',
+]
+
+
+# 이것을 실패시키는 것: libc별 fd metadata를 누락하거나 mount-id와 합쳐 중복/누락을 허용하는 것.
+@pytest.mark.parametrize('metadata', METADATA)
+@pytest.mark.parametrize('sync', ['', 'AT_STATX_SYNC_AS_STAT|'])
+def test_probe_metadata_shapes_have_the_same_exact_budget(metadata, sync):
+    from fsbudget.gate import check
+    trace = PROBE.replace(METADATA[0], metadata).replace(
+        'AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH', sync + 'AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH')
+    expected = {'exec': 1, **{'probe_' + k: v for k, v in
+        collector_repository_expected(CollectorAxes(phase='probe', probes=1)).items()}}
+
+    def errors(probe):
+        got = collector_attribute((PREFIX + probe).splitlines(), {'front': '/b', 'helper': '/b', 'collector': '/c'})
+        return got.errors + check(got.counts, {'collector': expected}, 'exact', ['collector'])
+
+    assert not errors(trace)
+    for line in trace.splitlines(keepends=True):
+        if line.startswith('12 close'):
+            continue
+        assert errors(trace.replace(line, '')), line
+        assert errors(trace.replace(line, line + line)), line
+    for fd in ['7</>', '4</outside>', '4', '-1</>', 'AT_FDCWD</>']:
+        damaged = metadata.replace('4</>', fd)
+        assert errors(trace.replace(metadata, damaged))
+    if '""' in metadata:
+        for damaged in [metadata.replace('""', '"HEAD"'),
+                        metadata.replace('AT_EMPTY_PATH', '0'),
+                        metadata.replace('AT_EMPTY_PATH', 'AT_SYMLINK_NOFOLLOW'),
+                        metadata.replace('AT_EMPTY_PATH', 'AT_EMPTY_PATH|0x80000000')]:
+            assert errors(trace.replace(metadata, damaged))
+    # Same total stat calls, but one metadata operation cannot replace MNT_ID.
+    mount = next(line for line in trace.splitlines(keepends=True) if ', STATX_MNT_ID,' in line)
+    assert errors(trace.replace(mount, '12 ' + metadata + ' = 0\n'))
+    assert errors(trace.replace(mount, mount.replace('AT_SYMLINK_NOFOLLOW|', '')))
+
 # 이것을 실패시키는 것: probe 예외를 필터 전·요청 뒤·다른 fd/path·중복 호출까지 넓히는 것.
 def test_probe_trace_window_is_exact():
     def check(text):
@@ -57,7 +101,9 @@ def test_probe_trace_window_is_exact():
         assert check(changed).errors, changed
 
 # 이것을 실패시키는 것: 경로/phase/계수/금지 효과 검사를 없애는 것.
-def test_repository_trace_checks_paths_counts_and_phases():
+@pytest.mark.parametrize('metadata', METADATA)
+@pytest.mark.parametrize('sync', ['', 'AT_STATX_SYNC_AS_STAT|'])
+def test_repository_trace_checks_paths_counts_and_phases(metadata, sync):
     from fsbudget.repository import check_repository_trace
     root = '/fixture'
     def marker(phase): return f'12 write(1<pipe:[9]>, "B3_PHASE {phase}\\n", 30) = 30\n'
@@ -80,7 +126,15 @@ def test_repository_trace_checks_paths_counts_and_phases():
 12 read(10</fixture/worktree/HEAD>, "", 57) = 0
 12 faccessat2(7</fixture/worktree>, ".", W_OK, AT_EACCESS) = 0
 ''' + marker('end')
+    # Exercise the same canonical metadata rule in probe/read-layer/content.
+    import re
+    trace = re.sub(r'fstat\((\d+<[^>]+>), \{[^}]+\}\)',
+                   lambda m: metadata.replace('4</>', m[1]), trace)
+    trace = trace.replace('AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH', sync + 'AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH')
     assert check_repository_trace(trace, root, 'openat2')['content']['read'] == 2
+    for fd in ['4', '-1</>', 'AT_FDCWD</>', '4<pipe:[9]>']:
+        with pytest.raises(AssertionError):
+            check_repository_trace(trace.replace(metadata, metadata.replace('4</>', fd)), root, 'openat2')
     for changed in [trace.replace('worktree/HEAD', 'outside/HEAD'),
                     trace.replace('O_RDONLY|O_NONBLOCK|O_CLOEXEC,', 'O_RDWR|O_NONBLOCK|O_CLOEXEC,'),
                     trace.replace('12 read(10</fixture/worktree/HEAD>, "", 57) = 0\n', ''),
@@ -88,3 +142,11 @@ def test_repository_trace_checks_paths_counts_and_phases():
                     trace.replace(marker('read-layer'), marker('probe') + PROBE + marker('end') + marker('read-layer'))]:
         with pytest.raises(AssertionError):
             check_repository_trace(changed, root, 'openat2')
+    for damaged in [trace.replace('AT_EMPTY_PATH', '0'),
+                    trace.replace('AT_EMPTY_PATH', 'AT_EMPTY_PATH|0x80000000'),
+                    trace.replace(', STATX_MNT_ID,', ', STATX_ALL,')]:
+        with pytest.raises(AssertionError):
+            check_repository_trace(damaged, root, 'openat2')
+    if metadata.startswith('statx'):
+        with pytest.raises(AssertionError):
+            check_repository_trace(trace.replace('STATX_BASIC_STATS', 'STATX_INO').replace('STATX_ALL', 'STATX_INO'), root, 'openat2')

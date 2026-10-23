@@ -47,8 +47,8 @@ clone3	435	435	enosys	row_clone3_enosys	Force libc to fall back to inspectable c
 prlimit64	302	261	bootstrap_as	row_prlimit64_bootstrap_as	Set the initial address-space ceiling before sealing
 seccomp	317	277	bootstrap_filter	row_seccomp_bootstrap_filter	Stack the final filter before Ready
 openat2	437	437	handled_write_set	row_openat2_handled_write_set	Read beneath selected roots only after installed write denial covers TRUNCATE; size must be 24
-fstatfs	138	44	read_root	row_fstatfs_read_root	Reject procfs and inspect the filesystem of already-held root descriptors
+fstatfs	138	44	read_root	row_fstatfs_read_root	BPF permits any fd; userspace inspects held root descriptors to reject procfs and identify filesystems
 faccessat2	439	439	readonly	row_faccessat2_readonly	Observe readonly with W_OK and AT_EACCESS only; no access fallback
-landlock_create_ruleset	444	444	read_layer_create	row_landlock_create_ruleset_read_layer_create	Query version or create an eight-byte filesystem ruleset to add read confinement
+landlock_create_ruleset	444	444	read_layer_create	row_landlock_create_ruleset_read_layer_create	Create an eight-byte filesystem ruleset with flags zero to add read confinement; VERSION is pre-filter only
 landlock_add_rule	445	445	read_layer_add	row_landlock_add_rule_read_layer_add	Add only PATH_BENEATH rules with flags zero for selected content roots
 landlock_restrict_self	446	446	read_layer_restrict	row_landlock_restrict_self_read_layer_restrict	Stack a monotone read restriction with flags zero after discovery

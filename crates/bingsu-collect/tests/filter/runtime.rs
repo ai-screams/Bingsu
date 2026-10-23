@@ -725,7 +725,32 @@ fn protection_installation_cost_has_200_samples() {
 
 fn repository_case(case: &str) -> String {
     use std::io::{BufRead, Write};
-    let dir = std::env::temp_dir().join(format!("b3-{}-{case}", std::process::id()));
+    let name = format!("b3-{}-{case}", std::process::id());
+    let dir = if matches!(case, "covered" | "missing-truncate" | "absent") {
+        super::tmpfile::select(
+            &name,
+            std::env::temp_dir(),
+            std::env::var_os("BINGSU_B3_TMPDIR").map(std::path::PathBuf::from),
+            |directory| {
+                use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+                std::fs::DirBuilder::new().mode(0o700).create(directory)?;
+                let result = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_TMPFILE | libc::O_CLOEXEC)
+                    .open(directory)
+                    .map(drop);
+                if result.is_err() {
+                    std::fs::remove_dir(directory)?;
+                }
+                result
+            },
+        )
+        .unwrap_or_else(|error| panic!("{error}"))
+    } else {
+        std::env::temp_dir().join(name)
+    };
     std::fs::create_dir_all(dir.join("worktree/a")).unwrap();
     for name in ["gitdir", "commondir", "outside", "home"] {
         std::fs::create_dir(dir.join(name)).unwrap();
@@ -898,7 +923,8 @@ fn repository_child() {
         );
         assert!(
             tmp >= 0,
-            "BLOCKED: filesystem must support O_TMPFILE: {}",
+            "BLOCKED: selected test filesystem {} failed the pre-filter openat2 O_TMPFILE control: {}",
+            dir.display(),
             errno()
         );
         // SAFETY: fresh positive-control descriptor.

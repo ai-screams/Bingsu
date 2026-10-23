@@ -19,6 +19,8 @@ def collector_success_expected(worker: str, *, landlock: bool = False,
     result = {"exec": 1, "fd_query": queries, "fstat": 1, "acl": 1,
               "cwd": 1, "openat": 1, "read": 1}
     if repository_probe:
+        # fstat is one held-fd metadata primitive on every libc (fstat,
+        # newfstatat or statx by shape); statx is the separate MNT_ID query.
         result.update({"probe_openat": 1, "probe_openat2": 1,
                        "probe_fstat": 1, "probe_fstatfs": 1, "probe_statx": 1,
                        "kernel_release": 1})
@@ -218,7 +220,9 @@ class CollectorAxes:
 def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
     """Primitive table from safe_read/linux.rs; phase windows stay separate.
 
-    Acquisition root: open/fstat/fstatfs/statx. Ordinary edge adds lstat too.
+    Acquisition root: open/fstat/fstatfs/statx. fstat includes libc's held-fd
+    newfstatat/statx metadata shapes; statx counts only the MNT_ID primitive.
+    Ordinary edge adds lstat too.
     Content fast: openat2/fstat/fstatfs/statx per file or directory; stepwise
     uses components and their lstat instead. Each followed link adds two lstat
     observations and readlink. Mutable reads include one EOF/cap+1 observation.

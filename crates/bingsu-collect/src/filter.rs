@@ -124,10 +124,9 @@ fn conditions(kind: &str) -> Vec<Vec<Cond>> {
         // deny set can authorize this row; size is a full-width size_t.
         "handled_write_set" => vec![vec![eq(3, 24), high(3, 0)]],
         "readonly" => vec![vec![eq(2, 2), eq(3, 0x200)]], // W_OK, AT_EACCESS
-        "read_layer_create" => vec![
-            vec![eq(0, 0), high(0, 0), eq(1, 0), high(1, 0), eq(2, 1)],
-            vec![eq(1, 8), high(1, 0), eq(2, 0)],
-        ],
+        // The VERSION query runs before filtering; sealed code only creates
+        // the eight-byte filesystem ruleset used for read confinement.
+        "read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)]],
         "read_layer_add" => vec![vec![eq(1, 1), eq(3, 0)]], // PATH_BENEATH
         "read_layer_restrict" => vec![vec![eq(1, 0)]],
         "response" => vec![vec![eq(0, 1)]],

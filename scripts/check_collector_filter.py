@@ -35,7 +35,7 @@ def check_identity_only():
 
 def host_tests_passed(result):
     return result.returncode == 0 and re.search(
-        r"^test result: ok\. 9 passed; 0 failed; 0 ignored; 0 measured; "
+        r"^test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; "
         r"\d+ filtered out; finished in \d+\.\d+s$", result.stdout, re.MULTILINE) is not None
 
 
@@ -62,7 +62,7 @@ def main():
     assert all(r["why"].strip() and r["probe"] == f'row_{r["syscall"]}_{r["condition"]}' for r in rows)
     result = run()
     assert host_tests_passed(result), result.stdout + result.stderr
-    print("collector identity/table/program/probes PASS: identity-only lib, 51 rows, both ABIs, 9 host tests")
+    print("collector identity/table/program/probes PASS: identity-only lib, 51 rows, both ABIs, 10 host tests")
     if args.repository_trace:
         repository_trace()
     if not args.mutations:
@@ -143,12 +143,18 @@ def main():
     # 이것을 실패시키는 것: 새 syscall 조건/handled set/counter 연결의 검사 제거.
     repository = "repository_rows_require_exact_arguments_and_handled_write_set"
     for old in ["eq(3, 24)", "high(3, 0)", "eq(2, 2)", "eq(3, 0x200)",
-                "eq(0, 0), high(0, 0)", "eq(1, 0), high(1, 0)",
-                "eq(1, 8)", "high(1, 0), eq(2, 0)", "eq(2, 1)"]:
+                "eq(1, 8)", "high(1, 0)", "eq(2, 0)"]:
         source = (ROOT / FILTER).read_text()
         section = source[source.index('"handled_write_set" =>'):source.index('"response" =>')]
         line = next(line for line in section.splitlines() if old in line)
         add("repository condition " + old, FILTER, line, line.replace(old, "low(0, 0, 0)", 1), repository)
+    add("post-seal VERSION query", FILTER,
+        '"read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)]]',
+        '"read_layer_create" => vec![vec![eq(1, 8), high(1, 0), eq(2, 0)], vec![eq(0, 0), high(0, 0), eq(1, 0), high(1, 0), eq(2, 1)]]', repository)
+    tmpfile = Path("crates/bingsu-collect/tests/filter/tmpfile.rs")
+    selection = "tmpfile::selection_probes_candidates_and_reports_all_failures"
+    add("tmpfile probe omitted", tmpfile, 'match probe(&directory)', 'match { let _ = &mut probe; Ok::<(), std::io::Error>(()) }', selection)
+    add("tmpfile fallback omitted", tmpfile, '.flatten()', '.flatten().take(1)', selection)
     for kind, old in [("read_layer_add", "eq(1, 1), eq(3, 0)"), ("read_layer_restrict", "eq(1, 0)")]:
         add("repository " + kind, FILTER, f'"{kind}" => vec![vec![{old}]]', f'"{kind}" => vec![vec![]]', repository)
     add("openat2 deny mode", FILTER, 'mode == Openat2Policy::Deny', 'mode != Openat2Policy::Deny', repository)

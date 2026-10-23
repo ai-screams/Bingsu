@@ -1,0 +1,431 @@
+3654  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace", "/home/tester/pt/test_shipped_collector_trace_h0/shipped-store", "--shipped-worker"], 0xffffc5083350 /* 22 vars */) = 0
+3654  clone(child_stack=0xe4fad7add000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+3655  execve("/home/tester/target/debug/collector-product-fixture/collector-product", ["/home/tester/target/debug/collector-product-fixture/collector-product", "--trace-helper", "/home/tester/pt/test_shipped_collector_trace_h0/shipped-store", "--shipped-worker"], 0xc72e2e0b9160 /* 0 vars */ <unfinished ...>
+3654  <... clone resumed>)              = 3655
+3655  <... execve resumed>)             = 0
+3655  clone(child_stack=0xefdc01c5e920, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[3656], tls=0xefdc01c5f7a0, child_tidptr=0xefdc01c5f130) = 3656
+3655  clone(child_stack=0xefdc01c10000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+3657  execve("/home/tester/target/debug/bingsu-collect", ["/home/tester/target/debug/bingsu-collect", "__collect-v1"], 0xac5718b5a078 /* 0 vars */ <unfinished ...>
+3655  <... clone resumed>)              = 3657
+3657  <... execve resumed>)             = 0
+3657  brk(NULL <unfinished ...>
+3657  <... brk resumed>)                = 0xb80b31111000
+3657  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xf476ddd87000
+3657  faccessat(AT_FDCWD</>, "/etc/ld.so.preload", R_OK <unfinished ...>
+3657  <... faccessat resumed>)          = -1 ENOENT (No such file or directory)
+3657  openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC <unfinished ...>
+3657  <... openat resumed>)             = 4</etc/ld.so.cache>
+3657  newfstatat(4</etc/ld.so.cache>, "", {st_mode=S_IFREG|0644, st_size=8543, ...}, AT_EMPTY_PATH) = 0
+3657  mmap(NULL, 8543, PROT_READ, MAP_PRIVATE, 4</etc/ld.so.cache>, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd84000
+3657  close(4</etc/ld.so.cache>)        = 0
+3657  openat(AT_FDCWD</>, "/lib/aarch64-linux-gnu/libgcc_s.so.1", O_RDONLY|O_CLOEXEC <unfinished ...>
+3657  <... openat resumed>)             = 4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>
+3657  read(4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>,  <unfinished ...>
+3657  <... read resumed>"\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\310\2\2\0\0\0\0\0\0\0\0\0@\08\0\7\0@\0\32\0\31\0\1\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0h2\1\0\0\0\0\0h2\1\0\0\0\0\0\0\0\1\0\0\0\0\0\1\0\0\0\6\0\0\0\270\375\1\0\0\0\0\0\270\375\2\0\0\0\0\0\270\375\2\0\0\0\0\0\350\3\0\0\0\0\0\0\20\5\0\0\0\0\0\0\0\0\1\0\0\0\0\0\2\0\0\0\6\0\0\0\310\375\1\0\0\0\0\0\310\375\2\0\0\0\0\0\310\375\2\0\0\0\0\0\360\1\0\0\0\0\0\0\360\1\0\0\0\0\0\0\10\0\0\0\0\0\0\0\4\0\0\0\4\0\0\0\310\1\0\0\0\0\0\0\310\1\0\0\0\0\0\0\310\1\0\0\0\0\0\0$\0\0\0\0\0\0\0$\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0P\345td\4\0\0\0 \22\1\0\0\0\0\0 \22\1\0\0\0\0\0 \22\1\0\0\0\0\0\34\5\0\0\0\0\0\0\34\5\0\0\0\0\0\0\4\0\0\0\0\0\0\0Q\345td\6\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0R\345td\4\0\0\0\270\375\1\0\0\0\0\0\270\375\2\0\0\0\0\0\270\375\2\0\0\0\0\0H\2\0\0\0\0\0\0H\2\0\0\0\0\0\0\1\0\0\0\0\0\0\0\4\0\0\0\24\0\0\0\3\0\0\0GNU\0\25\31\333\376\301\3\245\2j\306u\200\264\n,`\26\213\25\f\0\0\0\0\203\0\0\0\30\0\0\0\20\0\0\0\n\0\0\0\23\34\3\30\4$\0\1\1\201\0T\4\2\10\20\200\204\0\0\0\f\5\200\2\0`\20\4\222\0\24\22\200\300 \300\0\200\2t\1\0\0\10(\300\2H\1+ \320\1\2(\23\265$`l\322\0!#pB@r\204\30`@@\1\0\200\v\0\0\22$\0\0\21\2\10A\300\1$\t\21(  \10C\v\246\222\10\tH\10\3@\f\n\34\22O\306\1\207\vA\204\226\315\4\302\305\4\242\333\16\314\30\0\0\0\31\0\0\0\34\0\0\0\0\0\0\0\36\0\0\0\0\0\0\0!\0\0\0\"\0\0\0%\0\0\0(\0\0\0*\0\0\0\0\0\0\0+\0\0\0-\0\0\0.\0\0\0001\0\0\0002\0\0\0005\0\0\0006\0\0\08\0\0\0\0\0\0\09\0\0\0:\0\0\0\0\0\0\0>\0\0\0@\0\0\0A\0\0\0B\0\0\0C\0\0\0D\0\0\0F\0\0\0G\0\0\0\0\0\0\0\0\0\0\0H\0\0\0\0\0\0\0I\0\0\0J\0\0\0K\0\0\0L\0\0\0M\0\0\0N\0\0\0\0\0\0\0\0\0\0\0P\0\0\0\0\0\0\0\0\0\0\0R\0\0\0", 832) = 832
+3657  newfstatat(4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=133448, ...}, AT_EMPTY_PATH) = 0
+3657  mmap(NULL, 262856, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd0d000
+3657  mmap(0xf476ddd10000, 197320, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd10000
+3655  clone(child_stack=0xefdc01c0e920, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID <unfinished ...>
+3657  munmap(0xf476ddd0d000, 12288)     = 0
+3655  <... clone resumed>, parent_tid=[3658], tls=0xefdc01c0f7a0, child_tidptr=0xefdc01c0f130) = 3658
+3657  munmap(0xf476ddd41000, 49864 <unfinished ...>
+3657  <... munmap resumed>)             = 0
+3657  mprotect(0xf476ddd24000, 110592, PROT_NONE <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  mmap(0xf476ddd3f000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0x1f000 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd3f000
+3657  close(4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  openat(AT_FDCWD</>, "/lib/aarch64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC <unfinished ...>
+3657  <... openat resumed>)             = 4</usr/lib/aarch64-linux-gnu/libc.so.6>
+3657  read(4</usr/lib/aarch64-linux-gnu/libc.so.6>,  <unfinished ...>
+3657  <... read resumed>"\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0000y\2\0\0\0\0\0@\0\0\0\0\0\0\0\20#\31\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0?\0>\0\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0000\2\0\0\0\0\0\0000\2\0\0\0\0\0\0\10\0\0\0\0\0\0\0\3\0\0\0\4\0\0\08\326\25\0\0\0\0\08\326\25\0\0\0\0\08\326\25\0\0\0\0\0\33\0\0\0\0\0\0\0\33\0\0\0\0\0\0\0\10\0\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\234\270\30\0\0\0\0\0\234\270\30\0\0\0\0\0\0\0\1\0\0\0\0\0\1\0\0\0\6\0\0\0\300\315\30\0\0\0\0\0\300\315\31\0\0\0\0\0\300\315\31\0\0\0\0\0\10I\0\0\0\0\0\0\240\22\1\0\0\0\0\0\0\0\1\0\0\0\0\0\2\0\0\0\6\0\0\0\260\373\30\0\0\0\0\0\260\373\31\0\0\0\0\0\260\373\31\0\0\0\0\0\260\1\0\0\0\0\0\0\260\1\0\0\0\0\0\0\10\0\0\0\0\0\0\0\4\0\0\0\4\0\0\0p\2\0\0\0\0\0\0p\2\0\0\0\0\0\0p\2\0\0\0\0\0\0D\0\0\0\0\0\0\0D\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\7\0\0\0\4\0\0\0\300\315\30\0\0\0\0\0\300\315\31\0\0\0\0\0\300\315\31\0\0\0\0\0\20\0\0\0\0\0\0\0\220\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0P\345td\4\0\0\0T\326\25\0\0\0\0\0T\326\25\0\0\0\0\0T\326\25\0\0\0\0\0lh\0\0\0\0\0\0lh\0\0\0\0\0\0\4\0\0\0\0\0\0\0Q\345td\6\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0R\345td\4\0\0\0\300\315\30\0\0\0\0\0\300\315\31\0\0\0\0\0\300\315\31\0\0\0\0\0@2\0\0\0\0\0\0@2\0\0\0\0\0\0\1\0\0\0\0\0\0\0\4\0\0\0\24\0\0\0\3\0\0\0GNU\0o&\217\365F\305m\177\24\351P\32Ui\214\302\320\253G2\4\0\0\0\20\0\0\0\1\0\0\0GNU\0\0\0\0\0\3\0\0\0\7\0\0\0\0\0\0\0\0\0\0\0\361\3\0\0\27\0\0\0\0\1\0\0\16\0\0\0@0\22\\\250 \23\1\210\3\346\220\305E\214\0\304\0X\0\7\204 p\302\200\1\r\212\34\301\24\21\200\310D2\10*@\210V<- N\262H&\204\320\216\4\f\0\3\2\16\261\254:\17f\310\200\3003\0\300\fP\t \201\t\224\v$ ($\0\204$Z0\20X\200\312DB(\0\6\200\20\32C\0\250T\200\0IP\4Q\212P\22\4\0$\0\10  \21\20", 832) = 832
+3657  newfstatat(4</usr/lib/aarch64-linux-gnu/libc.so.6>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFREG|0755, st_size=1651408, ...}, AT_EMPTY_PATH) = 0
+3657  mmap(NULL, 1826912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddb51000
+3657  mmap(0xf476ddb60000, 1761376, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libc.so.6>, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddb60000
+3657  munmap(0xf476ddb51000, 61440 <unfinished ...>
+3657  <... munmap resumed>)             = 0
+3657  munmap(0xf476ddd0f000, 96 <unfinished ...>
+3657  <... munmap resumed>)             = 0
+3657  mprotect(0xf476ddcec000, 65536, PROT_NONE <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  mmap(0xf476ddcfc000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libc.so.6>, 0x18c000 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddcfc000
+3657  mmap(0xf476ddd02000, 49248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd02000
+3657  close(4</usr/lib/aarch64-linux-gnu/libc.so.6> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd82000
+3657  set_tid_address(0xf476ddd820f0 <unfinished ...>
+3657  <... set_tid_address resumed>)    = 3657
+3657  set_robust_list(0xf476ddd82100, 24 <unfinished ...>
+3657  <... set_robust_list resumed>)    = 0
+3657  rseq(0xf476ddd82740, 0x20, 0, 0xd428bc00) = 0
+3657  mprotect(0xf476ddcfc000, 16384, PROT_READ <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  mprotect(0xf476ddd3f000, 4096, PROT_READ <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  mprotect(0xb80b231d9000, 28672, PROT_READ <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  mprotect(0xf476ddd8c000, 8192, PROT_READ <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+3657  munmap(0xf476ddd84000, 8543 <unfinished ...>
+3657  <... munmap resumed>)             = 0
+3657  ppoll([{fd=0</dev/null>, events=0}, {fd=1<pipe:[1363205]>, events=0}, {fd=2</dev/null>, events=0}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0 <unfinished ...>
+3657  <... ppoll resumed>)              = 0 (Timeout)
+3657  rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART},  <unfinished ...>
+3657  <... rt_sigaction resumed>{sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+3657  getrandom( <unfinished ...>
+3657  <... getrandom resumed>"\x7c\x0e\xf3\x09\xae\x96\x09\xbb", 8, GRND_NONBLOCK) = 8
+3657  brk(NULL <unfinished ...>
+3657  <... brk resumed>)                = 0xb80b31111000
+3657  brk(0xb80b31132000 <unfinished ...>
+3657  <... brk resumed>)                = 0xb80b31132000
+3657  openat(AT_FDCWD</>, "/proc/self/maps", O_RDONLY|O_CLOEXEC <unfinished ...>
+3657  <... openat resumed>)             = 4</proc/3657/maps>
+3657  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+3657  newfstatat(4</proc/3657/maps>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
+3657  read(4</proc/3657/maps>,  <unfinished ...>
+3657  <... read resumed>"b80b23110000-b80b231cc000 r-xp 00000000 00:2a 6054069                    /home/tester/target/debug/bingsu-collect\nb80b231d9000-b80b231e0000 r--p 000c9000 00:2a 6054069                    /home/tester/target/debug/bingsu-collect\nb80b231e0000-b80b231e1000 rw-p 000d0000 00:2a 6054069                    /home/tester/target/debug/bingsu-collect\nb80b31111000-b80b31132000 rw-p 00000000 00:00 0                          [heap]\nf476ddb60000-f476ddcec000 r-xp 00000000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nf476ddcec000-f476ddcfc000 ---p 0018c000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nf476ddcfc000-f476ddd00000 r--p 0018c000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nf476ddd00000-f476ddd02000 rw-p 00190000 00:2a 5509943                    /usr/lib/aarch64-linux-gnu/libc.so.6\nf476ddd02000-f476ddd0f000 rw-p 00000000 00:00 0 \nf476ddd10000-f476ddd24000 r-xp 00000000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1", 1024) = 1024
+3657  read(4</proc/3657/maps>,  <unfinished ...>
+3657  <... read resumed>"\nf476ddd24000-f476ddd3f000 ---p 00014000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\nf476ddd3f000-f476ddd40000 r--p 0001f000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\nf476ddd40000-f476ddd41000 rw-p 00020000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1\nf476ddd4e000-f476ddd75000 r-xp 00000000 00:2a 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nf476ddd82000-f476ddd84000 rw-p 00000000 00:00 0 \nf476ddd87000-f476ddd89000 rw-p 00000000 00:00 0 \nf476ddd89000-f476ddd8b000 r--p 00000000 00:00 0                          [vvar]\nf476ddd8b000-f476ddd8c000 r-xp 00000000 00:00 0                          [vdso]\nf476ddd8c000-f476ddd8e000 r--p 0002e000 00:2a 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nf476ddd8e000-f476ddd90000 rw-p 00030000 00:2a 5509925                    /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1\nffffd6b04000-ffffd6b25000 rw-p 00000000 00:00 0          ", 1024) = 1024
+3657  read(4</proc/3657/maps>,  <unfinished ...>
+3657  <... read resumed>"                [stack]\n", 1024) = 24
+3657  close(4</proc/3657/maps> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  sched_getaffinity(3657, 32,  <unfinished ...>
+3657  <... sched_getaffinity resumed>[0 1 2 3]) = 8
+3657  rt_sigaction(SIGSEGV, NULL,  <unfinished ...>
+3657  <... rt_sigaction resumed>{sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+3657  sigaltstack(NULL,  <unfinished ...>
+3657  <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+3657  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0 <unfinished ...>
+3657  <... mmap resumed>)               = 0xf476ddd7d000
+3657  mprotect(0xf476ddd7d000, 4096, PROT_NONE <unfinished ...>
+3657  <... mprotect resumed>)           = 0
+3657  sigaltstack({ss_sp=0xf476ddd7e000, ss_flags=0, ss_size=16384},  <unfinished ...>
+3657  <... sigaltstack resumed>NULL)    = 0
+3657  gettid( <unfinished ...>
+3657  <... gettid resumed>)             = 3657
+3657  rt_sigaction(SIGSEGV, {sa_handler=0xb80b2317c454, sa_mask=[], sa_flags=SA_ONSTACK|SA_SIGINFO},  <unfinished ...>
+3657  <... rt_sigaction resumed>NULL, 8) = 0
+3657  rt_sigaction(SIGBUS, NULL,  <unfinished ...>
+3657  <... rt_sigaction resumed>{sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+3657  rt_sigaction(SIGBUS, {sa_handler=0xb80b2317c454, sa_mask=[], sa_flags=SA_ONSTACK|SA_SIGINFO}, NULL, 8) = 0
+3657  rt_sigaction(SIGALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+3657  rt_sigprocmask(SIG_UNBLOCK, [ALRM],  <unfinished ...>
+3657  <... rt_sigprocmask resumed>NULL, 8) = 0
+3657  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=1, tv_usec=0}},  <unfinished ...>
+3657  <... setitimer resumed>{it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=0, tv_usec=0}}) = 0
+3657  getppid()                         = 3655
+3657  prctl(PR_SET_PDEATHSIG, SIGKILL <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  getppid( <unfinished ...>
+3657  <... getppid resumed>)            = 3655
+3657  uname( <unfinished ...>
+3657  <... uname resumed>{sysname="Linux", nodename="8d19cc13d0fa", ...}) = 0
+3657  getpid()                          = 3657
+3657  pidfd_open(3657, 0 <unfinished ...>
+3657  <... pidfd_open resumed>)         = 4<anon_inode:[pidfd]>
+3657  close(4<anon_inode:[pidfd]> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  close(4 <unfinished ...>
+3657  <... close resumed>)              = -1 EBADF (Bad file descriptor)
+3657  close_range(6, 4294967295, 0 <unfinished ...>
+3657  <... close_range resumed>)        = 0
+3657  newfstatat(0</dev/null>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFCHR|0666, st_rdev=makedev(0x1, 0x3), ...}, AT_EMPTY_PATH) = 0
+3657  newfstatat(2</dev/null>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFCHR|0666, st_rdev=makedev(0x1, 0x3), ...}, AT_EMPTY_PATH) = 0
+3657  fcntl(1<pipe:[1363205]>, F_GETFL <unfinished ...>
+3657  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+3657  fcntl(3<pipe:[1363206]>, F_GETFL <unfinished ...>
+3657  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+3657  newfstatat(1<pipe:[1363205]>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFIFO|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+3657  newfstatat(3<pipe:[1363206]>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFIFO|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+3657  fcntl(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFL <unfinished ...>
+3657  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+3657  newfstatat(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+3657  geteuid( <unfinished ...>
+3657  <... geteuid resumed>)            = 1000
+3657  fgetxattr(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+3657  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+3657  getcwd( <unfinished ...>
+3657  <... getcwd resumed>"/", 512)     = 2
+3657  umask(077 <unfinished ...>
+3657  <... umask resumed>)              = 022
+3657  rt_sigaction(SIGXCPU, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+3657  <... rt_sigaction resumed>NULL, 8) = 0
+3657  rt_sigaction(SIGXFSZ, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+3657  <... rt_sigaction resumed>NULL, 8) = 0
+3657  rt_sigaction(SIGALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+3657  <... rt_sigaction resumed>NULL, 8) = 0
+3657  rt_sigprocmask(SIG_UNBLOCK, [ALRM XCPU XFSZ],  <unfinished ...>
+3657  <... rt_sigprocmask resumed>NULL, 8) = 0
+3657  prlimit64(0, RLIMIT_CPU, NULL, {rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+3657  prlimit64(0, RLIMIT_CPU, {rlim_cur=1, rlim_max=1},  <unfinished ...>
+3657  <... prlimit64 resumed>NULL)      = 0
+3657  prlimit64(0, RLIMIT_CPU, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=1, rlim_max=1}) = 0
+3657  prlimit64(0, RLIMIT_NOFILE, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=1024, rlim_max=512*1024}) = 0
+3657  prlimit64(0, RLIMIT_NOFILE, {rlim_cur=64, rlim_max=64}, NULL) = 0
+3657  prlimit64(0, RLIMIT_NOFILE, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=64, rlim_max=64}) = 0
+3657  prlimit64(0, RLIMIT_FSIZE, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+3657  prlimit64(0, RLIMIT_FSIZE, {rlim_cur=0, rlim_max=0},  <unfinished ...>
+3657  <... prlimit64 resumed>NULL)      = 0
+3657  prlimit64(0, RLIMIT_FSIZE, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=0, rlim_max=0}) = 0
+3657  prlimit64(0, RLIMIT_CORE, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+3657  prlimit64(0, RLIMIT_CORE, {rlim_cur=0, rlim_max=0},  <unfinished ...>
+3657  <... prlimit64 resumed>NULL)      = 0
+3657  prlimit64(0, RLIMIT_CORE, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=0, rlim_max=0}) = 0
+3657  capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0},  <unfinished ...>
+3657  <... capget resumed>{effective=0, permitted=0, inheritable=0}) = 0
+3657  prctl(PR_CAPBSET_READ, CAP_CHOWN) = 1
+3657  prctl(PR_CAPBSET_READ, CAP_DAC_OVERRIDE <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_DAC_READ_SEARCH <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_FOWNER <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_FSETID <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_KILL <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_SETGID <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_SETUID <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_SETPCAP <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_LINUX_IMMUTABLE) = 0
+3657  prctl(PR_CAPBSET_READ, CAP_NET_BIND_SERVICE <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_NET_BROADCAST <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_NET_ADMIN <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_NET_RAW <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_IPC_LOCK <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_IPC_OWNER <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_MODULE <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_RAWIO <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_CHROOT <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_PTRACE <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_PACCT <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_BOOT <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_NICE <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_RESOURCE <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_TIME <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYS_TTY_CONFIG <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_MKNOD <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_LEASE <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_AUDIT_WRITE <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_AUDIT_CONTROL <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SETFCAP <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  prctl(PR_CAPBSET_READ, CAP_MAC_OVERRIDE <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_MAC_ADMIN <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_SYSLOG <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_WAKE_ALARM <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_BLOCK_SUSPEND <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_AUDIT_READ <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_PERFMON <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_BPF <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, CAP_CHECKPOINT_RESTORE <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAPBSET_READ, 0x29 /* CAP_??? */ <unfinished ...>
+3657  <... prctl resumed>)              = -1 EINVAL (Invalid argument)
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  capset({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=0, permitted=0, inheritable=0} <unfinished ...>
+3657  <... capset resumed>)             = 0
+3657  capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=0, permitted=0, inheritable=0}) = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHOWN, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_DAC_OVERRIDE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_DAC_READ_SEARCH, 0, 0) = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_FOWNER, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_FSETID, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_KILL, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETGID, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETUID, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETPCAP, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_LINUX_IMMUTABLE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_BIND_SERVICE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_BROADCAST, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_ADMIN, 0, 0) = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_RAW, 0, 0) = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_IPC_LOCK, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_IPC_OWNER, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_MODULE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_RAWIO, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_CHROOT, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_PTRACE, 0, 0) = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_PACCT, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_ADMIN, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_BOOT, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_NICE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_RESOURCE, 0, 0) = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_TIME, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_TTY_CONFIG, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MKNOD, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_LEASE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_WRITE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_CONTROL, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETFCAP, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MAC_OVERRIDE, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MAC_ADMIN, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYSLOG, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_WAKE_ALARM, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_BLOCK_SUSPEND, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_READ, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_PERFMON, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_BPF, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 0
+3657  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHECKPOINT_RESTORE, 0, 0) = 0
+3657  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) = 0
+3657  landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION <unfinished ...>
+3657  <... landlock_create_ruleset resumed>) = 4
+3657  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_REMOVE_DIR|LANDLOCK_ACCESS_FS_REMOVE_FILE|LANDLOCK_ACCESS_FS_MAKE_CHAR|LANDLOCK_ACCESS_FS_MAKE_DIR|LANDLOCK_ACCESS_FS_MAKE_REG|LANDLOCK_ACCESS_FS_MAKE_SOCK|LANDLOCK_ACCESS_FS_MAKE_FIFO|LANDLOCK_ACCESS_FS_MAKE_BLOCK|LANDLOCK_ACCESS_FS_MAKE_SYM|LANDLOCK_ACCESS_FS_REFER|0x4000}, 8, 0 <unfinished ...>
+3657  <... landlock_create_ruleset resumed>) = 4<anon_inode:[landlock-ruleset]>
+3657  landlock_restrict_self(4<anon_inode:[landlock-ruleset]>, 0 <unfinished ...>
+3657  <... landlock_restrict_self resumed>) = 0
+3657  fcntl(4<anon_inode:[landlock-ruleset]>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
+3657  close(4<anon_inode:[landlock-ruleset]> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=372, filter=0xb80b31124570} <unfinished ...>
+3657  <... seccomp resumed>)            = 0
+3657  prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0 <unfinished ...>
+3657  <... prctl resumed>)              = 1
+3657  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+3657  <... openat resumed>)             = 4</proc/3657/statm>
+3657  read(4</proc/3657/statm>,  <unfinished ...>
+3657  <... read resumed>"797 556 487 188 0 93 0\n", 256) = 23
+3657  prlimit64(0, RLIMIT_AS, NULL, {rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+3657  prlimit64(0, RLIMIT_AS, {rlim_cur=35956*1024, rlim_max=35956*1024},  <unfinished ...>
+3657  <... prlimit64 resumed>NULL)      = 0
+3657  prlimit64(0, RLIMIT_AS, NULL,  <unfinished ...>
+3657  <... prlimit64 resumed>{rlim_cur=35956*1024, rlim_max=35956*1024}) = 0
+3657  fcntl(4</proc/3657/statm>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
+3657  close(4</proc/3657/statm> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=348, filter=0xb80b31124570} <unfinished ...>
+3657  <... seccomp resumed>)            = 0
+3657  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+3657  <... openat resumed>)             = 4</>
+3657  newfstatat(4</>, "",  <unfinished ...>
+3657  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+3657  fstatfs(4</>,  <unfinished ...>
+3657  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23688579, f_bavail=22373789, f_files=6553600, f_ffree=6424033, f_fsid={val=[0xdebe8026, 0x777ea002]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+3657  statx(4</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+3657  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+3657  openat2(4</>, ".", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+3657  <... openat2 resumed>)            = 6</>
+3657  fcntl(6</>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
+3657  close(6</> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  fcntl(4</>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0x1 (flags FD_CLOEXEC)
+3657  close(4</> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  fcntl(1<pipe:[1363205]>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0
+3657  close(1<pipe:[1363205]> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  fcntl(3<pipe:[1363206]>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0
+3657  close(3<pipe:[1363206]> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  fcntl(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock>, F_GETFD <unfinished ...>
+3657  <... fcntl resumed>)              = 0
+3657  close(5</home/tester/pt/test_shipped_collector_trace_h0/shipped-store/runtime/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f636f6e666967/state/2f686f6d652f7465737465722f70742f746573745f736869707065645f636f6c6c6563746f725f74726163655f68302f736869707065642d73746f72/652f7374617465/store/collections-v1/816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd/store/collection.lock> <unfinished ...>
+3657  <... close resumed>)              = 0
+3657  sigaltstack({ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=16384},  <unfinished ...>
+3657  <... sigaltstack resumed>NULL)    = 0
+3657  munmap(0xf476ddd7d000, 20480 <unfinished ...>
+3657  <... munmap resumed>)             = 0
+3657  exit_group(0 <unfinished ...>
+3657  <... exit_group resumed>)         = ?
+3657  +++ exited with 0 +++

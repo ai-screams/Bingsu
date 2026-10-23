@@ -848,6 +848,55 @@ def test_recorded_success_trace_fd_queries(worker, queries):
     assert got.errors == [] and got.counts["collector"]["fd_query"] == queries
 
 
+def recorded_repository_trace(worker):
+    # Bookworm/aarch64 glibc 2.36 startup/shutdown excerpts. Preserve the raw
+    # unfinished/resumed records; omit only pipe payloads and parent FS work.
+    path = ROOT / f"tools/fsbudget/tests/fixtures/m3c-bookworm-aarch64-{worker}-probe.strace"
+    fixture = "/home/tester/target/debug/collector-product-fixture/collector-product"
+    shipped = "/home/tester/target/debug/bingsu-collect" if worker == "shipped-debug" else None
+    return path.read_text().splitlines(), fixture, shipped
+
+
+# 이것을 실패시키는 것: newfstatat metadata 또는 SYNC_AS_STAT 표기의 mount-id를 probe에서 누락하는 것.
+@pytest.mark.parametrize("worker,queries", [("fixture", 3), ("shipped-debug", 10)])
+def test_recorded_repository_probe_metadata(worker, queries):
+    lines, fixture, shipped = recorded_repository_trace(worker)
+    got = assert_collector_roles(lines, fixture, shipped,
+        collector_debug_assertions=bool(shipped), repository_probe=True)
+    assert got.errors == [] and got.counts["collector"]["fd_query"] == queries
+    assert got.counts["collector"]["probe_fstat"] == got.counts["collector"]["probe_statx"] == 1
+    assert got.counts["collector"]["fstat"] == 1  # inherited lock, outside probe
+
+
+# 이것을 실패시키는 것: 실제 probe의 호출 누락/중복/다른 fd/경로/flags를 exact 공식이 놓치는 것.
+@pytest.mark.parametrize("worker", ["fixture", "shipped-debug"])
+@pytest.mark.parametrize("call", ["newfstatat", "statx"])
+@pytest.mark.parametrize("damage", ["removed", "duplicate", "wrong-fd", "path", "no-empty-path", "extra-flag"])
+def test_recorded_repository_probe_rejects_mutations(worker, call, damage):
+    lines, fixture, shipped = recorded_repository_trace(worker)
+    index, = [i for i, line in enumerate(lines) if re.match(rf"\d+\s+{call}\(4</>,", line)]
+    pid = lines[index].split()[0]
+    group = [index]
+    if "<unfinished ...>" in lines[index]:
+        group.append(next(i for i in range(index + 1, len(lines))
+                          if re.match(rf"{pid}\s+<\.\.\. {call} resumed>", lines[i])))
+    changed = lines.copy()
+    if damage == "removed":
+        changed = [line for i, line in enumerate(changed) if i not in group]
+    elif damage == "duplicate":
+        changed[group[-1] + 1:group[-1] + 1] = [lines[i] for i in group]
+    else:
+        old, new = {"wrong-fd": ("4</>", "7</>"), "path": ('""', '"HEAD"'),
+                    "no-empty-path": ("AT_EMPTY_PATH", "0"),
+                    "extra-flag": ("AT_EMPTY_PATH", "AT_EMPTY_PATH|0x80000000")}[damage]
+        assert old in "\n".join(lines[i] for i in group)
+        for i in group:
+            changed[i] = changed[i].replace(old, new)
+    with pytest.raises(AssertionError):
+        assert_collector_roles(changed, fixture, shipped,
+            collector_debug_assertions=bool(shipped), repository_probe=True)
+
+
 # 각 OwnedFd의 검사 누락/중복 및 같은 합계의 엉뚱한 조회를 개별적으로 거부한다.
 @pytest.mark.parametrize("query", range(5), ids=["ruleset", "statm", "result", "request", "lock"])
 @pytest.mark.parametrize("damage", ["removed", "duplicate", "wrong-command", "before-close"])

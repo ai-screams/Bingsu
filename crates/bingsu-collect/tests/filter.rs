@@ -73,7 +73,7 @@ fn positive(condition: &str) -> [u64; 6] {
             a[2] = 2;
             a[3] = 0x200;
         }
-        "read_layer_create" => a[2] = 1,
+        "read_layer_create" => a[1] = 8,
         "read_layer_add" => a[1] = 1,
         "response" => a[0] = 1,
         "thread" => a[0] = 0x10900,
@@ -521,6 +521,9 @@ fn bpf_final_filter_refuses_limit_changes() {
 #[path = "filter/runtime.rs"]
 mod runtime;
 
+#[path = "filter/tmpfile.rs"]
+mod tmpfile;
+
 // 이것을 실패시키는 것: TRUNCATE 대신 ABI 번호로 허용하거나 새 행의 인자 검사를 제거하는 것.
 #[test]
 fn repository_rows_require_exact_arguments_and_handled_write_set() {
@@ -564,12 +567,7 @@ fn repository_rows_require_exact_arguments_and_handled_write_set() {
                 (
                     "landlock_create_ruleset",
                     [1, 8, 0, 0, 0, 0],
-                    vec![(1, 0), (1, 16), (1, 8 | (1 << 32)), (2, 2)],
-                ),
-                (
-                    "landlock_create_ruleset",
-                    [0, 0, 1, 0, 0, 0],
-                    vec![(0, 1), (0, 1 << 32), (1, 1), (1, 1 << 32), (2, 2)],
+                    vec![(1, 0), (1, 16), (1, 8 | (1 << 32)), (2, 1), (2, 2)],
                 ),
                 (
                     "landlock_add_rule",
@@ -593,6 +591,16 @@ fn repository_rows_require_exact_arguments_and_handled_write_set() {
                     );
                 }
             }
+            // 이것을 실패시키는 것: 봉인 뒤 미사용 VERSION 조회를 다시 허용하는 것.
+            assert_eq!(
+                eval(
+                    &p,
+                    arch.value(),
+                    nr(arch, "landlock_create_ruleset"),
+                    [0, 0, 1, 0, 0, 0]
+                ),
+                DENY
+            );
             if arch == AuditArch::X86_64 {
                 for n in [437, 138, 439, 444, 445, 446] {
                     assert_eq!(eval(&p, arch.value(), n | 0x4000_0000, [0; 6]), KILL);

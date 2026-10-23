@@ -3,9 +3,37 @@ from collections import Counter
 import json
 import re
 
-from .classify import NON_FS, split_args
+from .classify import FD_ARG, NON_FS, fd_identity, split_args
 from .formula import CollectorAxes, collector_repository_expected
 from .strace_parse import parse
+
+
+def held_metadata_kind(c, args):
+    """Canonical fd metadata, separate from the explicit mount-id query.
+
+    libc may implement fstat with newfstatat or statx. strace may spell the
+    zero-valued statx sync flag explicitly; neither changes the primitive.
+    Only an annotated, nonnegative held fd and an empty-path query qualify.
+    """
+    if not args or not (fd := FD_ARG.fullmatch(args[0])) or int(fd[1]) < 0:
+        return None
+    identity = fd_identity(args[0])
+    if not identity or not identity.startswith('file:'):
+        return None
+    if c.name in {'fstat', 'fstat64'} and len(args) == 2:
+        return 'fstat'
+    if c.name in {'newfstatat', 'fstatat64'} and len(args) == 4 and args[1] == '""':
+        flags = set(args[3].split('|'))
+        if 'AT_EMPTY_PATH' in flags and flags <= {'AT_EMPTY_PATH', 'AT_SYMLINK_NOFOLLOW'}:
+            return 'fstat'
+    if c.name == 'statx' and len(args) == 5 and args[1] == '""':
+        flags = set(args[2].split('|')) - {'AT_STATX_SYNC_AS_STAT'}
+        if 'AT_EMPTY_PATH' in flags and flags <= {'AT_EMPTY_PATH', 'AT_SYMLINK_NOFOLLOW'}:
+            if args[3] in {'STATX_BASIC_STATS', 'STATX_ALL'}:
+                return 'fstat'
+            if args[3] == 'STATX_MNT_ID' and flags == {'AT_EMPTY_PATH', 'AT_SYMLINK_NOFOLLOW'}:
+                return 'statx'
+    return None
 
 
 def check_repository_trace(text: str, root: str, backend: str) -> dict:
@@ -50,8 +78,10 @@ def check_repository_trace(text: str, root: str, backend: str) -> dict:
             path = args[0] if name == 'open' else args[1]
             assert path in ({'"/"', '"."'} if active == 'probe' else {'"/"'} if active == 'read-layer' else {'"HEAD"'})
             if name == 'open': name = 'openat'  # libc File::open of fixed slash only
-        if name in {'newfstatat', 'fstatat64', 'statx'} and args[1] == '""' and 'STATX_MNT_ID' not in c.args:
-            name = 'fstat'
+        if (name in {'fstat', 'fstat64', 'statx'}
+                or name in {'newfstatat', 'fstatat64'} and len(args) > 1 and args[1] == '""'):
+            name = held_metadata_kind(c, args)
+            assert name, (active, 'not held-fd metadata', c)
         if name == 'landlock_add_rule':
             assert active == 'read-layer' and 'LANDLOCK_RULE_PATH_BENEATH' in c.args
             assert len(paths) == 1 and paths[0] in roots
