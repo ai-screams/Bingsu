@@ -720,7 +720,11 @@ fn entries_root(root: &Root, raw_limit: u32, meter: &mut Meter) -> Result<Listin
     {
         linux::entries(root, raw_limit, meter)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::entries(root, raw_limit, meter)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (root, raw_limit, meter);
         Err(ReadError::Denied)

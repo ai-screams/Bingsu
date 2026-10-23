@@ -50,12 +50,14 @@ dependencies = [
  "bingsu-identity",
  "gix-attributes",
  "gix-config",
+ "gix-error",
  "gix-ignore",
  "gix-index",
  "gix-object",
  "gix-pack",
  "gix-ref",
  "gix-revwalk",
+ "gix-zlib",
  "libc",
 ]
 

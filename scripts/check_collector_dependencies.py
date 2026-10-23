@@ -20,7 +20,8 @@ TARGETS = ("aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
            "aarch64-unknown-linux-musl", "x86_64-pc-windows-gnu")
 GIT_PINS = {"gix-index": "0.56.0", "gix-pack": "0.75.0", "gix-object": "0.65.0",
             "gix-config": "0.61.0", "gix-ref": "0.68.0", "gix-ignore": "0.23.0",
-            "gix-attributes": "0.36.0", "gix-revwalk": "0.36.0"}
+            "gix-attributes": "0.36.0", "gix-revwalk": "0.36.0",
+            "gix-error": "0.4.0", "gix-zlib": "0.2.0"}
 FORBIDDEN_PACKAGES = {"gix", "gix-diff", "gix-status", "gix-filter", "gix-worktree",
                       "gix-odb", "gix-discover", "gix-command"}
 FORBIDDEN_FEATURES = {"blob", "signature", "parallel", "generate", "streaming-input"}
@@ -92,7 +93,7 @@ def manifest_policy(root=ROOT):
     direct = {k: v for k, v in collector["dependencies"].items()
               if k == "gix" or k.startswith("gix-")}
     return [] if actual == expected and direct == {k: {"workspace": True} for k in expected} else [
-        "collector Git dependencies must use exactly eight workspace pins with defaults disabled"]
+        "collector Git dependencies must use the reviewed workspace pins with defaults disabled"]
 
 
 def origins(labels, root=ROOT):

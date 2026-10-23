@@ -211,7 +211,6 @@ fn git_bytes_ref_reads_are_confined() {
         );
     }
     // Raw limits include dot entries; a complete list cannot hide truncation.
-    #[cfg(target_os = "linux")]
     {
         let list = repo
             .io
@@ -226,11 +225,6 @@ fn git_bytes_ref_reads_are_confined() {
                 .complete
         );
     }
-    #[cfg(target_os = "macos")]
-    assert!(matches!(
-        repo.io.list(path(RootId::CommonDir, b"refs/heads"), 16),
-        Err(E::Denied)
-    ));
     let before = m.borrow().counts;
     for bad in [b"/outside".as_slice(), b"../outside", b"x\0y"] {
         assert!(repo.io.read(path(RootId::GitDir, bad), cap(64)).is_err());
@@ -324,10 +318,10 @@ fn git_io_scope_and_unsupported_are_closed() {
     ));
     assert!(matches!(Config::load(&port), Err(E::StageAOnly)));
     assert!(matches!(Refs::load(&port), Err(E::StageAOnly)));
-    assert_eq!(
+    assert!(matches!(
         port.map(path(RootId::CommonDir, b"objects/pack/x"), 4096),
-        Err(git::io::UNSUPPORTED)
-    );
+        Err(E::StageAOnly)
+    ));
     assert_eq!(git::GuardedRepository::new(port).err(), Some(E::StageAOnly));
     assert_eq!(m.borrow().counts, before);
 }
@@ -351,6 +345,9 @@ fn git_io_caps_and_shared_ref_budgets_precede_reads() {
     assert!(matches!(Config::load(&port), Err(E::Limit)));
     assert_eq!(m.borrow().counts[Phase::Content as usize].read, before);
     fs::remove_file(fixture.0.join("config")).unwrap();
+    // Each independent negative fixture gets a fresh port: C3 latches the
+    // first exhausted budget so subsequent product I/O cannot resume.
+    let port = io(&root, &access, &m);
     fixture.write(
         "refs/heads/large",
         vec![b'x'; budget::SMALL_FILE_BYTES as usize + 1],
@@ -362,9 +359,11 @@ fn git_io_caps_and_shared_ref_budgets_precede_reads() {
         Err(E::Limit)
     );
     fixture.write("packed-refs", vec![b'x'; budget::REF_BYTES as usize + 1]);
+    let port = io(&root, &access, &m);
     assert!(matches!(Refs::load(&port), Err(E::Limit)));
     assert_eq!(m.borrow().counts[Phase::Content as usize].read, before);
     fs::remove_file(fixture.0.join("packed-refs")).unwrap();
+    let port = io(&root, &access, &m);
     let refs = Refs::load(&port).unwrap();
     fixture.write("refs/heads/main", format!("{A}\n"));
     m.borrow_mut()
@@ -639,6 +638,8 @@ fn gix_io_has_no_ambient_path_escape() {
         include_str!("../src/git/io.rs"),
         include_str!("../src/git/config.rs"),
         include_str!("../src/git/refs.rs"),
+        include_str!("../src/git/index.rs"),
+        include_str!("../src/git/objects.rs"),
     ];
     for source in files {
         for forbidden in [
@@ -1195,4 +1196,2186 @@ fn git_packed_bounds_refuse_before_buffer() {
     let (result, counts) = allocation::measure(|| Refs::parse(&bytes, &mut m));
     assert!(matches!(result, Err(E::Limit)));
     assert_eq!(counts.calls, 0);
+}
+
+// C3 fixture encoders only operate on bytes, without the git CLI.
+use git::io::{
+    index as safe_index,
+    objects::{self, SafeObjectDb},
+};
+use gix_index::hash::{self, Kind as Hash, ObjectId};
+use gix_object::Kind;
+fn digest(bytes: &[u8]) -> ObjectId {
+    let mut h = hash::hasher(Hash::Sha1);
+    h.update(bytes);
+    h.try_finalize().unwrap()
+}
+fn seal(bytes: &mut Vec<u8>) {
+    bytes.extend_from_slice(digest(bytes).as_slice());
+}
+fn zip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = gix_zlib::stream::deflate::Write::new(Vec::new(), Default::default());
+    e.write_all(bytes).unwrap();
+    e.flush().unwrap();
+    e.into_inner()
+}
+fn loose_fixture(f: &Fixture, kind: Kind, body: &[u8]) -> ObjectId {
+    let id = gix_object::compute_hash(Hash::Sha1, kind, body).unwrap();
+    let h = id.to_string();
+    f.write(
+        &format!("objects/{}/{}", &h[..2], &h[2..]),
+        zip(&[format!("{kind} {}\0", body.len()).as_bytes(), body].concat()),
+    );
+    id
+}
+fn idx_fixture(count: usize, version: u32) -> Vec<u8> {
+    let mut out = b"DIRC".to_vec();
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&(count as u32).to_be_bytes());
+    for n in 0..count {
+        let name = format!("file-{n:05}");
+        let start = out.len();
+        out.extend_from_slice(&[0; 24]);
+        out.extend_from_slice(&0o100644u32.to_be_bytes());
+        out.extend_from_slice(&[0; 32]);
+        out.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        if version == 4 {
+            out.push(if n == 0 { 0 } else { name.len() as u8 });
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        if version != 4 {
+            out.resize(start + (out.len() - start).next_multiple_of(8), 0);
+        }
+    }
+    seal(&mut out);
+    out
+}
+fn extension(bytes: &mut Vec<u8>, signature: &[u8; 4], body: &[u8]) {
+    bytes.truncate(bytes.len() - 20);
+    bytes.extend_from_slice(signature);
+    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(body);
+    seal(bytes);
+}
+fn varint(mut n: usize, out: &mut Vec<u8>) {
+    loop {
+        let b = (n & 127) as u8;
+        n >>= 7;
+        out.push(b | if n != 0 { 128 } else { 0 });
+        if n == 0 {
+            break;
+        }
+    }
+}
+struct Packed {
+    name: String,
+    pack: Vec<u8>,
+    index: Vec<u8>,
+    ids: Vec<ObjectId>,
+    offsets: Vec<u64>,
+}
+fn packed(bodies: &[Vec<u8>], delta: bool) -> Packed {
+    use gix_pack::data::entry::Header;
+    let mut pack = b"PACK\0\0\0\x02".to_vec();
+    pack.extend_from_slice(&(bodies.len() as u32).to_be_bytes());
+    let mut ids = Vec::new();
+    let mut offsets = Vec::new();
+    for (n, body) in bodies.iter().enumerate() {
+        offsets.push(pack.len() as u64);
+        let payload = if delta && n != 0 {
+            let mut d = Vec::new();
+            varint(bodies[n - 1].len(), &mut d);
+            varint(body.len(), &mut d);
+            for c in body.chunks(127) {
+                d.push(c.len() as u8);
+                d.extend_from_slice(c);
+            }
+            let h = if n % 2 == 0 {
+                Header::OfsDelta {
+                    base_distance: offsets[n] - offsets[n - 1],
+                }
+            } else {
+                Header::RefDelta {
+                    base_id: ids[n - 1],
+                }
+            };
+            h.write_to(d.len() as u64, &mut pack).unwrap();
+            d
+        } else {
+            Header::Blob.write_to(body.len() as u64, &mut pack).unwrap();
+            body.clone()
+        };
+        pack.extend(zip(&payload));
+        ids.push(gix_object::compute_hash(Hash::Sha1, Kind::Blob, body).unwrap());
+    }
+    seal(&mut pack);
+    let name = format!("pack-{}", digest(&pack));
+    let mut index = b"\xfftOc\0\0\0\x02".to_vec();
+    let mut ordered: Vec<_> = ids.iter().copied().zip(offsets.iter().copied()).collect();
+    ordered.sort_by_key(|x| x.0);
+    for n in 0..256 {
+        index.extend_from_slice(
+            &(ordered
+                .iter()
+                .filter(|x| x.0.as_slice()[0] as usize <= n)
+                .count() as u32)
+                .to_be_bytes(),
+        );
+    }
+    for (id, _) in &ordered {
+        index.extend_from_slice(id.as_slice());
+    }
+    index.resize(index.len() + ordered.len() * 4, 0);
+    for (_, offset) in &ordered {
+        index.extend_from_slice(&(*offset as u32).to_be_bytes());
+    }
+    index.extend_from_slice(&pack[pack.len() - 20..]);
+    seal(&mut index);
+    Packed {
+        name,
+        pack,
+        index,
+        ids,
+        offsets,
+    }
+}
+fn install_pack(f: &Fixture, p: &Packed) {
+    f.write(&format!("objects/pack/{}.pack", p.name), &p.pack);
+    f.write(&format!("objects/pack/{}.idx", p.name), &p.index);
+}
+fn midx(packs: &[&Packed]) -> Vec<u8> {
+    let mut ordered = packs.to_vec();
+    ordered.sort_by_key(|p| &p.name);
+    let mut names = Vec::new();
+    let mut objects = Vec::new();
+    for (n, p) in ordered.iter().enumerate() {
+        names.extend_from_slice(format!("{}.idx\0", p.name).as_bytes());
+        objects.extend(
+            p.ids
+                .iter()
+                .copied()
+                .zip(p.offsets.iter().copied())
+                .map(|(id, offset)| (id, n, offset)),
+        );
+    }
+    names.resize(names.len().next_multiple_of(4), 0);
+    objects.sort_by_key(|x| x.0);
+    let mut fan = Vec::new();
+    for n in 0..256 {
+        fan.extend_from_slice(
+            &(objects
+                .iter()
+                .filter(|x| x.0.as_slice()[0] as usize <= n)
+                .count() as u32)
+                .to_be_bytes(),
+        );
+    }
+    let mut ids = Vec::new();
+    let mut offsets = Vec::new();
+    for (id, p, offset) in objects {
+        ids.extend_from_slice(id.as_slice());
+        offsets.extend_from_slice(&(p as u32).to_be_bytes());
+        offsets.extend_from_slice(&(offset as u32).to_be_bytes());
+    }
+    let chunks = [
+        (b"PNAM", names),
+        (b"OIDF", fan),
+        (b"OIDL", ids),
+        (b"OOFF", offsets),
+    ];
+    let mut out = b"MIDX\x01\x01\x04\0".to_vec();
+    out.extend_from_slice(&(packs.len() as u32).to_be_bytes());
+    let mut offset = 72;
+    for (id, data) in &chunks {
+        out.extend_from_slice(*id);
+        out.extend_from_slice(&(offset as u64).to_be_bytes());
+        offset += data.len();
+    }
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(offset as u64).to_be_bytes());
+    for (_, data) in chunks {
+        out.extend(data);
+    }
+    seal(&mut out);
+    out
+}
+
+// 이것을 실패시키는 것: same-fd map 읽기·PackBytes 선차감·오류 뒤 정지 또는 backing 해제를 제거하는 것.
+#[test]
+fn map_uses_validated_fd_and_unmaps_on_error() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    f.write("pack", b"original");
+    outside.write("secret", b"outside");
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let original = f.0.join("pack");
+    let saved = f.0.join("saved");
+    let secret = outside.0.join("secret");
+    let mut changed = false;
+    m.borrow_mut().hook = Some(Box::new(move |event| {
+        if event == "before_read" && !changed {
+            fs::rename(&original, &saved).unwrap();
+            symlink(&secret, &original).unwrap();
+            changed = true;
+        }
+    }));
+    let port = io(&root, &access, &m);
+    let (_, counts) = allocation::measure(|| {
+        let map = port.map(path(RootId::CommonDir, b"pack"), 8).unwrap();
+        assert_eq!(&*map, b"original");
+    });
+    assert!(counts.peak > 0);
+    assert_eq!(counts.live, 0);
+    assert_eq!(m.borrow().budget.used(Axis::PackBytes), 8);
+    assert_eq!(m.borrow().budget.used(Axis::MappedBytes), 0);
+    m.borrow_mut().hook = None;
+    assert!(port.map(path(RootId::CommonDir, b"pack"), 8).is_err());
+    let (result, counts) = allocation::measure(|| port.map(path(RootId::CommonDir, b"saved"), 7));
+    assert!(matches!(result, Err(E::Limit)));
+    assert_eq!(counts.live, 0);
+    let before = m.borrow().counts;
+    assert!(matches!(
+        port.map(path(RootId::CommonDir, b"saved"), 8),
+        Err(E::Limit)
+    ));
+    assert_eq!(m.borrow().counts, before);
+}
+
+// 이것을 실패시키는 것: loose zlib/header/length/hash 검증·Find 결과 buffer 연결을 제거하는 것.
+#[test]
+fn loose_objects_validate_all_bytes() {
+    let f = Fixture::new();
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let id = loose_fixture(&f, Kind::Blob, b"payload");
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    let mut out = Vec::new();
+    let data = gix_object::Find::try_find(&db, &id, &mut out)
+        .unwrap()
+        .unwrap();
+    assert_eq!(data.kind, Kind::Blob);
+    assert_eq!(data.data, b"payload");
+    let hex = id.to_string();
+    let name = format!("objects/{}/{}", &hex[..2], &hex[2..]);
+    for raw in [
+        b"blob 8\0payload".as_slice(),
+        b"blob 6\0payload",
+        b"blob 07\0payload",
+        b"bad 7\0payload",
+        b"blob 7\0changed",
+        b"blob -1\0payload",
+        b"blob 7payload",
+    ] {
+        f.write(&name, zip(raw));
+        let db = SafeObjectDb::new(&port);
+        assert!(db.find(&id, &mut out).is_err(), "{raw:?}");
+    }
+    let mut bytes = zip(b"blob 7\0payload");
+    bytes.push(0);
+    f.write(&name, &bytes);
+    assert!(SafeObjectDb::new(&port).find(&id, &mut out).is_err());
+    bytes.truncate(bytes.len() - 3);
+    f.write(&name, bytes);
+    assert!(SafeObjectDb::new(&port).find(&id, &mut out).is_err());
+}
+
+// 이것을 실패시키는 것: produced-length 검사만 제거해 부족한 payload를 0으로 채우는 것.
+#[test]
+fn loose_short_payload_cannot_hash_as_zero_padding() {
+    let expected = gix_object::compute_hash(Hash::Sha1, Kind::Blob, b"hello\0").unwrap();
+    assert!(
+        objects::loose(
+            &zip(b"blob 6\0hello"),
+            &expected,
+            &mut Vec::new(),
+            &mut meter()
+        )
+        .is_err()
+    );
+}
+
+// 이것을 실패시키는 것: OBJECT_ALLOC·누적 inflate·공유 meter·실패 뒤 신규 I/O0을 제거하는 것.
+#[test]
+fn object_limit_and_total_inflate_limit_are_independent() {
+    let f = Fixture::new();
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let large = loose_fixture(
+        &f,
+        Kind::Blob,
+        &vec![b'x'; budget::OBJECT_ALLOC as usize + 1],
+    );
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    let mut out = Vec::new();
+    assert!(matches!(db.find(&large, &mut out), Err(E::Limit)));
+    assert_eq!(out.capacity(), 0);
+    let before = m.borrow().counts;
+    assert!(db.find(&large, &mut out).is_err());
+    assert_eq!(m.borrow().counts, before);
+    let id = loose_fixture(&f, Kind::Blob, b"small");
+    let m = RefCell::new(meter());
+    m.borrow_mut()
+        .budget
+        .charge(Axis::DecompressedBytes, budget::DECOMPRESSED_BYTES - 64)
+        .unwrap();
+    let port = io(&root, &access, &m);
+    assert!(matches!(
+        SafeObjectDb::new(&port).find(&id, &mut out),
+        Err(E::Limit)
+    ));
+    let before = m.borrow().counts;
+    assert!(matches!(
+        SafeObjectDb::new(&port).find(&id, &mut out),
+        Err(E::Limit)
+    ));
+    assert_eq!(m.borrow().counts, before);
+}
+
+// 이것을 실패시키는 것: pack을 객체 접근 전에 읽거나 캐시 후 경로를 재열기·delta 복원 제거.
+#[test]
+fn lazy_pack_access_never_reopens_a_path() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    let p = packed(
+        &[b"base".to_vec(), b"changed".to_vec(), b"third".to_vec()],
+        true,
+    );
+    install_pack(&f, &p);
+    f.write("objects/pack/multi-pack-index", midx(&[&p]));
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let port = io(&root, &access, &m);
+    let before = m.borrow().counts;
+    let db = SafeObjectDb::new(&port);
+    assert_eq!(m.borrow().counts, before);
+    let mut out = Vec::new();
+    assert_eq!(
+        db.find(&p.ids[2], &mut out).unwrap().unwrap().data,
+        b"third"
+    );
+    assert_eq!(m.borrow().budget.used(Axis::Packs), 1);
+    let before = m.borrow().counts[Phase::Content as usize];
+    fs::rename(f.0.join("objects/pack"), f.0.join("saved")).unwrap();
+    symlink(&outside.0, f.0.join("objects/pack")).unwrap();
+    assert_eq!(
+        db.find(&p.ids[1], &mut out).unwrap().unwrap().data,
+        b"changed"
+    );
+    let after = m.borrow().counts[Phase::Content as usize];
+    assert_eq!(after.open, before.open);
+    assert_eq!(after.read, before.read);
+}
+
+// 이것을 실패시키는 것: index bytes/entry/path/allocation 선차감·checksum·split Partial·정렬 검사 제거.
+#[test]
+fn index_budget_precedes_parser_and_split_is_partial() {
+    for version in [2, 3, 4] {
+        let mut bytes = idx_fixture(3, version);
+        let mut m = meter();
+        let state = safe_index::parse(&mut bytes, &mut m).unwrap();
+        assert_eq!(state.entries().len(), 3);
+        assert_eq!(state.entries()[2].path(&state), b"file-00002".as_slice());
+        assert_eq!(m.budget.used(Axis::IndexEntries), 3);
+        assert_eq!(m.budget.used(Axis::IndexBytes), 30);
+    }
+    let mut bytes = idx_fixture(1, 2);
+    extension(&mut bytes, b"link", &[1; 20]);
+    assert!(matches!(
+        safe_index::parse(&mut bytes, &mut meter()),
+        Err(git::io::UNSUPPORTED)
+    ));
+    let mut bytes = idx_fixture(1, 2);
+    bytes[40] ^= 1;
+    assert!(matches!(
+        safe_index::parse(&mut bytes, &mut meter()),
+        Err(INVALID)
+    ));
+    let mut bytes = idx_fixture(2, 2);
+    bytes[8..12].copy_from_slice(&50_001u32.to_be_bytes());
+    let mut m = meter();
+    let (result, counts) = allocation::measure(|| safe_index::parse(&mut bytes, &mut m));
+    assert!(matches!(result, Err(E::Limit)));
+    assert_eq!(counts.calls, 0);
+    let mut bytes = idx_fixture(2, 2);
+    let mut m = meter();
+    m.allocation_limit = 1;
+    let (result, counts) = allocation::measure(|| safe_index::parse(&mut bytes, &mut m));
+    assert!(matches!(result, Err(E::Limit)));
+    assert_eq!(counts.calls, 0);
+    let mut bytes = idx_fixture(2, 2);
+    let mut m = meter();
+    m.budget
+        .charge(Axis::IndexBytes, budget::INDEX_BYTES)
+        .unwrap();
+    assert!(matches!(
+        safe_index::parse(&mut bytes, &mut m),
+        Err(E::Limit)
+    ));
+    let mut bytes = idx_fixture(2, 2);
+    bytes[92..172].copy_from_slice(&idx_fixture(1, 2)[12..92]);
+    bytes.truncate(bytes.len() - 20);
+    seal(&mut bytes);
+    assert!(matches!(
+        safe_index::parse(&mut bytes, &mut meter()),
+        Err(INVALID)
+    ));
+}
+
+// 이것을 실패시키는 것: parser 예약을 실측 peak 아래로 줄이거나 측정에서 실제 gix 호출을 빼는 것.
+#[test]
+fn object_index_parser_peaks_are_precharged() {
+    for version in [2, 3, 4] {
+        for count in [0, 1, 19_000, 50_000] {
+            let mut bytes = idx_fixture(count, version);
+            let input = bytes.len();
+            let mut m = meter();
+            let start = Instant::now();
+            let (state, counts) = allocation::measure(|| safe_index::parse(&mut bytes, &mut m));
+            let state = state.unwrap();
+            assert_eq!(state.entries().len(), count);
+            let charged = m.counts[Phase::Content as usize].allocated as usize;
+            assert!(
+                counts.peak <= charged,
+                "index v{version} count={count}: {counts:?} charge={charged}"
+            );
+            eprintln!(
+                "C3 index version={version} entries={count} input={input} peak={} charge={charged} ns={}",
+                counts.peak,
+                start.elapsed().as_nanos()
+            );
+        }
+    }
+    for size in [0, 4096, 1_048_576] {
+        let raw = [format!("blob {size}\0").into_bytes(), vec![b'x'; size]].concat();
+        let compressed = zip(&raw);
+        let id = gix_object::compute_hash(Hash::Sha1, Kind::Blob, &vec![b'x'; size]).unwrap();
+        let mut out = Vec::new();
+        let mut m = meter();
+        let start = Instant::now();
+        let (result, counts) =
+            allocation::measure(|| objects::loose(&compressed, &id, &mut out, &mut m));
+        assert_eq!(result.unwrap().data.len(), size);
+        let charged = m.counts[Phase::Content as usize].allocated as usize;
+        assert!(counts.peak <= charged, "loose: {counts:?} charge={charged}");
+        eprintln!(
+            "C3 loose bytes={size} compressed={} peak={} charge={charged} ns={}",
+            compressed.len(),
+            counts.peak,
+            start.elapsed().as_nanos()
+        );
+    }
+    for count in [1, 8, 64] {
+        let bodies: Vec<_> = (0..count).map(|n| vec![n as u8; 1024]).collect();
+        let p = packed(&bodies, true);
+        let (pack, counts) = allocation::measure(|| {
+            gix_pack::data::File::from_data(p.pack.as_slice(), Default::default(), Hash::Sha1)
+        });
+        let pack = pack
+            .unwrap()
+            .with_alloc_limit_bytes(Some(budget::OBJECT_ALLOC as usize));
+        assert!(counts.peak <= objects::PARSER_OVERHEAD);
+        eprintln!("C3 pack constructor peak={}", counts.peak);
+        let (idx, counts) = allocation::measure(|| {
+            gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+        });
+        let idx = idx.unwrap();
+        assert!(counts.peak <= objects::PARSER_OVERHEAD);
+        eprintln!("C3 idx constructor peak={}", counts.peak);
+        let midx = midx(&[&p]);
+        let (multi, counts) = allocation::measure(|| {
+            gix_pack::multi_index::File::from_data(
+                midx.as_slice(),
+                Default::default(),
+                Some(midx.len() + objects::PARSER_OVERHEAD),
+            )
+        });
+        assert_eq!(multi.unwrap().num_indices(), 1);
+        assert!(counts.peak <= midx.len() + objects::PARSER_OVERHEAD);
+        eprintln!("C3 MIDX constructor peak={}", counts.peak);
+        let entry = pack.entry(*p.offsets.last().unwrap()).unwrap();
+        let mut out = Vec::new();
+        let start = Instant::now();
+        let (result, counts) = allocation::measure(|| {
+            let mut inflate = Default::default();
+            pack.decode_entry(
+                entry,
+                &mut out,
+                &mut inflate,
+                &|id, _| {
+                    idx.lookup(id).map(|n| {
+                        gix_pack::data::decode::entry::ResolvedBase::InPack(
+                            pack.entry(idx.pack_offset_at_index(n)).unwrap(),
+                        )
+                    })
+                },
+                &mut gix_pack::cache::Never,
+            )
+        });
+        assert_eq!(result.unwrap().kind, Kind::Blob);
+        assert_eq!(out, bodies[count - 1]);
+        let cap = 2 * 1024 + count * 1040;
+        assert!(
+            counts.peak <= objects::DECODER_OVERHEAD + 3 * cap,
+            "{counts:?}"
+        );
+        eprintln!(
+            "C3 decode depth={} peak={} reserve={} ns={}",
+            count - 1,
+            counts.peak,
+            objects::DECODER_OVERHEAD + 3 * cap,
+            start.elapsed().as_nanos()
+        );
+    }
+    let tree = b"100644 a\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    let (n, counts) = allocation::measure(|| {
+        gix_object::TreeRefIter::from_bytes(tree, Hash::Sha1)
+            .inspect(|e| {
+                e.as_ref().unwrap();
+            })
+            .count()
+    });
+    assert_eq!(n, 1);
+    assert_eq!(counts.peak, 0);
+    let commit = format!("tree {A}\n\nmessage\n");
+    let (id, counts) = allocation::measure(|| {
+        gix_object::CommitRefIter::from_bytes(commit.as_bytes(), Hash::Sha1).tree_id()
+    });
+    assert_eq!(id.unwrap().to_string(), A);
+    assert_eq!(counts.peak, 0);
+}
+
+mod c3_extended {
+    use super::*;
+    // C3 fixtures encode only test inputs. Production parsers remain gitoxide's.
+    use git::io::{
+        index as git_index,
+        objects::{self, SafeObjectDb},
+    };
+    use gix_index::hash::{self, ObjectId};
+    use gix_object::Kind;
+
+    fn hash_bytes(bytes: &[u8]) -> ObjectId {
+        let mut h = hash::hasher(hash::Kind::Sha1);
+        h.update(bytes);
+        h.try_finalize().unwrap()
+    }
+    fn seal(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.extend_from_slice(hash_bytes(&bytes).as_slice());
+        bytes
+    }
+    // RFC 1950 stored DEFLATE blocks: independent of the decoder implementation.
+    fn zlib(bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01];
+        let chunks = bytes.len().max(1).div_ceil(65535);
+        for n in 0..chunks {
+            let start = n * 65535;
+            let block = &bytes[start..bytes.len().min(start + 65535)];
+            out.push(u8::from(n + 1 == chunks));
+            out.extend_from_slice(&(block.len() as u16).to_le_bytes());
+            out.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+            out.extend_from_slice(block);
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in bytes {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        out
+    }
+    fn oid(kind: Kind, bytes: &[u8]) -> ObjectId {
+        gix_object::compute_hash(hash::Kind::Sha1, kind, bytes).unwrap()
+    }
+    fn loose_fixture(f: &Fixture, kind: Kind, bytes: &[u8]) -> ObjectId {
+        let id = oid(kind, bytes);
+        let mut raw = format!("{} {}\0", kind, bytes.len()).into_bytes();
+        raw.extend_from_slice(bytes);
+        let hex = id.to_string();
+        f.write(&format!("objects/{}/{}", &hex[..2], &hex[2..]), zlib(&raw));
+        id
+    }
+    fn index_bytes(
+        version: u32,
+        count: usize,
+        name_len: usize,
+        extension: Option<(&[u8; 4], &[u8])>,
+    ) -> Vec<u8> {
+        let mut b = b"DIRC".to_vec();
+        b.extend_from_slice(&version.to_be_bytes());
+        b.extend_from_slice(&(count as u32).to_be_bytes());
+        for n in 0..count {
+            let start = b.len();
+            b.resize(start + 62, 0);
+            b[start + 24..start + 28].copy_from_slice(&0o100644u32.to_be_bytes());
+            let path = format!("{n:06}{}", "x".repeat(name_len.saturating_sub(6)));
+            b[start + 60..start + 62]
+                .copy_from_slice(&(path.len().min(0xfff) as u16).to_be_bytes());
+            if version == 4 {
+                b.push(if n == 0 { 0 } else { path.len() as u8 });
+            }
+            b.extend_from_slice(path.as_bytes());
+            b.push(0);
+            if version != 4 && path.len() < 0xfff {
+                b.resize(start + (b.len() - start).next_multiple_of(8), 0);
+            }
+        }
+        if let Some((name, data)) = extension {
+            b.extend_from_slice(name);
+            b.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            b.extend_from_slice(data);
+        }
+        seal(b)
+    }
+    struct PackFixture {
+        data: Vec<u8>,
+        index: Vec<u8>,
+        entries: Vec<(ObjectId, u64)>,
+        name: String,
+    }
+    fn pack_fixture(depth: usize, ref_delta: bool, bad_delta: bool) -> PackFixture {
+        let base = b"hello";
+        let mut data = b"PACK\0\0\0\x02".to_vec();
+        data.extend_from_slice(&((depth + 1) as u32).to_be_bytes());
+        let mut entries = vec![(oid(Kind::Blob, base), 12)];
+        data.push(0x35);
+        data.extend_from_slice(&zlib(base));
+        let mut previous = 12u64;
+        for n in 0..depth {
+            let offset = data.len() as u64;
+            let target = [b'h', b'e', b'l', b'l', (n + 1) as u8];
+            let delta = if bad_delta {
+                vec![5, 5, 0]
+            } else {
+                [vec![5, 5, 5], target.to_vec()].concat()
+            };
+            data.push((if ref_delta { 7 } else { 6 }) << 4 | delta.len() as u8);
+            if ref_delta {
+                data.extend_from_slice(entries.last().unwrap().0.as_slice());
+            } else {
+                assert!(offset - previous < 128);
+                data.push((offset - previous) as u8);
+            }
+            data.extend_from_slice(&zlib(&delta));
+            entries.push((oid(Kind::Blob, &target), offset));
+            previous = offset;
+        }
+        data = seal(data);
+        let mut index = b"\xfftOc\0\0\0\x02".to_vec();
+        entries.sort_by_key(|e| e.0);
+        for n in 0..256 {
+            index.extend_from_slice(
+                &(entries
+                    .iter()
+                    .filter(|e| e.0.as_slice()[0] as usize <= n)
+                    .count() as u32)
+                    .to_be_bytes(),
+            );
+        }
+        for (id, _) in &entries {
+            index.extend_from_slice(id.as_slice());
+        }
+        index.resize(index.len() + entries.len() * 4, 0); // CRC not used; object+pack hashes verified
+        for (_, offset) in &entries {
+            index.extend_from_slice(&(*offset as u32).to_be_bytes());
+        }
+        index.extend_from_slice(&data[data.len() - 20..]);
+        let name = format!("pack-{}", hash_bytes(&data));
+        PackFixture {
+            data,
+            index: seal(index),
+            entries,
+            name,
+        }
+    }
+    fn write_pack(f: &Fixture, pack: &PackFixture) {
+        f.write(&format!("objects/pack/{}.pack", pack.name), &pack.data);
+        f.write(&format!("objects/pack/{}.idx", pack.name), &pack.index);
+    }
+    fn midx_bytes(pack: &PackFixture, hostile_name: bool, large: bool) -> Vec<u8> {
+        let mut name = if hostile_name {
+            b"../outside.idx".to_vec()
+        } else {
+            format!("{}.idx", pack.name).into_bytes()
+        };
+        name.push(0);
+        name.resize(name.len().next_multiple_of(4), 0);
+        let mut fan = Vec::new();
+        for n in 0..256 {
+            fan.extend_from_slice(
+                &(pack
+                    .entries
+                    .iter()
+                    .filter(|e| e.0.as_slice()[0] as usize <= n)
+                    .count() as u32)
+                    .to_be_bytes(),
+            );
+        }
+        let mut ids = Vec::new();
+        let mut offsets = Vec::new();
+        for (id, off) in &pack.entries {
+            ids.extend_from_slice(id.as_slice());
+            offsets.extend_from_slice(&0u32.to_be_bytes());
+            offsets.extend_from_slice(&(*off as u32).to_be_bytes());
+        }
+        let mut chunks = vec![
+            (*b"PNAM", name),
+            (*b"OIDF", fan),
+            (*b"OIDL", ids),
+            (*b"OOFF", offsets),
+        ];
+        if large {
+            chunks.push((*b"LOFF", vec![0; 8]));
+        }
+        let mut bytes = b"MIDX\x01\x01".to_vec();
+        bytes.push(chunks.len() as u8);
+        bytes.push(0);
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        let mut at = 12 + (chunks.len() + 1) * 12;
+        for (name, data) in &chunks {
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(&(at as u64).to_be_bytes());
+            at += data.len();
+        }
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&(at as u64).to_be_bytes());
+        for (_, data) in chunks {
+            bytes.extend_from_slice(&data);
+        }
+        seal(bytes)
+    }
+
+    // 이것을 실패시키는 것: same-fd 읽기를 path 재열기로 바꾸거나 오류 뒤 backing/fd를 누수시키는 것.
+    #[test]
+    fn map_uses_validated_fd_and_unmaps_on_error() {
+        let f = Fixture::new();
+        let outside = Fixture::new();
+        f.write("data", b"original");
+        outside.write("value", b"OUTSIDE!");
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let dest = f.0.join("data");
+        let replacement = outside.0.join("value");
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_read" {
+                fs::remove_file(&dest).unwrap();
+                symlink(&replacement, &dest).unwrap();
+            }
+        }));
+        let map = port.map(path(RootId::GitDir, b"data"), 8).unwrap();
+        assert_eq!(&*map, b"original");
+        assert_eq!(m.borrow().budget.used(Axis::PackBytes), 8);
+        assert_eq!(m.borrow().budget.used(Axis::MappedBytes), 0);
+        m.borrow_mut().hook = None;
+        assert!(port.map(path(RootId::GitDir, b"data"), 8).is_err());
+        drop(map);
+        // Repeated error drops must release fd leases; >56 attempts catches leaks.
+        for _ in 0..70 {
+            assert!(port.map(path(RootId::GitDir, b"missing"), 8).is_err());
+        }
+        fs::remove_file(f.0.join("data")).unwrap();
+        f.write("data", b"small");
+        assert_eq!(
+            &*port.map(path(RootId::GitDir, b"data"), 5).unwrap(),
+            b"small"
+        );
+    }
+
+    // 이것을 실패시키는 것: lazy pack 검색을 생성자로 옮기거나 snapshot 대신 pack 경로를 재열기 하는 것.
+    #[test]
+    fn lazy_pack_access_never_reopens_a_path() {
+        let f = Fixture::new();
+        let p = pack_fixture(3, false, false);
+        write_pack(&f, &p);
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let before = m.borrow().counts;
+        let db = SafeObjectDb::new(&port);
+        assert_eq!(m.borrow().counts, before);
+        let mut buffer = Vec::new();
+        for (id, _) in &p.entries {
+            assert!(
+                gix_object::Find::try_find(&db, id, &mut buffer)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let before = m.borrow().counts[Phase::Content as usize];
+        fs::remove_dir_all(f.0.join("objects/pack")).unwrap();
+        for (id, _) in &p.entries {
+            assert!(db.find(id, &mut buffer).unwrap().is_some());
+        }
+        let after = m.borrow().counts[Phase::Content as usize];
+        assert_eq!(
+            (before.open, before.read, before.list),
+            (after.open, after.read, after.list)
+        );
+        assert_eq!(m.borrow().budget.used(Axis::Packs), 1);
+        assert_eq!(
+            m.borrow().budget.used(Axis::PackBytes),
+            (p.data.len() + p.index.len()) as u64
+        );
+    }
+
+    // 이것을 실패시키는 것: 객체 상한/총 inflate 상한을 합치거나 실패 뒤 새 I/O를 허용하는 것.
+    #[test]
+    fn object_limit_and_total_inflate_limit_are_independent() {
+        let f = Fixture::new();
+        let id = loose_fixture(&f, Kind::Blob, b"hello");
+        let access = access();
+        let root = f.root(&mut meter());
+        for remaining in [64 + 12, 64 + 12 - 1] {
+            let m = RefCell::new(meter());
+            m.borrow_mut()
+                .budget
+                .charge(
+                    Axis::DecompressedBytes,
+                    budget::DECOMPRESSED_BYTES - remaining,
+                )
+                .unwrap();
+            let port = io(&root, &access, &m);
+            let db = SafeObjectDb::new(&port);
+            let mut b = Vec::new();
+            let result = db.find(&id, &mut b);
+            if remaining == 76 {
+                assert_eq!(result.unwrap().unwrap().data, b"hello");
+            } else {
+                assert_eq!(result.unwrap_err(), E::Limit);
+                let before = m.borrow().counts;
+                assert_eq!(db.find(&id, &mut b).unwrap_err(), E::Limit);
+                assert_eq!(m.borrow().counts, before);
+            }
+        }
+        for size in [982_987, 982_988] {
+            // Stored zlib uses 15 blocks and 81 framing bytes; input + output
+            // straddles OBJECT_BUFFER by one byte, independently of total inflate.
+            let raw = [format!("blob {size}\0").into_bytes(), vec![b'x'; size]].concat();
+            let bytes = zlib(&raw);
+            let id = oid(Kind::Blob, &raw[raw.len() - size..]);
+            let mut m = meter();
+            let mut out = Vec::new();
+            let result = objects::loose(&bytes, &id, &mut out, &mut m);
+            if size == 982_987 {
+                assert_eq!(result.unwrap().data.len(), size);
+            } else {
+                assert_eq!(result.unwrap_err(), E::Limit);
+            }
+            assert!(m.budget.used(Axis::DecompressedBytes) < budget::DECOMPRESSED_BYTES);
+        }
+    }
+
+    // 이것을 실패시키는 것: loose zlib/header/length/hash 검사를 생략하거나 alternates/replace를 해석하는 것.
+    #[test]
+    fn loose_objects_validate_and_ignore_overrides() {
+        let f = Fixture::new();
+        let outside = Fixture::new();
+        let id = loose_fixture(&f, Kind::Blob, b"hello");
+        let replacement = loose_fixture(&outside, Kind::Blob, b"outside");
+        f.write("objects/info/alternates", outside.0.as_os_str().as_bytes());
+        f.write(&format!("refs/replace/{id}"), replacement.to_string());
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let db = SafeObjectDb::new(&port);
+        assert_eq!(
+            db.find(&id, &mut Vec::new()).unwrap().unwrap().data,
+            b"hello"
+        );
+        assert!(db.find(&replacement, &mut Vec::new()).unwrap().is_none());
+        for raw in [
+            b"blob 6\0hello".as_slice(),
+            b"blob 4\0hello",
+            b"blob 05\0hello",
+            b"blob -5\0hello",
+            b"blob x\0hello",
+            b"bogus 5\0hello",
+            b"blob 5 hello",
+            b"blob 5\0jello",
+            b"blob 184467440737095516160\0",
+        ] {
+            assert!(
+                objects::loose(&zlib(raw), &id, &mut Vec::new(), &mut meter()).is_err(),
+                "{raw:?}"
+            );
+        }
+        let valid = zlib(b"blob 5\0hello");
+        for broken in [
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+            vec![0; 20],
+        ] {
+            assert!(objects::loose(&broken, &id, &mut Vec::new(), &mut meter()).is_err());
+        }
+    }
+
+    // 이것을 실패시키는 것: pack 수/bytes 사전 charge 또는 오류 latch를 제거하는 것.
+    #[test]
+    fn pack_axes_stop_before_further_io() {
+        let f = Fixture::new();
+        let p = pack_fixture(0, false, false);
+        write_pack(&f, &p);
+        let access = access();
+        let root = f.root(&mut meter());
+        for axis in [Axis::Packs, Axis::PackBytes] {
+            let m = RefCell::new(meter());
+            m.borrow_mut().budget.charge(axis, axis.limit()).unwrap();
+            let port = io(&root, &access, &m);
+            let db = SafeObjectDb::new(&port);
+            let mut b = Vec::new();
+            assert_eq!(db.find(&p.entries[0].0, &mut b).unwrap_err(), E::Limit);
+            let before = m.borrow().counts;
+            assert_eq!(db.find(&p.entries[0].0, &mut b).unwrap_err(), E::Limit);
+            assert_eq!(m.borrow().counts, before);
+            assert_eq!(before[Phase::Content as usize].read_bytes, 0);
+            if axis == Axis::Packs {
+                assert_eq!(before[Phase::Content as usize].list, 0);
+            }
+        }
+        for count in [8, 9] {
+            let f = Fixture::new();
+            for n in 0..count {
+                let mut pack = pack_fixture(0, false, false);
+                pack.name = format!("pack-{n:040x}");
+                write_pack(&f, &pack);
+            }
+            let root = f.root(&mut meter());
+            let m = RefCell::new(meter());
+            let port = io(&root, &access, &m);
+            let db = SafeObjectDb::new(&port);
+            let mut buffer = Vec::new();
+            let result = db.find(&p.entries[0].0, &mut buffer);
+            if count == 8 {
+                assert!(result.unwrap().is_some());
+            } else {
+                assert_eq!(result.unwrap_err(), E::Limit);
+                assert_eq!(m.borrow().counts[Phase::Content as usize].read_bytes, 0);
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: delta 사전 walk·cycle/depth·ref callback 예산·MIDX 이름/offset 검증을 제거하는 것.
+    #[test]
+    fn delta_and_midx_are_bounded_bytes_parsers() {
+        let access = access();
+        for (depth, reference, malformed) in [
+            (0, false, false),
+            (3, true, false),
+            (64, false, false),
+            (65, false, false),
+            (1, false, true),
+        ] {
+            let f = Fixture::new();
+            let p = pack_fixture(depth, reference, malformed);
+            write_pack(&f, &p);
+            f.write(
+                "objects/pack/multi-pack-index",
+                midx_bytes(&p, false, false),
+            );
+            let root = f.root(&mut meter());
+            let m = RefCell::new(meter());
+            let port = io(&root, &access, &m);
+            let db = SafeObjectDb::new(&port);
+            let id = if depth == 0 {
+                oid(Kind::Blob, b"hello")
+            } else {
+                oid(Kind::Blob, &[b'h', b'e', b'l', b'l', depth as u8])
+            };
+            let mut buffer = Vec::new();
+            let result = db.find(&id, &mut buffer);
+            if depth > 64 {
+                assert_eq!(result.unwrap_err(), E::Limit);
+            } else if malformed {
+                assert_eq!(result.unwrap_err(), INVALID);
+            } else {
+                assert_eq!(result.unwrap().unwrap().data.len(), 5);
+            }
+        }
+        for (hostile, large) in [(true, false), (false, true)] {
+            let f = Fixture::new();
+            let p = pack_fixture(0, false, false);
+            write_pack(&f, &p);
+            f.write(
+                "objects/pack/multi-pack-index",
+                midx_bytes(&p, hostile, large),
+            );
+            let root = f.root(&mut meter());
+            let m = RefCell::new(meter());
+            let port = io(&root, &access, &m);
+            assert!(
+                SafeObjectDb::new(&port)
+                    .find(&p.entries[0].0, &mut Vec::new())
+                    .is_err()
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: index bytes/entries/할당 사전 검사·checksum·경로 정렬 또는 split Partial을 제거하는 것.
+    #[test]
+    fn index_allocation_and_split_are_bounded() {
+        let f = Fixture::new();
+        let access = access();
+        let root = f.root(&mut meter());
+        for version in [2, 3, 4] {
+            let bytes = index_bytes(version, 3, 16, None);
+            f.write("index", &bytes);
+            let m = RefCell::new(meter());
+            let port = io(&root, &access, &m);
+            let state = git_index::load(&port).unwrap();
+            assert_eq!(state.entries().len(), 3);
+            assert_eq!(
+                m.borrow().budget.used(Axis::IndexBytes),
+                bytes.len() as u64 + 48
+            );
+            assert_eq!(m.borrow().budget.used(Axis::IndexEntries), 3);
+        }
+        for entries in [50_000, 50_001] {
+            let mut bytes = index_bytes(2, entries, 6, None);
+            let mut m = meter();
+            m.allocation_limit = 64 * 1024 * 1024;
+            let result = git_index::parse(&mut bytes, &mut m);
+            if entries == 50_000 {
+                assert_eq!(result.unwrap().entries().len(), entries);
+            } else {
+                assert_eq!(result.unwrap_err(), E::Limit);
+            }
+        }
+        for (name, data, expected) in [
+            (
+                b"link",
+                [vec![1; 20], vec![0; 16]].concat(),
+                git::io::UNSUPPORTED,
+            ),
+            (b"abcd", vec![], git::io::UNSUPPORTED),
+            (b"sdir", vec![0], INVALID),
+        ] {
+            let mut bytes = index_bytes(2, 0, 0, Some((name, &data)));
+            assert_eq!(
+                git_index::parse(&mut bytes, &mut meter()).unwrap_err(),
+                expected
+            );
+        }
+        let mut bytes = index_bytes(2, 1, 6, None);
+        let mut m = meter();
+        m.allocation_limit = 0;
+        assert_eq!(git_index::parse(&mut bytes, &mut m).unwrap_err(), E::Limit);
+        let mut bytes = index_bytes(2, 1, 6, None);
+        bytes[20] ^= 1;
+        assert_eq!(
+            git_index::parse(&mut bytes, &mut meter()).unwrap_err(),
+            INVALID
+        );
+        let mut bytes = index_bytes(2, 2, 6, None);
+        bytes[84 + 62..84 + 68].copy_from_slice(b"000000");
+        let end = bytes.len() - 20;
+        bytes.truncate(end);
+        let mut bytes = seal(bytes);
+        assert_eq!(
+            git_index::parse(&mut bytes, &mut meter()).unwrap_err(),
+            INVALID
+        );
+        // Optional recursive caches are not needed; poison must be discarded.
+        let mut bytes = index_bytes(2, 1, 6, Some((b"TREE", b"malformed recursive cache")));
+        assert_eq!(
+            git_index::parse(&mut bytes, &mut meter())
+                .unwrap()
+                .entries()
+                .len(),
+            1
+        );
+    }
+
+    // 이것을 실패시키는 것: HEAD/tree가 adapter를 우회하거나 kind·tree entry 예산을 생략하는 것.
+    #[test]
+    fn head_tree_shares_object_and_index_budgets() {
+        let f = Fixture::new();
+        let blob = loose_fixture(&f, Kind::Blob, b"hello");
+        let tree = [b"100644 file\0".to_vec(), blob.as_slice().to_vec()].concat();
+        let tree_id = loose_fixture(&f, Kind::Tree, &tree);
+        let head = loose_fixture(
+            &f,
+            Kind::Commit,
+            format!(
+                "tree {tree_id}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nmessage\n"
+            )
+            .as_bytes(),
+        );
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let db = SafeObjectDb::new(&port);
+        assert_eq!(db.head_tree(&head).unwrap(), tree_id);
+        assert_eq!(db.tree(&tree_id, &mut Vec::new()).unwrap().count(), 1);
+        assert_eq!(m.borrow().budget.used(Axis::IndexEntries), 1);
+        assert_eq!(m.borrow().budget.used(Axis::IndexBytes), 4);
+        assert_eq!(db.head_tree(&blob).unwrap_err(), INVALID);
+        assert!(db.tree(&blob, &mut Vec::new()).is_err());
+        m.borrow_mut()
+            .budget
+            .charge(Axis::IndexEntries, budget::INDEX_ENTRIES - 1)
+            .unwrap();
+        assert!(matches!(db.tree(&tree_id, &mut Vec::new()), Err(E::Limit)));
+    }
+
+    // 이것을 실패시키는 것: Find의 읽기 전 buffer 해제 또는 bytes decoder의 이전 capacity 해제를 생략하는 것.
+    #[test]
+    fn retained_object_buffers_do_not_overlap_next_input() {
+        let first = vec![b'x'; 1_572_864];
+        let second = vec![b'y'; 943_718];
+        let first_raw = [
+            format!("blob {}\0", first.len()).into_bytes(),
+            first.clone(),
+        ]
+        .concat();
+        let second_raw = [
+            format!("blob {}\0", second.len()).into_bytes(),
+            second.clone(),
+        ]
+        .concat();
+        let compressed = super::zip(&first_raw);
+        let stored = zlib(&second_raw);
+        let first_id = oid(Kind::Blob, &first);
+        let second_id = oid(Kind::Blob, &second);
+        let mut buffer = Vec::new();
+        let mut m = meter();
+        assert_eq!(
+            objects::loose(&compressed, &first_id, &mut buffer, &mut m)
+                .unwrap()
+                .data,
+            first
+        );
+        assert_eq!(
+            objects::loose(&stored, &second_id, &mut buffer, &mut m)
+                .unwrap()
+                .data,
+            second
+        );
+        assert!(
+            buffer.capacity() + stored.len() + 1 + objects::DECODER_OVERHEAD
+                <= budget::OBJECT_ALLOC as usize
+        );
+
+        let f = Fixture::new();
+        let hex = second_id.to_string();
+        f.write(&format!("objects/{}/{}", &hex[..2], &hex[2..]), &stored);
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let db = SafeObjectDb::new(&port);
+        let (result, counts) = allocation::measure(|| {
+            let mut previous = vec![0; first_raw.len()];
+            db.find(&second_id, &mut previous)
+                .map(|data| data.unwrap().data.len())
+        });
+        assert_eq!(result.unwrap(), second.len());
+        assert!(counts.peak <= budget::OBJECT_ALLOC as usize, "{counts:?}");
+        eprintln!(
+            "C3_REUSE find_peak={} cap={}",
+            counts.peak,
+            budget::OBJECT_ALLOC
+        );
+
+        let p = super::packed(&[b"small".to_vec()], false);
+        let index =
+            gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+                .unwrap();
+        let mut oversized = vec![0; budget::OBJECT_ALLOC as usize + 1];
+        assert_eq!(
+            objects::decode(
+                &p.pack,
+                &index,
+                p.offsets[0],
+                &p.ids[0],
+                &mut oversized,
+                &mut meter()
+            )
+            .unwrap()
+            .data,
+            b"small"
+        );
+        assert!(oversized.capacity() <= objects::OBJECT_BUFFER);
+    }
+
+    // 이것을 실패시키는 것: gix 할당 선계상을 줄여 counting allocator peak보다 작게 만드는 것.
+    #[test]
+    fn c3_parser_peaks_are_precharged() {
+        for (version, count, length) in [
+            (2, 19_000, 12),
+            (2, 50_000, 6),
+            (4, 2000, 100),
+            (2, 1, 60_000),
+        ] {
+            let mut bytes = index_bytes(version, count, length, None);
+            let mut m = meter();
+            m.allocation_limit = 64 * 1024 * 1024;
+            let (result, counts) = allocation::measure(|| git_index::parse(&mut bytes, &mut m));
+            assert_eq!(result.unwrap().entries().len(), count);
+            let reserved = m.counts[Phase::Content as usize].allocated;
+            eprintln!(
+                "C3_PEAK index-v{version}-{count}-{length} input={} peak={} reserved={reserved}",
+                bytes.len(),
+                counts.peak
+            );
+            assert!(counts.peak as u64 <= reserved);
+        }
+        let access = access();
+        for depth in [0, 3, 64] {
+            let f = Fixture::new();
+            let p = pack_fixture(depth, true, false);
+            write_pack(&f, &p);
+            f.write(
+                "objects/pack/multi-pack-index",
+                midx_bytes(&p, false, false),
+            );
+            let root = f.root(&mut meter());
+            let m = RefCell::new(meter());
+            let port = io(&root, &access, &m);
+            let db = SafeObjectDb::new(&port);
+            let mut buffer = Vec::new();
+            let id = if depth == 0 {
+                oid(Kind::Blob, b"hello")
+            } else {
+                oid(Kind::Blob, &[b'h', b'e', b'l', b'l', depth as u8])
+            };
+            let (result, counts) = allocation::measure(|| db.find(&id, &mut buffer));
+            assert!(result.unwrap().is_some());
+            let reserved = m.borrow().counts[Phase::Content as usize].allocated;
+            eprintln!(
+                "C3_PEAK pack-midx-delta-{depth} peak={} reserved={reserved}",
+                counts.peak
+            );
+            assert!(counts.peak as u64 <= reserved);
+        }
+        for size in [0, 1024, 512 * 1024] {
+            let raw = [format!("blob {size}\0").into_bytes(), vec![b'x'; size]].concat();
+            let compressed = zlib(&raw);
+            let id = oid(Kind::Blob, &raw[raw.len() - size..]);
+            let mut buffer = Vec::new();
+            let mut m = meter();
+            let (result, counts) =
+                allocation::measure(|| objects::loose(&compressed, &id, &mut buffer, &mut m));
+            assert_eq!(result.unwrap().data.len(), size);
+            let reserved = m.counts[Phase::Content as usize].allocated;
+            eprintln!(
+                "C3_PEAK loose-{size} peak={} reserved={reserved}",
+                counts.peak
+            );
+            assert!(counts.peak as u64 <= reserved);
+        }
+    }
+}
+
+// 이것을 실패시키는 것: adapter delta 깊이/합산 scratch/inflate/hash 제한 또는 decoder 앞 예약을 제거하는 것.
+#[test]
+fn packed_decoder_bounds_and_peaks() {
+    for count in [1, 8, 64, 65, 66] {
+        let bodies: Vec<_> = (0..count).map(|n| vec![n as u8; 1024]).collect();
+        let p = packed(&bodies, true);
+        let idx =
+            gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+                .unwrap();
+        let mut out = Vec::new();
+        let mut m = meter();
+        let (result, counts) = allocation::measure(|| {
+            objects::decode(
+                &p.pack,
+                &idx,
+                *p.offsets.last().unwrap(),
+                p.ids.last().unwrap(),
+                &mut out,
+                &mut m,
+            )
+        });
+        if count <= 65 {
+            assert_eq!(result.unwrap().data, bodies[count - 1]);
+        } else {
+            assert!(matches!(result, Err(E::Limit)));
+            assert_eq!(out.capacity(), 0);
+        }
+        let charged = m.counts[Phase::Content as usize].allocated as usize;
+        assert!(
+            counts.peak <= charged,
+            "depth={count} {counts:?} charge={charged}"
+        );
+        eprintln!(
+            "C3 adapter delta_depth={} peak={} charge={charged} inflated={}",
+            count - 1,
+            counts.peak,
+            m.budget.used(Axis::DecompressedBytes)
+        );
+    }
+    let p = packed(&[vec![b'a'; 32], vec![b'b'; 1_048_576]], true);
+    let idx = gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+        .unwrap();
+    let mut out = Vec::new();
+    let mut m = meter();
+    assert!(matches!(
+        objects::decode(&p.pack, &idx, p.offsets[1], &p.ids[1], &mut out, &mut m),
+        Err(E::Limit)
+    ));
+    assert_eq!(out.capacity(), 0);
+    let p = packed(&[b"body".to_vec()], false);
+    let idx = gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+        .unwrap();
+    for offset in [0, 11, p.pack.len() as u64, u64::MAX] {
+        assert!(objects::decode(&p.pack, &idx, offset, &p.ids[0], &mut out, &mut meter()).is_err());
+    }
+    assert!(
+        objects::decode(
+            &p.pack,
+            &idx,
+            12,
+            &ObjectId::null(Hash::Sha1),
+            &mut out,
+            &mut meter()
+        )
+        .is_err()
+    );
+    let mut m = meter();
+    m.budget
+        .charge(Axis::DecompressedBytes, budget::DECOMPRESSED_BYTES - 3)
+        .unwrap();
+    assert!(matches!(
+        objects::decode(&p.pack, &idx, 12, &p.ids[0], &mut out, &mut m),
+        Err(E::Limit)
+    ));
+    let mut m = meter();
+    m.allocation_limit = 0;
+    let (result, counts) =
+        allocation::measure(|| objects::decode(&p.pack, &idx, 12, &p.ids[0], &mut out, &mut m));
+    assert!(matches!(result, Err(E::Limit)));
+    assert_eq!(counts.calls, 0);
+    let empty = packed(&[Vec::new()], false);
+    let empty_index =
+        gix_pack::index::File::from_data(empty.index.as_slice(), Default::default(), Hash::Sha1)
+            .unwrap();
+    for offset in [11usize, empty.pack.len() - 20] {
+        let mut data = empty.pack.clone();
+        let zlib = zip(b"");
+        data[offset] = 0x30; // forged empty-blob header in pack header/trailer
+        data[offset + 1..offset + 1 + zlib.len()].copy_from_slice(&zlib);
+        assert!(
+            objects::decode(
+                &data,
+                &empty_index,
+                offset as u64,
+                &empty.ids[0],
+                &mut Vec::new(),
+                &mut meter()
+            )
+            .is_err()
+        );
+    }
+    let mut corrupt = p.pack.clone();
+    corrupt[13] ^= 0xff;
+    assert!(objects::decode(&corrupt, &idx, 12, &p.ids[0], &mut out, &mut meter()).is_err());
+}
+
+// 이것을 실패시키는 것: index 캐시 확장을 gix에 그대로 넘기거나 V4 경로 확장·framing 검증을 제거하는 것.
+#[test]
+fn index_hostile_frames_and_extensions_are_bounded() {
+    for signature in [b"TREE", b"UNTR", b"REUC", b"FSMN", b"EOIE", b"IEOT"] {
+        let mut bytes = idx_fixture(1, 2);
+        extension(&mut bytes, signature, &vec![0xff; 8192]);
+        let mut m = meter();
+        let (state, counts) = allocation::measure(|| safe_index::parse(&mut bytes, &mut m));
+        assert_eq!(state.unwrap().entries().len(), 1);
+        assert!(counts.peak <= m.counts[Phase::Content as usize].allocated as usize);
+    }
+    let mut sparse = idx_fixture(0, 2);
+    extension(&mut sparse, b"sdir", &[]);
+    assert!(
+        safe_index::parse(&mut sparse, &mut meter())
+            .unwrap()
+            .is_sparse()
+    );
+    for mut bytes in [
+        vec![],
+        b"DIRC".to_vec(),
+        idx_fixture(1, 2),
+        idx_fixture(1, 3),
+        idx_fixture(1, 4),
+    ] {
+        if bytes.len() > 32 {
+            bytes.truncate(bytes.len() - 21);
+            bytes.extend_from_slice(&[0; 20]);
+        }
+        assert!(safe_index::parse(&mut bytes, &mut meter()).is_err());
+    }
+    for (offset, value) in [(0, b'X'), (7, 5), (72, b'/'), (73, 0)] {
+        let mut bytes = idx_fixture(1, 2);
+        bytes[offset] = value;
+        bytes.truncate(bytes.len() - 20);
+        seal(&mut bytes);
+        assert!(
+            safe_index::parse(&mut bytes, &mut meter()).is_err(),
+            "{offset}"
+        );
+    }
+    for (sig, body) in [(b"abcd", b"".as_slice()), (b"sdir", b"x")] {
+        let mut bytes = idx_fixture(1, 2);
+        extension(&mut bytes, sig, body);
+        assert!(safe_index::parse(&mut bytes, &mut meter()).is_err());
+    }
+    let mut bytes = idx_fixture(1, 2);
+    extension(&mut bytes, b"TREE", b"a");
+    let at = bytes.len() - 25;
+    bytes[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    bytes.truncate(bytes.len() - 20);
+    seal(&mut bytes);
+    assert!(safe_index::parse(&mut bytes, &mut meter()).is_err());
+    let mut bytes = idx_fixture(2, 4);
+    bytes[74] = 127;
+    bytes.truncate(bytes.len() - 20);
+    seal(&mut bytes);
+    assert!(safe_index::parse(&mut bytes, &mut meter()).is_err());
+    let mut huge = vec![0; budget::INDEX_BYTES as usize + 1];
+    let mut m = meter();
+    let (result, counts) = allocation::measure(|| safe_index::parse(&mut huge, &mut m));
+    assert!(matches!(result, Err(E::Limit)));
+    assert_eq!(counts.calls, 0);
+}
+
+// 이것을 실패시키는 것: HEAD/tree 파싱의 객체 kind·이름 검증 및 IndexEntries/IndexBytes 공유 charge 제거.
+#[test]
+fn head_tree_uses_find_and_shared_index_budgets() {
+    let f = Fixture::new();
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let blob = loose_fixture(&f, Kind::Blob, b"value");
+    let mut tree = b"100644 name\0".to_vec();
+    tree.extend_from_slice(blob.as_slice());
+    let tree_id = loose_fixture(&f, Kind::Tree, &tree);
+    let head = loose_fixture(
+        &f,
+        Kind::Commit,
+        format!("tree {tree_id}\n\nmessage\n").as_bytes(),
+    );
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    assert_eq!(db.head_tree(&head).unwrap(), tree_id);
+    let mut out = Vec::new();
+    let entries: Vec<_> = db
+        .tree(&tree_id, &mut out)
+        .unwrap()
+        .inspect(|e| {
+            e.as_ref().unwrap();
+        })
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].as_ref().unwrap().oid, blob.as_ref());
+    assert_eq!(m.borrow().budget.used(Axis::IndexEntries), 1);
+    assert_eq!(m.borrow().budget.used(Axis::IndexBytes), 4);
+    assert!(db.head_tree(&blob).is_err());
+    assert!(db.tree(&blob, &mut out).is_err());
+    let mut bad = b"100644 ../escape\0".to_vec();
+    bad.extend_from_slice(blob.as_slice());
+    let bad_id = loose_fixture(&f, Kind::Tree, &bad);
+    assert!(db.tree(&bad_id, &mut out).is_err());
+    let wrong_commit = loose_fixture(
+        &f,
+        Kind::Blob,
+        format!("tree {tree_id}\n\nmessage\n").as_bytes(),
+    );
+    assert_eq!(db.head_tree(&wrong_commit).unwrap_err(), INVALID);
+    let wrong_tree = loose_fixture(&f, Kind::Blob, &tree);
+    assert!(db.tree(&wrong_tree, &mut out).is_err());
+    let remaining = budget::INDEX_ENTRIES - m.borrow().budget.used(Axis::IndexEntries);
+    m.borrow_mut()
+        .budget
+        .charge(Axis::IndexEntries, remaining)
+        .unwrap();
+    assert!(matches!(db.tree(&tree_id, &mut out), Err(E::Limit)));
+    let before = m.borrow().counts;
+    assert!(db.head_tree(&head).is_err());
+    assert_eq!(m.borrow().counts, before);
+}
+
+// 이것을 실패시키는 것: __getdirentries64 심벌 제거·path 재열기·raw/할당/마감 선검사·EOF 검사 제거.
+#[test]
+#[cfg(target_os = "macos")]
+fn darwin_directory_symbol_and_bounded_blocks() {
+    let f = Fixture::new();
+    for n in 0..300 {
+        f.write(&format!("dir/{n:04}-{}", "x".repeat(80)), b"");
+    }
+    let access = access();
+    let root = f.root(&mut meter());
+    let directory = safe_read::directory(&root, b"dir", &access, &mut meter()).unwrap();
+    fs::rename(f.0.join("dir"), f.0.join("held")).unwrap();
+    f.write("dir/REPLACEMENT", b"");
+    let mut m = meter();
+    let list = safe_read::entries(&directory, 400, &mut m).unwrap();
+    assert!(list.complete);
+    assert_eq!(list.names.len(), 300);
+    assert!(list.names.iter().all(|name| name.len() == 85));
+    let count = m.counts[Phase::Content as usize];
+    assert_eq!(count.raw_entries, 302); // dots count before filtering
+    assert!(count.list > 2); // multiple 8 KiB blocks plus EOF
+    assert_eq!((count.open, count.stat, count.read), (0, 0, 0));
+    for limit in [0, 1, 302] {
+        let directory = safe_read::directory(&root, b"held", &access, &mut meter()).unwrap();
+        let mut m = meter();
+        let list = safe_read::entries(&directory, limit, &mut m).unwrap();
+        assert!(!list.complete);
+        assert_eq!(
+            m.counts[Phase::Content as usize].raw_entries,
+            u64::from(limit)
+        );
+        if limit == 0 {
+            assert_eq!(m.counts[Phase::Content as usize].list, 0);
+        }
+    }
+    for deadline in [false, true] {
+        let directory = safe_read::directory(&root, b"held", &access, &mut meter()).unwrap();
+        let mut m = if deadline {
+            Meter::new(Instant::now())
+        } else {
+            meter()
+        };
+        m.allocation_limit = 0;
+        let (result, counts) = allocation::measure(|| safe_read::entries(&directory, 400, &mut m));
+        assert_eq!(
+            result.err().unwrap(),
+            if deadline { E::Deadline } else { E::Limit }
+        );
+        assert_eq!(counts.calls, 0);
+        if deadline {
+            assert_eq!(m.counts[Phase::Content as usize].list, 0);
+        }
+    }
+}
+
+// 이것을 실패시키는 것: same-fd snapshot의 shrink/growth 거부 또는 소진된 축의 open 전 검사 제거.
+#[test]
+fn budgeted_snapshots_reject_changes_before_more_io() {
+    let f = Fixture::new();
+    let access = access();
+    let root = f.root(&mut meter());
+    for grow in [false, true] {
+        f.write("data", b"original");
+        let m = RefCell::new(meter());
+        let dest = f.0.join("data");
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_read" {
+                fs::write(
+                    &dest,
+                    if grow {
+                        b"overgrown".as_slice()
+                    } else {
+                        b"short"
+                    },
+                )
+                .unwrap();
+            }
+        }));
+        let port = io(&root, &access, &m);
+        assert_eq!(
+            port.map(path(RootId::GitDir, b"data"), 8).unwrap_err(),
+            if grow { E::Limit } else { E::Changed }
+        );
+    }
+    for axis in [Axis::IndexBytes, Axis::PackBytes] {
+        let m = RefCell::new(meter());
+        m.borrow_mut().budget.charge(axis, axis.limit()).unwrap();
+        let port = io(&root, &access, &m);
+        assert_eq!(
+            port.read_budgeted(path(RootId::GitDir, b"data"), 8, axis)
+                .unwrap_err(),
+            E::Limit
+        );
+        assert_eq!(m.borrow().counts[Phase::Content as usize].open, 0);
+    }
+}
+
+// 이것을 실패시키는 것: pack/idx/MIDX checksum·연결·이름·OID 순서·offset 검증을 생략하는 것.
+#[test]
+fn hostile_pack_metadata_is_not_clean_or_a_panic() {
+    let access = access();
+    for case in 0..20 {
+        let f = Fixture::new();
+        let mut p = packed(&[b"one".to_vec(), b"two".to_vec()], false);
+        let mut multi = midx(&[&p]);
+        let reseal = |data: &mut Vec<u8>| {
+            data.truncate(data.len() - 20);
+            seal(data);
+        };
+        match case {
+            0 => p.pack[15] ^= 1, // checksum
+            1 => p.index[1050] ^= 1,
+            2 => multi[80] ^= 1,
+            3 => {
+                p.index[4] = 1;
+                reseal(&mut p.index);
+            } // version
+            4 => {
+                p.index[1032..1052].fill(0);
+                reseal(&mut p.index);
+            } // fan mismatch
+            5 => {
+                p.index[1080..1084].copy_from_slice(&u32::MAX.to_be_bytes());
+                reseal(&mut p.index);
+            }
+            6 => {
+                multi[5] = 2;
+                reseal(&mut multi);
+            } // hash
+            7 => {
+                multi[7] = 1;
+                reseal(&mut multi);
+            } // chain
+            8 => {
+                multi[8..12].copy_from_slice(&9u32.to_be_bytes());
+                reseal(&mut multi);
+            }
+            9 => {
+                multi[72] = b'/';
+                reseal(&mut multi);
+            }
+            10 => {
+                multi[4] = 2;
+                reseal(&mut multi);
+            }
+            11 => {
+                // pack number
+                let at = u64::from_be_bytes(multi[52..60].try_into().unwrap()) as usize;
+                multi[at..at + 4].copy_from_slice(&9u32.to_be_bytes());
+                reseal(&mut multi);
+            }
+            12 => {
+                // offset mismatch
+                let at = u64::from_be_bytes(multi[52..60].try_into().unwrap()) as usize;
+                multi[at + 4..at + 8].copy_from_slice(&11u32.to_be_bytes());
+                reseal(&mut multi);
+            }
+            13 => {
+                p.pack[11] = 3;
+                reseal(&mut p.pack);
+            }
+            14 => {
+                // duplicate OID, correctly sealed
+                let id = p.index[1032..1052].to_vec();
+                p.index[1052..1072].copy_from_slice(&id);
+                reseal(&mut p.index);
+            }
+            15 => {
+                // matching pack checksum but wrong count
+                p.pack[11] = 3;
+                reseal(&mut p.pack);
+                let end = p.index.len();
+                p.index[end - 40..end - 20].copy_from_slice(&p.pack[p.pack.len() - 20..]);
+                reseal(&mut p.index);
+            }
+            16 => {
+                // bad MIDX ordering
+                let at = u64::from_be_bytes(multi[40..48].try_into().unwrap()) as usize;
+                multi[at..at + 20].fill(255);
+                reseal(&mut multi);
+            }
+            17 => {
+                let end = p.index.len();
+                p.index[end - 40] ^= 1;
+                reseal(&mut p.index);
+            }
+            18 => {
+                let at = u64::from_be_bytes(multi[40..48].try_into().unwrap()) as usize;
+                let first = multi[at..at + 20].to_vec();
+                multi[at + 20..at + 40].copy_from_slice(&first);
+                let at = u64::from_be_bytes(multi[52..60].try_into().unwrap()) as usize;
+                let first = multi[at..at + 8].to_vec();
+                multi[at + 8..at + 16].copy_from_slice(&first);
+                reseal(&mut multi);
+            }
+            19 => {
+                let at = u64::from_be_bytes(multi[28..36].try_into().unwrap()) as usize;
+                multi[at..at + 255 * 4].fill(0);
+                reseal(&mut multi);
+            }
+            _ => unreachable!(),
+        }
+        install_pack(&f, &p);
+        if case == 2 || (6..=12).contains(&case) || case == 16 || case == 18 || case == 19 {
+            f.write("objects/pack/multi-pack-index", multi);
+        }
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        assert!(
+            SafeObjectDb::new(&port)
+                .find(&p.ids[0], &mut Vec::new())
+                .is_err(),
+            "case {case}"
+        );
+    }
+}
+
+// 이것을 실패시키는 것: 실제 parser/decoder 호출 또는 결과 검증을 제거·손상시키는 것.
+#[test]
+fn object_index_observations() {
+    fn report(name: &str, samples: &mut [u128], cold: u128) {
+        samples.sort_unstable();
+        let mean = samples.iter().sum::<u128>() as f64 / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|n| (*n as f64 - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        eprintln!(
+            "C3_OBSERVE {{\"case\":\"{name}\",\"rounds\":{},\"cold_ns\":{cold},\"p50_ns\":{},\"p95_ns\":{},\"variance_ns2\":{variance}}}",
+            samples.len(),
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100]
+        );
+    }
+    let pristine = idx_fixture(19_000, 2);
+    let mut samples = Vec::new();
+    let mut cold = 0;
+    for n in 0..201 {
+        let mut bytes = pristine.clone();
+        let mut m = meter();
+        let start = Instant::now();
+        let state = safe_index::parse(&mut bytes, &mut m).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        assert_eq!(state.entries().len(), 19_000);
+        if n == 0 {
+            cold = elapsed;
+        } else {
+            samples.push(elapsed);
+        }
+    }
+    report("index-19000", &mut samples, cold);
+    let bodies: Vec<_> = (0..64).map(|n| vec![n as u8; 1024]).collect();
+    let p = packed(&bodies, true);
+    let index =
+        gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+            .unwrap();
+    samples.clear();
+    for n in 0..201 {
+        let mut m = meter();
+        let mut buffer = Vec::new();
+        let start = Instant::now();
+        let data = objects::decode(
+            &p.pack,
+            &index,
+            p.offsets[63],
+            &p.ids[63],
+            &mut buffer,
+            &mut m,
+        )
+        .unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        assert_eq!(data.data, bodies[63]);
+        if n == 0 {
+            cold = elapsed;
+        } else {
+            samples.push(elapsed);
+        }
+    }
+    report("delta-63", &mut samples, cold);
+}
+
+// 이것을 실패시키는 것: 중복 방어를 통과하도록 만든 입력에서 길이·kind·framing·MIDX 선예약을 제거하는 것.
+#[test]
+fn c3_guards_have_independent_negative_controls() {
+    let f = Fixture::new();
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    // Hash matches the zero-filled slack, so only the declared-vs-produced
+    // length check rejects this deliberately short zlib stream.
+    let id = gix_object::compute_hash(Hash::Sha1, Kind::Blob, b"payload\0").unwrap();
+    let raw = zip(b"blob 8\0payload");
+    assert!(matches!(
+        objects::loose(&raw, &id, &mut Vec::new(), &mut meter()),
+        Err(INVALID)
+    ));
+    // Valid tree syntax inside an object whose authenticated kind is Blob.
+    let tree = [
+        b"100644 a\0".as_slice(),
+        ObjectId::null(Hash::Sha1).as_slice(),
+    ]
+    .concat();
+    let id = loose_fixture(&f, Kind::Blob, &tree);
+    assert!(matches!(
+        SafeObjectDb::new(&port).tree(&id, &mut Vec::new()),
+        Err(INVALID)
+    ));
+    // A shortened path length would otherwise be accepted by gix after its
+    // padding skip. All entry bytes and the original checksum are valid.
+    let mut index = idx_fixture(1, 2);
+    index[73] = 9;
+    index.truncate(index.len() - 20);
+    seal(&mut index);
+    assert!(matches!(
+        safe_index::parse(&mut index, &mut meter()),
+        Err(INVALID)
+    ));
+    // MIDX's own allocator is small enough that a missing precharge used to
+    // hide under the unrelated pack reservation. Give it zero remaining bytes.
+    f.write("empty-midx", midx(&[]));
+    let bytes = port
+        .map(path(RootId::CommonDir, b"empty-midx"), 4096)
+        .unwrap();
+    let mut limit = meter();
+    limit.allocation_limit = 0;
+    assert!(matches!(
+        objects::validate_midx(bytes, &[], &mut limit),
+        Err(E::Limit)
+    ));
+    // The first object byte must never overlap PACK's 12-byte header, even if
+    // the bytes at offset 8 form a valid empty blob stream with the right hash.
+    let mut overlap = b"PACK\0\0\0\x02\x30".to_vec();
+    overlap.extend(zip(b""));
+    seal(&mut overlap);
+    let p = packed(&[Vec::new()], false);
+    let idx = gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+        .unwrap();
+    assert!(matches!(
+        objects::decode(&overlap, &idx, 8, &p.ids[0], &mut Vec::new(), &mut meter()),
+        Err(INVALID)
+    ));
+}
+
+// 이것을 실패시키는 것: loose 압축 입력과 출력의 동시 생존 bytes를 객체 상한에서 제외하는 것.
+#[test]
+fn loose_input_and_output_share_the_object_allocation_cap() {
+    // Oversized compressed input is rejected even before constructing zlib.
+    let excessive = vec![0; 1_966_080];
+    let mut m = meter();
+    let (result, counts) = allocation::measure(|| {
+        objects::loose(
+            &excessive,
+            &ObjectId::null(Hash::Sha1),
+            &mut Vec::new(),
+            &mut m,
+        )
+        .map(|_| ())
+    });
+    assert!(matches!(result, Err(E::Limit)));
+    assert_eq!(counts.calls, 0);
+    let f = Fixture::new();
+    let access = access();
+    let root = f.root(&mut meter());
+    f.write(
+        "objects/00/00000000000000000000000000000000000000",
+        &excessive,
+    );
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    assert!(matches!(
+        SafeObjectDb::new(&port).find(&ObjectId::null(Hash::Sha1), &mut Vec::new()),
+        Err(E::Limit)
+    ));
+    assert_eq!(m.borrow().counts[Phase::Content as usize].read_bytes, 0);
+    // Stored DEFLATE keeps input incompressible without a random fixture.
+    let body = vec![b'x'; budget::OBJECT_ALLOC as usize / 2];
+    let id = gix_object::compute_hash(Hash::Sha1, Kind::Blob, &body).unwrap();
+    let mut plain = format!("blob {}\0", body.len()).into_bytes();
+    plain.extend_from_slice(&body);
+    let mut compressed = vec![0x78, 0x01];
+    for (n, block) in plain.chunks(65535).enumerate() {
+        compressed.push(u8::from((n + 1) * 65535 >= plain.len()));
+        let len = block.len() as u16;
+        compressed.extend_from_slice(&len.to_le_bytes());
+        compressed.extend_from_slice(&(!len).to_le_bytes());
+        compressed.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for byte in plain {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    compressed.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let mut m = meter();
+    let mut out = Vec::new();
+    assert!(matches!(
+        objects::loose(&compressed, &id, &mut out, &mut m),
+        Err(E::Limit)
+    ));
+    assert_eq!(out.capacity(), 0);
+    assert_eq!(
+        m.counts[Phase::Content as usize].allocated,
+        objects::DECODER_OVERHEAD as u64
+    );
+}
+
+// 이것을 실패시키는 것: V4의 압축 경로 길이만 계수하고 확장 경로 bytes를 파싱 뒤에 검사하는 것.
+#[test]
+fn expanded_v4_paths_stop_before_allocation() {
+    fn input(count: u32, first_len: usize) -> Vec<u8> {
+        let fixed = idx_fixture(1, 4)[12..74].to_vec();
+        let mut bytes = b"DIRC\0\0\0\x04".to_vec();
+        bytes.extend_from_slice(&count.to_be_bytes());
+        for n in 0..count {
+            bytes.extend_from_slice(&fixed);
+            bytes.push(0);
+            if n == 0 {
+                bytes.extend(std::iter::repeat_n(b'a', first_len));
+            } else {
+                bytes.push(b'b');
+            }
+            bytes.push(0);
+        }
+        seal(&mut bytes);
+        bytes
+    }
+    for mut bytes in [input(2, 65_536), input(80, 60_000)] {
+        assert!(bytes.len() < (budget::INDEX_BYTES as usize));
+        let mut m = meter();
+        let (result, counts) = allocation::measure(|| safe_index::parse(&mut bytes, &mut m));
+        assert!(matches!(result, Err(E::Limit)));
+        assert_eq!(counts.calls, 0);
+    }
+}
+
+// 이것을 실패시키는 것: 실제 index/decoder 호출이나 결과 검증을 생략해 빈 작업 시간을 기록하는 것.
+#[test]
+fn c3_warm_decoder_and_index_observations() {
+    fn report(name: &str, mut samples: Vec<u128>, cold: u128) {
+        samples.sort_unstable();
+        let mean = samples.iter().sum::<u128>() as f64 / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|n| (*n as f64 - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        eprintln!(
+            "C3_TIME {name} rounds={} cold_ns={cold} p50_ns={} p95_ns={} variance_ns2={variance}",
+            samples.len(),
+            samples[100],
+            samples[190]
+        );
+    }
+    let source = idx_fixture(19_000, 2);
+    let mut samples = Vec::new();
+    let mut cold = 0;
+    for n in 0..201 {
+        let mut bytes = source.clone();
+        let mut m = meter();
+        let start = Instant::now();
+        let state = safe_index::parse(&mut bytes, &mut m).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        assert_eq!(state.entries().len(), 19_000);
+        if n == 0 {
+            cold = elapsed;
+        } else {
+            samples.push(elapsed);
+        }
+    }
+    report("index-19000", samples, cold);
+    let bodies: Vec<_> = (0..64).map(|n| vec![n as u8; 1024]).collect();
+    let p = packed(&bodies, true);
+    let idx = gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+        .unwrap();
+    let mut samples = Vec::new();
+    let mut cold = 0;
+    for n in 0..201 {
+        let mut out = Vec::new();
+        let mut m = meter();
+        let start = Instant::now();
+        let data =
+            objects::decode(&p.pack, &idx, p.offsets[63], &p.ids[63], &mut out, &mut m).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        assert_eq!(data.data, bodies[63]);
+        if n == 0 {
+            cold = elapsed;
+        } else {
+            samples.push(elapsed);
+        }
+    }
+    report("delta-depth-63", samples, cold);
+}
+
+// 이것을 실패시키는 것: 참조 객체가 없는 pack의 MIDX 이름 검사 생략 또는 새 pack이 생긴 정상 subset 거부.
+#[test]
+fn midx_unused_pack_names_are_validated() {
+    let access = access();
+    for hostile in [false, true] {
+        let f = Fixture::new();
+        let empty = packed(&[], false);
+        let other = packed(&[b"newer pack".to_vec()], false);
+        install_pack(&f, &empty);
+        install_pack(&f, &other);
+        let mut multi = midx(&[&empty, &other]);
+        if hostile {
+            let name = format!("{}.idx", empty.name);
+            let at = multi
+                .windows(name.len())
+                .position(|b| b == name.as_bytes())
+                .unwrap();
+            multi[at + 45] = b'/';
+            multi.truncate(multi.len() - 20);
+            seal(&mut multi);
+        }
+        f.write("objects/pack/multi-pack-index", multi);
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let mut buffer = Vec::new();
+        let db = SafeObjectDb::new(&port);
+        let result = db.find(&other.ids[0], &mut buffer);
+        if hostile {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().unwrap().data, b"newer pack");
+        }
+    }
+}
+
+// 이것을 실패시키는 것: 선택 extension payload를 gix의 initial path allocation 추정에 다시 포함하는 것.
+#[test]
+fn review_index_extension_peak_stays_inside_reservation() {
+    for size in [0, 100_000, 130_000] {
+        let mut bytes = idx_fixture(1000, 2);
+        extension(&mut bytes, b"TREE", &vec![0; size]);
+        let mut m = meter();
+        let (state, counts) = allocation::measure(|| safe_index::parse(&mut bytes, &mut m));
+        assert_eq!(state.unwrap().entries().len(), 1000);
+        assert!(counts.peak <= m.counts[Phase::Content as usize].allocated as usize);
+        eprintln!(
+            "C3_REVIEW extension={size} peak={} reserved={}",
+            counts.peak,
+            m.counts[Phase::Content as usize].allocated
+        );
+    }
+}
+
+// 이것을 실패시키는 것: MIDX가 모든 현재 pack을 포함해야 한다고 요구해 신규 standalone pack을 거부하는 것.
+#[test]
+fn review_midx_can_cover_a_subset_of_current_packs() {
+    let f = Fixture::new();
+    let first = packed(&[b"old pack".to_vec()], false);
+    let newer = packed(&[b"new pack".to_vec()], false);
+    install_pack(&f, &first);
+    install_pack(&f, &newer);
+    f.write("objects/pack/multi-pack-index", midx(&[&first]));
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let db = SafeObjectDb::new(&port);
+    assert_eq!(
+        db.find(&first.ids[0], &mut Vec::new())
+            .unwrap()
+            .unwrap()
+            .data,
+        b"old pack"
+    );
+    assert_eq!(
+        db.find(&newer.ids[0], &mut Vec::new())
+            .unwrap()
+            .unwrap()
+            .data,
+        b"new pack"
+    );
+}
+
+// 이것을 실패시키는 것: 이전 caller buffer를 Find/loose/decode에서 유지해 객체별 live-capacity 상한을 넘기는 것.
+#[test]
+fn reused_output_capacity_never_escapes_object_budget() {
+    let oversized = || Vec::with_capacity(budget::OBJECT_ALLOC as usize + 1);
+    let f = Fixture::new();
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let mut output = oversized();
+    assert!(
+        SafeObjectDb::new(&port)
+            .find(&ObjectId::null(Hash::Sha1), &mut output)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(output.capacity(), 0);
+    let raw = zip(b"blob 1\0x");
+    let id = gix_object::compute_hash(Hash::Sha1, Kind::Blob, b"x").unwrap();
+    let mut output = oversized();
+    assert_eq!(
+        objects::loose(&raw, &id, &mut output, &mut meter())
+            .unwrap()
+            .data,
+        b"x"
+    );
+    assert!(output.capacity() <= objects::OBJECT_BUFFER);
+    let p = packed(&[b"x".to_vec()], false);
+    let index =
+        gix_pack::index::File::from_data(p.index.as_slice(), Default::default(), Hash::Sha1)
+            .unwrap();
+    let mut output = oversized();
+    assert_eq!(
+        objects::decode(
+            &p.pack,
+            &index,
+            p.offsets[0],
+            &p.ids[0],
+            &mut output,
+            &mut meter()
+        )
+        .unwrap()
+        .data,
+        b"x"
+    );
+    assert!(output.capacity() <= objects::OBJECT_BUFFER);
+}
+
+// 이것을 실패시키는 것: borrowed commit/tree parser도 오류 할당을 할 수 있다는 점을 선예약에서 누락하는 것.
+#[test]
+fn borrowed_object_parser_peaks_are_precharged() {
+    let id = ObjectId::null(Hash::Sha1);
+    let commit =
+        format!("tree {id}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nmessage\n");
+    let tree = [b"100644 entry\0".as_slice(), id.as_slice()].concat();
+    for (input, valid) in [
+        (commit.as_bytes(), true),
+        (b"tree invalid\n".as_slice(), false),
+    ] {
+        let (result, counts) = allocation::measure(|| {
+            gix_object::CommitRefIter::from_bytes(input, Hash::Sha1).tree_id()
+        });
+        assert_eq!(result.is_ok(), valid);
+        if valid {
+            assert_eq!(result.unwrap(), id);
+        }
+        assert!(counts.peak <= objects::PARSER_OVERHEAD);
+        eprintln!(
+            "C3_BORROWED commit valid={valid} peak={} reserved={}",
+            counts.peak,
+            objects::PARSER_OVERHEAD
+        );
+    }
+    for (input, valid) in [(tree.as_slice(), true), (b"bad entry\0".as_slice(), false)] {
+        let (result, counts) = allocation::measure(|| {
+            gix_object::TreeRefIter::from_bytes(input, Hash::Sha1)
+                .next()
+                .unwrap()
+        });
+        assert_eq!(result.is_ok(), valid);
+        assert!(counts.peak <= objects::PARSER_OVERHEAD);
+        eprintln!(
+            "C3_BORROWED tree valid={valid} peak={} reserved={}",
+            counts.peak,
+            objects::PARSER_OVERHEAD
+        );
+    }
 }
