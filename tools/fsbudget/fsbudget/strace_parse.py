@@ -49,6 +49,13 @@ UNKNOWN_RESUMED = re.compile(r"^<\.\.\. \?\?\? resumed>\)\s+=\s+\?$")
 SIGKILL_EXIT = "+++ killed by SIGKILL +++"
 # An fd that strace -y names: a number (also `fd=3` in a struct) or AT_FDCWD.
 FD_BEFORE_NAME = re.compile(r"(?:^|[^\w])(?:\d+|AT_FDCWD)$")
+# -yy adds one terminal device annotation inside an absolute fd path. Raw
+# angle brackets in the path itself are still escaped, as with -y.
+FD_DEVICE_NAME = re.compile(r"</[^<>]*<(?:char|block) [0-9]+:[0-9]+>>")
+# Capability masks are printed as symbolic bits, not fd names. Accept this
+# exact struct-field value, not general shifts or arbitrary angle brackets.
+CAPABILITY_FIELD = re.compile(r"(?:\{|,)\s*(?:effective|permitted|inheritable)=$")
+CAPABILITY_BITS = re.compile(r"1<<CAP_[A-Z][A-Z0-9_]*(?:\|1<<CAP_[A-Z][A-Z0-9_]*)*(?=\s*[,}])")
 # strace's value-changed annotation between input and output structs. This
 # belongs to the argument grammar, not a clone3-only syscall exception.
 STRUCT_UPDATE = re.compile(r"=>\s*(?=\{)")
@@ -64,10 +71,13 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
 
     Quoted strings (with backslash escapes, optionally followed by `...` when
     truncated) and `/* comments */` are opaque. `<...>` is an fd name and is
-    allowed only right after an fd number or AT_FDCWD; strace -y escapes `<`
-    and `>` inside it (\\74, \\76), so the first `>` closes it. Brackets must
-    nest by type. `} => {` joins input/output structs within one argument;
-    both structs are still checked. Other bare angle brackets remain errors.
+    allowed only right after an fd number or AT_FDCWD. strace escapes `<`
+    and `>` in paths (\\74, \\76); -yy can append `<char major:minor>` or
+    `<block major:minor>` inside that fd name. Capability bits have the exact
+    spelling `1<<CAP_NAME`, joined by `|` in capability struct fields.
+    Brackets must nest by type. `} => {` joins
+    input/output structs within one argument; both structs are still checked.
+    Other bare angle brackets remain errors.
 
     With until_close the scan stops at the `)` that closes the call and
     returns the index after it; otherwise the whole text must be balanced.
@@ -100,9 +110,18 @@ def scan(text: str, start: int = 0, until_close: bool = False) -> tuple[list[str
                 cur.append(update.group())
                 i = update.end()
                 continue
+        if ch == "1" and stack and stack[-1] == "{" and CAPABILITY_FIELD.search("".join(cur)):
+            if bits := CAPABILITY_BITS.match(text, i):
+                cur.append(bits.group())
+                i = bits.end()
+                continue
         if ch == "<":
             if not FD_BEFORE_NAME.search("".join(cur)):
                 raise StructureError(f"'<' not after an fd at {i}")
+            if device := FD_DEVICE_NAME.match(text, i):
+                cur.append(device.group())
+                i = device.end()
+                continue
             j = text.find(">", i + 1)
             if j < 0 or "<" in text[i + 1:j]:
                 raise StructureError(f"unterminated fd name at {i}")

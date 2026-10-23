@@ -70,7 +70,12 @@ def check_repository_trace(text: str, root: str, backend: str) -> dict:
             continue  # debug OwnedFd drop; lifetime is checked by the role gate
         if name == 'mmap' and 'MAP_ANONYMOUS' in c.args:
             continue
-        paths = re.findall(r'<(/[^>]*)>', c.args)
+        path_args = c.args
+        # -yy annotates even an unused AT_FDCWD. The fixed absolute slash
+        # open does not access that cwd; relative opens still check its name.
+        if name == 'openat' and len(args) >= 2 and args[0].split('<')[0] == 'AT_FDCWD' and args[1] == '"/"':
+            path_args = ', '.join(args[1:])
+        paths = re.findall(r'<(/[^>]*)>', path_args)
         allowed = {'/'} if active == 'probe' else {'/', *roots} if active == 'read-layer' else {root + '/worktree', root + '/worktree/HEAD'}
         assert set(paths) <= allowed, (active, 'outside selected roots', c)
         if name in {'open', 'openat', 'openat2'}:
