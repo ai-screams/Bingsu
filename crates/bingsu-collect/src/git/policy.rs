@@ -195,6 +195,7 @@ pub enum PatternKind {
 pub struct Patterns {
     ignore: gix_ignore::Search,
     attributes: gix_attributes::Search,
+    info_attributes: gix_attributes::Search,
     metadata: MetadataCollection,
     words: usize,
     retained_bytes: usize,
@@ -288,10 +289,16 @@ impl Patterns {
                     assignment.map_err(|_| INVALID)?;
                 }
             }
-            self.attributes.add_patterns_buffer(
+            let info = source == Path::new("info/attributes");
+            let search = if info {
+                &mut self.info_attributes
+            } else {
+                &mut self.attributes
+            };
+            search.add_patterns_buffer(
                 bytes,
                 source,
-                Some(Path::new("")),
+                if info { None } else { Some(Path::new("")) },
                 &mut self.metadata,
                 false,
             );
@@ -341,7 +348,13 @@ impl Patterns {
         if let Some(error) = self.failure {
             return Err(error);
         }
-        io.metered(|m| {
+        if self.words == 0 {
+            return io.account(|m| {
+                m.check()?;
+                Ok(policies.conversion)
+            });
+        }
+        io.account(|m| {
             let mut scratch = m.object_allocation();
             scratch.reserve(
                 parser_reservation(
@@ -357,6 +370,12 @@ impl Patterns {
             out.initialize_with_selection(
                 &self.metadata,
                 ["filter", "text", "eol", "ident", "working-tree-encoding"],
+            );
+            self.info_attributes.pattern_matching_relative_path(
+                relative.as_bstr(),
+                policies.names.case(),
+                Some(false),
+                &mut out,
             );
             self.attributes.pattern_matching_relative_path(
                 relative.as_bstr(),
