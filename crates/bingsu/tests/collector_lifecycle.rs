@@ -100,6 +100,46 @@ static void grow_memory(void) {
     asm volatile("" : : "r"(memory) : "memory");
     for(;;) pause();
 }
+/* Static fixtures for compiler-free preparation; checked against the Rust encoder below. */
+static const unsigned char git_0[]={
+    3,0,1,0,0,0,0,15,0,0,0,1,5,1,0,1,5,2,0,0,
+    0,4,0,0,0,109,97,105,110,3,0,0,5,4,0,1,5,5,0,0,
+    4,0,6,0,1,5,7,0,1,5,8,0,0,5,9,0,0,5,10,0,
+    0,4,1,11,0,0,0,1,0,0,0,65,12,0,1,5,13,0,1,5,
+    14,0,1,5,0,
+};
+static const unsigned char git_1[]={
+    3,0,1,0,0,0,0,15,0,0,0,1,5,1,0,1,5,2,0,0,
+    0,4,0,0,0,109,97,105,110,3,0,0,5,4,0,0,1,0,0,0,
+    0,0,5,0,0,4,0,6,0,0,4,0,7,0,0,1,0,0,0,0,
+    0,8,0,0,5,9,0,0,5,10,0,0,4,1,11,0,0,0,1,0,
+    0,0,66,12,0,0,1,0,0,0,0,0,13,0,1,5,14,0,0,1,
+    0,0,0,0,0,0,
+};
+static const unsigned char git_2[]={
+    3,0,1,0,0,0,0,15,0,0,0,0,1,0,0,0,0,0,1,0,
+    0,1,0,0,0,0,0,2,0,0,0,4,0,0,0,109,97,105,110,3,
+    0,0,5,4,0,0,1,0,0,0,0,0,5,0,0,4,0,6,0,0,
+    4,0,7,0,0,1,0,0,0,0,0,8,0,0,5,9,0,0,5,10,
+    0,0,4,1,11,0,0,0,1,0,0,0,67,12,0,0,1,0,0,0,
+    0,0,13,0,1,5,14,0,0,1,0,0,0,0,0,0,
+};
+static const unsigned char git_3[]={
+    3,0,1,0,0,0,0,15,0,0,0,0,1,0,0,0,0,0,1,0,
+    0,1,0,0,0,0,0,2,0,0,0,4,0,0,0,109,97,105,110,3,
+    0,0,5,4,0,0,1,0,0,0,0,0,5,0,0,4,0,6,0,0,
+    4,0,7,0,0,1,0,0,0,0,0,8,0,0,5,9,0,0,5,10,
+    0,0,4,0,11,0,0,0,1,0,0,0,68,12,0,0,1,0,0,0,
+    0,0,13,0,0,1,0,0,0,0,0,14,0,0,1,0,0,0,0,0,
+    0,
+};
+static const uint32_t git_lengths[]={85,106,116,121};
+static void git_stage(int stage, int partial) {
+    const unsigned char *payload[]={git_0,git_1,git_2,git_3};
+    header(5,git_lengths[stage]);
+    put(h,80);
+    put(payload[stage],git_lengths[stage]-(partial?1:0));
+}
 int main(int argc, char **argv) {
     if(argc!=2) return 30;
     alarm(2);
@@ -120,6 +160,10 @@ int main(int argc, char **argv) {
         if(sigismember(&mask,SIGALRM) || a.sa_handler!=SIG_DFL) return 34;
     }
     unsigned char ready[24]={3}; ready[11]=128;
+    if(!strncmp(mode,"git-",4)) {
+        ready[11]=0;
+        ready[8]=8;
+    }
     if(!strcmp(mode,"baseline") || !strcmp(mode,"memory")) memset(ready+16,255,8);
     if(!strcmp(mode,"drip")) {
         header(1,24);
@@ -145,6 +189,36 @@ int main(int argc, char **argv) {
         if(h[10]==4) break;
     }
     if(!strcmp(mode,"large") && body<=65536) return 38;
+    if(!strncmp(mode,"git-",4)) {
+        unsigned char progress[10]={1,1,9};
+        if(!strcmp(mode,"git-memory-before")) grow_memory();
+        if(!strcmp(mode,"git-before-exit")) return 0;
+        if(!strcmp(mode,"git-forged-progress")) {
+            frame(7,progress,sizeof(progress));
+            return 0;
+        }
+        git_stage(0,0);
+        frame(7,progress,sizeof(progress));
+        if(!strcmp(mode,"git-memory")) grow_memory();
+        if(!strcmp(mode,"git-panic")) abort();
+        if(!strcmp(mode,"git-partial")) {
+            git_stage(1,1);
+            return 0;
+        }
+        if(!strcmp(mode,"git-normal")) {
+            for(int i=1;i<4;i++) git_stage(i,0);
+            frame(6,0,0);
+            return 0;
+        }
+        if(!strcmp(mode,"git-updates") || !strcmp(mode,"git-cutoff")) {
+            for(int i=1;i<16;i++) {
+                usleep(10000);
+                int stage=!strcmp(mode,"git-cutoff")?0:(i<4?i:3);
+                git_stage(stage,0);
+            }
+        }
+        for(;;) pause();
+    }
     if(!strcmp(mode,"empty")) { frame(6,0,0); return 0; }
     unsigned char update[]={31,0,1,2,0,0,0,'o','k',0,0,0};
     if(!strcmp(mode,"first-invalid")) update[2]=2;
@@ -1620,4 +1694,739 @@ fn interrupted_poll_child() {
         "the poll syscall must actually return EINTR"
     );
     assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+// 이것을 실패시키는 것: 정적 C peer의 payload·길이가 같은 요청 binding의 Update 인코딩과 달라지는 것.
+#[test]
+fn baked_git_peer_frames_match_wire_encoding() {
+    use bingsu_core::{
+        field::{self, Field, FieldValue, Value},
+        width::WidthProfile,
+    };
+    use collection::wire::Update;
+    let mut request = request(false);
+    request.binding.mask = 1 << 3;
+    let decl = &field::BUILTIN[3];
+    let mut fields = vec![Field::PENDING; decl.fields.len()];
+    for (name, value) in [
+        ("branch", Field::text(b"main", 256, WidthProfile::DEFAULT)),
+        ("commit", Field::ABSENT),
+        ("operation", Field::ABSENT),
+        ("no_repo", Field::ABSENT),
+        ("detached", Field::known(FieldValue::Bool(false))),
+    ] {
+        fields[decl.field_index(name).unwrap()] = value;
+    }
+    let initializer = |declaration: &str| {
+        PEER.split_once(declaration)
+            .unwrap()
+            .1
+            .split_once('{')
+            .unwrap()
+            .1
+            .split_once('}')
+            .unwrap()
+            .0
+    };
+    let lengths: Vec<usize> = initializer("static const uint32_t git_lengths[]=")
+        .split(',')
+        .map(|n| n.trim().parse().unwrap())
+        .collect();
+    assert_eq!(lengths.len(), 4);
+    for (index, stage) in [b"A", b"B", b"C", b"D"].into_iter().enumerate() {
+        let names: &[&str] = match index {
+            1 => &["staged", "modified", "untracked", "conflicted"],
+            2 => &["ahead", "behind"],
+            3 => &["stash"],
+            _ => &[],
+        };
+        for name in names {
+            fields[decl.field_index(name).unwrap()] = Field::known(FieldValue::Count {
+                n: 0,
+                saturated: false,
+            });
+        }
+        if index == 1 {
+            fields[decl.field_index("filtered").unwrap()] = Field::known(FieldValue::Bool(false));
+        }
+        fields[decl.field_index("stage").unwrap()] = Field::text(stage, 1, WidthProfile::DEFAULT);
+        fields[decl.field_index("partial").unwrap()] = Field::known(FieldValue::Bool(index != 3));
+        let payload = Update {
+            segment: 3,
+            value: Some(Value::new(b"", fields.clone())),
+            facts: None,
+        }
+        .encode(&request.binding)
+        .unwrap();
+        let baked: Vec<u8> = initializer(&format!("static const unsigned char git_{index}[]="))
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert_eq!(payload, baked, "stage {index} payload");
+        assert_eq!(payload.len(), lengths[index], "stage {index} length");
+    }
+}
+
+fn git_peer(
+    mode: &str,
+    generous: bool,
+) -> (
+    SupervisionReport,
+    Vec<collection::response::Completed>,
+    Vec<(u64, u64, u64)>,
+) {
+    let exe = peer();
+    let watchdog = helper_limits::start(Instant::now()).unwrap();
+    let mut request = request(false);
+    request.binding.mask = 1 << 3;
+    let (front, mut store) = D3FrontHarness::prepare(&request);
+    let worker_lock = store.worker_lock().unwrap();
+    let job = CollectorJob::fixture_timed(
+        exe.as_os_str(),
+        OsStr::new(mode),
+        request,
+        worker_lock,
+        &watchdog,
+        bingsu_core::field::BUILTIN,
+        generous.then_some((800_000_000, 800_000_000)),
+    )
+    .unwrap();
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let saved = values.clone();
+    let handle = job
+        .start(Box::new(move |completed| {
+            store.publish(&completed)?;
+            saved.lock().unwrap().push(completed);
+            Ok(())
+        }))
+        .unwrap();
+    handle.confirm_confinement().unwrap();
+    let report = handle.finish();
+    // Observe termination before publication reads/rendering can add latency.
+    let reaped_ns = collector_process::now_ns().unwrap();
+    if !generous && matches!(mode, "git-cutoff" | "git-updates") {
+        assert_git_request_cutoff(&report, reaped_ns);
+    }
+    let values = values.lock().unwrap().clone();
+    let saved_response = front.read_saved();
+    assert_eq!(saved_response.as_ref(), values.first());
+    let rendered = front.render_now();
+    assert!(rendered.response.record.starts_with(b"B1"));
+    assert_eq!(
+        rendered.response.status,
+        bingsu_core::status::Status::OK_NONE
+    );
+    assert!(String::from_utf8_lossy(&rendered.response.record).contains("D3-BEGIN"));
+    assert!(String::from_utf8_lossy(&rendered.response.record).contains("D3-END"));
+    if let Some(saved) = &saved_response {
+        assert!(rendered.collection_reads > 0);
+        assert_eq!(rendered.collection_bytes, saved.encode().unwrap().len());
+        let different = front.render(
+            b"/different-binding",
+            commands::collector_supervisor::fixture_clock().unwrap(),
+        );
+        assert_eq!(different.collection_bytes, 0);
+    } else {
+        assert_eq!(rendered.collection_reads, 0);
+    }
+    #[cfg(target_os = "macos")]
+    let observations = watchdog.observations.lock().unwrap().clone();
+    #[cfg(not(target_os = "macos"))]
+    let observations = Vec::new();
+    (report, values, observations)
+}
+fn assert_git_request_cutoff(report: &SupervisionReport, reaped_ns: u64) {
+    if let Some(ready) = report.lifecycle.ready {
+        assert_eq!(report.lifecycle.request_deadline, Some(ready + 50_000_000));
+        // 50ms request + 50ms scheduling/reaping margin. Count is an independent
+        // guard even when the host pauses the supervisor near this time bound.
+        let elapsed = reaped_ns - ready;
+        let updates = report.frames.saturating_sub(
+            1 + u16::from(report.progress.stage_a_complete), // Ready + Progress
+        );
+        eprintln!("D3 cutoff: ready_to_reaped_ns={elapsed} updates={updates}");
+        assert!(
+            updates <= 6,
+            "10ms peer exceeded six Updates before cutoff: {updates}, {report:?}"
+        );
+        assert!(
+            elapsed <= 100_000_000,
+            "termination exceeded Ready + 50ms + 50ms margin: {elapsed}ns, {report:?}"
+        );
+    }
+}
+
+fn git_field<'a>(
+    value: &'a collection::response::Completed,
+    name: &str,
+) -> &'a bingsu_core::field::Field {
+    let index = bingsu_core::field::BUILTIN[3].field_index(name).unwrap();
+    &value.updates[0].value.as_ref().unwrap().fields[index]
+}
+fn assert_git_a(value: &collection::response::Completed) {
+    use bingsu_core::{field::Field, width::WidthProfile};
+    assert_eq!(
+        git_field(value, "stage"),
+        &Field::text(b"A", 1, WidthProfile::DEFAULT)
+    );
+    assert_eq!(
+        git_field(value, "branch"),
+        &Field::text(b"main", 256, WidthProfile::DEFAULT)
+    );
+    assert_eq!(git_field(value, "staged"), &Field::PENDING);
+    assert!(value.progress.stage_a_complete);
+}
+
+// 이것을 실패시키는 것: helper 마감에서 검증된 A를 버리거나 Update마다 50ms를 다시 줌.
+#[test]
+fn x08_stage_a_survives_fifty_ms_cutoff() {
+    let _guard = commands::sys::test_inherited_fd_lock();
+    let mut observed_a = false;
+    // Product deadline: loaded hosts may terminate before A. Those attempts
+    // must remain unpublished; at least one attempt must exercise preservation.
+    for _ in 0..8 {
+        let (report, values, _) = git_peer("git-cutoff", false);
+        assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
+        assert!(report.kill_requested && report.reaped);
+        if let (Some(start), Some(end)) =
+            (report.lifecycle.ready, report.lifecycle.request_deadline)
+        {
+            assert_eq!(end - start, 50_000_000);
+        }
+        if let Some(value) = values.first() {
+            assert_eq!(
+                git_field(value, "branch"),
+                &bingsu_core::field::Field::text(
+                    b"main",
+                    256,
+                    bingsu_core::width::WidthProfile::DEFAULT
+                )
+            );
+            assert_eq!(
+                git_field(value, "staged"),
+                &bingsu_core::field::Field::PENDING
+            );
+            assert_eq!(report.progress, value.progress);
+            observed_a = true;
+            break;
+        }
+        assert!(!report.progress.stage_a_complete);
+    }
+    assert!(
+        observed_a,
+        "no attempt reached A under the product deadline"
+    );
+}
+
+// 이것을 실패시키는 것: 지속적인 정상 Update에 따라 helper/watchdog 마감을 연장.
+#[test]
+fn stage_updates_do_not_extend_deadline() {
+    let _guard = commands::sys::test_inherited_fd_lock();
+    let (report, values, _) = git_peer("git-updates", false);
+    assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
+    assert!(report.kill_requested && report.reaped);
+    if let (Some(start), Some(end)) = (report.lifecycle.ready, report.lifecycle.request_deadline) {
+        assert_eq!(end - start, 50_000_000);
+    }
+    // The exact count depends on scheduling; git_peer bounds it at six Updates
+    // and checks termination within Ready + 50ms + a 50ms scheduling margin.
+    if let Some(value) = values.first() {
+        assert_eq!(value.reason, EndReason::Deadline);
+    }
+}
+
+// 이것을 실패시키는 것: 잘린 B·panic으로 A를 교체하거나 검증 전 Progress를 성공으로 기록.
+#[test]
+fn git_stream_failures_preserve_only_validated_stages() {
+    let _guard = commands::sys::test_inherited_fd_lock();
+    for mode in [
+        "git-partial",
+        "git-panic",
+        "git-forged-progress",
+        "git-before-exit",
+        "git-normal",
+    ] {
+        let (report, values, _) = git_peer(mode, true);
+        assert!(report.reaped, "{mode}: {report:?}");
+        if matches!(mode, "git-forged-progress" | "git-before-exit") {
+            assert_eq!(report.reason, EndReason::Protocol);
+            assert!(values.is_empty());
+            assert!(!report.progress.stage_a_complete);
+        } else if mode == "git-normal" {
+            assert_eq!(report.reason, EndReason::Complete);
+            assert_eq!(values.len(), 1);
+            assert_eq!(report.frames, 7); // Ready + 4 updates + Progress + Complete.
+            assert!(report.progress.stage_a_complete);
+        } else {
+            assert_eq!(report.reason, EndReason::Protocol);
+            assert_eq!(values.len(), 1);
+            assert_git_a(&values[0]);
+            assert!(report.progress.stage_a_complete);
+        }
+    }
+}
+
+// 이것을 실패시키는 것: 실제 footprint 초과를 놓치거나 첫 Update 전 실패를 앞단 실패로 전파.
+#[cfg(target_os = "macos")]
+#[test]
+fn git_memory_limits_preserve_front() {
+    let _guard = commands::sys::test_inherited_fd_lock();
+    for mode in ["git-memory", "git-memory-before"] {
+        let (report, values, observations) = git_peer(mode, true);
+        assert_eq!(report.reason, EndReason::Resource, "{report:?}");
+        assert!(report.kill_requested && report.reaped);
+        if mode == "git-memory" {
+            assert_eq!(values.len(), 1);
+            assert_git_a(&values[0]);
+        } else {
+            assert!(values.is_empty());
+            assert!(!report.progress.stage_a_complete);
+        }
+        let first = observations
+            .iter()
+            .find(|sample| sample.1 > 0)
+            .expect("real overlimit sample");
+        assert!(first.2 >= first.0);
+        eprintln!(
+            "D3 {mode}: overshoot_bytes={} sample_to_kill_ns={}",
+            first.1,
+            first.2 - first.0
+        );
+    }
+}
+
+// Test-owned publication -> real filesystem -> front continuation harness.
+// This uses the shipped core reader/renderer with an explicit test catalog.
+// It does not exercise prompt_read.rs's private prefetch executor or enable the
+// shipped PRODUCT mask. Builtin Git rendering remains disabled until E2; this
+// checks exact stored Git evidence and normal front reads/output independently.
+// All filesystem facts below come from the retained fd.
+struct D3FrontHarness {
+    runtime: std::path::PathBuf,
+    binding: bingsu_core::collection::wire::Binding,
+    config: bingsu_core::config::compile::CompiledConfig,
+}
+
+struct D3FrontRead {
+    response: bingsu_core::front::staged::Response,
+    collection_reads: usize,
+    collection_bytes: usize,
+}
+
+impl D3FrontHarness {
+    fn prepare(
+        request: &bingsu_core::collection::wire::Request,
+    ) -> (Self, commands::collection_store::CollectionStore) {
+        use bingsu_core::{
+            collection::selection::Catalog,
+            color::palette::Mode,
+            config::{
+                compile::BUILTIN_TOML,
+                report::report,
+                source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust},
+            },
+            snapshot::{self, Marker, Snapshot},
+        };
+        use std::os::{fd::AsFd, unix::fs::PermissionsExt};
+
+        struct NoSources;
+        impl Resolver for NoSources {
+            fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
+                panic!("D3 builtin fixture has no config includes")
+            }
+        }
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let runtime = std::env::temp_dir().join(format!(
+            "bingsu-d3-front-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = runtime.canonicalize().unwrap();
+        let root = std::fs::File::open(&runtime).unwrap();
+        let binding = request.binding.clone();
+        // These lifecycle fixtures intentionally use no home/unique request.
+        assert_eq!(binding.path_query, Default::default());
+        assert_eq!(binding.mask, 1 << 3);
+        let context = commands::snapshot_store::CheckedContextFd::under_runtime(
+            &root,
+            &binding.config,
+            &binding.state,
+            commands::sys::current_uid(),
+            true,
+        )
+        .unwrap();
+        let context_fd = commands::snapshot_store::context_dir_for_test(&context);
+        let clock = commands::collector_supervisor::fixture_clock().unwrap();
+        let mut config = report(
+            vec![Opened {
+                key: FileKey { dev: 1, ino: 1 },
+                bytes: BUILTIN_TOML.as_bytes().to_vec(),
+                trust: Trust::Executable,
+                display: vec![],
+            }],
+            &mut NoSources,
+            [0, 3, 0],
+            Mode::Dark,
+        )
+        .snapshot
+        .unwrap();
+        let snapshot = Snapshot {
+            id: binding.snapshot,
+            config: config.clone(),
+            metadata: snapshot::encode_metadata(b"D3 fixture").unwrap(),
+        };
+        config.bands.clear();
+        config.band_order.clear();
+        config.collect_mask = 1 << 3;
+        config.variants = vec![
+            bingsu_core::template::compile::compile(
+                "D3-BEGIN {git.branch} | {git.staged} D3-END",
+                bingsu_core::field::BUILTIN,
+            )
+            .unwrap(),
+        ];
+        let marker = Marker {
+            id: binding.snapshot,
+            seq: 1,
+            verified_at: clock.now,
+            kind: binding.clock_kind,
+            domain: binding.domain,
+            resume: binding.resume,
+            invalid: false,
+        };
+        // Fixture setup only. Publication under test is CollectionStore::publish.
+        let context_path = snapshot::context_components(&binding.config, &binding.state)
+            .unwrap()
+            .into_iter()
+            .fold(runtime.clone(), |path, name| path.join(name));
+        for (name, bytes) in [
+            (
+                "snapshot",
+                snapshot.encode(binding.clock_kind, binding.resume).unwrap(),
+            ),
+            ("marker", marker.encode().to_vec()),
+        ] {
+            let path = context_path.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        // Confirm the filesystem fixture is accessible through the same checked
+        // context capability subsequently given to the publication store.
+        commands::sys::open_data_at_nofollow(context_fd.as_fd(), std::ffi::OsStr::new("snapshot"))
+            .unwrap();
+        let catalog = Catalog {
+            segments: bingsu_core::field::BUILTIN,
+            workers: 1 << 3,
+        };
+        let store = commands::collection_store::CollectionStore::fixture(
+            &context,
+            &binding,
+            clock,
+            catalog.segments,
+            None,
+        )
+        .unwrap();
+        (
+            Self {
+                runtime,
+                binding,
+                config,
+            },
+            store,
+        )
+    }
+
+    fn read_saved(&self) -> Option<bingsu_core::collection::response::Completed> {
+        use std::os::fd::AsFd;
+        let root = std::fs::File::open(&self.runtime).unwrap();
+        let context = commands::snapshot_store::CheckedContextFd::under_runtime(
+            &root,
+            &self.binding.config,
+            &self.binding.state,
+            commands::sys::current_uid(),
+            false,
+        )
+        .unwrap();
+        let mut dir = commands::snapshot_store::context_dir_for_test(&context);
+        let address = bingsu_core::collection::cwd_hash::address(&self.binding.cwd);
+        for name in ["collections-v1", address.as_str(), "store"] {
+            dir = commands::sys::open_dir_at_nofollow(dir.as_fd(), std::ffi::OsStr::new(name))
+                .unwrap();
+        }
+        let (_, bytes) = commands::collection_store::read_checked(
+            &dir,
+            "response",
+            bingsu_core::collection::wire::STREAM_MAX,
+            commands::sys::current_uid(),
+        )
+        .unwrap()?;
+        let completed = bingsu_core::collection::response::Completed::decode(&bytes).unwrap();
+        assert!(completed.binding.matches(&self.binding));
+        Some(completed)
+    }
+
+    fn render_now(&self) -> D3FrontRead {
+        self.render(
+            &self.binding.cwd,
+            commands::collector_supervisor::fixture_clock().unwrap(),
+        )
+    }
+
+    fn render(&self, cwd: &[u8], entry: bingsu_core::snapshot::Clock) -> D3FrontRead {
+        use bingsu_core::{
+            collection::{selection::Catalog, wire::STREAM_MAX},
+            front::staged::{self, FdFacts, Observation, Operation, Slot, Step},
+        };
+        use std::{
+            ffi::OsStr,
+            fs::File,
+            io::{Read, Seek},
+            os::{
+                fd::{AsFd, AsRawFd},
+                unix::{ffi::OsStrExt, fs::MetadataExt},
+            },
+        };
+        let facts = |file: &File| -> std::io::Result<FdFacts> {
+            let metadata = file.metadata()?;
+            Ok(FdFacts {
+                entry: commands::sys::fd_facts(file.as_fd())?,
+                local: commands::sys::fd_is_local(file.as_raw_fd()),
+                nlink: metadata.nlink(),
+                size: metadata.len(),
+            })
+        };
+        let metadata = self.runtime.metadata().unwrap();
+        let mut runtime_arg =
+            format!("--runtime-root={}:{}:", metadata.dev(), metadata.ino()).into_bytes();
+        runtime_arg.extend(self.runtime.as_os_str().as_bytes());
+        let mut args: Vec<Vec<u8>> = [
+            "--ctx", "1", "--record", "B1", "--width", "160", "--shell", "bash",
+        ]
+        .into_iter()
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
+        args.push(runtime_arg);
+        args.push([b"--config-root=", self.binding.config.as_slice()].concat());
+        args.push([b"--state-root=", self.binding.state.as_slice()].concat());
+        args.push(b"--pwd".to_vec());
+        args.push(cwd.to_vec());
+        let raw = args.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let mut plan = staged::prepare(&raw)
+            .with_entry(entry)
+            .with_build_id(self.binding.build_id)
+            .with_catalog(
+                Catalog {
+                    segments: bingsu_core::field::BUILTIN,
+                    workers: 1 << 3,
+                },
+                self.config.clone(),
+            );
+        let mut slots: [Option<File>; 3] = std::array::from_fn(|_| None);
+        let mut collections: [Option<File>; 2] = std::array::from_fn(|_| None);
+        let mut previous = None;
+        let mut reading_collection = false;
+        let mut collection_reads = 0;
+        let mut collection_bytes = 0;
+        for _ in 0..20_000 {
+            let effect = match staged::next(&mut plan, previous.take()) {
+                Step::Done(observed) => {
+                    return D3FrontRead {
+                        response: staged::finish(plan, observed),
+                        collection_reads,
+                        collection_bytes,
+                    };
+                }
+                Step::Read(effect) => effect,
+            };
+            if let Some(prefetch) = plan.prefetch(&effect) {
+                let opened = (|| -> Option<File> {
+                    let mut dir = slots[prefetch.parent().index()]
+                        .as_ref()?
+                        .try_clone()
+                        .ok()?;
+                    for name in prefetch.collection_components()? {
+                        dir = commands::sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name))
+                            .ok()?;
+                        if !prefetch.accepts_collection_directory(facts(&dir).ok()?) {
+                            return None;
+                        }
+                    }
+                    Some(dir)
+                })();
+                if let Some(dir) = opened {
+                    for (index, name) in ["response", "previous"].into_iter().enumerate() {
+                        collections[index] = commands::collection_store::read_checked(
+                            &dir,
+                            name,
+                            STREAM_MAX,
+                            commands::sys::current_uid(),
+                        )
+                        .ok()
+                        .flatten()
+                        .and_then(|(mut file, _bytes)| {
+                            if !prefetch.accepts_collection(facts(&file).ok()?) {
+                                return None;
+                            }
+                            file.rewind().ok()?;
+                            Some(file)
+                        });
+                    }
+                }
+            }
+            previous = Some(match effect.operation() {
+                Operation::Uid => Observation::Uid(commands::sys::current_uid()),
+                Operation::Clock => {
+                    Observation::Clock(commands::collector_supervisor::fixture_clock().ok())
+                }
+                Operation::OpenDirectory { parent, name, into } => {
+                    let opened = match parent {
+                        None => File::open(OsStr::from_bytes(name)),
+                        Some(parent) => commands::sys::open_dir_at_nofollow(
+                            slots[parent.index()].as_ref().unwrap().as_fd(),
+                            OsStr::from_bytes(name),
+                        ),
+                    };
+                    match opened {
+                        Ok(file) => {
+                            assert!(slots[into.index()].replace(file).is_none());
+                            Observation::Opened
+                        }
+                        Err(_) => Observation::Failed,
+                    }
+                }
+                Operation::OpenFile { parent, name, into } => {
+                    reading_collection = false;
+                    match commands::sys::open_data_at_nofollow(
+                        slots[parent.index()].as_ref().unwrap().as_fd(),
+                        OsStr::from_bytes(name),
+                    ) {
+                        Ok(file) => {
+                            assert!(slots[into.index()].replace(file).is_none());
+                            Observation::Opened
+                        }
+                        Err(_) => Observation::Failed,
+                    }
+                }
+                Operation::OpenCollection(copy) => match collections[copy.index()].take() {
+                    Some(file) => {
+                        reading_collection = true;
+                        assert!(slots[Slot::File.index()].replace(file).is_none());
+                        Observation::Opened
+                    }
+                    None => Observation::Failed,
+                },
+                Operation::Inspect(slot) => match facts(slots[slot.index()].as_ref().unwrap()) {
+                    Ok(facts) => Observation::Facts(facts),
+                    Err(_) => Observation::Failed,
+                },
+                Operation::Read { slot, len } => {
+                    let mut bytes = vec![0; *len];
+                    match slots[slot.index()].as_mut().unwrap().read(&mut bytes) {
+                        Ok(n) => {
+                            if reading_collection {
+                                collection_reads += 1;
+                                collection_bytes += n;
+                            }
+                            bytes.truncate(n);
+                            Observation::Bytes(bytes)
+                        }
+                        Err(_) => Observation::Failed,
+                    }
+                }
+                Operation::Close(slot) => {
+                    drop(slots[slot.index()].take());
+                    Observation::Closed
+                }
+            });
+        }
+        panic!("D3 front continuation did not terminate")
+    }
+}
+
+impl Drop for D3FrontHarness {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.runtime);
+    }
+}
+
+#[test]
+#[ignore = "release 200-run supervisor/wire/publication observations, not Git computation"]
+fn release_git_lifecycle_observations() {
+    let _guard = commands::sys::test_inherited_fd_lock();
+    peer();
+    let mut ready = Vec::new();
+    let mut exchange = Vec::new();
+    let mut exit = Vec::new();
+    let mut complete = 0;
+    for iteration in 0..201 {
+        let (report, _, _) = git_peer("git-normal", false);
+        if report.reason == EndReason::Complete {
+            complete += usize::from(iteration > 0);
+        }
+        let life = report.lifecycle;
+        let values = [
+            life.ready
+                .zip(life.spawn_enter)
+                .map(|(end, start)| u128::from(end.saturating_sub(start))),
+            life.completed
+                .zip(life.request_sent)
+                .map(|(end, start)| u128::from(end.saturating_sub(start))),
+            life.lock_closed
+                .zip(life.spawn_enter)
+                .map(|(end, start)| u128::from(end.saturating_sub(start))),
+        ];
+        if iteration == 0 {
+            println!("D3_LIFECYCLE cold_ready_exchange_exit_ns={values:?}");
+        } else {
+            if let Some(n) = values[0] {
+                ready.push(n);
+            }
+            if let Some(n) = values[1] {
+                exchange.push(n);
+            }
+            if let Some(n) = values[2] {
+                exit.push(n);
+            }
+        }
+    }
+    println!("D3_LIFECYCLE_RAW ready_ns={ready:?} exchange_ns={exchange:?} exit_ns={exit:?}");
+    distribution("D3 Ready ns", &mut ready);
+    distribution("D3 request-to-Complete ns (wire peer)", &mut exchange);
+    distribution("D3 spawn-to-lock-close ns", &mut exit);
+    println!("D3_LIFECYCLE complete={complete}/200");
+
+    let (_, completed, _) = git_peer("git-normal", true);
+    let mut request = request(false);
+    request.binding.mask = 1 << 3;
+    let (front, mut store) = D3FrontHarness::prepare(&request);
+    store.publish(&completed[0]).unwrap();
+    let mut reads = Vec::new();
+    let mut renders = Vec::new();
+    for iteration in 0..201 {
+        let start = Instant::now();
+        let saved = front.read_saved().unwrap();
+        let read_ns = start.elapsed().as_nanos();
+        assert_eq!(saved, completed[0]);
+        let start = Instant::now();
+        let rendered = front.render_now();
+        let render_ns = start.elapsed().as_nanos();
+        assert_eq!(
+            rendered.response.status,
+            bingsu_core::status::Status::OK_NONE
+        );
+        assert!(rendered.collection_reads > 0);
+        if iteration == 0 {
+            println!("D3_FRONT cold_read_render_ns=[{read_ns},{render_ns}]");
+        } else {
+            reads.push(read_ns);
+            renders.push(render_ns);
+        }
+    }
+    println!("D3_FRONT raw_read_ns={reads:?} raw_render_ns={renders:?}");
+    distribution("D3 saved response read ns", &mut reads);
+    distribution("D3 staged front render ns", &mut renders);
 }

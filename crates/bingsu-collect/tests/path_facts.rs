@@ -513,6 +513,8 @@ fn deadlines() -> git::StageDeadlines {
         a_ms: 60_000,
         path_ms: 60_000,
         b_ms: 60_000,
+        c_ms: 60_000,
+        d_ms: 60_000,
     }
 }
 
@@ -692,6 +694,21 @@ fn assert_gitfile_fd_budget(r: &Request, partial: bool) {
         } else {
             bingsu_core::field::Field::text(branch.as_bytes(), 256, WidthProfile::DEFAULT)
         }
+    );
+    assert_eq!(
+        sink.updates.iter().map(|u| u.segment).collect::<Vec<_>>(),
+        [3, 1, 3, 3, 3]
+    );
+    assert_eq!(
+        sink.updates
+            .iter()
+            .filter_map(|u| u.value.as_ref())
+            .map(|v| v.fields[bingsu_core::field::BUILTIN[3].field_index("stage").unwrap()].clone())
+            .collect::<Vec<_>>(),
+        [b"A", b"B", b"C", b"D"]
+            .into_iter()
+            .map(|stage| bingsu_core::field::Field::text(stage, 1, WidthProfile::DEFAULT))
+            .collect::<Vec<_>>()
     );
     assert_eq!(sink.updates[1].facts.as_ref(), Some(&facts));
     assert!(sink.progress[0].stage_a_complete);
@@ -932,8 +949,8 @@ fn discovery_drop_releases_every_unselected_ancestor() {
 
 // Dir-only still publishes valid completion evidence; no object/config preflight.
 #[test]
-fn dir_only_shares_discovery_and_deadline_returns_pending() {
-    if !isolated("dir_only_shares_discovery_and_deadline_returns_pending") {
+fn dir_only_shares_discovery_and_publishes_progress() {
+    if !isolated("dir_only_shares_discovery_and_publishes_progress") {
         return;
     }
     let f = Fixture::new();
@@ -949,16 +966,15 @@ fn dir_only_shares_discovery_and_deadline_returns_pending() {
         updates: vec![],
         progress: vec![],
     };
-    let mut limits = deadlines();
-    limits.path_ms = 0;
+    let limits = deadlines();
     assert_eq!(git::StageDeadlines::PRODUCT.path_ms, 3);
     git::collect_with_deadlines(&r, &mut sink, m, Access::stage_a_only(), limits).unwrap();
     assert_eq!(sink.updates.len(), 1);
     assert_eq!(sink.updates[0].segment, 1);
     let facts = sink.updates[0].facts.as_ref().unwrap();
-    assert!(facts.partial);
-    assert_eq!(facts.readonly, None);
-    assert!(facts.siblings.is_empty());
+    assert!(!facts.partial);
+    assert_eq!(facts.readonly, Some(false));
+    assert_eq!(facts.siblings.len(), 1);
     assert_eq!(facts.in_repo, Some(true));
     assert!(sink.progress[0].stage_a_complete);
     assert!(

@@ -42,6 +42,7 @@ pub(crate) struct CollectorRegistration {
     expires_ns: Arc<AtomicU64>,
     reason: Arc<AtomicU8>,
     wake: mpsc::Sender<()>,
+    request_started: bool,
 }
 impl CollectorRegistration {
     pub fn reason(&self) -> Option<bingsu_core::collection::wire::EndReason> {
@@ -52,9 +53,15 @@ impl CollectorRegistration {
             _ => None,
         }
     }
-    pub fn set_deadline(&self, deadline: u64) {
+    /// The sole Ready -> request transition. Updates/Progress cannot rearm it.
+    pub fn begin_request(&mut self, deadline: u64) -> io::Result<()> {
+        if self.request_started {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.request_started = true;
         self.expires_ns.store(deadline, Ordering::Release);
         let _ = self.wake.send(());
+        Ok(())
     }
 }
 impl Drop for CollectorRegistration {
@@ -99,6 +106,7 @@ impl Watchdog {
             expires_ns,
             reason,
             wake: self.stop.clone(),
+            request_started: false,
         };
         let _ = self.stop.send(());
         Ok(registration)
@@ -352,6 +360,24 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
+    // 이것을 실패시키는 것: Update마다 request 마감을 다시 설정하도록 허용.
+    #[test]
+    fn request_deadline_can_only_be_armed_once() {
+        let (wake, _receiver) = mpsc::channel();
+        let mut registration = CollectorRegistration {
+            collector: Arc::default(),
+            expires_ns: Arc::new(AtomicU64::new(100)),
+            reason: Arc::new(AtomicU8::new(0)),
+            wake,
+            request_started: false,
+        };
+        registration.begin_request(50).unwrap();
+        assert_eq!(
+            registration.begin_request(500).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(registration.expires_ns.load(Ordering::Acquire), 50);
+    }
     // 이것을 실패시키는 것: 표본 오류를 무시하거나 초과 경계/2ms 대기 상한을 바꾸는 것.
     #[cfg(target_os = "macos")]
     #[test]

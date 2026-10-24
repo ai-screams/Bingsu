@@ -48,6 +48,8 @@ pub(crate) struct CollectorJob {
     fixture_clock: bool,
     #[cfg(test)]
     ready_ns: Option<u64>,
+    #[cfg(test)]
+    fixture_allowances: Option<(u64, u64)>,
 }
 
 /// Helper-local monotonic observations, never timestamps subtracted across processes.
@@ -79,6 +81,7 @@ pub(crate) struct SupervisionReport {
     pub reaped: bool,
     pub published: bool,
     pub lifecycle: Lifecycle,
+    pub progress: wire::Progress,
     #[cfg(test)]
     pub unconfined_reads: u32,
     #[cfg(test)]
@@ -127,12 +130,29 @@ impl CollectorJob {
         watchdog: &Watchdog,
         catalog: &'static [SegmentDecl],
     ) -> io::Result<Self> {
+        Self::fixture_timed(exe, mode, request, lock, watchdog, catalog, None)
+    }
+
+    /// Inject before spawning/registering, so semantic tests never enter the
+    /// production 100ms Ready window. Product deadline tests pass None.
+    #[cfg(test)]
+    #[allow(dead_code, reason = "native stage stream integration")]
+    pub(crate) fn fixture_timed(
+        exe: &std::ffi::OsStr,
+        mode: &std::ffi::OsStr,
+        request: Request,
+        lock: File,
+        watchdog: &Watchdog,
+        catalog: &'static [SegmentDecl],
+        allowances: Option<(u64, u64)>,
+    ) -> io::Result<Self> {
         let mut job = Self::launch(
             request,
             lock,
             watchdog,
             now_ns()?,
             catalog,
+            allowances,
             |read, write, lock, deadline| {
                 collector_process::spawn_args(exe, &[mode], read, write, lock, deadline)
             },
@@ -155,6 +175,8 @@ impl CollectorJob {
             watchdog,
             started_ns,
             PRODUCT.segments,
+            #[cfg(test)]
+            None,
             |read, write, lock, deadline| {
                 collector_process::spawn(exe, read, write, lock, deadline, probe)
             },
@@ -167,9 +189,14 @@ impl CollectorJob {
         watchdog: &Watchdog,
         started_ns: u64,
         catalog: &'static [SegmentDecl],
+        #[cfg(test)] fixture_allowances: Option<(u64, u64)>,
         spawn: impl FnOnce(&File, &File, &File, u64) -> io::Result<OwnedChild>,
     ) -> io::Result<Self> {
         let (ready_ns, life_ns) = deadlines(started_ns, watchdog.expires_ns());
+        #[cfg(test)]
+        let ready_ns = fixture_allowances.map_or(ready_ns, |(ready, _)| {
+            started_ns.saturating_add(ready).min(life_ns)
+        });
         if now_ns()? >= life_ns {
             return Err(io::Error::other("collector lifetime"));
         }
@@ -204,6 +231,8 @@ impl CollectorJob {
             fixture_clock: false,
             #[cfg(test)]
             ready_ns: None,
+            #[cfg(test)]
+            fixture_allowances,
         })
     }
 
@@ -249,6 +278,7 @@ impl CollectorJob {
             reaped: false,
             published: false,
             lifecycle: self.lifecycle.clone(),
+            progress: wire::Progress::default(),
             #[cfg(test)]
             unconfined_reads: 0,
             #[cfg(test)]
@@ -355,6 +385,10 @@ impl CollectorJob {
         // hostile pipe until both limits and the synchronized filter are live.
         // Waiting consumes the original spawn-to-Ready budget.
         let mut deadline = deadlines(self.started_ns, self.helper_ns).0;
+        #[cfg(test)]
+        if let Some((ready, _)) = self.fixture_allowances {
+            deadline = self.started_ns.saturating_add(ready).min(self.life_ns);
+        }
         let mut permission = barrier.state.lock().unwrap_or_else(|e| e.into_inner());
         while *permission == Permission::Pending {
             let Ok(now) = now_ns() else {
@@ -460,6 +494,12 @@ impl CollectorJob {
                         if transcript.accept(frame).is_err() {
                             return EndReason::Protocol;
                         }
+                        // Success is only the codec-validated transition after
+                        // A evidence, never receipt of an arbitrary frame.
+                        if frame.kind == Kind::Progress {
+                            report.progress =
+                                wire::Progress::decode(frame.payload).expect("validated Progress");
+                        }
                         complete = frame.kind == Kind::Complete;
                         if complete {
                             report.lifecycle.completed = now_ns().ok();
@@ -489,9 +529,15 @@ impl CollectorJob {
                             deadline = start
                                 .saturating_add(u64::from(budget) * 1_000_000)
                                 .min(self.life_ns);
+                            #[cfg(test)]
+                            if let Some((_, request)) = self.fixture_allowances {
+                                deadline = start.saturating_add(request).min(self.life_ns);
+                            }
                             // The watchdog starts with Ready's tighter bound;
                             // after Ready its bound becomes the request end.
-                            self.registration.set_deadline(deadline);
+                            if self.registration.begin_request(deadline).is_err() {
+                                return EndReason::Protocol;
+                            }
                             report.lifecycle.request_deadline = Some(deadline);
                             let Ok(bytes) = request_bytes(&self.request, &mut buffer) else {
                                 return EndReason::Protocol;
@@ -652,6 +698,7 @@ impl SupervisorHandle {
             .unwrap()
             .join()
             .unwrap_or_else(|_| SupervisionReport {
+                progress: wire::Progress::default(),
                 reason: EndReason::Resource,
                 bytes: 0,
                 frames: 0,
