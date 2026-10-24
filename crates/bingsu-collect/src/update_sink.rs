@@ -1,6 +1,7 @@
 //! Immediate, bounded response writes. The receiver's codec is also the
 //! sender's policy: no separate ordering, frame, stream or storage counters.
 use std::io;
+use std::{cell::Cell, time::Instant};
 
 use bingsu_core::{
     collection::wire::{self, Frame, Kind, Progress, Request, Transcript, Update},
@@ -12,6 +13,7 @@ use bingsu_core::{
     reason = "product collection stays disabled until stage integration"
 )]
 pub(crate) trait UpdateSink {
+    fn stage_deadline(&mut self, _deadline: Instant) {}
     fn update(&mut self, value: Update) -> io::Result<()>;
     fn progress(&mut self, value: Progress) -> io::Result<()>;
 }
@@ -22,6 +24,8 @@ pub(crate) struct WireSink<'a> {
     buffer: &'a mut [u8; wire::FRAME_MAX],
     write: &'a mut dyn FnMut(&[u8]) -> io::Result<()>,
     stopped: bool,
+    deadline: Option<Instant>,
+    write_deadline: Option<&'a Cell<Instant>>,
 }
 
 impl<'a> WireSink<'a> {
@@ -50,7 +54,19 @@ impl<'a> WireSink<'a> {
             buffer,
             write,
             stopped: false,
+            deadline: None,
+            write_deadline: None,
         })
+    }
+
+    /// The worker's short-write loop observes the same stage boundary. The
+    /// request deadline remains a separate, immutable upper bound there.
+    #[allow(
+        dead_code,
+        reason = "codec-only integration targets omit worker pipe IO"
+    )]
+    pub(crate) fn attach_write_deadline(&mut self, deadline: &'a Cell<Instant>) {
+        self.write_deadline = Some(deadline);
     }
 
     /// Only the exchange owner completes a successful callback. A callback
@@ -80,6 +96,12 @@ impl<'a> WireSink<'a> {
         };
         let n = wire::encode_frame(frame, self.buffer).map_err(protocol)?;
         self.transcript.accept(frame).map_err(protocol)?;
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         (self.write)(&self.buffer[..n])?;
         self.stopped = kind == Kind::Complete;
         Ok(())
@@ -94,6 +116,12 @@ impl<'a> WireSink<'a> {
 }
 
 impl UpdateSink for WireSink<'_> {
+    fn stage_deadline(&mut self, deadline: Instant) {
+        self.deadline = Some(deadline);
+        if let Some(write_deadline) = self.write_deadline {
+            write_deadline.set(deadline);
+        }
+    }
     fn update(&mut self, value: Update) -> io::Result<()> {
         self.active()?;
         self.stopped = true;

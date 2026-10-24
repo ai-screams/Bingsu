@@ -45,7 +45,9 @@ pub fn preflight(roots: &RepoRoots, meter: &mut Meter) -> Result<GitAccess, Coll
     }
     meter.event("preflight_start");
     // RepoIo borrows a RefCell; move and restore the SAME meter and its live
-    // accounting, including failures. No second request budget is created.
+    // accounting on normal Ok/Err returns. An unwind drops slot's Meter and
+    // leaves the expired placeholder in the caller; there is no drop guard.
+    // No second request budget is created.
     let placeholder = meter.expired_placeholder();
     let slot = RefCell::new(std::mem::replace(meter, placeholder));
     let io = RepoIo::new(roots.io_roots(), &roots.access, &slot);

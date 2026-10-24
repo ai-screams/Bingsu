@@ -52,11 +52,8 @@ fn execute() -> std::io::Result<()> {
         landlock,
         &PRODUCT,
         crate::build_id(),
-        |request, sink: &mut dyn UpdateSink| {
-            let meter = crate::meter::Meter::new(
-                std::time::Instant::now()
-                    + std::time::Duration::from_millis(u64::from(request.budget_ms.min(50))),
-            );
+        |request, sink: &mut dyn UpdateSink, deadline| {
+            let meter = crate::meter::Meter::new(deadline);
             crate::git::collect_with_access(request, sink, meter, access)
                 .map_err(|_| std::io::Error::other("git collection"))
         },
@@ -121,7 +118,7 @@ fn exchange(
     landlock: u32,
     catalog: &collection::selection::Catalog<'_>,
     build_id: wire::BuildId,
-    collect: impl FnOnce(&wire::Request, &mut dyn UpdateSink) -> std::io::Result<()>,
+    collect: impl FnOnce(&wire::Request, &mut dyn UpdateSink, std::time::Instant) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     exchange_with_sink(
         fds,
@@ -130,7 +127,7 @@ fn exchange(
         landlock,
         catalog,
         build_id,
-        |request, sink| collect(request, sink),
+        |request, sink, deadline| collect(request, sink, deadline),
     )
 }
 
@@ -142,7 +139,7 @@ fn exchange_with_sink(
     landlock: u32,
     catalog: &collection::selection::Catalog<'_>,
     build_id: wire::BuildId,
-    collect: impl FnOnce(&wire::Request, &mut WireSink<'_>) -> std::io::Result<()>,
+    collect: impl FnOnce(&wire::Request, &mut WireSink<'_>, std::time::Instant) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let bad = |_| std::io::Error::other("worker protocol");
     let mut payload = [0; 24];
@@ -166,6 +163,10 @@ fn exchange_with_sink(
         fds.read_exact(&mut buffer[wire::HEADER..len])?;
         let frame = wire::decode_frame(&buffer[..len]).map_err(bad)?;
         if let Some(request) = decoder.accept(frame).map_err(bad)? {
+            // One local deadline includes policy validation, every stage and
+            // Complete. The helper's earlier send-start deadline is authoritative.
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(u64::from(request.budget_ms.min(50)));
             // Second product policy boundary, even after wire validation. A
             // catalog is explicit; no argv, feature or environment selects it.
             let selected = collection::request(
@@ -175,11 +176,16 @@ fn exchange_with_sink(
                 request.budget_ms,
             )
             .map_err(bad)?;
-            let mut write = |bytes: &[u8]| fds.write_all(bytes);
+            let stage_deadline = std::cell::Cell::new(deadline);
+            let mut write = |bytes: &[u8]| fds.write_all_until(bytes, deadline, &stage_deadline);
             let mut sink = WireSink::new(&request, catalog.segments, &payload, buffer, &mut write)?;
+            sink.attach_write_deadline(&stage_deadline);
+            let collect =
+                |request: &wire::Request, sink: &mut WireSink<'_>| collect(request, sink, deadline);
             if let Some(request) = selected {
                 collect(&request, &mut sink)?;
             }
+            sink.stage_deadline(deadline);
             return sink.complete();
         }
     }
@@ -307,7 +313,7 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
         landlock,
         &catalog,
         test_id,
-        |_, sink| {
+        |_, sink, _| {
             let mut payload = vec![31, 0, 1];
             payload.extend(7u32.to_le_bytes());
             payload.extend(b"fixture");

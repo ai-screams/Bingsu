@@ -71,6 +71,39 @@ impl WorkerFds {
     pub(crate) fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.result.write_all(bytes)
     }
+    pub(crate) fn write_all_until(
+        &mut self,
+        bytes: &[u8],
+        deadline: std::time::Instant,
+        stage_deadline: &std::cell::Cell<std::time::Instant>,
+    ) -> io::Result<()> {
+        write_checked(&mut self.result, bytes, || {
+            if std::time::Instant::now() >= deadline.min(stage_deadline.get()) {
+                Err(io::ErrorKind::TimedOut.into())
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+// Check again between short writes/EINTR, including after encoding a frame.
+// A write blocked in the kernel remains bounded by external supervision.
+fn write_checked(
+    writer: &mut impl Write,
+    mut bytes: &[u8],
+    check: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        check()?;
+        match writer.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -398,5 +431,65 @@ mod floor_tests {
         for supported in [b"5.9.0".as_slice(), b"6.1.0-vendor", b"7.0.0"] {
             assert!(supported_release(supported));
         }
+    }
+}
+
+#[cfg(test)]
+mod write_deadline_tests {
+    use super::*;
+    use std::cell::Cell;
+    // 이것을 실패시키는 것: 첫 write 또는 short write/EINTR 재시도 전 마감 검사 제거.
+    #[test]
+    fn response_checks_deadline_before_each_write_attempt() {
+        struct Writer {
+            attempts: usize,
+            interrupt: bool,
+            bytes: Vec<u8>,
+        }
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.attempts += 1;
+                if self.interrupt {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.bytes.push(bytes[0]);
+                Ok(1)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for interrupt in [false, true] {
+            for allowed in [0, 1, 3] {
+                let checks = Cell::new(0);
+                let mut writer = Writer {
+                    attempts: 0,
+                    interrupt,
+                    bytes: Vec::new(),
+                };
+                let error = write_checked(&mut writer, b"frame", || {
+                    let old = checks.replace(checks.get() + 1);
+                    if old == allowed {
+                        Err(io::ErrorKind::TimedOut.into())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                assert_eq!(writer.attempts, allowed);
+                assert_eq!(
+                    writer.bytes,
+                    if interrupt {
+                        &b""[..]
+                    } else {
+                        &b"frame"[..allowed]
+                    }
+                );
+            }
+        }
+        let mut bytes = Vec::new();
+        write_checked(&mut bytes, b"frame", || Ok(())).unwrap();
+        assert_eq!(bytes, b"frame");
     }
 }

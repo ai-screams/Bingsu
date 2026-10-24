@@ -67,6 +67,8 @@ fn collect(
             a_ms: 30_000,
             b_ms: 30_000,
             path_ms: 30_000,
+            c_ms: 30_000,
+            d_ms: 30_000,
         },
     )
 }
@@ -1194,6 +1196,14 @@ struct Recording {
     updates: Vec<Update>,
     progress: Vec<Progress>,
 }
+impl Recording {
+    fn stages(&self) -> Vec<String> {
+        self.updates
+            .iter()
+            .map(|update| text(update.value.as_ref().unwrap(), "stage").unwrap())
+            .collect()
+    }
+}
 impl UpdateSink for Recording {
     fn update(&mut self, v: Update) -> std::io::Result<()> {
         self.updates.push(v);
@@ -1245,10 +1255,16 @@ fn no_repo_sends_marker_before_a_complete() {
     let r = f.request();
     let mut sink = Recording::default();
     collect(&r, &mut sink, meter(), access()).unwrap();
-    assert_eq!(sink.updates.len(), 1);
+    assert_eq!(sink.stages(), ["A"]);
     assert_eq!(sink.updates[0].value, Some(schema::no_repo()));
     assert!(sink.updates[0].value.as_ref().unwrap().text().is_empty());
-    assert_eq!(sink.progress.len(), 1);
+    assert!(matches!(
+        sink.progress.as_slice(),
+        [Progress {
+            stage_a_complete: true,
+            ..
+        }]
+    ));
     assert!(sink.progress[0].stage_a_complete);
 }
 
@@ -1373,6 +1389,9 @@ fn injected_deadlines_apply_to_each_stage() {
     }
     assert_eq!(git::StageDeadlines::PRODUCT.a_ms, 5);
     assert_eq!(git::StageDeadlines::PRODUCT.b_ms, 28);
+    assert_eq!(git::StageDeadlines::PRODUCT.c_ms, 8);
+    assert_eq!(git::StageDeadlines::PRODUCT.d_ms, 4);
+    assert_eq!(git::StageDeadlines::PRODUCT.path_ms, 3);
     let f = Fixture::new();
     f.repo();
     for a_expired in [true, false] {
@@ -1388,12 +1407,24 @@ fn injected_deadlines_apply_to_each_stage() {
                     a_ms: if a_expired { 0 } else { 30_000 },
                     b_ms: if a_expired { 30_000 } else { 0 },
                     path_ms: 30_000,
+                    c_ms: 30_000,
+                    d_ms: 30_000,
                 },
             ),
             Err(CollectError::Read(E::Deadline))
         ));
-        assert_eq!(sink.updates.len(), usize::from(!a_expired));
-        assert_eq!(sink.progress.len(), usize::from(!a_expired));
+        assert_eq!(sink.stages(), if a_expired { vec![] } else { vec!["A"] });
+        if a_expired {
+            assert!(sink.progress.is_empty());
+        } else {
+            assert!(matches!(
+                sink.progress.as_slice(),
+                [Progress {
+                    stage_a_complete: true,
+                    ..
+                }]
+            ));
+        }
         assert_eq!(
             events.borrow().iter().any(|e| e == "preflight_start"),
             !a_expired
@@ -1887,7 +1918,7 @@ fn submodule_read_layer_excludes_ancestor_and_home() {
     let r = submodule(&f, "a", ".git/modules/a");
     let mut sink = Recording::default();
     collect(&r, &mut sink, meter(), access()).unwrap();
-    assert_eq!(sink.updates.len(), 1);
+    assert_eq!(sink.stages(), ["A", "B", "C", "D"]);
     assert_eq!(
         fs::read(f.0.join(".git/modules/a/refs/heads/main")).unwrap(),
         OID
@@ -1956,7 +1987,7 @@ fn unborn_with_unrelated_packed_refs_corrects_after_first_a() {
     );
     let mut sink = Recording::default();
     collect(&f.request(), &mut sink, meter(), access()).unwrap();
-    assert_eq!(sink.updates.len(), 2);
+    assert_eq!(sink.stages(), ["A", "A", "B", "C", "D"]);
     assert_eq!(
         text(sink.updates[0].value.as_ref().unwrap(), "branch").as_deref(),
         Some("main")
@@ -1965,7 +1996,13 @@ fn unborn_with_unrelated_packed_refs_corrects_after_first_a() {
     assert_eq!(field(last, "branch"), &Field::ABSENT);
     assert_eq!(field(last, "commit"), &Field::ABSENT);
     pending(last);
-    assert_eq!(sink.progress.len(), 1);
+    assert!(matches!(
+        sink.progress.as_slice(),
+        [Progress {
+            stage_a_complete: true,
+            ..
+        }]
+    ));
 }
 
 // 이것을 실패시키는 것: pointer 정규화의 구성 요소 상한을 제거하고 uncharged Vec를 키움.
