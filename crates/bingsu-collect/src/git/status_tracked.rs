@@ -465,6 +465,9 @@ fn attributes(io: &RepoIo<'_>, patterns: &mut Patterns, parent: &[u8]) -> Result
             RepoPath::new(RootId::Worktree, &path),
             PatternKind::Attributes,
         ),
+        // Git ignores symlinked attributes; never read their target. Other
+        // kinds (including directories) still leave the result unresolved.
+        Ok(metadata) if metadata.st_mode & libc::S_IFMT == libc::S_IFLNK => Ok(()),
         Ok(_) | Err(ReadError::Symlink) => Err(UNSUPPORTED),
         Err(ReadError::Missing) => Ok(()),
         Err(error) => Err(error),

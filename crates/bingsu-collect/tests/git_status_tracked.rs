@@ -323,6 +323,323 @@ fn parity(f: &Fixture) -> StatusCounts {
     got
 }
 
+// Mutations: reject mode 120000, follow the target, ignore type changes, or
+// apply filemode/text conversion to a symlink instead of hashing its bytes.
+#[test]
+fn tracked_symlinks_match_git_porcelain() {
+    for case in [
+        "unchanged",
+        "retargeted",
+        "retargeted-longer",
+        "deleted",
+        "file",
+        "directory",
+        "dangling",
+        "outside",
+        "file-to-link",
+    ] {
+        let f = init();
+        let outside = Fixture::new();
+        outside.write("canary", b"secret: must never be read");
+        let target = match case {
+            "dangling" => PathBuf::from("missing"),
+            "outside" => outside.0.join("canary"),
+            _ => PathBuf::from("target"),
+        };
+        f.write("target", b"ordinary file contents");
+        if case == "file-to-link" {
+            f.write("link", b"target");
+        } else {
+            symlink(&target, f.0.join("link")).unwrap();
+        }
+        commit(&f);
+        // Conversions affect regular files, never a tracked symlink blob.
+        f.write(".git/info/attributes", b"link text eol=crlf\n");
+        match case {
+            "retargeted" => {
+                fs::remove_file(f.0.join("link")).unwrap();
+                symlink("other!", f.0.join("link")).unwrap(); // same target length
+            }
+            "retargeted-longer" => {
+                fs::remove_file(f.0.join("link")).unwrap();
+                symlink("a-much-longer-target", f.0.join("link")).unwrap();
+            }
+            "deleted" => fs::remove_file(f.0.join("link")).unwrap(),
+            "file" => {
+                fs::remove_file(f.0.join("link")).unwrap();
+                f.write("link", b"target"); // same blob, different type
+            }
+            "directory" => {
+                fs::remove_file(f.0.join("link")).unwrap();
+                fs::create_dir(f.0.join("link")).unwrap();
+            }
+            "file-to-link" => {
+                fs::remove_file(f.0.join("link")).unwrap();
+                symlink("target", f.0.join("link")).unwrap();
+            }
+            _ => {}
+        }
+        let expected = u32::from(matches!(
+            case,
+            "retargeted" | "retargeted-longer" | "deleted" | "file" | "directory" | "file-to-link"
+        ));
+        let index_bytes = fs::read(f.0.join(".git/index")).unwrap();
+        let got = parity(&f);
+        assert_eq!(got.modified, count(expected), "{case}");
+        assert!(!got.filtered, "symlinks bypass text conversion: {case}");
+        // Force stat-mismatch fallback even on coarse Linux
+        // timestamps; a fresh index can otherwise take the cheap stat path.
+        if matches!(
+            case,
+            "unchanged" | "dangling" | "outside" | "retargeted" | "retargeted-longer"
+        ) {
+            with_repo(&f, |repo, m| {
+                let mut idx = index::load(&repo.io).unwrap();
+                idx.entries_mut()
+                    .iter_mut()
+                    .find(|e| e.mode == gix_index::entry::Mode::SYMLINK)
+                    .unwrap()
+                    .stat
+                    .size = 0;
+                let before = m.borrow().counts[Phase::Content as usize];
+                assert_eq!(
+                    status_tracked::tracked_status(repo, &idx).modified,
+                    count(expected)
+                );
+                assert_eq!(
+                    m.borrow().counts[Phase::Content as usize].readlink,
+                    before.readlink + 1
+                );
+            });
+        }
+        assert_eq!(fs::read(f.0.join(".git/index")).unwrap(), index_bytes);
+    }
+}
+
+// Mutations: ignore core.symlinks=false, compare executable bits, or skip
+// raw hashing for an ordinary target-containing file without conversion.
+#[test]
+fn tracked_symlinks_false_hashes_plain_file_contents() {
+    let f = init();
+    symlink("target", f.0.join("link")).unwrap();
+    commit(&f);
+    git(&f, &["config", "core.symlinks", "false"]);
+    fs::remove_file(f.0.join("link")).unwrap();
+    f.write("link", b"target");
+    fs::set_permissions(f.0.join("link"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(parity(&f).modified, count(0));
+    f.write("link", b"other!");
+    assert_eq!(parity(&f).modified, count(1));
+    fs::remove_file(f.0.join("link")).unwrap();
+    assert_eq!(parity(&f).modified, count(1));
+}
+
+// Mutation: gate conversion on index mode instead of the observed file kind.
+// The CRLF file really differs from the blob. Git converts it to clean; our
+// deliberate size/mtime approximation reports modified + filtered, just as
+// for an ordinary indexed file. Executable bits remain irrelevant.
+#[test]
+fn tracked_symlinks_false_uses_file_conversion_policy() {
+    for config_conversion in [false, true] {
+        let f = init();
+        symlink("a\nb", f.0.join("link")).unwrap();
+        commit(&f);
+        git(&f, &["config", "core.symlinks", "false"]);
+        if config_conversion {
+            git(&f, &["config", "core.autocrlf", "true"]);
+        } else {
+            f.write(".git/info/attributes", b"link text eol=crlf\n");
+        }
+        fs::remove_file(f.0.join("link")).unwrap();
+        f.write("link", b"a\r\nb");
+        fs::set_permissions(f.0.join("link"), fs::Permissions::from_mode(0o755)).unwrap();
+        let blob = git(&f, &["rev-parse", "HEAD:link"]);
+        let blob = std::str::from_utf8(&blob).unwrap().trim();
+        // Clear stale pre-checkout stat data so Git can cache the converted
+        // file's size rather than reject the old link's size mismatch first.
+        git(&f, &["update-index", "--cacheinfo", "120000", blob, "link"]);
+        // Refresh records the converted-clean file's size (4), not blob size (3).
+        git(&f, &["update-index", "--refresh"]);
+        let path = f.0.join("link");
+        let touched = fs::metadata(&path).unwrap().modified().unwrap() + Duration::from_secs(2);
+        fs::File::open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(touched))
+            .unwrap();
+        assert_eq!(oracle(&f), (0, 0, 0));
+        with_repo(&f, |repo, m| {
+            let mut idx = index::load(&repo.io).unwrap();
+            assert_eq!(idx.entries()[0].mode, gix_index::entry::Mode::SYMLINK);
+            assert_eq!(idx.entries()[0].stat.size, 4);
+            let got = status_tracked::tracked_status(repo, &idx);
+            assert_eq!(got.modified, count(1));
+            assert!(got.filtered);
+            assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+            idx.entries_mut()[0].mode = gix_index::entry::Mode::FILE_EXECUTABLE;
+            assert_eq!(
+                status_tracked::tracked_status(repo, &idx).modified,
+                got.modified
+            );
+        });
+        assert_eq!(git(&f, &["cat-file", "blob", "HEAD:link"]), b"a\nb");
+    }
+}
+
+// Mutations: reject symlinked attributes or follow their external target and
+// apply its filter. Both tracked and untracked links must be ignored by Git
+// and by the collector; only the tracked link's own bytes may be read.
+#[test]
+fn symlinked_attributes_are_ignored_like_git() {
+    for tracked in [false, true] {
+        for parent in ["", "d/"] {
+            let f = init();
+            let outside = Fixture::new();
+            outside.write("attributes", b"* filter=evil\n");
+            let attrs = format!("{parent}.gitattributes");
+            let file = format!("{parent}file");
+            f.write(&file, b"base");
+            if tracked {
+                symlink(outside.0.join("attributes"), f.0.join(&attrs)).unwrap();
+            }
+            commit(&f);
+            if !tracked {
+                symlink(outside.0.join("attributes"), f.0.join(&attrs)).unwrap();
+            }
+            assert_eq!(parity(&f).modified, count(0));
+            f.write(&file, b"different content");
+            let got = parity(&f);
+            assert_eq!(got.modified, count(1));
+            assert!(!got.filtered);
+            with_repo(&f, |repo, m| {
+                assert_eq!(status_tracked::load_status(repo), got);
+                assert_eq!(m.borrow().budget.used(Axis::AttributeFiles), 0);
+                assert_eq!(m.borrow().budget.used(Axis::AttributeBytes), 0);
+            });
+        }
+    }
+}
+
+// Mutation: ignore all non-regular attributes instead of symlinks alone.
+#[test]
+fn attributes_directory_remains_pending() {
+    let f = init();
+    f.write("file", b"base");
+    commit(&f);
+    fs::create_dir(f.0.join(".gitattributes")).unwrap();
+    assert_eq!(status(&f).modified, Field::PENDING);
+}
+
+fn symlink_corpus() -> Fixture {
+    let f = init();
+    fs::create_dir(f.0.join("d")).unwrap();
+    for i in 0..1000 {
+        symlink("../../outside-dangling", f.0.join(format!("d/link{i:04}"))).unwrap();
+    }
+    commit(&f);
+    f
+}
+
+// Mutations: accumulate per-link scratch, bypass readlink, or add target opens.
+// One request/meter handles every link, with no stage-deadline flakiness.
+#[test]
+fn tracked_symlinks_1000_deterministic_cost() {
+    let f = symlink_corpus();
+    let mut results = Vec::new();
+    for hash in [false, true] {
+        with_repo(&f, |repo, m| {
+            let mut idx = index::load(&repo.io).unwrap();
+            if hash {
+                for entry in idx.entries_mut() {
+                    entry.stat.size = 0;
+                }
+            }
+            idx.set_timestamp((std::time::SystemTime::now() + Duration::from_secs(60)).into());
+            let before = m.borrow().counts[Phase::Content as usize];
+            let ops = m.borrow().operations();
+            let live = m.borrow().live_allocated();
+            let got = status_tracked::tracked_status(repo, &idx);
+            assert_eq!((got.staged, got.modified), (count(0), count(0)));
+            let meter = m.borrow();
+            let after = meter.counts[Phase::Content as usize];
+            assert_eq!(
+                after.readlink - before.readlink,
+                if hash { 1000 } else { 0 }
+            );
+            results.push((
+                meter.operations() - ops,
+                after.open - before.open,
+                after.read - before.read,
+                meter.live_allocated() - live,
+            ));
+            eprintln!(
+                "SYMLINK_1000 hash={hash} ops={} counters={after:?} live={} delta_live={}",
+                meter.operations() - ops,
+                meter.live_allocated(),
+                meter.live_allocated() - live
+            );
+        });
+    }
+    assert_eq!(results[1].0 - results[0].0, 3000); // two lstat + readlinkat per link
+    assert_eq!(
+        (results[0].1, results[0].2, results[0].3),
+        (results[1].1, results[1].2, results[1].3)
+    );
+    eprintln!("SYMLINK_OPS stat={:?} hash={:?}", results[0], results[1]);
+}
+
+#[test]
+#[ignore = "release benchmark: 200 warm samples per new path"]
+fn tracked_symlinks_release_observations() {
+    let f = symlink_corpus();
+    for case in ["stat", "readlink", "plain"] {
+        if case == "plain" {
+            git(&f, &["config", "core.symlinks", "false"]);
+            for i in 0..1000 {
+                let path = f.0.join(format!("d/link{i:04}"));
+                fs::remove_file(&path).unwrap();
+                fs::write(path, b"../../outside-dangling").unwrap();
+            }
+        }
+        with_repo(&f, |repo, m| {
+            let mut idx = index::load(&repo.io).unwrap();
+            if case != "stat" {
+                for e in idx.entries_mut() {
+                    e.stat.size = 0;
+                }
+            }
+            idx.set_timestamp((std::time::SystemTime::now() + Duration::from_secs(60)).into());
+            let mut samples = Vec::new();
+            let mut first = 0;
+            for run in 0..201 {
+                *m.borrow_mut() = meter();
+                let start = Instant::now();
+                let got = status_tracked::tracked_status(repo, &idx);
+                let ns = start.elapsed().as_nanos();
+                assert_eq!(got.modified, count(0));
+                if run == 0 {
+                    first = ns;
+                } else {
+                    samples.push(ns);
+                }
+            }
+            eprintln!("SYMLINK_SAMPLES case={case} ns={samples:?}");
+            samples.sort_unstable();
+            let mean = samples.iter().sum::<u128>() as f64 / 200.;
+            let variance = samples
+                .iter()
+                .map(|n| (*n as f64 - mean).powi(2))
+                .sum::<f64>()
+                / 200.;
+            eprintln!(
+                "SYMLINK_BENCH case={case} n=200 first_ns={first} p50_ns={} p95_ns={} variance_ns2={variance} load={:?}",
+                samples[99],
+                samples[189],
+                load_average()
+            );
+        });
+    }
+}
+
 // Mutations: invert OID/mode/ITA comparison, remove sorting or HEAD deletions.
 #[test]
 fn staged_sorted_comparison_counts_distinct_paths() {

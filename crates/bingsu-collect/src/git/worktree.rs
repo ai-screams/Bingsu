@@ -54,9 +54,11 @@ pub fn compare(
     if entry.mode == Mode::COMMIT || entry.flags.contains(Flags::SKIP_WORKTREE) {
         return Ok(Comparison::Skipped);
     }
-    // Sparse directories and tracked symlinks are explicitly unresolved here.
-    // D1 must keep them Partial, never convert an unsupported kind to clean.
-    if !matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
+    // Sparse directories remain unresolved until their bounded expansion.
+    if !matches!(
+        entry.mode,
+        Mode::FILE | Mode::FILE_EXECUTABLE | Mode::SYMLINK
+    ) {
         return Err(super::UNSUPPORTED);
     }
     let observed = io.worktree_metadata(relative);
@@ -70,6 +72,7 @@ pub fn compare(
             conversion,
             filemode,
             names: Default::default(),
+            symlinks: true,
         },
         observed.as_ref().map_err(|e| *e),
     )
@@ -88,7 +91,10 @@ pub fn compare_observed(
     if entry.mode == Mode::COMMIT || entry.flags.contains(Flags::SKIP_WORKTREE) {
         return Ok(Comparison::Skipped);
     }
-    if !matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
+    if !matches!(
+        entry.mode,
+        Mode::FILE | Mode::FILE_EXECUTABLE | Mode::SYMLINK
+    ) {
         return Err(super::UNSUPPORTED);
     }
     let metadata = match observed {
@@ -101,20 +107,28 @@ pub fn compare_observed(
         stat: policy,
         conversion,
         filemode,
+        symlinks,
         ..
     } = policies;
     if metadata.st_dev != io.worktree_device() {
         return Ok(Comparison::Exact { modified: true });
     }
-    match metadata.st_mode & libc::S_IFMT {
-        libc::S_IFREG => {}
-        libc::S_IFLNK => return Ok(Comparison::Exact { modified: true }),
+    let indexed_link = entry.mode == Mode::SYMLINK;
+    let link = match metadata.st_mode & libc::S_IFMT {
+        libc::S_IFREG if !indexed_link || !symlinks => false,
+        libc::S_IFLNK if indexed_link => true,
+        libc::S_IFREG | libc::S_IFLNK | libc::S_IFDIR => {
+            return Ok(Comparison::Exact { modified: true });
+        }
         _ => return Err(ReadError::Special),
-    }
+    };
     let current = stat(metadata);
-    let mode_changed =
-        filemode && (metadata.st_mode & 0o100 != 0) != (entry.mode == Mode::FILE_EXECUTABLE);
-    if conversion == ConversionPolicy::MetadataApproximation {
+    let mode_changed = !indexed_link
+        && filemode
+        && (metadata.st_mode & 0o100 != 0) != (entry.mode == Mode::FILE_EXECUTABLE);
+    // Git converts ordinary files even for index mode 120000 when
+    // core.symlinks=false. Only actual links hash their target bytes raw.
+    if !link && conversion == ConversionPolicy::MetadataApproximation {
         // Deliberately size + full mtime only: ctime, inode churn and raw blob
         // differences say nothing reliable about the converted Git blob.
         return Ok(Comparison::Approximate {
@@ -138,7 +152,11 @@ pub fn compare_observed(
     {
         return Ok(Comparison::Exact { modified: false });
     }
-    let id = io.worktree_hash(relative, metadata)?;
+    let id = if link {
+        io.worktree_link_hash(relative, metadata)?
+    } else {
+        io.worktree_hash(relative, metadata)?
+    };
     Ok(Comparison::Exact {
         modified: id != entry.id,
     })

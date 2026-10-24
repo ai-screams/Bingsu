@@ -103,6 +103,7 @@ pub struct Policies {
     pub names: NamePolicy,
     pub conversion: ConversionPolicy,
     pub filemode: bool,
+    pub symlinks: bool,
 }
 impl Policies {
     pub fn from_config(config: &Config) -> Result<Self, ReadError> {
@@ -157,6 +158,7 @@ impl Policies {
                 ConversionPolicy::RawHash
             },
             filemode: boolean(value("core.filemode"), true)?,
+            symlinks: boolean(value("core.symlinks"), true)?,
         })
     }
 }
