@@ -179,6 +179,22 @@ jobs:
           grep -F 'test product_mask_is_zero_and_fixture_is_unreachable ... ok' "$RUNNER_TEMP/selection-native.txt"
       - name: Collector policy evaluator and table correspondence
         run: python3 scripts/check_collector_filter.py
+      # Fails if either environment-dependent oracle is omitted or runs zero tests.
+      - if: runner.os == 'Linux'
+        name: Path facts ACL and read-only mount oracles
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends acl
+          fixture=$(mktemp -d "$RUNNER_TEMP/e1-readonly.XXXXXX")
+          mkdir "$fixture/source" "$fixture/readonly"
+          sudo mount --bind "$fixture/source" "$fixture/readonly"
+          sudo mount -o remount,bind,ro "$fixture/readonly"
+          export BINGSU_E1_READONLY_MOUNT="$fixture/readonly"
+          cargo test --locked -j 2 -p bingsu-collect --test path_facts -- --ignored --exact readonly_honors_acl readonly_mount_is_observed_without_a_write_probe | tee "$RUNNER_TEMP/e1-readonly.txt"
+          grep -F 'test readonly_honors_acl ... ok' "$RUNNER_TEMP/e1-readonly.txt"
+          grep -F 'test readonly_mount_is_observed_without_a_write_probe ... ok' "$RUNNER_TEMP/e1-readonly.txt"
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/e1-readonly.txt"
       - if: runner.os == 'Linux'
         name: Native collector kernel probes (required cells, no silent skip)
         env:

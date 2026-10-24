@@ -31,17 +31,15 @@ unsafe extern "C" {
 pub(super) fn entries(
     root: &Root,
     raw_limit: u32,
+    bytes: Option<usize>,
     meter: &mut Meter,
 ) -> Result<Listing, ReadError> {
-    let mut names = Vec::new();
+    let mut names = Names::new(bytes, meter);
     let mut raw = 0;
     let mut buffer = [0u8; crate::meter::DIRENT_CHUNK];
     loop {
         if raw >= raw_limit {
-            return Ok(Listing {
-                names,
-                complete: false,
-            });
+            return Ok(names.finish(false));
         }
         let size = retry(meter, Op::List, || {
             let mut base = 0;
@@ -56,26 +54,17 @@ pub(super) fn entries(
             }
         })? as usize;
         if size == 0 {
-            return Ok(Listing {
-                names,
-                complete: true,
-            });
+            return Ok(names.finish(true));
         }
         let mut block = buffer.get(..size).ok_or(ReadError::Io(libc::EIO))?;
         while !block.is_empty() {
             if raw >= raw_limit {
-                return Ok(Listing {
-                    names,
-                    complete: false,
-                });
+                return Ok(names.finish(false));
             }
             let (name, length, live) = dirent(block)?;
-            meter.raw_entry()?;
             raw += 1;
-            if live && name != b"." && name != b".." {
-                meter.allocation(name.len() + std::mem::size_of::<Vec<u8>>())?;
-                names.try_reserve_exact(1).map_err(|_| ReadError::Limit)?;
-                names.push(name.to_vec());
+            if !names.entry(name, live, block[20], meter)? {
+                return Ok(names.finish(false));
             }
             block = &block[length..];
         }
@@ -91,14 +80,22 @@ fn dirent(block: &[u8]) -> Result<(&[u8], usize, bool), ReadError> {
     }
     let length = usize::from(u16::from_ne_bytes([block[16], block[17]]));
     let namesize = usize::from(u16::from_ne_bytes([block[18], block[19]]));
-    if length < NAME + 1 || length > block.len() || namesize >= length - NAME {
+    if length < NAME + 1 || length > block.len() {
+        return Err(invalid);
+    }
+    // Deleted slots have no meaningful name. Their record still spends one
+    // raw entry before filtering, including when d_namlen is zero.
+    if block[..8] == [0; 8] {
+        return Ok((&[], length, false));
+    }
+    if namesize >= length - NAME {
         return Err(invalid);
     }
     let name = &block[NAME..NAME + namesize];
     if block[NAME + namesize] != 0 || name.is_empty() || name.contains(&0) || name.contains(&b'/') {
         return Err(invalid);
     }
-    Ok((name, length, block[..8] != [0; 8]))
+    Ok((name, length, true))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -421,9 +418,14 @@ mod c3_listing_tests {
         let mut empty = record;
         empty[18..20].fill(0);
         empty[21] = 0;
-        assert!(dirent(&empty).is_err());
+        assert_eq!(dirent(&empty), Ok((b"".as_slice(), 32, false)));
+        record[0] = 1;
         for n in 0..32 {
-            assert!(dirent(&record[..n]).is_err(), "truncation {n}");
+            assert_eq!(
+                dirent(&record[..n]),
+                Err(ReadError::Io(libc::EIO)),
+                "truncation {n}"
+            );
         }
         for (at, value) in [
             (16, 21),
@@ -436,7 +438,11 @@ mod c3_listing_tests {
         ] {
             let mut broken = record;
             broken[at] = value;
-            assert!(dirent(&broken).is_err(), "field {at}={value}");
+            assert_eq!(
+                dirent(&broken),
+                Err(ReadError::Io(libc::EIO)),
+                "field {at}={value}"
+            );
         }
     }
 }

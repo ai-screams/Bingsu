@@ -97,16 +97,31 @@ def test_capability_bits_require_struct_field(args):
     assert parse(f'2012 capget({args}) = 0').errors
 
 
-# 이것을 실패시키는 것: 파싱만 성공하고 실제 B3 phase/경로/원시 계수 검증은 실패하는 것.
+# 이것을 실패시키는 것: E1 이전 캡처의 누락된 readonly mount 관찰을 현재 계약으로 수용하는 것.
 def test_bookworm_repository_openat2_offline_replay():
     assert len(TRACE.splitlines()) == 364
-    assert check_repository_trace(TRACE, ROOT, 'openat2') == {
+    with pytest.raises(AssertionError, match="'content'") as caught:
+        check_repository_trace(TRACE, ROOT, 'openat2')
+    phase, observed, expected = caught.value.args[0]
+    assert phase == 'content' and observed['fstatfs'] == 1
+    assert expected == {**observed, 'fstatfs': 2}
+
+
+# 이것을 실패시키는 것: 현재 readonly 경로의 두 fd별 fstatfs를 모델에서 빠뜨리는 것.
+def test_repository_replay_with_synthetic_readonly_mount_observation():
+    # Preserve the historical capture verbatim; this addition is synthetic, not Linux evidence.
+    access = next(line for line in TRACE.splitlines(keepends=True) if ' faccessat2(' in line)
+    mount = f'2012  fstatfs(6<{ROOT}/worktree>, {{f_type=OVERLAYFS_SUPER_MAGIC, f_flags=ST_RELATIME}}) = 0\n'
+    current = TRACE.replace(access, access + mount)
+    assert check_repository_trace(current, ROOT, 'openat2') == {
         'probe': {'openat': 1, 'fstat': 1, 'fstatfs': 1, 'statx': 1, 'openat2': 1},
         'read-layer': {'openat': 1, 'fstat': 4, 'landlock_create_ruleset': 1,
                        'landlock_add_rule': 3, 'landlock_restrict_self': 1},
-        'content': {'openat2': 1, 'fstat': 1, 'fstatfs': 1, 'statx': 1,
+        'content': {'openat2': 1, 'fstat': 1, 'fstatfs': 2, 'statx': 1,
                     'read': 2, 'faccessat2': 1},
     }
+    with pytest.raises(AssertionError, match="'content'"):
+        check_repository_trace(current.replace(mount, mount + mount), ROOT, 'openat2')
 
 
 # 이것을 실패시키는 것: 절대 slash의 미사용 cwd 예외를 상대 경로·다른 경로·실제 dirfd까지 넓히는 것.

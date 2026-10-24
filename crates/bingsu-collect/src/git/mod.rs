@@ -2,6 +2,8 @@
 pub mod config;
 pub mod discover;
 pub mod io;
+#[path = "../path_facts.rs"]
+pub mod path_facts;
 pub mod preflight;
 pub mod refs;
 pub mod stage_a;
@@ -51,12 +53,14 @@ pub fn collect_with_access(
 pub(crate) struct StageDeadlines {
     pub a_ms: u64,
     pub b_ms: u64,
+    pub path_ms: u64,
 }
 
 impl StageDeadlines {
     pub const PRODUCT: Self = Self {
         a_ms: bingsu_core::collection::budget::A_MS,
         b_ms: bingsu_core::collection::budget::B_MS,
+        path_ms: bingsu_core::collection::budget::PATH_MS,
     };
 }
 
@@ -71,16 +75,21 @@ pub(crate) fn collect_with_deadlines(
         git::{self, StageResult},
         wire::{Progress, Update},
     };
+    let wants_git = request.binding.mask & (1 << git::SEGMENT) != 0;
+    let wants_dir = request.binding.mask & (1 << 1) != 0;
     let (selected, mut snapshot) = meter.stage(deadlines.a_ms, |meter| {
         let selected = discover::select(request, access, meter)?;
         let (result, device) = match &selected {
-            discover::Selection::Outside(cwd, _) => {
+            discover::Selection::Outside(cwd, _, _) => {
                 (StageResult::Value(git::no_repo()), cwd.device())
             }
-            discover::Selection::Repository(roots) => (
+            discover::Selection::Repository(roots, _) if wants_git => (
                 stage_a::stage_a(roots, roots.head_policy(), meter),
                 roots.worktree.device(),
             ),
+            discover::Selection::Repository(roots, _) => {
+                (StageResult::Value(git::no_repo()), roots.worktree.device())
+            }
         };
         meter.check().map_err(CollectError::Read)?;
         let value = match result {
@@ -88,21 +97,52 @@ pub(crate) fn collect_with_deadlines(
             StageResult::Partial(value) | StageResult::Value(value) => value,
         };
         meter.check().map_err(CollectError::Read)?;
-        sink.update(Update {
-            segment: git::SEGMENT,
-            value: Some(value.clone()),
-            facts: None,
-        })
-        .map_err(CollectError::Sink)?;
-        sink.progress(Progress {
-            stage_a_complete: true,
-            device: Some(device),
-        })
-        .map_err(CollectError::Sink)?;
+        if wants_git {
+            sink.update(Update {
+                segment: git::SEGMENT,
+                value: Some(value.clone()),
+                facts: None,
+            })
+            .map_err(CollectError::Sink)?;
+            sink.progress(Progress {
+                stage_a_complete: true,
+                device: Some(device),
+            })
+            .map_err(CollectError::Sink)?;
+        }
         Ok((selected, value))
     })?;
+    let discovery = match &selected {
+        discover::Selection::Outside(_, _, discovery)
+        | discover::Selection::Repository(_, discovery) => discovery,
+    };
+    if wants_dir {
+        let facts = meter.stage(deadlines.path_ms, |meter| {
+            path_facts::collect(discovery, request.binding.path_query, meter)
+        });
+        let device = match &selected {
+            discover::Selection::Outside(root, _, _) => root.device(),
+            discover::Selection::Repository(roots, _) => roots.worktree.device(),
+        };
+        let discovery_complete = facts.in_repo.is_some();
+        sink.update(Update {
+            segment: 1,
+            value: None,
+            facts: Some(facts),
+        })
+        .map_err(CollectError::Sink)?;
+        if !wants_git {
+            sink.progress(Progress {
+                stage_a_complete: discovery_complete,
+                device: Some(device),
+            })
+            .map_err(CollectError::Sink)?;
+        }
+    }
     match selected {
-        discover::Selection::Outside(cwd, access) => {
+        discover::Selection::Outside(cwd, access, discovery) => {
+            drop(discovery);
+            meter.event("discovery_consumed");
             // No Discovery survives into restriction. The only root is cwd.
             meter.event("before_read_layer");
             #[cfg(target_os = "linux")]
@@ -116,10 +156,14 @@ pub(crate) fn collect_with_deadlines(
             let _ = (cwd, access);
             Ok(())
         }
-        discover::Selection::Repository(mut roots) => {
+        discover::Selection::Repository(mut roots, discovery) => {
+            drop(discovery);
+            meter.event("discovery_consumed");
             roots.restrict(&mut meter).map_err(CollectError::Read)?;
-            // E1 inserts bounded PathFacts before restriction. B preflight
-            // cannot consume the first A's budget or delay its immediate write.
+            if !wants_git {
+                return Ok(());
+            }
+            // PathFacts and ancestor release precede read restriction.
             let access =
                 meter.stage(deadlines.b_ms, |meter| preflight::preflight(&roots, meter))?;
             // A packed-only repository can prove unborn only after preflight.

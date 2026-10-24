@@ -99,6 +99,8 @@ impl PathFacts {
         }
     }
 
+    /// Attach the collector's effective-access observation; absence is unknown.
+    /// It does not change names, uniqueness evidence, or shortening.
     pub fn with_readonly(mut self, readonly: Option<bool>) -> Self {
         self.readonly = readonly;
         self
