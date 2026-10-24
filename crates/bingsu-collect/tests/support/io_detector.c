@@ -83,6 +83,33 @@ int EXPORTED(openat)(int fd, const char *path, int flags, ...) {
     int mode = 0; if (mode_arg(flags)) { va_list ap; va_start(ap,flags); mode=va_arg(ap,int); va_end(ap); }
     DECL_REAL(int,openat,(int,const char *,int,...)) detect(); return REAL(openat)(fd,path,flags,mode);
 } REPLACE(openat)
+#if defined(__GLIBC__)
+/* Rust's File::open on linux-gnu calls open64/openat64, not open/openat.
+ * 이것을 실패시키는 것: 이 두 hook을 지우면 Linux에서 history_never_contacts_remote의
+ * graph 모드가 경로 검사(87)보다 일반 read 검사(86)에 먼저 걸린다. */
+int open64(const char *path, int flags, ...) {
+    int mode = 0;
+    if (mode_arg(flags)) {
+        va_list ap;
+        va_start(ap,flags);
+        mode=va_arg(ap,int);
+        va_end(ap);
+    }
+    DECL_REAL(int,open64,(const char *,int,...)) detect();
+    return REAL(open64)(path,flags,mode);
+}
+int openat64(int fd, const char *path, int flags, ...) {
+    int mode = 0;
+    if (mode_arg(flags)) {
+        va_list ap;
+        va_start(ap,flags);
+        mode=va_arg(ap,int);
+        va_end(ap);
+    }
+    DECL_REAL(int,openat64,(int,const char *,int,...)) detect();
+    return REAL(openat64)(fd,path,flags,mode);
+}
+#endif
 void *EXPORTED(mmap)(void *addr, size_t n, int prot, int flags, int fd, off_t off) {
     DECL_REAL(void *,mmap,(void *,size_t,int,int,int,off_t))
     if (fd != -1)

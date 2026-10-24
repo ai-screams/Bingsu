@@ -171,20 +171,7 @@ pub(super) fn submodule_worktree(
 }
 
 pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Facts, ReadError> {
-    meter.check()?;
-    scan(bytes)?;
-    let mut scratch = meter.object_allocation();
-    scratch.reserve(PARSER_ALLOCATION, meter)?;
-    meter.event("before_config_parse");
-    let file = gix_config::File::from_bytes_no_includes(
-        bytes,
-        gix_config::file::Metadata::from(gix_config::Source::Local),
-        gix_config::file::init::Options {
-            lossy: true,
-            ..Default::default()
-        },
-    )
-    .map_err(|_| ReadError::Io(libc::EINVAL))?;
+    let (file, _scratch) = isolated(bytes, meter)?;
     let mut facts = Facts::default();
     for section in file.sections() {
         meter.check()?;
@@ -229,6 +216,29 @@ pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Facts, ReadError>
     )?;
     facts.allocation = Some(allocation);
     Ok(facts)
+}
+
+/// Shared bounded bytes constructor for policy and history configuration.
+/// The reservation must outlive the parser and any extraction scratch.
+pub(super) fn isolated(
+    bytes: &[u8],
+    meter: &mut Meter,
+) -> Result<(gix_config::File, ObjectAllocation), ReadError> {
+    meter.check()?;
+    scan(bytes)?;
+    let mut scratch = meter.object_allocation();
+    scratch.reserve(PARSER_ALLOCATION, meter)?;
+    meter.event("before_config_parse");
+    let file = gix_config::File::from_bytes_no_includes(
+        bytes,
+        gix_config::file::Metadata::from(gix_config::Source::Local),
+        gix_config::file::init::Options {
+            lossy: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| ReadError::Io(libc::EINVAL))?;
+    Ok((file, scratch))
 }
 
 fn scan(bytes: &[u8]) -> Result<(), ReadError> {

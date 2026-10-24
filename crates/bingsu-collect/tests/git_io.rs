@@ -168,7 +168,7 @@ fn git_bytes_ref_reads_are_confined() {
         &access,
         &m,
     );
-    let repo = git::GuardedRepository::new(port).unwrap();
+    let repo = git::GuardedRepository::new(port, &git::refs::RefSnapshot::default()).unwrap();
     assert_eq!(
         repo.config.common().unwrap().value("core.bare").unwrap(),
         Some(b"common".as_slice())
@@ -325,7 +325,10 @@ fn git_io_scope_and_unsupported_are_closed() {
         port.map(path(RootId::CommonDir, b"objects/pack/x"), 4096),
         Err(E::StageAOnly)
     ));
-    assert_eq!(git::GuardedRepository::new(port).err(), Some(E::StageAOnly));
+    assert_eq!(
+        git::GuardedRepository::new(port, &git::refs::RefSnapshot::default()).err(),
+        Some(E::StageAOnly)
+    );
     assert_eq!(m.borrow().counts, before);
 }
 
@@ -725,7 +728,8 @@ fn git_parser_observations() {
             let m = RefCell::new(meter());
             let port = io(&root, &access, &m);
             let start = Instant::now();
-            let repo = git::GuardedRepository::new(port).unwrap();
+            let repo =
+                git::GuardedRepository::new(port, &git::refs::RefSnapshot::default()).unwrap();
             assert_eq!(
                 repo.config.common().unwrap().value("core.bare"),
                 Some(Some(b"false".as_slice()))
@@ -1120,7 +1124,7 @@ fn git_unsupported_formats_stop_before_refs_and_objects() {
             assert!(matches!(Refs::load(&port), Err(E::StageAOnly)));
             assert_eq!(m.borrow().budget.used(Axis::RefBytes), 0);
             assert!(matches!(
-                git::GuardedRepository::new(port),
+                git::GuardedRepository::new(port, &git::refs::RefSnapshot::default()),
                 Err(E::StageAOnly)
             ));
             assert_eq!(m.borrow().budget.used(Axis::RefEntries), 0);
@@ -1141,7 +1145,7 @@ fn git_unsupported_formats_stop_before_refs_and_objects() {
         );
         assert!(matches!(Refs::load(&port), Err(E::StageAOnly)));
         assert!(matches!(
-            git::GuardedRepository::new(port),
+            git::GuardedRepository::new(port, &git::refs::RefSnapshot::default()),
             Err(E::StageAOnly)
         ));
         assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
@@ -1178,7 +1182,7 @@ fn git_unsupported_formats_stop_before_refs_and_objects() {
         &m,
     );
     assert_eq!(
-        git::GuardedRepository::new(port)
+        git::GuardedRepository::new(port, &git::refs::RefSnapshot::default())
             .unwrap()
             .object(A.as_bytes()),
         Err(git::io::UNSUPPORTED)

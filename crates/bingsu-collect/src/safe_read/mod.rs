@@ -855,6 +855,33 @@ fn read_inner(
 }
 
 impl ReadFile {
+    /// A bounded chunk on the already confined fd. The repository stream owns
+    /// the byte reservation and never exposes this fd to a parser.
+    pub(crate) fn stream_chunk(
+        &self,
+        bytes: &mut [u8],
+        meter: &mut Meter,
+    ) -> Result<usize, ReadError> {
+        if bytes.is_empty() || bytes.len() > READ_CHUNK || self.metadata.st_nlink != 1 {
+            return Err(ReadError::Special);
+        }
+        meter.event("before_read");
+        let n = retry(meter, Op::Read, || {
+            // SAFETY: held readable regular fd and bounded writable slice.
+            unsafe { libc::read(self.fd.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) }
+        })? as usize;
+        meter.returned_bytes(n);
+        Ok(n)
+    }
+
+    pub(crate) fn verify_stream(&self, meter: &mut Meter) -> Result<(), ReadError> {
+        let now = stat(self.fd.as_raw_fd(), meter)?;
+        if now.st_nlink != 1 || !same_worktree_stat(&self.metadata, &now) {
+            return Err(ReadError::Changed);
+        }
+        Ok(())
+    }
+
     /// Metadata has its own file cap and a live read reservation. It never
     /// spends the worktree content budget. Use the same inspected fd and size;
     /// the extra byte detects growth without reserving 64 KiB for every HEAD.
