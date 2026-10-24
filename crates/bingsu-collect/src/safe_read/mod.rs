@@ -10,6 +10,7 @@
 use std::{
     ffi::CString,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    rc::Rc,
 };
 
 use crate::meter::{Lease, Meter, Op, PathAllocation, Phase, READ_CHUNK};
@@ -321,7 +322,10 @@ pub struct ReadCap {
 }
 
 pub struct Discovery {
-    cwd: Root,
+    cwd: Rc<Root>,
+    components: usize,
+    repo_level: Option<usize>,
+    in_repo: Option<bool>,
     /// Oldest to newest, at most 32; never reopen ".." for discovery.
     ancestors: Vec<AncestorDir>,
     logical: bool,
@@ -332,16 +336,51 @@ pub struct Discovery {
 
 /// Names only: no conversion, raw fd, stage-A or content-read API.
 pub struct AncestorDir {
-    root: Root,
+    root: Rc<Root>,
+    listed: std::cell::Cell<bool>,
 }
 
 impl AncestorDir {
     pub fn entries(&self, raw_limit: u32, meter: &mut Meter) -> Result<Listing, ReadError> {
+        if self.listed.replace(true) {
+            return Err(ReadError::Changed);
+        }
         entries_root(&self.root, raw_limit.min(256), meter)
     }
 }
 
+impl AncestorDir {
+    pub(crate) fn siblings(&self, bytes: usize, meter: &mut Meter) -> Result<Listing, ReadError> {
+        if self.listed.replace(true) {
+            return Err(ReadError::Changed);
+        }
+        entries_bounded(&self.root, 256, Some(bytes), meter)
+    }
+}
+
 impl Discovery {
+    pub(crate) fn path_binding(&self) -> (usize, Option<usize>, Option<bool>) {
+        (self.components, self.repo_level, self.in_repo)
+    }
+
+    pub(crate) fn discard_names(&mut self) {
+        self.ancestors.clear();
+    }
+
+    /// Names are optional; selected cwd/worktree capabilities remain shared.
+    /// Missing ancestor sets make PathFacts partial and use abbrev, without
+    /// moving enumeration before stage A or increasing the descriptor budget.
+    pub(crate) fn spare_fds(&mut self, needed: u32, meter: &mut Meter) {
+        if meter.live_fds() > crate::meter::LIVE_FDS.saturating_sub(needed) {
+            self.discard_names();
+            meter.event("names_discarded_for_fds");
+        }
+    }
+
+    pub(crate) fn readonly(&self, meter: &mut Meter) -> Result<Option<bool>, ReadError> {
+        self.cwd.readonly(meter)
+    }
+
     /// Reacquiring an ancestor for gitfile proof must not reset the selected
     /// worktree's mount boundary before the ordinary bounded marker walk.
     pub(crate) fn ancestor_repository(
@@ -361,13 +400,24 @@ impl Discovery {
         max_levels: usize,
         meter: &mut Meter,
     ) -> Result<(Root, Option<usize>), ReadError> {
+        let (root, level) = self.retain_repository(max_levels, meter)?;
+        drop(self);
+        Ok((Rc::try_unwrap(root).map_err(|_| ReadError::Changed)?, level))
+    }
+
+    /// Select once, retaining names-only ancestors through the Path stage.
+    /// Rc shares the already-held descriptor: no dup, open or repeated stat.
+    pub(crate) fn retain_repository(
+        &mut self,
+        max_levels: usize,
+        meter: &mut Meter,
+    ) -> Result<(Rc<Root>, Option<usize>), ReadError> {
         for level in 0..=max_levels.min(32).min(self.ancestors.len()) {
             let root = if level == 0 {
                 &self.cwd
             } else {
                 &self.ancestors[self.ancestors.len() - level].root
             };
-            // Never probe / as a repository or cross a content mount boundary.
             if self.validate(root).is_err() {
                 break;
             }
@@ -382,18 +432,17 @@ impl Discovery {
             if kind != libc::S_IFDIR && (kind != libc::S_IFREG || marker.metadata.st_nlink != 1) {
                 return Err(ReadError::Special);
             }
-            return Ok((
-                if level == 0 {
-                    self.cwd
-                } else {
-                    self.ancestors
-                        .swap_remove(self.ancestors.len() - level)
-                        .root
-                },
-                Some(level),
-            ));
+            self.repo_level = Some(level);
+            self.in_repo = Some(true);
+            return Ok((Rc::clone(root), Some(level)));
         }
-        self.select_cwd().map(|root| (root, None))
+        self.validate(&self.cwd)?;
+        // A depth cutoff or an unproved logical boundary is not absence.
+        let needed = self.query.home_component.map_or(self.components, |home| {
+            self.components.saturating_sub(usize::from(home) + 1)
+        });
+        self.in_repo = (self.logical && needed <= max_levels.min(32)).then_some(false);
+        Ok((Rc::clone(&self.cwd), None))
     }
 
     /// External metadata pointers must be canonical, owned directories BEFORE
@@ -477,7 +526,7 @@ impl Discovery {
     /// The request's cwd is the only content root outside a repository.
     pub fn select_cwd(self) -> Result<Root, ReadError> {
         self.validate(&self.cwd)?;
-        Ok(self.cwd)
+        Rc::try_unwrap(self.cwd).map_err(|_| ReadError::Changed)
     }
 
     /// Select an already-held repository ancestor, never an arbitrary read
@@ -518,12 +567,14 @@ impl Discovery {
             return Err(ReadError::Special);
         }
         if levels == 0 {
-            Ok(self.cwd)
+            Rc::try_unwrap(self.cwd).map_err(|_| ReadError::Changed)
         } else {
-            Ok(self
-                .ancestors
-                .swap_remove(self.ancestors.len() - levels)
-                .root)
+            Rc::try_unwrap(
+                self.ancestors
+                    .swap_remove(self.ancestors.len() - levels)
+                    .root,
+            )
+            .map_err(|_| ReadError::Changed)
         }
     }
 
@@ -537,12 +588,12 @@ impl Discovery {
         if metadata.st_uid != unsafe { libc::geteuid() } {
             return Err(ReadError::Denied);
         }
-        Ok(self.cwd)
+        Rc::try_unwrap(self.cwd).map_err(|_| ReadError::Changed)
     }
 
     #[cfg(test)]
     pub fn unchecked_cwd_for_test(self) -> Root {
-        self.cwd
+        Rc::try_unwrap(self.cwd).ok().expect("exclusive test cwd")
     }
 }
 
@@ -593,11 +644,11 @@ impl Root {
         let Opened { fd, identity, .. } = walk::one_component(self, b".git", true, meter)?;
         Ok(Self { fd, identity })
     }
-    /// Observation only. No access(2) fallback if the exact query is unavailable.
-    #[cfg(target_os = "linux")]
+    /// Effective-user observation on the held cwd only; never create a file.
     pub fn readonly(&self, meter: &mut Meter) -> Result<Option<bool>, ReadError> {
         meter.charge(Op::Readonly)?;
-        // SAFETY: held directory and fixed relative dot; no object is created.
+        // SAFETY: held directory and fixed relative dot; no symlink traversal.
+        #[cfg(target_os = "linux")]
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_faccessat2,
@@ -607,7 +658,34 @@ impl Root {
                 libc::AT_EACCESS,
             )
         };
-        readonly_status(if rc == 0 { Ok(()) } else { Err(errno()) })
+        #[cfg(target_os = "macos")]
+        // SAFETY: same held directory and fixed relative dot.
+        let rc = unsafe {
+            libc::faccessat(
+                self.fd.as_raw_fd(),
+                c".".as_ptr(),
+                libc::W_OK,
+                libc::AT_EACCESS,
+            )
+        };
+        let access = readonly_status(if rc == 0 { Ok(()) } else { Err(errno()) });
+        meter.charge(Op::Filesystem)?;
+        // SAFETY: live fd and fully writable statfs output; no pathname lookup.
+        #[cfg(target_os = "linux")]
+        let mut fs = unsafe { std::mem::zeroed::<libc::statfs64>() };
+        #[cfg(target_os = "macos")]
+        // SAFETY: statfs is a C output structure; zero is a valid initialization.
+        let mut fs = unsafe { std::mem::zeroed::<libc::statfs>() };
+        // fstatfs64 is the same fstatfs syscall on our 64-bit Linux targets;
+        // unlike libc's GNU statfs binding, it exposes the UAPI f_flags field.
+        // SAFETY: matching output layout and the same live directory fd.
+        #[cfg(target_os = "linux")]
+        let rc = unsafe { libc::fstatfs64(self.fd.as_raw_fd(), &mut fs) };
+        #[cfg(target_os = "macos")]
+        // SAFETY: matching writable output and held directory fd.
+        let rc = unsafe { libc::fstatfs(self.fd.as_raw_fd(), &mut fs) };
+        // Linux ST_RDONLY and Darwin MNT_RDONLY both use bit 0.
+        readonly_observation(access, (rc == 0).then_some(fs.f_flags & 1 != 0))
     }
 
     pub fn device(&self) -> u64 {
@@ -645,6 +723,7 @@ fn inspect(fd: Fd, meter: &mut Meter) -> Result<Opened, ReadError> {
 pub struct Listing {
     pub names: Vec<Vec<u8>>,
     pub complete: bool,
+    _allocation: Option<PathAllocation>,
 }
 
 pub fn acquire(
@@ -1100,13 +1179,22 @@ pub fn entries(dir: &Directory, raw_limit: u32, meter: &mut Meter) -> Result<Lis
 }
 
 fn entries_root(root: &Root, raw_limit: u32, meter: &mut Meter) -> Result<Listing, ReadError> {
+    entries_bounded(root, raw_limit, None, meter)
+}
+
+fn entries_bounded(
+    root: &Root,
+    raw_limit: u32,
+    bytes: Option<usize>,
+    meter: &mut Meter,
+) -> Result<Listing, ReadError> {
     #[cfg(target_os = "linux")]
     {
-        linux::entries(root, raw_limit, meter)
+        linux::entries(root, raw_limit, bytes, meter)
     }
     #[cfg(target_os = "macos")]
     {
-        macos::entries(root, raw_limit, meter)
+        macos::entries(root, raw_limit, bytes, meter)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -1248,7 +1336,17 @@ pub fn probe_for_test(meter: &mut Meter) -> Result<Resolver, ReadError> {
     linux::probe_for_test(meter)
 }
 
-#[cfg(any(test, target_os = "linux"))]
+fn readonly_observation(
+    access: Result<Option<bool>, ReadError>,
+    mount: Option<bool>,
+) -> Result<Option<bool>, ReadError> {
+    match mount {
+        Some(true) => Ok(Some(true)),
+        Some(false) => access,
+        None => Ok(None),
+    }
+}
+
 fn readonly_status(result: Result<(), i32>) -> Result<Option<bool>, ReadError> {
     match result {
         Ok(()) => Ok(Some(false)),
@@ -1332,6 +1430,153 @@ mod tests {
         assert_eq!(readonly_status(Err(libc::ENOENT)), Err(ReadError::Missing));
         assert_eq!(
             readonly_status(Err(libc::EIO)),
+            Err(ReadError::Io(libc::EIO))
+        );
+    }
+}
+
+struct Names {
+    listing: Listing,
+    left: Option<usize>,
+}
+impl Names {
+    fn new(bytes: Option<usize>, meter: &Meter) -> Self {
+        Self {
+            listing: Listing {
+                names: Vec::new(),
+                complete: false,
+                _allocation: bytes.map(|_| meter.path_allocation()),
+            },
+            left: bytes.map(|n| n.min(bingsu_core::shorten::SIBLING_STEP_MAX)),
+        }
+    }
+    fn entry(
+        &mut self,
+        name: &[u8],
+        live: bool,
+        kind: u8,
+        meter: &mut Meter,
+    ) -> Result<bool, ReadError> {
+        meter.raw_entry()?;
+        if !live || name == b"." || name == b".." {
+            return Ok(true);
+        }
+        if name.is_empty() || name.contains(&0) || name.contains(&b'/') {
+            return Err(ReadError::Io(libc::EIO));
+        }
+        // Only the names-only sibling port filters known non-directories.
+        // DT_UNKNOWN is conservative evidence; never stat or follow a link.
+        if self.left.is_some() && kind != libc::DT_DIR && kind != libc::DT_UNKNOWN {
+            return Ok(true);
+        }
+        self.push(name, meter)
+    }
+    fn push(&mut self, name: &[u8], meter: &mut Meter) -> Result<bool, ReadError> {
+        if let Some(left) = &mut self.left {
+            if name.len() > bingsu_core::shorten::SIBLING_NAME_MAX || name.len() > *left {
+                return Ok(false);
+            }
+            *left -= name.len();
+        }
+        let bytes = name.len() + std::mem::size_of::<Vec<u8>>();
+        if let Some(allocation) = &mut self.listing._allocation {
+            allocation.reserve(bytes, meter)?;
+        } else {
+            // Preserve the general directory API's existing accounting. E1
+            // releases only its bounded, names-only per-folder scratch.
+            meter.allocation(bytes)?;
+        }
+        self.listing
+            .names
+            .try_reserve_exact(1)
+            .map_err(|_| ReadError::Limit)?;
+        self.listing.names.push(name.to_vec());
+        Ok(true)
+    }
+    fn finish(mut self, complete: bool) -> Listing {
+        self.listing.complete = complete;
+        self.listing
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    fn meter() -> Meter {
+        Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(60))
+    }
+    // Fails if name/step caps happen after allocation, or scratch accumulates.
+    #[test]
+    fn sibling_name_and_step_limits_precede_allocation() {
+        let mut m = meter();
+        for _ in 0..4096 {
+            let mut names = Names::new(Some(16_384), &m);
+            for _ in 0..8 {
+                assert!(names.push(&[b'x'; 1024], &mut m).unwrap());
+            }
+            let baseline = m.live_allocated();
+            assert!(!names.push(b"x", &mut m).unwrap());
+            assert_eq!(m.live_allocated(), baseline);
+            drop(names);
+            assert_eq!(m.live_allocated(), 0);
+        }
+        let mut names = Names::new(Some(8192), &m);
+        assert!(!names.push(&[b'x'; 1025], &mut m).unwrap());
+        assert_eq!(m.live_allocated(), 0);
+        assert!(names.push(&[b'x'; 1023], &mut m).unwrap());
+        assert!(names.push(&[b'x'; 1024], &mut m).unwrap());
+        let mut names = Names::new(Some(1023), &m);
+        assert!(!names.push(&[b'x'; 1024], &mut m).unwrap());
+        m.allocation_limit = 0;
+        assert_eq!(names.push(b"x", &mut m), Err(ReadError::Limit));
+    }
+    // Mount and effective access are independent observations; failure is unknown.
+    #[test]
+    fn readonly_mount_and_failed_observations_stay_conservative() {
+        for access in [
+            Ok(None),
+            Ok(Some(false)),
+            Ok(Some(true)),
+            Err(ReadError::Denied),
+        ] {
+            assert_eq!(readonly_observation(access, Some(true)), Ok(Some(true)));
+            assert_eq!(readonly_observation(access, None), Ok(None));
+            assert_eq!(readonly_observation(access, Some(false)), access);
+        }
+        #[cfg(target_os = "linux")]
+        assert_eq!(libc::ST_RDONLY, 1);
+        #[cfg(target_os = "macos")]
+        assert_eq!(libc::MNT_RDONLY, 1);
+    }
+}
+
+#[cfg(test)]
+mod raw_name_tests {
+    use super::*;
+    // A deleted slot, dot entries, files, links and unknown types all spend raw budget.
+    #[test]
+    fn raw_deleted_and_nonfolder_entries_count_before_filtering() {
+        let mut m = Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let mut names = Names::new(Some(8192), &m);
+        for (name, live) in [(b".".as_slice(), true), (b"..", true), (b"", false)] {
+            assert!(names.entry(name, live, libc::DT_DIR, &mut m).unwrap());
+        }
+        for _ in 3..256 {
+            assert!(
+                names
+                    .entry(b"file-or-unknown", true, libc::DT_UNKNOWN, &mut m)
+                    .unwrap()
+            );
+        }
+        assert_eq!(m.counts[Phase::Content as usize].raw_entries, 256);
+        for kind in [libc::DT_REG, libc::DT_LNK, libc::DT_FIFO, libc::DT_SOCK] {
+            assert!(names.entry(b"not-a-folder", true, kind, &mut m).unwrap());
+        }
+        assert_eq!(m.counts[Phase::Content as usize].raw_entries, 260);
+        assert_eq!(names.finish(false).names.len(), 253);
+        let mut names = Names::new(Some(8192), &m);
+        assert_eq!(
+            names.entry(b"bad/name", true, libc::DT_UNKNOWN, &mut m),
             Err(ReadError::Io(libc::EIO))
         );
     }

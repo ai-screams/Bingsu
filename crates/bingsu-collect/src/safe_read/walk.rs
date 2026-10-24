@@ -189,6 +189,7 @@ fn acquire_inner(
     if !cwd.starts_with(b"/") || cwd.contains(&0) {
         return Err(ReadError::Escape);
     }
+    let component_count = cwd.split(|b| *b == b'/').filter(|p| !p.is_empty()).count();
     let mut scratch = meter.path_allocation();
     let mut pending = components(cwd, &mut scratch, meter)?;
     let fd = openat(libc::AT_FDCWD, c"/", DIR_FLAGS, meter)?;
@@ -277,10 +278,23 @@ fn acquire_inner(
     }
     let cwd = stack.pop_back().ok_or(ReadError::Changed)?;
     let mut allocation = meter.path_allocation();
-    allocation.reserve(stack.len() * std::mem::size_of::<Root>(), meter)?;
+    allocation.reserve(
+        (stack.len() + 1) * (std::mem::size_of::<Root>() + 2 * std::mem::size_of::<usize>())
+            + stack.len() * std::mem::size_of::<AncestorDir>(),
+        meter,
+    )?;
     Ok(Discovery {
-        cwd,
-        ancestors: stack.into_iter().map(|root| AncestorDir { root }).collect(),
+        cwd: Rc::new(cwd),
+        components: component_count,
+        repo_level: None,
+        in_repo: None,
+        ancestors: stack
+            .into_iter()
+            .map(|root| AncestorDir {
+                root: Rc::new(root),
+                listed: std::cell::Cell::new(false),
+            })
+            .collect(),
         logical,
         query,
         slash,

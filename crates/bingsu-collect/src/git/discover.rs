@@ -5,10 +5,10 @@ use crate::{
     safe_read::{self, Access, ReadError, Root, StageAFile},
 };
 use bingsu_core::collection::wire::Request;
-use std::cell::Cell;
+use std::{cell::Cell, rc::Rc};
 
 pub struct RepoRoots {
-    pub(super) worktree: Root,
+    pub(super) worktree: Rc<Root>,
     pub(super) gitdir: Root,
     pub(super) commondir: Option<Root>,
     pub(super) access: Access,
@@ -78,17 +78,17 @@ pub fn discover_with_access(
     meter: &mut Meter,
 ) -> Result<Option<RepoRoots>, CollectError> {
     match select(input, access, meter)? {
-        Selection::Repository(roots) => Ok(Some(roots)),
-        Selection::Outside(_, _) => Ok(None),
+        Selection::Repository(roots, _) => Ok(Some(roots)),
+        Selection::Outside(_, _, _) => Ok(None),
     }
 }
 
-pub(super) enum Selection {
-    Repository(RepoRoots),
-    Outside(Root, Access),
+pub(crate) enum Selection {
+    Repository(RepoRoots, safe_read::Discovery),
+    Outside(Rc<Root>, Access, safe_read::Discovery),
 }
 
-pub(super) fn select(
+pub(crate) fn select(
     input: &Request,
     access: Access,
     meter: &mut Meter,
@@ -103,7 +103,7 @@ fn select_inner(
 ) -> Result<Selection, ReadError> {
     let cwd = &input.binding.cwd;
     let query = input.binding.path_query;
-    let discovery = safe_read::acquire(cwd, query, meter)?;
+    let mut discovery = safe_read::acquire(cwd, query, meter)?;
     let logical = discovery.logical();
     let mut scratch = meter.path_allocation();
     scratch.reserve(cwd.len() * 2 + 4096 * std::mem::size_of::<&[u8]>(), meter)?;
@@ -118,10 +118,12 @@ fn select_inner(
     } else {
         0
     }; // a logical HOME boundary cannot be proved through a symlink
-    let (worktree, level) = discovery.repository(max_levels, meter)?;
-    meter.event("discovery_consumed");
+    let (worktree, level) = discovery.retain_repository(max_levels, meter)?;
+    if !query.unique || input.binding.mask & (1 << 1) == 0 {
+        discovery.discard_names();
+    }
     let Some(level) = level else {
-        return Ok(Selection::Outside(worktree, access));
+        return Ok(Selection::Outside(worktree, access, discovery));
     };
     let worktree_path = absolute(&parts[..parts.len() - level]);
     let location = Location {
@@ -130,7 +132,7 @@ fn select_inner(
         ancestors: max_levels.min(32).saturating_sub(level),
         depth: 0,
     };
-    let metadata = metadata(&worktree, location, &access, meter)?;
+    let metadata = metadata(&worktree, location, &access, &mut discovery, meter)?;
     let binding = if metadata.submodule {
         let mut allocation = meter.path_allocation();
         allocation.reserve(metadata.path.len() + worktree_path.len(), meter)?;
@@ -142,23 +144,29 @@ fn select_inner(
     } else {
         None
     };
-    Ok(Selection::Repository(RepoRoots {
-        worktree,
-        gitdir: metadata.gitdir,
-        commondir: metadata.commondir,
-        access,
-        policy: metadata.policy,
-        reason: Cell::new(metadata.reason),
-        unborn: Cell::new(false),
-        refs: super::refs::RefSnapshot::default(),
-        binding,
-    }))
+    Ok(Selection::Repository(
+        RepoRoots {
+            worktree,
+            gitdir: metadata.gitdir,
+            commondir: metadata.commondir,
+            access,
+            policy: metadata.policy,
+            reason: Cell::new(metadata.reason),
+            unborn: Cell::new(false),
+            refs: super::refs::RefSnapshot::default(),
+            binding,
+        },
+        discovery,
+    ))
 }
 
 // At most eight gitfile validations can be live. Every recursive ancestor
 // search also spends the original HOME/32-level distance budget, so neither
 // recursion nor an ancestor chain can reset discovery's bound.
 const GITFILE_DEPTH: usize = 8;
+// Acquisition retains 33 directories and opens the next before evicting the
+// oldest. Include that transient descriptor when protecting optional names.
+const ACQUISITION_FDS: u32 = 34;
 #[derive(Clone, Copy)]
 struct Location<'a> {
     path: &'a [u8],
@@ -179,8 +187,11 @@ fn metadata(
     worktree: &Root,
     location: Location<'_>,
     access: &Access,
+    names: &mut safe_read::Discovery,
     meter: &mut Meter,
 ) -> Result<Metadata, ReadError> {
+    // gitdir + a fixed metadata file + Darwin's atomic reopen can coexist.
+    names.spare_fds(3, meter);
     let worktree_owned = worktree.owned(meter)?;
     let gitdir = match worktree.git_directory(meter) {
         Ok(gitdir) => gitdir,
@@ -196,7 +207,7 @@ fn metadata(
             let pointer = line(&bytes)?
                 .strip_prefix(b"gitdir: ")
                 .ok_or(ReadError::Escape)?;
-            return gitfile(worktree, location, pointer, access, meter);
+            return gitfile(worktree, location, pointer, access, names, meter);
         }
         Err(error) => return Err(error),
     };
@@ -233,6 +244,7 @@ fn gitfile(
     location: Location<'_>,
     pointer: &[u8],
     access: &Access,
+    names: &mut safe_read::Discovery,
     meter: &mut Meter,
 ) -> Result<Metadata, ReadError> {
     // Three bounded pointer buffers, their normalized paths and component
@@ -248,9 +260,10 @@ fn gitfile(
     // is not a metadata capability. Validate the shape BEFORE acquisition and
     // select_metadata; the reciprocal registration then binds the one slot.
     if parts.len() < 3 || parts[parts.len() - 2] != b"worktrees" {
-        return submodule(worktree, location, &git_path, access, meter);
+        return submodule(worktree, location, &git_path, access, names, meter);
     }
     let common_path = absolute(&parts[..parts.len() - 2]);
+    names.spare_fds(ACQUISITION_FDS, meter);
     let candidate = safe_read::acquire_metadata(&git_path, meter)?;
     if !candidate.pointer_is_logical() {
         return Err(ReadError::Escape);
@@ -261,7 +274,7 @@ fn gitfile(
         // core.worktree binding, not the suffix spelling, decides the layout.
         Err(ReadError::Missing) => {
             drop(candidate);
-            return submodule(worktree, location, &git_path, access, meter);
+            return submodule(worktree, location, &git_path, access, names, meter);
         }
         Err(error) => return Err(error),
     };
@@ -274,6 +287,8 @@ fn gitfile(
     if normalize(&git_path, line(&backlink)?)? != expected {
         return Err(ReadError::Escape);
     }
+    // The candidate remains live: recheck rather than reuse the first margin.
+    names.spare_fds(ACQUISITION_FDS, meter);
     let common = safe_read::acquire_metadata(&common_path, meter)?;
     // No commondir chain/cycle, and never turn a parent into an allow rule.
     match common.metadata_pointer(StageAFile::CommonDir, worktree, meter) {
@@ -300,6 +315,7 @@ fn submodule(
     location: Location<'_>,
     git_path: &[u8],
     access: &Access,
+    names: &mut safe_read::Discovery,
     meter: &mut Meter,
 ) -> Result<Metadata, ReadError> {
     // Reject arbitrary pointers before acquiring their target (notably HOME).
@@ -323,6 +339,7 @@ fn submodule(
         if path.is_empty() {
             return Err(ReadError::Escape);
         }
+        names.spare_fds(ACQUISITION_FDS, meter);
         let discovery = safe_read::acquire(path, Default::default(), meter)?;
         if !discovery.logical() {
             return Err(ReadError::Escape);
@@ -347,6 +364,7 @@ fn submodule(
                 depth: location.depth + 1,
             },
             access,
+            names,
             meter,
         )?;
         if parent.policy != HeadPolicy::OwnedMetadata || parent.reason.is_some() {
@@ -360,6 +378,7 @@ fn submodule(
             break;
         }
     }
+    names.spare_fds(ACQUISITION_FDS, meter);
     let candidate = safe_read::acquire_metadata(git_path, meter)?;
     match candidate.metadata_pointer(StageAFile::CommonDir, worktree, meter) {
         Err(ReadError::Missing) => {}

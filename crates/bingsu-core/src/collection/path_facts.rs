@@ -268,3 +268,56 @@ impl PathFactInput {
         .with_readonly(self.readonly))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        shorten::{Method, ShortenRequest, Source, run_builtin},
+        width::WidthProfile,
+    };
+    // Removing complete gating would claim the partial prefix is unique.
+    #[test]
+    fn incomplete_names_and_readonly_survive_wire_without_claiming_unique() {
+        let cwd = b"/home/alphabet/leaf";
+        let query = PathQuery {
+            home_component: Some(0),
+            unique: true,
+        };
+        let mut input = PathFactInput {
+            in_repo: Some(true),
+            repo_component: Some(1),
+            readonly: Some(true),
+            partial: true,
+            siblings: alloc::vec![SiblingSet {
+                component: 1,
+                complete: false,
+                names: alloc::vec![b"alpine".to_vec()]
+            }],
+        };
+        for readonly in [None, Some(false), Some(true)] {
+            input.readonly = readonly;
+            let decoded = PathFactInput::decode(&input.encode(cwd).unwrap(), cwd).unwrap();
+            let facts = decoded.to_path_facts(cwd, query).unwrap();
+            assert_eq!(facts.readonly(), readonly);
+            let render = |f: &PathFacts| {
+                run_builtin(&ShortenRequest {
+                    source: Source::Path(f),
+                    method: Method::Unique,
+                    budget: u32::MAX,
+                    profile: WidthProfile::DEFAULT,
+                })
+                .unwrap()
+                .text()
+            };
+            let oracle = PathFacts::new(Anchor::Home, &[b"alphabet", b"leaf"], Some(0), &[]);
+            assert_eq!(render(&facts), render(&oracle));
+            input.siblings[0].complete = true;
+            assert_ne!(
+                render(&input.to_path_facts(cwd, query).unwrap()),
+                render(&oracle)
+            );
+            input.siblings[0].complete = false;
+        }
+    }
+}

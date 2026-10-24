@@ -266,7 +266,8 @@ def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
     return {"openat" if stepwise else "openat2": opened + ax.candidates + ax.retries,
             "fstat": opened + hashes,
             "newfstatat": (ax.components + hashes if stepwise else 0) + 2 * ax.symlinks + ax.stat_leaves + 2 * ax.stat_directory_groups,
-            "fstatfs": opened, "statx": opened, "readlinkat": ax.symlinks,
+            # Readonly rechecks mount flags on the held cwd fd, independently of opened content fds.
+            "fstatfs": opened + ax.readonly, "statx": opened, "readlinkat": ax.symlinks,
             "read": sum(ceil_div(n, 16384) + 1 for n in ax.read_bytes + ax.worktree_hash_bytes),
             "getdents64": sum(ceil_div(n, 8192) + 1 for n in ax.dir_bytes) - ax.capped_directories,
             "mmap": ax.maps, "faccessat2": ax.readonly}
