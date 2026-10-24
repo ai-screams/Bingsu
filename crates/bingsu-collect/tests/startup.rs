@@ -1,5 +1,11 @@
 //! Irreversible checks run only in isolated, single-threaded child processes.
 #![cfg(unix)]
+#[allow(dead_code)]
+#[path = "../src/git/mod.rs"]
+mod git;
+#[allow(dead_code)]
+#[path = "../src/update_sink.rs"]
+mod update_sink;
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},

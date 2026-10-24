@@ -1,6 +1,9 @@
 //! Bounded loose refs and an in-memory packed-refs snapshot. No ref store.
 use super::io::{RepoIo, RepoPath, RootId};
-use crate::{meter::Meter, safe_read::ReadError};
+use crate::{
+    meter::{Meter, ObjectAllocation},
+    safe_read::ReadError,
+};
 use bingsu_core::collection::budget::{Axis, REF_BYTES, SMALL_FILE_BYTES};
 use gix_ref::bstr::ByteSlice;
 
@@ -21,6 +24,7 @@ pub enum Target {
 
 pub struct Refs {
     packed: Option<gix_ref::packed::Buffer>,
+    _allocation: Option<ObjectAllocation>,
 }
 
 impl Refs {
@@ -36,7 +40,12 @@ impl Refs {
         config.ensure_supported(io)?;
         let bytes = match io.read_ref(RepoPath::new(RootId::CommonDir, b"packed-refs"), REF_BYTES) {
             Ok(bytes) => bytes,
-            Err(ReadError::Missing) => return Ok(Self { packed: None }),
+            Err(ReadError::Missing) => {
+                return Ok(Self {
+                    packed: None,
+                    _allocation: None,
+                });
+            }
             Err(error) => return Err(error),
         };
         io.metered(|meter| Self::parse(&bytes, meter))
@@ -46,7 +55,8 @@ impl Refs {
         if bytes.len() > REF_BYTES as usize {
             return Err(ReadError::Limit);
         }
-        meter.allocation(PARSER_ALLOCATION)?;
+        let mut allocation = meter.object_allocation();
+        allocation.reserve(PARSER_ALLOCATION, meter)?;
         // Validate and charge BEFORE Buffer's optional unsorted-input sort.
         let iter =
             gix_ref::packed::Iter::new(bytes, gix_index::hash::Kind::Sha1).map_err(|_| INVALID)?;
@@ -71,6 +81,7 @@ impl Refs {
         }
         Ok(Self {
             packed: Some(packed),
+            _allocation: Some(allocation),
         })
     }
 
@@ -89,7 +100,14 @@ impl Refs {
 
     pub fn resolve(&self, io: &RepoIo<'_>, name: &[u8]) -> Result<Option<ObjectId>, ReadError> {
         validate_name(name)?;
-        io.metered(|meter| meter.allocation(name.len()))?;
+        let mut scratch = io.metered(|meter| {
+            let mut scratch = meter.path_allocation();
+            scratch.reserve(
+                name.len() + SYMREF_LIMIT * std::mem::size_of::<Vec<u8>>(),
+                meter,
+            )?;
+            Ok(scratch)
+        })?;
         let mut seen = Vec::new();
         let mut current = name.to_vec();
         for _ in 0..SYMREF_LIMIT {
@@ -99,7 +117,7 @@ impl Refs {
             }
             io.metered(|meter| {
                 meter.charge_axis(Axis::RefEntries, 1)?;
-                meter.allocation(current.len())
+                scratch.reserve(current.len(), meter)
             })?;
             // HEAD and per-worktree namespaces live in gitdir. Never interpret
             // main-worktree/worktrees pseudo paths or repository-supplied roots.

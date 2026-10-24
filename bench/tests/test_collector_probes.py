@@ -35,7 +35,8 @@ def recorded_x32_build(monkeypatch):
 
 def test_ledger_requires_every_acceptance_cell(monkeypatch, tmp_path, recorded_x32_build):
     rows = probe.ledger_rows()
-    assert len(rows) == 108
+    assert len(rows) == 120
+    assert {row["case"] for row in rows if "Product lower-crate pin" in row["reason"]} == {"X-09", "X-10"}
     assert sum(row["status"] == "observed" and row["case"] == "X-32"
                and row["environment"] == "macos-current" and row["arch"] == "aarch64" for row in rows) == 6
     # Missing one required kernel/arch/criterion cell must block acceptance.
@@ -285,7 +286,7 @@ def test_stale_observations_become_blocked_for_remeasurement(monkeypatch):
     original = probe.build_id
     monkeypatch.setattr(probe, "build_id", lambda case: "new-build" if case == "X-32" else original(case))
     rows = probe.ledger_rows(allow_stale=True)
-    assert len(rows) == 108
+    assert len(rows) == 120
     assert all(row["outcome"] == "BLOCKED" for row in rows)
     assert sum(row["reason"] == "observed build_id is stale" for row in rows) == 6
 

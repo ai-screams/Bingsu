@@ -162,6 +162,18 @@ impl Meter {
         }
     }
 
+    /// A stage may shorten the request deadline, never extend it or reset any
+    /// counter. Unused stage time is not added to the next stage's allowance.
+    pub(crate) fn stage<T>(&mut self, millis: u64, run: impl FnOnce(&mut Self) -> T) -> T {
+        let request_deadline = self.deadline;
+        self.deadline = self
+            .deadline
+            .min(Instant::now() + std::time::Duration::from_millis(millis));
+        let result = run(self);
+        self.deadline = request_deadline;
+        result
+    }
+
     /// Reentry sentinel for RepoIo's loan. Sharing the live counters avoids
     /// two heap allocations per leaf; its expired deadline rejects all work.
     pub(crate) fn expired_placeholder(&self) -> Self {

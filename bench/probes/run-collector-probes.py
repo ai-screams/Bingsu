@@ -341,6 +341,13 @@ def ledger_rows(allow_stale=False):
                                    ("X-14", ("linux-glibc", "linux-musl")),
                                    ("X-16", ("linux-glibc", "linux-musl"))):
             expected.update((case, env, arch, cell) for env in environments for cell in CELLS[case])
+        # Product lower-crate pins are run by their Rust test catalog, not the
+        # historical umbrella-gix API probes. Archive native evidence before
+        # promoting these pending cells; a unit run alone is not certification.
+        for case, cell in (("X-09", "replace_alternates_a_only"),
+                           ("X-10", "request_roots_ignore_environment")):
+            expected.update((case, env, arch, cell)
+                            for env in ("macos-current", "linux-glibc", "linux-musl"))
     keys = [(r["case"], r["environment"], r["arch"], r["cell"]) for r in rows]
     require(len(keys) == len(set(keys)) and set(keys) == expected, "required ledger cells missing or duplicated")
     for row in rows:

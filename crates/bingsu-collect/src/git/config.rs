@@ -1,8 +1,8 @@
 //! Isolated config: repository bytes only; include directives remain inert data.
 use super::io::{RepoIo, RepoPath, RootId};
 use crate::{
-    meter::Meter,
-    safe_read::{ReadCap, ReadError},
+    meter::{Meter, ObjectAllocation},
+    safe_read::{Access, Discovery, ReadCap, ReadError, Root},
 };
 use bingsu_core::collection::budget::CONFIG_BYTES;
 
@@ -18,10 +18,12 @@ pub const WORD_LIMIT: usize = 4096;
 // there. git_parser_charges_cover_counted_peak guards upgrades with an allocator.
 pub const PARSER_ALLOCATION: usize = CONFIG_BYTES as usize * 11;
 
-// Only C3-C5 policy facts survive parsing. External paths/drivers/includes are
-// intentionally not retained. A missing key, implicit value and explicit empty
+// Only C3-C5 policy facts survive parsing. core.worktree is retained solely for
+// reciprocal submodule validation; no external path/driver/include is followed.
+// A missing key, implicit value and explicit empty
 // value remain distinct; later policy code must validate the value it consumes.
-const KEYS: [&str; 14] = [
+const KEYS: [&str; 15] = [
+    "core.worktree",
     "core.repositoryformatversion",
     "core.bare",
     "core.filemode",
@@ -41,8 +43,10 @@ const KEYS: [&str; 14] = [
 #[derive(Debug, Default)]
 pub struct Facts {
     core_worktree: bool,
+    use_replace_refs: bool,
     unknown_extension: bool,
     values: [Option<Option<Vec<u8>>>; KEYS.len()],
+    allocation: Option<ObjectAllocation>,
 }
 
 impl Facts {
@@ -96,6 +100,27 @@ impl Config {
             .any(|f| f.core_worktree)
     }
 
+    pub(super) fn risky_worktree(&self, roots: &super::discover::RepoRoots) -> bool {
+        [&self.common, &self.worktree]
+            .into_iter()
+            .flatten()
+            .filter(|facts| facts.core_worktree)
+            .any(|facts| {
+                !facts
+                    .value("core.worktree")
+                    .flatten()
+                    .is_some_and(|value| roots.matches_worktree(value))
+            })
+    }
+
+    /// Presence alone is unsafe, including implicit, empty and false values.
+    pub fn has_use_replace_refs(&self) -> bool {
+        [&self.common, &self.worktree]
+            .into_iter()
+            .flatten()
+            .any(|f| f.use_replace_refs)
+    }
+
     pub fn ensure_supported(&self, io: &RepoIo<'_>) -> Result<(), ReadError> {
         if [&self.common, &self.worktree]
             .into_iter()
@@ -128,10 +153,28 @@ fn read(io: &RepoIo<'_>, root: RootId, name: &[u8]) -> Result<Option<Facts>, Rea
     io.metered(|meter| parse(&bytes, meter).map(Some))
 }
 
+/// Discovery's fixed, owner-checked config read uses the same bounded isolated
+/// parser as preflight. This does not create a general metadata capability.
+pub(super) fn submodule_worktree(
+    candidate: &Discovery,
+    anchor: &Root,
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<Vec<u8>, ReadError> {
+    let bytes = candidate.metadata_config(anchor, access, meter)?;
+    let facts = parse(&bytes, meter)?;
+    facts
+        .value("core.worktree")
+        .flatten()
+        .map(<[u8]>::to_vec)
+        .ok_or(ReadError::Escape)
+}
+
 pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Facts, ReadError> {
     meter.check()?;
     scan(bytes)?;
-    meter.allocation(PARSER_ALLOCATION)?;
+    let mut scratch = meter.object_allocation();
+    scratch.reserve(PARSER_ALLOCATION, meter)?;
     meter.event("before_config_parse");
     let file = gix_config::File::from_bytes_no_includes(
         bytes,
@@ -151,6 +194,7 @@ pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Facts, ReadError>
         }
         if header.name().eq_ignore_ascii_case(b"core") {
             facts.core_worktree |= section.contains_value_name("worktree");
+            facts.use_replace_refs |= section.contains_value_name("useReplaceRefs");
         }
         if header.name().eq_ignore_ascii_case(b"extensions") {
             for name in section.value_names() {
@@ -171,8 +215,19 @@ pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Facts, ReadError>
             }
         }
     }
-    // File (events, section maps and backing bytes) drops here, before the next
-    // config is read. The reservation includes extraction while File is live.
+    // Only extracted values survive this parse, not the parser envelope.
+    let mut allocation = meter.object_allocation();
+    allocation.reserve(
+        facts
+            .values
+            .iter()
+            .flatten()
+            .flatten()
+            .map(Vec::capacity)
+            .sum(),
+        meter,
+    )?;
+    facts.allocation = Some(allocation);
     Ok(facts)
 }
 
