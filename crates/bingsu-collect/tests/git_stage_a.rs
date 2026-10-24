@@ -66,6 +66,7 @@ fn collect(
         git::StageDeadlines {
             a_ms: 30_000,
             b_ms: 30_000,
+            path_ms: 30_000,
         },
     )
 }
@@ -1386,6 +1387,7 @@ fn injected_deadlines_apply_to_each_stage() {
                 git::StageDeadlines {
                     a_ms: if a_expired { 0 } else { 30_000 },
                     b_ms: if a_expired { 30_000 } else { 0 },
+                    path_ms: 30_000,
                 },
             ),
             Err(CollectError::Read(E::Deadline))

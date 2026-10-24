@@ -190,17 +190,15 @@ fn mount_result(result: Result<(u32, u64), i32>) -> Result<[u64; 2], ReadError> 
 pub(super) fn entries(
     root: &Root,
     raw_limit: u32,
+    bytes: Option<usize>,
     meter: &mut Meter,
 ) -> Result<Listing, ReadError> {
-    let mut names = Vec::new();
+    let mut names = Names::new(bytes, meter);
     let mut raw = 0;
     let mut buffer = [0u8; DIRENT_CHUNK];
     loop {
         if raw >= raw_limit {
-            return Ok(Listing {
-                names,
-                complete: false,
-            });
+            return Ok(names.finish(false));
         }
         let size = retry(meter, Op::List, || {
             // SAFETY: owned directory fd and writable, bounded byte buffer.
@@ -214,18 +212,12 @@ pub(super) fn entries(
             }
         })? as usize;
         if size == 0 {
-            return Ok(Listing {
-                names,
-                complete: true,
-            });
+            return Ok(names.finish(true));
         }
         let mut offset = 0;
         while offset < size {
             if raw >= raw_limit {
-                return Ok(Listing {
-                    names,
-                    complete: false,
-                });
+                return Ok(names.finish(false));
             }
             // linux_dirent64: ino(8), off(8), reclen(2), type(1), name.
             let record = &buffer[offset..size];
@@ -236,21 +228,20 @@ pub(super) fn entries(
             if length < 20 || length > record.len() {
                 return Err(ReadError::Io(libc::EIO));
             }
-            meter.raw_entry()?;
             raw += 1;
-            let name = &record[19..length];
-            let end = name
-                .iter()
-                .position(|&byte| byte == 0)
-                .ok_or(ReadError::Io(libc::EIO))?;
-            let name = &name[..end];
-            if name != b"." && name != b".." {
-                if name.is_empty() || name.contains(&b'/') {
-                    return Err(ReadError::Io(libc::EIO));
-                }
-                meter.allocation(name.len() + std::mem::size_of::<Vec<u8>>())?;
-                names.try_reserve_exact(1).map_err(|_| ReadError::Limit)?;
-                names.push(name.to_vec());
+            let live = record[..8] != [0; 8];
+            let name = if live {
+                let name = &record[19..length];
+                let end = name
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .ok_or(ReadError::Io(libc::EIO))?;
+                &name[..end]
+            } else {
+                &[]
+            };
+            if !names.entry(name, live, record[18], meter)? {
+                return Ok(names.finish(false));
             }
             offset += length;
         }

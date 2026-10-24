@@ -270,6 +270,15 @@ impl Meter {
     }
 
     #[cfg(test)]
+    pub fn fd_observer(&self) -> Rc<Cell<u32>> {
+        Rc::clone(&self.live)
+    }
+
+    pub fn live_fds(&self) -> u32 {
+        self.live.get()
+    }
+
+    #[cfg(test)]
     pub fn live_allocated(&self) -> u64 {
         self.allocated.get()
     }

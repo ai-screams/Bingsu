@@ -152,24 +152,23 @@ MAC = [('darwin_atomic_root',
 # 이것을 실패시키는 것: dot을 raw 계수에서 제외·names에 포함하거나 cap 이후 할당·EOF 추정을 허용하는 것.
 LINUX = [('entries_dot_not_counted',
   'entries_limit_precedes_filtering_and_allocation',
-  [('linux', '            meter.raw_entry()?;\n            raw += 1;\n', ''),
-   ('linux', '            if name != b"." && name != b".." {',
-    '            if name != b"." && name != b".." {\n                meter.raw_entry()?;\n                raw += 1;')]),
+  [('mod', '        meter.raw_entry()?;\n        if !live', '        if !live'),
+   ('mod', '        self.push(name, meter)', '        meter.raw_entry()?;\n        self.push(name, meter)')]),
  ('entries_dot_in_names',
   'entries_limit_precedes_filtering_and_allocation',
-  [('linux', 'if name != b"." && name != b".." {', 'if true {')]),
+  [('mod', 'if !live || name == b"." || name == b".." {', 'if !live {')]),
  ('entries_allocate_past_cap',
   'entries_limit_precedes_filtering_and_allocation',
   [('linux', '            if raw >= raw_limit {', '            if false {')]),
  ('entries_exact_cap_complete',
   'entries_limit_precedes_filtering_and_allocation',
-  [('linux', 'complete: false,', 'complete: raw_limit == 302,')]),
+  [('linux', 'names.finish(false)', 'names.finish(raw_limit == 302)')]),
  ('entries_extra_getdents',
   'entries_limit_precedes_filtering_and_allocation',
   [('linux', '\n        if raw >= raw_limit {', '\n        if raw > raw_limit {')]),
  ('entries_allocation_unmetered',
   'entries_limit_precedes_filtering_and_allocation',
-  [('linux', '                meter.allocation(name.len() + std::mem::size_of::<Vec<u8>>())?;', '')]),
+  [('mod', '            meter.allocation(bytes)?;', '')]),
  ('landlock_install',
   'linux_landlock_backstop_blocks_held_fd_after_coarse_rename',
   [('landlock',
@@ -206,7 +205,7 @@ REVIEW = [
  ('selection_mount', 'content_roots_require_validated_selection', [('mod', 'if found.device != root.device || found.mount != root.mount {', 'if false {')]),
 ]
 API_TEST = 'capabilities_cannot_be_forged_or_read_as_roots'
-for field, typ in [('cwd','Root'), ('ancestors','Vec<AncestorDir>'), ('logical','bool'), ('query','DiscoveryQuery')]:
+for field, typ in [('cwd','Rc<Root>'), ('ancestors','Vec<AncestorDir>'), ('logical','bool'), ('query','DiscoveryQuery')]:
     REVIEW.append(('private_'+field, API_TEST, [('mod', f'    {field}: {typ},\n' + ('    slash' if field == 'query' else ''), f'    pub {field}: {typ},\n' + ('    slash' if field == 'query' else ''))]))
 for typ in ['AncestorDir', "StageADir<'_>"]:
     REVIEW.append(('no_root_'+typ.split('<')[0], API_TEST, [('mod', 'struct Fd {', f'impl std::ops::Deref for {typ} {{ type Target = Root; fn deref(&self) -> &Root {{ &self.root }} }}\nstruct Fd {{')]))
