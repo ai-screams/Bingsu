@@ -24,6 +24,7 @@ bingsu-core = { path = "../bingsu-core" }
 gix-index.workspace = true
 gix-pack.workspace = true
 gix-error.workspace = true
+gix-utils.workspace = true
 gix-zlib.workspace = true
 gix-object.workspace = true
 gix-config.workspace = true

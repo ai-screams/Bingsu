@@ -8,6 +8,10 @@
 //!   full stepwise reads require the installed Landlock read layer.
 //! - symlink: readlinkat plus same-name lstat before/after, no path reopening;
 //! - listing: getdents64 per 8KiB buffer plus EOF, except when the raw cap ends it.
+//! - index stats: one no-follow fstatat per leaf, no leaf open. A non-root
+//!   directory edge uses lstat/open/fstat/fstatfs/statx once, then exit lstat.
+//!   The depth-bounded stack shares ancestors across stats and hashes;
+//!   root-level entries borrow the selected root without any directory open.
 use super::*;
 use crate::meter::DIRENT_CHUNK;
 
@@ -48,6 +52,23 @@ pub(super) fn open(
     })
 }
 
+pub(super) fn open_nofollow(
+    root: &Root,
+    path: &[u8],
+    is_dir: bool,
+    meter: &mut Meter,
+) -> Result<Fd, ReadError> {
+    meter.event("before_openat2");
+    let path = cstring(path, meter)?;
+    let mut how = open_how(is_dir);
+    how.resolve |= libc::RESOLVE_NO_SYMLINKS;
+    how.flags |= libc::O_NOFOLLOW as u64;
+    open_raw_how(root.fd.as_raw_fd(), &path, how, meter).map_err(|error| match error {
+        ReadError::Io(error) => ReadError::errno(error),
+        other => other,
+    })
+}
+
 fn open_how(is_dir: bool) -> libc::open_how {
     // SAFETY: the UAPI requires zero initialization, including future fields.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
@@ -65,7 +86,15 @@ fn open_raw(
     is_dir: bool,
     meter: &mut Meter,
 ) -> Result<Fd, ReadError> {
-    let how = open_how(is_dir);
+    open_raw_how(root, path, open_how(is_dir), meter)
+}
+
+fn open_raw_how(
+    root: RawFd,
+    path: &std::ffi::CStr,
+    how: libc::open_how,
+    meter: &mut Meter,
+) -> Result<Fd, ReadError> {
     let lease = meter.lease()?;
     let mut interrupted = 0;
     let mut changed = 0;
@@ -75,6 +104,7 @@ fn open_raw(
         let injected = meter.openat2_errors.pop_front();
         #[cfg(not(test))]
         let injected: Option<i32> = None;
+        meter.event("before_safe_syscall");
         let result = if injected.is_some() {
             -1
         } else {
@@ -89,6 +119,8 @@ fn open_raw(
                 )
             }
         };
+        let saved_errno = errno();
+        meter.event("after_safe_syscall");
         if result >= 0 {
             return Ok(Fd {
                 // SAFETY: successful syscall returns a fresh, uniquely owned fd.
@@ -97,9 +129,9 @@ fn open_raw(
             });
         }
         #[cfg(test)]
-        let error = injected.unwrap_or_else(errno);
+        let error = injected.unwrap_or(saved_errno);
         #[cfg(not(test))]
-        let error = errno();
+        let error = saved_errno;
         match error {
             libc::EINTR if interrupted < 8 => interrupted += 1,
             libc::EAGAIN if changed < 2 => changed += 1,

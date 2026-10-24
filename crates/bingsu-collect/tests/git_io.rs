@@ -633,6 +633,12 @@ fn git_io_meter_restores_counters_on_unwind_and_deadline() {
 // 이것을 실패시키는 것: bytes 경계에 ambient 파일/환경/process 또는 path 생성자를 추가하는 것.
 #[test]
 fn gix_io_has_no_ambient_path_escape() {
+    if let Ok(mode) = std::env::var("BINGSU_C4_IO_CHILD") {
+        detector_child(&mode);
+        return;
+    }
+    run_io_detector();
+
     let files = [
         include_str!("../src/git/mod.rs"),
         include_str!("../src/git/io.rs"),
@@ -640,6 +646,8 @@ fn gix_io_has_no_ambient_path_escape() {
         include_str!("../src/git/refs.rs"),
         include_str!("../src/git/index.rs"),
         include_str!("../src/git/objects.rs"),
+        include_str!("../src/git/policy.rs"),
+        include_str!("../src/git/worktree.rs"),
     ];
     for source in files {
         for forbidden in [
@@ -661,6 +669,14 @@ fn gix_io_has_no_ambient_path_escape() {
             "gix_status",
             "gix_filter",
             "gix_diff",
+            "gix_dir",
+            "add_patterns_file",
+            "new_globals",
+            "from_file",
+            "gix_index::File::",
+            "std::io::Read",
+            "::symlink_metadata",
+            "::metadata(",
             "select_metadata",
             "safe_read::acquire",
         ] {
@@ -3584,4 +3600,2265 @@ fn borrowed_object_parser_peaks_are_precharged() {
             objects::PARSER_OVERHEAD
         );
     }
+}
+
+use git::io::{
+    policy::{ConversionPolicy, NamePolicy, PatternKind, Patterns, Policies, StatPolicy},
+    worktree::{self, Comparison},
+};
+
+fn worktree_entry(metadata: &libc::stat, bytes: &[u8]) -> gix_index::Entry {
+    let mut entry = gix_index::State::from_bytes(
+        &idx_fixture(1, 2),
+        std::time::UNIX_EPOCH.into(),
+        gix_index::hash::Kind::Sha1,
+        gix_index::decode::Options::default(),
+    )
+    .unwrap()
+    .0
+    .entries()[0]
+        .clone();
+    entry.stat = worktree::stat(metadata);
+    entry.id = gix_object::compute_hash(gix_index::hash::Kind::Sha1, Kind::Blob, bytes).unwrap();
+    entry.mode = gix_index::entry::Mode::FILE;
+    entry.flags = gix_index::entry::Flags::empty();
+    entry
+}
+fn old_index() -> gix_index::State {
+    // Bytes-only timestamp construction, no ambient index file or clock API.
+    gix_index::State::from_bytes(
+        &idx_fixture(0, 2),
+        std::time::UNIX_EPOCH.into(),
+        gix_index::hash::Kind::Sha1,
+        gix_index::decode::Options::default(),
+    )
+    .unwrap()
+    .0
+}
+
+// 이것을 실패시키는 것: racy/stat mismatch의 hash 제거·worktree byte charge 제거·gitlink 열기.
+#[test]
+fn racy_index_uses_safe_content_hash() {
+    let f = Fixture::new();
+    f.write("file", b"old");
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let access = access();
+    let io = io(&root, &access, &m);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let mut entry = worktree_entry(&metadata, b"old");
+    let index = old_index();
+    assert!(
+        entry
+            .stat
+            .is_racy(index.timestamp(), StatPolicy::default().options())
+    );
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"file",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 3);
+    entry.id = gix_object::compute_hash(gix_index::hash::Kind::Sha1, Kind::Blob, b"new").unwrap();
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"file",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Exact { modified: true })
+    );
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 6);
+    // Metadata mismatches still hash; a touched but identical file is clean.
+    entry.id = worktree_entry(&metadata, b"old").id;
+    entry.stat.size = 9;
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"file",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Exact { modified: false })
+    );
+    let before = m.borrow().counts;
+    entry.mode = gix_index::entry::Mode::COMMIT;
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"/outside",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Skipped)
+    );
+    entry.mode = gix_index::entry::Mode::FILE;
+    entry.flags = gix_index::entry::Flags::SKIP_WORKTREE;
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"/outside",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Skipped)
+    );
+    assert_eq!(m.borrow().counts, before);
+}
+
+// 이것을 실패시키는 것: checkstat/trustctime 값 무시·ctime에 birthtime 사용·정책 오류를 default로 바꾸기.
+#[test]
+fn stat_policy_honors_checkstat_and_trustctime() {
+    let f = Fixture::new();
+    f.write("file", b"a");
+    f.write("config", b"[core]\ncheckStat = minimal\ntrustctime = false\nignoreCase = true\nprecomposeUnicode = true\n");
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let access = access();
+    let io = io(&root, &access, &m);
+    let policy = Policies::from_config(&Config::load(&io).unwrap()).unwrap();
+    assert!(!policy.stat.check_stat);
+    assert!(!policy.stat.trust_ctime);
+    assert!(policy.names.ignore_case && policy.names.precompose_unicode);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let original = worktree::stat(&metadata);
+    assert_eq!(original.ctime.secs, metadata.st_ctime as u32);
+    assert_eq!(original.ctime.nsecs, metadata.st_ctime_nsec as u32);
+    let mut changed = original;
+    changed.ctime.secs = changed.ctime.secs.wrapping_add(1);
+    changed.ino ^= 1;
+    changed.uid ^= 1;
+    changed.gid ^= 1;
+    changed.dev ^= 1;
+    changed.mtime.nsecs ^= 1;
+    assert!(original.matches(&changed, policy.stat.options()));
+    assert!(!original.matches(&changed, StatPolicy::default().options()));
+    changed = original;
+    changed.ctime.secs ^= 1;
+    assert!(
+        !original.matches(
+            &changed,
+            StatPolicy {
+                trust_ctime: true,
+                check_stat: false,
+                ..policy.stat
+            }
+            .options()
+        )
+    );
+    changed = original;
+    changed.mtime.nsecs ^= 1;
+    assert!(
+        !original.matches(
+            &changed,
+            StatPolicy {
+                check_stat: true,
+                use_nsec: true,
+                ..policy.stat
+            }
+            .options()
+        )
+    );
+    changed = original;
+    changed.dev ^= 1;
+    assert!(
+        !original.matches(
+            &changed,
+            StatPolicy {
+                check_stat: true,
+                use_stdev: true,
+                ..policy.stat
+            }
+            .options()
+        )
+    );
+    for (key, value) in [
+        ("checkstat", "typo"),
+        ("trustctime", "maybe"),
+        ("autocrlf", "typo"),
+        ("eol", "typo"),
+        ("ignorecase", "maybe"),
+    ] {
+        f.write("config", format!("[core]\n{key}={value}\n"));
+        assert_eq!(
+            Policies::from_config(&Config::load(&io).unwrap()),
+            Err(INVALID)
+        );
+    }
+    f.write(
+        "config",
+        b"[core]\ncheckstat=default\n[extensions]\nworktreeConfig=true\n",
+    );
+    f.write(
+        "config.worktree",
+        b"[core]\ncheckstat=minimal\ntrustctime\n",
+    );
+    let policies = Policies::from_config(&Config::load(&io).unwrap()).unwrap();
+    assert!(!policies.stat.check_stat && policies.stat.trust_ctime);
+}
+
+// 이것을 실패시키는 것: 변환 파일 hash/read·근사 표시 제거·외부 설정/include 해석·buffer matcher 우회.
+#[test]
+fn conversion_paths_use_metadata_approximation() {
+    let f = Fixture::new();
+    f.write("file", b"raw\r\n");
+    f.write("config", b"[core]\nattributesFile=/outside\nexcludesFile=/outside\n[include]\npath=/outside\n[filter \"evil\"]\nclean=touch /outside\nsmudge=touch /outside\nprocess=touch /outside\n");
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let access = access();
+    let io = io(&root, &access, &m);
+    let policies = Policies::from_config(&Config::load(&io).unwrap()).unwrap();
+    assert_eq!(policies.conversion, ConversionPolicy::RawHash);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let entry = worktree_entry(&metadata, b"converted\n");
+    let index = old_index();
+    for attribute in [
+        "filter=evil",
+        "text",
+        "text=auto",
+        "eol=lf",
+        "eol=crlf",
+        "ident",
+        "working-tree-encoding=UTF-16",
+        "filter",
+        "text=unknown",
+    ] {
+        f.write(".gitattributes", format!("file {attribute}\n"));
+        let mut patterns = Patterns::default();
+        patterns
+            .add(
+                &io,
+                path(RootId::Worktree, b".gitattributes"),
+                PatternKind::Attributes,
+            )
+            .unwrap();
+        let conversion = patterns.conversion(&io, b"file", policies).unwrap();
+        assert_eq!(
+            conversion,
+            ConversionPolicy::MetadataApproximation,
+            "{attribute}"
+        );
+        let reads = m.borrow().counts[Phase::Content as usize].read;
+        assert_eq!(
+            worktree::compare(
+                &io,
+                b"file",
+                &entry,
+                &index,
+                policies.stat,
+                conversion,
+                true
+            ),
+            Ok(Comparison::Approximate { modified: false })
+        );
+        let mut changed = entry.clone();
+        changed.stat.size += 1;
+        assert_eq!(
+            worktree::compare(
+                &io,
+                b"file",
+                &changed,
+                &index,
+                policies.stat,
+                conversion,
+                true
+            ),
+            Ok(Comparison::Approximate { modified: true })
+        );
+        assert_eq!(m.borrow().counts[Phase::Content as usize].read, reads);
+        assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    }
+    for config in [
+        b"[core]\nautocrlf=true\n".as_slice(),
+        b"[core]\nautocrlf=input\n",
+        b"[core]\neol=lf\n",
+        b"[core]\neol=crlf\n",
+        b"[core]\neol=native\n",
+    ] {
+        f.write("config", config);
+        assert_eq!(
+            Policies::from_config(&Config::load(&io).unwrap())
+                .unwrap()
+                .conversion,
+            ConversionPolicy::MetadataApproximation
+        );
+    }
+    f.write(".gitignore", b"*.log\n!important.log\n");
+    let mut patterns = Patterns::default();
+    patterns
+        .add(
+            &io,
+            path(RootId::Worktree, b".gitignore"),
+            PatternKind::Ignore,
+        )
+        .unwrap();
+    assert!(
+        patterns
+            .ignored(&io, b"app.log", false, NamePolicy::default())
+            .unwrap()
+    );
+    assert!(
+        !patterns
+            .ignored(&io, b"important.log", false, NamePolicy::default())
+            .unwrap()
+    );
+    assert!(
+        !patterns
+            .ignored(&io, b"APP.LOG", false, NamePolicy::default())
+            .unwrap()
+    );
+    assert!(
+        patterns
+            .ignored(
+                &io,
+                b"APP.LOG",
+                false,
+                NamePolicy {
+                    ignore_case: true,
+                    ..NamePolicy::default()
+                }
+            )
+            .unwrap()
+    );
+}
+
+// 이것을 실패시키는 것: 이름 정규화 결과를 I/O 경로로 사용·scratch 누적·nofollow/cap/same-fd 검사 제거.
+#[test]
+fn worktree_names_and_hash_budgets_remain_confined() {
+    let f = Fixture::new();
+    f.write("raw", b"raw");
+    symlink("raw", f.0.join("link")).unwrap();
+    symlink("/outside", f.0.join("escape")).unwrap();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let access = access();
+    let io = io(&root, &access, &m);
+    for name in [b"link".as_slice(), b"escape"] {
+        assert_eq!(io.worktree_metadata(name).err(), Some(E::Missing));
+    }
+    assert_eq!(io.worktree_metadata(b"../outside").err(), Some(E::Escape));
+    let names = NamePolicy {
+        ignore_case: true,
+        precompose_unicode: true,
+    };
+    for _ in 0..4096 {
+        assert!(
+            names
+                .same("ÉA".as_bytes(), "E\u{301}a".as_bytes(), &mut m.borrow_mut())
+                .unwrap()
+        );
+    }
+    assert!(!names.same(b"\xffA", b"\xfea", &mut m.borrow_mut()).unwrap());
+    let metadata = io.worktree_metadata(b"raw").unwrap();
+    let before = m.borrow().live_allocated();
+    for _ in 0..1000 {
+        assert_eq!(
+            io.worktree_hash(b"raw", &metadata).unwrap(),
+            worktree_entry(&metadata, b"raw").id
+        );
+    }
+    assert_eq!(m.borrow().live_allocated(), before);
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 3000);
+    f.write("raw", b"new");
+    assert_eq!(io.worktree_hash(b"raw", &metadata), Err(E::Changed));
+    m.borrow_mut()
+        .budget
+        .charge(Axis::WorktreeReadBytes, budget::WORKTREE_READ_BYTES - 3000)
+        .unwrap();
+    let before = m.borrow().counts;
+    assert_eq!(io.worktree_hash(b"raw", &metadata), Err(E::Limit));
+    assert_eq!(m.borrow().counts, before);
+    assert_eq!(io.worktree_metadata(b"raw").err(), Some(E::Limit));
+}
+
+// 이것을 실패시키는 것: matcher 파싱 전 예산 제거·잘못된 attribute를 조용히 무시·할당 선계상 축소.
+#[test]
+fn pattern_parser_limits_and_counted_peak() {
+    let f = Fixture::new();
+    let access = access();
+    for (kind, content) in [
+        (PatternKind::Ignore, "*.log\n".repeat(2048)),
+        (
+            PatternKind::Attributes,
+            (0..680)
+                .map(|i| format!("p{i} text filter=evil\n"))
+                .collect::<String>(),
+        ),
+        (
+            PatternKind::Attributes,
+            format!("file filter={}\n", "x".repeat(60_000)),
+        ),
+    ] {
+        f.write("patterns", &content);
+        let mut m = meter();
+        let root = f.root(&mut m);
+        let m = RefCell::new(m);
+        let io = io(&root, &access, &m);
+        let before = m.borrow().counts[Phase::Content as usize].allocated;
+        let (patterns, peak) = allocation::measure(|| {
+            let mut patterns = Patterns::default();
+            patterns
+                .add(&io, path(RootId::Worktree, b"patterns"), kind)
+                .unwrap();
+            patterns
+        });
+        let charged = m.borrow().counts[Phase::Content as usize].allocated - before;
+        eprintln!(
+            "C4_PARSER bytes={} peak={} reserved={charged}",
+            content.len(),
+            peak.peak
+        );
+        assert!(
+            peak.peak > 0 && peak.peak as u64 <= charged,
+            "{peak:?} reserved={charged}"
+        );
+        let policies = Policies::from_config(&Config::default()).unwrap();
+        let query_before = m.borrow().counts[Phase::Content as usize].allocated;
+        let live_before = m.borrow().live_allocated();
+        let (_, query_peak) =
+            allocation::measure(|| patterns.conversion(&io, b"file", policies).unwrap());
+        let query_charge = m.borrow().counts[Phase::Content as usize].allocated - query_before;
+        assert!(
+            query_peak.peak as u64 <= query_charge,
+            "query {query_peak:?} charge={query_charge}"
+        );
+        assert_eq!(m.borrow().live_allocated(), live_before);
+        eprintln!("C4_QUERY peak={} reserved={query_charge}", query_peak.peak);
+        let file_axis = match kind {
+            PatternKind::Ignore => Axis::IgnoreFiles,
+            PatternKind::Attributes => Axis::AttributeFiles,
+        };
+        assert_eq!(m.borrow().budget.used(file_axis), 1);
+        assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    }
+    for (content, error) in [
+        (
+            "[attr]custom text\nfile custom\n".to_owned(),
+            git::io::UNSUPPORTED,
+        ),
+        ("file -\n".to_owned(), INVALID),
+        ("x ".repeat(2049), E::Limit),
+    ] {
+        f.write("patterns", content);
+        let mut m = meter();
+        let root = f.root(&mut m);
+        let m = RefCell::new(m);
+        let io = io(&root, &access, &m);
+        let mut patterns = Patterns::default();
+        assert_eq!(
+            patterns.add(
+                &io,
+                path(RootId::Worktree, b"patterns"),
+                PatternKind::Attributes
+            ),
+            Err(error)
+        );
+        assert_eq!(
+            patterns.conversion(
+                &io,
+                b"file",
+                Policies::from_config(&Config::default()).unwrap()
+            ),
+            Err(error)
+        );
+    }
+    for axis in [
+        Axis::IgnoreFiles,
+        Axis::IgnoreBytes,
+        Axis::IgnorePatterns,
+        Axis::AttributeFiles,
+        Axis::AttributeBytes,
+        Axis::AttributePatterns,
+    ] {
+        f.write("patterns", "file text\n");
+        let mut m = meter();
+        let root = f.root(&mut m);
+        m.budget.charge(axis, axis.limit()).unwrap();
+        let m = RefCell::new(m);
+        let io = io(&root, &access, &m);
+        let kind = if matches!(
+            axis,
+            Axis::IgnoreFiles | Axis::IgnoreBytes | Axis::IgnorePatterns
+        ) {
+            PatternKind::Ignore
+        } else {
+            PatternKind::Attributes
+        };
+        let mut patterns = Patterns::default();
+        assert_eq!(
+            patterns.add(&io, path(RootId::Worktree, b"patterns"), kind),
+            Err(E::Limit)
+        );
+    }
+}
+
+// 이것을 실패시키는 것: 측정 중 stat/hash 실제 작업 제거. 200 warm samples; no timing gate.
+#[test]
+fn worktree_stat_hash_observations() {
+    let f = Fixture::new();
+    f.write("blob", vec![b'x'; 1_048_576]);
+    for n in 0..1000 {
+        f.write(&format!("f{n}"), b"x");
+    }
+    let names: Vec<_> = (0..1000).map(|n| format!("f{n}").into_bytes()).collect();
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let mut stats = Vec::new();
+    let mut hashes = Vec::new();
+    for n in 0..201 {
+        let m = RefCell::new(meter());
+        let io = io(&root, &access, &m);
+        let start = Instant::now();
+        for name in &names {
+            std::hint::black_box(worktree::stat(&io.worktree_metadata(name).unwrap()));
+        }
+        let stat_ns = start.elapsed().as_nanos();
+        let metadata = io.worktree_metadata(b"blob").unwrap();
+        let start = Instant::now();
+        std::hint::black_box(io.worktree_hash(b"blob", &metadata).unwrap());
+        let hash_ns = start.elapsed().as_nanos();
+        assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 1_048_576);
+        if n == 0 {
+            eprintln!("C4_COLD stat_1000_ns={stat_ns} hash_1m_ns={hash_ns}");
+        } else {
+            stats.push(stat_ns);
+            hashes.push(hash_ns);
+        }
+    }
+    for (label, values) in [("stat_1000", &mut stats), ("hash_1m", &mut hashes)] {
+        values.sort_unstable();
+        let mean = values.iter().sum::<u128>() as f64 / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|n| (*n as f64 - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64;
+        eprintln!(
+            "C4_WARM {label} n=200 p50_ns={} p95_ns={} variance_ns2={variance}",
+            values[99], values[189]
+        );
+    }
+}
+
+fn run_io_detector() {
+    let f = Fixture::new();
+    let library = f.0.join("io-detector.so");
+    let mut cc = std::process::Command::new("cc");
+    cc.args(["-Wall", "-Wextra", "-Werror", "-fPIC"]);
+    #[cfg(target_os = "macos")]
+    cc.arg("-dynamiclib");
+    #[cfg(target_os = "linux")]
+    cc.args(["-shared", "-ldl"]);
+    let output = cc
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/io_detector.c"
+        ))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for mode in ["adapter", "read", "stat", "list", "map", "open", "bulk"] {
+        if mode == "bulk" && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "gix_io_has_no_ambient_path_escape",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BINGSU_C4_IO_CHILD", mode);
+        #[cfg(target_os = "macos")]
+        child.env("DYLD_INSERT_LIBRARIES", &library);
+        #[cfg(target_os = "linux")]
+        child.env("LD_PRELOAD", &library);
+        let output = child.output().unwrap();
+        if mode == "adapter" {
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(if mode == "adapter" { 0 } else { 86 }),
+            "detector {mode}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn detector_child(mode: &str) {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    f.write("config", b"[core]\ncheckstat=minimal\n");
+    f.write("HEAD", b"ref: refs/heads/main\n");
+    f.write("refs/heads/main", format!("{A}\n"));
+    f.write("packed-refs", format!("{B} refs/heads/other\n"));
+    f.write("index", idx_fixture(1, 2));
+    f.write("work", b"work");
+    f.write(".gitignore", b"*.log\n");
+    f.write(".gitattributes", b"work text\n");
+    let loose = loose_fixture(&f, Kind::Blob, b"loose");
+    let pack = packed(&[b"packed".to_vec()], false);
+    install_pack(&f, &pack);
+    let fd = fs::File::open(f.0.join("work")).unwrap();
+    let raw_path = std::ffi::CString::new(f.0.join("work").as_os_str().as_bytes()).unwrap();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let access = access();
+    // SAFETY: symbols and exact C signatures are defined by the just-built,
+    // test-only interposer; all pointers are checked before conversion.
+    fn symbol(name: &std::ffi::CStr) -> *mut libc::c_void {
+        // SAFETY: constant NUL-terminated name; detector remains loaded.
+        let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+        assert!(!ptr.is_null(), "interposer not loaded");
+        ptr
+    }
+    // SAFETY: exact function signatures in io_detector.c.
+    let arm = unsafe {
+        std::mem::transmute::<*mut libc::c_void, extern "C" fn(i32)>(symbol(c"bingsu_io_arm"))
+    };
+    // SAFETY: exact function signature in io_detector.c.
+    let permit = unsafe {
+        std::mem::transmute::<*mut libc::c_void, extern "C" fn(i32)>(symbol(c"bingsu_io_permit"))
+    };
+    // SAFETY: exact function signature in io_detector.c.
+    let calls = unsafe {
+        std::mem::transmute::<*mut libc::c_void, extern "C" fn() -> libc::c_ulong>(symbol(
+            c"bingsu_io_calls",
+        ))
+    };
+    m.hook = Some(Box::new(move |event| match event {
+        "before_safe_syscall" => permit(1),
+        "after_safe_syscall" => permit(0),
+        _ => (),
+    }));
+    let m = RefCell::new(m);
+    let io = io(&root, &access, &m);
+    arm(1);
+    // SAFETY: valid held fd, bounded buffers/output records; these deliberate
+    // ambient mutations must be caught BEFORE libc performs them.
+    match mode {
+        "read" => {
+            let mut b = [0; 1];
+            // SAFETY: valid fd and writable byte, intercepted before use.
+            unsafe {
+                libc::read(fd.as_raw_fd(), b.as_mut_ptr().cast(), 1);
+            }
+        }
+        "stat" => {
+            // SAFETY: plain output record.
+            let mut st = unsafe { std::mem::zeroed() };
+            // SAFETY: valid fd/output, intercepted before use.
+            unsafe {
+                libc::fstat(fd.as_raw_fd(), &mut st);
+            }
+        }
+        "list" => {
+            // SAFETY: live fd, intercepted before transfer of ownership.
+            unsafe {
+                libc::fdopendir(fd.as_raw_fd());
+            }
+        }
+        "map" => {
+            // SAFETY: live file fd, intercepted before creating a mapping.
+            unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE,
+                    fd.as_raw_fd(),
+                    0,
+                );
+            }
+        }
+        "open" => {
+            // SAFETY: terminated path, intercepted before opening it.
+            unsafe {
+                libc::open(raw_path.as_ptr(), libc::O_RDONLY);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        "bulk" => {
+            // SAFETY: the detector must terminate before this deliberately
+            // invalid ambient call reaches libc (otherwise the test fails).
+            unsafe {
+                libc::getattrlistbulk(
+                    fd.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                );
+            }
+        }
+        "adapter" => (),
+        _ => panic!("unknown detector mode"),
+    }
+    let config = Config::load(&io).unwrap();
+    let policies = Policies::from_config(&config).unwrap();
+    io.worktree_directory_stats(b"", &[b"work"], policies.names, |_, metadata| {
+        assert_eq!(metadata?.st_size, 4);
+        Ok(())
+    })
+    .unwrap();
+    let refs = Refs::load(&io).unwrap();
+    assert!(refs.resolve(&io, b"HEAD").unwrap().is_some());
+    let _ = io.metadata(path_for_detector()).unwrap();
+    let _ = io.map(path_for_detector(), 64).unwrap();
+    assert!(
+        io.list(path(RootId::CommonDir, b"refs"), 16)
+            .unwrap()
+            .complete
+    );
+    assert_eq!(git::io::index::load(&io).unwrap().entries().len(), 1);
+    let objects = git::io::objects::SafeObjectDb::new(&io);
+    let mut out = Vec::new();
+    use gix_object::Find;
+    assert!(objects.try_find(&loose, &mut out).unwrap().is_some());
+    assert!(objects.try_find(&pack.ids[0], &mut out).unwrap().is_some());
+    let metadata = io.worktree_metadata(b"work").unwrap();
+    assert_eq!(
+        io.worktree_hash(b"work", &metadata).unwrap(),
+        worktree_entry(&metadata, b"work").id
+    );
+    let mut patterns = Patterns::default();
+    patterns
+        .add(
+            &io,
+            path(RootId::Worktree, b".gitignore"),
+            PatternKind::Ignore,
+        )
+        .unwrap();
+    patterns
+        .add(
+            &io,
+            path(RootId::Worktree, b".gitattributes"),
+            PatternKind::Attributes,
+        )
+        .unwrap();
+    assert!(
+        patterns
+            .ignored(&io, b"file.log", false, policies.names)
+            .unwrap()
+    );
+    assert_eq!(
+        patterns.conversion(&io, b"work", policies).unwrap(),
+        ConversionPolicy::MetadataApproximation
+    );
+    let count = calls();
+    arm(0);
+    assert!(count >= 30, "detector saw only {count} calls");
+    eprintln!(
+        "C4_IO_DETECTOR backend={:?} calls={count}",
+        access.guarantee()
+    );
+}
+fn path_for_detector() -> RepoPath {
+    path(RootId::Worktree, b"work")
+}
+
+// 이것을 실패시키는 것: exact blob cap/EOF probe·같은 fd 사후 stat·non-racy shortcut·빈 smudged entry hash 제거.
+#[test]
+fn worktree_hash_boundaries_and_races_are_explicit() {
+    let f = Fixture::new();
+    f.write("file", vec![b'x'; budget::OBJECT_ALLOC as usize]);
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let m = RefCell::new(meter());
+    let io = io(&root, &access, &m);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let expected = gix_object::compute_hash(
+        gix_index::hash::Kind::Sha1,
+        Kind::Blob,
+        &vec![b'x'; budget::OBJECT_ALLOC as usize],
+    )
+    .unwrap();
+    for _ in 0..4 {
+        assert_eq!(io.worktree_hash(b"file", &metadata), Ok(expected));
+    }
+    let before = m.borrow().counts;
+    assert_eq!(io.worktree_hash(b"file", &metadata), Err(E::Limit));
+    assert_eq!(m.borrow().counts, before);
+    let m = RefCell::new(meter());
+    let io = io_for_test(&root, &access, &m);
+    f.write("file", vec![b'x'; budget::OBJECT_ALLOC as usize + 1]);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let reads = m.borrow().counts[Phase::Content as usize].read;
+    assert_eq!(io.worktree_hash(b"file", &metadata), Err(E::Limit));
+    assert_eq!(m.borrow().counts[Phase::Content as usize].read, reads);
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    for (replacement, expected) in [
+        (b"growth".as_slice(), E::Limit),
+        (b"".as_slice(), E::Changed),
+        (b"new".as_slice(), E::Changed),
+    ] {
+        f.write("file", b"old");
+        let m = RefCell::new(meter());
+        let io = io_for_test(&root, &access, &m);
+        let metadata = io.worktree_metadata(b"file").unwrap();
+        let filename = f.0.join("file");
+        let mut changed = false;
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_read" && !changed {
+                changed = true;
+                fs::write(&filename, replacement).unwrap();
+            }
+        }));
+        let result = io.worktree_hash(b"file", &metadata);
+        if cfg!(target_os = "linux") && replacement.len() == 3 {
+            // Linux file timestamps are coarse: a same-size rewrite in the same
+            // tick keeps every stat field, so the read can only see the new bytes
+            // and report them (status is still modified); the old id never returns.
+            let old = gix_object::compute_hash(Hash::Sha1, Kind::Blob, b"old").unwrap();
+            let new = gix_object::compute_hash(Hash::Sha1, Kind::Blob, b"new").unwrap();
+            assert_ne!(result, Ok(old));
+            assert!(result == Err(expected) || result == Ok(new), "{result:?}");
+        } else {
+            assert_eq!(result, Err(expected));
+        }
+    }
+    f.write("file", b"ok");
+    let m = RefCell::new(meter());
+    let io = io_for_test(&root, &access, &m);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let index = gix_index::State::from_bytes(
+        &idx_fixture(0, 2),
+        (std::time::UNIX_EPOCH + Duration::from_secs(4_000_000_000)).into(),
+        gix_index::hash::Kind::Sha1,
+        gix_index::decode::Options::default(),
+    )
+    .unwrap()
+    .0;
+    let entry = worktree_entry(&metadata, b"ok");
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"file",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    f.write("file", b"");
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let entry = worktree_entry(&metadata, b"not empty");
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"file",
+            &entry,
+            &index,
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Exact { modified: true })
+    );
+    let before = m.borrow().counts;
+    let denied = Access::stage_a_only();
+    let denied_io = io_for_test(&root, &denied, &m);
+    assert_eq!(
+        denied_io.worktree_metadata(b"file").err(),
+        Some(E::StageAOnly)
+    );
+    assert_eq!(
+        denied_io.worktree_hash(b"file", &metadata),
+        Err(E::StageAOnly)
+    );
+    assert_eq!(m.borrow().counts, before);
+}
+fn io_for_test<'a>(root: &'a Root, access: &'a Access, meter: &'a RefCell<Meter>) -> RepoIo<'a> {
+    io(root, access, meter)
+}
+
+fn stat_fixture_19000() -> (Fixture, Vec<Vec<u8>>) {
+    let f = Fixture::new();
+    let names: Vec<_> = (0..19_000)
+        .map(|n| format!("d{:03}/f{:03}", n / 100, n % 100).into_bytes())
+        .collect();
+    for name in &names {
+        f.write(std::str::from_utf8(name).unwrap(), b"x");
+    }
+    (f, names)
+}
+
+// 이것을 실패시키는 것: leaf마다 안전 open 재실행·dirfd 캐시 제거·stat 선계상 제거·fd 누적.
+#[test]
+fn worktree_stat_19000_uses_one_meter_within_caps() {
+    let (f, names) = stat_fixture_19000();
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let io = io(&root, &access, &m);
+    let (_, allocations) = allocation::measure(|| {
+        io.with_worktree_stats(|| {
+            for name in &names {
+                assert_eq!(worktree::stat(&io.worktree_metadata(name)?).size, 1);
+            }
+            Ok(())
+        })
+        .unwrap()
+    });
+    // 이것을 실패시키는 것: meter loan마다 두 Rc를 새로 heap 할당하는 것.
+    assert!(allocations.calls < 3000, "{allocations:?}");
+    let m = m.borrow();
+    let counts = m.counts[Phase::Content as usize];
+    // 190 directory edges: lstat/open/fstat/mount at entry, lstat at exit.
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        (
+            counts.open,
+            counts.stat,
+            counts.filesystem,
+            counts.components
+        ),
+        (190, 19_570, 190, 190)
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        (counts.open, counts.stat, counts.filesystem, counts.mount),
+        (190, 19_570, 190, 190)
+    );
+    assert_eq!(m.budget.used(Axis::Directories), 190);
+    assert_eq!(m.budget.used(Axis::WorktreeReadBytes), 0);
+    assert_eq!(counts.read, 0);
+    assert!(m.peak_fds <= budget::LIVE_FDS as u32);
+    assert!(m.live_allocated() <= m.allocation_limit);
+    eprintln!(
+        "C4_STAT_19000 counts={counts:?} peak_fds={} live_allocated={}",
+        m.peak_fds,
+        m.live_allocated()
+    );
+}
+
+// 이것을 실패시키는 것: leaf fstatat에서 AT_SYMLINK_NOFOLLOW를 제거하거나 symlink를 열기.
+#[test]
+fn worktree_stat_replaced_leaf_never_follows_outside_symlink() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    f.write("d/a", b"x");
+    f.write("d/b", b"x");
+    outside.write("canary", b"outside secret");
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let m = RefCell::new(meter());
+    let io = io(&root, &access, &m);
+    io.with_worktree_stats(|| {
+        io.worktree_metadata(b"d/a")?;
+        let filename = f.0.join("d/b");
+        let canary = outside.0.join("canary");
+        let mut replaced = false;
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_worktree_stat" && !replaced {
+                replaced = true;
+                fs::remove_file(&filename).unwrap();
+                symlink(&canary, &filename).unwrap();
+            }
+        }));
+        let before = m.borrow().counts[Phase::Content as usize];
+        assert_eq!(io.worktree_metadata(b"d/b").err(), Some(E::Missing));
+        let after = m.borrow().counts[Phase::Content as usize];
+        assert_eq!(after.open, before.open);
+        assert_eq!(after.read, before.read);
+        assert_eq!(after.stat, before.stat + 1);
+        Ok(())
+    })
+    .unwrap();
+}
+
+// 이것을 실패시키는 것: 다른 st_dev leaf를 clean으로 비교하거나 hash 전에 여는 것.
+#[test]
+fn worktree_stat_mount_leaf_is_changed_without_open() {
+    let f = Fixture::new();
+    f.write("file", b"x");
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let m = RefCell::new(meter());
+    let io = io(&root, &access, &m);
+    let metadata = io.worktree_metadata(b"file").unwrap();
+    let entry = worktree_entry(&metadata, b"x");
+    // An unprivileged, deterministic syscall-result fault. Linux native mount
+    // enforcement is covered separately by safe_read_linux's real mounts.
+    m.borrow_mut().worktree_device = Some(root.device() ^ 1);
+    let before = m.borrow().counts[Phase::Content as usize];
+    assert_eq!(
+        worktree::compare(
+            &io,
+            b"file",
+            &entry,
+            &old_index(),
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            true
+        ),
+        Ok(Comparison::Exact { modified: true })
+    );
+    let mount = io.worktree_metadata(b"file").unwrap();
+    assert_eq!(io.worktree_hash(b"file", &mount), Err(E::Changed));
+    let after = m.borrow().counts[Phase::Content as usize];
+    assert_eq!(after.open, before.open);
+    assert_eq!(after.read, before.read);
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+}
+
+// 이것을 실패시키는 것: 캐시 퇴출/종료에서 검증된 부모 fd에서 edge identity 대조 제거.
+#[test]
+fn worktree_stat_directory_rename_invalidates_scan() {
+    for (final_group, replacement) in [(false, false), (false, true), (true, false), (true, true)] {
+        let f = Fixture::new();
+        let outside = Fixture::new();
+        f.write("a/one", b"x");
+        f.write("a/two", b"x");
+        f.write("b/three", b"x");
+        let access = access();
+        let mut setup = meter();
+        let root = f.root(&mut setup);
+        let m = RefCell::new(meter());
+        let io = io(&root, &access, &m);
+        let result = io.with_worktree_stats(|| {
+            io.worktree_metadata(b"a/one")?;
+            fs::rename(f.0.join("a"), outside.0.join("moved")).unwrap();
+            if replacement {
+                f.write("a/two", b"replacement");
+            }
+            if !final_group {
+                assert_eq!(io.worktree_metadata(b"b/three").err(), Some(E::Changed));
+                // Catching a directory error must not turn the cache into an
+                // unchecked root-relative leaf or let finalization succeed.
+                assert_eq!(io.worktree_metadata(b"a/two").err(), Some(E::Changed));
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(E::Changed));
+        assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
+        // A failed scan releases its fd and does not contaminate the next one.
+        io.with_worktree_stats(|| io.worktree_metadata(b"b/three").map(|_| ()))
+            .unwrap();
+    }
+}
+
+// 이것을 실패시키는 것: slash/dot leaf 허용·축소 scope 또는 stat 예산의 사전 검사 제거.
+#[test]
+fn worktree_stat_rejects_noncanonical_paths_and_exhaustion() {
+    let f = Fixture::new();
+    f.write("file", b"x");
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let m = RefCell::new(meter());
+    let io = io(&root, &access, &m);
+    for path in [
+        b"../file".as_slice(),
+        b"./file",
+        b"a/../file",
+        b"a//file",
+        b"file/",
+        b"a/.",
+        b"a/..",
+        b"/file",
+        b"a\0/file",
+    ] {
+        assert_eq!(
+            io.worktree_metadata(path).err(),
+            Some(E::Escape),
+            "{path:?}"
+        );
+    }
+    assert_eq!(m.borrow().counts[Phase::Content as usize].stat, 0);
+    m.borrow_mut()
+        .budget
+        .charge(Axis::Stats, budget::STATS)
+        .unwrap();
+    assert_eq!(
+        io.with_worktree_stats(|| io.worktree_metadata(b"file"))
+            .err(),
+        Some(E::Limit)
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].stat, 0);
+}
+
+// 이것을 실패시키는 것: 실제 stat/hash 대신 상수 측정·19,000 loop의 meter 재설정.
+#[test]
+#[ignore = "200 alternating release samples; run explicitly without concurrent gates"]
+fn worktree_stat_19000_alternating_observations() {
+    let (f, names) = stat_fixture_19000();
+    f.write("blob", vec![b'x'; 1_048_576]);
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let mut cached_samples = Vec::new();
+    let mut old_samples = Vec::new();
+    let mut hash_samples = Vec::new();
+    for run in 0..201 {
+        let mut durations = [0u128; 2];
+        for old in if run % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let start = Instant::now();
+            if old {
+                // The original implementation cannot finish 19k in one meter.
+                // Split ONLY this baseline into 1k chunks; never raise a cap.
+                // resolve_nofollow is the unchanged old stat implementation.
+                for chunk in names.chunks(1000) {
+                    let m = RefCell::new(meter());
+                    let io = io(&root, &access, &m);
+                    for name in chunk {
+                        let metadata = io
+                            .metered(|m| {
+                                Ok(
+                                    safe_read::resolve_nofollow(&root, name, &access, m)?
+                                        .metadata(),
+                                )
+                            })
+                            .unwrap();
+                        std::hint::black_box(worktree::stat(&metadata));
+                    }
+                }
+            } else {
+                let m = RefCell::new(meter());
+                let io = io(&root, &access, &m);
+                io.with_worktree_stats(|| {
+                    for name in &names {
+                        std::hint::black_box(worktree::stat(&io.worktree_metadata(name)?));
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+            durations[usize::from(old)] = start.elapsed().as_nanos();
+        }
+        let m = RefCell::new(meter());
+        let io = io(&root, &access, &m);
+        let metadata = io.worktree_metadata(b"blob").unwrap();
+        let start = Instant::now();
+        std::hint::black_box(io.worktree_hash(b"blob", &metadata).unwrap());
+        let hash_ns = start.elapsed().as_nanos();
+        assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 1_048_576);
+        eprintln!(
+            "C4_SAMPLE run={run} cached_ns={} old_chunked_ns={} hash_1m_ns={hash_ns}",
+            durations[0], durations[1]
+        );
+        if run != 0 {
+            cached_samples.push(durations[0]);
+            old_samples.push(durations[1]);
+            hash_samples.push(hash_ns);
+        }
+    }
+    for (name, samples) in [
+        ("cached_19000", &mut cached_samples),
+        ("old_chunked_19000", &mut old_samples),
+        ("hash_1m", &mut hash_samples),
+    ] {
+        samples.sort_unstable();
+        let mean = samples.iter().sum::<u128>() as f64 / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|&n| (n as f64 - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        eprintln!(
+            "C4_WARM {name} n=200 p50_ns={} p95_ns={} variance_ns2={variance}",
+            samples[99], samples[189]
+        );
+    }
+}
+
+// 이것을 실패시키는 것: special leaf를 열기·중첩 scan 허용·오류/unwind 뒤 캐시 해제 누락.
+#[test]
+fn worktree_stat_special_leaves_and_scan_lifetime() {
+    let f = Fixture::new();
+    f.write("d/file", b"x");
+    let fifo = std::ffi::CString::new(f.0.join("fifo").as_os_str().as_bytes()).unwrap();
+    // SAFETY: terminated fixture path, valid FIFO mode.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let m = RefCell::new(meter());
+    let io = io(&root, &access, &m);
+    for path in [b"fifo".as_slice(), b"d"] {
+        assert_eq!(io.worktree_metadata(path).err(), Some(E::Special));
+    }
+    assert_eq!(m.borrow().counts[Phase::Content as usize].open, 0);
+    assert_eq!(
+        io.worktree_metadata(&vec![b'x'; 4097]).err(),
+        Some(E::Limit)
+    );
+    // A budget failure is sticky for this port, so the lifetime tests use a
+    // separate request meter rather than granting more budget to that request.
+    let m = RefCell::new(meter());
+    let io = io_for_test(&root, &access, &m);
+    io.with_worktree_stats(|| {
+        io.worktree_metadata(b"d/file")?;
+        assert_eq!(io.with_worktree_stats(|| Ok(())), Err(E::Denied));
+        Ok(())
+    })
+    .unwrap();
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), E> = io.with_worktree_stats(|| {
+            io.worktree_metadata(b"d/file")?;
+            panic!("fixture unwind");
+        });
+    }));
+    assert!(unwind.is_err());
+    assert_eq!(
+        io.with_worktree_stats(|| Err::<(), _>(E::Denied)),
+        Err(E::Denied)
+    );
+    io.with_worktree_stats(|| io.worktree_metadata(b"d/file").map(|_| ()))
+        .unwrap();
+}
+
+// 이것을 실패시키는 것: 측정 중 실제 stat 또는 단일 meter를 제거하는 것.
+#[test]
+#[ignore = "release benchmark: 200 warm samples, also runnable in Linux containers"]
+fn worktree_stat_release_bench() {
+    let external = std::env::var_os("BINGSU_STAT_TREE");
+    let generated = external.is_none().then(stat_fixture_19000);
+    let external_names: Vec<_> = (0..19_000)
+        .map(|n| format!("d{:03}/f{:03}", n / 100, n % 100).into_bytes())
+        .collect();
+    let names = generated.as_ref().map_or(&external_names, |(_, n)| n);
+    let path = external
+        .map(PathBuf::from)
+        .unwrap_or_else(|| generated.as_ref().unwrap().0.0.clone());
+    let access = access();
+    let root = safe_read::acquire(
+        path.as_os_str().as_bytes(),
+        DiscoveryQuery::default(),
+        &mut meter(),
+    )
+    .unwrap()
+    .select_cwd()
+    .unwrap();
+    let rounds = std::env::var("BINGSU_STAT_ROUNDS")
+        .ok()
+        .map(|n| n.parse::<usize>().unwrap())
+        .unwrap_or(200);
+    let mut samples = Vec::new();
+    for run in 0..=rounds {
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let start = Instant::now();
+        scan_directory_groups(&port, names).unwrap();
+        let ns = start.elapsed().as_nanos();
+        if run == 0 {
+            eprintln!("STAT_FIRST_NS {ns}");
+        } else {
+            samples.push(ns);
+        }
+        if run == rounds {
+            eprintln!(
+                "STAT_COUNTS {:?} peak_fds={}",
+                m.borrow().counts[Phase::Content as usize],
+                m.borrow().peak_fds
+            );
+        }
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "STAT_BENCH n={} p50_ns={} p95_ns={}",
+        samples.len(),
+        samples[(samples.len() - 1) / 2],
+        samples[(samples.len() * 95).div_ceil(100) - 1]
+    );
+}
+
+// 이것을 실패시키는 것: syscall hook 또는 실제 metadata 연산을 생략하는 것.
+#[test]
+#[ignore = "instrumented profiling; keep separate from timing benchmark"]
+fn worktree_stat_profile() {
+    let (f, names) = stat_fixture_19000();
+    let access = access();
+    let root = f.root(&mut meter());
+    for _ in 0..5 {
+        let m = RefCell::new(meter());
+        let calls = Rc::new(std::cell::Cell::new((0u64, 0u128, 0u128)));
+        let c = calls.clone();
+        let mut start = Instant::now();
+        let mut bulk = false;
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_worktree_bulk" {
+                bulk = true;
+            }
+            if event == "after_worktree_bulk" {
+                bulk = false;
+            }
+            if event == "before_safe_syscall" {
+                start = Instant::now();
+            }
+            if event == "after_safe_syscall" {
+                let (n, ns, bulk_ns) = c.get();
+                let elapsed = start.elapsed().as_nanos();
+                c.set((
+                    n + 1,
+                    ns + elapsed,
+                    bulk_ns + if bulk { elapsed } else { 0 },
+                ));
+            }
+        }));
+        let port = io(&root, &access, &m);
+        let start = Instant::now();
+        let (_, alloc) = allocation::measure(|| {
+            scan_directory_groups(&port, &names).unwrap();
+        });
+        eprintln!(
+            "STAT_PROFILE total_ns={} syscall={:?} alloc={alloc:?}",
+            start.elapsed().as_nanos(),
+            calls.get()
+        );
+    }
+}
+
+fn scan_directory_groups(port: &RepoIo<'_>, paths: &[Vec<u8>]) -> Result<(), E> {
+    let mut visited = 0;
+    port.with_worktree_stats(|| {
+        for group in paths.chunks(100) {
+            let leaves: [&[u8]; 100] = std::array::from_fn(|i| &group[i][5..]);
+            port.worktree_directory_stats(
+                &group[0][..4],
+                &leaves,
+                NamePolicy::default(),
+                |_, metadata| {
+                    let current = worktree::stat(metadata?);
+                    assert_eq!(current.size, 1);
+                    std::hint::black_box(current);
+                    visited += 1;
+                    Ok(())
+                },
+            )?;
+        }
+        assert_eq!(visited, 19_000);
+        Ok(())
+    })
+}
+
+// 이것을 실패시키는 것: bulk를 per-file stat으로 교체·entry 선계상 제거·meter 재설정.
+#[test]
+fn worktree_bulk_19000_uses_one_meter_within_caps() {
+    let (f, names) = stat_fixture_19000();
+    let access = access();
+    let mut setup = meter();
+    let root = f.root(&mut setup);
+    let initial_stats = setup.budget.used(Axis::Stats);
+    let m = RefCell::new(setup);
+    let port = io(&root, &access, &m);
+    scan_directory_groups(&port, &names).unwrap();
+    let m = m.borrow();
+    let c = m.counts[Phase::Content as usize];
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!((c.open, c.stat, c.filesystem), (190, 570, 190));
+        assert_eq!(c.raw_entries, 19_000);
+        assert!(c.list > 190 && c.list < 1000);
+    }
+    #[cfg(target_os = "linux")]
+    assert_eq!((c.open, c.stat, c.list), (190, 19_570, 0));
+    assert_eq!(m.budget.used(Axis::Directories), 190);
+    #[cfg(target_os = "macos")]
+    assert_eq!(m.budget.used(Axis::Stats) - initial_stats, 19_570);
+    #[cfg(target_os = "linux")]
+    assert_eq!(m.budget.used(Axis::Stats) - initial_stats, 19_570);
+    assert_eq!(c.read, 0);
+    assert_eq!(m.budget.used(Axis::WorktreeReadBytes), 0);
+    assert!(m.peak_fds <= budget::LIVE_FDS as u32);
+    eprintln!(
+        "BULK_COUNTS {c:?} peak_fds={} live_allocated={}",
+        m.peak_fds,
+        m.live_allocated()
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_bulk_stat_fields(actual: &libc::stat, expected: &libc::stat) {
+    assert_eq!(actual.st_dev, expected.st_dev, "device");
+    assert_eq!(actual.st_ino, expected.st_ino, "file id");
+    assert_eq!(actual.st_mode, expected.st_mode, "type and permissions");
+    assert_eq!(actual.st_uid, expected.st_uid, "owner");
+    assert_eq!(actual.st_gid, expected.st_gid, "group");
+    assert_eq!(actual.st_mtime, expected.st_mtime, "mtime secs");
+    assert_eq!(actual.st_mtime_nsec, expected.st_mtime_nsec, "mtime nsecs");
+    assert_eq!(actual.st_ctime, expected.st_ctime, "ctime secs");
+    assert_eq!(actual.st_ctime_nsec, expected.st_ctime_nsec, "ctime nsecs");
+    assert_eq!(actual.st_size, expected.st_size, "data length");
+    assert_eq!(worktree::stat(actual), worktree::stat(expected));
+}
+
+// 이것을 실패시키는 것: bulk 속성 순서/크기/time 선택·링크 추종·이름 정책의 경로 변환.
+#[cfg(target_os = "macos")]
+#[test]
+fn worktree_bulk_equals_fstatat_on_generated_tree() {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    f.write("d/regular", b"content");
+    fs::set_permissions(
+        f.0.join("d/regular"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o754),
+    )
+    .unwrap();
+    fs::hard_link(f.0.join("d/regular"), f.0.join("d/hard")).unwrap();
+    fs::create_dir(f.0.join("d/directory")).unwrap();
+    symlink("../../outside-does-not-exist", f.0.join("d/link")).unwrap();
+    let fifo = std::ffi::CString::new(f.0.join("d/fifo").as_os_str().as_bytes()).unwrap();
+    // SAFETY: generated fixture, terminated path and mode.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    f.write("nfc/é", b"nfc");
+    f.write("nfd/e\u{301}", b"nfd");
+    f.write("d/UNTRACKED", b"skipped");
+    let raw_name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
+    let non_utf8 = fs::write(f.0.join("d").join(raw_name), b"raw");
+    eprintln!("BULK_NON_UTF8_FIXTURE {non_utf8:?}");
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    for parent in [b"d".as_slice(), b"nfc", b"nfd"] {
+        let dir = fs::File::open(f.0.join(std::ffi::OsStr::from_bytes(parent))).unwrap();
+        let mut leaves: Vec<Vec<u8>> = fs::read_dir(f.0.join(std::ffi::OsStr::from_bytes(parent)))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().as_bytes().to_vec())
+            .filter(|name| name != b"UNTRACKED")
+            .collect();
+        leaves.sort();
+        let refs: Vec<_> = leaves.iter().map(Vec::as_slice).collect();
+        let mut seen = vec![false; leaves.len()];
+        port.worktree_directory_stats(parent, &refs, NamePolicy::default(), |i, observed| {
+            let actual = observed?;
+            let name = std::ffi::CString::new(leaves[i].as_slice()).unwrap();
+            // SAFETY: test oracle only, live directory, one terminated leaf.
+            // SAFETY: stat is a plain C output record.
+            let mut expected: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                // SAFETY: live test directory, terminated name and writable stat.
+                unsafe {
+                    libc::fstatat(
+                        dir.as_raw_fd(),
+                        name.as_ptr(),
+                        &mut expected,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                },
+                0
+            );
+            assert_bulk_stat_fields(actual, &expected);
+            seen[i] = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(seen.into_iter().all(|v| v));
+    }
+    let c = m.borrow().counts[Phase::Content as usize];
+    assert_eq!(c.read, 0);
+    assert_eq!(c.stat, 9); // only entry/exit directory verification, no leaf stat
+    assert_eq!(c.raw_entries, if non_utf8.is_ok() { 9 } else { 8 });
+    // A different native filesystem is optional, never synthesized as evidence.
+    let source_device = fs::metadata(&f.0).unwrap();
+    let other = fs::metadata("/dev").unwrap();
+    let different = std::os::unix::fs::MetadataExt::dev(&source_device)
+        != std::os::unix::fs::MetadataExt::dev(&other);
+    if different {
+        let devroot = safe_read::acquire(b"/dev", DiscoveryQuery::default(), &mut meter())
+            .unwrap()
+            .select_cwd()
+            .unwrap();
+        let m = RefCell::new(meter());
+        let port = io(&devroot, &access, &m);
+        let dir = fs::File::open("/dev").unwrap();
+        port.worktree_directory_stats(b"", &[b"null"], NamePolicy::default(), |_, observed| {
+            let actual = observed?;
+            // SAFETY: stat is a plain C output record.
+            let mut expected: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                // SAFETY: live test directory, terminated name and writable stat.
+                unsafe {
+                    libc::fstatat(
+                        dir.as_raw_fd(),
+                        c"null".as_ptr(),
+                        &mut expected,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                },
+                0
+            );
+            assert_bulk_stat_fields(actual, &expected);
+            Ok(())
+        })
+        .unwrap();
+    }
+    eprintln!("BULK_OTHER_DEVICE_TESTED {different}");
+}
+
+// 이것을 실패시키는 것: index 밖 항목 무료 처리·예산 초과를 Missing/clean으로 변환·fstatat fallback.
+#[cfg(target_os = "macos")]
+#[test]
+fn worktree_bulk_entry_budget_is_partial_without_leaf_fallback() {
+    let f = Fixture::new();
+    for n in 0..5 {
+        f.write(&format!("d/a{n}"), b"x");
+    }
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    m.borrow_mut()
+        .budget
+        .charge(Axis::WorktreeEntries, budget::WORKTREE_ENTRIES - 4)
+        .unwrap();
+    let port = io(&root, &access, &m);
+    let mut visited = 0;
+    assert_eq!(
+        port.worktree_directory_stats(b"d", &[b"a0"], NamePolicy::default(), |_, _| {
+            visited += 1;
+            Ok(())
+        }),
+        Err(E::Limit)
+    );
+    assert_eq!(visited, 0); // entire syscall batch charged before using a name
+    let c = m.borrow().counts[Phase::Content as usize];
+    assert_eq!((c.open, c.stat, c.list, c.read), (1, 2, 1, 0));
+    assert_eq!(port.worktree_metadata(b"d/a0").err(), Some(E::Limit));
+    assert_eq!(m.borrow().counts[Phase::Content as usize], c);
+    // Exactly the remaining budget, with actual EOF, is a complete directory.
+    let m = RefCell::new(meter());
+    m.borrow_mut()
+        .budget
+        .charge(Axis::WorktreeEntries, budget::WORKTREE_ENTRIES - 5)
+        .unwrap();
+    let port = io(&root, &access, &m);
+    let mut visited = 0;
+    port.worktree_directory_stats(
+        b"d",
+        &[b"a0", b"missing"],
+        NamePolicy::default(),
+        |i, metadata| {
+            if i == 0 {
+                assert_eq!(metadata?.st_size, 1);
+            } else {
+                assert_eq!(metadata.err(), Some(E::Missing));
+            }
+            visited += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(visited, 2);
+}
+
+// 이것을 실패시키는 것: normalization/case 대조 생략·동일 key 중복을 clean으로 처리·name path 재사용.
+#[cfg(target_os = "macos")]
+#[test]
+fn worktree_bulk_name_policy_and_collisions() {
+    let f = Fixture::new();
+    f.write("d/ÉCase", b"x");
+    let access = access();
+    let root = f.root(&mut meter());
+    let policy = NamePolicy {
+        precompose_unicode: true,
+        ignore_case: true,
+    };
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let mut seen = 0;
+    port.worktree_directory_stats(b"d", &["E\u{301}case".as_bytes()], policy, |_, metadata| {
+        assert_eq!(metadata?.st_size, 1);
+        seen += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, 1);
+    let before = m.borrow().counts;
+    assert_eq!(
+        port.worktree_directory_stats(b"d", &[b"A", b"a"], policy, |_, _| Ok(())),
+        Err(E::Changed)
+    );
+    let c = m.borrow().counts[Phase::Content as usize];
+    let before = before[Phase::Content as usize];
+    assert_eq!(
+        (c.open, c.stat, c.list),
+        (before.open, before.stat, before.list)
+    );
+    // On case-sensitive filesystems two raw entries may map to one index key.
+    f.write("ambiguous/A", b"x");
+    f.write("ambiguous/a", b"x");
+    if fs::read_dir(f.0.join("ambiguous")).unwrap().count() == 2 {
+        assert_eq!(
+            port.worktree_directory_stats(b"ambiguous", &[b"a"], policy, |_, _| Ok(())),
+            Err(E::Changed)
+        );
+    }
+}
+
+// 이것을 실패시키는 것: bulk 뒤 identity 재검증 또는 보장 없는 full-read 거부 제거.
+#[cfg(target_os = "macos")]
+#[test]
+fn worktree_bulk_rename_and_scope_preserve_guarantees() {
+    for replace in [false, true] {
+        let f = Fixture::new();
+        let outside = Fixture::new();
+        f.write("d/file", b"x");
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        assert_eq!(
+            port.worktree_directory_stats(
+                b"d",
+                &[b"file"],
+                NamePolicy::default(),
+                |_, metadata| {
+                    assert_eq!(metadata?.st_size, 1);
+                    fs::rename(f.0.join("d"), outside.0.join("moved")).unwrap();
+                    if replace {
+                        f.write("d/file", b"replacement");
+                    }
+                    Ok(())
+                }
+            ),
+            Err(E::Changed)
+        );
+        assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
+    }
+    let f = Fixture::new();
+    f.write("file", b"x");
+    let root = f.root(&mut meter());
+    let access = Access::stage_a_only();
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    assert_eq!(
+        port.worktree_directory_stats(b"", &[b"file"], NamePolicy::default(), |_, _| Ok(())),
+        Err(E::StageAOnly)
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].open, 0);
+}
+
+// 이것을 실패시키는 것: batch 관찰을 다시 stat하거나 type/dev 경계를 생략·hash identity 재검사 제거.
+#[cfg(target_os = "macos")]
+#[test]
+fn worktree_bulk_observation_drives_safe_comparison() {
+    let f = Fixture::new();
+    f.write("d/file", b"x");
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let metadata = port.worktree_metadata(b"d/file").unwrap();
+    let entry = worktree_entry(&metadata, b"x");
+    let index = gix_index::State::from_bytes(
+        &idx_fixture(0, 2),
+        (std::time::UNIX_EPOCH + Duration::from_secs(metadata.st_mtime as u64 + 1)).into(),
+        Hash::Sha1,
+        gix_index::decode::Options::default(),
+    )
+    .unwrap()
+    .0;
+    let policies = Policies {
+        stat: StatPolicy::default(),
+        conversion: ConversionPolicy::RawHash,
+        names: NamePolicy::default(),
+        filemode: true,
+    };
+    let mut observed = None;
+    port.worktree_directory_stats(b"d", &[b"file"], policies.names, |_, metadata| {
+        observed = Some(*metadata?);
+        Ok(())
+    })
+    .unwrap();
+    let observed = observed.unwrap();
+    let before = m.borrow().counts;
+    assert_eq!(
+        worktree::compare_observed(&port, b"d/file", &entry, &index, policies, Ok(&observed)),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().counts, before);
+    m.borrow_mut().worktree_device = Some(root.device() ^ 1);
+    port.worktree_directory_stats(b"d", &[b"file"], policies.names, |_, metadata| {
+        let metadata = metadata?;
+        assert_eq!(
+            worktree::compare_observed(&port, b"d/file", &entry, &index, policies, Ok(metadata)),
+            Ok(Comparison::Exact { modified: true })
+        );
+        Ok(())
+    })
+    .unwrap();
+    m.borrow_mut().worktree_device = None;
+    let outside = Fixture::new();
+    outside.write("canary", b"secret");
+    fs::remove_file(f.0.join("d/file")).unwrap();
+    symlink(outside.0.join("canary"), f.0.join("d/file")).unwrap();
+    port.worktree_directory_stats(b"d", &[b"file"], policies.names, |_, metadata| {
+        assert_eq!(
+            worktree::compare_observed(&port, b"d/file", &entry, &index, policies, metadata),
+            Ok(Comparison::Exact { modified: true })
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(port.worktree_hash(b"d/file", &observed), Err(E::Missing));
+    assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
+}
+
+// 이것을 실패시키는 것: 배치의 canonical component·정렬·길이 검사를 없애는 것.
+#[test]
+fn worktree_directory_rejects_invalid_index_names_before_io() {
+    let f = Fixture::new();
+    let access = access();
+    let root = f.root(&mut meter());
+    for (parent, leaves, expected) in [
+        (b"../d".as_slice(), vec![b"file".as_slice()], E::Escape),
+        (b"/d", vec![b"file"], E::Escape),
+        (b"d/", vec![b"file"], E::Escape),
+        (b"d\0", vec![b"file"], E::Escape),
+        (b"", vec![b"a/file"], E::Escape),
+        (b"", vec![b"."], E::Escape),
+        (b"", vec![b".."], E::Escape),
+        (b"", vec![b""], E::Escape),
+        (b"", vec![b"a\0"], E::Escape),
+        (b"", vec![b"b", b"a"], E::Escape),
+        (b"", vec![b"a", b"a"], E::Escape),
+    ] {
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        assert_eq!(
+            port.worktree_directory_stats(parent, &leaves, NamePolicy::default(), |_, _| panic!(
+                "invalid entry"
+            )),
+            Err(expected)
+        );
+        assert_eq!(m.borrow().counts[Phase::Content as usize].open, 0);
+    }
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    assert_eq!(
+        port.worktree_directory_stats(b"", &[&[b'a'; 4097]], NamePolicy::default(), |_, _| Ok(())),
+        Err(E::Limit)
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].open, 0);
+}
+
+// 이것을 실패시키는 것: ignoreCase에서 각 반환 이름을 owned lowercase key로 할당하는 것.
+#[cfg(target_os = "macos")]
+#[test]
+fn worktree_bulk_casefold_has_no_per_entry_allocations() {
+    let f = Fixture::new();
+    let leaves: Vec<_> = (0..1000).map(|i| format!("f{i:04}").into_bytes()).collect();
+    for n in 0..1000 {
+        f.write(&format!("d/F{n:04}"), b"x");
+    }
+    let refs: Vec<_> = leaves.iter().map(Vec::as_slice).collect();
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let mut visited = 0;
+    let (_, allocations) = allocation::measure(|| {
+        port.worktree_directory_stats(
+            b"d",
+            &refs,
+            NamePolicy {
+                ignore_case: true,
+                precompose_unicode: false,
+            },
+            |_, metadata| {
+                assert_eq!(metadata?.st_size, 1);
+                visited += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    });
+    assert_eq!(visited, 1000);
+    assert!(allocations.calls < 32, "{allocations:?}");
+}
+
+// Fixture oracle only: the collector never invokes git or refreshes an index.
+fn git_oracle(f: &Fixture, args: &[&str]) -> Vec<u8> {
+    let result = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&f.0)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result.stderr);
+    result.stdout
+}
+
+// 이것을 실패시키는 것: worktree directory 또는 hash가 부모 symlink를 따르거나 Missing을 clean으로 처리하는 것.
+#[test]
+fn worktree_parent_symlinks_match_git_deleted() {
+    for (parent, target, chained) in [("a", "b", false), ("a", "c", true), ("d/a", "b", false)] {
+        let f = Fixture::new();
+        let path = format!("{parent}/f");
+        f.write(&path, b"x");
+        git_oracle(&f, &["init", "-q"]);
+        git_oracle(&f, &["add", "--", &path]);
+        // Avoid needing a commit/identity: diff-files compares index to worktree.
+        let root = f.root(&mut meter());
+        let access = access();
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let metadata = port.worktree_metadata(path.as_bytes()).unwrap();
+        let entry = worktree_entry(&metadata, b"x");
+        let destination = if parent.contains('/') { "d/b" } else { "b" };
+        fs::rename(f.0.join(parent), f.0.join(destination)).unwrap();
+        if chained {
+            symlink("b", f.0.join("c")).unwrap();
+        }
+        symlink(target, f.0.join(parent)).unwrap();
+        assert_eq!(
+            git_oracle(&f, &["diff-files", "--name-status", "--", &path]),
+            format!("D\t{path}\n").as_bytes()
+        );
+        let untracked = git_oracle(
+            &f,
+            &["ls-files", "--others", "--exclude-standard", "--", parent],
+        );
+        assert_eq!(untracked, format!("{parent}\n").as_bytes());
+        // Exercise the real fast backend and the component walk separately.
+        let stepwise = safe_read::unchecked_backend_for_test(safe_read::Resolver::Stepwise);
+        for access in [&access, &stepwise] {
+            let m = RefCell::new(meter());
+            let port = io(&root, access, &m);
+            assert_eq!(
+                port.worktree_metadata(path.as_bytes()).err(),
+                Some(E::Missing)
+            );
+            assert_eq!(
+                port.worktree_hash(path.as_bytes(), &metadata),
+                Err(E::Missing)
+            );
+            assert_eq!(
+                worktree::compare(
+                    &port,
+                    path.as_bytes(),
+                    &entry,
+                    &old_index(),
+                    StatPolicy::default(),
+                    ConversionPolicy::RawHash,
+                    false
+                ),
+                Ok(Comparison::Exact { modified: true })
+            );
+            let mut seen = Vec::new();
+            port.worktree_directory_stats(
+                parent.as_bytes(),
+                &[b"f"],
+                NamePolicy::default(),
+                |i, stat| {
+                    seen.push((i, stat.map(|s| s.st_size)));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(seen, [(0, Err(E::Missing))]);
+            assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
+            assert_eq!(m.borrow().live_allocated(), 0);
+            // Non-worktree reads still follow confined links.
+            assert_eq!(
+                safe_read::read(&root, path.as_bytes(), cap(1), access, &mut meter()).unwrap(),
+                b"x"
+            );
+            assert_eq!(
+                port.worktree_metadata(b"../outside/f").err(),
+                Some(E::Escape)
+            );
+            assert_eq!(
+                port.worktree_hash(b"../outside/f", &metadata),
+                Err(E::Escape)
+            );
+        }
+    }
+}
+
+// 이것을 실패시키는 것: path scratch를 그룹/해석 종료 때 반환하지 않거나 meter를 항목마다 재설정하는 것.
+#[test]
+fn worktree_deep_4096_groups_and_hashes_release_path_scratch() {
+    let f = Fixture::new();
+    // Exactly DIRECTORIES directories: seven shared ancestors and 4089
+    // leaves, with one hashed file in every directory and maximum depth 8.
+    let mut parents = Vec::new();
+    let mut prefix = String::new();
+    for n in 0..7 {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(&format!("level{n}_abcdefghijkl"));
+        parents.push(prefix.clone());
+    }
+    parents.extend((0..4089).map(|n| format!("{prefix}/directory{n:04}xyz")));
+    assert_eq!(parents.len(), 4096);
+    assert!(parents.last().unwrap().len() >= 156);
+    for parent in &parents {
+        f.write(&format!("{parent}/f"), b"x");
+    }
+    let fast = access();
+    let stepwise = safe_read::unchecked_backend_for_test(safe_read::Resolver::Stepwise);
+    for (label, access) in [("fast", &fast), ("stepwise", &stepwise)] {
+        for bulk in [false, true] {
+            let mut setup = meter();
+            let root = f.root(&mut setup);
+            setup.allocation(17).unwrap();
+            let initial_ops = setup.operations();
+            let m = RefCell::new(setup);
+            let baseline = m.borrow().live_allocated();
+            let port = io(&root, access, &m);
+            port.with_worktree_stats(|| {
+                for parent in &parents {
+                    let path = format!("{parent}/f");
+                    let metadata = if bulk {
+                        let mut observed = None;
+                        port.worktree_directory_stats(
+                            parent.as_bytes(),
+                            &[b"f"],
+                            NamePolicy::default(),
+                            |i, stat| {
+                                assert_eq!(i, 0);
+                                observed = Some(*stat?);
+                                Ok(())
+                            },
+                        )?;
+                        observed.unwrap()
+                    } else {
+                        port.worktree_metadata(path.as_bytes())?
+                    };
+                    assert_eq!(
+                        port.worktree_hash(path.as_bytes(), &metadata)?,
+                        worktree_entry(&metadata, b"x").id
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+            let m = m.borrow();
+            let c = m.counts[Phase::Content as usize];
+            assert_eq!(m.live_allocated(), baseline);
+            assert_eq!(m.budget.used(Axis::Directories), 4096);
+            assert_eq!(m.budget.used(Axis::WorktreeReadBytes), 4096);
+            assert!(m.budget.used(Axis::Stats) <= budget::STATS);
+            assert_eq!(m.peak_fds, 10, "root plus depth 8 plus one content fd");
+            // One checked directory open per component; one file per hash.
+            assert_eq!(c.open, 8192);
+            assert_eq!(c.filesystem, c.open);
+            #[cfg(target_os = "linux")]
+            assert_eq!(c.mount, c.open);
+            assert_eq!(c.components, if label == "stepwise" { 8192 } else { 4096 });
+            assert!(m.operations() <= 100_000);
+            eprintln!(
+                "DEEP_GROUPS backend={label} bulk={bulk} directories=4096 hashes=4096 content_ops={} total_ops={} peak_fds={} baseline={baseline} live={} counts={c:?}",
+                m.operations() - initial_ops,
+                m.operations(),
+                m.peak_fds,
+                m.live_allocated()
+            );
+        }
+    }
+}
+
+// 이것을 실패시키는 것: empty blob/size 0 shortcut 제거, OID 조건 제거, u32로 줄인 size만 검사하는 것.
+#[test]
+fn worktree_empty_blob_uses_stat_without_content_open() {
+    let f = Fixture::new();
+    f.write("empty", b"");
+    git_oracle(&f, &["init", "-q"]);
+    git_oracle(&f, &["add", "empty"]);
+    assert!(git_oracle(&f, &["diff-files", "--name-only", "--", "empty"]).is_empty());
+    let root = f.root(&mut meter());
+    let access = access();
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let metadata = port.worktree_metadata(b"empty").unwrap();
+    let mut entry = worktree_entry(&metadata, b"");
+    assert!(
+        entry
+            .stat
+            .is_racy(old_index().timestamp(), StatPolicy::default().options())
+    );
+    m.borrow_mut().hook = Some(Box::new(|event| {
+        assert_ne!(event, "before_worktree_hash");
+        assert_ne!(event, "before_read");
+    }));
+    let before = m.borrow().counts[Phase::Content as usize];
+    for stale_stat in [false, true] {
+        if stale_stat {
+            entry.stat.mtime.secs = 0;
+            entry.stat.size = 123;
+        }
+        assert_eq!(
+            worktree::compare(
+                &port,
+                b"empty",
+                &entry,
+                &old_index(),
+                StatPolicy::default(),
+                ConversionPolicy::RawHash,
+                false
+            ),
+            Ok(Comparison::Exact { modified: false })
+        );
+    }
+    let after = m.borrow().counts[Phase::Content as usize];
+    assert_eq!(after.stat - before.stat, 2);
+    assert_eq!(after.open, before.open);
+    assert_eq!(after.read, before.read);
+    assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    m.borrow_mut().hook = None;
+    let mut large = metadata;
+    large.st_size = 1i64 << 32;
+    assert_eq!(
+        worktree::compare_observed(
+            &port,
+            b"empty",
+            &entry,
+            &old_index(),
+            Policies {
+                stat: StatPolicy::default(),
+                conversion: ConversionPolicy::RawHash,
+                filemode: false,
+                names: NamePolicy::default()
+            },
+            Ok(&large)
+        ),
+        Err(E::Changed)
+    );
+    entry.id = worktree_entry(&metadata, b"nonempty").id;
+    assert_eq!(
+        worktree::compare(
+            &port,
+            b"empty",
+            &entry,
+            &old_index(),
+            StatPolicy::default(),
+            ConversionPolicy::RawHash,
+            false
+        ),
+        Ok(Comparison::Exact { modified: true })
+    );
+}
+
+// 이것을 실패시키는 것: 오류/unwind에서 경로 예약을 누수하거나 살아 있는 parent/CString 예약을 생략하는 것.
+#[test]
+fn worktree_path_scratch_releases_on_errors_and_unwind() {
+    let f = Fixture::new();
+    f.write("long-parent/deeper/f", b"x");
+    let root = f.root(&mut meter());
+    let fast = access();
+    let stepwise = safe_read::unchecked_backend_for_test(safe_read::Resolver::Stepwise);
+    for access in [&fast, &stepwise] {
+        let m = RefCell::new(meter());
+        let port = io(&root, access, &m);
+        for error in [E::Missing, E::Denied] {
+            assert_eq!(
+                port.with_worktree_stats(|| {
+                    port.worktree_metadata(b"long-parent/deeper/f")?;
+                    assert!(m.borrow().live_allocated() >= b"long-parent/deeper".len() as u64);
+                    Err::<(), _>(error)
+                }),
+                Err(error)
+            );
+            assert_eq!(m.borrow().live_allocated(), 0);
+            assert_eq!(
+                port.worktree_directory_stats(
+                    b"long-parent/deeper",
+                    &[b"f"],
+                    NamePolicy::default(),
+                    |_, _| Err(error)
+                ),
+                Err(error)
+            );
+            assert_eq!(m.borrow().live_allocated(), 0);
+        }
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), E> = port.with_worktree_stats(|| {
+                port.worktree_metadata(b"long-parent/deeper/f")?;
+                panic!("test unwind with a cached parent");
+            });
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(m.borrow().live_allocated(), 0);
+        let metadata = port.worktree_metadata(b"long-parent/deeper/f").unwrap();
+        let mut limited = meter();
+        limited.allocation_limit = 1;
+        let limited = RefCell::new(limited);
+        let denied = io(&root, access, &limited);
+        assert_eq!(
+            denied.worktree_hash(b"long-parent/deeper/f", &metadata),
+            Err(E::Limit)
+        );
+        assert_eq!(limited.borrow().live_allocated(), 0);
+        fs::rename(f.0.join("long-parent/deeper"), f.0.join("moved")).unwrap();
+        assert_eq!(
+            port.worktree_hash(b"long-parent/deeper/f", &metadata),
+            Err(E::Missing)
+        );
+        assert_eq!(m.borrow().live_allocated(), 0);
+        fs::rename(f.0.join("moved"), f.0.join("long-parent/deeper")).unwrap();
+    }
+}
+
+// 이것을 실패시키는 것: Darwin NOFOLLOW_ANY 또는 Linux RESOLVE_NO_SYMLINKS를 최종 원자 open에서 제거하는 것.
+#[test]
+fn worktree_parent_swap_before_atomic_open_is_missing() {
+    for operation in ["stat", "bulk", "hash"] {
+        let f = Fixture::new();
+        f.write("d/f", b"x");
+        let root = f.root(&mut meter());
+        let access = access();
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let metadata = port.worktree_metadata(b"d/f").unwrap();
+        let dir = f.0.clone();
+        let mut swapped = false;
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            #[cfg(target_os = "macos")]
+            let trigger = if operation == "hash" {
+                "before_beneath_open"
+            } else {
+                "before_open_component"
+            };
+            #[cfg(not(target_os = "macos"))]
+            let trigger = if operation == "hash" {
+                "before_openat2"
+            } else {
+                "before_open_component"
+            };
+            if event == trigger && !swapped {
+                fs::rename(dir.join("d"), dir.join("original")).unwrap();
+                symlink("original", dir.join("d")).unwrap();
+                swapped = true;
+            }
+        }));
+        match operation {
+            "stat" => assert_eq!(port.worktree_metadata(b"d/f").err(), Some(E::Missing)),
+            "hash" => assert_eq!(port.worktree_hash(b"d/f", &metadata), Err(E::Missing)),
+            "bulk" => {
+                let mut seen = 0;
+                port.worktree_directory_stats(b"d", &[b"f"], NamePolicy::default(), |_, stat| {
+                    assert_eq!(stat.err(), Some(E::Missing));
+                    seen += 1;
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(seen, 1);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(m.borrow().live_allocated(), 0);
+        assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
+    }
+}
+
+// 이것을 실패시키는 것: fast hash를 이동된 cached parent 기준으로 열거나 원래 root의 원자 open을 생략하는 것.
+#[test]
+fn worktree_cached_hash_keeps_original_root_confinement() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    f.write("a/b/f", b"x");
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    assert_eq!(
+        port.with_worktree_stats(|| {
+            let metadata = port.worktree_metadata(b"a/b/f")?;
+            fs::rename(f.0.join("a"), outside.0.join("moved")).unwrap();
+            assert_eq!(port.worktree_hash(b"a/b/f", &metadata), Err(E::Missing));
+            Ok(())
+        }),
+        Err(E::Changed)
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].read, 0);
+    assert_eq!(m.borrow().live_allocated(), 0);
+}
+
+// 이것을 실패시키는 것: 공통 조상을 먼저 닫거나 검증하지 않고 subtree 결과를 발행하는 것.
+#[test]
+fn worktree_shared_ancestor_rename_invalidates_descendants() {
+    for replace in [false, true] {
+        let f = Fixture::new();
+        let outside = Fixture::new();
+        f.write("a/b/f", b"x");
+        f.write("a/c/f", b"x");
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        assert_eq!(
+            port.with_worktree_stats(|| {
+                port.worktree_metadata(b"a/b/f")?;
+                fs::rename(f.0.join("a"), outside.0.join("moved")).unwrap();
+                if replace {
+                    f.write("a/c/f", b"new");
+                }
+                // The held subtree still has stable edges, but its root binding
+                // must fail at finalization; nothing can be published yet.
+                port.worktree_metadata(b"a/c/f")?;
+                Ok(())
+            }),
+            Err(E::Changed)
+        );
+        assert_eq!(m.borrow().live_allocated(), 0);
+    }
+}
+
+// 이것을 실패시키는 것: cache fd cap을 늘리거나 깊이에 비례하는 fd를 반환하지 않는 것.
+#[test]
+fn worktree_cache_depth_respects_existing_fd_cap() {
+    let f = Fixture::new();
+    let path = format!("{}f", "d/".repeat(60));
+    f.write(&path, b"x");
+    let root = f.root(&mut meter());
+    let access = access();
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    assert_eq!(
+        port.with_worktree_stats(|| port.worktree_metadata(path.as_bytes()).map(|_| ())),
+        Err(E::Limit)
+    );
+    assert_eq!(m.borrow().peak_fds, budget::LIVE_FDS as u32);
+    assert_eq!(m.borrow().live_allocated(), 0);
 }

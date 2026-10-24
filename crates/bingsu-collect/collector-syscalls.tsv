@@ -36,7 +36,7 @@ getdents64	217	61	any	row_getdents64_any	Enumerate repository directories read-o
 clock_gettime	228	113	clock	row_clock_gettime_clock	Read monotonic or boottime deadlines only
 exit_group	231	94	any	row_exit_group_any	Terminate the dedicated collector
 openat	257	56	openat	row_openat_openat	Open fixed statm and capability probe paths, then held-fd repository components read-only
-newfstatat	262	79	any	row_newfstatat_any	Check repository component identity without following links
+newfstatat	262	79	any	row_newfstatat_any	Check repository components and single-component worktree leaves relative to verified dirfds without following links
 readlinkat	267	78	any	row_readlinkat_any	Read symbolic link targets relative to a directory
 set_robust_list	273	99	any	row_set_robust_list_any	Register libc thread robust mutex cleanup
 prlimit64	302	261	query	row_prlimit64_query	Read resource limits with a full-width NULL new_limit
