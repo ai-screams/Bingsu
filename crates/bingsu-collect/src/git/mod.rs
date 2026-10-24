@@ -5,9 +5,11 @@ pub mod io;
 pub mod preflight;
 pub mod refs;
 pub mod stage_a;
+pub mod stage_b;
 pub mod stage_c;
 pub mod stage_d;
 pub mod status_tracked;
+pub mod untracked;
 
 pub(crate) use crate::update_sink::UpdateSink;
 

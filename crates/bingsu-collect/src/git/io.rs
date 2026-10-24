@@ -59,6 +59,16 @@ pub struct RepoIo<'a> {
 /// the safe-read fd is closed before this snapshot can escape its checks.
 #[derive(Debug)]
 pub struct ReadMap(Vec<u8>);
+
+pub(crate) struct WorktreeEntry {
+    pub name: Vec<u8>,
+    pub metadata: Result<libc::stat, ReadError>,
+}
+pub(crate) struct WorktreeListing {
+    pub entries: Vec<WorktreeEntry>,
+    pub more: bool,
+    _allocation: crate::meter::PathAllocation,
+}
 impl std::ops::Deref for ReadMap {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
@@ -217,6 +227,71 @@ impl<'a> RepoIo<'a> {
                 return scan.metadata(self.roots.worktree, relative, self.access, meter);
             }
             safe_read::worktree_metadata(self.roots.worktree, relative, self.access, meter)
+        })
+    }
+
+    /// One bounded batch of the shared tracked/untracked listing. The caller
+    /// drops its scratch before requesting the next batch on the same OFD.
+    pub(crate) fn worktree_listing(
+        &self,
+        parent: &[u8],
+        first: bool,
+    ) -> Result<WorktreeListing, ReadError> {
+        self.metered(|meter| {
+            let mut cached = self
+                .worktree_stats
+                .try_borrow_mut()
+                .map_err(|_| ReadError::Denied)?;
+            let scan = cached.as_mut().ok_or(ReadError::Denied)?;
+            let mut entries: Vec<WorktreeEntry> = Vec::new();
+            let mut allocation = meter.path_allocation();
+            // The safe layer lends its meter only after raw-entry/stat charging.
+            let more = scan.visit_batch(
+                self.roots.worktree,
+                parent,
+                self.access,
+                meter,
+                first,
+                |raw, metadata, m| {
+                    if entries.len() == entries.capacity() {
+                        let extra = entries.capacity().max(16);
+                        allocation.reserve(extra * std::mem::size_of::<WorktreeEntry>(), m)?;
+                        let mut growth = m.path_allocation();
+                        growth.reserve(
+                            entries.capacity() * std::mem::size_of::<WorktreeEntry>(),
+                            m,
+                        )?;
+                        entries
+                            .try_reserve_exact(extra)
+                            .map_err(|_| ReadError::Limit)?;
+                    }
+                    allocation.reserve(raw.len(), m)?;
+                    entries.push(WorktreeEntry {
+                        name: raw.to_vec(),
+                        metadata: metadata.copied(),
+                    });
+                    Ok(())
+                },
+            )?;
+            meter.check()?;
+            Ok(WorktreeListing {
+                entries,
+                more,
+                _allocation: allocation,
+            })
+        })
+    }
+
+    /// Inspect only the fixed marker in the directory just listed. The safe
+    /// layer does not reopen the path, enumerate .git, or follow a gitfile.
+    pub(crate) fn worktree_embedded_repository(&self) -> Result<bool, ReadError> {
+        self.metered(|meter| {
+            self.worktree_stats
+                .try_borrow()
+                .map_err(|_| ReadError::Denied)?
+                .as_ref()
+                .ok_or(ReadError::Denied)?
+                .embedded_repository(self.access, meter)
         })
     }
 

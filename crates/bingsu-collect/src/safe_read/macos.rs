@@ -1,6 +1,6 @@
 //! Runtime semantics, not SDK/OS version, grant Darwin authority. B2 supplies
 //! its validated helper fixture fd; no fixture means stage A only.
-// Sorted index directory batches use bulk::visit (getattrlistbulk), with the
+// Sorted index directory batches use bulk::visit_batch (getattrlistbulk), with the
 // shared component mount checks + parent-edge exit validation. Single-leaf
 // metadata remains no-follow fstatat; failed bulk scans never fall back to it.
 use super::*;

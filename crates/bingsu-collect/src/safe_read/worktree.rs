@@ -6,7 +6,6 @@ use super::*;
 struct Step {
     directory: Root,
     name: PathCString,
-    #[cfg(target_os = "macos")]
     listed: bool,
 }
 
@@ -17,7 +16,6 @@ struct Step {
 pub struct WorktreeStats {
     stack: Vec<Step>,
     allocation: Option<PathAllocation>,
-    #[cfg(target_os = "macos")]
     root_listing: Option<Directory>,
     failed: Option<ReadError>,
 }
@@ -103,7 +101,6 @@ impl WorktreeStats {
                     identity: opened.identity,
                 },
                 name,
-                #[cfg(target_os = "macos")]
                 listed: false,
             });
         }
@@ -247,8 +244,7 @@ impl WorktreeStats {
         })
     }
 
-    /// Each directory's OFD is private to this walk and listed at most once.
-    /// D1 must reuse these observations for untracked matching as well.
+    /// Compatibility entry point for the tracked-only caller.
     #[cfg(target_os = "macos")]
     pub fn directory(
         &mut self,
@@ -256,7 +252,34 @@ impl WorktreeStats {
         parent: &[u8],
         access: &Access,
         meter: &mut Meter,
-        visitor: impl FnMut(&[u8], Result<&libc::stat, ReadError>) -> Result<(), ReadError>,
+        mut visitor: impl FnMut(&[u8], Result<&libc::stat, ReadError>) -> Result<(), ReadError>,
+    ) -> Result<bool, ReadError> {
+        match self.parent(root, parent, access, meter) {
+            Ok(()) => {}
+            Err(ReadError::Missing) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let mut first = true;
+        while self.visit_batch(root, parent, access, meter, first, |name, stat, _| {
+            visitor(name, stat)
+        })? {
+            first = false;
+        }
+        Ok(true)
+    }
+
+    /// Resume one listing on the same private OFD, one bounded kernel batch
+    /// at a time. False means EOF. Returning to a held parent preserves its
+    /// offset; starting a second listing on it is forbidden.
+    #[allow(clippy::too_many_arguments)]
+    pub fn visit_batch(
+        &mut self,
+        root: &Root,
+        parent: &[u8],
+        access: &Access,
+        meter: &mut Meter,
+        first: bool,
+        visitor: impl FnMut(&[u8], Result<&libc::stat, ReadError>, &mut Meter) -> Result<(), ReadError>,
     ) -> Result<bool, ReadError> {
         match self.parent(root, parent, access, meter) {
             Ok(()) => {}
@@ -264,22 +287,121 @@ impl WorktreeStats {
             Err(error) => return Err(error),
         }
         let held = if let Some(step) = self.stack.last_mut() {
-            if step.listed {
+            if step.listed == first {
                 return Err(ReadError::Denied);
             }
             step.listed = true;
             &step.directory
         } else {
-            if self.root_listing.is_some() {
+            if self.root_listing.is_some() == first {
                 return Err(ReadError::Denied);
             }
-            meter.charge_axis(bingsu_core::collection::budget::Axis::Directories, 1)?;
-            // A fresh root OFD isolates bulk offsets from other list callers.
-            self.root_listing = Some(worktree_directory(root, b".", access, meter)?);
+            if first {
+                meter.charge_axis(bingsu_core::collection::budget::Axis::Directories, 1)?;
+                // A fresh root OFD isolates bulk offsets from other list callers.
+                let Opened { fd, identity, .. } =
+                    resolve_worktree(root, b".", true, access, meter)?;
+                self.root_listing = Some(Directory {
+                    root: Root { fd, identity },
+                });
+            }
             &self.root_listing.as_ref().expect("root listing").root
         };
-        bulk::visit(held, meter, visitor)?;
-        Ok(true)
+        #[cfg(target_os = "macos")]
+        return bulk::visit_batch(held, meter, visitor);
+        #[cfg(target_os = "linux")]
+        return visit_linux_batch(held, meter, visitor);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (held, meter, visitor);
+            return Err(ReadError::Denied);
+        }
+    }
+
+    /// A narrow marker probe on the already-listed directory. No recursive
+    /// listing, HEAD read, or gitfile target resolution is permitted here.
+    #[allow(clippy::unnecessary_cast)]
+    pub(crate) fn embedded_repository(
+        &self,
+        access: &Access,
+        meter: &mut Meter,
+    ) -> Result<bool, ReadError> {
+        access.full()?;
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        let held = match self.stack.last() {
+            Some(step) if step.listed => &step.directory,
+            None => &self.root_listing.as_ref().ok_or(ReadError::Denied)?.root,
+            _ => return Err(ReadError::Denied),
+        };
+        let marker = match walk::lstat(held.fd.as_raw_fd(), c".git", meter) {
+            Ok(metadata) => metadata,
+            Err(ReadError::Missing) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let kind = marker.st_mode & libc::S_IFMT;
+        if !matches!(kind, libc::S_IFREG | libc::S_IFDIR) {
+            return Ok(false);
+        }
+        if marker.st_dev as u64 != held.identity.device {
+            return Err(ReadError::Escape);
+        }
+        if kind == libc::S_IFDIR {
+            meter.charge_axis(bingsu_core::collection::budget::Axis::Directories, 1)?;
+        }
+        // A separate, no-follow capability prevents an intermediate .git
+        // symlink from escaping via a multi-component fstatat lookup.
+        let opened = resolve_worktree(held, b".git", kind == libc::S_IFDIR, access, meter)?;
+        if !same_worktree_stat(&marker, &opened.metadata) {
+            return Err(ReadError::Changed);
+        }
+        let valid = if kind == libc::S_IFDIR {
+            let mut valid = true;
+            for (name, expected) in [
+                (c"HEAD", libc::S_IFREG),
+                (c"objects", libc::S_IFDIR),
+                (c"refs", libc::S_IFDIR),
+            ] {
+                match walk::lstat(opened.fd.as_raw_fd(), name, meter) {
+                    Ok(metadata) => {
+                        if metadata.st_dev as u64 != held.identity.device {
+                            return Err(ReadError::Escape);
+                        }
+                        valid &= metadata.st_mode & libc::S_IFMT == expected;
+                    }
+                    Err(ReadError::Missing) => valid = false,
+                    Err(error) => return Err(error),
+                }
+            }
+            valid
+        } else {
+            let file = ReadFile {
+                fd: opened.fd,
+                metadata: opened.metadata,
+            };
+            let mut prefix = [0u8; 8];
+            // Pointer metadata uses the existing repository-byte axis. Only
+            // this fixed prefix is read, regardless of hostile file size.
+            meter.charge_axis(
+                bingsu_core::collection::budget::Axis::RefBytes,
+                prefix.len() as u64,
+            )?;
+            let mut used = 0;
+            while used < prefix.len() {
+                let n = file.stream_chunk(&mut prefix[used..], meter)?;
+                if n == 0 {
+                    break;
+                }
+                used += n;
+            }
+            file.verify_stream(meter)?;
+            used == prefix.len() && &prefix == b"gitdir: "
+        };
+        if !same_worktree_stat(&marker, &walk::lstat(held.fd.as_raw_fd(), c".git", meter)?) {
+            return Err(ReadError::Changed);
+        }
+        Ok(valid)
     }
 
     pub fn finish(
@@ -299,13 +421,72 @@ impl WorktreeStats {
         })();
         self.stack = Vec::new();
         self.allocation = None;
-        #[cfg(target_os = "macos")]
-        {
-            self.root_listing = None;
-        }
+        self.root_listing = None;
         self.failed = result.err();
         result
     }
+}
+
+/// Stream getdents64 once on the verified OFD, then stat each raw leaf without
+/// following links. Dot entries count toward the raw budget, but are not visited.
+#[cfg(target_os = "linux")]
+fn visit_linux_batch(
+    root: &Root,
+    meter: &mut Meter,
+    mut visitor: impl FnMut(&[u8], Result<&libc::stat, ReadError>, &mut Meter) -> Result<(), ReadError>,
+) -> Result<bool, ReadError> {
+    let mut buffer = [0u8; crate::meter::DIRENT_CHUNK];
+    meter.event("before_worktree_bulk");
+    let size = retry(meter, Op::List, || {
+        // SAFETY: owned verified directory fd and bounded writable buffer.
+        unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                root.fd.as_raw_fd(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            ) as isize
+        }
+    })? as usize;
+    meter.event("after_worktree_bulk");
+    if size == 0 {
+        return Ok(false);
+    }
+    let mut offset = 0;
+    while offset < size {
+        let record = &buffer[offset..size];
+        if record.len() < 20 {
+            return Err(ReadError::Io(libc::EIO));
+        }
+        let length = u16::from_ne_bytes([record[16], record[17]]) as usize;
+        if length < 20 || length > record.len() {
+            return Err(ReadError::Io(libc::EIO));
+        }
+        meter.raw_entry()?;
+        let name = std::ffi::CStr::from_bytes_until_nul(&record[19..length])
+            .map_err(|_| ReadError::Io(libc::EIO))?;
+        let raw = name.to_bytes();
+        if raw != b"." && raw != b".." {
+            if raw.is_empty() || raw.contains(&b'/') {
+                return Err(ReadError::Io(libc::EIO));
+            }
+            meter.event("before_worktree_stat");
+            let metadata = match walk::lstat(root.fd.as_raw_fd(), name, meter) {
+                Err(error @ (ReadError::Limit | ReadError::Deadline)) => return Err(error),
+                result => result,
+            };
+            #[cfg(test)]
+            let metadata = metadata.map(|mut s| {
+                if let Some(device) = meter.worktree_device {
+                    s.st_dev = device as _;
+                }
+                s
+            });
+            visitor(raw, metadata.as_ref().map_err(|e| *e), meter)?;
+        }
+        offset += length;
+    }
+    Ok(true)
 }
 
 fn canonical(path: &[u8]) -> Result<(), ReadError> {
