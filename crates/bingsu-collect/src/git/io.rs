@@ -291,6 +291,66 @@ impl<'a> RepoIo<'a> {
         self.roots.worktree.device() as libc::dev_t
     }
 
+    /// Hash the link itself, including dangling/absolute targets. The extra
+    /// byte detects truncation; scratch is live, not cumulative per request.
+    pub fn worktree_link_hash(
+        &self,
+        relative: &[u8],
+        expected: &libc::stat,
+    ) -> Result<gix_index::hash::ObjectId, ReadError> {
+        self.metered(|meter| {
+            if expected.st_dev != self.worktree_device()
+                || expected.st_mode & libc::S_IFMT != libc::S_IFLNK
+            {
+                return Err(ReadError::Changed);
+            }
+            let size = u64::try_from(expected.st_size).map_err(|_| ReadError::Limit)?;
+            let capacity = usize::try_from(size.checked_add(1).ok_or(ReadError::Limit)?)
+                .map_err(|_| ReadError::Limit)?;
+            // Match walk::target's 4097-byte buffer, including its truncation
+            // sentinel. Reject hostile stat sizes before charging read bytes.
+            if capacity > 4097 || capacity as u64 > bingsu_core::collection::budget::OBJECT_ALLOC {
+                return Err(ReadError::Limit);
+            }
+            meter.charge_axis(Axis::WorktreeReadBytes, size)?;
+            let mut scratch = meter.object_allocation();
+            // ObjectAllocation enforces the existing per-blob OBJECT_ALLOC
+            // cap as well as the request's live allocation limit.
+            scratch.reserve(capacity, meter)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(capacity)
+                .map_err(|_| ReadError::Limit)?;
+            bytes.resize(capacity, 0);
+            let mut cached = self
+                .worktree_stats
+                .try_borrow_mut()
+                .map_err(|_| ReadError::Denied)?;
+            let mut local = safe_read::WorktreeStats::default();
+            let scan = cached.as_mut().unwrap_or(&mut local);
+            let len = scan.read_link(
+                self.roots.worktree,
+                relative,
+                expected,
+                &mut bytes,
+                self.access,
+                meter,
+            )?;
+            if cached.is_none() {
+                local.finish(self.roots.worktree, self.access, meter)?;
+            }
+            meter.event("before_worktree_hash");
+            let id = gix_object::compute_hash(
+                gix_index::hash::Kind::Sha1,
+                gix_object::Kind::Blob,
+                &bytes[..len],
+            )
+            .map_err(|_| ReadError::Io(libc::EINVAL))?;
+            meter.check()?;
+            Ok(id)
+        })
+    }
+
     /// Hash only bytes from the same validated fd. Worktree bytes are charged
     /// independently of repository snapshots; scratch is released each call.
     pub fn worktree_hash(

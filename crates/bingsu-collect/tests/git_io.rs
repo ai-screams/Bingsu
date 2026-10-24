@@ -3965,7 +3965,10 @@ fn worktree_names_and_hash_budgets_remain_confined() {
     let access = access();
     let io = io(&root, &access, &m);
     for name in [b"link".as_slice(), b"escape"] {
-        assert_eq!(io.worktree_metadata(name).err(), Some(E::Missing));
+        assert_eq!(
+            io.worktree_metadata(name).unwrap().st_mode & libc::S_IFMT,
+            libc::S_IFLNK
+        );
     }
     assert_eq!(io.worktree_metadata(b"../outside").err(), Some(E::Escape));
     let names = NamePolicy {
@@ -4000,6 +4003,244 @@ fn worktree_names_and_hash_budgets_remain_confined() {
     assert_eq!(io.worktree_hash(b"raw", &metadata), Err(E::Limit));
     assert_eq!(m.borrow().counts, before);
     assert_eq!(io.worktree_metadata(b"raw").err(), Some(E::Limit));
+}
+
+// Mutations: follow/open a target, hash a truncated link, skip stat identity
+// revalidation, or keep per-link allocations for the lifetime of the request.
+#[test]
+fn worktree_link_hash_reads_only_leaf_bytes_with_live_scratch() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    outside.write("secret", b"never read this content");
+    let target = outside.0.join("secret");
+    symlink(&target, f.0.join("link")).unwrap();
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let metadata = port.worktree_metadata(b"link").unwrap();
+    let expected = gix_object::compute_hash(
+        Hash::Sha1,
+        gix_object::Kind::Blob,
+        target.as_os_str().as_bytes(),
+    )
+    .unwrap();
+    let before = m.borrow().counts[Phase::Content as usize];
+    let live = m.borrow().live_allocated();
+    for _ in 0..2000 {
+        assert_eq!(port.worktree_link_hash(b"link", &metadata), Ok(expected));
+        assert_eq!(m.borrow().live_allocated(), live);
+    }
+    let after = m.borrow().counts[Phase::Content as usize];
+    assert_eq!(after.open, before.open);
+    assert_eq!(after.read, before.read);
+    assert_eq!(after.readlink - before.readlink, 2000);
+    assert_eq!(after.stat - before.stat, 4000);
+    assert_eq!(
+        m.borrow().budget.used(Axis::WorktreeReadBytes),
+        metadata.st_size as u64 * 2000
+    );
+    assert_eq!(
+        port.worktree_link_hash(b"../link", &metadata),
+        Err(E::Escape)
+    );
+}
+
+// Mutations: allocate or issue readlinkat before the blob/worktree caps, fail
+// to revalidate before/after readlinkat, or accept a replaced parent symlink.
+#[test]
+fn worktree_link_hash_caps_and_races_fail_closed() {
+    for case in [
+        "device",
+        "regular",
+        "negative",
+        "object",
+        "link-cap",
+        "link-over-cap",
+        "link-boundary",
+        "bytes",
+        "allocation",
+        "before",
+        "after",
+        "parent",
+        "length",
+    ] {
+        let f = Fixture::new();
+        f.write("d/placeholder", b"x");
+        symlink("missing", f.0.join("d/link")).unwrap();
+        let access = access();
+        let root = f.root(&mut meter());
+        let m = RefCell::new(meter());
+        let port = io(&root, &access, &m);
+        let mut metadata = port.worktree_metadata(b"d/link").unwrap();
+        let expected = match case {
+            "device" => {
+                metadata.st_dev ^= 1;
+                E::Changed
+            }
+            "regular" => {
+                metadata.st_mode = libc::S_IFREG;
+                E::Changed
+            }
+            "negative" => {
+                metadata.st_size = -1;
+                E::Limit
+            }
+            "object" => {
+                metadata.st_size = budget::OBJECT_ALLOC as _;
+                E::Limit
+            }
+            "link-cap" => {
+                metadata.st_size = 4097;
+                E::Limit
+            }
+            "link-over-cap" => {
+                metadata.st_size = 4098;
+                E::Limit
+            }
+            "link-boundary" => {
+                metadata.st_size = 4096; // buffer + sentinel still fits 4097
+                E::Changed
+            }
+            "bytes" => {
+                m.borrow_mut()
+                    .charge_axis(
+                        Axis::WorktreeReadBytes,
+                        Axis::WorktreeReadBytes.limit() - metadata.st_size as u64 + 1,
+                    )
+                    .unwrap();
+                E::Limit
+            }
+            "allocation" => {
+                m.borrow_mut().allocation_limit = metadata.st_size as u64;
+                E::Limit
+            }
+            "parent" => {
+                fs::rename(f.0.join("d"), f.0.join("other")).unwrap();
+                symlink("other", f.0.join("d")).unwrap();
+                E::Missing
+            }
+            "length" => {
+                metadata.st_size += 1;
+                E::Changed
+            }
+            _ => {
+                let filename = f.0.join("d/link");
+                let mut replaced = false;
+                let event = if case == "before" {
+                    "before_worktree_readlink"
+                } else {
+                    "after_worktree_readlink"
+                };
+                m.borrow_mut().hook = Some(Box::new(move |observed| {
+                    if observed == event && !replaced {
+                        replaced = true;
+                        fs::rename(&filename, filename.with_extension("old")).unwrap();
+                        symlink("changed", &filename).unwrap();
+                    }
+                }));
+                E::Changed
+            }
+        };
+        let before = m.borrow().counts;
+        let live = m.borrow().live_allocated();
+        let charged = m.borrow().budget.used(Axis::WorktreeReadBytes);
+        assert_eq!(
+            port.worktree_link_hash(b"d/link", &metadata),
+            Err(expected),
+            "{case}"
+        );
+        assert_eq!(m.borrow().live_allocated(), live);
+        if matches!(case, "length" | "device" | "regular" | "negative") {
+            assert_eq!(
+                m.borrow().counts[Phase::Content as usize].readlink,
+                before[Phase::Content as usize].readlink
+            );
+        }
+        if matches!(case, "device" | "regular" | "negative") {
+            assert_eq!(m.borrow().counts, before);
+        }
+        if matches!(
+            case,
+            "object" | "link-cap" | "link-over-cap" | "bytes" | "allocation"
+        ) {
+            assert_eq!(
+                m.borrow().counts,
+                before,
+                "{case}: cap before any I/O/allocation"
+            );
+            assert_eq!(port.worktree_metadata(b"d/link").map(|_| ()), Err(E::Limit));
+            assert_eq!(m.borrow().counts, before);
+        }
+        // Mutation: charge bytes before validating the object/link buffer cap.
+        if matches!(case, "object" | "link-cap" | "link-over-cap") {
+            assert_eq!(m.borrow().budget.used(Axis::WorktreeReadBytes), charged);
+        }
+        assert_eq!(
+            m.borrow().counts[Phase::Content as usize].read,
+            before[Phase::Content as usize].read
+        );
+    }
+}
+
+// Mutations: bypass the existing stat policy or its racy fallback for links.
+#[test]
+fn worktree_symlink_stat_policy_and_racy_fallback() {
+    let f = Fixture::new();
+    symlink("dangling", f.0.join("link")).unwrap();
+    let access = access();
+    let root = f.root(&mut meter());
+    let m = RefCell::new(meter());
+    let port = io(&root, &access, &m);
+    let metadata = port.worktree_metadata(b"link").unwrap();
+    let mut entry = worktree_entry(&metadata, b"dangling");
+    entry.mode = gix_index::entry::Mode::SYMLINK;
+    let mut idx = old_index();
+    idx.set_timestamp((std::time::SystemTime::now() + Duration::from_secs(60)).into());
+    let policies = Policies::from_config(&Config::default()).unwrap();
+    let compare = |entry: &gix_index::Entry, idx: &gix_index::State, policies| {
+        worktree::compare_observed(&port, b"link", entry, idx, policies, Ok(&metadata))
+    };
+    assert_eq!(
+        compare(&entry, &idx, policies),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].readlink, 0);
+    entry.stat.ctime.secs ^= 1;
+    assert_eq!(
+        compare(
+            &entry,
+            &idx,
+            Policies {
+                stat: StatPolicy {
+                    trust_ctime: false,
+                    ..policies.stat
+                },
+                ..policies
+            }
+        ),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].readlink, 0);
+    assert_eq!(
+        compare(&entry, &idx, policies),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].readlink, 1);
+    entry.stat = worktree::stat(&metadata);
+    assert_eq!(
+        worktree::compare(
+            &port,
+            b"link",
+            &entry,
+            &old_index(),
+            policies.stat,
+            policies.conversion,
+            policies.filemode
+        ),
+        Ok(Comparison::Exact { modified: false })
+    );
+    assert_eq!(m.borrow().counts[Phase::Content as usize].readlink, 2);
 }
 
 // 이것을 실패시키는 것: matcher 파싱 전 예산 제거·잘못된 attribute를 조용히 무시·할당 선계상 축소.
@@ -4604,7 +4845,12 @@ fn worktree_stat_replaced_leaf_never_follows_outside_symlink() {
             }
         }));
         let before = m.borrow().counts[Phase::Content as usize];
-        assert_eq!(io.worktree_metadata(b"d/b").err(), Some(E::Missing));
+        let metadata = io.worktree_metadata(b"d/b").unwrap();
+        assert_eq!(metadata.st_mode & libc::S_IFMT, libc::S_IFLNK);
+        assert_eq!(
+            metadata.st_size as usize,
+            outside.0.join("canary").as_os_str().as_bytes().len()
+        );
         let after = m.borrow().counts[Phase::Content as usize];
         assert_eq!(after.open, before.open);
         assert_eq!(after.read, before.read);
@@ -4827,9 +5073,11 @@ fn worktree_stat_special_leaves_and_scan_lifetime() {
     let root = f.root(&mut setup);
     let m = RefCell::new(meter());
     let io = io(&root, &access, &m);
-    for path in [b"fifo".as_slice(), b"d"] {
-        assert_eq!(io.worktree_metadata(path).err(), Some(E::Special));
-    }
+    assert_eq!(io.worktree_metadata(b"fifo").err(), Some(E::Special));
+    assert_eq!(
+        io.worktree_metadata(b"d").unwrap().st_mode & libc::S_IFMT,
+        libc::S_IFDIR
+    );
     assert_eq!(m.borrow().counts[Phase::Content as usize].open, 0);
     assert_eq!(
         io.worktree_metadata(&vec![b'x'; 4097]).err(),
@@ -5306,6 +5554,7 @@ fn worktree_bulk_observation_drives_safe_comparison() {
         conversion: ConversionPolicy::RawHash,
         names: NamePolicy::default(),
         filemode: true,
+        symlinks: true,
     };
     let mut observed = None;
     port.worktree_directory_stats(b"d", &[b"file"], policies.names, |_, metadata| {
@@ -5666,6 +5915,7 @@ fn worktree_empty_blob_uses_stat_without_content_open() {
                 stat: StatPolicy::default(),
                 conversion: ConversionPolicy::RawHash,
                 filemode: false,
+                symlinks: true,
                 names: NamePolicy::default()
             },
             Ok(&large)

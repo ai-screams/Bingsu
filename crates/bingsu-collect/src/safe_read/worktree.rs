@@ -155,10 +155,61 @@ impl WorktreeStats {
             return Ok(metadata);
         }
         match metadata.st_mode & libc::S_IFMT {
-            libc::S_IFREG => Ok(metadata),
-            libc::S_IFLNK => Err(ReadError::Missing),
+            libc::S_IFREG | libc::S_IFLNK | libc::S_IFDIR => Ok(metadata),
             _ => Err(ReadError::Special),
         }
+    }
+
+    /// Read only a leaf link's bytes from its verified parent. Targets are
+    /// opaque blob data: never resolve, open, or interpret them as paths.
+    #[allow(clippy::too_many_arguments)]
+    // dev_t is u64 on Linux and narrower on Darwin.
+    #[allow(clippy::unnecessary_cast)]
+    pub(crate) fn read_link(
+        &mut self,
+        root: &Root,
+        path: &[u8],
+        expected: &libc::stat,
+        buffer: &mut [u8],
+        access: &Access,
+        meter: &mut Meter,
+    ) -> Result<usize, ReadError> {
+        access.full()?;
+        let (parent, leaf) = split(path)?;
+        self.parent(root, parent, access, meter)?;
+        let held = self.held(root);
+        let name = cstring(leaf, meter)?;
+        let verify = |meter: &mut Meter| {
+            let now = walk::lstat(held.fd.as_raw_fd(), &name, meter)?;
+            if now.st_mode & libc::S_IFMT != libc::S_IFLNK
+                || now.st_dev as u64 != held.identity.device
+                || !same_worktree_stat(expected, &now)
+            {
+                return Err(ReadError::Changed);
+            }
+            Ok(())
+        };
+        verify(meter)?;
+        meter.event("before_worktree_readlink");
+        let size = retry(meter, Op::Readlink, || {
+            // SAFETY: held verified parent, one terminated leaf, writable
+            // precharged bounded slice. readlinkat never follows the target.
+            unsafe {
+                libc::readlinkat(
+                    held.fd.as_raw_fd(),
+                    name.as_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            }
+        })? as usize;
+        meter.returned_bytes(size);
+        meter.event("after_worktree_readlink");
+        verify(meter)?;
+        if size == buffer.len() || size as i64 != expected.st_size {
+            return Err(ReadError::Changed);
+        }
+        Ok(size)
     }
 
     /// Hash opens share verified ancestors, but retain atomic root confinement
