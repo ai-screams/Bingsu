@@ -173,13 +173,26 @@ pub(super) fn acquire(
     query: DiscoveryQuery,
     meter: &mut Meter,
 ) -> Result<Discovery, ReadError> {
+    acquire_inner(cwd, query, false, meter)
+}
+
+pub(super) fn acquire_metadata(path: &[u8], meter: &mut Meter) -> Result<Discovery, ReadError> {
+    acquire_inner(path, DiscoveryQuery::default(), true, meter)
+}
+
+fn acquire_inner(
+    cwd: &[u8],
+    query: DiscoveryQuery,
+    metadata_pointer: bool,
+    meter: &mut Meter,
+) -> Result<Discovery, ReadError> {
     if !cwd.starts_with(b"/") || cwd.contains(&0) {
         return Err(ReadError::Escape);
     }
     let mut scratch = meter.path_allocation();
     let mut pending = components(cwd, &mut scratch, meter)?;
     let fd = openat(libc::AT_FDCWD, c"/", DIR_FLAGS, meter)?;
-    meter.allocation(34 * std::mem::size_of::<Root>())?;
+    scratch.reserve(34 * std::mem::size_of::<Root>(), meter)?;
     let mut stack = VecDeque::with_capacity(34);
     stack.push_back(Root {
         identity: identity(fd.as_raw_fd(), meter)?,
@@ -210,6 +223,9 @@ pub(super) fn acquire(
         let parent = stack.back().ok_or(ReadError::Changed)?.fd.as_raw_fd();
         let before = lstat(parent, &name, meter)?;
         if before.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            if metadata_pointer {
+                return Err(ReadError::Symlink);
+            }
             logical = false;
             links += 1;
             if links > 40 {
@@ -232,6 +248,14 @@ pub(super) fn acquire(
             pending = expanded;
             continue;
         }
+        // Do not open a foreign pointer target, even to inspect HEAD. fstat
+        // after opening and selection recheck this against replacement races.
+        if metadata_pointer && pending.is_empty()
+            // SAFETY: process identity only.
+            && before.st_uid != unsafe { libc::geteuid() }
+        {
+            return Err(ReadError::Denied);
+        }
         let Opened {
             fd,
             metadata: after,
@@ -252,13 +276,15 @@ pub(super) fn acquire(
         }
     }
     let cwd = stack.pop_back().ok_or(ReadError::Changed)?;
-    meter.allocation(stack.len() * std::mem::size_of::<Root>())?;
+    let mut allocation = meter.path_allocation();
+    allocation.reserve(stack.len() * std::mem::size_of::<Root>(), meter)?;
     Ok(Discovery {
         cwd,
         ancestors: stack.into_iter().map(|root| AncestorDir { root }).collect(),
         logical,
         query,
         slash,
+        _allocation: allocation,
     })
 }
 

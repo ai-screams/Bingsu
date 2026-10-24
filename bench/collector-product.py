@@ -640,10 +640,8 @@ def prepare(binary):
     else:
         modules.append('mod sandbox {pub fn enter()->bingsu_core::front::Sandbox{bingsu_core::front::Sandbox::Absent}}')
     worker = (source / "crates/bingsu-collect/src/worker.rs").read_text()
-    # Generated workers live outside the source directory; both must use the
-    # original sink implementation rather than resolve a sibling fixture file.
-    worker = replace_required(worker, '#[path = "update_sink.rs"]',
-                              f'#[path = {json.dumps(str(source / "crates/bingsu-collect/src/update_sink.rs"))}]')
+    # main.rs supplies the shared update_sink module, including for both
+    # generated worker copies; do not duplicate a worker-local module list.
     # Collection has written the fixture Update through the sink. Release its
     # borrows before the existing raw failure/probe frames, and never Complete
     # a failure transcript. Mode zero retains the normal sink completion path.

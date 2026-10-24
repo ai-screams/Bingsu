@@ -156,6 +156,8 @@ impl Access {
 pub enum StageAFile {
     GitPointer,
     CommonDir,
+    /// Reciprocal linked-worktree registration, used only during discovery.
+    WorktreePointer,
     Head,
     MergeHead,
     CherryPickHead,
@@ -170,6 +172,7 @@ impl StageAFile {
         match self {
             Self::GitPointer => b".git",
             Self::CommonDir => b"commondir",
+            Self::WorktreePointer => b"gitdir",
             Self::Head => b"HEAD",
             Self::MergeHead => b"MERGE_HEAD",
             Self::CherryPickHead => b"CHERRY_PICK_HEAD",
@@ -198,16 +201,7 @@ pub fn read_stage_a(
         }
         return read_stage_a_component(root, file.path(), meter);
     }
-    read_inner(
-        root,
-        file.path(),
-        ReadCap {
-            bytes: 65_536,
-            single_link: true,
-        },
-        access,
-        meter,
-    )
+    resolve_with(root, file.path(), access, meter)?.read_metadata(65_536, meter)
 }
 
 fn read_stage_a_component(
@@ -219,13 +213,7 @@ fn read_stage_a_component(
     if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(ReadError::Special);
     }
-    ReadFile { fd, metadata }.read(
-        ReadCap {
-            bytes: 65_536,
-            single_link: true,
-        },
-        meter,
-    )
+    ReadFile { fd, metadata }.read_metadata(65_536, meter)
 }
 
 /// Fixed discovery/operation directories. These cannot become content Roots.
@@ -258,21 +246,13 @@ impl StageADir<'_> {
                 _ => return Err(ReadError::Denied),
             };
             let size = prefix.len() + file.path().len();
-            meter.allocation(size)?;
+            let mut scratch = meter.path_allocation();
+            scratch.reserve(size, meter)?;
             let mut path = Vec::new();
             path.try_reserve_exact(size).map_err(|_| ReadError::Limit)?;
             path.extend_from_slice(prefix);
             path.extend_from_slice(file.path());
-            return read_inner(
-                self.selected,
-                &path,
-                ReadCap {
-                    bytes: 65_536,
-                    single_link: true,
-                },
-                access,
-                meter,
-            );
+            return resolve_with(self.selected, &path, access, meter)?.read_metadata(65_536, meter);
         }
         let name = match (self.kind, file) {
             (StageADirectory::RebaseMerge, StageAFile::RebaseMergeHeadName)
@@ -347,6 +327,7 @@ pub struct Discovery {
     logical: bool,
     query: DiscoveryQuery,
     slash: Identity,
+    _allocation: PathAllocation,
 }
 
 /// Names only: no conversion, raw fd, stage-A or content-read API.
@@ -361,6 +342,121 @@ impl AncestorDir {
 }
 
 impl Discovery {
+    /// Reacquiring an ancestor for gitfile proof must not reset the selected
+    /// worktree's mount boundary before the ordinary bounded marker walk.
+    pub(crate) fn ancestor_repository(
+        self,
+        anchor: &Root,
+        max_levels: usize,
+        meter: &mut Meter,
+    ) -> Result<(Root, Option<usize>), ReadError> {
+        same_mount(self.cwd.identity, anchor.identity)?;
+        self.repository(max_levels, meter)
+    }
+
+    /// Inspect only the fixed marker on held ancestors. A failed/unsafe marker
+    /// is not absence. Consume discovery before any read ruleset is installed.
+    pub(crate) fn repository(
+        mut self,
+        max_levels: usize,
+        meter: &mut Meter,
+    ) -> Result<(Root, Option<usize>), ReadError> {
+        for level in 0..=max_levels.min(32).min(self.ancestors.len()) {
+            let root = if level == 0 {
+                &self.cwd
+            } else {
+                &self.ancestors[self.ancestors.len() - level].root
+            };
+            // Never probe / as a repository or cross a content mount boundary.
+            if self.validate(root).is_err() {
+                break;
+            }
+            same_mount(root.identity, self.cwd.identity)?;
+            meter.event("discovery_candidate");
+            let marker = match walk::one_component(root, b".git", false, meter) {
+                Ok(marker) => marker,
+                Err(ReadError::Missing) => continue,
+                Err(error) => return Err(error),
+            };
+            let kind = marker.metadata.st_mode & libc::S_IFMT;
+            if kind != libc::S_IFDIR && (kind != libc::S_IFREG || marker.metadata.st_nlink != 1) {
+                return Err(ReadError::Special);
+            }
+            return Ok((
+                if level == 0 {
+                    self.cwd
+                } else {
+                    self.ancestors
+                        .swap_remove(self.ancestors.len() - level)
+                        .root
+                },
+                Some(level),
+            ));
+        }
+        self.select_cwd().map(|root| (root, None))
+    }
+
+    /// External metadata pointers must be canonical, owned directories BEFORE
+    /// selection. No symlink in a pointer path may redirect a shape check.
+    pub(crate) fn pointer_is_logical(&self) -> bool {
+        self.logical
+    }
+
+    /// No general content authority escapes while C5 verifies the reciprocal
+    /// gitfile/commondir shape. The selected root is still unpublished.
+    pub(crate) fn metadata_pointer(
+        &self,
+        file: StageAFile,
+        anchor: &Root,
+        meter: &mut Meter,
+    ) -> Result<Vec<u8>, ReadError> {
+        if !matches!(file, StageAFile::CommonDir | StageAFile::WorktreePointer) {
+            return Err(ReadError::Denied);
+        }
+        self.validate(&self.cwd)?;
+        same_mount(self.cwd.identity, anchor.identity)?;
+        if !self.logical || !self.cwd.owned(meter)? {
+            return Err(ReadError::Denied);
+        }
+        read_stage_a(&self.cwd, file, &Access::stage_a_only(), meter)
+    }
+
+    /// Shape validation may inspect only this fixed config before publishing
+    /// a metadata root. The owner decision precedes both bytes and gix parsing;
+    /// config needs the same kernel guarantee as every other general read.
+    pub(crate) fn metadata_config(
+        &self,
+        anchor: &Root,
+        access: &Access,
+        meter: &mut Meter,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.validate(&self.cwd)?;
+        same_mount(self.cwd.identity, anchor.identity)?;
+        if !self.logical || !self.cwd.owned(meter)? {
+            return Err(ReadError::Denied);
+        }
+        resolve_with(&self.cwd, b"config", access, meter)?
+            .read_metadata(bingsu_core::collection::budget::CONFIG_BYTES, meter)
+    }
+
+    /// A reciprocal worktree registration alone cannot authorize an arbitrary
+    /// common directory. Probe fixed metadata markers, never object payloads.
+    pub(crate) fn metadata_signature(
+        &self,
+        anchor: &Root,
+        meter: &mut Meter,
+    ) -> Result<(), ReadError> {
+        self.validate(&self.cwd)?;
+        same_mount(self.cwd.identity, anchor.identity)?;
+        if !self.logical || !self.cwd.owned(meter)? {
+            return Err(ReadError::Denied);
+        }
+        read_stage_a(&self.cwd, StageAFile::Head, &Access::stage_a_only(), meter)?;
+        for name in [b"objects".as_slice(), b"refs"] {
+            walk::one_component(&self.cwd, name, true, meter)?;
+        }
+        Ok(())
+    }
     pub fn ancestors(&self) -> &[AncestorDir] {
         &self.ancestors
     }
@@ -479,6 +575,24 @@ pub struct Root {
     identity: Identity,
 }
 impl Root {
+    pub(crate) fn owned(&self, meter: &mut Meter) -> Result<bool, ReadError> {
+        let metadata = stat(self.fd.as_raw_fd(), meter)?;
+        // SAFETY: reads only the process identity; never NSS or environment.
+        let owned = metadata.st_uid == unsafe { libc::geteuid() };
+        meter.event(if owned {
+            "owner_owned"
+        } else {
+            "owner_foreign"
+        });
+        Ok(owned)
+    }
+
+    /// Only the fixed .git child can become an in-worktree metadata root.
+    /// Unlike external pointers, foreign ownership is allowed for HEAD only.
+    pub(crate) fn git_directory(&self, meter: &mut Meter) -> Result<Self, ReadError> {
+        let Opened { fd, identity, .. } = walk::one_component(self, b".git", true, meter)?;
+        Ok(Self { fd, identity })
+    }
     /// Observation only. No access(2) fallback if the exact query is unavailable.
     #[cfg(target_os = "linux")]
     pub fn readonly(&self, meter: &mut Meter) -> Result<Option<bool>, ReadError> {
@@ -545,6 +659,21 @@ pub fn acquire(
     result
 }
 
+/// Pointer acquisition rejects every symlink and checks the leaf's owner
+/// before opening that directory. This is not a general content-read API.
+pub(crate) fn acquire_metadata(path: &[u8], meter: &mut Meter) -> Result<Discovery, ReadError> {
+    let previous = meter.phase;
+    meter.phase = Phase::Acquisition;
+    let result = walk::acquire_metadata(path, meter).map(|mut discovery| {
+        // Pointer validation never walks these ancestors. In particular, do
+        // not retain a fresh 33-fd stack at every nested submodule level.
+        discovery.ancestors.clear();
+        discovery
+    });
+    meter.phase = previous;
+    result
+}
+
 pub fn resolve_with(
     root: &Root,
     path: &[u8],
@@ -577,6 +706,8 @@ fn resolve(
     single_link: bool,
     meter: &mut Meter,
 ) -> Result<Opened, ReadError> {
+    #[cfg(test)]
+    meter.event(&format!("resolve:{}", String::from_utf8_lossy(path)));
     relative(path)?;
     let fd = match access.backend {
         #[cfg(target_os = "linux")]
@@ -724,6 +855,31 @@ fn read_inner(
 }
 
 impl ReadFile {
+    /// Metadata has its own file cap and a live read reservation. It never
+    /// spends the worktree content budget. Use the same inspected fd and size;
+    /// the extra byte detects growth without reserving 64 KiB for every HEAD.
+    pub(crate) fn read_metadata(self, cap: u64, meter: &mut Meter) -> Result<Vec<u8>, ReadError> {
+        let size = u64::try_from(self.metadata.st_size).map_err(|_| ReadError::Limit)?;
+        if size > cap {
+            return Err(ReadError::Limit);
+        }
+        let capacity = usize::try_from(size.checked_add(1).ok_or(ReadError::Limit)?)
+            .map_err(|_| ReadError::Limit)?;
+        let mut scratch = meter.path_allocation();
+        scratch.reserve(capacity, meter)?;
+        let bytes = self.read_reserved(
+            ReadCap {
+                bytes: size,
+                single_link: true,
+            },
+            meter,
+        )?;
+        if bytes.len() as u64 != size {
+            return Err(ReadError::Changed);
+        }
+        Ok(bytes)
+    }
+
     /// Metadata of the already validated, held regular file; never reopens a path.
     pub fn metadata(&self) -> libc::stat {
         self.metadata
@@ -848,6 +1004,36 @@ impl ReadFile {
     }
 }
 
+/// Observe a directory entry without following its leaf. In particular, a
+/// dangling symlink is present. Only the confined parent directory is opened.
+pub(crate) fn has_entry(
+    root: &Root,
+    relative: &[u8],
+    access: &Access,
+    meter: &mut Meter,
+) -> Result<bool, ReadError> {
+    access.full()?;
+    let split = relative
+        .iter()
+        .rposition(|b| *b == b'/')
+        .ok_or(ReadError::Escape)?;
+    let (parent, name) = (&relative[..split], &relative[split + 1..]);
+    if matches!(name, b"" | b"." | b"..") {
+        return Err(ReadError::Escape);
+    }
+    let dir = match directory(root, parent, access, meter) {
+        Ok(dir) => dir,
+        Err(ReadError::Missing) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let name = cstring(name, meter)?;
+    match walk::lstat(dir.root.fd.as_raw_fd(), &name, meter) {
+        Ok(_) => Ok(true),
+        Err(ReadError::Missing) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn directory(
     root: &Root,
     relative: &[u8],
@@ -968,6 +1154,8 @@ fn openat(
     flags: i32,
     meter: &mut Meter,
 ) -> Result<Fd, ReadError> {
+    #[cfg(test)]
+    meter.event(&format!("openat:{}", name.to_string_lossy()));
     let lease = meter.lease()?;
     let fd = retry(meter, Op::Open, || {
         // SAFETY: valid C string; no create flags, and parent stays alive.
@@ -1046,6 +1234,45 @@ fn readonly_status(result: Result<(), i32>) -> Result<Option<bool>, ReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 이것을 실패시키는 것: ancestor 재획득이 원래 worktree의 device/mount 경계를 초기화.
+    #[test]
+    fn ancestor_repository_preserves_mount_boundary() {
+        use std::os::unix::ffi::OsStrExt;
+        let path =
+            std::env::temp_dir().join(format!("bingsu-ancestor-mount-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        let mut meter = Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        for device in [true, false] {
+            let query = acquire(
+                path.as_os_str().as_bytes(),
+                DiscoveryQuery::default(),
+                &mut meter,
+            )
+            .unwrap();
+            let mut anchor = acquire(
+                path.as_os_str().as_bytes(),
+                DiscoveryQuery::default(),
+                &mut meter,
+            )
+            .unwrap()
+            .select_cwd()
+            .unwrap();
+            if device {
+                anchor.identity.device ^= 1;
+            } else {
+                anchor.identity.mount[0] ^= 1;
+            }
+            let before = meter.operations();
+            assert!(matches!(
+                query.ancestor_repository(&anchor, 0, &mut meter),
+                Err(ReadError::Escape)
+            ));
+            assert_eq!(meter.operations(), before);
+        }
+        std::fs::remove_dir(path).unwrap();
+    }
+
     // 이것을 실패시키는 것: CString의 선예약 또는 drop 시 live 예약 반환을 생략하는 것.
     #[test]
     fn path_cstring_reservation_is_live_and_precharged() {

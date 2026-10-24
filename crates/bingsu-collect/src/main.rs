@@ -5,7 +5,7 @@
 // The other ABI and row metadata are exercised by tests/filter.rs.
 #[allow(dead_code, unsafe_code)]
 mod filter;
-// C2 compiles the bytes-only git boundary; C5/E4 connect collection later.
+// C5 connects the bytes-only collector; E4 alone enables the product mask.
 #[cfg(unix)]
 #[allow(dead_code)]
 mod git;
@@ -25,6 +25,8 @@ mod safe_read;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;
+#[cfg(unix)]
+mod update_sink;
 mod worker;
 #[cfg(unix)]
 use bingsu_identity::build_id;

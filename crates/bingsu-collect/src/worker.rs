@@ -1,10 +1,10 @@
 //! Fixed product entry and one bounded request. Every startup error precedes
 //! Ready and the first request read. Both Linux filters precede collection.
-// Keep the sink binary-local. The startup integration target includes worker.rs
-// directly and therefore exercises the same sink without linking it into lib.rs.
+// The binary-local sink is shared with git collection and startup fixtures.
 #[cfg(unix)]
-#[path = "update_sink.rs"]
-mod update_sink;
+pub(crate) use crate::update_sink::UpdateSink;
+#[cfg(unix)]
+use crate::update_sink::WireSink;
 #[cfg(unix)]
 use crate::{limits, sys};
 #[cfg(unix)]
@@ -13,10 +13,6 @@ use bingsu_core::collection::{
     selection::PRODUCT,
     wire::{self, Frame, Kind, M3B_REQUEST_ID, RequestDecoder},
 };
-#[cfg(unix)]
-pub(crate) use update_sink::UpdateSink;
-#[cfg(unix)]
-use update_sink::WireSink;
 
 pub fn run() -> i32 {
     std::panic::set_hook(Box::new(|_| {}));
@@ -46,9 +42,9 @@ fn execute() -> std::io::Result<()> {
     sys::hygiene()?;
     let (installed, landlock) = protected()?;
     #[cfg(target_os = "macos")]
-    let _access = probe_before_ready(&mut fds)?;
+    let access = probe_before_ready(&mut fds)?;
     #[cfg(target_os = "linux")]
-    let _access = probe_before_ready()?;
+    let access = probe_before_ready()?;
     exchange(
         &mut fds,
         &mut buffer,
@@ -56,7 +52,14 @@ fn execute() -> std::io::Result<()> {
         landlock,
         &PRODUCT,
         crate::build_id(),
-        |_, _: &mut dyn UpdateSink| Err(std::io::Error::other("no product workers")),
+        |request, sink: &mut dyn UpdateSink| {
+            let meter = crate::meter::Meter::new(
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(u64::from(request.budget_ms.min(50))),
+            );
+            crate::git::collect_with_access(request, sink, meter, access)
+                .map_err(|_| std::io::Error::other("git collection"))
+        },
     )
 }
 

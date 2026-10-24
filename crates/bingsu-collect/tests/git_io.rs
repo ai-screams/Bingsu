@@ -13,6 +13,9 @@ mod meter;
 #[allow(dead_code)]
 #[path = "../src/safe_read/mod.rs"]
 mod safe_read;
+#[allow(dead_code)]
+#[path = "../src/update_sink.rs"]
+mod update_sink;
 
 #[path = "support/allocation.rs"]
 mod allocation;

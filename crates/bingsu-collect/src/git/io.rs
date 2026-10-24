@@ -153,13 +153,7 @@ impl<'a> RepoIo<'a> {
                 return Err(ReadError::Limit);
             }
             meter.charge_axis(Axis::RefBytes, size)?;
-            file.read_reserved(
-                ReadCap {
-                    bytes: size,
-                    single_link: true,
-                },
-                meter,
-            )
+            file.read_metadata(cap, meter)
         })
     }
 
@@ -171,6 +165,12 @@ impl<'a> RepoIo<'a> {
                 safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?
                     .metadata(),
             )
+        })
+    }
+
+    pub(super) fn has_entry(&self, path: RepoPath) -> Result<bool, ReadError> {
+        self.metered(|meter| {
+            safe_read::has_entry(self.root(path.root), &path.relative, self.access, meter)
         })
     }
 
@@ -414,6 +414,9 @@ impl<'a> RepoIo<'a> {
             }
             if let Some(axis) = axis {
                 meter.charge_axis(axis, size)?;
+            }
+            if axis.is_none() && files.is_none() && cap.single_link {
+                return file.read_metadata(cap.bytes, meter);
             }
             let bytes = file.read_reserved(
                 ReadCap {
