@@ -100,7 +100,46 @@ static void grow_memory(void) {
     asm volatile("" : : "r"(memory) : "memory");
     for(;;) pause();
 }
-/* D3_GIT_FRAMES */
+/* Static fixtures for compiler-free preparation; checked against the Rust encoder below. */
+static const unsigned char git_0[]={
+    3,0,1,0,0,0,0,15,0,0,0,1,5,1,0,1,5,2,0,0,
+    0,4,0,0,0,109,97,105,110,3,0,0,5,4,0,1,5,5,0,0,
+    4,0,6,0,1,5,7,0,1,5,8,0,0,5,9,0,0,5,10,0,
+    0,4,1,11,0,0,0,1,0,0,0,65,12,0,1,5,13,0,1,5,
+    14,0,1,5,0,
+};
+static const unsigned char git_1[]={
+    3,0,1,0,0,0,0,15,0,0,0,1,5,1,0,1,5,2,0,0,
+    0,4,0,0,0,109,97,105,110,3,0,0,5,4,0,0,1,0,0,0,
+    0,0,5,0,0,4,0,6,0,0,4,0,7,0,0,1,0,0,0,0,
+    0,8,0,0,5,9,0,0,5,10,0,0,4,1,11,0,0,0,1,0,
+    0,0,66,12,0,0,1,0,0,0,0,0,13,0,1,5,14,0,0,1,
+    0,0,0,0,0,0,
+};
+static const unsigned char git_2[]={
+    3,0,1,0,0,0,0,15,0,0,0,0,1,0,0,0,0,0,1,0,
+    0,1,0,0,0,0,0,2,0,0,0,4,0,0,0,109,97,105,110,3,
+    0,0,5,4,0,0,1,0,0,0,0,0,5,0,0,4,0,6,0,0,
+    4,0,7,0,0,1,0,0,0,0,0,8,0,0,5,9,0,0,5,10,
+    0,0,4,1,11,0,0,0,1,0,0,0,67,12,0,0,1,0,0,0,
+    0,0,13,0,1,5,14,0,0,1,0,0,0,0,0,0,
+};
+static const unsigned char git_3[]={
+    3,0,1,0,0,0,0,15,0,0,0,0,1,0,0,0,0,0,1,0,
+    0,1,0,0,0,0,0,2,0,0,0,4,0,0,0,109,97,105,110,3,
+    0,0,5,4,0,0,1,0,0,0,0,0,5,0,0,4,0,6,0,0,
+    4,0,7,0,0,1,0,0,0,0,0,8,0,0,5,9,0,0,5,10,
+    0,0,4,0,11,0,0,0,1,0,0,0,68,12,0,0,1,0,0,0,
+    0,0,13,0,0,1,0,0,0,0,0,14,0,0,1,0,0,0,0,0,
+    0,
+};
+static const uint32_t git_lengths[]={85,106,116,121};
+static void git_stage(int stage, int partial) {
+    const unsigned char *payload[]={git_0,git_1,git_2,git_3};
+    header(5,git_lengths[stage]);
+    put(h,80);
+    put(payload[stage],git_lengths[stage]-(partial?1:0));
+}
 int main(int argc, char **argv) {
     if(argc!=2) return 30;
     alarm(2);
@@ -211,11 +250,7 @@ fn peer() -> &'static PathBuf {
         let dir = std::fs::canonicalize(dir).unwrap();
         let exe = dir.join("peer");
         let source = dir.join("peer.c");
-        std::fs::write(
-            &source,
-            PEER.replace("/* D3_GIT_FRAMES */", &git_peer_frames()),
-        )
-        .unwrap();
+        std::fs::write(&source, PEER).unwrap();
         let status = Command::new("cc")
             .args(["-O2", "-Wall", "-Werror", "-o"])
             .arg(&exe)
@@ -1661,9 +1696,9 @@ fn interrupted_poll_child() {
     assert!(started.elapsed() < Duration::from_millis(500));
 }
 
-// Encoded by the production schema; the hostile peer only chooses when/where
-// to cut a frame. Real Git computation is covered in git_deadlines.rs.
-fn git_peer_frames() -> String {
+// 이것을 실패시키는 것: 정적 C peer의 payload·길이가 같은 요청 binding의 Update 인코딩과 달라지는 것.
+#[test]
+fn baked_git_peer_frames_match_wire_encoding() {
     use bingsu_core::{
         field::{self, Field, FieldValue, Value},
         width::WidthProfile,
@@ -1682,8 +1717,22 @@ fn git_peer_frames() -> String {
     ] {
         fields[decl.field_index(name).unwrap()] = value;
     }
-    let mut code = String::new();
-    let mut lengths = Vec::new();
+    let initializer = |declaration: &str| {
+        PEER.split_once(declaration)
+            .unwrap()
+            .1
+            .split_once('{')
+            .unwrap()
+            .1
+            .split_once('}')
+            .unwrap()
+            .0
+    };
+    let lengths: Vec<usize> = initializer("static const uint32_t git_lengths[]=")
+        .split(',')
+        .map(|n| n.trim().parse().unwrap())
+        .collect();
+    assert_eq!(lengths.len(), 4);
     for (index, stage) in [b"A", b"B", b"C", b"D"].into_iter().enumerate() {
         let names: &[&str] = match index {
             1 => &["staged", "modified", "untracked", "conflicted"],
@@ -1709,26 +1758,15 @@ fn git_peer_frames() -> String {
         }
         .encode(&request.binding)
         .unwrap();
-        lengths.push(payload.len());
-        let bytes = payload
-            .iter()
-            .map(u8::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        code += &format!("static const unsigned char git_{index}[]={{ {bytes} }};\n");
+        let baked: Vec<u8> = initializer(&format!("static const unsigned char git_{index}[]="))
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert_eq!(payload, baked, "stage {index} payload");
+        assert_eq!(payload.len(), lengths[index], "stage {index} length");
     }
-    code += "static void git_stage(int stage, int partial) {\n";
-    code += "    const unsigned char *payload[]={git_0,git_1,git_2,git_3};\n";
-    code += &format!(
-        "    const uint32_t lengths[]={{{}}};\n",
-        lengths
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    code += "    header(5,lengths[stage]);\n    put(h,80);\n    put(payload[stage],lengths[stage]-(partial?1:0));\n}\n";
-    code
 }
 
 fn git_peer(
