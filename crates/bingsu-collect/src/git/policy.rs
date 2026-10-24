@@ -198,7 +198,7 @@ pub enum PatternKind {
     Attributes,
 }
 
-/// Buffer matchers, with no global sources or filesystem stack. D1 supplies
+/// Buffer matchers, with no ambient sources or filesystem stack. D1 supplies
 /// traversal/order. A failure invalidates this matcher; it cannot return clean.
 #[derive(Default)]
 pub struct Patterns {
@@ -212,6 +212,35 @@ pub struct Patterns {
     allocation: Option<crate::meter::PathAllocation>,
 }
 impl Patterns {
+    /// Call before info/exclude and per-directory .gitignore. Only helper
+    /// bytes cross this boundary; the label is never opened as a path.
+    pub(crate) fn add_global(&mut self, io: &RepoIo<'_>, bytes: &[u8]) -> Result<(), ReadError> {
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let result = io.metered(|meter| {
+            if bytes.len() > bingsu_core::collection::wire::GLOBAL_EXCLUDES_MAX {
+                return Err(ReadError::Limit);
+            }
+            meter.charge_axis(Axis::IgnoreFiles, 1)?;
+            meter.charge_axis(Axis::IgnoreBytes, bytes.len() as u64)?;
+            self.add_buffer(
+                bytes,
+                "<global-excludes>".into(),
+                PatternKind::Ignore,
+                Axis::IgnorePatterns,
+                meter,
+            )
+        });
+        if let Err(error) = result {
+            self.failure = Some(error);
+        }
+        result
+    }
+
     pub fn add(
         &mut self,
         io: &RepoIo<'_>,
@@ -337,7 +366,8 @@ impl Patterns {
                 .checked_add(input_bytes)
                 .ok_or(ReadError::Limit)?;
         } else {
-            let info = source == Path::new("info/exclude");
+            let info =
+                source == Path::new("info/exclude") || source == Path::new("<global-excludes>");
             self.ignore.add_patterns_buffer(
                 bytes,
                 source,

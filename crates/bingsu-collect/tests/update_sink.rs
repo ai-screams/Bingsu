@@ -40,6 +40,8 @@ fn request(mask: u32) -> Request {
         },
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
     }
 }
 

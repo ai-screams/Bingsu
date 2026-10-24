@@ -37,6 +37,8 @@ fn request() -> Request {
         },
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
     }
 }
 fn frame<'a>(r: &Request, kind: Kind, payload: &'a [u8]) -> Frame<'a> {
@@ -751,5 +753,104 @@ proptest! {
         refuse_transcript(&t,&encoded(frame(&r,Kind::Progress,&done)),ProtocolError::Order);
         t.accept(frame(&r,Kind::Complete,&[])).unwrap();
         refuse_transcript(&t,&encoded(frame(&r,Kind::Progress,&done)),ProtocolError::Order);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases:128, .. ProptestConfig::default() })]
+    // Mutations: discard/invert the knowledge flag, accept a non-boolean tag,
+    // discard/rewrite the raw payload or allocate the declared length
+    // before applying the cap. Arbitrary non-UTF8/NUL data is wire data; the
+    // matcher owns pattern validity and reports Partial for invalid patterns.
+    #[test]
+    fn global_excludes_request_roundtrip_and_fuzz(
+        bytes in prop::collection::vec(any::<u8>(),0..=65_536),
+        declared in prop_oneof![Just(65_537u32),Just(u32::MAX)],
+        known in any::<bool>(),
+        invalid_tag in 2u8..=255,
+    ) {
+        let mut r=request();r.global_excludes=bytes;r.global_excludes_known=known;
+        let good=r.encode_body().unwrap();
+        prop_assert_eq!(Request::decode_body(r.binding.build_id,r.request_id,&good),Ok(r.clone()));
+        let field_at=good.len()-r.global_excludes.len()-4;
+        let mut bad=good.clone();bad[field_at-1]=invalid_tag;
+        prop_assert_eq!(Request::decode_body(r.binding.build_id,r.request_id,&bad),Err(ProtocolError::Schema));
+        let mut bad=good[..field_at+4].to_vec();
+        bad[field_at..].copy_from_slice(&declared.to_le_bytes());
+        let mut result=Ok(r.clone());
+        let (_,total,peak)=allocation::counted(|| result=Request::decode_body(r.binding.build_id,r.request_id,&bad));
+        prop_assert_eq!(result,Err(ProtocolError::Budget));
+        prop_assert!(total < 1024 && peak < 1024, "unbounded field allocation: {total}/{peak}");
+        let mut truncated=good.clone();truncated.pop();
+        prop_assert_eq!(Request::decode_body(r.binding.build_id,r.request_id,&truncated),Err(ProtocolError::Schema));
+        let mut trailing=good;trailing.push(0);
+        prop_assert_eq!(Request::decode_body(r.binding.build_id,r.request_id,&trailing),Err(ProtocolError::Schema));
+    }
+}
+
+#[test]
+#[ignore = "release measurement over 200 warm runs"]
+fn measure_global_excludes_codec() {
+    for size in [0, 10, 65_536] {
+        let mut r = request();
+        r.global_excludes = vec![b'#'; size];
+        let mut ns = Vec::new();
+        for _ in 0..201 {
+            let start = std::time::Instant::now();
+            let encoded = std::hint::black_box(&r).encode_body().unwrap();
+            std::hint::black_box(
+                Request::decode_body(r.binding.build_id, r.request_id, &encoded).unwrap(),
+            );
+            ns.push(start.elapsed().as_nanos());
+        }
+        let cold = ns.remove(0);
+        let mean = ns.iter().sum::<u128>() as f64 / 200.0;
+        let variance = ns.iter().map(|n| (*n as f64 - mean).powi(2)).sum::<f64>() / 200.0;
+        ns.sort_unstable();
+        eprintln!(
+            "D1C_CODEC bytes={size} runs=200 cold_ns={cold} p50_ns={} p95_ns={} variance_ns2={variance} samples_ns={ns:?}",
+            ns[99], ns[189]
+        );
+    }
+    // Prompt-side argument parsing and the pure helper handoff run even when
+    // the product collection mask is zero. Include their cost separately.
+    for (label, size) in [("baseline", 0), ("typical", 32), ("max", 65_536)] {
+        let mut raw: Vec<&[u8]> = vec![
+            b"--ctx",
+            b"1",
+            b"--record",
+            b"B1",
+            b"--width",
+            b"80",
+            b"--runtime-root=1:2:/r",
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            b"--home=/home/user",
+            b"--pwd",
+            b"/work",
+        ];
+        let mut home = b"--git-global-home=/".to_vec();
+        let mut xdg = b"--git-global-xdg=/".to_vec();
+        if size != 0 {
+            home.extend(vec![b'a'; size - 1]);
+            xdg.extend(vec![b'b'; size - 1]);
+            raw.extend([home.as_slice(), xdg.as_slice()]);
+        }
+        let mut ns = Vec::new();
+        for _ in 0..201 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(bingsu_core::envelope::parse(&raw).unwrap());
+            std::hint::black_box(bingsu_core::helper::words(&raw).unwrap());
+            ns.push(start.elapsed().as_nanos());
+        }
+        let cold = ns.remove(0);
+        let mean = ns.iter().sum::<u128>() as f64 / 200.0;
+        let variance = ns.iter().map(|n| (*n as f64 - mean).powi(2)).sum::<f64>() / 200.0;
+        ns.sort_unstable();
+        eprintln!(
+            "D1C_HANDOFF {label} runs=200 cold_ns={cold} p50_ns={} p95_ns={} variance_ns2={variance} samples_ns={ns:?}",
+            ns[99], ns[189]
+        );
     }
 }

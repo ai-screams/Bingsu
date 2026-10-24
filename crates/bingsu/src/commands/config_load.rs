@@ -1349,6 +1349,7 @@ mod tests {
     ) -> Option<crate::commands::init::roots::ConfigRootPin> {
         let env = crate::commands::init::trusted_env::TrustedEnv {
             path: None,
+            home: None,
             xdg_config_home: Some(config_home.as_os_str().to_owned()),
             xdg_runtime_dir: Some(fx.base.join("run").into_os_string()),
             xdg_state_home: Some(fx.base.join("state").into_os_string()),

@@ -53,6 +53,8 @@ fn request(max: bool) -> Request {
         },
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
     }
 }
 fn clock(r: &Request, now: u64) -> Clock {
@@ -179,9 +181,9 @@ fn frame_length_is_checked_before_allocation() {
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].fill(0);
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC03");
+    bad[..8].copy_from_slice(b"BNGIPC05");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 3;
+    bad[8] = 5;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -480,9 +482,9 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC03");
+    bad[..8].copy_from_slice(b"BNGIPC05");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 3;
+    bad[8] = 5;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -560,7 +562,8 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut bytes = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::Ready, &ready(r.binding.mask)), &mut bytes).unwrap();
-    for v in [1u16, 2, 4] {
+    // Mutation: accept an old or future version after the v5 schema change.
+    for v in [0u16, 1, 2, 3, 4, 6] {
         let mut b = bytes[..n].to_vec();
         b[8..10].copy_from_slice(&v.to_le_bytes());
         assert_eq!(wire::decode_frame(&b), Err(E::Version));
@@ -1014,4 +1017,134 @@ fn untrusted_text_is_resanitized() {
         .unwrap()
         .unwrap();
     assert_eq!(Completed::decode(&c.encode().unwrap()), Ok(c));
+}
+
+// Mutations: retain IPC04, omit/change the known flag, accept non-boolean tags,
+// accept trailing/oversized bytes, or
+// charge only body bytes when maximum binding paths leave little wire space.
+#[test]
+fn global_excludes_v5_golden_and_limits() {
+    let mut r = request(false);
+    r.global_excludes = b".DS_Store\n".to_vec();
+    let hex = include_str!("../../../tests/golden/collection/request-v5.hex").trim();
+    let golden: Vec<_> = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(r.encode_body().unwrap(), golden);
+    assert_eq!(
+        Request::decode_body(r.binding.build_id, r.request_id, &golden),
+        Ok(r.clone())
+    );
+    let mut buffer = [0; 65_536];
+    let n = wire::encode_frame(frame(&r, Kind::RequestEnd, &[0; 4]), &mut buffer).unwrap();
+    assert_eq!(&buffer[..12], b"BNGIPC05\x05\0\x04\0");
+    buffer[7] = b'4';
+    assert_eq!(wire::decode_frame(&buffer[..n]), Err(E::Magic));
+    buffer[7] = b'5';
+    buffer[8] = 4;
+    assert_eq!(wire::decode_frame(&buffer[..n]), Err(E::Version));
+    let field_at = golden.len() - 14;
+    for tag in 2..=255 {
+        let mut bad = golden.clone();
+        bad[field_at - 1] = tag;
+        assert_eq!(
+            Request::decode_body(r.binding.build_id, r.request_id, &bad),
+            Err(E::Schema)
+        );
+    }
+    for cut in field_at - 1..golden.len() {
+        assert_eq!(
+            Request::decode_body(r.binding.build_id, r.request_id, &golden[..cut]),
+            Err(E::Schema)
+        );
+    }
+    let mut bad = golden.clone();
+    bad.push(0);
+    assert_eq!(
+        Request::decode_body(r.binding.build_id, r.request_id, &bad),
+        Err(E::Schema)
+    );
+    bad = golden.clone();
+    bad[field_at..field_at + 4].copy_from_slice(&65_537u32.to_le_bytes());
+    assert_eq!(
+        Request::decode_body(r.binding.build_id, r.request_id, &bad),
+        Err(E::Budget)
+    );
+    r.global_excludes = vec![0xff; wire::GLOBAL_EXCLUDES_MAX];
+    assert_eq!(
+        Request::decode_body(r.binding.build_id, r.request_id, &r.encode_body().unwrap()),
+        Ok(r.clone())
+    );
+    r.global_excludes.push(0);
+    assert_eq!(r.encode_body(), Err(E::Budget));
+    let mut large = request(true);
+    large.global_excludes = vec![b'#'; wire::GLOBAL_EXCLUDES_MAX];
+    assert_eq!(large.encode_body(), Err(E::Budget));
+    // Maximum binding + 64,920 bytes leaves exactly 512 bytes for the
+    // Begin, four chunks (with offsets), and End frames.
+    large.global_excludes.resize(64_920, b'#');
+    let body = large.encode_body().unwrap();
+    assert_eq!(body.len(), 262_144 - 512);
+    let mut d = decoder(&large);
+    d.accept(frame(&large, Kind::RequestBegin, &begin(body.len())))
+        .unwrap();
+    let mut at = 0;
+    for part in body.chunks(65_452) {
+        d.accept(frame(&large, Kind::RequestChunk, &chunk(at, part)))
+            .unwrap();
+        at += part.len();
+    }
+    assert_eq!(
+        d.accept(frame(&large, Kind::RequestEnd, &snapshot::crc32c(&[&body]))),
+        Ok(Some(large.clone()))
+    );
+    large.global_excludes.push(b'#');
+    assert_eq!(large.encode_body(), Err(E::Budget));
+    let field_at = body.len() - 64_920 - 4;
+    let mut bad = body;
+    bad[field_at..field_at + 4].copy_from_slice(&64_921u32.to_le_bytes());
+    bad.push(b'#');
+    assert_eq!(
+        Request::decode_body(large.binding.build_id, large.request_id, &bad),
+        Err(E::Budget)
+    );
+    large.global_excludes.clear();
+    assert!(large.encode_body().is_ok());
+}
+
+// Mutations: conflate missing (known-empty) with an unknown skipped input,
+// invert either codec flag, or lose it across the framed request decoder.
+#[test]
+fn global_excludes_empty_knowledge_goldens() {
+    for (known, hex) in [
+        (
+            true,
+            include_str!("../../../tests/golden/collection/request-v5-missing.hex"),
+        ),
+        (
+            false,
+            include_str!("../../../tests/golden/collection/request-v5-unknown.hex"),
+        ),
+    ] {
+        let mut r = request(false);
+        r.global_excludes_known = known;
+        let golden: Vec<_> = hex
+            .trim()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
+            .collect();
+        assert_eq!(r.encode_body().unwrap(), golden);
+        let mut d = decoder(&r);
+        d.accept(frame(&r, Kind::RequestBegin, &begin(golden.len())))
+            .unwrap();
+        d.accept(frame(&r, Kind::RequestChunk, &chunk(0, &golden)))
+            .unwrap();
+        assert_eq!(
+            d.accept(frame(&r, Kind::RequestEnd, &snapshot::crc32c(&[&golden]))),
+            Ok(Some(r))
+        );
+    }
 }

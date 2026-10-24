@@ -181,7 +181,7 @@ fn with_repo<T>(f: &Fixture, run: impl FnOnce(&GuardedRepository<'_>, &RefCell<M
     run(&repo, &slot)
 }
 fn status(f: &Fixture) -> StatusCounts {
-    with_repo(f, |repo, _| stage_b::status(repo))
+    with_repo(f, |repo, _| stage_b::status(repo, &[]))
 }
 fn count(n: u32) -> Field {
     Field::known(FieldValue::Count {
@@ -311,7 +311,7 @@ fn untracked_walker_never_opens_submodules() {
         let events = std::rc::Rc::new(RefCell::new(Vec::new()));
         let copy = events.clone();
         m.borrow_mut().hook = Some(Box::new(move |e| copy.borrow_mut().push(e.to_owned())));
-        let got = stage_b::status(repo);
+        let got = stage_b::status(repo, &[]);
         assert_eq!(
             (got.staged, got.modified, got.untracked),
             (count(0), count(1), count(1))
@@ -347,7 +347,10 @@ fn sparse_expansion_is_budgeted() {
     let costs = with_repo(&f, |repo, slot| {
         let idx = index::load(&repo.io).unwrap();
         assert!(idx.entries().iter().any(|e| e.mode.is_sparse()));
-        assert_eq!(git::untracked::untracked_status(repo, &idx), Field::PENDING);
+        assert_eq!(
+            git::untracked::untracked_status(repo, &idx, &[]),
+            Field::PENDING
+        );
         let before = slot.borrow().budget.clone();
         let idx = index::expand_sparse(repo, idx).unwrap();
         assert_eq!(idx.entries().len(), 3);
@@ -417,7 +420,7 @@ fn untracked_limits_are_charged_before_io() {
     let needed = with_repo(&f, |repo, slot| {
         let idx = index::load(&repo.io).unwrap();
         let before = slot.borrow().budget.clone();
-        assert_eq!(git::untracked::untracked_status(repo, &idx), count(3));
+        assert_eq!(git::untracked::untracked_status(repo, &idx, &[]), count(3));
         axes.map(|axis| slot.borrow().budget.used(axis) - before.used(axis))
     });
     assert_eq!(needed[0], if cfg!(target_os = "linux") { 9 } else { 5 });
@@ -431,7 +434,7 @@ fn untracked_limits_are_charged_before_io() {
                 slot.borrow_mut()
                     .charge_axis(axis, axis.limit() - used - remaining)
                     .unwrap();
-                let got = git::untracked::untracked_status(repo, &idx);
+                let got = git::untracked::untracked_status(repo, &idx, &[]);
                 if remaining >= needed {
                     assert_eq!(got, count(3), "{axis:?}/{remaining}");
                 } else {
@@ -461,7 +464,7 @@ fn stage_b_merges_tracked_and_untracked_without_losing_partial() {
     f.write("new/file", b"untracked");
     assert_eq!(oracle(&f), (1, 1, 1, 0));
     with_repo(&f, |repo, _| {
-        let StageResult::Partial(value) = stage_b::stage_b(repo) else {
+        let StageResult::Partial(value) = stage_b::stage_b(repo, &[], true) else {
             panic!("approximation must be Partial");
         };
         let decl = &bingsu_core::field::BUILTIN[3];
@@ -481,7 +484,7 @@ fn stage_b_merges_tracked_and_untracked_without_losing_partial() {
         (Field::PENDING, Field::PENDING)
     );
     with_repo(&f, |repo, _| {
-        let StageResult::Partial(value) = stage_b::stage_b(repo) else {
+        let StageResult::Partial(value) = stage_b::stage_b(repo, &[], true) else {
             panic!("incomplete walk must be Partial");
         };
         let decl = &bingsu_core::field::BUILTIN[3];
@@ -522,7 +525,10 @@ fn shared_walk_preserves_raw_names_and_rejects_changed_edges() {
             b"dir/file".as_slice().into(),
         );
         idx.sort_entries();
-        assert_eq!(git::untracked::untracked_status(repo, &idx), Field::PENDING);
+        assert_eq!(
+            git::untracked::untracked_status(repo, &idx, &[]),
+            Field::PENDING
+        );
     });
     with_repo(&f, |repo, slot| {
         let path = f.0.clone();
@@ -534,7 +540,7 @@ fn shared_walk_preserves_raw_names_and_rejects_changed_edges() {
                 fs::create_dir(path.join("Dir")).unwrap();
             }
         }));
-        let got = stage_b::status(repo);
+        let got = stage_b::status(repo, &[]);
         assert_eq!((got.staged, got.conflicted), (count(0), count(0)));
         assert_eq!(
             (got.modified, got.untracked),
@@ -555,7 +561,7 @@ fn walker_patterns_never_read_symlinks_or_filtered_contents() {
     git(&f, &["commit", "-qm", "fixture"]);
     f.write("file.txt", b"changed and longer");
     with_repo(&f, |repo, slot| {
-        let got = stage_b::status(repo);
+        let got = stage_b::status(repo, &[]);
         assert_eq!(got.modified, count(1));
         assert!(got.filtered);
         assert_eq!(slot.borrow().budget.used(Axis::WorktreeReadBytes), 0);
@@ -565,7 +571,7 @@ fn walker_patterns_never_read_symlinks_or_filtered_contents() {
     symlink(outside.0.join("ignore"), f.0.join(".gitignore")).unwrap();
     assert_eq!(oracle(&f), (0, 1, 2, 0));
     with_repo(&f, |repo, slot| {
-        let got = stage_b::status(repo);
+        let got = stage_b::status(repo, &[]);
         assert_eq!(got.untracked, count(2));
         assert_eq!(slot.borrow().budget.used(Axis::WorktreeReadBytes), 0);
         // Only Git's default info/exclude was read, never the symlink target.
@@ -575,7 +581,7 @@ fn walker_patterns_never_read_symlinks_or_filtered_contents() {
     outside.write("attributes", b"*.txt filter=canary\n");
     symlink(outside.0.join("attributes"), f.0.join(".gitattributes")).unwrap();
     with_repo(&f, |repo, slot| {
-        let got = stage_b::status(repo);
+        let got = stage_b::status(repo, &[]);
         assert_eq!((got.modified, got.untracked), (count(1), count(2)));
         assert!(!got.filtered);
         assert_eq!(slot.borrow().budget.used(Axis::AttributeFiles), 0);
@@ -643,7 +649,7 @@ fn embedded_repositories_count_once_without_reading_local_policies() {
         // the worktree: the fixed prefix is sufficient and never grants access.
         f.write("nested/.gitignore", vec![b'x'; 65_537]);
         with_repo(&f, |repo, slot| {
-            let got = stage_b::status(repo);
+            let got = stage_b::status(repo, &[]);
             assert_eq!(
                 (got.staged, got.modified, got.untracked),
                 (count(0), count(0), count(1))
@@ -812,7 +818,7 @@ fn precomposed_ignore_matching_preserves_raw_io_names() {
     );
     parity(&f);
     with_repo(&f, |repo, slot| {
-        let got = stage_b::status(repo);
+        let got = stage_b::status(repo, &[]);
         assert_eq!(
             (got.staged, got.modified, got.untracked),
             (
@@ -851,7 +857,7 @@ fn large_directories_use_bounded_batches_and_collapse_early() {
     }
     assert_eq!(oracle(&f), (0, 0, 1, 0));
     with_repo(&f, |repo, slot| {
-        let (got, allocated) = allocation::measure(|| stage_b::status(repo));
+        let (got, allocated) = allocation::measure(|| stage_b::status(repo, &[]));
         assert_eq!(
             (got.staged, got.modified, got.untracked, got.conflicted),
             (count(0), count(0), count(1), count(0))
@@ -943,7 +949,7 @@ fn shared_scan_19000_tracked_1000_untracked_prunes_50000_ignored() {
     for _ in 0..2 {
         with_repo(&f, |repo, slot| {
             let before = slot.borrow().operations();
-            let (got, allocations) = allocation::measure(|| stage_b::status(repo));
+            let (got, allocations) = allocation::measure(|| stage_b::status(repo, &[]));
             assert_eq!(
                 (got.staged, got.modified, got.untracked, got.conflicted),
                 (count(0), count(0), count(1000), count(0))
@@ -995,7 +1001,10 @@ fn untracked_scratch_is_live_across_thousands_of_directories() {
     with_repo(&f, |repo, slot| {
         let idx = index::load(&repo.io).unwrap();
         let before = slot.borrow().live_allocated();
-        assert_eq!(git::untracked::untracked_status(repo, &idx), count(3000));
+        assert_eq!(
+            git::untracked::untracked_status(repo, &idx, &[]),
+            count(3000)
+        );
         assert_eq!(slot.borrow().live_allocated(), before);
         assert_eq!(slot.borrow().budget.used(Axis::Directories), 3001);
     });
@@ -1086,7 +1095,7 @@ fn stage_b_release_observations() {
                 with_repo(&f, |repo, _| {
                     let start = Instant::now();
                     let got = if kind == 0 {
-                        stage_b::status(repo)
+                        stage_b::status(repo, &[])
                     } else {
                         git::status_tracked::load_status(repo)
                     };
@@ -1108,5 +1117,365 @@ fn stage_b_release_observations() {
         }
         report(name, &mut times[0], cold[0]);
         report(&format!("{name}-d1a-baseline"), &mut times[1], cold[1]);
+    }
+}
+
+// Mutations: omit helper bytes, load them after info/exclude/.gitignore, give
+// the global list a directory base, or consult repository core.excludesFile.
+#[test]
+fn global_excludes_lowest_precedence_matches_git() {
+    let f = init();
+    f.write("tracked", b"tracked");
+    f.write("sub/tracked", b"tracked");
+    f.write(".gitignore", b"!keep.log\n");
+    commit(&f);
+    let home = Fixture::new();
+    let bytes = b".DS_Store\n*.tmp\n*.log\n/root-only\n";
+    home.write(".config/git/ignore", bytes);
+    f.write(".DS_Store", b"ignored");
+    f.write("info-wins", b"ignored");
+    f.write("root-only", b"ignored");
+    f.write("visible", b"visible");
+    f.write("keep.tmp", b"visible");
+    f.write("keep.log", b"visible");
+    f.write(".git/info/exclude", b"!keep.tmp\ninfo-wins\n");
+    f.write(".gitignore", b"!keep.log\n");
+    // The directory is tracked so normal status reports individual names.
+    f.write("sub/.DS_Store", b"ignored");
+    f.write("sub/root-only", b"visible");
+    let oracle = || {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&f.0)
+            .args([
+                "-c",
+                "status.renames=false",
+                "status",
+                "--porcelain=v2",
+                "--untracked-files=normal",
+            ])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", &home.0)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .expect("git oracle required");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+            .split(|b| *b == b'\n')
+            .filter(|line| line.starts_with(b"? "))
+            .count() as u32
+    };
+    let expected = oracle();
+    assert_eq!(expected, 4); // visible, keep.tmp, keep.log, sub/root-only.
+    with_repo(&f, |repo, slot| {
+        let counts = stage_b::status(repo, bytes);
+        assert_eq!(counts.untracked, count(expected));
+        assert_eq!(counts.modified, count(0));
+        assert_eq!(slot.borrow().budget.used(Axis::IgnoreFiles), 3);
+        assert_eq!(
+            slot.borrow().budget.used(Axis::IgnoreBytes),
+            (bytes.len() + b"!keep.tmp\ninfo-wins\n".len() + b"!keep.log\n".len()) as u64
+        );
+    });
+    // Recreate the same rules via a trusted global core.excludesFile.
+    home.write("custom", bytes);
+    home.write(".gitconfig", b"[core]\n excludesFile = ~/custom\n");
+    assert_eq!(oracle(), expected);
+    // Repository override is deliberately ignored by the helper and collector.
+    // An outside rule must not replace the helper-provided input.
+    git(
+        &f,
+        &[
+            "config",
+            "core.excludesFile",
+            home.0.join("hostile").to_str().unwrap(),
+        ],
+    );
+    home.write("hostile", b"*\n");
+    assert_eq!(oracle(), 2); // info/exclude and .gitignore re-include keep.*.
+    with_repo(&f, |repo, _| {
+        assert_eq!(stage_b::status(repo, bytes).untracked, count(expected))
+    });
+}
+
+// Mutations: bypass file/byte/pattern caps, parse after a failed reservation,
+// leave a failed matcher usable, or perform filesystem I/O for global bytes.
+#[test]
+fn global_excludes_are_budgeted_before_parse_without_io() {
+    use git::io::policy::Patterns;
+    let f = init();
+    with_repo(&f, |repo, slot| {
+        let before = slot.borrow().counts;
+        let initial_allocation = slot.borrow().live_allocated();
+        let mut patterns = Patterns::default();
+        patterns.add_global(&repo.io, b".DS_Store\n").unwrap();
+        assert!(
+            patterns
+                .ignored(&repo.io, b"sub/.DS_Store", false, Default::default())
+                .unwrap()
+        );
+        let after = slot.borrow().counts;
+        for i in 0..3 {
+            assert_eq!(
+                (
+                    before[i].open,
+                    before[i].stat,
+                    before[i].read,
+                    before[i].list
+                ),
+                (after[i].open, after[i].stat, after[i].read, after[i].list)
+            );
+        }
+        assert_eq!(slot.borrow().budget.used(Axis::IgnoreFiles), 1);
+        assert_eq!(slot.borrow().budget.used(Axis::IgnoreBytes), 10);
+        assert_eq!(slot.borrow().budget.used(Axis::IgnorePatterns), 1);
+        let retained = slot.borrow().live_allocated();
+        let mut name = vec![b'a'; 256];
+        name.extend_from_slice(b"e\xcc\x81/.DS_Store");
+        for _ in 0..4000 {
+            assert!(
+                patterns
+                    .ignored(
+                        &repo.io,
+                        &name,
+                        false,
+                        git::io::policy::NamePolicy {
+                            ignore_case: false,
+                            precompose_unicode: true,
+                        }
+                    )
+                    .unwrap()
+            );
+        }
+        assert_eq!(slot.borrow().live_allocated(), retained);
+        drop(patterns);
+        assert_eq!(slot.borrow().live_allocated(), initial_allocation);
+    });
+    for axis in [Axis::IgnoreFiles, Axis::IgnoreBytes, Axis::IgnorePatterns] {
+        with_repo(&f, |repo, slot| {
+            slot.borrow_mut().charge_axis(axis, axis.limit()).unwrap();
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let called = calls.clone();
+            slot.borrow_mut().hook = Some(Box::new(move |event| {
+                if event == "before_pattern_parse" {
+                    called.set(called.get() + 1)
+                }
+            }));
+            let mut p = Patterns::default();
+            assert_eq!(p.add_global(&repo.io, b"file\n"), Err(E::Limit));
+            assert_eq!(
+                p.ignored(&repo.io, b"file", false, Default::default()),
+                Err(E::Limit)
+            );
+            assert_eq!(calls.get(), 0);
+        });
+    }
+    for bad in [
+        vec![b'#'; 65_537],
+        b"bad\0pattern\n".to_vec(),
+        b"x\n".repeat(2049),
+    ] {
+        with_repo(&f, |repo, _| {
+            assert_eq!(
+                Patterns::default().add_global(&repo.io, &bad),
+                Err(E::Limit)
+            )
+        });
+    }
+}
+
+#[test]
+#[ignore = "release measurement over 200 warm runs"]
+fn measure_global_excludes_matcher() {
+    use git::io::policy::Patterns;
+    let f = init();
+    f.write("tracked", b"tracked");
+    commit(&f);
+    f.write(".DS_Store", b"ignored");
+    for (label, bytes) in [
+        ("empty", vec![]),
+        ("default", b".DS_Store\n".to_vec()),
+        ("64k", vec![b'#'; 65_536]),
+        (
+            "2048-patterns",
+            b"unmatched-entry-000000000000000\n".repeat(2048),
+        ),
+    ] {
+        let mut ns = Vec::new();
+        for _ in 0..201 {
+            with_repo(&f, |repo, _| {
+                let start = Instant::now();
+                let mut p = Patterns::default();
+                p.add_global(&repo.io, &bytes).unwrap();
+                std::hint::black_box(
+                    p.ignored(&repo.io, b".DS_Store", false, Default::default())
+                        .unwrap(),
+                );
+                ns.push(start.elapsed().as_nanos());
+            });
+        }
+        let cold = ns.remove(0);
+        let mean = ns.iter().sum::<u128>() as f64 / 200.0;
+        let variance = ns.iter().map(|n| (*n as f64 - mean).powi(2)).sum::<f64>() / 200.0;
+        ns.sort_unstable();
+        eprintln!(
+            "D1C_MATCHER {label} runs=200 cold_ns={cold} p50_ns={} p95_ns={} variance_ns2={variance} samples_ns={ns:?}",
+            ns[99], ns[189]
+        );
+    }
+}
+
+// Mutations: omit/invert the wire knowledge flag; skip the shared scan for
+// unknown input; publish its untracked/filtered observation as confident;
+// mark missing (known-empty) Partial; or lose independent tracked counts.
+#[test]
+fn global_excludes_knowledge_survives_wire_into_stage_b() {
+    use bingsu_core::{
+        collection::{
+            git::StageResult,
+            wire::{self, Binding, BuildId, Frame, Kind, Request, RequestDecoder, RequestId},
+        },
+        snapshot::{self, Identity},
+    };
+    let f = init();
+    f.write("tracked", b"before");
+    commit(&f);
+    f.write("tracked", b"modified and longer");
+    f.write("added", b"staged");
+    git(&f, &["add", "added"]);
+    f.write("visible", b"untracked");
+    assert_eq!(oracle(&f), (1, 1, 1, 0));
+    let mut scans = Vec::new();
+    for known in [true, false] {
+        let request = Request {
+            request_id: RequestId([1; 32]),
+            binding: Binding {
+                build_id: BuildId([2; 32]),
+                snapshot: Identity {
+                    boot: [0; 16],
+                    epoch: [0; 16],
+                    generation: 0,
+                    source: [0; 4],
+                    context: snapshot::context_crc(b"/c", b"/s").unwrap(),
+                },
+                clock_kind: 1,
+                domain: [0; 16],
+                resume: 0,
+                config: b"/c".to_vec(),
+                state: b"/s".to_vec(),
+                cwd: f.0.as_os_str().as_bytes().to_vec(),
+                mask: 1 << 3,
+                path_query: Default::default(),
+            },
+            budget_ms: 50,
+            environment: vec![],
+            global_excludes_known: known,
+            global_excludes: vec![],
+        };
+        let body = request.encode_body().unwrap();
+        let mut ready = wire::FEATURES.to_le_bytes().to_vec();
+        ready.extend(request.binding.mask.to_le_bytes());
+        ready.extend(0u32.to_le_bytes());
+        ready.extend(0u64.to_le_bytes());
+        let mut begin = (body.len() as u32).to_le_bytes().to_vec();
+        begin.extend(wire::FEATURES.to_le_bytes());
+        let mut chunk = 0u32.to_le_bytes().to_vec();
+        chunk.extend(&body);
+        let mut decoder = RequestDecoder::new();
+        let mut decoded = None;
+        for (kind, payload) in [
+            (Kind::Ready, ready),
+            (Kind::RequestBegin, begin),
+            (Kind::RequestChunk, chunk),
+            (Kind::RequestEnd, snapshot::crc32c(&[&body]).to_vec()),
+        ] {
+            let mut buffer = [0; wire::FRAME_MAX];
+            let len = wire::encode_frame(
+                Frame {
+                    kind,
+                    build_id: request.binding.build_id,
+                    request_id: request.request_id,
+                    payload: &payload,
+                },
+                &mut buffer,
+            )
+            .unwrap();
+            decoded = decoder
+                .accept(wire::decode_frame(&buffer[..len]).unwrap())
+                .unwrap();
+        }
+        let decoded = decoded.unwrap();
+        assert_eq!(decoded, request);
+        with_repo(&f, |repo, slot| {
+            let result = stage_b::stage_b(
+                repo,
+                &decoded.global_excludes,
+                decoded.global_excludes_known,
+            );
+            let value = match (known, result) {
+                (true, StageResult::Value(value)) | (false, StageResult::Partial(value)) => value,
+                (_, result) => panic!("wrong knowledge: {known}: {result:?}"),
+            };
+            let decl = &bingsu_core::field::BUILTIN[3];
+            for (name, expected) in [
+                ("staged", count(1)),
+                ("modified", count(1)),
+                ("conflicted", count(0)),
+                ("untracked", if known { count(1) } else { Field::PENDING }),
+                (
+                    "filtered",
+                    if known {
+                        Field::known(FieldValue::Bool(false))
+                    } else {
+                        Field::PENDING
+                    },
+                ),
+                ("partial", Field::known(FieldValue::Bool(!known))),
+            ] {
+                assert_eq!(
+                    value.fields[decl.field_index(name).unwrap()],
+                    expected,
+                    "{name}"
+                );
+            }
+            let entries = slot.borrow().counts[Phase::Content as usize].raw_entries;
+            assert!(entries >= 4, "unknown input must still scan the worktree");
+            scans.push(entries);
+        });
+    }
+    assert_eq!(scans[0], scans[1]);
+}
+
+// Observation only; semantic mutations are covered by the wire-to-B test above.
+#[test]
+#[ignore = "release measurement over 200 warm runs"]
+fn measure_global_excludes_knowledge_stage_b() {
+    let f = init();
+    f.write("tracked", b"tracked");
+    commit(&f);
+    f.write("visible", b"untracked");
+    for known in [true, false] {
+        let mut ns = Vec::new();
+        for _ in 0..201 {
+            with_repo(&f, |repo, _| {
+                let start = Instant::now();
+                std::hint::black_box(stage_b::stage_b(repo, &[], known));
+                ns.push(start.elapsed().as_nanos());
+            });
+        }
+        let cold = ns.remove(0);
+        let mean = ns.iter().sum::<u128>() as f64 / 200.0;
+        let variance = ns.iter().map(|n| (*n as f64 - mean).powi(2)).sum::<f64>() / 200.0;
+        ns.sort_unstable();
+        eprintln!(
+            "D1C_KNOWLEDGE known={known} runs=200 cold_ns={cold} p50_ns={} p95_ns={} variance_ns2={variance} samples_ns={ns:?}",
+            ns[99], ns[189]
+        );
     }
 }

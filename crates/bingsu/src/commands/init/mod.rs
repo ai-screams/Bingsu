@@ -92,6 +92,9 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     };
     let started = ctx::start();
     let env = trusted_env::TrustedEnv::capture();
+    let (git_global_home, git_global_xdg) = env.git_global_paths(|name, reason| {
+        eprintln!("bingsu: {name} {reason}; pinning unknown for global Git excludes");
+    });
     let Some(user) = ctx::User::current() else {
         eprintln!("{}", en(MsgId::NoHome));
         return ExitCode::from(1);
@@ -171,6 +174,8 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
         roots_var: roots_var.as_deref(),
         session_hex: &session,
         home: pw.home.as_os_str().as_bytes(),
+        git_global_home,
+        git_global_xdg,
     };
     let mut out = Vec::with_capacity(16 * 1024);
     render::render(&inputs, &mut out);
@@ -234,6 +239,8 @@ mod tests {
                     roots_var: None,
                     session_hex: &[b'0'; 32],
                     home: b"/h",
+                    git_global_home: b"/home ' $(literal)\nname",
+                    git_global_xdg: b"/xdg ' `literal`\nname",
                 },
                 &mut out,
             );

@@ -36,6 +36,8 @@ fn request(mask: u32) -> Request {
         },
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
     }
 }
 fn frame<'a>(r: &Request, kind: Kind, payload: &'a [u8]) -> Frame<'a> {
@@ -418,7 +420,7 @@ fn v3_max_binding_leaves_65294_update_bytes() {
     r.binding.cwd = path;
     r.binding.snapshot.context =
         snapshot::context_crc(&r.binding.config, &r.binding.state).unwrap();
-    assert_eq!(r.encode_body().unwrap().len() + 32 - 6, 196_733);
+    assert_eq!(r.encode_body().unwrap().len() + 32 - 11, 196_733);
     let mut rest = 65_294 - 266;
     let fields = (0..32)
         .map(|_| {

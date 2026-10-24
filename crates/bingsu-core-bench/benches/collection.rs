@@ -50,6 +50,8 @@ fn request() -> Request {
         },
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
     }
 }
 fn request_bytes() -> Vec<u8> {
@@ -93,7 +95,7 @@ fn cwd(n: usize) -> Vec<u8> {
 }
 fn prefix() -> [u8; 80] {
     let mut p = [0; 80];
-    p[..8].copy_from_slice(b"BNGIPC03");
+    p[..8].copy_from_slice(b"BNGIPC05");
     p[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     p
 }

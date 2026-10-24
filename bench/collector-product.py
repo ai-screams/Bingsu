@@ -483,6 +483,7 @@ fn main(){
     #[cfg(not(target_os="linux"))]
     println!("{{\"initial_bpf_instructions\":0,\"final_bpf_instructions\":0}}");
   },
+  Some("--global-excludes-stream")=>global_stream::run(Path::new(&args[2]), &args[3], &args[4]),
   Some("--worker")=>worker::fixture_entry().unwrap(),
   Some("--security-worker")=>security_worker::fixture_entry().unwrap(),
   Some("--trace")=>{
@@ -503,6 +504,77 @@ fn main(){
   Some("--read")=>prompt_read::tests::product_read_measure(Path::new(&args[2])),
   _=>panic!("fixture mode"),
  }
+}
+'''
+
+# Test-only adapters appended to generated modules; production visibility and
+# the product collection mask stay unchanged.
+GLOBAL_INPUT_FIXTURE = r'''
+pub(crate) fn global_input_fixture(
+    r: &mut bingsu_core::collection::wire::Request,
+    home: &std::ffi::OsStr,
+    xdg: &std::ffi::OsStr,
+) -> String {
+    let env = init::trusted_env::TrustedEnv {
+        path: None, home: Some(home.to_owned()), xdg_config_home: Some(xdg.to_owned()),
+        xdg_runtime_dir: None, xdg_state_home: None, xdg_cache_home: None,
+    };
+    let (home, xdg) = env.git_global_paths(|_, _| {});
+    let mut home_word = b"--git-global-home=".to_vec();
+    home_word.extend(home);
+    let mut xdg_word = b"--git-global-xdg=".to_vec();
+    xdg_word.extend(xdg);
+    let raw = [
+        b"--runtime-root=1:2:/r".as_slice(), b"--config-root=/c",
+        b"--config-root-written=/c", b"--state-root=/s", b"--home=/display-home",
+        home_word.as_slice(), xdg_word.as_slice(),
+    ];
+    let words = bingsu_core::helper::words(&raw).unwrap();
+    let envelope = bingsu_core::helper::validate(&words).unwrap();
+    format!("{:?}", git_global::attach(r, &envelope))
+}
+'''
+
+GLOBAL_STREAM_FIXTURE = r'''
+pub(crate) fn run(base: &std::path::Path, home: &std::ffi::OsStr, xdg: &std::ffi::OsStr) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: disposable fixture process, before the production read layer.
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+    let f = Fixture(base.to_owned());
+    let mut r = f.request();
+    r.binding.mask |= 1 << 1;
+    let reason = crate::commands::global_input_fixture(&mut r, home, xdg);
+    let known = r.global_excludes_known;
+    let pattern_bytes = r.global_excludes.len();
+    let s = stream_request(r, meter(), GENEROUS, false);
+    s.result.as_ref().unwrap();
+    assert_eq!(s.values.iter().map(stage).collect::<Vec<_>>(), ["A", "B", "C", "D"]);
+    assert_eq!(s.updates.iter().map(|u| u.segment).collect::<Vec<_>>(), [3, 1, 3, 3, 3]);
+    assert_eq!(s.updates[1].facts.as_ref().unwrap().in_repo, Some(true));
+    for v in &s.values[1..] {
+        count(v, "staged", 1);
+        count(v, "modified", 1);
+        count(v, "conflicted", 0);
+        if known { count(v, "untracked", if pattern_bytes == 0 { 2 } else { 1 }); }
+        else {
+            assert_eq!(field(v, "untracked"), &Field::PENDING);
+            assert_eq!(field(v, "filtered"), &Field::PENDING);
+        }
+    }
+    for v in &s.values[..3] {
+        assert_eq!(field(v, "partial"), &Field::known(FieldValue::Bool(true)));
+    }
+    let last = s.values.last().unwrap();
+    count(last, "ahead", 0);
+    count(last, "behind", 0);
+    count(last, "stash", 0);
+    assert_eq!(field(last, "partial"), &Field::known(FieldValue::Bool(!known)));
+    assert_eq!(s.frames.iter().map(|f| wire::decode_frame(f).unwrap().kind).collect::<Vec<_>>(),
+        [Kind::Update, Kind::Progress, Kind::Update, Kind::Update, Kind::Update, Kind::Update, Kind::Complete]);
+    let result = completed(&s, EndReason::Complete);
+    assert!(result.progress.stage_a_complete);
+    assert_eq!(result.updates.iter().find(|u| u.segment == 3).unwrap().value.as_ref(), Some(last));
+    println!("{{\"known\":{known},\"reason\":\"{reason}\",\"pattern_bytes\":{pattern_bytes},\"complete\":true,\"partial\":{}}}", !known);
 }
 '''
 
@@ -633,7 +705,7 @@ def prepare(binary):
             commands = commands.replace("mod collector;", "pub(crate) mod collector;")
             commands = commands.replace("mod group_policy;", "pub(crate) mod group_policy;")
             module_path = copied / "mod.rs"
-            module_path.write_text(commands)
+            module_path.write_text(commands + GLOBAL_INPUT_FIXTURE)
         modules.append(f'#[path={json.dumps(str(module_path))}] mod {name};')
     if platform.system() == "Linux":
         modules.append(f'#[path={json.dumps(str(source / "crates/bingsu/src/sandbox.rs"))}] mod sandbox;')
@@ -668,6 +740,13 @@ def prepare(binary):
     reader_path = directory / "reader.rs"
     reader_path.write_text(reader)
     modules.append(f'#[path={json.dumps(str(reader_path))}] mod prompt_read;')
+    # Reuse D3's generous-deadline wire harness on the main thread, including
+    # its real capability probe. Helper inputs are attached before confinement.
+    stream_source = (source / "crates/bingsu-collect/tests/git_deadlines.rs").read_text()
+    stream_source = "use crate::{git, meter, safe_read, update_sink};\n" + stream_source[stream_source.index("use bingsu_core"):] + GLOBAL_STREAM_FIXTURE
+    stream_path = directory / "global_stream.rs"
+    stream_path.write_text(stream_source)
+    modules.append(f'#[path={json.dumps(str(stream_path))}] mod global_stream;')
     rust = directory / "main.rs"
     rust.write_text(HARNESS.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect")))))
     fixture = directory / "collector-product"

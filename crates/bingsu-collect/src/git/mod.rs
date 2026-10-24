@@ -215,7 +215,15 @@ pub(crate) fn collect_with_deadlines(
                 meter.borrow_mut().event("repository_init");
                 repo = GuardedRepository::from_roots(&roots, &meter).ok();
                 meter.borrow_mut().event("stage_b");
-                let result = repo.as_ref().map_or(StageResult::Hidden, stage_b::stage_b);
+                // Unknown global rules yield a completed partial B value. They
+                // do not stop C/D or make this stage's execution unfinished.
+                let result = repo.as_ref().map_or(StageResult::Hidden, |repo| {
+                    stage_b::stage_b(
+                        repo,
+                        &request.global_excludes,
+                        request.global_excludes_known,
+                    )
+                });
                 publish(
                     &meter,
                     sink,

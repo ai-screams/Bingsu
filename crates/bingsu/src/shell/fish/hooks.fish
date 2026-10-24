@@ -57,7 +57,7 @@ function _bingsu_call
     if test -n "$SSH_CONNECTION"; or test -n "$SSH_TTY"
         set _bingsu_ssh 1
     end
-    set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" --colorfgbg "$_bingsu_colorfgbg" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ @COLLECTOR_EXE@ | string collect -N)
+    set -g _bingsu_rec (@BIN@ prompt --ctx 1 --record @RECORD@ $argv --shell fish --pwd "$_bingsu_pwd" --colorterm "$COLORTERM" --colorfgbg "$_bingsu_colorfgbg" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session $_bingsu_session --seq $_bingsu_seq @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ @GIT_GLOBAL_HOME@ @GIT_GLOBAL_XDG@ @COLLECTOR_EXE@ | string collect -N)
     if test $pipestatus[1] -ge 128
         set -g _bingsu_dead 1
     end

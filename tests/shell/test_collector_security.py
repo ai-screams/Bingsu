@@ -52,6 +52,54 @@ def native_contract(preparation, group, name):
     return result
 
 
+# Mutations: drop either request input in D3; collapse invalid pins to empty;
+# block Complete/later stages for partial B; overwrite Pending in C or D.
+@pytest.mark.parametrize("case", [
+    "known", "missing", "empty", "unknown", "invalid-home", "invalid-xdg", "invalid-both",
+])
+def test_global_excludes_wire_stream(preparation, tmp_path, case):
+    repo, home, xdg = (tmp_path / name for name in ("repo", "home", "xdg"))
+    for path in (repo, home, xdg / "git"):
+        path.mkdir(parents=True)
+    rules = xdg / "git/ignore"
+    rules.write_bytes(b".DS_Store\n")
+    env = {"PATH": os.environ["PATH"], "HOME": str(home), "XDG_CONFIG_HOME": str(xdg),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "f@example.org",
+           "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "f@example.org"}
+    def git(*args):
+        return product.run(["git", "-C", repo, *args], env=env).stdout
+    git("init", "-q", "--initial-branch=main")
+    (repo / "tracked").write_text("base\n")
+    git("add", "tracked")
+    git("commit", "-qm", "base")
+    git("branch", "upstream")
+    git("branch", "--set-upstream-to=upstream")
+    (repo / "tracked").write_text("modified\n")
+    (repo / "added").write_text("staged\n")
+    git("add", "added")
+    (repo / ".DS_Store").write_text("globally ignored\n")
+    (repo / "visible").write_text("untracked\n")
+    assert [line for line in git("status", "--porcelain=v2").splitlines() if line.startswith(b"? ")] == [b"? visible"]
+    if case == "missing":
+        rules.unlink()
+    if case == "unknown":
+        rules.write_bytes(b"x" * 65_537)
+    home_arg = "relative" if case in ("invalid-home", "invalid-both") else str(home)
+    xdg_arg = "~/.config" if case in ("invalid-xdg", "invalid-both") else str(xdg)
+    if case == "empty":
+        home_arg = xdg_arg = ""
+    result = product.run([preparation["fixture"], "--global-excludes-stream", repo, home_arg, xdg_arg])
+    observed = json.loads(result.stdout)
+    known = case in ("known", "missing", "empty")
+    assert observed == {
+        "known": known, "reason": "Loaded" if case == "known" else
+        "Missing" if known else "TooLarge" if case == "unknown" else "UnsafePath",
+        "pattern_bytes": 10 if case == "known" else 0,
+        "complete": True, "partial": not known,
+    }
+
+
 # 이것을 실패시키는 것: 한도/exec 실패를 실제 공유 보호·감독·발행 경로에 연결하지 않는 것.
 @pytest.mark.parametrize("mode", ["cpu", "nofile", *(
     pytest.param(mode, marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux resource filter"))
@@ -1041,7 +1089,7 @@ def test_shipped_collector_ready_has_installed_limits(preparation, tmp_path):
                     chunk = os.read(child.stdout.fileno(), 104 - len(ready))
                     assert chunk, "shipped collector exited before Ready"
                     ready.extend(chunk)
-                assert ready[:8] == b"BNGIPC03" and ready[10] == 1, ready
+                assert ready[:8] == b"BNGIPC05" and ready[10] == 1, ready
                 baseline, = struct.unpack_from("<Q", ready, 96)
                 assert baseline > 0
                 if sys.platform == "linux":

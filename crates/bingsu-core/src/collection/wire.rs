@@ -83,10 +83,10 @@ pub fn frame_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if total > FRAME_MAX {
         return Err(ProtocolError::Length);
     }
-    if &bytes[..8] != b"BNGIPC03" {
+    if &bytes[..8] != b"BNGIPC05" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 3u16.to_le_bytes() {
+    if bytes[8..10] != 5u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
     if !(1..=7).contains(&bytes[10]) {
@@ -142,8 +142,8 @@ pub fn decode_eof(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
 }
 pub fn encode_frame(frame: Frame<'_>, out: &mut [u8; FRAME_MAX]) -> Result<usize, ProtocolError> {
     let len = frame_size(frame)?;
-    out[..8].copy_from_slice(b"BNGIPC03");
-    out[8..10].copy_from_slice(&3u16.to_le_bytes());
+    out[..8].copy_from_slice(b"BNGIPC05");
+    out[8..10].copy_from_slice(&5u16.to_le_bytes());
     out[10] = frame.kind.tag();
     out[11] = 0;
     out[12..16].copy_from_slice(&(frame.payload.len() as u32).to_le_bytes());
@@ -294,16 +294,30 @@ fn validate_path(p: &[u8]) -> Result<(), ProtocolError> {
         Ok(())
     }
 }
+/// Maximum helper-supplied global ignore file; it is data, never a path.
+pub const GLOBAL_EXCLUDES_MAX: usize = 65_536;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub request_id: RequestId,
     pub binding: Binding,
     pub budget_ms: u32,
     pub environment: Vec<(Vec<u8>, Vec<u8>)>,
+    /// False means the helper could not determine the complete global input.
+    pub global_excludes_known: bool,
+    pub global_excludes: Vec<u8>,
 }
 impl Request {
     fn body_len(&self) -> Result<usize, ProtocolError> {
-        let n = add_budget(self.binding.encoded_len()? - 32, 6, STREAM_MAX)?;
+        let n = add_budget(self.binding.encoded_len()? - 32, 11, STREAM_MAX)?;
+        if self.global_excludes.len() > GLOBAL_EXCLUDES_MAX {
+            return Err(ProtocolError::Budget);
+        }
+        let n = add_budget(n, self.global_excludes.len(), STREAM_MAX)?;
+        // Begin (12), chunk offsets (4 each), End (4), and every header
+        // count against the unchanged directional stream cap.
+        let chunks = n.div_ceil(FRAME_MAX - HEADER - 4);
+        add_budget(n, (chunks + 2) * HEADER + 16 + 4 * chunks, STREAM_MAX)?;
         if !(1..=50).contains(&self.budget_ms) {
             return Err(ProtocolError::Budget);
         }
@@ -319,6 +333,8 @@ impl Request {
         out.extend_from_slice(&self.budget_ms.to_le_bytes());
         self.binding.put_paths(&mut out);
         out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(u8::from(self.global_excludes_known));
+        put_bytes(&mut out, &self.global_excludes);
         checked_encoding(out, n)
     }
     pub fn decode_body(
@@ -339,13 +355,23 @@ impl Request {
         if r.u16()? != 0 {
             return Err(ProtocolError::Schema);
         }
+        let global_excludes_known = match r.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(ProtocolError::Schema),
+        };
+        let global_excludes = r.bytes(GLOBAL_EXCLUDES_MAX, ProtocolError::Budget)?;
         r.end()?;
-        Ok(Self {
+        let request = Self {
             request_id,
             binding,
             budget_ms,
             environment: Vec::new(),
-        })
+            global_excludes_known,
+            global_excludes: global_excludes.to_vec(),
+        };
+        request.body_len()?;
+        Ok(request)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

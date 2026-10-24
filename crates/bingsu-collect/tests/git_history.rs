@@ -1677,6 +1677,8 @@ fn request(work: &Fixture) -> bingsu_core::collection::wire::Request {
         request_id: M3B_REQUEST_ID,
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
         binding: Binding {
             build_id: BuildId([7; 32]),
             snapshot: Identity {

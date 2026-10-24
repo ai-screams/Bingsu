@@ -77,6 +77,8 @@ pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<Cow<'a, [u8]>>, EnvelopeError> 
                 b"--state-root=",
                 b"--log-root=",
                 b"--home=",
+                b"--git-global-home=",
+                b"--git-global-xdg=",
                 b"--collector-exe=",
                 b"--log-level=",
             ]
@@ -276,5 +278,89 @@ mod tests {
         let mut duplicate = raw.to_vec();
         duplicate.push(b"--state-root=/other");
         assert!(words(&duplicate).is_err());
+    }
+}
+
+#[cfg(test)]
+mod global_input_tests {
+    use super::*;
+    use alloc::vec;
+    // Mutation: drop either observation, permit duplicate fields, or
+    // interpret a display argument as helper authority.
+    #[test]
+    fn global_locations_cross_empty_environment_as_data() {
+        let raw: &[&[u8]] = &[
+            b"--runtime-root=1:2:/r",
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            b"--home=/pinned",
+            b"--git-global-home=/fixture home",
+            b"--git-global-xdg=/xdg;$(literal)",
+            b"--host",
+            b"--git-global-home=/hostile",
+        ];
+        let e = validate(&words(raw).unwrap()).unwrap();
+        assert_eq!(
+            e.git_global_home.as_deref(),
+            Some(b"/fixture home".as_slice())
+        );
+        assert_eq!(
+            e.git_global_xdg.as_deref(),
+            Some(b"/xdg;$(literal)".as_slice())
+        );
+        let mut duplicate = raw.to_vec();
+        duplicate.push(b"--git-global-xdg=/other");
+        assert_eq!(
+            words(&duplicate),
+            Err(EnvelopeError::BadArgs("duplicate field"))
+        );
+        let mut raw = raw[..5].to_vec();
+        raw.push(b"--git-global-home=");
+        raw.push(b"--git-global-xdg=");
+        let e = validate(&words(&raw).unwrap()).unwrap();
+        assert_eq!(e.git_global_home, Some(vec![]));
+        assert_eq!(e.git_global_xdg, Some(vec![]));
+    }
+
+    // Mutation: reject over-cap observations, truncate instead of blanking,
+    // or drop the presence marker (revives pinned HOME / accepts duplicates).
+    #[test]
+    fn oversized_global_locations_are_missing_not_bad_args() {
+        for prefix in [b"--git-global-home=".as_slice(), b"--git-global-xdg="] {
+            for size in [65_536, 65_537, 70_000] {
+                let mut arg = prefix.to_vec();
+                arg.extend(vec![b'x'; size]);
+                let args: &[&[u8]] = &[
+                    b"--ctx",
+                    b"1",
+                    b"--record",
+                    b"B1",
+                    b"--shell",
+                    b"bash",
+                    b"--width",
+                    b"80",
+                    &arg,
+                ];
+                let e = crate::envelope::parse(args).unwrap();
+                let observed = if prefix == b"--git-global-home=" {
+                    e.git_global_home
+                } else {
+                    e.git_global_xdg
+                };
+                assert_eq!(
+                    observed,
+                    Some(if size > 65_536 {
+                        vec![]
+                    } else {
+                        vec![b'x'; size]
+                    })
+                );
+                assert_eq!(
+                    words(&[&arg, &arg]),
+                    Err(EnvelopeError::BadArgs("duplicate field"))
+                );
+            }
+        }
     }
 }

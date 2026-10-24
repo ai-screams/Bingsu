@@ -97,6 +97,8 @@ pub fn request(
         binding,
         budget_ms,
         environment: Vec::new(),
+        global_excludes_known: false,
+        global_excludes: Vec::new(),
     };
     request.encode_body()?;
     Ok(Some(request))

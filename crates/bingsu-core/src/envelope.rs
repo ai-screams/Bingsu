@@ -74,6 +74,10 @@ pub struct Envelope {
     pub colorfgbg: Option<crate::color::palette::Mode>,
     /// `--home=<path>`, pinned by init from getpwuid.
     pub home: Option<Vec<u8>>,
+    /// Init-pinned HOME/XDG_CONFIG_HOME for helper-only Git global config.
+    /// Absent fields identify old hooks; explicit empty values stay empty.
+    pub git_global_home: Option<Vec<u8>>,
+    pub git_global_xdg: Option<Vec<u8>>,
     /// Canonical dedicated sibling pinned by init; never read from environment.
     pub collector_exe: Option<Vec<u8>>,
     pub runtime_groups: Vec<crate::fs_trust::GroupPin>,
@@ -263,6 +267,32 @@ pub fn parse(args: &[&[u8]]) -> Result<Envelope, EnvelopeError> {
         }
         if let Some(v) = a.strip_prefix(b"--runtime-groups=") {
             set_once(&mut groups, v)?;
+            i += 1;
+            continue;
+        }
+        let global = a
+            .strip_prefix(b"--git-global-home=")
+            .map(|v| (&mut e.git_global_home, v))
+            .or_else(|| {
+                a.strip_prefix(b"--git-global-xdg=")
+                    .map(|v| (&mut e.git_global_xdg, v))
+            });
+        if let Some((slot, value)) = global {
+            if value.len() <= 65_536 && value.contains(&0) {
+                return Err(EnvelopeError::BadArgs("git global path"));
+            }
+            // Direct/older callers can still send over-cap values. Degrade
+            // without failing the prompt; new hooks validate these at init.
+            // Keep Some(empty) so pinned HOME is not revived and duplicate
+            // fields still fail closed.
+            set_once(
+                slot,
+                if value.len() > 65_536 {
+                    Vec::new()
+                } else {
+                    value.to_vec()
+                },
+            )?;
             i += 1;
             continue;
         }
