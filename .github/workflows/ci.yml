@@ -182,15 +182,12 @@ jobs:
       # Fails if either environment-dependent oracle is omitted or runs zero tests.
       - if: runner.os == 'Linux'
         name: Path facts ACL and read-only mount oracles
-        shell: bash
+        shell: bash --noprofile --norc -euo pipefail {0}
         run: |
-          if ! command -v setfacl >/dev/null; then
-            sudo apt-get update -q
-            sudo apt-get install -y -q --no-install-recommends acl
-          fi
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends acl
           fixture=$(mktemp -d "$RUNNER_TEMP/e1-readonly.XXXXXX")
           mkdir "$fixture/source" "$fixture/readonly"
-          trap 'sudo umount "$fixture/readonly"; rmdir "$fixture/readonly" "$fixture/source" "$fixture"' EXIT
           sudo mount --bind "$fixture/source" "$fixture/readonly"
           sudo mount -o remount,bind,ro "$fixture/readonly"
           export BINGSU_E1_READONLY_MOUNT="$fixture/readonly"

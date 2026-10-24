@@ -19,6 +19,17 @@ def test_repository_formula_uses_independent_primitive_axes():
     assert collector_success_expected('shipped-debug', landlock=True, repository_probe=True)['fd_query'] == 10
 
 
+# 이것을 실패시키는 것: readonly mount 관찰을 content fd의 identity 검사와 합치거나 statx까지 늘리는 것.
+@pytest.mark.parametrize('backend', ['openat2', 'stepwise'])
+@pytest.mark.parametrize('readonly', [0, 1, 2])
+def test_readonly_adds_one_mount_observation_per_held_cwd(backend, readonly):
+    axes = dict(backend=backend, components=1, files=1, read_bytes=(8,))
+    expected = collector_repository_expected(CollectorAxes(**axes))
+    expected['faccessat2'] += readonly
+    expected['fstatfs'] += readonly
+    assert collector_repository_expected(CollectorAxes(**axes, readonly=readonly)) == expected
+
+
 PREFIX = '''10 execve("/b", ["/b", "prompt"], 0x0 /* 0 vars */) = 0
 10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 11
 11 execve("/b", ["/b", "__refresh-v1"], 0x0 /* 0 vars */) = 0
@@ -125,12 +136,14 @@ def test_repository_trace_checks_paths_counts_and_phases(metadata, sync):
 12 read(10</fixture/worktree/HEAD>, "sentinel", 65) = 8
 12 read(10</fixture/worktree/HEAD>, "", 57) = 0
 12 faccessat2(7</fixture/worktree>, ".", W_OK, AT_EACCESS) = 0
+12 fstatfs(7</fixture/worktree>, {f_type=EXT4_SUPER_MAGIC, f_flags=ST_RELATIME}) = 0
 ''' + marker('end')
     # Exercise the same canonical metadata rule in probe/read-layer/content.
     import re
     trace = re.sub(r'fstat\((\d+<[^>]+>), \{[^}]+\}\)',
                    lambda m: metadata.replace('4</>', m[1]), trace)
     trace = trace.replace('AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH', sync + 'AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH')
+    mount = '12 fstatfs(7</fixture/worktree>, {f_type=EXT4_SUPER_MAGIC, f_flags=ST_RELATIME}) = 0\n'
     assert check_repository_trace(trace, root, 'openat2')['content']['read'] == 2
     for fd in ['4', '-1</>', 'AT_FDCWD</>', '4<pipe:[9]>']:
         with pytest.raises(AssertionError):
@@ -138,6 +151,8 @@ def test_repository_trace_checks_paths_counts_and_phases(metadata, sync):
     for changed in [trace.replace('worktree/HEAD', 'outside/HEAD'),
                     trace.replace('O_RDONLY|O_NONBLOCK|O_CLOEXEC,', 'O_RDWR|O_NONBLOCK|O_CLOEXEC,'),
                     trace.replace('12 read(10</fixture/worktree/HEAD>, "", 57) = 0\n', ''),
+                    trace.replace(mount, ''),
+                    trace.replace(mount, mount + mount),
                     trace.replace(marker('content'), marker('content') + '12 socket(AF_INET, SOCK_STREAM, 0) = -1 EPERM\n'),
                     trace.replace(marker('read-layer'), marker('probe') + PROBE + marker('end') + marker('read-layer'))]:
         with pytest.raises(AssertionError):

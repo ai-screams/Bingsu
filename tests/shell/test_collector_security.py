@@ -214,6 +214,7 @@ LINUX_SECURITY_STEPS = {
     "Independent gix 0.83.0 X-14 (locked, glibc and musl)",
     "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
     "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
+    "Path facts ACL and read-only mount oracles",
 }
 MACOS_SECURITY_STEPS = {"Both shipped Mach-O architectures", "Assert native macOS M3b security passes"}
 
