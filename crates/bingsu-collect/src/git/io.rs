@@ -113,6 +113,24 @@ impl<'a> RepoIo<'a> {
         }
     }
 
+    /// Pure accounting/parser work does not loan the meter across a syscall or
+    /// callback. Avoid copying a request-sized sentinel for every index entry.
+    pub(crate) fn account<T>(
+        &self,
+        operation: impl FnOnce(&mut Meter) -> Result<T, ReadError>,
+    ) -> Result<T, ReadError> {
+        if let Some(error) = self.stopped.get() {
+            return Err(error);
+        }
+        let mut meter = self.meter.try_borrow_mut().map_err(|_| ReadError::Denied)?;
+        meter.check()?;
+        let result = operation(&mut meter);
+        if let Err(error @ (ReadError::Limit | ReadError::Deadline)) = result {
+            self.stopped.set(Some(error));
+        }
+        result
+    }
+
     pub(crate) fn metered<T>(
         &self,
         operation: impl FnOnce(&mut Meter) -> Result<T, ReadError>,
@@ -362,6 +380,32 @@ impl<'a> RepoIo<'a> {
         })
     }
 
+    /// Preserve the timestamp of the very descriptor whose index bytes were
+    /// checked. A separate path stat would let a replacement hide racy entries.
+    pub(crate) fn read_index(&self) -> Result<(Vec<u8>, libc::stat), ReadError> {
+        self.metered(|meter| {
+            use bingsu_core::collection::budget;
+            if meter.budget.used(Axis::IndexBytes) == budget::INDEX_BYTES {
+                return Err(ReadError::Limit);
+            }
+            let file = safe_read::resolve_with(self.roots.gitdir, b"index", self.access, meter)?;
+            let metadata = file.metadata();
+            let size = u64::try_from(metadata.st_size).map_err(|_| ReadError::Limit)?;
+            meter.charge_axis(Axis::IndexBytes, size)?;
+            let bytes = file.read_reserved(
+                ReadCap {
+                    bytes: size,
+                    single_link: true,
+                },
+                meter,
+            )?;
+            if bytes.len() as u64 != size {
+                return Err(ReadError::Changed);
+            }
+            Ok((bytes, metadata))
+        })
+    }
+
     pub(crate) fn read_budgeted(
         &self,
         path: RepoPath,
@@ -418,8 +462,16 @@ impl<'a> RepoIo<'a> {
             {
                 return Err(ReadError::Limit);
             }
-            let file =
-                safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?;
+            let file = if path.root == RootId::Worktree {
+                safe_read::resolve_nofollow(
+                    self.root(path.root),
+                    &path.relative,
+                    self.access,
+                    meter,
+                )?
+            } else {
+                safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?
+            };
             let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
             if size > cap.bytes {
                 return Err(ReadError::Limit);

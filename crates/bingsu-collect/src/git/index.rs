@@ -1,19 +1,97 @@
-//! Bounded index input. Extension caches are never needed for a read-only
-//! comparison; discard them before gix can allocate or recurse through them.
-use super::{RepoIo, RepoPath, RootId, UNSUPPORTED};
+//! Bounded index input. Keep only the optional, bounded TREE cache and sparse
+//! marker; other extension parsers cannot allocate or recurse through input.
+use super::{RepoIo, UNSUPPORTED};
 use crate::{meter::Meter, safe_read::ReadError};
 use bingsu_core::collection::budget::{self, Axis};
 use gix_index::hash::{self, Kind};
 
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
+pub(crate) const CACHE_DEPTH: usize = 64;
+
+/// Framing only, before gix's recursive TREE decoder. In particular gix sorts
+/// children, so check their original order here, before that evidence is lost.
+/// Bad/too-deep optional caches are discarded, never evidence of staged-clean.
+fn tree_reservation(mut bytes: &[u8]) -> Option<usize> {
+    let mut stack = [(1usize, &b""[..]); CACHE_DEPTH];
+    let mut depth = 0;
+    let mut nodes = 0usize;
+    let mut allocation = std::mem::size_of::<gix_index::extension::Tree>();
+    while !bytes.is_empty() {
+        let end = bytes.iter().position(|b| *b == 0)?;
+        let name = &bytes[..end];
+        let root = nodes == 0;
+        if (root && !name.is_empty())
+            || (!root && (name.is_empty() || name == b"." || name == b".." || name.contains(&b'/')))
+            // Git's cache-tree.c subtree_name_cmp orders by length, then
+            // memcmp. gix re-sorts decoded children by bytes for lookup.
+            // Equality is a duplicate and must be rejected before decoding.
+            || (!stack[depth].1.is_empty()
+                && (stack[depth].1.len(), stack[depth].1) >= (name.len(), name))
+        {
+            return None;
+        }
+        stack[depth].1 = name;
+        stack[depth].0 = stack[depth].0.checked_sub(1)?;
+        bytes = &bytes[end + 1..];
+        let end = bytes.iter().position(|b| *b == b' ')?;
+        let entries = std::str::from_utf8(&bytes[..end])
+            .ok()?
+            .parse::<i32>()
+            .ok()?;
+        bytes = &bytes[end + 1..];
+        let end = bytes.iter().position(|b| *b == b'\n')?;
+        let children = std::str::from_utf8(&bytes[..end])
+            .ok()?
+            .parse::<usize>()
+            .ok()?;
+        bytes = bytes.get(end + 1 + if entries >= 0 { 20 } else { 0 }..)?;
+        nodes += 1;
+        if nodes > budget::INDEX_ENTRIES as usize || children > budget::INDEX_ENTRIES as usize {
+            return None;
+        }
+        // Vec minimum capacity and stable-sort scratch, plus SmallVec names
+        // rounded up by reserve(). Bound the aggregate, not one child Vec.
+        allocation = allocation.checked_add(2 * name.len())?;
+        if children != 0 {
+            allocation = allocation.checked_add(
+                2 * children.max(4) * std::mem::size_of::<gix_index::extension::Tree>(),
+            )?;
+            depth += 1;
+            if depth == CACHE_DEPTH {
+                return None;
+            }
+            stack[depth] = (children, b"");
+        } else {
+            while stack[depth].0 == 0 {
+                if depth == 0 {
+                    return bytes.is_empty().then_some(allocation);
+                }
+                depth -= 1;
+            }
+        }
+    }
+    None
+}
 
 pub fn load(io: &RepoIo<'_>) -> Result<gix_index::State, ReadError> {
-    let mut bytes = io.read_budgeted(
-        RepoPath::new(RootId::GitDir, b"index"),
-        budget::INDEX_BYTES,
-        Axis::IndexBytes,
-    )?;
-    io.metered(|meter| parse(&mut bytes, meter))
+    let (mut bytes, metadata) = match io.read_index() {
+        Ok(input) => input,
+        // A repository without an index is an empty staging area, including
+        // unborn repositories. Other failures must never become empty/clean.
+        Err(ReadError::Missing) => return Ok(gix_index::State::new(Kind::Sha1)),
+        Err(error) => return Err(error),
+    };
+    let mut state = io.metered(|meter| parse(&mut bytes, meter))?;
+    let secs = u64::try_from(metadata.st_mtime).map_err(|_| INVALID)?;
+    let nanos = u32::try_from(metadata.st_mtime_nsec).map_err(|_| INVALID)?;
+    if nanos >= 1_000_000_000 {
+        return Err(INVALID);
+    }
+    let timestamp = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::new(secs, nanos))
+        .ok_or(INVALID)?;
+    state.set_timestamp(timestamp.into());
+    Ok(state)
 }
 
 pub(crate) fn checksum(bytes: &[u8]) -> Result<(), ReadError> {
@@ -120,6 +198,8 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
     meter.charge_axis(Axis::IndexBytes, paths as u64)?;
     let entry_end = pos;
     let mut sparse = false;
+    let mut tree = None;
+    let mut trees = 0;
     // Reject split indexes as B Partial before bitmap decoding. In particular,
     // do not ever follow link with gix_index::File or regard it as an empty index.
     while pos < end {
@@ -137,6 +217,11 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
         if &signature == b"link" {
             return Err(UNSUPPORTED);
         }
+        if &signature == b"TREE" {
+            trees += 1;
+            tree =
+                tree_reservation(&bytes[pos + 8..next]).map(|reservation| (pos..next, reservation));
+        }
         if &signature == b"sdir" {
             if size != 0 {
                 return Err(INVALID);
@@ -148,21 +233,28 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
 
         pos = next;
     }
-    // 3x covers Vec old+new growth, plus the V4 delta scratch. Entry Vec is
-    // exact-sized. Optional extension parsers (recursive TREE/UNTR etc.) cannot
-    // run. The fixed margin includes error construction; tested by allocator.
-    let backing = paths.max(entry_end.saturating_sub(12 + entries * 62));
+    if trees != 1 {
+        tree = None;
+    }
+    let tree_bytes = tree.as_ref().map_or(0, |(range, _)| range.len());
+    let tree_allocation = tree.as_ref().map_or(0, |(_, reservation)| *reservation);
+    // gix estimates path capacity from the entire supplied slice, extensions
+    // included. Charge that estimate as well as bounded TREE decoding scratch.
+    let backing = paths.max(entry_end.saturating_sub(12 + entries * 62) + tree_bytes);
     let reservation = entries
         .checked_mul(std::mem::size_of::<gix_index::Entry>())
-        .and_then(|n| n.checked_add(3 * backing + 3 * longest + 4096))
+        .and_then(|n| n.checked_add(3 * backing + 3 * longest + tree_allocation + 4096))
         .ok_or(ReadError::Limit)?;
     meter.allocation(reservation)?;
-    // Drop caches entirely: gix estimates initial path backing from the input
-    // length, even for unknown extensions. Signature replacement alone would
-    // leave their payloads as an uncharged allocation estimate.
-    let parser_end = entry_end + if sparse { 8 } else { 0 };
+    // Compact the same safe-read bytes only after checking the original hash.
+    // No second pathname read and no independent cache-tree object parser.
+    if let Some((range, _)) = tree {
+        bytes.copy_within(range, entry_end);
+    }
+    let mut parser_end = entry_end + tree_bytes;
     if sparse {
-        bytes[entry_end..parser_end].copy_from_slice(b"sdir\0\0\0\0");
+        bytes[parser_end..parser_end + 8].copy_from_slice(b"sdir\0\0\0\0");
+        parser_end += 8;
     }
     bytes[parser_end..parser_end + 20].fill(0);
     let (state, _) = gix_index::State::from_bytes(
@@ -176,10 +268,20 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
         },
     )
     .map_err(|_| INVALID)?;
-    // A malformed ordering/path must not become a clean staged comparison.
+    validate(&state, meter)?;
+    Ok(state)
+}
+
+/// Also validate caller-supplied (including later sparse-expanded) states.
+pub(crate) fn validate(state: &gix_index::State, meter: &mut Meter) -> Result<(), ReadError> {
     let mut last = None;
+    let has_gitlinks = state
+        .entries()
+        .iter()
+        .any(|e| e.mode == gix_index::entry::Mode::COMMIT);
     for entry in state.entries() {
-        let path: &[u8] = entry.path(&state).as_ref();
+        meter.check()?;
+        let path: &[u8] = entry.path(state).as_ref();
         if path.is_empty()
             || path.contains(&0)
             || path
@@ -201,7 +303,30 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
         if last.is_some_and(|previous| previous >= key) {
             return Err(INVALID);
         }
+        if last.is_some_and(|(previous, stage)| previous == path && stage == 0) {
+            return Err(INVALID);
+        }
+        // A gitlink cannot own index children. Ordinary conflicted file/directory
+        // pairs can coexist and must still count as distinct conflict paths.
+        // Checking every ancestor also catches sub, sub-foo, sub/x ordering.
+        for (end, _) in path
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| has_gitlinks && **b == b'/')
+        {
+            let ancestor = &path[..end];
+            let i = state
+                .entries()
+                .partition_point(|e| e.path(state) < ancestor);
+            if state.entries()[i..]
+                .iter()
+                .take_while(|e| e.path(state) == ancestor)
+                .any(|e| e.mode == gix_index::entry::Mode::COMMIT)
+            {
+                return Err(INVALID);
+            }
+        }
         last = Some(key);
     }
-    Ok(state)
+    Ok(())
 }

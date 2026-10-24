@@ -7,6 +7,7 @@ pub mod refs;
 pub mod stage_a;
 pub mod stage_c;
 pub mod stage_d;
+pub mod status_tracked;
 
 pub(crate) use crate::update_sink::UpdateSink;
 
