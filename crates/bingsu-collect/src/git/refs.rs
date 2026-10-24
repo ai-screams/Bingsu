@@ -6,6 +6,7 @@ use crate::{
 };
 use bingsu_core::collection::budget::{Axis, REF_BYTES, SMALL_FILE_BYTES};
 use gix_ref::bstr::ByteSlice;
+use std::{cell::RefCell, rc::Rc};
 
 pub type ObjectId = gix_index::hash::ObjectId;
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
@@ -25,6 +26,47 @@ pub enum Target {
 pub struct Refs {
     packed: Option<gix_ref::packed::Buffer>,
     _allocation: Option<ObjectAllocation>,
+}
+
+type LoadedRefs = Result<Rc<Refs>, ReadError>;
+
+/// One lazy packed-refs parse per request, shared by preflight and B/C/D.
+/// Cloning the immutable result releases the cell before loose-ref I/O.
+#[derive(Default)]
+pub struct RefSnapshot {
+    refs: RefCell<Option<LoadedRefs>>,
+}
+
+impl RefSnapshot {
+    pub fn load(&self, io: &RepoIo<'_>) -> LoadedRefs {
+        self.get_or_load(io, || Refs::load(io))
+    }
+
+    pub(super) fn load_with_config(
+        &self,
+        io: &RepoIo<'_>,
+        config: &super::config::Config,
+    ) -> LoadedRefs {
+        self.get_or_load(io, || Refs::load_with_config(io, config))
+    }
+
+    fn get_or_load(
+        &self,
+        io: &RepoIo<'_>,
+        load: impl FnOnce() -> Result<Refs, ReadError>,
+    ) -> LoadedRefs {
+        io.metered(|meter| meter.check())?;
+        if let Some(loaded) = self.refs.borrow().as_ref() {
+            return loaded.clone();
+        }
+        // No snapshot borrow spans I/O. Deadline belongs to this stage only;
+        // real reads/parsed entries stay charged even when a later stage retries.
+        let loaded = load().map(Rc::new);
+        if !matches!(loaded, Err(ReadError::Deadline)) {
+            *self.refs.borrow_mut() = Some(loaded.clone());
+        }
+        loaded
+    }
 }
 
 impl Refs {

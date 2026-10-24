@@ -4,7 +4,6 @@ use super::{
     config::Config,
     discover::RepoRoots,
     io::{RepoIo, RepoPath, RootId},
-    refs::Refs,
     stage_a::HeadPolicy,
 };
 use crate::{
@@ -99,7 +98,7 @@ fn inspect(io: &RepoIo<'_>, roots: &RepoRoots) -> Result<Option<AOnlyReason>, Re
     if io.has_directory(RepoPath::new(RootId::CommonDir, b"refs/replace"))? {
         return Ok(Some(AOnlyReason::LooseReplace));
     }
-    let refs = Refs::load_with_config(io, &config)?;
+    let refs = roots.ref_snapshot().load_with_config(io, &config)?;
     if refs.contains_replace() {
         return Ok(Some(AOnlyReason::PackedReplace));
     }

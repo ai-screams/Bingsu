@@ -90,6 +90,21 @@ impl<'a> RepoIo<'a> {
         }
     }
 
+    /// Only at a stage boundary: a B-local Limit/Deadline must not suppress
+    /// independent C/D work. All counters, live allocations and the absolute
+    /// request deadline stay in the SAME meter; exhausted shared axes still fail.
+    pub(crate) fn next_stage(&self) -> Self {
+        Self::new(
+            RepoRoots {
+                worktree: self.roots.worktree,
+                gitdir: self.roots.gitdir,
+                commondir: self.roots.commondir,
+            },
+            self.access,
+            self.meter,
+        )
+    }
+
     fn root(&self, id: RootId) -> &Root {
         match id {
             RootId::Worktree => self.roots.worktree,
@@ -429,6 +444,63 @@ impl<'a> RepoIo<'a> {
                 return Err(ReadError::Changed);
             }
             Ok(bytes)
+        })
+    }
+
+    /// Stream a stable prefix from ONE fd, with a separately charged reflog
+    /// axis and one extra EOF probe. False means unexamined bytes remain.
+    /// Visitor false stops parsing, but still verifies the held file metadata.
+    pub(crate) fn stream_reflog(
+        &self,
+        present: impl FnOnce() -> Result<bool, ReadError>,
+        mut visit: impl FnMut(&[u8], &mut Meter) -> Result<bool, ReadError>,
+    ) -> Result<bool, ReadError> {
+        let file = self.metered(|meter| {
+            let file = safe_read::resolve_with(
+                self.roots.commondir,
+                b"logs/refs/stash",
+                self.access,
+                meter,
+            )?;
+            if file.metadata().st_nlink != 1 {
+                return Err(ReadError::Special);
+            }
+            Ok(file)
+        })?;
+        let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
+        // Only nonempty reflogs need a ref lookup (and possibly packed-refs).
+        // Keep this same fd, but release the meter borrow before nested I/O.
+        if size != 0 && !present()? {
+            return Ok(true);
+        }
+        self.metered(|meter| {
+            let remaining = Axis::ReflogBytes.limit() - meter.budget.used(Axis::ReflogBytes);
+            let reserved = size.min(remaining);
+            meter.charge_axis(Axis::ReflogBytes, reserved)?;
+            meter.event("before_reflog_read");
+            let mut buffer = [0; crate::meter::READ_CHUNK];
+            let mut read = 0;
+            while read < reserved {
+                let len = (reserved - read).min(buffer.len() as u64) as usize;
+                let n = file.stream_chunk(&mut buffer[..len], meter)?;
+                if n == 0 {
+                    return Err(ReadError::Changed);
+                }
+                read += n as u64;
+                if !visit(&buffer[..n], meter)? {
+                    file.verify_stream(meter)?;
+                    return Ok(false);
+                }
+            }
+            let n = file.stream_chunk(&mut buffer[..1], meter)?;
+            file.verify_stream(meter)?;
+            if size <= reserved && n != 0 {
+                return Err(ReadError::Changed);
+            }
+            if size > reserved && n == 0 {
+                return Err(ReadError::Changed);
+            }
+            Ok(n == 0)
         })
     }
 

@@ -5,6 +5,8 @@ pub mod io;
 pub mod preflight;
 pub mod refs;
 pub mod stage_a;
+pub mod stage_c;
+pub mod stage_d;
 
 pub(crate) use crate::update_sink::UpdateSink;
 
@@ -143,17 +145,40 @@ pub(crate) fn collect_with_deadlines(
 pub struct GuardedRepository<'a> {
     pub io: io::RepoIo<'a>,
     pub config: config::Config,
-    pub refs: refs::Refs,
+    pub refs: std::rc::Rc<refs::Refs>,
+    packs: io::objects::PackSnapshot,
 }
 
 impl<'a> GuardedRepository<'a> {
-    pub fn new(io: io::RepoIo<'a>) -> Result<Self, ReadError> {
-        let config = config::Config::load(&io)?;
-        let refs = refs::Refs::load_with_config(&io, &config)?;
-        Ok(Self { io, config, refs })
+    pub fn from_roots(
+        roots: &'a discover::RepoRoots,
+        meter: &'a std::cell::RefCell<crate::meter::Meter>,
+    ) -> Result<Self, ReadError> {
+        Self::new(
+            io::RepoIo::new(roots.io_roots(), &roots.access, meter),
+            roots.ref_snapshot(),
+        )
     }
 
-    /// C3 supplies the object adapter. Never fall back to a path-based store.
+    /// Pass the selected roots' request snapshot, also used by preflight and D.
+    pub fn new(io: io::RepoIo<'a>, snapshot: &refs::RefSnapshot) -> Result<Self, ReadError> {
+        let config = config::Config::load(&io)?;
+        let refs = snapshot.load_with_config(&io, &config)?;
+        Ok(Self {
+            io,
+            config,
+            refs,
+            packs: io::objects::PackSnapshot::default(),
+        })
+    }
+
+    /// B uses `repo.objects(&repo.io)`; C supplies its fresh stage port. Both
+    /// retain one lazy pack snapshot while scratch and stop state stay local.
+    pub fn objects<'b>(&self, io: &'b io::RepoIo<'b>) -> io::objects::SafeObjectDb<'b> {
+        io::objects::SafeObjectDb::with_snapshot(io, &self.packs)
+    }
+
+    /// Never fall back to a path-based store.
     pub fn object(&self, _id: &[u8]) -> Result<Vec<u8>, ReadError> {
         Err(io::UNSUPPORTED)
     }

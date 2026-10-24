@@ -15,6 +15,7 @@ pub struct RepoRoots {
     pub(super) policy: HeadPolicy,
     pub(super) reason: Cell<Option<AOnlyReason>>,
     pub(super) unborn: Cell<bool>,
+    refs: super::refs::RefSnapshot,
     binding: Option<WorktreeBinding>,
 }
 
@@ -25,6 +26,9 @@ struct WorktreeBinding {
 }
 
 impl RepoRoots {
+    pub fn ref_snapshot(&self) -> &super::refs::RefSnapshot {
+        &self.refs
+    }
     pub(super) fn matches_worktree(&self, value: &[u8]) -> bool {
         self.binding.as_ref().is_some_and(|binding| {
             normalize(&binding.gitdir, value).is_ok_and(|path| path == binding.worktree)
@@ -146,6 +150,7 @@ fn select_inner(
         policy: metadata.policy,
         reason: Cell::new(metadata.reason),
         unborn: Cell::new(false),
+        refs: super::refs::RefSnapshot::default(),
         binding,
     }))
 }

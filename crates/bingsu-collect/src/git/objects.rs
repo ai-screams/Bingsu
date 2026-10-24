@@ -10,7 +10,7 @@ use gix_error::ErrorExt;
 use gix_index::hash::{self, ObjectId, oid};
 use gix_object::{Data, Kind};
 use gix_pack::data::{Entry, entry::Header};
-use std::{cell::RefCell, path::PathBuf};
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
 pub const DELTA_DEPTH: usize = 64;
@@ -26,19 +26,32 @@ pub(crate) struct Pack {
     index: gix_pack::index::File<ReadMap>,
     data: ReadMap,
 }
+type LoadedPacks = Result<Vec<Pack>, ReadError>;
 
-/// One adapter per repository, sharing the same B/C meter. Initialization does
-/// no I/O. Immutable pack snapshots are retained after the first loose miss.
+/// Request-owned lazy pack state. Stage adapters share the immutable snapshot
+/// and deterministic load errors. A stage deadline leaves it uninitialized so
+/// the next stage can retry, retaining all I/O already charged to the request.
+#[derive(Clone, Default)]
+pub struct PackSnapshot {
+    packs: Rc<RefCell<Option<LoadedPacks>>>,
+}
+
+/// A stage-local adapter with object scratch and a request-shared pack snapshot.
+/// Initialization does no I/O; the first loose miss loads the packs once.
 pub struct SafeObjectDb<'a> {
     io: &'a RepoIo<'a>,
-    packs: RefCell<Option<Result<Vec<Pack>, ReadError>>>,
+    snapshot: PackSnapshot,
     scratch: RefCell<Option<ObjectAllocation>>,
 }
 impl<'a> SafeObjectDb<'a> {
     pub fn new(io: &'a RepoIo<'a>) -> Self {
+        Self::with_snapshot(io, &PackSnapshot::default())
+    }
+
+    pub(crate) fn with_snapshot(io: &'a RepoIo<'a>, snapshot: &PackSnapshot) -> Self {
         Self {
             io,
-            packs: RefCell::new(None),
+            snapshot: snapshot.clone(),
             scratch: RefCell::new(None),
         }
     }
@@ -58,7 +71,7 @@ impl<'a> SafeObjectDb<'a> {
             return Err(UNSUPPORTED);
         }
         // Reuse the packed snapshot without reopening paths after initialization.
-        if self.packs.borrow().is_none() {
+        if self.snapshot.packs.borrow().is_none() {
             let mut hex = [0u8; 40];
             id.write_hex_to(&mut hex.as_mut_slice())
                 .map_err(|_| INVALID)?;
@@ -81,10 +94,15 @@ impl<'a> SafeObjectDb<'a> {
                 Err(ReadError::Missing) => {}
                 Err(error) => return Err(error),
             }
-            *self.packs.borrow_mut() = Some(self.load_packs());
+            // Never retain a RefCell borrow across adapter I/O.
+            let loaded = self.load_packs();
+            if matches!(loaded, Err(ReadError::Deadline)) {
+                return Err(ReadError::Deadline);
+            }
+            *self.snapshot.packs.borrow_mut() = Some(loaded);
         }
-        let packs = self.packs.borrow();
-        let packs = packs
+        let snapshot = self.snapshot.packs.borrow();
+        let packs = snapshot
             .as_ref()
             .expect("initialized")
             .as_ref()
@@ -98,6 +116,7 @@ impl<'a> SafeObjectDb<'a> {
                     .map(|decoded| self.retain(decoded));
             }
         }
+        drop(snapshot);
         // A packed miss can still be loose, including objects added after pack
         // initialization. It never causes a pack refresh or alternates lookup.
         let relative = format!("objects/{}/{}", &id.to_string()[..2], &id.to_string()[2..]);
