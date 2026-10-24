@@ -3748,7 +3748,8 @@ fn stat_policy_honors_checkstat_and_trustctime() {
     let policy = Policies::from_config(&Config::load(&io).unwrap()).unwrap();
     assert!(!policy.stat.check_stat);
     assert!(!policy.stat.trust_ctime);
-    assert!(policy.names.ignore_case && policy.names.precompose_unicode);
+    assert!(policy.names.ignore_case);
+    assert_eq!(policy.names.precompose_unicode, cfg!(target_os = "macos"));
     let metadata = io.worktree_metadata(b"file").unwrap();
     let original = worktree::stat(&metadata);
     assert_eq!(original.ctime.secs, metadata.st_ctime as u32);
@@ -3976,10 +3977,12 @@ fn worktree_names_and_hash_budgets_remain_confined() {
         precompose_unicode: true,
     };
     for _ in 0..4096 {
-        assert!(
+        // Mutation: direct NamePolicy callers bypass the macOS-only gate.
+        assert_eq!(
             names
                 .same("ÉA".as_bytes(), "E\u{301}a".as_bytes(), &mut m.borrow_mut())
-                .unwrap()
+                .unwrap(),
+            cfg!(target_os = "macos")
         );
     }
     assert!(!names.same(b"\xffA", b"\xfea", &mut m.borrow_mut()).unwrap());

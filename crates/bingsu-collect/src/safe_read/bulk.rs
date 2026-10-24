@@ -22,11 +22,11 @@ const UNSUPPORTED: ReadError = ReadError::Io(libc::ENOTSUP);
 #[repr(align(8))]
 struct Buffer([u8; crate::meter::DIRENT_CHUNK]);
 
-pub(super) fn visit(
+pub(super) fn visit_batch(
     root: &Root,
     meter: &mut Meter,
-    mut visitor: impl FnMut(&[u8], Result<&libc::stat, ReadError>) -> Result<(), ReadError>,
-) -> Result<(), ReadError> {
+    mut visitor: impl FnMut(&[u8], Result<&libc::stat, ReadError>, &mut Meter) -> Result<(), ReadError>,
+) -> Result<bool, ReadError> {
     let mut attrs = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -37,48 +37,47 @@ pub(super) fn visit(
         forkattr: 0,
     };
     let mut buffer = Buffer([0; crate::meter::DIRENT_CHUNK]);
-    loop {
-        meter.event("before_worktree_bulk");
-        let count = retry(meter, Op::List, || {
-            // SAFETY: verified, readable directory with a fresh OFD; fully
-            // initialized attrlist, aligned bounded writable output. The API
-            // returns symlink metadata itself, regardless of NOFOLLOW.
-            unsafe {
-                libc::getattrlistbulk(
-                    root.fd.as_raw_fd(),
-                    (&mut attrs as *mut libc::attrlist).cast(),
-                    buffer.0.as_mut_ptr().cast(),
-                    buffer.0.len(),
-                    libc::FSOPT_NOFOLLOW as u64,
-                ) as isize
-            }
-        })? as usize;
-        meter.event("after_worktree_bulk");
-        if count == 0 {
-            return Ok(());
+    meter.event("before_worktree_bulk");
+    let count = retry(meter, Op::List, || {
+        // SAFETY: verified, readable directory with a fresh OFD; fully
+        // initialized attrlist, aligned bounded writable output. The API
+        // returns symlink metadata itself, regardless of NOFOLLOW.
+        unsafe {
+            libc::getattrlistbulk(
+                root.fd.as_raw_fd(),
+                (&mut attrs as *mut libc::attrlist).cast(),
+                buffer.0.as_mut_ptr().cast(),
+                buffer.0.len(),
+                libc::FSOPT_NOFOLLOW as u64,
+            ) as isize
         }
-        if count > buffer.0.len() / 24 {
-            return Err(INVALID);
-        }
-        // Charge the entire returned batch BEFORE decoding/matching any entry,
-        // including names absent from the index. Never fall back on exhaustion.
-        meter.raw_entries(count as u64)?;
-        meter.charge_axis(bingsu_core::collection::budget::Axis::Stats, count as u64)?;
-        let mut remaining = buffer.0.as_slice();
-        for _ in 0..count {
-            let record = Record::parse(remaining)?;
-            #[cfg(test)]
-            let record = {
-                let mut r = record;
-                if let Some(device) = meter.worktree_device {
-                    r.metadata.st_dev = device as _;
-                }
-                r
-            };
-            visitor(record.name, record.result())?;
-            remaining = &remaining[record.length..];
-        }
+    })? as usize;
+    meter.event("after_worktree_bulk");
+    if count == 0 {
+        return Ok(false);
     }
+    if count > buffer.0.len() / 24 {
+        return Err(INVALID);
+    }
+    // Charge the entire returned batch BEFORE decoding/matching any entry,
+    // including names absent from the index. Never fall back on exhaustion.
+    meter.raw_entries(count as u64)?;
+    meter.charge_axis(bingsu_core::collection::budget::Axis::Stats, count as u64)?;
+    let mut remaining = buffer.0.as_slice();
+    for _ in 0..count {
+        let record = Record::parse(remaining)?;
+        #[cfg(test)]
+        let record = {
+            let mut r = record;
+            if let Some(device) = meter.worktree_device {
+                r.metadata.st_dev = device as _;
+            }
+            r
+        };
+        visitor(record.name, record.result(), meter)?;
+        remaining = &remaining[record.length..];
+    }
+    Ok(true)
 }
 
 struct Cursor<'a> {

@@ -1428,6 +1428,39 @@ fn colliding_parent_name_policies_are_partial() {
     });
 }
 
+// Mutations: normalize a copied repo's NFC/NFD index keys on Linux; ignore
+// precomposition on macOS. Directory renames are raw I/O, never normalized.
+#[test]
+fn precompose_tracked_names_match_git_on_each_os() {
+    let f = init();
+    git(&f, &["config", "core.precomposeunicode", "true"]);
+    let nfc = "\u{d55c}";
+    let nfd = "\u{1112}\u{1161}\u{11ab}";
+    f.write(&format!("{nfc}/{nfc}"), b"base");
+    commit(&f);
+    fs::rename(f.0.join(nfc), f.0.join("temporary")).unwrap();
+    fs::rename(f.0.join("temporary"), f.0.join(nfd)).unwrap();
+    let parent = f.0.join(nfd);
+    fs::rename(parent.join(nfc), parent.join("temporary")).unwrap();
+    fs::rename(parent.join("temporary"), parent.join(nfd)).unwrap();
+    let expected = u32::from(!cfg!(target_os = "macos"));
+    assert_eq!(oracle(&f), (0, expected, 0));
+    assert_eq!(parity(&f).modified, count(expected));
+    f.write(&format!("{nfd}/{nfd}"), b"changed and longer");
+    assert_eq!(oracle(&f), (0, 1, 0));
+    assert_eq!(parity(&f).modified, count(1));
+
+    // A Linux filesystem can hold both names. Git's copied setting must not
+    // turn two distinct index paths into an ambiguous normalized collision.
+    #[cfg(target_os = "linux")]
+    {
+        f.write(&format!("{nfc}/{nfc}"), b"another path");
+        commit(&f);
+        assert_eq!(oracle(&f), (0, 0, 0));
+        assert_eq!(parity(&f).modified, count(0));
+    }
+}
+
 // Fixtures use Git's ordinary v2/v3 index framing; only the optional extensions
 // are replaced. Re-sign so the tests exercise TREE validation, not checksum.
 fn extensions_offset(bytes: &[u8]) -> usize {

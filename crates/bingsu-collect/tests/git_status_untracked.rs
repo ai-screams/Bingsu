@@ -1,0 +1,1112 @@
+//! D1b oracle, budget, shared-scan and sparse-index acceptance fixtures.
+#![cfg(unix)]
+#[allow(dead_code)]
+#[path = "../src/git/mod.rs"]
+mod git;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/landlock.rs"]
+mod landlock;
+#[allow(dead_code)]
+#[path = "../src/meter.rs"]
+mod meter;
+#[allow(dead_code)]
+#[path = "../src/safe_read/mod.rs"]
+mod safe_read;
+#[allow(dead_code)]
+#[path = "../src/update_sink.rs"]
+mod update_sink;
+
+#[path = "support/allocation.rs"]
+mod allocation;
+
+use bingsu_core::{
+    collection::budget::Axis,
+    field::{Field, FieldValue},
+};
+use git::{
+    GuardedRepository,
+    io::{RepoIo, RepoRoots, index},
+    stage_b,
+    status_tracked::StatusCounts,
+};
+use meter::{Meter, Phase};
+use safe_read::{Access, DiscoveryQuery, ReadError as E, Root};
+use std::{
+    cell::RefCell,
+    fs,
+    io::Write,
+    os::unix::{ffi::OsStrExt, fs::symlink},
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+fn meter() -> Meter {
+    Meter::new(Instant::now() + Duration::from_secs(60))
+}
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bingsu-untracked-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        Self(fs::canonicalize(dir).unwrap())
+    }
+    fn write(&self, name: &str, bytes: impl AsRef<[u8]>) {
+        let name = self.0.join(name);
+        fs::create_dir_all(name.parent().unwrap()).unwrap();
+        fs::write(name, bytes).unwrap();
+    }
+    fn root(&self, meter: &mut Meter) -> Root {
+        safe_read::acquire(
+            self.0.as_os_str().as_bytes(),
+            DiscoveryQuery::default(),
+            meter,
+        )
+        .unwrap()
+        .select_cwd()
+        .unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+fn access() -> Access {
+    #[cfg(target_os = "linux")]
+    let access = Access::probe(&mut meter()).unwrap();
+    #[cfg(target_os = "macos")]
+    let access = {
+        use std::os::fd::AsFd;
+        let fixture = Fixture::new();
+        fixture.write("value", b"inside");
+        fixture.write("dir/file", b"inside");
+        fixture.write("hard", b"linked");
+        fs::hard_link(fixture.0.join("hard"), fixture.0.join("hard2")).unwrap();
+        for (target, name) in [
+            ("../value", "dir/inner"),
+            ("dir", "linkdir"),
+            ("/", "absolute"),
+            ("../outside", "escape"),
+            ("../../outside", "dir/up"),
+        ] {
+            symlink(target, fixture.0.join(name)).unwrap();
+        }
+        let fd = fs::File::open(&fixture.0).unwrap();
+        safe_read::macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut meter()).unwrap()
+    };
+    assert!(
+        access.guarantee().is_some(),
+        "BLOCKED: a real kernel read guarantee is required"
+    );
+    access
+}
+
+fn command(f: &Fixture, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+    let mut child = Command::new("git")
+        .args(["-C"])
+        .arg(&f.0)
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &f.0)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git oracle required");
+    if let Some(input) = input {
+        child.stdin.take().unwrap().write_all(input).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+fn git(f: &Fixture, args: &[&str]) -> Vec<u8> {
+    command(f, args, None)
+}
+fn init() -> Fixture {
+    let f = Fixture::new();
+    git(&f, &["init", "-q"]);
+    git(&f, &["config", "user.name", "Fixture"]);
+    git(&f, &["config", "user.email", "fixture@example.invalid"]);
+    git(&f, &["config", "core.filemode", "true"]);
+    // Keep fixture object layout deterministic and prevent Git's detached
+    // maintenance from racing teardown of the large/deep corpora.
+    git(&f, &["config", "gc.auto", "0"]);
+    git(&f, &["config", "maintenance.auto", "false"]);
+    f
+}
+fn commit(f: &Fixture) {
+    git(f, &["add", "."]);
+    git(f, &["commit", "-qm", "fixture"]);
+}
+fn with_repo<T>(f: &Fixture, run: impl FnOnce(&GuardedRepository<'_>, &RefCell<Meter>) -> T) -> T {
+    let access = access();
+    let mut m = meter();
+    let wr = f.root(&mut m);
+    let gr = safe_read::acquire(
+        f.0.join(".git").as_os_str().as_bytes(),
+        DiscoveryQuery::default(),
+        &mut m,
+    )
+    .unwrap()
+    .select_cwd()
+    .unwrap();
+    m.phase = Phase::Content;
+    let slot = RefCell::new(m);
+    let io = RepoIo::new(
+        RepoRoots {
+            worktree: &wr,
+            gitdir: &gr,
+            commondir: &gr,
+        },
+        &access,
+        &slot,
+    );
+    let repo = GuardedRepository::new(io, &git::refs::RefSnapshot::default()).unwrap();
+    run(&repo, &slot)
+}
+fn status(f: &Fixture) -> StatusCounts {
+    with_repo(f, |repo, _| stage_b::status(repo))
+}
+fn count(n: u32) -> Field {
+    Field::known(FieldValue::Count {
+        n,
+        saturated: false,
+    })
+}
+
+fn oracle(f: &Fixture) -> (u32, u32, u32, u32) {
+    let raw = git(
+        f,
+        &[
+            "-c",
+            "status.renames=false",
+            "status",
+            "--porcelain=v2",
+            "--ignore-submodules=all",
+            "--untracked-files=normal",
+            "-z",
+        ],
+    );
+    let mut out = (0, 0, 0, 0);
+    for line in raw.split(|b| *b == 0).filter(|l| !l.is_empty()) {
+        match line[0] {
+            b'1' => {
+                out.0 += u32::from(line[2] != b'.');
+                out.1 += u32::from(line[3] != b'.');
+            }
+            b'?' => out.2 += 1,
+            b'u' => out.3 += 1,
+            _ => panic!("unexpected porcelain {line:?}"),
+        }
+    }
+    out
+}
+fn parity(f: &Fixture) -> StatusCounts {
+    let expected = oracle(f);
+    let got = status(f);
+    assert_eq!(
+        (&got.staged, &got.modified, &got.untracked, &got.conflicted),
+        (
+            &count(expected.0),
+            &count(expected.1),
+            &count(expected.2),
+            &count(expected.3)
+        ),
+        "{got:?}"
+    );
+    got
+}
+
+// Mutations: omit buffered patterns; wrong info/exclude base/priority; count
+// leaves instead of normal directory collapse; apply an outside config source.
+#[test]
+fn untracked_walker_honors_buffered_ignore_and_attributes() {
+    let f = init();
+    f.write(
+        ".gitignore",
+        b"*.log\n!important.log\nnode_modules/\n!node_modules/keep\n",
+    );
+    f.write(".gitattributes", b"*.txt text\n");
+    f.write("tracked.txt", b"line\n");
+    f.write("src/tracked", b"base");
+    commit(&f);
+    f.write(".git/info/exclude", b"info-only\nimportant.log\n");
+    f.write("info-only", b"ignored");
+    f.write("important.log", b"visible");
+    f.write("drop.log", b"ignored");
+    f.write("node_modules/keep", b"ignored parent wins");
+    f.write("src/.gitignore", b"!nested.log\n");
+    f.write("src/nested.log", b"visible");
+    f.write("src/other.log", b"ignored");
+    f.write("new/a", b"one");
+    f.write("new/deep/b", b"two");
+    fs::create_dir(f.0.join("empty")).unwrap();
+    let got = parity(&f);
+    assert_eq!(got.untracked, count(4));
+    assert!(got.filtered);
+    let outside = Fixture::new();
+    outside.write("ignore", b"*\n");
+    outside.write("attrs", b"* filter=canary\n");
+    git(
+        &f,
+        &[
+            "config",
+            "core.excludesFile",
+            outside.0.join("ignore").to_str().unwrap(),
+        ],
+    );
+    git(
+        &f,
+        &[
+            "config",
+            "core.attributesFile",
+            outside.0.join("attrs").to_str().unwrap(),
+        ],
+    );
+    // Git's external-config policy differs deliberately; compare to baseline.
+    assert_eq!(status(&f), got);
+    assert!(!outside.0.join("canary").exists());
+}
+
+// Mutation: recurse through a gitlink even if it contains visible entries or
+// hostile patterns; follow a worktree symlink component.
+#[test]
+fn untracked_walker_never_opens_submodules() {
+    let f = init();
+    f.write("base", b"base");
+    f.write("a/tracked", b"base");
+    commit(&f);
+    let oid = String::from_utf8(git(&f, &["rev-parse", "HEAD"])).unwrap();
+    git(
+        &f,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},sub", oid.trim()),
+        ],
+    );
+    fs::remove_file(f.0.join(".git/info/exclude")).unwrap();
+    f.write("sub/.gitignore", vec![b'x'; 65_537]);
+    f.write("sub/visible", b"never opened");
+    fs::remove_dir_all(f.0.join("a")).unwrap();
+    symlink("sub", f.0.join("a")).unwrap();
+    with_repo(&f, |repo, m| {
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let copy = events.clone();
+        m.borrow_mut().hook = Some(Box::new(move |e| copy.borrow_mut().push(e.to_owned())));
+        let got = stage_b::status(repo);
+        assert_eq!(
+            (got.staged, got.modified, got.untracked),
+            (count(0), count(1), count(1))
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|e| e == "openat:sub" || e == "openat:a")
+        );
+        assert_eq!(m.borrow().budget.used(Axis::IgnoreFiles), 0);
+    });
+    assert_eq!(oracle(&f), (0, 1, 1, 0));
+}
+
+fn sparse_fixture() -> Fixture {
+    let f = init();
+    f.write("keep/a", b"visible");
+    f.write("omit/a", b"one");
+    f.write("omit/b", b"two");
+    commit(&f);
+    git(&f, &["sparse-checkout", "init", "--cone", "--sparse-index"]);
+    git(&f, &["sparse-checkout", "set", "keep"]);
+    f
+}
+
+// Mutations: skip expansion, drop skip-worktree, bypass either expansion axis,
+// continue I/O after a failed charge, or refresh/write the on-disk index.
+#[test]
+fn sparse_expansion_is_budgeted() {
+    let f = sparse_fixture();
+    let original = fs::read(f.0.join(".git/index")).unwrap();
+    let costs = with_repo(&f, |repo, slot| {
+        let idx = index::load(&repo.io).unwrap();
+        assert!(idx.entries().iter().any(|e| e.mode.is_sparse()));
+        assert_eq!(git::untracked::untracked_status(repo, &idx), Field::PENDING);
+        let before = slot.borrow().budget.clone();
+        let idx = index::expand_sparse(repo, idx).unwrap();
+        assert_eq!(idx.entries().len(), 3);
+        for e in idx.entries() {
+            assert_eq!(
+                e.flags.contains(gix_index::entry::Flags::SKIP_WORKTREE),
+                e.path(&idx).starts_with(b"omit/")
+            );
+            assert!(!e.mode.is_sparse());
+        }
+        [Axis::IndexEntries, Axis::IndexBytes]
+            .map(|axis| slot.borrow().budget.used(axis) - before.used(axis))
+    });
+    assert_eq!(costs, [2, 12]); // Two leaves, each full path is omit/{a,b}.
+    for (axis, needed) in [Axis::IndexEntries, Axis::IndexBytes]
+        .into_iter()
+        .zip(costs)
+    {
+        for remaining in [needed - 1, needed, needed + 1] {
+            with_repo(&f, |repo, slot| {
+                let idx = index::load(&repo.io).unwrap();
+                let used = slot.borrow().budget.used(axis);
+                slot.borrow_mut()
+                    .charge_axis(axis, axis.limit() - used - remaining)
+                    .unwrap();
+                let result = index::expand_sparse(repo, idx).map(|_| ());
+                assert_eq!(
+                    result,
+                    if remaining < needed {
+                        Err(E::Limit)
+                    } else {
+                        Ok(())
+                    },
+                    "{axis:?}/{remaining}"
+                );
+                if remaining < needed {
+                    let before = slot.borrow().counts;
+                    assert_eq!(repo.io.worktree_metadata(b"keep/a").err(), Some(E::Limit));
+                    assert_eq!(slot.borrow().counts, before);
+                }
+            });
+        }
+    }
+    assert_eq!(parity(&f).modified, count(0));
+    assert_eq!(fs::read(f.0.join(".git/index")).unwrap(), original);
+}
+
+// Mutation: omit an individual precharge, return exact zero on failure or
+// allow the port to resume reads after the first Limit.
+#[test]
+fn untracked_limits_are_charged_before_io() {
+    let f = init();
+    f.write(".gitignore", b"*.log\n");
+    f.write(".gitattributes", b"*.txt text\n");
+    f.write("dir/file", b"visible");
+    let axes = [
+        Axis::WorktreeEntries,
+        Axis::Directories,
+        Axis::Stats,
+        Axis::IgnoreFiles,
+        Axis::IgnoreBytes,
+        Axis::IgnorePatterns,
+        Axis::AttributeFiles,
+        Axis::AttributeBytes,
+        Axis::AttributePatterns,
+    ];
+    let needed = with_repo(&f, |repo, slot| {
+        let idx = index::load(&repo.io).unwrap();
+        let before = slot.borrow().budget.clone();
+        assert_eq!(git::untracked::untracked_status(repo, &idx), count(3));
+        axes.map(|axis| slot.borrow().budget.used(axis) - before.used(axis))
+    });
+    assert_eq!(needed[0], if cfg!(target_os = "linux") { 9 } else { 5 });
+    assert_eq!(needed[1], 2); // Root and dir, once each.
+    assert_eq!((needed[3], needed[6]), (2, 1)); // info/exclude plus local policies.
+    for (axis, needed) in axes.into_iter().zip(needed) {
+        for remaining in [0, needed - 1, needed, needed + 1] {
+            with_repo(&f, |repo, slot| {
+                let idx = index::load(&repo.io).unwrap();
+                let used = slot.borrow().budget.used(axis);
+                slot.borrow_mut()
+                    .charge_axis(axis, axis.limit() - used - remaining)
+                    .unwrap();
+                let got = git::untracked::untracked_status(repo, &idx);
+                if remaining >= needed {
+                    assert_eq!(got, count(3), "{axis:?}/{remaining}");
+                } else {
+                    assert_eq!(got, Field::PENDING, "{axis:?}/{remaining}");
+                    let before = slot.borrow().counts;
+                    assert_eq!(repo.io.worktree_metadata(b"dir/file").err(), Some(E::Limit));
+                    assert_eq!(slot.borrow().counts, before, "I/O after {axis:?}");
+                }
+            });
+        }
+    }
+}
+
+// Mutations: drop independent D1a counts; publish the provisional filtered
+// bool on failure; label a partial walk Value. No assertion depends on whether
+// readdir visits new/ before file.txt (Linux) or after it (some macOS volumes).
+#[test]
+fn stage_b_merges_tracked_and_untracked_without_losing_partial() {
+    use bingsu_core::collection::git::StageResult;
+    let f = init();
+    f.write(".gitattributes", b"*.txt text\n");
+    f.write("file.txt", b"base\n");
+    commit(&f);
+    f.write("staged", b"added");
+    git(&f, &["add", "staged"]);
+    f.write("file.txt", b"changed and longer\n");
+    f.write("new/file", b"untracked");
+    assert_eq!(oracle(&f), (1, 1, 1, 0));
+    with_repo(&f, |repo, _| {
+        let StageResult::Partial(value) = stage_b::stage_b(repo) else {
+            panic!("approximation must be Partial");
+        };
+        let decl = &bingsu_core::field::BUILTIN[3];
+        for name in ["staged", "modified", "untracked"] {
+            assert_eq!(value.fields[decl.field_index(name).unwrap()], count(1));
+        }
+        assert_eq!(
+            value.fields[decl.field_index("filtered").unwrap()],
+            Field::known(FieldValue::Bool(true))
+        );
+    });
+    f.write("new/.gitignore", vec![b'x'; 65_537]);
+    let got = status(&f);
+    assert_eq!((got.staged, got.conflicted), (count(1), count(0)));
+    assert_eq!(
+        (got.modified, got.untracked),
+        (Field::PENDING, Field::PENDING)
+    );
+    with_repo(&f, |repo, _| {
+        let StageResult::Partial(value) = stage_b::stage_b(repo) else {
+            panic!("incomplete walk must be Partial");
+        };
+        let decl = &bingsu_core::field::BUILTIN[3];
+        for name in ["modified", "untracked", "filtered"] {
+            assert_eq!(
+                value.fields[decl.field_index(name).unwrap()],
+                Field::PENDING,
+                "{name}"
+            );
+        }
+        assert_eq!(value.fields[decl.field_index("staged").unwrap()], count(1));
+        assert_eq!(
+            value.fields[decl.field_index("conflicted").unwrap()],
+            count(0)
+        );
+    });
+}
+
+// Mutations: normalize I/O paths; accept ambiguous normalized index keys;
+// publish provisional worktree observations before final edge validation.
+#[test]
+fn shared_walk_preserves_raw_names_and_rejects_changed_edges() {
+    let f = init();
+    f.write("Dir/File", b"base");
+    commit(&f);
+    git(&f, &["config", "core.ignorecase", "true"]);
+    f.write("Dir/File", b"changed");
+    f.write("Dir/Extra", b"untracked");
+    assert_eq!(parity(&f).modified, count(1));
+    with_repo(&f, |repo, _| {
+        let mut idx = index::load(&repo.io).unwrap();
+        let entry = idx.entries()[0].clone();
+        idx.dangerously_push_entry(
+            entry.stat,
+            entry.id,
+            entry.flags,
+            entry.mode,
+            b"dir/file".as_slice().into(),
+        );
+        idx.sort_entries();
+        assert_eq!(git::untracked::untracked_status(repo, &idx), Field::PENDING);
+    });
+    with_repo(&f, |repo, slot| {
+        let path = f.0.clone();
+        let mut changed = false;
+        slot.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_worktree_directory_check" && !changed {
+                changed = true;
+                fs::rename(path.join("Dir"), path.join("moved")).unwrap();
+                fs::create_dir(path.join("Dir")).unwrap();
+            }
+        }));
+        let got = stage_b::status(repo);
+        assert_eq!((got.staged, got.conflicted), (count(0), count(0)));
+        assert_eq!(
+            (got.modified, got.untracked),
+            (Field::PENDING, Field::PENDING)
+        );
+    });
+}
+
+// Mutations: follow a policy-file symlink, reject nonregular policies, or
+// stream tracked conversion content. Track only the converted file so Linux's
+// second-resolution racy checks cannot hash a tracked .gitattributes fixture.
+#[test]
+fn walker_patterns_never_read_symlinks_or_filtered_contents() {
+    let f = init();
+    f.write(".gitattributes", b"*.txt filter=canary\n");
+    f.write("file.txt", b"base");
+    git(&f, &["add", "file.txt"]);
+    git(&f, &["commit", "-qm", "fixture"]);
+    f.write("file.txt", b"changed and longer");
+    with_repo(&f, |repo, slot| {
+        let got = stage_b::status(repo);
+        assert_eq!(got.modified, count(1));
+        assert!(got.filtered);
+        assert_eq!(slot.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+    });
+    let outside = Fixture::new();
+    outside.write("ignore", b"*\n");
+    symlink(outside.0.join("ignore"), f.0.join(".gitignore")).unwrap();
+    assert_eq!(oracle(&f), (0, 1, 2, 0));
+    with_repo(&f, |repo, slot| {
+        let got = stage_b::status(repo);
+        assert_eq!(got.untracked, count(2));
+        assert_eq!(slot.borrow().budget.used(Axis::WorktreeReadBytes), 0);
+        // Only Git's default info/exclude was read, never the symlink target.
+        assert_eq!(slot.borrow().budget.used(Axis::IgnoreFiles), 1);
+    });
+    fs::remove_file(f.0.join(".gitattributes")).unwrap();
+    outside.write("attributes", b"*.txt filter=canary\n");
+    symlink(outside.0.join("attributes"), f.0.join(".gitattributes")).unwrap();
+    with_repo(&f, |repo, slot| {
+        let got = stage_b::status(repo);
+        assert_eq!((got.modified, got.untracked), (count(1), count(2)));
+        assert!(!got.filtered);
+        assert_eq!(slot.borrow().budget.used(Axis::AttributeFiles), 0);
+    });
+    fs::remove_file(f.0.join(".gitignore")).unwrap();
+    f.write(".gitignore/inner", b"visible");
+    assert_eq!(parity(&f).untracked, count(2));
+
+    // Nested attribute symlinks exercise the getdents64/getattrlistbulk visit
+    // path, rather than just the tracked-only policy lookup.
+    f.write("sub/tracked.txt", b"base");
+    git(&f, &["add", "sub/tracked.txt"]);
+    git(&f, &["commit", "-qm", "nested"]);
+    symlink(outside.0.join("attributes"), f.0.join("sub/.gitattributes")).unwrap();
+    assert!(!parity(&f).filtered);
+    // Special also covers regular-file hardlink rejection. That is a safety
+    // failure, not a nonregular policy to ignore (mutation: swallow Special).
+    fs::remove_dir_all(f.0.join(".gitignore")).unwrap();
+    f.write("policy", b"*\n");
+    fs::hard_link(f.0.join("policy"), f.0.join(".gitignore")).unwrap();
+    assert_eq!(status(&f).untracked, Field::PENDING);
+}
+
+// Mutations: skip valid .git; read local policies before checking the marker;
+// resolve a gitfile target; descend into repositories. Creating .git before or
+// after the other entries must not matter, even across multiple listing batches.
+#[test]
+fn embedded_repositories_count_once_without_reading_local_policies() {
+    for kind in 0..4 {
+        let f = init();
+        f.write("base", b"base");
+        commit(&f);
+        fs::create_dir(f.0.join("nested")).unwrap();
+        let metadata = Fixture::new();
+        let make_repo = || {
+            if kind < 2 {
+                git(&f, &["-C", "nested", "init", "-q"]);
+            } else {
+                git(
+                    &f,
+                    &[
+                        "-C",
+                        "nested",
+                        "init",
+                        "-q",
+                        "--separate-git-dir",
+                        metadata.0.to_str().unwrap(),
+                    ],
+                );
+            }
+        };
+        if kind % 2 == 0 {
+            make_repo();
+        }
+        f.write("nested/.gitignore", b"*\n");
+        if kind % 2 != 0 {
+            for i in 0..3000 {
+                f.write(&format!("nested/d/f{i}"), b"x");
+                f.write(&format!("nested/f{i:04}"), b"x");
+            }
+            make_repo();
+        }
+        assert_eq!(oracle(&f), (0, 0, 1, 0));
+        // A local policy read would exceed the cap. Gitfile targets are outside
+        // the worktree: the fixed prefix is sufficient and never grants access.
+        f.write("nested/.gitignore", vec![b'x'; 65_537]);
+        with_repo(&f, |repo, slot| {
+            let got = stage_b::status(repo);
+            assert_eq!(
+                (got.staged, got.modified, got.untracked),
+                (count(0), count(0), count(1))
+            );
+            assert_eq!(
+                slot.borrow().budget.used(Axis::Directories),
+                if kind < 2 { 3 } else { 2 }
+            );
+            assert_eq!(slot.borrow().budget.used(Axis::IgnoreFiles), 1);
+            assert!(slot.borrow().budget.used(Axis::WorktreeEntries) < 600);
+        });
+    }
+}
+
+// Mutations: accept any .git name, accept a directory without all three shape
+// entries, or retry marker-name collapse in a later batch. Only ignored content
+// makes false embedded detection observable, regardless of listing order.
+#[test]
+fn junk_repository_markers_are_walked_normally_like_git() {
+    for kind in 0..6 {
+        let f = init();
+        f.write(".gitignore", b"*.o\n");
+        f.write("base", b"base");
+        commit(&f);
+        fs::create_dir(f.0.join("nested")).unwrap();
+        match kind {
+            0 => fs::create_dir(f.0.join("nested/.git")).unwrap(),
+            1 => f.write("nested/.git", b"junk"),
+            2 => f.write("nested/.git", b"gitdir:"),
+            3..=5 => {
+                git(&f, &["-C", "nested", "init", "-q"]);
+                match kind {
+                    3 => fs::remove_file(f.0.join("nested/.git/HEAD")).unwrap(),
+                    4 => fs::remove_dir_all(f.0.join("nested/.git/objects")).unwrap(),
+                    _ => fs::remove_dir_all(f.0.join("nested/.git/refs")).unwrap(),
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(oracle(&f), (0, 0, 0, 0), "kind={kind}");
+        assert_eq!(parity(&f).untracked, count(0));
+        for i in 0..3000 {
+            f.write(&format!("nested/f{i:04}.o"), b"ignored");
+        }
+        assert_eq!(oracle(&f), (0, 0, 0, 0), "kind={kind}");
+        assert_eq!(parity(&f).untracked, count(0));
+        f.write("nested/visible", b"untracked");
+        assert_eq!(oracle(&f), (0, 0, 1, 0));
+        assert_eq!(parity(&f).untracked, count(1));
+    }
+}
+
+// Mutations: follow marker/shape symlinks, read the entire gitfile or its
+// target, omit pre-read charging, or accept a replaced marker. The probe must
+// use the held batch fd without listing again, independently of entry order.
+#[test]
+fn embedded_marker_probe_is_bounded_and_never_follows_links() {
+    let f = init();
+    let outside = init();
+    fs::create_dir(f.0.join("nested")).unwrap();
+    symlink(outside.0.join(".git"), f.0.join("nested/.git")).unwrap();
+    let probe = |expected, bytes| {
+        with_repo(&f, |repo, slot| {
+            let before = slot.borrow().counts;
+            assert_eq!(repo.io.worktree_embedded_repository(), Err(E::Denied));
+            assert_eq!(slot.borrow().counts, before);
+            repo.io
+                .with_worktree_stats(|| {
+                    let _batch = repo.io.worktree_listing(b"nested", true)?;
+                    let before = slot.borrow().counts[Phase::Content as usize];
+                    assert_eq!(repo.io.worktree_embedded_repository(), expected);
+                    let after = slot.borrow().counts[Phase::Content as usize];
+                    assert_eq!(after.list, before.list);
+                    assert_eq!(after.read_bytes - before.read_bytes, bytes);
+                    Ok(())
+                })
+                .unwrap();
+        });
+    };
+    probe(Ok(false), 0);
+    fs::remove_file(f.0.join("nested/.git")).unwrap();
+    git(&f, &["-C", "nested", "init", "-q"]);
+    fs::remove_dir_all(f.0.join("nested/.git/objects")).unwrap();
+    symlink(
+        outside.0.join(".git/objects"),
+        f.0.join("nested/.git/objects"),
+    )
+    .unwrap();
+    probe(Ok(false), 0);
+    fs::remove_dir_all(f.0.join("nested/.git")).unwrap();
+    let mut pointer = b"gitdir: ".to_vec();
+    pointer.resize(65_537, b'x');
+    f.write("nested/.git", pointer);
+    probe(Ok(true), 8);
+    with_repo(&f, |repo, slot| {
+        let result = repo.io.with_worktree_stats(|| {
+            let _batch = repo.io.worktree_listing(b"nested", true)?;
+            let remaining = Axis::RefBytes.limit() - slot.borrow().budget.used(Axis::RefBytes);
+            slot.borrow_mut()
+                .charge_axis(Axis::RefBytes, remaining - 7)?;
+            let before = slot.borrow().counts[Phase::Content as usize].read;
+            assert_eq!(repo.io.worktree_embedded_repository(), Err(E::Limit));
+            assert_eq!(slot.borrow().counts[Phase::Content as usize].read, before);
+            let stopped = slot.borrow().counts;
+            assert_eq!(repo.io.worktree_embedded_repository(), Err(E::Limit));
+            assert_eq!(slot.borrow().counts, stopped);
+            Err::<(), _>(E::Limit)
+        });
+        assert_eq!(result, Err(E::Limit));
+    });
+    with_repo(&f, |repo, slot| {
+        let result = repo.io.with_worktree_stats(|| {
+            let _batch = repo.io.worktree_listing(b"nested", true)?;
+            let path = f.0.join("nested/.git");
+            let mut replaced = false;
+            slot.borrow_mut().hook = Some(Box::new(move |event| {
+                if event == "before_read" && !replaced {
+                    replaced = true;
+                    fs::rename(&path, path.with_extension("old")).unwrap();
+                    fs::write(&path, b"junk").unwrap();
+                }
+            }));
+            repo.io.worktree_embedded_repository()
+        });
+        assert_eq!(result, Err(E::Changed));
+    });
+}
+
+// Mutation: apply macOS precomposition to a copied repo on Linux (or disable it
+// on macOS). This isolates the reviewer's NFD file / NFC ignore-pattern oracle.
+#[test]
+fn precompose_ignore_matches_git_on_each_os() {
+    let f = init();
+    git(&f, &["config", "core.precomposeunicode", "true"]);
+    f.write(".gitignore", "\u{d55c}.txt\n");
+    commit(&f);
+    f.write("\u{1112}\u{1161}\u{11ab}.txt", b"untracked on Linux");
+    let expected = u32::from(!cfg!(target_os = "macos"));
+    assert_eq!(oracle(&f), (0, 0, expected, 0));
+    assert_eq!(parity(&f).untracked, count(expected));
+}
+
+// Mutations: ignore the OS policy in directory/index/attribute matching;
+// normalize I/O paths; leave nested pattern source/base names unnormalized.
+#[test]
+fn precomposed_ignore_matching_preserves_raw_io_names() {
+    let f = init();
+    git(&f, &["config", "core.precomposeunicode", "true"]);
+    let nfc = "\u{d55c}";
+    let nfd = "\u{1112}\u{1161}\u{11ab}";
+    f.write(".gitignore", format!("{nfc}.txt\n{nfc}-ignored/\n"));
+    f.write(&format!("{nfc}/tracked"), b"base");
+    commit(&f);
+    fs::rename(f.0.join(nfc), f.0.join("temporary")).unwrap();
+    fs::rename(f.0.join("temporary"), f.0.join(nfd)).unwrap();
+    f.write(&format!("{nfd}.txt"), b"ignored");
+    f.write(&format!("{nfd}-ignored/file"), b"untracked on Linux");
+    f.write(&format!("{nfd}/.gitignore"), b"/local\n*.tmp\n");
+    f.write(&format!("{nfd}/local"), b"ignored");
+    f.write(&format!("{nfd}/new.tmp"), b"ignored");
+    f.write(&format!("{nfd}/visible"), b"visible");
+    let macos = cfg!(target_os = "macos");
+    assert_eq!(
+        oracle(&f),
+        (0, u32::from(!macos), if macos { 2 } else { 3 }, 0)
+    );
+    parity(&f);
+    with_repo(&f, |repo, slot| {
+        let got = stage_b::status(repo);
+        assert_eq!(
+            (got.staged, got.modified, got.untracked),
+            (
+                count(0),
+                count(u32::from(!macos)),
+                count(if macos { 2 } else { 3 })
+            )
+        );
+        assert_eq!(
+            slot.borrow().budget.used(Axis::Directories),
+            if macos { 2 } else { 3 }
+        );
+    });
+    f.write(&format!("{nfd}/.gitattributes"), b"tracked filter=canary\n");
+    f.write(&format!("{nfd}/tracked"), b"changed and longer");
+    let got = parity(&f);
+    assert_eq!((got.modified, got.untracked), (count(1), count(3)));
+    assert_eq!(got.filtered, macos);
+}
+
+// Mutations: retain/double a whole directory's stat vector; omit early exit
+// after proving an index-free directory nonempty. Neither cap is raised.
+#[test]
+fn large_directories_use_bounded_batches_and_collapse_early() {
+    let f = init();
+    for i in 0..17_000 {
+        f.write(&format!("data/f{i:05}"), b"x");
+    }
+    commit(&f);
+    std::thread::sleep(Duration::from_millis(1100));
+    git(&f, &["update-index", "--really-refresh"]);
+    git(&f, &["write-tree"]);
+    assert_eq!(parity(&f).untracked, count(0));
+    for i in 0..70_000 {
+        f.write(&format!("build/f{i:05}"), b"x");
+    }
+    assert_eq!(oracle(&f), (0, 0, 1, 0));
+    with_repo(&f, |repo, slot| {
+        let (got, allocated) = allocation::measure(|| stage_b::status(repo));
+        assert_eq!(
+            (got.staged, got.modified, got.untracked, got.conflicted),
+            (count(0), count(0), count(1), count(0))
+        );
+        assert_eq!(slot.borrow().budget.used(Axis::Directories), 3);
+        assert!(slot.borrow().budget.used(Axis::WorktreeEntries) < 18_000);
+        assert!(allocated.peak < 8_388_608, "{allocated:?}");
+    });
+}
+
+// Mutations: charge each leaf permanently at 3x, release before the returned
+// index dies, keep allocation-heavy stable sorting, or lose valid sparse TREE
+// counts and traverse the same 30,000 leaves again in staged comparison.
+#[test]
+fn sparse_30000_leaves_keep_live_reservations_and_return_values() {
+    let f = init();
+    f.write("keep/a", b"visible");
+    for d in 0..300 {
+        for i in 0..100 {
+            f.write(&format!("omit/d{d:03}/f{i:03}"), b"x");
+        }
+    }
+    commit(&f);
+    git(&f, &["sparse-checkout", "init", "--cone", "--sparse-index"]);
+    git(&f, &["sparse-checkout", "set", "keep"]);
+    with_repo(&f, |repo, slot| {
+        let ((idx, before), allocated) = allocation::measure(|| {
+            let idx = index::load(&repo.io).unwrap();
+            let before = slot.borrow().live_allocated();
+            (index::expand_sparse(repo, idx).unwrap(), before)
+        });
+        assert_eq!(idx.entries().len(), 30_001);
+        assert!(idx.entries().iter().all(|e| !e.mode.is_sparse()));
+        let retained = slot.borrow().live_allocated() - before;
+        assert!(retained > 3_000_000);
+        // Real Vec capacity, not a per-leaf multiplier. The small original
+        // decoded index is covered by its existing parser reservation.
+        assert!(
+            retained.abs_diff(allocated.live as u64) < 16_384,
+            "{retained}/{allocated:?}"
+        );
+        assert!(allocated.peak < 8_388_608, "{allocated:?}");
+        eprintln!(
+            "D1B_SPARSE leaves=30000 retained={retained} actual_live={} actual_peak={}",
+            allocated.live, allocated.peak
+        );
+        drop(idx);
+        assert_eq!(slot.borrow().live_allocated(), before);
+    });
+    assert_eq!(parity(&f).untracked, count(0));
+    // A changed visible path still gets staged/modified comparison after the
+    // sparse cache's counts are adjusted.
+    f.write("keep/a", b"longer");
+    assert_eq!(parity(&f).modified, count(1));
+    git(&f, &["add", "keep/a"]);
+    let got = parity(&f);
+    assert_eq!((got.staged, got.modified), (count(1), count(0)));
+}
+
+fn corpus() -> Fixture {
+    let f = init();
+    f.write(".gitignore", b"node_modules/\n");
+    for dir in 0..190 {
+        for leaf in 0..if dir == 0 { 99 } else { 100 } {
+            f.write(&format!("d{dir:03}/f{leaf:03}"), b"unchanged\n");
+        }
+    }
+    commit(&f);
+    // Separate index timestamp on filesystems with second-resolution clocks.
+    std::thread::sleep(Duration::from_millis(1100));
+    git(&f, &["update-index", "--really-refresh"]);
+    git(&f, &["write-tree"]);
+    for i in 0..1000 {
+        f.write(&format!("u{i:04}"), b"untracked");
+    }
+    for i in 0..50_000 {
+        f.write(&format!("node_modules/f{i:05}"), b"ignored");
+    }
+    f
+}
+
+// Mutations: list twice; walk ignored directory; sum live per-directory scratch;
+// bypass raw charging. The large ignored subtree must not enter the counters.
+#[test]
+fn shared_scan_19000_tracked_1000_untracked_prunes_50000_ignored() {
+    let f = corpus();
+    assert_eq!(oracle(&f), (0, 0, 1000, 0));
+    let mut previous = None;
+    for _ in 0..2 {
+        with_repo(&f, |repo, slot| {
+            let before = slot.borrow().operations();
+            let (got, allocations) = allocation::measure(|| stage_b::status(repo));
+            assert_eq!(
+                (got.staged, got.modified, got.untracked, got.conflicted),
+                (count(0), count(0), count(1000), count(0))
+            );
+            let m = slot.borrow();
+            assert_eq!(m.budget.used(Axis::Directories), 191);
+            let expected_raw = 20_192
+                + if cfg!(target_os = "linux") {
+                    2 * 191
+                } else {
+                    0
+                };
+            assert_eq!(m.budget.used(Axis::WorktreeEntries), expected_raw);
+            assert_eq!(m.budget.used(Axis::WorktreeReadBytes), 0);
+            assert!(m.live_allocated() < 5_000_000);
+            let costs = (
+                m.operations() - before,
+                m.counts[Phase::Content as usize].list,
+                m.budget.used(Axis::WorktreeEntries),
+                m.budget.used(Axis::Directories),
+            );
+            if let Some(previous) = previous {
+                assert_eq!(costs, previous);
+            }
+            previous = Some(costs);
+            eprintln!(
+                "D1B_DETERMINISTIC ops={} list_calls={} entries={} directories={} live={} allocation_peak={} peak_fds={} process_peak_rss_bytes={}",
+                costs.0,
+                costs.1,
+                costs.2,
+                costs.3,
+                m.live_allocated(),
+                allocations.peak,
+                m.peak_fds,
+                process_peak_rss_bytes()
+            );
+        });
+    }
+}
+
+// Thousands of directories with ONE meter: request totals must not retain
+// temporary listing, path-key or pattern source allocations after each item.
+#[test]
+fn untracked_scratch_is_live_across_thousands_of_directories() {
+    let f = init();
+    for i in 0..3000 {
+        f.write(&format!("d{i:04}/file"), b"x");
+    }
+    with_repo(&f, |repo, slot| {
+        let idx = index::load(&repo.io).unwrap();
+        let before = slot.borrow().live_allocated();
+        assert_eq!(git::untracked::untracked_status(repo, &idx), count(3000));
+        assert_eq!(slot.borrow().live_allocated(), before);
+        assert_eq!(slot.borrow().budget.used(Axis::Directories), 3001);
+    });
+}
+
+// Whole test-process high-water RSS, including fixture construction; not a
+// claim about the product worker's separately supervised footprint.
+fn process_peak_rss_bytes() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage receives a valid writable output record.
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    assert_eq!(result, 0);
+    // SAFETY: the successful getrusage call initialized the whole record.
+    let usage = unsafe { usage.assume_init() };
+    usage.ru_maxrss as u64 * if cfg!(target_os = "macos") { 1 } else { 1024 }
+}
+
+fn load_average() -> [f64; 3] {
+    let mut load = [0.; 3];
+    // SAFETY: getloadavg writes at most three doubles to this live array.
+    assert_eq!(unsafe { libc::getloadavg(load.as_mut_ptr(), 3) }, 3);
+    load
+}
+fn report(name: &str, times: &mut [u128], cold: u128) {
+    let mean = times.iter().sum::<u128>() as f64 / times.len() as f64;
+    let variance = times
+        .iter()
+        .map(|n| (*n as f64 - mean).powi(2))
+        .sum::<f64>()
+        / times.len() as f64;
+    times.sort_unstable();
+    eprintln!(
+        "D1B_OBSERVE case={name} rounds={} first_ns={cold} p50_ns={} p95_ns={} variance_ns2={variance}",
+        times.len(),
+        times[times.len() / 2],
+        times[times.len() * 95 / 100]
+    );
+}
+
+#[test]
+#[ignore = "release observations: load < 4, 200 alternating warm samples"]
+fn stage_b_release_observations() {
+    let load = load_average();
+    eprintln!("D1B_LOAD {load:?}");
+    if load.iter().any(|n| *n >= 4.) {
+        eprintln!("BLOCKED: wall-clock observations require load < 4");
+        return;
+    }
+    assert!(
+        std::hint::black_box(!cfg!(debug_assertions)),
+        "release build required"
+    );
+    let mut fixtures = vec![("19000+1000+50000", corpus()), ("sparse", sparse_fixture())];
+    let gitfile_target = init();
+    for name in [
+        "empty-gitdir",
+        "junk-gitfile",
+        "valid-gitdir",
+        "valid-gitfile",
+    ] {
+        let f = init();
+        f.write("base", b"base");
+        commit(&f);
+        fs::create_dir(f.0.join("nested")).unwrap();
+        match name {
+            "empty-gitdir" => fs::create_dir(f.0.join("nested/.git")).unwrap(),
+            "junk-gitfile" => f.write("nested/.git", b"junk"),
+            "valid-gitdir" => {
+                git(&f, &["-C", "nested", "init", "-q"]);
+            }
+            _ => f.write(
+                "nested/.git",
+                format!("gitdir: {}\n", gitfile_target.0.join(".git").display()),
+            ),
+        }
+        parity(&f);
+        fixtures.push((name, f));
+    }
+    for (name, f) in fixtures {
+        let mut times = [Vec::new(), Vec::new()];
+        let mut cold = [0; 2];
+        for run in 0..201 {
+            if load_average().iter().any(|n| *n >= 4.) {
+                eprintln!("BLOCKED: {name} run={run} load crossed threshold");
+                return;
+            }
+            for kind in if run % 2 == 0 { [0, 1] } else { [1, 0] } {
+                with_repo(&f, |repo, _| {
+                    let start = Instant::now();
+                    let got = if kind == 0 {
+                        stage_b::status(repo)
+                    } else {
+                        git::status_tracked::load_status(repo)
+                    };
+                    let elapsed = start.elapsed().as_nanos();
+                    if kind == 0 {
+                        assert_ne!(got.untracked, Field::PENDING);
+                    }
+                    if run == 0 {
+                        cold[kind] = elapsed;
+                    } else {
+                        times[kind].push(elapsed);
+                    }
+                });
+            }
+        }
+        if load_average().iter().any(|n| *n >= 4.) {
+            eprintln!("BLOCKED: final load crossed threshold");
+            return;
+        }
+        report(name, &mut times[0], cold[0]);
+        report(&format!("{name}-d1a-baseline"), &mut times[1], cold[1]);
+    }
+}

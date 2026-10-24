@@ -52,11 +52,17 @@ pub struct NamePolicy {
     pub precompose_unicode: bool,
 }
 impl NamePolicy {
+    /// Git only compensates for decomposed filesystem names on macOS. A
+    /// copied repository's config must not change Linux byte comparisons.
+    pub(crate) fn precompose(self) -> bool {
+        cfg!(target_os = "macos") && self.precompose_unicode
+    }
+
     /// A comparison key only. Never pass it to RepoIo. Non-UTF-8 names remain
     /// raw bytes; Git's ignoreCase folds ASCII, not Unicode case mappings.
     pub(crate) fn key(self, raw: &[u8]) -> Cow<'_, [u8]> {
         let mut key = Cow::Borrowed(raw);
-        if self.precompose_unicode
+        if self.precompose()
             && !raw.is_ascii()
             && let Ok(text) = std::str::from_utf8(raw)
             && let Cow::Owned(text) = gix_utils::str::precompose(Cow::Borrowed(text))
@@ -150,7 +156,8 @@ impl Policies {
             },
             names: NamePolicy {
                 ignore_case: boolean(value("core.ignorecase"), false)?,
-                precompose_unicode: boolean(value("core.precomposeunicode"), false)?,
+                precompose_unicode: cfg!(target_os = "macos")
+                    && boolean(value("core.precomposeunicode"), false)?,
             },
             conversion: if autocrlf || eol {
                 ConversionPolicy::MetadataApproximation
@@ -202,6 +209,7 @@ pub struct Patterns {
     words: usize,
     retained_bytes: usize,
     failure: Option<ReadError>,
+    allocation: Option<crate::meter::PathAllocation>,
 }
 impl Patterns {
     pub fn add(
@@ -210,10 +218,20 @@ impl Patterns {
         path: RepoPath,
         kind: PatternKind,
     ) -> Result<(), ReadError> {
+        self.add_with_names(io, path, kind, NamePolicy::default())
+    }
+
+    pub(crate) fn add_with_names(
+        &mut self,
+        io: &RepoIo<'_>,
+        path: RepoPath,
+        kind: PatternKind,
+        names: NamePolicy,
+    ) -> Result<(), ReadError> {
         if let Some(error) = self.failure {
             return Err(error);
         }
-        let result = self.add_inner(io, path, kind);
+        let result = self.add_inner(io, path, kind, names);
         if let Err(error) = result {
             self.failure = Some(error);
         }
@@ -225,6 +243,7 @@ impl Patterns {
         io: &RepoIo<'_>,
         path: RepoPath,
         kind: PatternKind,
+        names: NamePolicy,
     ) -> Result<(), ReadError> {
         let (files, bytes_axis, patterns) = match kind {
             PatternKind::Ignore => (Axis::IgnoreFiles, Axis::IgnoreBytes, Axis::IgnorePatterns),
@@ -236,16 +255,22 @@ impl Patterns {
         };
         // Resolve missing candidates without counting them as read files.
         // Successful files reserve both axes before the first byte read.
-        io.metered(|m| {
+        let _source = io.account(|m| {
             if path.relative.len() > 65_536 {
                 return Err(ReadError::Limit);
             }
-            m.allocation(path.relative.len())
+            let mut scratch = m.path_allocation();
+            scratch.reserve(path.relative.len() * 34, m)?;
+            Ok(scratch)
         })?;
-        let source = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path.relative));
+        // Normalize only the matcher source/base; open the observed raw path.
+        let key = names.key(&path.relative);
+        let source = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&key));
+        let worktree = path.root == super::RootId::Worktree;
         let bytes = match io.read_patterns(path, files, bytes_axis) {
             Ok(bytes) => bytes,
             Err(ReadError::Missing) => return Ok(()),
+            Err(ReadError::Symlink) if worktree => return Ok(()),
             Err(error) => return Err(error),
         };
         io.metered(|m| self.add_buffer(&bytes, source, kind, patterns, m))
@@ -276,7 +301,9 @@ impl Patterns {
             .checked_add(source.as_os_str().len())
             .ok_or(ReadError::Limit)?;
         let reserve = parser_reservation(input_bytes, words)?;
-        meter.allocation(reserve)?;
+        self.allocation
+            .get_or_insert_with(|| meter.path_allocation())
+            .reserve(reserve, meter)?;
         meter.event("before_pattern_parse");
         if matches!(kind, PatternKind::Attributes) {
             // The lower parser is deliberately lenient; do not silently drop
@@ -310,10 +337,11 @@ impl Patterns {
                 .checked_add(input_bytes)
                 .ok_or(ReadError::Limit)?;
         } else {
+            let info = source == Path::new("info/exclude");
             self.ignore.add_patterns_buffer(
                 bytes,
                 source,
-                Some(Path::new("")),
+                if info { None } else { Some(Path::new("")) },
                 gix_ignore::search::Ignore {
                     support_precious: false,
                 },
@@ -334,9 +362,18 @@ impl Patterns {
         }
         io.metered(|m| {
             m.check()?;
+            let mut scratch = m.path_allocation();
+            if names.precompose() && !relative.is_ascii() {
+                scratch.reserve(relative.len() * 33, m)?;
+            }
+            let name = NamePolicy {
+                ignore_case: false,
+                ..names
+            }
+            .key(relative);
             Ok(self
                 .ignore
-                .pattern_matching_relative_path(relative.as_bstr(), Some(is_dir), names.case())
+                .pattern_matching_relative_path(name.as_bstr(), Some(is_dir), names.case())
                 .is_some_and(|found| !found.pattern.is_negative()))
         })
     }
@@ -368,19 +405,28 @@ impl Patterns {
                 )?,
                 m,
             )?;
+            let mut normalization = m.path_allocation();
+            if policies.names.precompose() && !relative.is_ascii() {
+                normalization.reserve(relative.len() * 33, m)?;
+            }
+            let name = NamePolicy {
+                ignore_case: false,
+                ..policies.names
+            }
+            .key(relative);
             let mut out = gix_attributes::search::Outcome::default();
             out.initialize_with_selection(
                 &self.metadata,
                 ["filter", "text", "eol", "ident", "working-tree-encoding"],
             );
             self.info_attributes.pattern_matching_relative_path(
-                relative.as_bstr(),
+                name.as_bstr(),
                 policies.names.case(),
                 Some(false),
                 &mut out,
             );
             self.attributes.pattern_matching_relative_path(
-                relative.as_bstr(),
+                name.as_bstr(),
                 policies.names.case(),
                 Some(false),
                 &mut out,

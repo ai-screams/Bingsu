@@ -27,6 +27,8 @@ pub struct StatusCounts {
     pub modified: Field,
     pub untracked: Field,
     pub conflicted: Field,
+    /// Provisional until modified comparison completes; Stage B also requires
+    /// a complete shared walk before publishing this as a known Bool.
     pub filtered: bool,
 }
 impl Default for StatusCounts {
@@ -61,6 +63,21 @@ pub fn load_status(repo: &GuardedRepository<'_>) -> StatusCounts {
 /// Preflight/ownership and the B deadline are the caller's responsibility.
 /// Exact independent counts survive later failure; untracked belongs to D1b.
 pub fn tracked_status(repo: &GuardedRepository<'_>, index: &State) -> StatusCounts {
+    let (mut result, policies) = index_counts(repo, index);
+    if let Some(policies) = policies
+        && let Ok(n) = modified(&repo.io, index, policies, &mut result.filtered)
+    {
+        result.modified = count(n);
+    }
+    result
+}
+
+/// D1b supplies modified and untracked from one shared worktree scan.
+pub(crate) fn index_status(repo: &GuardedRepository<'_>, index: &State) -> StatusCounts {
+    index_counts(repo, index).0
+}
+
+fn index_counts(repo: &GuardedRepository<'_>, index: &State) -> (StatusCounts, Option<Policies>) {
     let mut result = StatusCounts::default();
     let io = &repo.io;
     if io
@@ -74,7 +91,7 @@ pub fn tracked_status(repo: &GuardedRepository<'_>, index: &State) -> StatusCoun
         })
         .is_err()
     {
-        return result;
+        return (result, None);
     }
     let mut conflicts = 0;
     let mut previous = None;
@@ -87,21 +104,18 @@ pub fn tracked_status(repo: &GuardedRepository<'_>, index: &State) -> StatusCoun
     result.conflicted = count(conflicts);
     // Never treat a sparse directory's tree OID as a tracked file.
     if index.entries().iter().any(|e| e.mode.is_sparse()) {
-        return result;
+        return (result, None);
     }
     let policies = match Policies::from_config(&repo.config) {
         Ok(p) => p,
-        Err(_) => return result,
+        Err(_) => return (result, None),
     };
     match staged(repo, index) {
         Ok(n) => result.staged = count(n),
-        Err(ReadError::Limit | ReadError::Deadline) => return result,
+        Err(ReadError::Limit | ReadError::Deadline) => return (result, None),
         Err(_) => {}
     }
-    if let Ok(n) = modified(io, index, policies, &mut result.filtered) {
-        result.modified = count(n);
-    }
-    result
+    (result, Some(policies))
 }
 
 struct TreeEntry {
@@ -481,7 +495,7 @@ fn unique_names(io: &RepoIo<'_>, index: &State, policies: Policies) -> Result<()
     let names = policies.names;
     let changes = |p: &[u8]| {
         (names.ignore_case && p.iter().any(u8::is_ascii_uppercase))
-            || (names.precompose_unicode && !p.is_ascii())
+            || (names.precompose() && !p.is_ascii())
     };
     if !index
         .entries()
