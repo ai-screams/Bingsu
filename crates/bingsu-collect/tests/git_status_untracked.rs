@@ -199,7 +199,7 @@ fn oracle(f: &Fixture) -> (u32, u32, u32, u32) {
             "status",
             "--porcelain=v2",
             "--ignore-submodules=all",
-            "--untracked-files=normal",
+            "--untracked-files=all",
             "-z",
         ],
     );
@@ -234,7 +234,7 @@ fn parity(f: &Fixture) -> StatusCounts {
 }
 
 // Mutations: omit buffered patterns; wrong info/exclude base/priority; count
-// leaves instead of normal directory collapse; apply an outside config source.
+// collapse directories or stop at their first leaf; apply an outside config source.
 #[test]
 fn untracked_walker_honors_buffered_ignore_and_attributes() {
     let f = init();
@@ -258,7 +258,7 @@ fn untracked_walker_honors_buffered_ignore_and_attributes() {
     f.write("new/deep/b", b"two");
     fs::create_dir(f.0.join("empty")).unwrap();
     let got = parity(&f);
-    assert_eq!(got.untracked, count(4));
+    assert_eq!(got.untracked, count(5));
     assert!(got.filtered);
     let outside = Fixture::new();
     outside.write("ignore", b"*\n");
@@ -282,6 +282,322 @@ fn untracked_walker_honors_buffered_ignore_and_attributes() {
     // Git's external-config policy differs deliberately; compare to baseline.
     assert_eq!(status(&f), got);
     assert!(!outside.0.join("canary").exists());
+}
+
+// Mutations: restore either directory collapse or the first-visible-entry
+// return. Multiple batches, descendants and empty dirs all use Git's -uall.
+#[test]
+fn untracked_directories_count_every_file_like_git_uall() {
+    let f = init();
+    f.write("new/a", b"one");
+    f.write("new/b", b"two");
+    assert_eq!(parity(&f).untracked, count(2));
+    for i in 0..253 {
+        f.write(&format!("new/deep/f{i:04}"), b"x");
+    }
+    fs::create_dir(f.0.join("empty")).unwrap();
+    fs::create_dir(f.0.join("new/empty")).unwrap();
+    assert_eq!(parity(&f).untracked, count(255));
+}
+
+fn lower_bound(n: u32) -> Field {
+    Field::known(FieldValue::Count { n, saturated: true })
+}
+
+// Mutations: remove/shift the 256-file cap, publish exact partial counts, or
+// discard modified when only an index-free subtree was truncated. At exactly
+// the cap, EOF is still unproven, so conservatively keep the plus marker.
+#[test]
+fn untracked_subtree_cap_boundary() {
+    let f = init();
+    for i in 0..257 {
+        f.write(&format!("new/f{i:04}"), b"x");
+        if i >= 254 {
+            assert_eq!(oracle(&f), (0, 0, i + 1, 0));
+            let got = status(&f);
+            assert_eq!(
+                got.untracked,
+                if i == 254 {
+                    count(255)
+                } else {
+                    lower_bound(256)
+                }
+            );
+            assert_eq!(
+                (got.staged, got.modified, got.conflicted),
+                (count(0), count(0), count(0))
+            );
+        }
+    }
+}
+
+// Mutations: renew the allowance at each nested directory, cap the repository
+// globally, or apply the cap to a directory that contains index entries.
+// Assertions are independent of directory enumeration order on either OS.
+#[test]
+fn nested_untracked_subtrees_share_caps_but_tracked_containers_do_not() {
+    let f = init();
+    for name in ["tracked/a", "tracked/z"] {
+        f.write(name, b"base");
+    }
+    commit(&f);
+    for i in 0..1000 {
+        f.write(&format!("tracked/f{i:04}"), b"x");
+    }
+    assert_eq!(parity(&f).untracked, count(1000));
+    for dir in ["one", "two"] {
+        for i in 0..200 {
+            f.write(&format!("{dir}/f{i:04}"), b"x");
+        }
+    }
+    assert_eq!(parity(&f).untracked, count(1400));
+    for dir in ["tracked/new/left", "tracked/new/right"] {
+        for i in 0..200 {
+            f.write(&format!("{dir}/f{i:04}"), b"x");
+        }
+    }
+    f.write("tracked/a", b"staged change");
+    git(&f, &["add", "tracked/a"]);
+    f.write("tracked/z", b"worktree change");
+    assert_eq!(oracle(&f), (1, 1, 1800, 0));
+    let got = status(&f);
+    assert_eq!(
+        (got.staged, got.modified, got.untracked, got.conflicted),
+        (count(1), count(1), lower_bound(1656), count(0))
+    );
+}
+
+// Mutations: share one request-wide cap, stop the whole walk at the first cap,
+// or keep scanning a capped directory after reaching its allowance.
+#[test]
+fn three_large_untracked_directories_have_independent_caps() {
+    let f = init();
+    f.write("tracked/file", b"base");
+    commit(&f);
+    f.write("tracked/file", b"modified");
+    f.write("added", b"staged");
+    git(&f, &["add", "added"]);
+    for dir in ["one", "two", "tracked/new"] {
+        for i in 0..20_000 {
+            f.write(&format!("{dir}/f{i:05}"), b"x");
+        }
+    }
+    assert_eq!(oracle(&f), (1, 1, 60_000, 0));
+    with_repo(&f, |repo, slot| {
+        let got = stage_b::status(repo, &[]);
+        assert_eq!(
+            (got.staged, got.modified, got.untracked, got.conflicted),
+            (count(1), count(1), lower_bound(768), count(0))
+        );
+        let m = slot.borrow();
+        assert_eq!(m.budget.used(Axis::Directories), 5);
+        assert!(m.budget.used(Axis::WorktreeEntries) < 2000);
+        eprintln!(
+            "UNTRACKED_THREE dirs={} raw={} ops={} lists={}",
+            m.budget.used(Axis::Directories),
+            m.budget.used(Axis::WorktreeEntries),
+            m.operations(),
+            m.counts[Phase::Content as usize].list
+        );
+    });
+}
+
+// Mutations: skip held-edge validation after a local cap; turn an unknown
+// global excludes input into a numeric lower bound; publish a complete B;
+// let a local untracked cap make a completed modified comparison approximate.
+#[test]
+fn capped_subtrees_revalidate_edges_and_preserve_unknown() {
+    use bingsu_core::collection::git::StageResult;
+    let f = init();
+    for i in 0..2000 {
+        f.write(&format!("new/f{i:04}"), b"x");
+    }
+    assert_eq!(oracle(&f), (0, 0, 2000, 0));
+    for kind in 0..3 {
+        with_repo(&f, |repo, slot| {
+            if kind == 2 {
+                let path = f.0.clone();
+                let mut changed = false;
+                slot.borrow_mut().hook = Some(Box::new(move |event| {
+                    if event == "before_worktree_directory_check" && !changed {
+                        changed = true;
+                        fs::rename(path.join("new"), path.join("moved")).unwrap();
+                        fs::create_dir(path.join("new")).unwrap();
+                    }
+                }));
+            }
+            let StageResult::Partial(value) = stage_b::stage_b(repo, &[], kind != 1) else {
+                panic!("cap/unknown/changed walk must be Partial");
+            };
+            let decl = &bingsu_core::field::BUILTIN[3];
+            let field = |name| value.fields[decl.field_index(name).unwrap()].clone();
+            assert_eq!(
+                field("untracked"),
+                if kind == 0 {
+                    lower_bound(256)
+                } else {
+                    Field::PENDING
+                }
+            );
+            assert_eq!(
+                field("modified"),
+                if kind == 2 { Field::PENDING } else { count(0) }
+            );
+            assert_eq!(
+                field("filtered"),
+                if kind == 0 {
+                    Field::known(FieldValue::Bool(false))
+                } else {
+                    Field::PENDING
+                }
+            );
+            assert_eq!(field("partial"), Field::known(FieldValue::Bool(true)));
+            assert_eq!(field("staged"), count(0));
+            assert_eq!(field("conflicted"), count(0));
+        });
+    }
+}
+
+// Mutations: tie filtered to untracked saturation again, publish filtered=true
+// on a clean tracked tree, or clear partial merely because modified completed.
+// Exercise the core formatter with the actual collector fields, including N+.
+#[test]
+fn capped_untracked_clean_tree_renders_without_approximate_modified() {
+    use bingsu_core::{
+        collection::git::StageResult, icons::IconSet, shell_values::format_git, width::WidthProfile,
+    };
+    let f = init();
+    f.write("tracked", b"base");
+    commit(&f);
+    for i in 0..300 {
+        f.write(&format!("new/f{i:04}"), b"x");
+    }
+    assert_eq!(oracle(&f), (0, 0, 300, 0));
+    with_repo(&f, |repo, _| {
+        let StageResult::Partial(mut value) = stage_b::stage_b(repo, &[], true) else {
+            panic!("capped untracked count must remain Partial");
+        };
+        let decl = &bingsu_core::field::BUILTIN[3];
+        // Isolate B's display from fields owned by A/C/D; keep all B fields.
+        for name in ["branch", "operation", "ahead", "behind", "stash"] {
+            value.fields[decl.field_index(name).unwrap()] = Field::ABSENT;
+        }
+        assert_eq!(
+            format_git(&value, IconSet::Ascii, WidthProfile::DEFAULT).text(),
+            "?256+"
+        );
+        assert_eq!(
+            value.fields[decl.field_index("partial").unwrap()],
+            Field::known(FieldValue::Bool(true))
+        );
+    });
+}
+
+// Mutations: publish an unvalidated saturated count, finalize through the
+// stopped port (losing every lower bound), resume listing after Limit, or
+// expose modified/filtered as exact after an incomplete shared walk.
+#[test]
+fn saturated_untracked_revalidates_edges_and_preserves_unknown() {
+    use bingsu_core::collection::git::StageResult;
+    let f = init();
+    // Keep this directory index-bearing so the global raw budget, rather
+    // than the local untracked subtree cap, interrupts the shared scan.
+    f.write("new/tracked", b"base");
+    commit(&f);
+    for i in 0..2000 {
+        f.write(&format!("new/f{i:04}"), b"x");
+    }
+    assert_eq!(oracle(&f), (0, 0, 2000, 0));
+    for kind in 0..3 {
+        with_repo(&f, |repo, slot| {
+            slot.borrow_mut()
+                .charge_axis(Axis::WorktreeEntries, Axis::WorktreeEntries.limit() - 1000)
+                .unwrap();
+            if kind == 2 {
+                let path = f.0.clone();
+                let mut changed = false;
+                slot.borrow_mut().hook = Some(Box::new(move |event| {
+                    if event == "before_worktree_directory_check" && !changed {
+                        changed = true;
+                        fs::rename(path.join("new"), path.join("moved")).unwrap();
+                        fs::create_dir(path.join("new")).unwrap();
+                    }
+                }));
+            }
+            let StageResult::Partial(value) = stage_b::stage_b(repo, &[], kind != 1) else {
+                panic!("budget/unknown/changed walk must be Partial");
+            };
+            let decl = &bingsu_core::field::BUILTIN[3];
+            let untracked = &value.fields[decl.field_index("untracked").unwrap()];
+            if kind == 0 {
+                assert!(matches!(
+                    untracked.value,
+                    FieldValue::Count {
+                        n: 1..=1000,
+                        saturated: true
+                    }
+                ));
+            } else {
+                assert_eq!(*untracked, Field::PENDING);
+            }
+            for name in ["modified", "filtered"] {
+                assert_eq!(
+                    value.fields[decl.field_index(name).unwrap()],
+                    Field::PENDING
+                );
+            }
+            for name in ["staged", "conflicted"] {
+                assert_eq!(value.fields[decl.field_index(name).unwrap()], count(0));
+            }
+            let stopped = slot.borrow().counts;
+            assert_eq!(
+                repo.io.worktree_listing(b"new", false).err(),
+                Some(E::Limit)
+            );
+            assert_eq!(slot.borrow().counts, stopped);
+        });
+    }
+}
+
+// Mutation: skip final edge checks, reset the stop latch or perform content I/O
+// during cleanup. Finalization may spend only the remaining metadata budget.
+#[test]
+fn limit_cleanup_only_revalidates_with_the_existing_meter() {
+    let f = init();
+    f.write("new/file", b"x");
+    for exhaust_stats in [false, true] {
+        with_repo(&f, |repo, slot| {
+            let mut stopped = None;
+            let result = repo.io.with_worktree_stats(|| {
+                let _batch = repo.io.worktree_listing(b"new", true)?;
+                repo.io.account(|m| {
+                    m.charge_axis(
+                        Axis::WorktreeEntries,
+                        Axis::WorktreeEntries.limit() - m.budget.used(Axis::WorktreeEntries),
+                    )?;
+                    if exhaust_stats {
+                        m.charge_axis(
+                            Axis::Stats,
+                            Axis::Stats.limit() - m.budget.used(Axis::Stats),
+                        )?;
+                    }
+                    Ok(())
+                })?;
+                assert_eq!(repo.io.account(|m| m.raw_entry()), Err(E::Limit));
+                stopped = Some(slot.borrow().counts[Phase::Content as usize]);
+                Ok(())
+            });
+            assert_eq!(result, if exhaust_stats { Err(E::Limit) } else { Ok(()) });
+            let before = stopped.unwrap();
+            let after = slot.borrow().counts[Phase::Content as usize];
+            assert_eq!(
+                (after.open, after.list, after.read, after.read_bytes),
+                (before.open, before.list, before.read, before.read_bytes)
+            );
+            assert_eq!(after.stat - before.stat, u64::from(!exhaust_stats));
+            assert_eq!(repo.io.worktree_metadata(b"new/file").err(), Some(E::Limit));
+        });
+    }
 }
 
 // Mutation: recurse through a gitlink even if it contains visible entries or
@@ -438,7 +754,17 @@ fn untracked_limits_are_charged_before_io() {
                 if remaining >= needed {
                     assert_eq!(got, count(3), "{axis:?}/{remaining}");
                 } else {
-                    assert_eq!(got, Field::PENDING, "{axis:?}/{remaining}");
+                    assert!(
+                        got == Field::PENDING
+                            || matches!(
+                                got.value,
+                                FieldValue::Count {
+                                    n: 1..=3,
+                                    saturated: true
+                                }
+                            ),
+                        "{axis:?}/{remaining}: {got:?}"
+                    );
                     let before = slot.borrow().counts;
                     assert_eq!(repo.io.worktree_metadata(b"dir/file").err(), Some(E::Limit));
                     assert_eq!(slot.borrow().counts, before, "I/O after {axis:?}");
@@ -812,9 +1138,11 @@ fn precomposed_ignore_matching_preserves_raw_io_names() {
     f.write(&format!("{nfd}/new.tmp"), b"ignored");
     f.write(&format!("{nfd}/visible"), b"visible");
     let macos = cfg!(target_os = "macos");
+    // Linux keeps NFC/NFD distinct: the renamed tracked file is deleted and
+    // five files are untracked. This is a file count, not a directory count.
     assert_eq!(
         oracle(&f),
-        (0, u32::from(!macos), if macos { 2 } else { 3 }, 0)
+        (0, u32::from(!macos), if macos { 2 } else { 5 }, 0)
     );
     parity(&f);
     with_repo(&f, |repo, slot| {
@@ -824,9 +1152,11 @@ fn precomposed_ignore_matching_preserves_raw_io_names() {
             (
                 count(0),
                 count(u32::from(!macos)),
-                count(if macos { 2 } else { 3 })
+                count(if macos { 2 } else { 5 })
             )
         );
+        // Linux visits root, the NFD directory and its ignored-name sibling;
+        // macOS prunes that sibling after precomposed ignore matching.
         assert_eq!(
             slot.borrow().budget.used(Axis::Directories),
             if macos { 2 } else { 3 }
@@ -835,14 +1165,23 @@ fn precomposed_ignore_matching_preserves_raw_io_names() {
     f.write(&format!("{nfd}/.gitattributes"), b"tracked filter=canary\n");
     f.write(&format!("{nfd}/tracked"), b"changed and longer");
     let got = parity(&f);
-    assert_eq!((got.modified, got.untracked), (count(1), count(3)));
+    // The new policy file adds one untracked file on either OS.
+    assert_eq!(
+        (got.modified, got.untracked),
+        if macos {
+            (count(1), count(3))
+        } else {
+            (count(1), count(6))
+        }
+    );
     assert_eq!(got.filtered, macos);
 }
 
-// Mutations: retain/double a whole directory's stat vector; omit early exit
-// after proving an index-free directory nonempty. Neither cap is raised.
+// Mutations: retain/double a whole directory's stat vector; collapse build/;
+// report an exact partial count or discard the verified lower bound at a cap.
+// A local cap must leave the tracked scan complete, in any directory order.
 #[test]
-fn large_directories_use_bounded_batches_and_collapse_early() {
+fn large_directories_use_bounded_batches_and_saturate() {
     let f = init();
     for i in 0..17_000 {
         f.write(&format!("data/f{i:05}"), b"x");
@@ -855,15 +1194,28 @@ fn large_directories_use_bounded_batches_and_collapse_early() {
     for i in 0..70_000 {
         f.write(&format!("build/f{i:05}"), b"x");
     }
-    assert_eq!(oracle(&f), (0, 0, 1, 0));
+    assert_eq!(oracle(&f), (0, 0, 70_000, 0));
     with_repo(&f, |repo, slot| {
         let (got, allocated) = allocation::measure(|| stage_b::status(repo, &[]));
         assert_eq!(
-            (got.staged, got.modified, got.untracked, got.conflicted),
-            (count(0), count(0), count(1), count(0))
+            (got.staged, got.modified, got.conflicted),
+            (count(0), count(0), count(0))
         );
-        assert_eq!(slot.borrow().budget.used(Axis::Directories), 3);
-        assert!(slot.borrow().budget.used(Axis::WorktreeEntries) < 18_000);
+        assert_eq!(got.untracked, lower_bound(256));
+        let m = slot.borrow();
+        assert_eq!(m.budget.used(Axis::Directories), 3);
+        // Darwin charges an entire kernel batch before exposing any records;
+        // Linux charges raw entries individually. Neither may exceed the cap.
+        assert!((17_256..18_000).contains(&m.budget.used(Axis::WorktreeEntries)));
+        eprintln!(
+            "UNTRACKED_LARGE dirs={} raw={} ops={} lists={} count={:?} allocation_peak={}",
+            m.budget.used(Axis::Directories),
+            m.budget.used(Axis::WorktreeEntries),
+            m.operations(),
+            m.counts[Phase::Content as usize].list,
+            got.untracked,
+            allocated.peak
+        );
         assert!(allocated.peak < 8_388_608, "{allocated:?}");
     });
 }
@@ -1044,6 +1396,194 @@ fn report(name: &str, times: &mut [u128], cold: u128) {
     );
 }
 
+// External mode lets a runner alternate base/current release binaries on the
+// SAME filesystem fixture, excluding process startup and acquisition from B.
+// Observation only: correctness and budget mutations use the active tests.
+#[test]
+#[ignore = "release measurement: 200 warm samples, or one externally owned fixture"]
+fn measure_untracked_file_count() {
+    assert!(std::hint::black_box(!cfg!(debug_assertions)));
+    let sample = |f: &Fixture| {
+        with_repo(f, |repo, slot| {
+            let before = slot.borrow().operations();
+            let start = Instant::now();
+            let got = stage_b::status(repo, &[]);
+            let ns = start.elapsed().as_nanos();
+            let m = slot.borrow();
+            eprintln!(
+                "UNTRACKED_SAMPLE ns={ns} dirs={} raw={} ops={} lists={} count={:?} staged={:?} modified={:?} rss={}",
+                m.budget.used(Axis::Directories),
+                m.budget.used(Axis::WorktreeEntries),
+                m.operations() - before,
+                m.counts[Phase::Content as usize].list,
+                got.untracked,
+                got.staged,
+                got.modified,
+                process_peak_rss_bytes()
+            );
+            ns
+        })
+    };
+    if let Some(path) = std::env::var_os("BINGSU_UNTRACKED_MEASURE_ROOT") {
+        // The alternating runner owns this fixture, including teardown.
+        let f = std::mem::ManuallyDrop::new(Fixture(PathBuf::from(path)));
+        sample(&f);
+        return;
+    }
+    let large = init();
+    for i in 0..70_000 {
+        large.write(&format!("build/f{i:05}"), b"x");
+    }
+    assert_eq!(oracle(&large), (0, 0, 70_000, 0));
+    let small = init();
+    small.write("new/a", b"one");
+    small.write("new/b", b"two");
+    let several = corpus();
+    for dir in ["build", "output", "d000/new"] {
+        for i in 0..20_000 {
+            several.write(&format!("{dir}/f{i:05}"), b"x");
+        }
+    }
+    assert_eq!(oracle(&several), (0, 0, 61_000, 0));
+    for (name, f) in [
+        ("19000+1000+50000", corpus()),
+        ("70000", large),
+        ("19000+1000+50000+3x20000", several),
+        ("two-files", small),
+    ] {
+        eprintln!("UNTRACKED_LOAD case={name} load={:?}", load_average());
+        let cold = sample(&f);
+        let mut times = (0..200).map(|_| sample(&f)).collect::<Vec<_>>();
+        report(name, &mut times, cold);
+    }
+}
+
+// Observation only: measure actual B preflight through publication using the
+// real pipeline and wire sink. Semantic assertions above use generous time;
+// this opt-in probe also exercises the unchanged product 28 ms B deadline.
+#[test]
+#[ignore = "release measurement on an externally owned fixture"]
+fn measure_untracked_pipeline() {
+    use bingsu_core::{
+        collection::wire::{self, Binding, BuildId, Request},
+        snapshot::{self, Identity},
+    };
+    use std::{cell::Cell, rc::Rc};
+    assert!(std::hint::black_box(!cfg!(debug_assertions)));
+    let path = std::env::var_os("BINGSU_UNTRACKED_MEASURE_ROOT").unwrap();
+    let cwd = PathBuf::from(path).as_os_str().as_bytes().to_vec();
+    let request = Request {
+        request_id: wire::M3B_REQUEST_ID,
+        binding: Binding {
+            build_id: BuildId([7; 32]),
+            snapshot: Identity {
+                boot: [1; 16],
+                epoch: [2; 16],
+                generation: 3,
+                source: [4; 4],
+                context: snapshot::context_crc(b"/c", b"/s").unwrap(),
+            },
+            clock_kind: 1,
+            domain: [5; 16],
+            resume: 0,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            path_query: bingsu_core::collection::path_facts::PathQuery::for_path(
+                &cwd,
+                Some(&cwd),
+                false,
+            ),
+            cwd,
+            mask: 1 << 3,
+        },
+        budget_ms: 50,
+        environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
+    };
+    let access = access();
+    let started = Rc::new(Cell::new(None));
+    let hook_started = started.clone();
+    let mut m = meter();
+    m.hook = Some(Box::new(move |event| {
+        if event == "preflight_start" {
+            hook_started.set(Some(Instant::now()));
+        }
+    }));
+    let mut ready = wire::FEATURES.to_le_bytes().to_vec();
+    ready.extend(request.binding.mask.to_le_bytes());
+    ready.extend(0u32.to_le_bytes());
+    ready.extend(0u64.to_le_bytes());
+    let mut buffer = [0; wire::FRAME_MAX];
+    let mut b_ns = None;
+    let mut b_value = None;
+    let mut transcript = wire::Transcript::new(&request);
+    transcript
+        .accept(wire::Frame {
+            kind: wire::Kind::Ready,
+            build_id: request.binding.build_id,
+            request_id: request.request_id,
+            payload: &ready,
+        })
+        .unwrap();
+    transcript.request_sent().unwrap();
+    let mut write = |bytes: &[u8]| {
+        transcript
+            .accept(wire::decode_frame(bytes).unwrap())
+            .unwrap();
+        let completed = transcript
+            .clone()
+            .finish(
+                wire::EndReason::WorkerExit,
+                snapshot::Clock {
+                    kind: 1,
+                    domain: [5; 16],
+                    resume: 0,
+                    boot: [1; 16],
+                    now: 1,
+                },
+            )
+            .unwrap();
+        if let Some(value) = completed
+            .as_ref()
+            .into_iter()
+            .flat_map(|c| &c.updates)
+            .find(|u| u.segment == 3)
+            .and_then(|u| u.value.as_ref())
+        {
+            let decl = &bingsu_core::field::BUILTIN[3];
+            if value.fields[decl.field_index("stage").unwrap()]
+                == Field::text(b"B", 1, bingsu_core::width::WidthProfile::DEFAULT)
+                && b_ns.is_none()
+            {
+                b_ns = Some(started.get().unwrap().elapsed().as_nanos());
+                b_value = Some(value.clone());
+            }
+        }
+        Ok(())
+    };
+    let mut sink = update_sink::WireSink::new(
+        &request,
+        bingsu_core::field::BUILTIN,
+        &ready,
+        &mut buffer,
+        &mut write,
+    )
+    .unwrap();
+    let product = std::env::var_os("BINGSU_UNTRACKED_PRODUCT_B").is_some();
+    let deadlines = git::StageDeadlines {
+        a_ms: 30_000,
+        b_ms: if product { 28 } else { 30_000 },
+        c_ms: 30_000,
+        d_ms: 30_000,
+        path_ms: 30_000,
+    };
+    let result = git::collect_with_deadlines(&request, &mut sink, m, access, deadlines);
+    eprintln!(
+        "UNTRACKED_PIPELINE product={product} ns={b_ns:?} result={result:?} value={b_value:?}"
+    );
+}
+
 #[test]
 #[ignore = "release observations: load < 4, 200 alternating warm samples"]
 fn stage_b_release_observations() {
@@ -1152,7 +1692,7 @@ fn global_excludes_lowest_precedence_matches_git() {
                 "status.renames=false",
                 "status",
                 "--porcelain=v2",
-                "--untracked-files=normal",
+                "--untracked-files=all",
             ])
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap())

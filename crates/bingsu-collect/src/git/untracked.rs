@@ -18,6 +18,11 @@ use gix_index::{
 };
 use std::borrow::Cow;
 
+// One allowance per topmost index-free subtree, shared by all descendants.
+// Kernel batches remain bounded/accounted separately. Root and directories
+// containing index entries must finish their tracked comparisons.
+const UNTRACKED_SUBTREE_FILES: u32 = 256;
+
 fn count(n: u32) -> Field {
     Field::known(FieldValue::Count {
         n,
@@ -58,21 +63,49 @@ pub(crate) fn worktree_status(
                     RepoPath::new(RootId::CommonDir, b"info/attributes"),
                     PatternKind::Attributes,
                 )?;
-                let untracked = walk.directory(b"", false, false)?;
+                if let Err(error) = walk.directory(b"", false, None) {
+                    return if error == ReadError::Limit && walk.untracked != 0 {
+                        Ok((
+                            Field::known(FieldValue::Count {
+                                n: walk.untracked,
+                                saturated: true,
+                            }),
+                            false,
+                        ))
+                    } else {
+                        Err(error)
+                    };
+                }
                 for (i, entry) in index.entries().iter().enumerate() {
                     if !walk.seen[i] && eligible(entry) {
                         walk.compare(i, entry.path(index).as_ref(), Err(ReadError::Missing))?;
                     }
                 }
-                Ok(untracked)
+                Ok((
+                    Field::known(FieldValue::Count {
+                        n: walk.untracked,
+                        saturated: walk.capped,
+                    }),
+                    true,
+                ))
             })
-            .map(|n| (n, walk.modified, walk.filtered, walk.modified_error))
+            .map(|(n, complete)| {
+                (
+                    n,
+                    complete,
+                    walk.modified,
+                    walk.filtered,
+                    walk.modified_error,
+                )
+            })
             .inspect_err(|_| counts.filtered |= walk.filtered)
     })();
-    if let Ok((untracked, modified, filtered, error)) = result {
-        counts.untracked = count(untracked);
+    if let Ok((untracked, complete, modified, filtered, error)) = result {
+        counts.untracked = untracked;
         counts.filtered |= filtered;
-        if error.is_none() {
+        // A local untracked cap skips no index entries. Only a global walk
+        // failure prevents publishing the completed tracked comparison.
+        if complete && error.is_none() {
             counts.modified = count(modified);
         }
     }
@@ -91,6 +124,8 @@ struct Walk<'a, 'io> {
     keys: Vec<(Cow<'a, [u8]>, usize)>,
     seen: Vec<bool>,
     patterns: Patterns,
+    untracked: u32,
+    capped: bool,
     modified: u32,
     filtered: bool,
     modified_error: Option<ReadError>,
@@ -142,6 +177,8 @@ impl<'a, 'io> Walk<'a, 'io> {
             keys,
             seen: vec![false; index.entries().len()],
             patterns: Patterns::default(),
+            untracked: 0,
+            capped: false,
             modified: 0,
             filtered: false,
             modified_error: None,
@@ -197,12 +234,18 @@ impl<'a, 'io> Walk<'a, 'io> {
         Ok(())
     }
 
+    fn reached_cap(&mut self, limit: Option<u32>) -> bool {
+        let reached = limit.is_some_and(|limit| self.untracked >= limit);
+        self.capped |= reached;
+        reached
+    }
+
     fn directory(
         &mut self,
         parent: &[u8],
         inherited_ignore: bool,
-        collapse: bool,
-    ) -> Result<u32, ReadError> {
+        subtree_limit: Option<u32>,
+    ) -> Result<(), ReadError> {
         let mut batch = self.io.worktree_listing(parent, true)?;
         let mut scratch = self.io.account(|m| Ok(m.path_allocation()))?;
         self.io
@@ -216,8 +259,9 @@ impl<'a, 'io> Walk<'a, 'io> {
         // Validate the fixed marker from this batch's held directory fd, even
         // when .git is beyond the first batch. Junk markers are ordinary dirs;
         // valid repositories collapse before reading their local policies.
-        if collapse && self.io.worktree_embedded_repository()? {
-            return Ok(1);
+        if subtree_limit.is_some() && self.io.worktree_embedded_repository()? {
+            self.untracked += 1;
+            return Ok(());
         }
         for (name, kind) in [
             (b".gitignore".as_slice(), PatternKind::Ignore),
@@ -247,84 +291,97 @@ impl<'a, 'io> Walk<'a, 'io> {
         // Retain only comparison keys across batches to detect ambiguous names.
         // Full stat records live for one kernel batch, not the whole directory.
         let mut keys: Vec<Vec<u8>> = Vec::new();
-        let mut untracked = 0;
-        loop {
-            for record in &batch.entries {
-                self.io.account(|m| m.check())?;
-                // Never inspect repository metadata or gitlink contents.
-                if record.name.eq_ignore_ascii_case(b".git") {
-                    continue;
-                }
-                path.truncate(prefix);
-                path.extend_from_slice(&record.name);
-                let key = self.policies.names.key(&path);
-                self.io.account(|m| {
-                    if keys.len() == keys.capacity() {
-                        let extra = keys.capacity().max(16);
-                        scratch.reserve(extra * std::mem::size_of::<Vec<u8>>(), m)?;
-                        let mut growth = m.path_allocation();
-                        growth.reserve(keys.capacity() * std::mem::size_of::<Vec<u8>>(), m)?;
-                        keys.try_reserve_exact(extra)
-                            .map_err(|_| ReadError::Limit)?;
+        // Keep the observed lower bound on Limit, but reject ambiguous keys
+        // even when a later batch or descendant exhausts a budget.
+        let result = (|| {
+            loop {
+                for record in &batch.entries {
+                    self.io.account(|m| m.check())?;
+                    if self.reached_cap(subtree_limit) {
+                        return Ok(());
                     }
-                    scratch.reserve(key.len(), m)
-                })?;
-                keys.push(key.to_vec());
-                let exact = self
-                    .keys
-                    .binary_search_by(|(p, _)| p.as_ref().cmp(key.as_ref()))
-                    .ok()
-                    .map(|i| self.keys[i].1);
-                if exact.is_some_and(|i| self.index.entries()[i].mode == Mode::COMMIT) {
-                    continue;
-                }
-                let metadata = record.metadata.as_ref().map_err(|e| *e)?;
-                if metadata.st_dev != self.io.worktree_device() {
-                    return Err(ReadError::Escape);
-                }
-                if let Some(i) = exact {
-                    self.compare(i, &path, Ok(metadata))?;
-                }
-                let directory = metadata.st_mode & libc::S_IFMT == libc::S_IFDIR;
-                let ignored = inherited_ignore
-                    || self
-                        .patterns
-                        .ignored(self.io, &path, directory, self.policies.names)?;
-                if directory {
-                    let mut child = key.into_owned();
-                    child.push(b'/');
-                    let start = self
-                        .keys
-                        .partition_point(|(p, _)| p.as_ref() < child.as_slice());
-                    let tracked = self
-                        .keys
-                        .get(start)
-                        .is_some_and(|(p, _)| p.starts_with(&child));
-                    if !tracked && ignored {
+                    // Never inspect repository metadata or gitlink contents.
+                    if record.name.eq_ignore_ascii_case(b".git") {
                         continue;
                     }
-                    let n = self.directory(&path, ignored, !tracked)?;
-                    untracked += if tracked { n } else { u32::from(n != 0) };
-                } else if exact.is_none() && !ignored {
-                    untracked += 1;
+                    path.truncate(prefix);
+                    path.extend_from_slice(&record.name);
+                    let key = self.policies.names.key(&path);
+                    self.io.account(|m| {
+                        if keys.len() == keys.capacity() {
+                            let extra = keys.capacity().max(16);
+                            scratch.reserve(extra * std::mem::size_of::<Vec<u8>>(), m)?;
+                            let mut growth = m.path_allocation();
+                            growth.reserve(keys.capacity() * std::mem::size_of::<Vec<u8>>(), m)?;
+                            keys.try_reserve_exact(extra)
+                                .map_err(|_| ReadError::Limit)?;
+                        }
+                        scratch.reserve(key.len(), m)
+                    })?;
+                    keys.push(key.to_vec());
+                    let exact = self
+                        .keys
+                        .binary_search_by(|(p, _)| p.as_ref().cmp(key.as_ref()))
+                        .ok()
+                        .map(|i| self.keys[i].1);
+                    if exact.is_some_and(|i| self.index.entries()[i].mode == Mode::COMMIT) {
+                        continue;
+                    }
+                    let metadata = record.metadata.as_ref().map_err(|e| *e)?;
+                    if metadata.st_dev != self.io.worktree_device() {
+                        return Err(ReadError::Escape);
+                    }
+                    if let Some(i) = exact {
+                        self.compare(i, &path, Ok(metadata))?;
+                    }
+                    let directory = metadata.st_mode & libc::S_IFMT == libc::S_IFDIR;
+                    let ignored = inherited_ignore
+                        || self
+                            .patterns
+                            .ignored(self.io, &path, directory, self.policies.names)?;
+                    if directory {
+                        let mut child = key.into_owned();
+                        child.push(b'/');
+                        let start = self
+                            .keys
+                            .partition_point(|(p, _)| p.as_ref() < child.as_slice());
+                        let tracked = self
+                            .keys
+                            .get(start)
+                            .is_some_and(|(p, _)| p.starts_with(&child));
+                        if !tracked && ignored {
+                            continue;
+                        }
+                        let limit = if tracked {
+                            None
+                        } else {
+                            // Absolute count at this subtree's boundary avoids
+                            // resetting the allowance in nested directories.
+                            subtree_limit.or(Some(self.untracked + UNTRACKED_SUBTREE_FILES))
+                        };
+                        self.directory(&path, ignored, limit)?;
+                    } else if exact.is_none() && !ignored {
+                        self.untracked += 1;
+                    }
                 }
-                // --untracked-files=normal only needs proof of one visible
-                // entry below an index-free directory, including descendants.
-                if collapse && untracked != 0 {
-                    return Ok(1);
+                let more = batch.more;
+                drop(batch);
+                if !more {
+                    break;
                 }
+                // EOF is not proven: even exactly cap files are a lower bound
+                // here. Do not fetch another batch just to refine that bound.
+                if self.reached_cap(subtree_limit) {
+                    break;
+                }
+                batch = self.io.worktree_listing(parent, false)?;
             }
-            let more = batch.more;
-            drop(batch);
-            if !more {
-                break;
-            }
-            batch = self.io.worktree_listing(parent, false)?;
-        }
+            Ok(())
+        })();
         keys.sort_unstable();
         if keys.windows(2).any(|p| p[0] == p[1]) {
             return Err(ReadError::Changed);
         }
-        Ok(untracked)
+        result
     }
 }

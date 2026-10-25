@@ -18,17 +18,17 @@ pub fn stage_b(
     if !global_excludes_known {
         counts.untracked = Field::PENDING;
     }
-    // The bool is provisional during the walk. Neither true nor false may
-    // escape an incomplete/unvalidated scan; unseen entries can change it.
-    let filtered = if [&counts.modified, &counts.untracked].iter().all(|f| {
-        matches!(
-            f.value,
-            FieldValue::Count {
-                saturated: false,
-                ..
-            }
-        )
-    }) {
+    // Only a completed, validated modified comparison fixes this bool. A
+    // local untracked cap skips no index entries, unlike a global walk limit.
+    let complete = matches!(
+        counts.modified.value,
+        FieldValue::Count {
+            saturated: false,
+            ..
+        }
+    );
+    // Preserve the conservative unknown-global-policy publication contract.
+    let filtered = if complete && global_excludes_known {
         Field::known(FieldValue::Bool(counts.filtered))
     } else {
         Field::PENDING

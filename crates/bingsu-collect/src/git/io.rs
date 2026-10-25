@@ -148,6 +148,13 @@ impl<'a> RepoIo<'a> {
         if let Some(error) = self.stopped.get() {
             return Err(error);
         }
+        self.loan_meter(operation)
+    }
+
+    fn loan_meter<T>(
+        &self,
+        operation: impl FnOnce(&mut Meter) -> Result<T, ReadError>,
+    ) -> Result<T, ReadError> {
         let value = {
             let mut slot = self.meter.try_borrow_mut().map_err(|_| ReadError::Denied)?;
             slot.check()?;
@@ -321,7 +328,11 @@ impl<'a> RepoIo<'a> {
             .borrow_mut()
             .take()
             .expect("active scan");
-        self.metered(|meter| stats.finish(self.roots.worktree, self.access, meter))?;
+        // A caller may return a bounded partial result after Limit. Only the
+        // held-edge finalizer may run past the stop latch: it performs no new
+        // open/list/read/map and still charges the same stat/op/deadline budget.
+        // Failure here invalidates even a proposed lower bound.
+        self.loan_meter(|meter| stats.finish(self.roots.worktree, self.access, meter))?;
         Ok(result)
     }
 
