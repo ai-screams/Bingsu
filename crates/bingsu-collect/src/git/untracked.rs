@@ -201,14 +201,6 @@ impl<'a, 'io> Walk<'a, 'io> {
         let result = if entry.flags.contains(Flags::INTENT_TO_ADD) {
             Ok(Comparison::Exact { modified: true })
         } else {
-            // A file replaced by a directory is deleted from the tracked view.
-            let metadata = metadata.and_then(|m| {
-                if m.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                    Err(ReadError::Missing)
-                } else {
-                    Ok(m)
-                }
-            });
             worktree::compare_observed(
                 self.io,
                 raw,

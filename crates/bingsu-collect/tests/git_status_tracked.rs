@@ -192,6 +192,617 @@ fn count(n: u32) -> Field {
     })
 }
 
+fn unicode_fixture(precompose: bool, reverse: bool) -> (Fixture, &'static str, &'static str) {
+    let f = init();
+    let (indexed, disk) = if reverse {
+        ("cafe\u{301}", "caf\u{e9}")
+    } else {
+        ("caf\u{e9}", "cafe\u{301}")
+    };
+    // Force the requested raw index spelling even for the reverse/on case.
+    git(&f, &["config", "core.precomposeUnicode", "false"]);
+    f.write(indexed, b"base\n");
+    commit(&f);
+    assert_eq!(
+        git(&f, &["ls-files", "-z"]),
+        [indexed.as_bytes(), b"\0"].concat()
+    );
+    fs::rename(f.0.join(indexed), f.0.join("temporary")).unwrap();
+    fs::rename(f.0.join("temporary"), f.0.join(disk)).unwrap();
+    git(
+        &f,
+        &[
+            "config",
+            "core.precomposeUnicode",
+            if precompose { "true" } else { "false" },
+        ],
+    );
+    let listed: Vec<_> = fs::read_dir(&f.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(listed.iter().any(|n| n.as_bytes() == disk.as_bytes()));
+    assert!(!listed.iter().any(|n| n.as_bytes() == indexed.as_bytes()));
+    (f, indexed, disk)
+}
+
+fn unicode_oracle(f: &Fixture) -> StatusCounts {
+    let raw = git(
+        f,
+        &[
+            "-c",
+            "status.renames=false",
+            "status",
+            "--porcelain=v2",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+            "-z",
+        ],
+    );
+    let mut n = [0; 4];
+    for line in raw.split(|b| *b == 0).filter(|l| !l.is_empty()) {
+        match line[0] {
+            b'1' => {
+                n[0] += u32::from(line[2] != b'.');
+                n[1] += u32::from(line[3] != b'.');
+            }
+            b'?' => n[2] += 1,
+            b'u' => n[3] += 1,
+            _ => panic!("unexpected porcelain {line:?}"),
+        }
+    }
+    StatusCounts {
+        staged: count(n[0]),
+        modified: count(n[1]),
+        untracked: count(n[2]),
+        conflicted: count(n[3]),
+        filtered: false,
+    }
+}
+
+// Mutations: treat a missing bulk name as deleted on macOS; normalize on
+// Linux; count a policy-matched alias twice; invent clean without comparing.
+#[test]
+fn unicode_name_lookup_matches_git_and_filesystem() {
+    for precompose in [false, true] {
+        for reverse in [false, true] {
+            let (f, indexed, disk) = unicode_fixture(precompose, reverse);
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let exact = fs::symlink_metadata(f.0.join(indexed)).unwrap();
+                let listed = fs::symlink_metadata(f.0.join(disk)).unwrap();
+                assert_eq!((exact.dev(), exact.ino()), (listed.dev(), listed.ino()));
+            }
+            #[cfg(not(target_os = "macos"))]
+            assert_eq!(
+                fs::symlink_metadata(f.0.join(indexed)).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            for dirty in [false, true] {
+                if dirty {
+                    f.write(disk, b"changed content\n");
+                }
+                let expected = unicode_oracle(&f);
+                eprintln!(
+                    "UNICODE precompose={precompose} reverse={reverse} dirty={dirty} oracle={expected:?}"
+                );
+                let mut tracked = expected.clone();
+                tracked.untracked = Field::PENDING;
+                assert_eq!(
+                    status(&f),
+                    tracked,
+                    "tracked precompose={precompose} reverse={reverse} dirty={dirty}"
+                );
+                let shared = with_repo(&f, |repo, _| git::stage_b::status(repo, &[]));
+                assert_eq!(
+                    (&shared.staged, &shared.modified, &shared.conflicted),
+                    (&expected.staged, &expected.modified, &expected.conflicted)
+                );
+                if cfg!(target_os = "macos") && precompose && reverse {
+                    // Existing walker limitation: Git composes disk names, not
+                    // a legacy NFD index; our walker composes both. Keep this
+                    // oracle discrepancy explicit, outside the lookup fix.
+                    assert_eq!(expected.untracked, count(1));
+                    assert_eq!(shared.untracked, count(0));
+                } else {
+                    assert_eq!(
+                        shared.untracked, expected.untracked,
+                        "shared precompose={precompose} reverse={reverse} dirty={dirty}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// Mutations: stat every matched entry, stat twice, bypass the meter, retain
+// per-item scratch, retry non-Missing errors, stat a gitlink without
+// SKIP_WORKTREE, or follow a replacement link.
+#[cfg(target_os = "macos")]
+#[test]
+fn unicode_missing_lookup_is_one_metered_nofollow_stat() {
+    use git::io::{
+        policy::Policies,
+        worktree::{self, Comparison},
+    };
+    let (f, indexed, disk) = unicode_fixture(false, false);
+    let outside = Fixture::new();
+    outside.write("empty", b"");
+    f.write(disk, b"");
+    git(&f, &["add", "--", indexed]);
+    // Git add uses the supplied index name; keep only that entry.
+    with_repo(&f, |repo, slot| {
+        let idx = index::load(&repo.io).unwrap();
+        assert_eq!(idx.entries().len(), 1);
+        let entry = &idx.entries()[0];
+        let policies = Policies::from_config(&repo.config).unwrap();
+        let result = repo.io.with_worktree_stats(|| {
+            let raw = repo.io.worktree_metadata(indexed.as_bytes())?;
+            let baseline = slot.borrow().live_allocated();
+            for observed in [Ok(&raw), Err(E::Missing)] {
+                let before = slot.borrow().counts;
+                let ops = slot.borrow().operations();
+                let stats = slot.borrow().budget.used(Axis::Stats);
+                for _ in 0..4096 {
+                    assert_eq!(
+                        worktree::compare_observed(
+                            &repo.io,
+                            indexed.as_bytes(),
+                            entry,
+                            &idx,
+                            policies,
+                            observed
+                        )?,
+                        Comparison::Exact { modified: false }
+                    );
+                }
+                let expected = if observed.is_ok() { 0 } else { 4096 };
+                let after = slot.borrow();
+                assert_eq!(after.counts[2].stat - before[2].stat, expected);
+                assert_eq!(after.operations() - ops, expected);
+                assert_eq!(after.budget.used(Axis::Stats) - stats, expected);
+                assert_eq!(after.counts[2].open, before[2].open);
+                assert_eq!(after.counts[2].read, before[2].read);
+                assert_eq!(after.live_allocated(), baseline);
+            }
+            // The fallback must use the index spelling, not a caller's raw
+            // listing alias (which may have disappeared since enumeration).
+            assert_eq!(
+                worktree::compare_observed(
+                    &repo.io,
+                    b"not-the-index-name",
+                    entry,
+                    &idx,
+                    policies,
+                    Err(E::Missing)
+                )?,
+                Comparison::Exact { modified: false }
+            );
+            for error in [E::Denied, E::Changed, E::Limit, E::Deadline] {
+                let before = slot.borrow().counts;
+                assert_eq!(
+                    worktree::compare_observed(
+                        &repo.io,
+                        indexed.as_bytes(),
+                        entry,
+                        &idx,
+                        policies,
+                        Err(error)
+                    ),
+                    Err(error)
+                );
+                assert_eq!(slot.borrow().counts, before);
+            }
+            for (mode, skip_worktree) in [
+                (gix_index::entry::Mode::COMMIT, false),
+                (gix_index::entry::Mode::COMMIT, true),
+                (gix_index::entry::Mode::FILE, true),
+            ] {
+                let mut skipped = entry.clone();
+                skipped.mode = mode;
+                skipped
+                    .flags
+                    .set(gix_index::entry::Flags::SKIP_WORKTREE, skip_worktree);
+                let before = slot.borrow().counts;
+                assert_eq!(
+                    worktree::compare_observed(
+                        &repo.io,
+                        indexed.as_bytes(),
+                        &skipped,
+                        &idx,
+                        policies,
+                        Err(E::Missing)
+                    )?,
+                    Comparison::Skipped
+                );
+                assert_eq!(slot.borrow().counts, before);
+            }
+            slot.borrow_mut().worktree_device = Some(raw.st_dev as u64 + 1);
+            let before = slot.borrow().counts;
+            assert_eq!(
+                worktree::compare_observed(
+                    &repo.io,
+                    indexed.as_bytes(),
+                    entry,
+                    &idx,
+                    policies,
+                    Err(E::Missing)
+                )?,
+                Comparison::Exact { modified: true }
+            );
+            assert_eq!(slot.borrow().counts[2].open, before[2].open);
+            slot.borrow_mut().worktree_device = None;
+            // Same index name now resolves to a symlink, including an outside
+            // target with identical empty content. It must be modified, unread.
+            fs::remove_file(f.0.join(disk)).unwrap();
+            symlink(outside.0.join("empty"), f.0.join(disk)).unwrap();
+            let before = slot.borrow().counts;
+            assert_eq!(
+                worktree::compare_observed(
+                    &repo.io,
+                    indexed.as_bytes(),
+                    entry,
+                    &idx,
+                    policies,
+                    Err(E::Missing)
+                )?,
+                Comparison::Exact { modified: true }
+            );
+            let after = slot.borrow().counts;
+            assert_eq!(after[2].stat - before[2].stat, 1);
+            assert_eq!(after[2].open, before[2].open);
+            assert_eq!(after[2].read, before[2].read);
+            assert_eq!(after[2].readlink, before[2].readlink);
+            fs::remove_file(f.0.join(disk)).unwrap();
+            let before = slot.borrow().counts;
+            assert_eq!(
+                worktree::compare(
+                    &repo.io,
+                    indexed.as_bytes(),
+                    entry,
+                    &idx,
+                    policies.stat,
+                    policies.conversion,
+                    policies.filemode
+                )?,
+                Comparison::Exact { modified: true }
+            );
+            assert_eq!(slot.borrow().counts[2].stat - before[2].stat, 1);
+            let used = slot.borrow().budget.used(Axis::Stats);
+            slot.borrow_mut()
+                .charge_axis(Axis::Stats, Axis::Stats.limit() - used)?;
+            let before = slot.borrow().counts;
+            assert_eq!(
+                worktree::compare_observed(
+                    &repo.io,
+                    indexed.as_bytes(),
+                    entry,
+                    &idx,
+                    policies,
+                    Err(E::Missing)
+                ),
+                Err(E::Limit)
+            );
+            assert_eq!(slot.borrow().counts, before);
+            Ok(())
+        });
+        assert_eq!(result, Err(E::Limit));
+    });
+}
+
+// Mutation: reopen a missing parent for every fallback. One request with
+// 5,000 deleted entries must not exhaust the 4,096-directory budget.
+#[test]
+fn deleted_directory_reuses_missing_parent_and_matches_git() {
+    let f = init();
+    for i in 0..5000 {
+        f.write(&format!("gone/f{i:04}"), b"");
+    }
+    f.write("keep", b"");
+    commit(&f);
+    fs::remove_dir_all(f.0.join("gone")).unwrap();
+    let expected = unicode_oracle(&f);
+    assert_eq!(expected.modified, count(5000));
+    assert_eq!(expected.untracked, count(0));
+    for shared in [false, true] {
+        with_repo(&f, |repo, slot| {
+            let before = slot.borrow().budget.used(Axis::Directories);
+            let got = if shared {
+                git::stage_b::status(repo, &[])
+            } else {
+                status_tracked::load_status(repo)
+            };
+            let mut expected = expected.clone();
+            if !shared {
+                expected.untracked = Field::PENDING;
+            }
+            assert_eq!(got, expected, "shared={shared}");
+            // Every walk opens gone at most once. Only macOS adds a root listing
+            // (tracked bulk pass) or an alias fallback; Linux shared proves
+            // absence from the root listing. Fails if gone is probed per entry.
+            assert_eq!(
+                slot.borrow().budget.used(Axis::Directories) - before,
+                1 + u64::from(cfg!(target_os = "macos"))
+            );
+        });
+    }
+}
+
+// Mutations: remember only the last failure or the full requested parent,
+// use a byte prefix without a component boundary, or retain misses across
+// requests. Missing and NotDir must be equally cheap, including descendants.
+#[test]
+fn missing_parent_cache_is_component_scoped_and_request_local() {
+    let f = init();
+    f.write("a/notdir", b"");
+    f.write("a/gone-sibling/file", b"");
+    f.write("b/keep", b"");
+    with_repo(&f, |repo, slot| {
+        let baseline = slot.borrow().live_allocated();
+        repo.io
+            .with_worktree_stats(|| {
+                let dirs = slot.borrow().budget.used(Axis::Directories);
+                for path in [b"a/gone/deep/x".as_slice(), b"a/notdir/x", b"b/gone/x"] {
+                    assert_eq!(repo.io.worktree_metadata(path).err(), Some(E::Missing));
+                }
+                // Two existing parents and three failed components, once each.
+                assert_eq!(slot.borrow().budget.used(Axis::Directories) - dirs, 5);
+                let before = slot.borrow().counts;
+                let ops = slot.borrow().operations();
+                let live = slot.borrow().live_allocated();
+                let dirs = slot.borrow().budget.used(Axis::Directories);
+                for _ in 0..5000 {
+                    for path in [b"a/gone/other/x".as_slice(), b"a/notdir/x", b"b/gone/x"] {
+                        assert_eq!(repo.io.worktree_metadata(path).err(), Some(E::Missing));
+                    }
+                }
+                assert_eq!(slot.borrow().counts, before);
+                assert_eq!(slot.borrow().operations(), ops);
+                assert_eq!(slot.borrow().budget.used(Axis::Directories), dirs);
+                assert_eq!(slot.borrow().live_allocated(), live);
+                assert!(repo.io.worktree_metadata(b"a/gone-sibling/file").is_ok());
+                f.write("a/gone/x", b"");
+                assert_eq!(
+                    repo.io.worktree_metadata(b"a/gone/x").err(),
+                    Some(E::Missing)
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(slot.borrow().live_allocated(), baseline);
+        repo.io
+            .with_worktree_stats(|| repo.io.worktree_metadata(b"a/gone/x").map(|_| ()))
+            .unwrap();
+        assert_eq!(slot.borrow().live_allocated(), baseline);
+    });
+}
+
+// Mutation: follow an aliased parent symlink during fallback instead of
+// retaining Missing. Git reports a deleted tracked leaf and an untracked link.
+#[cfg(target_os = "macos")]
+#[test]
+fn unicode_parent_symlink_alias_matches_git_without_target_io() {
+    let f = init();
+    let outside = Fixture::new();
+    let (indexed, disk) = ("caf\u{e9}", "cafe\u{301}");
+    git(&f, &["config", "core.precomposeUnicode", "false"]);
+    f.write(&format!("{indexed}/x"), b"");
+    outside.write("x", b"");
+    commit(&f);
+    fs::remove_dir_all(f.0.join(indexed)).unwrap();
+    symlink(&outside.0, f.0.join(disk)).unwrap();
+    let expected = unicode_oracle(&f);
+    assert_eq!(expected.modified, count(1));
+    assert_eq!(expected.untracked, count(1));
+    assert_eq!(
+        with_repo(&f, |repo, _| git::stage_b::status(repo, &[])),
+        expected
+    );
+    with_repo(&f, |repo, slot| {
+        repo.io
+            .with_worktree_stats(|| {
+                let before = slot.borrow().counts;
+                for _ in 0..5000 {
+                    assert_eq!(
+                        repo.io
+                            .worktree_metadata(format!("{indexed}/x").as_bytes())
+                            .err(),
+                        Some(E::Missing)
+                    );
+                }
+                let after = slot.borrow().counts;
+                assert_eq!(after[2].stat - before[2].stat, 1);
+                assert_eq!(after[2].open, before[2].open);
+                assert_eq!(after[2].read, before[2].read);
+                assert_eq!(after[2].readlink, before[2].readlink);
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+// Mutations: omit the failed-path/vector allocation charge, leave misses
+// unsorted, or discard previous misses when adding a new one.
+#[test]
+fn missing_parent_cache_charges_live_storage_for_distinct_failures() {
+    let f = init();
+    with_repo(&f, |repo, slot| {
+        let baseline = slot.borrow().live_allocated();
+        repo.io
+            .with_worktree_stats(|| {
+                let (_, allocated) = allocation::measure(|| {
+                    for i in (0..1024).rev() {
+                        assert_eq!(
+                            repo.io
+                                .worktree_metadata(format!("gone{i:04}/x").as_bytes())
+                                .err(),
+                            Some(E::Missing)
+                        );
+                    }
+                });
+                assert!(allocated.live > 0);
+                assert!(allocated.live as u64 <= slot.borrow().live_allocated() - baseline);
+                let before = slot.borrow().counts;
+                for i in 0..1024 {
+                    assert_eq!(
+                        repo.io
+                            .worktree_metadata(format!("gone{i:04}/deep/x").as_bytes())
+                            .err(),
+                        Some(E::Missing)
+                    );
+                }
+                assert_eq!(slot.borrow().counts, before);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(slot.borrow().live_allocated(), baseline);
+    });
+}
+
+// Mutation: publish a partial fallback scan as an exact modified/untracked
+// count when the shared Stats budget runs out partway through alias lookup.
+#[cfg(target_os = "macos")]
+#[test]
+fn unicode_alias_lookup_budget_exhaustion_keeps_counts_pending() {
+    let f = init();
+    git(&f, &["config", "core.precomposeUnicode", "false"]);
+    for i in 0..300 {
+        f.write(&format!("d/caf\u{e9}{i:03}"), b"");
+    }
+    commit(&f);
+    for i in 0..300 {
+        fs::rename(
+            f.0.join(format!("d/caf\u{e9}{i:03}")),
+            f.0.join("temporary"),
+        )
+        .unwrap();
+        fs::rename(
+            f.0.join("temporary"),
+            f.0.join(format!("d/cafe\u{301}{i:03}")),
+        )
+        .unwrap();
+    }
+    let expected = unicode_oracle(&f);
+    assert_eq!(expected.modified, count(0));
+    assert_eq!(expected.untracked, count(300));
+    for shared in [false, true] {
+        // The larger allowances get past the 300 bulk observations and
+        // expire during per-alias fallback, not just during enumeration.
+        for remaining in [0, 50, 150, 280, 400, 500, 580] {
+            with_repo(&f, |repo, slot| {
+                let used = slot.borrow().budget.used(Axis::Stats);
+                slot.borrow_mut()
+                    .charge_axis(Axis::Stats, Axis::Stats.limit() - remaining - used)
+                    .unwrap();
+                let got = if shared {
+                    git::stage_b::status(repo, &[])
+                } else {
+                    status_tracked::load_status(repo)
+                };
+                assert_eq!(
+                    got.modified,
+                    Field::PENDING,
+                    "shared={shared} remaining={remaining}"
+                );
+                assert_eq!(got.untracked, Field::PENDING);
+            });
+        }
+    }
+    assert_eq!(
+        with_repo(&f, |repo, _| git::stage_b::status(repo, &[])),
+        expected
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_directory_alias_replacement(indexed: &str, disk: &str, precompose: bool) {
+    let f = init();
+    git(&f, &["config", "core.ignorecase", "true"]);
+    git(
+        &f,
+        &[
+            "config",
+            "core.precomposeUnicode",
+            if precompose { "true" } else { "false" },
+        ],
+    );
+    // More than one kernel batch, without relying on directory entry order.
+    for i in 0..3000 {
+        f.write(&format!("{indexed}/f{i:04}"), b"");
+    }
+    f.write(&format!("{indexed}/x"), b"");
+    commit(&f);
+    fs::rename(f.0.join(indexed), f.0.join("temporary")).unwrap();
+    fs::rename(f.0.join("temporary"), f.0.join(disk)).unwrap();
+    fs::remove_file(f.0.join(format!("{disk}/x"))).unwrap();
+    f.write(&format!("{disk}/x/inner"), b"");
+    let expected = unicode_oracle(&f);
+    assert_eq!(expected.modified, count(1));
+    assert_eq!(expected.untracked, count(1));
+    let mut tracked = expected.clone();
+    tracked.untracked = Field::PENDING;
+    assert_eq!(status(&f), tracked);
+    assert_eq!(
+        with_repo(&f, |repo, _| git::stage_b::status(repo, &[])),
+        expected
+    );
+}
+
+// Mutation: convert a matched S_IFDIR into Missing, triggering an index-name
+// fallback that pops the case-aliased directory before its next batch.
+#[cfg(target_os = "macos")]
+#[test]
+fn case_alias_directory_replacement_preserves_listing() {
+    assert_directory_alias_replacement("Dir", "dir", false);
+}
+
+// Mutation: the same redundant conversion must also fail when the active
+// directory uses NFD bytes while the index uses NFC and precomposition is on.
+#[cfg(target_os = "macos")]
+#[test]
+fn precomposed_directory_replacement_preserves_listing() {
+    assert_directory_alias_replacement("caf\u{e9}", "cafe\u{301}", true);
+}
+
+/// Driver supplies an immutable fixture and alternates baseline/fixed binaries.
+/// The generous meter isolates cost from product deadlines; report, don't
+/// certify, samples exceeding the Stage B budget.
+#[test]
+#[ignore = "release observations: BINGSU_NAME_LOOKUP_BENCH_ROOT required"]
+fn unicode_name_lookup_release_observations() {
+    let path = std::env::var_os("BINGSU_NAME_LOOKUP_BENCH_ROOT").expect("benchmark fixture");
+    let f = std::mem::ManuallyDrop::new(Fixture(PathBuf::from(path)));
+    for shared in [false, true] {
+        // A fresh request per sample; warm once before timing the same fixture.
+        for warm in [true, false] {
+            with_repo(&f, |repo, slot| {
+                let before = slot.borrow().counts[2];
+                let directories = slot.borrow().budget.used(Axis::Directories);
+                let start = Instant::now();
+                let got = if shared {
+                    git::stage_b::status(repo, &[])
+                } else {
+                    status_tracked::load_status(repo)
+                };
+                let ns = start.elapsed().as_nanos();
+                let after = slot.borrow().counts[2];
+                if !warm {
+                    println!(
+                        "NAME_LOOKUP shared={shared} ns={ns} stat={} open={} list={} dirs={} modified={:?} untracked={:?}",
+                        after.stat - before.stat,
+                        after.open - before.open,
+                        after.list - before.list,
+                        slot.borrow().budget.used(Axis::Directories) - directories,
+                        got.modified,
+                        got.untracked
+                    );
+                }
+            });
+        }
+    }
+}
+
 // Exercise the real B comparator, including HEAD commit and subtree reads.
 // A fresh object store in B or C double-charges the 5 MB pack and makes C fail.
 #[test]

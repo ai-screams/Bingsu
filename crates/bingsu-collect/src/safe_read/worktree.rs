@@ -15,6 +15,10 @@ struct Step {
 #[derive(Default)]
 pub struct WorktreeStats {
     stack: Vec<Step>,
+    // Sorted raw prefixes whose directory open returned Missing (including
+    // ENOTDIR and refused symlinks). Absence is a request-local observation;
+    // later leaves and descendants must not retry it or disturb a live listing.
+    missing: Vec<PathCString>,
     allocation: Option<PathAllocation>,
     root_listing: Option<Directory>,
     failed: Option<ReadError>,
@@ -61,6 +65,22 @@ impl WorktreeStats {
         if !path.is_empty() {
             canonical(path)?;
         }
+        if !self.missing.is_empty() {
+            for end in path
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &b)| (b == b'/').then_some(i))
+                .chain(std::iter::once(path.len()))
+            {
+                if self
+                    .missing
+                    .binary_search_by(|name| name.to_bytes().cmp(&path[..end]))
+                    .is_ok()
+                {
+                    return Err(ReadError::Missing);
+                }
+            }
+        }
         let common = path
             .split(|&b| b == b'/')
             .zip(&self.stack)
@@ -79,14 +99,31 @@ impl WorktreeStats {
         {
             meter.charge_axis(bingsu_core::collection::budget::Axis::Directories, 1)?;
             let name = cstring(part, meter)?;
-            let opened = walk::worktree_component(self.held(root), &name, true, access, meter)
-                .map_err(|e| {
-                    if e == ReadError::Symlink {
-                        ReadError::Missing
-                    } else {
-                        e
-                    }
-                })?;
+            let opened = match walk::worktree_component(self.held(root), &name, true, access, meter)
+            {
+                Ok(opened) => opened,
+                Err(ReadError::Missing | ReadError::Symlink) => {
+                    let end = self
+                        .stack
+                        .iter()
+                        .map(|step| step.name.to_bytes().len() + 1)
+                        .sum::<usize>()
+                        + part.len();
+                    let missing = cstring(&path[..end], meter)?;
+                    self.allocation
+                        .get_or_insert_with(|| meter.path_allocation())
+                        .reserve(std::mem::size_of::<PathCString>(), meter)?;
+                    self.missing
+                        .try_reserve_exact(1)
+                        .map_err(|_| ReadError::Limit)?;
+                    let at = self
+                        .missing
+                        .partition_point(|name| name.to_bytes() < missing.to_bytes());
+                    self.missing.insert(at, missing);
+                    return Err(ReadError::Missing);
+                }
+                Err(error) => return Err(error),
+            };
             if self.stack.len() == self.stack.capacity() {
                 self.allocation
                     .get_or_insert_with(|| meter.path_allocation())
@@ -420,6 +457,7 @@ impl WorktreeStats {
             Ok(())
         })();
         self.stack = Vec::new();
+        self.missing = Vec::new();
         self.allocation = None;
         self.root_listing = None;
         self.failed = result.err();
