@@ -14,8 +14,41 @@ syscall that shows up as `unknown-fs` in CI goes into NON_FS with its
 reason, never silently.
 """
 import re
+import ast
+import posixpath
 
 from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call, StructureError, scan
+
+
+def repository_path(c):
+    """Resolve an attempted path from -yy, including unsuccessful opens.
+
+    The returned path is lexical: resolving it on the harness filesystem would
+    follow hostile links and erase the exact capability boundary being tested.
+    """
+    args = split_args(c.args)
+    pairs = {"open": (None, 0), "openat": (0, 1), "openat2": (0, 1),
+             "stat": (None, 0), "lstat": (None, 0), "readlink": (None, 0),
+             "newfstatat": (0, 1), "fstatat64": (0, 1), "statx": (0, 1),
+             "readlinkat": (0, 1), "faccessat": (0, 1), "faccessat2": (0, 1)}
+    if c.name in pairs:
+        fd_index, path_index = pairs[c.name]
+        raw = args[path_index]
+        assert raw.startswith('"') and raw.endswith('"'), ("truncated path", c)
+        path = ast.literal_eval(raw)
+        if path.startswith("/"):
+            return posixpath.normpath(path)
+        assert fd_index is not None, ("ambient relative path", c)
+        assert not args[fd_index].startswith("AT_FDCWD"), ("ambient relative path", c)
+        match = re.search(r"<(/[^<>]*)>", args[fd_index])
+        assert match, ("unnamed directory capability", c)
+        return posixpath.normpath(posixpath.join(match[1], path))
+    index = 4 if c.name in {"mmap", "mmap2"} else 0
+    if len(args) > index:
+        match = re.search(r"<(/[^<>]*)>", args[index])
+        if match:
+            return posixpath.normpath(match[1])
+    return None
 
 NAMES = {
     "openat": {"openat"},
@@ -145,7 +178,9 @@ def collector_kind(c: Call) -> str | None:
         return "thread" if "CLONE_THREAD" in c.args else "spawn"
     if c.name in {"execve", "execveat"}:
         return "exec"
-    if c.name in {"socket", "socketpair", "connect", "sendto", "sendmsg", "sendmmsg"}:
+    if c.name in {"socket", "socketpair", "connect", "bind", "listen", "accept", "accept4",
+                  "sendto", "sendmsg", "sendmmsg", "recvfrom", "recvmsg", "recvmmsg",
+                  "shutdown", "getsockname", "getpeername", "setsockopt", "getsockopt"}:
         return "network"
     return kind(c)
 

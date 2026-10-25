@@ -137,7 +137,8 @@ jobs:
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The arm runner needs about 19 minutes before the F1 corpus and about 23 with it.
+    timeout-minutes: 30
     env:
       # Audit the real linked binaries, then strip those same files for shipping.
       CARGO_PROFILE_RELEASE_STRIP: "none"
@@ -309,6 +310,60 @@ jobs:
       - name: Resource isolation; macOS interpose and descendant audit
         run: '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_no_spawn_macos.py -q -p no:cacheprovider'
 
+      - name: Prepare F1 hostile Git corpus on the host
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: python3 scripts/prepare_git_corpus.py
+      - name: F1 protected collection and policy corpus
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          export BINGSU_GIT_CORPUS_REQUIRED=1
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_git_collection_security.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/f1-traces" | tee "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_hostile_git_canaries_have_zero_effects' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_trace_rejects_outside_root_even_on_eperm' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_no_spawn_harness_detects_attempts' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_status_matches_policy_porcelain_corpus' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_ancestor_names_keep_their_capability' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_each_canary_rejects_read_spawn_and_write_mutations' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_each_policy_case_rejects_wrong_results' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_actual_fifty_ms_partial_preserves_stage_a' "$RUNNER_TEMP/f1-security.txt"
+          grep -F 'PASSED tests/shell/test_git_collection_security.py::test_warm_collection_observations' "$RUNNER_TEMP/f1-security.txt"
+      - if: runner.os == 'Linux'
+        name: Assert native Linux F1 collection passes
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_hostile_git_canaries_have_zero_effects' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_trace_rejects_outside_root_even_on_eperm' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_no_spawn_harness_detects_attempts' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_status_matches_policy_porcelain_corpus' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_ancestor_names_keep_their_capability' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_each_canary_rejects_read_spawn_and_write_mutations' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_each_policy_case_rejects_wrong_results' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_actual_fifty_ms_partial_preserves_stage_a' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_warm_collection_observations' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-under-cap]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-at-cap]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-over-cap]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-large]' "$RUNNER_TEMP/f1-security.txt"
+      - if: runner.os == 'macOS'
+        name: Assert native macOS F1 collection passes
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_hostile_git_canaries_have_zero_effects' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_trace_rejects_outside_root_even_on_eperm' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_no_spawn_harness_detects_attempts' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_status_matches_policy_porcelain_corpus' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_ancestor_names_keep_their_capability' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_each_canary_rejects_read_spawn_and_write_mutations' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_each_policy_case_rejects_wrong_results' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_actual_fifty_ms_partial_preserves_stage_a' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_warm_collection_observations' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-under-cap]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-at-cap]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-over-cap]' "$RUNNER_TEMP/f1-security.txt"
+          grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-large]' "$RUNNER_TEMP/f1-security.txt"
+
       - name: Prepare M3b compiler-free product fixtures
         # Native Linux (x86_64/arm64) and macOS: prepare the current release
         # siblings after all builds; pytest below selects this exact pair.
@@ -404,6 +459,8 @@ jobs:
           path: |
             ${{ runner.temp }}/m3b-security.txt
             ${{ runner.temp }}/m3b-musl.txt
+            ${{ runner.temp }}/f1-security.txt
+            ${{ runner.temp }}/f1-traces/
             ${{ runner.temp }}/filter-native.txt
             ${{ runner.temp }}/filter-musl.txt
             target/b3-evidence/
