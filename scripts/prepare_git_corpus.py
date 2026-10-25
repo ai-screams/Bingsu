@@ -52,8 +52,11 @@ def git(path, *args):
            "GIT_AUTHOR_NAME": "Corpus", "GIT_AUTHOR_EMAIL": "corpus@example.invalid",
            "GIT_COMMITTER_NAME": "Corpus", "GIT_COMMITTER_EMAIL": "corpus@example.invalid",
            "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z"}
+    # Auto gc/maintenance may run detached and add or drop lock files while the
+    # oracle copy is taken; the corpus must be a quiescent snapshot.
     return run(["git", "--no-optional-locks", "-c", "core.hooksPath=/dev/null",
-                "-c", "core.fsmonitor=false", "-C", path, *args], env=env)
+                "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
+                "-c", "maintenance.auto=false", "-C", path, *args], env=env)
 
 
 def write(path, data):
