@@ -1,5 +1,6 @@
 //! Bounded collector protocol and fixed catalog admission.
 use alloc::vec::Vec;
+pub mod breaker;
 pub mod budget;
 pub mod cwd_hash;
 pub mod git;

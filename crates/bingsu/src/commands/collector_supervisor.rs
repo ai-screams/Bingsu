@@ -88,6 +88,14 @@ pub(crate) struct SupervisionReport {
     pub unconfined_decodes: u32,
 }
 
+impl SupervisionReport {
+    /// `progress` is assigned only AFTER Transcript::accept validates the A
+    /// transition. Hidden, initial Progress and GC admission are not A evidence.
+    pub(crate) fn breaker_observation(&self) -> (wire::Progress, EndReason) {
+        (self.progress, self.reason)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Permission {
     Pending,

@@ -1,7 +1,7 @@
 //! Detached fixed refresh command. All NSS, source I/O and publication live here.
 use super::{
     clock::SystemClock,
-    collection_gc,
+    collection_breaker, collection_gc,
     collection_store::{Admission, CollectionStore},
     collector,
     group_policy::SystemGroups,
@@ -87,6 +87,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut filter_failed = false;
     let mut supervisor = None;
     let mut collection_runtime = None;
+    let mut breaker_ticket = None;
     let mut collection_outcome = None;
     let mut verification = Verification::start();
     let mut broker = |context: &super::snapshot_store::CheckedContextFd,
@@ -133,15 +134,30 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     Admission::Deferred(stop) => return Ok(Err(stop)),
                 };
                 let lock = store.worker_lock()?;
+                match collection_breaker::begin(
+                    &context.runtime,
+                    e.session.as_deref(),
+                    e.seq,
+                    &request.binding.cwd,
+                    now,
+                ) {
+                    collection_breaker::Decision::Blocked => return Ok(Ok(None)),
+                    collection_breaker::Decision::Deferred => {
+                        return Ok(Err(collection_gc::GcStop::Busy));
+                    }
+                    collection_breaker::Decision::Run(ticket) => breaker_ticket = ticket,
+                }
                 let job = verification.attach(
                     collector::spawn(&pin, request, lock, &_watchdog, context)?,
                     &store,
                 );
-                Ok::<_, super::snapshot_store::StoreError>(Ok(
-                    job.start(Box::new(move |result| store.publish(&result)))?
-                ))
+                Ok::<_, super::snapshot_store::StoreError>(Ok(Some(
+                    job.start(Box::new(move |result| store.publish(&result)))?,
+                )))
             })();
-            (supervisor, collection_outcome) = collection_result(admission);
+            let (started, outcome) = collection_result(admission);
+            supervisor = started.flatten();
+            collection_outcome = outcome;
         }
         #[cfg(test)]
         if fixture.is_some() {
@@ -184,7 +200,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     };
     // refresh_broker has released the snapshot lock and source descriptors.
     if let Some(handle) = supervisor {
-        let _ = handle.finish();
+        let supervision = handle.finish();
+        if let Some(ticket) = breaker_ticket.take()
+            && let Ok(now) = clock.observe()
+        {
+            let (progress, reason) = supervision.breaker_observation();
+            // Persistence failure affects only the next optional breaker lookup.
+            let _ = ticket.finish(progress, reason, now);
+        }
     }
     if let Some(runtime) = collection_runtime
         && let Ok(now) = clock.observe()
