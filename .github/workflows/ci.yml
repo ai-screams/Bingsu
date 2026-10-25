@@ -137,7 +137,8 @@ jobs:
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The arm runner needs about 19 minutes before the F1 corpus and about 23 with it.
+    timeout-minutes: 30
     env:
       # Audit the real linked binaries, then strip those same files for shipping.
       CARGO_PROFILE_RELEASE_STRIP: "none"
