@@ -220,6 +220,10 @@ impl Binding {
     }
     pub(crate) fn encoded_len(&self) -> Result<usize, ProtocolError> {
         self.validate()?;
+        self.len_from_paths()
+    }
+    // Length arithmetic only: decoding has already validated the borrowed paths.
+    fn len_from_paths(&self) -> Result<usize, ProtocolError> {
         let mut n = 125;
         for path in [&self.config, &self.state, &self.cwd] {
             n = add_budget(n, path.len(), STREAM_MAX)?;
@@ -309,21 +313,25 @@ pub struct Request {
 }
 impl Request {
     fn body_len(&self) -> Result<usize, ProtocolError> {
-        let n = add_budget(self.binding.encoded_len()? - 32, 11, STREAM_MAX)?;
-        if self.global_excludes.len() > GLOBAL_EXCLUDES_MAX {
-            return Err(ProtocolError::Budget);
-        }
-        let n = add_budget(n, self.global_excludes.len(), STREAM_MAX)?;
-        // Begin (12), chunk offsets (4 each), End (4), and every header
-        // count against the unchanged directional stream cap.
-        let chunks = n.div_ceil(FRAME_MAX - HEADER - 4);
-        add_budget(n, (chunks + 2) * HEADER + 16 + 4 * chunks, STREAM_MAX)?;
+        let n = Self::checked_body_len(self.binding.encoded_len()?, self.global_excludes.len())?;
         if !(1..=50).contains(&self.budget_ms) {
             return Err(ProtocolError::Budget);
         }
         if !self.environment.is_empty() {
             return Err(ProtocolError::Schema);
         }
+        Ok(n)
+    }
+    fn checked_body_len(binding_len: usize, excludes_len: usize) -> Result<usize, ProtocolError> {
+        let n = add_budget(binding_len - 32, 11, STREAM_MAX)?;
+        if excludes_len > GLOBAL_EXCLUDES_MAX {
+            return Err(ProtocolError::Budget);
+        }
+        let n = add_budget(n, excludes_len, STREAM_MAX)?;
+        // Begin (12), chunk offsets (4 each), End (4), and every header
+        // count against the unchanged directional stream cap.
+        let chunks = n.div_ceil(FRAME_MAX - HEADER - 4);
+        add_budget(n, (chunks + 2) * HEADER + 16 + 4 * chunks, STREAM_MAX)?;
         Ok(n)
     }
     pub fn encode_body(&self) -> Result<Vec<u8>, ProtocolError> {
@@ -362,16 +370,18 @@ impl Request {
         };
         let global_excludes = r.bytes(GLOBAL_EXCLUDES_MAX, ProtocolError::Budget)?;
         r.end()?;
-        let request = Self {
+        // read_paths checked path syntax, context CRC, clock and query; the
+        // reader checked every remaining field. Only stream framing is left.
+        // Do not call body_len here: it repeats the full binding validation.
+        Self::checked_body_len(binding.len_from_paths()?, global_excludes.len())?;
+        Ok(Self {
             request_id,
             binding,
             budget_ms,
             environment: Vec::new(),
             global_excludes_known,
             global_excludes: global_excludes.to_vec(),
-        };
-        request.body_len()?;
-        Ok(request)
+        })
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

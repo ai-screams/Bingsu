@@ -788,6 +788,50 @@ proptest! {
     }
 }
 
+// Mutations: re-encode the body after decoding, clone decoded paths/payload,
+// or copy the excludes field before checking the directional stream budget.
+// CRC/path rescans do not allocate; their cost is covered by request_decode's
+// instruction-count benchmark rather than a wall-clock assertion here.
+#[test]
+fn request_decode_copies_each_field_once_after_its_budget_check() {
+    let mut r = request();
+    let mut path = vec![b'a'; 65_536];
+    path[0] = b'/';
+    r.binding.config = path.clone();
+    r.binding.state = path.clone();
+    r.binding.cwd = path;
+    r.binding.snapshot.context =
+        snapshot::context_crc(&r.binding.config, &r.binding.state).unwrap();
+    for size in [0, 64_920] {
+        r.global_excludes = vec![0xff; size];
+        let bytes = r.encode_body().unwrap();
+        let mut decoded = None;
+        let counts = allocation::counted(|| {
+            decoded = Some(Request::decode_body(
+                r.binding.build_id,
+                r.request_id,
+                &bytes,
+            ));
+        });
+        assert_eq!(decoded.unwrap(), Ok(r.clone()));
+        assert_eq!(counts, (3 + usize::from(size != 0), 0, 3 * 65_536 + size));
+    }
+    let mut bytes = r.encode_body().unwrap();
+    let field_at = bytes.len() - r.global_excludes.len() - 4;
+    bytes[field_at..field_at + 4].copy_from_slice(&64_921u32.to_le_bytes());
+    bytes.push(0xff);
+    let mut decoded = None;
+    let counts = allocation::counted(|| {
+        decoded = Some(Request::decode_body(
+            r.binding.build_id,
+            r.request_id,
+            &bytes,
+        ));
+    });
+    assert_eq!(decoded.unwrap(), Err(ProtocolError::Budget));
+    assert_eq!(counts, (3, 0, 3 * 65_536));
+}
+
 #[test]
 #[ignore = "release measurement over 200 warm runs"]
 fn measure_global_excludes_codec() {
