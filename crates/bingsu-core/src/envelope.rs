@@ -49,6 +49,7 @@ pub struct Envelope {
     pub duration_ms: Option<u64>,
     pub jobs: Option<u32>,
     pub keymap: Option<Vec<u8>>,
+    /// Opaque lowercase hex identity; forwarded as data to the existing helper.
     pub session: Option<Vec<u8>>,
     pub seq: Option<u64>,
     pub redraw: bool,

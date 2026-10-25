@@ -36,6 +36,9 @@ impl Fixture {
         self.git_home(args, &self.0)
     }
     fn git_home(&self, args: &[&str], home: &Path) -> Vec<u8> {
+        // Keep oracle children from transiently inheriting another test's
+        // close-only breaker/GC lock between fork and exec.
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let output = Command::new("git")
             .arg("-C")
             .arg(self.0.join("repo"))

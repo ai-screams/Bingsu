@@ -13,6 +13,8 @@ mod build_identity;
 )]
 mod clock;
 #[cfg(unix)]
+pub(crate) mod collection_breaker;
+#[cfg(unix)]
 pub(crate) mod collection_gc;
 #[cfg(unix)]
 pub(crate) mod collection_store;

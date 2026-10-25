@@ -2,6 +2,7 @@
 //! Catalog entries are hints: deletion always reopens and checks the actual
 //! parent/name, data and collection lock. Snapshot names are never candidates.
 use super::{
+    collection_breaker,
     collection_store::{self, FILES, LOCK, PREVIOUS, RESPONSE, STAGE},
     snapshot_store::{self, CheckedContextFd, StoreError},
     sys,
@@ -370,6 +371,45 @@ impl<'a> Registration<'a> {
         // This durable-in-process reservation precedes every collection mkdir.
         save(self.runtime, self.me, &self.catalog)
     }
+    /// Register session directories before mkdir. Payload capacity is charged
+    /// from actual lengths under the session lock before each write.
+    pub(super) fn reserve_breaker(
+        &mut self,
+        session: &str,
+        now: Clock,
+    ) -> Result<bool, StoreError> {
+        let path = collection_breaker::path(session);
+        if !collection_breaker::location(&path) {
+            return Err(StoreError::Unsafe);
+        }
+        if let Some(index) = self.catalog.entries.iter().position(|e| e.path == path) {
+            let entry = &self.catalog.entries[index];
+            let dir = open_path(self.runtime, &path, self.me)?;
+            let stamp = sys::file_stamp(&dir)?;
+            if (stamp.dev, stamp.ino) != (entry.dev, entry.ino) {
+                return Err(StoreError::Unsafe);
+            }
+            self.selected = Some(index);
+            return Ok(false);
+        }
+        if !self.catalog.capacity(1, 3, 0) {
+            return Err(StoreError::Busy);
+        }
+        self.catalog.entries.push(Entry {
+            path,
+            cwd: vec![],
+            dev: 0,
+            ino: 0,
+            bytes: 0,
+            reserved: true,
+            used: now,
+        });
+        self.catalog.stores += 1;
+        self.catalog.nodes += 3;
+        self.selected = Some(self.catalog.entries.len() - 1);
+        save(self.runtime, self.me, &self.catalog)?;
+        Ok(true)
+    }
     pub(super) fn attach(&mut self, dir: &File, created: u64) -> Result<(), StoreError> {
         let entry = &mut self.catalog.entries[self.selected.ok_or(StoreError::Unsafe)?];
         let stamp = sys::file_stamp(dir)?;
@@ -385,6 +425,52 @@ impl<'a> Registration<'a> {
         entry.ino = stamp.ino;
         save(self.runtime, self.me, &self.catalog)
     }
+}
+
+/// Caller holds the session lock. Never wait for GC_LOCK, or retain it while
+/// reading/writing breaker payloads; GC takes session locks non-blockingly too.
+pub(super) fn reserve_breaker_write(
+    runtime: &File,
+    dir: &File,
+    session: &str,
+    bytes: u64,
+    now: Clock,
+    me: u32,
+) -> Result<(), StoreError> {
+    if bytes > collection_breaker::MAX_RESERVATION
+        || bytes % collection_breaker::ACCOUNTING_UNIT != 0
+    {
+        return Err(StoreError::Unsafe);
+    }
+    let _lock = collection_store::close_only_lock(runtime, GC_LOCK, me, true)?;
+    let mut catalog = load(runtime, me)?.ok_or(StoreError::Busy)?;
+    if !catalog.ready || catalog.unsafe_seen {
+        return Err(StoreError::Busy);
+    }
+    let path = collection_breaker::path(session);
+    let index = catalog
+        .entries
+        .iter()
+        .position(|entry| entry.path == path)
+        .ok_or(StoreError::Busy)?;
+    let entry = &catalog.entries[index];
+    let actual = sys::file_stamp(dir)?;
+    let named = open_path(runtime, &path, me)?;
+    let named = sys::file_stamp(&named)?;
+    if (actual.dev, actual.ino) != (entry.dev, entry.ino)
+        || (actual.dev, actual.ino) != (named.dev, named.ino)
+    {
+        return Err(StoreError::Unsafe);
+    }
+    catalog.bytes = catalog.bytes.saturating_sub(entry.bytes);
+    if !catalog.capacity(0, 0, bytes) {
+        return Err(StoreError::Busy);
+    }
+    catalog.bytes += bytes;
+    catalog.entries[index].bytes = bytes;
+    catalog.entries[index].reserved = true;
+    catalog.entries[index].used = now;
+    save(runtime, me, &catalog)
 }
 
 pub(crate) fn reclaim(
@@ -759,6 +845,11 @@ fn identity(location: &Location, binding: &Binding) -> bool {
             || unhex(&location.address).is_ok_and(|bytes| bytes == binding.cwd))
 }
 fn entry_valid(entry: &Entry) -> bool {
+    if collection_breaker::location(&entry.path) {
+        return entry.cwd.is_empty()
+            && entry.bytes <= collection_breaker::MAX_RESERVATION
+            && entry.bytes % collection_breaker::ACCOUNTING_UNIT == 0;
+    }
     let Ok(loc) = location(&entry.path) else {
         return false;
     };
@@ -775,7 +866,12 @@ fn descend(path: &[String], name: &str) -> bool {
         return false;
     }
     if path.is_empty() {
-        return name == "contexts-v2";
+        return name == "contexts-v2" || name == collection_breaker::ROOT;
+    }
+    if path[0] == collection_breaker::ROOT {
+        return (path.len() == 1 && name == "sessions")
+            || (path.len() == 2
+                && collection_breaker::location(&[path[0].clone(), path[1].clone(), name.into()]));
     }
     if path.len() == 1 {
         return name == "config";
@@ -894,7 +990,10 @@ fn inventory(
             continue;
         };
         if !descend(&path, &name) {
-            if path.iter().any(|n| n == "collections-v1") {
+            if path
+                .iter()
+                .any(|n| n == "collections-v1" || n == collection_breaker::ROOT)
+            {
                 catalog.unsafe_seen = true;
             }
             catalog.cursor.last_mut().unwrap().pending.pop();
@@ -944,7 +1043,7 @@ fn inventory(
             batch_entries += 1;
             continue;
         }
-        if location(&child_path).is_ok() {
+        if location(&child_path).is_ok() || collection_breaker::location(&child_path) {
             if first_name(&child)?.is_none() {
                 queue_prune(catalog, name);
                 catalog.nodes = catalog.nodes.saturating_add(1);
@@ -968,7 +1067,10 @@ fn inventory(
         } else {
             catalog.cursor.last_mut().unwrap().pending.pop();
             batch_entries += 1;
-            if child_path.iter().any(|n| n == "collections-v1") {
+            if child_path
+                .iter()
+                .any(|n| n == "collections-v1" || n == collection_breaker::ROOT)
+            {
                 catalog.nodes = catalog.nodes.saturating_add(1);
             }
             catalog.cursor.push(Cursor::new(name, &stamp, catalog));
@@ -976,7 +1078,10 @@ fn inventory(
             path = child_path;
             continue;
         }
-        if child_path.iter().any(|n| n == "collections-v1") {
+        if child_path
+            .iter()
+            .any(|n| n == "collections-v1" || n == collection_breaker::ROOT)
+        {
             catalog.nodes = catalog.nodes.saturating_add(1);
         }
         catalog.cursor.last_mut().unwrap().pending.pop();
@@ -1059,6 +1164,33 @@ fn inspect(
     now: Clock,
     schema: &[SegmentDecl],
 ) -> Result<Entry, StoreError> {
+    if collection_breaker::location(&path) {
+        let stamp = sys::file_stamp(dir)?;
+        let lock = match collection_store::close_only_lock(dir, collection_breaker::LOCK, me, false)
+        {
+            Ok(lock) => Some(lock),
+            Err(StoreError::Busy) => None,
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let (used, bytes) = if lock.is_some() {
+            let (breaker, bytes) = collection_breaker::inventory(dir, me)?;
+            (breaker.map_or(now, |b| b.used()), bytes)
+        } else {
+            // Without the session lock, lengths can change. Conservatively
+            // cover both capped files until a locked write/inspection updates it.
+            (now, collection_breaker::MAX_RESERVATION)
+        };
+        return Ok(Entry {
+            path,
+            cwd: vec![],
+            dev: stamp.dev,
+            ino: stamp.ino,
+            bytes,
+            reserved: lock.is_none(),
+            used,
+        });
+    }
     let loc = location(&path)?;
     let stamp = sys::file_stamp(dir)?;
     let lock = match collection_store::close_only_lock(dir, LOCK, me, false) {
@@ -1169,6 +1301,14 @@ fn evict(
         let entry = catalog.entries[i].clone();
         if !entry_valid(&entry) {
             return Err(StoreError::Unsafe);
+        }
+        if collection_breaker::location(&entry.path) {
+            if evict_breaker(runtime, me, now, catalog, i, report)? {
+                continue;
+            }
+            i += 1;
+            catalog.next = i as u32;
+            continue;
         }
         let parent = open_path(runtime, &entry.path[..entry.path.len() - 1], me)?;
         let name = entry.path.last().unwrap();
@@ -1317,6 +1457,94 @@ fn evict(
     }
     catalog.next = 0;
     Ok(())
+}
+
+// A session directory is tombstoned while BOTH global and session locks are
+// held. The fixed lock is removed last, after its public name has disappeared.
+fn evict_breaker(
+    runtime: &File,
+    me: u32,
+    now: Clock,
+    catalog: &mut Catalog,
+    index: usize,
+    report: &mut GcReport,
+) -> Result<bool, StoreError> {
+    let entry = catalog.entries[index].clone();
+    let parent = open_path(runtime, &entry.path[..2], me)?;
+    let name = &entry.path[2];
+    let dir = sys::open_dir_at_nofollow(parent.as_fd(), OsStr::new(name))?;
+    snapshot_store::check_directory(&dir, me)?;
+    snapshot_store::same_name(&dir, parent.as_fd(), name)?;
+    let stamp = sys::file_stamp(&dir)?;
+    if (entry.dev, entry.ino) != (stamp.dev, stamp.ino) {
+        return Err(StoreError::Unsafe);
+    }
+    let lock = match collection_store::close_only_lock(&dir, collection_breaker::LOCK, me, false) {
+        Ok(lock) => Some(lock),
+        Err(StoreError::Busy) => return Ok(false),
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let (breaker, bytes) = collection_breaker::inventory(&dir, me)?;
+    catalog.bytes = catalog
+        .bytes
+        .saturating_sub(entry.bytes)
+        .saturating_add(bytes);
+    catalog.entries[index].bytes = bytes;
+    catalog.entries[index].reserved = false;
+    if let Some(breaker) = &breaker {
+        catalog.entries[index].used = breaker.used();
+        if breaker.live(now) {
+            return Ok(false);
+        }
+        if !collection_breaker::tombstone(name)
+            && !old(&catalog.entries[index], now)
+            && catalog.capacity(1, 3, RESERVATION)
+        {
+            return Ok(false);
+        }
+    }
+    let tomb = if collection_breaker::tombstone(name) {
+        name.clone()
+    } else {
+        format!(".{name}.gc")
+    };
+    if let Some(lock) = &lock {
+        snapshot_store::same_name(lock, dir.as_fd(), collection_breaker::LOCK)?;
+    }
+    snapshot_store::same_name(&dir, parent.as_fd(), name)?;
+    if name != &tomb {
+        if !sys::at_stamp(parent.as_fd(), OsStr::new(&tomb))
+            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+        {
+            return Err(StoreError::Busy);
+        }
+        sys::rename_at(parent.as_fd(), OsStr::new(name), OsStr::new(&tomb))?;
+        catalog.entries[index].path[2] = tomb.clone();
+    }
+    snapshot_store::same_name(&dir, parent.as_fd(), &tomb)?;
+    for file in collection_breaker::FILES {
+        if collection_store::remove_checked(
+            &dir,
+            file,
+            if file == collection_breaker::LOCK {
+                0
+            } else {
+                bingsu_core::collection::breaker::MAX_BYTES
+            },
+            me,
+        )? {
+            report.removed_files += 1;
+        }
+    }
+    sys::remove_dir_at(parent.as_fd(), OsStr::new(&tomb))?;
+    report.removed_dirs += 1;
+    catalog.bytes = catalog.bytes.saturating_sub(bytes);
+    catalog.stores = catalog.stores.saturating_sub(1);
+    catalog.nodes = catalog.nodes.saturating_sub(1);
+    catalog.entries.remove(index);
+    catalog.next = index as u32;
+    Ok(true)
 }
 
 // The suffix is checkpointed before its first removal, so a budget stop

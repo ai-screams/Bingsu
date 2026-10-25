@@ -49,7 +49,7 @@ pub fn decode_groups(word: &[u8], components: usize) -> Result<Vec<GroupPin>, En
     Ok(pins)
 }
 
-/// Only fixed roots, group pins, home, level, width, redraw and a display cwd cross the
+/// Only fixed roots, group pins, home, level, width, redraw, session/sequence and a display cwd cross the
 /// boundary. Two-word display fields cannot smuggle a root option as a value.
 pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<Cow<'a, [u8]>>, EnvelopeError> {
     let mut out: Vec<&[u8]> = alloc::vec![b"--ctx", b"1", b"--record", b"B1"];
@@ -61,7 +61,7 @@ pub fn words<'a>(raw: &[&'a [u8]]) -> Result<Vec<Cow<'a, [u8]>>, EnvelopeError> 
             let v = raw
                 .get(i + 1)
                 .ok_or(EnvelopeError::BadArgs("missing value"))?;
-            if a == b"--pwd" || a == b"--width" {
+            if matches!(a, b"--pwd" | b"--width" | b"--session" | b"--seq") {
                 out.extend([a, *v]);
                 if a == b"--width" {
                     width_at = Some(out.len() - 1);
@@ -362,5 +362,42 @@ mod global_input_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod breaker_handoff_tests {
+    use super::*;
+    #[test]
+    fn session_sequence_cross_existing_helper_as_validated_data() {
+        let base: &[&[u8]] = &[
+            b"--runtime-root=1:2:/r",
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            b"--home=/h",
+        ];
+        let mut raw = base.to_vec();
+        raw.extend([
+            b"--session".as_slice(),
+            b"0123456789abcdef0123456789abcdef",
+            b"--seq",
+            b"42",
+            b"--host",
+            b"--seq",
+        ]);
+        let e = validate(&words(&raw).unwrap()).unwrap();
+        assert_eq!(
+            e.session.as_deref(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+        assert_eq!(e.seq, Some(42));
+        let e = validate(&words(base).unwrap()).unwrap();
+        assert_eq!((e.session, e.seq), (None, None));
+        raw.extend([b"--seq".as_slice(), b"43"]);
+        assert_eq!(words(&raw), Err(EnvelopeError::BadArgs("duplicate field")));
+        let mut raw = base.to_vec();
+        raw.extend([b"--session".as_slice(), b"../../session"]);
+        assert_eq!(words(&raw), Err(EnvelopeError::BadArgs("session")));
     }
 }
