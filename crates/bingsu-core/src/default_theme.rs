@@ -233,6 +233,23 @@ mod tests {
             let d = DefaultTheme::new(mode).unwrap();
             assert_eq!(d.theme().variants.len(), 2);
             assert_eq!(d.setup().len(), BUILTIN.len());
+            // Both layouts already contain git once, immediately after dir.
+            for variant in d.theme().variants {
+                let segments: Vec<_> = variant
+                    .iter()
+                    .flat_map(|line| line.nodes())
+                    .filter_map(|n| {
+                        if let crate::template::compile::Node::Segment { seg, .. } = n {
+                            Some(*seg)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(segments.iter().filter(|s| **s == 3).count(), 1);
+                let git = segments.iter().position(|s| *s == 3).unwrap();
+                assert_eq!(segments[git - 1], 1);
+            }
         }
         for (id, _, _) in SETUP {
             assert!(segment(id).is_some(), "{id}");

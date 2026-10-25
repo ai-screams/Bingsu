@@ -1,7 +1,7 @@
 //! Segment values the front end makes from the envelope alone (spec
 //! section 4 process table: `status`, `duration`, `jobs`, `char`, and
 //! `dir`, `host`, `venv` from display-only hook words, never opened).
-//! git and time stay hidden until their tasks land.
+//! Collected git fields are formatted here without consulting the filesystem.
 use crate::envelope::Envelope;
 use crate::field::{BUILTIN, Field, FieldValue, Value, segment, write_duration};
 use crate::shorten::{Anchor, MAX_STEPS, PathFacts};
@@ -18,6 +18,75 @@ pub const DURATION_MIN_MS: u64 = 2000;
 pub struct Collected {
     pub values: Vec<Option<Value>>,
     pub facts: Vec<Option<PathFacts>>,
+}
+
+/// The default git display is derived only from typed fields. In particular,
+/// a worker's display string is never authoritative. Direct field references
+/// keep their numeric formatter (including exact zero).
+pub fn format_git(value: &Value, icons: crate::icons::IconSet, profile: WidthProfile) -> Value {
+    use crate::field::FieldType;
+    let decl = &BUILTIN[usize::from(crate::collection::git::SEGMENT)];
+    let fields: Vec<_> = value
+        .fields
+        .iter()
+        .zip(decl.fields)
+        .map(|(field, d)| {
+            let mut f = match (&field.value, d.ty) {
+                (FieldValue::Text(t), FieldType::Text { max_cells }) => {
+                    Field::text(t.as_str().as_bytes(), max_cells, profile)
+                }
+                _ => field.clone(),
+            };
+            f.state = field.state;
+            f
+        })
+        .collect();
+    let get = |name| decl.field_index(name).and_then(|i| fields.get(i));
+    let yes = |name| get(name) == Some(&Field::known(FieldValue::Bool(true)));
+    let mut text = String::new();
+    if !yes("no_repo") {
+        let head = if yes("detached") { "commit" } else { "branch" };
+        for (name, icon) in [
+            (head, "git.branch"),
+            ("operation", ""),
+            ("staged", "git.staged"),
+            ("modified", "git.modified"),
+            ("untracked", "git.untracked"),
+            ("conflicted", "git.conflicted"),
+            ("ahead", "git.ahead"),
+            ("behind", "git.behind"),
+            ("stash", "git.stash"),
+        ] {
+            // Only Known(false) proves that the modified count is exact.
+            // An approximate zero must stay visible; Absent still has no count.
+            let approximate = name == "modified"
+                && get("filtered") != Some(&Field::known(FieldValue::Bool(false)));
+            let Some(f) = get(name).filter(|f| {
+                !f.is_empty_for_group()
+                    || (approximate && matches!(f.value, FieldValue::Count { .. }))
+            }) else {
+                continue;
+            };
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            if let Some(icon) = crate::icons::lookup(icon) {
+                let glyph = crate::icons::resolve(icon, icons, profile).text;
+                text.push_str(glyph);
+                if name == head && !glyph.is_empty() {
+                    text.push(' ');
+                }
+            }
+            // Pending wins even over a numeric payload in a hostile snapshot.
+            f.write_to(&mut text);
+            if approximate {
+                text.push('~');
+            }
+        }
+    }
+    // Keep Bool fields and partial/stage metadata intact for conditional groups.
+    // Value::new also passes the assembled text through the shared sanitizer.
+    Value::new(text.as_bytes(), fields)
 }
 
 fn index(id: &str) -> usize {

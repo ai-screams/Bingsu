@@ -553,14 +553,26 @@ impl<'l, 'i> Lay<'l, 'i> {
             } else if let Some(Some(f)) = inp.facts.get(s) {
                 if f.display_len() > PATH_BYTES_MAX {
                     let e = ellipsis(p, 1);
-                    slot.short = Some(Short {
+                    let mut short = Short {
                         text: e.into(),
                         ends: alloc::vec![(e.len(), true)],
-                    });
-                    slot.m = text_m(e, join, p);
+                    };
+                    if f.readonly() == Some(true) {
+                        let prefix = alloc::format!("{} ", icons::readonly_marker(o.icons, p));
+                        short.text.insert_str(0, &prefix);
+                        short.ends[0].0 += prefix.len();
+                        short.ends.insert(0, (prefix.len(), false));
+                    }
+                    slot.m = text_m(&short.text, join, p);
+                    slot.short = Some(short);
                     continue;
                 }
-                slot.base = Base::Owned(f.display());
+                let mut text = f.display();
+                if f.readonly() == Some(true) {
+                    text.insert(0, ' ');
+                    text.insert_str(0, icons::readonly_marker(o.icons, p));
+                }
+                slot.base = Base::Owned(text);
             } else {
                 slot.base = Base::Value;
             }
@@ -680,6 +692,16 @@ impl<'l, 'i> Lay<'l, 'i> {
         }
     }
 
+    fn readonly_prefix(&self, s: usize) -> Option<String> {
+        let facts = self.inp.facts.get(s)?.as_ref()?;
+        if facts.readonly() != Some(true) {
+            return None;
+        }
+        let mut prefix = String::from(icons::readonly_marker(self.o.icons, self.o.profile));
+        prefix.push(' ');
+        Some(prefix)
+    }
+
     /// The methods' first result that fits `budget`, else the narrowest, as
     /// `shorten` picks, over the first `METHODS_MAX` methods. A method sure
     /// to give more than `SEG_PIECES_MAX` pieces or `LINE_BYTES_MAX` bytes
@@ -697,13 +719,18 @@ impl<'l, 'i> Lay<'l, 'i> {
         if matches!(self.inp.facts.get(s), Some(Some(f)) if f.display_len() > PATH_BYTES_MAX) {
             return None;
         }
+        let prefix = self.readonly_prefix(s);
+        let prefix_width = prefix
+            .as_deref()
+            .map_or(0, |t| str_width(t, self.o.profile));
+        let budget = budget.saturating_sub(prefix_width);
         let mut best: Option<(Vec<Piece>, u32)> = None;
         let mut best_at = 0;
         for (at, m) in methods.iter().take(METHODS_MAX).enumerate() {
             if too_big(*m, self.source(s)) {
                 continue;
             }
-            let Some((res, _, w)) = shorten(
+            let Some((mut res, _, w)) = shorten(
                 self.source(s),
                 core::slice::from_ref(m),
                 budget,
@@ -711,6 +738,15 @@ impl<'l, 'i> Lay<'l, 'i> {
             ) else {
                 continue;
             };
+            if let Some(prefix) = &prefix {
+                res.pieces.insert(
+                    0,
+                    Piece {
+                        text: prefix.clone(),
+                        shortened: false,
+                    },
+                );
+            }
             if res.pieces.len() > SEG_PIECES_MAX {
                 continue;
             }
@@ -775,7 +811,12 @@ impl<'l, 'i> Lay<'l, 'i> {
         for (k, n) in self.nodes.iter().enumerate() {
             let on_right = self.fill.is_some_and(|f| k > f);
             acc += u32::from(match *n {
-                Node::Segment { seg, .. } => self.visible(usize::from(seg), on_right),
+                Node::Segment { seg, .. } => {
+                    let s = usize::from(seg);
+                    // Empty displays cannot keep a group's literals visible.
+                    // Direct fields keep their own group semantics below.
+                    self.visible(s, on_right) && self.slots[s].m.head != 0
+                }
                 Node::Field { seg, .. } => {
                     self.visible(usize::from(seg), on_right) && self.info[k].filled
                 }
@@ -913,6 +954,13 @@ impl<'l, 'i> Lay<'l, 'i> {
 
     fn push_segment(&self, side: &mut Vec<Item>, styles: &[Style], s: usize, block: bool) {
         let slot = &self.slots[s];
+        // Empty displays (for example, an unborn clean repository) must not
+        // create a padded block that keeps adjacent separators visible. This
+        // applies to every segment; non-empty displays and direct fields remain
+        // unchanged, including a directly referenced exact zero.
+        if slot.m.head == 0 {
+            return;
+        }
         let base = if block {
             Style {
                 fg: slot
@@ -1684,7 +1732,32 @@ pub fn layout_line_into<R: Recorder>(
                 Keep::Start
             };
             let cut = w.saturating_sub(fit.cells.saturating_sub(target)).max(1);
-            let short = truncate(&lay.pieces(s), cut, keep, p);
+            let short = if let Some(prefix) = lay.readonly_prefix(s) {
+                // The marker is decoration, never a path component or a
+                // partially truncated token. Reserve it even in step four.
+                let mut pieces = lay.pieces(s);
+                let first = pieces.first_mut().expect("visible path piece");
+                first.0 = first.0.strip_prefix(&prefix).expect("readonly prefix");
+                let path = truncate(
+                    &pieces,
+                    cut.saturating_sub(str_width(&prefix, p)).max(1),
+                    keep,
+                    p,
+                );
+                let mut short = Short {
+                    text: prefix.clone(),
+                    ends: alloc::vec![(prefix.len(), false)],
+                };
+                short.text.push_str(&path.text);
+                short.ends.extend(
+                    path.ends
+                        .into_iter()
+                        .map(|(end, dim)| (end + prefix.len(), dim)),
+                );
+                short
+            } else {
+                truncate(&lay.pieces(s), cut, keep, p)
+            };
             if str_width(&short.text, p) >= w {
                 lay.slots[s].exhausted = true;
                 continue;

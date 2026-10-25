@@ -240,6 +240,7 @@ pub struct Harness {
     prefetch: Option<Vec<String>>,
     args: Vec<Vec<u8>>,
     fixture: bool,
+    workers: u32,
     schema: &'static [SegmentDecl],
     render_config: CompiledConfig,
 }
@@ -275,6 +276,7 @@ impl Harness {
             prefetch: None,
             args: args(),
             fixture: true,
+            workers: TEST_MASK,
             schema: &CATALOG,
             render_config: fixture_config(),
         }
@@ -302,7 +304,7 @@ impl Harness {
             plan = plan.with_catalog(
                 Catalog {
                     segments: self.schema,
-                    workers: TEST_MASK,
+                    workers: self.workers,
                 },
                 self.render_config.clone(),
             );
@@ -591,9 +593,20 @@ fn collected_values_do_not_override_shell_values() {
             value: Some(Value::new(b"OVERRIDE", vec![])),
         });
     }
-    collection::merge(&mut values, Some(&r), 0);
+    let mut expected = binding();
+    expected.mask = 0;
+    assert_eq!(
+        collection::merge(&mut values, Some(&r), &expected, b"/cwd", None),
+        Err(collection::wire::ProtocolError::Schema)
+    );
     assert_eq!(values.values, original);
-    collection::merge(&mut values, Some(&r), TEST_MASK);
+    expected.mask = TEST_MASK;
+    assert_eq!(
+        collection::merge(&mut values, Some(&r), &expected, b"/cwd", None),
+        Err(collection::wire::ProtocolError::Schema)
+    );
+    r.updates.truncate(1);
+    collection::merge(&mut values, Some(&r), &expected, b"/cwd", None).unwrap();
     assert_eq!(&values.values[..original.len()], &original);
     assert_eq!(format!("{:?}", values.facts), original_facts);
     assert!(!values.values[31].as_ref().unwrap().text().contains('\x1b'));
@@ -739,5 +752,136 @@ fn colliding_root_bytes_never_authorize_reuse() {
         marker.id.context = context;
         h.marker = marker.encode().to_vec();
         assert!(!h.text().contains("COLLISION"));
+    }
+}
+
+// Killed by accepting another home/unique binding, a completed-at tie, a stale
+// snapshot identity, trusting worker display text, or doing repository I/O.
+#[test]
+fn path_query_and_entry_cutoff_are_exact() {
+    use bingsu_core::{
+        collection::path_facts::{PathFactInput, PathQuery},
+        field::FieldValue,
+        icons::IconSet,
+        shorten::Method,
+        width::WidthProfile,
+    };
+    let make = |branch: &[u8], at| {
+        let mut r = completed(at, b"");
+        r.binding.mask = 10;
+        r.binding.path_query = PathQuery {
+            home_component: Some(0),
+            unique: true,
+        };
+        let mut fields = vec![Field::ABSENT; field::BUILTIN[3].fields.len()];
+        for (name, f) in [
+            ("branch", Field::text(branch, 256, WidthProfile::DEFAULT)),
+            ("staged", Field::PENDING),
+            (
+                "modified",
+                Field::known(FieldValue::Count {
+                    n: 2,
+                    saturated: false,
+                }),
+            ),
+            ("stage", Field::text(b"B", 1, WidthProfile::DEFAULT)),
+        ] {
+            fields[field::BUILTIN[3].field_index(name).unwrap()] = f;
+        }
+        r.updates = vec![
+            Update {
+                segment: 3,
+                value: Some(Value::new(b"FORGED", fields)),
+                facts: None,
+            },
+            Update {
+                segment: 1,
+                value: None,
+                facts: Some(PathFactInput {
+                    readonly: Some(true),
+                    ..Default::default()
+                }),
+            },
+        ];
+        r
+    };
+    for icons in [IconSet::Ascii, IconSet::Unicode, IconSet::Nerd] {
+        for amb in [1, 2] {
+            for change in 0..8 {
+                let mut h = Harness::new(None, None);
+                h.workers = 10;
+                h.schema = field::BUILTIN;
+                h.args.push(b"--home=/cwd".to_vec());
+                h.render_config = snapshot().config;
+                h.render_config.icons = icons;
+                h.render_config.profile = WidthProfile::new(amb, 2).unwrap();
+                h.render_config.setup[1].methods = vec![Method::Unique];
+                h.render_config.variants = vec![compile("{dir} {git}", field::BUILTIN).unwrap(); 2];
+                let mut current = make(b"CURRENT", 99);
+                match change {
+                    0 => (),
+                    1 => current.binding.path_query.home_component = None,
+                    2 => current.binding.path_query.unique = false,
+                    3 => current.completed_at_ns = 100,
+                    4 => current.completed_at_ns = 101,
+                    5 => current.binding.snapshot.generation += 1,
+                    6 => current.binding.cwd = b"/elsewhere".to_vec(),
+                    _ => current.binding.snapshot.source[0] ^= 1,
+                }
+                h.responses = [
+                    Some(current.encode().unwrap()),
+                    Some(make(b"PREVIOUS", 98).encode().unwrap()),
+                ];
+                let record = h.text();
+                let wanted = if change == 0 { "CURRENT" } else { "PREVIOUS" };
+                assert!(record.contains(wanted), "{change}: {record}");
+                assert!(!record.contains(if change == 0 { "PREVIOUS" } else { "CURRENT" }));
+                assert!(!record.contains("FORGED"));
+                assert!(record.contains("+? !2~"), "{record}");
+                assert_eq!(
+                    record.contains('\u{e0a0}'),
+                    icons == IconSet::Nerd,
+                    "{record}"
+                );
+                assert!(record.contains(bingsu_core::icons::readonly_marker(
+                    icons,
+                    WidthProfile::new(amb, 2).unwrap()
+                )));
+                // The continuation has no effect capable of opening repository metadata.
+                assert_eq!(
+                    h.operations
+                        .iter()
+                        .filter(|s| s.starts_with("OpenFile"))
+                        .count(),
+                    2
+                );
+                assert!(h.reads.iter().all(|(name, _, _)| {
+                    [b"snapshot".as_slice(), b"marker", b"response", b"previous"].contains(name)
+                }));
+                assert_eq!(
+                    h.operations
+                        .iter()
+                        .filter(|s| s.starts_with("OpenCollection"))
+                        .count(),
+                    if change == 0 { 1 } else { 2 }
+                );
+            }
+        }
+    }
+    // No eligible response means unknown directory observations, including when
+    // a complete response was rejected at the prompt-entry boundary.
+    for current in [None, Some(make(b"REJECTED", 100).encode().unwrap())] {
+        let mut h = Harness::new(None, None);
+        h.workers = 10;
+        h.schema = field::BUILTIN;
+        h.args.push(b"--home=/cwd".to_vec());
+        h.render_config = snapshot().config;
+        h.render_config.setup[1].methods = vec![Method::Unique];
+        h.render_config.variants =
+            vec![compile("{dir.in_repo}/{dir.readonly}/{git}", field::BUILTIN).unwrap(); 2];
+        h.responses = [current, None];
+        let record = h.text();
+        assert!(record.contains("?/?/"), "{record}");
+        assert!(!record.contains("REJECTED"));
     }
 }

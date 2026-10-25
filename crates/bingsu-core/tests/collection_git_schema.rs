@@ -237,7 +237,8 @@ fn contradictory_git_values_are_refused_by_wire_and_response() {
 #[test]
 fn no_repo_marker_is_hidden_in_front() {
     use bingsu_core::{collection, envelope, shell_values};
-    let r = request(8);
+    let mut r = request(8);
+    r.binding.cwd = b"/cwd".to_vec();
     let mut t = transcript(&r);
     put(
         &mut t,
@@ -266,26 +267,43 @@ fn no_repo_marker_is_hidden_in_front() {
     values.values[3] = Some(git(b"A"));
     let before = values.values.clone();
     for mask in [0, 2, 10] {
-        collection::merge(&mut values, Some(&c), mask);
+        let mut expected = c.binding.clone();
+        expected.mask = mask;
+        assert_eq!(
+            collection::merge(&mut values, Some(&c), &expected, b"/cwd", None),
+            Err(E::Schema)
+        );
         assert_eq!(values.values, before);
     }
     for mask in [0, 2] {
         let mut unrequested = c.clone();
         unrequested.binding.mask = mask;
-        collection::merge(&mut values, Some(&unrequested), mask);
+        assert_eq!(
+            collection::merge(
+                &mut values,
+                Some(&unrequested),
+                &unrequested.binding,
+                b"/cwd",
+                None
+            ),
+            Err(E::Schema)
+        );
         assert_eq!(values.values, before);
     }
     let mut repository = c.clone();
     repository.updates[0].value = Some(git(b"A"));
-    collection::merge(&mut values, Some(&repository), 8);
+    collection::merge(&mut values, Some(&repository), &r.binding, b"/cwd", None).unwrap();
     assert_eq!(values.values, before);
     let mut invalid = c.clone();
     let d = &field::BUILTIN[3];
     invalid.updates[0].value.as_mut().unwrap().fields[d.field_index("partial").unwrap()] =
         Field::known(FieldValue::Bool(true));
-    collection::merge(&mut values, Some(&invalid), 8);
+    assert_eq!(
+        collection::merge(&mut values, Some(&invalid), &r.binding, b"/cwd", None),
+        Err(E::Schema)
+    );
     assert_eq!(values.values, before);
-    collection::merge(&mut values, Some(&c), 8);
+    collection::merge(&mut values, Some(&c), &r.binding, b"/cwd", None).unwrap();
     assert_eq!(values.values[3], None);
     for (i, v) in before.iter().enumerate() {
         if i != 3 {

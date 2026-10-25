@@ -88,6 +88,7 @@ pub fn render_selected(
         compiled,
         mode,
         collection,
+        collection.map(|r| &r.binding),
         &crate::collection::selection::PRODUCT,
         out,
     );
@@ -104,6 +105,7 @@ fn render_selected_with_catalog(
     compiled: Option<&CompiledConfig>,
     mode: Mode,
     collection: Option<&crate::collection::response::Completed>,
+    expected: Option<&crate::collection::wire::Binding>,
     catalog: &crate::collection::selection::Catalog<'_>,
     out: &mut Vec<u8>,
 ) {
@@ -142,7 +144,24 @@ fn render_selected_with_catalog(
     };
     let mut collected = shell_values::collect_with_duration_min(parsed, duration_min);
     let mask = compiled.map_or(0, |c| catalog.worker_mask(c, parsed.width, false));
-    crate::collection::merge(&mut collected, collection, mask);
+    if mask != 0 {
+        let merged = expected.filter(|b| b.mask == mask).is_some_and(|expected| {
+            crate::collection::merge(
+                &mut collected,
+                collection,
+                expected,
+                parsed.pwd.as_deref().unwrap_or_default(),
+                parsed.home.as_deref(),
+            )
+            .is_ok()
+        });
+        if !merged {
+            crate::collection::pending(&mut collected, mask);
+        }
+        if let Some(Some(git)) = collected.values.get_mut(3) {
+            *git = shell_values::format_git(git, options.icons, options.profile);
+        }
+    }
     let inputs = Inputs {
         catalog: catalog.segments,
         values: &collected.values,

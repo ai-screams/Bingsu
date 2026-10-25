@@ -488,6 +488,18 @@ mod tests {
         assert_eq!(n[5], Node::GroupEnd);
         let Node::Style(s) = n[2] else { panic!() };
         assert_eq!((s.fg.is_some(), s.bg, s.attrs), (true, None, BOLD));
+        // The full public git schema uses the same indices as wire and values.
+        for (field, decl) in BUILTIN[3].fields.iter().enumerate() {
+            let source = alloc::format!("{{git.{}}}", decl.name);
+            let lines = compile(&source, BUILTIN).unwrap();
+            assert_eq!(
+                lines[0].nodes(),
+                &[Node::Field {
+                    seg: 3,
+                    field: field as u16
+                }]
+            );
+        }
     }
 
     // 이것을 실패시키는 것: 닫힌 도우미 목록·인자·참조 검사 중 하나가 빠지는 것.
