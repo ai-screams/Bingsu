@@ -67,7 +67,7 @@ _bingsu_call() {
   _bingsu_bytes "$_bingsu_colorfgbg" 2>/dev/null
   (( _bingsu_n <= 65536 )) || _bingsu_colorfgbg=
   [[ -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ]] && _bingsu_ssh=1
-  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --colorfgbg "$_bingsu_colorfgbg" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ @COLLECTOR_EXE@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null
+  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ "$@" --shell bash --pwd "$_bingsu_pwd" --colorterm "${COLORTERM-}" --colorfgbg "$_bingsu_colorfgbg" "--log-level=$_bingsu_log" --host "$_bingsu_host" --venv "$_bingsu_venv" "--ssh=$_bingsu_ssh" --session "$_bingsu_session" --seq "$_bingsu_seq" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@ @GIT_GLOBAL_HOME@ @GIT_GLOBAL_XDG@ @COLLECTOR_EXE@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null
   (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn
   _bingsu_rec=${_bingsu_rec%.}
 }

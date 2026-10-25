@@ -31,7 +31,7 @@ HOOK_WORDS = (
     b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm", b"--colorfgbg",
     b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
-    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--collector-exe=",
+    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--git-global-home=", b"--git-global-xdg=", b"--collector-exe=",
 )
 
 
@@ -54,12 +54,19 @@ def test_shape_only_root_words_survive_real_shells(tmp_path, shells):
         b"--config-root-shape-only",
     ]
     for shell in shells:
+        env = trusted_env(tmp_path)
+        env["HOME"] = str(tmp_path / "home ' $(literal)\nname")
+        env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg ' `literal`\nname")
         result = run_shell_script(shell, source(shell, fixture / f"init.{shell}") + call(shell),
-                                  trusted_env(tmp_path), tmp_path)
+                                  env, tmp_path)
         assert result.returncode == 0 and result.stderr == b"", (shell, result)
         words = (fixture / "words").read_bytes().split(b"\0")[:-1]
         roots = [w for w in words if w.startswith(b"--config-root")]
         assert roots == want, (shell, words)
+        assert [w for w in words if w.startswith(b"--git-global-")] == [
+            b"--git-global-home=/home ' $(literal)\nname",
+            b"--git-global-xdg=/xdg ' `literal`\nname",
+        ], (shell, words)
 
 
 def source(shell, path):
@@ -89,6 +96,8 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         shutil.copyfile(real_collector(), collector)
         collector.chmod(0o700)
         env = trusted_env(base, tag=case)
+        env["HOME"] = str(base / ("home " + case))
+        pathlib.Path(env["HOME"]).mkdir(parents=True)
         script = inst.init(shell, env)
         inst.use_fake(minimal_record())
         init_file = base / "init.sh"
@@ -128,6 +137,8 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         assert words[b"--colorterm"] == b"", (shell, argv)
         assert words[b"--colorfgbg"] == b"", (shell, argv)
         assert words[b"--home="] == pwd.getpwuid(os.getuid()).pw_dir.encode(), (shell, argv)
+        assert words[b"--git-global-home="] == os.fsencode(env["HOME"]), (shell, argv)
+        assert words[b"--git-global-xdg="] == os.fsencode(env["XDG_CONFIG_HOME"]), (shell, argv)
 
 
 # 이것을 실패시키는 것: 역할 검사를 빼거나 형제 링크를 해석하거나 unsafe bingsu에서 pin하는 것.
@@ -172,8 +183,10 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
     for shell in shells:
         base = tmp_path / shell
         inst = Install(base)
-        a = inst.init(shell, trusted_env(base, "a"))
+        a_env = dict(trusted_env(base, "a"), HOME=str(base / "home-a"))
+        a = inst.init(shell, a_env)
         b_env = trusted_env(base, "b")
+        b_env["HOME"] = str(base / "home-b")
         b = inst.init(shell, b_env)
         inst.use_fake(minimal_record())
         (base / "a.sh").write_bytes(a)
@@ -185,6 +198,8 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
         assert any(x.startswith(b"--runtime-root=") and x.endswith(b":" + root_b) for x in argv), (shell, argv)
         # Every other pinned value follows the second init too (N-129), not only the runtime root.
         want = {
+            b"--git-global-home=": os.fsencode(b_env["HOME"]),
+            b"--git-global-xdg=": os.fsencode(b_env["XDG_CONFIG_HOME"]),
             b"--config-root=": os.path.realpath(b_env["XDG_CONFIG_HOME"] + "/bingsu").encode(),
             b"--config-root-written=": (b_env["XDG_CONFIG_HOME"] + "/bingsu").encode(),
             b"--state-root=": os.path.realpath(b_env["XDG_STATE_HOME"]).encode() + b"/bingsu",
@@ -192,7 +207,7 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
         }
         for word, value in want.items():
             assert any(x == word + value for x in argv), (shell, word, argv)
-        assert not any(old in x for x in argv for old in (b"run-a", b"cfg-a", b"state-a")), (shell, argv)
+        assert not any(old in x for x in argv for old in (b"run-a", b"cfg-a", b"state-a", b"home-a")), (shell, argv)
 
 
 def _set_env(shell, name, value):

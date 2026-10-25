@@ -6,8 +6,18 @@ use bingsu_core::{
     field::{Field, FieldValue},
 };
 
-pub fn stage_b(repo: &GuardedRepository<'_>) -> StageResult {
-    let counts = status(repo);
+/// D3 passes both global excludes fields from the decoded request, unchanged.
+pub fn stage_b(
+    repo: &GuardedRepository<'_>,
+    global_excludes: &[u8],
+    global_excludes_known: bool,
+) -> StageResult {
+    let mut counts = status(repo, global_excludes);
+    // Still perform the shared scan, but missing rules can exclude any counted
+    // path. The observed count is neither exact nor a proven lower bound.
+    if !global_excludes_known {
+        counts.untracked = Field::PENDING;
+    }
     // The bool is provisional during the walk. Neither true nor false may
     // escape an incomplete/unvalidated scan; unseen entries can change it.
     let filtered = if [&counts.modified, &counts.untracked].iter().all(|f| {
@@ -43,7 +53,7 @@ pub fn stage_b(repo: &GuardedRepository<'_>) -> StageResult {
     super::stage_c::result(b"B", partial, &fields)
 }
 
-pub fn status(repo: &GuardedRepository<'_>) -> StatusCounts {
+pub(crate) fn status(repo: &GuardedRepository<'_>, global_excludes: &[u8]) -> StatusCounts {
     let index = match index::load(&repo.io) {
         Ok(index) => index,
         Err(_) => return StatusCounts::default(),
@@ -53,6 +63,6 @@ pub fn status(repo: &GuardedRepository<'_>) -> StatusCounts {
         Err(_) => return StatusCounts::default(),
     };
     let mut counts = super::status_tracked::index_status(repo, &index);
-    untracked::worktree_status(repo, &index, &mut counts);
+    untracked::worktree_status(repo, &index, &mut counts, global_excludes);
     counts
 }

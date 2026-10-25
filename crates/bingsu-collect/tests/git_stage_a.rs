@@ -134,6 +134,8 @@ fn request(path: &Path) -> Request {
         },
         budget_ms: 50,
         environment: vec![],
+        global_excludes_known: true,
+        global_excludes: vec![],
     }
 }
 fn access() -> Access {

@@ -89,7 +89,7 @@ static void put(const void *p, size_t n) {
     while(n) { ssize_t k=write(1,p,n); if(k<=0) _exit(32); p=(char*)p+k; n-=k; }
 }
 static void header(int kind, uint32_t n) {
-    memset(h,0,80); memcpy(h,"BNGIPC03",8); h[8]=3; h[10]=kind;
+    memset(h,0,80); memcpy(h,"BNGIPC05",8); h[8]=5; h[10]=kind;
     memcpy(h+12,&n,4); memset(h+16,7,32);
 }
 static void frame(int kind, const void *p, uint32_t n) { header(kind,n); put(h,80); put(p,n); }

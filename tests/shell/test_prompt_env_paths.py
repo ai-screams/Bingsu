@@ -37,6 +37,8 @@ def pinned_roots(trusted):
     st = os.stat(run_root)
     return {
         b"--runtime-root=": f"--runtime-root={st.st_dev}:{st.st_ino}:{run_root}".encode(),
+        b"--git-global-home=": b"--git-global-home=" + os.fsencode(trusted.get("HOME", "")),
+        b"--git-global-xdg=": b"--git-global-xdg=" + os.fsencode(trusted.get("XDG_CONFIG_HOME", "")),
         b"--config-root-written=": b"--config-root-written=" + (trusted["XDG_CONFIG_HOME"] + "/bingsu").encode(),
         b"--config-root=": b"--config-root=" + os.path.realpath(trusted["XDG_CONFIG_HOME"] + "/bingsu").encode(),
         b"--state-root=": b"--state-root=" + os.path.realpath(trusted["XDG_STATE_HOME"] + "/bingsu").encode(),

@@ -113,7 +113,11 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                         .unwrap()
                         .map(|result| result.map(|()| unreachable!("fixture has no worker")));
                 }
-                let request = request.unwrap();
+                let mut request = request.unwrap();
+                if request.binding.mask & (1 << collection::git::SEGMENT) != 0 {
+                    let reason = super::git_global::attach(&mut request, &e);
+                    report(&mut groups, reason.log_level(), reason.message());
+                }
                 collection_runtime = Some(context.runtime.try_clone()?);
                 let path = e
                     .collector_exe

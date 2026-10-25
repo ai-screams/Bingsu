@@ -117,6 +117,8 @@ impl Fixture {
             },
             budget_ms: 50,
             environment: vec![],
+            global_excludes_known: true,
+            global_excludes: vec![],
         }
     }
 }
@@ -237,6 +239,9 @@ fn stream(f: &Fixture, m: Meter, deadlines: StageDeadlines, truncate: bool) -> S
     stream_request(f.request(), m, deadlines, truncate)
 }
 fn stream_request(r: Request, m: Meter, deadlines: StageDeadlines, truncate: bool) -> Stream {
+    // Exercise the request wire as well as response publication. In particular,
+    // neither global patterns nor their knowledge bit may be lost in transit.
+    let r = decode_request(&r);
     let mut buffer = [0; wire::FRAME_MAX];
     let mut frames = Vec::new();
     let mut updates = Vec::new();
@@ -289,6 +294,40 @@ fn stream_request(r: Request, m: Meter, deadlines: StageDeadlines, truncate: boo
         frames,
         values,
     }
+}
+
+fn decode_request(request: &Request) -> Request {
+    let body = request.encode_body().unwrap();
+    let mut begin = (body.len() as u32).to_le_bytes().to_vec();
+    begin.extend(wire::FEATURES.to_le_bytes());
+    let mut chunk = 0u32.to_le_bytes().to_vec();
+    chunk.extend(&body);
+    let mut decoder = wire::RequestDecoder::new();
+    let mut decoded = None;
+    for (kind, payload) in [
+        (Kind::Ready, ready(request)),
+        (Kind::RequestBegin, begin),
+        (Kind::RequestChunk, chunk),
+        (Kind::RequestEnd, snapshot::crc32c(&[&body]).to_vec()),
+    ] {
+        let mut bytes = [0; wire::FRAME_MAX];
+        let len = wire::encode_frame(
+            Frame {
+                kind,
+                build_id: request.binding.build_id,
+                request_id: request.request_id,
+                payload: &payload,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        decoded = decoder
+            .accept(wire::decode_frame(&bytes[..len]).unwrap())
+            .unwrap();
+    }
+    let decoded = decoded.unwrap();
+    assert_eq!(&decoded, request);
+    decoded
 }
 fn completed(stream: &Stream, reason: EndReason) -> bingsu_core::collection::response::Completed {
     let mut transcript = receiver(&stream.request);
@@ -410,6 +449,100 @@ fn cumulative_stages_match_git_and_real_filesystem() {
     assert!(s.updates.len() <= wire::UPDATES_MAX as usize);
     assert!(s.frames.len() < wire::FRAMES_MAX);
     assert!(s.frames.iter().map(Vec::len).sum::<usize>() + wire::HEADER + 24 <= wire::STREAM_MAX);
+}
+
+// Mutations: discard request patterns, force known=true/false, suppress C/D or
+// Complete for a completed partial B, or clear Pending/partial in later stages.
+#[test]
+fn known_global_excludes_complete_through_stream() {
+    if isolated("known_global_excludes_complete_through_stream") {
+        global_excludes_stream(true);
+    }
+}
+
+#[test]
+fn unknown_global_excludes_complete_partial_through_stream() {
+    if isolated("unknown_global_excludes_complete_partial_through_stream") {
+        global_excludes_stream(false);
+    }
+}
+
+fn global_excludes_stream(known: bool) {
+    let f = Fixture::new();
+    f.init();
+    f.write("tracked", b"modified\n");
+    f.write("added", b"staged\n");
+    f.git(&["add", "added"]);
+    f.write(".DS_Store", b"ignored globally\n");
+    f.write("visible", b"untracked\n");
+    let mut r = f.request();
+    r.binding.mask |= 1 << 1;
+    r.global_excludes_known = known;
+    r.global_excludes = if known {
+        b".DS_Store\n".to_vec()
+    } else {
+        vec![]
+    };
+    let s = stream_request(r, meter(), GENEROUS, false);
+    s.result.as_ref().unwrap();
+    assert_eq!(
+        s.values.iter().map(stage).collect::<Vec<_>>(),
+        ["A", "B", "C", "D"]
+    );
+    assert_eq!(
+        s.updates.iter().map(|u| u.segment).collect::<Vec<_>>(),
+        [3, 1, 3, 3, 3]
+    );
+    assert_eq!(s.updates[1].facts.as_ref().unwrap().in_repo, Some(true));
+    for v in &s.values[1..] {
+        count(v, "staged", 1);
+        count(v, "modified", 1);
+        count(v, "conflicted", 0);
+        if known {
+            count(v, "untracked", 1);
+        } else {
+            assert_eq!(field(v, "untracked"), &Field::PENDING);
+            assert_eq!(field(v, "filtered"), &Field::PENDING);
+        }
+    }
+    for v in &s.values[..3] {
+        assert_eq!(field(v, "partial"), &Field::known(FieldValue::Bool(true)));
+    }
+    let last = s.values.last().unwrap();
+    count(last, "ahead", 0);
+    count(last, "behind", 0);
+    count(last, "stash", 0);
+    assert_eq!(
+        field(last, "partial"),
+        &Field::known(FieldValue::Bool(!known))
+    );
+    assert_eq!(
+        s.frames
+            .iter()
+            .map(|f| wire::decode_frame(f).unwrap().kind)
+            .collect::<Vec<_>>(),
+        [
+            Kind::Update,
+            Kind::Progress,
+            Kind::Update,
+            Kind::Update,
+            Kind::Update,
+            Kind::Update,
+            Kind::Complete
+        ]
+    );
+    let result = completed(&s, EndReason::Complete);
+    assert!(result.progress.stage_a_complete);
+    assert_eq!(
+        result
+            .updates
+            .iter()
+            .find(|u| u.segment == 3)
+            .unwrap()
+            .value
+            .as_ref(),
+        Some(last)
+    );
 }
 
 // A path-local timeout leaves A intact and still runs B-D, but never completes.
@@ -899,7 +1032,15 @@ fn expired_stage_is_checked_at_the_wire_write_boundary() {
 #[test]
 #[ignore = "release warm 200-run observations; not a timing assertion"]
 fn release_stage_stream_observations() {
-    let cases = ["no-git", "git-clean", "git-dirty", "19000", "budget-bound"];
+    let cases = [
+        "no-git",
+        "git-clean",
+        "git-dirty",
+        "19000",
+        "budget-bound",
+        "known-global",
+        "unknown-global",
+    ];
     for case in cases {
         let f = Fixture::new();
         if case != "no-git" {
@@ -915,11 +1056,20 @@ fn release_stage_stream_observations() {
                 f.write("tracked", b"changed\n");
                 f.write("loose", b"new\n");
             }
+            if matches!(case, "known-global" | "unknown-global") {
+                f.write(".DS_Store", b"ignored globally\n");
+                f.write("visible", b"untracked\n");
+            }
             if case == "budget-bound" {
                 f.write(".git/index", vec![0; 4_194_305]);
             }
         }
-        let r = f.request();
+        let mut r = f.request();
+        if case == "known-global" {
+            r.global_excludes = b".DS_Store\n".to_vec();
+        } else if case == "unknown-global" {
+            r.global_excludes_known = false;
+        }
         let mut samples = vec![Vec::new(); 5];
         let mut cold = Vec::new();
         let mut sizes = (0, 0);

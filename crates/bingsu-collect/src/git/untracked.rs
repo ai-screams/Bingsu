@@ -25,9 +25,13 @@ fn count(n: u32) -> Field {
     })
 }
 
-pub fn untracked_status(repo: &GuardedRepository<'_>, index: &State) -> Field {
+pub(crate) fn untracked_status(
+    repo: &GuardedRepository<'_>,
+    index: &State,
+    global_excludes: &[u8],
+) -> Field {
     let mut counts = StatusCounts::default();
-    worktree_status(repo, index, &mut counts);
+    worktree_status(repo, index, &mut counts, global_excludes);
     counts.untracked
 }
 
@@ -35,11 +39,13 @@ pub(crate) fn worktree_status(
     repo: &GuardedRepository<'_>,
     index: &State,
     counts: &mut StatusCounts,
+    global_excludes: &[u8],
 ) {
     // Counts are provisional until all held directory edges are revalidated.
     let result = (|| {
         let policies = Policies::from_config(&repo.config)?;
         let mut walk = Walk::new(&repo.io, index, policies)?;
+        walk.patterns.add_global(&repo.io, global_excludes)?;
         repo.io
             .with_worktree_stats(|| {
                 walk.patterns.add(

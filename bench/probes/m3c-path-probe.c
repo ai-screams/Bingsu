@@ -27,7 +27,7 @@ static int checked_openat(int base, const char *path, int flags, ...) {
     return openat(base, path, flags, 0);
 }
 static ssize_t checked_write(int fd, const void *buf, size_t size) {
-    if (fd == 1 && size >= 11 && !memcmp(buf, "BNGIPC03", 8) && ((const unsigned char *)buf)[10] == 1) {
+    if (fd == 1 && size >= 11 && !memcmp(buf, "BNGIPC05", 8) && ((const unsigned char *)buf)[10] == 1) {
         if (!saw_probe || fcntl(6, F_GETFD) >= 0 || errno != EBADF) _exit(89);
     }
     return write(fd, buf, size);

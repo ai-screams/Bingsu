@@ -28,6 +28,11 @@ pub struct ScriptInputs<'a> {
     pub session_hex: &'a [u8; 32],
     /// `pw_dir` from getpwuid, for the `~` of the dir segment.
     pub home: &'a [u8],
+    /// Validated init-time HOME/XDG_CONFIG_HOME or an invalid-input marker,
+    /// independent of display home.
+    /// Always emitted, including empty values, to distinguish legacy hooks.
+    pub git_global_home: &'a [u8],
+    pub git_global_xdg: &'a [u8],
 }
 
 const ZSH: [&str; 2] = [
@@ -104,6 +109,8 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
             }
         }
         b"HOME" => prefixed(sh, HOME_PREFIX, inp.home, out),
+        b"GIT_GLOBAL_HOME" => prefixed(sh, b"--git-global-home=", inp.git_global_home, out),
+        b"GIT_GLOBAL_XDG" => prefixed(sh, b"--git-global-xdg=", inp.git_global_xdg, out),
         b"MSG_BASH_TOO_OLD" => encode_word(sh, en(MsgId::BashTooOld).as_bytes(), out),
         b"MSG_LATE_HOOK_ZSH" => encode_word(sh, en(MsgId::LateHookZsh).as_bytes(), out),
         b"MSG_LATE_HOOK_BASH" => encode_word(sh, en(MsgId::LateHookBash).as_bytes(), out),
@@ -215,6 +222,8 @@ mod tests {
                 roots_var: Some(b"5:a\nb'c"),
                 session_hex: &[b'0'; 32],
                 home,
+                git_global_home: home,
+                git_global_xdg: b"/xdg",
             },
             &mut out,
         );
@@ -309,6 +318,8 @@ mod tests {
                     roots_var: None,
                     session_hex: &[b'0'; 32],
                     home: b"/h",
+                    git_global_home: b"",
+                    git_global_xdg: b"",
                 },
                 &mut out,
             );

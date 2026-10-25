@@ -302,6 +302,7 @@ mod tests {
     fn env(rt: Option<&str>, cache: Option<&str>) -> TrustedEnv {
         TrustedEnv {
             path: None,
+            home: None,
             xdg_runtime_dir: rt.map(OsString::from),
             xdg_config_home: None,
             xdg_state_home: None,

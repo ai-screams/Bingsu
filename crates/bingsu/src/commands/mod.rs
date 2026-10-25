@@ -39,6 +39,8 @@ mod ctx;
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
 #[cfg(unix)]
+mod git_global;
+#[cfg(unix)]
 mod group_policy;
 #[cfg(unix)]
 #[allow(unsafe_code)]

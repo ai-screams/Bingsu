@@ -1434,7 +1434,7 @@ fn peer() -> PathBuf {
 static unsigned char h[80], b[65536];
 static void exact(int fd, void *p, unsigned n) { while(n) { int k=read(fd,p,n); if(k<=0) _exit(31); p=(char*)p+k; n-=k; } }
 static void put(const void *p, unsigned n) { while(n) { int k=write(1,p,n); if(k<=0) _exit(32); p=(char*)p+k; n-=k; } }
-static void frame(unsigned kind, unsigned size) { memcpy(h,"BNGIPC03",8); h[8]=3; h[10]=kind; memcpy(h+12,&size,4); memset(h+16,7,32); put(h,80); if(size) put(b,size); }
+static void frame(unsigned kind, unsigned size) { memcpy(h,"BNGIPC05",8); h[8]=5; h[10]=kind; memcpy(h+12,&size,4); memset(h+16,7,32); put(h,80); if(size) put(b,size); }
 int main(int argc, char **argv) {
   /* Only the spawn dup2 action makes the CLOEXEC source available as fd 5. */
   if (fcntl(5, F_GETFD) != 0 || (fcntl(5, F_GETFL) & O_ACCMODE) != O_RDONLY) _exit(34);

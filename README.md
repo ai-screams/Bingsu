@@ -115,6 +115,18 @@ running shell. Hooks and the binary must come from the same version: newer hooks
 binary does not know, and older hooks can leave a newer binary unable to trust saved settings until init runs again.
 The record reader can accept older compatible records; that does not promise compatibility between hook and binary versions.
 
+For global Git excludes, init also pins `HOME` and `XDG_CONFIG_HOME` into the hooks. Later environment changes
+(including direnv) do not select different global config or ignore files; run init again to change these locations.
+Unset or empty values stay empty. Invalid values (relative paths, including literal `~/.config`, or more than
+64 KiB) are pinned as unknown with one stderr notice per variable naming the reason; init still prints the script.
+An empty XDG pin falls back to `HOME/.config`; an empty HOME stays absent. An older hook without these arguments
+uses its pinned `--home` with a newer binary, with no XDG override. A newer hook with an older binary can produce `error:bad-args`; refresh the hooks after a downgrade.
+
+The helper sends global excludes bytes with a known/unknown flag in IPC v5. A missing file is known-empty;
+other skipped inputs are unknown. The collector still scans untracked files for unknown input, but publishes
+untracked as Pending and stage B as partial. `gitdir:` and `gitdir/i:` conditions are not evaluated; conditional
+includes that change `core.excludesFile` make the global input unknown unless a later unconditional value resolves it.
+
 Init pins the executable and the runtime, settings, state and log folder paths. After changing XDG paths or replacing
 a settings-folder symlink (for example with stow), evaluate init again or open a new shell. A changed symlink target
 is refused until then; roots are not automatically selected again. `bingsu reload` refreshes settings for the pinned
