@@ -263,8 +263,10 @@ LINUX_SECURITY_STEPS = {
     "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
     "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
     "Path facts ACL and read-only mount oracles",
+    "Assert native Linux F1 collection passes",
 }
-MACOS_SECURITY_STEPS = {"Both shipped Mach-O architectures", "Assert native macOS M3b security passes"}
+MACOS_SECURITY_STEPS = {"Both shipped Mach-O architectures", "Assert native macOS M3b security passes",
+                        "Assert native macOS F1 collection passes"}
 
 
 def security_steps(text):
@@ -277,7 +279,8 @@ def security_steps(text):
         "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]"]
     required_names = LINUX_SECURITY_STEPS | MACOS_SECURITY_STEPS | {
         "Prepare M3b compiler-free product fixtures", "M3b product security and measurements contracts",
-        "Product imports and matching deployment pair"}
+        "Product imports and matching deployment pair", "Prepare F1 hostile Git corpus on the host",
+        "F1 protected collection and policy corpus"}
     for name in required_names:
         assert sum(step.get("name") == name for step in steps) == 1, ("required security step", name)
     for step in steps:
@@ -289,6 +292,24 @@ def security_steps(text):
                      "runner.os == 'macOS'" if name in MACOS_SECURITY_STEPS else None)
         assert step.get("if") == condition, (name, "skippable security step", step.get("if"))
         assert_run_unconditional(step)
+    f1 = {step.get("name"): step for step in steps if "F1" in step.get("name", "")}
+    assert run_commands(f1["Prepare F1 hostile Git corpus on the host"]) == [["python3", "scripts/prepare_git_corpus.py"]]
+    assert ["export", "BINGSU_GIT_CORPUS_REQUIRED=1"] in run_commands(f1["F1 protected collection and policy corpus"]), "F1 preparation must fail closed"
+    common = [command[2] for command in run_commands(f1["F1 protected collection and policy corpus"])
+              if command[:2] == ["grep", "-F"]]
+    required = ["test_hostile_git_canaries_have_zero_effects", "test_trace_rejects_outside_root_even_on_eperm",
+                "test_no_spawn_harness_detects_attempts", "test_status_matches_policy_porcelain_corpus",
+                "test_ancestor_names_keep_their_capability", "test_each_canary_rejects_read_spawn_and_write_mutations",
+                "test_each_policy_case_rejects_wrong_results", "test_actual_fifty_ms_partial_preserves_stage_a",
+                "test_warm_collection_observations"]
+    assert common == ["PASSED tests/shell/test_git_collection_security.py::" + name for name in required], "F1 required pass assertions"
+    untracked_passes = [
+        "PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[" + name + "]"
+        for name in ("untracked", "untracked-under-cap", "untracked-at-cap", "untracked-over-cap", "untracked-large")]
+    for platform in ("Linux", "macOS"):
+        commands = run_commands(f1[f"Assert native {platform} F1 collection passes"])
+        assert commands == [["grep", "-Fx", name, "$RUNNER_TEMP/f1-security.txt"]
+                            for name in common + untracked_passes], "F1 exact platform passes"
     return steps
 
 
@@ -500,6 +521,27 @@ def test_acceptance_table_tests_exist_and_run_in_ci():
         assert result.returncode == 0, (file, result.stdout, result.stderr)
         collected.extend(result.stdout.splitlines())
     assert_acceptance_table(table, (ROOT / ".github/workflows/ci.yml").read_text(), collected=collected)
+
+
+@pytest.mark.parametrize("before,after", [
+    ("run: python3 scripts/prepare_git_corpus.py", "run: python3 --version"),
+    ("export BINGSU_GIT_CORPUS_REQUIRED=1", "export BINGSU_GIT_CORPUS_REQUIRED=0"),
+    ("grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_hostile_git_canaries_have_zero_effects'",
+     "grep -F 'PASSED tests/shell/test_git_collection_security.py::test_hostile_git_canaries_have_zero_effects'"),
+    ("-m pytest tests/shell/test_git_collection_security.py -q", "-m pytest tools/fsbudget/tests -q"),
+    ("grep -F 'PASSED tests/shell/test_git_collection_security.py::test_status_matches_policy_porcelain_corpus'",
+     "# grep -F 'PASSED tests/shell/test_git_collection_security.py::test_status_matches_policy_porcelain_corpus'"),
+    ("grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked]",
+     "grep -F 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked]"),
+    ("PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-at-cap]'",
+     "XFAIL tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-at-cap]'"),
+])
+def test_f1_ci_seam_rejects_missing_preparation_or_exact_pass(before, after):
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert before in workflow
+    with pytest.raises(AssertionError):
+        assert_acceptance_table(table, workflow.replace(before, after))
 
 
 # 이것을 실패시키는 것: 빠진 선언·중복 선언 또는 주석뿐인 CI 단언을 수용하는 것.

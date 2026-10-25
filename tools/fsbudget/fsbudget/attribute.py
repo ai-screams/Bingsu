@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from .classify import FD_DEPENDENT, fd_identity, kind, split_args
 from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call
 
+
 SPAWN = {"clone", "clone3", "fork", "vfork"}
 OPEN = {"open", "openat", "openat2", "creat"}
 MARKERS = ('PR_SET_NAME, "fsb:begin"', 'PR_SET_NAME, "fsb:end"')
@@ -653,3 +654,228 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     if collector_execs != required:
         errors.append(f"collector execs: measured {collector_execs}, expected {required}")
     return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs)
+
+
+def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) -> None:
+    """Audit attempts, descriptor lifetimes and disjoint collection phases.
+
+    Roots and optional primitive axes are fixture inputs, never inferred from
+    successful calls. The output dictionary records measured phase counts.
+    Linux uses the same parser/held-metadata primitives as the B3 gate.
+    Darwin records calls before dispatch, including calls that later fail.
+    """
+    import ast
+    import posixpath
+    from pathlib import PurePosixPath
+    from collections import Counter
+    from .classify import collector_kind, repository_path, FD_ARG, NON_FS
+    from .formula import CollectorAxes, collector_repository_expected, git_collection_limits
+    from .repository import held_metadata_kind
+    from .strace_parse import parse
+
+    def below(path, root):
+        return path == root or path.startswith(root.rstrip("/") + "/")
+
+    roots = set(capabilities["roots"])
+    assert 1 <= len(roots) <= 3 and "/" not in roots, "invalid content roots"
+    assert all(p.startswith("/") and posixpath.normpath(p) == p for p in roots)
+    ancestors = {"/"}
+    for root in roots:
+        ancestors.update(str(p) for p in PurePosixPath(root).parents)
+    names = set(capabilities.get("names", []))
+    limits = git_collection_limits(ancestor_directories=len(names))
+    repo = capabilities.get("repo", capabilities["roots"][0])
+    home = capabilities.get("home", posixpath.dirname(repo))
+    assert all(p in ancestors and below(p, home) and below(repo, p) for p in names), "invalid ancestor capability"
+    forbidden = capabilities.get("forbidden", [])
+    expected_axes = capabilities.get("axes", {})
+    transitions = {"acquisition": "acquisition", "stage_a_head": "A", "path_facts": "Path",
+                   "ancestor_names": "ancestor-names", "before_read_layer": "read-layer",
+                   "preflight_start": "B", "stage_c": "C", "stage_d": "D", "end": "end"}
+    order = list(transitions.values())
+    active, owner, listing = None, None, None
+    seen, held, closed, counts, raw_counts = [], {}, set(), {}, {}
+    first_exec = True
+
+    def phase(event):
+        nonlocal active, listing
+        assert event in transitions, ("unknown phase", event)
+        new = transitions[event]
+        assert seen or new == "acquisition", "missing acquisition"
+        assert not seen or order.index(new) > order.index(active) or new == active == "ancestor-names", "repository phase reversal"
+        active = new
+        seen.append(new)
+        counts.setdefault(new, Counter())
+        listing = None
+
+    def path_check(name, path, flags=""):
+        assert active not in (None, "end"), ("IO outside collection window", name, path)
+        assert path is not None, ("unresolved repository path", name)
+        assert not any(flag in flags for flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")), ("forbidden write open", name, path)
+        assert not any(below(path, denied) for denied in forbidden), ("outside/forbidden capability", name, path)
+        if name in {"read", "pread", "pread64", "readv", "mmap"}:
+            assert path not in capabilities.get("no_read", []), ("filtered content read", name, path)
+        if name in OPEN or name in {"open-result", "read", "pread", "pread64", "readv", "mmap", "getdents", "getdents64", "bulk"}:
+            assert not any(below(path, denied) for denied in capabilities.get("no_open", [])), ("forbidden submodule open", name, path)
+        if active == "ancestor-names":
+            assert name in {"getdents", "getdents64"}, ("ancestor entry metadata/content; must use already-held fd", name, path)
+            allowed = path in names
+        elif active == "acquisition" and path in ancestors:
+            assert name not in {"read", "pread", "pread64", "readv", "mmap", "getdents", "getdents64", "bulk"}, ("ancestor content", name, path)
+            if name in OPEN:
+                assert "O_DIRECTORY" in flags, ("acquisition content open", name, path)
+            allowed = True
+        elif active == "acquisition" and posixpath.basename(path) == ".git" and posixpath.dirname(path) in ancestors:
+            allowed = True  # fixed discovery candidate only
+        elif active == "read-layer" and path == "/":
+            allowed = name in {"open", "openat", "open-result", "fstat", "fstat64", "newfstatat", "statx"}
+        else:
+            allowed = any(below(path, root) for root in roots)
+        assert allowed, ("outside selected roots", active, name, path)
+
+    def use(fd, path):
+        assert fd not in closed, ("closed repository fd", fd, path)
+        assert fd in held, ("unheld repository fd", fd, path)
+        assert held[fd] == path, ("repository fd alias changed", fd, path, held[fd])
+
+    def bind(fd, path):
+        assert fd not in held, ("live fd reassigned", fd, path)
+        path_check("open-result", path)
+        held[fd] = path
+        closed.discard(fd)
+
+    def raw(value):
+        assert active == "ancestor-names" and listing is not None, "raw slot without held listing"
+        assert value == raw_counts.get(listing, 0) + 1 and value <= 256, "ancestor raw 256 cap"
+        raw_counts[listing] = value
+
+    def directory(path, size):
+        nonlocal listing
+        if active == "ancestor-names":
+            assert 0 < size <= limits["dir_chunk"], "ancestor buffer cap"
+            assert raw_counts.get(path, 0) < 256, "ancestor raw 256 cap before next syscall"
+            listing = path
+
+    if capabilities.get("platform") == "darwin":
+        for line in lines:
+            if line.startswith("F1_PHASE "):
+                phase(line.split()[1])
+            elif line.startswith("F1_RAW "):
+                raw(int(line.split()[1]))
+            elif line.startswith("F1_BIND "):
+                _, fd, path = line.split()
+                bind(int(fd), bytes.fromhex(path).decode())
+            elif line.startswith("F1_CLOSE "):
+                fd = int(line.split()[1])
+                held.pop(fd, None)
+                closed.add(fd)
+            elif line.startswith("F1_IO "):
+                _, name, base, relative, flags, fd = line.split()
+                base = bytes.fromhex(base).decode()
+                relative = "" if relative == "-" else bytes.fromhex(relative).decode()
+                number, flag = int(fd), int(flags)
+                assert base.startswith("/") or relative.startswith("/"), ("unnamed capability", line)
+                path = posixpath.normpath(posixpath.join(base, relative))
+                if number >= 0:
+                    use(number, base)
+                readable = ""
+                if name in {"open", "openat"}:
+                    assert flag & (3 | 8 | 0x200 | 0x400) == 0, ("write open", line)
+                    readable = "O_DIRECTORY" if flag & 0x100000 else ""
+                if name == "mmap":
+                    assert flag & 2 == 0, ("writable map", line)
+                path_check(name, path, readable)
+                if name == "getdents":
+                    directory(path, flag)
+                counts[active][name] += 1
+    else:
+        parsed = parse("\n".join(lines))
+        assert not parsed.errors, parsed.errors
+        for index, call in enumerate(parsed):
+            args = split_args(call.args)
+            effect = collector_kind(call)
+            if effect == "exec" and first_exec and active is None and call.ret.startswith("0"):
+                first_exec = False
+                continue  # exactly one launch of the fixed worker
+            assert effect not in {"exec", "spawn", "thread", "network"}, ("forbidden repository effect (attempt)", effect, call)
+            if call.name == "write" and len(args) == 3 and args[0].split("<")[0] == "1":
+                try:
+                    message = ast.literal_eval(args[1])
+                except (SyntaxError, ValueError):
+                    message = ""
+                if message.startswith("F1_PHASE "):
+                    assert owner in (None, call.pid), "phase owner changed"
+                    owner = call.pid
+                    assert not call.ret.startswith("-1"), "failed phase observation"
+                    phase(message.strip().split()[1])
+                elif message.startswith("F1_RAW "):
+                    raw(int(message.strip().split()[1]))
+                continue
+            if active is None:
+                continue  # C1/B3 separately gate the shipped bootstrap
+            assert call.pid == owner, ("other task in repository phase", call)
+            if call.name == "close":
+                if call.ret == "0":
+                    fd = int(args[0].split("<")[0])
+                    held.pop(fd, None)
+                    closed.add(fd)
+                continue
+            if call.name in {"dup", "dup2", "dup3"} or call.name == "fcntl" and len(args) > 1 and args[1].startswith("F_DUPFD"):
+                source = FD_ARG.fullmatch(args[0])
+                assert source and source[2], ("unheld dup source", call)
+                use(int(source[1]), source[2])
+                if not call.ret.startswith("-1"):
+                    target = int(call.ret.split("<")[0])
+                    if call.name in {"dup2", "dup3"}:
+                        held.pop(target, None)
+                    held[target] = source[2]
+                    closed.discard(target)
+                continue
+            if call.name == "fcntl":
+                assert args[1] in {"F_GETFD", "F_SETFD"}, ("unknown fd effect", call)
+                if args[1] == "F_SETFD":
+                    assert args[2:] == ["FD_CLOEXEC"], call
+                    previous = parsed[index - 1] if index else None
+                    assert (previous and previous.name in OPEN and "O_CLOEXEC" in previous.args
+                            and previous.ret.split("<")[0] == args[0].split("<")[0]), ("nonadjacent cloexec", call)
+                continue
+            if call.name in NON_FS or call.name == EXIT_EVENT:
+                continue
+            if call.name == "mmap" and "MAP_ANONYMOUS" in call.args:
+                continue
+            if call.name == "landlock_add_rule":
+                paths = re.findall(r"parent_fd=(\d+)<(/[^>]+)>", call.args)
+                assert active == "read-layer" and len(paths) == 1 and paths[0][1] in roots, ("Landlock root widening", call)
+                use(int(paths[0][0]), paths[0][1])
+                assert "LANDLOCK_ACCESS_FS_READ_FILE" in call.args and "LANDLOCK_ACCESS_FS_READ_DIR" in call.args
+            if call.name in {"landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self"}:
+                assert active == "read-layer", ("Landlock phase/widening", call)
+                counts[active][call.name] += 1
+                continue
+            allowed = OPEN | {"stat", "lstat", "newfstatat", "fstatat64", "statx", "fstat", "fstat64", "fstatfs", "fstatfs64", "read", "pread64", "readv", "readlink", "readlinkat", "getdents", "getdents64", "faccessat2", "mmap", "lseek"}
+            assert call.name in allowed, ("unknown repository effect", call)
+            if call.name == "mmap":
+                assert "PROT_WRITE" not in call.args and "MAP_PRIVATE" in call.args, call
+            path = repository_path(call)
+            path_check(call.name, path, call.args)
+            # Validate argument descriptor generations, including relative
+            # opens and mappings. AT_FDCWD is allowed only for absolute paths.
+            index = 4 if call.name == "mmap" else 0
+            fd = FD_ARG.fullmatch(args[index]) if len(args) > index else None
+            if fd and int(fd[1]) >= 0:
+                use(int(fd[1]), fd[2])
+            if call.name in OPEN and not call.ret.startswith("-1"):
+                result = FD_ARG.fullmatch(call.ret)
+                assert result and result[2], ("unplaced open result", call)
+                bind(int(result[1]), result[2])
+            if call.name in {"getdents", "getdents64"}:
+                directory(path, int(args[2]))
+            primitive = held_metadata_kind(call, args) or call.name
+            if primitive == "open" and active == "read-layer" and path == "/":
+                primitive = "openat"  # same fixed-slash libc alias as B3
+            counts[active][primitive] += 1
+    assert seen and seen[-1] == "end", ("missing repository phase evidence/completion", seen)
+    for name, axes in expected_axes.items():
+        expected = collector_repository_expected(CollectorAxes(**axes))
+        assert dict(counts.get(name, {})) == {k: v for k, v in expected.items() if v}, (name, counts.get(name), expected)
+    phases.update({key: dict(value) for key, value in counts.items()})

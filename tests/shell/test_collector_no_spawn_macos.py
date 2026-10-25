@@ -8,10 +8,12 @@ import fcntl
 import json
 import os
 import select
+import signal
 import struct
 import subprocess
 import sys
 import time
+from functools import lru_cache
 
 import pytest
 from conftest import ROOT
@@ -39,14 +41,29 @@ def request(identity, mask):
             + frame(3, identity, bytes(4) + body) + frame(4, identity, crc(body)))
 
 
-def children(pid):
+@lru_cache(maxsize=1)
+def child_api():
     lib = ctypes.CDLL("/usr/lib/libproc.dylib")
     lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
     lib.proc_listchildpids.restype = ctypes.c_int
+    return lib.proc_listchildpids
+
+
+def children(pid):
     values = (ctypes.c_int * 64)()
-    count = lib.proc_listchildpids(pid, values, ctypes.sizeof(values))
+    count = child_api()(pid, values, ctypes.sizeof(values))
     assert 0 <= count < len(values), "descendant census failed or overflowed"
     return list(values)[:count]
+
+
+def assert_no_process_effects(code, descendants):
+    """Shared by the mask0 audit and F1's real collection corpus.
+
+    The interposer exits on the CALL, even if the OS would have refused it.
+    A zero exit status alone never proves the absence of creation attempts.
+    """
+    assert not descendants, f"descendants: {descendants}"
+    assert code != 86, "forbidden process/network attempt: interposer exit 86"
 
 
 def run_worker(command, dylib, tmp_path, mutation=False):
@@ -60,6 +77,7 @@ def run_worker(command, dylib, tmp_path, mutation=False):
         os.dup2(sources[1], 5)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, cwd="/", close_fds=False, preexec_fn=setup,
+                               start_new_session=True,
                                env={"DYLD_INSERT_LIBRARIES": str(dylib)} if dylib else {})
     seen, output, sent = [], bytearray(), False
     deadline = time.monotonic() + 5
@@ -84,6 +102,7 @@ def run_worker(command, dylib, tmp_path, mutation=False):
         if mutation:
             assert code == 86, (code, output)
         else:
+            assert_no_process_effects(code, seen)
             assert code == 0 and sent, (code, output)
             wire = output[output.index(b"BNGIPC05"):]
             kinds = []
@@ -95,9 +114,12 @@ def run_worker(command, dylib, tmp_path, mutation=False):
             assert kinds in ([1, 6], [1, 5, 6]), kinds
         return bytes(output)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
         for fd in (read, write, lock):
             os.close(fd)
 

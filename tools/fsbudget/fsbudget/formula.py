@@ -5,6 +5,21 @@ caller-provided coefficients (all 1 for the synthetic program)."""
 from dataclasses import dataclass, field
 
 
+def git_collection_limits(*, ancestor_directories: int) -> dict[str, int]:
+    """F1 names-only phase limits from the fixed PathFacts contract.
+
+    Raw entries are processed up to 256, not accumulated between directories.
+    Each syscall buffer remains 8 KiB even when its final batch contains more
+    entries than the processing limit. EOF costs one additional call.
+    Full repository coefficients remain collector_repository_expected below.
+    """
+    if not 0 <= ancestor_directories <= 32:
+        raise ValueError("ancestor capability count exceeds 32")
+    return {"directories": ancestor_directories, "raw_per_directory": 256,
+            "dir_chunk": 8192, "content_reads": 0, "entry_stats": 0,
+            "landlock_rules": 0}
+
+
 def collector_success_expected(worker: str, *, landlock: bool = False,
                                repository_probe: bool = False, openat2_succeeded: bool = True) -> dict[str, int]:
     """Exact Linux success budgets, with a separate shipped debug entry.
@@ -245,8 +260,20 @@ def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
                ax.stat_leaves, ax.stat_directory_groups]
     if min(scalars + list(ax.dir_bytes) + list(ax.read_bytes) + list(ax.worktree_hash_bytes)) < 0:
         raise ValueError("negative repository axis")
-    if ax.backend not in {"openat2", "stepwise"} or ax.phase not in {"acquisition", "content", "read-layer", "probe"}:
+    if ax.backend not in {"openat2", "stepwise"} or ax.phase not in {"acquisition", "content", "read-layer", "probe", "ancestor-names"}:
         raise ValueError("unreviewed repository primitive table")
+    if ax.phase == "ancestor-names":
+        # U2: use held ancestor descriptors only. Each directory has its own
+        # chunk rounding and EOF, never per-entry stat/open or a new read root.
+        if (len(ax.dir_bytes) != ax.directories or ax.directories > 32
+                or ax.raw_entries > 256 * ax.directories
+                or ax.capped_directories > ax.directories
+                or any((ax.files, ax.components, ax.candidates, ax.symlinks,
+                        ax.maps, ax.probes, ax.retries, ax.roots, ax.root_inputs,
+                        ax.readonly, ax.stat_leaves, ax.stat_directory_groups))
+                or ax.read_bytes or ax.worktree_hash_bytes):
+            raise ValueError("names-only held ancestor axes")
+        return {"getdents64": sum(ceil_div(n, 8192) + 1 for n in ax.dir_bytes) - ax.capped_directories}
     if ax.phase == "read-layer":
         if not 1 <= ax.roots <= ax.root_inputs <= 3:
             raise ValueError("selected roots only")
