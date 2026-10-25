@@ -337,6 +337,7 @@ fn unicode_missing_lookup_is_one_metered_nofollow_stat() {
         assert_eq!(idx.entries().len(), 1);
         let entry = &idx.entries()[0];
         let policies = Policies::from_config(&repo.config).unwrap();
+        let mut stopped = None;
         let result = repo.io.with_worktree_stats(|| {
             let raw = repo.io.worktree_metadata(indexed.as_bytes())?;
             let baseline = slot.borrow().live_allocated();
@@ -485,9 +486,22 @@ fn unicode_missing_lookup_is_one_metered_nofollow_stat() {
                 Err(E::Limit)
             );
             assert_eq!(slot.borrow().counts, before);
+            stopped = Some(before);
             Ok(())
         });
-        assert_eq!(result, Err(E::Limit));
+        // 이것을 실패시키는 것: 정리 단계를 중단 래치를 검사하는 metered로 되돌리기.
+        // #131 permits finalization after a handled Limit. This root-only
+        // callback publishes no counts and holds no parent edges to recheck,
+        // so cleanup succeeds without spending another stat. The failed alias
+        // lookup above must still return Limit and leave the port stopped.
+        assert_eq!(result, Ok(()));
+        assert_eq!(slot.borrow().counts, stopped.unwrap());
+        let before = slot.borrow().counts;
+        assert_eq!(
+            repo.io.worktree_metadata(indexed.as_bytes()).err(),
+            Some(E::Limit)
+        );
+        assert_eq!(slot.borrow().counts, before);
     });
 }
 
@@ -660,11 +674,152 @@ fn missing_parent_cache_charges_live_storage_for_distinct_failures() {
     });
 }
 
-// Mutation: publish a partial fallback scan as an exact modified/untracked
-// count when the shared Stats budget runs out partway through alias lookup.
+// 이것을 실패시키는 것: 비교 키의 Unicode 정규화를 생략해 별칭을 untracked에 더하기.
+// A physical alias is not necessarily tracked under Git's name policy. With
+// precomposition off, explicitly ignore the NFD spelling so the fallback
+// fixtures also have zero untracked files according to Git.
 #[cfg(target_os = "macos")]
 #[test]
-fn unicode_alias_lookup_budget_exhaustion_keeps_counts_pending() {
+fn alias_lookup_budget_never_invents_untracked_files() {
+    use std::{cell::Cell, os::unix::fs::MetadataExt, rc::Rc};
+
+    for (indexed, disk, precompose, ignored) in [
+        ("caf\u{e9}", "cafe\u{301}", true, false),
+        ("FILE", "file", false, false),
+        ("CAF\u{e9}", "cafe\u{301}", true, false),
+        ("caf\u{e9}", "cafe\u{301}", false, true),
+        ("CAF\u{e9}", "cafe\u{301}", false, true),
+    ] {
+        let f = init();
+        git(&f, &["config", "core.ignorecase", "true"]);
+        git(&f, &["config", "core.precomposeUnicode", "false"]);
+        for i in 0..300 {
+            f.write(&format!("d/{indexed}{i:03}"), b"");
+        }
+        commit(&f);
+        let index_names: Vec<_> = (0..300)
+            .flat_map(|i| format!("d/{indexed}{i:03}\0").into_bytes())
+            .collect();
+        assert_eq!(git(&f, &["ls-files", "-z"]), index_names);
+        for i in 0..300 {
+            let index_path = f.0.join(format!("d/{indexed}{i:03}"));
+            let disk_path = f.0.join(format!("d/{disk}{i:03}"));
+            fs::rename(&index_path, f.0.join("temporary")).unwrap();
+            fs::rename(f.0.join("temporary"), &disk_path).unwrap();
+            let a = fs::symlink_metadata(index_path).unwrap();
+            let b = fs::symlink_metadata(disk_path).unwrap();
+            assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        }
+        let mut listed: Vec<_> = fs::read_dir(f.0.join("d"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().as_bytes().to_vec())
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            (0..300)
+                .map(|i| format!("{disk}{i:03}").into_bytes())
+                .collect::<Vec<_>>()
+        );
+        git(
+            &f,
+            &[
+                "config",
+                "core.precomposeUnicode",
+                if precompose { "true" } else { "false" },
+            ],
+        );
+        if ignored {
+            f.write(".git/info/exclude", format!("/d/{disk}*\n"));
+        }
+        let expected = unicode_oracle(&f);
+        assert_eq!(expected.modified, count(0));
+        assert_eq!(expected.untracked, count(0));
+        for shared in [false, true] {
+            for remaining in [
+                Some(0),
+                Some(50),
+                Some(150),
+                Some(280),
+                Some(400),
+                Some(500),
+                Some(580),
+                None,
+            ] {
+                with_repo(&f, |repo, slot| {
+                    if let Some(remaining) = remaining {
+                        let used = slot.borrow().budget.used(Axis::Stats);
+                        slot.borrow_mut()
+                            .charge_axis(Axis::Stats, Axis::Stats.limit() - remaining - used)
+                            .unwrap();
+                    }
+                    // The stat tail after the last bulk call distinguishes
+                    // actual per-alias fallback from an enumeration failure.
+                    let events = Rc::new(Cell::new((0, 0)));
+                    let observed = events.clone();
+                    slot.borrow_mut().hook = Some(Box::new(move |event| {
+                        let (bulk, stats) = observed.get();
+                        match event {
+                            "before_worktree_bulk" => observed.set((bulk + 1, 0)),
+                            "before_worktree_stat" => observed.set((bulk, stats + 1)),
+                            _ => {}
+                        }
+                    }));
+                    let got = if shared {
+                        git::stage_b::status(repo, &[])
+                    } else {
+                        status_tracked::load_status(repo)
+                    };
+                    let (bulk, stat_tail) = events.get();
+                    eprintln!(
+                        "ZERO_ALIAS indexed={indexed} precompose={precompose} ignored={ignored} shared={shared} remaining={remaining:?} bulk={bulk} stat_tail={stat_tail} modified={:?} untracked={:?}",
+                        got.modified, got.untracked
+                    );
+                    assert!(
+                        got.untracked == Field::PENDING || got.untracked == count(0),
+                        "overcount: {got:?}"
+                    );
+                    if got.modified == Field::PENDING {
+                        // A partial walk cannot publish even an exact zero.
+                        assert_eq!(got.untracked, Field::PENDING);
+                        let before = slot.borrow().counts;
+                        assert_eq!(repo.io.worktree_metadata(b"d/unused").err(), Some(E::Limit));
+                        assert_eq!(slot.borrow().counts, before);
+                    }
+                    if matches!(remaining, Some(150 | 280)) {
+                        assert!(
+                            bulk > 0 && stat_tail == 0,
+                            "must exhaust during enumeration"
+                        );
+                        assert_eq!(got.modified, Field::PENDING);
+                    }
+                    if ignored && remaining.is_some_and(|n| n >= 400) {
+                        assert!(bulk > 0 && stat_tail > 10, "must exhaust during fallback");
+                        assert_eq!(got.modified, Field::PENDING);
+                        assert_eq!(got.untracked, Field::PENDING);
+                    }
+                    if remaining.is_none() {
+                        let mut expected = expected.clone();
+                        if !shared {
+                            expected.untracked = Field::PENDING;
+                        }
+                        assert_eq!(got, expected);
+                        if ignored {
+                            assert_eq!(stat_tail, 300);
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+// 이것을 실패시키는 것: Partial 단계의 검증된 하한에서 saturated를 지워 정확값으로 게시하기.
+#[cfg(target_os = "macos")]
+#[test]
+fn unicode_alias_lookup_budget_exhaustion_preserves_verified_bounds() {
+    use bingsu_core::collection::git::StageResult;
+
     let f = init();
     git(&f, &["config", "core.precomposeUnicode", "false"]);
     for i in 0..300 {
@@ -687,26 +842,61 @@ fn unicode_alias_lookup_budget_exhaustion_keeps_counts_pending() {
     assert_eq!(expected.modified, count(0));
     assert_eq!(expected.untracked, count(300));
     for shared in [false, true] {
+        let mut bounds = 0;
         // The larger allowances get past the 300 bulk observations and
         // expire during per-alias fallback, not just during enumeration.
+        // Git counts these raw NFD names as untracked with precomposition off;
+        // #131 can preserve a verified lower bound from completed batches.
         for remaining in [0, 50, 150, 280, 400, 500, 580] {
             with_repo(&f, |repo, slot| {
                 let used = slot.borrow().budget.used(Axis::Stats);
                 slot.borrow_mut()
                     .charge_axis(Axis::Stats, Axis::Stats.limit() - remaining - used)
                     .unwrap();
-                let got = if shared {
-                    git::stage_b::status(repo, &[])
+                let (modified, untracked) = if shared {
+                    let StageResult::Partial(value) = git::stage_b::stage_b(repo, &[], true) else {
+                        panic!("budget-limited alias walk must be Partial");
+                    };
+                    let decl = &bingsu_core::field::BUILTIN[3];
+                    assert_eq!(
+                        value.fields[decl.field_index("filtered").unwrap()],
+                        Field::PENDING
+                    );
+                    (
+                        value.fields[decl.field_index("modified").unwrap()].clone(),
+                        value.fields[decl.field_index("untracked").unwrap()].clone(),
+                    )
                 } else {
-                    status_tracked::load_status(repo)
+                    let got = status_tracked::load_status(repo);
+                    (got.modified, got.untracked)
                 };
                 assert_eq!(
-                    got.modified,
+                    modified,
                     Field::PENDING,
                     "shared={shared} remaining={remaining}"
                 );
-                assert_eq!(got.untracked, Field::PENDING);
+                eprintln!(
+                    "ALIAS_BOUND shared={shared} remaining={remaining} untracked={untracked:?}"
+                );
+                if shared && untracked != Field::PENDING {
+                    assert!(
+                        matches!(
+                            untracked.value,
+                            FieldValue::Count {
+                                n: 1..=300,
+                                saturated: true
+                            }
+                        ),
+                        "shared={shared} remaining={remaining}: {untracked:?}"
+                    );
+                    bounds += 1;
+                } else {
+                    assert_eq!(untracked, Field::PENDING);
+                }
             });
+        }
+        if shared {
+            assert!(bounds > 0, "must exercise #131's verified lower bound");
         }
     }
     assert_eq!(
