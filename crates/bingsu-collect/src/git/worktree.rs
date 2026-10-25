@@ -62,7 +62,7 @@ pub fn compare(
         return Err(super::UNSUPPORTED);
     }
     let observed = io.worktree_metadata(relative);
-    compare_observed(
+    compare_metadata(
         io,
         relative,
         entry,
@@ -78,9 +78,44 @@ pub fn compare(
     )
 }
 
-/// Consume a validated batch observation without another stat or record copy.
-/// The caller retains the original raw path for any subsequent safe hash.
+/// Consume a validated batch observation. A missing macOS listing match is
+/// not proof of absence: APFS can resolve a differently composed index name.
+/// Ask the verified parent fd once, with the exact index bytes and NOFOLLOW.
+/// Supplied metadata and all Linux observations need no extra lookup.
 pub fn compare_observed(
+    io: &RepoIo<'_>,
+    relative: &[u8],
+    entry: &Entry,
+    index: &State,
+    policies: super::policy::Policies,
+    observed: Result<&libc::stat, ReadError>,
+) -> Result<Comparison, ReadError> {
+    #[cfg(target_os = "macos")]
+    if matches!(observed, Err(ReadError::Missing))
+        && matches!(
+            entry.mode,
+            Mode::FILE | Mode::FILE_EXECUTABLE | Mode::SYMLINK
+        )
+        && !entry.flags.contains(Flags::SKIP_WORKTREE)
+    {
+        // This is the same metered, no-follow stat used by direct comparison;
+        // it verifies every parent component and never opens the leaf. Keep
+        // errors (including limits) and the existing device/type/hash checks.
+        let relative = entry.path(index).as_ref();
+        let fallback = io.worktree_metadata(relative);
+        return compare_metadata(
+            io,
+            relative,
+            entry,
+            index,
+            policies,
+            fallback.as_ref().map_err(|e| *e),
+        );
+    }
+    compare_metadata(io, relative, entry, index, policies, observed)
+}
+
+fn compare_metadata(
     io: &RepoIo<'_>,
     relative: &[u8],
     entry: &Entry,
