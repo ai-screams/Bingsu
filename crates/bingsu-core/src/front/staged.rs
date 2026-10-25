@@ -285,6 +285,7 @@ pub struct Observed {
     clock: Option<Clock>,
     boot_changed: bool,
     collection: Option<Box<Completed>>,
+    collection_binding: Option<Box<Binding>>,
 }
 
 pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
@@ -513,14 +514,13 @@ impl ReadPlan {
         self.observed.collection =
             Completed::decode_with_catalog(&self.collection_bytes, self.catalog.segments)
                 .ok()
-                .filter(|r| {
-                    self.expected_binding()
-                        .zip(self.entry)
-                        .is_some_and(|(binding, entry)| r.eligible(&binding, entry))
-                })
-                .map(|r| {
-                    // Keep ownership explicit without exposing a function address.
-                    Box::new(r)
+                .and_then(|r| {
+                    let binding = self.expected_binding()?;
+                    if !r.eligible(&binding, self.entry?) {
+                        return None;
+                    }
+                    self.observed.collection_binding = Some(Box::new(binding));
+                    Some(Box::new(r))
                 });
         self.next_file();
     }
@@ -944,6 +944,7 @@ pub fn finish_with_catalog(
                 .collection
                 .as_deref()
                 .filter(|_| observed.selected.is_some()),
+            observed.collection_binding.as_deref(),
             catalog,
             &mut response.record,
         );

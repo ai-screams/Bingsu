@@ -28,6 +28,14 @@ use bingsu_core::width::WidthProfile;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "shared git display fixtures; integration assertions run in core"
+)]
+#[path = "../../bingsu-core/tests/git_render.rs"]
+mod git_fixture;
+
 fn hex(b: &[u8]) -> String {
     b.iter()
         .fold(String::with_capacity(b.len() * 2), |mut s, x| {
@@ -317,6 +325,155 @@ fn main() {
     let mut out = String::new();
     color_cases(&mut out);
     render_cases(&mut out);
+    git_cases(&mut out);
     // A closed stdout (a pipe that went away) is not an error worth a panic.
     let _ = std::io::stdout().write_all(out.as_bytes());
+}
+
+fn git_cases(out: &mut String) {
+    let mut cases: Vec<_> = git_fixture::CASES
+        .into_iter()
+        .map(|name| (name, git_fixture::git_value(name)))
+        .collect();
+    for (name, raw) in git_fixture::hostile_cases() {
+        let mut value = git_fixture::git_value("clean");
+        git_fixture::set(
+            &mut value,
+            "branch",
+            Field::text(&raw, 256, WidthProfile::DEFAULT),
+        );
+        cases.push((name, value));
+    }
+    for name in ["readonly-unknown", "readonly-false", "readonly-true"] {
+        cases.push((name, git_fixture::git_value("clean")));
+    }
+    let theme = bingsu_core::default_theme::DefaultTheme::new(Mode::Dark).unwrap();
+    for (name, value) in cases {
+        for (set, icons) in [
+            ("ascii", IconSet::Ascii),
+            ("unicode", IconSet::Unicode),
+            ("nerd", IconSet::Nerd),
+        ] {
+            for amb in [1, 2] {
+                let profile = WidthProfile::new(amb, 2).unwrap();
+                let mut r = git_fixture::response(value.clone());
+                if name.starts_with("readonly-") {
+                    r.updates[1].facts.as_mut().unwrap().readonly = match name {
+                        "readonly-true" => Some(true),
+                        "readonly-false" => Some(false),
+                        _ => None,
+                    };
+                }
+                let mut collected = bingsu_core::shell_values::collect(&git_fixture::envelope());
+                bingsu_core::collection::merge(
+                    &mut collected,
+                    Some(&r),
+                    &r.binding,
+                    &r.binding.cwd,
+                    Some(b"/home/u"),
+                )
+                .unwrap();
+                if let Some(v) = &mut collected.values[3] {
+                    *v = bingsu_core::shell_values::format_git(v, icons, profile);
+                }
+                let inputs = Inputs {
+                    catalog: BUILTIN,
+                    values: &collected.values,
+                    facts: &collected.facts,
+                    setup: theme.setup(),
+                };
+                for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+                    for width in [0, 1, 2, 3, 59, 60, 120] {
+                        let rendered = render_prompt(
+                            &theme.theme(),
+                            &inputs,
+                            &Target {
+                                shell,
+                                depth: ColorDepth::TrueColor,
+                                options: Options {
+                                    width,
+                                    profile,
+                                    icons,
+                                    use_last_column: false,
+                                },
+                            },
+                            &mut NoopRecorder,
+                        );
+                        let _ = write!(out, "git {name} {set} {amb} {} {width}\t", shell.as_str());
+                        for bytes in [
+                            &rendered.upper,
+                            &rendered.left,
+                            &rendered.right,
+                            &rendered.transient_left,
+                            &rendered.transient_right,
+                            &rendered.vi_insert,
+                            &rendered.vi_command,
+                        ] {
+                            out.push_str(&hex(bytes));
+                            out.push(' ');
+                        }
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Filesystem oracle: the complete listing and its reverse must yield the same
+// unique result. No test depends on readdir/getdents order.
+#[test]
+fn filesystem_sibling_order_matches_the_full_shortener() {
+    use bingsu_core::{
+        collection, shell_values,
+        shorten::{Method, ShortenRequest, Source, run_builtin},
+    };
+    use git_fixture::{binding, envelope, facts, git_value, response};
+    let root = std::env::temp_dir().join(format!("bingsu-e2-siblings-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    for name in ["alphabet", "alpine", "beta"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let mut names: Vec<Vec<u8>> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            assert!(e.file_type().unwrap().is_dir());
+            e.file_name().into_string().unwrap().into_bytes()
+        })
+        .collect();
+    assert_eq!(names.len(), 3);
+    let expected = "~/alph/leaf";
+    for _ in 0..2 {
+        let mut f = facts();
+        f.siblings[0].names = names.clone();
+        let mut r = response(git_value("clean"));
+        r.updates[1].facts = Some(f);
+        let mut c = shell_values::collect(&envelope());
+        collection::merge(
+            &mut c,
+            Some(&r),
+            &binding(),
+            &binding().cwd,
+            Some(b"/home/u"),
+        )
+        .unwrap();
+        let shown = run_builtin(&ShortenRequest {
+            source: Source::Path(c.facts[1].as_ref().unwrap()),
+            method: Method::Unique,
+            budget: u32::MAX,
+            profile: WidthProfile::DEFAULT,
+        })
+        .unwrap()
+        .text();
+        assert_eq!(shown, expected);
+        names.reverse();
+    }
 }

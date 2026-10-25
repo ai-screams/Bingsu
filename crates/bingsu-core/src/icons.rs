@@ -107,6 +107,18 @@ pub fn lookup(name: &str) -> Option<&'static Icon> {
         .map(|i| &ICONS[i])
 }
 
+/// Directory access observations need a visible fallback even in icon sets
+/// whose optional readonly glyph is empty.
+pub fn readonly_marker(set: IconSet, profile: WidthProfile) -> &'static str {
+    let glyph = resolve(
+        lookup("readonly").expect("fixed readonly icon"),
+        set,
+        profile,
+    )
+    .text;
+    if glyph.is_empty() { "[ro]" } else { glyph }
+}
+
 /// Cells for a private use code point that the icon table uses (1). None
 /// means one of two things: a private use code point the table does not
 /// know (1 cell plus a warning, src/width.rs), or a char that is not private

@@ -1164,6 +1164,22 @@ mod tests {
             (c.icons, c.profile, c.duration_min_ms),
             (IconSet::Unicode, WidthProfile::DEFAULT, 2000)
         );
+        for variant in &c.variants {
+            let segments: Vec<_> = variant
+                .iter()
+                .flat_map(|line| line.nodes())
+                .filter_map(|node| {
+                    if let crate::template::compile::Node::Segment { seg, .. } = node {
+                        Some(*seg)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(segments.iter().filter(|seg| **seg == 3).count(), 1);
+            let git = segments.iter().position(|seg| *seg == 3).unwrap();
+            assert_eq!(segments[git - 1], 1);
+        }
     }
 
     // 이것을 실패시키는 것: 사용자 파일의 값(아이콘·폭·한쪽 배열)을 쓰지 않거나, 쓰지 않은 부분까지 내장 값을 버리는 것.

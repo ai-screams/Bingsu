@@ -19,6 +19,57 @@ fn native_output_matches_committed_golden() {
         .output()
         .expect("run bingsu-golden");
     assert!(out.status.success(), "bingsu-golden failed");
+    // Keep coverage even if both the generator and golden are regenerated after
+    // accidentally deleting a matrix axis. Every cell has seven rendered fields.
+    let text = std::str::from_utf8(&out.stdout).unwrap();
+    let rows: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with("git "))
+        .collect();
+    assert_eq!(rows.len(), 43 * 3 * 2 * 3 * 7);
+    for case in [
+        "no-repo",
+        "unborn",
+        "unborn-pending",
+        "detached",
+        "rebase",
+        "merge",
+        "cherry-pick",
+        "revert",
+        "bisect",
+        "counts",
+        "pending",
+        "saturated",
+        "filtered",
+        "clean",
+        "partial",
+        "filtered-pending",
+        "filtered-zero",
+        "filtered-unknown-count",
+        "filtered-unknown-zero",
+        "readonly-unknown",
+        "readonly-false",
+        "readonly-true",
+        "cmdsub",
+        "osc_title",
+        "bidi_override",
+        "bad_utf8",
+    ] {
+        for icons in ["ascii", "unicode", "nerd"] {
+            for amb in [1, 2] {
+                for shell in ["zsh", "bash", "fish"] {
+                    for width in [0, 1, 2, 3, 59, 60, 120] {
+                        let key = format!("git {case} {icons} {amb} {shell} {width}\t");
+                        let row = rows
+                            .iter()
+                            .find(|r| r.starts_with(&key))
+                            .expect("git golden matrix cell");
+                        assert_eq!(row.split_once('\t').unwrap().1.split(' ').count(), 8);
+                    }
+                }
+            }
+        }
+    }
     let first = out
         .stdout
         .split(|&b| b == b'\n')
