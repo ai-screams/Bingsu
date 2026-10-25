@@ -73,26 +73,26 @@ pub fn tracked_status(repo: &GuardedRepository<'_>, index: &State) -> StatusCoun
 }
 
 /// D1b supplies modified and untracked from one shared worktree scan.
-pub(crate) fn index_status(repo: &GuardedRepository<'_>, index: &State) -> StatusCounts {
-    index_counts(repo, index).0
+pub(crate) fn index_status(
+    repo: &GuardedRepository<'_>,
+    index: &index::ExpandedIndex,
+) -> StatusCounts {
+    index_counts_validated(repo, index).0
 }
 
 fn index_counts(repo: &GuardedRepository<'_>, index: &State) -> (StatusCounts, Option<Policies>) {
-    let mut result = StatusCounts::default();
     let io = &repo.io;
-    if io
-        .account(|m| {
-            if index.entries().len() > budget::INDEX_ENTRIES as usize
-                || index.path_backing().len() > budget::INDEX_BYTES as usize
-            {
-                return Err(ReadError::Limit);
-            }
-            index::validate(index, m)
-        })
-        .is_err()
-    {
-        return (result, None);
+    if io.account(|m| index::validate(index, m)).is_err() {
+        return (StatusCounts::default(), None);
     }
+    index_counts_validated(repo, index)
+}
+
+fn index_counts_validated(
+    repo: &GuardedRepository<'_>,
+    index: &State,
+) -> (StatusCounts, Option<Policies>) {
+    let mut result = StatusCounts::default();
     let mut conflicts = 0;
     let mut previous = None;
     for entry in index.entries() {
@@ -626,38 +626,79 @@ fn modified(
                 }
                 Err(error) => return Err(error),
             }
-            for (entry, metadata) in group.iter().zip(&observed) {
-                let path = entry.path(index).as_ref();
-                let conversion = patterns.conversion(io, path, policies)?;
-                let current = Policies {
-                    conversion,
-                    ..policies
-                };
-                let comparison = if entry.flags.contains(Flags::INTENT_TO_ADD) {
-                    Comparison::Exact { modified: true }
-                } else {
-                    worktree::compare_observed(
-                        io,
-                        path,
-                        entry,
-                        index,
-                        current,
-                        metadata.as_ref().map_err(|e| *e),
-                    )?
-                };
-                match comparison {
-                    Comparison::Skipped => {}
-                    Comparison::Exact { modified } => n += u32::from(modified),
-                    Comparison::Approximate { modified } => {
-                        n += u32::from(modified);
-                        *filtered = true;
-                    }
-                }
-            }
+            n += compare_group(io, index, policies, &patterns, group, &observed, filtered)?;
             start = end;
         }
         Ok(n)
     })
+}
+
+fn compare_group(
+    io: &RepoIo<'_>,
+    index: &State,
+    policies: Policies,
+    patterns: &Patterns,
+    entries: &[&gix_index::Entry],
+    observed: &[Result<libc::stat, ReadError>],
+    filtered: &mut bool,
+) -> Result<u32, ReadError> {
+    let mut n = 0;
+    for (entry, metadata) in entries.iter().zip(observed) {
+        io.account(|_| Ok(()))?;
+        let path = entry.path(index).as_ref();
+        let conversion = patterns.conversion(io, path, policies)?;
+        let current = Policies {
+            conversion,
+            ..policies
+        };
+        let comparison = if entry.flags.contains(Flags::INTENT_TO_ADD) {
+            Comparison::Exact { modified: true }
+        } else {
+            worktree::compare_observed(
+                io,
+                path,
+                entry,
+                index,
+                current,
+                metadata.as_ref().map_err(|e| *e),
+            )?
+        };
+        match comparison {
+            Comparison::Skipped => {}
+            Comparison::Exact { modified } => n += u32::from(modified),
+            Comparison::Approximate { modified } => {
+                n += u32::from(modified);
+                *filtered = true;
+            }
+        }
+    }
+    Ok(n)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn tracked_entries_check_expired_deadline_before_comparison() {
+        super::super::io::test_support::with_io(|io, meter, index, policies| {
+            let entries: Vec<_> = index.entries().iter().collect();
+            let observed = vec![Err(ReadError::Missing); entries.len()];
+            *meter.borrow_mut() = crate::meter::Meter::new(std::time::Instant::now());
+            assert_eq!(
+                compare_group(
+                    io,
+                    index,
+                    policies,
+                    &Patterns::default(),
+                    &entries,
+                    &observed,
+                    &mut false
+                ),
+                Err(ReadError::Deadline)
+            );
+        });
+    }
 }
 
 // Per-thread test observations do not change the product's meter or deadline.

@@ -54,11 +54,7 @@ pub fn stage_b(
 }
 
 pub(crate) fn status(repo: &GuardedRepository<'_>, global_excludes: &[u8]) -> StatusCounts {
-    let index = match index::load(&repo.io) {
-        Ok(index) => index,
-        Err(_) => return StatusCounts::default(),
-    };
-    let index = match index::expand_sparse(repo, index) {
+    let index = match index::load_expanded(repo) {
         Ok(index) => index,
         Err(_) => return StatusCounts::default(),
     };

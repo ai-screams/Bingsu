@@ -36,11 +36,26 @@ pub(crate) fn untracked_status(
     global_excludes: &[u8],
 ) -> Field {
     let mut counts = StatusCounts::default();
-    worktree_status(repo, index, &mut counts, global_excludes);
+    if repo
+        .io
+        .account(|m| super::io::index::validate(index, m))
+        .is_ok()
+    {
+        worktree_status_validated(repo, index, &mut counts, global_excludes);
+    }
     counts.untracked
 }
 
 pub(crate) fn worktree_status(
+    repo: &GuardedRepository<'_>,
+    index: &super::io::index::ExpandedIndex,
+    counts: &mut StatusCounts,
+    global_excludes: &[u8],
+) {
+    worktree_status_validated(repo, index, counts, global_excludes);
+}
+
+fn worktree_status_validated(
     repo: &GuardedRepository<'_>,
     index: &State,
     counts: &mut StatusCounts,
@@ -76,11 +91,7 @@ pub(crate) fn worktree_status(
                         Err(error)
                     };
                 }
-                for (i, entry) in index.entries().iter().enumerate() {
-                    if !walk.seen[i] && eligible(entry) {
-                        walk.compare(i, entry.path(index).as_ref(), Err(ReadError::Missing))?;
-                    }
-                }
+                walk.compare_unseen()?;
                 Ok((
                     Field::known(FieldValue::Count {
                         n: walk.untracked,
@@ -134,7 +145,6 @@ struct Walk<'a, 'io> {
 impl<'a, 'io> Walk<'a, 'io> {
     fn new(io: &'a RepoIo<'io>, index: &'a State, policies: Policies) -> Result<Self, ReadError> {
         let allocation = io.account(|m| {
-            super::io::index::validate(index, m)?;
             if index.entries().iter().any(|e| e.mode.is_sparse()) {
                 return Err(super::io::UNSUPPORTED);
             }
@@ -184,6 +194,16 @@ impl<'a, 'io> Walk<'a, 'io> {
             modified_error: None,
             _allocation: allocation,
         })
+    }
+
+    fn compare_unseen(&mut self) -> Result<(), ReadError> {
+        for (i, entry) in self.index.entries().iter().enumerate() {
+            if !self.seen[i] && eligible(entry) {
+                self.io.account(|_| Ok(()))?;
+                self.compare(i, entry.path(self.index).as_ref(), Err(ReadError::Missing))?;
+            }
+        }
+        Ok(())
     }
 
     fn compare(
@@ -248,6 +268,13 @@ impl<'a, 'io> Walk<'a, 'io> {
             path.push(b'/');
         }
         let prefix = path.len();
+        // The index keys are sorted. Search only this directory's descendants,
+        // keeping the slash in the prefix so adjacent names cannot overlap.
+        let prefix_key = self.policies.names.key(&path);
+        // Retain this key while the path buffer and each child's key change.
+        self.io.account(|m| scratch.reserve(prefix_key.len(), m))?;
+        let prefix_key = prefix_key.into_owned();
+        let candidates = directory_candidates(&self.keys, &prefix_key);
         // Validate the fixed marker from this batch's held directory fd, even
         // when .git is beyond the first batch. Junk markers are ordinary dirs;
         // valid repositories collapse before reading their local policies.
@@ -261,7 +288,11 @@ impl<'a, 'io> Walk<'a, 'io> {
         ] {
             path.truncate(prefix);
             path.extend_from_slice(name);
-            let metadata = if let Some(record) = batch.entries.iter().find(|r| r.name == name) {
+            let metadata = if let Some(record) = batch
+                .entries
+                .iter()
+                .find(|r| &batch.names[r.name.clone()] == name)
+            {
                 record.metadata
             } else {
                 // Missing candidates do not consume pattern-file axes, even
@@ -282,40 +313,34 @@ impl<'a, 'io> Walk<'a, 'io> {
         }
         // Retain only comparison keys across batches to detect ambiguous names.
         // Full stat records live for one kernel batch, not the whole directory.
-        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut keys: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut key_bytes = Vec::new();
         // Keep the observed lower bound on Limit, but reject ambiguous keys
         // even when a later batch or descendant exhausts a budget.
         let result = (|| {
             loop {
                 for record in &batch.entries {
-                    self.io.account(|m| m.check())?;
                     if self.reached_cap(subtree_limit) {
                         return Ok(());
                     }
                     // Never inspect repository metadata or gitlink contents.
-                    if record.name.eq_ignore_ascii_case(b".git") {
+                    let name = &batch.names[record.name.clone()];
+                    if name.eq_ignore_ascii_case(b".git") {
                         continue;
                     }
                     path.truncate(prefix);
-                    path.extend_from_slice(&record.name);
+                    path.extend_from_slice(name);
                     let key = self.policies.names.key(&path);
+                    // One live deadline check covers key reservation and the
+                    // comparison below. Any content I/O charges/checks again.
                     self.io.account(|m| {
-                        if keys.len() == keys.capacity() {
-                            let extra = keys.capacity().max(16);
-                            scratch.reserve(extra * std::mem::size_of::<Vec<u8>>(), m)?;
-                            let mut growth = m.path_allocation();
-                            growth.reserve(keys.capacity() * std::mem::size_of::<Vec<u8>>(), m)?;
-                            keys.try_reserve_exact(extra)
-                                .map_err(|_| ReadError::Limit)?;
-                        }
-                        scratch.reserve(key.len(), m)
+                        super::io::reserve_scratch(&mut keys, 1, &mut scratch, m)?;
+                        super::io::reserve_scratch(&mut key_bytes, key.len(), &mut scratch, m)
                     })?;
-                    keys.push(key.to_vec());
-                    let exact = self
-                        .keys
-                        .binary_search_by(|(p, _)| p.as_ref().cmp(key.as_ref()))
-                        .ok()
-                        .map(|i| self.keys[i].1);
+                    let start = key_bytes.len();
+                    key_bytes.extend_from_slice(&key);
+                    keys.push(start..key_bytes.len());
+                    let exact = find_key(&self.keys, &prefix_key, candidates.clone(), &key);
                     if exact.is_some_and(|i| self.index.entries()[i].mode == Mode::COMMIT) {
                         continue;
                     }
@@ -327,10 +352,16 @@ impl<'a, 'io> Walk<'a, 'io> {
                         self.compare(i, &path, Ok(metadata))?;
                     }
                     let directory = metadata.st_mode & libc::S_IFMT == libc::S_IFDIR;
+                    // Ignore rules affect untracked leaves and directory
+                    // traversal, never an already compared tracked leaf.
                     let ignored = inherited_ignore
-                        || self
-                            .patterns
-                            .ignored(self.io, &path, directory, self.policies.names)?;
+                        || ((directory || exact.is_none())
+                            && self.patterns.ignored(
+                                self.io,
+                                &path,
+                                directory,
+                                self.policies.names,
+                            )?);
                     if directory {
                         let mut child = key.into_owned();
                         child.push(b'/');
@@ -370,10 +401,112 @@ impl<'a, 'io> Walk<'a, 'io> {
             }
             Ok(())
         })();
-        keys.sort_unstable();
-        if keys.windows(2).any(|p| p[0] == p[1]) {
+        if ambiguous_keys(&mut keys, &key_bytes) {
             return Err(ReadError::Changed);
         }
         result
+    }
+}
+
+fn directory_candidates(keys: &[(Cow<'_, [u8]>, usize)], prefix: &[u8]) -> std::ops::Range<usize> {
+    let start = keys.partition_point(|(p, _)| p.as_ref() < prefix);
+    let len = keys[start..].partition_point(|(p, _)| p.starts_with(prefix));
+    start..start + len
+}
+
+fn find_key(
+    keys: &[(Cow<'_, [u8]>, usize)],
+    prefix: &[u8],
+    candidates: std::ops::Range<usize>,
+    key: &[u8],
+) -> Option<usize> {
+    // NFC precomposition falls back to raw bytes for an entire non-UTF-8
+    // path. Its parent's normalized key need not be a prefix in that case.
+    let candidates = if key.starts_with(prefix) {
+        candidates
+    } else {
+        0..keys.len()
+    };
+    keys[candidates.clone()]
+        .binary_search_by(|(p, _)| p.as_ref().cmp(key))
+        .ok()
+        .map(|i| keys[candidates.start + i].1)
+}
+
+fn ambiguous_keys(keys: &mut [std::ops::Range<usize>], bytes: &[u8]) -> bool {
+    keys.sort_unstable_by(|a, b| bytes[a.clone()].cmp(&bytes[b.clone()]));
+    keys.windows(2)
+        .any(|p| bytes[p[0].clone()] == bytes[p[1].clone()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_key_search_falls_back_for_nonprefix_keys() {
+        let keys = [
+            (Cow::Borrowed(b"a/file".as_slice()), 7),
+            (Cow::Borrowed(b"z/file".as_slice()), 9),
+        ];
+        let candidates = directory_candidates(&keys, b"z/");
+        assert_eq!(candidates, 1..2);
+        assert_eq!(
+            find_key(&keys, b"z/", candidates.clone(), b"z/file"),
+            Some(9)
+        );
+        assert_eq!(find_key(&keys, b"z/", candidates, b"a/file"), Some(7));
+    }
+
+    // No filesystem fixture: APFS rejects the non-UTF-8 child with EILSEQ.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nfd_parent_non_utf8_child_uses_full_key_search() {
+        let names = super::super::io::policy::NamePolicy {
+            precompose_unicode: true,
+            ..Default::default()
+        };
+        for ignore_case in [false, true] {
+            let names = super::super::io::policy::NamePolicy {
+                ignore_case,
+                ..names
+            };
+            let parent = b"e\xcc\x81/";
+            let child = b"e\xcc\x81/\xffFile";
+            let prefix = names.key(parent);
+            let key = names.key(child);
+            assert_eq!(prefix.as_ref(), "é/".as_bytes());
+            assert!(!key.starts_with(&prefix));
+            let mut keys = vec![
+                (names.key(b"a/file"), 3),
+                (names.key(child), 5),
+                (names.key("é/other".as_bytes()), 8),
+            ];
+            keys.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            let candidates = directory_candidates(&keys, &prefix);
+            assert!(!keys[candidates.clone()].iter().any(|(p, _)| p == &key));
+            assert_eq!(find_key(&keys, &prefix, candidates, &key), Some(5));
+        }
+    }
+
+    #[test]
+    fn unseen_entries_check_expired_deadline_before_comparison() {
+        super::super::io::test_support::with_io(|io, meter, index, policies| {
+            let mut walk = Walk::new(io, index, policies).unwrap();
+            *meter.borrow_mut() = crate::meter::Meter::new(std::time::Instant::now());
+            assert_eq!(walk.compare_unseen(), Err(ReadError::Deadline));
+            assert_eq!(walk.modified, 0);
+            assert!(walk.seen.iter().all(|seen| !seen));
+        });
+    }
+
+    // Mutations: compare offsets instead of name bytes, omit sorting or accept
+    // duplicates. Equal keys can live in different batches of one directory.
+    #[test]
+    fn ambiguous_names_compare_bytes_across_disjoint_ranges() {
+        let names = b"dogcatdogcatalog";
+        assert!(!super::ambiguous_keys(&mut [0..3, 3..6, 9..16], names));
+        assert!(super::ambiguous_keys(&mut [0..3, 3..6, 6..9, 9..16], names));
+        assert!(!super::ambiguous_keys(&mut [], names));
     }
 }

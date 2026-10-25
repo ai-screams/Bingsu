@@ -1317,6 +1317,11 @@ fn shared_scan_19000_tracked_1000_untracked_prunes_50000_ignored() {
             assert_eq!(m.budget.used(Axis::WorktreeEntries), expected_raw);
             assert_eq!(m.budget.used(Axis::WorktreeReadBytes), 0);
             assert!(m.live_allocated() < 5_000_000);
+            // Mutation: restore one heap-owned name per listed or compared leaf.
+            assert!(
+                allocations.calls < 20_000,
+                "per-entry allocation: {allocations:?}"
+            );
             let costs = (
                 m.operations() - before,
                 m.counts[Phase::Content as usize].list,
@@ -2018,4 +2023,83 @@ fn measure_global_excludes_knowledge_stage_b() {
             ns[99], ns[189]
         );
     }
+}
+
+// Mutations: skip ignore lookup for directories replacing tracked files, skip
+// it for untracked leaves, or suppress comparison of ignored tracked leaves.
+#[test]
+fn tracked_ignore_shortcut_still_checks_directories_and_untracked_leaves() {
+    let f = init();
+    f.write("kept", b"base");
+    f.write("replaced", b"base");
+    commit(&f);
+    f.write(".gitignore", b"kept\nreplaced/\n*.log\n");
+    commit(&f);
+    f.write("kept", b"changed");
+    fs::remove_file(f.0.join("replaced")).unwrap();
+    f.write("replaced/hidden", b"ignored");
+    f.write("hidden.log", b"ignored");
+    f.write("visible", b"untracked");
+    let got = parity(&f);
+    assert_eq!((got.modified, got.untracked), (count(2), count(1)));
+}
+
+// Mutations: trust a mutable caller's index without validating it at either
+// entry point; this must fail before any worktree listing or content I/O.
+#[test]
+fn edited_indexes_must_be_validated_before_certification_or_walking() {
+    let f = init();
+    f.write("tracked", b"base");
+    commit(&f);
+    for expansion in [false, true] {
+        with_repo(&f, |repo, slot| {
+            let mut idx = index::load(&repo.io).unwrap();
+            let e = idx.entries()[0].clone();
+            idx.dangerously_push_entry(
+                e.stat,
+                e.id,
+                e.flags,
+                e.mode,
+                b"../escape".as_slice().into(),
+            );
+            idx.sort_entries();
+            let before = slot.borrow().counts;
+            if expansion {
+                assert_eq!(
+                    index::expand_sparse(repo, idx).err(),
+                    Some(E::Io(libc::EINVAL))
+                );
+            } else {
+                assert_eq!(
+                    git::untracked::untracked_status(repo, &idx, &[]),
+                    Field::PENDING
+                );
+            }
+            assert_eq!(slot.borrow().counts, before);
+        });
+    }
+}
+
+// Mutations: lose the slash boundary, use a directory-local offset as a global
+// entry index, or truncate the candidate range. Raw names still drive I/O.
+#[test]
+fn directory_key_ranges_preserve_prefix_boundaries_and_offsets() {
+    let f = init();
+    for (path, content) in [
+        ("d/a", "one"),
+        ("d/nested/z", "two two"),
+        ("d-neighbor/a", "three three three"),
+        ("D2/a", "four four four four"),
+    ] {
+        f.write(path, content);
+    }
+    commit(&f);
+    git(&f, &["config", "core.ignorecase", "true"]);
+    f.write("d/extra", b"untracked");
+    let got = parity(&f);
+    assert_eq!((got.modified, got.untracked), (count(0), count(1)));
+    f.write("D2/a", b"changed");
+    fs::remove_file(f.0.join("d/nested/z")).unwrap();
+    let got = parity(&f);
+    assert_eq!((got.modified, got.untracked), (count(2), count(1)));
 }
