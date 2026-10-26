@@ -486,6 +486,18 @@ fn config(seeds: &mut Vec<Seed>) {
         // Its trailing 0xff bytes fail the parse; the peak came before that error.
         Invalid,
     );
+    // Front matter, then a section that doubles the event Vec: the front
+    // SmallVec stays live beside it. One 2 * NPOT(all events) envelope
+    // undercounted this by 33 KB before front matter was charged on its own.
+    let found = include_bytes!("../seeds/config-front-matter-then-section.bin");
+    push(
+        seeds,
+        t,
+        "finding-front-matter-then-section",
+        Valid,
+        found.to_vec(),
+        Ok,
+    );
 }
 
 fn patterns(seeds: &mut Vec<Seed>, t: Target) {

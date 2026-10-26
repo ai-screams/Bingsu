@@ -1299,6 +1299,45 @@ fn git_parser_charges_cover_counted_peak() {
             .collect::<String>()
             .into_bytes(),
     ));
+    // Front-matter events (2 per implicit key here) stay in their SmallVec
+    // while a later section's Vec
+    // doubles or is copied at the next header, so the two are charged apart.
+    // 이것을 실패시키는 것: front matter와 section 이벤트를 2 * NPOT(전체) 하나로 다시 합치는 것.
+    let implicit = |keys: usize| {
+        (0..keys.div_ceil(40))
+            .map(|line| {
+                "k ".repeat((keys - line * 40).min(40))
+                    .trim_end()
+                    .to_owned()
+                    + "\n"
+            })
+            .collect::<String>()
+            .into_bytes()
+    };
+    shapes.push((
+        "front-then-section/fuzz".into(),
+        include_bytes!("../../../fuzz/collector/seeds/config-front-matter-then-section.bin")
+            .to_vec(),
+    ));
+    for (front, section, prior) in [
+        (550, 1450, 0),
+        (257, 700, 0),
+        (1025, 3000, 0),
+        (513, 1500, 1),
+        (129, 350, 3),
+    ] {
+        let mut bytes = implicit(front);
+        for _ in 0..prior {
+            bytes.extend_from_slice(b"[p]\nk k\n");
+        }
+        bytes.extend_from_slice(b"[a]\n");
+        bytes.extend(implicit(section));
+        bytes.extend_from_slice(b"[b]\n");
+        shapes.push((
+            format!("front-then-section/{front}/{section}/{prior}"),
+            bytes,
+        ));
+    }
     // A header name of nearly the whole input is copied by the lookup tree
     // although neither the word nor the quoted count sees it.
     // 이것을 실패시키는 것: 예약의 바이트 몫을 2 * len에서 len으로 줄이는 것.
