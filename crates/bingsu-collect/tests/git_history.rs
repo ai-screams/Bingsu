@@ -19,6 +19,8 @@ mod update_sink;
 
 #[path = "support/allocation.rs"]
 mod allocation;
+#[path = "support/divergence.rs"]
+mod divergence_tests;
 use bingsu_core::{
     collection::{
         budget::{self, Axis},
@@ -259,6 +261,7 @@ fn pending(r: StageResult) {
     let v = value(r);
     assert_eq!(field(&v, "ahead"), &Field::PENDING);
     assert_eq!(field(&v, "behind"), &Field::PENDING);
+    assert_eq!(field(&v, "partial"), &Field::known(FieldValue::Bool(true)));
 }
 fn line(message: usize) -> Vec<u8> {
     let mut b = format!(
@@ -495,12 +498,12 @@ impl gix_object::Find for Synthetic {
         buffer: &'a mut Vec<u8>,
     ) -> gix_error::ExnResult<Option<gix_object::Data<'a>>> {
         let n = u32::from_str_radix(&oid.to_string()[32..], 16).unwrap();
-        if n == 0 || n > self.count {
+        if n == 0 || n > self.count + u32::from(self.cycle) {
             return Ok(None);
         }
         buffer.clear();
         buffer.extend(b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n");
-        if n > 1 || self.cycle {
+        if n <= self.count && (n > 1 || self.cycle) {
             buffer.extend(
                 format!("parent {}\n", id(if n == 1 { self.count } else { n - 1 })).bytes(),
             );
@@ -542,6 +545,7 @@ fn incomplete_graph_has_no_false_lower_bound() {
     pending(stage_c(&repo));
     let m = RefCell::new(meter());
     let io = port(&root, &access, &m);
+    // 이것을 실패시키는 것: 관찰된 graph의 active cycle 거부를 제거하는 것.
     assert_eq!(
         walk(
             &io,
@@ -550,7 +554,9 @@ fn incomplete_graph_has_no_false_lower_bound() {
                 cycle: true
             },
             id(3),
-            id(2)
+            // A disjoint tip exposes the synthetic cycle. A verified SHA-1
+            // graph cannot hide a cycle behind a cut common ancestor.
+            id(4)
         ),
         Err(INVALID)
     );
@@ -565,6 +571,7 @@ fn incomplete_graph_has_no_false_lower_bound() {
     pending(stage_c(&repo));
 }
 
+// 이것을 실패시키는 것: unique commit charge를 빼거나 누적 Commits 예산을 초기화하는 것.
 #[test]
 fn graph_budget_is_unique_cumulative_and_scratch_is_live() {
     let f = Fixture::new();
@@ -582,11 +589,11 @@ fn graph_budget_is_unique_cumulative_and_scratch_is_live() {
                 cycle: false,
             },
             id(10_000),
-            id(5000),
+            id(1),
         );
         (result, m.borrow().counts[2].allocated - before)
     });
-    assert_eq!(result, Ok((5000, 0)));
+    assert_eq!(result, Ok((9999, 0)));
     assert_eq!(m.borrow().budget.used(Axis::Commits), 10_000);
     assert_eq!(m.borrow().live_allocated(), before);
     assert!(alloc.peak as u64 <= charged, "{alloc:?} reserved={charged}");
@@ -594,10 +601,10 @@ fn graph_budget_is_unique_cumulative_and_scratch_is_live() {
         walk(
             &io,
             &Synthetic {
-                count: 1,
+                count: 2,
                 cycle: false
             },
-            id(1),
+            id(2),
             id(1)
         ),
         Err(E::Limit)
@@ -1807,7 +1814,9 @@ fn stash_stream_revalidates_after_the_last_read() {
     );
 }
 
-// Product-sized deadline only here. Semantic tests use generous deadlines.
+// 이것을 실패시키는 것: C의 Deadline을 exact count로 바꾸거나 D에 전달하는 것.
+// Force expiry inside C; speed improvements must not make this
+// test depend on the machine taking more than eight milliseconds naturally.
 #[test]
 fn product_history_deadlines_preserve_unknown() {
     let f = Fixture::new();
@@ -1824,7 +1833,14 @@ fn product_history_deadlines_preserve_unknown() {
             port(&root, &access, &m),
             &git::refs::RefSnapshot::default(),
         ) {
-            Ok(repo) => stage_c(&repo),
+            Ok(repo) => {
+                m.borrow_mut().hook = Some(Box::new(|event| {
+                    if event == "before_read" {
+                        std::thread::sleep(Duration::from_millis(budget::C_MS + 1));
+                    }
+                }));
+                stage_c(&repo)
+            }
             Err(E::Deadline) => {
                 *request = m.into_inner();
                 return None;
@@ -1838,6 +1854,7 @@ fn product_history_deadlines_preserve_unknown() {
         pending(result);
     }
     assert_eq!(request.check(), Ok(()));
+    request.hook = None;
     // The independent D allowance does not reset prior byte/commit accounting.
     f.write("logs/refs/stash", line(2));
     let commits = request.budget.used(Axis::Commits);

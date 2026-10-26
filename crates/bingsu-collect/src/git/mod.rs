@@ -363,6 +363,9 @@ pub struct GuardedRepository<'a> {
     pub io: io::RepoIo<'a>,
     pub config: config::Config,
     pub refs: std::rc::Rc<refs::Refs>,
+    /// B read this HEAD as a commit and successfully decoded its root tree.
+    /// Keep the OID, not a bool, so C can match its resolved tip explicitly.
+    head_with_tree: std::cell::Cell<Option<refs::ObjectId>>,
     packs: io::objects::PackSnapshot,
 }
 
@@ -385,6 +388,7 @@ impl<'a> GuardedRepository<'a> {
             io,
             config,
             refs,
+            head_with_tree: std::cell::Cell::new(None),
             packs: io::objects::PackSnapshot::default(),
         })
     }

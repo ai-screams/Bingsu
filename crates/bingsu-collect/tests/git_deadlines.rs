@@ -1261,6 +1261,8 @@ fn request_counters_survive_stage_transitions() {
     }
     let f = Fixture::new();
     f.init();
+    // Unequal tips must consult the exhausted request-wide commit budget.
+    f.git(&["commit", "--allow-empty", "-qm", "ahead"]);
     let mut m = meter();
     m.charge_axis(
         bingsu_core::collection::budget::Axis::Commits,
