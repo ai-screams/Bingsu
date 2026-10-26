@@ -212,6 +212,28 @@ pub struct Patterns {
     allocation: Option<crate::meter::PathAllocation>,
 }
 impl Patterns {
+    /// Fuzz and seed replay only: one file's bytes, charged like a read file.
+    /// collector_fuzz is set by fuzz/collector's build script, never a feature.
+    #[cfg(any(test, collector_fuzz))]
+    pub(crate) fn fuzz_bytes(
+        &mut self,
+        bytes: &[u8],
+        kind: PatternKind,
+        meter: &mut Meter,
+    ) -> Result<(), ReadError> {
+        let (files, size, patterns) = match kind {
+            PatternKind::Ignore => (Axis::IgnoreFiles, Axis::IgnoreBytes, Axis::IgnorePatterns),
+            PatternKind::Attributes => (
+                Axis::AttributeFiles,
+                Axis::AttributeBytes,
+                Axis::AttributePatterns,
+            ),
+        };
+        meter.charge_axis(files, 1)?;
+        meter.charge_axis(size, bytes.len() as u64)?;
+        self.add_buffer(bytes, "fuzz".into(), kind, patterns, meter)
+    }
+
     /// Call before info/exclude and per-directory .gitignore. Only helper
     /// bytes cross this boundary; the label is never opened as a path.
     pub(crate) fn add_global(&mut self, io: &RepoIo<'_>, bytes: &[u8]) -> Result<(), ReadError> {
@@ -390,22 +412,31 @@ impl Patterns {
         if let Some(error) = self.failure {
             return Err(error);
         }
-        io.metered(|m| {
-            m.check()?;
-            let mut scratch = m.path_allocation();
-            if names.precompose() && !relative.is_ascii() {
-                scratch.reserve(relative.len() * 33, m)?;
-            }
-            let name = NamePolicy {
-                ignore_case: false,
-                ..names
-            }
-            .key(relative);
-            Ok(self
-                .ignore
-                .pattern_matching_relative_path(name.as_bstr(), Some(is_dir), names.case())
-                .is_some_and(|found| !found.pattern.is_negative()))
-        })
+        io.metered(|m| self.ignored_in(m, relative, is_dir, names))
+    }
+
+    /// The matcher itself, without the port; shared with the fuzz corpus.
+    pub(crate) fn ignored_in(
+        &self,
+        m: &mut Meter,
+        relative: &[u8],
+        is_dir: bool,
+        names: NamePolicy,
+    ) -> Result<bool, ReadError> {
+        m.check()?;
+        let mut scratch = m.path_allocation();
+        if names.precompose() && !relative.is_ascii() {
+            scratch.reserve(relative.len() * 33, m)?;
+        }
+        let name = NamePolicy {
+            ignore_case: false,
+            ..names
+        }
+        .key(relative);
+        Ok(self
+            .ignore
+            .pattern_matching_relative_path(name.as_bstr(), Some(is_dir), names.case())
+            .is_some_and(|found| !found.pattern.is_negative()))
     }
 
     pub fn conversion(
@@ -422,55 +453,67 @@ impl Patterns {
             // per-entry deadline before requesting this already-known policy.
             return Ok(policies.conversion);
         }
-        io.account(|m| {
-            let mut scratch = m.object_allocation();
-            scratch.reserve(
-                parser_reservation(
-                    relative
-                        .len()
-                        .checked_add(self.retained_bytes)
-                        .ok_or(ReadError::Limit)?,
-                    self.words,
-                )?,
-                m,
-            )?;
-            let mut normalization = m.path_allocation();
-            if policies.names.precompose() && !relative.is_ascii() {
-                normalization.reserve(relative.len() * 33, m)?;
-            }
-            let name = NamePolicy {
-                ignore_case: false,
-                ..policies.names
-            }
-            .key(relative);
-            let mut out = gix_attributes::search::Outcome::default();
-            out.initialize_with_selection(
-                &self.metadata,
-                ["filter", "text", "eol", "ident", "working-tree-encoding"],
-            );
-            self.info_attributes.pattern_matching_relative_path(
-                name.as_bstr(),
-                policies.names.case(),
-                Some(false),
-                &mut out,
-            );
-            self.attributes.pattern_matching_relative_path(
-                name.as_bstr(),
-                policies.names.case(),
-                Some(false),
-                &mut out,
-            );
-            // Conservatively approximate every active conversion attribute,
-            // including text=auto and unknown values. Explicit unset/unspecified
-            // do not activate a conversion. A global conversion stays conservative.
-            let conversion = out
-                .iter_selected()
-                .any(|a| matches!(a.assignment.state, StateRef::Set | StateRef::Value(_)));
-            Ok(if conversion {
-                ConversionPolicy::MetadataApproximation
-            } else {
-                policies.conversion
-            })
+        io.account(|m| self.conversion_in(m, relative, policies))
+    }
+
+    /// The attribute matcher itself, without the port; shared with the fuzz corpus.
+    pub(crate) fn conversion_in(
+        &self,
+        m: &mut Meter,
+        relative: &[u8],
+        policies: Policies,
+    ) -> Result<ConversionPolicy, ReadError> {
+        if self.words == 0 {
+            // Same as conversion(): no matching, allocation or deadline check.
+            return Ok(policies.conversion);
+        }
+        let mut scratch = m.object_allocation();
+        scratch.reserve(
+            parser_reservation(
+                relative
+                    .len()
+                    .checked_add(self.retained_bytes)
+                    .ok_or(ReadError::Limit)?,
+                self.words,
+            )?,
+            m,
+        )?;
+        let mut normalization = m.path_allocation();
+        if policies.names.precompose() && !relative.is_ascii() {
+            normalization.reserve(relative.len() * 33, m)?;
+        }
+        let name = NamePolicy {
+            ignore_case: false,
+            ..policies.names
+        }
+        .key(relative);
+        let mut out = gix_attributes::search::Outcome::default();
+        out.initialize_with_selection(
+            &self.metadata,
+            ["filter", "text", "eol", "ident", "working-tree-encoding"],
+        );
+        self.info_attributes.pattern_matching_relative_path(
+            name.as_bstr(),
+            policies.names.case(),
+            Some(false),
+            &mut out,
+        );
+        self.attributes.pattern_matching_relative_path(
+            name.as_bstr(),
+            policies.names.case(),
+            Some(false),
+            &mut out,
+        );
+        // Conservatively approximate every active conversion attribute,
+        // including text=auto and unknown values. Explicit unset/unspecified
+        // do not activate a conversion. A global conversion stays conservative.
+        let conversion = out
+            .iter_selected()
+            .any(|a| matches!(a.assignment.state, StateRef::Set | StateRef::Value(_)));
+        Ok(if conversion {
+            ConversionPolicy::MetadataApproximation
+        } else {
+            policies.conversion
         })
     }
 }

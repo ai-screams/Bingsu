@@ -35,13 +35,15 @@ def recorded_x32_build(monkeypatch):
 
 def test_ledger_requires_every_acceptance_cell(monkeypatch, tmp_path, recorded_x32_build):
     rows = probe.ledger_rows()
-    assert len(rows) == 120
-    assert {row["case"] for row in rows if "Product lower-crate pin" in row["reason"]} == {"X-09", "X-10"}
+    assert len(rows) == 108
+    assert not {row["case"] for row in rows} & set(probe.M3C_CASES)
     assert sum(row["status"] == "observed" and row["case"] == "X-32"
                and row["environment"] == "macos-current" and row["arch"] == "aarch64" for row in rows) == 6
     # Missing one required kernel/arch/criterion cell must block acceptance.
     text = (SOURCE.parent / "collector-acceptance.tsv").read_text()
-    (tmp_path / "collector-acceptance.tsv").write_text("\n".join(text.splitlines()[:-1]) + "\n")
+    lines = text.splitlines()
+    del lines[max(i for i, line in enumerate(lines) if i and line.split("\t")[0] not in probe.M3C_CASES)]
+    (tmp_path / "collector-acceptance.tsv").write_text("\n".join(lines) + "\n")
     monkeypatch.setattr(probe, "HERE", tmp_path)
     with pytest.raises(ValueError, match="missing or duplicated"):
         probe.ledger_rows()
@@ -286,7 +288,7 @@ def test_stale_observations_become_blocked_for_remeasurement(monkeypatch):
     original = probe.build_id
     monkeypatch.setattr(probe, "build_id", lambda case: "new-build" if case == "X-32" else original(case))
     rows = probe.ledger_rows(allow_stale=True)
-    assert len(rows) == 120
+    assert len(rows) == 108
     assert all(row["outcome"] == "BLOCKED" for row in rows)
     assert sum(row["reason"] == "observed build_id is stale" for row in rows) == 6
 

@@ -250,23 +250,7 @@ impl<T: gix_object::Find> gix_object::Find for CheckedFind<'_, T> {
             }
         })?;
         if let Some(data) = &data {
-            let checked = self.io.metered(|meter| {
-                if data.kind != gix_object::Kind::Commit {
-                    return Err(INVALID);
-                }
-                let mut message = false;
-                for token in gix_object::CommitRefIter::from_bytes(data.data, data.object_hash) {
-                    meter.check()?;
-                    message |= matches!(
-                        token.map_err(|_| INVALID)?,
-                        gix_object::commit::ref_iter::Token::Message(_)
-                    );
-                }
-                if !message {
-                    return Err(INVALID);
-                }
-                Ok(())
-            });
+            let checked = self.io.metered(|meter| checked_commit(data, meter));
             if let Err(error) = checked {
                 self.error.set(Some(error));
                 return Err(super::io::objects::ObjectError(error).raise_erased());
@@ -274,6 +258,28 @@ impl<T: gix_object::Find> gix_object::Find for CheckedFind<'_, T> {
         }
         Ok(data)
     }
+}
+
+/// The history walk's per-object check, before any parent is retained.
+pub(crate) fn checked_commit(
+    data: &gix_object::Data<'_>,
+    meter: &mut crate::meter::Meter,
+) -> Result<(), ReadError> {
+    if data.kind != gix_object::Kind::Commit {
+        return Err(INVALID);
+    }
+    let mut message = false;
+    for token in gix_object::CommitRefIter::from_bytes(data.data, data.object_hash) {
+        meter.check()?;
+        message |= matches!(
+            token.map_err(|_| INVALID)?,
+            gix_object::commit::ref_iter::Token::Message(_)
+        );
+    }
+    if !message {
+        return Err(INVALID);
+    }
+    Ok(())
 }
 
 /// Retain each unique commit once, then color both reachable sets. The active

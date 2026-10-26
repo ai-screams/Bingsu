@@ -1,0 +1,122 @@
+# Independent fuzz crate, never a product, bench or workspace dependency. It
+# compiles its own copy of the collector's parser modules (#[path]) with
+# cfg(collector_fuzz), which only build.rs here sets. Lower-crate pins equal
+# the workspace pins (checked by tests/shell/test_collector_security.py).
+[package]
+name = "bingsu-collector-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[features]
+# cargo fuzz run --features libfuzzer <target>; the seed writer needs none.
+libfuzzer = ["dep:libfuzzer-sys"]
+
+[dependencies]
+libfuzzer-sys = { version = "=0.4.13", optional = true }
+libc = "0.2"
+bingsu-core = { path = "../../crates/bingsu-core" }
+gix-index = { version = "=0.56.0", default-features = false }
+gix-pack = { version = "=0.75.0", default-features = false }
+gix-error = { version = "=0.4.0", default-features = false }
+gix-utils = { version = "=0.4.0", default-features = false }
+gix-zlib = { version = "=0.2.0", default-features = false }
+gix-object = { version = "=0.65.0", default-features = false, features = ["sha1"] }
+gix-config = { version = "=0.61.0", default-features = false }
+gix-ref = { version = "=0.68.0", default-features = false }
+gix-ignore = { version = "=0.23.0", default-features = false }
+gix-attributes = { version = "=0.36.0", default-features = false }
+gix-revwalk = { version = "=0.36.0", default-features = false }
+
+[[bin]]
+name = "write-seeds"
+path = "src/bin/write-seeds.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index"
+path = "fuzz_targets/index.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pack"
+path = "fuzz_targets/pack.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "attributes"
+path = "fuzz_targets/attributes.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "ignore"
+path = "fuzz_targets/ignore.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "refs"
+path = "fuzz_targets/refs.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "commit_objects"
+path = "fuzz_targets/commit_objects.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "multi_pack_index"
+path = "fuzz_targets/multi_pack_index.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "gitdir"
+path = "fuzz_targets/gitdir.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "commondir"
+path = "fuzz_targets/commondir.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

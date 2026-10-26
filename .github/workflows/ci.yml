@@ -78,8 +78,9 @@ jobs:
       - name: Required ledger cells and evidence mutations
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/probe-tests/bin/python" -m pytest bench/tests/test_collector_probes.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/probe-tests.txt"
+          "$RUNNER_TEMP/probe-tests/bin/python" -m pytest bench/tests/test_collector_probes.py bench/tests/test_m3c_probes.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/probe-tests.txt"
           grep -F 'PASSED bench/tests/test_collector_probes.py::test_ledger_requires_every_acceptance_cell' "$RUNNER_TEMP/probe-tests.txt"
+          grep -F 'PASSED bench/tests/test_m3c_probes.py::test_m3c_ledger_requires_every_acceptance_cell' "$RUNNER_TEMP/probe-tests.txt"
       # Only read the default sysctl value. Other values require disposable VMs.
       # The actual macOS version is recorded; this is not minimum-VM evidence.
       - name: Native probe and deliberately wrong expectation
@@ -277,6 +278,13 @@ jobs:
           CC=musl-gcc cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --target "$target" --release -- --case all | tee "$RUNNER_TEMP/x14-musl.txt"
           grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-musl.txt"
       - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
+      # 이것을 실패시키는 것: build script·RUSTFLAGS·config가 제품 rustc에 --cfg collector_fuzz를 넘기는 것.
+      - name: Product rustc never enables collector_fuzz
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          touch crates/bingsu-collect/src/main.rs
+          cargo build --locked -j 2 --release -p bingsu-collect -v 2>&1 | tee "$RUNNER_TEMP/collector-build-v.txt"
+          python3 scripts/check_no_fuzz_cfg.py "$RUNNER_TEMP/collector-build-v.txt"
       - name: Exact product and separate bench dependency audit
         run: python3 scripts/check_collector_dependencies.py
       - if: runner.os == 'Linux'
@@ -364,6 +372,21 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-over-cap]' "$RUNNER_TEMP/f1-security.txt"
           grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-large]' "$RUNNER_TEMP/f1-security.txt"
 
+      # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것.
+      - name: F2 fixed fuzz seed regression corpus
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          cargo test --locked -j 2 -p bingsu-collect --test fuzz_seeds -- --test-threads=2 | tee "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test fixed_seed_corpus_replays_with_pinned_verdicts ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test every_target_has_every_seed_class ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+      - name: F2 file-backed seed repositories under the protected collector
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          export BINGSU_GIT_CORPUS_REQUIRED=1
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_git_fuzz_repositories.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/f2-traces" | tee "$RUNNER_TEMP/f2-repositories.txt"
+          grep -F 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -F 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations' "$RUNNER_TEMP/f2-repositories.txt"
       - name: Prepare M3b compiler-free product fixtures
         # Native Linux (x86_64/arm64) and macOS: prepare the current release
         # siblings after all builds; pytest below selects this exact pair.
@@ -461,6 +484,9 @@ jobs:
             ${{ runner.temp }}/m3b-musl.txt
             ${{ runner.temp }}/f1-security.txt
             ${{ runner.temp }}/f1-traces/
+            ${{ runner.temp }}/f2-seeds.txt
+            ${{ runner.temp }}/f2-repositories.txt
+            ${{ runner.temp }}/f2-traces/
             ${{ runner.temp }}/filter-native.txt
             ${{ runner.temp }}/filter-musl.txt
             target/b3-evidence/

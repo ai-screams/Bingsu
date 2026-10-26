@@ -600,6 +600,21 @@ fn delta_size(bytes: &[u8]) -> Result<(u64, usize), ReadError> {
     Err(INVALID)
 }
 
+/// Fuzz and seed replay only: every indexed object through the bounded chain.
+/// collector_fuzz is set by fuzz/collector's build script, never a feature.
+#[cfg(any(test, collector_fuzz))]
+impl Pack {
+    pub(crate) fn fuzz_decode_all(&self, meter: &mut Meter) -> Result<(), ReadError> {
+        let mut buffer = Vec::new();
+        for n in 0..self.index.num_objects() {
+            let id = self.index.oid_at_index(n);
+            let offset = self.index.pack_offset_at_index(n);
+            decode(&self.data, &self.index, offset, id, &mut buffer, meter)?;
+        }
+        Ok(())
+    }
+}
+
 impl Pack {
     pub(crate) fn from_bytes(
         name: Vec<u8>,
