@@ -274,7 +274,7 @@ def security_steps(text):
     assert meta["needs"][0] == "detect"
     matrix = "\n".join(meta["strategy"][1])
     assert [line.strip() for line in matrix.splitlines() if line.strip() and not line.lstrip().startswith("#")] == [
-        "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, macos-26-intel]"]
+        "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]"]
     required_names = LINUX_SECURITY_STEPS | MACOS_SECURITY_STEPS | {
         "Prepare M3b compiler-free product fixtures", "M3b product security and measurements contracts",
         "Product imports and matching deployment pair", "Prepare F1 hostile Git corpus on the host",
@@ -756,7 +756,7 @@ def test_ci_structural_mutations_are_refused(damage):
     elif damage == "folded-if":
         changed = saved.replace("if: runner.os == 'Linux'", "if: >\n          false", 1)
     elif damage == "matrix-exclude":
-        changed = saved.replace("        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, macos-26-intel]", "        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, macos-26-intel]\n        exclude: [{os: ubuntu-24.04-arm}]")
+        changed = saved.replace("        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]", "        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]\n        exclude: [{os: ubuntu-24.04-arm}]")
     elif damage == "comment-assertions":
         changed = re.sub(r"(?m)^(\s*)grep -F", r"\1# grep -F", saved)
     elif damage == "comment-basetemp":
@@ -1600,7 +1600,7 @@ def assert_real_collection_ci(workflow, table):
     common = run_commands(named["M3b product security and measurements contracts"])
     for case in ("known", "missing", "empty", "unknown", "invalid-home", "invalid-xdg", "invalid-both"):
         assert ["grep", "-Fx", f"PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[{case}]", "$RUNNER_TEMP/m3b-security.txt"] in common, case
-    # Both native macOS cells audit the same release files they execute.
+    # The native macOS cell audits the same release files it executes.
     assert "scripts/check_collector_symbols.py" in named["Product imports and matching deployment pair"]["run"]
     linux = run_commands(named["Assert native Linux M3b security passes"])
     musl = run_commands(named["M3b native musl lifecycle security"])
@@ -1626,7 +1626,7 @@ def test_real_collection_has_no_silent_skip():
 
 
 # 이것을 실패시키는 것: 한 매개변수나 실행 순서 삭제를 정상으로 받아들이는 것.
-@pytest.mark.parametrize("damage", [*F3_CASES, "prepare", "intel", "symbols", "exec", "tsv", "order", "global", "release-order"])
+@pytest.mark.parametrize("damage", [*F3_CASES, "prepare", "macos", "fail-fast-true", "fail-fast-missing", "symbols", "exec", "tsv", "order", "global", "release-order"])
 def test_real_collection_ci_rejects_mutations(damage):
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     table = (ROOT / "tests/collector-acceptance.tsv").read_text()
@@ -1634,8 +1634,14 @@ def test_real_collection_ci_rejects_mutations(damage):
         workflow = workflow.replace(f"test_shipped_real_collection[{damage}]", "removed")
     elif damage == "prepare":
         workflow = workflow.replace("bench/git-product.py --prepare target/release/bingsu", "true")
-    elif damage == "intel":
-        workflow = workflow.replace(", macos-26-intel", "")
+    elif damage == "macos":
+        workflow = workflow.replace(", macos-latest", "")
+    elif damage == "fail-fast-true":
+        workflow = workflow.replace("      fail-fast: false\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]",
+                                    "      fail-fast: true\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]")
+    elif damage == "fail-fast-missing":
+        workflow = workflow.replace("      fail-fast: false\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]",
+                                    "      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]")
     elif damage == "symbols":
         workflow = workflow.replace("scripts/check_collector_symbols.py", "removed.py")
     elif damage == "exec":

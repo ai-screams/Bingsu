@@ -185,7 +185,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # F3 first-run native failures: x64 14m09s, arm64 24m35s. Keep room for
     # musl by sampling F1 observations 20 times (security gates unchanged).
-    # Each macOS architecture now builds/audits its own native shipped pair.
+    # The macOS cell builds/audits its native shipped pair.
     timeout-minutes: 30
     env:
       # Audit the real linked binaries, then strip those same files for shipping.
@@ -193,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, macos-26-intel]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

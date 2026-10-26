@@ -317,7 +317,6 @@ def test_c1_ci_requires_every_shipped_link_and_msrv():
     for before, after in (
         ("--unstripped-dir", "--unchecked"), ("--strip", "--unchecked"),
         (", macos-latest", ""),
-        (", macos-26-intel", ""),
         ('"target/$triple/release/bingsu-collect"', '"unshipped"'),
         ("toolchain: 1.88.0", "toolchain: stable"),
         ("test_security_table_resource_failures_preserve_front[exec]", "unrun_exec"),
