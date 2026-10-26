@@ -1,4 +1,4 @@
-//! Repository identity and bytes-only Git readers. Product mask stays zero.
+//! Repository identity and bytes-only Git readers for the fixed product workers.
 pub mod config;
 pub mod discover;
 pub mod io;

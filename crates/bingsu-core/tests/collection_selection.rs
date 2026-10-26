@@ -240,10 +240,10 @@ fn field_only_and_grouped_fixture_are_reachable() {
     }
 }
 
-// 이것을 실패시키는 것: 제품 catalog가 어떤 내장 또는 시험 bit31에 worker 권한을 주는 것.
+// 이것을 실패시키는 것: 제품 catalog가 시험 bit31에 worker 권한을 주는 것.
 #[test]
-fn product_mask_is_zero_and_fixture_is_unreachable() {
-    assert_eq!(selection::PRODUCT.workers, 0);
+fn product_fixture_remains_unreachable() {
+    assert_eq!(selection::PRODUCT.workers, 10);
     assert_eq!(
         selection::PRODUCT
             .segments
@@ -272,6 +272,93 @@ fn product_mask_is_zero_and_fixture_is_unreachable() {
             .snapshot
             .is_none()
         );
+    }
+}
+
+// 이것을 실패시키는 것: PRODUCT를 0으로 되돌리거나 dir 수집을 unique에 종속시키거나 field/group을 빼는 것.
+#[test]
+fn product_workers_follow_selected_git_and_dir() {
+    for width in [0, 1, 39, 79, 80, 65535] {
+        assert_eq!(selection::worker_mask(&config(""), width, false), 10);
+        for (template, expected) in [
+            ("{dir}{git}{char}", 10),
+            ("{git}{char}", 8),
+            ("{dir}{char}", 2),
+            ("{char}", 0),
+            ("{time}{char}", 0),
+            ("{dir.path}{git.branch}{char}", 10),
+            ("{@group}{git.branch}{dir.path}{@end}{char}", 10),
+        ] {
+            for unique in [false, true] {
+                let c = config(&format!(
+                    "[style]\ntemplate='{template}'\n[segment.dir]\nshorten=['{}']\n\
+                     [layout.when.narrow.style]\ntemplate='{template}'\n",
+                    if unique { "unique" } else { "abbrev" }
+                ));
+                assert_eq!(
+                    selection::worker_mask(&c, width, false),
+                    expected,
+                    "{template} {width}"
+                );
+                assert_eq!(
+                    selection::path_query(&c, width, b"/home/me/repo", Some(b"/home/me")),
+                    collection::path_facts::PathQuery {
+                        home_component: Some(1),
+                        unique: unique && expected & 2 != 0,
+                    },
+                    "{template} {width} unique={unique}"
+                );
+            }
+        }
+    }
+}
+
+// 이것을 실패시키는 것: enabled=false·선택 폭·우선순위·redraw를 무시하고 숨은 dir/git를 수집하는 것.
+#[test]
+fn disabled_unreachable_and_redraw_workers_are_zero() {
+    let mut missing_setup = config("");
+    missing_setup.setup.clear();
+    assert!(!selection::path_query(&missing_setup, 80, b"/repo", None).unique);
+    let disabled =
+        config("[segment.dir]\nenabled=false\nshorten=['unique']\n[segment.git]\nenabled=false\n");
+    for width in [0, 39, 79, 80, 65535] {
+        assert_eq!(selection::worker_mask(&disabled, width, false), 0);
+        assert!(!selection::path_query(&disabled, width, b"/home/me", Some(b"/home")).unique);
+        assert_eq!(selection::worker_mask(&config(""), width, true), 0);
+    }
+    let mut c = config("[segment.dir]\nshorten=['unique']\n");
+    c.bands = vec![
+        Band {
+            min_cols: Some(0),
+            max_cols: Some(79),
+            order: Some(0),
+        },
+        Band {
+            min_cols: Some(80),
+            max_cols: None,
+            order: Some(0),
+        },
+        Band {
+            min_cols: None,
+            max_cols: None,
+            order: Some(1),
+        },
+    ];
+    c.band_order = bands::order_bands(&c.bands).unwrap();
+    c.variants = [
+        "{dir}{git}{char}",
+        "{char}",
+        "{git}{char}",
+        "{dir}{git}{char}",
+    ]
+    .map(|text| compile(text, field::BUILTIN).unwrap())
+    .to_vec();
+    for width in [0, 1, 79, 80, 65535] {
+        assert_eq!(
+            selection::worker_mask(&c, width, false),
+            if width < 80 { 0 } else { 8 }
+        );
+        assert!(!selection::path_query(&c, width, b"/home/me", Some(b"/home")).unique);
     }
 }
 

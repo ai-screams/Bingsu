@@ -54,6 +54,8 @@ fn execute() -> std::io::Result<()> {
         crate::build_id(),
         |request, sink: &mut dyn UpdateSink, deadline| {
             let meter = crate::meter::Meter::new(deadline);
+            // Preserve startup's probed capability, including unsupported macOS
+            // fallback, rather than probing again after repository confinement.
             crate::git::collect_with_access(request, sink, meter, access)
                 .map_err(|_| std::io::Error::other("git collection"))
         },

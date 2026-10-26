@@ -52,12 +52,11 @@ def native_contract(preparation, group, name):
     return result
 
 
-# Mutations: drop either request input in D3; collapse invalid pins to empty;
-# block Complete/later stages for partial B; overwrite Pending in C or D.
+# 이것을 실패시키는 것: helper 선택을 0으로 되돌리거나 excludes wire 입력을 버려 stage B가 무시 파일을 세는 것.
 @pytest.mark.parametrize("case", [
     "known", "missing", "empty", "unknown", "invalid-home", "invalid-xdg", "invalid-both",
 ])
-def test_global_excludes_wire_stream(preparation, tmp_path, case):
+def test_product_global_excludes_reaches_stage_b(preparation, tmp_path, case):
     repo, home, xdg = (tmp_path / name for name in ("repo", "home", "xdg"))
     for path in (repo, home, xdg / "git"):
         path.mkdir(parents=True)
@@ -164,7 +163,7 @@ def test_b2_lower_bound_is_replaced_by_product_filter_evidence(preparation, tmp_
     sample = product.observe(real_bin(), preparation, tmp_path)
     assert sample["events"]["ready"] >= sample["events"]["spawn_return"]
     assert preparation["policy"]["table_sha256"] == product.digest(ROOT / "crates/bingsu-collect/collector-syscalls.tsv")
-    assert preparation["policy"]["product_mask"] == 0 and preparation["policy"]["fixture_mask"] == 1 << 31
+    assert preparation["policy"]["product_mask"] == 10 and preparation["policy"]["fixture_mask"] == 1 << 31
     assert sample["as_baseline"] > 0 and sample["collector_peak_rss_bytes"] > 0
     if sys.platform == "linux":
         assert 0 < preparation["policy"]["initial_bpf_instructions"] <= 4096
@@ -1053,8 +1052,7 @@ def test_shipped_collector_empty_request_completes(preparation, tmp_path):
     result = product.run([preparation["fixture"], "--helper-case", tmp_path, "--shipped-worker"],
                          env={**os.environ, "TMPDIR": str(tmp_path)})
     report = json.loads(result.stdout.splitlines()[-1])
-    # PRODUCT has no workers in M3b: Ready -> empty Request -> Complete is a
-    # successful exchange, with no Update or response to publish.
+    # Explicit mask0 remains a successful empty exchange after activation.
     assert report == {"reason": "Complete", "published": False, "reaped": True, "partial_values": 0, "probe": ""}
 
 

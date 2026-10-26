@@ -479,8 +479,8 @@ mod cases {
             assert_eq!(r.status, want, "case {case}");
             assert!(r.execution.permit().is_none(), "case {case}");
             assert!(record(&r).contains('!'));
-            // Product collection remains empty independently of execution eligibility.
-            assert_eq!(r.worker_mask, 0);
+            // A safe compiled screen collects independently of command eligibility.
+            assert_eq!(r.worker_mask, 10);
         }
     }
     // 이것을 실패시키는 것: 부팅/현재 셸 문맥을 선택에서 빼거나 외부 문맥의 일치하는 짝을 허용하는 것.
@@ -682,7 +682,7 @@ mod cases {
     fn n7_builtin_collection_survives_invalid_marker() {
         let mut h = Harness::new();
         let ordinary = h.run(&args(), Mode::Dark);
-        assert_eq!(ordinary.worker_mask, 0);
+        assert_eq!(ordinary.worker_mask, 10);
         let mut m = marker(&snapshot(""));
         m.invalid = true;
         h.marker = Some(m.encode().to_vec());

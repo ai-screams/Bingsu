@@ -103,7 +103,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         let selected = selected || fixture.is_some();
         if selected {
             // Collection admission failure does not invalidate independent
-            // snapshot publication. No product catalog grants a worker yet.
+            // snapshot publication.
             let admission = (|| {
                 #[cfg(test)]
                 if let Some(fixture) = &fixture {
@@ -367,13 +367,7 @@ pub(crate) fn selected_request(
     collection::request(
         catalog,
         collection::wire::Binding {
-            path_query: collection::path_facts::PathQuery::for_path(
-                cwd,
-                e.home.as_deref(),
-                config.setup[1]
-                    .methods
-                    .contains(&bingsu_core::shorten::Method::Unique),
-            ),
+            path_query: collection::selection::path_query(config, e.width, cwd, e.home.as_deref()),
             build_id: bingsu_identity::build_id(),
             snapshot: id,
             clock_kind: now.kind,

@@ -134,7 +134,7 @@ def normal_record(result):
 
 
 def prompt_context(binary, directory):
-    """Prime a real mask0 product snapshot outside the measured interval."""
+    """Prime the default product snapshot outside the measured interval."""
     env = {"PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8"}
     for key, name in (("XDG_CONFIG_HOME", "product-config"), ("XDG_STATE_HOME", "product-state"),
                       ("XDG_RUNTIME_DIR", "product-runtime"), ("XDG_CACHE_HOME", "product-cache")):
@@ -152,7 +152,9 @@ def prompt_context(binary, directory):
     roots = []
     for line in init.stdout.decode().splitlines():
         if "--runtime-root=" in line and "--config-root=" in line:
-            roots = [word for word in shlex.split(line)
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            roots = [word for word in lexer
                      if word.startswith(("--runtime-root=", "--runtime-groups=", "--config-root=", "--config-root-written=",
                                          "--state-root=", "--log-root=", "--home=", "--collector-exe="))
                      or word == "--config-root-shape-only"]
@@ -165,7 +167,7 @@ def prompt_context(binary, directory):
         result = run(command, env=env)
         if normal_record(result):
             return command, env
-    raise ValueError("normal mask0 product snapshot unavailable (clock/trust/host prerequisite)")
+    raise ValueError("normal product snapshot unavailable (clock/trust/host prerequisite)")
 
 
 def observe(binary, preparation, directory):
@@ -188,7 +190,7 @@ def observe(binary, preparation, directory):
         sample["prompt_ns"] = time.monotonic_ns() - start
         if not normal_record(prompt):
             sample.pop("prompt_ns")
-            sample["blocked"] = {"prompt_ns": "normal mask0 prompt did not emit a silent complete B1 record"}
+            sample["blocked"] = {"prompt_ns": "normal prompt did not emit a silent complete B1 record"}
     else:
         sample["blocked"] = {"prompt_ns": preparation["prompt_context_error"]}
     zero = json.loads(run([fixture, "--helper-product", directory], env={**os.environ, "TMPDIR": str(directory)}).stdout)
@@ -320,7 +322,10 @@ fn print_sample(report: commands::collector_supervisor::SupervisionReport, filte
 fn helper(base:&Path,mode:&str) {
     let _guard=commands::sys::test_inherited_fd_lock();
     for name in ["runtime","config","state","home"] {let p=base.join(name);fs::create_dir_all(&p).unwrap();fs::set_permissions(p,fs::Permissions::from_mode(0o700)).unwrap();}
-    fs::write(base.join("config/config.toml"),"icons = 'ascii'\n").unwrap();
+    let text=if mode=="--product-zero" {
+       "icons='ascii'\n[style]\ntemplate='{char}'\n[layout.when.narrow.style]\ntemplate='{char}'\n"
+    } else {"icons='ascii'\n"};
+    fs::write(base.join("config/config.toml"),text).unwrap();
     let now=commands::collector_supervisor::fixture_clock().unwrap();
     let meta=fs::metadata(base.join("runtime")).unwrap();
     let request=commands::refresh::RefreshRequest {
@@ -530,7 +535,24 @@ pub(crate) fn global_input_fixture(
         home_word.as_slice(), xdg_word.as_slice(),
     ];
     let words = bingsu_core::helper::words(&raw).unwrap();
-    let envelope = bingsu_core::helper::validate(&words).unwrap();
+    let mut envelope = bingsu_core::helper::validate(&words).unwrap();
+    envelope.pwd = Some(r.binding.cwd.clone());
+    envelope.width = 80;
+    use bingsu_core::config::{compile::BUILTIN_TOML, report::report,
+        source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust}};
+    struct NoSources;
+    impl Resolver for NoSources {
+        fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> { unreachable!() }
+    }
+    let config = report(vec![Opened {key:FileKey {dev:1,ino:1}, bytes:BUILTIN_TOML.as_bytes().to_vec(),
+        trust:Trust::Executable, display:vec![]}], &mut NoSources, [0,3,0],
+        bingsu_core::color::palette::Mode::Dark).snapshot.unwrap();
+    let selected = helper::selected_request(&bingsu_core::collection::selection::PRODUCT,
+        &envelope, Some((&config, r.binding.snapshot)),
+        bingsu_core::snapshot::Clock {boot:r.binding.snapshot.boot, kind:r.binding.clock_kind,
+            domain:r.binding.domain, resume:r.binding.resume, now:1}).unwrap().unwrap();
+    assert_eq!(selected.binding.mask, 10);
+    *r = selected;
     format!("{:?}", git_global::attach(r, &envelope))
 }
 '''
@@ -783,7 +805,7 @@ def prepare(binary):
     result = {"fixture": str(fixture), "stub": str(binary.with_name("m1-collect-stub")),
               "collector_debug_assertions": collector_artifact["profile"]["debug_assertions"],
               "hashes": {"front": digest(binary), "collector": digest(binary.with_name("bingsu-collect")), "fixture": digest(fixture), "stub": digest(binary.with_name("m1-collect-stub"))},
-              "sibling_build_id": sibling_id.hex(), "compiler": run(["rustc", "-vV"]).stdout.decode(), "stripped_bytes": sizes, "policy": {"table_sha256": digest(table), "product_mask": 0,
+              "sibling_build_id": sibling_id.hex(), "compiler": run(["rustc", "-vV"]).stdout.decode(), "stripped_bytes": sizes, "policy": {"table_sha256": digest(table), "product_mask": 10,
                "fixture_mask": 1 << 31, "formal": False, "product_target": triple if triple.endswith(("-linux-musl", "-linux-gnu")) else next(line.split(": ",1)[1] for line in run(["rustc", "-vV"]).stdout.decode().splitlines() if line.startswith("host: ")), **policy,
                "filter_kind": "seccomp-bootstrap+final+Landlock" if platform.system() == "Linux" else "absent",
                "as_baseline_kind": "virtual address space" if platform.system() == "Linux" else "sampled footprint",

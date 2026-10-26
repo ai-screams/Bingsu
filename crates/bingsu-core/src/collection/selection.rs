@@ -1,5 +1,6 @@
 //! Collection follows the renderer's selected layout, before value-dependent
 //! overflow or conditional groups. A catalog grants worker capability separately.
+use super::path_facts::PathQuery;
 use crate::{
     bands,
     config::compile::CompiledConfig,
@@ -13,10 +14,10 @@ pub struct Catalog<'a> {
     pub workers: u32,
 }
 
-/// No product builtin collects in this milestone.
+/// Only directory facts and Git have shipped worker capability.
 pub const PRODUCT: Catalog<'static> = Catalog {
     segments: field::BUILTIN,
-    workers: 0,
+    workers: (1 << 1) | (1 << 3),
 };
 
 pub(crate) fn references(lines: &[CompiledLine]) -> u32 {
@@ -61,4 +62,23 @@ impl Catalog<'_> {
 
 pub fn worker_mask(config: &CompiledConfig, width: u16, redraw: bool) -> u32 {
     PRODUCT.worker_mask(config, width, redraw)
+}
+
+/// Bind the home boundary on both sides of the handoff. Only a selected dir
+/// using unique shortening requests names; readonly and repo facts need no names.
+pub fn path_query(
+    config: &CompiledConfig,
+    width: u16,
+    pwd: &[u8],
+    home: Option<&[u8]>,
+) -> PathQuery {
+    PathQuery::for_path(
+        pwd,
+        home,
+        config
+            .setup
+            .get(1)
+            .is_some_and(|setup| setup.methods.contains(&crate::shorten::Method::Unique))
+            && builtin_mask(config, width) & (1 << 1) != 0,
+    )
 }

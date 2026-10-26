@@ -12,7 +12,7 @@ SEC-TRACE	Product trace adapter uses separate role/kind budgets	portable	tests/s
 SEC-PARTIAL	Only validated updates survive malformed/truncated/deadline endings	Unix	crates/bingsu/tests/collector_lifecycle.rs::partial_survives_only_after_validated_updates	M3b
 SEC-DRIP	Slow bytes never extend the absolute spawn deadline	Unix	crates/bingsu/tests/collector_lifecycle.rs::slow_drip_does_not_extend_spawn_deadline	M3b
 SEC-READY	Hostile bytes are read only after helper confinement	Unix	crates/bingsu/tests/collector_lifecycle.rs::immediate_ready_is_not_read_or_decoded_before_confinement	M3b
-SEC-VERIFY	Runtime/context/display verified before spawn; product/redraw mask stays zero	Unix	crates/bingsu/tests/collector_lifecycle.rs::verified_screen_spawns_once_before_helper_tsync	M3b
+SEC-VERIFY	Runtime/context/display verified before spawn; reachable product once, cold/redraw/empty zero	Unix	crates/bingsu/tests/collector_lifecycle.rs::verified_screen_spawns_once_before_helper_tsync	M3b
 SEC-PUBLISH	Same-fd identity/bytes checked before atomic rename	Unix	crates/bingsu/tests/collection_store.rs::publication_checks_same_fd_bytes_and_identity	M3b
 SEC-LOCK	Closing helper duplicate never unlocks live worker	Unix	crates/bingsu/tests/collection_store.rs::helper_close_never_unlocks_live_worker	M3b
 SEC-COLLISION	Exact cwd bytes override hash address	Unix	crates/bingsu/tests/collection_store.rs::hash_collision_never_reuses_or_overwrites_other_cwd	M3b
@@ -25,7 +25,7 @@ PERF-POLICY	Product filter evidence includes table hash, BPF lengths, ABI, basel
 PERF-BUDGET	Phase/chunk/directory axes for normal, failure, previous, collision and GC fixtures	portable	bench/tests/test_collector_product.py::test_product_budgets_cover_success_failure_and_gc	formula self-consistency only, not trace-checked; per-case trace gates below; full coefficients remain M3d
 CI-CELLS	Required native libc, root, macOS and all four experiment rows exist	portable	tests/shell/test_collector_security.py::test_ci_has_no_silent_acceptance_skip	M3b
 X-LEDGER	Every required experiment acceptance cell has validated evidence	native	bench/tests/test_collector_probes.py::test_ledger_requires_every_acceptance_cell	X-02/X-14/X-16/X-32; missing host cells BLOCKED
-PRODUCT-ZERO	No product worker in any screen/width/redraw	portable	crates/bingsu-core/tests/collection_selection.rs::product_mask_is_zero_and_fixture_is_unreachable	M3b
+PRODUCT-ZERO	Historical M3b zero product mask; superseded by PRODUCT-SELECTED in M3c	portable	crates/bingsu-core/tests/collection_selection.rs::product_fixture_remains_unreachable	historical; fixture exclusion remains active
 PERF-WIRING	Product helper and fixture share verification clocks and lifecycle report attachment	portable	bench/tests/test_collector_product.py::test_product_helper_keeps_the_shared_observation_wiring	M3b
 PERF-NORMAL-DEGRADED	Fallback/degraded output cannot be reported as normal prompt latency	portable	bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[degraded]	M3b
 PERF-NORMAL-VERSION	Fallback/degraded output cannot be reported as normal prompt latency	portable	bench/tests/test_collector_product.py::test_normal_product_measurement_refuses_fallback_and_broken_records[version]	M3b
@@ -81,3 +81,7 @@ F2-SEED-CLASSES	Every fuzz target has valid, damaged, truncated, cyclic, oversiz
 F2-REPOSITORIES	File-backed seed repositories (safe-read caps, symref cycles, gitdir and commondir escapes, special files, unused commit-graph) have zero effects under the protected collector	Unix	tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects	M3c; Linux strace and macOS interposer plus snapshot
 F2-REPOSITORY-MUTATIONS	Every seed repository rejects read, write and spawn mutations	Unix	tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations	M3c
 X-LEDGER-M3C	Every M3c experiment cell has complete raw evidence or stays BLOCKED	native	bench/tests/test_m3c_probes.py::test_m3c_ledger_requires_every_acceptance_cell	X-08/X-09/X-10/X-11/X-13/X-15; no X is marked executed
+PRODUCT-SELECTED	Selected dir/git mask 10/8/2/0; unique only adds names	portable	crates/bingsu-core/tests/collection_selection.rs::product_workers_follow_selected_git_and_dir	M3c E4
+PRODUCT-UNREACHABLE	Disabled, shadowed and redraw workers are zero	portable	crates/bingsu-core/tests/collection_selection.rs::disabled_unreachable_and_redraw_workers_are_zero	M3c E4
+PRODUCT-FIXTURE	Product catalog never grants fixture authority	portable	crates/bingsu-core/tests/collection_selection.rs::product_fixture_remains_unreachable	M3c E4
+PRODUCT-GLOBAL-EXCLUDES	Shipped helper and wire carry global ignores into stage B	portable	tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b	M3c E4

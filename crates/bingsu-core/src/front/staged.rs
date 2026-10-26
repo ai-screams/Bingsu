@@ -470,12 +470,11 @@ impl ReadPlan {
             return None;
         }
         Some(Binding {
-            path_query: crate::collection::path_facts::PathQuery::for_path(
+            path_query: crate::collection::selection::path_query(
+                &selected.config,
+                e.width,
                 e.pwd.as_deref()?,
                 e.home.as_deref(),
-                selected.config.setup[1]
-                    .methods
-                    .contains(&crate::shorten::Method::Unique),
             ),
             build_id: self.build_id?,
             snapshot: selected.id,

@@ -137,6 +137,7 @@ pub struct CompiledConfig {
     /// Disabled-aware upper bound over all layout references, including bands
     /// hidden by priority. Collection intersects it with the selected variant
     /// and the adapter's fixed worker catalog; it is not execution authority.
+    /// Dir references need readonly/repo facts even without unique shortening.
     pub collect_mask: u32,
     pub icons: IconSet,
     pub profile: WidthProfile,

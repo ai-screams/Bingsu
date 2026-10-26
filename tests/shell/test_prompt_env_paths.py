@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +45,17 @@ def pinned_roots(trusted):
         b"--state-root=": b"--state-root=" + os.path.realpath(trusted["XDG_STATE_HOME"] + "/bingsu").encode(),
         b"--log-root=": b"--log-root=" + os.path.realpath(trusted["XDG_STATE_HOME"] + "/bingsu/log").encode(),
     }
+
+
+def init_collector_exe(script):
+    # This bash fixture uses plain paths; consume init's quoted pin, not the
+    # build location or a sibling guessed from the symlink used to run init.
+    pins = re.findall(rb"'--collector-exe=([^']*)'", script)
+    assert len(pins) == 1, ("exactly one init collector pin", pins)
+    path = os.fsdecode(pins[0])
+    assert path.startswith("/") and os.path.normpath(path) == path, path
+    assert os.path.basename(path) == "bingsu-collect", path
+    return path
 
 
 def export_line(shell, values):
@@ -380,6 +392,65 @@ def open_flags(text):
     return set(text.split("|")) - {"O_LARGEFILE"}
 
 
+def helper_readonly_fd_metadata(call):
+    # 실제 Linux trace의 같은 fd 조회 형태만 허용한다. statx의 반환 stx_mask와
+    # 요청 마스크는 다르므로, 반환에 MNT_ID가 있어도 요청 권한을 넓히지 않는다.
+    args = args_of(call)
+    if call.name == "fstat":
+        return len(args) == 2
+    if call.name == "newfstatat":
+        return len(args) == 4 and args[1] == '""' and args[3] == "AT_EMPTY_PATH"
+    if call.name == "statx":
+        return (len(args) == 5 and args[1] == '""'
+                and set(args[2].split("|")) == {"AT_STATX_SYNC_AS_STAT", "AT_EMPTY_PATH"}
+                and args[3] == "STATX_ALL")
+    if call.name == "fcntl":
+        return len(args) == 2 and args[1] == "F_GETFD"
+    return False
+
+
+def helper_global_input(call, path, files, held):
+    # D1c: before sending a Git request, the trusted helper reads init-pinned
+    # XDG git/config, HOME .gitconfig, then the selected excludes file. This
+    # fixture has empty/missing configs, so only XDG git/ignore is selected;
+    # no include, configured excludes target, or directory prefix is allowed.
+    # User global sources intentionally follow symlinks (unlike repository
+    # safe_read); git_global::read_bounded checks regular file, uid/root owner,
+    # 64 KiB cap and same-fd stamps. This fixture has no links: a successful
+    # open must resolve to the exact requested file, never another target.
+    if path not in files:
+        return False
+    args = args_of(call)
+    if call.name in {"open", "openat"}:
+        if call.name == "openat":
+            if args[0] not in {"AT_FDCWD", "AT_FDCWD</>"}:
+                return False
+            args = args[1:]
+        return (len(args) == 2 and args[0] == f'"{path}"'
+                and open_flags(args[1]) == {"O_RDONLY", "O_NONBLOCK", "O_NOCTTY", "O_CLOEXEC"}
+                and (call.ret == "-1 ENOENT (No such file or directory)"
+                     or re.fullmatch(r"\d+<" + re.escape(path) + r">", call.ret) is not None))
+    if held.get(args[0]) != path:
+        return False
+    # git_global::read_bounded -> std OpenOptions::open -> musl open():
+    # src/fcntl/open.c sets CLOEXEC again after a successful O_CLOEXEC open.
+    # https://openwall.com/lists/musl/2025/11/25/3 (original open.c, lines 15-20)
+    # Keep this out of helper_readonly_fd_metadata: the collector uses
+    # sys::open_at -> libc::openat, whose musl wrapper has no such fcntl.
+    # 이것을 실패시키는 것: musl 전역 입력 open을 거부하거나 CLOEXEC 해제·다른 fd 변경까지 허용하는 것.
+    if call.name == "fcntl" and args[1:] == ["F_SETFD", "FD_CLOEXEC"]:
+        return call.ret == "0"
+    # Same-fd stamps and bounded reads, then close. These inputs are read
+    # before the helper filter, so the general helper syscall list is not
+    # sufficient: every other operation on their fds must fail here.
+    if call.name == "close":
+        return len(args) == 1
+    if helper_readonly_fd_metadata(call):
+        return True
+    return (call.name == "read" and len(args) == 3 and args[2].isdecimal()
+            and call.ret.isdecimal() and 0 <= int(call.ret) <= int(args[2]) <= 65_537)
+
+
 def helper_walk_step(call, path, roots):
     # Runtime-root validation opens only pinned ancestors, one component at a time, without content access.
     if call.name != "openat" or not any(r.startswith(path.rstrip("/") + "/") for r in roots):
@@ -489,7 +560,7 @@ def fixed_exec(call, exe, verb):
     args = args_of(call)
     words = QUOTED.findall(args[1])
     return (call.name == "execve" and args[0] == f'"{exe}"'
-            and (words == [exe, verb] if verb == "__collect-legacy-v1" else words[:2] == [exe, verb])
+            and (words == [exe, verb] if verb in {"__collect-v1", "__collect-legacy-v1"} else words[:2] == [exe, verb])
             and (args[2] == "[]" or re.fullmatch(r'0x[0-9a-f]+ /\* 0 vars \*/', args[2]))
             and call.ret == "0")
 
@@ -670,6 +741,40 @@ class HelperExecutableWalk:
         return False
 
 
+class HelperCollectorExecutable(HelperExecutableWalk):
+    """The exact init pin, opened by PinnedCollector::verify before spawn."""
+
+    def file_op(self, call, path):
+        # collector.rs verifies the build/role with pread64 and rechecks the
+        # held file and parent/name stamps before spawn. Unlike build identity
+        # lookup for bingsu, this canonical pin never follows executable links.
+        if call.name == "openat":
+            return (self.parent_held(call, path) and len(args_of(call)) == 3
+                    and open_flags(args_of(call)[2]) == {
+                        "O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC"}
+                    and (call.ret.startswith("-1 ")
+                         or re.fullmatch(r"\d+<" + re.escape(path) + r">", call.ret)))
+        return (call.name == "newfstatat" and self.parent_held(call, path)
+                and args_of(call)[3] == "AT_SYMLINK_NOFOLLOW")
+
+    def fd_op(self, call):
+        args = args_of(call)
+        if args[0] not in self.held:
+            return False
+        if helper_readonly_fd_metadata(call):
+            return True
+        if call.name == "close":
+            return len(args) == 1
+        if call.name == "fstatfs":
+            return len(args) == 2
+        if call.name == "fgetxattr":
+            return args[1:] == ['"system.posix_acl_access"', "NULL", "0"]
+        return (call.name == "pread64" and len(args) == 4 and args[2].isdecimal()
+                and call.ret.isdecimal()
+                and 0 <= int(call.ret) <= int(args[2]) <= 65_536
+                and args[3].isdecimal() and int(args[3]) < 64 * 1024 * 1024)
+
+
 def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
     """Track the root's prepared fds. No path operation survives the filter.
 
@@ -747,14 +852,20 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
             acl_fallback.discard(fd)
 
 
-def assert_prompt_trace_budget(lines, exe, pinned):
+def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None):
     from fsbudget.attribute import collector_attribute
+    collector_exe = collector_exe or os.path.join(os.path.dirname(exe), "bingsu-collect")
     _, scoped = tree(lines, exe)
+    # E4: a default screen in a Git repository starts at most one collector.
+    # Attribution still validates its pinned identity, creation parent and effects.
+    # 이것을 실패시키는 것: collector를 0개로 막거나 두 번째 collector를 허용하는 것.
+    collectors = sum(is_root(line, collector_exe) for line in scoped)
+    assert collectors <= 1, ("extra collector", collectors)
     roles = collector_attribute(scoped, {"front": exe, "helper": exe,
-                                "collector": os.path.join(os.path.dirname(exe), "bingsu-collect"),
-                                "collectors": 0})
+                                "collector": collector_exe, "collectors": collectors})
     assert not roles.errors, roles.errors
-    _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=0)
+    _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
+                                collector_exe=collector_exe, check_collection=True)
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -762,7 +873,8 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1)
 
 
-def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
+def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
+                                collector_exe=None, check_collection=False):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -814,14 +926,16 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
     assert seen == ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
     cwd = prompt_cwd(initial)
     prompt_root_io(front, filters[0].index, exe, pinned, root, cwd)
-    if collector_limit == 0 and cwd is not None:
+    if check_collection and cwd is not None:
         assert_collection_trace(front, filters[0].index, pinned, cwd)
     # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
-    assert all(c.name in HELPER_CALLS for c in helper), [c for c in helper if c.name not in HELPER_CALLS]
-    # M3a collector exec: exactly the pinned executable and __collect-legacy-v1,
-    # no additional argv and an empty environment. It precedes confinement.
+    assert all(c.name in HELPER_CALLS | {"kill"} for c in helper), [c for c in helper if c.name not in HELPER_CALLS | {"kill"}]
+    # Exactly the pinned collector executable/verb, no additional argv and an
+    # empty environment. Only archived captures use the old in-binary stub.
     collectors = [c for c in execs if c.pid != helper_pid]
-    assert len(collectors) <= collector_limit and all(fixed_exec(c, exe, "__collect-legacy-v1") for c in collectors), collectors
+    collector_path = collector_exe or exe
+    collector_verb = "__collect-v1" if collector_exe else "__collect-legacy-v1"
+    assert len(collectors) <= collector_limit and all(fixed_exec(c, collector_path, collector_verb) for c in collectors), collectors
     mains = {helper_pid} | {c.pid for c in collectors}
     owners = {pid: pid for pid in mains}
     children = []
@@ -837,9 +951,30 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
         children.extend(int(c.ret) for c in made)
     assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
     created = set()
+    global_held = {}
     exe_walks = {pid: HelperExecutableWalk(exe) for pid in owners}
+    collector_walk = HelperCollectorExecutable(collector_exe) if collector_exe else None
     for c in helper:
         exe_walk = exe_walks[c.pid]
+        collector_owner = collector_walk is not None and c.pid == helper_pid
+        # 이것을 실패시키는 것: collector 고정 경로의 fd를 관찰 없이 읽거나 쓰기·변경에 쓰는 것.
+        args = args_of(c)
+        collector_fd = (collector_exe and args
+                        and re.fullmatch(r"\d+<" + re.escape(collector_exe) + r">", args[0]))
+        if collector_fd:
+            assert collector_owner and collector_walk.fd_op(c), ("helper collector fd", c)
+        # 이것을 실패시키는 것: content_paths에 없는 전역 입력 fd 변경·복제를 필터 설치 전에 허용하는 것.
+        global_fd = re.fullmatch(r"\d+<(/[^<>]*)>", args[0]) if args else None
+        if global_fd and global_fd.group(1) in global_inputs:
+            path = global_fd.group(1)
+            assert (c.pid == helper_pid
+                    and helper_global_input(c, path, global_inputs, global_held)), ("helper global input fd", c)
+        if c.name == "kill":
+            # helper_limits::kill_self: strace can exhaust the helper's overall
+            # deadline. Its watchdog kills its own TGID, never a reusable child
+            # PID; helper_filter permits only this target and SIGKILL.
+            # 이것을 실패시키는 것: helper 자기 종료를 막거나 다른 TGID·신호·collector의 kill을 허용하는 것.
+            assert owners[c.pid] == helper_pid and args_of(c) == [str(helper_pid), "SIGKILL"], ("helper self kill", c)
         if c.name in {"mkdir", "mkdirat"}:
             paths = call_paths(c)
             assert len(paths) == 1 and helper_mkdir_step(c, paths[0], pinned), ("helper mkdir", c)
@@ -864,6 +999,19 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
             if empty and annotation and annotation.group(1) in exe_walk.roots:
                 assert exe_walk.fd_stat(c), ("helper executable metadata", c)
         for path in paths:
+            if c in collectors and path == collector_path:
+                continue  # Exact pinned exec/argv/environment checked above; no other file access.
+            if collector_exe and path == collector_exe:
+                # 이것을 실패시키는 것: init 고정 collector 검증을 막거나 같은 디렉터리 전체를 허용하는 것.
+                assert collector_owner and (
+                    collector_walk.fd_op(c) if path in contents
+                    else collector_walk.file_op(c, path)
+                ), ("helper collector executable", c, path)
+                continue
+            if path in global_inputs:
+                assert (c.pid == helper_pid
+                        and helper_global_input(c, path, global_inputs, global_held)), ("helper global input", c, path)
+                continue
             # Historical N3 captures still contain namespace opens. New link
             # reads get this exact budget, never the broad legacy proc allowance.
             if c.name in {"readlink", "readlinkat"}:
@@ -885,6 +1033,8 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
             # Link targets learned earlier need the same no-follow ancestor
             # traversal and metadata checks to verify the executable binding.
             walk_roots = [*pinned, exe, *exe_walk.roots]
+            if collector_owner:
+                walk_roots.append(collector_exe)
             walk = helper_walk_step(c, path, walk_roots)
             nss_root = helper_nss_root_stat(c, path)
             creation = (c.name == "mkdirat" and helper_mkdir_step(c, path, pinned)
@@ -898,12 +1048,43 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit):
             assert (system or detached or walk or nss_root or creation or chain_stat or ancestor_stat
                     or allowed(path, c.args, exe, pinned, allow_walk=False)), ("helper path", c, path)
         exe_walk.observe(c)
+        if collector_owner:
+            collector_walk.observe(c)
+        if c.pid == helper_pid:
+            if c.name in OPENS:
+                opened = re.fullmatch(r"(\d+)<(/[^<>]*)>", c.ret)
+                if opened:
+                    fd, path = opened.groups()
+                    global_held = {k: v for k, v in global_held.items() if not k.startswith(fd + "<")}
+                    if helper_global_input(c, path, global_inputs, global_held):
+                        global_held[c.ret] = path
+            elif c.name == "close":
+                global_held.pop(args_of(c)[0], None)
+
+
+def assert_global_inputs_exercised(lines, exe, global_inputs, global_present):
+    """Require coverage in this run, even if the helper's watchdog killed it.
+
+    Called after the path gate: observing a name alone never authorizes access.
+    Empty config files must still have a successful read (EOF is sufficient).
+    """
+    _, scoped = tree(lines, exe)
+    calls = parse_trace("\n".join(scoped))
+    assert not calls.errors, calls.errors
+    # 이것을 실패시키는 것: watchdog 종료를 이유로 도달하지 않은 전역 입력 검사를 통과시키는 것.
+    opens = [c for c in calls if c.name in OPENS and call_paths(c) in [[p] for p in global_inputs]]
+    assert [call_paths(c)[0] for c in opens] == list(global_inputs), ("global input opens missing/order", opens)
+    assert all((not c.ret.startswith("-1")) == global_present for c in opens), opens
+    if global_present:
+        assert {p for c in calls if c.name == "read" and c.ret.isdecimal()
+                for p in content_paths(c) if p in global_inputs} == set(global_inputs), "global input reads missing"
 
 
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
 # 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
-def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path):
+@pytest.mark.parametrize("global_present", [False, True], ids=["global-missing", "global-present"])
+def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path, global_present):
     """Every path argument of every traced call (open, stat, rename, link,
     ...) of the binary and its threads and children. SYSTEM_PATHS was
     observed on Debian and Ubuntu glibc (aarch64, the three test images) and
@@ -914,7 +1095,20 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     assert shutil.which("strace"), "Linux path gate must execute strace"
     inst = Install(tmp_path)
     trusted = trusted_env(tmp_path)
+    trusted["HOME"] = str(tmp_path / "home-t")
+    global_inputs = tuple(str(path) for path in (
+        Path(trusted["XDG_CONFIG_HOME"]) / "git/config", Path(trusted["HOME"]) / ".gitconfig",
+        Path(trusted["XDG_CONFIG_HOME"]) / "git/ignore",
+    ))
+    # Exact init-time locations, independent of the hostile prompt environment.
+    # 이것을 실패시키는 것: 각 전역 입력을 같은 뿌리의 다른 파일로 바꾸거나 쓰기 플래그로 여는 것.
+    if global_present:
+        for path in global_inputs:
+            source = Path(path)
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(".DS_Store\n" if source.name == "ignore" else "")
     script = inst.init("bash", trusted)
+    collector_exe = init_collector_exe(script)
     repo = tmp_path / "repo"
     repo.mkdir()
     env = dict(trusted, **{k: str(repo / k.lower()) for k in HOSTILE_VARS})
@@ -930,7 +1124,10 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
               (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
-    assert_prompt_trace_budget(trace.read_text(errors="replace").splitlines(), exe, pinned)
+    lines = trace.read_text(errors="replace").splitlines()
+    assert_prompt_trace_budget(lines, exe, pinned, global_inputs=global_inputs,
+                               collector_exe=collector_exe)
+    assert_global_inputs_exercised(lines, exe, global_inputs, global_present)
 
 
 TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}

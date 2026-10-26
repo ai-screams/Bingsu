@@ -1068,8 +1068,14 @@ fn verified_screen_spawns_once_before_helper_tsync() {
     for case in [
         "valid",
         "invalid",
+        "invalid-last-good",
         "expired",
         "product",
+        "narrow",
+        "git-only",
+        "dir-only",
+        "time-only",
+        "cold",
         "empty",
         "redraw",
         "unsafe-runtime",
@@ -1137,7 +1143,18 @@ fn verified_screen_child() {
         std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let source = root.join("config/config.toml");
-    std::fs::write(&source, "icons = 'ascii'\n").unwrap();
+    let template = match case.as_str() {
+        "git-only" => Some("{git}{char}"),
+        "dir-only" => Some("{dir}{char}"),
+        "time-only" => Some("{time}{char}"),
+        "empty" => Some("{char}"),
+        _ => None,
+    };
+    let text = template.map_or_else(
+        || "icons='ascii'\n".to_owned(),
+        |t| format!("icons='ascii'\n[style]\ntemplate='{t}'\n[layout.when.narrow.style]\ntemplate='{t}'\n"),
+    );
+    std::fs::write(&source, text).unwrap();
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
     let now = commands::collector_supervisor::fixture_clock().unwrap();
     let metadata = std::fs::metadata(root.join("runtime")).unwrap();
@@ -1158,10 +1175,12 @@ fn verified_screen_child() {
         build: Some([1; 40]),
         process_started: now,
     };
-    assert!(matches!(
-        refresh::refresh(refresh_request.clone(), &mut FixedClock(now)),
-        RefreshResult::Published { .. }
-    ));
+    if case != "cold" {
+        assert!(matches!(
+            refresh::refresh(refresh_request.clone(), &mut FixedClock(now)),
+            RefreshResult::Published { .. }
+        ));
+    }
     let context = snapshot::context_components(
         refresh_request.config_canonical.as_os_str().as_bytes(),
         refresh_request.state_root.as_os_str().as_bytes(),
@@ -1169,8 +1188,14 @@ fn verified_screen_child() {
     .unwrap()
     .iter()
     .fold(root.join("runtime"), |path, name| path.join(name));
-    if case == "invalid" || case == "unsafe-screen" {
+    if matches!(
+        case.as_str(),
+        "invalid" | "invalid-last-good" | "unsafe-screen"
+    ) {
         std::fs::write(&source, "broken = [").unwrap();
+    }
+    if case == "invalid-last-good" {
+        std::fs::remove_file(context.join("snapshot")).unwrap();
     }
     let unsafe_path = match case.as_str() {
         "unsafe-runtime" => Some(root.join("runtime")),
@@ -1196,21 +1221,9 @@ fn verified_screen_child() {
         ),
         state_root: Some(refresh_request.state_root.as_os_str().as_bytes().to_vec()),
         pwd: Some(b"/repo".to_vec()),
-        width: 80,
+        width: if case == "narrow" { 20 } else { 80 },
         redraw: case == "redraw",
         ..Envelope::default()
-    };
-    let mut segments = SEGMENTS;
-    for (segment, name) in segments[..31].iter_mut().zip([
-        "a00", "a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a11", "a12",
-        "a13", "a14", "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23", "a24", "a25",
-        "a26", "a27", "a28", "a29", "a30",
-    ]) {
-        segment.id = name;
-    }
-    let catalog = Catalog {
-        segments: &segments,
-        workers: 1 << 31,
     };
     let watchdog = helper_limits::start(Instant::now()).unwrap();
     let (release, released) = std::sync::mpsc::sync_channel(1);
@@ -1223,28 +1236,26 @@ fn verified_screen_child() {
         refresh_request.clone(),
         &mut FixedClock(observed),
         &mut |_, display, clock| {
-            let adjusted = display.map(|(config, id)| {
-                let mut config = config.clone();
-                config.bands.clear();
-                config.band_order.clear();
-                config.variants =
-                    vec![bingsu_core::template::compile::compile("{fixture}", &segments).unwrap()];
-                config.collect_mask = if case == "empty" { 0 } else { 1 << 31 };
-                (config, id)
-            });
             let verified_ns = collector_process::now_ns().unwrap();
             let selected = helper::selected_request(
-                if case == "product" {
-                    &collection::selection::PRODUCT
-                } else {
-                    &catalog
-                },
+                &collection::selection::PRODUCT,
                 &envelope,
-                adjusted.as_ref().map(|(c, id)| (c, *id)),
+                display,
                 clock,
             )?;
             if let Some(mut request) = selected {
                 assert!(!confined);
+                assert_eq!(
+                    request.binding.mask,
+                    match case.as_str() {
+                        "git-only" => 8,
+                        "dir-only" => 2,
+                        _ => 10,
+                    }
+                );
+                // Selection above uses the real screen and PRODUCT grant. The
+                // protocol peer below is the existing deterministic bit31 worker.
+                request.binding.mask = 1 << 31;
                 request.binding.build_id = BuildId([7; 32]);
                 spawns += 1;
                 let held_lock = lock("screen");
@@ -1280,8 +1291,17 @@ fn verified_screen_child() {
     );
     let expected = usize::from(matches!(
         case.as_str(),
-        "valid" | "invalid" | "expired" | "snapshot-lock"
+        "valid"
+            | "invalid"
+            | "invalid-last-good"
+            | "expired"
+            | "snapshot-lock"
+            | "product"
+            | "narrow"
+            | "git-only"
+            | "dir-only"
     ));
+    eprintln!("E4 {case}: helper collector spawns={spawns}");
     assert_eq!(spawns, expected, "{case}: {result:?}");
     if let Some(handle) = handle {
         entering.recv_timeout(Duration::from_millis(300)).unwrap();

@@ -389,7 +389,11 @@ fn run(
     } else {
         None
     };
-    let display = if replace {
+    let display = if replace && old.is_none() {
+        // A cold prompt had no compiled screen. Publish first; its next prompt
+        // can select collection from that snapshot without waiting for us.
+        None
+    } else if replace {
         report
             .as_ref()
             .and_then(|r| r.snapshot.as_ref())
