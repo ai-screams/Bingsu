@@ -1886,3 +1886,28 @@ fn b_partial_does_not_suppress_independent_history() {
     );
     assert_eq!(m.borrow().budget.used(Axis::Commits), 4);
 }
+
+// upstream holds both parsed configs at once beside the packed-refs snapshot;
+// the largest config event peak (front-matter keys) in both still fits.
+// 이것을 실패시키는 것: config 예약이 객체 상한(OBJECT_ALLOC)이나 meter 한도를 넘게 커지는 것.
+#[test]
+fn upstream_fits_with_two_worst_configs_and_packed_refs() {
+    let f = Fixture::new();
+    let (a, b) = f.graph();
+    f.packed_refs(4000, a, b);
+    let front = b"a a a a=\n".repeat(1000);
+    let mut common = front.clone();
+    common.extend(b"[core]\nrepositoryformatversion=0\nbare=true\n[branch \"main\"]\nremote=origin\nmerge=refs/heads/main\n[remote \"origin\"]\nfetch=+refs/heads/*:refs/remotes/origin/*\n[extensions]\nworktreeConfig=true\n");
+    let mut worktree = front;
+    worktree.extend(b"[branch \"main\"]\nremote=origin\n");
+    f.write("config", common);
+    f.write("config.worktree", worktree);
+    let root = f.root();
+    let access = access();
+    let m = RefCell::new(meter());
+    let repo = repository(&root, &access, &m);
+    let (result, counts) = allocation::measure(|| divergence(&repo));
+    assert_eq!(result, Ok(Some((2, 1))));
+    // One File stays live while the other reaches its front-matter peak.
+    assert!(counts.peak > 2_500_000, "{counts:?}");
+}

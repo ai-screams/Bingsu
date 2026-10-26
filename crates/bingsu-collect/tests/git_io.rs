@@ -847,7 +847,13 @@ fn git_config_bounds_refuse_before_parser() {
         b"[x]".repeat(257),
         b"[x]\n".repeat(257),
         [b"[x]\n".to_vec(), b"a\n".repeat(1024)].concat(),
-        [b"[x]".to_vec(), b"a ".repeat(4096)].concat(),
+        // Value lines are skipped to their end but still count as lines.
+        // 이것을 실패시키는 것: value를 건너뛴 줄의 newline을 세지 않는 것.
+        [b"[x]\n".to_vec(), b"a=b\n".repeat(1024)].concat(),
+        // A value continued to EOF counts its lines too.
+        // 이것을 실패시키는 것: 줄 잇기로 센 줄을 루프 뒤에서 한도와 비교하지 않는 것.
+        [b"[x]\nk=".to_vec(), b"\\\n".repeat(1024), b"v".to_vec()].concat(),
+        [b"[x]".to_vec(), b"a ".repeat(4097)].concat(),
         vec![b' '; budget::CONFIG_BYTES as usize + 1],
     ] {
         let entered = Rc::new(std::cell::Cell::new(0));
@@ -864,12 +870,189 @@ fn git_config_bounds_refuse_before_parser() {
         assert_eq!(allocations.calls, 0);
         assert_eq!(m.counts[Phase::Content as usize].allocated, 0);
     }
+    let bytes = b"[core]\nbare=false\n";
     let mut m = meter();
-    m.allocation_limit = (git::config::PARSER_ALLOCATION - 1) as u64;
-    let (result, allocations) =
-        allocation::measure(|| git::config::parse(b"[core]\nbare=false\n", &mut m));
+    m.allocation_limit = (git::config::parser_allocation(bytes).unwrap() - 1) as u64;
+    let (result, allocations) = allocation::measure(|| git::config::parse(bytes, &mut m));
     assert!(matches!(result, Err(E::Limit)));
     assert_eq!(allocations.calls, 0);
+}
+
+// A typical repository config is charged by its scanned structure, not by the
+// worst config the scan admits.
+// 이것을 실패시키는 것: 예약을 입력과 무관한 PARSER_ALLOCATION으로 되돌리는 것.
+#[test]
+fn git_config_charge_follows_scanned_structure() {
+    let bytes = b"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n\tignorecase = true\n\tprecomposeunicode = true\n[remote \"origin\"]\n\turl = git@github.com:ai-screams/Bingsu.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n[branch \"fix/m3c-config-parser-reservation\"]\n\tremote = origin\n\tmerge = refs/heads/fix/m3c-config-parser-reservation\n[lfs]\n\trepositoryformatversion = 0\n";
+    let mut m = meter();
+    let (facts, counts) = allocation::measure(|| git::config::parse(bytes, &mut m));
+    assert_eq!(
+        facts.unwrap().value("core.bare"),
+        Some(Some(b"false".as_slice()))
+    );
+    let charged = m.counts[Phase::Content as usize].allocated;
+    assert!(counts.peak as u64 <= charged, "{counts:?} > {charged}");
+    assert!(charged <= 32_768, "charged={charged} for {} B", bytes.len());
+}
+
+// A large ordinary config (one branch section per tracked branch, up to the
+// section limit) stays parseable; hostile event and subsection bulk together
+// is refused before the parser runs.
+// 이것을 실패시키는 것: 정상 대형 config: byte·subsection 몫을 과대 계상해 2 MiB를 넘기는 것.
+// 이것을 실패시키는 것: 거부: quoted byte 몫(4 * quoted_bytes)을 빼 큰 subsection을 파싱하게 두는 것.
+#[test]
+fn git_config_large_ordinary_parses_and_hostile_bulk_refuses() {
+    let mut bytes = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:ai-screams/Bingsu.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n".to_vec();
+    for n in 0..254 {
+        bytes.extend(format!("[branch \"feat/m3c-topic-number-{n}\"]\n\tremote = origin\n\tmerge = refs/heads/feat/m3c-topic-number-{n}\n").bytes());
+    }
+    let mut m = meter();
+    let (facts, counts) = allocation::measure(|| git::config::parse(&bytes, &mut m));
+    assert!(facts.is_ok(), "{} B: {facts:?}", bytes.len());
+    let charged = m.counts[Phase::Content as usize].allocated;
+    assert!(counts.peak as u64 <= charged, "{counts:?} > {charged}");
+    // Quoted values and long lines after a short subsection header still fit:
+    // only header subsection bytes are charged, up to the end of their line.
+    // 이것을 실패시키는 것: quoted 계수를 줄 끝에서 끊지 않거나 '[' 없는 '"'부터 세는 것.
+    let line = [b"a a a a=\"".to_vec(), vec![b'!'; 54], b"\"\n".to_vec()].concat();
+    let quoted = [b"[a \"b\"]\n".to_vec(), line.repeat(1000)].concat();
+    let mut m = meter();
+    let (facts, counts) = allocation::measure(|| git::config::parse(&quoted, &mut m));
+    assert!(facts.is_ok(), "{} B: {facts:?}", quoted.len());
+    assert!(counts.peak as u64 <= m.counts[Phase::Content as usize].allocated);
+    let hostile = [
+        b"a a a a=\n".repeat(1000),
+        b"[a \"\\\"".to_vec(),
+        vec![b'!'; 50_000],
+        b"\"]\n".to_vec(),
+    ]
+    .concat();
+    let entered = Rc::new(std::cell::Cell::new(0));
+    let counter = entered.clone();
+    let mut m = meter();
+    m.hook = Some(Box::new(move |event| {
+        if event == "before_config_parse" {
+            counter.set(counter.get() + 1);
+        }
+    }));
+    let (result, counts) = allocation::measure(|| git::config::parse(&hostile, &mut m));
+    assert!(matches!(result, Err(E::Limit)), "{result:?}");
+    assert_eq!((entered.get(), counts.calls), (0, 0));
+}
+
+// Value and header words and '[' in values are not charged as keys or
+// sections: each pair has equal length and differs only in those bytes.
+// 이것을 실패시키는 것: '=' 뒤 value 상태, header ']'·닫는 '"'·escape 뒤 복귀, value 안
+// '['를 header로 세지 않는 것, header 안 단어나 주석을 세지 않는 것 중 하나를 빼는 것.
+#[test]
+fn git_config_value_words_are_not_charged() {
+    for (words, filler) in [
+        ("[a]\nk = w w w w w w w w\n", "[a]\nk = ! ! ! ! ! ! ! !\n"),
+        ("[a] k = w w w w w w w w\n", "[a] k = ! ! ! ! ! ! ! !\n"),
+        ("[a]\nk = [::1] [x] [y] w\n", "[a]\nk = !!!!! !!! !!! !\n"),
+        ("[a \"x\"] k = w w w w w\n", "[a \"x\"] k = ! ! ! ! !\n"),
+        ("[a \"\\x\"] k = w w w w\n", "[a \"\\x\"] k = ! ! ! !\n"),
+        ("[a \"w w w w\"]\nk=v\n", "[a \"! ! ! !\"]\nk=v\n"),
+        ("[a.w.w.w.w]\nk=v\n", "[a.!.!.!.!]\nk=v\n"),
+        (
+            "[a]\n# w w [x] w\nk ; w [y]\n",
+            "[a]\n# ! ! !!! !\nk ; ! !!!\n",
+        ),
+    ] {
+        assert_eq!(words.len(), filler.len());
+        assert_eq!(
+            git::config::parser_allocation(words.as_bytes()),
+            git::config::parser_allocation(filler.as_bytes()),
+            "{words:?}"
+        );
+    }
+}
+
+// A remote per mirror with a long URL and a refspec, up to the section limit,
+// is an ordinary config that must stay parseable.
+// 이것을 실패시키는 것: value 단어나 value 안 '['를 key·section으로 다시 세는 것.
+#[test]
+fn git_config_many_mirror_remotes_parse() {
+    for pad in [100, 120, 125, 128] {
+        let bytes: Vec<u8> = (0..256)
+            .flat_map(|i| {
+                format!("[remote \"mirror-{i:03}\"]\n\turl = https://git.example.com/{}/project-{i}.git\n\tfetch = +refs/heads/*:refs/remotes/mirror-{i:03}/*\n", "a".repeat(pad)).into_bytes()
+            })
+            .collect();
+        let mut m = meter();
+        let (facts, counts) = allocation::measure(|| git::config::parse(&bytes, &mut m));
+        assert!(facts.is_ok(), "pad {pad}, {} B: {facts:?}", bytes.len());
+        let charged = m.counts[Phase::Content as usize].allocated;
+        assert!(counts.peak as u64 <= charged, "{counts:?} > {charged}");
+    }
+}
+
+// Values continued over hundreds of lines are ordinary configs git reads;
+// their words must not be charged as keys.
+// 이것을 실패시키는 것: 줄 잇기(LF·CRLF, 따옴표 안 `;` 포함) 다음 줄을 key 줄로 다시 세는 것.
+#[test]
+fn git_config_continued_values_parse() {
+    let sections: Vec<u8> = (0..255)
+        .flat_map(|i| format!("[s{i}]\n").into_bytes())
+        .collect();
+    let continued = |first: &[u8], line: &[u8], last: &[u8]| {
+        [
+            sections.clone(),
+            first.to_vec(),
+            line.repeat(766),
+            last.to_vec(),
+        ]
+        .concat()
+    };
+    let subsection = [
+        b"[a \"".to_vec(),
+        vec![b'x'; 55_000],
+        b"\"]\nk = v\\\n".to_vec(),
+        b"a b c d\\\n".repeat(1000),
+        b"e\n".to_vec(),
+    ]
+    .concat();
+    for (name, bytes) in [
+        (
+            "lf",
+            continued(b"[core]\nk = v\\\n", b"a b c d e\\\n", b"e\n"),
+        ),
+        (
+            "crlf",
+            continued(b"[core]\r\nk = v\\\r\n", b"a b c d e\\\r\n", b"e\r\n"),
+        ),
+        (
+            "quoted",
+            continued(b"[core]\nk = \"v;\\\n", b"a b c d e;\\\n", b"e\"\n"),
+        ),
+        ("subsection", subsection),
+    ] {
+        let mut m = meter();
+        let (facts, counts) = allocation::measure(|| git::config::parse(&bytes, &mut m));
+        assert!(facts.is_ok(), "{name}, {} B: {facts:?}", bytes.len());
+        let charged = m.counts[Phase::Content as usize].allocated;
+        assert!(
+            counts.peak as u64 <= charged,
+            "{name}: {counts:?} > {charged}"
+        );
+    }
+}
+
+// The reservation constants are measured for one gix-config release.
+// 이것을 실패시키는 것: Cargo.lock의 gix-config를 GIX_CONFIG_VERSION과 다른 버전으로 올리는 것.
+#[test]
+fn git_config_derivation_is_pinned() {
+    let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+        .replace("\r\n", "\n");
+    let versions: Vec<_> = lock
+        .split("\n[[package]]\n")
+        .filter(|block| block.starts_with("name = \"gix-config\"\n"))
+        .map(|block| block.lines().nth(1).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        versions,
+        [format!("version = \"{}\"", git::config::GIX_CONFIG_VERSION)]
+    );
 }
 
 // 이것을 실패시키는 것: config/packed parser의 선차감량을 실측 peak보다 줄이거나 gix File을 보관하는 것.
@@ -928,9 +1111,269 @@ fn git_parser_charges_cover_counted_peak() {
             max_config = (counts.peak, format!("malformed/{sections}"));
         }
     }
+    // gix keeps one doubling event Vec per section and copies it whole at the
+    // next header (front matter: into a power-of-two SmallVec). `a a a a=`
+    // keeps 9 events per line, so lines sweep the 8,192-slot growth edge and
+    // the scan maximum, with and without a following header or a parse error.
+    // 이것을 실패시키는 것: 예약을 11 * 64 KiB나 한 Vec(EVENT_SLOTS) 몫으로 줄이는 것.
+    let mut max_section = 0;
+    let mut max_front = 0;
+    let keys = |lines: usize| b"a a a a=\n".repeat(lines);
+    let mut shapes: Vec<(String, Vec<u8>)> = vec![
+        (
+            "repro".into(),
+            [b"[a]\n".to_vec(), b" k".repeat(4000), b"\n[a]\n".to_vec()].concat(),
+        ),
+        (
+            "fuzz".into(),
+            [b"[a]\n".repeat(7), b" k".repeat(2487), b"\n[a]\n".repeat(8)].concat(),
+        ),
+    ];
+    // Escaped quoted subsections are decoded by push growth and copied again
+    // into File's lookup tree.
+    // 이것을 실패시키는 것: 예약에서 quoted byte 몫(4 * quoted_bytes)을 빼는 것.
+    let subsection = |escape_first: bool, fill: usize| {
+        let mut b = b"[a \"".to_vec();
+        if escape_first {
+            b.extend_from_slice(b"\\\"");
+        }
+        b.extend(std::iter::repeat_n(b'!', fill));
+        if !escape_first {
+            b.extend_from_slice(b"\\\"");
+        }
+        b.extend_from_slice(b"\"]\n");
+        b
+    };
+    shapes.push(("subsection/last".into(), subsection(false, 65_524)));
+    shapes.push(("subsection/first".into(), subsection(true, 65_524)));
+    shapes.push(("subsection/32k".into(), subsection(true, 32_769)));
+    for n in [2, 4] {
+        shapes.push((
+            format!("subsection/x{n}"),
+            subsection(true, budget::CONFIG_BYTES as usize / n - 10).repeat(n),
+        ));
+    }
+    // A value continued over every line keeps 2W + L + 1 events.
+    // 이것을 실패시키는 것: 사건 상한을 2W + L로 줄이는 것.
+    for lines in [1021, 1022, 1023] {
+        shapes.push((
+            format!("continued/{lines}"),
+            [b"a=\\\n".to_vec(), b"\\\n".repeat(lines - 1)].concat(),
+        ));
+    }
+    // Scan skips words and '[' after a key's '=' on the same line. Each shape
+    // hides keys where a wrong value state would skip them, past the 8,192
+    // event edge so an undercount shrinks the reservation below the peak.
+    // 이것을 실패시키는 것: 줄 끝에서 value 상태를 끝내지 않거나, header의 '['·'"'·'\\'
+    // 전환을 빼 header 안 '='를 구분자로 보는 것.
+    let keys_line = |prefix: &str, keys: usize, end: &str| {
+        format!("{prefix}{}{end}", " k".repeat(keys)).into_bytes()
+    };
+    let hidden: [(&str, Vec<u8>); 13] = [
+        ("header-keys", keys_line("[a]", 14, "\n").repeat(255)),
+        ("header-eq", keys_line("[a \"x=y\"]", 13, "\n").repeat(255)),
+        (
+            "header-escape",
+            keys_line("[a \"\\\"]=\\\"\"]", 13, "\n").repeat(255),
+        ),
+        (
+            "header-comment",
+            keys_line("[a \"=;#\"]", 14, "\n").repeat(255),
+        ),
+        (
+            "after-value",
+            [
+                b"[a]\n".to_vec(),
+                [b"k=v\n".to_vec(), keys_line("", 10, "\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "after-value-crlf",
+            [
+                b"[a]\r\n".to_vec(),
+                [b"k = \"q=;#[x]\"\r\n".to_vec(), keys_line("", 10, "\r\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "bracket-value",
+            [
+                b"[a]\n".to_vec(),
+                [b"k=[::1]:22\n".to_vec(), keys_line(" k k [b]", 8, "\n")]
+                    .concat()
+                    .repeat(254),
+            ]
+            .concat(),
+        ),
+        // A value continues only past a `\` that escapes the line end itself.
+        // 이것을 실패시키는 것: `\` 다음 바이트를 escape로 건너뛰지 않거나, 주석이나 닫힌
+        // 따옴표 뒤의 `\`를 줄 잇기로 보는 것.
+        (
+            "even-backslash",
+            [
+                b"[a]\n".to_vec(),
+                [b"k=v\\\\\n".to_vec(), keys_line("", 10, "\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "even-backslash-crlf",
+            [
+                b"[a]\r\n".to_vec(),
+                [b"k=v\\\\\r\n".to_vec(), keys_line("", 10, "\r\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "comment-backslash",
+            [
+                b"[a]\n".to_vec(),
+                [b"k=v # c\\\n".to_vec(), keys_line("", 10, "\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "quoted-comment-backslash",
+            [
+                b"[a]\n".to_vec(),
+                [b"k = \"a\" ; \\\n".to_vec(), keys_line("", 10, "\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "key-comment-backslash",
+            [
+                b"[a]\n".to_vec(),
+                [b"; k=v\\\n".to_vec(), keys_line("", 10, "\n")]
+                    .concat()
+                    .repeat(372),
+            ]
+            .concat(),
+        ),
+        (
+            "front-after-value",
+            [b"k=v\n".to_vec(), keys_line("", 10, "\n")]
+                .concat()
+                .repeat(372),
+        ),
+    ];
+    for (name, body) in hidden {
+        shapes.push((format!("hidden/{name}"), [body, b"[z]\n".to_vec()].concat()));
+    }
+    // Header and subsection words make no body event, so scan leaves them
+    // out; their bytes are charged by the section, len and quoted terms.
+    // 이것을 실패시키는 것: 예약에서 quoted byte 몫(4 * quoted_bytes)을 빼는 것(quoted-escaped).
+    let long_name = |n: usize| (0..n).map(|i| format!("w{i}")).collect::<Vec<_>>();
+    shapes.push((
+        "header-words/quoted-one".into(),
+        format!("[a \"{}\"]\nk=v\n", long_name(9000).join(" ")).into_bytes(),
+    ));
+    shapes.push((
+        "header-words/quoted-escaped".into(),
+        format!("[a \"\\\"{}\"]\nk=v\n", long_name(9000).join(" ")).into_bytes(),
+    ));
+    shapes.push((
+        "header-words/unquoted-256".into(),
+        (0..256)
+            .map(|_| format!("[a.{}]\n", long_name(48).join(".")))
+            .collect::<String>()
+            .into_bytes(),
+    ));
+    shapes.push((
+        "header-words/quoted-256".into(),
+        (0..256)
+            .map(|i| format!("[a \"\\\"{i}{}\"] k k\n", long_name(40).join(" ")))
+            .collect::<String>()
+            .into_bytes(),
+    ));
+    // A header name of nearly the whole input is copied by the lookup tree
+    // although neither the word nor the quoted count sees it.
+    // 이것을 실패시키는 것: 예약의 바이트 몫을 2 * len에서 len으로 줄이는 것.
+    shapes.push((
+        "header-name/plain".into(),
+        [b"[".to_vec(), vec![b'a'; 65_530], b"]".to_vec()].concat(),
+    ));
+    shapes.push((
+        "header-name/dotted".into(),
+        [b"[a.".to_vec(), vec![b'b'; 65_520], b"]".to_vec()].concat(),
+    ));
+    // Many sections with few events and bytes: per-section tables dominate.
+    // 이것을 실패시키는 것: 예약의 section 몫(SECTION_BYTES)을 실측 567 B 아래로 줄이는 것.
+    for n in [64, 128, 255, 256] {
+        shapes.push((
+            format!("sections/unique/{n}"),
+            (0..n)
+                .map(|i| format!("[x{i}]\n"))
+                .collect::<String>()
+                .into_bytes(),
+        ));
+        shapes.push((format!("sections/adjacent/{n}"), b"[x]".repeat(n)));
+        shapes.push((
+            format!("sections/dotted/{n}"),
+            (0..n)
+                .map(|i| format!("[x{i}.y{i}]\n"))
+                .collect::<String>()
+                .into_bytes(),
+        ));
+        shapes.push((
+            format!("sections/subsection/{n}"),
+            (0..n)
+                .map(|i| format!("[x{i} \"{i}\"]\n"))
+                .collect::<String>()
+                .into_bytes(),
+        ));
+    }
+    for lines in [910, 911, 1020] {
+        for (tail, suffix) in [("end", &b""[..]), ("header", b"[a]\n"), ("bad", b"[a]\n~")] {
+            shapes.push((
+                format!("section/{lines}/{tail}"),
+                [b"[a]\n".to_vec(), keys(lines), suffix.to_vec()].concat(),
+            ));
+            shapes.push((
+                format!("front/{lines}/{tail}"),
+                [keys(lines), suffix.to_vec()].concat(),
+            ));
+        }
+    }
+    for (name, bytes) in shapes {
+        let mut m = meter();
+        let (facts, counts) = allocation::measure(|| git::config::parse(&bytes, &mut m));
+        assert_eq!(facts.is_ok(), !name.ends_with("bad"), "{name}: {facts:?}");
+        let charged = m.counts[Phase::Content as usize].allocated;
+        assert!(
+            counts.peak as u64 <= charged,
+            "{name}: {counts:?} > {charged}"
+        );
+        let max = if name.starts_with("front") {
+            &mut max_front
+        } else {
+            &mut max_section
+        };
+        *max = (*max).max(counts.peak);
+        if counts.peak > max_config.0 {
+            max_config = (counts.peak, name);
+        }
+    }
+    // The sweep must reach both copy peaks, not only the last Vec growth
+    // (21 * 64 KiB). 이것을 실패시키는 것: 뒤 header 행이나 front matter 행을 빼는 것.
+    assert!(max_section > budget::CONFIG_BYTES as usize * 43 / 2);
+    assert!(max_front > budget::CONFIG_BYTES as usize * 27);
     // Both repository files are loaded together, but neither gix File survives.
     let fixture = Fixture::new();
-    let bytes = bounded_config("implicit-sections", 256, 512);
+    let bytes = keys(1020);
     fixture.write("config", &bytes);
     fixture.write("config.worktree", &bytes);
     let access = access();
