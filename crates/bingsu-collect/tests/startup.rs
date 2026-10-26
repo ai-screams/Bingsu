@@ -392,7 +392,7 @@ fn fd_contract_child() {
     drop(fds);
 }
 
-// 이것을 실패시키는 것: Ready의 build-id가 공유된 빌드 manifest와 다르게 나오는 것.
+// 이것을 실패시키는 것: Ready의 build-id가 공유 manifest와 다르거나 제품 worker mask가 10이 아닌 것.
 #[test]
 fn sibling_build_id_is_exact() {
     use bingsu_core::collection::wire;
@@ -410,7 +410,7 @@ fn sibling_build_id_is_exact() {
     let ready = wire::decode_frame(&ready).unwrap();
     assert_eq!(ready.kind, wire::Kind::Ready);
     assert_eq!(ready.build_id, bingsu_identity::build_id());
-    assert_eq!(&ready.payload[8..12], &0u32.to_le_bytes());
+    assert_eq!(&ready.payload[8..12], &10u32.to_le_bytes());
     let mut mismatched = [0; wire::FRAME_MAX];
     let frame = wire::Frame {
         kind: wire::Kind::RequestBegin,

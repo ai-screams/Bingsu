@@ -113,39 +113,45 @@ fn completed(at: u64, text: &[u8]) -> Completed {
 fn wire(r: &Completed) -> Vec<u8> {
     r.encode_with_catalog(&CATALOG).unwrap()
 }
-// 이것을 실패시키는 것: 앞단 expected binding에서 envelope home 또는 compiled unique 정책을 버리는 것.
+// 이것을 실패시키는 것: 앞단 expected binding에서 home 또는 선택된 dir의 unique 정책을 버리는 것.
 #[test]
 fn expected_path_query_uses_the_selected_display_and_home() {
     use bingsu_core::{collection::path_facts::PathQuery, shorten::Method};
     for home in [false, true] {
         for unique in [false, true] {
-            let mut h = Harness::new(None, None);
-            let mut s = snapshot();
-            if unique {
-                s.config.setup[1].methods = vec![Method::Unique];
+            for dir in [false, true] {
+                let mut h = Harness::new(None, None);
+                h.render_config.setup[1].methods = if unique {
+                    vec![Method::Unique]
+                } else {
+                    vec![Method::Abbrev(1)]
+                };
+                if dir {
+                    h.render_config.collect_mask |= 2;
+                    h.render_config.variants[0] = compile("{a01}{fixture}", &CATALOG).unwrap();
+                }
+                if home {
+                    h.args.push(b"--home=/cwd".to_vec());
+                }
+                let mut c = completed(99, b"QUERY");
+                c.binding.path_query = PathQuery {
+                    home_component: home.then_some(0),
+                    unique: dir && unique,
+                };
+                h.responses[0] = Some(wire(&c));
+                let shown = h.text();
+                assert!(
+                    shown.contains("QUERY"),
+                    "home={home}, unique={unique}, dir={dir}: {shown}"
+                );
+                c.binding.path_query.unique = !c.binding.path_query.unique;
+                h.responses[0] = Some(wire(&c));
+                assert!(!h.text().contains("QUERY"));
             }
-            h.render_config.setup[1].methods = s.config.setup[1].methods.clone();
-            h.snapshot = s.encode(1, 0).unwrap();
-            if home {
-                h.args.push(b"--home=/cwd".to_vec());
-            }
-            let mut c = completed(99, b"QUERY");
-            c.binding.path_query = PathQuery {
-                home_component: home.then_some(0),
-                unique,
-            };
-            h.responses[0] = Some(wire(&c));
-            let shown = h.text();
-            assert!(
-                shown.contains("QUERY"),
-                "home={home}, unique={unique}: {shown}"
-            );
-            c.binding.path_query.unique = !unique;
-            h.responses[0] = Some(wire(&c));
-            assert!(!h.text().contains("QUERY"));
         }
     }
 }
+
 fn args() -> Vec<Vec<u8>> {
     [
         "--ctx",

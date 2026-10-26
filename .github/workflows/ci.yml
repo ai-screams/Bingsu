@@ -178,7 +178,9 @@ jobs:
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"
-          grep -F 'test product_mask_is_zero_and_fixture_is_unreachable ... ok' "$RUNNER_TEMP/selection-native.txt"
+          grep -F 'test product_workers_follow_selected_git_and_dir ... ok' "$RUNNER_TEMP/selection-native.txt"
+          grep -F 'test disabled_unreachable_and_redraw_workers_are_zero ... ok' "$RUNNER_TEMP/selection-native.txt"
+          grep -F 'test product_fixture_remains_unreachable ... ok' "$RUNNER_TEMP/selection-native.txt"
       - name: Collector policy evaluator and table correspondence
         run: python3 scripts/check_collector_filter.py
       # Fails if either environment-dependent oracle is omitted or runs zero tests.
@@ -412,6 +414,7 @@ jobs:
           grep -F 'PASSED bench/tests/test_collector_product.py::test_unavailable_normal_prompt_keeps_evidence_but_blocks_acceptance' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_acceptance_table_tests_exist_and_run_in_ci' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tools/fsbudget/tests/test_repository.py::test_repository_trace_checks_paths_counts_and_phases' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_ci_has_no_silent_acceptance_skip' "$RUNNER_TEMP/m3b-security.txt"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_prompt_trace_budget.py::test_collector_gate_keeps_role_and_kind_budgets_separate -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/m3b-trace-contract.txt"

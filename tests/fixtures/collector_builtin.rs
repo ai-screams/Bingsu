@@ -341,7 +341,7 @@ fn fixture_adapter_stops_at_the_first_error() {
     let c = t.finish(EndReason::Protocol, clock(&r)).unwrap().unwrap();
     assert_eq!(c.updates, [first]);
     assert_eq!(c.reason, EndReason::Protocol);
-    assert_eq!(collection::selection::PRODUCT.workers, 0);
+    assert_eq!(collection::selection::PRODUCT.workers & TEST_MASK, 0);
     assert!(matches!(
         wire::decode_frame(&[0]),
         Err(ProtocolError::Length)

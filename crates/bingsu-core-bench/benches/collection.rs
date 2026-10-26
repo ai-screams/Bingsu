@@ -238,13 +238,27 @@ fn front_collection(mut fixture: front_fixture::Harness) -> (front_fixture::Harn
     let record = black_box(fixture.run().record);
     (fixture, record)
 }
-// Product policy remains empty even when a compiled display requests builtins.
-// Keep selection cost separate from the test-catalog completed-file continuation.
+// Historical M3b policy, retained separately from the activated product catalog.
 #[library_benchmark]
 #[bench::bands4096(setup=selected_config)]
 fn product_mask_zero(c: CompiledConfig) -> (CompiledConfig, u32) {
-    let mask = black_box(selection::PRODUCT.worker_mask(black_box(&c), 65535, false));
+    let catalog = selection::Catalog {
+        segments: selection::PRODUCT.segments,
+        workers: 0,
+    };
+    let mask = black_box(catalog.worker_mask(black_box(&c), 65535, false));
     assert_eq!(mask, 0);
+    (c, mask)
+}
+#[inline(never)]
+fn product_selected(c: &CompiledConfig) -> u32 {
+    selection::PRODUCT.worker_mask(c, 65535, false)
+}
+#[library_benchmark]
+#[bench::bands4096(setup=selected_config)]
+fn product_selected_variant(c: CompiledConfig) -> (CompiledConfig, u32) {
+    let mask = black_box(product_selected(black_box(&c)));
+    assert_eq!(mask, 10);
     (c, mask)
 }
 fn maximum_facts() -> (Vec<u8>, Vec<u8>) {
@@ -305,6 +319,7 @@ library_benchmark_group!(
         selected_variant,
         front_collection,
         product_mask_zero,
+        product_selected_variant,
         facts_decode,
         budget_charge
     ]

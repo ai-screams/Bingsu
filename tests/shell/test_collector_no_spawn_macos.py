@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from functools import lru_cache
+from pathlib import Path
 
 import pytest
 from conftest import ROOT
@@ -32,9 +33,10 @@ def frame(kind, identity, payload):
     return b"BNGIPC05" + struct.pack("<HBBI", 5, kind, 0, len(payload)) + identity + bytes(32) + payload
 
 
-def request(identity, mask):
-    paths = b"".join(struct.pack("<I", len(p)) + p for p in (b"/c", b"/s", b"/r"))
-    context = crc(b"bingsu-context-v3\0" + paths[:-6])
+def request(identity, mask, cwd=b"/r"):
+    context_paths = b"".join(struct.pack("<I", len(p)) + p for p in (b"/c", b"/s"))
+    paths = context_paths + struct.pack("<I", len(cwd)) + cwd
+    context = crc(b"bingsu-context-v3\0" + context_paths)
     body = bytes([1]) * 16 + bytes([2]) * 16 + struct.pack("<Q", 1) + bytes([3]) * 4 + context
     body += bytes([1]) + bytes(16) + struct.pack("<QI", 0, mask) + bytes(4) + struct.pack("<I", 50) + paths + bytes(2) + b"\x01" + bytes(4)
     return (frame(2, identity, struct.pack("<IQ", len(body), 3))
@@ -66,7 +68,7 @@ def assert_no_process_effects(code, descendants):
     assert code != 86, "forbidden process/network attempt: interposer exit 86"
 
 
-def run_worker(command, dylib, tmp_path, mutation=False):
+def run_worker(command, dylib, tmp_path, mutation=False, cwd=None):
     read, write = os.pipe()
     lock = os.open(tmp_path / "lock", os.O_CREAT | os.O_RDWR, 0o600)
     sources = [fcntl.fcntl(fd, fcntl.F_DUPFD, 10) for fd in (read, lock)]
@@ -95,7 +97,9 @@ def run_worker(command, dylib, tmp_path, mutation=False):
             at = output.find(b"BNGIPC05")
             if not sent and at >= 0 and len(output) >= at + 104:
                 mask, = struct.unpack_from("<I", output, at + 88)
-                os.write(write, request(output[at + 16:at + 48], mask))
+                if "__collect-v1" in command and cwd is None:
+                    mask = 0  # Historical empty exchange, independent of PRODUCT grants.
+                os.write(write, request(output[at + 16:at + 48], mask, os.fsencode(cwd) if cwd else b"/r"))
                 sent = True
         code = process.wait(timeout=2)
         assert not seen, f"descendants: {seen}"
@@ -111,7 +115,11 @@ def run_worker(command, dylib, tmp_path, mutation=False):
                 kind, size = wire[10], struct.unpack_from("<I", wire, 12)[0]
                 kinds.append(kind)
                 wire = wire[80 + size:]
-            assert kinds in ([1, 6], [1, 5, 6]), kinds
+            if cwd is None:
+                assert kinds in ([1, 6], [1, 5, 6]), kinds
+            else:
+                assert kinds[0] == 1 and kinds[-1] == 6 and 5 in kinds, kinds
+                assert set(kinds) <= {1, 5, 6, 7}, kinds
         return bytes(output)
     finally:
         try:
@@ -125,9 +133,21 @@ def run_worker(command, dylib, tmp_path, mutation=False):
 
 
 def prepared():
-    path = ROOT / "target/collector-audit/fixture.json"
+    path = Path(os.environ.get("BINGSU_COLLECTOR_AUDIT", ROOT / "target/collector-audit/fixture.json"))
     assert path.is_file(), "run scripts/prepare_collector_audit.py on the host first"
     return json.loads(path.read_text())
+
+
+# 이것을 실패시키는 것: 실제 제품 mask10에서 프로세스 생성 시도 또는 Update 누락을 허용하는 것.
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS shipped process canary")
+def test_shipped_reachable_git_has_no_process_effects(tmp_path):
+    repo = tmp_path.resolve() / "repo"
+    (repo / ".git/refs/heads").mkdir(parents=True)
+    (repo / ".git/objects").mkdir()
+    (repo / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (repo / ".git/config").write_text("[core]\nrepositoryformatversion=0\n")
+    output = run_worker([prepared()["worker"], "__collect-v1"], prepared()["canary"], tmp_path, cwd=repo)
+    assert b"main" in output
 
 
 # 이것을 실패시키는 것: 자식의 한도 실패가 앞단의 exit0·B1·stderr0 계약을 바꾸는 것.

@@ -8,10 +8,28 @@ import shutil
 
 import pytest
 
+
 SOURCE = Path(__file__).resolve().parents[1] / "collector-product.py"
 SPEC = importlib.util.spec_from_file_location("collector_product", SOURCE)
 product = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(product)
+
+
+# 이것을 실패시키는 것: init 셸 문장의 끝 세미콜론을 collector 실행 경로에 붙이는 것.
+def test_prompt_context_preserves_collector_pin(monkeypatch, tmp_path):
+    from subprocess import CompletedProcess
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        output = (b"'--runtime-root=1:2:/r' '--config-root=/c' "
+                  b"'--collector-exe=/trusted/semi;colon/bingsu-collect';\n") if command[1] == "init" else (
+                      b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e")
+        return CompletedProcess(command, 0, output, b"")
+    monkeypatch.setattr(product, "run", run)
+    command, _ = product.prompt_context("/trusted/bingsu", tmp_path)
+    assert "--collector-exe=/trusted/semi;colon/bingsu-collect" in command
+    assert calls[-1] == command
+
 
 
 def sample():

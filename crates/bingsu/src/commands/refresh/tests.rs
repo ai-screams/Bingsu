@@ -1538,7 +1538,7 @@ fn selection_changes_and_late_contention_preserve_marker() {
     }
 }
 
-// 이것을 실패시키는 것: 검증 전 broker 호출·필터 실패 후 발행·broker 뒤 최종 재검증 생략.
+// 이것을 실패시키는 것: cold 화면 수집·검증 전 broker 호출·필터 실패 후 발행·broker 뒤 최종 재검증 생략.
 #[test]
 fn broker_runs_after_validation_before_final_revalidation() {
     let fx = Fx::new("broker");
@@ -1549,9 +1549,10 @@ fn broker_runs_after_validation_before_final_revalidation() {
         &mut Fixed(clock()),
         &mut |_, display, now| {
             calls += 1;
-            let (config, id) = display.unwrap();
-            assert!(!config.exec_units.is_empty());
-            assert_eq!(id.generation, 1);
+            assert!(
+                display.is_none(),
+                "cold screen is published before collection"
+            );
             assert_eq!(now.boot, clock().boot);
             Err(StoreError::Unsafe)
         },
