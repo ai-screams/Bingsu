@@ -142,3 +142,80 @@ missing cells, new failures, and stale observations always fail CI. Output
 ledgers never automatically create reviewed exceptions. No macOS 26 exception
 is registered for the fd race: it is a probe bug also reproduced on 27. The
 corrected macOS 26 run is still required before claiming its cells pass.
+
+## F3 CI failure reproduction and time budget
+
+From the checkout root on Linux (Python 3.10+, stable Rust, `cc`, Git,
+binutils and `strace` installed), the argv regression needs no product build:
+
+```sh
+python3 -m venv /tmp/f3-ci-tests
+/tmp/f3-ci-tests/bin/python -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+/tmp/f3-ci-tests/bin/python -m pytest bench/tests/test_git_product.py -q -p no:cacheprovider -k normalizes_path_argv
+```
+
+To reproduce the native M3b step, including the five real F3 cases:
+
+```sh
+export CARGO_PROFILE_RELEASE_STRIP=none
+cargo build --locked -j 2 --release -p bingsu -p bingsu-collect
+python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu --unstripped-dir target/release/symbol-audit --strip
+python3 bench/git-product.py --prepare target/release/bingsu --out target/f3/preparation.json
+python3 bench/collector-product.py --prepare target/release/bingsu
+CI=1 BINGSU_BIN="$PWD/target/release/bingsu" /tmp/f3-ci-tests/bin/python -m pytest tests/shell/test_collector_security.py bench/tests/test_collector_product.py bench/tests/test_git_product.py tools/fsbudget/tests -q -rA -p no:cacheprovider --basetemp=/tmp/f3-m3b-native
+```
+
+The real Linux cases require the host kernel's collector protection features;
+a container still uses its host kernel and seccomp policy. The argv regression
+above isolates the Python failure from those runtime prerequisites.
+
+First-run inputs supplied for PR #144 at 5776aa9: x86 Linux failed at 14m09s,
+ARM Linux at 24m35s, macOS was about 23 minutes before cancellation, and Intel
+macOS stopped early at the roots unit test. The late Linux musl release build,
+fixture preparation and tests were not yet run. Provisionally allowing 6–9
+minutes for that suffix puts ARM at 31–34 minutes before cleanup: unsafe for
+the unchanged 30-minute limit.
+
+Planning estimates below are **not measured passing CI durations**. Individual
+step logs were unavailable locally. They allow for moving the independent
+X-14 builds out of the Linux product jobs, reducing 60 F1 corpus rows from 200
+to 20 warm observations (12,000 to 1,200 attempts), eliminating the two extra
+macOS cross-target release builds per cell, and bounded evidence packaging.
+Intel has no comparable completed prefix, so its estimate has lowest confidence.
+The supplied macOS elapsed time does not isolate failed cleanup; its original
+estimate conservatively treats 23 minutes as the pre-upload envelope.
+
+| Cell | Original full-pass estimate | Revised planning estimate |
+| --- | --- | --- |
+| ubuntu-24.04 | 20–23 min | 13–20 min |
+| ubuntu-24.04-arm | 31–34 min | 21–28 min |
+| macos-latest | 24–26 min, excluding the broken recursive upload | 13–22 min |
+| macos-26-intel | insufficient timings; duplicate builds risk exceeding 30 min | 18–28 min, extrapolated |
+
+The new X-14 job retains native x86/ARM glibc and musl gates, with a separate
+20-minute limit (estimated 5–12 minutes). Confirm these estimates with the next
+CI run; cache misses and shared-runner load remain uncertain. No timeout was
+raised. All real-collection, syscall, resource and exact-PASS checks remain.
+F1 timings are observation evidence, not performance gates: each artifact
+records `requested_rounds`, all raw samples and `performance_gate: false`.
+The local default remains 200; the separate M3c pair benchmark still requires
+200 alternating rounds.
+
+On macOS, collection creates `open-flags/root/absolute -> /`. The old
+`m3b-traces/**/*.trace` upload [follows symbolic links](https://github.com/actions/upload-artifact/blob/main/src/shared/search.ts) and can search the entire
+runner, explaining a long search even with no native strace files. F3 adds
+more of these product contexts, not a large native macOS trace stream.
+`pack_collector_evidence.py` never follows those links: it compresses every
+M3b raw trace and F3 sample JSON, records link targets and byte counts in an
+inventory, and preserves complete F1/F2 trees with links as links. The upload
+receives explicit archives; packing and upload each have a two-minute bound.
+Raw evidence is not truncated. Test output is still uploaded separately.
+
+The Intel `Ancestor { at: 3 }` failure identifies `/System/Volumes/Data` in the
+hardcoded `/System/Volumes/Data/home` autofs test, before the locality check.
+It is an unestablished test precondition, not evidence of an Intel locality
+implementation defect; the runner's precise owner/mode/ACL was not available.
+The replacement first pins a private local control root, then injects non-local
+and unknown observations into the shared creation routine. It requires that
+the locality check was reached and rejects both results without skipping.
+The separate native descriptor test still checks the OS locality observation.

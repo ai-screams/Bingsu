@@ -133,13 +133,59 @@ jobs:
       # 이것을 실패시키는 것: 제품이나 전이 의존성이 MSRV보다 새 문법/API를 쓰는 것.
       - run: cargo build --locked -j 2 -p bingsu -p bingsu-collect
 
+  # Independent probe crates have their own lock/build graph. Keep their
+  # native glibc+musl gates off the product job's 30-minute critical path.
+  collector-x14:
+    name: Collector X-14 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Prepare native musl toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends musl-tools
+          rustup target add "$(uname -m)-unknown-linux-musl"
+      - name: Independent gix 0.83.0 X-14 (locked, glibc and musl)
+        env:
+          BINGSU_REQUIRE_LANDLOCK: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -o pipefail
+          # The release lead supplies this lock; absence is an incomplete gate.
+          test -s bench/probes/collector-x14/Cargo.lock
+          cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --release -- --case all | tee "$RUNNER_TEMP/x14-gnu.txt"
+          grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-gnu.txt"
+          target="$(uname -m)-unknown-linux-musl"
+          CC=musl-gcc cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --target "$target" --release -- --case all | tee "$RUNNER_TEMP/x14-musl.txt"
+          grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-musl.txt"
+      - name: Preserve X-14 gate output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: collector-x14-${{ matrix.os }}
+          path: ${{ runner.temp }}/x14-*.txt
+          if-no-files-found: error
+
   collector:
     name: Dedicated collector (${{ matrix.os }})
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
-    # The arm runner last took 23m38s. F3 adds one small fixture build and
-    # five runtime cases (estimated 1--2 minutes); retain the 30-minute limit.
+    # F3 first-run native failures: x64 14m09s, arm64 24m35s. Keep room for
+    # musl by sampling F1 observations 20 times (security gates unchanged).
+    # Each macOS architecture now builds/audits its own native shipped pair.
     timeout-minutes: 30
     env:
       # Audit the real linked binaries, then strip those same files for shipping.
@@ -270,21 +316,6 @@ jobs:
           grep -F 'test runtime::x14_threads_and_status_survive_fork_is_refused ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test worker_limits_fail_without_blocking_front ... ok' "$RUNNER_TEMP/filter-musl.txt"
-      - if: runner.os == 'Linux'
-        name: Independent gix 0.83.0 X-14 (locked, glibc and musl)
-        env:
-          BINGSU_REQUIRE_LANDLOCK: "1"
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-        run: |
-          set -o pipefail
-          # The release lead supplies this lock; absence is an incomplete gate.
-          test -s bench/probes/collector-x14/Cargo.lock
-          cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --release -- --case all | tee "$RUNNER_TEMP/x14-gnu.txt"
-          grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-gnu.txt"
-          target="$(uname -m)-unknown-linux-musl"
-          CC=musl-gcc cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --target "$target" --release -- --case all | tee "$RUNNER_TEMP/x14-musl.txt"
-          grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-musl.txt"
       # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것.
       - name: F2 fixed fuzz seed regression corpus
         shell: bash --noprofile --norc -euo pipefail {0}
@@ -315,20 +346,12 @@ jobs:
       # 이것을 실패시키는 것: 출하 collector의 spawn/import 또는 앞단 gix 심벌 유입.
       - name: Product imports and matching deployment pair
         run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu --unstripped-dir target/release/symbol-audit --strip
-      - if: runner.os == 'macOS'
-        name: Both shipped Mach-O architectures
-        run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          cargo build --locked -j 2 --release -p bingsu -p bingsu-collect --target aarch64-apple-darwin
-          python3 scripts/check_collector_symbols.py target/aarch64-apple-darwin/release/bingsu-collect --sibling target/aarch64-apple-darwin/release/bingsu --unstripped-dir target/aarch64-apple-darwin/release/symbol-audit --strip
-          cargo build --locked -j 2 --release -p bingsu -p bingsu-collect --target x86_64-apple-darwin
-          python3 scripts/check_collector_symbols.py target/x86_64-apple-darwin/release/bingsu-collect --sibling target/x86_64-apple-darwin/release/bingsu --unstripped-dir target/x86_64-apple-darwin/release/symbol-audit --strip
       - name: Prepare Python audit tests
         run: |
           python3 -m venv "$RUNNER_TEMP/collector-tests"
           "$RUNNER_TEMP/collector-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
       - name: Host dependency, symbol and manifest mutations
-        run: '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest scripts/test_collector_audits.py -q -p no:cacheprovider'
+        run: '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest scripts/test_collector_audits.py scripts/test_pack_collector_evidence.py -q -p no:cacheprovider'
       - name: Prepare runtime audit fixtures on the host
         run: python3 scripts/prepare_collector_audit.py
       - name: Resource isolation; macOS interpose and descendant audit
@@ -337,7 +360,11 @@ jobs:
       - name: Prepare F1 hostile Git corpus on the host
         shell: bash --noprofile --norc -euo pipefail {0}
         run: python3 scripts/prepare_git_corpus.py
+      # Timing observations are evidence, not latency gates. Full 200-round
+      # runs remain the local default; CI retains every one of its 20 samples.
       - name: F1 protected collection and policy corpus
+        env:
+          BINGSU_F1_OBSERVATION_ROUNDS: "20"
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
           export BINGSU_GIT_CORPUS_REQUIRED=1
@@ -514,15 +541,28 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-dirty]' "$RUNNER_TEMP/m3b-musl.txt"
           grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[tracked-19000]' "$RUNNER_TEMP/m3b-musl.txt"
           grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[budget-bound]' "$RUNNER_TEMP/m3b-musl.txt"
+      - name: Pack M3b raw security traces on failure
+        if: failure()
+        timeout-minutes: 2
+        run: python3 scripts/pack_collector_evidence.py "$RUNNER_TEMP/m3b-traces" "$RUNNER_TEMP/m3b-security-traces.tar.gz" --traces-only
       - name: Preserve M3b raw security traces on failure
         if: failure()
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: m3b-security-traces-${{ matrix.os }}
-          path: ${{ runner.temp }}/m3b-traces/**/*.trace
+          path: ${{ runner.temp }}/m3b-security-traces.tar.gz
+          compression-level: 0
           if-no-files-found: warn
+      - name: Pack F1 and F2 evidence without following fixture links
+        if: always()
+        timeout-minutes: 2
+        run: |
+          python3 scripts/pack_collector_evidence.py "$RUNNER_TEMP/f1-traces" "$RUNNER_TEMP/f1-evidence.tar.gz"
+          python3 scripts/pack_collector_evidence.py "$RUNNER_TEMP/f2-traces" "$RUNNER_TEMP/f2-evidence.tar.gz"
       - name: Preserve M3b native acceptance output
         if: always()
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: m3b-security-${{ matrix.os }}
@@ -530,10 +570,10 @@ jobs:
             ${{ runner.temp }}/m3b-security.txt
             ${{ runner.temp }}/m3b-musl.txt
             ${{ runner.temp }}/f1-security.txt
-            ${{ runner.temp }}/f1-traces/
+            ${{ runner.temp }}/f1-evidence.tar.gz
             ${{ runner.temp }}/f2-seeds.txt
             ${{ runner.temp }}/f2-repositories.txt
-            ${{ runner.temp }}/f2-traces/
+            ${{ runner.temp }}/f2-evidence.tar.gz
             ${{ runner.temp }}/filter-native.txt
             ${{ runner.temp }}/filter-musl.txt
             target/b3-evidence/

@@ -258,13 +258,12 @@ LINUX_SECURITY_STEPS = {
     "Repository read layer trace and acceptance",
     "Final filter refuses root limit and capability changes",
     "Native musl collector probes (both architectures)",
-    "Independent gix 0.83.0 X-14 (locked, glibc and musl)",
     "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
     "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
     "Path facts ACL and read-only mount oracles",
     "Assert native Linux F1 collection passes", "Assert exact F3 musl collection passes",
 }
-MACOS_SECURITY_STEPS = {"Both shipped Mach-O architectures", "Assert native macOS M3b security passes",
+MACOS_SECURITY_STEPS = {"Assert native macOS M3b security passes",
                         "Assert native macOS F1 collection passes"}
 
 
@@ -288,7 +287,9 @@ def security_steps(text):
         name = step.get("name", "")
         assert "continue-on-error" not in step, name
         condition = ("runner.os == 'Linux'" if name in LINUX_SECURITY_STEPS else
-                     "runner.os == 'macOS'" if name in MACOS_SECURITY_STEPS else None)
+                     "runner.os == 'macOS'" if name in MACOS_SECURITY_STEPS else
+                     "failure()" if name == "Pack M3b raw security traces on failure" else
+                     "always()" if name == "Pack F1 and F2 evidence without following fixture links" else None)
         assert step.get("if") == condition, (name, "skippable security step", step.get("if"))
         assert_run_unconditional(step)
     f1 = {step.get("name"): step for step in steps if "F1" in step.get("name", "")}
@@ -386,10 +387,26 @@ def ci_test_evidence(text):
         if "run" in step:
             assert "if" not in step and "continue-on-error" not in step
             assert_run_unconditional(step)
-    for job, entries in (("collector", steps), ("collector-probes", probes)):
+    meta, x14 = workflow_job(text, "collector-x14")
+    assert "if" not in meta and "continue-on-error" not in meta
+    assert [line.strip() for line in meta["strategy"][1] if line.strip()] == [
+        "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm]"]
+    for step in x14:
+        if "run" in step:
+            assert "if" not in step and "continue-on-error" not in step
+            assert_run_unconditional(step)
+    gate = next(step for step in x14 if step.get("name") == "Independent gix 0.83.0 X-14 (locked, glibc and musl)")
+    commands = run_commands(gate)
+    assert ["cargo", "run", "--locked", "-j", "2", "--manifest-path", "bench/probes/collector-x14/Cargo.toml",
+            "--release", "--", "--case", "all", "|", "tee", "$RUNNER_TEMP/x14-gnu.txt"] in commands
+    assert ["CC=musl-gcc", "cargo", "run", "--locked", "-j", "2", "--manifest-path", "bench/probes/collector-x14/Cargo.toml",
+            "--target", "$target", "--release", "--", "--case", "all", "|", "tee", "$RUNNER_TEMP/x14-musl.txt"] in commands
+    for libc in ("gnu", "musl"):
+        assert ["grep", "-Fx", "X-14 PASS", f"$RUNNER_TEMP/x14-{libc}.txt"] in commands
+    for job, entries in (("collector", steps), ("collector-probes", probes), ("collector-x14", x14)):
         for step in entries:
             step["_job"] = job
-    return steps + probes
+    return steps + probes + x14
 
 
 def assert_acceptance_table(table, workflow, *, read=lambda name: (ROOT / name).read_text(), collected=None):
@@ -796,8 +813,13 @@ def assert_ci_contract(texts):
         assert f'--basetemp=$RUNNER_TEMP/m3b-traces/{libc}' in executable
     artifact = collector.split("      - name: Preserve M3b raw security traces on failure\n")[1].split("      - name:")[0]
     for token in ("if: failure()", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
-                  "name: m3b-security-traces-${{ matrix.os }}", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"):
+                  "name: m3b-security-traces-${{ matrix.os }}", "path: ${{ runner.temp }}/m3b-security-traces.tar.gz",
+                  "timeout-minutes: 2", "compression-level: 0"):
         assert token in artifact, token
+    pack = next(step for step in steps if step.get("name") == "Pack M3b raw security traces on failure")
+    assert pack["if"] == "failure()" and pack["timeout-minutes"] == "2"
+    assert run_commands(pack) == [["python3", "scripts/pack_collector_evidence.py",
+                                 "$RUNNER_TEMP/m3b-traces", "$RUNNER_TEMP/m3b-security-traces.tar.gz", "--traces-only"]]
     # Both full-suite jobs must exclude the unprepared security module. The
     # Linux job applies the same invocation to all three container images.
     for job in ("shell-linux", "shell-macos"):
@@ -831,7 +853,12 @@ def test_ci_has_no_silent_acceptance_skip():
     ("ci.yml", '--basetemp="$RUNNER_TEMP/m3b-traces/musl"'),
     ("ci.yml", "if: failure()"),
     ("ci.yml", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"),
-    ("ci.yml", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"),
+    ("ci.yml", "path: ${{ runner.temp }}/m3b-security-traces.tar.gz"),
+    ("ci.yml", "scripts/pack_collector_evidence.py"),
+    ("ci.yml", "compression-level: 0"),
+    ("ci.yml", "timeout-minutes: 2"),
+    ("ci.yml", "os: [ubuntu-24.04, ubuntu-24.04-arm]"),
+    ("ci.yml", 'grep -Fx \'X-14 PASS\' "$RUNNER_TEMP/x14-musl.txt"'),
     ("bench.yml", "--rounds 200"),
 ])
 def test_missing_ci_cell_is_refused(file, token):
@@ -1573,8 +1600,8 @@ def assert_real_collection_ci(workflow, table):
     common = run_commands(named["M3b product security and measurements contracts"])
     for case in ("known", "missing", "empty", "unknown", "invalid-home", "invalid-xdg", "invalid-both"):
         assert ["grep", "-Fx", f"PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[{case}]", "$RUNNER_TEMP/m3b-security.txt"] in common, case
-    for name in ("Product imports and matching deployment pair", "Both shipped Mach-O architectures"):
-        assert "scripts/check_collector_symbols.py" in named[name]["run"]
+    # Both native macOS cells audit the same release files they execute.
+    assert "scripts/check_collector_symbols.py" in named["Product imports and matching deployment pair"]["run"]
     linux = run_commands(named["Assert native Linux M3b security passes"])
     musl = run_commands(named["M3b native musl lifecycle security"])
     for commands, log in ((linux, "$RUNNER_TEMP/m3b-security.txt"), (musl, "$RUNNER_TEMP/m3b-musl.txt")):
@@ -1650,6 +1677,8 @@ def real_collection_context(tmp_path_factory):
 def test_shipped_real_collection(real_collection_context, case):
     measurement, binary, prepared, directory, repos = real_collection_context
     sample = measurement.observe(binary, prepared, directory / "context" / case, repos[case])
+    # Keep frames, timing, stderr and diagnostics even when an assertion fails.
+    (directory / f"{case}.json").write_text(json.dumps(sample, indent=2) + "\n")
     assert sample["status"] == "OBSERVED", sample
     assert sample["stage_a"] and sample["published"] and sample["reaped"], sample
     frames = [bytes.fromhex(raw) for _, raw in sample["frames"]]

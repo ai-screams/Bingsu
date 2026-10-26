@@ -1,7 +1,9 @@
 """M3c observation contracts; product runtime lives in the dedicated CI job."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +11,47 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("git_product", ROOT / "bench/git-product.py")
 git = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(git)
+
+
+# Exercise observe itself: the summary tests replace it and missed a Path in
+# prompt_context's argv. Include cached contexts and paths containing spaces.
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("executable_type", [str, Path])
+def test_observe_normalizes_path_argv_before_retargeting(monkeypatch, tmp_path, cached, executable_type):
+    binary = executable_type(tmp_path / "front binary")
+    repo, directory = tmp_path / "repo with spaces", tmp_path / "observation"
+    command = [binary, "prompt", "--home=/old", "--pwd", Path("/old")]
+    original = list(command)
+    env = {"context": "preserved"}
+    prep = {"fixture": tmp_path / "helper fixture"}
+    if cached:
+        prep["prompt_contexts"] = {str(directory): (command, env)}
+    class Helper:
+        returncode = 0
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def poll(self): return 0
+        def communicate(self): return b'F3_RESULT {"published": true}\n', b""
+    def popen(argv, **kwargs):
+        assert argv == [str(prep["fixture"]), str(directory), str(repo)]
+        return Helper()
+    calls = []
+    def run(argv, **kwargs):
+        assert all(isinstance(word, str) for word in argv)
+        calls.append(argv)
+        if "--read" in argv:
+            return SimpleNamespace(stdout=b'{"front_read_ns": 12}')
+        assert argv == [str(binary), "prompt", "--home=" + str(repo), "--pwd", str(repo)]
+        assert kwargs["env"] is env
+        return SimpleNamespace(returncode=0, stderr=b"", stdout=b"B1\x1f" + b"\x1f" * 8 + b"ok:none\x1e")
+    monkeypatch.setattr(git.subprocess, "Popen", popen)
+    monkeypatch.setattr(git.M3B, "run", run)
+    monkeypatch.setattr(git.M3B, "prompt_context", lambda *args: (command, env))
+    monkeypatch.setattr(git, "observe_stages", lambda *args: {"status": "OBSERVED"})
+    result = git.observe(binary, prep, directory, repo)
+    assert result["status"] == "OBSERVED" and "prompt_ns" in result
+    assert result["previous_read"]["front_read_ns"] == 12
+    assert len(calls) == 2 and command == original
 
 
 def sample(*, partial=False, reason="Complete", published=True, at=20):

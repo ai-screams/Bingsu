@@ -761,30 +761,41 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    // /System/Volumes/Data/home is an autofs mount point owned by root. With uid 0 the owner
-    // check passes, so the refusal must come from the file-system check
-    // (without it, fchmod would fail with a permission error instead).
+    // /System/Volumes/Data can itself be untrusted on runner images. Testing
+    // its autofs child with uid 0 then fails at Ancestor { at: 3 }, before the
+    // locality check. Establish our own trusted chain and inject only the OS
+    // locality observation into the same creation routine used by pin_for.
+    // Native fd observation is covered by runtime_root's descriptor test.
     // 이것을 실패시키는 것: 런타임 폴더의 로컬 파일 시스템 검사를 빼는 것.
     #[cfg(target_os = "macos")]
     #[test]
     fn pin_refuses_non_local_file_system() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        let mount = std::process::Command::new("/sbin/mount").output().unwrap();
-        if !String::from_utf8_lossy(&mount.stdout).contains(" on /System/Volumes/Data/home (autofs")
-        {
-            eprintln!(
-                "skipped: an autofs mount on /System/Volumes/Data/home not present on this host"
+        let base = std::fs::canonicalize(scratch("non-local")).unwrap();
+        let root = base.join("run");
+        let me = sys::current_uid();
+        pin_for(&root, me, &mut RefuseGroupWrite).expect("private local control root");
+        for observed in [Some(false), None] {
+            let mut called = false;
+            let err = runtime_root::create_private_with_locality(
+                &root,
+                me,
+                &mut RefuseGroupWrite,
+                |fd| {
+                    called = true;
+                    assert_eq!(sys::fd_is_local(fd), Some(true), "local control fd");
+                    observed
+                },
+            )
+            .err()
+            .expect("must refuse non-local or unknown locality");
+            assert!(
+                called,
+                "ancestor checks must reach the locality observation"
             );
-            return;
+            assert!(err.to_string().contains("local file system"), "{err}");
         }
-        let err = pin_for(
-            Path::new("/System/Volumes/Data/home"),
-            0,
-            &mut RefuseGroupWrite,
-        )
-        .err()
-        .expect("must refuse");
-        assert!(err.to_string().contains("local file system"), "{err}");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     // The walk must refuse a symlink anywhere in the path: after

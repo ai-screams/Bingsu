@@ -161,7 +161,7 @@ def prompt_context(binary, directory):
             break
     if not roots:
         raise ValueError("normal product init did not pin roots")
-    command = [binary, "prompt", "--ctx", "1", "--record", "B1", "--shell", "bash", "--width", "80",
+    command = [str(binary), "prompt", "--ctx", "1", "--record", "B1", "--shell", "bash", "--width", "80",
                "--pwd", str(directory), "--log-level=off", *roots]
     for _ in range(16):
         result = run(command, env=env)

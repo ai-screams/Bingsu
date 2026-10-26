@@ -296,7 +296,6 @@ def test_c1_ci_requires_every_shipped_link_and_msrv():
         assert "if" not in native
         for name, directories in (
             ("Product imports and matching deployment pair", ("target/release",)),
-            ("Both shipped Mach-O architectures", ("target/aarch64-apple-darwin/release", "target/x86_64-apple-darwin/release")),
             ("M3b native musl lifecycle security", ("target/$triple/release",)),
         ):
             commands = security.run_commands(names[name])
@@ -317,8 +316,8 @@ def test_c1_ci_requires_every_shipped_link_and_msrv():
     check(text)
     for before, after in (
         ("--unstripped-dir", "--unchecked"), ("--strip", "--unchecked"),
-        ("target/aarch64-apple-darwin/release/bingsu-collect", "unshipped"),
-        ("target/x86_64-apple-darwin/release/bingsu-collect", "unshipped"),
+        (", macos-latest", ""),
+        (", macos-26-intel", ""),
         ('"target/$triple/release/bingsu-collect"', '"unshipped"'),
         ("toolchain: 1.88.0", "toolchain: stable"),
         ("test_security_table_resource_failures_preserve_front[exec]", "unrun_exec"),

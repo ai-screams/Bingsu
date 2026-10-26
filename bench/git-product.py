@@ -200,7 +200,7 @@ def prepare(binary):
     sizes = {}
     for name, path in (("front", binary), ("collector", binary.with_name("bingsu-collect"))):
         stripped = directory / (name + "-stripped")
-        M3B.run(["strip", "-o", stripped, path])
+        M3B.run(["strip", "-o", str(stripped), str(path)])
         sizes[name] = stripped.stat().st_size
     sizes["combined"] = sum(sizes.values())
     diagnostic = prepare_diagnostic(source, directory, binary, deps, cross, triple)
@@ -263,7 +263,7 @@ def observe_stages(preparation, directory, repo):
             os.dup2(fd, target)
     output = bytearray()
     try:
-        with subprocess.Popen([preparation["diagnostic"], str(repo), str(repo), "timed", "known", "plain", "false", "/unused"],
+        with subprocess.Popen([str(preparation["diagnostic"]), str(repo), str(repo), "timed", "known", "plain", "false", "/unused"],
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               env={}, cwd="/", close_fds=False, preexec_fn=setup) as child:
             for fd in copies:
@@ -357,7 +357,7 @@ def observe(binary, preparation, directory, repo):
     output = bytearray()
     memory = []
     pid = None
-    with subprocess.Popen([preparation["fixture"], str(directory), str(repo)], stdout=subprocess.PIPE,
+    with subprocess.Popen([str(preparation["fixture"]), str(directory), str(repo)], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, env={**os.environ, "TMPDIR": str(directory)}) as child:
         deadline = time.monotonic() + 5
         while child.poll() is None:
@@ -382,7 +382,7 @@ def observe(binary, preparation, directory, repo):
     sample = json.loads(lines[0])
     sample.update(status="OBSERVED", memory_samples=memory, load=load, cwd=str(repo), clock="fixture helper identity; unchanged monotonic deadlines")
     try:
-        reader = M3B.run([preparation["fixture"], "--read", directory, repo])
+        reader = M3B.run([str(preparation["fixture"]), "--read", str(directory), str(repo)])
         sample["previous_read"] = json.loads(reader.stdout)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         sample["previous_read"] = {"status": "BLOCKED", "reason": str(error)}
@@ -398,7 +398,10 @@ def observe(binary, preparation, directory, repo):
         if isinstance(contexts[key], str):
             raise ValueError(contexts[key])
         command, env = contexts[key]
-        command = list(command)
+        # prompt_context accepts a Path executable; normalize before inspecting
+        # argv, just as M3B.run does at the subprocess boundary. Keep the cached
+        # context unchanged when retargeting this observation's repository.
+        command = [str(word) for word in command]
         command = ["--home=" + str(repo) if word.startswith("--home=") else word for word in command]
         command[command.index("--pwd") + 1] = str(repo)
         start = time.monotonic_ns()
