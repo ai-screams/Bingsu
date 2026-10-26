@@ -1,5 +1,7 @@
 """Portable regression/mutation fixtures for the Linux strace gate."""
 from pathlib import Path
+from collections import Counter
+import hashlib
 
 import pytest
 
@@ -8,6 +10,93 @@ from test_prompt_env_paths import assert_historical_prompt_trace_budget as asser
 
 EXE = "/pinned/bin/bingsu"
 ROOTS = ["/pinned/run", "/pinned/config", "/pinned/state"]
+
+
+# prompt 트리의 read 계열 payload만 줄였다. provenance: fixtures/prompt-e4-trace.md.
+# 컨테이너 경로는 문자열 인자로만 전달하며,
+# macOS의 realpath/stat 또는 현재 빌드 위치로 바꾸지 않는다.
+@pytest.mark.parametrize("capture,base,digest", [
+    (0, "/home/tester/pt/test_prompt_binary_names_only_0",
+     "66caaeed9d79a542f5d6837581e96cc9e00f907d996a9220c5709ad48108e684"),
+    (1, "/home/tester/pt/test_prompt_binary_names_only_1",
+     "4dde46365d2758ba745a656fa7d116603513d4858cde4c65e0b470d4e5f9c34c"),
+])
+def test_real_e4_linux_fd_contract(capture, base, digest):
+    data = Path(__file__).with_name("fixtures").joinpath(
+        f"prompt-e4-linux-{capture}.strace").read_bytes()
+    assert len(data) < 600_000
+    assert hashlib.sha256(data).hexdigest() == digest
+    lines = data.decode().splitlines()
+    exe = base + "/bin/bingsu"
+    collector = "/home/tester/target/debug/bingsu-collect"
+    roots = [base + suffix for suffix in (
+        "/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log",
+    )]
+    inputs = tuple(base + suffix for suffix in (
+        "/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore",
+    ))
+    budget.assert_prompt_trace_budget(lines, exe, roots, global_inputs=inputs,
+                                      collector_exe=collector)
+    _, scoped = budget.tree(lines, exe)
+    calls = budget.parse_trace("\n".join(scoped))
+    assert not calls.errors, calls.errors
+    inventory = {path: Counter() for path in (collector, *inputs)}
+    for call in calls:
+        args = budget.args_of(call)
+        if not args:
+            continue
+        # 모든 대상 fd 인자와 open/부모 기준 이름 조회를 집계한다.
+        paths = set(budget.call_paths(call)) | {
+            path for path in inventory if any(f"<{path}>" in arg for arg in args)
+        }
+        for path in paths & inventory.keys():
+            shape = call.name
+            if call.name in {"read", "pread64"}:
+                shape += ":" + args[2]
+            elif call.name == "newfstatat":
+                shape += ":" + args[3]
+            elif call.name == "statx":
+                shape += ":" + args[2] + ":" + args[3]
+            elif call.name == "fcntl":
+                shape += ":" + ",".join(args[1:])
+            elif call.name == "openat":
+                shape += ":" + args[2]
+            inventory[path][shape] += 1
+    if capture == 0:
+        assert inventory[collector] == Counter({
+            "openat:O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC": 1,
+            "newfstatat:AT_EMPTY_PATH": 2, "newfstatat:AT_SYMLINK_NOFOLLOW": 1,
+            "statx:AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH:STATX_ALL": 4,
+            "fstatfs": 1, "pread64:65536": 1, "pread64:65488": 873,
+            "fcntl:F_GETFD": 1, "close": 1,
+        })
+        for path in inputs:
+            assert inventory[path] == Counter({
+                "openat:O_RDONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC": 1,
+            })
+        budget.assert_global_inputs_exercised(lines, exe, inputs, False)
+        # 축소한 실제 trace에서도 열린 collector fd의 변경/복제/마스크 확대는 거부한다.
+        read = next(c for c in calls if c.name == "pread64" and collector in c.args)
+        fd = budget.args_of(read)[0]
+        at = next(i for i, line in enumerate(lines) if f"pread64({fd}," in line)
+        for operation in (
+            f'write({fd}, "x", 1) = 1',
+            f'fcntl({fd}, F_SETFD, 0) = 0',
+            f'dup({fd}) = 60<{collector}>',
+            f'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, '
+            'STATX_ALL|STATX_MNT_ID, {}) = 0',
+        ):
+            mutated = lines[:at] + [f"{read.pid} {operation}"] + lines[at:]
+            with pytest.raises(AssertionError):
+                budget.assert_prompt_trace_budget(mutated, exe, roots, global_inputs=inputs,
+                                                  collector_exe=collector)
+    else:
+        # _1은 helper exit_group(1) 전에 대상 파일에 도달하지 않았다.
+        # 경로 게이트 통과를 전역 입력의 성공 읽기 증거로 오인하면 실패한다.
+        assert all(not counts for counts in inventory.values())
+        assert any(c.name == "exit_group" and c.args == "1" for c in calls)
+        with pytest.raises(AssertionError, match="global input opens missing"):
+            budget.assert_global_inputs_exercised(lines, exe, inputs, True)
 
 
 @pytest.fixture(scope="module")
@@ -520,6 +609,21 @@ def test_collector_verification_uses_init_pin(pin, spawn):
                                       collector_exe=collector_exe)
 
 
+# 이것을 실패시키는 것: 실제 _0에서 관찰한 fd 조회 중 하나를 다시 빠뜨리는 것.
+@pytest.mark.parametrize("operation", [
+    'newfstatat({fd}, "", {{st_mode=S_IFREG|0755}}, AT_EMPTY_PATH) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, '
+    '{{stx_mask=STATX_ALL|STATX_MNT_ID, stx_mode=S_IFREG|0755}}) = 0',
+    'fcntl({fd}, F_GETFD) = 0x1 (flags FD_CLOEXEC)',
+])
+def test_collector_verification_allows_observed_fd_metadata(operation):
+    pin = "/trusted/build/bingsu-collect"
+    lines = collector_verification_trace(pin, spawn=False)
+    at = next(i for i, line in enumerate(lines) if line.startswith('11 fstat(50<'))
+    lines.insert(at, '11 ' + operation.format(fd=f'50<{pin}>'))
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, collector_exe=pin)
+
+
 # 이것을 실패시키는 것: collector pin이 없거나 중복·상대 경로·다른 이름인데 추측해서 통과시키는 것.
 @pytest.mark.parametrize("words", ["", "'--collector-exe=relative'",
     "'--collector-exe=/trusted/build/other'",
@@ -730,24 +834,54 @@ def test_helper_global_inputs_are_exact_reads(path, missing):
                                       global_inputs=GLOBAL_INPUTS)
 
 
-# 이것을 실패시키는 것: 전역 입력의 같은 fd 메타데이터 확인을 newfstatat로 기록한 실행을 거부하는 것.
+# 이것을 실패시키는 것: 전역 입력의 같은 fd 메타데이터 확인을 Linux stat 형태로 기록한 실행을 거부하는 것.
 @pytest.mark.parametrize("path", GLOBAL_INPUTS)
-def test_helper_global_input_allows_empty_path_fd_stat(path):
-    lines = [line.replace('fstat(', 'newfstatat(').replace('>, {', '>, "", {')
-             .replace('}) = 0', '}, AT_EMPTY_PATH) = 0')
+@pytest.mark.parametrize("operation", [
+    'newfstatat({fd}, "", {{st_mode=S_IFREG|0600, st_size=5}}, AT_EMPTY_PATH) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, '
+    '{{stx_mask=STATX_ALL|STATX_MNT_ID, stx_mode=S_IFREG|0600, stx_size=5}}) = 0',
+])
+def test_helper_global_input_allows_empty_path_fd_stat(path, operation):
+    lines = ['11 ' + operation.format(fd=f'40<{path}>')
              if line.startswith('11 fstat(40<') else line for line in global_input_trace(path)]
     budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
 
 
-# 이것을 실패시키는 것: 열린 전역 입력 fd의 권한·소유자·길이·offset·동기화·fcntl 변경·복제를 허용하는 것.
 @pytest.mark.parametrize("path", GLOBAL_INPUTS)
+def test_helper_global_input_allows_fd_flags_query(path):
+    lines = global_input_trace(path)
+    at = next(i for i, line in enumerate(lines) if line.startswith(f'11 close(40<{path}>'))
+    lines.insert(at, f'11 fcntl(40<{path}>, F_GETFD) = 0x1 (flags FD_CLOEXEC)')
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+
+
+# 이것을 실패시키는 것: collector와 세 전역 입력의 열린 fd에서 조회 허용을
+# 변경·복제·다른 statx 플래그/마스크 또는 인자 수까지 넓히는 것.
+@pytest.mark.parametrize("path", ["/trusted/build/bingsu-collect", *GLOBAL_INPUTS])
 @pytest.mark.parametrize("operation", [
+    'statx({fd}, "child", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "{path}", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "", AT_EMPTY_PATH, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "", AT_EMPTY_PATH|AT_STATX_FORCE_SYNC, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "", AT_EMPTY_PATH|AT_STATX_DONT_SYNC, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW, STATX_ALL, {{}}) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL|STATX_MNT_ID, {{}}) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_BASIC_STATS, {{}}) = 0',
+    'statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {{}}, 0) = 0',
+    'newfstatat({fd}, "child", {{}}, AT_EMPTY_PATH) = 0',
+    'newfstatat({fd}, "", {{}}, AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW) = 0',
+    'newfstatat({fd}, "", {{}}, AT_EMPTY_PATH, 0) = 0',
+    'fcntl({fd}, F_GETFD, 0) = 0x1 (flags FD_CLOEXEC)',
+    'fcntl({fd}, F_GETFL) = 0',
     'fchmod({fd}, 0777) = 0',
     'fchown({fd}, 0, 0) = 0',
     'ftruncate({fd}, 0) = 0',
     'lseek({fd}, 0, SEEK_SET) = 0',
     'fsync({fd}) = 0',
     'fdatasync({fd}) = 0',
+    'write({fd}, "x", 1) = 1',
+    'pwrite64({fd}, "x", 1, 0) = 1',
     'fcntl({fd}, F_SETFD, 0) = 0',
     'fcntl({fd}, F_SETFL, O_RDWR|O_APPEND) = 0',
     'fcntl({fd}, F_DUPFD, 60) = 60<{path}>',
@@ -756,12 +890,15 @@ def test_helper_global_input_allows_empty_path_fd_stat(path):
     'dup2({fd}, 60) = 60<{path}>',
     'dup3({fd}, 60, O_CLOEXEC) = 60<{path}>',
 ])
-def test_helper_global_input_rejects_fd_operation_injection(path, operation):
-    lines = global_input_trace(path)
-    at = next(i for i, line in enumerate(lines) if f'"{path}"' in line and 'openat(' in line)
-    lines.insert(at + 1, '11 ' + operation.format(fd=f'40<{path}>', path=path))
+def test_helper_pinned_input_rejects_fd_operation_injection(path, operation):
+    collector = path.endswith("/bingsu-collect")
+    lines = collector_verification_trace(path, spawn=False) if collector else global_input_trace(path)
+    fd = f'{50 if collector else 40}<{path}>'
+    at = next(i for i, line in enumerate(lines) if 'openat(' in line and line.endswith('= ' + fd))
+    lines.insert(at + 1, '11 ' + operation.format(fd=fd, path=path))
     with pytest.raises(AssertionError):
-        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS,
+                                          collector_exe=path if collector else None)
 
 
 # 이것을 실패시키는 것: 각 허용 파일을 같은 뿌리의 다른 이름으로 바꾸거나, 쓰기·다른 errno·

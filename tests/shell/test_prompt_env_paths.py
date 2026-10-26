@@ -392,6 +392,23 @@ def open_flags(text):
     return set(text.split("|")) - {"O_LARGEFILE"}
 
 
+def helper_readonly_fd_metadata(call):
+    # 실제 Linux trace의 같은 fd 조회 형태만 허용한다. statx의 반환 stx_mask와
+    # 요청 마스크는 다르므로, 반환에 MNT_ID가 있어도 요청 권한을 넓히지 않는다.
+    args = args_of(call)
+    if call.name == "fstat":
+        return len(args) == 2
+    if call.name == "newfstatat":
+        return len(args) == 4 and args[1] == '""' and args[3] == "AT_EMPTY_PATH"
+    if call.name == "statx":
+        return (len(args) == 5 and args[1] == '""'
+                and set(args[2].split("|")) == {"AT_STATX_SYNC_AS_STAT", "AT_EMPTY_PATH"}
+                and args[3] == "STATX_ALL")
+    if call.name == "fcntl":
+        return len(args) == 2 and args[1] == "F_GETFD"
+    return False
+
+
 def helper_global_input(call, path, files, held):
     # D1c: before sending a Git request, the trusted helper reads init-pinned
     # XDG git/config, HOME .gitconfig, then the selected excludes file. This
@@ -418,11 +435,11 @@ def helper_global_input(call, path, files, held):
     # Same-fd stamps and bounded reads, then close. These inputs are read
     # before the helper filter, so the general helper syscall list is not
     # sufficient: every other operation on their fds must fail here.
-    if call.name in {"fstat", "close"}:
+    if call.name == "close":
+        return len(args) == 1
+    if helper_readonly_fd_metadata(call):
         return True
-    if call.name == "newfstatat":
-        return args[1] == '""' and args[3] == "AT_EMPTY_PATH"
-    return (call.name == "read"
+    return (call.name == "read" and len(args) == 3 and args[2].isdecimal()
             and call.ret.isdecimal() and 0 <= int(call.ret) <= int(args[2]) <= 65_537)
 
 
@@ -736,13 +753,16 @@ class HelperCollectorExecutable(HelperExecutableWalk):
         args = args_of(call)
         if args[0] not in self.held:
             return False
-        if call.name in {"fstat", "newfstatat", "statx"}:
-            return self.fd_stat(call)
-        if call.name in {"close", "fstatfs"}:
+        if helper_readonly_fd_metadata(call):
             return True
+        if call.name == "close":
+            return len(args) == 1
+        if call.name == "fstatfs":
+            return len(args) == 2
         if call.name == "fgetxattr":
             return args[1:] == ['"system.posix_acl_access"', "NULL", "0"]
-        return (call.name == "pread64" and call.ret.isdecimal()
+        return (call.name == "pread64" and len(args) == 4 and args[2].isdecimal()
+                and call.ret.isdecimal()
                 and 0 <= int(call.ret) <= int(args[2]) <= 65_536
                 and args[3].isdecimal() and int(args[3]) < 64 * 1024 * 1024)
 
