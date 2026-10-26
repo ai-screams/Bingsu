@@ -413,6 +413,19 @@ fn linux_floor() -> io::Result<()> {
     Ok(())
 }
 
+/// In-process exchange tests own their pipes; entry validation is tested apart.
+#[cfg(test)]
+#[allow(dead_code, reason = "integration test injection only")]
+pub fn worker_fds_for_test(result: File, request: File, lock: File) -> WorkerFds {
+    WorkerFds {
+        result,
+        request,
+        _lock: lock,
+        #[cfg(target_os = "macos")]
+        probe: None,
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 #[allow(dead_code, reason = "integration test injection only")]
 pub fn required_features_for_test() -> io::Result<()> {
