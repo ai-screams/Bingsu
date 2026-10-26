@@ -418,10 +418,9 @@ impl Patterns {
             return Err(error);
         }
         if self.words == 0 {
-            return io.account(|m| {
-                m.check()?;
-                Ok(policies.conversion)
-            });
+            // No matching, allocation or I/O. The status loops check their
+            // per-entry deadline before requesting this already-known policy.
+            return Ok(policies.conversion);
         }
         io.account(|m| {
             let mut scratch = m.object_allocation();

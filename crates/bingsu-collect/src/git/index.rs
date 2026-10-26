@@ -94,8 +94,9 @@ pub fn load(io: &RepoIo<'_>) -> Result<gix_index::State, ReadError> {
     Ok(state)
 }
 
-/// The expanded state owns its live reservations. Dropping it releases both
-/// entry and path capacity, including on a failed expansion.
+/// Validated, immutable expanded state with its live reservations. Only this
+/// module can construct or change it; consumers can reuse its validation.
+/// Dropping it releases entry and path capacity, including on failed expansion.
 pub struct ExpandedIndex {
     state: gix_index::State,
     entries: crate::meter::PathAllocation,
@@ -179,9 +180,24 @@ pub fn expand_sparse(
     repo: &crate::git::GuardedRepository<'_>,
     state: gix_index::State,
 ) -> Result<ExpandedIndex, ReadError> {
+    repo.io.account(|m| validate(&state, m))?;
+    expand_validated(repo, state)
+}
+
+/// load has already validated the decoded state. No mutable State escapes
+/// between that validation and expansion (which validates its own changes).
+pub(crate) fn load_expanded(
+    repo: &crate::git::GuardedRepository<'_>,
+) -> Result<ExpandedIndex, ReadError> {
+    expand_validated(repo, load(&repo.io)?)
+}
+
+fn expand_validated(
+    repo: &crate::git::GuardedRepository<'_>,
+    state: gix_index::State,
+) -> Result<ExpandedIndex, ReadError> {
     use gix_index::entry::Flags;
     let io = &repo.io;
-    io.account(|m| validate(&state, m))?;
     let (entries, paths) = io.account(|m| Ok((m.path_allocation(), m.path_allocation())))?;
     let mut expanded = ExpandedIndex {
         state: gix_index::State::new(Kind::Sha1),
@@ -534,6 +550,11 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
 
 /// Also validate caller-supplied (including later sparse-expanded) states.
 pub(crate) fn validate(state: &gix_index::State, meter: &mut Meter) -> Result<(), ReadError> {
+    if state.entries().len() > budget::INDEX_ENTRIES as usize
+        || state.path_backing().len() > budget::INDEX_BYTES as usize
+    {
+        return Err(ReadError::Limit);
+    }
     let mut last = None;
     let has_gitlinks = state
         .entries()
@@ -589,4 +610,50 @@ pub(crate) fn validate(state: &gix_index::State, meter: &mut Meter) -> Result<()
         last = Some(key);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    // Mutations: omit/invert either bound when certifying caller-owned states.
+    #[test]
+    fn validated_states_enforce_entry_and_path_limits() {
+        let mut state = gix_index::State::new(Kind::Sha1);
+        let mut meter = Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        for i in 0..budget::INDEX_ENTRIES {
+            state.dangerously_push_entry(
+                Default::default(),
+                hash::ObjectId::null(Kind::Sha1),
+                gix_index::entry::Flags::empty(),
+                gix_index::entry::Mode::FILE,
+                format!("f{i:05}").as_bytes().into(),
+            );
+        }
+        assert_eq!(validate(&state, &mut meter), Ok(()));
+        state.dangerously_push_entry(
+            Default::default(),
+            hash::ObjectId::null(Kind::Sha1),
+            gix_index::entry::Flags::empty(),
+            gix_index::entry::Mode::FILE,
+            b"last".as_slice().into(),
+        );
+        assert_eq!(validate(&state, &mut meter), Err(ReadError::Limit));
+        let mut empty = gix_index::State::new(Kind::Sha1);
+        empty.dangerously_push_entry(
+            Default::default(),
+            hash::ObjectId::null(Kind::Sha1),
+            gix_index::entry::Flags::empty(),
+            gix_index::entry::Mode::FILE,
+            b"f".as_slice().into(),
+        );
+        let mut paths = empty.take_path_backing();
+        paths.resize(budget::INDEX_BYTES as usize, b'x');
+        empty.return_path_backing(paths);
+        assert_eq!(validate(&empty, &mut meter), Ok(()));
+        let mut paths = empty.take_path_backing();
+        paths.push(b'x');
+        empty.return_path_backing(paths);
+        assert_eq!(validate(&empty, &mut meter), Err(ReadError::Limit));
+    }
 }

@@ -61,13 +61,41 @@ pub struct RepoIo<'a> {
 pub struct ReadMap(Vec<u8>);
 
 pub(crate) struct WorktreeEntry {
-    pub name: Vec<u8>,
+    pub name: std::ops::Range<usize>,
     pub metadata: Result<libc::stat, ReadError>,
 }
 pub(crate) struct WorktreeListing {
     pub entries: Vec<WorktreeEntry>,
+    pub names: Vec<u8>,
     pub more: bool,
     _allocation: crate::meter::PathAllocation,
+}
+
+/// Grow bounded scratch before writing it. Charge the new capacity while the
+/// old buffer is still live during reallocation; retain only the final capacity.
+pub(super) fn reserve_scratch<T>(
+    buffer: &mut Vec<T>,
+    additional: usize,
+    allocation: &mut crate::meter::PathAllocation,
+    meter: &mut Meter,
+) -> Result<(), ReadError> {
+    let needed = buffer
+        .len()
+        .checked_add(additional)
+        .ok_or(ReadError::Limit)?;
+    if needed > buffer.capacity() {
+        let extra = (needed - buffer.capacity()).max(buffer.capacity().max(16));
+        let bytes = extra
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or(ReadError::Limit)?;
+        allocation.reserve(bytes, meter)?;
+        let mut growth = meter.path_allocation();
+        growth.reserve(buffer.capacity() * std::mem::size_of::<T>(), meter)?;
+        buffer
+            .try_reserve_exact(buffer.capacity() + extra - buffer.len())
+            .map_err(|_| ReadError::Limit)?;
+    }
+    Ok(())
 }
 impl std::ops::Deref for ReadMap {
     type Target = [u8];
@@ -251,6 +279,7 @@ impl<'a> RepoIo<'a> {
                 .map_err(|_| ReadError::Denied)?;
             let scan = cached.as_mut().ok_or(ReadError::Denied)?;
             let mut entries: Vec<WorktreeEntry> = Vec::new();
+            let mut names = Vec::new();
             let mut allocation = meter.path_allocation();
             // The safe layer lends its meter only after raw-entry/stat charging.
             let more = scan.visit_batch(
@@ -260,21 +289,12 @@ impl<'a> RepoIo<'a> {
                 meter,
                 first,
                 |raw, metadata, m| {
-                    if entries.len() == entries.capacity() {
-                        let extra = entries.capacity().max(16);
-                        allocation.reserve(extra * std::mem::size_of::<WorktreeEntry>(), m)?;
-                        let mut growth = m.path_allocation();
-                        growth.reserve(
-                            entries.capacity() * std::mem::size_of::<WorktreeEntry>(),
-                            m,
-                        )?;
-                        entries
-                            .try_reserve_exact(extra)
-                            .map_err(|_| ReadError::Limit)?;
-                    }
-                    allocation.reserve(raw.len(), m)?;
+                    reserve_scratch(&mut entries, 1, &mut allocation, m)?;
+                    reserve_scratch(&mut names, raw.len(), &mut allocation, m)?;
+                    let start = names.len();
+                    names.extend_from_slice(raw);
                     entries.push(WorktreeEntry {
-                        name: raw.to_vec(),
+                        name: start..names.len(),
                         metadata: metadata.copied(),
                     });
                     Ok(())
@@ -283,6 +303,7 @@ impl<'a> RepoIo<'a> {
             meter.check()?;
             Ok(WorktreeListing {
                 entries,
+                names,
                 more,
                 _allocation: allocation,
             })
@@ -706,3 +727,47 @@ impl<'a> RepoIo<'a> {
         self.read_budgeted(path, cap, Axis::PackBytes).map(ReadMap)
     }
 }
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    // Mutations: grow at exact capacity; omit either the retained capacity or
+    // the transient old-buffer charge; reserve after allocating; lose bytes.
+    #[test]
+    fn scratch_capacity_is_live_and_precharged_through_growth() {
+        for limit in [31, 32, 47, 48] {
+            let mut meter =
+                Meter::new(std::time::Instant::now() + std::time::Duration::from_secs(30));
+            let mut allocation = meter.path_allocation();
+            let mut bytes = Vec::<u8>::new();
+            reserve_scratch(&mut bytes, 16, &mut allocation, &mut meter).unwrap();
+            bytes.extend(0..16);
+            assert_eq!(meter.live_allocated(), 16);
+            meter.allocation_limit = 16;
+            reserve_scratch(&mut bytes, 0, &mut allocation, &mut meter).unwrap();
+            meter.allocation_limit = limit;
+            let result = reserve_scratch(&mut bytes, 1, &mut allocation, &mut meter);
+            assert_eq!(
+                result,
+                if limit < 48 {
+                    Err(ReadError::Limit)
+                } else {
+                    Ok(())
+                }
+            );
+            assert_eq!(bytes, (0..16).collect::<Vec<_>>());
+            assert_eq!(bytes.capacity(), if limit < 48 { 16 } else { 32 });
+            if result.is_ok() {
+                assert_eq!(meter.live_allocated(), 32);
+            }
+            drop(bytes);
+            drop(allocation);
+            assert_eq!(meter.live_allocated(), 0);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "io_test_support.rs"]
+pub(crate) mod test_support;

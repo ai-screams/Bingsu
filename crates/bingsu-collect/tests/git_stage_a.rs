@@ -585,9 +585,9 @@ fn alternates_presence_includes_dangling_symlinks_and_directories() {
                 "dangling" | "symlink" => {
                     fs::remove_file(f.0.join(&path)).unwrap();
                     if kind == "symlink" {
-                        f.write(".git/objects/info/target", b"outside");
+                        f.write(".git/objects/info/alternates-destination", b"outside");
                     }
-                    symlink("target", f.0.join(&path)).unwrap();
+                    symlink("alternates-destination", f.0.join(&path)).unwrap();
                 }
                 _ => {}
             }
@@ -605,7 +605,8 @@ fn alternates_presence_includes_dangling_symlinks_and_directories() {
                 !events
                     .borrow()
                     .iter()
-                    .any(|event| event == &format!("openat:{name}") || event == "openat:target")
+                    .any(|event| event == &format!("openat:{name}")
+                        || event == "openat:alternates-destination")
             );
             no_objects(&m, &events.borrow());
         }
