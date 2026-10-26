@@ -413,7 +413,16 @@ def helper_global_input(call, path, files, held):
                 and open_flags(args[1]) == {"O_RDONLY", "O_NONBLOCK", "O_NOCTTY", "O_CLOEXEC"}
                 and (call.ret == "-1 ENOENT (No such file or directory)"
                      or re.fullmatch(r"\d+<" + re.escape(path) + r">", call.ret) is not None))
-    return (call.name == "read" and held.get(args[0]) == path
+    if held.get(args[0]) != path:
+        return False
+    # Same-fd stamps and bounded reads, then close. These inputs are read
+    # before the helper filter, so the general helper syscall list is not
+    # sufficient: every other operation on their fds must fail here.
+    if call.name in {"fstat", "close"}:
+        return True
+    if call.name == "newfstatat":
+        return args[1] == '""' and args[3] == "AT_EMPTY_PATH"
+    return (call.name == "read"
             and call.ret.isdecimal() and 0 <= int(call.ret) <= int(args[2]) <= 65_537)
 
 
@@ -926,6 +935,12 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
                         and re.fullmatch(r"\d+<" + re.escape(collector_exe) + r">", args[0]))
         if collector_fd:
             assert collector_owner and collector_walk.fd_op(c), ("helper collector fd", c)
+        # 이것을 실패시키는 것: content_paths에 없는 전역 입력 fd 변경·복제를 필터 설치 전에 허용하는 것.
+        global_fd = re.fullmatch(r"\d+<(/[^<>]*)>", args[0]) if args else None
+        if global_fd and global_fd.group(1) in global_inputs:
+            path = global_fd.group(1)
+            assert (c.pid == helper_pid
+                    and helper_global_input(c, path, global_inputs, global_held)), ("helper global input fd", c)
         if c.name == "kill":
             # helper_limits::kill_self: strace can exhaust the helper's overall
             # deadline. Its watchdog kills its own TGID, never a reusable child

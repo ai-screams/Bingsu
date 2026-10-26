@@ -730,6 +730,40 @@ def test_helper_global_inputs_are_exact_reads(path, missing):
                                       global_inputs=GLOBAL_INPUTS)
 
 
+# 이것을 실패시키는 것: 전역 입력의 같은 fd 메타데이터 확인을 newfstatat로 기록한 실행을 거부하는 것.
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+def test_helper_global_input_allows_empty_path_fd_stat(path):
+    lines = [line.replace('fstat(', 'newfstatat(').replace('>, {', '>, "", {')
+             .replace('}) = 0', '}, AT_EMPTY_PATH) = 0')
+             if line.startswith('11 fstat(40<') else line for line in global_input_trace(path)]
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+
+
+# 이것을 실패시키는 것: 열린 전역 입력 fd의 권한·소유자·길이·offset·동기화·fcntl 변경·복제를 허용하는 것.
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+@pytest.mark.parametrize("operation", [
+    'fchmod({fd}, 0777) = 0',
+    'fchown({fd}, 0, 0) = 0',
+    'ftruncate({fd}, 0) = 0',
+    'lseek({fd}, 0, SEEK_SET) = 0',
+    'fsync({fd}) = 0',
+    'fdatasync({fd}) = 0',
+    'fcntl({fd}, F_SETFD, 0) = 0',
+    'fcntl({fd}, F_SETFL, O_RDWR|O_APPEND) = 0',
+    'fcntl({fd}, F_DUPFD, 60) = 60<{path}>',
+    'fcntl({fd}, F_DUPFD_CLOEXEC, 60) = 60<{path}>',
+    'dup({fd}) = 60<{path}>',
+    'dup2({fd}, 60) = 60<{path}>',
+    'dup3({fd}, 60, O_CLOEXEC) = 60<{path}>',
+])
+def test_helper_global_input_rejects_fd_operation_injection(path, operation):
+    lines = global_input_trace(path)
+    at = next(i for i, line in enumerate(lines) if f'"{path}"' in line and 'openat(' in line)
+    lines.insert(at + 1, '11 ' + operation.format(fd=f'40<{path}>', path=path))
+    with pytest.raises(AssertionError):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+
+
 # 이것을 실패시키는 것: 각 허용 파일을 같은 뿌리의 다른 이름으로 바꾸거나, 쓰기·다른 errno·
 # symlink 대상·미개방/닫힌 fd·watchdog 읽기를 허용하는 것. 변이는 실제 제품 trace 게이트를 거친다.
 @pytest.mark.parametrize("path", GLOBAL_INPUTS)
