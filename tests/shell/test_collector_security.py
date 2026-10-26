@@ -1672,20 +1672,98 @@ def real_collection_context(tmp_path_factory):
     return measurement, binary, prepared, directory, repos
 
 
-# 이것을 실패시키는 것: 출하 mask 10을 0으로 되돌려 실제 git/path 프레임 없이 통과하는 것.
+def assert_shipped_collection(sample, case):
+    # Selection, protocol and child cleanup are contracts under any load.
+    # A real deadline is an observation, not a promise of completed collection.
+    detail = json.dumps(sample, indent=2)
+    assert sample.get("exit") == 0, detail  # Never hide a panic as timing noise.
+    assert sample.get("product_mask") == 10, detail
+    if sample["status"] == "BLOCKED":
+        assert sample.get("blocked_at") == "admission", detail
+        assert sample.get("deferred") == "Some(YieldTime)", detail
+        assert sample.get("broker") == "Busy", detail
+        return
+    assert sample["status"] == "OBSERVED", detail
+    assert sample["reaped"], detail
+    assert sample["reason"] in ("Complete", "Deadline"), detail
+    frames = [bytes.fromhex(raw) for _, raw in sample["frames"]]
+    updates = [raw[80:] for raw in frames if raw[10] == 5]
+    assert all(raw[:2] in (b"\x01\0", b"\x03\0") for raw in updates), detail
+    if sample["stage_a"]:
+        assert any(raw[:2] == b"\x03\0" for raw in updates), detail
+    if sample["published"]:
+        assert updates, detail
+    if sample["reason"] == "Deadline":
+        return
+    assert sample["stage_a"] and sample["published"], detail
+    assert any(raw[:2] == b"\x03\0" for raw in updates), detail
+    assert any(raw[:2] == b"\x01\0" for raw in updates), detail
+    if case in ("no-git", "git-clean", "git-dirty"):
+        assert sample["partial"] is False, detail
+    if case == "budget-bound":
+        assert sample["partial"] is True, detail
+
+
+@pytest.mark.parametrize("outcome", ["admission", "before-a", "after-a", "complete"])
+@pytest.mark.parametrize("damage", [None, "panic", "mask", "cleanup", "protocol", "frames"])
+def test_shipped_collection_security_is_gated_under_load(outcome, damage):
+    def update(segment):
+        raw = bytearray(80)
+        raw[10] = 5
+        return [1, (raw + segment.to_bytes(2, "little")).hex()]
+    sample = {"status": "OBSERVED", "exit": 0, "product_mask": 10, "reaped": True,
+              "reason": "Complete" if outcome == "complete" else "Deadline",
+              "stage_a": outcome in ("after-a", "complete"), "partial": False,
+              "published": outcome in ("after-a", "complete"),
+              "frames": [] if outcome == "before-a" else [update(3), update(1)]}
+    if outcome == "admission":
+        sample.update(status="BLOCKED", blocked_at="admission", deferred="Some(YieldTime)", broker="Busy")
+    if damage == "panic":
+        sample["exit"] = 101
+    elif damage == "mask":
+        sample["product_mask"] = 0
+    elif damage == "cleanup":
+        sample["broker" if outcome == "admission" else "reaped"] = False
+    elif damage == "protocol":
+        sample["deferred" if outcome == "admission" else "reason"] = "Protocol"
+    elif damage == "frames":
+        if outcome == "admission":
+            sample["blocked_at"] = "unknown"
+        elif outcome == "before-a":
+            sample["frames"] = [update(0)]
+        else:
+            sample["frames"] = [update(1)]
+    if damage:
+        with pytest.raises(AssertionError):
+            assert_shipped_collection(sample, "no-git")
+    else:
+        assert_shipped_collection(sample, "no-git")
+
+
+# 이것을 실패시키는 것: 출하 mask 10을 0으로 되돌리거나 완료된 수집의 git/path 프레임을 누락하는 것.
 @pytest.mark.parametrize("case", F3_CASES)
 def test_shipped_real_collection(real_collection_context, case):
     measurement, binary, prepared, directory, repos = real_collection_context
     sample = measurement.observe(binary, prepared, directory / "context" / case, repos[case])
     # Keep frames, timing, stderr and diagnostics even when an assertion fails.
     (directory / f"{case}.json").write_text(json.dumps(sample, indent=2) + "\n")
-    assert sample["status"] == "OBSERVED", sample
-    assert sample["stage_a"] and sample["published"] and sample["reaped"], sample
-    frames = [bytes.fromhex(raw) for _, raw in sample["frames"]]
-    updates = [raw[80:] for raw in frames if raw[10] == 5]
-    assert any(raw[:2] == b"\x03\0" for raw in updates), sample
-    if case in ("no-git", "git-clean", "git-dirty"):
-        assert any(raw[:2] == b"\x01\0" for raw in updates), sample
-        assert sample["reason"] == "Complete" and sample["partial"] is False, sample
-    if case == "budget-bound":
-        assert sample["partial"] is True, sample
+    print(json.dumps({"case": case, "status": sample["status"],
+                      "completion_status": sample.get("completion_status", "BLOCKED"),
+                      "reason": sample.get("reason", sample.get("deferred", sample.get("error")))}))
+    assert_shipped_collection(sample, case)
+
+
+def test_shipped_admission_deadline_is_blocked_without_panic(real_collection_context):
+    _, _, prepared, directory, repos = real_collection_context
+    result = subprocess.run([prepared["fixture"], str(directory / "expired-admission"),
+                             str(repos["no-git"]), "--expire-admission"],
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert not result.stderr, result.stderr
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1 and lines[0].startswith(b"F3_RESULT "), result.stdout
+    sample = json.loads(lines[0][10:])
+    assert sample["status"] == "BLOCKED" and sample["deferred"] == "Some(YieldTime)", sample
+    sample.update(exit=result.returncode, stdout=result.stdout.decode(), stderr=result.stderr.decode())
+    (directory / "expired-admission.json").write_text(json.dumps(sample, indent=2) + "\n")
+    assert_shipped_collection(sample, "no-git")

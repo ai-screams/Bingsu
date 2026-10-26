@@ -64,6 +64,32 @@ def sample(*, partial=False, reason="Complete", published=True, at=20):
             "footprint_bytes": 800, "as_peak_bytes": 4000, "rss_peak_bytes": 1000}], "load": [1, 2, 3]}
 
 
+@pytest.mark.parametrize("panic", [False, True])
+def test_admission_yield_and_panic_keep_raw_evidence(monkeypatch, tmp_path, panic):
+    record = {"status": "BLOCKED", "product_mask": 10, "blocked_at": "admission",
+              "deferred": "Some(YieldTime)", "broker": "Busy"}
+    stdout = b"" if panic else b"F3_RESULT " + json.dumps(record).encode() + b"\n"
+    stderr = b"thread 'main' panicked: helper admission\n" if panic else b""
+    class Helper:
+        returncode = 101 if panic else 0
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def poll(self): return self.returncode
+        def communicate(self): return stdout, stderr
+    monkeypatch.setattr(git.subprocess, "Popen", lambda *a, **k: Helper())
+    def unexpected(*args, **kwargs):
+        pytest.fail("blocked observation must not retry or synthesize downstream measurements")
+    monkeypatch.setattr(git.M3B, "run", unexpected)
+    monkeypatch.setattr(git, "observe_stages", unexpected)
+    result = git.observe("front", {"fixture": "helper"}, tmp_path / "context", tmp_path / "repo")
+    assert result["status"] == "BLOCKED"
+    assert result["exit"] == Helper.returncode
+    assert result["stdout"] == stdout.decode() and result["stderr"] == stderr.decode()
+    if not panic:
+        assert result.items() >= record.items()
+    assert git.summarize([result], 1)["observed"] == 0
+
+
 @pytest.fixture
 def pair(monkeypatch, tmp_path):
     prep = {"hashes": {"front": "front", "collector": "collector"}, "source_hashes": {"source": "digest"},

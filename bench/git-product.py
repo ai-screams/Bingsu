@@ -87,24 +87,31 @@ fn main() {
  state_root:base.join("state"),home:repo.to_owned(),me:commands::sys::current_uid(),
  user:commands::sys::passwd_entry(commands::sys::current_uid()).unwrap().name,version:[0,0,0],build:Some([1;40]),process_started:now};
  let primed=commands::refresh::refresh(request.clone(),&mut Fixed(now));
- assert!(matches!(primed,commands::refresh::RefreshResult::Published{..}|commands::refresh::RefreshResult::Revalidated{..}));
+ assert!(matches!(primed,commands::refresh::RefreshResult::Published{..}|commands::refresh::RefreshResult::Revalidated{..}),"snapshot prime: {primed:?}");
  let envelope=Envelope {config_root:Some(request.config_canonical.as_os_str().as_bytes().to_vec()),state_root:Some(request.state_root.as_os_str().as_bytes().to_vec()),pwd:Some(repo.as_os_str().as_bytes().to_vec()),home:Some(repo.as_os_str().as_bytes().to_vec()),width:80,..Envelope::default()};
  let mut groups=commands::group_policy::SystemGroups::new(&request.user);
  let watchdog=commands::helper_limits::start(Instant::now()).unwrap();
  let mut verification=commands::helper::Verification::start();
- let mut handle=None;let mut admission_ns=0;
+ let mut handle=None;let mut admission_ns=0;let mut product_mask=None;let mut deferred=None;
  let value=std::sync::Arc::new(std::sync::Mutex::new(None));let output=value.clone();
- commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock| {
+ let broker=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock| {
  verification.verified();
  let mut selected=commands::helper::selected_request(&collection::selection::PRODUCT,&envelope,display,clock)?.unwrap();
  assert_eq!(selected.binding.mask,10);
+ product_mask=Some(selected.binding.mask);
  // An isolated HOME/XDG with no global files is a known empty input, exactly
  // the normal helper's result for the measurement environment.
  selected.global_excludes_known=true;
  let pin=commands::collector::PinnedCollector::verify(OsStr::new(@COLLECTOR@),commands::sys::current_uid(),&mut groups)?;
  let at=process::now_ns()?;
- let mut store=match CollectionStore::admit(context,&selected.binding,clock)? {
- Admission::Admitted(store)=>store,Admission::Deferred(_)=>return Err(commands::snapshot_store::StoreError::Busy)};
+ // Only the explicit regression mode injects an expired admission clock.
+ // Ordinary observations retain the shipped GC time and operation budgets.
+ let admission=if args.get(3).is_some_and(|arg|arg=="--expire-admission") {
+ CollectionStore::fixture_admit(context,&selected.binding,clock,bingsu_core::field::BUILTIN,
+ commands::collection_gc::GcBudget{max_ops:4096,max_ns:0},Some(||0))?
+ } else {CollectionStore::admit(context,&selected.binding,clock)?};
+ let mut store=match admission {
+ Admission::Admitted(store)=>store,Admission::Deferred(reason)=>{deferred=Some(reason);return Err(commands::snapshot_store::StoreError::Busy)}};
  admission_ns=process::now_ns()?.saturating_sub(at);
  let lock=store.worker_lock()?;
  let job=verification.attach(commands::collector::spawn(&pin,selected,lock,&watchdog,context)?,&store);
@@ -114,14 +121,18 @@ fn main() {
  commands::helper_limits::install(&watchdog)?;commands::helper_filter::install(pidfd)?;
  handle.as_ref().unwrap().confirm_confinement()?;Ok(())
  });
- let report=handle.expect("helper admission").finish();
+ let Some(handle)=handle else {
+ println!("F3_RESULT {{\"status\":\"BLOCKED\",\"product_mask\":{},\"blocked_at\":\"admission\",\"deferred\":\"{deferred:?}\",\"broker\":\"{broker:?}\"}}",product_mask.map_or("null".into(),|n|n.to_string()));
+ return;
+ };
+ let report=handle.finish();
  let value=value.lock().unwrap();
  let partial=value.as_ref().map(|v|v.reason!=wire::EndReason::Complete || v.updates.iter().any(|u|u.value.as_ref().is_some_and(|v|v.fields.get(10).is_some_and(|f|matches!(f.value,bingsu_core::field::FieldValue::Bool(true))))));
  let t=report.lifecycle;
  let events=[("verify_start",t.verify_start),("verify_end",t.verify_end),("spawn_enter",t.spawn_enter),("spawn_return",t.spawn_return),("ready",t.ready),("request_sent",t.request_sent),("completed",t.completed),("response_renamed",t.response_renamed),("lock_acquired",t.lock_acquired),("lock_closed",t.lock_closed),("request_deadline",t.request_deadline),("as_baseline",t.as_baseline)];
  let events=events.iter().map(|(k,v)|format!("\"{k}\":{}",opt(*v))).collect::<Vec<_>>().join(",");
  let frames=report.f3_frames.iter().map(|(n,b)|format!("[{},\"{}\"]",n,hex(b))).collect::<Vec<_>>().join(",");
- println!("F3_RESULT {{\"events\":{{{events}}},\"frames\":[{frames}],\"reason\":\"{:?}\",\"published\":{},\"reaped\":{},\"stage_a\":{},\"partial\":{},\"admission_gc_ns\":{admission_ns},\"completed_at_ns\":{}}}",report.reason,report.published,report.reaped,report.progress.stage_a_complete,partial.map_or("null".into(),|v|v.to_string()),opt(value.as_ref().map(|v|v.completed_at_ns)));
+ println!("F3_RESULT {{\"product_mask\":{},\"events\":{{{events}}},\"frames\":[{frames}],\"reason\":\"{:?}\",\"published\":{},\"reaped\":{},\"stage_a\":{},\"partial\":{},\"admission_gc_ns\":{admission_ns},\"completed_at_ns\":{}}}",product_mask.unwrap(),report.reason,report.published,report.reaped,report.progress.stage_a_complete,partial.map_or("null".into(),|v|v.to_string()),opt(value.as_ref().map(|v|v.completed_at_ns)));
 }
 '''
 
@@ -380,7 +391,12 @@ def observe(binary, preparation, directory, repo):
         return {"status": "BLOCKED", "error": "helper observation failed", "exit": child.returncode,
                 "stdout": output.decode(errors="replace"), "stderr": stderr.decode(errors="replace"), "memory_samples": memory, "load": load}
     sample = json.loads(lines[0])
-    sample.update(status="OBSERVED", memory_samples=memory, load=load, cwd=str(repo), clock="fixture helper identity; unchanged monotonic deadlines")
+    sample.setdefault("status", "OBSERVED")
+    sample.update(memory_samples=memory, load=load, cwd=str(repo), clock="fixture helper identity; unchanged monotonic deadlines",
+                  exit=child.returncode, stdout=output.decode(errors="replace"), stderr=stderr.decode(errors="replace"))
+    if sample["status"] == "BLOCKED":
+        return sample
+    sample["completion_status"] = "OBSERVED" if sample.get("reason") == "Complete" else "BLOCKED"
     try:
         reader = M3B.run([str(preparation["fixture"]), "--read", str(directory), str(repo)])
         sample["previous_read"] = json.loads(reader.stdout)

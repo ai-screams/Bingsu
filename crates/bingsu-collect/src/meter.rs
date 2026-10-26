@@ -65,6 +65,8 @@ pub struct Meter {
     #[cfg(test)]
     pub hook: Option<Hook>,
     #[cfg(test)]
+    pub expire_on_event: Option<&'static str>,
+    #[cfg(test)]
     pub mount_fault: Option<i32>,
     #[cfg(test)]
     pub worktree_device: Option<u64>,
@@ -146,6 +148,8 @@ impl Meter {
             #[cfg(test)]
             hook: None,
             #[cfg(test)]
+            expire_on_event: None,
+            #[cfg(test)]
             mount_fault: None,
             #[cfg(test)]
             worktree_device: None,
@@ -191,6 +195,8 @@ impl Meter {
             peak_fds: 0,
             #[cfg(test)]
             hook: None,
+            #[cfg(test)]
+            expire_on_event: None,
             #[cfg(test)]
             mount_fault: None,
             #[cfg(test)]
@@ -339,6 +345,12 @@ impl Meter {
     }
 
     pub fn event(&mut self, _event: &str) {
+        // Expire the active stage at a deterministic checkpoint. Meter::stage
+        // restores the request deadline normally; no clock or counter is reset.
+        #[cfg(test)]
+        if self.expire_on_event == Some(_event) {
+            self.deadline = Instant::now();
+        }
         #[cfg(test)]
         if let Some(hook) = self.hook.as_mut() {
             hook(_event);
