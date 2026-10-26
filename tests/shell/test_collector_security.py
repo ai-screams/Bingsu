@@ -1421,6 +1421,12 @@ def test_product_rustc_cfg_gate_rejects_enabled_or_vacuous_logs():
                 line.replace("bingsu_collect", "gix_index") + "\n" + line.replace("--check-cfg", "--cfg collector_fuzz --check-cfg"),
                 "       Fresh bingsu-collect v0.0.0"):
         assert gate.check(bad), bad
+    # CI form: cargo colours the status word (CARGO_TERM_COLOR=always).
+    coloured = line.replace("     Running", "\x1b[1m\x1b[92m     Running\x1b[0m")
+    assert gate.check(coloured) == []
+    for hidden in (coloured.replace("--check-cfg", "--cfg \x1b[0mcollector_fuzz --check-cfg"),
+                   coloured.replace("--check-cfg", "\x1b[1m--cfg\x1b[0m collector\x1b[0m_fuzz --check-cfg")):
+        assert gate.check(hidden), repr(hidden)
 
 
 def fuzz_texts():

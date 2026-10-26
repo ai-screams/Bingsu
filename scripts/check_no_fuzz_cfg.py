@@ -12,7 +12,16 @@ import shlex
 import sys
 
 
+# CSI (ESC [ … final byte) and two-byte ESC sequences. Cargo colours
+# "Running" under CARGO_TERM_COLOR=always (as in CI), and a colour code
+# inside a command line must not hide a flag from the check.
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+
 def check(log):
+    # 이것을 실패시키는 것: ANSI를 지우지 않아 색 입힌 CI 로그를 빈 로그로 보거나,
+    # 색 코드 사이에 낀 --cfg collector_fuzz를 놓치는 것.
+    log = ANSI.sub("", log)
     lines = [line for line in log.splitlines() if re.search(r"Running `.*\brustc\b.*--crate-name ", line)]
     errors = []
     if not any("--crate-name bingsu_collect " in line for line in lines):
