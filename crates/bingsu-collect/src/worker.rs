@@ -169,20 +169,23 @@ fn exchange_with_sink(
                 + std::time::Duration::from_millis(u64::from(request.budget_ms.min(50)));
             // Second product policy boundary, even after wire validation. A
             // catalog is explicit; no argv, feature or environment selects it.
+            // The rebuilt request only admits: it carries no global excludes, so
+            // collection keeps the decoded request and its helper-supplied input.
             let selected = collection::request(
                 catalog,
                 request.binding.clone(),
                 request.request_id,
                 request.budget_ms,
             )
-            .map_err(bad)?;
+            .map_err(bad)?
+            .is_some();
             let stage_deadline = std::cell::Cell::new(deadline);
             let mut write = |bytes: &[u8]| fds.write_all_until(bytes, deadline, &stage_deadline);
             let mut sink = WireSink::new(&request, catalog.segments, &payload, buffer, &mut write)?;
             sink.attach_write_deadline(&stage_deadline);
             let collect =
                 |request: &wire::Request, sink: &mut WireSink<'_>| collect(request, sink, deadline);
-            if let Some(request) = selected {
+            if selected {
                 collect(&request, &mut sink)?;
             }
             sink.stage_deadline(deadline);
@@ -273,6 +276,23 @@ mod tests {
             );
         }
     }
+}
+
+/// The shipped exchange with caller-owned pipes and catalog. Startup
+/// validation and protection are covered by the startup target.
+#[cfg(all(test, unix))]
+#[allow(
+    dead_code,
+    reason = "called by the exchange integration target, never shipped"
+)]
+pub(crate) fn exchange_for_test(
+    fds: &mut sys::WorkerFds,
+    catalog: &collection::selection::Catalog<'_>,
+    build_id: wire::BuildId,
+    collect: impl FnOnce(&wire::Request, &mut dyn UpdateSink, std::time::Instant) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut buffer = Box::new([0; wire::FRAME_MAX]);
+    exchange(fds, &mut buffer, 0, 0, catalog, build_id, collect)
 }
 
 /// Test target only, with a distinct build identity and a fixed deterministic
