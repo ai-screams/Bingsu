@@ -10,11 +10,11 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Stage**: M3a (config, snapshot, refresh helper) and M3b (collector process protocol, supervision, publication) are done;
-  M3c (git, path facts, safe reads) is next. `bingsu prompt` renders the built-in default theme or the user's TOML config
-  through a snapshot the refresh helper publishes; the helper can run the pinned `bingsu-collect` worker under its sandbox,
-  but no product segment collects data yet, so there is no git segment; command segments are checked but not run (M6);
-  there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
+- **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
+  M3c (git, path facts, safe reads) are done; M3d (measurement) is next. `bingsu prompt` renders the built-in default
+  theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
+  `bingsu-collect` worker under its sandbox for screens that show `dir` or `git`, and the prompt shows the collected git
+  status and folder facts from the next prompt on; command segments are checked but not run (M6); there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout

@@ -12,9 +12,9 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in early development (M3a and M3b done, M3c next).** `bingsu prompt` draws the built-in default prompt in bash,
-> zsh and fish, or your own look from a TOML config file. There is no release and no git segment yet, and command
-> segments are checked but not run yet. Published performance numbers do not exist yet.
+> **bingsu is in early development (M3a, M3b and M3c done, M3d next).** `bingsu prompt` draws the built-in default prompt
+> in bash, zsh and fish, or your own look from a TOML config file, with git status collected in the background. There is
+> no release yet, and command segments are checked but not run yet. Published performance numbers do not exist yet.
 > This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
 
 ## What is bingsu?
@@ -82,8 +82,9 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Record path and shell hooks (M1) | Done |
 | Core renderer (M2: layout, width, colors, per-shell output) | Done, used by `bingsu prompt` |
 | Config, snapshot and refresh helper (M3a) | Done: TOML config files (`config.toml`, `conf.d/*.toml`, `config.local.toml`, `extends`) with a JSON Schema; a background helper compiles them into a snapshot the prompt reads; `bingsu config check`, `config path`, `config use`, `config schema` and `bingsu reload` |
-| Background collection (M3b) | Done as plumbing: the helper runs a separate collector process with time, memory and file limits (and a system-call filter on Linux), and the prompt shows only results finished before it started; no segment collects data yet |
-| Git segment | Planned; git data is not collected yet |
+| Background collection (M3b) | Done: the helper runs a separate collector process with time, memory and file limits (and a system-call filter on Linux), and the prompt shows only results finished before it started |
+| Git and folder collection (M3c) | Done: the collector reads git state through bounded, read-only file access (no `git` process) and reports branch or commit, staged, modified, untracked and conflicted counts, ahead/behind and stash, plus whether the folder is read-only or inside a repository; values it cannot finish in time show as unknown (`?`) |
+| Git segment | Shown after the folder in the built-in default theme from the second prompt in a repository |
 | Performance measurement (M1 Part B) | Measurement tools in progress, no published numbers yet |
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width |
 | Theme selection and customization | Partly: style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
