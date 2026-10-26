@@ -550,15 +550,188 @@ fn patterns(seeds: &mut Vec<Seed>, t: Target) {
         push(seeds, t, "trailing-escape", Truncated, s("dir/\\"), Ok);
     }
     push(seeds, t, "nul-byte", Damaged, s("*.c x\0y\n"), Limit);
+    // Nine `**` runs: matching cost grows about 2^n with them, so add_buffer
+    // refuses the line before any match.
     let explosion = "**/**/**/**/**/**/**/**/**/a*b*c*d*e* x\n".repeat(64);
     push(
         seeds,
         t,
         "glob-explosion",
-        Valid,
+        Oversize,
         explosion.into_bytes(),
+        Limit,
+    );
+    // A scheduled fuzz run's input: one ignore match took 3.4 s under ASan.
+    let found = include_bytes!("../seeds/ignore-globstar-deadline.bin");
+    push(
+        seeds,
+        t,
+        "finding-globstar-deadline",
+        Oversize,
+        found.to_vec(),
+        Limit,
+    );
+    // Shape caps per line, not per word; `#` lines are exempt.
+    let globstars = crate::git::io::policy::GLOBSTAR_RUNS;
+    let stars = crate::git::io::policy::STAR_RUNS;
+    let line = |runs: usize, sep: &str| format!("{}x\n", sep.repeat(runs)).into_bytes();
+    push(
+        seeds,
+        t,
+        "globstar-runs-at-cap",
+        AtCap,
+        line(globstars, "**/a"),
         Ok,
     );
+    push(
+        seeds,
+        t,
+        "globstar-runs-cap-plus-one",
+        CapPlusOne,
+        line(globstars + 1, "**/a"),
+        Limit,
+    );
+    push(
+        seeds,
+        t,
+        "globstar-runs-across-a-space",
+        CapPlusOne,
+        line(globstars + 1, "** "),
+        Limit,
+    );
+    push(seeds, t, "star-runs-at-cap", AtCap, line(stars, "*a"), Ok);
+    push(
+        seeds,
+        t,
+        "star-runs-cap-plus-one",
+        CapPlusOne,
+        line(stars + 1, "*a"),
+        Limit,
+    );
+    // Class bytes per line (brackets included), against CLASS_BYTES.
+    let classes = crate::git::io::policy::CLASS_BYTES;
+    let class = |n: usize| format!("[{}a]", "c".repeat(n - 3));
+    push(
+        seeds,
+        t,
+        "class-bytes-at-cap",
+        AtCap,
+        format!("x{}\n", class(classes)).into_bytes(),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "class-bytes-cap-plus-one",
+        CapPlusOne,
+        format!("x{}\n", class(classes + 1)).into_bytes(),
+        Limit,
+    );
+    let review = |n: usize| {
+        let c = class(n);
+        format!("**/*{c}*/**/*{c}*/**/*{c}x\n").into_bytes()
+    };
+    push(
+        seeds,
+        t,
+        "class-review-at-cap",
+        AtCap,
+        review(classes / 3),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "class-review-long",
+        Oversize,
+        review(5_003),
+        Limit,
+    );
+    let c = class(1_003);
+    push(
+        seeds,
+        t,
+        "class-review-slashes",
+        Oversize,
+        format!("**/{c}/**/{c}/**/{c}/c\n").into_bytes(),
+        Limit,
+    );
+    // A quoted attribute pattern is unquoted before matching: octal escapes
+    // become `[` and `*`. Ignore files never unquote, so there the raw line
+    // is the pattern and stays under the caps.
+    let quoted_class = {
+        let c = format!("\\133{}a]", "c".repeat(5_000));
+        format!("\"**/*{c}*/**/*{c}*/**/*{c}x\" text\n").into_bytes()
+    };
+    let unquoted = if attributes { Limit } else { Ok };
+    push(
+        seeds,
+        t,
+        "quoted-class-review",
+        Oversize,
+        quoted_class,
+        unquoted,
+    );
+    let quoted_globstars =
+        |k: usize| format!("\"{}c\" text\n", "\\052\\052/\\052a/".repeat(k)).into_bytes();
+    push(
+        seeds,
+        t,
+        "quoted-globstars-at-cap",
+        AtCap,
+        quoted_globstars(globstars),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "quoted-globstars-cap-plus-one",
+        CapPlusOne,
+        quoted_globstars(globstars + 1),
+        unquoted,
+    );
+    // A byte-order mark comes off before the first line is read.
+    let mut after_mark = "\u{feff}".as_bytes().to_vec();
+    after_mark.extend(quoted_globstars(globstars + 1));
+    push(
+        seeds,
+        t,
+        "quoted-after-byte-order-mark",
+        CapPlusOne,
+        after_mark,
+        unquoted,
+    );
+    // gix skips blanks before looking for the quote.
+    let mut indented = b"x\n \t".to_vec();
+    indented.extend(quoted_globstars(globstars + 1));
+    push(
+        seeds,
+        t,
+        "quoted-after-blanks",
+        CapPlusOne,
+        indented,
+        unquoted,
+    );
+    push(
+        seeds,
+        t,
+        "quoted-globstars-review",
+        Oversize,
+        quoted_globstars(14),
+        unquoted,
+    );
+    push(
+        seeds,
+        t,
+        "classes-in-real-files",
+        Valid,
+        s("*.py[cod]\n[Bb]in/\nreport.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json\n"),
+        Ok,
+    );
+    let mut comment = b"#".to_vec();
+    comment.extend(line(globstars + 1, "**/"));
+    comment.extend(b"*.tmp\n");
+    push(seeds, t, "stars-in-comment", Valid, comment, Ok);
     let cap = bingsu_core::collection::budget::IGNORE_BYTES as usize;
     debug_assert_eq!(
         cap,
@@ -591,6 +764,37 @@ fn patterns(seeds: &mut Vec<Seed>, t: Target) {
         CapPlusOne,
         words(2049),
         Limit,
+    );
+    // Comment lines, as each grammar defines them, are outside the word cap.
+    let with = |n: usize, tail: &str| {
+        let mut data = words(n);
+        data.extend(tail.as_bytes());
+        data
+    };
+    push(
+        seeds,
+        t,
+        "comments-past-word-cap",
+        AtCap,
+        with(2048, &"# a comment of seven words here\n".repeat(64)),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "escaped-hash-counts",
+        CapPlusOne,
+        with(2048, "\\#a\n"),
+        Limit,
+    );
+    // An attribute comment may follow blanks; in an ignore file it is a pattern.
+    push(
+        seeds,
+        t,
+        "indented-hash",
+        AtCap,
+        with(2048, " # a\n"),
+        if attributes { Ok } else { Limit },
     );
 }
 
