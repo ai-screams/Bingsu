@@ -126,13 +126,40 @@ fn select_inner(
         return Ok(Selection::Outside(worktree, access, discovery));
     };
     let worktree_path = absolute(&parts[..parts.len() - level]);
+    let ancestors = max_levels.min(32).saturating_sub(level);
     let location = Location {
         path: &worktree_path,
         logical,
-        ancestors: max_levels.min(32).saturating_sub(level),
+        ancestors,
         depth: 0,
     };
-    let metadata = metadata(&worktree, location, &access, &mut discovery, meter)?;
+    let (metadata, worktree_path) =
+        match metadata(&worktree, location, &access, &mut discovery, meter) {
+            Ok(metadata) => (metadata, worktree_path),
+            // Git records worktree paths in the volume's stored spelling; the
+            // cwd may spell the held worktree in another case or Unicode
+            // normalization. Retry once with the kernel's spelling of that
+            // held directory: never fold bytes, never look up a recorded path.
+            Err(ReadError::Escape) => {
+                // No stored spelling (another kernel, a failed query or a
+                // path beyond PATH_MAX) proves nothing: keep the Escape.
+                let stored = match worktree.stored_path(meter) {
+                    Ok(Some(stored)) if stored != worktree_path => stored,
+                    _ => return Err(ReadError::Escape),
+                };
+                scratch.reserve(stored.len(), meter)?;
+                meter.event("stored_spelling");
+                let location = Location {
+                    path: &stored,
+                    logical,
+                    ancestors,
+                    depth: 0,
+                };
+                let metadata = metadata(&worktree, location, &access, &mut discovery, meter)?;
+                (metadata, stored)
+            }
+            Err(error) => return Err(error),
+        };
     let binding = if metadata.submodule {
         let mut allocation = meter.path_allocation();
         allocation.reserve(metadata.path.len() + worktree_path.len(), meter)?;

@@ -692,6 +692,26 @@ impl Root {
         self.identity.device
     }
 
+    /// The kernel's stored spelling of this held directory, without a path
+    /// lookup. Darwin volumes may ignore case and Unicode normalization, so a
+    /// cwd and git's recorded paths can spell one directory differently.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn stored_path(&self, meter: &mut Meter) -> Result<Option<Vec<u8>>, ReadError> {
+        let mut path = [0u8; libc::PATH_MAX as usize];
+        retry(meter, Op::Stat, || {
+            // SAFETY: descriptor-only query with a PATH_MAX writable buffer.
+            unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETPATH, path.as_mut_ptr()) as isize }
+        })?;
+        let end = path.iter().position(|b| *b == 0).ok_or(ReadError::Denied)?;
+        Ok(Some(path[..end].to_vec()))
+    }
+
+    /// Other kernels compare names bytewise: there is no second spelling.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn stored_path(&self, _meter: &mut Meter) -> Result<Option<Vec<u8>>, ReadError> {
+        Ok(None)
+    }
+
     /// B3 ruleset installer only; do not use as an ambient IO adapter.
     #[cfg(target_os = "linux")]
     pub(crate) fn read_rule_fd(&self) -> std::os::fd::BorrowedFd<'_> {

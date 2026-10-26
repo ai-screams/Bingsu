@@ -1438,3 +1438,440 @@ fn bounded_discovery_never_claims_absence_before_home() {
     assert_eq!(facts.siblings.len(), 32);
     assert_eq!(facts.readonly, Some(false));
 }
+
+const CAFE: &str = "caf\u{e9}";
+const OID_LINE: &[u8] = b"0123456789012345678901234567890123456789\n";
+
+fn commit(repo: &Path) {
+    git_oracle(repo, &["init", "-qb", "main"]);
+    git_oracle(
+        repo,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    );
+}
+
+fn add_submodule(worktree: &Path, source: &Path, name: &str) -> PathBuf {
+    git_oracle(
+        worktree,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            source.to_str().unwrap(),
+            name,
+        ],
+    );
+    worktree.join(name)
+}
+
+/// Real git layouts under a non-ASCII parent, with the cwd's leaf name.
+fn alias_layout(f: &Fixture, layout: &str) -> (PathBuf, &'static str) {
+    let root = f.dir(CAFE);
+    let main = root.join("main");
+    fs::create_dir(&main).unwrap();
+    commit(&main);
+    let linked = |relative: bool| {
+        let path = root.join("link\u{e9}");
+        let mut args = vec![];
+        if relative {
+            args.extend(["-c", "worktree.useRelativePaths=true"]);
+        }
+        args.extend(["worktree", "add", "-q", "--detach", path.to_str().unwrap()]);
+        git_oracle(&main, &args);
+        path
+    };
+    match layout {
+        "linked" => (linked(false), "link\u{e9}"),
+        "linked-relative" => (linked(true), "link\u{e9}"),
+        "submodule" => (add_submodule(&main, &main, "sub\u{e9}"), "sub\u{e9}"),
+        "submodule-nested" => {
+            let outer = add_submodule(&main, &main, "sub\u{e9}");
+            (add_submodule(&outer, &main, "inn\u{e9}"), "inn\u{e9}")
+        }
+        "submodule-linked" => (
+            add_submodule(&linked(false), &main, "sub\u{e9}"),
+            "sub\u{e9}",
+        ),
+        _ => unreachable!(),
+    }
+}
+
+/// Respell one component the fixture created, never the temporary base.
+fn respell(path: &Path, from: &str, to: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    let mut hits = 0;
+    for part in path.iter() {
+        if part == std::ffi::OsStr::new(from) {
+            hits += 1;
+            out.push(to);
+        } else {
+            out.push(part);
+        }
+    }
+    assert_eq!(hits, 1, "{path:?} {from}");
+    out
+}
+
+fn variants(leaf: &'static str) -> [(&'static str, &'static str, String); 5] {
+    [
+        ("exact", leaf, leaf.to_owned()),
+        ("above-case", CAFE, "CAF\u{e9}".to_owned()),
+        ("above-nfd", CAFE, "cafe\u{301}".to_owned()),
+        ("leaf-case", leaf, leaf.to_ascii_uppercase()),
+        ("leaf-nfd", leaf, leaf.replace('\u{e9}', "e\u{301}")),
+    ]
+}
+
+fn same_inode(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+fn alias_events(m: &mut Meter) -> Rc<RefCell<Vec<String>>> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let output = Rc::clone(&events);
+    m.hook = Some(Box::new(move |e| output.borrow_mut().push(e.to_owned())));
+    events
+}
+
+// A cwd that spells the worktree in another case or normalization still selects
+// git and dir facts where the volume makes it the same directory; elsewhere the
+// spelling is absent and discovery's error is unchanged.
+// 이것을 실패시키는 것: 저장 철자 재시도 생략(leaf·linked alias에서 Escape),
+// binding에 요청 cwd 철자를 남김(submodule leaf에서 preflight가 CoreWorktree),
+// 바이트가 같은데도 F_GETPATH를 먼저 부름(exact에 stored_spelling).
+#[test]
+fn aliased_cwd_keeps_linked_and_submodule_identity() {
+    for layout in [
+        "linked",
+        "linked-relative",
+        "submodule",
+        "submodule-nested",
+        "submodule-linked",
+    ] {
+        let f = Fixture::new();
+        let (real, leaf) = alias_layout(&f, layout);
+        let oid = git_oracle(&real, &["rev-parse", "HEAD"]);
+        let branch = git_oracle(&real, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        for (variant, from, to) in variants(leaf) {
+            let cwd = respell(&real, from, &to);
+            let r = request(&cwd, &f.0, true);
+            let mut m = meter();
+            let events = alias_events(&mut m);
+            let access = full_access();
+            let start = Instant::now();
+            let result = discover::select(&r, access, &mut m);
+            let micros = start.elapsed().as_micros();
+            if !same_inode(&cwd, &real) {
+                // Case- and normalization-sensitive volumes: no such directory.
+                assert!(
+                    matches!(
+                        result,
+                        Err(git::CollectError::Read(safe_read::ReadError::Missing))
+                    ),
+                    "{layout} {variant}"
+                );
+                println!("alias layout={layout} variant={variant} distinct");
+                continue;
+            }
+            let Ok(Selection::Repository(roots, names)) = result else {
+                panic!("{layout} {variant}: {:?}", result.err());
+            };
+            let aliased = events
+                .borrow()
+                .iter()
+                .filter(|e| *e == "stored_spelling")
+                .count();
+            println!(
+                "alias layout={layout} variant={variant} stored_spelling={aliased} ops={} us={micros}",
+                m.operations()
+            );
+            if variant == "exact" {
+                assert_eq!(aliased, 0, "{layout}");
+            } else if variant.starts_with("leaf") {
+                assert!(aliased > 0, "{layout} {variant}");
+            }
+            let facts = collect(&names, r.binding.path_query, &mut m);
+            assert_eq!(facts.in_repo, Some(true), "{layout} {variant}");
+            assert_eq!(facts.readonly, Some(false), "{layout} {variant}");
+            drop(names);
+            let value = match git::stage_a::stage_a(&roots, roots.head_policy(), &mut m) {
+                bingsu_core::collection::git::StageResult::Value(v)
+                | bingsu_core::collection::git::StageResult::Partial(v) => v,
+                bingsu_core::collection::git::StageResult::Hidden => {
+                    panic!("{layout} {variant}: Hidden")
+                }
+            };
+            let (name, text, cap) = if branch == "HEAD" {
+                ("commit", &oid.as_bytes()[..12], 16)
+            } else {
+                ("branch", branch.as_bytes(), 256)
+            };
+            assert_eq!(
+                value.fields[bingsu_core::field::BUILTIN[3].field_index(name).unwrap()],
+                bingsu_core::field::Field::text(text, cap, WidthProfile::DEFAULT),
+                "{layout} {variant}"
+            );
+            // extensions.relativeWorktrees (git 2.48+) is not supported yet.
+            let config = fs::read_to_string(f.0.join(CAFE).join("main/.git/config")).unwrap();
+            let expected = if config.to_ascii_lowercase().contains("relativeworktrees") {
+                "Err(Read(StageAOnly))"
+            } else {
+                "Ok(Objects)"
+            };
+            assert_eq!(
+                format!("{:?}", git::preflight::preflight(&roots, &mut m)),
+                expected,
+                "{layout} {variant}"
+            );
+        }
+    }
+}
+
+fn escapes(cwd: &Path, f: &Fixture) -> Vec<String> {
+    let mut m = meter();
+    let events = alias_events(&mut m);
+    let result = discover::select(&request(cwd, &f.0, true), full_access(), &mut m);
+    assert!(
+        matches!(
+            result,
+            Err(git::CollectError::Read(safe_read::ReadError::Escape))
+        ),
+        "{cwd:?}: {:?}",
+        result.err()
+    );
+    events.take()
+}
+
+// A recorded spelling of another directory, a symlinked spelling of the same
+// one, or a different shape is never an alias, on any volume. The worktree
+// path a backlink or core.worktree records is never looked up (the gitdir
+// pointer itself is acquired as before).
+// 이것을 실패시키는 것: 저장 철자가 cwd와 같을 때나 Escape가 아닌 오류에도 재시도(stored_spelling 발생),
+// 기록된 경로를 따라 여는 비교(gitdir·config를 읽은 뒤 "/"부터 다시 걷기).
+#[test]
+fn recorded_spelling_of_another_directory_still_escapes() {
+    // A comparison that followed the recorded path would walk it from "/"
+    // right after reading it; only the stored-spelling retry may walk again.
+    let never_walked = |events: &[String]| {
+        let mut read = false;
+        for e in events {
+            match e.as_str() {
+                // Darwin reads config by openat, Linux by the openat2 resolver.
+                "openat:gitdir" | "openat:config" | "resolve:config" => read = true,
+                "stored_spelling" => read = false,
+                "openat:/" => assert!(!read, "{events:?}"),
+                _ => {}
+            }
+        }
+        assert!(events.iter().any(|e| matches!(
+            e.as_str(),
+            "openat:gitdir" | "openat:config" | "resolve:config"
+        )));
+    };
+    // A copied worktree whose backlink names the registered one.
+    let f = Fixture::new();
+    let (real, leaf) = alias_layout(&f, "linked");
+    let copy = real.with_file_name("copy");
+    fs::create_dir(&copy).unwrap();
+    fs::copy(real.join(".git"), copy.join(".git")).unwrap();
+    let events = escapes(&copy, &f);
+    assert!(!events.iter().any(|e| e == "stored_spelling"));
+    never_walked(&events);
+    // Respelled, the copy is retried with its stored name and still refused.
+    let upper = respell(&copy, "copy", "COPY");
+    if same_inode(&upper, &copy) {
+        let events = escapes(&upper, &f);
+        assert!(events.iter().any(|e| e == "stored_spelling"));
+        never_walked(&events);
+        // Only a spelling mismatch (Escape) is retried, not a missing gitdir.
+        fs::write(
+            copy.join(".git"),
+            format!("gitdir: {}\n", f.0.join("gone/.git/worktrees/x").display()),
+        )
+        .unwrap();
+        let mut m = meter();
+        let events = alias_events(&mut m);
+        let result = discover::select(&request(&upper, &f.0, true), full_access(), &mut m);
+        assert!(matches!(
+            result,
+            Err(git::CollectError::Read(safe_read::ReadError::Missing))
+        ));
+        assert!(!events.borrow().iter().any(|e| e == "stored_spelling"));
+    }
+
+    let backlink =
+        f.0.join(CAFE)
+            .join("main/.git/worktrees")
+            .join(leaf)
+            .join("gitdir");
+    let link = real.with_file_name("alias");
+    symlink(leaf, &link).unwrap();
+    for recorded in [link.join(".git"), real.clone(), real.join(".git/x")] {
+        fs::write(&backlink, recorded.as_os_str().as_bytes()).unwrap();
+        let events = escapes(&real, &f);
+        assert!(
+            !events.iter().any(|e| e == "stored_spelling"),
+            "{recorded:?}"
+        );
+        never_walked(&events);
+    }
+
+    // core.worktree naming another owned directory.
+    let f = Fixture::new();
+    let (real, leaf) = alias_layout(&f, "submodule");
+    let main = f.0.join(CAFE).join("main");
+    fs::create_dir_all(main.join("other/deeper")).unwrap();
+    for worktree in ["other", "other/deeper"] {
+        git_oracle(
+            &main,
+            &[
+                "config",
+                "-f",
+                &format!(".git/modules/{leaf}/config"),
+                "core.worktree",
+                &format!("../../../{worktree}"),
+            ],
+        );
+        let events = escapes(&real, &f);
+        assert!(!events.iter().any(|e| e == "stored_spelling"), "{worktree}");
+        never_walked(&events);
+    }
+}
+
+// Real collection: stage A and the dir facts publish for an aliased linked cwd.
+// 이것을 실패시키는 것: 저장 철자 재시도 생략(A 전에 Escape로 git·dir 모두 미발행).
+#[test]
+fn aliased_linked_cwd_publishes_stage_a_and_dir_facts() {
+    if !isolated("aliased_linked_cwd_publishes_stage_a_and_dir_facts") {
+        return;
+    }
+    let f = Fixture::new();
+    let (real, leaf) = alias_layout(&f, "linked");
+    let cwd = respell(&real, leaf, &leaf.to_ascii_uppercase());
+    let r = request(&cwd, &f.0, true);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut sink = Sink {
+        events: Rc::clone(&events),
+        updates: vec![],
+        progress: vec![],
+    };
+    let result = git::collect_with_deadlines(&r, &mut sink, meter(), full_access(), deadlines());
+    if !same_inode(&cwd, &real) {
+        assert!(matches!(
+            result,
+            Err(git::CollectError::Read(safe_read::ReadError::Missing))
+        ));
+        assert!(sink.updates.is_empty());
+        return;
+    }
+    result.unwrap();
+    assert_eq!(sink.updates[0].segment, 3);
+    let facts = sink
+        .updates
+        .iter()
+        .find(|u| u.segment == 1)
+        .and_then(|u| u.facts.as_ref())
+        .expect("dir facts");
+    assert_eq!(facts.in_repo, Some(true));
+    assert_eq!(facts.readonly, Some(false));
+    assert!(sink.progress[0].stage_a_complete);
+}
+
+// A worktree path beyond PATH_MAX has no kernel spelling (F_GETPATH fails with
+// ENOSPC on Darwin): an aliased cwd keeps Escape, the exact spelling still works.
+// Discovery walks by component, so the exact spelling works on Linux too.
+// 이것을 실패시키는 것: F_GETPATH 실패를 Escape 대신 그 오류(Io)로 전파.
+#[test]
+fn aliased_cwd_beyond_path_max_keeps_escape() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let open_at = |dir: &OwnedFd, name: &str| {
+        let name = std::ffi::CString::new(name).unwrap();
+        // SAFETY: live directory fd and a NUL-terminated relative name.
+        unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
+        // SAFETY: the same live fd and name; directory only.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+            )
+        };
+        assert!(fd >= 0, "{name:?}");
+        // SAFETY: a fresh descriptor owned only here.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    };
+    let f = Fixture::new();
+    let main = f.0.join("main/.git");
+    for dir in ["objects", "refs", "worktrees/w"] {
+        fs::create_dir_all(main.join(dir)).unwrap();
+    }
+    fs::write(main.join("HEAD"), OID_LINE).unwrap();
+    fs::write(main.join("worktrees/w/HEAD"), OID_LINE).unwrap();
+    fs::write(main.join("worktrees/w/commondir"), b"../..\n").unwrap();
+    let mut dir: OwnedFd = fs::File::open(&f.0).unwrap().into();
+    let mut real = f.0.clone();
+    let depth = libc::PATH_MAX as usize / 100 + 1;
+    for name in std::iter::repeat_n("d".repeat(100), depth).chain(["Wt".to_owned()]) {
+        let name = name.as_str();
+        dir = open_at(&dir, name);
+        real.push(name);
+    }
+    assert!(real.as_os_str().len() > libc::PATH_MAX as usize);
+    let pointer = format!("gitdir: {}\n", main.join("worktrees/w").display());
+    let git = std::ffi::CString::new(".git").unwrap();
+    // SAFETY: live directory fd, fixed relative name, owner-only regular file.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            git.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT,
+            0o600,
+        )
+    };
+    assert!(fd >= 0);
+    // SAFETY: the fd was just created and is owned here.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    std::io::Write::write_all(&mut file, pointer.as_bytes()).unwrap();
+    let mut backlink = real.as_os_str().as_bytes().to_vec();
+    backlink.extend_from_slice(b"/.git\n");
+    fs::write(main.join("worktrees/w/gitdir"), backlink).unwrap();
+
+    let exact = discover::select(&request(&real, &f.0, true), full_access(), &mut meter());
+    assert!(
+        matches!(exact, Ok(Selection::Repository(..))),
+        "{:?}",
+        exact.err()
+    );
+    let alias = real.with_file_name("wt");
+    let mut m = meter();
+    let events = alias_events(&mut m);
+    let result = discover::select(&request(&alias, &f.0, true), full_access(), &mut m);
+    // The long spelling cannot be stat'ed by path; probe the volume instead.
+    let probe = f.dir("Probe");
+    let expected = if same_inode(&probe, &f.0.join("probe")) {
+        safe_read::ReadError::Escape
+    } else {
+        safe_read::ReadError::Missing
+    };
+    assert!(
+        matches!(result, Err(git::CollectError::Read(e)) if e == expected),
+        "{:?}",
+        result.err()
+    );
+    assert!(!events.borrow().iter().any(|e| e == "stored_spelling"));
+}
