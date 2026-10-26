@@ -12,7 +12,7 @@ repository = "https://github.com/ai-screams/Bingsu"
 [workspace.dependencies]
 # Gitoxide 0.88 lower crates only. Staged counts use a bounded sorted merge;
 # gix-diff's blob feature would pull filter/worktree/command into this graph.
-gix-index = { version = "=0.56.0", default-features = false }
+gix-index = { version = "=0.57.0", default-features = false }
 gix-pack = { version = "=0.75.0", default-features = false }
 gix-error = { version = "=0.4.0", default-features = false }
 gix-utils = { version = "=0.4.0", default-features = false }
