@@ -29,7 +29,9 @@ exactly one `X-14 status PASS` record. `Outcome::write_changes` is never called.
 Failure must lead to reviewing read-only syscall needs or the memory budget,
 without loosening the protection policy automatically.
 
-The Dedicated collector CI matrix runs native x86_64 and aarch64 with glibc
-2.35+ and musl. The workspace filter tests independently require a pre-filter
+The independent `collector-x14` CI matrix runs native x86_64 and aarch64 with
+glibc 2.35+ and musl, preserving both PASS assertions and logs. Its separate
+build graph no longer consumes the Dedicated collector's 30-minute budget.
+The workspace filter tests independently require a pre-filter
 clone3 EINVAL control, real per-row syscall probes, inherited thread protection,
 and X-16's six denial cells. Those tests do not depend on fetching gix.

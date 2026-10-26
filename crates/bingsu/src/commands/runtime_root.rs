@@ -128,6 +128,17 @@ pub fn create_private(
     uid: u32,
     groups: &mut dyn GroupOracle,
 ) -> std::io::Result<Chain> {
+    create_private_with_locality(path, uid, groups, sys::fd_is_local)
+}
+
+// Keep the OS observation injectable so the non-local refusal can be tested
+// under a private, verified ancestor chain, independently of host mount layout.
+pub(super) fn create_private_with_locality(
+    path: &Path,
+    uid: u32,
+    groups: &mut dyn GroupOracle,
+    locality: impl FnOnce(std::os::fd::RawFd) -> Option<bool>,
+) -> std::io::Result<Chain> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let bad = |what: &str| std::io::Error::other(format!("private root: {what}"));
     let all = names(path).map_err(|e| bad(&format!("{e:?}")))?;
@@ -180,7 +191,7 @@ pub fn create_private(
             chain.fds.push(child);
         }
         let root = owned_child(&chain.fds, last)?;
-        if sys::fd_is_local(root.as_raw_fd()) != Some(true) {
+        if locality(root.as_raw_fd()) != Some(true) {
             return Err(bad("not on a local file system"));
         }
         root.set_permissions(std::fs::Permissions::from_mode(0o700))?;

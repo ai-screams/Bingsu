@@ -461,26 +461,48 @@ def test_actual_fifty_ms_partial_preserves_stage_a(corpus, tmp_path):
 
 
 def test_warm_collection_observations(corpus, tmp_path):
+    # Timing evidence only: CI samples 20 rounds; a full local run defaults to
+    # 200. Neither sample count is a latency/performance acceptance threshold.
+    rounds = int(os.environ.get("BINGSU_F1_OBSERVATION_ROUNDS", "200"))
+    assert 1 <= rounds <= 200, "observation rounds must be between 1 and 200"
     observations, failures = {}, []
     for data in corpus["cases"]:
         case = CorpusCase(data)
         first = execute(corpus, case, tmp_path / case.name / "first", trace=False)
         samples = []
-        for attempt in range(200):
+        for attempt in range(rounds):
             try:
                 samples.append(execute(corpus, case, tmp_path / case.name / "warm", trace=False))
             except AssertionError as error:
                 failures.append({"case": case.name, "attempt": attempt, "error": str(error)})
-                shutil.copytree(tmp_path / case.name / "warm", tmp_path / case.name / f"failed-{attempt}")
+                shutil.copytree(tmp_path / case.name / "warm", tmp_path / case.name / f"failed-{attempt}", symlinks=True)
                 (tmp_path / "warm-failures.json").write_text(json.dumps(failures, indent=2))
         values = sorted(row["elapsed_ns"] for row in samples)
         assert all(row["result"] == "Ok(())" for row in samples), case.name
-        observations[case.name] = {"first_ns": first["elapsed_ns"], "successful_runs": len(values),
+        observations[case.name] = {"requested_rounds": rounds, "performance_gate": False, "first_ns": first["elapsed_ns"], "successful_runs": len(values),
                                   "p50_ns": statistics.median(values) if values else None,
                                   "p95_ns": values[(len(values) * 95 + 99) // 100 - 1] if values else None,
                                   "variance_ns2": statistics.pvariance(values) if values else None,
                                   "samples": [{"elapsed_ns": row["elapsed_ns"], "times": row["times"]} for row in samples]}
         # Preserve completed cases if a later worker fails; never retry or
         # silently replace a bad sample with a successful one.
-        (tmp_path / "warm-200.json").write_text(json.dumps(observations, indent=2))
+        (tmp_path / f"warm-{rounds}.json").write_text(json.dumps(observations, indent=2))
     assert not failures, failures
+
+
+@pytest.mark.parametrize("configured,rounds", [(None, 200), ("20", 20)])
+def test_warm_observation_count_and_raw_evidence(monkeypatch, tmp_path, configured, rounds):
+    if configured is None:
+        monkeypatch.delenv("BINGSU_F1_OBSERVATION_ROUNDS", raising=False)
+    else:
+        monkeypatch.setenv("BINGSU_F1_OBSERVATION_ROUNDS", configured)
+    calls = []
+    def fake_execute(*args, **kwargs):
+        calls.append(args)
+        return {"result": "Ok(())", "elapsed_ns": len(calls), "times": {"B": 10}}
+    monkeypatch.setitem(test_warm_collection_observations.__globals__, "execute", fake_execute)
+    test_warm_collection_observations({"cases": [{"case": "controlled"}]}, tmp_path)
+    row = json.loads((tmp_path / f"warm-{rounds}.json").read_text())["controlled"]
+    assert len(calls) == rounds + 1
+    assert row["requested_rounds"] == row["successful_runs"] == len(row["samples"]) == rounds
+    assert row["performance_gate"] is False

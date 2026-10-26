@@ -24,11 +24,32 @@ pub fn run() -> i32 {
     }
     #[cfg(unix)]
     {
-        execute().map_or(1, |()| 0)
+        exit_code(execute())
     }
     #[cfg(not(unix))]
     {
         1
+    }
+}
+
+#[cfg(unix)]
+fn exit_code(result: std::io::Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => wire::DEADLINE_EXIT_CODE,
+        Err(_) => 1,
+    }
+}
+
+#[cfg(unix)]
+fn collection_error(error: crate::git::CollectError) -> std::io::Error {
+    use crate::{git::CollectError, safe_read::ReadError};
+    match error {
+        CollectError::Deadline | CollectError::Read(ReadError::Deadline) => {
+            std::io::ErrorKind::TimedOut.into()
+        }
+        CollectError::Sink(error) => error,
+        _ => std::io::Error::other("git collection"),
     }
 }
 
@@ -56,8 +77,7 @@ fn execute() -> std::io::Result<()> {
             let meter = crate::meter::Meter::new(deadline);
             // Preserve startup's probed capability, including unsupported macOS
             // fallback, rather than probing again after repository confinement.
-            crate::git::collect_with_access(request, sink, meter, access)
-                .map_err(|_| std::io::Error::other("git collection"))
+            crate::git::collect_with_access(request, sink, meter, access).map_err(collection_error)
         },
     )
 }
@@ -129,11 +149,15 @@ fn exchange(
         landlock,
         catalog,
         build_id,
+        #[cfg(test)]
+        None,
         |request, sink, deadline| collect(request, sink, deadline),
     )
 }
 
 #[cfg(unix)]
+// The test-only deadline allowance is the eighth argument.
+#[cfg_attr(test, allow(clippy::too_many_arguments))]
 fn exchange_with_sink(
     fds: &mut sys::WorkerFds,
     buffer: &mut [u8; wire::FRAME_MAX],
@@ -141,6 +165,7 @@ fn exchange_with_sink(
     landlock: u32,
     catalog: &collection::selection::Catalog<'_>,
     build_id: wire::BuildId,
+    #[cfg(test)] deadline_allowance: Option<std::time::Duration>,
     collect: impl FnOnce(&wire::Request, &mut WireSink<'_>, std::time::Instant) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let bad = |_| std::io::Error::other("worker protocol");
@@ -169,6 +194,12 @@ fn exchange_with_sink(
             // Complete. The helper's earlier send-start deadline is authoritative.
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_millis(u64::from(request.budget_ms.min(50)));
+            // Semantic fixtures can extend the exchange's write/Complete bound
+            // alongside their stage allowances without changing the wire budget.
+            #[cfg(test)]
+            let deadline = deadline_allowance
+                .map(|allowance| std::time::Instant::now() + allowance)
+                .unwrap_or(deadline);
             // Second product policy boundary, even after wire validation. A
             // catalog is explicit; no argv, feature or environment selects it.
             // The rebuilt request only admits: it carries no global excludes, so
@@ -200,6 +231,30 @@ fn exchange_with_sink(
 mod tests {
     use super::*;
     use std::{cell::RefCell, io};
+
+    // 이것을 실패시키는 것: 단계 마감을 일반 실패로 합치거나 비마감 오류에 마감 코드를 주는 것.
+    #[test]
+    fn stage_deadline_exit_is_distinct_from_protocol_and_resource_failure() {
+        use crate::{git::CollectError, safe_read::ReadError};
+        for error in [
+            CollectError::Deadline,
+            CollectError::Read(ReadError::Deadline),
+            CollectError::Sink(io::ErrorKind::TimedOut.into()),
+        ] {
+            assert_eq!(
+                exit_code(Err(collection_error(error))),
+                wire::DEADLINE_EXIT_CODE
+            );
+        }
+        for error in [
+            CollectError::Read(ReadError::Denied),
+            CollectError::Panic,
+            CollectError::Sink(io::ErrorKind::InvalidData.into()),
+        ] {
+            assert_eq!(exit_code(Err(collection_error(error))), 1);
+        }
+        assert_eq!(exit_code(Ok(())), 0);
+    }
 
     // 이것을 실패시키는 것: 최종 필터 전에 Ready·요청·스레드를 허용하거나 seal 생략.
     #[test]
@@ -291,10 +346,20 @@ pub(crate) fn exchange_for_test(
     fds: &mut sys::WorkerFds,
     catalog: &collection::selection::Catalog<'_>,
     build_id: wire::BuildId,
+    deadline_allowance: std::time::Duration,
     collect: impl FnOnce(&wire::Request, &mut dyn UpdateSink, std::time::Instant) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let mut buffer = Box::new([0; wire::FRAME_MAX]);
-    exchange(fds, &mut buffer, 0, 0, catalog, build_id, collect)
+    exchange_with_sink(
+        fds,
+        &mut buffer,
+        0,
+        0,
+        catalog,
+        build_id,
+        Some(deadline_allowance),
+        |request, sink, deadline| collect(request, sink, deadline),
+    )
 }
 
 /// Test target only, with a distinct build identity and a fixed deterministic
@@ -335,6 +400,7 @@ pub(crate) fn fixture_entry() -> std::io::Result<()> {
         landlock,
         &catalog,
         test_id,
+        None,
         |_, sink, _| {
             let mut payload = vec![31, 0, 1];
             payload.extend(7u32.to_le_bytes());

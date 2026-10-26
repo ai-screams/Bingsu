@@ -462,11 +462,37 @@ impl CollectorJob {
             }
             match self.input.read(&mut buffer[have..want]) {
                 Ok(0) => {
-                    return if transcript.accept_bytes(&buffer[..have]).is_ok() && complete {
-                        EndReason::Complete
-                    } else {
-                        EndReason::Protocol
-                    };
+                    if complete {
+                        return if transcript.accept_bytes(&buffer[..have]).is_ok() {
+                            EndReason::Complete
+                        } else {
+                            EndReason::Protocol
+                        };
+                    }
+                    // A timeout status cannot excuse malformed/truncated frames
+                    // or EOF before the complete request. Wait only at a clean
+                    // frame boundary, within the original absolute deadline.
+                    if have != 0 || !ready || sent != outgoing.len() {
+                        return EndReason::Protocol;
+                    }
+                    loop {
+                        match self.child.reap() {
+                            Ok(true) => {
+                                return if self.child.exit_code() == Some(wire::DEADLINE_EXIT_CODE) {
+                                    EndReason::Deadline
+                                } else {
+                                    EndReason::Protocol
+                                };
+                            }
+                            Ok(false) => {}
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(_) => return EndReason::Protocol,
+                        }
+                        if now_ns().map_or(true, |now| now >= deadline) {
+                            return EndReason::Deadline;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                 }
                 Ok(n) => {
                     report.bytes += n as u32;

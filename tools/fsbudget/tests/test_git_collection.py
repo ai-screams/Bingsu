@@ -160,3 +160,20 @@ def test_darwin_attempt_paths_and_descriptor_generations():
                   f'F1_CLOSE 9\nF1_IO read {hx("/home/repo")} - 1 9'):
         with pytest.raises(AssertionError):
             assert_repository_trace(lines[:-1] + event.splitlines() + lines[-1:], caps, {})
+
+
+# 이것을 실패시키는 것: repository 여유를 front/helper/startup 초과와 합산해 상쇄하는 것.
+@pytest.mark.parametrize("role,kind", [("front", "openat"), ("helper", "read"),
+                                       ("collector-startup", "exec"), ("collector", "network")])
+def test_repository_budget_cannot_hide_other_role_surplus(role, kind):
+    from copy import deepcopy
+    from fsbudget.gate import check
+    repository = collector_repository_expected(CollectorAxes(files=2, read_bytes=(16384, 16385)))
+    expected = {"repository": repository, "front": {"openat": 5}, "helper": {"read": 3},
+                "collector-startup": {"exec": 1}, "collector": {"network": 0, "read": 1}}
+    measured = deepcopy(expected)
+    assert check(measured, expected, "le", expected) == []
+    measured["repository"] = {k: 0 for k in repository}
+    measured[role][kind] += 1
+    assert check(measured, expected, "le", expected) == [
+        f"{role}.{kind}: measured {measured[role][kind]}, formula {expected[role][kind]} (le)"]

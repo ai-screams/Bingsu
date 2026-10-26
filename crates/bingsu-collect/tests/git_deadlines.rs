@@ -804,18 +804,16 @@ fn local_deadline_keeps_later_stages(expired: &'static str) {
     );
     assert!(f.git(&["stash", "list"]).is_empty());
     let mut m = meter(); // 120s request; only the selected stage expires.
+    // B's allowance also covers safety preflight and repository construction.
+    // Expire only after those succeed: timing out preflight must stop C/D.
+    m.expire_on_event = Some(expired);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
     m.hook = Some(Box::new(move |event| {
-        if event == expired {
-            std::thread::sleep(Duration::from_millis(60));
-        }
+        observed.borrow_mut().push(event.to_owned());
     }));
-    let mut deadlines = GENEROUS;
-    if expired == "stage_b" {
-        deadlines.b_ms = 50;
-    } else {
-        deadlines.c_ms = 50;
-    }
-    let s = stream(&f, m, deadlines, false);
+    let s = stream(&f, m, GENEROUS, false);
+    assert!(events.borrow().iter().any(|event| event == expired));
     assert!(
         matches!(s.result, Err(CollectError::Read(ReadError::Deadline))),
         "{:?}",

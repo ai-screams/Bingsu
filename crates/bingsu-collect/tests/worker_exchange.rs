@@ -278,10 +278,24 @@ fn decoded_global_excludes_reach_collection_through_exchange() {
     });
     let mut fds = sys::worker_fds_for_test(result_write, request_read, lock);
     let access = access();
-    worker::exchange_for_test(&mut fds, &GIT_ONLY, build, |decoded, sink, _| {
-        git::collect_with_deadlines(decoded, sink, meter(), access, GENEROUS)
+    // Stage allowances alone cannot extend the exchange's sink/Complete bound.
+    // Keep the encoded request at the wire maximum while allowing slow runners.
+    worker::exchange_for_test(
+        &mut fds,
+        &GIT_ONLY,
+        build,
+        Duration::from_secs(120),
+        |decoded, sink, deadline| {
+            git::collect_with_deadlines(
+                decoded,
+                sink,
+                meter::Meter::new(deadline),
+                access,
+                GENEROUS,
+            )
             .map_err(|e| std::io::Error::other(format!("git collection: {e:?}")))
-    })
+        },
+    )
     .unwrap();
     drop(fds);
     let bytes = reader.join().unwrap();

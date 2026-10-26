@@ -258,13 +258,12 @@ LINUX_SECURITY_STEPS = {
     "Repository read layer trace and acceptance",
     "Final filter refuses root limit and capability changes",
     "Native musl collector probes (both architectures)",
-    "Independent gix 0.83.0 X-14 (locked, glibc and musl)",
     "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
     "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
     "Path facts ACL and read-only mount oracles",
-    "Assert native Linux F1 collection passes",
+    "Assert native Linux F1 collection passes", "Assert exact F3 musl collection passes",
 }
-MACOS_SECURITY_STEPS = {"Both shipped Mach-O architectures", "Assert native macOS M3b security passes",
+MACOS_SECURITY_STEPS = {"Assert native macOS M3b security passes",
                         "Assert native macOS F1 collection passes"}
 
 
@@ -288,7 +287,9 @@ def security_steps(text):
         name = step.get("name", "")
         assert "continue-on-error" not in step, name
         condition = ("runner.os == 'Linux'" if name in LINUX_SECURITY_STEPS else
-                     "runner.os == 'macOS'" if name in MACOS_SECURITY_STEPS else None)
+                     "runner.os == 'macOS'" if name in MACOS_SECURITY_STEPS else
+                     "failure()" if name == "Pack M3b raw security traces on failure" else
+                     "always()" if name == "Pack F1 and F2 evidence without following fixture links" else None)
         assert step.get("if") == condition, (name, "skippable security step", step.get("if"))
         assert_run_unconditional(step)
     f1 = {step.get("name"): step for step in steps if "F1" in step.get("name", "")}
@@ -386,10 +387,26 @@ def ci_test_evidence(text):
         if "run" in step:
             assert "if" not in step and "continue-on-error" not in step
             assert_run_unconditional(step)
-    for job, entries in (("collector", steps), ("collector-probes", probes)):
+    meta, x14 = workflow_job(text, "collector-x14")
+    assert "if" not in meta and "continue-on-error" not in meta
+    assert [line.strip() for line in meta["strategy"][1] if line.strip()] == [
+        "fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm]"]
+    for step in x14:
+        if "run" in step:
+            assert "if" not in step and "continue-on-error" not in step
+            assert_run_unconditional(step)
+    gate = next(step for step in x14 if step.get("name") == "Independent gix 0.83.0 X-14 (locked, glibc and musl)")
+    commands = run_commands(gate)
+    assert ["cargo", "run", "--locked", "-j", "2", "--manifest-path", "bench/probes/collector-x14/Cargo.toml",
+            "--release", "--", "--case", "all", "|", "tee", "$RUNNER_TEMP/x14-gnu.txt"] in commands
+    assert ["CC=musl-gcc", "cargo", "run", "--locked", "-j", "2", "--manifest-path", "bench/probes/collector-x14/Cargo.toml",
+            "--target", "$target", "--release", "--", "--case", "all", "|", "tee", "$RUNNER_TEMP/x14-musl.txt"] in commands
+    for libc in ("gnu", "musl"):
+        assert ["grep", "-Fx", "X-14 PASS", f"$RUNNER_TEMP/x14-{libc}.txt"] in commands
+    for job, entries in (("collector", steps), ("collector-probes", probes), ("collector-x14", x14)):
         for step in entries:
             step["_job"] = job
-    return steps + probes
+    return steps + probes + x14
 
 
 def assert_acceptance_table(table, workflow, *, read=lambda name: (ROOT / name).read_text(), collected=None):
@@ -779,7 +796,7 @@ def assert_ci_contract(texts):
                    "test runtime::x14_threads_and_status_survive_fork_is_refused ... ok",
                    "test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok", "X-14 PASS", "X-14", "X-02", "X-32"),
         "shell.yml": ("libc: [gnu, musl]", "--ignore tests/shell/test_collector_security.py"),
-        "bench.yml": ("base_ref:", "--rounds 200", "--base base/target/release/bingsu", "--out candidate/target/m3b-product.json",
+        "bench.yml": ("base_ref:", "--rounds 200", "--base base/target/release/bingsu", "--out candidate/target/f3/m3c-product.json",
                       "if: always()", "if-no-files-found: error"),
     }
     steps = ci_test_evidence(texts["ci.yml"])
@@ -796,8 +813,13 @@ def assert_ci_contract(texts):
         assert f'--basetemp=$RUNNER_TEMP/m3b-traces/{libc}' in executable
     artifact = collector.split("      - name: Preserve M3b raw security traces on failure\n")[1].split("      - name:")[0]
     for token in ("if: failure()", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
-                  "name: m3b-security-traces-${{ matrix.os }}", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"):
+                  "name: m3b-security-traces-${{ matrix.os }}", "path: ${{ runner.temp }}/m3b-security-traces.tar.gz",
+                  "timeout-minutes: 2", "compression-level: 0"):
         assert token in artifact, token
+    pack = next(step for step in steps if step.get("name") == "Pack M3b raw security traces on failure")
+    assert pack["if"] == "failure()" and pack["timeout-minutes"] == "2"
+    assert run_commands(pack) == [["python3", "scripts/pack_collector_evidence.py",
+                                 "$RUNNER_TEMP/m3b-traces", "$RUNNER_TEMP/m3b-security-traces.tar.gz", "--traces-only"]]
     # Both full-suite jobs must exclude the unprepared security module. The
     # Linux job applies the same invocation to all three container images.
     for job in ("shell-linux", "shell-macos"):
@@ -831,7 +853,12 @@ def test_ci_has_no_silent_acceptance_skip():
     ("ci.yml", '--basetemp="$RUNNER_TEMP/m3b-traces/musl"'),
     ("ci.yml", "if: failure()"),
     ("ci.yml", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"),
-    ("ci.yml", "path: ${{ runner.temp }}/m3b-traces/**/*.trace"),
+    ("ci.yml", "path: ${{ runner.temp }}/m3b-security-traces.tar.gz"),
+    ("ci.yml", "scripts/pack_collector_evidence.py"),
+    ("ci.yml", "compression-level: 0"),
+    ("ci.yml", "timeout-minutes: 2"),
+    ("ci.yml", "os: [ubuntu-24.04, ubuntu-24.04-arm]"),
+    ("ci.yml", 'grep -Fx \'X-14 PASS\' "$RUNNER_TEMP/x14-musl.txt"'),
     ("bench.yml", "--rounds 200"),
 ])
 def test_missing_ci_cell_is_refused(file, token):
@@ -1550,3 +1577,199 @@ def test_security_fuzz_job_rejects_mutations(old, new):
     assert sorted(targets) == sorted(order)
     with pytest.raises((AssertionError, KeyError, TypeError, ValueError)):
         assert_fuzz_job(changed, order)
+
+
+F3_CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
+
+
+def assert_real_collection_ci(workflow, table):
+    steps = security_steps(workflow)
+    named = {step.get("name"): step for step in steps}
+    positions = {step.get("name"): i for i, step in enumerate(steps)}
+    release = next(i for i, step in enumerate(steps) if
+                   ["cargo", "build", "-j", "2", "--release", "-p", "bingsu", "-p", "bingsu-collect"] in run_commands(step))
+    assert positions["F2 fixed fuzz seed regression corpus"] < release < positions["Prepare F3 release collection observations"]
+    assert positions["Prepare F3 release collection observations"] < positions["Prepare M3b compiler-free product fixtures"] < positions["M3b product security and measurements contracts"]
+    assert run_commands(named["Prepare F3 release collection observations"]) == [[
+        "python3", "bench/git-product.py", "--prepare", "target/release/bingsu", "--out", "target/f3/preparation.json"]]
+    for name, log in (("Assert exact F3 collection passes", "$RUNNER_TEMP/m3b-security.txt"),
+                      ("Assert exact F3 musl collection passes", "$RUNNER_TEMP/m3b-musl.txt")):
+        commands = run_commands(named[name])
+        for case in F3_CASES:
+            assert ["grep", "-Fx", f"PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[{case}]", log] in commands, case
+    common = run_commands(named["M3b product security and measurements contracts"])
+    for case in ("known", "missing", "empty", "unknown", "invalid-home", "invalid-xdg", "invalid-both"):
+        assert ["grep", "-Fx", f"PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[{case}]", "$RUNNER_TEMP/m3b-security.txt"] in common, case
+    # The native macOS cell audits the same release files it executes.
+    assert "scripts/check_collector_symbols.py" in named["Product imports and matching deployment pair"]["run"]
+    linux = run_commands(named["Assert native Linux M3b security passes"])
+    musl = run_commands(named["M3b native musl lifecycle security"])
+    for commands, log in ((linux, "$RUNNER_TEMP/m3b-security.txt"), (musl, "$RUNNER_TEMP/m3b-musl.txt")):
+        assert ["grep", "-F", "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]", log] in commands
+    import csv
+    import io
+    rows = {r["id"]: r for r in csv.DictReader(io.StringIO(table), delimiter="\t")}
+    required = {
+        "F3-REAL": "tests/shell/test_collector_security.py::test_real_collection_has_no_silent_skip",
+        "F3-ROLES": "tools/fsbudget/tests/test_git_collection.py::test_repository_budget_cannot_hide_other_role_surplus",
+        "F3-OBSERVATIONS": "bench/tests/test_git_product.py::test_m3c_measurement_is_not_formal_b5_b7",
+        "F3-MEMORY": "bench/tests/test_git_product.py::test_two_binary_sizes_and_git_memory_are_reported",
+    }
+    for name, test in required.items():
+        assert rows[name]["test"] == test
+
+
+# 이것을 실패시키는 것: native 아키텍처/libc·심벌·exec·정확한 매개변수 PASS·TSV 행을 빼는 것.
+def test_real_collection_has_no_silent_skip():
+    assert_real_collection_ci((ROOT / ".github/workflows/ci.yml").read_text(),
+                              (ROOT / "tests/collector-acceptance.tsv").read_text())
+
+
+# 이것을 실패시키는 것: 한 매개변수나 실행 순서 삭제를 정상으로 받아들이는 것.
+@pytest.mark.parametrize("damage", [*F3_CASES, "prepare", "macos", "fail-fast-true", "fail-fast-missing", "symbols", "exec", "tsv", "order", "global", "release-order"])
+def test_real_collection_ci_rejects_mutations(damage):
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    table = (ROOT / "tests/collector-acceptance.tsv").read_text()
+    if damage in F3_CASES:
+        workflow = workflow.replace(f"test_shipped_real_collection[{damage}]", "removed")
+    elif damage == "prepare":
+        workflow = workflow.replace("bench/git-product.py --prepare target/release/bingsu", "true")
+    elif damage == "macos":
+        workflow = workflow.replace(", macos-latest", "")
+    elif damage == "fail-fast-true":
+        workflow = workflow.replace("      fail-fast: false\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]",
+                                    "      fail-fast: true\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]")
+    elif damage == "fail-fast-missing":
+        workflow = workflow.replace("      fail-fast: false\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]",
+                                    "      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]")
+    elif damage == "symbols":
+        workflow = workflow.replace("scripts/check_collector_symbols.py", "removed.py")
+    elif damage == "exec":
+        workflow = workflow.replace("test_security_table_resource_failures_preserve_front[exec]", "removed")
+    elif damage == "tsv":
+        table = table.replace("F3-MEMORY\t", "REMOVED\t")
+    elif damage == "global":
+        workflow = workflow.replace("test_product_global_excludes_reaches_stage_b[invalid-both]", "removed")
+    elif damage == "release-order":
+        release = "      - run: cargo build -j 2 --release -p bingsu -p bingsu-collect\n"
+        workflow = workflow.replace(release, "").replace("      - name: F2 fixed fuzz seed regression corpus\n",
+                                                        release + "      - name: F2 fixed fuzz seed regression corpus\n")
+    else:
+        workflow = workflow.replace("name: Prepare F3 release collection observations", "name: swap").replace(
+            "name: M3b product security and measurements contracts", "name: Prepare F3 release collection observations").replace(
+            "name: swap", "name: M3b product security and measurements contracts")
+    with pytest.raises((AssertionError, KeyError)):
+        assert_real_collection_ci(workflow, table)
+
+
+@pytest.fixture(scope="module")
+def real_collection_context(tmp_path_factory):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("f3_runtime", ROOT / "bench/git-product.py")
+    measurement = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(measurement)
+    binary = real_bin()
+    # Required cells must fail on missing preparation; this module is already
+    # excluded from minimum-shell jobs that never prepare host fixtures.
+    prepared = measurement.prepared(binary)
+    directory = tmp_path_factory.mktemp("f3-real")
+    # Repositories are also used by the 200-round bench, including exact 19000.
+    repos = measurement.repositories(directory)
+    return measurement, binary, prepared, directory, repos
+
+
+def assert_shipped_collection(sample, case):
+    # Selection, protocol and child cleanup are contracts under any load.
+    # A real deadline is an observation, not a promise of completed collection.
+    detail = json.dumps(sample, indent=2)
+    assert sample.get("exit") == 0, detail  # Never hide a panic as timing noise.
+    assert sample.get("product_mask") == 10, detail
+    if sample["status"] == "BLOCKED":
+        assert sample.get("blocked_at") == "admission", detail
+        assert sample.get("deferred") == "Some(YieldTime)", detail
+        assert sample.get("broker") == "Busy", detail
+        return
+    assert sample["status"] == "OBSERVED", detail
+    assert sample["reaped"], detail
+    assert sample["reason"] in ("Complete", "Deadline"), detail
+    frames = [bytes.fromhex(raw) for _, raw in sample["frames"]]
+    updates = [raw[80:] for raw in frames if raw[10] == 5]
+    assert all(raw[:2] in (b"\x01\0", b"\x03\0") for raw in updates), detail
+    if sample["stage_a"]:
+        assert any(raw[:2] == b"\x03\0" for raw in updates), detail
+    if sample["published"]:
+        assert updates, detail
+    if sample["reason"] == "Deadline":
+        return
+    assert sample["stage_a"] and sample["published"], detail
+    assert any(raw[:2] == b"\x03\0" for raw in updates), detail
+    assert any(raw[:2] == b"\x01\0" for raw in updates), detail
+    if case in ("no-git", "git-clean", "git-dirty"):
+        assert sample["partial"] is False, detail
+    if case == "budget-bound":
+        assert sample["partial"] is True, detail
+
+
+@pytest.mark.parametrize("outcome", ["admission", "before-a", "after-a", "complete"])
+@pytest.mark.parametrize("damage", [None, "panic", "mask", "cleanup", "protocol", "frames"])
+def test_shipped_collection_security_is_gated_under_load(outcome, damage):
+    def update(segment):
+        raw = bytearray(80)
+        raw[10] = 5
+        return [1, (raw + segment.to_bytes(2, "little")).hex()]
+    sample = {"status": "OBSERVED", "exit": 0, "product_mask": 10, "reaped": True,
+              "reason": "Complete" if outcome == "complete" else "Deadline",
+              "stage_a": outcome in ("after-a", "complete"), "partial": False,
+              "published": outcome in ("after-a", "complete"),
+              "frames": [] if outcome == "before-a" else [update(3), update(1)]}
+    if outcome == "admission":
+        sample.update(status="BLOCKED", blocked_at="admission", deferred="Some(YieldTime)", broker="Busy")
+    if damage == "panic":
+        sample["exit"] = 101
+    elif damage == "mask":
+        sample["product_mask"] = 0
+    elif damage == "cleanup":
+        sample["broker" if outcome == "admission" else "reaped"] = False
+    elif damage == "protocol":
+        sample["deferred" if outcome == "admission" else "reason"] = "Protocol"
+    elif damage == "frames":
+        if outcome == "admission":
+            sample["blocked_at"] = "unknown"
+        elif outcome == "before-a":
+            sample["frames"] = [update(0)]
+        else:
+            sample["frames"] = [update(1)]
+    if damage:
+        with pytest.raises(AssertionError):
+            assert_shipped_collection(sample, "no-git")
+    else:
+        assert_shipped_collection(sample, "no-git")
+
+
+# 이것을 실패시키는 것: 출하 mask 10을 0으로 되돌리거나 완료된 수집의 git/path 프레임을 누락하는 것.
+@pytest.mark.parametrize("case", F3_CASES)
+def test_shipped_real_collection(real_collection_context, case):
+    measurement, binary, prepared, directory, repos = real_collection_context
+    sample = measurement.observe(binary, prepared, directory / "context" / case, repos[case])
+    # Keep frames, timing, stderr and diagnostics even when an assertion fails.
+    (directory / f"{case}.json").write_text(json.dumps(sample, indent=2) + "\n")
+    print(json.dumps({"case": case, "status": sample["status"],
+                      "completion_status": sample.get("completion_status", "BLOCKED"),
+                      "reason": sample.get("reason", sample.get("deferred", sample.get("error")))}))
+    assert_shipped_collection(sample, case)
+
+
+def test_shipped_admission_deadline_is_blocked_without_panic(real_collection_context):
+    _, _, prepared, directory, repos = real_collection_context
+    result = subprocess.run([prepared["fixture"], str(directory / "expired-admission"),
+                             str(repos["no-git"]), "--expire-admission"],
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert not result.stderr, result.stderr
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1 and lines[0].startswith(b"F3_RESULT "), result.stdout
+    sample = json.loads(lines[0][10:])
+    assert sample["status"] == "BLOCKED" and sample["deferred"] == "Some(YieldTime)", sample
+    sample.update(exit=result.returncode, stdout=result.stdout.decode(), stderr=result.stderr.decode())
+    (directory / "expired-admission.json").write_text(json.dumps(sample, indent=2) + "\n")
+    assert_shipped_collection(sample, "no-git")

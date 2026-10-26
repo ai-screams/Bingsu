@@ -144,5 +144,46 @@ fn readonly_layout(case: LayoutCase) -> (LayoutCase, LaidLine) {
     (case, output)
 }
 
-library_benchmark_group!(name = git; benchmarks = format_git, merge_git, readonly_layout);
+#[inline(never)]
+fn budget_call() -> collection::budget::BudgetCounters {
+    use collection::budget::{Axis, BudgetCounters};
+    let mut budget = BudgetCounters::default();
+    for axis in Axis::ALL {
+        black_box(budget.charge(axis, axis.limit())).unwrap();
+        black_box(budget.charge(axis, 1)).unwrap_err();
+    }
+    budget
+}
+
+#[library_benchmark]
+fn git_budget() -> collection::budget::BudgetCounters {
+    black_box(budget_call())
+}
+
+#[inline(never)]
+fn facts_call() -> collection::path_facts::PathFactInput {
+    use collection::path_facts::{PathFactInput, SiblingSet};
+    let value = PathFactInput {
+        repo_component: Some(2),
+        in_repo: Some(true),
+        readonly: Some(false),
+        siblings: vec![SiblingSet {
+            component: 2,
+            complete: true,
+            names: vec![b"project".to_vec(), b"project-other".to_vec()],
+        }],
+        partial: false,
+    };
+    let cwd = b"/home/u/project";
+    let bytes = value.encode(black_box(cwd)).unwrap();
+    PathFactInput::decode(black_box(&bytes), black_box(cwd)).unwrap()
+}
+
+#[library_benchmark]
+fn path_facts_codec() -> collection::path_facts::PathFactInput {
+    black_box(facts_call())
+}
+
+// 이것을 실패시키는 것: 새 budget/PathFacts 작업을 bench 그룹에서 빼거나 측정 helper를 inline하는 것.
+library_benchmark_group!(name = git; benchmarks = format_git, merge_git, readonly_layout, git_budget, path_facts_codec);
 main!(library_benchmark_groups = git);
