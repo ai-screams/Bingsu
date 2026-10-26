@@ -432,6 +432,14 @@ def helper_global_input(call, path, files, held):
                      or re.fullmatch(r"\d+<" + re.escape(path) + r">", call.ret) is not None))
     if held.get(args[0]) != path:
         return False
+    # git_global::read_bounded -> std OpenOptions::open -> musl open():
+    # src/fcntl/open.c sets CLOEXEC again after a successful O_CLOEXEC open.
+    # https://openwall.com/lists/musl/2025/11/25/3 (original open.c, lines 15-20)
+    # Keep this out of helper_readonly_fd_metadata: the collector uses
+    # sys::open_at -> libc::openat, whose musl wrapper has no such fcntl.
+    # 이것을 실패시키는 것: musl 전역 입력 open을 거부하거나 CLOEXEC 해제·다른 fd 변경까지 허용하는 것.
+    if call.name == "fcntl" and args[1:] == ["F_SETFD", "FD_CLOEXEC"]:
+        return call.ret == "0"
     # Same-fd stamps and bounded reads, then close. These inputs are read
     # before the helper filter, so the general helper syscall list is not
     # sufficient: every other operation on their fds must fail here.

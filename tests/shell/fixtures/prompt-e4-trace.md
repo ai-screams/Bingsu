@@ -123,3 +123,109 @@ relax product deadlines/the positive coverage check to make this pass.
 `_0` also is not an end-to-end success capture: it checks the collector
 executable and observes all three missing global files, but later dies from
 SIGXCPU during collection catalog work. Its fd-shape evidence remains useful.
+
+## CI musl global-present: source audit and reproduction
+
+The reported CI `fcntl(13<.../cfg-t/git/config>, F_SETFD, FD_CLOEXEC) = 0`
+comes from musl, via this call chain:
+
+1. `commands/helper.rs` broker -> `git_global::attach` -> `load` ->
+   `resolve`/`config` -> `git_global::read_bounded`.
+2. `std::fs::OpenOptions::open` -> Unix `File::open_c` -> libc `open`.
+   In the inspected Rust 1.98.1 source, `std/src/sys/fs/unix.rs:70-73`
+   aliases `open` as `open64` for musl; `File::open_c` at line 1381
+   supplies `O_CLOEXEC` and calls it. This is not gix or a project fcntl.
+3. musl `src/fcntl/open.c`, `open`, lines 16-18: after `__sys_open_cp`,
+   a successful fd with `O_CLOEXEC` triggers
+   `__syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC)`.
+   The original implementation is reproduced in the
+   [upstream musl discussion](https://openwall.com/lists/musl/2025/11/25/3).
+   The Rust source is also available at
+   [Unix File::open_c](https://github.com/rust-lang/rust/blob/1.98.1/library/std/src/sys/fs/unix.rs#L1381).
+   CI tracks `stable`, so its exact compiler/musl revision must be recorded
+   from that run; the reported syscall alone does not establish a version.
+
+The collector does **not** use this open wrapper:
+`PinnedCollector::verify` -> `sys::open_data_at_nofollow` -> `sys::open_at`
+calls `libc::openat` directly. musl `src/fcntl/openat.c:16` returns
+`syscall_cp(SYS_openat, fd, filename, flags|O_LARGEFILE, mode)` with no
+follow-up fcntl (also visible in the
+[musl import diff](https://android.googlesource.com/platform/external/musl/+/de1aff4a6d5ce868deb3cdd1686164fd534bbf2f%5E1..de1aff4a6d5ce868deb3cdd1686164fd534bbf2f/)).
+Consequently the setter exception is local to `helper_global_input`, not
+the shared metadata predicate or collector predicate.
+
+For each successfully opened global config/ignore, the complete normal fd
+path is as follows. Configs and the chosen ignore use the same reader.
+
+| Step | Syscall and source | Gate change |
+| --- | --- | --- |
+| Open | `open`/`openat`, readonly + NONBLOCK + NOCTTY + CLOEXEC; `read_bounded` -> std -> libc | Already allowed, exact path/flags and held fd |
+| Close-on-exec | `fcntl(fd, F_SETFD, FD_CLOEXEC)`; musl `open.c` | Only new allowance, exactly three arguments and return 0 |
+| Before stamp | `fstat`; `sys::file_stamp` -> `File::metadata` -> Unix `file_attr`. GNU variants use empty-name `statx(..., STATX_ALL, ...)` or `newfstatat(..., AT_EMPTY_PATH)` | Already allowed |
+| Read | `read` through `Take<&mut File>::read_to_end` -> `default_read_to_end` -> `Take::read`/`read_buf` -> Unix `FileDesc` | Already allowed, at most cap+1 = 65,537 per request; EOF read counts for empty configs |
+| After stamp | Same metadata calls; `sys::file_stamp` compares identity/times/size | Already allowed |
+| Debug drop check | `fcntl(fd, F_GETFD)`; `OwnedFd::drop` -> `debug_assert_fd_is_open` (`std/src/os/fd/owned.rs`, `std/src/sys/fs/unix.rs`) | Already allowed |
+| Drop | `close(fd)`; `OwnedFd::drop` | Already allowed |
+
+`geteuid()` between the first stamp and reading has no fd argument and is
+already in the helper syscall list. `Take` uses the default read-to-end
+implementation, not `File::read_to_end`'s size hint/stream-position path:
+there is no `lseek`, `pread64`, `readv`, ioctl, mmap, xattr, or fd duplication
+to add for these global inputs. Early errors drop the opened file; failed
+opens never reach the fcntl. No other new fd calls are authorized.
+
+`test_helper_global_inputs_allow_complete_musl_fd_sequence` is explicitly a
+**source-derived synthetic trace**, covering all three successful opens,
+empty-config EOF reads, nonempty ignore reads, stamps, setter, and debug/
+release close behavior. It is not a replacement for a successful live run.
+Injection controls reject clearing/other setter values, wrong arity,
+failed setters, other fcntl changes, collector setters and invalid fd/PID
+ownership. The Korean `이것을 실패시키는 것:` comments describe each control.
+
+### Reproduce on native x86_64 Linux
+
+`.github/workflows/shell.yml`'s three Shell PTY jobs build **debug**, not
+release: `cargo build -p bingsu -p bingsu-collect --target
+x86_64-unknown-linux-musl`. All three Dockerfiles install strace. The job
+runs as root, copies both binaries to root-owned `/usr/local/bin`, places
+test directories under `/root/pytest`, and grants `SYS_PTRACE`. The separate
+`filter-calls` job varies debug/release and GNU/musl but runs other selected
+tests; it is not these failing container jobs.
+
+From the checkout on a native x86_64 Linux host with the musl Rust target
+installed, the focused equivalent is:
+
+```sh
+cargo build -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl
+docker build -f tests/shell/containers/cur-d13.Dockerfile -t bingsu-cur-d13 tests/shell/containers
+docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
+  -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
+  -e CI=true -e BINGSU_TEST_SHELLS='bash zsh fish' -e LC_ALL=C.UTF-8 \
+  bingsu-cur-d13 sh -c '
+    install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
+    exec python3 -m pytest tests/shell/test_prompt_env_paths.py \
+      -k "binary_names_only and global-present" -q -rA -p no:cacheprovider --basetemp=/root/pytest'
+```
+
+Use `min-u22` with `BINGSU_TEST_SHELLS='bash zsh'`, or `min-d12` with
+`BINGSU_TEST_SHELLS=fish`, to match the other images; this particular test
+always invokes Bash. The shape-only fixture and observation-recording env
+vars in the full CI suite are not consumed by this focused test.
+
+For the previous local debug/strace timeout, build both binaries with the
+same command plus `--release`, and change **both** install paths from
+`debug/` to `release/`. For a native, non-container Linux run, point
+`BINGSU_BIN` at the absolute release binary, keep its matching collector
+beside it, and use a user-owned `--basetemp` under HOME (not world-writable
+`/tmp`). macOS cannot run this Linux gate directly; prefer a native Linux
+VM/host over x86 emulation for timing evidence.
+
+Release reduces debug computation/drop checks and collector binary size,
+but does not guarantee meeting the deadline on an overloaded/traced host.
+`CI=true` and `BINGSU_TEST_SHELLS` do not raise the fixed 500 ms work / 2 s
+lifetime limits; there is no timeout override in these paths. `BINGSU_BIN`
+must be set explicitly or pytest defaults to `target/debug/bingsu`.
+The test itself requires all three opens and successful reads, so an early
+clock exit remains a failure. Keep the full syscall trace and that coverage
+assertion. A new live Linux run was unavailable during this change because
+Docker socket access was denied; only portable trace tests were executed.

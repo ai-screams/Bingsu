@@ -855,6 +855,65 @@ def test_helper_global_input_allows_fd_flags_query(path):
     budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
 
 
+# 이것을 실패시키는 것: musl open의 CLOEXEC 설정부터 빈 config/ignore 읽기·stamp 재확인·close까지 중간 호출을 빠뜨리는 것.
+@pytest.mark.parametrize("debug", [False, True], ids=["release", "debug"])
+@pytest.mark.parametrize("open_call", ["open", "openat"])
+def test_helper_global_inputs_allow_complete_musl_fd_sequence(debug, open_call):
+    # Source-derived trace, not a live capture: read_bounded uses Take<File>,
+    # whose default_read_to_end reads directly (no File size/seek fast path).
+    lines = clone_prompt_reference(historical=False)
+    extra = []
+    for path in GLOBAL_INPUTS:
+        fd = f"40<{path}>"
+        prefix = 'AT_FDCWD</>, ' if open_call == "openat" else ''
+        size = 10 if path.endswith("/ignore") else 0
+        stamp = f'fstat({fd}, {{st_mode=S_IFREG|0600, st_size={size}}}) = 0'
+        extra += [f'11 {open_call}({prefix}"{path}", {GLOBAL_FLAGS}) = {fd}',
+                  f'11 fcntl({fd}, F_SETFD, FD_CLOEXEC) = 0',
+                  f'11 {stamp}']
+        if size:
+            extra.append(f'11 read({fd}, ".DS_Store\\n", 32) = 10')
+        extra += [f'11 read({fd}, "", 32) = 0', f'11 {stamp}']
+        if debug:
+            extra.append(f'11 fcntl({fd}, F_GETFD) = 0x1 (flags FD_CLOEXEC)')
+        extra.append(f'11 close({fd}) = 0')
+    at = next(i for i, line in enumerate(lines) if line.startswith('12 prctl'))
+    lines[at:at] = extra
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+    budget.assert_global_inputs_exercised(lines, EXE, GLOBAL_INPUTS, True)
+
+
+# 이것을 실패시키는 것: openat을 직접 쓰는 collector까지 musl open의 F_SETFD 예외를 넓히는 것.
+def test_collector_rejects_cloexec_setter_injection():
+    pin = "/trusted/build/bingsu-collect"
+    lines = collector_verification_trace(pin, spawn=False)
+    at = next(i for i, line in enumerate(lines) if line.startswith('11 fstat(50<'))
+    lines.insert(at, f'11 fcntl(50<{pin}>, F_SETFD, FD_CLOEXEC) = 0')
+    with pytest.raises(AssertionError, match="helper collector fd"):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, collector_exe=pin)
+
+
+# 이것을 실패시키는 것: CLOEXEC 설정 예외가 미개방·닫힌·재사용 fd 또는 watchdog까지 허용하는 것.
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+@pytest.mark.parametrize("mutation", ["unopened", "closed", "reused", "watchdog"])
+def test_helper_global_cloexec_requires_held_helper_fd(path, mutation):
+    lines = global_input_trace(path)
+    fd = f"40<{path}>"
+    at = next(i for i, line in enumerate(lines) if line.startswith(f'11 fstat({fd}'))
+    if mutation == "unopened":
+        at -= 1
+    elif mutation == "closed":
+        at = next(i for i, line in enumerate(lines) if line.startswith(f'11 close({fd}')) + 1
+    elif mutation == "reused":
+        lines[at:at] = [f'11 close({fd}) = 0',
+                       f'11 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 40</dev/null>']
+        at += 2
+    pid = 12 if mutation == "watchdog" else 11
+    lines.insert(at, f'{pid} fcntl({fd}, F_SETFD, FD_CLOEXEC) = 0')
+    with pytest.raises(AssertionError):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+
+
 # 이것을 실패시키는 것: collector와 세 전역 입력의 열린 fd에서 조회 허용을
 # 변경·복제·다른 statx 플래그/마스크 또는 인자 수까지 넓히는 것.
 @pytest.mark.parametrize("path", ["/trusted/build/bingsu-collect", *GLOBAL_INPUTS])
@@ -883,6 +942,12 @@ def test_helper_global_input_allows_fd_flags_query(path):
     'write({fd}, "x", 1) = 1',
     'pwrite64({fd}, "x", 1, 0) = 1',
     'fcntl({fd}, F_SETFD, 0) = 0',
+    'fcntl({fd}, F_SETFD, 2) = 0',
+    'fcntl({fd}, F_SETFD, -1) = 0',
+    'fcntl({fd}, F_SETFD, FD_CLOEXEC|0x2) = 0',
+    'fcntl({fd}, F_SETFD) = 0',
+    'fcntl({fd}, F_SETFD, FD_CLOEXEC, 0) = 0',
+    'fcntl({fd}, F_SETFD, FD_CLOEXEC) = -1 EPERM (Operation not permitted)',
     'fcntl({fd}, F_SETFL, O_RDWR|O_APPEND) = 0',
     'fcntl({fd}, F_DUPFD, 60) = 60<{path}>',
     'fcntl({fd}, F_DUPFD_CLOEXEC, 60) = 60<{path}>',
