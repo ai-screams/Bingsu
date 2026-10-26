@@ -247,6 +247,7 @@ fn push<T>(
     Ok(())
 }
 fn head_entries(repo: &GuardedRepository<'_>, index: &State) -> Result<HeadEntries, ReadError> {
+    repo.head_with_tree.set(None);
     let io = &repo.io;
     let mut entries = Vec::new();
     let mut allocation = io.account(|m| Ok(m.path_allocation()))?;
@@ -315,7 +316,11 @@ fn head_entries(repo: &GuardedRepository<'_>, index: &State) -> Result<HeadEntri
             cached_id = Some(id);
             #[cfg(test)]
             observations::find(true);
-            db.tree(&id, &mut buffer)?
+            let tree = db.tree(&id, &mut buffer)?;
+            if prefix.is_empty() {
+                repo.head_with_tree.set(Some(head));
+            }
+            tree
         };
         let mut previous = None;
         for entry in tree {

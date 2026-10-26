@@ -17,7 +17,7 @@ use bingsu_core::{
 };
 use gix_error::ErrorExt;
 use gix_object::bstr::ByteSlice;
-use std::cell::Cell;
+use std::{cell::Cell, cmp::Reverse, collections::BinaryHeap};
 
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
 
@@ -75,6 +75,10 @@ pub(crate) fn divergence(repo: &GuardedRepository<'_>) -> Result<Option<(u32, u3
         .refs
         .resolve(&io, &upstream)?
         .ok_or(ReadError::Missing)?;
+    io.account(|meter| meter.check())?;
+    if head == upstream && repo.head_with_tree.get() == Some(head) {
+        return Ok(Some((0, 0)));
+    }
     let objects = repo.objects(&io);
     walk(&io, &objects, head, upstream).map(Some)
 }
@@ -230,6 +234,11 @@ fn matches_pattern<'a>(pattern: &[u8], value: &'a [u8]) -> Result<Option<&'a [u8
 struct Node {
     parents: Vec<ObjectId>,
     reach: u8,
+    sent: u8,
+    queued: bool,
+    timestamp: i64,
+    proof: usize,
+    reaches_boundary: bool,
     active: bool,
     next: usize,
 }
@@ -250,7 +259,7 @@ impl<T: gix_object::Find> gix_object::Find for CheckedFind<'_, T> {
             }
         })?;
         if let Some(data) = &data {
-            let checked = self.io.metered(|meter| checked_commit(data, meter));
+            let checked = self.io.account(|meter| checked_commit(data, meter));
             if let Err(error) = checked {
                 self.error.set(Some(error));
                 return Err(super::io::objects::ObjectError(error).raise_erased());
@@ -282,119 +291,312 @@ pub(crate) fn checked_commit(
     Ok(())
 }
 
-/// Retain each unique commit once, then color both reachable sets. The active
-/// DFS color rejects cycles; no discovered count is published before BOTH walks
-/// finish. Graph::insert_parents would silently skip missing parents, so use
-/// explicit lookup instead. Grafts and commit-graph are not I/O inputs here.
+// Timestamp is only a scheduling hint, never an ancestry bound. FIFO ties keep
+// equally dated tips moving together instead of draining one complete history.
+type QueueEntry = (i64, Reverse<usize>, ObjectId);
+
+// Count every candidate scan and DFS step (including parent edges), across
+// all boundaries. Exhaustion disables cuts permanently for this walk.
+const PROOF_WORK_PER_NODE: usize = 4;
+
+struct Paint<'a> {
+    io: &'a RepoIo<'a>,
+    graph: gix_revwalk::Graph<'a, 'a, Node>,
+    error: &'a Cell<Option<ReadError>>,
+    allocation: crate::meter::PathAllocation,
+    queue: BinaryHeap<QueueEntry>,
+    common: Vec<ObjectId>,
+    repaint: Vec<ObjectId>,
+    ids: Vec<ObjectId>,
+    stack: Vec<ObjectId>,
+    sequence: usize,
+    proof: usize,
+    proof_work: usize,
+    full_walk: bool,
+}
+
+impl Paint<'_> {
+    fn proof_step(&mut self) -> bool {
+        if self.proof_work >= PROOF_WORK_PER_NODE * self.ids.len() {
+            self.full_walk = true;
+            self.stack.clear();
+            #[cfg(test)]
+            observations::fallback();
+            return false;
+        }
+        self.proof_work += 1;
+        #[cfg(test)]
+        observations::proof_step(self.ids.len());
+        true
+    }
+
+    fn paint(&mut self, id: ObjectId, color: u8) -> Result<(), ReadError> {
+        self.io.account(|meter| meter.check())?;
+        if !self.graph.contains(&id) {
+            self.io.account(|meter| {
+                meter.charge_axis(Axis::Commits, 1)?;
+                // Hash-map node and overlapping rehash capacity. The frontier
+                // and proof scratch are reserved separately before the walk.
+                self.allocation.reserve(384, meter)
+            })?;
+            // insert_parents silently skips missing objects; explicitly look
+            // up and validate each unique commit before retaining its parents.
+            let commit = self
+                .graph
+                .try_lookup(&id)
+                .map_err(|_| self.error.get().unwrap_or(INVALID))?
+                .ok_or(ReadError::Missing)?;
+            let timestamp = commit.committer_timestamp().map_err(|_| INVALID)?;
+            let count = commit.iter_parents().try_fold(0usize, |n, parent| {
+                self.io.account(|meter| meter.check())?;
+                parent.map_err(|_| INVALID)?;
+                n.checked_add(1).ok_or(ReadError::Limit)
+            })?;
+            self.io.account(|meter| {
+                self.allocation.reserve(
+                    count
+                        .checked_mul(std::mem::size_of::<ObjectId>())
+                        .ok_or(ReadError::Limit)?,
+                    meter,
+                )
+            })?;
+            let mut parents = Vec::new();
+            parents
+                .try_reserve_exact(count)
+                .map_err(|_| ReadError::Limit)?;
+            for parent in commit.iter_parents() {
+                self.io.account(|meter| meter.check())?;
+                parents.push(parent.map_err(|_| INVALID)?);
+            }
+            self.graph.insert(
+                id,
+                Node {
+                    parents,
+                    timestamp,
+                    ..Node::default()
+                },
+            );
+            self.ids.push(id);
+        }
+        let node = self.graph.get_mut(&id).expect("inserted");
+        let previous = node.reach;
+        node.reach |= color;
+        if node.reach == 3 && previous != 3 && node.sent != 0 {
+            // Common paint must catch up through already expanded nodes before
+            // another exclusive step; otherwise equal timestamps drain history.
+            node.queued = true;
+            self.repaint.push(id);
+        } else if node.reach != node.sent && !node.queued {
+            node.queued = true;
+            self.queue
+                .push((node.timestamp, Reverse(self.sequence), id));
+            self.sequence += 1;
+        }
+        Ok(())
+    }
+
+    fn expand(&mut self, id: ObjectId) -> Result<(), ReadError> {
+        let node = self.graph.get_mut(&id).expect("painted");
+        let color = node.reach;
+        let count = node.parents.len();
+        node.sent = color;
+        node.queued = false;
+        for n in 0..count {
+            self.io.account(|meter| meter.check())?;
+            let parent = self.graph.get(&id).expect("painted").parents[n];
+            self.paint(parent, color)?;
+        }
+        Ok(())
+    }
+
+    /// Prove ancestry using ONLY retained edges, with memoized iterative DFS.
+    /// Unknown parents cannot prove a path. The active color also rejects cycles
+    /// in the observed graph (verified SHA-1 objects cannot construct cycles).
+    fn reaches(&mut self, start: ObjectId, boundary: Option<ObjectId>) -> Result<bool, ReadError> {
+        self.io.account(|meter| meter.check())?;
+        if boundary.is_some() && !self.proof_step() {
+            return Ok(false);
+        }
+        if Some(start) == boundary {
+            return Ok(true);
+        }
+        if self.graph.get(&start).expect("retained").proof == self.proof {
+            return Ok(self.graph.get(&start).expect("retained").reaches_boundary);
+        }
+        self.stack.push(start);
+        while let Some(id) = self.stack.last().copied() {
+            self.io.account(|meter| meter.check())?;
+            if boundary.is_some() && !self.proof_step() {
+                return Ok(false);
+            }
+            let node = self.graph.get_mut(&id).expect("retained");
+            if node.proof != self.proof {
+                node.proof = self.proof;
+                node.next = 0;
+                node.active = true;
+                node.reaches_boundary = false;
+            }
+            if let Some(parent) = node.parents.get(node.next).copied() {
+                node.next += 1;
+                if Some(parent) == boundary {
+                    node.reaches_boundary = true;
+                    continue;
+                }
+                let Some(parent_node) = self.graph.get(&parent) else {
+                    continue;
+                };
+                if parent_node.proof == self.proof {
+                    if parent_node.active {
+                        return Err(INVALID);
+                    }
+                    let reaches = parent_node.reaches_boundary;
+                    self.graph.get_mut(&id).expect("retained").reaches_boundary |= reaches;
+                } else {
+                    if self.stack.len() == budget::COMMITS as usize {
+                        return Err(ReadError::Limit);
+                    }
+                    self.stack.push(parent);
+                }
+            } else {
+                node.active = false;
+                let reaches = node.reaches_boundary;
+                self.stack.pop();
+                if let Some(child) = self.stack.last() {
+                    self.graph
+                        .get_mut(child)
+                        .expect("retained")
+                        .reaches_boundary |= reaches;
+                }
+            }
+        }
+        Ok(self.graph.get(&start).expect("retained").reaches_boundary)
+    }
+
+    /// Every still-exclusive commit must be a descendant of this boundary.
+    /// Otherwise its unread ancestry might recolor a previously counted commit,
+    /// even though the pending frontier is entirely common (clock skew/merges).
+    fn can_stop_at(&mut self, boundary: ObjectId) -> Result<bool, ReadError> {
+        self.proof += 1;
+        for n in 0..self.ids.len() {
+            self.io.account(|meter| meter.check())?;
+            if !self.proof_step() {
+                return Ok(false);
+            }
+            let id = self.ids[n];
+            if self.graph.get(&id).expect("retained").reach != 3
+                && !self.reaches(id, Some(boundary))?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Two-color merge-base walk. Common frontiers are deferred while any exclusive
+/// paint remains. A common boundary can be cut only after the retained graph
+/// proves that every exclusive candidate descends from it: no ancestor of that
+/// boundary can then be exclusive without forming a cycle. If the proof fails,
+/// propagate common paint further and retry within a cumulative linear work
+/// allowance. On exhaustion, finish the full colouring walk from the current
+/// state without attempting further cuts. This also removes candidates
+/// visited too early under clock skew; timestamps never justify a cut.
+///
+/// Once exclusive paint is drained, further expansion only adds common nodes,
+/// so a successful cut stays valid. All unseen ancestry is behind such cuts;
+/// all retained exclusive nodes are therefore exact. No count escapes a failed
+/// read, charge, deadline, or proof. Grafts and commit-graph are not I/O inputs.
 pub(crate) fn walk(
     io: &RepoIo<'_>,
     objects: &impl gix_object::Find,
     head: ObjectId,
     upstream: ObjectId,
 ) -> Result<(u32, u32), ReadError> {
-    let mut allocation = io.metered(|meter| {
+    io.account(|meter| meter.check())?;
+    let allocation = io.account(|meter| {
         let mut allocation = meter.path_allocation();
         allocation.reserve(
-            budget::COMMITS as usize * std::mem::size_of::<ObjectId>() + 1024,
+            budget::COMMITS as usize
+                * (std::mem::size_of::<QueueEntry>() + 4 * std::mem::size_of::<ObjectId>())
+                + 1024,
             meter,
         )?;
         Ok(allocation)
     })?;
     let error = Cell::new(None);
-    let mut graph = gix_revwalk::Graph::<Node>::new(
-        CheckedFind {
-            objects,
-            error: &error,
-            io,
-        },
-        None,
-    );
-    let mut stack = Vec::new();
-    stack
+    let mut paint = Paint {
+        io,
+        graph: gix_revwalk::Graph::new(
+            CheckedFind {
+                objects,
+                error: &error,
+                io,
+            },
+            None,
+        ),
+        error: &error,
+        allocation,
+        queue: BinaryHeap::new(),
+        common: Vec::new(),
+        repaint: Vec::new(),
+        ids: Vec::new(),
+        stack: Vec::new(),
+        sequence: 0,
+        proof: 0,
+        proof_work: 0,
+        full_walk: false,
+    };
+    paint
+        .queue
         .try_reserve_exact(budget::COMMITS as usize)
         .map_err(|_| ReadError::Limit)?;
-    for (tip, color) in [(head, 1), (upstream, 2)] {
-        stack.push(tip);
-        while let Some(id) = stack.last().copied() {
-            io.metered(|meter| meter.check())?;
-            if !graph.contains(&id) {
-                io.metered(|meter| {
-                    meter.charge_axis(Axis::Commits, 1)?;
-                    // Hash-map node and overlapping rehash capacity, reserved
-                    // before insertion. Parent arrays are accounted separately.
-                    allocation.reserve(384, meter)
-                })?;
-                let commit = graph
-                    .try_lookup(&id)
-                    .map_err(|_| error.get().unwrap_or(INVALID))?
-                    .ok_or(ReadError::Missing)?;
-                commit.committer_timestamp().map_err(|_| INVALID)?;
-                let count = commit.iter_parents().try_fold(0usize, |n, parent| {
-                    parent.map_err(|_| INVALID)?;
-                    n.checked_add(1).ok_or(ReadError::Limit)
-                })?;
-                io.metered(|meter| {
-                    allocation.reserve(
-                        count
-                            .checked_mul(std::mem::size_of::<ObjectId>())
-                            .ok_or(ReadError::Limit)?,
-                        meter,
-                    )
-                })?;
-                let mut parents = Vec::new();
-                parents
-                    .try_reserve_exact(count)
-                    .map_err(|_| ReadError::Limit)?;
-                for parent in commit.iter_parents() {
-                    parents.push(parent.map_err(|_| INVALID)?);
-                }
-                graph.insert(
-                    id,
-                    Node {
-                        parents,
-                        ..Node::default()
-                    },
-                );
-            }
-            let node = graph.get_mut(&id).expect("inserted");
-            if node.reach & color != 0 {
-                stack.pop();
+    for scratch in [
+        &mut paint.common,
+        &mut paint.repaint,
+        &mut paint.ids,
+        &mut paint.stack,
+    ] {
+        scratch
+            .try_reserve_exact(budget::COMMITS as usize)
+            .map_err(|_| ReadError::Limit)?;
+    }
+    paint.paint(head, 1)?;
+    paint.paint(upstream, 2)?;
+    loop {
+        while !paint.queue.is_empty() || !paint.repaint.is_empty() {
+            if let Some(id) = paint.repaint.pop() {
+                paint.expand(id)?;
                 continue;
             }
-            node.active = true;
-            let mut next = None;
-            loop {
-                let node = graph.get_mut(&id).expect("inserted");
-                let Some(parent) = node.parents.get(node.next).copied() else {
-                    break;
-                };
-                node.next += 1;
-                let parent_node = graph.get(&parent);
-                if parent_node.is_some_and(|n| n.active) {
-                    return Err(INVALID);
-                }
-                if parent_node.is_none_or(|n| n.reach & color == 0) {
-                    next = Some(parent);
-                    break;
-                }
-            }
-            if let Some(parent) = next {
-                if stack.len() == budget::COMMITS as usize {
-                    return Err(ReadError::Limit);
-                }
-                stack.push(parent);
+            let (_, _, id) = paint.queue.pop().expect("nonempty frontier");
+            io.account(|meter| meter.check())?;
+            if paint.graph.get(&id).expect("queued").reach == 3 {
+                paint.common.push(id);
             } else {
-                let node = graph.get_mut(&id).expect("inserted");
-                node.active = false;
-                node.next = 0;
-                node.reach |= color;
-                stack.pop();
+                paint.expand(id)?;
             }
         }
+        let Some(id) = paint.common.pop() else {
+            break;
+        };
+        if !paint.full_walk && paint.can_stop_at(id)? {
+            let node = paint.graph.get_mut(&id).expect("common");
+            node.sent = 3;
+            node.queued = false;
+        } else {
+            paint.expand(id)?;
+        }
+    }
+    // Validate every retained edge, including duplicate parents and edges into
+    // cut nodes. Unread ancestry is excluded by the proof, not assumed acyclic
+    // from an untrusted timestamp. Object hashes are verified by the adapter.
+    paint.proof += 1;
+    for n in 0..paint.ids.len() {
+        paint.reaches(paint.ids[n], None)?;
     }
     let (mut ahead, mut behind) = (0, 0);
-    for node in graph.detach().into_values() {
-        io.metered(|meter| meter.check())?;
+    for node in paint.graph.detach().into_values() {
+        io.account(|meter| meter.check())?;
         ahead += u32::from(node.reach == 1);
         behind += u32::from(node.reach == 2);
     }
@@ -420,5 +622,35 @@ pub(super) fn result(stage: &[u8], partial: bool, fields: &[(&str, Field)]) -> S
         StageResult::Partial(value)
     } else {
         StageResult::Value(value)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod observations {
+    use std::cell::Cell;
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Counts {
+        pub proof_work: usize,
+        pub max_work_per_node: usize,
+        pub fallbacks: usize,
+    }
+    thread_local! { static COUNTS: Cell<Counts> = Cell::new(Counts::default()); }
+    pub fn take() -> Counts {
+        COUNTS.take()
+    }
+    pub(super) fn proof_step(nodes: usize) {
+        COUNTS.with(|slot| {
+            let mut c = slot.get();
+            c.proof_work += 1;
+            c.max_work_per_node = c.max_work_per_node.max(c.proof_work.div_ceil(nodes));
+            slot.set(c);
+        });
+    }
+    pub(super) fn fallback() {
+        COUNTS.with(|slot| {
+            let mut c = slot.get();
+            c.fallbacks += 1;
+            slot.set(c);
+        });
     }
 }
