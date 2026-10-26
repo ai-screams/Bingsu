@@ -14,15 +14,28 @@ use bingsu_core::collection::budget::{CONFIG_BYTES, OBJECT_ALLOC};
 pub const SECTION_LIMIT: usize = 256;
 pub const LINE_LIMIT: usize = 1024;
 pub const WORD_LIMIT: usize = 4096;
-// gix-config 0.61.0 (lossy) keeps the events of the current section, or of the
-// front matter, in one 56 B-per-event Vec that starts at 256 and doubles. Peak
-// is that capacity plus one copy: drain(..).collect() of a section at the next
-// header, or the SmallVec collect of front matter (rounded to a power of two).
+// gix-config 0.61.0 (lossy, Events::from_bytes) keeps events in one 56 B-per-
+// event scratch Vec. Front matter fills it from capacity 256; the first
+// header collects it into a SmallVec rounded up to a power of two and leaves
+// an empty Vec. Section events then grow that Vec by doubling, and
+// drain(..).collect() copies them at the next header while the Vec keeps its
+// capacity. With F front-matter events and S section events, the front
+// collect holds max(256, NPOT(F)) + NPOT(F) slots, and any later drain or
+// doubling holds the SmallVec, the earlier sections' copies and the current
+// section with the scratch: at most NPOT(F) + S + NPOT(S). The larger of the
+// two is reserved. One shared 2 * NPOT(F + S) did not cover the second:
+// 1,100 front-matter events and then 2,900 in one section peaked 41,922 B
+// above it. Scan splits its counts at the first counted '[': a '[' outside a
+// value or comment there starts a header or ends parsing (from_bytes stops
+// front matter at any line that starts with '['), and the boundary line counts
+// on both sides, since `[a] k=v\` puts a separator and a continuation on it.
+// No test kills dropping that second count; like the second per-line event
+// below, it is derivation headroom.
 // Kept events are at most 2 per key name (name, value) plus 2 per line
 // (separator, continuation), so scan's own counts bound them; at the scan
-// limits that is 10,240 events and 16,384 slots per term. The second per-line
-// event is needed: `a=\` followed by 1,021 lines of `\` keeps 2W + L + 1
-// events and overruns a 2W + L reservation.
+// limits that is 10,240 events, rounded up to 16,384 slots. The second
+// per-line event is needed: `a=\` followed by 1,021 lines of `\` keeps
+// 2W + L + 1 events and overruns a 2W + L reservation.
 // Key names are counted as words outside values and headers. In gix's
 // parse/from_bytes, section_header() turns a header into one SectionHeader
 // event that Events::from_bytes keeps in SectionData, not in a body or the
@@ -64,34 +77,69 @@ pub const GIX_CONFIG_VERSION: &str = "0.61.0";
 const EVENT_BYTES: usize = 56;
 const EVENT_SCRATCH: usize = 256;
 const SECTION_BYTES: usize = 768;
-const fn reservation(
+/// Counts before the first header (front matter) and after it, from scan.
+#[derive(Clone, Copy)]
+struct Counts {
     headers: usize,
+    front_lines: usize,
+    front_words: usize,
     lines: usize,
     words: usize,
-    len: usize,
     quoted_bytes: usize,
-) -> usize {
-    let events = (2 * words + 2 * lines).next_power_of_two();
-    let scratch = if events > EVENT_SCRATCH {
-        events
+}
+
+const fn reservation(counts: Counts, len: usize) -> usize {
+    let Counts {
+        headers,
+        front_lines,
+        front_words,
+        lines,
+        words,
+        quoted_bytes,
+    } = counts;
+    let front = (2 * front_words + 2 * front_lines).next_power_of_two();
+    let section_events = 2 * (words - front_words) + 2 * (lines - front_lines + 1);
+    let collect = if front > EVENT_SCRATCH {
+        front
     } else {
         EVENT_SCRATCH
+    } + front;
+    let sections = front + section_events + section_events.next_power_of_two();
+    let slots = if collect > sections {
+        collect
+    } else {
+        sections
     };
-    EVENT_BYTES * (scratch + events)
+    EVENT_BYTES * slots
         + 2 * len
         + 4 * quoted_bytes
         + SECTION_BYTES * (headers + 1).next_power_of_two()
 }
 pub const PARSER_ALLOCATION: usize = OBJECT_ALLOC as usize;
-const _: () = assert!(
-    reservation(
-        SECTION_LIMIT,
-        LINE_LIMIT,
-        LINE_LIMIT,
-        CONFIG_BYTES as usize,
-        CONFIG_BYTES as usize
-    ) <= PARSER_ALLOCATION
-);
+/// Largest reservation for a config git reads (W <= L) over every front
+/// matter split, with every byte quoted.
+const fn git_readable_worst() -> usize {
+    let (mut front, mut worst) = (0, 0);
+    while front <= LINE_LIMIT {
+        let reserve = reservation(
+            Counts {
+                headers: SECTION_LIMIT,
+                front_lines: front,
+                front_words: front,
+                lines: LINE_LIMIT,
+                words: LINE_LIMIT,
+                quoted_bytes: CONFIG_BYTES as usize,
+            },
+            CONFIG_BYTES as usize,
+        );
+        if reserve > worst {
+            worst = reserve;
+        }
+        front += 1;
+    }
+    worst
+}
+const _: () = assert!(git_readable_worst() <= PARSER_ALLOCATION);
 
 // Only C3-C5 policy facts survive parsing. core.worktree is retained solely for
 // reciprocal submodule validation; no external path/driver/include is followed.
@@ -340,6 +388,7 @@ pub(crate) fn parser_allocation(bytes: &[u8]) -> Result<usize, ReadError> {
     const COMMENT: u8 = 5;
     let (mut headers, mut lines, mut words) = (0, usize::from(!bytes.is_empty()), 0);
     let (mut in_word, mut state, mut quoted_bytes) = (false, KEY, 0);
+    let mut front = None;
     let mut i = 0;
     while let Some(&byte) = bytes.get(i) {
         if state == VALUE || state == COMMENT {
@@ -376,6 +425,9 @@ pub(crate) fn parser_allocation(bytes: &[u8]) -> Result<usize, ReadError> {
         // and comments, '[' counts even in subsections, and so do name runs
         // outside headers, including several implicit keys on one line.
         headers += usize::from(byte == b'[');
+        if headers == 1 && front.is_none() {
+            front = Some((lines, words));
+        }
         lines += usize::from(byte == b'\n' && i + 1 < bytes.len());
         let word = state == KEY && (byte.is_ascii_alphanumeric() || byte == b'-');
         words += usize::from(word && !in_word);
@@ -402,11 +454,14 @@ pub(crate) fn parser_allocation(bytes: &[u8]) -> Result<usize, ReadError> {
     if lines > LINE_LIMIT {
         return Err(ReadError::Limit);
     }
-    Ok(reservation(
+    let (front_lines, front_words) = front.unwrap_or((lines, words));
+    let counts = Counts {
         headers,
+        front_lines,
+        front_words,
         lines,
         words,
-        bytes.len(),
         quoted_bytes,
-    ))
+    };
+    Ok(reservation(counts, bytes.len()))
 }
