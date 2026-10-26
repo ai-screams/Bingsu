@@ -35,7 +35,7 @@ DEBIAN_ROOTS = [DEBIAN_BASE + suffix for suffix in (
 )]
 
 
-# 이것을 실패시키는 것: 현재 제품 trace에 과거 collector 생성 허용량을 적용하는 것.
+# 이것을 실패시키는 것: 현재 제품 collector 허용이 과거 고정 stub 실행까지 허용하는 것.
 def test_product_trace_rejects_the_historical_collector(debian_trace):
     with pytest.raises(AssertionError):
         budget.assert_prompt_trace_budget(debian_trace, DEBIAN_EXE, DEBIAN_ROOTS)
@@ -455,6 +455,310 @@ def clone3_prompt_trace(split, historical):
             f'clone(child_stack={stack}, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = {child}',
             'clone3(' + before + after)
     return text.splitlines()
+
+
+GLOBAL_INPUTS = ("/trusted/xdg/git/config", "/trusted/home/.gitconfig", "/trusted/xdg/git/ignore")
+GLOBAL_FLAGS = "O_RDONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC"
+
+
+def product_collector_trace(collector_exe="/pinned/bin/bingsu-collect"):
+    lines = clone_prompt_reference(historical=False)
+    at = next(i for i, line in enumerate(lines) if line.startswith('11 seccomp'))
+    lines[at:at] = [
+        '11 clone(child_stack=0x2, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 13',
+        f'13 execve("{collector_exe}", ["{collector_exe}", "__collect-v1"], []) = 0',
+        '13 clone(child_stack=0x3, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 14',
+        '14 exit(0) = ?',
+        '13 exit_group(0) = ?',
+    ]
+    return lines
+
+
+# 이것을 실패시키는 것: 기본 화면에서 고정 collector 하나의 생성을 거부하는 것.
+@pytest.mark.parametrize("collector_exe", ["/pinned/bin/bingsu-collect", "/trusted/build/bingsu-collect"])
+def test_product_allows_one_pinned_collector(collector_exe):
+    budget.assert_prompt_trace_budget(product_collector_trace(collector_exe), EXE, ROOTS,
+                                      collector_exe=collector_exe)
+
+
+def collector_verification_trace(collector_exe, *, spawn=True):
+    lines = (product_collector_trace(collector_exe) if spawn
+             else clone_prompt_reference(historical=False))
+    at = next(i for i, line in enumerate(lines)
+              if line.startswith('11 clone(child_stack=0x2') or line.startswith('11 seccomp'))
+    parent = str(Path(collector_exe).parent)
+    walk = ['11 openat(AT_FDCWD</>, "/", O_RDONLY|O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 40</>']
+    directory, fd = "", 40
+    for name in Path(parent).parts[1:]:
+        child = directory + "/" + name
+        walk.append(f'11 openat({fd}<{directory or "/"}>, "{name}", '
+                    f'O_RDONLY|O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = {fd + 1}<{child}>')
+        directory, fd = child, fd + 1
+    walk += [
+        f'11 openat({fd}<{parent}>, "bingsu-collect", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 50<{collector_exe}>',
+        f'11 fstat(50<{collector_exe}>, {{st_mode=S_IFREG|0755, st_size=128, ...}}) = 0',
+        f'11 fstatfs(50<{collector_exe}>, {{f_type=EXT4_SUPER_MAGIC}}) = 0',
+        f'11 fgetxattr(50<{collector_exe}>, "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)',
+        f'11 pread64(50<{collector_exe}>, "build and role tags", 65536, 0) = 128',
+        f'11 newfstatat(50<{collector_exe}>, "", {{st_mode=S_IFREG|0755, ...}}, AT_EMPTY_PATH) = 0',
+        f'11 newfstatat({fd}<{parent}>, "bingsu-collect", {{st_mode=S_IFREG|0755, ...}}, AT_SYMLINK_NOFOLLOW) = 0',
+    ]
+    lines[at:at] = walk
+    at = next(i for i, line in enumerate(lines) if line.startswith('11 seccomp'))
+    lines.insert(at, f'11 close(50<{collector_exe}>) = 0')
+    return lines
+
+
+# 이것을 실패시키는 것: init의 collector pin 대신 실행 파일의 별칭 옆 경로나 빌드 환경 경로를 쓰는 것.
+@pytest.mark.parametrize("pin", ["/pinned/bin/bingsu-collect", "/trusted/build/bingsu-collect"])
+@pytest.mark.parametrize("spawn", [False, True], ids=["verify-only", "spawn"])
+def test_collector_verification_uses_init_pin(pin, spawn):
+    script = f"_bingsu_call() {{ '{EXE}' prompt '--collector-exe={pin}'; }}\n".encode()
+    collector_exe = budget.init_collector_exe(script)
+    assert collector_exe == pin
+    budget.assert_prompt_trace_budget(collector_verification_trace(pin, spawn=spawn), EXE, ROOTS,
+                                      collector_exe=collector_exe)
+
+
+# 이것을 실패시키는 것: collector pin이 없거나 중복·상대 경로·다른 이름인데 추측해서 통과시키는 것.
+@pytest.mark.parametrize("words", ["", "'--collector-exe=relative'",
+    "'--collector-exe=/trusted/build/other'",
+    "'--collector-exe=/a/bingsu-collect' '--collector-exe=/b/bingsu-collect'"])
+def test_collector_init_pin_is_unambiguous(words):
+    with pytest.raises(AssertionError):
+        budget.init_collector_exe(words.encode())
+
+
+# 이것을 실패시키는 것: 같은 디렉터리의 다른 파일·쓰기·필수 플래그 누락·다른 pin·살아 있지 않은 fd를 허용하는 것.
+@pytest.mark.parametrize("mutation", [
+    "sibling", "write-open", "readwrite-open", "truncate-open", "nofollow", "nonblock", "cloexec",
+    "absolute-open", "wrong-parent", "wrong-result", "different-pin", "different-name",
+    "write", "pwrite", "truncate", "chmod", "mmap", "oversized-read", "closed-fd", "unopened-fd",
+    "unheld-parent", "other-process", "followed-stat",
+])
+def test_collector_verification_rejects_trace_injection(mutation):
+    pin = "/trusted/build/bingsu-collect"
+    lines = collector_verification_trace(pin, spawn=False)
+    opened = next(i for i, line in enumerate(lines) if '"bingsu-collect", O_RDONLY' in line)
+    read = next(i for i, line in enumerate(lines) if line.startswith('11 pread64(50<'))
+    fd = f"50<{pin}>"
+    if mutation in {"different-pin", "different-name"}:
+        pin = "/other/build/bingsu-collect" if mutation == "different-pin" else "/trusted/build/other"
+    elif mutation == "sibling":
+        lines[opened] = lines[opened].replace("bingsu-collect", "neighbor")
+    elif mutation in {"write-open", "readwrite-open", "truncate-open"}:
+        lines[opened] = lines[opened].replace("O_RDONLY", {
+            "write-open": "O_WRONLY", "readwrite-open": "O_RDWR", "truncate-open": "O_RDONLY|O_TRUNC",
+        }[mutation])
+    elif mutation in {"nofollow", "nonblock", "cloexec"}:
+        lines[opened] = lines[opened].replace("|O_" + mutation.upper(), "")
+    elif mutation == "absolute-open":
+        lines[opened] = lines[opened].replace('42</trusted/build>, "bingsu-collect"', f'AT_FDCWD, "{pin}"')
+    elif mutation == "wrong-parent":
+        lines[opened] = lines[opened].replace('42</trusted/build>', '42</other/build>')
+    elif mutation == "wrong-result":
+        lines[opened] = lines[opened].replace(f'= {fd}', '= 50</trusted/build/neighbor>')
+    elif mutation == "unheld-parent":
+        lines.insert(opened, '11 close(42</trusted/build>) = 0')
+    elif mutation == "other-process":
+        lines[opened] = lines[opened].replace('11 openat', '12 openat')
+    elif mutation == "followed-stat":
+        lines = [line.replace('AT_SYMLINK_NOFOLLOW', '0') if '"bingsu-collect", {' in line else line
+                 for line in lines]
+    else:
+        extra = {
+            "write": f'11 write({fd}, "x", 1) = 1',
+            "pwrite": f'11 pwrite64({fd}, "x", 1, 0) = 1',
+            "truncate": f'11 ftruncate({fd}, 0) = 0',
+            "chmod": f'11 fchmod({fd}, 0777) = 0',
+            "mmap": f'11 mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, {fd}, 0) = 0x1000',
+            "oversized-read": f'11 pread64({fd}, "x", 65537, 0) = 1',
+            "closed-fd": f'11 close({fd}) = 0',
+            "unopened-fd": f'11 pread64(51<{pin}>, "x", 1, 0) = 1',
+        }[mutation]
+        lines.insert(read, extra)
+    with pytest.raises(AssertionError):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, collector_exe=pin)
+
+
+# 이것을 실패시키는 것: collector 상한을 늘리거나 실행 경로·verb·argv·빈 환경 계약을 푸는 것.
+@pytest.mark.parametrize("mutation", ["second", "path", "verb", "argv", "env"])
+def test_product_collector_allowance_stays_bounded(mutation):
+    lines = product_collector_trace()
+    at = next(i for i, line in enumerate(lines) if line.startswith('13 execve'))
+    if mutation == "second":
+        lines[at:at] = [
+            '11 clone(child_stack=0x4, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 15',
+            lines[at].replace('13 execve', '15 execve'),
+        ]
+    else:
+        old, new = {
+            "path": ('/pinned/bin/bingsu-collect', '/other/bingsu-collect'),
+            "verb": ('__collect-v1', '__other'),
+            "argv": ('"__collect-v1"]', '"__collect-v1", "extra"]'),
+            "env": ('], [])', '], ["HOME=/repo"])'),
+        }[mutation]
+        lines[at] = lines[at].replace(old, new)
+    with pytest.raises(AssertionError):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+# 이것을 실패시키는 것: collector_limit=1로 바꾸면서 기존 C3 경로/횟수 검사를 건너뛰는 것.
+def test_one_collector_keeps_front_collection_budget():
+    lines = product_collector_trace()
+    lines[0] = lines[0].replace('"prompt"]', '"prompt", "--pwd", "/cwd"]')
+    absent, _ = collection_trace(absent=True)
+    entry = absent[0].replace('77 openat', '10 openat')
+    at = next(i for i, line in enumerate(lines) if 'PR_SET_SECCOMP' in line)
+    lines.insert(at, entry)
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS)
+    lines.insert(at, entry)
+    with pytest.raises(AssertionError, match="collection extra open"):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS)
+
+
+def watchdog_killed_trace(lines, *, split=False):
+    lines = [line for line in lines if line not in {'12 exit(0) = ?', '11 exit_group(0) = ?'}]
+    lines += (['12 kill(11, SIGKILL <unfinished ...>'] if split else ['12 kill(11, SIGKILL) = 0'])
+    return lines + ['12 +++ killed by SIGKILL +++', '11 +++ killed by SIGKILL +++']
+
+
+# 이것을 실패시키는 것: helper TGID에 속한 watchdog의 자기 SIGKILL(미완료 호출 포함)을 거부하는 것.
+@pytest.mark.parametrize("split", [False, True], ids=["whole", "unfinished-at-death"])
+@pytest.mark.parametrize("collector", [False, True], ids=["no-collector", "one-collector"])
+def test_product_allows_helper_watchdog_self_kill(split, collector):
+    lines = product_collector_trace() if collector else clone_prompt_reference(historical=False)
+    budget.assert_prompt_trace_budget(watchdog_killed_trace(lines, split=split), EXE, ROOTS)
+
+
+# 이것을 실패시키는 것: 자기 종료 허용을 다른 PID·신호·collector 발신·collector 대상까지 넓히는 것.
+@pytest.mark.parametrize("extra", [
+    '12 kill(999, SIGKILL) = -1 EPERM (Operation not permitted)',
+    '12 kill(10, SIGKILL) = 0',
+    '12 kill(12, SIGKILL) = 0',
+    '12 kill(0, SIGKILL) = 0',
+    '12 kill(-11, SIGKILL) = 0',
+    '12 kill(11, SIGTERM) = 0',
+    '12 kill(11, 0) = 0',
+    '12 kill(13, SIGKILL) = 0',
+    '11 kill(13, SIGKILL) = 0',
+    '13 kill(11, SIGKILL) = 0',
+    '14 kill(11, SIGKILL) = 0',
+    '13 kill(13, SIGKILL) = 0',
+    '14 kill(13, SIGKILL) = 0',
+    '12 tkill(11, SIGKILL) = 0',
+    '12 tgkill(11, 12, SIGKILL) = 0',
+    '10 kill(11, SIGKILL) = 0',
+])
+def test_product_rejects_other_signal_calls(extra):
+    lines = product_collector_trace()
+    # Inject while the root and all workers are live, with no pending syscall.
+    lines = [line for line in lines if not line.startswith(('12 futex', '12 <... futex'))]
+    root_exit = [line for line in lines if line.startswith(('10 exit_group', '10 +++ exited'))]
+    lines = [line for line in lines if line not in root_exit]
+    at = next(i for i, line in enumerate(lines) if line.startswith('14 exit'))
+    lines[at:at] = [extra]
+    with pytest.raises(AssertionError):
+        budget.assert_prompt_trace_budget(lines + root_exit, EXE, ROOTS)
+
+
+def global_input_trace(path, *, missing=False):
+    lines = clone_prompt_reference(historical=False)
+    result = "-1 ENOENT (No such file or directory)" if missing else f"40<{path}>"
+    extra = [f'11 openat(AT_FDCWD</>, "{path}", {GLOBAL_FLAGS}) = {result}']
+    if not missing:
+        extra += [f'11 fstat(40<{path}>, {{st_mode=S_IFREG|0600, st_size=5}}) = 0',
+                  f'11 read(40<{path}>, "# e4\\n", 32) = 5',
+                  f'11 read(40<{path}>, "", 32) = 0',
+                  f'11 fstat(40<{path}>, {{st_mode=S_IFREG|0600, st_size=5}}) = 0',
+                  f'11 close(40<{path}>) = 0']
+    at = next(i for i, line in enumerate(lines) if line.startswith('12 prctl'))
+    lines[at:at] = extra
+    return lines
+
+
+def all_global_inputs_trace(missing):
+    lines = product_collector_trace()
+    at = next(i for i, line in enumerate(lines) if line.startswith('12 prctl'))
+    extra = [line for path in GLOBAL_INPUTS for line in global_input_trace(path, missing=missing)
+             if path in line]
+    lines[at:at] = extra
+    return watchdog_killed_trace(lines)
+
+
+# 이것을 실패시키는 것: 전역 입력 접근을 마친 실행도 watchdog 종료만으로 거부하는 것.
+@pytest.mark.parametrize("missing", [False, True], ids=["present", "missing"])
+def test_watchdog_death_preserves_global_input_coverage(missing):
+    lines = all_global_inputs_trace(missing)
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+    budget.assert_global_inputs_exercised(lines, EXE, GLOBAL_INPUTS, not missing)
+
+
+# 이것을 실패시키는 것: watchdog이 먼저 끝낸 실행에서 생략된 open/read를 조용히 통과시키는 것.
+@pytest.mark.parametrize("missing", [False, True], ids=["present", "missing"])
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+def test_watchdog_death_cannot_hide_missing_global_input(missing, path):
+    lines = [line for line in all_global_inputs_trace(missing) if path not in line]
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+    with pytest.raises(AssertionError, match="global input opens missing"):
+        budget.assert_global_inputs_exercised(lines, EXE, GLOBAL_INPUTS, not missing)
+
+
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+def test_watchdog_death_cannot_replace_reads_with_opens(path):
+    lines = [line for line in all_global_inputs_trace(False)
+             if not (line.startswith('11 read(') and path in line)]
+    budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+    with pytest.raises(AssertionError, match="global input reads missing"):
+        budget.assert_global_inputs_exercised(lines, EXE, GLOBAL_INPUTS, True)
+
+
+# 이것을 실패시키는 것: 허용된 watchdog 종료가 앞선 금지 경로 접근을 덮어버리는 것.
+def test_watchdog_death_does_not_relax_path_rules():
+    lines = all_global_inputs_trace(False)
+    at = next(i for i, line in enumerate(lines) if line.startswith('12 kill'))
+    lines.insert(at, '11 openat(AT_FDCWD</>, "/repo/secret", O_RDONLY) = -1 ENOENT (No such file or directory)')
+    with pytest.raises(AssertionError, match="helper path"):
+        budget.assert_prompt_trace_budget(lines, EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
+
+
+# 이것을 실패시키는 것: 세 파일 각각의 ENOENT/성공 open 또는 같은 fd read 허용을 제거하는 것.
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+@pytest.mark.parametrize("missing", [False, True], ids=["read", "enoent"])
+def test_helper_global_inputs_are_exact_reads(path, missing):
+    budget.assert_prompt_trace_budget(global_input_trace(path, missing=missing), EXE, ROOTS,
+                                      global_inputs=GLOBAL_INPUTS)
+
+
+# 이것을 실패시키는 것: 각 허용 파일을 같은 뿌리의 다른 이름으로 바꾸거나, 쓰기·다른 errno·
+# symlink 대상·미개방/닫힌 fd·watchdog 읽기를 허용하는 것. 변이는 실제 제품 trace 게이트를 거친다.
+@pytest.mark.parametrize("path", GLOBAL_INPUTS)
+@pytest.mark.parametrize("mutation", [
+    "sibling", "write-open", "write-fd", "errno", "symlink", "unopened", "closed", "watchdog",
+])
+def test_helper_global_input_mutations_are_refused(path, mutation):
+    lines = global_input_trace(path)
+    text = "\n".join(lines)
+    if mutation == "sibling":
+        text = text.replace(path, path + ".other")
+    elif mutation == "write-open":
+        text = text.replace(GLOBAL_FLAGS, GLOBAL_FLAGS.replace("O_RDONLY", "O_RDWR"))
+    elif mutation == "write-fd":
+        text = text.replace(f'11 read(40<{path}>, "", 32) = 0', f'11 write(40<{path}>, "x", 1) = 1')
+    elif mutation == "errno":
+        text = "\n".join(global_input_trace(path, missing=True)).replace(
+            "ENOENT (No such file or directory)", "EACCES (Permission denied)")
+    elif mutation == "symlink":
+        text = text.replace(f"40<{path}>", f"40<{path}.target>")
+    elif mutation == "unopened":
+        text = "\n".join(line for line in lines if f'"{path}", {GLOBAL_FLAGS}' not in line)
+    elif mutation == "closed":
+        text = text.replace(f"11 read(40<{path}>", f"11 close(40<{path}>) = 0\n11 read(40<{path}>")
+    else:
+        text = text.replace(f'11 openat(AT_FDCWD</>, "{path}"', f'12 openat(AT_FDCWD</>, "{path}"')
+    error = "descriptor lifetime/identity mismatch" if mutation == "closed" else "helper (global input|path)"
+    with pytest.raises(AssertionError, match=error):
+        budget.assert_prompt_trace_budget(text.splitlines(), EXE, ROOTS, global_inputs=GLOBAL_INPUTS)
 
 
 # 이것을 실패시키는 것: prompt의 현재/과거 게이트가 성공 clone3의 =>·스레드 owner·vfork 생성 예산을 다르게 처리하는 것.
