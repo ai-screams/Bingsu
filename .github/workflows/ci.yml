@@ -138,7 +138,8 @@ jobs:
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
-    # The arm runner needs about 19 minutes before the F1 corpus and about 23 with it.
+    # The arm runner last took 23m38s. F3 adds one small fixture build and
+    # five runtime cases (estimated 1--2 minutes); retain the 30-minute limit.
     timeout-minutes: 30
     env:
       # Audit the real linked binaries, then strip those same files for shipping.
@@ -146,7 +147,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, macos-26-intel]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -159,9 +160,13 @@ jobs:
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-collect --test startup -- --test-threads=2 | tee "$RUNNER_TEMP/startup-native.txt"
+          grep -F 'test worker::tests::stage_deadline_exit_is_distinct_from_protocol_and_resource_failure ... ok' "$RUNNER_TEMP/startup-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu --test collector_lifecycle --test collection_store --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test stage_deadline_exit_preserves_protocol_validation ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test three_worker_deadlines_before_a_block_for_five_minutes ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test worker_deadline_after_a_resets_failure_count ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test partial_survives_only_after_validated_updates ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test slow_drip_does_not_extend_spawn_deadline ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test immediate_ready_is_not_read_or_decoded_before_confinement ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
@@ -261,6 +266,7 @@ jobs:
           export BINGSU_X16_CFLAGS
           set -o pipefail
           cargo test --locked -j 2 -p bingsu-collect --target "$target" --test startup --test filter -- --nocapture --test-threads=2 | tee "$RUNNER_TEMP/filter-musl.txt"
+          grep -F 'test worker::tests::stage_deadline_exit_is_distinct_from_protocol_and_resource_failure ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test runtime::x14_threads_and_status_survive_fork_is_refused ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test worker_limits_fail_without_blocking_front ... ok' "$RUNNER_TEMP/filter-musl.txt"
@@ -279,6 +285,14 @@ jobs:
           target="$(uname -m)-unknown-linux-musl"
           CC=musl-gcc cargo run --locked -j 2 --manifest-path bench/probes/collector-x14/Cargo.toml --target "$target" --release -- --case all | tee "$RUNNER_TEMP/x14-musl.txt"
           grep -Fx 'X-14 PASS' "$RUNNER_TEMP/x14-musl.txt"
+      # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것.
+      - name: F2 fixed fuzz seed regression corpus
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          cargo test --locked -j 2 -p bingsu-collect --test fuzz_seeds -- --test-threads=2 | tee "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test fixed_seed_corpus_replays_with_pinned_verdicts ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test every_target_has_every_seed_class ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
       - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
       # 이것을 실패시키는 것: build script·RUSTFLAGS·config가 제품 rustc에 --cfg collector_fuzz를 넘기는 것.
       - name: Product rustc never enables collector_fuzz
@@ -374,14 +388,6 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-over-cap]' "$RUNNER_TEMP/f1-security.txt"
           grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-large]' "$RUNNER_TEMP/f1-security.txt"
 
-      # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것.
-      - name: F2 fixed fuzz seed regression corpus
-        shell: bash --noprofile --norc -euo pipefail {0}
-        run: |
-          cargo test --locked -j 2 -p bingsu-collect --test fuzz_seeds -- --test-threads=2 | tee "$RUNNER_TEMP/f2-seeds.txt"
-          grep -F 'test fixed_seed_corpus_replays_with_pinned_verdicts ... ok' "$RUNNER_TEMP/f2-seeds.txt"
-          grep -F 'test every_target_has_every_seed_class ... ok' "$RUNNER_TEMP/f2-seeds.txt"
-          grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
       - name: F2 file-backed seed repositories under the protected collector
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -389,6 +395,9 @@ jobs:
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_git_fuzz_repositories.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/f2-traces" | tee "$RUNNER_TEMP/f2-repositories.txt"
           grep -F 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects' "$RUNNER_TEMP/f2-repositories.txt"
           grep -F 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations' "$RUNNER_TEMP/f2-repositories.txt"
+      # 이것을 실패시키는 것: 제품 mask 10의 실제 수집 fixture를 준비하지 않고 runtime을 실행하는 것.
+      - name: Prepare F3 release collection observations
+        run: python3 bench/git-product.py --prepare target/release/bingsu --out target/f3/preparation.json
       - name: Prepare M3b compiler-free product fixtures
         # Native Linux (x86_64/arm64) and macOS: prepare the current release
         # siblings after all builds; pytest below selects this exact pair.
@@ -398,7 +407,7 @@ jobs:
           set -o pipefail
           export BINGSU_BIN="$PWD/target/release/bingsu"
           mkdir -p "$RUNNER_TEMP/m3b-traces"
-          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py bench/tests/test_collector_product.py tools/fsbudget/tests -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/native" | tee "$RUNNER_TEMP/m3b-security.txt"
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py bench/tests/test_collector_product.py bench/tests/test_git_product.py tools/fsbudget/tests -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/native" | tee "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED bench/tests/test_collector_product.py::test_latency_measures_verification_spawn_ready_and_read_separately' "$RUNNER_TEMP/m3b-security.txt"
@@ -414,6 +423,13 @@ jobs:
           grep -F 'PASSED bench/tests/test_collector_product.py::test_unavailable_normal_prompt_keeps_evidence_but_blocks_acceptance' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_acceptance_table_tests_exist_and_run_in_ci' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[known]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[missing]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[empty]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[unknown]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[invalid-home]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[invalid-xdg]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b[invalid-both]' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_product_global_excludes_reaches_stage_b' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tools/fsbudget/tests/test_repository.py::test_repository_trace_checks_paths_counts_and_phases' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_ci_has_no_silent_acceptance_skip' "$RUNNER_TEMP/m3b-security.txt"
@@ -422,6 +438,25 @@ jobs:
           grep -F 'PASSED tools/fsbudget/tests/test_attribute.py::test_collector_role_mutations_are_refused' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tools/fsbudget/tests/test_attribute.py::test_trace_attributes_spawn_sites_and_fd_lifetimes' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tools/fsbudget/tests/test_gate.py::test_role_and_kind_surplus_is_never_hidden' "$RUNNER_TEMP/m3b-security.txt"
+      # 이것을 실패시키는 것: 하나의 PASS로 다른 실제 수집 매개변수의 skip을 숨기는 것.
+      - name: Assert exact F3 collection passes
+        run: |
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_real_collection_has_no_silent_skip' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED bench/tests/test_git_product.py::test_m3c_measurement_is_not_formal_b5_b7' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED bench/tests/test_git_product.py::test_two_binary_sizes_and_git_memory_are_reported' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[no-git]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-clean]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-dirty]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[tracked-19000]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[budget-bound]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tools/fsbudget/tests/test_git_collection.py::test_repository_budget_cannot_hide_other_role_surplus[front-openat]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tools/fsbudget/tests/test_git_collection.py::test_repository_budget_cannot_hide_other_role_surplus[helper-read]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tools/fsbudget/tests/test_git_collection.py::test_repository_budget_cannot_hide_other_role_surplus[collector-startup-exec]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tools/fsbudget/tests/test_git_collection.py::test_repository_budget_cannot_hide_other_role_surplus[collector-network]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_real_collection_has_no_silent_skip' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED tools/fsbudget/tests/test_git_collection.py::test_repository_budget_cannot_hide_other_role_surplus' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_git_product.py::test_m3c_measurement_is_not_formal_b5_b7' "$RUNNER_TEMP/m3b-security.txt"
+          grep -F 'PASSED bench/tests/test_git_product.py::test_two_binary_sizes_and_git_memory_are_reported' "$RUNNER_TEMP/m3b-security.txt"
       - if: runner.os == 'Linux'
         name: Assert native Linux M3b security passes
         run: |
@@ -452,6 +487,7 @@ jobs:
           cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
           # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
           python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
+          python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out target/f3/musl-preparation.json
           python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
           export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
           mkdir -p "$RUNNER_TEMP/m3b-traces"
@@ -470,6 +506,14 @@ jobs:
           grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-musl.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
+      - if: runner.os == 'Linux'
+        name: Assert exact F3 musl collection passes
+        run: |
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[no-git]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-clean]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-dirty]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[tracked-19000]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[budget-bound]' "$RUNNER_TEMP/m3b-musl.txt"
       - name: Preserve M3b raw security traces on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -493,6 +537,7 @@ jobs:
             ${{ runner.temp }}/filter-native.txt
             ${{ runner.temp }}/filter-musl.txt
             target/b3-evidence/
+            target/f3/
           if-no-files-found: error
 
   test:

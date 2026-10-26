@@ -145,6 +145,7 @@ int main(int argc, char **argv) {
     alarm(2);
     const char *mode=argv[1];
     if(!strcmp(mode,"exit")) return 0;
+    if(!strcmp(mode,"deadline-before-ready")) return 75;
     if(!strcmp(mode,"idle")) { for(;;) pause(); }
     if(!strcmp(mode,"sample-memory")) {
         // Let the watchdog register its baseline before allocating.
@@ -191,6 +192,11 @@ int main(int argc, char **argv) {
     if(!strcmp(mode,"large") && body<=65536) return 38;
     if(!strncmp(mode,"git-",4)) {
         unsigned char progress[10]={1,1,9};
+        if(!strcmp(mode,"git-deadline-before-a") || !strcmp(mode,"git-deadline-after-a")) {
+            unsigned char initial[10]={0,1,9};
+            frame(7,initial,sizeof(initial));
+            if(!strcmp(mode,"git-deadline-before-a")) return 75;
+        }
         if(!strcmp(mode,"git-memory-before")) grow_memory();
         if(!strcmp(mode,"git-before-exit")) return 0;
         if(!strcmp(mode,"git-forged-progress")) {
@@ -199,6 +205,7 @@ int main(int argc, char **argv) {
         }
         git_stage(0,0);
         frame(7,progress,sizeof(progress));
+        if(!strcmp(mode,"git-deadline-after-a")) return 75;
         if(!strcmp(mode,"git-memory")) grow_memory();
         if(!strcmp(mode,"git-panic")) abort();
         if(!strcmp(mode,"git-partial")) {
@@ -223,6 +230,10 @@ int main(int argc, char **argv) {
     unsigned char update[]={31,0,1,2,0,0,0,'o','k',0,0,0};
     if(!strcmp(mode,"first-invalid")) update[2]=2;
     frame(5,update,sizeof(update));
+    if(!strcmp(mode,"stage-deadline")) return 75;
+    if(!strcmp(mode,"stage-failure")) return 1;
+    if(!strcmp(mode,"deadline-truncated")) { header(5,11); put(h,17); return 75; }
+    if(!strcmp(mode,"deadline-invalid")) { update[2]=2; frame(5,update,sizeof(update)); return 75; }
     if(!strcmp(mode,"timeout")) { for(;;) pause(); }
     if(!strncmp(mode,"memory",6)) {
         grow_memory();
@@ -2449,4 +2460,123 @@ fn release_git_lifecycle_observations() {
     println!("D3_FRONT raw_read_ns={reads:?} raw_render_ns={renders:?}");
     distribution("D3 saved response read ns", &mut reads);
     distribution("D3 staged front render ns", &mut renders);
+}
+
+// 이것을 실패시키는 것: 마감 종료를 Protocol로 합치거나 마감 코드로 잘린/잘못된 프레임을 통과시키는 것.
+#[test]
+fn stage_deadline_exit_preserves_protocol_validation() {
+    for (mode, expected, count) in [
+        ("stage-deadline", EndReason::Deadline, 1),
+        ("stage-failure", EndReason::Protocol, 1),
+        ("deadline-truncated", EndReason::Protocol, 1),
+        ("deadline-invalid", EndReason::Protocol, 1),
+        ("deadline-before-ready", EndReason::Protocol, 0),
+    ] {
+        let (report, values) = run_peer(mode, true);
+        assert_eq!(report.reason, expected, "{mode}");
+        assert!(report.reaped, "{mode}");
+        assert_eq!(values.len(), count, "{mode}");
+        if let Some(value) = values.first() {
+            assert_eq!(value.reason, expected, "{mode}");
+        }
+    }
+}
+
+struct WorkerDeadlineBreaker {
+    root: PathBuf,
+    runtime: File,
+    clock: snapshot::Clock,
+}
+impl WorkerDeadlineBreaker {
+    fn new(name: &str) -> Self {
+        let root = peer().parent().unwrap().join(name);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = File::open(&root).unwrap();
+        Self {
+            root,
+            runtime,
+            clock: commands::collector_supervisor::fixture_clock().unwrap(),
+        }
+    }
+    fn begin(&self, sequence: u64, elapsed: u64) -> commands::collection_breaker::Decision {
+        commands::collection_breaker::fixture_begin(
+            &self.runtime,
+            Some(b"0123456789abcdef0123456789abcdef"),
+            Some(sequence),
+            b"/repo",
+            snapshot::Clock {
+                now: self.clock.now + elapsed,
+                ..self.clock
+            },
+        )
+    }
+    fn run(&self, sequence: u64, stage_a_complete: bool) {
+        let commands::collection_breaker::Decision::Run(Some(ticket)) =
+            self.begin(sequence, sequence)
+        else {
+            panic!("expected persisted admission for run {sequence}");
+        };
+        let mode = if stage_a_complete {
+            "git-deadline-after-a"
+        } else {
+            "git-deadline-before-a"
+        };
+        let (report, _, _) = git_peer(mode, true);
+        assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
+        // A supervisor timeout must not stand in for the peer's exit 75.
+        assert!(report.reaped && !report.kill_requested, "{report:?}");
+        assert_eq!(report.frames, if stage_a_complete { 4 } else { 2 });
+        assert_eq!(report.progress.stage_a_complete, stage_a_complete);
+        assert_eq!(report.progress.device, Some(9));
+        let (progress, reason) = report.breaker_observation();
+        ticket
+            .finish(
+                progress,
+                reason,
+                snapshot::Clock {
+                    now: self.clock.now + sequence,
+                    ..self.clock
+                },
+            )
+            .unwrap();
+    }
+}
+impl Drop for WorkerDeadlineBreaker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+// 이것을 실패시키는 것: worker exit 75를 Protocol로 되돌리거나 A 완료 전 Deadline을 breaker 실패에서 제외하는 것.
+#[test]
+fn three_worker_deadlines_before_a_block_for_five_minutes() {
+    use commands::collection_breaker::Decision;
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
+    let breaker = WorkerDeadlineBreaker::new("worker-deadline-block");
+    for sequence in 1..=3 {
+        breaker.run(sequence, false);
+    }
+    assert!(matches!(breaker.begin(4, 4), Decision::Blocked));
+    let expiry = 3 + collection::breaker::BLOCK_NS;
+    assert!(matches!(breaker.begin(4, expiry - 1), Decision::Blocked));
+    assert!(matches!(breaker.begin(4, expiry), Decision::Run(Some(_))));
+}
+
+// 이것을 실패시키는 것: exit 75의 Deadline을 검증된 stage_a_complete보다 우선하여 실패 횟수 초기화를 건너뛰는 것.
+#[test]
+fn worker_deadline_after_a_resets_failure_count() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
+    let breaker = WorkerDeadlineBreaker::new("worker-deadline-reset");
+    breaker.run(1, false);
+    breaker.run(2, false);
+    breaker.run(3, true);
+    // Reset must clear both earlier failures, not just forgive this run.
+    for sequence in 4..=6 {
+        breaker.run(sequence, false);
+    }
+    assert!(matches!(
+        breaker.begin(7, 7),
+        commands::collection_breaker::Decision::Blocked
+    ));
 }

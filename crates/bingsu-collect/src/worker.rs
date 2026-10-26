@@ -24,11 +24,32 @@ pub fn run() -> i32 {
     }
     #[cfg(unix)]
     {
-        execute().map_or(1, |()| 0)
+        exit_code(execute())
     }
     #[cfg(not(unix))]
     {
         1
+    }
+}
+
+#[cfg(unix)]
+fn exit_code(result: std::io::Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => wire::DEADLINE_EXIT_CODE,
+        Err(_) => 1,
+    }
+}
+
+#[cfg(unix)]
+fn collection_error(error: crate::git::CollectError) -> std::io::Error {
+    use crate::{git::CollectError, safe_read::ReadError};
+    match error {
+        CollectError::Deadline | CollectError::Read(ReadError::Deadline) => {
+            std::io::ErrorKind::TimedOut.into()
+        }
+        CollectError::Sink(error) => error,
+        _ => std::io::Error::other("git collection"),
     }
 }
 
@@ -56,8 +77,7 @@ fn execute() -> std::io::Result<()> {
             let meter = crate::meter::Meter::new(deadline);
             // Preserve startup's probed capability, including unsupported macOS
             // fallback, rather than probing again after repository confinement.
-            crate::git::collect_with_access(request, sink, meter, access)
-                .map_err(|_| std::io::Error::other("git collection"))
+            crate::git::collect_with_access(request, sink, meter, access).map_err(collection_error)
         },
     )
 }
@@ -200,6 +220,30 @@ fn exchange_with_sink(
 mod tests {
     use super::*;
     use std::{cell::RefCell, io};
+
+    // 이것을 실패시키는 것: 단계 마감을 일반 실패로 합치거나 비마감 오류에 마감 코드를 주는 것.
+    #[test]
+    fn stage_deadline_exit_is_distinct_from_protocol_and_resource_failure() {
+        use crate::{git::CollectError, safe_read::ReadError};
+        for error in [
+            CollectError::Deadline,
+            CollectError::Read(ReadError::Deadline),
+            CollectError::Sink(io::ErrorKind::TimedOut.into()),
+        ] {
+            assert_eq!(
+                exit_code(Err(collection_error(error))),
+                wire::DEADLINE_EXIT_CODE
+            );
+        }
+        for error in [
+            CollectError::Read(ReadError::Denied),
+            CollectError::Panic,
+            CollectError::Sink(io::ErrorKind::InvalidData.into()),
+        ] {
+            assert_eq!(exit_code(Err(collection_error(error))), 1);
+        }
+        assert_eq!(exit_code(Ok(())), 0);
+    }
 
     // 이것을 실패시키는 것: 최종 필터 전에 Ready·요청·스레드를 허용하거나 seal 생략.
     #[test]

@@ -392,6 +392,13 @@ pub enum EndReason {
     Resource,
     WorkerExit,
 }
+/// Worker-local stage/request timeout, classified as Deadline only after Ready
+/// and request delivery at a validated frame boundary. Under S-17, like a
+/// supervisor deadline, it counts as a breaker failure before verified stage A
+/// completion: three failures block the key for BLOCK_NS (300 s). Verified A
+/// completion resets the count even when followed by this exit status.
+/// It never substitutes for a validated frame, Ready or Complete.
+pub const DEADLINE_EXIT_CODE: i32 = 75;
 impl EndReason {
     pub(crate) fn tag(self) -> u8 {
         match self {

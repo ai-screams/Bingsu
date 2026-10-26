@@ -97,6 +97,7 @@ harness = false
 test = false
 
 [[bench]]
+# M3c schema/budget/merge/format/PathFacts; new cases record positive Ir first.
 name = "git"
 harness = false
 test = false

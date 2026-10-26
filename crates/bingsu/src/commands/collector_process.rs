@@ -14,6 +14,7 @@ use std::{
 struct State {
     killed: bool,
     reaped: bool,
+    exit_code: Option<i32>,
 }
 
 pub(crate) struct SignalChild {
@@ -192,11 +193,16 @@ impl OwnedChild {
             }
             // SAFETY: waitid initialized the child event fields.
             state.reaped = unsafe { info.si_pid() } != 0;
+            if state.reaped && info.si_code == libc::CLD_EXITED {
+                // SAFETY: waitid returned an initialized CLD_EXITED event.
+                state.exit_code = Some(unsafe { info.si_status() });
+            }
         }
         #[cfg(target_os = "macos")]
         {
-            // SAFETY: sole reaper; signal and sampling are excluded by state.
-            let rc = unsafe { libc::waitpid(self.signal.pid, std::ptr::null_mut(), libc::WNOHANG) };
+            let mut status = 0;
+            // SAFETY: sole reaper, writable status; state excludes signals and sampling.
+            let rc = unsafe { libc::waitpid(self.signal.pid, &mut status, libc::WNOHANG) };
             if rc < 0 {
                 let error = io::Error::last_os_error();
                 if error.raw_os_error() == Some(libc::ECHILD) {
@@ -206,9 +212,20 @@ impl OwnedChild {
                 }
             } else {
                 state.reaped = rc == self.signal.pid;
+                if state.reaped && libc::WIFEXITED(status) {
+                    state.exit_code = Some(libc::WEXITSTATUS(status));
+                }
             }
         }
         Ok(state.reaped)
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        self.signal
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .exit_code
     }
 }
 
@@ -497,6 +514,7 @@ mod tests {
                 state: Arc::new(Mutex::new(State {
                     killed: false,
                     reaped: true,
+                    exit_code: None,
                 })),
             },
             expires_ns: 0,
@@ -526,6 +544,7 @@ mod tests {
                 state: Arc::new(Mutex::new(State {
                     killed: true,
                     reaped: false,
+                    exit_code: None,
                 })),
             },
             expires_ns: 0,

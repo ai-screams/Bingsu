@@ -68,6 +68,25 @@ jobs:
       - if: steps.check.outputs.lock == 'true'
         run: cargo audit --file fuzz/collector/Cargo.lock
 
+  collector-contracts:
+    name: Shipped collector CI contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare contract tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/contracts"
+          "$RUNNER_TEMP/contracts/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      # 이것을 실패시키는 것: 출하 심벌·exec 거부·실제 수집 셀을 required CI에서 제거하는 것.
+      - name: Pin required real collection cells
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          "$RUNNER_TEMP/contracts/bin/python" -m pytest tests/shell/test_collector_security.py::test_real_collection_has_no_silent_skip -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/contracts.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_real_collection_has_no_silent_skip' "$RUNNER_TEMP/contracts.txt"
+
   # Long sanitizer fuzz of the collector's in-memory git parsers. The fixed
   # seeds replay on stable in every PR (ci.yml, F2 fixed fuzz seed regression
   # corpus); this job explores beyond them on a schedule or on request.
