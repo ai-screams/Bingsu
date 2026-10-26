@@ -76,13 +76,15 @@ def capabilities(case, *, unique=False):
     for root in roots:
         ancestors.update(str(p) for p in Path(root).parents)
     axes = {"read-layer": {"phase": "read-layer", "roots": len(roots), "root_inputs": len(roots)}} if sys.platform == "linux" else {}
+    # F2 refused-pointer seeds end before any read layer; they assert its absence.
+    axes = case.data.get("axes", axes)
     return {"roots": roots, "repo": case.data["repo"], "ancestors": sorted(ancestors), "forbidden": [case.data["outside"]],
-            "no_open": [str(Path(case.data["repo"]) / "sub")] if case.name == "gitlink-staged" else [],
+            "no_open": ([str(Path(case.data["repo"]) / "sub")] if case.name == "gitlink-staged" else []) + case.data.get("no_open", []),
             "no_read": [str(Path(case.data["repo"]) / "tracked")] if case.data["policy"].startswith("filtered") else [],
             "names": [str(Path(case.data["repo"]).parent)] if unique else [], "platform": sys.platform, "axes": axes}
 
 
-def decode(output):
+def decode(output, *, require_update=True):
     updates, current, result, display = [], None, None, None
     times, siblings = {}, []
     for line in output.decode().splitlines():
@@ -117,12 +119,13 @@ def decode(output):
         elif line.startswith("F1_TIME "):
             _, phase, ns = line.split()
             times[phase] = int(ns)
-    assert current is None and updates and result is not None, output[-4000:]
-    return {"updates": updates, "value": updates[-1], "result": result[0], "elapsed_ns": int(result[1]),
+    # F2's refused-pointer seeds end before stage A; their effects are still audited.
+    assert current is None and (updates or not require_update) and result is not None, output[-4000:]
+    return {"updates": updates, "value": updates[-1] if updates else None, "result": result[0], "elapsed_ns": int(result[1]),
             "display": display, "times": times, "siblings": siblings}
 
 
-def execute(corpus, case, tmp_path, *, mutant=False, timed=False, unique=False, trace=True):
+def execute(corpus, case, tmp_path, *, mutant=False, timed=False, unique=False, trace=True, require_update=True):
     """Own, drain, kill on error, and reap every child before returning."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     worker = "effect-mutant" if mutant in {"read", "write", "deadline"} else "spawn-mutant" if mutant else "worker"
@@ -194,7 +197,7 @@ def execute(corpus, case, tmp_path, *, mutant=False, timed=False, unique=False, 
         phases = {}
         if trace:
             assert_repository_trace(lines, capabilities(case, unique=unique), phases)
-        result = decode(output)
+        result = decode(output, require_update=require_update)
         result["phases"] = phases
         (tmp_path / "observations.json").write_text(json.dumps(result, indent=2))
         return result

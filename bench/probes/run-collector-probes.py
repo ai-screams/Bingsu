@@ -33,6 +33,9 @@ CELLS = {
     "X-16": ("O_RDONLY|O_TRUNC", "O_WRONLY|O_TRUNC", "unlink", "rename", "socket", "connect"),
 }
 FIELDS = ("case", "environment", "arch", "cell", "status", "outcome", "evidence_file", "command", "reason")
+# The shared ledger's M3c rows belong to run-m3c-probes.py, which validates
+# them; this runner neither checks nor rewrites them.
+M3C_CASES = ("X-08", "X-09", "X-10", "X-11", "X-13", "X-15")
 
 
 @dataclass
@@ -57,7 +60,9 @@ def build_id(case):
     if case in ("X-02", "X-32"):
         paths.append(HERE / ("x02-memfd.c" if case == "X-02" else "x32-spawn.c"))
     else:
+        # build.rs changes the collector's bytes as much as filter.rs does.
         paths.extend([ROOT / "crates/bingsu-collect/src/filter.rs",
+                      ROOT / "crates/bingsu-collect/build.rs",
                       ROOT / "crates/bingsu-collect/tests/filter/runtime.rs"])
         paths.extend(sorted((HERE / "collector-x14").rglob("*.rs")) if case == "X-14"
                      else [HERE / "x16-write-denial.c"])
@@ -331,9 +336,14 @@ def execute_case(case, target=None):
         return result
 
 
-def ledger_rows(allow_stale=False):
+def all_ledger_rows():
     rows = list(csv.DictReader((HERE / "collector-acceptance.tsv").open(), delimiter="\t"))
     require(rows and set(rows[0]) == set(FIELDS), "ledger schema")
+    return rows
+
+
+def ledger_rows(allow_stale=False):
+    rows = [row for row in all_ledger_rows() if row["case"] not in M3C_CASES]
     expected = set()
     for arch in ("x86_64", "aarch64"):
         for case, environments in (("X-02", ("linux-ge6.3-noexec0", "linux-ge6.3-noexec1", "linux-ge6.3-noexec2", "linux-le6.2-einval")),
@@ -341,13 +351,6 @@ def ledger_rows(allow_stale=False):
                                    ("X-14", ("linux-glibc", "linux-musl")),
                                    ("X-16", ("linux-glibc", "linux-musl"))):
             expected.update((case, env, arch, cell) for env in environments for cell in CELLS[case])
-        # Product lower-crate pins are run by their Rust test catalog, not the
-        # historical umbrella-gix API probes. Archive native evidence before
-        # promoting these pending cells; a unit run alone is not certification.
-        for case, cell in (("X-09", "replace_alternates_a_only"),
-                           ("X-10", "request_roots_ignore_environment")):
-            expected.update((case, env, arch, cell)
-                            for env in ("macos-current", "linux-glibc", "linux-musl"))
     keys = [(r["case"], r["environment"], r["arch"], r["cell"]) for r in rows]
     require(len(keys) == len(set(keys)) and set(keys) == expected, "required ledger cells missing or duplicated")
     for row in rows:
@@ -476,9 +479,11 @@ def main():
                            reason=cell["reason"] if cell else r.evidence.get("reason", "suite failed; no criterion accepted" if r.outcome == "FAIL" else ""))
     if args.ledger_out:
         args.ledger_out.parent.mkdir(parents=True, exist_ok=True)
+        mine = {(r["case"], r["environment"], r["arch"], r["cell"]): r for r in rows}
+        merged = [mine.get((r["case"], r["environment"], r["arch"], r["cell"]), r) for r in all_ledger_rows()]
         with args.ledger_out.open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=FIELDS, delimiter="\t", lineterminator="\n")
-            writer.writeheader(); writer.writerows(rows)
+            writer.writeheader(); writer.writerows(merged)
     if any(r.outcome == "FAIL" and not r.evidence.get("ci_observed_platform_differences") for r in results):
         return 1
     if any(r.outcome == "BLOCKED" for r in results) or (args.case == "all" and any(r["outcome"] != "PASS" for r in rows)):

@@ -204,9 +204,7 @@ fn metadata(
                 return Err(ReadError::Escape);
             }
             let bytes = safe_read::read_stage_a(worktree, StageAFile::GitPointer, access, meter)?;
-            let pointer = line(&bytes)?
-                .strip_prefix(b"gitdir: ")
-                .ok_or(ReadError::Escape)?;
+            let pointer = gitfile_pointer(&bytes)?;
             return gitfile(worktree, location, pointer, access, names, meter);
         }
         Err(error) => return Err(error),
@@ -250,7 +248,7 @@ fn gitfile(
     // Three bounded pointer buffers, their normalized paths and component
     // vectors coexist only during this selection; release them on return.
     let mut scratch = meter.path_allocation();
-    scratch.reserve(6 * 65_536 + 6 * 4096 * std::mem::size_of::<&[u8]>(), meter)?;
+    scratch.reserve(POINTER_SCRATCH, meter)?;
     let git_path = normalize(location.path, pointer)?;
     let parts: Vec<_> = git_path
         .split(|b| *b == b'/')
@@ -259,10 +257,9 @@ fn gitfile(
     // An arbitrary owned directory (HOME, a parent, another repository's .git)
     // is not a metadata capability. Validate the shape BEFORE acquisition and
     // select_metadata; the reciprocal registration then binds the one slot.
-    if parts.len() < 3 || parts[parts.len() - 2] != b"worktrees" {
+    let Some(common_path) = linked_common(&parts) else {
         return submodule(worktree, location, &git_path, access, names, meter);
-    }
-    let common_path = absolute(&parts[..parts.len() - 2]);
+    };
     names.spare_fds(ACQUISITION_FDS, meter);
     let candidate = safe_read::acquire_metadata(&git_path, meter)?;
     if !candidate.pointer_is_logical() {
@@ -278,13 +275,13 @@ fn gitfile(
         }
         Err(error) => return Err(error),
     };
-    if normalize(&git_path, line(&common)?)? != common_path {
+    if pointer_target(&git_path, &common)? != common_path {
         return Err(ReadError::Escape);
     }
     let backlink = candidate.metadata_pointer(StageAFile::WorktreePointer, worktree, meter)?;
     let mut expected = location.path.to_vec();
     expected.extend_from_slice(b"/.git");
-    if normalize(&git_path, line(&backlink)?)? != expected {
+    if pointer_target(&git_path, &backlink)? != expected {
         return Err(ReadError::Escape);
     }
     // The candidate remains live: recheck rather than reuse the first margin.
@@ -401,7 +398,7 @@ fn submodule(
     })
 }
 
-fn module_suffix(path: &[u8], parent: &[u8]) -> bool {
+pub(crate) fn module_suffix(path: &[u8], parent: &[u8]) -> bool {
     let Some(suffix) = path
         .strip_prefix(parent)
         .and_then(|p| p.strip_prefix(b"/modules/"))
@@ -426,7 +423,32 @@ fn absolute(parts: &[&[u8]]) -> Vec<u8> {
     path
 }
 
-fn normalize(base: &[u8], path: &[u8]) -> Result<Vec<u8>, ReadError> {
+/// Reserved before a gitfile's pointers are normalized (see gitfile()).
+pub(crate) const POINTER_SCRATCH: usize = 6 * 65_536 + 6 * 4096 * std::mem::size_of::<&[u8]>();
+
+/// The bytes-only pointer syntax shared by discovery and the fuzz corpus.
+/// Ownership and the reciprocal binding are separate, file-backed checks.
+pub(crate) fn gitfile_pointer(bytes: &[u8]) -> Result<&[u8], ReadError> {
+    line(bytes)?
+        .strip_prefix(b"gitdir: ")
+        .ok_or(ReadError::Escape)
+}
+
+/// `<common>/worktrees/<name>` names a linked-worktree gitdir; any other
+/// shape is a submodule candidate or an error, never a commondir capability.
+pub(crate) fn linked_common(parts: &[&[u8]]) -> Option<Vec<u8>> {
+    if parts.len() < 3 || parts[parts.len() - 2] != b"worktrees" {
+        return None;
+    }
+    Some(absolute(&parts[..parts.len() - 2]))
+}
+
+/// A one-line pointer file (commondir, gitdir backlink) resolved from `base`.
+pub(crate) fn pointer_target(base: &[u8], bytes: &[u8]) -> Result<Vec<u8>, ReadError> {
+    normalize(base, line(bytes)?)
+}
+
+pub(crate) fn normalize(base: &[u8], path: &[u8]) -> Result<Vec<u8>, ReadError> {
     if path.is_empty() || path.contains(&0) || path.len() > 65_536 {
         return Err(ReadError::Escape);
     }

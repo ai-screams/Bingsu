@@ -60,6 +60,15 @@ pub struct RepoIo<'a> {
 #[derive(Debug)]
 pub struct ReadMap(Vec<u8>);
 
+/// Fuzz and seed replay only: the bytes a bounded map would have returned.
+/// collector_fuzz is set by fuzz/collector's build script, never a feature.
+#[cfg(any(test, collector_fuzz))]
+impl ReadMap {
+    pub(crate) fn fuzz_bytes(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
 pub(crate) struct WorktreeEntry {
     pub name: std::ops::Range<usize>,
     pub metadata: Result<libc::stat, ReadError>,

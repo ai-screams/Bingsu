@@ -201,11 +201,14 @@ flamegraph.svg
 mutants.out/
 mutants.out.old/
 
-# Fuzzing (cargo-fuzz)
+# Fuzzing (cargo-fuzz); fuzz/<crate>/ is each fuzz crate's default output
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
 fuzz/coverage/
+fuzz/*/corpus/
+fuzz/*/artifacts/
+fuzz/*/coverage/
 
 # Snapshot testing (insta): pending snapshots are reviewed, not committed
 *.snap.new

@@ -153,6 +153,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Fuzz and seed replay only: parsed common config without a port.
+    /// collector_fuzz is set by fuzz/collector's build script, never a feature.
+    #[cfg(any(test, collector_fuzz))]
+    pub(crate) fn fuzz_common(facts: Facts) -> Self {
+        Self {
+            common: Some(facts),
+            worktree: None,
+        }
+    }
+
     pub fn load(io: &RepoIo<'_>) -> Result<Self, ReadError> {
         // Inspect even inactive config.worktree for unsafe policy/format facts.
         Ok(Self {

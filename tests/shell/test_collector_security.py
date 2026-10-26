@@ -1348,3 +1348,201 @@ def test_nofile_musl_pairs_preserve_all_other_errors(call, result, fd):
     ):
         with pytest.raises(AssertionError):
             assert_failure_trace(lines + changed, fixture, "--nofile-worker")
+
+
+FUZZ = ROOT / "fuzz/collector"
+FUZZ_ONLY = {"arbitrary", "bingsu-collector-fuzz", "cc", "find-msvc-tools", "jobserver", "libfuzzer-sys", "shlex"}
+
+
+def assert_fuzz_isolation(texts):
+    """The fuzz crate's own graph and cfg, never the product's."""
+    import tomllib
+    workspace = tomllib.loads(texts["Cargo.toml"])
+    fuzz = tomllib.loads(texts["fuzz/collector/Cargo.toml"])
+    # 이것을 실패시키는 것: fuzz crate를 root workspace member로 넣거나 자체 [workspace]를 지우는 것.
+    assert "workspace" in fuzz and not any("fuzz" in member for member in workspace["workspace"]["members"])
+    # 이것을 실패시키는 것: fuzz copy가 product와 다른 gix 하위 crate pin·feature를 쓰는 것.
+    pins = {k: v for k, v in workspace["workspace"]["dependencies"].items() if k.startswith("gix-")}
+    assert {k: v for k, v in fuzz["dependencies"].items() if k.startswith("gix-")} == pins
+    # 이것을 실패시키는 것: fuzz lock에서 공유 crate 버전이 product lock과 갈라지는 것.
+    root = {}
+    for package in tomllib.loads(texts["Cargo.lock"])["package"]:
+        root.setdefault(package["name"], set()).add(package["version"])
+    for package in tomllib.loads(texts["fuzz/collector/Cargo.lock"])["package"]:
+        assert package["version"] in root.get(package["name"], set()) or package["name"] in FUZZ_ONLY, package
+    # 이것을 실패시키는 것: product build·feature·config·workflow flag로 collector_fuzz를 켜는 것.
+    # Text is only the first gate; scripts/check_no_fuzz_cfg.py audits the real
+    # rustc command lines of a product build in CI.
+    for name, text in texts.items():
+        if name.startswith("fuzz/"):
+            if name == "fuzz/collector/build.rs":
+                assert 'println!("cargo:rustc-cfg=collector_fuzz");' in text
+        elif name.endswith("build.rs"):
+            # 이것을 실패시키는 것: format!/concat!으로 쪼갠 rustc-cfg 출력이나 이름 조각.
+            allowed = 'println!("cargo:rustc-check-cfg=cfg(collector_fuzz)");'
+            rest = text.replace(allowed, "") if name == "crates/bingsu-collect/build.rs" else text
+            assert "rustc-cfg" not in rest and "_fuzz" not in rest and "collector_fuzz" not in rest, name
+        elif name.endswith("Cargo.toml"):
+            assert "collector_fuzz" not in text, name
+        elif name.startswith(".github/"):
+            # Only the gate's own step name may say it; no flag, env or command.
+            code = re.sub(r"(?m)^\s*#.*$", "", text).replace("name: Product rustc never enables collector_fuzz", "")
+            assert "collector_fuzz" not in code, name
+        elif name.startswith("crates/bingsu-collect/src/"):
+            # 이것을 실패시키는 것: cfg!(…), cfg_attr, not(…) 등 다른 형태로 이름을 쓰는 것.
+            code = re.sub(r"//[^\n]*", "", text)
+            assert code.count("collector_fuzz") == code.count("#[cfg(any(test, collector_fuzz))]"), name
+    assert texts["cargo-config"] == "", "a .cargo config can add --cfg flags"
+
+
+def test_product_rustc_cfg_gate_runs_in_ci():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    _, steps = workflow_job(text, "collector")
+    step, = [s for s in steps if s.get("name") == "Product rustc never enables collector_fuzz"]
+    assert "if" not in step and step["shell"] == "bash --noprofile --norc -euo pipefail {0}"
+    assert run_commands(step) == [
+        ["touch", "crates/bingsu-collect/src/main.rs"],
+        ["cargo", "build", "--locked", "-j", "2", "--release", "-p", "bingsu-collect", "-v", "2>&1", "|", "tee",
+         "$RUNNER_TEMP/collector-build-v.txt"],
+        ["python3", "scripts/check_no_fuzz_cfg.py", "$RUNNER_TEMP/collector-build-v.txt"]]
+
+
+# 이것을 실패시키는 것: --cfg collector_fuzz가 든 rustc 줄을 받거나, bingsu_collect
+# rustc 줄이 없는(Fresh) 로그를 통과시키는 것.
+def test_product_rustc_cfg_gate_rejects_enabled_or_vacuous_logs():
+    spec = importlib.util.spec_from_file_location("check_no_fuzz_cfg", ROOT / "scripts/check_no_fuzz_cfg.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    line = ("     Running `/r/rustc --crate-name bingsu_collect --edition=2024 crates/bingsu-collect/src/main.rs "
+            "--check-cfg 'cfg(collector_fuzz)' --cfg feature=\"x\"`")
+    assert gate.check(line) == []
+    for bad in (line.replace("--check-cfg", "--cfg collector_fuzz --check-cfg"),
+                line.replace("--edition", "--cfg=collector_fuzz --edition"),
+                line.replace("bingsu_collect", "gix_index") + "\n" + line.replace("--check-cfg", "--cfg collector_fuzz --check-cfg"),
+                "       Fresh bingsu-collect v0.0.0"):
+        assert gate.check(bad), bad
+
+
+def fuzz_texts():
+    names = ["Cargo.toml", "Cargo.lock", "fuzz/collector/Cargo.toml", "fuzz/collector/Cargo.lock",
+             "fuzz/collector/build.rs"]
+    names += [str(p.relative_to(ROOT)) for p in ROOT.glob("crates/*/build.rs")]
+    names += [str(p.relative_to(ROOT)) for p in ROOT.glob("crates/*/Cargo.toml")]
+    names += [str(p.relative_to(ROOT)) for p in (ROOT / ".github/workflows").glob("*.yml")]
+    names += [str(p.relative_to(ROOT)) for p in (ROOT / "crates/bingsu-collect/src").rglob("*.rs")]
+    texts = {name: (ROOT / name).read_text().replace("\r\n", "\n") for name in names}
+    configs = [p for p in ROOT.rglob(".cargo/config*") if "target" not in p.relative_to(ROOT).parts]
+    texts["cargo-config"] = "".join(p.read_text() for p in configs)
+    return texts
+
+
+def test_fuzz_crate_stays_outside_product_graphs():
+    assert_fuzz_isolation(fuzz_texts())
+
+
+@pytest.mark.parametrize("damage", ["member", "no-workspace", "pin", "lock", "build-script", "feature",
+                                    "workflow-flag", "hook-cfg", "cargo-config", "fuzz-cfg-removed"])
+def test_fuzz_isolation_rejects_mutations(damage):
+    texts = fuzz_texts()
+    if damage == "member":
+        texts["Cargo.toml"] = texts["Cargo.toml"].replace('"tools/core-cfg-check"]', '"tools/core-cfg-check", "fuzz/collector"]')
+    elif damage == "no-workspace":
+        texts["fuzz/collector/Cargo.toml"] = texts["fuzz/collector/Cargo.toml"].replace("\n[workspace]\n", "\n")
+    elif damage == "pin":
+        texts["fuzz/collector/Cargo.toml"] = texts["fuzz/collector/Cargo.toml"].replace('"=0.56.0"', '"=0.56.1"')
+    elif damage == "lock":
+        texts["fuzz/collector/Cargo.lock"] = texts["fuzz/collector/Cargo.lock"].replace(
+            'name = "gix-index"\nversion = "0.56.0"', 'name = "gix-index"\nversion = "0.56.9"')
+    elif damage == "build-script":
+        texts["crates/bingsu-collect/build.rs"] += '\nfn x() { println!("cargo:rustc-cfg=collector_fuzz"); }\n'
+    elif damage == "feature":
+        texts["crates/bingsu-collect/Cargo.toml"] += "\n[features]\nfuzz = []\ncollector_fuzz = []\n"
+        texts["crates/bingsu-collect/Cargo.toml"] = texts["crates/bingsu-collect/Cargo.toml"].replace(
+            '[features]\n# Identity only', '[x]\n# Identity only')
+    elif damage == "workflow-flag":
+        texts[".github/workflows/ci.yml"] = texts[".github/workflows/ci.yml"].replace(
+            "  CARGO_TERM_COLOR: always\n", "  CARGO_TERM_COLOR: always\n  RUSTFLAGS: --cfg collector_fuzz\n")
+    elif damage == "hook-cfg":
+        texts["crates/bingsu-collect/src/git/io.rs"] = texts["crates/bingsu-collect/src/git/io.rs"].replace(
+            "#[cfg(any(test, collector_fuzz))]", "#[cfg(any(feature = \"bench-build\", collector_fuzz))]")
+    elif damage == "cargo-config":
+        texts["cargo-config"] = '[build]\nrustflags = ["--cfg", "collector_fuzz"]\n'
+    else:
+        texts["fuzz/collector/build.rs"] = texts["fuzz/collector/build.rs"].replace("rustc-cfg=collector_fuzz", "rustc-cfg=other")
+    with pytest.raises((AssertionError, KeyError)):
+        assert_fuzz_isolation(texts)
+
+
+def assert_fuzz_job(text, targets):
+    meta, steps = workflow_job(text, "fuzz")
+    assert re.search(r"(?m)^permissions:\n  contents: read$", text), "top-level read-only token"
+    assert meta["if"][0] == "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    env = dict(line.strip().split(": ", 1) for line in meta["env"][1] if line.strip())
+    # 이것을 실패시키는 것: nightly 날짜나 cargo-fuzz 버전을 떠 있는 값으로 바꾸는 것.
+    assert re.fullmatch(r"nightly-\d{4}-\d{2}-\d{2}", env["FUZZ_TOOLCHAIN"]), env
+    assert re.fullmatch(r"\d+\.\d+\.\d+", env["CARGO_FUZZ_VERSION"]), env
+    matrix = "\n".join(meta["strategy"][1])
+    assert re.search(r"target: \[(.*)\]", matrix)[1].split(", ") == targets
+    block = re.search(r"(?ms)^  fuzz:\n(.*?)(?=^  [\w-]+:|\Z)", text)[1]
+    for uses in re.findall(r"uses: (\S+)(.*)", block):
+        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", uses[0]) and re.fullmatch(r" # \S+", uses[1]), uses
+    assert "persist-credentials: false" in block
+    assert f"toolchain: {env['FUZZ_TOOLCHAIN']}" in block
+    commands = [command for step in steps for command in run_commands(step)]
+    assert ["cargo", "install", "--locked", "cargo-fuzz", "--version", "=${CARGO_FUZZ_VERSION}"] in commands
+    fuzz, = [c for c in commands if c[1:3] == ["+$FUZZ_TOOLCHAIN", "fuzz"]]
+    for option in ("--sanitizer", "-max_total_time=900", "-rss_limit_mb=2048", "-timeout=10"):
+        assert option in fuzz, option
+    for step in steps:
+        if "run" in step:
+            assert step.get("shell") == "bash --noprofile --norc -euo pipefail {0}", step.get("name")
+            assert_run_unconditional(step)
+    assert "run: cargo audit --file fuzz/collector/Cargo.lock" in text
+    # 이것을 실패시키는 것: main push가 정기·수동 fuzz run을 같은 group에서 취소하는 것.
+    concurrency = re.search(r"(?m)^concurrency:\n((?:  .*\n)+)", text)[1]
+    assert "  group: security-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n" in concurrency
+    assert ("  cancel-in-progress: ${{ github.event_name != 'schedule' && "
+            "github.event_name != 'workflow_dispatch' }}\n") in concurrency
+    # 이것을 실패시키는 것: crash 입력(저장소 바이트) artifact를 기본 90일 보존하는 것.
+    upload = block.split("uses: actions/upload-artifact@", 1)[1]
+    assert re.search(r"(?m)^          retention-days: 2$", upload), "crash input retention"
+
+
+def test_security_fuzz_job_is_pinned_and_covers_every_target():
+    targets = [line.split('"')[1] for line in (FUZZ / "Cargo.toml").read_text().splitlines()
+               if line.startswith('name = "') and line != 'name = "bingsu-collector-fuzz"' and line != 'name = "write-seeds"']
+    assert sorted(targets) == sorted(p.stem for p in (FUZZ / "fuzz_targets").glob("*.rs")) and len(targets) == 10
+    assert_fuzz_job((ROOT / ".github/workflows/security.yml").read_text(), targets)
+
+
+@pytest.mark.parametrize("old, new", [
+    ("FUZZ_TOOLCHAIN: nightly-2026-09-15", "FUZZ_TOOLCHAIN: nightly"),
+    ("CARGO_FUZZ_VERSION: 0.13.2", "CARGO_FUZZ_VERSION: 0.13"),
+    ("cargo install --locked cargo-fuzz", "cargo install cargo-fuzz"),
+    ("-max_total_time=900 ", ""),
+    ("-rss_limit_mb=2048 ", ""),
+    ("--sanitizer address ", ""),
+    ("target: [index, pack,", "target: [pack,"),
+    ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - uses: dtolnay",
+     "actions/checkout@v7\n        with:\n          persist-credentials: false\n      - uses: dtolnay"),
+    ("    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'\n", ""),
+    ("        run: cargo install", "        shell: bash {0}\n        run: cargo install"),
+    ("run: cargo audit --file fuzz/collector/Cargo.lock", "run: cargo audit"),
+    ("-${{ github.event_name }}\n  cancel", "\n  cancel"),
+    ("cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}", "cancel-in-progress: true"),
+    ("          retention-days: 2\n", ""),
+])
+def test_security_fuzz_job_rejects_mutations(old, new):
+    text = (ROOT / ".github/workflows/security.yml").read_text()
+    block = text.split("\n  fuzz:\n")[1]
+    if old.startswith(("run: cargo audit", "-${{", "cancel-in")):
+        assert text.count(old) == 1
+        changed = text.replace(old, new)
+    else:
+        assert block.count(old) >= 1, old
+        changed = text.split("\n  fuzz:\n")[0] + "\n  fuzz:\n" + block.replace(old, new, 1)
+    targets = [p.stem for p in sorted((FUZZ / "fuzz_targets").glob("*.rs"))]
+    order = ["index", "pack", "config", "attributes", "ignore", "refs", "commit_objects", "multi_pack_index", "gitdir", "commondir"]
+    assert sorted(targets) == sorted(order)
+    with pytest.raises((AssertionError, KeyError, TypeError, ValueError)):
+        assert_fuzz_job(changed, order)
