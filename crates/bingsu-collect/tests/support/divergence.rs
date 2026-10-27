@@ -317,32 +317,353 @@ fn equal_non_commit_tips_stay_pending_after_stage_b() {
     }
 }
 
-// 이것을 실패시키는 것: B를 생략했거나 root tree 읽기가 실패해도 shortcut을 허용하는 것.
+// 이것을 실패시키는 것: B를 거치지 않은 같은 tip에 shortcut을 허용하는 것, 또는 사실을
+// root tree 읽기 성공에 다시 묶는 것(bad의 Commits가 1이 된다).
 #[test]
-fn equal_tips_without_read_tree_use_normal_walk() {
+fn equal_tips_without_stage_b_use_normal_walk() {
     let f = Fixture::new();
     f.init();
     let good = f.commit(&[], "good");
+    // The tree is missing: B is Pending, but the commit itself passes the
+    // walk's check, so the fact no longer implies a readable root tree.
     let bad = f.object("commit", b"tree 1234567890123456789012345678901234567890\nauthor F <f@example.org> 1700000000 +0000\ncommitter F <f@example.org> 1700000000 +0000\n\nbad tree\n");
     for tip in [good, bad] {
-        f.refs(tip, tip);
+        assert_eq!(f.oracle(tip, tip), (0, 0));
         let root = f.root();
         let access = access();
         let m = RefCell::new(meter());
         let repo = repository(&root, &access, &m);
-        if tip == bad {
-            assert_eq!(
-                git::status_tracked::load_status(&repo).staged,
-                Field::PENDING
-            );
-        }
         assert_eq!(divergence(&repo), Ok(Some((0, 0))));
         assert_eq!(m.borrow().budget.used(Axis::Commits), 1);
         m.borrow_mut()
             .charge_axis(Axis::Commits, budget::COMMITS - 1)
             .unwrap();
         pending(stage_c(&repo));
+        if tip == bad {
+            let m = RefCell::new(meter());
+            let repo = repository(&root, &access, &m);
+            assert_eq!(
+                git::status_tracked::load_status(&repo).staged,
+                Field::PENDING
+            );
+            assert_eq!(divergence(&repo), Ok(Some((0, 0))));
+            assert_eq!(m.borrow().budget.used(Axis::Commits), 0);
+        }
     }
+}
+
+const EMPTY_TREE: &str = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n";
+const SIGNATURES: &str =
+    "author F <f@example.org> 1700000000 +0000\ncommitter F <f@example.org> 1700000000 +0000\n";
+
+impl Fixture {
+    fn literal_commit(&self, body: &str) -> ObjectId {
+        let out = self.git(
+            &[
+                "hash-object",
+                "--literally",
+                "-w",
+                "--stdin",
+                "-t",
+                "commit",
+            ],
+            body.as_bytes(),
+        );
+        ObjectId::from_hex(out.trim_ascii()).unwrap()
+    }
+
+    /// `rev-list --left-right --count HEAD...@{u}`: Some(counts) or None on failure.
+    fn git_counts(&self) -> Option<(u32, u32)> {
+        let out = Command::new("git")
+            .args([
+                "--git-dir",
+                self.0.to_str().unwrap(),
+                "rev-list",
+                "--left-right",
+                "--count",
+                "HEAD...@{u}",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        out.status.success().then(|| {
+            let text = String::from_utf8(out.stdout).unwrap();
+            let mut n = text.split_whitespace().map(|s| s.parse().unwrap());
+            (n.next().unwrap(), n.next().unwrap())
+        })
+    }
+}
+
+// The shortcut must equal the walk on the same tip: a HEAD that the walk
+// rejects stays Pending after B even though B itself decoded its tree.
+// 이것을 실패시키는 것: head_commit의 checked_commit 호출을 빼거나 그 실패에도 사실을 세우는 것,
+// 또는 root tree를 읽은 자리에서 사실을 다시 세우는 것(이 fixture는 cache-tree가 없어 root tree를 읽는다).
+#[test]
+fn equal_tips_with_unchecked_head_commit_stay_pending() {
+    let cases = [
+        (
+            "malformed parent",
+            format!(
+                "{EMPTY_TREE}parent zz34567890123456789012345678901234567890\n{SIGNATURES}\nm\n"
+            ),
+            None,
+        ),
+        (
+            "short parent",
+            format!("{EMPTY_TREE}parent 1234\n{SIGNATURES}\nm\n"),
+            None,
+        ),
+        // Git accepts these and prints 0 0; the walk rejects them, so Pending
+        // is the conservative answer the shortcut must not overrule.
+        (
+            "non-numeric timestamp",
+            format!(
+                "{EMPTY_TREE}author F <f@example.org> 1700000000 +0000\ncommitter F <f@example.org> 17x\n\nm\n"
+            ),
+            Some((0, 0)),
+        ),
+        (
+            "object cut inside the timestamp",
+            format!(
+                "{EMPTY_TREE}author F <f@example.org> 1700000000 +0000\ncommitter F <f@example.org> 17000"
+            ),
+            Some((0, 0)),
+        ),
+        (
+            "no committer",
+            format!("{EMPTY_TREE}author F <f@example.org> 1700000000 +0000\n\nm\n"),
+            Some((0, 0)),
+        ),
+        (
+            "no message",
+            format!("{EMPTY_TREE}{SIGNATURES}"),
+            Some((0, 0)),
+        ),
+    ];
+    for (name, body, expected_git) in &cases {
+        let f = Fixture::new();
+        f.init();
+        let tip = f.literal_commit(body);
+        f.refs(tip, tip);
+        assert_eq!(f.git_counts(), *expected_git, "{name}");
+        let root = f.root();
+        let access = access();
+        let m = RefCell::new(meter());
+        let repo = repository(&root, &access, &m);
+        assert!(divergence(&repo).is_err(), "{name}: walk");
+        let m = RefCell::new(meter());
+        let repo = repository(&root, &access, &m);
+        git::status_tracked::observations::take();
+        // B still succeeds: its root tree parses even when later tokens do not.
+        assert_ne!(
+            git::status_tracked::load_status(&repo).staged,
+            Field::PENDING,
+            "{name}"
+        );
+        assert_eq!(
+            git::status_tracked::observations::take().tree_reads,
+            1,
+            "{name}"
+        );
+        pending(stage_c(&repo));
+    }
+}
+
+// Other kinds: Git peels a tag to 0 0 and rejects a blob, but B and the walk
+// both require a commit, so the shortcut has nothing to reuse: C is Pending.
+// The blob holds commit bytes, so only a kind check (not parsing) rejects it.
+// 이것을 실패시키는 것: shortcut에서 사실 일치 조건을 빼는 것, head_commit의 kind 검사를 빼는 것
+// (B가 commit 바이트를 가진 blob을 HEAD로 받아들인다).
+#[test]
+fn equal_other_kind_tips_stay_pending() {
+    let f = Fixture::new();
+    f.init();
+    let commit = f.commit(&[], "tagged");
+    let tag = f.object(
+        "tag",
+        format!(
+            "object {commit}\ntype commit\ntag t\ntagger F <f@example.org> 1700000000 +0000\n\nt\n"
+        )
+        .as_bytes(),
+    );
+    let blob = f.object(
+        "blob",
+        format!("{EMPTY_TREE}{SIGNATURES}\nblob\n").as_bytes(),
+    );
+    for (tip, expected_git) in [(tag, Some((0, 0))), (blob, None)] {
+        f.refs(tip, tip);
+        assert_eq!(f.git_counts(), expected_git);
+        let root = f.root();
+        let access = access();
+        let m = RefCell::new(meter());
+        let repo = repository(&root, &access, &m);
+        assert_eq!(
+            git::status_tracked::load_status(&repo).staged,
+            Field::PENDING
+        );
+        pending(stage_c(&repo));
+    }
+}
+
+fn signed(f: &Fixture, parent: &str, signature: usize, message: &str) -> ObjectId {
+    let mut body =
+        format!("{EMPTY_TREE}{parent}{SIGNATURES}gpgsig -----BEGIN PGP SIGNATURE-----\n");
+    for _ in 0..signature / 78 {
+        body += &format!(" {}\n", "A".repeat(76));
+    }
+    body += &format!(" -----END PGP SIGNATURE-----\n\n{message}\n");
+    f.literal_commit(&body)
+}
+
+// checked_commit copies a multi-line header (gpgsig) once and charges that
+// copy first, both when B decodes HEAD and on every commit the walk retains.
+// 이것을 실패시키는 것: checked_commit에서 객체 크기만큼의 reserve를 빼는 것(B와 walk 모두
+// peak가 charge를 넘는다).
+#[test]
+fn checked_commit_charges_its_header_copy() {
+    let f = Fixture::new();
+    f.init();
+    for (parent, size) in [("", 600_000), ("", 1_000_000), ("parent 1234\n", 600_000)] {
+        let tip = signed(&f, parent, size, "signed");
+        f.refs(tip, tip);
+        let root = f.root();
+        let access = access();
+        let m = RefCell::new(meter());
+        let charged = || m.borrow().counts.iter().map(|c| c.allocated).sum::<u64>();
+        let io = port(&root, &access, &m);
+        let db = git::io::objects::SafeObjectDb::new(&io);
+        let before = charged();
+        let (result, alloc) = allocation::measure(|| walk(&io, &db, tip, tip));
+        assert_eq!(result.is_ok(), parent.is_empty(), "{size}");
+        assert!(
+            alloc.peak as u64 <= charged() - before,
+            "walk {alloc:?} reserved={}",
+            charged() - before
+        );
+        let m = RefCell::new(meter());
+        let charged = || m.borrow().counts.iter().map(|c| c.allocated).sum::<u64>();
+        let repo = repository(&root, &access, &m);
+        let db = repo.objects(&repo.io);
+        let before = charged();
+        let (commit, alloc) = allocation::measure(|| db.head_commit(&tip).unwrap());
+        assert_eq!(commit.checked, parent.is_empty(), "{size}");
+        assert!(
+            alloc.peak as u64 <= charged() - before,
+            "B {alloc:?} reserved={}",
+            charged() - before
+        );
+        drop(db);
+        assert_ne!(
+            git::status_tracked::load_status(&repo).staged,
+            Field::PENDING
+        );
+        if parent.is_empty() {
+            assert_eq!(f.git_counts(), Some((0, 0)));
+            assert_eq!(divergence(&repo), Ok(Some((0, 0))));
+            assert_eq!(m.borrow().budget.used(Axis::Commits), 0);
+        } else {
+            assert_eq!(f.git_counts(), None);
+            pending(stage_c(&repo));
+        }
+    }
+}
+
+// 이것을 실패시키는 것: header 복사 reserve의 실패를 무시하는 것(Limit 대신 Ok가 된다).
+#[test]
+fn checked_commit_without_room_for_the_copy_is_a_limit() {
+    let body = format!("{EMPTY_TREE}{SIGNATURES}\nm\n");
+    let data = gix_object::Data {
+        kind: gix_object::Kind::Commit,
+        object_hash: gix_index::hash::Kind::Sha1,
+        data: body.as_bytes(),
+    };
+    for (room, expected) in [(0, Err(E::Limit)), (1, Ok(()))] {
+        let mut m = meter();
+        m.allocation_limit = m.live_allocated() + body.len() as u64 - 1 + room;
+        assert_eq!(git::io::objects::checked_commit(&data, &mut m), expected);
+        assert_eq!(m.live_allocated(), 0);
+    }
+}
+
+// Commit, then read-tree and write-tree: the index holds a root cache-tree
+// equal to HEAD's tree, which is the state right after commit or checkout.
+fn clean_index(f: &Fixture, body: impl Fn(ObjectId) -> String) -> ObjectId {
+    f.init();
+    let blob = f.object("blob", b"file\n");
+    let tree = f.git(
+        &["mktree"],
+        format!("100644 blob {blob}\tfile\n").as_bytes(),
+    );
+    let tree = std::str::from_utf8(tree.trim_ascii()).unwrap().to_owned();
+    let tip = f.literal_commit(&body(ObjectId::from_hex(tree.as_bytes()).unwrap()));
+    f.refs(tip, tip);
+    f.git(&["read-tree", &tree], b"");
+    assert_eq!(f.git(&["write-tree"], b"").trim_ascii(), tree.as_bytes());
+    tip
+}
+
+// 이것을 실패시키는 것: 사실을 root tree 읽기 뒤에서만 세우는 것(clean index에서 단축이 빠져
+// Commits가 1이 된다), 또는 C의 단축 안에서 HEAD 커밋을 다시 읽는 것(DecompressedBytes가 는다).
+#[test]
+fn clean_index_equal_tips_use_the_shortcut() {
+    let f = Fixture::new();
+    clean_index(&f, |tree| format!("tree {tree}\n{SIGNATURES}\nclean\n"));
+    assert_eq!(f.git_counts(), Some((0, 0)));
+    let root = f.root();
+    let access = access();
+    let m = RefCell::new(meter());
+    let repo = repository(&root, &access, &m);
+    git::status_tracked::observations::take();
+    assert_ne!(
+        git::status_tracked::load_status(&repo).staged,
+        Field::PENDING
+    );
+    // The cache-tree hit: one find (the HEAD commit) and no tree object.
+    let b = git::status_tracked::observations::take();
+    assert_eq!((b.finds, b.tree_reads), (1, 0));
+    let before = (
+        m.borrow().budget.used(Axis::Commits),
+        m.borrow().budget.used(Axis::DecompressedBytes),
+    );
+    let v = value(stage_c(&repo));
+    let after = (
+        m.borrow().budget.used(Axis::Commits),
+        m.borrow().budget.used(Axis::DecompressedBytes),
+    );
+    assert_eq!((before.0, after), (0, before));
+    for name in ["ahead", "behind"] {
+        assert_eq!(
+            field(&v, name),
+            &Field::known(FieldValue::Count {
+                n: 0,
+                saturated: false
+            })
+        );
+    }
+}
+
+// 이것을 실패시키는 것: cache-tree 분기 앞에서 checked 여부와 무관하게 사실을 세우는 것.
+#[test]
+fn clean_index_malformed_parent_stays_pending() {
+    let f = Fixture::new();
+    clean_index(&f, |tree| {
+        format!("tree {tree}\nparent 1234\n{SIGNATURES}\nm\n")
+    });
+    assert_eq!(f.git_counts(), None);
+    let root = f.root();
+    let access = access();
+    let m = RefCell::new(meter());
+    let repo = repository(&root, &access, &m);
+    git::status_tracked::observations::take();
+    assert_ne!(
+        git::status_tracked::load_status(&repo).staged,
+        Field::PENDING
+    );
+    assert_eq!(git::status_tracked::observations::take().tree_reads, 0);
+    pending(stage_c(&repo));
 }
 
 // 이것을 실패시키는 것: B에서 HEAD를 확인했다는 이유만으로 서로 다른 tip도 0/0으로 반환하는 것.

@@ -247,7 +247,7 @@ fn push<T>(
     Ok(())
 }
 fn head_entries(repo: &GuardedRepository<'_>, index: &State) -> Result<HeadEntries, ReadError> {
-    repo.head_with_tree.set(None);
+    repo.checked_head.set(None);
     let io = &repo.io;
     let mut entries = Vec::new();
     let mut allocation = io.account(|m| Ok(m.path_allocation()))?;
@@ -262,7 +262,12 @@ fn head_entries(repo: &GuardedRepository<'_>, index: &State) -> Result<HeadEntri
     let db = repo.objects(io);
     #[cfg(test)]
     observations::find(false);
-    let tree = db.head_tree(&head)?;
+    let commit = db.head_commit(&head)?;
+    // Before the cache-tree branch: a clean index never reads the root tree.
+    if commit.checked {
+        repo.checked_head.set(Some(head));
+    }
+    let tree = commit.tree;
     let cache = index.tree().filter(|t| t.name.is_empty());
     let mut memo = CacheConsistency {
         nodes: Vec::new(),
@@ -316,11 +321,7 @@ fn head_entries(repo: &GuardedRepository<'_>, index: &State) -> Result<HeadEntri
             cached_id = Some(id);
             #[cfg(test)]
             observations::find(true);
-            let tree = db.tree(&id, &mut buffer)?;
-            if prefix.is_empty() {
-                repo.head_with_tree.set(Some(head));
-            }
-            tree
+            db.tree(&id, &mut buffer)?
         };
         let mut previous = None;
         for entry in tree {
@@ -707,7 +708,7 @@ mod deadline_tests {
 }
 
 // Per-thread test observations do not change the product's meter or deadline.
-// SafeObjectDb::head_tree and ::tree each invoke find exactly once; count at
+// SafeObjectDb::head_commit and ::tree each invoke find exactly once; count at
 // their call sites, excluding reuse of the last decoded tree buffer.
 #[cfg(test)]
 pub(crate) mod observations {
