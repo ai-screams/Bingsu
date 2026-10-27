@@ -450,22 +450,36 @@ def ci_test_evidence(text):
     return steps + probes + x14
 
 
-# The shell.yml job whose steps may carry acceptance evidence. Its other steps
-# predate the evidence rules, so the anti-bypass checks apply to the steps a
-# row actually uses (see acceptance_pair_allowed).
-SHELL_EVIDENCE_JOB = "filter-calls"
+# The shell.yml jobs whose steps may carry acceptance evidence, with their
+# pinned matrix (None: no matrix). shell-macos is a required check;
+# filter-calls is not. Their other steps predate the evidence rules, so the
+# anti-bypass checks apply to the steps a row actually uses (see
+# acceptance_pair_allowed).
+SHELL_EVIDENCE_JOBS = {
+    "filter-calls": ["fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"],
+    "shell-macos": None,
+}
 
 
 def shell_test_evidence(text):
     # 이것을 실패시키는 것: job 단위 continue-on-error·if 우회, matrix 칸을 빼는 exclude·축 변경.
-    meta, steps = workflow_job(text, SHELL_EVIDENCE_JOB)
-    assert "continue-on-error" not in meta
-    assert meta["if"][0] == "needs.detect.outputs.rust == 'true'"
-    assert [line.strip() for line in meta["strategy"][1] if line.strip() and not line.lstrip().startswith("#")] == [
-        "fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"]
-    for step in steps:
-        step["_job"] = ("shell.yml", SHELL_EVIDENCE_JOB)
-    return steps
+    evidence = []
+    for job, matrix in SHELL_EVIDENCE_JOBS.items():
+        meta, steps = workflow_job(text, job)
+        assert "continue-on-error" not in meta, job
+        assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
+        strategy = meta.get("strategy", ("", []))[1]
+        assert [line.strip() for line in strategy if line.strip() and not line.lstrip().startswith("#")] == (matrix or []), job
+        for step in steps:
+            step["_job"] = ("shell.yml", job)
+            try:
+                run_commands(step)
+            except ValueError:
+                # Line continuations predate the evidence rules; such a step
+                # cannot carry evidence, so leaving it out fails closed.
+                continue
+            evidence.append(step)
+    return evidence
 
 
 def acceptance_evidence(workflows):
@@ -481,6 +495,7 @@ def acceptance_evidence(workflows):
 
 def acceptance_pair_allowed(row, *steps):
     # 이것을 실패시키는 것: 증거 step에 continue-on-error·플랫폼 밖 if·`|| true` 같은 상태 대체를 붙이는 것.
+    # Only runner.os is checked here; telling release from debug matrix cells is A2's work.
     required_if = ("runner.os == 'Linux'" if row["platform"].startswith("Linux") else
                    "runner.os == 'macOS'" if row["platform"] == "macOS" else None)
     if any(entry.get("if") not in (None, required_if) for entry in steps):

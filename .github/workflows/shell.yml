@@ -246,6 +246,13 @@ jobs:
       # BINGSU_PY (set above through GITHUB_ENV) makes run-all.sh use the venv.
       - name: Record golden vectors
         run: SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+      # 이것을 실패시키는 것: 필수 job에서 게이트 행 표의 검사를 빼거나 그 skip을 통과로 세는 것.
+      - name: Gate acceptance rows map every clause to a CI-asserted test
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_gate_acceptance.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/gate-acceptance.txt"
+          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' "$RUNNER_TEMP/gate-acceptance.txt"
+          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_every_gate_clause_is_a_row_or_pending' "$RUNNER_TEMP/gate-acceptance.txt"
       - name: PTY tests
         if: success() || failure()
         env:

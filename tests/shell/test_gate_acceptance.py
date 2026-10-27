@@ -7,6 +7,7 @@ Task proves the behaviour with its own live test and product mutations.
 """
 import csv
 import io
+import re
 import subprocess
 import sys
 
@@ -221,17 +222,49 @@ def test_every_gate_clause_is_a_row_or_pending():
     assert_clauses_accounted(table)
 
 
-def assert_self_rows(texts, target="pytest", files=("shell.yml",)):
+SELF_STEP = "      - name: Gate acceptance rows map every clause to a CI-asserted test\n"
+# shell.yml jobs that run this file and assert its passes; shell-macos is a required check.
+GATE_STEP_JOBS = ("filter-calls", "shell-macos")
+
+
+def job_span(text, job):
+    start = text.index(f"\n  {job}:\n") + 1
+    after = re.search(r"(?m)^  [\w-]+:\n", text[start + 1:])
+    return start, (start + 1 + after.start() if after else len(text))
+
+
+def in_job(text, job, old, new):
+    start, end = job_span(text, job)
+    block = text[start:end]
+    assert block.count(old) == 1, (job, old)
+    return text[:start] + block.replace(old, new) + text[end:]
+
+
+def drop_gate_step(text, job):
+    start, end = job_span(text, job)
+    block = text[start:end]
+    first = block.index(SELF_STEP)
+    last = block.index("      - ", first + len(SELF_STEP))
+    return text[:start] + block[:first] + block[last:] + text[end:]
+
+
+def assert_self_rows(texts, job, target="pytest", files=("shell.yml",)):
+    # Only `job` keeps its gate step, so each job must carry the evidence on its own.
+    texts = dict(texts)
+    for other in GATE_STEP_JOBS:
+        if other != job:
+            texts["shell.yml"] = drop_gate_step(texts["shell.yml"], other)
     names = ("test_gate_rows_exist_and_run_in_ci", "test_every_gate_clause_is_a_row_or_pending")
     table = "id\tproperty\tplatform\ttest\ttarget\tstage\n" + "".join(
-        f"SELF-{index}\tGate table check\tLinux\ttests/shell/test_gate_acceptance.py::{name}\t{target}\tM3d\n"
+        f"SELF-{index}\tGate table check\tUnix\ttests/shell/test_gate_acceptance.py::{name}\t{target}\tM3d\n"
         for index, name in enumerate(names))
     assert_acceptance_table(table, {name: texts[name] for name in files}, required_ids=frozenset({"SELF-0", "SELF-1"}))
 
 
-# 이것을 실패시키는 것: shell.yml에서 이 표 검사의 실행이나 PASSED 단언을 빼는 것.
-def test_gate_table_checks_are_asserted_in_ci():
-    assert_self_rows(workflows())
+# 이것을 실패시키는 것: 필수 job(Shell PTY macOS) 또는 filter-calls에서 이 표 검사의 실행이나 PASSED 단언을 빼는 것.
+@pytest.mark.parametrize("job", GATE_STEP_JOBS)
+def test_gate_table_checks_are_asserted_in_ci(job):
+    assert_self_rows(workflows(), job)
 
 
 # 이것을 실패시키는 것: 행 삭제(primary·보조)·gate 오타·절 번호 아닌 clause·gate.clause와 다른 id·CI 단언 주석 처리를 받는 것.
@@ -406,52 +439,52 @@ def test_lib_row_rejects_mutations(damage):
 
 
 SELF_GREP = "          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' \"$RUNNER_TEMP/gate-acceptance.txt\"\n"
-SELF_STEP = "      - name: Gate acceptance rows map every clause to a CI-asserted test\n"
-JOB_HEADER = "    name: Prompt filter calls (x86_64 ${{ matrix.libc }} ${{ matrix.profile }})\n    needs: detect\n"
+JOB_NEEDS = "    needs: detect\n"
 JOB_IF = "    if: needs.detect.outputs.rust == 'true'\n"
-MATRIX = "        libc: [gnu, musl]\n        profile: [debug, release]\n"
+MATRIX = {"filter-calls": ("        profile: [debug, release]\n", "        profile: [debug, release]\n        exclude: [{profile: release}]\n"),
+          "shell-macos": (JOB_NEEDS, JOB_NEEDS + "    strategy:\n      matrix:\n        os: [macos-latest]\n")}
 
 
 # 이것을 실패시키는 것: shell.yml 증거 step의 단언 삭제·`set +e`·continue-on-error·matrix if,
-# 다른 workflow의 interpreter, 다른 로그, .py 파일의 Rust target, job 단위 우회·matrix exclude,
+# 다른 workflow의 interpreter, 다른 로그, .py 파일의 Rust target, job 단위 우회·matrix 변경,
 # 모르는 workflow를 받는 것.
 @pytest.mark.parametrize("damage", ["delete", "set+e", "continue", "matrix-if", "interpreter", "other-log", "target",
-                                    "job-continue", "job-if", "matrix-exclude", "unknown-workflow"])
-def test_gate_ci_step_rejects_mutations(damage):
+                                    "job-continue", "job-if", "matrix", "unknown-workflow"])
+@pytest.mark.parametrize("job", GATE_STEP_JOBS)
+def test_gate_ci_step_rejects_mutations(job, damage):
     texts = workflows()
     shell = texts["shell.yml"]
-    assert all(shell.count(text) == 1 for text in (SELF_GREP, SELF_STEP, JOB_HEADER + JOB_IF, MATRIX))
     if damage == "delete":
-        shell = shell.replace(SELF_GREP, "")
+        shell = in_job(shell, job, SELF_GREP, "")
     elif damage == "set+e":
-        shell = shell.replace(SELF_GREP, "          set +e\n" + SELF_GREP)
+        shell = in_job(shell, job, SELF_GREP, "          set +e\n" + SELF_GREP)
     elif damage == "continue":
-        shell = shell.replace(SELF_STEP, SELF_STEP + "        continue-on-error: true\n")
+        shell = in_job(shell, job, SELF_STEP, SELF_STEP + "        continue-on-error: true\n")
     elif damage == "matrix-if":
-        shell = shell.replace(SELF_STEP, SELF_STEP + "        if: matrix.profile == 'debug'\n")
+        shell = in_job(shell, job, SELF_STEP, SELF_STEP + "        if: matrix.os == 'macos-latest'\n")
     elif damage == "interpreter":
-        shell = shell.replace('"$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_gate_acceptance.py',
-                              '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_gate_acceptance.py')
+        shell = in_job(shell, job, '"$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_gate_acceptance.py',
+                       '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_gate_acceptance.py')
     elif damage == "other-log":
-        shell = shell.replace(SELF_GREP, SELF_GREP.replace("gate-acceptance.txt", "pytest.out"))
+        shell = in_job(shell, job, SELF_GREP, SELF_GREP.replace("gate-acceptance.txt", "pytest.out"))
     elif damage == "job-continue":
-        shell = shell.replace(JOB_HEADER, JOB_HEADER + "    continue-on-error: true\n")
+        shell = in_job(shell, job, JOB_NEEDS, JOB_NEEDS + "    continue-on-error: true\n")
     elif damage == "job-if":
-        shell = shell.replace(JOB_HEADER + JOB_IF, JOB_HEADER + "    if: always()\n")
-    elif damage == "matrix-exclude":
-        shell = shell.replace(MATRIX, MATRIX + "        exclude: [{profile: release}]\n")
+        shell = in_job(shell, job, JOB_IF, "    if: always()\n")
+    elif damage == "matrix":
+        shell = in_job(shell, job, *MATRIX[job])
     if damage == "unknown-workflow":
         # A workflow the checker does not read must be refused, not ignored.
         texts["bench.yml"] = (ROOT / ".github/workflows/bench.yml").read_text()
         with pytest.raises(AssertionError, match="bench.yml"):
-            assert_self_rows(texts, files=("shell.yml", "bench.yml"))
+            assert_self_rows(texts, job, files=("shell.yml", "bench.yml"))
         return
     if damage == "target":
         # A pytest row must say pytest; a Rust target on a .py file is refused.
         with pytest.raises(AssertionError, match="target and file"):
-            assert_self_rows(texts, target="test:gate_acceptance")
+            assert_self_rows(texts, job, target="test:gate_acceptance")
         return
     assert shell != texts["shell.yml"]
     texts["shell.yml"] = shell
     with pytest.raises(AssertionError):
-        assert_self_rows(texts)
+        assert_self_rows(texts, job)
