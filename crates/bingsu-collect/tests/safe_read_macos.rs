@@ -205,7 +205,7 @@ fn x11_each_flag_requires_negative_semantics() {
     );
 }
 
-// 이것을 실패시키는 것: 무시된 flag를 지원으로 간주하거나 BENEATH 없이 일반 읽기를 허용하는 것.
+// 이것을 실패시키는 것: 무시된 flag를 지원으로 간주하거나 BENEATH와 NOFOLLOW_ANY를 함께 증명하지 않고 일반 읽기를 허용하는 것.
 #[test]
 fn unknown_darwin_flags_do_not_enable_fast_path() {
     let f = Fixture::new();
@@ -227,23 +227,22 @@ fn unknown_darwin_flags_do_not_enable_fast_path() {
                 unique: flags[2] == UNIQUE
             }
         );
-        if flags[0] != BENEATH {
-            assert_eq!(access.scope(), ReadScope::StageAOnly);
-            let root = acquire(
-                f.root.as_os_str().as_bytes(),
-                DiscoveryQuery::default(),
-                &mut meter(),
-            )
-            .unwrap()
-            .select_cwd()
-            .unwrap();
-            let mut m = meter();
-            assert_eq!(
-                read(&root, b"value", cap(false), &access, &mut m),
-                Err(ReadError::StageAOnly)
-            );
-            assert_eq!(m.counts[Phase::Content as usize].open, 0);
-        }
+        // None of these rows proves both BENEATH and NOFOLLOW_ANY.
+        assert_eq!(access.scope(), ReadScope::StageAOnly);
+        let root = acquire(
+            f.root.as_os_str().as_bytes(),
+            DiscoveryQuery::default(),
+            &mut meter(),
+        )
+        .unwrap()
+        .select_cwd()
+        .unwrap();
+        let mut m = meter();
+        assert_eq!(
+            read(&root, b"value", cap(false), &access, &mut m),
+            Err(ReadError::StageAOnly)
+        );
+        assert_eq!(m.counts[Phase::Content as usize].open, 0);
     }
 }
 

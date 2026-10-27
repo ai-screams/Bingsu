@@ -140,7 +140,7 @@ fn probe_flags(
         let fd = fixture.as_raw_fd();
         access.darwin = evaluate_flags(flags, |path, flag| attempt(fd, path, flag, meter))?;
         meter.check()?;
-        if access.darwin.beneath {
+        if atomic_open_confined(access.darwin) {
             access.backend = Resolver::DarwinBeneath;
             access.guarantee = Some(Guarantee::DarwinBeneath);
         }
@@ -148,6 +148,13 @@ fn probe_flags(
     })();
     meter.phase = previous;
     result
+}
+
+/// `open` resolves the whole path from root in one call. BENEATH confines it,
+/// but with plain O_NOFOLLOW a parent swapped for a symlink after the walk is
+/// still followed; only NOFOLLOW_ANY makes that open as strict as the walk.
+fn atomic_open_confined(caps: DarwinCaps) -> bool {
+    caps.beneath && caps.nofollow_any
 }
 
 impl Access {
@@ -398,6 +405,24 @@ fn validate_fixture(fixture: BorrowedFd<'_>, meter: &mut Meter) -> Result<(), Re
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod guarantee_tests {
+    use super::*;
+
+    // 이것을 실패시키는 것: BENEATH 하나만 보고 DarwinBeneath 보장을 주는 것.
+    #[test]
+    fn beneath_guarantee_needs_nofollow_any() {
+        for bits in 0..8u8 {
+            let caps = DarwinCaps {
+                beneath: bits & 1 != 0,
+                nofollow_any: bits & 2 != 0,
+                unique: bits & 4 != 0,
+            };
+            assert_eq!(atomic_open_confined(caps), bits & 3 == 3, "{caps:?}");
+        }
+    }
 }
 
 #[cfg(test)]
