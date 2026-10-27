@@ -919,7 +919,7 @@ fn darwin_each_flag_requires_negative_semantics() {
                 unique: flags[2] != 0
             }
         );
-        assert_eq!(access.guarantee().is_some(), flags[0] != 0);
+        assert_eq!(access.guarantee().is_some(), flags[0] != 0 && flags[1] != 0);
     }
 }
 
@@ -1094,7 +1094,7 @@ fn component_replacement_is_changed() {
     assert_eq!(budget.counts[Phase::Content as usize].read_bytes, 0);
 }
 
-// 이것을 실패시키는 것: 탐침이 검증한 UNIQUE를 최종 open에서 빼거나 ANY 없이 안전한 fallback을 거부하는 것.
+// 이것을 실패시키는 것: 탐침이 검증한 UNIQUE를 최종 open에서 빼거나 ANY 없이 BENEATH 보장을 주는 것.
 #[test]
 #[cfg(target_os = "macos")]
 fn darwin_optional_flags_are_used_only_when_probed() {
@@ -1103,11 +1103,15 @@ fn darwin_optional_flags_are_used_only_when_probed() {
     let (fixture, fd) = darwin_fixture();
     let mut budget = meter();
     let root = fixture.root(&mut budget);
+    // Without NOFOLLOW_ANY the atomic root open could follow a swapped parent.
     let access = macos::probe_flags_for_test(fd.as_fd(), [BENEATH, 0, 0], &mut budget).unwrap();
+    assert_eq!(access.scope(), safe_read::ReadScope::StageAOnly);
+    let mut stage_a = meter();
     assert_eq!(
-        safe_read::read(&root, b"dir/inner", cap(64), &access, &mut budget).unwrap(),
-        b"inside"
+        safe_read::read(&root, b"dir/inner", cap(64), &access, &mut stage_a),
+        Err(E::StageAOnly)
     );
+    assert_eq!(stage_a.counts[Phase::Content as usize].open, 0);
     let access = macos::probe_unvalidated_for_test(Some(fd.as_fd()), &mut budget).unwrap();
     let path = fixture.0.clone();
     budget.hook = Some(Box::new(move |event| {

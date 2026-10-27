@@ -436,7 +436,7 @@ impl<'a> RepoIo<'a> {
                 .map_err(|_| ReadError::Limit)?;
             // Match walk::target's 4097-byte buffer, including its truncation
             // sentinel. Reject hostile stat sizes before charging read bytes.
-            if capacity > 4097 || capacity as u64 > bingsu_core::collection::budget::OBJECT_ALLOC {
+            if capacity > 4097 {
                 return Err(ReadError::Limit);
             }
             meter.charge_axis(Axis::WorktreeReadBytes, size)?;
