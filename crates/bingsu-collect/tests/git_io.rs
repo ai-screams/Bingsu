@@ -56,15 +56,28 @@ fn path(root: RootId, relative: &[u8]) -> RepoPath {
 
 struct Fixture(PathBuf);
 impl Fixture {
+    // 이것을 실패시키는 것: pid만으로 이름을 짓고 이미 있는 디렉터리에서 create_dir().unwrap()하는 것
+    // (`bingsu-git-io-<pid>-0`이 남아 있으면 실패한다).
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "bingsu-git-io-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::create_dir(&dir).unwrap();
-        Self(fs::canonicalize(dir).unwrap())
+        // The pid can be reused after a run whose Drop never ran, so the name also
+        // carries the clock; a taken name is skipped, never adopted or deleted.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        for _ in 0..64 {
+            let dir = std::env::temp_dir().join(format!(
+                "bingsu-git-io-{}-{nonce:x}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match fs::create_dir(&dir) {
+                Ok(()) => return Self(fs::canonicalize(dir).unwrap()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("fixture directory: {e}"),
+            }
+        }
+        panic!("no free fixture directory name");
     }
     fn write(&self, name: &str, bytes: impl AsRef<[u8]>) {
         let name = self.0.join(name);
@@ -84,7 +97,10 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        // No panic in Drop: a failed cleanup must not mask the test result.
+        if let Err(e) = fs::remove_dir_all(&self.0) {
+            eprintln!("cleanup of {} failed: {e}", self.0.display());
+        }
     }
 }
 
