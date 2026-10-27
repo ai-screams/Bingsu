@@ -284,7 +284,7 @@ impl Meter {
         self.live.get()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, collector_fuzz))]
     pub fn live_allocated(&self) -> u64 {
         self.allocated.get()
     }

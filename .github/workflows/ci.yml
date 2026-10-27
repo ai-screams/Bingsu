@@ -317,15 +317,17 @@ jobs:
           grep -F 'test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test worker_limits_fail_without_blocking_front ... ok' "$RUNNER_TEMP/filter-musl.txt"
       # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것,
-      # `--skip ::`를 지워 제품 unit test를 이 바이너리에서 다시 실행하는 것(running 3 tests가 깨진다).
+      # `--skip ::`를 지워 제품 unit test를 이 바이너리에서 다시 실행하는 것(running 5 tests가 깨진다).
       - name: F2 fixed fuzz seed regression corpus
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
           cargo test --locked -j 2 -p bingsu-collect --test fuzz_seeds -- --test-threads=2 --skip :: | tee "$RUNNER_TEMP/f2-seeds.txt"
-          grep -Fx 'running 3 tests' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -Fx 'running 5 tests' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test fixed_seed_corpus_replays_with_pinned_verdicts ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test every_target_has_every_seed_class ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test pattern_flags_reach_every_source_label ... ok' "$RUNNER_TEMP/f2-seeds.txt"
+          grep -F 'test assert_live_rejects_unreserved_heap - should panic ... ok' "$RUNNER_TEMP/f2-seeds.txt"
       - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
       # 이것을 실패시키는 것: build script·RUSTFLAGS·config가 제품 rustc에 --cfg collector_fuzz를 넘기는 것.
       - name: Product rustc never enables collector_fuzz

@@ -312,16 +312,16 @@ def security_steps(text):
                             for name in common + untracked_passes], "F1 exact platform passes"
     seeds = next(step for step in steps if step.get("name") == "F2 fixed fuzz seed regression corpus")
     seed_commands = run_commands(seeds)
-    # 이것을 실패시키는 것: `--skip ::` 삭제(제품 unit test 재실행) 또는 `running 3 tests` 단언 삭제.
+    # 이것을 실패시키는 것: `--skip ::` 삭제(제품 unit test 재실행) 또는 `running 5 tests` 단언 삭제.
     assert any(c[:2] == ["cargo", "test"] and ["--skip", F2_SEED_SKIP] in [c[i:i + 2] for i in range(len(c))]
                for c in seed_commands), "F2 seed replay must skip the included product unit tests"
-    assert ["grep", "-Fx", "running 3 tests", "$RUNNER_TEMP/f2-seeds.txt"] in seed_commands, "F2 seed count"
+    assert ["grep", "-Fx", "running 5 tests", "$RUNNER_TEMP/f2-seeds.txt"] in seed_commands, "F2 seed count"
     assert_f2_repository_step(next(step for step in steps if step.get("name") == F2_STEP))
     return steps
 
 
 # fuzz_seeds includes product modules by #[path], so libtest also lists their unit
-# tests (all named module::...). Skipping every name with "::" leaves the three
+# tests (all named module::...). Skipping every name with "::" leaves the five
 # top-level seed tests; CI pins that count.
 F2_SEED_SKIP = "::"
 F2_STEP = "F2 file-backed seed repositories under the protected collector"
@@ -654,7 +654,7 @@ def test_f2_repository_step_rejects_mutations(damage):
     elif damage == "no-skip-flag":
         workflow = workflow.replace(" --skip :: |", " |")
     elif damage == "no-count":
-        workflow = workflow.replace("grep -Fx 'running 3 tests'", "grep -F 'running'")
+        workflow = workflow.replace("grep -Fx 'running 5 tests'", "grep -F 'running'")
     else:
         workflow = workflow.replace("export BINGSU_GIT_CORPUS_REQUIRED=1\n          \"$RUNNER_TEMP/collector-tests/bin/python\" -m pytest tests/shell/test_git_fuzz",
                                     "export BINGSU_GIT_CORPUS_REQUIRED=0\n          \"$RUNNER_TEMP/collector-tests/bin/python\" -m pytest tests/shell/test_git_fuzz")

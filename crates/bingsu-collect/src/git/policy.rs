@@ -577,13 +577,15 @@ pub struct Patterns {
     allocation: Option<crate::meter::PathAllocation>,
 }
 impl Patterns {
-    /// Fuzz and seed replay only: one file's bytes, charged like a read file.
+    /// Fuzz and seed replay only: one file's bytes, charged like a read file,
+    /// under the source path the caller picks (the label add_buffer branches on).
     /// collector_fuzz is set by fuzz/collector's build script, never a feature.
     #[cfg(any(test, collector_fuzz))]
     pub(crate) fn fuzz_bytes(
         &mut self,
         bytes: &[u8],
         kind: PatternKind,
+        source: std::path::PathBuf,
         meter: &mut Meter,
     ) -> Result<(), ReadError> {
         let (files, size, patterns) = match kind {
@@ -596,7 +598,7 @@ impl Patterns {
         };
         meter.charge_axis(files, 1)?;
         meter.charge_axis(size, bytes.len() as u64)?;
-        self.add_buffer(bytes, "fuzz".into(), kind, patterns, meter)
+        self.add_buffer(bytes, source, kind, patterns, meter)
     }
 
     /// Call before info/exclude and per-directory .gitignore. Only helper

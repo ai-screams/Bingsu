@@ -119,3 +119,46 @@ fn every_fuzz_target_calls_its_shared_entry() {
         );
     }
 }
+
+// 이것을 실패시키는 것: pattern_source가 flag와 무관하게 한 label만 돌려주는 것.
+// info 목록, 전역 excludes, 중첩 경로는 서로 다른 add_buffer 분기라 label이
+// 갈려야 fuzz가 그 분기에 닿는다.
+#[test]
+fn pattern_flags_reach_every_source_label() {
+    use git::io::policy::PatternKind;
+    let labels = |kind| -> BTreeSet<String> {
+        (0..=15u8)
+            .map(|flag| {
+                entries::pattern_source(kind, flag)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    };
+    let ignore = labels(PatternKind::Ignore);
+    for want in ["fuzz", "info/exclude", "<global-excludes>", ".gitignore"] {
+        assert!(ignore.contains(want), "{want}");
+    }
+    assert!(ignore.contains("d0/d1/d2/.gitignore"), "{ignore:?}");
+    let attributes = labels(PatternKind::Attributes);
+    for want in ["fuzz", "info/attributes", ".gitattributes"] {
+        assert!(attributes.contains(want), "{want}");
+    }
+    assert!(
+        attributes.contains("d0/d1/d2/.gitattributes"),
+        "{attributes:?}"
+    );
+}
+
+// 이것을 실패시키는 것: assert_live의 여유를 입력 크기만큼 늘리거나 live 비교를
+// 지우는 것. 예약 없는 64 KiB를 쥔 채 호출하면 패닉해야 한다.
+#[test]
+#[should_panic(expected = "live heap bytes above")]
+fn assert_live_rejects_unreserved_heap() {
+    let meter = meter::Meter::new(std::time::Instant::now() + Duration::from_secs(2));
+    let (_, _) = allocation::measure(|| {
+        let held = vec![1u8; 64 * 1024];
+        entries::assert_live(&meter, "synthetic");
+        held.len()
+    });
+}

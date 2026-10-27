@@ -274,17 +274,15 @@ fn gitfile(
 ) -> Result<Metadata, ReadError> {
     // Three bounded pointer buffers, their normalized paths and component
     // vectors coexist only during this selection; release them on return.
-    let mut scratch = meter.path_allocation();
-    scratch.reserve(POINTER_SCRATCH, meter)?;
-    let git_path = normalize(location.path, pointer)?;
-    let parts: Vec<_> = git_path
-        .split(|b| *b == b'/')
-        .filter(|p| !p.is_empty())
-        .collect();
+    let GitfileShape {
+        scratch: _scratch,
+        git_path,
+        common: common_path,
+    } = gitfile_shape(location.path, pointer, meter)?;
     // An arbitrary owned directory (HOME, a parent, another repository's .git)
     // is not a metadata capability. Validate the shape BEFORE acquisition and
     // select_metadata; the reciprocal registration then binds the one slot.
-    let Some(common_path) = linked_common(&parts) else {
+    let Some(common_path) = common_path else {
         return submodule(worktree, location, &git_path, access, names, meter);
     };
     names.spare_fds(ACQUISITION_FDS, meter);
@@ -331,6 +329,36 @@ fn gitfile(
         reason: None,
         path: git_path,
         submodule: false,
+    })
+}
+
+pub(crate) struct GitfileShape {
+    pub scratch: crate::meter::PathAllocation,
+    pub git_path: Vec<u8>,
+    pub common: Option<Vec<u8>>,
+}
+
+/// The bytes-only start of gitfile(), shared with the fuzz entries: reserve
+/// the pointer scratch, normalize the pointer against `base` and read the
+/// linked-worktree common directory from the result. The reservation lives as
+/// long as the returned guard.
+pub(crate) fn gitfile_shape(
+    base: &[u8],
+    pointer: &[u8],
+    meter: &mut Meter,
+) -> Result<GitfileShape, ReadError> {
+    let mut scratch = meter.path_allocation();
+    scratch.reserve(POINTER_SCRATCH, meter)?;
+    let git_path = normalize(base, pointer)?;
+    let parts: Vec<_> = git_path
+        .split(|b| *b == b'/')
+        .filter(|p| !p.is_empty())
+        .collect();
+    let common = linked_common(&parts);
+    Ok(GitfileShape {
+        scratch,
+        git_path,
+        common,
     })
 }
 
