@@ -76,7 +76,8 @@ pub(crate) fn divergence(repo: &GuardedRepository<'_>) -> Result<Option<(u32, u3
         .resolve(&io, &upstream)?
         .ok_or(ReadError::Missing)?;
     io.account(|meter| meter.check())?;
-    if head == upstream && repo.head_with_tree.get() == Some(head) {
+    // An equal-tip walk reads only this commit and applies checked_commit.
+    if head == upstream && repo.checked_head.get() == Some(head) {
         return Ok(Some((0, 0)));
     }
     let objects = repo.objects(&io);
@@ -269,27 +270,7 @@ impl<T: gix_object::Find> gix_object::Find for CheckedFind<'_, T> {
     }
 }
 
-/// The history walk's per-object check, before any parent is retained.
-pub(crate) fn checked_commit(
-    data: &gix_object::Data<'_>,
-    meter: &mut crate::meter::Meter,
-) -> Result<(), ReadError> {
-    if data.kind != gix_object::Kind::Commit {
-        return Err(INVALID);
-    }
-    let mut message = false;
-    for token in gix_object::CommitRefIter::from_bytes(data.data, data.object_hash) {
-        meter.check()?;
-        message |= matches!(
-            token.map_err(|_| INVALID)?,
-            gix_object::commit::ref_iter::Token::Message(_)
-        );
-    }
-    if !message {
-        return Err(INVALID);
-    }
-    Ok(())
-}
+pub(crate) use super::io::objects::checked_commit;
 
 // Timestamp is only a scheduling hint, never an ancestry bound. FIFO ties keep
 // equally dated tips moving together instead of draining one complete history.

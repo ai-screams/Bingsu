@@ -193,20 +193,28 @@ impl<'a> SafeObjectDb<'a> {
     }
 
     pub fn head_tree(&self, head: &oid) -> Result<ObjectId, ReadError> {
+        self.head_commit(head).map(|commit| commit.tree)
+    }
+
+    /// The root tree, and whether this same decoded commit also passes the
+    /// history walk's `checked_commit`. A failed check leaves B unchanged.
+    pub fn head_commit(&self, head: &oid) -> Result<HeadCommit, ReadError> {
         let mut buffer = Vec::new();
         let data = self.find(head, &mut buffer)?.ok_or(ReadError::Missing)?;
         self.io.metered(|meter| {
-            self.scratch
-                .borrow_mut()
-                .as_mut()
-                .expect("found object")
-                .reserve(PARSER_OVERHEAD, meter)?;
+            let mut scratch = self.scratch.borrow_mut();
+            let scratch = scratch.as_mut().expect("found object");
+            scratch.reserve(PARSER_OVERHEAD, meter)?;
             if data.kind != Kind::Commit {
                 return Err(INVALID);
             }
-            gix_object::CommitRefIter::from_bytes(data.data, hash::Kind::Sha1)
+            let tree = gix_object::CommitRefIter::from_bytes(data.data, hash::Kind::Sha1)
                 .tree_id()
-                .map_err(|_| INVALID)
+                .map_err(|_| INVALID)?;
+            // Any failure only leaves C to walk; an expired deadline still
+            // fails B at its next check.
+            let checked = checked_commit(&data, meter).is_ok();
+            Ok(HeadCommit { tree, checked })
         })
     }
 
@@ -243,6 +251,36 @@ impl<'a> SafeObjectDb<'a> {
         })
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeadCommit {
+    pub tree: ObjectId,
+    pub checked: bool,
+}
+
+/// The history walk's per-object check, before any parent is retained. Every
+/// token must parse, so parent ids and the committer signature are included.
+pub(crate) fn checked_commit(data: &Data<'_>, meter: &mut Meter) -> Result<(), ReadError> {
+    if data.kind != Kind::Commit {
+        return Err(INVALID);
+    }
+    // A multi-line header (gpgsig) is copied once per token, never beyond the
+    // object. Charge that copy for as long as the tokens are parsed.
+    let mut copy = meter.object_allocation();
+    copy.reserve(data.data.len(), meter)?;
+    let mut message = false;
+    for token in gix_object::CommitRefIter::from_bytes(data.data, data.object_hash) {
+        meter.check()?;
+        message |= matches!(
+            token.map_err(|_| INVALID)?,
+            gix_object::commit::ref_iter::Token::Message(_)
+        );
+    }
+    if !message {
+        return Err(INVALID);
+    }
+    Ok(())
+}
+
 impl gix_object::Find for SafeObjectDb<'_> {
     fn try_find<'b>(
         &self,
