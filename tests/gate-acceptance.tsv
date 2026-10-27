@@ -1,0 +1,10 @@
+id	gate	clause	property	platform	test	target	stage
+GATE-EXEC-DEADLINE.2-m3a	GATE-EXEC-DEADLINE	2	Config chmod or replacement after staging never gets a new marker	Unix	crates/bingsu/src/commands/refresh/tests.rs::commands::refresh::tests::mutations_after_staging_never_get_a_new_marker	bin:bingsu	M3a
+GATE-MARKER-UPDATE.3-m3a	GATE-MARKER-UPDATE	3	Confirmed compile failure writes an Invalid marker and keeps the display	Unix	crates/bingsu/src/commands/refresh/tests.rs::commands::refresh::tests::invalid_preserves_display_and_advances_only_verification	bin:bingsu	M3a
+GATE-FDS.3	GATE-FDS	3	Write-only child starts with only allowed descriptors; deferred to M4, where the write-only child is built with the session state file	-	-	-	deferred:M4
+GATE-TRUST-REVOKE.3	GATE-TRUST-REVOKE	3	Exec time of a revoked unit is recorded; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-EXEC-DEADLINE.3	GATE-EXEC-DEADLINE	3	Deadline passed between approval and the pre-exec check stops exec; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-EXEC-DEADLINE.4	GATE-EXEC-DEADLINE	4	Sleep after approval and wake past the deadline stops exec; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-CLOCK-READS.2	GATE-CLOCK-READS	2	Same-machine A/B latency of the relay deadline checks; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-CLOCK-READS.3	GATE-CLOCK-READS	3	Exec count +1 and unchanged process count per unit; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-CLOCK-READS.4	GATE-CLOCK-READS	4	Pre-exec clock reads per execution unit are counted in test builds; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6

@@ -226,6 +226,9 @@ jobs:
           grep -F 'test early_exit_never_signals_recycled_pid ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test lock_clock_includes_store_close_without_publication ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test prompt_read::tests::new_completion_never_blocks_the_current_prompt ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          # tests/gate-acceptance.tsv rows (bin:bingsu).
+          grep -F 'test commands::refresh::tests::mutations_after_staging_never_get_a_new_marker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::invalid_preserves_display_and_advances_only_verification ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"
