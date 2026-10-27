@@ -185,6 +185,13 @@ jobs:
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py -k after_the_filter -q -rs -p no:cacheprovider | tee "$RUNNER_TEMP/pytest.out"
           grep -q '2 passed' "$RUNNER_TEMP/pytest.out"
+      # 이것을 실패시키는 것: 게이트 행 표의 검사를 빼거나 그 skip을 통과로 세는 것.
+      - name: Gate acceptance rows map every clause to a CI-asserted test
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_gate_acceptance.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/gate-acceptance.txt"
+          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' "$RUNNER_TEMP/gate-acceptance.txt"
+          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_every_gate_clause_is_a_row_or_pending' "$RUNNER_TEMP/gate-acceptance.txt"
       - name: Mounted procfs self with a different visible PID
         if: matrix.libc == 'gnu' && matrix.profile == 'debug'
         run: |
