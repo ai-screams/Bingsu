@@ -278,7 +278,7 @@ def security_steps(text):
     required_names = LINUX_SECURITY_STEPS | MACOS_SECURITY_STEPS | {
         "Prepare M3b compiler-free product fixtures", "M3b product security and measurements contracts",
         "Product imports and matching deployment pair", "Prepare F1 hostile Git corpus on the host",
-        "F1 protected collection and policy corpus"}
+        "F1 protected collection and policy corpus", F2_STEP}
     for name in required_names:
         assert sum(step.get("name") == name for step in steps) == 1, ("required security step", name)
     for step in steps:
@@ -310,7 +310,48 @@ def security_steps(text):
         commands = run_commands(f1[f"Assert native {platform} F1 collection passes"])
         assert commands == [["grep", "-Fx", name, "$RUNNER_TEMP/f1-security.txt"]
                             for name in common + untracked_passes], "F1 exact platform passes"
+    seeds = next(step for step in steps if step.get("name") == "F2 fixed fuzz seed regression corpus")
+    seed_commands = run_commands(seeds)
+    # 이것을 실패시키는 것: `--skip ::` 삭제(제품 unit test 재실행) 또는 `running 3 tests` 단언 삭제.
+    assert any(c[:2] == ["cargo", "test"] and ["--skip", F2_SEED_SKIP] in [c[i:i + 2] for i in range(len(c))]
+               for c in seed_commands), "F2 seed replay must skip the included product unit tests"
+    assert ["grep", "-Fx", "running 3 tests", "$RUNNER_TEMP/f2-seeds.txt"] in seed_commands, "F2 seed count"
+    assert_f2_repository_step(next(step for step in steps if step.get("name") == F2_STEP))
     return steps
+
+
+# fuzz_seeds includes product modules by #[path], so libtest also lists their unit
+# tests (all named module::...). Skipping every name with "::" leaves the three
+# top-level seed tests; CI pins that count.
+F2_SEED_SKIP = "::"
+F2_STEP = "F2 file-backed seed repositories under the protected collector"
+
+
+def assert_f2_repository_step(step):
+    # 이것을 실패시키는 것: seed 저장소 step을 지우거나(필수 이름), 접두 grep·param 누락·
+    # 다른 시험 파일 실행·BINGSU_GIT_CORPUS_REQUIRED 해제로 일부 seed의 skip을 통과시키는 것.
+    # Parsed, not imported: scripts/test_collector_audits.py calls this without tests/shell on sys.path.
+    import ast
+    tree = ast.parse((ROOT / "tests/shell/test_git_fuzz_repositories.py").read_text())
+    table = next(node.value for node in tree.body if isinstance(node, ast.Assign) and
+                 [t.id for t in node.targets if isinstance(t, ast.Name)] == ["SEEDS"])
+    SEEDS = [key.value for key in table.keys]
+    assert SEEDS and len(set(SEEDS)) == len(SEEDS), "F2 SEEDS table"
+    commands = run_commands(step)
+    assert ["export", "BINGSU_GIT_CORPUS_REQUIRED=1"] in commands, "F2 preparation must fail closed"
+    assert any(c[1:4] == ["-m", "pytest", "tests/shell/test_git_fuzz_repositories.py"] and "|" in c
+               and c[-1] == "$RUNNER_TEMP/f2-repositories.txt" for c in commands), "F2 pytest run"
+    prefix = "PASSED tests/shell/test_git_fuzz_repositories.py::"
+    expected = [prefix + "test_every_seed_has_a_pinned_outcome"] + [
+        f"{prefix}{test}[{name}]" for test in ("test_hostile_seed_repositories_have_zero_effects",
+                                              "test_each_seed_rejects_read_spawn_and_write_mutations")
+        for name in sorted(SEEDS)]
+    greps = [c for c in commands if c[0] == "grep"]
+    # The acceptance table's rows select the unparameterized names with `grep -F`; the
+    # `-Fx` lines pin every parameter.
+    prefixes = [["grep", "-F", prefix + test, "$RUNNER_TEMP/f2-repositories.txt"] for test in (
+        "test_hostile_seed_repositories_have_zero_effects", "test_each_seed_rejects_read_spawn_and_write_mutations")]
+    assert sorted(greps) == sorted(prefixes + [["grep", "-Fx", line, "$RUNNER_TEMP/f2-repositories.txt"] for line in expected]), "F2 exact passes"
 
 
 def run_commands(step):
@@ -409,6 +450,24 @@ def ci_test_evidence(text):
     return steps + probes + x14
 
 
+def cargo_test_args_allowed(run, target):
+    # 이것을 실패시키는 것: `::`을 위치 필터로, `--skip :: ::`로, `--` 앞의 `--skip`으로 받아들이는 것,
+    # 또는 fuzz_seeds 밖 target의 `--skip`.
+    end = run.index("|") if "|" in run else len(run)
+    if "--" not in run[:end]:
+        return "--skip" not in run
+    cargo, rest = run[:run.index("--")], run[run.index("--") + 1:end]
+    if "--skip" in cargo:
+        return False
+    skips = [i for i, v in enumerate(rest) if v == "--skip"]
+    if skips:
+        i = skips[0]
+        if target != "fuzz_seeds" or len(skips) != 1 or rest[i:i + 2] != ["--skip", F2_SEED_SKIP]:
+            return False
+        rest = rest[:i] + rest[i + 2:]
+    return all(v == "--nocapture" or v.startswith("--test-threads=") for v in rest)
+
+
 def assert_acceptance_table(table, workflow, *, read=lambda name: (ROOT / name).read_text(), collected=None):
     import ast
     import csv
@@ -490,8 +549,8 @@ def assert_acceptance_table(table, workflow, *, read=lambda name: (ROOT / name).
             runnable = [run for _, run in commands if run[:2] == ["cargo", "test"] and "--no-run" not in run
                         and ["-p", crate] in [run[i:i+2] for i in range(len(run))]
                         and ["--test", target] in [run[i:i+2] for i in range(len(run))]
-                        and not any(v in run for v in ("--skip", "--list", "--exact", "--ignored"))
-                        and ("--" not in run or all(v == "--nocapture" or v.startswith("--test-threads=") for v in run[run.index("--") + 1:run.index("|") if "|" in run else len(run)]))]
+                        and not any(v in run for v in ("--list", "--exact", "--ignored"))
+                        and cargo_test_args_allowed(run, target)]
             assert runnable, (row["id"], "no CI cargo target", crate, target)
             module = {"crates/bingsu-collect/src/limits.rs": "limits::tests::",
                       "crates/bingsu-collect/src/landlock.rs": "landlock::tests::",
@@ -558,6 +617,49 @@ def test_f1_ci_seam_rejects_missing_preparation_or_exact_pass(before, after):
     assert before in workflow
     with pytest.raises(AssertionError):
         assert_acceptance_table(table, workflow.replace(before, after))
+
+
+# 이것을 실패시키는 것: `--skip ::` 허용을 위치 필터·중복·`--` 앞·다른 target으로 넓히는 것.
+@pytest.mark.parametrize("run,target,ok", [
+    (["cargo", "test", "--", "--test-threads=2", "--skip", "::"], "fuzz_seeds", True),
+    (["cargo", "test", "--", "--test-threads=2"], "fuzz_seeds", True),
+    (["cargo", "test", "--", "--test-threads=2", "::"], "startup", False),
+    (["cargo", "test", "--", "--test-threads=2", "::"], "fuzz_seeds", False),
+    (["cargo", "test", "--", "--skip", "::", "::"], "fuzz_seeds", False),
+    (["cargo", "test", "--", "--skip", "::", "--skip", "::"], "fuzz_seeds", False),
+    (["cargo", "test", "--skip", "::", "--", "--test-threads=2"], "fuzz_seeds", False),
+    (["cargo", "test", "--skip", "::"], "fuzz_seeds", False),
+    (["cargo", "test", "--", "--skip", "::"], "startup", False),
+])
+def test_cargo_test_skip_allowance_is_narrow(run, target, ok):
+    assert cargo_test_args_allowed(run, target) is ok
+
+
+# 이것을 실패시키는 것: F2 seed step 삭제·접두 grep·seed 하나의 PASSED 줄 누락.
+@pytest.mark.parametrize("damage", ["delete-step", "prefix-grep", "drop-seed", "skip-seed", "no-require", "no-skip-flag", "no-count"])
+def test_f2_repository_step_rejects_mutations(damage):
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    security_steps(workflow)
+    seed = "test_hostile_seed_repositories_have_zero_effects[symref-cycle]"
+    line = f"          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::{seed}' \"$RUNNER_TEMP/f2-repositories.txt\"\n"
+    assert line in workflow
+    if damage == "delete-step":
+        workflow = workflow.replace(F2_STEP, "F2 renamed")
+    elif damage == "prefix-grep":
+        workflow = workflow.replace(line, line.replace("-Fx", "-F"))
+    elif damage == "drop-seed":
+        workflow = workflow.replace(line, "")
+    elif damage == "skip-seed":
+        workflow = workflow.replace(line, line.replace("PASSED", "SKIPPED"))
+    elif damage == "no-skip-flag":
+        workflow = workflow.replace(" --skip :: |", " |")
+    elif damage == "no-count":
+        workflow = workflow.replace("grep -Fx 'running 3 tests'", "grep -F 'running'")
+    else:
+        workflow = workflow.replace("export BINGSU_GIT_CORPUS_REQUIRED=1\n          \"$RUNNER_TEMP/collector-tests/bin/python\" -m pytest tests/shell/test_git_fuzz",
+                                    "export BINGSU_GIT_CORPUS_REQUIRED=0\n          \"$RUNNER_TEMP/collector-tests/bin/python\" -m pytest tests/shell/test_git_fuzz")
+    with pytest.raises(AssertionError):
+        security_steps(workflow)
 
 
 # 이것을 실패시키는 것: 빠진 선언·중복 선언 또는 주석뿐인 CI 단언을 수용하는 것.
