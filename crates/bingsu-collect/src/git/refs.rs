@@ -4,7 +4,7 @@ use crate::{
     meter::{Meter, ObjectAllocation},
     safe_read::{ReadError, same_worktree_stat},
 };
-use bingsu_core::collection::budget::{Axis, REF_BYTES, SMALL_FILE_BYTES};
+use bingsu_core::collection::budget::{Axis, REF_BYTES, REF_ENTRIES, SMALL_FILE_BYTES};
 use gix_ref::bstr::ByteSlice;
 use std::{cell::RefCell, rc::Rc};
 
@@ -12,10 +12,25 @@ pub type ObjectId = gix_index::hash::ObjectId;
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
 // At most 40 reads (39 symbolic hops followed by an object).
 pub const SYMREF_LIMIT: usize = 40;
-// gix-ref 0.68.0: counted peak 1,139,975 B (4.35 * 256 KiB), including
-// unsorted entries, sort scratch and overlapping serialized Vec growth.
-// Round up to 5 * 256 KiB; the allocator corpus guards this pinned envelope.
+/// The release PARSER_ALLOCATION is derived from.
+pub const GIX_REF_VERSION: &str = "0.68.0";
+// gix-ref 0.68.0 Buffer::from_bytes on N <= REF_BYTES input bytes copies them
+// (N). Without a sorted header it collects at most REF_ENTRIES references (the
+// axis is charged before; a power of two, so the doubling Vec stops there and
+// its growth stays under the later peak), sorts them with scratch of the same size (freed
+// before the next step), then writes them back in order into a Vec that
+// doubles: at its last growth the old buffer is under N and the new one under
+// 2N. The peak is therefore under N + 3N + REF_ENTRIES * size_of(Reference),
+// 1,245,184 B with 48-byte references; the worst measured shape (2,049
+// unsorted refs, a 1,994 B first name) peaked at 1,244,856 B. Rounded up to
+// 5 * 256 KiB.
 pub const PARSER_ALLOCATION: usize = REF_BYTES as usize * 5;
+// 이것을 실패시키는 것: PARSER_ALLOCATION을 4 * REF_BYTES로 줄이는 것(빌드가 멈춘다).
+const _: () = assert!(
+    4 * REF_BYTES as usize
+        + REF_ENTRIES as usize * std::mem::size_of::<gix_ref::packed::Reference<'static>>()
+        <= PARSER_ALLOCATION
+);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Target {
