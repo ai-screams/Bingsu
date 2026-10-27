@@ -340,17 +340,33 @@ fn run_peer_observed(
     Vec<collection::response::Completed>,
     Vec<(u64, u64, u64)>,
 ) {
+    run_peer_timed(mode, allow, None)
+}
+/// Tests of a resource or lifecycle property pass generous Ready/request
+/// allowances so a starved runner cannot end the exchange at the 100/50 ms
+/// product deadlines first; those deadlines have their own tests.
+const GENEROUS: Option<(u64, u64)> = Some((800_000_000, 800_000_000));
+fn run_peer_timed(
+    mode: &str,
+    allow: bool,
+    allowances: Option<(u64, u64)>,
+) -> (
+    SupervisionReport,
+    Vec<collection::response::Completed>,
+    Vec<(u64, u64, u64)>,
+) {
     let exe = peer();
     let watchdog = helper_limits::start(Instant::now()).unwrap();
     let held_lock = lock(mode);
     let lock_started = Instant::now();
-    let job = CollectorJob::fixture(
+    let job = CollectorJob::fixture_timed(
         exe.as_os_str(),
         OsStr::new(mode),
         request(mode == "large"),
         held_lock,
         &watchdog,
         &SEGMENTS,
+        allowances,
     )
     .unwrap();
     let values = Arc::new(Mutex::new(Vec::new()));
@@ -782,15 +798,17 @@ fn early_exit_never_signals_recycled_pid() {
 }
 
 // 이것을 실패시키는 것: Ready의 worker 제공 baseline으로 감독자의 메모리 여유를 늘리는 것.
+// 실행한 변이: 표본 한도 32 MiB·helper 한도 128 MiB를 1024배로 키우면 Resource 단언이 실패한다.
+// 마감은 GENEROUS로 넓혀 두어, 느린 runner에서 50 ms 요청 마감이 표본보다 먼저 닿지 않는다.
 #[test]
 fn ready_cannot_raise_the_memory_allowance() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    let (report, values) = run_peer("baseline", true);
+    let (report, values, _) = run_peer_timed("baseline", true, GENEROUS);
     assert_eq!(report.reason, EndReason::Complete);
     assert_eq!(values.len(), 1);
     #[cfg(target_os = "macos")]
     for mode in ["memory", "memory-low"] {
-        let (report, values) = run_peer(mode, true);
+        let (report, values, _) = run_peer_timed(mode, true, GENEROUS);
         assert_eq!(report.reason, EndReason::Resource);
         assert!(report.kill_requested && report.reaped);
         assert_eq!(values.len(), 1);
@@ -986,7 +1004,7 @@ fn macos_signal_precedes_reap_and_never_targets_reused_pid() {
     }
 }
 
-// 이것을 실패시키는 것: 첫 완료한 초과 표본의 종료 요청 또는 32MiB 예산을 제거하는 것.
+// 이것을 실패시키는 것: 첫 완료한 초과 표본의 종료 요청 또는 32MiB 예산을 제거하는 것(실행: 예산 1024배 변이에서 Deadline만 남아 starved 상한 또는 reason 단언으로 실패).
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_first_completed_overlimit_sample_terminates() {
@@ -996,7 +1014,14 @@ fn macos_first_completed_overlimit_sample_terminates() {
     let mut intervals = Vec::new();
     let mut kill_delays = Vec::new();
     peer();
-    for _ in 0..200 {
+    // A runner that starves the worker for the whole 1 s registration budget
+    // ends it by Deadline before any sample exists; that iteration says nothing
+    // about the sampler and is retried. An over-limit sample that does not
+    // signal, or a Resource end without a sample, still fails at once.
+    let mut starved = 0;
+    let mut iterations = 0;
+    while iterations < 200 {
+        assert!(starved <= 20, "worker starved in {starved} iterations");
         let start = Instant::now();
         // Exercise the real sampler/signal/reap path with its own finite
         // registration budget. The protocol's 50ms request deadline can win
@@ -1021,16 +1046,23 @@ fn macos_first_completed_overlimit_sample_terminates() {
             commands::sys::write_fd(write.as_raw_fd(), &[1]),
             commands::sys::WriteOutcome::Done
         );
-        let end = Instant::now() + Duration::from_millis(1500);
+        // The registration budget ends the worker by 1 s; the helper's own 2 s
+        // life is the outer bound.
+        let end = Instant::now() + Duration::from_millis(1800);
         while !child.reap().unwrap() {
             assert!(Instant::now() < end, "overlimit worker was not reaped");
             std::thread::sleep(Duration::from_millis(2));
         }
         let observations = watchdog.observations.lock().unwrap().clone();
-        let over = observations
-            .iter()
-            .find(|v| v.1 > 0)
-            .expect("actual overlimit sample");
+        let Some(over) = observations.iter().find(|v| v.1 > 0) else {
+            assert_eq!(
+                registration.reason(),
+                Some(EndReason::Deadline),
+                "actual overlimit sample"
+            );
+            starved += 1;
+            continue;
+        };
         assert!(
             over.2 >= over.0,
             "first completed overlimit sample must signal"
@@ -1045,6 +1077,7 @@ fn macos_first_completed_overlimit_sample_terminates() {
         assert_eq!(registration.reason(), Some(EndReason::Resource));
         assert!(child.kill_requested());
         samples.push(start.elapsed().as_micros());
+        iterations += 1;
         drop((registration, read, write, input, output));
     }
     distribution("spawn-to-termination us", &mut samples);
@@ -1562,7 +1595,7 @@ fn four_hundred_requests_leave_no_workers_or_zombies() {
 fn four_hundred_child() {
     let mut completed = 0;
     for _ in 0..400 {
-        let (report, values) = run_peer("normal", true);
+        let (report, values, _) = run_peer_timed("normal", true, GENEROUS);
         assert_eq!(report.reason, EndReason::Complete);
         assert!(report.reaped && !report.kill_requested, "{report:?}");
         assert_eq!(values.len(), 1);
