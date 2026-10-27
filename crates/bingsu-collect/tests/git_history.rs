@@ -737,6 +737,175 @@ fn stash_requires_a_loose_or_packed_ref() {
     }
 }
 
+// `git pack-refs --prune` between the request's packed snapshot and D's loose
+// lookup moves refs/stash into a packed-refs the snapshot never saw.
+// 이것을 실패시키는 것: refs::resolve의 packed-refs 비교를 빼는 것(두 경우
+// 모두 확정 0), 비교를 loose 조회 앞으로 옮기는 것(같음), 없던 packed-refs를
+// snapshot과 같다고 보는 것(packed_before=false 경우).
+#[test]
+fn stash_packed_after_the_snapshot_is_pending() {
+    for packed_before in [false, true] {
+        let work = Fixture::new();
+        let f = Fixture(work.0.join(".git"));
+        fs::create_dir(&f.0).unwrap();
+        let (head, _) = f.graph();
+        if packed_before {
+            f.git(&["pack-refs", "--all", "--prune"], b"");
+        }
+        assert_eq!(f.0.join("packed-refs").exists(), packed_before);
+        f.write("refs/stash", head.to_string());
+        let entry = String::from_utf8(line(1))
+            .unwrap()
+            .replace(&"1".repeat(40), &head.to_string());
+        f.write("logs/refs/stash", entry.repeat(2));
+        let oracle = || {
+            f.git(
+                &["--work-tree", work.0.to_str().unwrap(), "stash", "list"],
+                b"",
+            )
+            .split(|b| *b == b'\n')
+            .filter(|s| !s.is_empty())
+            .count() as u32
+        };
+        assert_eq!(oracle(), 2);
+        let known = Field::known(FieldValue::Count {
+            n: 2,
+            saturated: false,
+        });
+        let run = |race: bool| {
+            let mut m = meter();
+            let roots = git::discover::discover_with_access(&request(&work), access(), &mut m)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                git::preflight::preflight(&roots, &mut m).unwrap(),
+                git::preflight::GitAccess::Objects
+            );
+            let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+            if race {
+                let dir = f.0.clone();
+                let hook_fired = fired.clone();
+                m.hook = Some(Box::new(move |event| {
+                    if event == "resolve:refs/stash" && !hook_fired.replace(true) {
+                        let status = Command::new("git")
+                            .args(["--git-dir", dir.to_str().unwrap()])
+                            .args(["pack-refs", "--all", "--prune"])
+                            .env_clear()
+                            .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+                            .env("GIT_CONFIG_NOSYSTEM", "1")
+                            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                            .status()
+                            .unwrap();
+                        assert!(status.success());
+                    }
+                }));
+            }
+            let m = RefCell::new(m);
+            let d = git::stage_d::stage_d(&roots, roots.ref_snapshot(), &m);
+            assert_eq!(fired.get(), race);
+            field(&value(d), "stash").clone()
+        };
+        // Without a race the same request shape counts the loose stash.
+        assert_eq!(run(false), known, "packed_before={packed_before}");
+        assert!(f.0.join("refs/stash").exists());
+        assert_eq!(run(true), Field::PENDING, "packed_before={packed_before}");
+        assert!(!f.0.join("refs/stash").exists());
+        // git still lists both entries; a fresh request finds the packed ref.
+        assert_eq!(oracle(), 2);
+        assert_eq!(run(false), known, "packed_before={packed_before}");
+    }
+}
+
+type PackHook = Box<dyn FnMut(&str)>;
+/// Runs `git pack-refs --all --prune` once, when the collector first opens
+/// `event`'s path: after the request's packed snapshot, before its loose read.
+fn pack_on(dir: PathBuf, event: &'static str) -> (PackHook, std::rc::Rc<std::cell::Cell<bool>>) {
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    let hook_fired = fired.clone();
+    let hook: PackHook = Box::new(move |seen| {
+        if seen == event && !hook_fired.replace(true) {
+            let status = Command::new("git")
+                .args(["--git-dir", dir.to_str().unwrap()])
+                .args(["pack-refs", "--all", "--prune"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+    });
+    (hook, fired)
+}
+
+// packed-refs has no main, loose main does; packing after the snapshot must
+// not read as unborn (preflight) or an empty HEAD tree (D1a staged).
+// 이것을 실패시키는 것: find_packed 뒤 packed-refs 비교를 빼는 것(Ok(None)),
+// 비교를 loose 조회 앞으로 옮기는 것(같음).
+#[test]
+fn head_packed_after_the_snapshot_is_changed() {
+    let f = Fixture::new();
+    let (head, _) = f.graph();
+    fs::remove_file(f.0.join("refs/heads/main")).unwrap();
+    f.git(&["pack-refs", "--all", "--prune"], b"");
+    f.write("refs/heads/main", head.to_string());
+    let root = f.root();
+    let access = access();
+    let m = RefCell::new(meter());
+    let io = port(&root, &access, &m);
+    let refs = RefSnapshot::default().load(&io).unwrap();
+    assert_eq!(refs.resolve(&io, b"HEAD"), Ok(Some(head)));
+    let (hook, fired) = pack_on(f.0.clone(), "resolve:refs/heads/main");
+    m.borrow_mut().hook = Some(hook);
+    assert_eq!(refs.resolve(&io, b"HEAD"), Err(E::Changed));
+    assert!(fired.get());
+    m.borrow_mut().hook = None;
+    assert!(!f.0.join("refs/heads/main").exists());
+    let oracle = f.git(&["rev-parse", "HEAD"], b"");
+    assert_eq!(oracle.trim_ascii(), head.to_string().as_bytes());
+    let fresh = RefSnapshot::default().load(&io).unwrap();
+    assert_eq!(fresh.resolve(&io, b"HEAD"), Ok(Some(head)));
+}
+
+// packed main is one commit behind loose main. Packing after the snapshot
+// used to answer from the old packed id: (1, 1) where git says (2, 1).
+// 이것을 실패시키는 것: snapshot 적중 때 비교를 건너뛰는 것(Ok(Some((1, 1)))).
+#[test]
+fn branch_packed_after_the_snapshot_is_pending_in_c() {
+    let f = Fixture::new();
+    let (head, _) = f.graph();
+    let older = f.git(&["rev-parse", "main~1"], b"");
+    f.write("refs/heads/main", older.trim_ascii());
+    f.git(&["pack-refs", "--all", "--prune"], b"");
+    f.write("refs/heads/main", head.to_string());
+    let oracle = || {
+        f.git(
+            &["rev-list", "--left-right", "--count", "main...origin/main"],
+            b"",
+        )
+    };
+    assert_eq!(oracle(), b"2\t1\n");
+    let root = f.root();
+    let access = access();
+    let m = RefCell::new(meter());
+    let repo = repository(&root, &access, &m);
+    assert_eq!(divergence(&repo), Ok(Some((2, 1))));
+    let (hook, fired) = pack_on(f.0.clone(), "resolve:refs/heads/main");
+    m.borrow_mut().hook = Some(hook);
+    assert_eq!(divergence(&repo), Err(E::Changed));
+    assert!(fired.get());
+    m.borrow_mut().hook = None;
+    assert!(!f.0.join("refs/heads/main").exists());
+    pending(stage_c(&repo));
+    assert_eq!(oracle(), b"2\t1\n");
+    let m = RefCell::new(meter());
+    assert_eq!(
+        divergence(&repository(&root, &access, &m)),
+        Ok(Some((2, 1)))
+    );
+}
+
 #[test]
 fn stash_uses_one_fd_and_rejects_unsafe_or_changed_files() {
     let f = Fixture::new();

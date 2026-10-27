@@ -1332,6 +1332,70 @@ fn preflight_errors_follow_first_a_update() {
     println!("first_a_update_us={}", first.borrow().unwrap().as_micros());
 }
 
+// Packing between preflight's packed snapshot and its HEAD lookup must leave
+// A's branch on screen with B/C/D unknown, never correct it to unborn.
+// 이것을 실패시키는 것: refs::resolve의 packed-refs 비교를 빼는 것(두 번째 A
+// Update가 branch를 확정 ABSENT로 바꾸고 결과가 Ok).
+#[test]
+fn preflight_head_packed_after_the_snapshot_keeps_the_branch() {
+    if !isolated(
+        "preflight_head_packed_after_the_snapshot_keeps_the_branch",
+        &[],
+    ) {
+        return;
+    }
+    let f = Fixture::new();
+    f.repo();
+    let other = "1".repeat(40);
+    f.write(".git/packed-refs", format!("{other} refs/tags/t\n"));
+    f.write(
+        ".git/packed-refs.next",
+        format!(
+            "{} refs/heads/main\n{other} refs/tags/t\n",
+            std::str::from_utf8(OID).unwrap()
+        ),
+    );
+    // The read layer confines the collecting thread (Linux); a helper started
+    // before it performs git's pack: rename packed-refs, then delete the loose.
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let git_dir = f.0.join(".git");
+    let packer = std::thread::spawn(move || {
+        if wait.recv().is_ok() {
+            fs::rename(
+                git_dir.join("packed-refs.next"),
+                git_dir.join("packed-refs"),
+            )
+            .unwrap();
+            fs::remove_file(git_dir.join("refs/heads/main")).unwrap();
+            done.send(()).unwrap();
+        }
+    });
+    let mut m = meter();
+    let mut armed = false;
+    m.hook = Some(Box::new(move |event| {
+        if event == "preflight_start" {
+            armed = true;
+        } else if armed && event == "resolve:refs/heads/main" {
+            armed = false;
+            go.send(()).unwrap();
+            finished.recv().unwrap();
+        }
+    }));
+    let mut sink = Recording::default();
+    let result = collect(&f.request(), &mut sink, m, access());
+    packer.join().unwrap();
+    assert!(!f.0.join(".git/refs/heads/main").exists());
+    assert!(
+        matches!(result, Err(CollectError::Read(E::Changed))),
+        "{result:?}"
+    );
+    assert_eq!(sink.stages(), ["A"]);
+    let value = sink.updates[0].value.as_ref().unwrap();
+    assert_eq!(text(value, "branch").as_deref(), Some("main"));
+    pending(value);
+}
+
 // 이것을 실패시키는 것: 느린 preflight가 첫 A 발행보다 먼저 실행되거나 B 마감을 무시함.
 #[test]
 fn preflight_never_delays_first_a_update() {
