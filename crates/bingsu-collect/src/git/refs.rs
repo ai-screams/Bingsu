@@ -2,7 +2,7 @@
 use super::io::{RepoIo, RepoPath, RootId};
 use crate::{
     meter::{Meter, ObjectAllocation},
-    safe_read::ReadError,
+    safe_read::{ReadError, same_worktree_stat},
 };
 use bingsu_core::collection::budget::{Axis, REF_BYTES, SMALL_FILE_BYTES};
 use gix_ref::bstr::ByteSlice;
@@ -25,7 +25,16 @@ pub enum Target {
 
 pub struct Refs {
     packed: Option<gix_ref::packed::Buffer>,
+    source: Source,
     _allocation: Option<ObjectAllocation>,
+}
+
+/// What packed-refs was when the snapshot was taken.
+enum Source {
+    Missing,
+    File(libc::stat),
+    /// Parsed from bytes without a file (fuzz, unit tests): never current.
+    Unrecorded,
 }
 
 type LoadedRefs = Result<Rc<Refs>, ReadError>;
@@ -80,17 +89,20 @@ impl Refs {
         config: &super::config::Config,
     ) -> Result<Self, ReadError> {
         config.ensure_supported(io)?;
-        let bytes = match io.read_ref(RepoPath::new(RootId::CommonDir, b"packed-refs"), REF_BYTES) {
-            Ok(bytes) => bytes,
+        let (bytes, metadata) = match io.read_ref_stat(packed_path(), REF_BYTES) {
+            Ok(read) => read,
             Err(ReadError::Missing) => {
                 return Ok(Self {
                     packed: None,
+                    source: Source::Missing,
                     _allocation: None,
                 });
             }
             Err(error) => return Err(error),
         };
-        io.metered(|meter| Self::parse(&bytes, meter))
+        let mut refs = io.metered(|meter| Self::parse(&bytes, meter))?;
+        refs.source = Source::File(metadata);
+        Ok(refs)
     }
 
     pub(crate) fn parse(bytes: &[u8], meter: &mut Meter) -> Result<Self, ReadError> {
@@ -123,6 +135,7 @@ impl Refs {
         }
         Ok(Self {
             packed: Some(packed),
+            source: Source::Unrecorded,
             _allocation: Some(allocation),
         })
     }
@@ -140,6 +153,10 @@ impl Refs {
         })
     }
 
+    /// Loose first, then the request snapshot. A loose miss answered from the
+    /// snapshot is trusted only while packed-refs is still the file the
+    /// snapshot read: packing after the snapshot moves a loose ref into a
+    /// packed-refs it never saw, which is `Changed`, never absence or an old id.
     pub fn resolve(&self, io: &RepoIo<'_>, name: &[u8]) -> Result<Option<ObjectId>, ReadError> {
         validate_name(name)?;
         let mut scratch = io.metered(|meter| {
@@ -172,11 +189,35 @@ impl Refs {
                         current = next;
                     }
                 },
-                Err(ReadError::Missing) => return self.find_packed(io, &current, root),
+                Err(ReadError::Missing) => {
+                    let found = self.find_packed(io, &current, root)?;
+                    // After the loose miss: git packs by renaming packed-refs
+                    // into place before it deletes loose refs, so an unchanged
+                    // file now proves the miss and the snapshot agree.
+                    if root == RootId::CommonDir {
+                        self.ensure_current(io)?;
+                    }
+                    return Ok(found);
+                }
                 Err(error) => return Err(error),
             }
         }
         Err(ReadError::Limit)
+    }
+
+    /// A fresh same-path open and fstat, compared with the snapshot's fd stat.
+    fn ensure_current(&self, io: &RepoIo<'_>) -> Result<(), ReadError> {
+        let same = match (&self.source, io.metadata(packed_path())) {
+            (Source::Missing, Err(ReadError::Missing)) => true,
+            (Source::File(then), Ok(now)) => same_worktree_stat(then, &now),
+            (_, Err(error)) if error != ReadError::Missing => return Err(error),
+            _ => false,
+        };
+        if same {
+            Ok(())
+        } else {
+            Err(ReadError::Changed)
+        }
     }
 
     fn find_packed(
@@ -201,6 +242,10 @@ impl Refs {
             Ok(None)
         })
     }
+}
+
+fn packed_path() -> RepoPath {
+    RepoPath::new(RootId::CommonDir, b"packed-refs")
 }
 
 fn ref_root(name: &[u8]) -> RootId {

@@ -227,6 +227,16 @@ impl<'a> RepoIo<'a> {
     /// Reserve the inspected size before reading from that same fd. Growth is
     /// an error (cap+1 probe), never an uncharged extension of the reservation.
     pub(super) fn read_ref(&self, path: RepoPath, cap: u64) -> Result<Vec<u8>, ReadError> {
+        self.read_ref_stat(path, cap).map(|(bytes, _)| bytes)
+    }
+
+    /// `read_ref` plus the same fd's metadata, so a caller can later tell
+    /// whether the path still names the file these bytes came from.
+    pub(super) fn read_ref_stat(
+        &self,
+        path: RepoPath,
+        cap: u64,
+    ) -> Result<(Vec<u8>, libc::stat), ReadError> {
         self.metered(|meter| {
             // Exhaustion forbids even another path lookup.
             if meter.budget.used(Axis::RefBytes) == Axis::RefBytes.limit() {
@@ -241,6 +251,7 @@ impl<'a> RepoIo<'a> {
             }
             meter.charge_axis(Axis::RefBytes, size)?;
             file.read_metadata(cap, meter)
+                .map(|bytes| (bytes, metadata))
         })
     }
 
