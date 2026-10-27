@@ -330,7 +330,13 @@ F2_STEP = "F2 file-backed seed repositories under the protected collector"
 def assert_f2_repository_step(step):
     # 이것을 실패시키는 것: seed 저장소 step을 지우거나(필수 이름), 접두 grep·param 누락·
     # 다른 시험 파일 실행·BINGSU_GIT_CORPUS_REQUIRED 해제로 일부 seed의 skip을 통과시키는 것.
-    from test_git_fuzz_repositories import SEEDS
+    # Parsed, not imported: scripts/test_collector_audits.py calls this without tests/shell on sys.path.
+    import ast
+    tree = ast.parse((ROOT / "tests/shell/test_git_fuzz_repositories.py").read_text())
+    table = next(node.value for node in tree.body if isinstance(node, ast.Assign) and
+                 [t.id for t in node.targets if isinstance(t, ast.Name)] == ["SEEDS"])
+    SEEDS = [key.value for key in table.keys]
+    assert SEEDS and len(set(SEEDS)) == len(SEEDS), "F2 SEEDS table"
     commands = run_commands(step)
     assert ["export", "BINGSU_GIT_CORPUS_REQUIRED=1"] in commands, "F2 preparation must fail closed"
     assert any(c[1:4] == ["-m", "pytest", "tests/shell/test_git_fuzz_repositories.py"] and "|" in c
