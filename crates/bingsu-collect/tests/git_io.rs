@@ -1054,21 +1054,25 @@ fn git_config_continued_values_parse() {
     }
 }
 
-// The reservation constants are measured for one gix-config release.
-// 이것을 실패시키는 것: Cargo.lock의 gix-config를 GIX_CONFIG_VERSION과 다른 버전으로 올리는 것.
+// The reservation constants are measured for one gix-config release and
+// derived from one gix-ref release.
+// 이것을 실패시키는 것: Cargo.lock의 gix-config나 gix-ref를 GIX_CONFIG_VERSION·
+// GIX_REF_VERSION과 다른 버전으로 올리는 것.
 #[test]
 fn git_config_derivation_is_pinned() {
     let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
         .replace("\r\n", "\n");
-    let versions: Vec<_> = lock
-        .split("\n[[package]]\n")
-        .filter(|block| block.starts_with("name = \"gix-config\"\n"))
-        .map(|block| block.lines().nth(1).unwrap_or_default())
-        .collect();
-    assert_eq!(
-        versions,
-        [format!("version = \"{}\"", git::config::GIX_CONFIG_VERSION)]
-    );
+    for (name, version) in [
+        ("gix-config", git::config::GIX_CONFIG_VERSION),
+        ("gix-ref", refs::GIX_REF_VERSION),
+    ] {
+        let versions: Vec<_> = lock
+            .split("\n[[package]]\n")
+            .filter(|block| block.starts_with(&format!("name = \"{name}\"\n")))
+            .map(|block| block.lines().nth(1).unwrap_or_default())
+            .collect();
+        assert_eq!(versions, [format!("version = \"{version}\"")], "{name}");
+    }
 }
 
 // 이것을 실패시키는 것: config/packed parser의 선차감량을 실측 peak보다 줄이거나 gix File을 보관하는 것.
@@ -1529,6 +1533,32 @@ fn git_parser_charges_cover_counted_peak() {
             max_packed = max_packed.max(counts.peak);
         }
     }
+    // The derived worst case: unsorted refs whose sorted copy starts with one
+    // long name, so the serialized Vec's last growth comes just below N and
+    // the entry Vec has grown to REF_ENTRIES slots.
+    // 이것을 실패시키는 것: 이 형태를 빼는 것(아래 4.5 * REF_BYTES 하한).
+    {
+        let (count, long) = (2049, 1982);
+        let fixed_a = 40 + 1 + "refs/heads/a".len() + long + 1;
+        let fixed_z = 40 + 1 + "refs/heads/z".len() + 1;
+        let width = (budget::REF_BYTES as usize - fixed_a) / (count - 1) - fixed_z;
+        let mut packed = String::new();
+        for i in (0..count - 1).rev() {
+            packed.push_str(&format!("{A} refs/heads/z{i:0width$}\n"));
+        }
+        // The division's remainder goes to the long name, so N is the cap.
+        let long = budget::REF_BYTES as usize - packed.len() - fixed_a + long;
+        packed.push_str(&format!("{A} refs/heads/a{}\n", "b".repeat(long)));
+        assert_eq!(packed.len(), budget::REF_BYTES as usize);
+        let mut m = meter();
+        let (refs, counts) = allocation::measure(|| Refs::parse(packed.as_bytes(), &mut m));
+        assert!(refs.is_ok(), "{:?}", refs.err());
+        assert!(
+            counts.peak as u64 <= m.counts[Phase::Content as usize].allocated,
+            "derived worst: {counts:?}"
+        );
+        max_packed = max_packed.max(counts.peak);
+    }
     eprintln!(
         "C2_ALLOC config_peak={} corpus={} config_charge={} packed_peak={} packed_charge={}",
         max_config.0,
@@ -1539,7 +1569,150 @@ fn git_parser_charges_cover_counted_peak() {
     );
     // Measured corpus must really exercise amplification, not an empty parser.
     assert!(max_config.0 > budget::CONFIG_BYTES as usize * 4);
-    assert!(max_packed > budget::REF_BYTES as usize * 3);
+    assert!(max_packed > budget::REF_BYTES as usize * 9 / 2);
+}
+
+// A heavy attribute line is a part of its own, so per-part costs (a Search,
+// a Mapping Vec of at least 4 slots, the source and base copies) dominate.
+// One request keeps every file's parts, so files repeat in one Patterns until
+// the live limit stops them; the counted peak must stay under what the meter
+// holds live and under the request's live limit.
+// 이것을 실패시키는 것: attribute_part_bytes의 항을 줄이는 것(각 항의 주석).
+#[test]
+fn git_attribute_charges_cover_counted_peak() {
+    let normal: Vec<u8> = (0..300)
+        .flat_map(|i| format!("*.ext{i} text eol=lf\ndocs/**/*.bin{i} -diff binary\n").into_bytes())
+        .collect();
+    let distinct = |file: usize| {
+        (0..1024)
+            .map(|j| format!("*/**/**/** n{file}x{j}\n"))
+            .collect::<String>()
+            .into_bytes()
+    };
+    // One line of 2,047 distinct names fills the shared name table.
+    let names = |file: usize| {
+        let mut line = b"*".to_vec();
+        for i in 0..2047 {
+            line.extend(format!(" f{file}n{i}").bytes());
+        }
+        line.push(b'\n');
+        line
+    };
+    let heavy = b"*/**/**/**\n".repeat(2048);
+    let assigned = b"*/**/**/** x\n".repeat(1024);
+    let mut max_file = 0;
+    for (name, bytes) in [
+        ("normal", normal),
+        ("heavy", heavy.clone()),
+        ("heavy-assigned", assigned.clone()),
+        ("heavy-distinct", distinct(0)),
+        ("comments", b"#*/**/**/**\n".repeat(8192)),
+        ("light", b"a\n".repeat(2048)),
+        ("names", names(0)),
+    ] {
+        let mut m = meter();
+        let mut patterns = Patterns::default();
+        let (result, counts) =
+            allocation::measure(|| patterns.fuzz_bytes(&bytes, PatternKind::Attributes, &mut m));
+        assert_eq!(result, Ok(()), "{name}");
+        let charged = m.counts[Phase::Content as usize].allocated;
+        assert!(
+            counts.peak as u64 <= charged,
+            "{name}: {counts:?} > {charged}"
+        );
+        eprintln!("C4_ATTR {name} peak={} charged={charged}", counts.peak);
+        max_file = max_file.max(counts.peak);
+    }
+    for (name, files) in [
+        ("heavy", vec![heavy; 8]),
+        ("heavy-assigned", vec![assigned; 8]),
+        ("heavy-distinct", (0..8).map(distinct).collect()),
+        ("names", (0..8).map(names).collect()),
+    ] {
+        // Every prefix of the request is measured on its own: the peak of the
+        // first k files must stay under what the meter holds after them, not
+        // only under the last file's total.
+        let mut stop = None;
+        for k in 1..=files.len() {
+            let mut m = meter();
+            let mut patterns = Patterns::default();
+            let mut results = [Ok(()); 8];
+            let (_, counts) = allocation::measure(|| {
+                // A product request stops at its first failed file (add latches it).
+                for (i, file) in files[..k].iter().enumerate() {
+                    results[i] = patterns.fuzz_bytes(file, PatternKind::Attributes, &mut m);
+                    if results[i].is_err() {
+                        break;
+                    }
+                }
+            });
+            let live = m.live_allocated();
+            assert!(
+                counts.peak as u64 <= live && live <= m.allocation_limit,
+                "{name}/{k}: {counts:?} live={live} {results:?}"
+            );
+            if let Some(i) = results[..k].iter().position(Result::is_err) {
+                assert_eq!(results[i], Err(E::Limit), "{name}/{k}");
+                eprintln!(
+                    "C4_ATTR_REQUEST {name} files={i} peak={} live={live}",
+                    counts.peak
+                );
+                stop = Some(i);
+                break;
+            }
+        }
+        assert!(stop.is_some_and(|i| i >= 1), "{name}: {stop:?}");
+    }
+    // A nested file's parts each copy a long source and its base.
+    let f = Fixture::new();
+    let dir = ["d".repeat(150), "e".repeat(150), "f".repeat(150)].join("/");
+    let paths: Vec<_> = (0..4)
+        .map(|i| format!("{dir}/{i}/.gitattributes"))
+        .collect();
+    for file in &paths {
+        f.write(file, b"*/**/**/**\n".repeat(2048));
+    }
+    let access = access();
+    let mut m = meter();
+    let root = f.root(&mut m);
+    let m = RefCell::new(m);
+    let io = io(&root, &access, &m);
+    let mut patterns = Patterns::default();
+    // The first file alone, so later files' reservations cannot hide it.
+    let (first, counts) = allocation::measure(|| {
+        patterns.add(
+            &io,
+            path(RootId::Worktree, paths[0].as_bytes()),
+            PatternKind::Attributes,
+        )
+    });
+    let live = m.borrow().live_allocated();
+    assert_eq!(first, Ok(()));
+    assert!(
+        counts.peak as u64 <= live,
+        "nested first: {counts:?} live={live}"
+    );
+    eprintln!("C4_ATTR_NESTED_FIRST peak={} live={live}", counts.peak);
+    let first_peak = counts.peak;
+    let mut results = [Ok(()); 4];
+    let (_, counts) = allocation::measure(|| {
+        for (i, file) in paths.iter().enumerate().skip(1) {
+            results[i] = patterns.add(
+                &io,
+                path(RootId::Worktree, file.as_bytes()),
+                PatternKind::Attributes,
+            );
+        }
+    });
+    let live = m.borrow().live_allocated();
+    assert!(results.contains(&Err(E::Limit)), "{results:?}");
+    assert!(
+        counts.peak as u64 <= live && live <= m.borrow().allocation_limit,
+        "nested: {counts:?} live={live}"
+    );
+    eprintln!("C4_ATTR_NESTED peak={} live={live}", counts.peak);
+    // The corpus must reach the per-part shapes, not only light files.
+    assert!(max_file > 2_400_000 && first_peak > 4_000_000);
 }
 
 // 이것을 실패시키는 것: implicit core.worktree를 raw_value로 검사하거나 마지막 core section만 보는 것.
