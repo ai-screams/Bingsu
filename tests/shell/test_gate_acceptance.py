@@ -14,7 +14,7 @@ import sys
 import pytest
 
 # Helpers only: importing test_* names here would collect them twice.
-from test_collector_security import ROOT, assert_acceptance_table
+from test_collector_security import ROOT, assert_acceptance_table, job_platforms
 
 TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
@@ -574,3 +574,32 @@ def test_named_bin_row_rejects_mutations(damage):
     with pytest.raises(AssertionError):
         assert_acceptance_table(table, texts, required_ids=frozenset({"GATE-ZOMBIES.1"}),
                                 required_gates=frozenset(M3D_GATE_IDS))
+
+
+COLLECTOR_RUNS_ON = "    runs-on: ${{ matrix.os }}\n    # F3 first-run native failures"
+
+
+# 이것을 실패시키는 것: ci.yml collector job의 runs-on을 바꿔도 하드코딩한 플랫폼으로 Unix 행을 받는 것.
+@pytest.mark.parametrize("runner", ["macos-latest", "ubuntu-latest"])
+def test_ci_job_platforms_come_from_the_workflow(runner):
+    texts = workflows()
+    assert texts["ci.yml"].count(COLLECTOR_RUNS_ON) == 1
+    texts["ci.yml"] = texts["ci.yml"].replace(COLLECTOR_RUNS_ON, COLLECTOR_RUNS_ON.replace("${{ matrix.os }}", runner))
+    with pytest.raises(AssertionError, match="platform evidence"):
+        assert_gate_table((ROOT / TABLE).read_text(), texts)
+
+
+# 이것을 실패시키는 것: matrix exclude로 빠진 OS를 그 job의 플랫폼으로 세는 것, 모르는 runner를 받는 것.
+@pytest.mark.parametrize("strategy,runs_on", [
+    (["matrix:", "  os: [ubuntu-24.04, macos-latest]", "  exclude: [{os: macos-latest}]"], "${{ matrix.os }}"),
+    ([], "windows-latest"),
+])
+def test_job_platforms_refuse_excludes_and_unknown_runners(strategy, runs_on):
+    with pytest.raises(AssertionError):
+        job_platforms("synthetic", {"runs-on": (runs_on, []), "strategy": ("", strategy)})
+
+
+def test_job_platforms_read_lists_and_includes():
+    assert job_platforms("synthetic", {"runs-on": ("${{ matrix.os }}", []), "strategy": (
+        "", ["matrix:", "  include:", "    - os: ubuntu-24.04", "    - os: macos-latest"])}) == {"linux", "macos"}
+    assert job_platforms("synthetic", {"runs-on": ("ubuntu-latest", [])}) == {"linux"}

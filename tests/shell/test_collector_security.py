@@ -445,9 +445,36 @@ def ci_test_evidence(text):
     for libc in ("gnu", "musl"):
         assert ["grep", "-Fx", "X-14 PASS", f"$RUNNER_TEMP/x14-{libc}.txt"] in commands
     for job, entries in (("collector", steps), ("collector-probes", probes), ("collector-x14", x14)):
+        platforms = job_platforms(job, workflow_job(text, job)[0])
         for step in entries:
             step["_job"] = ("ci.yml", job)
+            step["_platforms"] = platforms
     return steps + probes + x14
+
+
+def job_platforms(job, meta):
+    """Operating systems a job runs on, read from its runs-on and matrix."""
+    # 이것을 실패시키는 것: runs-on·matrix os를 바꿔도 행 플랫폼 증거로 그대로 세는 것.
+    def platform(label):
+        for prefix, name in (("ubuntu-", "linux"), ("macos-", "macos")):
+            if label.startswith(prefix):
+                return name
+        raise AssertionError((job, "unknown runner", label))
+
+    runs_on = meta["runs-on"][0]
+    if runs_on != "${{ matrix.os }}":
+        assert "${{" not in runs_on, (job, "runs-on", runs_on)
+        return {platform(runs_on)}
+    lines = [line.strip() for line in meta["strategy"][1] if line.strip() and not line.lstrip().startswith("#")]
+    assert not any(line.startswith("exclude") for line in lines), (job, "matrix exclude")
+    labels = []
+    for line in lines:
+        if listed := re.fullmatch(r"os: \[(.*)\]", line):
+            labels += [value.strip() for value in listed[1].split(",")]
+        elif single := re.fullmatch(r"- os: (\S+)", line):
+            labels.append(single[1])
+    assert labels, (job, "matrix os")
+    return {platform(label) for label in labels}
 
 
 # The shell.yml jobs whose steps may carry acceptance evidence, with their
@@ -456,32 +483,25 @@ def ci_test_evidence(text):
 # anti-bypass checks apply to the steps a row actually uses (see
 # acceptance_pair_allowed).
 SHELL_EVIDENCE_JOBS = {
-    "filter-calls": ("ubuntu-latest", ["fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"]),
-    "shell-macos": ("macos-latest", None),
-}
-# Operating systems each evidence job runs on; their matrices and runners are
-# pinned by ci_test_evidence and shell_test_evidence.
-EVIDENCE_JOB_PLATFORMS = {
-    ("ci.yml", "collector"): {"linux", "macos"},
-    ("ci.yml", "collector-probes"): {"linux", "macos"},
-    ("ci.yml", "collector-x14"): {"linux"},
-    ("shell.yml", "filter-calls"): {"linux"},
-    ("shell.yml", "shell-macos"): {"macos"},
+    "filter-calls": ["fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"],
+    "shell-macos": None,
 }
 
 
 def shell_test_evidence(text):
-    # 이것을 실패시키는 것: job 단위 continue-on-error·if 우회, matrix 칸을 빼는 exclude·축 변경, runner 변경.
+    # 이것을 실패시키는 것: job 단위 continue-on-error·if 우회, matrix 칸을 빼는 exclude·축 변경.
+    # The runner's OS comes from runs-on through job_platforms.
     evidence = []
-    for job, (runner, matrix) in SHELL_EVIDENCE_JOBS.items():
+    for job, matrix in SHELL_EVIDENCE_JOBS.items():
         meta, steps = workflow_job(text, job)
-        assert meta["runs-on"][0] == runner, (job, "runner")
         assert "continue-on-error" not in meta, job
         assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
         strategy = meta.get("strategy", ("", []))[1]
         assert [line.strip() for line in strategy if line.strip() and not line.lstrip().startswith("#")] == (matrix or []), job
+        platforms = job_platforms(job, meta)
         for step in steps:
             step["_job"] = ("shell.yml", job)
+            step["_platforms"] = platforms
             try:
                 run_commands(step)
             except ValueError:
@@ -528,7 +548,7 @@ def acceptance_pair_allowed(row, step, run_step, run):
         assert "pipefail" in run_step.get("shell", "") or any(
             c[0] == "set" and "pipefail" in c for c in before), (row["id"], "evidence pipeline without pipefail")
     allowed = {"runner.os == 'Linux'": {"linux"}, "runner.os == 'macOS'": {"macos"}}
-    platforms = set(EVIDENCE_JOB_PLATFORMS[run_step["_job"]])
+    platforms = set(run_step["_platforms"])
     for entry in (step, run_step):
         platforms &= allowed.get(entry.get("if"), {"linux", "macos"})
     return platforms
