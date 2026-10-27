@@ -7,3 +7,4 @@ GATE-EXEC-DEADLINE.3	GATE-EXEC-DEADLINE	3	Deadline passed between approval and t
 GATE-EXEC-DEADLINE.4	GATE-EXEC-DEADLINE	4	Sleep after approval and wake past the deadline stops exec; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
 GATE-CLOCK-READS.2	GATE-CLOCK-READS	2	Same-machine A/B latency of the relay deadline checks; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
 GATE-CLOCK-READS.3	GATE-CLOCK-READS	3	Exec count +1 and unchanged process count per unit; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-CLOCK-READS.4	GATE-CLOCK-READS	4	Pre-exec clock reads per execution unit are counted in test builds; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6

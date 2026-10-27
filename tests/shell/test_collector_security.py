@@ -456,16 +456,26 @@ def ci_test_evidence(text):
 # anti-bypass checks apply to the steps a row actually uses (see
 # acceptance_pair_allowed).
 SHELL_EVIDENCE_JOBS = {
-    "filter-calls": ["fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"],
-    "shell-macos": None,
+    "filter-calls": ("ubuntu-latest", ["fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"]),
+    "shell-macos": ("macos-latest", None),
+}
+# Operating systems each evidence job runs on; their matrices and runners are
+# pinned by ci_test_evidence and shell_test_evidence.
+EVIDENCE_JOB_PLATFORMS = {
+    ("ci.yml", "collector"): {"linux", "macos"},
+    ("ci.yml", "collector-probes"): {"linux", "macos"},
+    ("ci.yml", "collector-x14"): {"linux"},
+    ("shell.yml", "filter-calls"): {"linux"},
+    ("shell.yml", "shell-macos"): {"macos"},
 }
 
 
 def shell_test_evidence(text):
-    # 이것을 실패시키는 것: job 단위 continue-on-error·if 우회, matrix 칸을 빼는 exclude·축 변경.
+    # 이것을 실패시키는 것: job 단위 continue-on-error·if 우회, matrix 칸을 빼는 exclude·축 변경, runner 변경.
     evidence = []
-    for job, matrix in SHELL_EVIDENCE_JOBS.items():
+    for job, (runner, matrix) in SHELL_EVIDENCE_JOBS.items():
         meta, steps = workflow_job(text, job)
+        assert meta["runs-on"][0] == runner, (job, "runner")
         assert "continue-on-error" not in meta, job
         assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
         strategy = meta.get("strategy", ("", []))[1]
@@ -493,17 +503,42 @@ def acceptance_evidence(workflows):
     return steps
 
 
-def acceptance_pair_allowed(row, *steps):
-    # 이것을 실패시키는 것: 증거 step에 continue-on-error·플랫폼 밖 if·`|| true` 같은 상태 대체를 붙이는 것.
-    # Only runner.os is checked here; telling release from debug matrix cells is A2's work.
+def row_platforms(row):
+    return {"linux"} if row["platform"].startswith("Linux") else (
+        {"macos"} if row["platform"] == "macOS" else {"linux", "macos"})
+
+
+def acceptance_pair_allowed(row, step, run_step, run):
+    """Platforms this (assertion, run) pair proves for the row, or None.
+
+    Only runner.os is checked here; telling release from debug matrix cells is A2's work.
+    """
+    # 이것을 실패시키는 것: 증거 step에 continue-on-error·플랫폼 밖 if·`|| true` 같은 상태 대체를 붙이는 것,
+    # pipefail 없이 tee 뒤로 실행 실패를 숨기는 것.
     required_if = ("runner.os == 'Linux'" if row["platform"].startswith("Linux") else
                    "runner.os == 'macOS'" if row["platform"] == "macOS" else None)
-    if any(entry.get("if") not in (None, required_if) for entry in steps):
-        return False
-    for entry in steps:
+    if any(entry.get("if") not in (None, required_if) for entry in (step, run_step)):
+        return None
+    for entry in (step, run_step):
         assert "continue-on-error" not in entry, (row["id"], "skippable evidence step")
         assert_run_unconditional(entry)
-    return True
+    if "|" in run:
+        commands = run_commands(run_step)
+        before = commands[:commands.index(run)]
+        assert "pipefail" in run_step.get("shell", "") or any(
+            c[0] == "set" and "pipefail" in c for c in before), (row["id"], "evidence pipeline without pipefail")
+    allowed = {"runner.os == 'Linux'": {"linux"}, "runner.os == 'macOS'": {"macos"}}
+    platforms = set(EVIDENCE_JOB_PLATFORMS[run_step["_job"]])
+    for entry in (step, run_step):
+        platforms &= allowed.get(entry.get("if"), {"linux", "macos"})
+    return platforms
+
+
+def assert_platform_evidence(row, evidence, what):
+    # 이것을 실패시키는 것: Linux 행을 macOS job 증거만으로(또는 그 반대로) 받는 것.
+    covered = set().union(*(platforms for *_, platforms in evidence)) if evidence else set()
+    assert evidence, (row["id"], what, row["test"])
+    assert row_platforms(row) <= covered, (row["id"], "platform evidence", sorted(row_platforms(row) - covered))
 
 
 # Python interpreters whose pytest output may carry evidence, per workflow.
@@ -551,22 +586,20 @@ def rust_module_path(row, path, target, read, platforms):
         assert_cfgs_hold(row, found[0], platforms)
 
     if target == "lib" or target.startswith("bin:"):
-        # 이것을 실패시키는 것: 기본 bin 이름이 아닌 bin, lib 없는 crate의 lib 행, src 밖 파일.
-        root = "lib.rs" if target == "lib" else "main.rs"
-        assert target in ("lib", "bin:" + crate), (row["id"], "only the default bin target", target)
-        base = f"crates/{crate}/src/"
-        assert path.startswith(base) and path.endswith(".rs"), (row["id"], "target source", path)
-        assert read_exists(read, base + root), (row["id"], "no target root", base + root)
+        # 이것을 실패시키는 것: 다른 target의 root·src 밖 파일·root 아래가 아닌 파일을 그 target의 행으로 받는 것.
+        root = cargo_target_root(row, f"crates/{crate}/", target, read)
+        assert path.endswith(".rs"), (row["id"], "target source", path)
+        if path == root:
+            return []
+        base = root.rsplit("/", 1)[0] + "/"
+        assert path.startswith(base), (row["id"], "target source", path, root)
         parts = path[len(base):-3].split("/")
         if parts[-1] == "mod":
             parts.pop()
-        if parts in (["lib"], ["main"]):
-            assert parts == [root[:-3]], (row["id"], "target root", path)
-            return []
         for index, name in enumerate(parts):
             prefix = "/".join(parts[:index])
-            parent = base + root if not index else (
-                base + prefix + ".rs" if not read_exists(read, base + prefix + "/mod.rs") else base + prefix + "/mod.rs")
+            parent = root if not index else (
+                base + prefix + "/mod.rs" if read_exists(read, base + prefix + "/mod.rs") else base + prefix + ".rs")
             declared(parent, name)
         return parts
     assert target.startswith("test:"), (row["id"], "unknown target", target)
@@ -590,6 +623,33 @@ def rust_module_path(row, path, target, read, platforms):
     assert len(found) == 1, (row["id"], "module declaration", target_path, modules[0])
     assert_cfgs_hold(row, found[0], platforms)
     return modules
+
+
+def cargo_target_root(row, crate_dir, target, read):
+    """The root source file cargo builds for `lib` or `bin:<name>` of this crate."""
+    manifest = read(crate_dir + "Cargo.toml")
+    sections = re.findall(r"(?ms)^(\[\[?[\w.-]+\]\]?)\s*$(.*?)(?=^\[|\Z)", manifest)
+
+    def value(body, key):
+        found = re.findall(r'(?m)^' + key + r'\s*=\s*"([^"\n]+)"', body)
+        assert len(found) <= 1, (row["id"], "manifest", key)
+        return found[0] if found else None
+
+    package, = [value(body, "name") for header, body in sections if header == "[package]"]
+    if target == "lib":
+        paths = [value(body, "path") for header, body in sections if header == "[lib]"]
+        candidates = [paths[0] if paths and paths[0] else "src/lib.rs"]
+    else:
+        name = target.removeprefix("bin:")
+        assert name, (row["id"], "bin name")
+        paths = [value(body, "path") for header, body in sections
+                 if header == "[[bin]]" and value(body, "name") == name]
+        assert len(paths) <= 1, (row["id"], "duplicate [[bin]]", name)
+        candidates = ([paths[0]] if paths and paths[0] else
+                      (["src/main.rs"] if name == package else []) + [f"src/bin/{name}.rs", f"src/bin/{name}/main.rs"])
+    roots = [crate_dir + c for c in candidates if read_exists(read, crate_dir + c)]
+    assert len(roots) == 1, (row["id"], "target root", target, roots)
+    return roots[0]
 
 
 def read_exists(read, name):
@@ -658,9 +718,12 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                 nodes = [node for node in collected if node == row["test"] or
                          ("[" not in name and node.startswith(row["test"] + "["))]
                 assert nodes and len(nodes) == len(set(nodes)), (row["id"], "pytest collection", row["test"])
+            # Gate rows assert the exact line (`grep -Fx`); historical collector rows
+            # may select every parameter with a `grep -F` prefix.
+            greps = [["grep", "-Fx"]] if target is not None else [["grep", "-F"], ["grep", "-Fx"]]
             evidence = []
             for step, command in commands:
-                if command[:2] != ["grep", "-F"] or command[2:3] != ["PASSED " + row["test"]]:
+                if command[:2] not in greps or command[2:3] != ["PASSED " + row["test"]]:
                     continue
                 log = command[3:]
                 # The corresponding pytest must produce this asserted log in
@@ -672,11 +735,12 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                         continue
                     selected = run[run.index("pytest") + 1:run.index("|")]
                     assert not any(token in {"-k", "-m"} or token.startswith(("--ignore", "--deselect")) for token in selected), (row["id"], "pytest selection filter")
-                    if not acceptance_pair_allowed(row, step, run_step):
+                    platforms = acceptance_pair_allowed(row, step, run_step, run)
+                    if platforms is None:
                         continue
                     if any(token in {path, row["test"]} or path.startswith(token.rstrip("/") + "/") for token in selected):
-                        evidence.append((step, run_step))
-            assert evidence, (row["id"], "no asserted CI pytest", row["test"])
+                        evidence.append((step, run_step, platforms))
+            assert_platform_evidence(row, evidence, "no asserted CI pytest")
         else:
             groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
             groups = [group for group in groups if group]
@@ -739,7 +803,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                 for run_step, run in commands:
                     if run_step["_job"] != step["_job"] or "tee" not in run or run[run.index("tee") + 1:] != grep[3:]:
                         continue
-                    if not acceptance_pair_allowed(row, step, run_step):
+                    platforms = acceptance_pair_allowed(row, step, run_step, run)
+                    if platforms is None:
                         continue
                     if ignored:
                         if not ("sudo" == run[0] and "$bin" in run and "--exact" in run and
@@ -752,8 +817,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                             continue
                     elif run not in runnable:
                         continue
-                    evidence.append((step, run_step))
-            assert evidence, (row["id"], "no asserted CI Rust pass", label)
+                    evidence.append((step, run_step, platforms))
+            assert_platform_evidence(row, evidence, "no asserted CI Rust pass")
 
 
 # 이것을 실패시키는 것: 호출에 넘기는 SEC-* 필수 집합에서 하나를 빼, 그 행 없이도 collector 표가 통과하는 것.

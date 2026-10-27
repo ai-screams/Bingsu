@@ -70,6 +70,7 @@ M3D_GATES = {
         "A test-build counter shows a fixed number of executed front clock reads per use and fixture",
         "Same-machine A/B total latency of the deadline checks",
         "Per execution unit, exec count +1 and an unchanged process count through the trusted relay",
+        "A test-build counter shows a fixed number of executed pre-exec clock reads per execution unit",
     ),
     "GATE-COLLECTOR-TIMING": (
         "No segment needs a collector: zero collectors",
@@ -91,8 +92,10 @@ M3D_GATES = {
 }
 M3D_GATE_IDS = tuple(M3D_GATES)
 
-# Supplementary rows that must stay: existing tests that cover part of a clause.
-M3D_SUPPLEMENTARY = ("GATE-EXEC-DEADLINE.2-m3a", "GATE-MARKER-UPDATE.3-m3a")
+# Supplementary rows that must stay, with their stage: existing tests that cover part of a clause.
+M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3a": "M3a"}
+# Stages an active row may name: the milestone whose work added the test.
+ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
 # Clauses deferred to a later milestone, with that milestone. Each has a row
 # whose stage is `deferred:<milestone>`; removing one fails the table check.
@@ -103,6 +106,7 @@ M3D_DEFERRED = {
     "GATE-EXEC-DEADLINE.4": "M6",
     "GATE-CLOCK-READS.2": "M6",
     "GATE-CLOCK-READS.3": "M6",
+    "GATE-CLOCK-READS.4": "M6",
 }
 DEFERRED_MILESTONES = ("M4", "M6")
 
@@ -157,11 +161,16 @@ def without_deferred(table):
 
 
 def assert_deferred_rows(table):
-    # 이것을 실패시키는 것: deferred 행 삭제·추가, M4·M6 밖 마일스톤, 시험을 가진 deferred 행,
-    # gate.clause와 다른 id.
+    # 이것을 실패시키는 것: deferred 행 삭제·추가·중복, M4·M6 밖 마일스톤, 시험을 가진 deferred 행,
+    # gate.clause와 다른 id, 마일스톤 밖 active stage, 보조 행 stage 변경.
+    ids = [row["id"] for row in rows(table)]
+    assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
     found = {}
     for row in rows(table):
         if not is_deferred(row):
+            assert row["stage"] in ACTIVE_STAGES, (row["id"], "stage", row["stage"])
+            if row["id"] in M3D_SUPPLEMENTARY:
+                assert row["stage"] == M3D_SUPPLEMENTARY[row["id"]], (row["id"], "supplementary stage", row["stage"])
             continue
         milestone = row["stage"].removeprefix("deferred:")
         assert row["stage"] == "deferred:" + milestone and milestone in DEFERRED_MILESTONES, (row["id"], row["stage"])
@@ -248,15 +257,16 @@ def drop_gate_step(text, job):
     return text[:start] + block[:first] + block[last:] + text[end:]
 
 
-def assert_self_rows(texts, job, target="pytest", files=("shell.yml",)):
+def assert_self_rows(texts, job, target="pytest", files=("shell.yml",), platform=None):
     # Only `job` keeps its gate step, so each job must carry the evidence on its own.
     texts = dict(texts)
     for other in GATE_STEP_JOBS:
         if other != job:
             texts["shell.yml"] = drop_gate_step(texts["shell.yml"], other)
     names = ("test_gate_rows_exist_and_run_in_ci", "test_every_gate_clause_is_a_row_or_pending")
+    platform = platform or {"filter-calls": "Linux", "shell-macos": "macOS"}[job]
     table = "id\tproperty\tplatform\ttest\ttarget\tstage\n" + "".join(
-        f"SELF-{index}\tGate table check\tUnix\ttests/shell/test_gate_acceptance.py::{name}\t{target}\tM3d\n"
+        f"SELF-{index}\tGate table check\t{platform}\ttests/shell/test_gate_acceptance.py::{name}\t{target}\tM3d\n"
         for index, name in enumerate(names))
     assert_acceptance_table(table, {name: texts[name] for name in files}, required_ids=frozenset({"SELF-0", "SELF-1"}))
 
@@ -344,13 +354,24 @@ def test_clause_accounting_rejects_mutations(damage):
 
 
 # 이것을 실패시키는 것: deferred 행 삭제·마일스톤 변경·시험을 가진 deferred 행·고정 목록 밖 deferred 행을 받는 것.
-@pytest.mark.parametrize("damage", ["removed", "milestone", "named-test", "extra", "id", "no-disposition"])
+@pytest.mark.parametrize("damage", ["removed", "milestone", "named-test", "extra", "id", "no-disposition",
+                                    "duplicate", "active-stage", "supplementary-stage"])
 def test_deferred_rows_reject_mutations(damage, monkeypatch):
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     line = next(line for line in table.splitlines(True) if line.startswith("GATE-CLOCK-READS.3\t"))
+    supplementary = next(line for line in table.splitlines(True) if line.startswith("GATE-EXEC-DEADLINE.2-m3a\t"))
     if damage == "removed":
         table = table.replace(line, "")
+    elif damage == "duplicate":
+        table += line
+    elif damage == "active-stage":
+        # The pinned stage moves too, so only the active-stage rule can refuse it.
+        monkeypatch.setitem(M3D_SUPPLEMENTARY, "GATE-EXEC-DEADLINE.2-m3a", "M6")
+        table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM6\n"))
+    elif damage == "supplementary-stage":
+        # M3b is an active stage, so only the pinned supplementary stage refuses it.
+        table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM3b\n"))
     elif damage == "milestone":
         # The pinned list moves too, so only the milestone rule can refuse it.
         monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.3", "M5")
@@ -370,12 +391,17 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
         assert_deferred_rows(table)
 
 
-# 이것을 실패시키는 것: 보조 행이 있는 pending 쌍을 거부하는 것(부분 증거를 가리키되 쌍은 열어 둠).
-def test_supplementary_row_keeps_its_pair_pending():
-    table = (ROOT / TABLE).read_text()
-    supplementary = [row for row in rows(table) if row["id"] != f'{row["gate"]}.{row["clause"]}']
-    assert supplementary and all(f'{row["gate"]}.{row["clause"]}' in M3D_PENDING for row in supplementary)
-    assert_clauses_accounted(table)
+# 이것을 실패시키는 것: 보조 행이 있는 pending 쌍을 거부하는 것(부분 증거를 가리키되 쌍은 열어 둠),
+# 또는 나중에 primary 행이 그 쌍을 닫는 것을 거부하는 것.
+@pytest.mark.parametrize("closed", [False, True], ids=["pending", "closed-by-primary"])
+def test_supplementary_row_keeps_its_pair_pending(closed):
+    pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
+    table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1) + deferred_lines()
+    if closed:
+        table += row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1)
+    else:
+        pending += ("GATE-ZOMBIES.1",)
+    assert_clauses_accounted(table, pending)
 
 
 # A lib row has no real counterpart yet: a synthetic row and CI step check the
@@ -438,7 +464,7 @@ def test_lib_row_rejects_mutations(damage):
                                 required_gates=frozenset(M3D_GATE_IDS), read=read)
 
 
-SELF_GREP = "          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' \"$RUNNER_TEMP/gate-acceptance.txt\"\n"
+SELF_GREP = "          grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' \"$RUNNER_TEMP/gate-acceptance.txt\"\n"
 JOB_NEEDS = "    needs: detect\n"
 JOB_IF = "    if: needs.detect.outputs.rust == 'true'\n"
 MATRIX = {"filter-calls": ("        profile: [debug, release]\n", "        profile: [debug, release]\n        exclude: [{profile: release}]\n"),
@@ -449,7 +475,8 @@ MATRIX = {"filter-calls": ("        profile: [debug, release]\n", "        profi
 # 다른 workflow의 interpreter, 다른 로그, .py 파일의 Rust target, job 단위 우회·matrix 변경,
 # 모르는 workflow를 받는 것.
 @pytest.mark.parametrize("damage", ["delete", "set+e", "continue", "matrix-if", "interpreter", "other-log", "target",
-                                    "job-continue", "job-if", "matrix", "unknown-workflow"])
+                                    "job-continue", "job-if", "matrix", "unknown-workflow", "runner",
+                                    "other-platform", "both-platforms", "no-pipefail", "prefix-grep"])
 @pytest.mark.parametrize("job", GATE_STEP_JOBS)
 def test_gate_ci_step_rejects_mutations(job, damage):
     texts = workflows()
@@ -473,6 +500,25 @@ def test_gate_ci_step_rejects_mutations(job, damage):
         shell = in_job(shell, job, JOB_IF, "    if: always()\n")
     elif damage == "matrix":
         shell = in_job(shell, job, *MATRIX[job])
+    elif damage == "runner":
+        runner = {"filter-calls": "ubuntu-latest", "shell-macos": "macos-latest"}[job]
+        other = {"filter-calls": "macos-latest", "shell-macos": "ubuntu-latest"}[job]
+        shell = in_job(shell, job, f"    runs-on: {runner}\n", f"    runs-on: {other}\n")
+    elif damage == "no-pipefail":
+        start, end = job_span(shell, job)
+        block = shell[start:end]
+        at = block.index(SELF_STEP)
+        block = block[:at] + block[at:].replace("          set -o pipefail\n", "", 1)
+        shell = shell[:start] + block + shell[end:]
+    elif damage == "prefix-grep":
+        # A substring match would accept a passing `..._decoy` test in place of a skipped one.
+        shell = in_job(shell, job, SELF_GREP, SELF_GREP.replace("grep -Fx", "grep -F"))
+    if damage in ("other-platform", "both-platforms"):
+        # Only this job keeps its step: a row for the other OS, or for both, lacks evidence.
+        platform = {"filter-calls": "macOS", "shell-macos": "Linux"}[job] if damage == "other-platform" else "Unix"
+        with pytest.raises(AssertionError, match="no asserted CI pytest|platform evidence"):
+            assert_self_rows(texts, job, platform=platform)
+        return
     if damage == "unknown-workflow":
         # A workflow the checker does not read must be refused, not ignored.
         texts["bench.yml"] = (ROOT / ".github/workflows/bench.yml").read_text()
@@ -488,3 +534,43 @@ def test_gate_ci_step_rejects_mutations(job, damage):
     texts["shell.yml"] = shell
     with pytest.raises(AssertionError):
         assert_self_rows(texts, job)
+
+
+# A named binary resolves through its [[bin]] path: a synthetic CI step checks
+# the real bingsu-bench `m1-cgroup-probe` test.
+BIN_TEST = "crates/bingsu-bench/src/bin/m1_cgroup_probe.rs::tests::label_fails_closed"
+BIN_STEP = (
+    "      - run: |\n"
+    "          set -o pipefail\n"
+    "          cargo test -j 2 -p bingsu-bench --bin m1-cgroup-probe | tee \"$RUNNER_TEMP/bench-bin.txt\"\n"
+    "          grep -F 'test tests::label_fails_closed ... ok' \"$RUNNER_TEMP/bench-bin.txt\"\n")
+
+
+def bin_case(damage):
+    table = ("id\tgate\tclause\tproperty\tplatform\ttest\ttarget\tstage\n"
+             f"GATE-ZOMBIES.1\tGATE-ZOMBIES\t1\tSynthetic bin row\tUnix\t{BIN_TEST}\tbin:m1-cgroup-probe\tM3d\n")
+    texts = workflows()
+    step = BIN_STEP
+    if damage == "other-bin":
+        table = table.replace("\tbin:m1-cgroup-probe\t", "\tbin:m1-file-costs\t")
+    elif damage == "unknown-bin":
+        table = table.replace("\tbin:m1-cgroup-probe\t", "\tbin:m1-absent\t")
+    elif damage == "selection":
+        step = step.replace("--bin m1-cgroup-probe", "--bin m1-file-costs")
+    texts["ci.yml"] = texts["ci.yml"].replace(LIB_ANCHOR, step + LIB_ANCHOR)
+    return table, texts
+
+
+def test_named_bin_row_is_accepted():
+    table, texts = bin_case(None)
+    assert_acceptance_table(table, texts, required_ids=frozenset({"GATE-ZOMBIES.1"}),
+                            required_gates=frozenset(M3D_GATE_IDS))
+
+
+# 이것을 실패시키는 것: 이름 붙은 bin을 다른 bin의 root로 풀거나, 없는 bin·다른 --bin 실행을 받는 것.
+@pytest.mark.parametrize("damage", ["other-bin", "unknown-bin", "selection"])
+def test_named_bin_row_rejects_mutations(damage):
+    table, texts = bin_case(damage)
+    with pytest.raises(AssertionError):
+        assert_acceptance_table(table, texts, required_ids=frozenset({"GATE-ZOMBIES.1"}),
+                                required_gates=frozenset(M3D_GATE_IDS))
