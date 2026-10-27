@@ -10,7 +10,11 @@
 //! Input layout per target (F = one flag byte; bit 0 re-seals SHA-1 trailers):
 //! - index, multi_pack_index: F + file bytes
 //! - pack: F + pack length (u32 LE) + pack bytes + .idx bytes
-//! - config, attributes, ignore, gitdir: file bytes
+//! - config, gitdir: file bytes
+//! - attributes, ignore: F + file bytes; bits 0–1 pick the source label (0 the
+//!   generic one, 1 a possibly nested .gitignore/.gitattributes, 2 info/exclude
+//!   or info/attributes, 3 the global excludes or a nested attributes file),
+//!   bits 2–3 the nesting depth
 //! - refs: F + bytes; bit 0 clear = packed-refs, set = one loose ref
 //! - commit_objects: F + bytes; bit 0 clear = commit body (framed, deflated
 //!   and hashed here), set = a raw zlib stream under a non-matching id
@@ -31,7 +35,10 @@ use crate::{
     meter::Meter,
     safe_read::ReadError,
 };
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Target {
@@ -134,7 +141,7 @@ pub(crate) enum Prepared {
     Index(Vec<u8>),
     Pack(Vec<u8>, Vec<u8>),
     Config(Vec<u8>),
-    Patterns(PatternKind, Vec<u8>),
+    Patterns(PatternKind, PathBuf, Vec<u8>),
     PackedRefs(Vec<u8>),
     LooseRef(Vec<u8>),
     Commit {
@@ -150,6 +157,33 @@ fn split_flag(data: &[u8]) -> (u8, &[u8]) {
     match data.split_first() {
         Some((flag, rest)) => (*flag, rest),
         None => (0, data),
+    }
+}
+
+/// The source label the product gives a pattern file, picked by the flag byte:
+/// nested per-directory files, info/exclude, info/attributes and the global
+/// excludes take different add_buffer branches (matcher base, info lists).
+pub(crate) fn pattern_source(kind: PatternKind, flag: u8) -> PathBuf {
+    let name = match kind {
+        PatternKind::Ignore => ".gitignore",
+        PatternKind::Attributes => ".gitattributes",
+    };
+    let nested = |depth: u8| {
+        let mut path = PathBuf::new();
+        for level in 0..depth {
+            path.push(format!("d{level}"));
+        }
+        path.push(name);
+        path
+    };
+    let depth = (flag >> 2) & 3;
+    match (flag & 3, kind) {
+        (1, _) => nested(depth),
+        (2, PatternKind::Ignore) => "info/exclude".into(),
+        (2, PatternKind::Attributes) => "info/attributes".into(),
+        (3, PatternKind::Ignore) => "<global-excludes>".into(),
+        (3, PatternKind::Attributes) => nested(depth + 1),
+        _ => "fuzz".into(),
     }
 }
 
@@ -180,8 +214,16 @@ pub(crate) fn prepare(target: Target, data: &[u8]) -> Prepared {
             Prepared::Pack(pack, idx)
         }
         Target::Config => Prepared::Config(data.to_vec()),
-        Target::Attributes => Prepared::Patterns(PatternKind::Attributes, data.to_vec()),
-        Target::Ignore => Prepared::Patterns(PatternKind::Ignore, data.to_vec()),
+        Target::Attributes => Prepared::Patterns(
+            PatternKind::Attributes,
+            pattern_source(PatternKind::Attributes, flag),
+            rest.to_vec(),
+        ),
+        Target::Ignore => Prepared::Patterns(
+            PatternKind::Ignore,
+            pattern_source(PatternKind::Ignore, flag),
+            rest.to_vec(),
+        ),
         Target::Refs if flag & 1 == 0 => Prepared::PackedRefs(rest.to_vec()),
         Target::Refs => Prepared::LooseRef(rest.to_vec()),
         Target::CommitObjects if flag & 1 == 0 => {
@@ -275,11 +317,17 @@ fn parts(path: &[u8]) -> Vec<&[u8]> {
 
 fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadError> {
     match prepared {
-        Prepared::Index(bytes) => index::parse(bytes, meter).map(drop),
+        Prepared::Index(bytes) => {
+            let parsed = index::parse(bytes, meter)?;
+            assert_live(meter, "index");
+            drop(parsed);
+            Ok(())
+        }
         Prepared::Pack(data, idx) => {
             // The product maps both files; these copies stand in for the maps.
             let (data, idx) = (ReadMap::fuzz_bytes(data), ReadMap::fuzz_bytes(idx));
             let pack = Pack::from_bytes(b"fuzz.idx".to_vec(), data, idx, meter)?;
+            assert_live(meter, "pack");
             pack.fuzz_decode_all(meter)
         }
         Prepared::Config(bytes) => {
@@ -293,13 +341,15 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
                 assert!(charged >= reservation as u64, "config reservation");
             }
             let facts = facts?;
+            assert_live(meter, "config facts");
             let config = Config::fuzz_common(facts);
             let _ = (config.has_core_worktree(), config.has_use_replace_refs());
             Policies::from_config(&config).map(drop)
         }
-        Prepared::Patterns(kind, bytes) => {
+        Prepared::Patterns(kind, source, bytes) => {
             let mut patterns = Patterns::default();
-            patterns.fuzz_bytes(bytes, *kind, meter)?;
+            patterns.fuzz_bytes(bytes, *kind, source.clone(), meter)?;
+            assert_live(meter, "patterns");
             let policies = Policies::from_config(&Config::default())?;
             for names in [
                 NamePolicy::default(),
@@ -321,18 +371,26 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
                     }
                 }
             }
+            assert_live(meter, "pattern matches");
             Ok(())
         }
         Prepared::PackedRefs(bytes) => {
             let refs = Refs::parse(bytes, meter)?;
+            assert_live(meter, "packed refs");
             let _ = refs.contains_replace();
             Ok(())
         }
-        Prepared::LooseRef(bytes) => refs::parse_loose(bytes).map(drop),
+        Prepared::LooseRef(bytes) => {
+            let parsed = refs::parse_loose(bytes)?;
+            assert_live(meter, "loose ref");
+            drop(parsed);
+            Ok(())
+        }
         Prepared::Commit { compressed, id } => {
             let id = gix_index::hash::ObjectId::from_bytes_or_panic(&id[..]);
             let mut buffer = Vec::new();
             let decoded = objects::loose(compressed, &id, &mut buffer, meter)?;
+            assert_live(meter, "loose object");
             stage_c::checked_commit(&decoded, meter)?;
             gix_object::CommitRefIter::from_bytes(decoded.data, gix_index::hash::Kind::Sha1)
                 .tree_id()
@@ -345,13 +403,15 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
             meter,
         ),
         Prepared::Gitdir(bytes) => {
-            // gitfile() reserves this before it normalizes any pointer.
-            let mut scratch = meter.path_allocation();
-            scratch.reserve(discover::POINTER_SCRATCH, meter)?;
             let pointer = discover::gitfile_pointer(bytes)?;
-            let git_path = discover::normalize(BASE, pointer)?;
+            let discover::GitfileShape {
+                scratch: _scratch,
+                git_path,
+                common,
+            } = discover::gitfile_shape(BASE, pointer, meter)?;
+            assert_live(meter, "gitfile");
             assert_normalized(&git_path);
-            if let Some(common) = discover::linked_common(&parts(&git_path)) {
+            if let Some(common) = common {
                 assert_normalized(&common);
                 assert!(git_path.starts_with(&[&common[..], b"/worktrees/"].concat()));
             }
@@ -359,11 +419,14 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
             Ok(())
         }
         Prepared::Commondir(gitfile, common) => {
-            let mut scratch = meter.path_allocation();
-            scratch.reserve(discover::POINTER_SCRATCH, meter)?;
             let pointer = discover::gitfile_pointer(gitfile)?;
-            let git_path = discover::normalize(BASE, pointer)?;
-            let Some(expected) = discover::linked_common(&parts(&git_path)) else {
+            let discover::GitfileShape {
+                scratch: _scratch,
+                git_path,
+                common: expected,
+            } = discover::gitfile_shape(BASE, pointer, meter)?;
+            assert_live(meter, "commondir");
+            let Some(expected) = expected else {
                 // Not a linked worktree: the commondir file is never consulted.
                 return Err(ReadError::Escape);
             };
@@ -376,6 +439,25 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
             Ok(())
         }
     }
+}
+
+/// Live-heap oracle, run while a parse result is still held: the heap alive
+/// now must be covered by what the Meter holds reserved now (a released
+/// reservation covers nothing) plus UNRESERVED. The cumulative charge cannot
+/// see an allocation made after a release, and an allowance sized by the
+/// input would hide an unreserved copy of it. Measured over every fixed seed
+/// the largest excess of live over reserved was 63 B (a loose ref); the map
+/// stand-ins of the pack and midx entries are covered by their reservations.
+// 이것을 실패시키는 것: config::parse 첫 줄에 `std::mem::forget(bytes.to_vec())`
+// 같은 입력 크기의 무예약 할당을 넣는 것("config facts"가 실패한다), 그리고
+// assert_live_rejects_unreserved_heap 시험(fuzz_seeds.rs)에서 이 검사를 지우는 것.
+pub(crate) fn assert_live(meter: &Meter, what: &str) {
+    let live = crate::allocation::live();
+    let reserved = usize::try_from(meter.live_allocated()).unwrap_or(usize::MAX);
+    assert!(
+        live <= reserved.saturating_add(UNRESERVED),
+        "{what}: {live} live heap bytes above the {reserved} reserved now"
+    );
 }
 
 /// The measured step. Callers bracket only this with their heap counter;
@@ -397,11 +479,12 @@ pub(crate) fn execute(prepared: &mut Prepared) -> Outcome {
 pub const UNRESERVED: usize = 4096;
 
 /// Oracles shared by fuzzing and replay: no descriptor is held, the request
-/// deadline bounds time, and the heap never grows past what the parser
-/// reserved through the Meter beforehand (itself under the Meter's 8 MiB
-/// live cap). Two input-sized copies are allowed (the map stand-in and one
-/// derived value such as a ref name, both charged by the product's read),
-/// plus UNRESERVED.
+/// deadline bounds time, and the peak heap never passes what the parser
+/// reserved through the Meter (cumulative, itself under the 8 MiB live cap)
+/// plus two input-sized copies and UNRESERVED. The copies stand for those a
+/// measured step makes itself (the pack and midx map stand-ins, one derived
+/// value); prepare's own copies are made outside the measure and are not
+/// counted. assert_live checks the stricter live bound at each stage.
 pub fn assert_bounded(outcome: &Outcome, peak: usize, input: usize, slack: Duration) {
     assert_eq!(outcome.fds_after, 0, "descriptor lease leaked");
     assert!(

@@ -1612,8 +1612,9 @@ fn git_attribute_charges_cover_counted_peak() {
     ] {
         let mut m = meter();
         let mut patterns = Patterns::default();
-        let (result, counts) =
-            allocation::measure(|| patterns.fuzz_bytes(&bytes, PatternKind::Attributes, &mut m));
+        let (result, counts) = allocation::measure(|| {
+            patterns.fuzz_bytes(&bytes, PatternKind::Attributes, "fuzz".into(), &mut m)
+        });
         assert_eq!(result, Ok(()), "{name}");
         let charged = m.counts[Phase::Content as usize].allocated;
         assert!(
@@ -1640,7 +1641,8 @@ fn git_attribute_charges_cover_counted_peak() {
             let (_, counts) = allocation::measure(|| {
                 // A product request stops at its first failed file (add latches it).
                 for (i, file) in files[..k].iter().enumerate() {
-                    results[i] = patterns.fuzz_bytes(file, PatternKind::Attributes, &mut m);
+                    results[i] =
+                        patterns.fuzz_bytes(file, PatternKind::Attributes, "fuzz".into(), &mut m);
                     if results[i].is_err() {
                         break;
                     }

@@ -48,6 +48,13 @@ unsafe impl GlobalAlloc for Allocator {
 #[global_allocator]
 static ALLOCATOR: Allocator = Allocator;
 
+/// Heap bytes live right now inside `measure`; 0 outside it. Only the fuzz
+/// entries read it, so the other test crates that include this file skip it.
+#[allow(dead_code)]
+pub fn live() -> usize {
+    COUNTS.with(|slot| slot.get().map_or(0, |counts| counts.live))
+}
+
 pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Counts) {
     struct Reset;
     impl Drop for Reset {

@@ -90,6 +90,12 @@ fn push(
     data: Vec<u8>,
     expect: Verdict,
 ) {
+    // Pattern inputs start with the source flag; 0 is the generic label.
+    let data = if matches!(target, Target::Attributes | Target::Ignore) {
+        with_flag(0, &data)
+    } else {
+        data
+    };
     seeds.push(Seed {
         target,
         name,
@@ -796,6 +802,31 @@ fn patterns(seeds: &mut Vec<Seed>, t: Target) {
         with(2048, " # a\n"),
         if attributes { Ok } else { Limit },
     );
+    // The source flag reaches the info lists, the global excludes and nested
+    // per-directory files, which the generic label (flag 0) never takes.
+    let body = if attributes {
+        "*.txt text eol=lf\n*.bin -text\n"
+    } else {
+        "*.tmp\n!keep.tmp\nbuild/\n"
+    };
+    let flags: &[(&'static str, u8)] = if attributes {
+        &[("info-source", 2), ("nested-source", 1 | 3 << 2)]
+    } else {
+        &[
+            ("info-source", 2),
+            ("global-source", 3),
+            ("nested-source", 1 | 3 << 2),
+        ]
+    };
+    for (name, flag) in flags {
+        seeds.push(Seed {
+            target: t,
+            name,
+            class: Valid,
+            data: with_flag(*flag, body.as_bytes()),
+            expect: Ok,
+        });
+    }
 }
 
 fn packed(names: impl Iterator<Item = String>) -> Vec<u8> {
