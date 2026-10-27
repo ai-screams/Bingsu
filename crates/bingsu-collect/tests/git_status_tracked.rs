@@ -878,7 +878,13 @@ fn unicode_alias_lookup_budget_exhaustion_preserves_verified_bounds() {
                 eprintln!(
                     "ALIAS_BOUND shared={shared} remaining={remaining} untracked={untracked:?}"
                 );
-                if shared && untracked != Field::PENDING {
+                // Measured on macOS: allowances that expire during enumeration
+                // (150, 280) keep a verified lower bound; 0 and 50 expire before
+                // any batch completes and 400 or more expire during the
+                // per-alias fallback, where a partial walk publishes nothing.
+                // 이것을 실패시키는 것: fallback 중(400 이상) 하한 게시 또는
+                // 열거 중(150, 280) 하한 삭제.
+                if shared && matches!(remaining, 150 | 280) {
                     assert!(
                         matches!(
                             untracked.value,
@@ -886,12 +892,16 @@ fn unicode_alias_lookup_budget_exhaustion_preserves_verified_bounds() {
                                 n: 1..=300,
                                 saturated: true
                             }
-                        ),
+                        ) && untracked != Field::PENDING,
                         "shared={shared} remaining={remaining}: {untracked:?}"
                     );
                     bounds += 1;
                 } else {
-                    assert_eq!(untracked, Field::PENDING);
+                    assert_eq!(
+                        untracked,
+                        Field::PENDING,
+                        "shared={shared} remaining={remaining}"
+                    );
                 }
             });
         }
@@ -899,6 +909,34 @@ fn unicode_alias_lookup_budget_exhaustion_preserves_verified_bounds() {
             assert!(bounds > 0, "must exercise #131's verified lower bound");
         }
     }
+    assert_eq!(
+        with_repo(&f, |repo, _| git::stage_b::status(repo, &[])),
+        expected
+    );
+}
+
+// A tracked file replaced by a directory, with no name aliasing: this runs on
+// every platform, so the Linux untracked path is compared with the git CLI too.
+// 이것을 실패시키는 것: 디렉터리로 바뀐 추적 파일을 modified에서 빼거나 그
+// 안의 파일을 untracked에서 빼기, 또는 untracked를 Pending 대신 정확값으로
+// 단독 게시하기.
+#[test]
+fn tracked_file_replaced_by_directory_matches_git() {
+    let f = init();
+    // More than one kernel batch, without relying on directory entry order.
+    for i in 0..3000 {
+        f.write(&format!("Dir/f{i:04}"), b"");
+    }
+    f.write("Dir/x", b"");
+    commit(&f);
+    fs::remove_file(f.0.join("Dir/x")).unwrap();
+    f.write("Dir/x/inner", b"");
+    let expected = unicode_oracle(&f);
+    assert_eq!(expected.modified, count(1));
+    assert_eq!(expected.untracked, count(1));
+    let mut tracked = expected.clone();
+    tracked.untracked = Field::PENDING;
+    assert_eq!(status(&f), tracked);
     assert_eq!(
         with_repo(&f, |repo, _| git::stage_b::status(repo, &[])),
         expected
