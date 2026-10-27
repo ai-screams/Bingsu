@@ -429,12 +429,22 @@ fn filesystem_sibling_order_matches_the_full_shortener() {
         shorten::{Method, ShortenRequest, Source, run_builtin},
     };
     use git_fixture::{binding, envelope, facts, git_value, response};
-    let root = std::env::temp_dir().join(format!("bingsu-e2-siblings-{}", std::process::id()));
+    // The pid can be reused after a run that never dropped; the clock keeps the name fresh.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let root = std::env::temp_dir().join(format!(
+        "bingsu-e2-siblings-{}-{nonce:x}",
+        std::process::id()
+    ));
     std::fs::create_dir(&root).unwrap();
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).unwrap();
+            // No panic in Drop: a failed cleanup must not mask the test result.
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                eprintln!("cleanup of {} failed: {e}", self.0.display());
+            }
         }
     }
     let _cleanup = Cleanup(root.clone());

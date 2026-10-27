@@ -40,6 +40,8 @@ def start(tmp_path, shell, folder):
 
 # 이것을 실패시키는 것: hook이 `--shell`·`--pwd`를 넘기지 않는 것(최소 레코드 `> `가 그려짐), prompt가
 # 렌더러를 부르지 않는 것, 윗줄을 버리는 것, 실패한 명령 뒤 char가 바뀌지 않는 것.
+# 윗줄 판정에 `"cd " not in r` 같은 부분 문자열 제외를 넣지 않는다: 에코된 명령 줄은 `" 1"`로 끝나지 않아
+# 이미 걸러지고(제외를 지워도 3셸 통과), hostname이 `...cd`인 runner에서는 정상 윗줄을 버린다.
 @pytest.mark.parametrize("shell", SHELLS)
 def test_default_prompt_is_drawn(tmp_path, shell):
     folder = tmp_path / "vis-prompt"
@@ -48,7 +50,7 @@ def test_default_prompt_is_drawn(tmp_path, shell):
     rows = screen_rows(s.close())
     # The prompt after `false`: its upper row holds the folder and the
     # status 1, the row below starts with the failure char.
-    hits = [i for i, r in enumerate(rows) if "vis-prompt" in r and r.endswith(" 1") and "cd " not in r]
+    hits = [i for i, r in enumerate(rows) if "vis-prompt" in r and r.endswith(" 1")]
     assert hits, "\n".join(rows)
     assert rows[hits[0] + 1].lstrip().startswith("\u2717"), rows[hits[0] + 1]
     assert not any(r.startswith("> ") for r in rows), rows
