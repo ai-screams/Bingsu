@@ -19,8 +19,7 @@ TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
 
 # Gate id -> its clauses, in order; clause N is the N-th entry. Clauses whose
-# work belongs to a later milestone (the write-only child, the trusted exec
-# relay) are not listed: they are not M3d gate clauses.
+# work belongs to a later milestone are listed too and have a deferred row.
 M3D_GATES = {
     "GATE-FS-HELPER": (
         "Helper filesystem calls per publication stage equal the formula, counted per role and call kind",
@@ -37,6 +36,7 @@ M3D_GATES = {
     "GATE-FDS": (
         "The helper starts with only the allowed descriptors and no shell pipe",
         "The collector holds only its fixed descriptors",
+        "The write-only child starts with only the allowed descriptors",
     ),
     "GATE-HELPER-LIFETIME": (
         "After the deadline a kill request is sent, on the normal and the blocked-mount fixture",
@@ -57,13 +57,18 @@ M3D_GATES = {
     "GATE-TRUST-REVOKE": (
         "After `chmod g+w` on a config file, no command from it is approved past verified_at + T",
         "The same holds on the blocked-mount fixture",
+        "The exec time of a revoked unit is recorded (best effort)",
     ),
     "GATE-EXEC-DEADLINE": (
         "A clock moved past the deadline right after the decision makes the front approve no spawn",
         "A chmod or file replacement during the scan leaves the marker unchanged",
+        "A deadline passed after approval and before the pre-exec check: the target is not executed",
+        "Asleep after approval and woken past the deadline (wake-generation platforms): the target is not executed",
     ),
     "GATE-CLOCK-READS": (
         "A test-build counter shows a fixed number of executed front clock reads per use and fixture",
+        "Same-machine A/B total latency of the deadline checks",
+        "Per execution unit, exec count +1 and an unchanged process count through the trusted relay",
     ),
     "GATE-COLLECTOR-TIMING": (
         "No segment needs a collector: zero collectors",
@@ -87,6 +92,18 @@ M3D_GATE_IDS = tuple(M3D_GATES)
 
 # Supplementary rows that must stay: existing tests that cover part of a clause.
 M3D_SUPPLEMENTARY = ("GATE-EXEC-DEADLINE.2-m3a", "GATE-MARKER-UPDATE.3-m3a")
+
+# Clauses deferred to a later milestone, with that milestone. Each has a row
+# whose stage is `deferred:<milestone>`; removing one fails the table check.
+M3D_DEFERRED = {
+    "GATE-FDS.3": "M4",
+    "GATE-TRUST-REVOKE.3": "M6",
+    "GATE-EXEC-DEADLINE.3": "M6",
+    "GATE-EXEC-DEADLINE.4": "M6",
+    "GATE-CLOCK-READS.2": "M6",
+    "GATE-CLOCK-READS.3": "M6",
+}
+DEFERRED_MILESTONES = ("M4", "M6")
 
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
@@ -119,9 +136,39 @@ def rows(table):
     return list(csv.DictReader(io.StringIO(table), delimiter="\t"))
 
 
+def is_deferred(row):
+    return row["stage"].startswith("deferred")
+
+
 def covered(table):
-    # Pairs with a primary row; supplementary rows do not close a pair.
-    return {row["id"] for row in rows(table) if row["id"] == f'{row["gate"]}.{row["clause"]}'}
+    # Pairs with a primary row; supplementary and deferred rows do not close a pair.
+    return {row["id"] for row in rows(table)
+            if row["id"] == f'{row["gate"]}.{row["clause"]}' and not is_deferred(row)}
+
+
+def deferred(table):
+    return {row["id"] for row in rows(table) if is_deferred(row)}
+
+
+def without_deferred(table):
+    lines = table.splitlines(True)
+    return lines[0] + "".join(line for line, row in zip(lines[1:], rows(table)) if not is_deferred(row))
+
+
+def assert_deferred_rows(table):
+    # 이것을 실패시키는 것: deferred 행 삭제·추가, M4·M6 밖 마일스톤, 시험을 가진 deferred 행,
+    # gate.clause와 다른 id.
+    found = {}
+    for row in rows(table):
+        if not is_deferred(row):
+            continue
+        milestone = row["stage"].removeprefix("deferred:")
+        assert row["stage"] == "deferred:" + milestone and milestone in DEFERRED_MILESTONES, (row["id"], row["stage"])
+        assert row["id"] == f'{row["gate"]}.{row["clause"]}', (row["id"], "deferred id")
+        assert (row["platform"], row["test"], row["target"]) == ("-", "-", "-"), (row["id"], "deferred row names a test")
+        assert row["property"].strip(), (row["id"], "deferred disposition")
+        found[row["id"]] = milestone
+    assert found == M3D_DEFERRED, (sorted(found.items()), sorted(M3D_DEFERRED.items()))
 
 
 def named(table):
@@ -133,20 +180,25 @@ def clauses():
 
 
 def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
-    # Each clause that is not pending keeps a primary row whose id is exactly GATE-ID.N;
-    # the listed supplementary rows stay too.
-    assert_acceptance_table(table, texts, required_ids=frozenset(clauses() - set(pending)) | set(M3D_SUPPLEMENTARY),
+    # Each clause that is neither pending nor deferred keeps a primary row whose id is
+    # exactly GATE-ID.N; the listed supplementary rows stay too. Deferred rows name no test.
+    assert_deferred_rows(table)
+    required = clauses() - set(pending) - set(M3D_DEFERRED)
+    assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
                             required_gates=frozenset(M3D_GATE_IDS), collected=collected)
 
 
 def assert_clauses_accounted(table, pending=M3D_PENDING):
     # 이것을 실패시키는 것: 행 삭제(쌍이 행도 pending도 아님), primary 행을 더하고 pending을 남김,
-    # 없는 절을 pending이나 표에 둠(합집합 비교), pending 중복, 보조 행만으로 쌍을 닫음.
+    # 없는 절을 pending이나 표에 둠(합집합 비교), pending 중복, 보조 행만으로 쌍을 닫음,
+    # deferred 절을 pending으로 셈.
     expected = clauses()
     assert len(set(pending)) == len(pending), "duplicate pending pair"
     assert named(table) <= expected, sorted(named(table) - expected)
     assert not covered(table) & set(pending), sorted(covered(table) & set(pending))
-    assert covered(table) | set(pending) == expected, sorted(expected ^ (covered(table) | set(pending)))
+    assert not deferred(table) & (covered(table) | set(pending)), sorted(deferred(table) & (covered(table) | set(pending)))
+    accounted = covered(table) | set(pending) | deferred(table)
+    assert accounted == expected, sorted(expected ^ accounted)
 
 
 # 이것을 실패시키는 것: TSV 오타·중복 선언·미수집 매개변수·CI에서 실행/단언하지 않는 행.
@@ -164,7 +216,9 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
-    assert_clauses_accounted((ROOT / TABLE).read_text())
+    table = (ROOT / TABLE).read_text()
+    assert_deferred_rows(table)
+    assert_clauses_accounted(table)
 
 
 def assert_self_rows(texts, target="pytest", files=("shell.yml",)):
@@ -222,14 +276,26 @@ def row_line(row_id, gate, clause):
     return f"{row_id}\t{gate}\t{clause}\tp\tUnix\tcrates/x/src/main.rs::t\tbin:x\tM3d\n"
 
 
+def deferred_lines():
+    table = (ROOT / TABLE).read_text()
+    return "".join(line for line, row in zip(table.splitlines(True)[1:], rows(table)) if is_deferred(row))
+
+
 @pytest.mark.parametrize("damage", ["removed-row", "row-still-pending", "unknown-pending", "duplicate-pending",
-                                    "supplementary-closes", "unknown-supplementary"])
+                                    "supplementary-closes", "unknown-supplementary", "deferred-also-pending",
+                                    "deferred-also-primary", "removed-deferred"])
 def test_clause_accounting_rejects_mutations(damage):
     pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
-    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1)
+    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1) + deferred_lines()
     assert_clauses_accounted(table, pending)
     if damage == "removed-row":
-        table = HEADER
+        table = HEADER + deferred_lines()
+    elif damage == "deferred-also-pending":
+        pending = pending + ("GATE-FDS.3",)
+    elif damage == "deferred-also-primary":
+        table += row_line("GATE-FDS.3", "GATE-FDS", 3)
+    elif damage == "removed-deferred":
+        table = "".join(line for line in table.splitlines(True) if not line.startswith("GATE-FDS.3\t"))
     elif damage == "row-still-pending":
         pending = pending + ("GATE-ZOMBIES.1",)
     elif damage == "unknown-pending":
@@ -242,6 +308,33 @@ def test_clause_accounting_rejects_mutations(damage):
         table += row_line("GATE-ZOMBIES.2-m3a", "GATE-ZOMBIES", 2)
     with pytest.raises(AssertionError):
         assert_clauses_accounted(table, pending)
+
+
+# 이것을 실패시키는 것: deferred 행 삭제·마일스톤 변경·시험을 가진 deferred 행·고정 목록 밖 deferred 행을 받는 것.
+@pytest.mark.parametrize("damage", ["removed", "milestone", "named-test", "extra", "id", "no-disposition"])
+def test_deferred_rows_reject_mutations(damage, monkeypatch):
+    table = (ROOT / TABLE).read_text()
+    assert_deferred_rows(table)
+    line = next(line for line in table.splitlines(True) if line.startswith("GATE-CLOCK-READS.3\t"))
+    if damage == "removed":
+        table = table.replace(line, "")
+    elif damage == "milestone":
+        # The pinned list moves too, so only the milestone rule can refuse it.
+        monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.3", "M5")
+        table = table.replace(line, line.replace("deferred:M6", "deferred:M5"))
+    elif damage == "named-test":
+        table = table.replace(line, line.replace("\t-\t-\t-\t", "\tUnix\tcrates/x/src/main.rs::t\tbin:x\t"))
+    elif damage == "extra":
+        table += line.replace("GATE-CLOCK-READS.3\tGATE-CLOCK-READS\t3\t", "GATE-CLOCK-READS.1\tGATE-CLOCK-READS\t1\t")
+    elif damage == "id":
+        monkeypatch.delitem(M3D_DEFERRED, "GATE-CLOCK-READS.3")
+        monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.3-m6", "M6")
+        table = table.replace(line, line.replace("GATE-CLOCK-READS.3\t", "GATE-CLOCK-READS.3-m6\t", 1))
+    else:
+        table = table.replace(line, "\t".join(v if i != 3 else " " for i, v in enumerate(line.split("\t"))))
+    assert table != (ROOT / TABLE).read_text()
+    with pytest.raises(AssertionError):
+        assert_deferred_rows(table)
 
 
 # 이것을 실패시키는 것: 보조 행이 있는 pending 쌍을 거부하는 것(부분 증거를 가리키되 쌍은 열어 둠).
