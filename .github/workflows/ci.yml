@@ -316,11 +316,13 @@ jobs:
           grep -F 'test runtime::x14_threads_and_status_survive_fork_is_refused ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok' "$RUNNER_TEMP/filter-musl.txt"
           grep -F 'test worker_limits_fail_without_blocking_front ... ok' "$RUNNER_TEMP/filter-musl.txt"
-      # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것.
+      # 이것을 실패시키는 것: fuzz entry와 같은 seed의 고정 판정·oracle을 PR에서 건너뛰는 것,
+      # `--skip ::`를 지워 제품 unit test를 이 바이너리에서 다시 실행하는 것(running 3 tests가 깨진다).
       - name: F2 fixed fuzz seed regression corpus
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
-          cargo test --locked -j 2 -p bingsu-collect --test fuzz_seeds -- --test-threads=2 | tee "$RUNNER_TEMP/f2-seeds.txt"
+          cargo test --locked -j 2 -p bingsu-collect --test fuzz_seeds -- --test-threads=2 --skip :: | tee "$RUNNER_TEMP/f2-seeds.txt"
+          grep -Fx 'running 3 tests' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test fixed_seed_corpus_replays_with_pinned_verdicts ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test every_target_has_every_seed_class ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
@@ -415,6 +417,7 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-over-cap]' "$RUNNER_TEMP/f1-security.txt"
           grep -Fx 'PASSED tests/shell/test_git_collection_security.py::test_untracked_file_counts_follow_u7[untracked-large]' "$RUNNER_TEMP/f1-security.txt"
 
+      # 이것을 실패시키는 것: 이 step이나 seed별 PASSED 줄을 지우는 것, seed 하나가 skip·xfail 되는 것.
       - name: F2 file-backed seed repositories under the protected collector
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -422,6 +425,49 @@ jobs:
           "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_git_fuzz_repositories.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/f2-traces" | tee "$RUNNER_TEMP/f2-repositories.txt"
           grep -F 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects' "$RUNNER_TEMP/f2-repositories.txt"
           grep -F 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_every_seed_has_a_pinned_outcome' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[config-cap-plus-one]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[packed-refs-cap-plus-one]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[index-damaged-huge-count]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[index-cap-plus-one]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[pack-idx-midx-damaged]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[commit-graph-unused]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[symref-cycle]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[symref-depth-41]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[config-fifo]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[config-symlink-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[head-symlink-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[objects-symlink-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[gitdir-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[gitdir-parent-escape]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[gitdir-empty-worktrees-target]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[gitdir-foreign-worktree-backlink]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[gitdir-outside-modules-shape]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[gitdir-self]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[commondir-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[commondir-parent-escape]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_hostile_seed_repositories_have_zero_effects[commondir-self]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[config-cap-plus-one]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[packed-refs-cap-plus-one]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[index-damaged-huge-count]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[index-cap-plus-one]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[pack-idx-midx-damaged]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[commit-graph-unused]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[symref-cycle]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[symref-depth-41]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[config-fifo]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[config-symlink-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[head-symlink-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[objects-symlink-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[gitdir-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[gitdir-parent-escape]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[gitdir-empty-worktrees-target]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[gitdir-foreign-worktree-backlink]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[gitdir-outside-modules-shape]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[gitdir-self]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[commondir-outside]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[commondir-parent-escape]' "$RUNNER_TEMP/f2-repositories.txt"
+          grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[commondir-self]' "$RUNNER_TEMP/f2-repositories.txt"
       # 이것을 실패시키는 것: 제품 mask 10의 실제 수집 fixture를 준비하지 않고 runtime을 실행하는 것.
       - name: Prepare F3 release collection observations
         run: python3 bench/git-product.py --prepare target/release/bingsu --out target/f3/preparation.json
