@@ -590,20 +590,28 @@ mod tests {
     fn memory_child() {
         let _watchdog = start(Instant::now()).unwrap();
         install(&_watchdog).unwrap();
-        let mut memory = Vec::<u8>::new();
         #[cfg(target_os = "linux")]
         {
+            let mut memory = Vec::<u8>::new();
             assert!(memory.try_reserve_exact(160 * 1024 * 1024).is_err());
         }
         #[cfg(target_os = "macos")]
         {
-            memory.resize(160 * 1024 * 1024, 0x7f);
+            // Touch one byte per page instead of filling: a debug-build fill of
+            // 160 MiB costs about 0.4 s of CPU, and a slower runner then reaches
+            // the 1 s CPU limit (SIGXCPU) before the footprint limit.
+            let mut memory = vec![0u8; 160 * 1024 * 1024];
+            // SAFETY: sysconf with a valid name has no preconditions.
+            let page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+            for page in memory.chunks_mut(page_size) {
+                page[0] = 0x7f;
+            }
             std::hint::black_box(&mut memory);
             std::thread::sleep(Duration::from_secs(1));
             panic!("footprint not enforced");
         }
     }
-    // 이것을 실패시키는 것: 메모리 한도를 적용하지 않아 큰 할당이 계속되는 것.
+    // 이것을 실패시키는 것: 메모리 한도를 적용하지 않아 큰 할당이 계속되는 것(실행: 32 MiB 표본 한도와 128 MiB helper 한도를 1024배로 키우면 SIGKILL 대신 panic 종료).
     #[test]
     fn memory_is_enforced() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
