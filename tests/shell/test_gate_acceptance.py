@@ -85,8 +85,14 @@ M3D_GATES = {
 }
 M3D_GATE_IDS = tuple(M3D_GATES)
 
-# (gate, clause) pairs without a row yet, as "GATE-ID.N". Each gate Task adds
-# its rows and removes its pairs here; the final Task asserts this is empty.
+# Supplementary rows that must stay: existing tests that cover part of a clause.
+M3D_SUPPLEMENTARY = ("GATE-EXEC-DEADLINE.2-m3a", "GATE-MARKER-UPDATE.3-m3a")
+
+# (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
+# Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
+# the final Task asserts this is empty. A supplementary row (id GATE-ID.N-<tag>)
+# points at an existing test that covers part of a clause and does not close
+# its pair.
 M3D_PENDING = (
     "GATE-FS-HELPER.1", "GATE-FS-HELPER.2",
     "GATE-FS-FRONT.1",
@@ -97,11 +103,11 @@ M3D_PENDING = (
     "GATE-FRONT-READ-BYTES.1", "GATE-FRONT-READ-BYTES.2",
     "GATE-GENERATION.1", "GATE-GENERATION.2",
     "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
-    "GATE-EXEC-DEADLINE.1",
+    "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
     "GATE-CLOCK-READS.1",
     "GATE-COLLECTOR-TIMING.1", "GATE-COLLECTOR-TIMING.2", "GATE-COLLECTOR-TIMING.3", "GATE-COLLECTOR-TIMING.4",
     "GATE-RUNTIME-ROOT.1", "GATE-RUNTIME-ROOT.2", "GATE-RUNTIME-ROOT.3", "GATE-RUNTIME-ROOT.4",
-    "GATE-MARKER-UPDATE.1", "GATE-MARKER-UPDATE.2",
+    "GATE-MARKER-UPDATE.1", "GATE-MARKER-UPDATE.2", "GATE-MARKER-UPDATE.3",
 )
 
 
@@ -114,6 +120,11 @@ def rows(table):
 
 
 def covered(table):
+    # Pairs with a primary row; supplementary rows do not close a pair.
+    return {row["id"] for row in rows(table) if row["id"] == f'{row["gate"]}.{row["clause"]}'}
+
+
+def named(table):
     return {f'{row["gate"]}.{row["clause"]}' for row in rows(table)}
 
 
@@ -122,16 +133,18 @@ def clauses():
 
 
 def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
-    # Each clause that is not pending keeps a primary row whose id is exactly GATE-ID.N.
-    assert_acceptance_table(table, texts, required_ids=frozenset(clauses() - set(pending)),
+    # Each clause that is not pending keeps a primary row whose id is exactly GATE-ID.N;
+    # the listed supplementary rows stay too.
+    assert_acceptance_table(table, texts, required_ids=frozenset(clauses() - set(pending)) | set(M3D_SUPPLEMENTARY),
                             required_gates=frozenset(M3D_GATE_IDS), collected=collected)
 
 
 def assert_clauses_accounted(table, pending=M3D_PENDING):
-    # 이것을 실패시키는 것: 행 삭제(쌍이 행도 pending도 아님), 행을 더하고 pending을 남김,
-    # 없는 절을 pending이나 표에 둠(합집합 비교), pending 중복.
+    # 이것을 실패시키는 것: 행 삭제(쌍이 행도 pending도 아님), primary 행을 더하고 pending을 남김,
+    # 없는 절을 pending이나 표에 둠(합집합 비교), pending 중복, 보조 행만으로 쌍을 닫음.
     expected = clauses()
     assert len(set(pending)) == len(pending), "duplicate pending pair"
+    assert named(table) <= expected, sorted(named(table) - expected)
     assert not covered(table) & set(pending), sorted(covered(table) & set(pending))
     assert covered(table) | set(pending) == expected, sorted(expected ^ (covered(table) | set(pending)))
 
@@ -154,12 +167,12 @@ def test_every_gate_clause_is_a_row_or_pending():
     assert_clauses_accounted((ROOT / TABLE).read_text())
 
 
-def assert_self_rows(texts, target="pytest"):
+def assert_self_rows(texts, target="pytest", files=("shell.yml",)):
     names = ("test_gate_rows_exist_and_run_in_ci", "test_every_gate_clause_is_a_row_or_pending")
     table = "id\tproperty\tplatform\ttest\ttarget\tstage\n" + "".join(
         f"SELF-{index}\tGate table check\tLinux\ttests/shell/test_gate_acceptance.py::{name}\t{target}\tM3d\n"
         for index, name in enumerate(names))
-    assert_acceptance_table(table, {"shell.yml": texts["shell.yml"]}, required_ids=frozenset({"SELF-0", "SELF-1"}))
+    assert_acceptance_table(table, {name: texts[name] for name in files}, required_ids=frozenset({"SELF-0", "SELF-1"}))
 
 
 # 이것을 실패시키는 것: shell.yml에서 이 표 검사의 실행이나 PASSED 단언을 빼는 것.
@@ -167,11 +180,11 @@ def test_gate_table_checks_are_asserted_in_ci():
     assert_self_rows(workflows())
 
 
-# 이것을 실패시키는 것: 행 삭제·gate 오타·절 번호 아닌 clause·gate.clause와 다른 id·CI 단언 주석 처리를 받는 것.
+# 이것을 실패시키는 것: 행 삭제(primary·보조)·gate 오타·절 번호 아닌 clause·gate.clause와 다른 id·CI 단언 주석 처리를 받는 것.
 # 오타 행은 원래 행 옆에 더해, 다른 검사(필수 id)가 대신 잡지 않게 한다.
 @pytest.mark.parametrize("damage,reason", [
     pytest.param(damage, reason, id=damage) for damage, reason in (
-        ("removed-row", "GATE-"), ("gate-typo", "unknown gate"), ("clause-zero", "clause"),
+        ("removed-row", "GATE-"), ("removed-supplementary", "-m3a"), ("gate-typo", "unknown gate"), ("clause-zero", "clause"),
         ("id-mismatch", "'id'"), ("ci-grep", "no asserted CI Rust pass"))])
 def test_gate_table_rejects_mutations(damage, reason):
     table = (ROOT / TABLE).read_text()
@@ -179,39 +192,64 @@ def test_gate_table_rejects_mutations(damage, reason):
     first = rows(table)[0]
     line = next(line for line in table.splitlines(True) if line.startswith(first["id"] + "\t"))
     gate, clause = first["gate"], first["clause"]
+    tag = first["id"][len(f"{gate}.{clause}"):]
+    pending = M3D_PENDING
     if damage == "removed-row":
+        # The pair is no longer pending, so its primary row is required.
+        pending = tuple(p for p in pending if p != f"{gate}.{clause}")
+    elif damage == "removed-supplementary":
         table = table.replace(line, "")
     elif damage == "gate-typo":
-        table += line.replace(f"{gate}.{clause}\t{gate}\t", f"{gate}S.{clause}\t{gate}S\t", 1)
+        table += line.replace(f"{gate}.{clause}{tag}\t{gate}\t", f"{gate}S.{clause}{tag}\t{gate}S\t", 1)
     elif damage == "clause-zero":
-        table += line.replace(f"{gate}.{clause}\t{gate}\t{clause}\t", f"{gate}.0\t{gate}\t0\t", 1)
+        table += line.replace(f"{gate}.{clause}{tag}\t{gate}\t{clause}\t", f"{gate}.0{tag}\t{gate}\t0\t", 1)
     elif damage == "id-mismatch":
-        table += line.replace(f"{gate}.{clause}\t", f"{gate}.9\t", 1)
+        table += line.replace(f"{gate}.{clause}{tag}\t", f"{gate}.9{tag}\t", 1)
     else:
         label = "test " + first["test"].split("::", 1)[1] + " ... ok"
         assert label in texts["ci.yml"]
         texts["ci.yml"] = texts["ci.yml"].replace("grep -F '" + label, "# grep -F '" + label)
-    assert table != (ROOT / TABLE).read_text() or damage == "ci-grep"
+    assert table != (ROOT / TABLE).read_text() or damage in ("ci-grep", "removed-row")
     with pytest.raises(AssertionError, match=reason):
-        assert_gate_table(table, texts)
+        assert_gate_table(table, texts, pending=pending)
 
 
 # 이것을 실패시키는 것: 행이 생긴 쌍을 pending에 남김, 없는 절·중복을 pending에 둠, 행 삭제.
-@pytest.mark.parametrize("damage", ["removed-row", "row-still-pending", "unknown-pending", "duplicate-pending"])
+HEADER = "id\tgate\tclause\tproperty\tplatform\ttest\ttarget\tstage\n"
+
+
+def row_line(row_id, gate, clause):
+    return f"{row_id}\t{gate}\t{clause}\tp\tUnix\tcrates/x/src/main.rs::t\tbin:x\tM3d\n"
+
+
+@pytest.mark.parametrize("damage", ["removed-row", "row-still-pending", "unknown-pending", "duplicate-pending",
+                                    "supplementary-closes", "unknown-supplementary"])
 def test_clause_accounting_rejects_mutations(damage):
-    table = (ROOT / TABLE).read_text()
-    pending = M3D_PENDING
-    first = rows(table)[0]
+    pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
+    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1)
+    assert_clauses_accounted(table, pending)
     if damage == "removed-row":
-        table = "".join(line for line in table.splitlines(True) if not line.startswith(first["id"] + "\t"))
+        table = HEADER
     elif damage == "row-still-pending":
-        pending = pending + (first["id"],)
+        pending = pending + ("GATE-ZOMBIES.1",)
     elif damage == "unknown-pending":
         pending = pending + ("GATE-ZOMBIES.2",)
-    else:
+    elif damage == "duplicate-pending":
         pending = pending + pending[:1]
+    elif damage == "supplementary-closes":
+        table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1)
+    else:
+        table += row_line("GATE-ZOMBIES.2-m3a", "GATE-ZOMBIES", 2)
     with pytest.raises(AssertionError):
         assert_clauses_accounted(table, pending)
+
+
+# 이것을 실패시키는 것: 보조 행이 있는 pending 쌍을 거부하는 것(부분 증거를 가리키되 쌍은 열어 둠).
+def test_supplementary_row_keeps_its_pair_pending():
+    table = (ROOT / TABLE).read_text()
+    supplementary = [row for row in rows(table) if row["id"] != f'{row["gate"]}.{row["clause"]}']
+    assert supplementary and all(f'{row["gate"]}.{row["clause"]}' in M3D_PENDING for row in supplementary)
+    assert_clauses_accounted(table)
 
 
 # A lib row has no real counterpart yet: a synthetic row and CI step check the
@@ -276,15 +314,20 @@ def test_lib_row_rejects_mutations(damage):
 
 SELF_GREP = "          grep -F 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' \"$RUNNER_TEMP/gate-acceptance.txt\"\n"
 SELF_STEP = "      - name: Gate acceptance rows map every clause to a CI-asserted test\n"
+JOB_HEADER = "    name: Prompt filter calls (x86_64 ${{ matrix.libc }} ${{ matrix.profile }})\n    needs: detect\n"
+JOB_IF = "    if: needs.detect.outputs.rust == 'true'\n"
+MATRIX = "        libc: [gnu, musl]\n        profile: [debug, release]\n"
 
 
 # 이것을 실패시키는 것: shell.yml 증거 step의 단언 삭제·`set +e`·continue-on-error·matrix if,
-# 다른 workflow의 interpreter, 다른 로그, .py 파일의 Rust target을 받는 것.
-@pytest.mark.parametrize("damage", ["delete", "set+e", "continue", "matrix-if", "interpreter", "other-log", "target"])
+# 다른 workflow의 interpreter, 다른 로그, .py 파일의 Rust target, job 단위 우회·matrix exclude,
+# 모르는 workflow를 받는 것.
+@pytest.mark.parametrize("damage", ["delete", "set+e", "continue", "matrix-if", "interpreter", "other-log", "target",
+                                    "job-continue", "job-if", "matrix-exclude", "unknown-workflow"])
 def test_gate_ci_step_rejects_mutations(damage):
     texts = workflows()
     shell = texts["shell.yml"]
-    assert shell.count(SELF_GREP) == 1 and shell.count(SELF_STEP) == 1
+    assert all(shell.count(text) == 1 for text in (SELF_GREP, SELF_STEP, JOB_HEADER + JOB_IF, MATRIX))
     if damage == "delete":
         shell = shell.replace(SELF_GREP, "")
     elif damage == "set+e":
@@ -298,6 +341,18 @@ def test_gate_ci_step_rejects_mutations(damage):
                               '"$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_gate_acceptance.py')
     elif damage == "other-log":
         shell = shell.replace(SELF_GREP, SELF_GREP.replace("gate-acceptance.txt", "pytest.out"))
+    elif damage == "job-continue":
+        shell = shell.replace(JOB_HEADER, JOB_HEADER + "    continue-on-error: true\n")
+    elif damage == "job-if":
+        shell = shell.replace(JOB_HEADER + JOB_IF, JOB_HEADER + "    if: always()\n")
+    elif damage == "matrix-exclude":
+        shell = shell.replace(MATRIX, MATRIX + "        exclude: [{profile: release}]\n")
+    if damage == "unknown-workflow":
+        # A workflow the checker does not read must be refused, not ignored.
+        texts["bench.yml"] = (ROOT / ".github/workflows/bench.yml").read_text()
+        with pytest.raises(AssertionError, match="bench.yml"):
+            assert_self_rows(texts, files=("shell.yml", "bench.yml"))
+        return
     if damage == "target":
         # A pytest row must say pytest; a Rust target on a .py file is refused.
         with pytest.raises(AssertionError, match="target and file"):

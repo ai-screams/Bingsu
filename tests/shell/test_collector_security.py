@@ -457,9 +457,12 @@ SHELL_EVIDENCE_JOB = "filter-calls"
 
 
 def shell_test_evidence(text):
+    # 이것을 실패시키는 것: job 단위 continue-on-error·if 우회, matrix 칸을 빼는 exclude·축 변경.
     meta, steps = workflow_job(text, SHELL_EVIDENCE_JOB)
     assert "continue-on-error" not in meta
     assert meta["if"][0] == "needs.detect.outputs.rust == 'true'"
+    assert [line.strip() for line in meta["strategy"][1] if line.strip() and not line.lstrip().startswith("#")] == [
+        "fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"]
     for step in steps:
         step["_job"] = ("shell.yml", SHELL_EVIDENCE_JOB)
     return steps
