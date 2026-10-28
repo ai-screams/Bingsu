@@ -157,6 +157,8 @@ fn prefetch_collections(
 
 impl Prepared {
     fn before(&mut self, effect: &Effect, clock: fn(Option<Deadline>) -> ClockPins) -> Observation {
+        #[cfg(test)]
+        tests::clock_reads::step(effect.operation());
         check_deadline(self.deadline);
         match effect.operation() {
             // SAFETY: getuid has no preconditions and cannot fail.
@@ -207,6 +209,8 @@ impl Prepared {
         }
     }
     fn after(&mut self, effect: &Effect) -> Observation {
+        #[cfg(test)]
+        tests::clock_reads::step(effect.operation());
         check_deadline(self.deadline);
         match effect.operation() {
             Operation::OpenCollection(copy) => {
@@ -381,7 +385,10 @@ impl ClockPins {
             clock.now = now;
             return Ok(clock);
         }
-        clock.now = crate::prompt_io::monotonic_ns()?;
+        clock.now = crate::prompt_io::monotonic_ns(
+            #[cfg(test)]
+            crate::prompt_io::ClockUse::Approval,
+        )?;
         Ok(clock)
     }
     #[cfg(target_os = "macos")]
@@ -648,6 +655,8 @@ fn acl(fd: i32, deadline: Option<Deadline>) -> AclFacts {
         let Ok(path) = CString::new(format!("/proc/self/fd/{fd}")) else {
             return AclFacts::Unknown;
         };
+        #[cfg(test)]
+        tests::clock_reads::acl_alias();
         check_deadline(deadline);
         // SAFETY: terminated names; length-only query on the held fd alias.
         n = unsafe {
@@ -858,7 +867,7 @@ pub(crate) mod tests {
         }
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let (f, b, _) = collection_fixture(b"/cwd");
-        let entry = crate::prompt_io::monotonic_ns().unwrap();
+        let entry = crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline).unwrap();
         publish_fixture(&f, &b, entry - 1, b"PREVIOUS");
         publish_fixture(&f, &b, entry + 1, b"CURRENT");
         for (start, want, refused) in [
@@ -1254,11 +1263,21 @@ pub(crate) mod tests {
                             if matches!(effect.operation(), Operation::OpenCollection(_))
                                 && start.is_none()
                             {
-                                start = Some(crate::prompt_io::monotonic_ns().unwrap());
+                                start = Some(
+                                    crate::prompt_io::monotonic_ns(
+                                        crate::prompt_io::ClockUse::Deadline,
+                                    )
+                                    .unwrap(),
+                                );
                             }
                             if matches!(effect.operation(), Operation::Clock) {
-                                elapsed =
-                                    start.map(|at| crate::prompt_io::monotonic_ns().unwrap() - at);
+                                elapsed = start.map(|at| {
+                                    crate::prompt_io::monotonic_ns(
+                                        crate::prompt_io::ClockUse::Deadline,
+                                    )
+                                    .unwrap()
+                                        - at
+                                });
                             }
                             let observation = p.after(&effect);
                             p.step = staged::next(&mut p.plan, Some(observation));
@@ -1691,10 +1710,10 @@ pub(crate) mod tests {
     // 이것을 실패시키는 것: 저장 시각 반환, 현재 관찰 생략, identity 실패를 성공으로 바꾸는 것.
     #[test]
     fn fresh_clock_is_monotonic_and_missing_identity_fails() {
-        let before = crate::prompt_io::monotonic_ns().unwrap();
+        let before = crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline).unwrap();
         let mut pins = fixed_clock(None);
         let observed = pins.observe().unwrap();
-        let after = crate::prompt_io::monotonic_ns().unwrap();
+        let after = crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline).unwrap();
         assert!(before > 0 && before <= observed.now && observed.now <= after);
         pins.identity = None;
         assert!(pins.observe().is_err());
@@ -1921,7 +1940,9 @@ pub(crate) mod tests {
     std::thread_local! { static BOUNDARY_START: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
     fn boundary_stamp() {
         if BOUNDARY_START.get().is_none() {
-            BOUNDARY_START.set(Some(crate::prompt_io::monotonic_ns().unwrap()));
+            BOUNDARY_START.set(Some(
+                crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline).unwrap(),
+            ));
         }
     }
     fn boundary_native_clock(deadline: Option<Deadline>) -> ClockPins {
@@ -1958,7 +1979,7 @@ pub(crate) mod tests {
             Snapshot,
             Marker,
         }
-        let now = || crate::prompt_io::monotonic_ns().unwrap();
+        let now = || crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline).unwrap();
         let pause = |ns: u64| {
             if ns > 0 {
                 std::thread::sleep(std::time::Duration::from_nanos(ns));
@@ -2097,5 +2118,260 @@ pub(crate) mod tests {
         unsafe { libc::write(1, out.as_ptr().cast(), out.len()) };
         // SAFETY: child exit avoids libtest output under the filter.
         unsafe { libc::_exit(0) }
+    }
+
+    // ---- C3: executed front clock reads per use (GATE-CLOCK-READS.1) ----
+    // Kept apart from the shared fixtures above. The two hooks in `before`/`after`
+    // and the one in the Linux ACL alias fallback record effect boundaries only.
+    pub(crate) mod clock_reads {
+        use super::*;
+
+        /// Effect-boundary facts of the measured window, in executor terms.
+        #[derive(Clone, Copy, Default)]
+        struct Steps {
+            steps: u32,
+            reads: u32,
+            clocks: u32,
+            acl_aliases: u32,
+        }
+        std::thread_local! { static STEPS: std::cell::Cell<Steps> = const { std::cell::Cell::new(Steps { steps: 0, reads: 0, clocks: 0, acl_aliases: 0 }) }; }
+        pub(in super::super) fn step(operation: &Operation) {
+            let mut s = STEPS.get();
+            s.steps += 1;
+            s.reads += u32::from(matches!(operation, Operation::Read { .. }));
+            s.clocks += u32::from(matches!(operation, Operation::Clock));
+            STEPS.set(s);
+        }
+        #[cfg(target_os = "linux")]
+        pub(in super::super) fn acl_alias() {
+            let mut s = STEPS.get();
+            s.acl_aliases += 1;
+            STEPS.set(s);
+        }
+
+        const CASES: [&str; 4] = ["normal", "last-good", "marker-invalid", "runtime-root"];
+        const TAG: &str = "C3-CLOCK-READS";
+
+        /// The child: the production pre-filter reader and executor in `run_prompt`'s
+        /// order (entry, arm, prepare, filter, respond). The counters are copied right
+        /// after the record is ready and written to the parent's capture pipe (fd 1,
+        /// the only fd the filter lets us write); the refresh bootstrap and the write
+        /// loop are outside the measured window.
+        fn child(case: &str) -> ! {
+            // The fixture is published at the real clock identity, so ClockPins::prepare
+            // (the production path) accepts it. Setup reads are excluded below.
+            let clock = crate::prompt_io::observe_clock().expect("native clock identity");
+            let f = Fx::at(
+                std::env::temp_dir().join(format!("bingsu-c3-clock-{}", std::process::id())),
+                clock,
+                false,
+            );
+            let mut args = f.args.clone();
+            match case {
+                "last-good" => {
+                    let mut bad = f.wire.clone();
+                    bad[0] ^= 1;
+                    fs::write(f.store.join("snapshot"), bad).unwrap();
+                }
+                "marker-invalid" => {
+                    let mut m = Marker::decode(&fs::read(f.store.join("marker")).unwrap()).unwrap();
+                    m.invalid = true;
+                    fs::write(f.store.join("marker"), m.encode()).unwrap();
+                }
+                "runtime-root" => {
+                    let m = fs::metadata(&f.base).unwrap();
+                    *args.last_mut().unwrap() = format!(
+                        "--runtime-root={}:{}:{}",
+                        m.dev(),
+                        m.ino() + 1,
+                        f.base.display()
+                    )
+                    .into_bytes();
+                }
+                _ => {}
+            }
+            let raw: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            take_events();
+            STEPS.set(Steps::default());
+            let before = crate::prompt_io::clock_reads();
+            let entry = crate::prompt_io::entry_deadline().unwrap();
+            // A long budget keeps a slow debug child from expiring; the number of
+            // checks does not depend on the budget's length.
+            let deadline = Deadline::from_entry(entry.start(), 60_000_000_000).unwrap();
+            assert!(crate::prompt_io::arm_deadline(deadline));
+            let staged = prepare(&raw, deadline);
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                crate::sandbox::enter(),
+                bingsu_core::front::Sandbox::Installed
+            );
+            let record = staged();
+            let after = crate::prompt_io::clock_reads();
+            let reads: Vec<u32> = (0..4).map(|i| after[i] - before[i]).collect();
+            let events = take_events();
+            let opens = events
+                .iter()
+                .filter(|e| matches!(e, Event::Open(..)))
+                .count();
+            let helds = events
+                .iter()
+                .filter(|e| matches!(e, Event::Facts(..)))
+                .count();
+            let s = STEPS.get();
+            let line = format!(
+                "{TAG} {} {} {} {} steps={} reads={} clocks={} opens={opens} helds={helds} aliases={} base={}\n",
+                reads[0],
+                reads[1],
+                reads[2],
+                reads[3],
+                s.steps,
+                s.reads,
+                s.clocks,
+                s.acl_aliases,
+                f.base.display()
+            );
+            for bytes in [line.as_bytes(), &record] {
+                // SAFETY: initialized slices; fd 1 is the parent's capture pipe.
+                let n = unsafe { libc::write(1, bytes.as_ptr().cast(), bytes.len()) };
+                assert_eq!(usize::try_from(n).ok(), Some(bytes.len()));
+            }
+            // SAFETY: child exit; the parent removes the fixture (the filter forbids unlink).
+            unsafe { libc::_exit(0) }
+        }
+        #[test]
+        #[ignore = "child: counts one front run"]
+        fn child_normal() {
+            child(CASES[0])
+        }
+        #[test]
+        #[ignore = "child: counts one front run"]
+        fn child_last_good() {
+            child(CASES[1])
+        }
+        #[test]
+        #[ignore = "child: counts one front run"]
+        fn child_marker_invalid() {
+            child(CASES[2])
+        }
+        #[test]
+        #[ignore = "child: counts one front run"]
+        fn child_runtime_root() {
+            child(CASES[3])
+        }
+
+        /// Deadline reads: one per `deadline_now` the front executes (through
+        /// `check_deadline` or `arm_deadline`). Every term is an effect-boundary count,
+        /// never a re-derived product branch: arm 1; preparation entry 1; a loop head
+        /// per executor step plus one closing head on each side of the filter; one at
+        /// each step; one more per held-fd read and per clock step (`observe`); one per
+        /// path open; three per held descriptor (fstat, fstatfs, ACL) and one per ACL
+        /// alias fallback; and per clock preparation a fixed term: macOS 1 + the
+        /// identity's 3; Linux 1 + the time-namespace 1 + its 2 link reads + the procfs
+        /// self name 1 + the boot-id read loop 2 (37 bytes, then end of file).
+        fn deadline_formula(f: &Fields, prepared: u32) -> u32 {
+            let per_prepare = if cfg!(target_os = "linux") { 7 } else { 4 };
+            1 + 1
+                + 2
+                + 2 * f.steps
+                + f.reads
+                + f.clocks
+                + f.opens
+                + 3 * f.helds
+                + f.aliases
+                + per_prepare * prepared
+        }
+        #[derive(Debug, Default)]
+        struct Fields {
+            reads_by_use: [u32; 4],
+            steps: u32,
+            reads: u32,
+            clocks: u32,
+            opens: u32,
+            helds: u32,
+            aliases: u32,
+        }
+        fn parse(line: &str) -> (Fields, PathBuf) {
+            let mut words = line.split(' ').skip(1);
+            let mut f = Fields::default();
+            for slot in f.reads_by_use.iter_mut() {
+                *slot = words.next().unwrap().parse().unwrap();
+            }
+            let mut base = PathBuf::new();
+            for word in words {
+                let (key, value) = word.split_once('=').unwrap();
+                match key {
+                    "base" => base = PathBuf::from(value),
+                    _ => {
+                        let n = value.parse().unwrap();
+                        match key {
+                            "steps" => f.steps = n,
+                            "reads" => f.reads = n,
+                            "clocks" => f.clocks = n,
+                            "opens" => f.opens = n,
+                            "helds" => f.helds = n,
+                            "aliases" => f.aliases = n,
+                            _ => panic!("{key}"),
+                        }
+                    }
+                }
+            }
+            (f, base)
+        }
+
+        // 프롬프트 하나의 시계 읽기를 용도별로 센다(GATE-CLOCK-READS.1). Entry는 1, Approval은 그 경로의
+        // StartClock·FinalClock 수(고정 값), Identity는 macOS 1·Linux 0(procfs 정체는 시계를 읽지 않음),
+        // Deadline은 효과 경계 수와 고정 항의 식과 같다.
+        // 이것을 실패시키는 것: 기존 반복문(respond 또는 준비 반복문)에 check_deadline 하나 추가(Deadline),
+        // ClockPins::prepare에 확인 하나 추가(Deadline 고정 항), FinalClock 단계 생략(Approval),
+        // ClockPins::observe가 시계를 두 번 읽는 것(Approval), observe가 Deadline 용도를 넘기는 것(섞어 세기).
+        #[test]
+        fn test_front_clock_reads_per_use_are_fixed() {
+            let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+            let identity = u32::from(cfg!(target_os = "macos"));
+            for (case, name, approval, status) in [
+                (CASES[0], "child_normal", 2, "ok:none"),
+                (CASES[1], "child_last_good", 2, "error:config-last-good"),
+                (
+                    CASES[2],
+                    "child_marker_invalid",
+                    2,
+                    "degraded:trust-invalid",
+                ),
+                (CASES[3], "child_runtime_root", 1, "degraded:runtime-root"),
+            ] {
+                let out = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        &format!("prompt_read::tests::clock_reads::{name}"),
+                        "--test-threads=1",
+                        "--nocapture",
+                        "-q",
+                    ])
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert_eq!(out.status.code(), Some(0), "{case}: {out:?}");
+                let at = stdout
+                    .find(TAG)
+                    .unwrap_or_else(|| panic!("{case}: {stdout}"));
+                let (line, record) = stdout[at..].split_once('\n').unwrap();
+                let (f, base) = parse(line);
+                let _ = fs::remove_dir_all(&base);
+                eprintln!("{case}: {f:?}");
+                let [entry, deadline, approve, ident] = f.reads_by_use;
+                assert_eq!(entry, 1, "{case}");
+                assert_eq!(approve, approval, "{case}");
+                assert_eq!(
+                    f.clocks, approval,
+                    "{case}: one approval read per clock step"
+                );
+                assert_eq!(ident, identity, "{case}");
+                // One clock preparation per prompt, at the start clock.
+                assert_eq!(deadline, deadline_formula(&f, 1), "{case}: {f:?}");
+                // Counts first: a dropped clock step must fail as a count, not only as a status.
+                assert!(record.contains(status), "{case}: {record:?}");
+            }
+        }
     }
 }

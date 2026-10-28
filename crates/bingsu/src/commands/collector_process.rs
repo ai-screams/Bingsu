@@ -267,7 +267,12 @@ fn cleanup_unattached(pid: libc::pid_t, expires_ns: u64) {
 }
 
 pub(crate) fn now_ns() -> io::Result<u64> {
-    crate::prompt_io::monotonic_ns().map_err(|_| io::Error::other("collection clock"))
+    // Helper-side supervision clock; test builds count it as a deadline read.
+    crate::prompt_io::monotonic_ns(
+        #[cfg(test)]
+        crate::prompt_io::ClockUse::Deadline,
+    )
+    .map_err(|_| io::Error::other("collection clock"))
 }
 
 pub(crate) fn pipe() -> io::Result<(File, File)> {

@@ -113,6 +113,9 @@ python3 scripts/check_core_no_std.py
 python3 scripts/check_cli_prompt_forbid.py --checker "$checker"
 python3 -B scripts/test_check_cli_prompt_forbid.py
 python3 -B scripts/test_prompt_bootstrap.py
+# Call sites of the counted clock read; the executed-read counter is the gate.
+python3 scripts/check_prompt_clock_sites.py
+python3 -B scripts/test_check_prompt_clock_sites.py
 python3 -B scripts/test_gate_bypass.py
 python3 -B scripts/test_check_core_cfg.py
 python3 -B scripts/test_check_core_purity_env.py

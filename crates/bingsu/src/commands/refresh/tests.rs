@@ -2006,7 +2006,7 @@ fn n7_measure_publish() {
     impl ClockSource for Advancing {
         fn observe(&mut self) -> Result<Clock, ClockError> {
             Ok(Clock {
-                now: crate::prompt_io::monotonic_ns()?,
+                now: crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline)?,
                 ..clock()
             })
         }

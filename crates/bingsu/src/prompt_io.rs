@@ -21,7 +21,14 @@ extern "C" fn alarm_handler(_: i32) {
 
 /// Sample at dispatch entry, before collecting/parsing argv or doing any I/O.
 pub(crate) fn entry_deadline() -> Option<Deadline> {
-    Deadline::from_entry(monotonic_ns().ok()?, PROMPT_BUDGET_NS)
+    Deadline::from_entry(
+        monotonic_ns(
+            #[cfg(test)]
+            ClockUse::Entry,
+        )
+        .ok()?,
+        PROMPT_BUDGET_NS,
+    )
 }
 
 /// Post-filter observation: only the already-allowed monotonic clock call.
@@ -29,7 +36,11 @@ pub(crate) fn deadline_now(deadline: Deadline) -> Option<u64> {
     if EXPIRED.load(Ordering::Relaxed) {
         return None;
     }
-    let now = monotonic_ns().ok()?;
+    let now = monotonic_ns(
+        #[cfg(test)]
+        ClockUse::Deadline,
+    )
+    .ok()?;
     deadline.remaining(now)?;
     Some(now)
 }
@@ -107,7 +118,10 @@ pub(crate) fn observe_clock_until(deadline: Option<Deadline>) -> Result<Clock, C
     check_deadline(deadline);
     let domain = clock_domain()?;
     check_deadline(deadline);
-    let now = monotonic_ns()?;
+    let now = monotonic_ns(
+        #[cfg(test)]
+        ClockUse::Identity,
+    )?;
     Ok(Clock {
         boot,
         domain,
@@ -134,7 +148,32 @@ pub(crate) fn entry_clock(deadline: Deadline, observed: Clock) -> Option<Clock> 
     })
 }
 
-pub(crate) fn monotonic_ns() -> Result<u64, ClockError> {
+/// Test builds count every executed read by the use its caller names (C3);
+/// the argument and the counter do not exist in other builds.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum ClockUse {
+    /// The entry sample of `entry_deadline`.
+    Entry,
+    /// An output-deadline check (`deadline_now`), wherever it is called from.
+    Deadline,
+    /// A pre-approval sample of the front (`ClockPins::observe`).
+    Approval,
+    /// The time sample of the publisher's clock identity (`observe_clock_until`).
+    Identity,
+}
+#[cfg(test)]
+static CLOCK_READS: [std::sync::atomic::AtomicU32; 4] =
+    [const { std::sync::atomic::AtomicU32::new(0) }; 4];
+/// Executed reads of this process, indexed in `ClockUse` order.
+#[cfg(test)]
+pub(crate) fn clock_reads() -> [u32; 4] {
+    CLOCK_READS.each_ref().map(|n| n.load(Ordering::Relaxed))
+}
+
+pub(crate) fn monotonic_ns(#[cfg(test)] reader: ClockUse) -> Result<u64, ClockError> {
+    #[cfg(test)]
+    CLOCK_READS[reader as usize].fetch_add(1, Ordering::Relaxed);
     #[cfg(target_os = "linux")]
     let kind = libc::CLOCK_BOOTTIME;
     #[cfg(target_os = "macos")]
@@ -479,9 +518,9 @@ mod tests {
     // 이것을 실패시키는 것: 제품 예산 상수 변경 또는 진입 시각 외 기준으로 마감 계산.
     #[test]
     fn entry_uses_the_provisional_whole_prompt_budget() {
-        let before = super::monotonic_ns().unwrap();
+        let before = super::monotonic_ns(ClockUse::Deadline).unwrap();
         let deadline = super::entry_deadline().unwrap();
-        let after = super::monotonic_ns().unwrap();
+        let after = super::monotonic_ns(ClockUse::Deadline).unwrap();
         assert!((before + 50_000_000..=after + 50_000_000).contains(&deadline.end()));
     }
 
@@ -781,8 +820,8 @@ mod tests {
     // 이것을 실패시키는 것: 실제 OS 시각을 고정된 0으로 돌리거나 다른 시계로 대체하는 것.
     #[test]
     fn native_clock_observation() {
-        let a = monotonic_ns().unwrap();
-        let b = monotonic_ns().unwrap();
+        let a = monotonic_ns(ClockUse::Deadline).unwrap();
+        let b = monotonic_ns(ClockUse::Deadline).unwrap();
         assert!(a > 0 && b >= a);
         match observe_clock() {
             Ok(c) => {
