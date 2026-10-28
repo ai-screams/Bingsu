@@ -499,9 +499,11 @@ def shell_test_evidence(text):
         strategy = meta.get("strategy", ("", []))[1]
         assert [line.strip() for line in strategy if line.strip() and not line.lstrip().startswith("#")] == (matrix or []), job
         platforms = job_platforms(job, meta)
+        profiles = job_profiles(strategy)
         for step in steps:
             step["_job"] = ("shell.yml", job)
             step["_platforms"] = platforms
+            step["_profiles"] = profiles
             try:
                 run_commands(step)
             except ValueError:
@@ -510,6 +512,32 @@ def shell_test_evidence(text):
                 continue
             evidence.append(step)
     return evidence
+
+
+def job_profiles(strategy):
+    """Build profiles of a job's pinned `profile` matrix axis, or None."""
+    for line in strategy:
+        if listed := re.fullmatch(r"\s*profile: \[(.*)\]\s*", line):
+            return {value.strip() for value in listed[1].split(",")}
+    return None
+
+
+# The one step condition that narrows a job's profile axis.
+PROFILE_IF = re.compile(r"matrix\.profile == '(debug|release)'")
+
+
+def pair_profiles(step, run_step):
+    """Build profiles this (assertion, run) pair runs under: the job's profile
+    axis narrowed by an exact `matrix.profile == '<p>'` condition. A job
+    without the axis has no known profile (None)."""
+    # 이것을 실패시키는 것: profile 조건을 무시해 debug 칸의 실행을 release 증거로 세는 것.
+    profiles = run_step.get("_profiles")
+    if profiles is None:
+        return None
+    for entry in (step, run_step):
+        if match := PROFILE_IF.fullmatch(entry.get("if") or ""):
+            profiles = profiles & {match[1]}
+    return profiles
 
 
 def acceptance_evidence(workflows):
@@ -531,13 +559,18 @@ def row_platforms(row):
 def acceptance_pair_allowed(row, step, run_step, run):
     """Platforms this (assertion, run) pair proves for the row, or None.
 
-    Only runner.os is checked here; telling release from debug matrix cells is A2's work.
+    A `matrix.profile == '<p>'` condition is accepted only in a job with that
+    matrix axis; pair_profiles reports which build profiles the pair covers.
     """
     # 이것을 실패시키는 것: 증거 step에 continue-on-error·플랫폼 밖 if·`|| true` 같은 상태 대체를 붙이는 것,
     # pipefail 없이 tee 뒤로 실행 실패를 숨기는 것.
     required_if = ("runner.os == 'Linux'" if row["platform"].startswith("Linux") else
                    "runner.os == 'macOS'" if row["platform"] == "macOS" else None)
-    if any(entry.get("if") not in (None, required_if) for entry in (step, run_step)):
+    def condition_allowed(entry):
+        value = entry.get("if")
+        return value in (None, required_if) or (
+            PROFILE_IF.fullmatch(value or "") is not None and run_step.get("_profiles") is not None)
+    if not all(condition_allowed(entry) for entry in (step, run_step)):
         return None
     for entry in (step, run_step):
         assert "continue-on-error" not in entry, (row["id"], "skippable evidence step")
@@ -699,13 +732,16 @@ def cargo_test_args_allowed(run, target):
 
 
 def assert_acceptance_table(table, workflows, *, required_ids, required_gates=frozenset(),
-                            read=lambda name: (ROOT / name).read_text(), collected=None):
+                            read=lambda name: (ROOT / name).read_text(), collected=None,
+                            release_gates=frozenset()):
     """Every row names one real test that a CI job runs and asserts as passed.
 
     Rows without a `target` column (the collector table) keep the historical
     `--test` derivation and module table below. Rows with one name it: `lib`,
     `bin:<name>`, `test:<name>` or `pytest`; their Rust `test` is the full
     `file::module::path::name` and the CI assertion is that exact libtest line.
+    Rows of a `release_gates` gate count only evidence pairs that run in
+    release cells alone (pair_profiles == {"release"}).
     """
     import ast
     import csv
@@ -758,9 +794,13 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                     platforms = acceptance_pair_allowed(row, step, run_step, run)
                     if platforms is None:
                         continue
+                    # 이것을 실패시키는 것: release 게이트 행을 debug 칸(또는 profile 축이 없는 job)의 증거로 받는 것.
+                    if row.get("gate") in release_gates and pair_profiles(step, run_step) != {"release"}:
+                        continue
                     if any(token in {path, row["test"]} or path.startswith(token.rstrip("/") + "/") for token in selected):
                         evidence.append((step, run_step, platforms))
-            assert_platform_evidence(row, evidence, "no asserted CI pytest")
+            what = "no asserted CI pytest" + (" in release cells" if row.get("gate") in release_gates else "")
+            assert_platform_evidence(row, evidence, what)
         else:
             groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
             groups = [group for group in groups if group]
@@ -826,6 +866,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                     platforms = acceptance_pair_allowed(row, step, run_step, run)
                     if platforms is None:
                         continue
+                    if row.get("gate") in release_gates and pair_profiles(step, run_step) != {"release"}:
+                        continue
                     if ignored:
                         if not ("sudo" == run[0] and "$bin" in run and "--exact" in run and
                                 module + base in run and "--ignored" in run):
@@ -838,7 +880,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                     elif run not in runnable:
                         continue
                     evidence.append((step, run_step, platforms))
-            assert_platform_evidence(row, evidence, "no asserted CI Rust pass")
+            assert_platform_evidence(row, evidence, "no asserted CI Rust pass"
+                                     + (" in release cells" if row.get("gate") in release_gates else ""))
 
 
 # 이것을 실패시키는 것: 호출에 넘기는 SEC-* 필수 집합에서 하나를 빼, 그 행 없이도 collector 표가 통과하는 것.

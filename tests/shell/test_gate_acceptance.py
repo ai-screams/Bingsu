@@ -110,13 +110,17 @@ M3D_DEFERRED = {
 }
 DEFERRED_MILESTONES = ("M4", "M6")
 
+# Gates whose rows count a live capture of a release build: their evidence must
+# come from steps that run only in release matrix cells (followups 106).
+M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER"})
+
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
 # the final Task asserts this is empty. A supplementary row (id GATE-ID.N-<tag>)
 # points at an existing test that covers part of a clause and does not close
 # its pair.
 M3D_PENDING = (
-    "GATE-FS-HELPER.1", "GATE-FS-HELPER.2",
+    "GATE-FS-HELPER.2",
     "GATE-FS-FRONT.1",
     "GATE-CHILDREN.1", "GATE-CHILDREN.2", "GATE-CHILDREN.3",
     "GATE-FDS.1", "GATE-FDS.2",
@@ -195,7 +199,8 @@ def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
     assert_deferred_rows(table)
     required = clauses() - set(pending) - set(M3D_DEFERRED)
     assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
-                            required_gates=frozenset(M3D_GATE_IDS), collected=collected)
+                            required_gates=frozenset(M3D_GATE_IDS), collected=collected,
+                            release_gates=M3D_RELEASE_GATES)
 
 
 def assert_clauses_accounted(table, pending=M3D_PENDING):
@@ -324,15 +329,24 @@ def deferred_lines():
     return "".join(line for line, row in zip(table.splitlines(True)[1:], rows(table)) if is_deferred(row))
 
 
+def standing_lines():
+    """The real table's deferred rows and the primary rows of closed pairs:
+    the synthetic accounting tables below vary only GATE-ZOMBIES.1."""
+    table = (ROOT / TABLE).read_text()
+    closed = covered(table)
+    return "".join(line for line, row in zip(table.splitlines(True)[1:], rows(table))
+                   if is_deferred(row) or row["id"] in closed)
+
+
 @pytest.mark.parametrize("damage", ["removed-row", "row-still-pending", "unknown-pending", "duplicate-pending",
                                     "supplementary-closes", "unknown-supplementary", "deferred-also-pending",
                                     "deferred-also-primary", "removed-deferred"])
 def test_clause_accounting_rejects_mutations(damage):
     pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
-    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1) + deferred_lines()
+    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1) + standing_lines()
     assert_clauses_accounted(table, pending)
     if damage == "removed-row":
-        table = HEADER + deferred_lines()
+        table = HEADER + standing_lines()
     elif damage == "deferred-also-pending":
         pending = pending + ("GATE-FDS.3",)
     elif damage == "deferred-also-primary":
@@ -396,7 +410,7 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
 @pytest.mark.parametrize("closed", [False, True], ids=["pending", "closed-by-primary"])
 def test_supplementary_row_keeps_its_pair_pending(closed):
     pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
-    table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1) + deferred_lines()
+    table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1) + standing_lines()
     if closed:
         table += row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1)
     else:
@@ -603,3 +617,40 @@ def test_job_platforms_read_lists_and_includes():
     assert job_platforms("synthetic", {"runs-on": ("${{ matrix.os }}", []), "strategy": (
         "", ["matrix:", "  include:", "    - os: ubuntu-24.04", "    - os: macos-latest"])}) == {"linux", "macos"}
     assert job_platforms("synthetic", {"runs-on": ("ubuntu-latest", [])}) == {"linux"}
+
+
+RELEASE_STEP = "      - name: Helper calls per publication stage equal the formula (release)\n"
+RELEASE_IF = "        if: matrix.profile == 'release'\n"
+
+
+# 이것을 실패시키는 것: release 게이트(GATE-FS-HELPER) 행을 debug 칸까지 도는 step, debug 칸만 도는 step,
+# 또는 profile 축이 없는 job의 profile 조건으로 받는 것.
+@pytest.mark.parametrize("damage", ["no-condition", "debug-only", "release-gate-unknown"])
+def test_release_gate_rows_need_release_only_cells(damage):
+    table = (ROOT / TABLE).read_text()
+    texts = workflows()
+    shell = texts["shell.yml"]
+    assert shell.count(RELEASE_STEP + RELEASE_IF) == 1
+    if damage == "no-condition":
+        shell = shell.replace(RELEASE_STEP + RELEASE_IF, RELEASE_STEP)
+    elif damage == "debug-only":
+        shell = shell.replace(RELEASE_STEP + RELEASE_IF, RELEASE_STEP + RELEASE_IF.replace("release", "debug"))
+    texts["shell.yml"] = shell
+    if damage == "release-gate-unknown":
+        # The same evidence without the release-gate set passes: the set is what refuses debug cells.
+        assert_acceptance_table(without_deferred(table), texts,
+                                required_ids=frozenset(covered(table)) | set(M3D_SUPPLEMENTARY),
+                                required_gates=frozenset(M3D_GATE_IDS))
+        return
+    with pytest.raises(AssertionError, match="release cells"):
+        assert_gate_table(table, texts)
+
+
+# 이것을 실패시키는 것: profile 축이 없는 job(shell-macos)의 profile 조건 step을 증거로 받는 것.
+def test_profile_condition_needs_a_profile_axis():
+    from test_collector_security import acceptance_pair_allowed
+    row = {"id": "GATE-FS-HELPER.1", "platform": "Linux"}
+    step = {"if": "matrix.profile == 'release'", "run": "echo ok", "_platforms": {"linux"}, "_profiles": None}
+    assert acceptance_pair_allowed(row, step, step, ["echo", "ok"]) is None
+    step["_profiles"] = {"debug", "release"}
+    assert acceptance_pair_allowed(row, step, step, ["echo", "ok"]) == {"linux"}

@@ -192,6 +192,19 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_gate_acceptance.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_every_gate_clause_is_a_row_or_pending' "$RUNNER_TEMP/gate-acceptance.txt"
+      # GATE-FS-HELPER.1 counts a release build: the debug cells would measure
+      # the debug profile's extra fd checks (the test also refuses a debug binary).
+      # 이것을 실패시키는 것: 이 단계를 debug 칸에서도 돌리거나 매개변수 하나의 PASSED 단언을 빼는 것.
+      - name: Helper calls per publication stage equal the formula (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' "$RUNNER_TEMP/helper-stage.txt"
       - name: Mounted procfs self with a different visible PID
         if: matrix.libc == 'gnu' && matrix.profile == 'debug'
         run: |
