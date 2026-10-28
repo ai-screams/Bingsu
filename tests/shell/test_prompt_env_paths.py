@@ -1397,6 +1397,68 @@ def warm_collection_previous(store, prompt, wait):
             return {"response_bytes": response_bytes, "previous_bytes": previous_bytes}
 
 
+def bash_prompt_script(script, pwd, seq, probe=b""):
+    import shlex
+    return (script + b"\n_bingsu_seq=" + str(seq).encode() + b"\ncd "
+            + os.fsencode(shlex.quote(str(pwd))) + b"\n" + probe + CALL)
+
+
+def pinned_prompt_argv(script, exe, pwd, seq, env, base):
+    """Ask A2's real hook for its expanded invocation without running product code.
+
+    Bash permits an unquoted pathname as a function name with `function`.
+    Shadow only this fixture's pinned executable; init and _bingsu_call stay
+    intact. The NUL-delimited result preserves empty and quoted arguments.
+    """
+    import shlex
+    exe = str(exe)
+    # Fixture install paths are plain words; never interpolate shell syntax.
+    assert re.fullmatch(r"[/a-zA-Z0-9_.-]+", exe), exe
+    output = base / "prompt-argv.bin"
+    output.unlink(missing_ok=True)
+    probe = (f"function {exe} {{ printf '%s\\0' {shlex.quote(exe)} \"$@\" > "
+             f"{shlex.quote(str(output))}; }}\n").encode()
+    path = base / "prompt-argv.bash"
+    path.write_bytes(bash_prompt_script(script, pwd, seq, probe))
+    result = subprocess.run(SHELL_CMD["bash"] + [str(path)], env=env,
+                            capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    wire = output.read_bytes()
+    assert wire.endswith(b"\0"), wire
+    argv = [os.fsdecode(word) for word in wire[:-1].split(b"\0")]
+    assert argv[:2] == [exe, "prompt"], argv
+    return argv
+
+
+# 이것을 실패시키는 것: init의 다른 root pin 행 수에 의존하거나 실제 prompt argv를 누락하는 것.
+def test_pinned_prompt_argv_from_real_init(tmp_path):
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    # Real init emits shell-encoded pins; exercise quotes and a physical newline.
+    env["XDG_CONFIG_HOME"] += " ' quoted\nconfig"
+    script = inst.init("bash", env)
+    (tmp_path / "init.bash").write_bytes(script)
+    argv = pinned_prompt_argv(script, inst.exe, tmp_path, 7, env, tmp_path)
+    assert argv[:8] == [str(inst.exe), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
+    assert argv[argv.index("--pwd") + 1] == str(tmp_path)
+    assert argv[argv.index("--seq") + 1] == "8"
+    assert re.fullmatch(r"[0-9a-f]{32}", argv[argv.index("--session") + 1])
+    for flag, word in pinned_roots(env).items():
+        assert [os.fsencode(a) for a in argv if os.fsencode(a).startswith(flag)] == [word]
+    assert "--collector-exe=" + init_collector_exe(script) in argv
+    # Extra flag-bearing lines (such as init's exported command roots) cannot
+    # select a different invocation or make extraction ambiguous.
+    extra = b"\n# --runtime-root=decoy --config-root=decoy\n"
+    assert pinned_prompt_argv(script + extra * 3, inst.exe, tmp_path, 7, env, tmp_path) == argv
+    # Compare every word with the same hook calling the existing fake binary.
+    inst.use_fake(minimal_record())
+    path = tmp_path / "actual-prompt.bash"
+    path.write_bytes(bash_prompt_script(script, tmp_path, 7))
+    result = subprocess.run(SHELL_CMD["bash"] + [str(path)], env=env, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert inst.calls() == [[os.fsencode(word) for word in argv[1:]]]
+
+
 class HelperStageFixture:
     """Real init, warm-up prompts and one traced prompt for a helper stage.
 
@@ -1405,7 +1467,7 @@ class HelperStageFixture:
     the stage formula does not include, so the fixture refuses one.
     """
 
-    def __init__(self, stage):
+    def __init__(self, stage, *, template=None):
         import tempfile
         root = real_bin().parent.parent
         self.base = Path(tempfile.mkdtemp(prefix="helper-stage-", dir=root)).resolve()
@@ -1419,7 +1481,7 @@ class HelperStageFixture:
         os.mkdir(self.env["HOME"], 0o700)
         self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, mode=0o700)
-        self.put("collect" if stage == "collect" else "plain")
+        self.put("collect" if stage == "collect" else "plain", template=template)
         self.script = self.inst.init("bash", self.env)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
@@ -1457,10 +1519,11 @@ class HelperStageFixture:
         elif stage == "failure-recover":
             (self.store / "snapshot").chmod(0o644)
 
-    def put(self, name):
+    def put(self, name, *, template=None):
         path = self.config / "config.toml"
         pending = path.with_name("config.toml.new")
-        pending.write_text(TEMPLATES[name])
+        pending.write_text(TEMPLATES[name] if template is None else
+                           f"[style]\ntemplate='{template}'\n[layout.when.narrow.style]\ntemplate='{template}'\n")
         pending.chmod(0o600)
         pending.replace(path)
 
@@ -1470,8 +1533,7 @@ class HelperStageFixture:
         # run's, as one long-lived shell would, so the collection breaker
         # sees a new sequence instead of a replayed one.
         self.seq += 1
-        f.write_bytes(self.script + b"\n_bingsu_seq=" + str(self.seq).encode() + b"\ncd '"
-                      + os.fsencode(str(self.pwd)) + b"'\n" + CALL)
+        f.write_bytes(bash_prompt_script(self.script, self.pwd, self.seq))
         strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
                   "-e", "trace=all",
                   "-o", str(trace)] if trace else []
@@ -1886,3 +1948,162 @@ def test_live_front_attempts_match_axis_c(front_capture):
 def test_front_never_reads_trust_metadata_section(front_capture):
     lines, exe, pinned, store, attempts, evidence = front_capture
     check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
+
+
+@pytest.fixture
+def child_capture(tmp_path):
+    # 이것을 실패시키는 것: debug 바이너리 또는 strace 없는 host를 live PASS로 세는 것.
+    if sys.platform != "linux":
+        pytest.skip("Linux release strace gate; native Linux run required")
+    # 이것을 실패시키는 것: if real_bin().parent.name != "release" 조건을 제거하거나 반전하는 변이.
+    if real_bin().parent.name != "release":
+        pytest.skip("child-count measurement requires release")
+    # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
+    assert shutil.which("strace"), "required live tracing tool is missing"
+
+    def capture(template="{dir}{git}{char}", invalid=False):
+        base = tmp_path / str(len(list(tmp_path.iterdir())))
+        base.mkdir()
+        # Reuse A2's real hook, advancing session sequence and untraced warm-up.
+        # A cold admission under strace may defer before it can spawn a worker.
+        fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
+                                     template=template)
+        try:
+            return capture_prompt(fixture, base, invalid)
+        finally:
+            wait_helpers(fixture.base)
+            shutil.rmtree(fixture.base)
+
+    def capture_prompt(fixture, base, invalid):
+        marker = fixture.store / "marker"
+        wire = bytearray(marker.read_bytes())
+        # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
+        assert wire[:8] == b"BNGMRK02" and len(wire) == 208
+        # 이것을 실패시키는 것: if invalid 조건을 제거하거나 반전하는 변이.
+        if invalid:
+            wire[12] = 2
+            crc = 0xffffffff
+            for byte in b"bingsu-marker-v2\0" + wire[:176]:
+                crc ^= byte
+                for _ in range(8):
+                    crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+            wire[176:180] = (crc ^ 0xffffffff).to_bytes(4, "little")
+            pending = marker.with_suffix(".b1")
+            pending.write_bytes(wire)
+            pending.chmod(0o600)
+            pending.replace(marker)
+        evidence = base / "child-count.strace"
+        # Expand A2's exact hook without tracing bash or running a prompt.
+        # A2 increments fixture.seq before setting the hook's pre-call counter;
+        # use that same next counter so capture cannot replay the last warm-up.
+        argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
+                                  fixture.seq + 1, fixture.env, base)
+        assert "--collector-exe=" + fixture.collector in argv, argv
+        result = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
+                                 "-o", str(evidence), *argv],
+                                cwd=fixture.pwd, env=fixture.env, capture_output=True, timeout=60)
+        (base / "stdout").write_bytes(result.stdout)
+        (base / "stderr").write_bytes(result.stderr)
+        # 이것을 실패시키는 것: assert result.returncode == 0, (result.stderr, evidence) 조건을 제거하거나 반전하는 변이.
+        assert result.returncode == 0, (result.stderr, evidence)
+        trace = parse_trace(evidence.read_text())
+        # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
+        assert not trace.errors, (trace.errors, evidence)
+        return trace, fixture.store, result.stdout
+    return capture
+
+
+# 이것을 실패시키는 것: helper 생략·중복 생성, collector 중복·자식 생성, 쓰기 전용·명령 프로세스 추가.
+def test_live_child_count_is_bounded_per_role(child_capture):
+    from fsbudget.attribute import role_children
+    trace, _, _ = child_capture()
+    children = role_children(trace)
+    # 이것을 실패시키는 것: assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children 조건을 제거하거나 반전하는 변이.
+    assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children
+
+
+# 이것을 실패시키는 것: worker가 없는 화면에도 collector 생성.
+def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
+    from fsbudget.attribute import role_children
+    trace, _, _ = child_capture("{char}")
+    # 이것을 실패시키는 것: assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0} 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
+
+
+# 이것을 실패시키는 것: 표식 무효면 worker mask 0.
+def test_live_collector_count_ignores_marker_validity(child_capture):
+    from fsbudget.attribute import role_children
+    valid, _, _ = child_capture()
+    invalid, _, record = child_capture(invalid=True)
+    # 이것을 실패시키는 것: assert b"degraded:trust-invalid" in record, record 조건을 제거하거나 반전하는 변이.
+    assert b"degraded:trust-invalid" in record, record
+    # 이것을 실패시키는 것: assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1
+
+
+# 이것을 실패시키는 것: 머리 읽기 전에 collector 생성.
+def test_live_collector_spawns_after_helper_header_and_marker_reads(child_capture):
+    from fsbudget.attribute import first_index, role_children
+    trace, store, _ = child_capture()
+    # 이것을 실패시키는 것: assert role_children(trace)["helper"] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace)["helper"] == 1
+    assert_child_timing(trace, store)
+
+
+def assert_child_timing(trace, store):
+    from fsbudget.attribute import first_index
+    helper_exec = first_index(trace, "helper", lambda c: c.name == "execve" and c.ret == "0")
+    main = trace[helper_exec].pid
+    spawn = first_index(trace, "helper", lambda c: c.pid == main and c.name in SPAWNS
+                        and "CLONE_THREAD" not in c.args and re.fullmatch(r"[1-9][0-9]*", c.ret))
+    # The helper verifies its freshly staged marker by same-fd readback before
+    # admission. This is distinct from the front reading the published marker.
+    for name, size in (("snapshot", 192), (".marker.stage", 208)):
+        read = first_index(trace, "helper", lambda c: c.pid == main and c.name == "read"
+                           and args_of(c)[0].endswith("<" + str(store / name) + ">")
+                           and c.ret.isdigit() and int(c.ret) >= size)
+        # 이것을 실패시키는 것: 머리·표식 읽기를 collector 생성 뒤로 옮기는 것.
+        assert read < spawn, (name, read, spawn)
+
+
+# 이것을 실패시키는 것: 앞단의 marker 읽기로 helper 읽기를 대체하거나 읽기 순서·길이를 무시하는 것.
+@pytest.mark.parametrize("mutation", ["none", "early", "front-marker", "short-header", "failed-marker"])
+def test_child_timing_negative_controls(mutation):
+    head = '11 read(3</store/snapshot>, "header", 192) = 192'
+    marker = '11 read(4</store/.marker.stage>, "marker", 208) = 208'
+    spawn = '11 vfork() = 13'
+    # 이것을 실패시키는 것: if mutation == "front-marker" 조건을 제거하거나 반전하는 변이.
+    if mutation == "front-marker":
+        marker = marker.replace('11 read', '10 read')
+    # 이것을 실패시키는 것: elif mutation == "short-header" 조건을 제거하거나 반전하는 변이.
+    elif mutation == "short-header":
+        head = head.replace('= 192', '= 1')
+    # 이것을 실패시키는 것: elif mutation == "failed-marker" 조건을 제거하거나 반전하는 변이.
+    elif mutation == "failed-marker":
+        marker = marker.replace('= 208', '= -1 EBADF (Bad file descriptor)')
+    prefix = ['10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0',
+              '10 vfork() = 11',
+              '11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0']
+    events = [spawn, head, marker] if mutation == "early" else [head, marker, spawn]
+    trace = parse_trace('\n'.join(prefix + events + [
+        '13 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0']))
+    # 이것을 실패시키는 것: if mutation == "none" 조건을 제거하거나 반전하는 변이.
+    if mutation == "none":
+        assert_child_timing(trace, Path('/store'))
+    else:
+        with pytest.raises((AssertionError, StopIteration)):
+            assert_child_timing(trace, Path('/store'))
+
+
+# Stored synthetic control: one collector in both traces, only timing differs.
+# No product overlay or warm-up is needed to reach the timing assertion.
+def test_stored_child_timing_control():
+    from fsbudget.attribute import role_children
+    fixtures = Path(__file__).parent / 'fixtures'
+    passing = parse_trace((fixtures / 'b1-child-timing-passing.strace').read_text())
+    moved = parse_trace((fixtures / 'b1-child-timing-before-reads.strace').read_text())
+    expected = {"front": 1, "helper": 1, "collector": 0, "command": 0}
+    assert role_children(passing) == role_children(moved) == expected
+    assert_child_timing(passing, Path('/store'))
+    with pytest.raises(AssertionError, match='snapshot'):
+        assert_child_timing(moved, Path('/store'))

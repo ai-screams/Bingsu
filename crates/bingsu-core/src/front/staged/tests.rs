@@ -689,6 +689,22 @@ mod cases {
         let invalid = h.run(&args(), Mode::Dark);
         assert_eq!(invalid.worker_mask, ordinary.worker_mask);
         assert!(invalid.execution.permit().is_none());
+        // 이것을 실패시키는 것: 무효 표식에서 실행 단위를 허용하는 것.
+        assert!(invalid.execution.units().is_empty());
+        let s = snapshot(
+            "[segment.\"custom/run\"]\nkind='command'\ncommand=['echo','yes']\n[layout.line2]\nleft=['custom/run','char']",
+        );
+        let mut h = Harness::new();
+        h.current = Some(s.encode(1, 0).unwrap());
+        let mut m = marker(&s);
+        h.marker = Some(m.encode().to_vec());
+        // 이것을 실패시키는 것: 실행 단위가 없는 fixture로 무효 표식 시험을 공허하게 만드는 것.
+        assert_eq!(h.run(&args(), Mode::Dark).execution.units().len(), 1);
+        m.invalid = true;
+        h.marker = Some(m.encode().to_vec());
+        // 이것을 실패시키는 것: 무효 표식에서 설정의 실행 단위를 허용하는 것.
+        assert!(h.run(&args(), Mode::Dark).execution.units().is_empty());
+
         let ids = [
             "a00", "a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a11",
             "a12", "a13", "a14", "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23",

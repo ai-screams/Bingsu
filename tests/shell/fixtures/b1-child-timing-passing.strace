@@ -1,0 +1,15 @@
+10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0
+10 vfork( <unfinished ...>
+11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0
+10 <... vfork resumed>) = 11
+11 clone(flags=CLONE_THREAD|CLONE_VM) = 12
+12 futex(0x123, FUTEX_WAIT, 0, NULL) = 0
+11 read(3</store/snapshot>, "header", 192) = 192
+11 read(4</store/.marker.stage>, "marker", 208) = 208
+11 vfork( <unfinished ...>
+13 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0
+11 <... vfork resumed>) = 13
+13 +++ exited with 0 +++
+12 +++ exited with 0 +++
+11 +++ exited with 0 +++
+10 +++ exited with 0 +++

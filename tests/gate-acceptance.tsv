@@ -22,3 +22,10 @@ GATE-EXEC-DEADLINE.4	GATE-EXEC-DEADLINE	4	Sleep after approval and wake past the
 GATE-CLOCK-READS.2	GATE-CLOCK-READS	2	Same-machine A/B latency of the relay deadline checks; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
 GATE-CLOCK-READS.3	GATE-CLOCK-READS	3	Exec count +1 and unchanged process count per unit; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
 GATE-CLOCK-READS.4	GATE-CLOCK-READS	4	Pre-exec clock reads per execution unit are counted in test builds; deferred to M6 with the trusted exec relay	-	-	-	deferred:M6
+GATE-CHILDREN.1	GATE-CHILDREN	1	The front spawns exactly one refresh helper per prompt	Linux	tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role	pytest	M3d
+GATE-CHILDREN.2	GATE-CHILDREN	2	At most one collector per helper and zero collector children	Linux	tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role	pytest	M3d
+GATE-CHILDREN.3	GATE-CHILDREN	3	No write-only child or command process (P5 regression)	Linux	tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role	pytest	M3d
+GATE-COLLECTOR-TIMING.1	GATE-COLLECTOR-TIMING	1	No worker segment spawns zero collectors	Linux	tests/shell/test_prompt_env_paths.py::test_live_no_worker_segment_spawns_zero_collectors	pytest	M3d
+GATE-COLLECTOR-TIMING.2	GATE-COLLECTOR-TIMING	2	Marker validity does not change collector count	Linux	tests/shell/test_prompt_env_paths.py::test_live_collector_count_ignores_marker_validity	pytest	M3d
+GATE-COLLECTOR-TIMING.3	GATE-COLLECTOR-TIMING	3	An invalid marker yields zero execution units	Linux	crates/bingsu-core/src/front/staged/tests.rs::front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker	lib	M3d
+GATE-COLLECTOR-TIMING.4	GATE-COLLECTOR-TIMING	4	Collector creation follows helper snapshot and marker readback	Linux	tests/shell/test_prompt_env_paths.py::test_live_collector_spawns_after_helper_header_and_marker_reads	pytest	M3d
