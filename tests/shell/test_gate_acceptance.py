@@ -97,6 +97,10 @@ M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3
                      # GATE-FS-HELPER.1 is one row per stage parameter; the primary row is unchanged.
                      "GATE-FS-HELPER.1-publish": "M3d", "GATE-FS-HELPER.1-collect": "M3d",
                      "GATE-FS-HELPER.1-last_good": "M3d", "GATE-FS-HELPER.1-recover": "M3d"}
+# 이것을 실패시키는 것: fallback/상한/머리 거부 행을 지우고 normal만으로 게이트를 닫는 것.
+M3D_SUPPLEMENTARY.update({f"{gate}.1-{case}": "M3d"
+                          for gate in ("GATE-FS-FRONT", "GATE-FRONT-READ-BYTES")
+                          for case in ("checksum_last_good", "body_limit", "header_only")})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
@@ -115,7 +119,7 @@ DEFERRED_MILESTONES = ("M4", "M6")
 
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
-M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER"})
+M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-READ-BYTES"})
 
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
@@ -124,12 +128,10 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER"})
 # its pair.
 M3D_PENDING = (
     "GATE-FS-HELPER.2",
-    "GATE-FS-FRONT.1",
     "GATE-CHILDREN.1", "GATE-CHILDREN.2", "GATE-CHILDREN.3",
     "GATE-FDS.1", "GATE-FDS.2",
     "GATE-HELPER-LIFETIME.1", "GATE-HELPER-LIFETIME.2", "GATE-HELPER-LIFETIME.3",
     "GATE-ZOMBIES.1",
-    "GATE-FRONT-READ-BYTES.1", "GATE-FRONT-READ-BYTES.2",
     "GATE-GENERATION.1", "GATE-GENERATION.2",
     "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
     "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
@@ -720,4 +722,34 @@ def test_release_gate_cells_require_effective_matrix_runner():
     assert job.split("  shell-macos:", 1)[0].count(runner) == 1
     texts["shell.yml"] = prefix + "  filter-calls:\n" + job.replace(runner, "    runs-on: ubuntu-latest\n", 1)
     with pytest.raises(AssertionError, match="release runner"):
+        assert_gate_table((ROOT / TABLE).read_text(), texts)
+
+
+# 이것을 실패시키는 것: A4 fallback/상한/머리 거부 행을 삭제하는 것.
+@pytest.mark.parametrize('gate', ['GATE-FS-FRONT', 'GATE-FRONT-READ-BYTES'])
+@pytest.mark.parametrize('suffix', ['', '-checksum_last_good', '-body_limit', '-header_only'])
+def test_every_front_attempt_row_is_required(gate, suffix):
+    row_id = gate + '.1' + suffix
+    table = (ROOT / TABLE).read_text()
+    table = '\n'.join(line for line in table.splitlines() if not line.startswith(row_id + '\t')) + '\n'
+    with pytest.raises(AssertionError):
+        assert_gate_table(table, workflows())
+
+
+# 이것을 실패시키는 것: A4 live를 debug에서 돌리거나 정확한 PASSED 단언/pipefail을 빼는 것.
+@pytest.mark.parametrize('mutation', ['release', 'grep', 'pipefail'])
+def test_front_live_ci_evidence_is_required(mutation):
+    texts = workflows()
+    step = '      - name: Front attempts equal axis C and byte formulas (release)\n'
+    start = texts['shell.yml'].index(step)
+    end = texts['shell.yml'].index('      - name: Upload failed', start)
+    block = texts['shell.yml'][start:end]
+    if mutation == 'release':
+        changed = block.replace("        if: matrix.profile == 'release'\n", '')
+    elif mutation == 'grep':
+        changed = block.replace("grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[body-limit]'", "grep -Fx 'PASSED absent'")
+    else:
+        changed = block.replace('          set -o pipefail\n', '')
+    texts['shell.yml'] = texts['shell.yml'][:start] + changed + texts['shell.yml'][end:]
+    with pytest.raises(AssertionError):
         assert_gate_table((ROOT / TABLE).read_text(), texts)

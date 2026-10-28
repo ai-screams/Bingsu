@@ -3,6 +3,7 @@ repository; the hook must still pass only the roots pinned by init, and the
 binary (with every process and thread it starts) must touch nothing under
 the repository."""
 import os
+import platform
 import ast
 import hashlib
 import re
@@ -1607,3 +1608,275 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
                 wait_helpers(fixture.base)
                 shutil.rmtree(fixture.base, ignore_errors=True)
     pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {helper_stage_evidence / stage}")
+
+
+# Fixture metadata, pinned independently from the product source.
+FRONT_CHUNK = 16 * 1024
+FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only')
+
+
+# 이것을 실패시키는 것: 제품 READ_CHUNK를 바꾸고 fixture 메타데이터는 그대로 두는 것.
+def test_front_chunk_matches_product_constant():
+    source = (ROOT / 'crates/bingsu-core/src/snapshot.rs').read_text().replace('\r\n', '\n')
+    match = re.search(r'pub const READ_CHUNK: usize = (\d+) \* (\d+);', source)
+    assert match and int(match[1]) * int(match[2]) == FRONT_CHUNK
+
+
+def front_attempt_plan(case, body):
+    from fsbudget.formula import FrontAttempt
+    current = FrontAttempt('current', True, case not in ('header-only', 'body-limit'),
+                           body if case in ('normal', 'checksum-last-good') else 0,
+                           case in ('normal', 'checksum-last-good'))
+    return [current] + ([] if case == 'normal' else [FrontAttempt('last_good', True, True, body, True)])
+
+
+def assert_front_reads(trace, store, attempts, *, evidence=None):
+    from fsbudget.formula import front_read_bytes
+    paths = [str(store / name) for name in ('snapshot', 'last-good', 'marker')]
+    boot = '/proc/sys/kernel/random/boot_id'
+    expected = {path: [] for path in paths}
+    for a in attempts:
+        path = paths[0 if a.copy == 'current' else 1]
+        expected[path] = ([64] if a.header_read else []) + ([128] if a.prefix_read else [])
+        expected[path] += [min(FRONT_CHUNK, a.body_bytes_read - offset)
+                           for offset in range(0, a.body_bytes_read, FRONT_CHUNK)]
+    expected[paths[2]] = [208]
+    expected[boot] = [37, 0]  # in-place procfs boot observation: final EOF required
+    actual = {path: [] for path in expected}
+    for call in trace:
+        args = args_of(call)
+        if call.name == 'read' and args:
+            match = re.fullmatch(r'\d+<(/[^<>]*)>', args[0])
+            if match and match[1] in actual:
+                actual[match[1]].append(int(call.ret))
+    measured = front_read_bytes(trace, list(expected))
+    if evidence is not None:
+        evidence.update(read_chunks=actual, expected_chunks=expected, read_bytes=measured)
+    # 이것을 실패시키는 것: TrustMetadata까지 읽게 길이 계산 변경, last-good 선택 뒤 현재 사본 재읽기.
+    assert actual == expected, ('front read sequence', actual, expected)
+    # 이것을 실패시키는 것: 사본별 바이트를 합산해 초과 읽기를 다른 사본의 여유로 상쇄하는 것.
+    assert measured == {path: sum(chunks) for path, chunks in expected.items()}
+
+
+def front_fact_kind(call):
+    """Count each libc's held-fd primitive; pathname stats cannot substitute."""
+    args = args_of(call)
+    # 이것을 실패시키는 것: 플랫폼 fd stat 변형을 ignore하거나 pathname stat으로 대체하는 것.
+    if call.name == 'fstat':
+        return 'fstat'
+    if call.name == 'newfstatat' and args[1] == '""' and args[3] == 'AT_EMPTY_PATH':
+        return 'fstat'
+    if (call.name == 'statx' and args[1] == '""'
+            and args[2] == 'AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH' and args[3] == 'STATX_BASIC_STATS'):
+        return 'fstat'
+    raise AssertionError(('unexpected front facts primitive', call))
+
+
+def front_spawn_pipe_calls(front, boundary, libc, evidence):
+    """Exact parent error channel, never a general pipe exemption."""
+    from collections import Counter
+    from fsbudget.formula import POSIX_SPAWN_PRIMITIVES
+    spawns = successful_spawns(front)
+    assert len(spawns) <= 1, ('front helper spawns', spawns)
+    expected = Counter(POSIX_SPAWN_PRIMITIVES[libc]) if spawns else Counter()
+    pipes = [c for c in front if c.name == 'pipe2']
+    assert len(pipes) == expected['pipe2'], ('front spawn pipe count', pipes, expected)
+    accounted = []
+    for pipe in pipes:
+        match = re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_CLOEXEC', pipe.args)
+        assert match and pipe.ret == '0', ('front spawn pipe creation', pipe)
+        reader, inode, writer = match.groups()
+        assert reader != writer, ('front spawn pipe endpoints', pipe)
+        read_fd, write_fd = (f'{fd}<pipe:[{inode}]>' for fd in (reader, writer))
+        # Include every read/close on this pipe: duplicates cannot borrow slack.
+        channel = [c for c in front if c.name in ('read', 'close')
+                   and args_of(c)[0] in (read_fd, write_fd)]
+        assert [(c.name, args_of(c), c.ret) for c in channel] == [
+            ('close', [write_fd], '0'),
+            ('read', [read_fd, '""', '4'], '0'),
+            ('close', [read_fd], '0'),
+        ], ('front spawn pipe sequence', channel)
+        assert pipe.index < spawns[0].index < channel[0].index, ('front spawn pipe order', pipe, spawns)
+        assert all(c.index < boundary for c in [pipe, *channel]), ('late front spawn pipe', channel)
+        accounted.extend([pipe, *channel])
+    actual = Counter(c.name for c in accounted)
+    evidence.update(spawn_pipe_counts=actual, spawn_pipe_expected=expected)
+    assert actual == expected, ('front spawn pipe primitives', actual, expected)
+    return {c.index for c in accounted}
+
+
+def check_front_capture(lines, exe, pinned, store, attempts, *, arch, libc, evidence):
+    from collections import Counter
+    from fsbudget.strace_parse import Trace
+    from fsbudget.formula import front_attempts_expected, collection_front_expected, STARTUP_PRIMITIVES
+    _, scoped = tree(lines, exe)
+    root = int(next(line.split()[0] for line in scoped if is_root(line, exe)))
+    parsed = parse_trace('\n'.join(scoped))
+    # 이것을 실패시키는 것: 불완전 캡처 또는 필터 없이 앞단 계수를 통과시키는 것.
+    assert not parsed.errors, parsed.errors
+    front = Trace()
+    front.extend(c for c in parsed if c.pid == root and c.name != EXIT_EVENT)
+    # 이것을 실패시키는 것: trace=all에 새 syscall을 남겨도 계수 대상이 아니라며 버리는 것.
+    startup_model = STARTUP_PRIMITIVES[arch, libc]
+    # lseek is counted below, never ignored or allowed on arbitrary fds.
+    assert all(c.name in ROOT_CALLS | {'lseek'} for c in front), [c for c in front if c.name not in ROOT_CALLS | {'lseek'}]
+    # 이것을 실패시키는 것: snapshot을 mmap하여 TrustMetadata 읽기를 read 계수 밖으로 옮기는 것.
+    for call in front:
+        assert call.name != 'readv', ('unexpected front read primitive', call)
+        if call.name != 'read':
+            assert not set(content_paths(call)) & {str(store / n) for n in ('snapshot', 'last-good', 'marker')}, ('front content primitive', call)
+    filters = [c.index for c in front if c.name == 'prctl' and 'PR_SET_SECCOMP' in c.args and c.ret == '0']
+    assert len(filters) == 1, filters
+    cwd = prompt_cwd(next(c for c in front if c.name == 'execve'))
+    prompt_root_io(front, filters[0], exe, pinned, root, cwd)
+    spawn_pipe_calls = front_spawn_pipe_calls(front, filters[0], libc, evidence)
+    dirs, files = prompt_sources(pinned)
+    collection_dirs, _ = prompt_collection_sources(pinned, cwd)
+    boot_paths = {'/', '/proc', f'/proc/{root}', f'/proc/{root}/ns',
+                  f'/proc/{root}/timens_offsets', '/proc/sys', '/proc/sys/kernel',
+                  '/proc/sys/kernel/random', '/proc/sys/kernel/random/boot_id'}
+    held, counts, primitives = {}, Counter(), Counter()
+    startup = {name: Counter() for name in ('front_fds', 'front_cache', 'front_libgcc', 'front_libc', 'front_maps', 'stack_guard')}
+    seeks = []
+
+    def startup_kind(path):
+        if path in ('/proc/self/fd', f'/proc/{root}/fd'):
+            return 'front_fds'
+        if path == '/etc/ld.so.cache':
+            return 'front_cache'
+        if path in ('/proc/self/maps', f'/proc/{root}/maps'):
+            return 'front_maps'
+        for suffix, kind in (('libgcc_s.so.1', 'front_libgcc'), ('libc.so.6', 'front_libc')):
+            if re.fullmatch(r'/(?:usr/)?lib(?:64)?/(?:[^/]+/)?' + re.escape(suffix), path):
+                return kind
+        raise AssertionError(('unaccounted front startup path', path))
+    for c in front:
+        if c.index in spawn_pipe_calls:
+            continue
+        args = args_of(c)
+        paths = call_paths(c)
+        if c.name in OPENS:
+            assert paths, ('unaccounted front open', c)
+            kind = None if paths[0] in dirs | files | boot_paths | collection_dirs else startup_kind(paths[0])
+            if kind is None:
+                counts['openat'] += 1
+            else:
+                assert c.index < filters[0], ('late front startup open', c)
+                startup[kind]['openat'] += 1
+            if not c.ret.startswith('-1'):
+                held[int(c.ret.split('<')[0])] = kind
+            continue
+        if c.name == 'getxattr':
+            match = re.fullmatch(r'"/proc/self/fd/(\d+)"', args[0])
+        else:
+            match = re.fullmatch(r'(\d+)(?:<[^<>]*>)?', args[0]) if args else None
+        fd = int(match[1]) if match else None
+        if c.name in ('read', 'pread64', 'lseek'):
+            assert fd in held, ('untracked front descriptor', c)
+            kind = held[fd]
+            if c.name == 'lseek':
+                assert kind == 'front_maps' and c.index < filters[0], ('unexpected front seek', c)
+                assert len(args) == 3 and not c.ret.startswith('-1'), ('front startup seek', c)
+                seeks.append(args[2])
+                startup['stack_guard']['seek'] += 1
+            elif kind is None:
+                assert c.name == 'read', ('unexpected front read primitive', c)
+                counts['read'] += 1
+            else:
+                assert c.index < filters[0], ('late front startup read', c)
+                startup[kind][c.name] += 1
+            continue
+        if fd not in held:
+            continue
+        if c.name == 'close':
+            held.pop(fd)
+        elif held[fd] is not None:
+            continue
+        elif c.name in ('fstat', 'newfstatat', 'statx'):
+            counts[front_fact_kind(c)] += 1
+            primitives[c.name] += 1
+        elif c.name in ('fstatfs', 'fgetxattr', 'getxattr', 'readlinkat', 'read'):
+            counts[c.name] += 1
+    expected = Counter(front_attempts_expected(len(dirs), attempts, FRONT_CHUNK))
+    # Plain config has no collection store: prefetch still probes its namespace.
+    expected.update(collection_front_expected(0, (), (), absent=True))
+    startup_expected = {name: Counter(startup_model.get(name, {})) for name in startup}
+    evidence.update(C=len(dirs), counts=counts, expected=expected, fact_primitives=primitives,
+                    arch=arch, libc=libc, startup_counts=startup, startup_expected=startup_expected)
+    assert startup == startup_expected, ('front startup primitives', startup, startup_expected)
+    assert seeks == (['SEEK_CUR', 'SEEK_SET'] if startup_model['stack_guard'].get('seek') else []), ('front startup seek pair', seeks)
+    # 이것을 실패시키는 것: 앞단 open/facts/read 하나 추가, collection prefetch를 비용에서 빼는 것.
+    assert counts == expected, ('front axis C', counts, expected)
+    assert_front_reads(front, store, attempts, evidence=evidence)
+
+
+@pytest.fixture
+def front_capture(request, tmp_path_factory):
+    """Use A2's init/warm-up/trace harness; hold its publication lock while corrupting."""
+    import fcntl
+    import json
+    from dataclasses import asdict
+    libc = require_release_helper(real_bin())
+    assert shutil.which('strace'), 'front gate must execute strace'
+    case = getattr(request, 'param', 'normal')
+    artifacts = tmp_path_factory.getbasetemp() / 'front-evidence' / request.node.name
+    artifacts.mkdir(parents=True)
+    evidence = {'case': case, 'chunk': FRONT_CHUNK, 'arch': platform.machine(), 'libc': libc}
+    fixture = None
+    lock = None
+    try:
+        fixture = HelperStageFixture('unchanged')
+        lock = (fixture.store / 'snapshot.lock').open('rb')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = bytearray((fixture.store / 'snapshot').read_bytes())
+        body = int.from_bytes(data[76:80], 'little')
+        metadata = int.from_bytes(data[80:84], 'little')
+        # 이것을 실패시키는 것: metadata 없는 fixture로 TrustMetadata 0 읽기를 공허하게 증명하는 것.
+        assert metadata > 0 and len(data) == 64 + 128 + body + metadata
+        last = fixture.store / 'last-good'
+        last.write_bytes(data)
+        last.chmod(0o600)
+        if case == 'checksum-last-good':
+            data[160] ^= 1
+        elif case == 'body-limit':
+            limit = 16 * 1024 * 1024 + 1
+            data[60:64] = (128 + limit).to_bytes(4, 'little')
+            data[76:80] = limit.to_bytes(4, 'little')
+            data = data[:192 + body] + bytearray(limit - body) + data[192 + body:]
+        elif case == 'header-only':
+            data[0] ^= 1
+        (fixture.store / 'snapshot').write_bytes(data)
+        attempts = front_attempt_plan(case, body)
+        evidence.update(attempts=[asdict(a) for a in attempts], body=body, metadata=metadata)
+        trace = artifacts / 'trace.strace'
+        result = fixture.prompt(trace)
+        (artifacts / 'stdout').write_bytes(result.stdout)
+        (artifacts / 'stderr').write_bytes(result.stderr)
+        pinned = [os.path.realpath(Path(fixture.env[key]) / 'bingsu')
+                  for key in ('XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME')]
+        yield trace.read_text().splitlines(), str(fixture.inst.exe), pinned, fixture.store, attempts, evidence
+    except BaseException as error:
+        evidence['failure'] = str(error)
+        raise
+    finally:
+        (artifacts / 'attempt.json').write_text(json.dumps(evidence, indent=2) + '\n')
+        if lock is not None:
+            lock.close()
+        if fixture is not None:
+            wait_helpers(fixture.base)
+            shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+# 이것을 실패시키는 것: TrustMetadata 길이 추가, last-good 뒤 현재 사본 재읽기, 사본별 머리/prefix 읽기 생략.
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux strace runtime gate')
+@pytest.mark.parametrize('front_capture', FRONT_CASES, indirect=True)
+def test_live_front_attempts_match_axis_c(front_capture):
+    lines, exe, pinned, store, attempts, evidence = front_capture
+    check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
+
+
+# 이것을 실패시키는 것: FrontDecoder의 end에 TrustMetadata 길이를 더하는 것.
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux strace runtime gate')
+def test_front_never_reads_trust_metadata_section(front_capture):
+    lines, exe, pinned, store, attempts, evidence = front_capture
+    check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
