@@ -475,7 +475,7 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_git_fuzz_repositories.py::test_each_seed_rejects_read_spawn_and_write_mutations[commondir-self]' "$RUNNER_TEMP/f2-repositories.txt"
       # 이것을 실패시키는 것: 제품 mask 10의 실제 수집 fixture를 준비하지 않고 runtime을 실행하는 것.
       - name: Prepare F3 release collection observations
-        run: python3 bench/git-product.py --prepare target/release/bingsu --out target/f3/preparation.json
+        run: python3 bench/git-product.py --prepare target/release/bingsu --out "$RUNNER_TEMP/measurements/preparation.json"
       - name: Prepare M3b compiler-free product fixtures
         # Native Linux (x86_64/arm64) and macOS: prepare the current release
         # siblings after all builds; pytest below selects this exact pair.
@@ -565,7 +565,7 @@ jobs:
           cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
           # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
           python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
-          python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out target/f3/musl-preparation.json
+          python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out "$RUNNER_TEMP/measurements/musl-preparation.json"
           python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
           export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
           mkdir -p "$RUNNER_TEMP/m3b-traces"
@@ -628,7 +628,7 @@ jobs:
             ${{ runner.temp }}/filter-native.txt
             ${{ runner.temp }}/filter-musl.txt
             target/b3-evidence/
-            target/f3/
+            ${{ runner.temp }}/measurements/
           if-no-files-found: error
 
   test:

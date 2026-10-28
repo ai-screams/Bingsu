@@ -111,7 +111,12 @@ def test_m3c_measurement_is_not_formal_b5_b7(pair):
     assert "M3d formal B5-B7" in value["pending"]
     assert set(value["cases"]) == set(git.CASES)
     for case in value["cases"].values():
-        assert case["order"] == ["base", "candidate", "candidate", "base"] * 100
+        assert len(case['order']) == 400
+        assert case['order'].count('base') == case['order'].count('candidate') == 200
+        for block in case['blocks']:
+            first = block['order'][:2]
+            assert first in (['base', 'candidate'], ['candidate', 'base'])
+            assert block['order'] == (first + first[::-1]) * 10
         assert set(case["cold_first_process"]) == {"base", "candidate"}
         for row in case["variants"].values():
             assert len(row["samples"]) == row["observed"] == 200
@@ -250,3 +255,48 @@ def test_darwin_memory_sampler_uses_resident_and_footprint(monkeypatch):
     monkeypatch.setattr(git.ctypes, "CDLL", lambda *a, **k: Lib())
     monkeypatch.setattr(git.time, "monotonic_ns", lambda: 10)
     assert git.memory_sample(123) == {"at_ns": 10, "resident_bytes": 800, "footprint_bytes": 900}
+
+
+@pytest.fixture(autouse=True)
+def controlled_protocol(monkeypatch):
+    # Product tests exercise real pairing; host probes have dedicated negative controls.
+    p = git.M3B.protocol
+    calibration = dict(stable=True, p95_of_medians=100, **p.identity())
+    monkeypatch.setattr(p, 'calibrate', lambda _: calibration)
+    monkeypatch.setattr(p, 'snapshot', lambda _: dict(**p.identity(), power='ac',
+        thermal='normal', load_1m=1., reference=p.summary([100] * 20)))
+
+
+# 이것을 실패시키는 것: --cases 선택을 무시하고 모든 칸을 측정한다.
+def test_cases_option_selects_only_named_cases(pair):
+    value = git.measure_pair('base', 'candidate', 200, cases=['git-clean'])
+    assert list(value['cases']) == ['git-clean']
+    with pytest.raises(ValueError):
+        git.measure_pair('base', 'candidate', 200, cases=['unknown'])
+
+
+def test_cli_forwards_cases_mode_and_condition(monkeypatch, tmp_path):
+    import sys
+    received = {}
+    def measure(base, candidate, rounds, **kwargs):
+        received.update(kwargs)
+        return {'status': 'OBSERVED'}
+    monkeypatch.setattr(git, 'measure_pair', measure)
+    monkeypatch.setattr(git.M3B.protocol, 'write_output', lambda *_: None)
+    monkeypatch.setattr(sys, 'argv', ['git-product.py', '--base', 'b', '--candidate', 'c',
+        '--out', str(tmp_path / 'out.json'), '--cases', 'git-clean', '--mode', 'experiment',
+        '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
+    assert git.main() == 0
+    assert received['cases'] == ['git-clean']
+    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+
+
+@pytest.mark.parametrize('metric', ['prompt_ns', 'admission_gc_ns'])
+def test_protocol_blocks_missing_git_metric(pair, monkeypatch, metric):
+    row = sample()
+    row.pop(metric)
+    monkeypatch.setattr(git, 'observe', lambda *args: row)
+    result = git.measure_pair('base', 'candidate', 200, cases=['git-clean'])
+    assert result['status'] == 'BLOCKED'
+    assert result['cases']['git-clean']['status'] == 'BLOCKED'
+    assert metric in result['cases']['git-clean']['reason']

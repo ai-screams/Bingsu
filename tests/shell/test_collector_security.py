@@ -1298,7 +1298,7 @@ def assert_ci_contract(texts):
                    "test runtime::x14_threads_and_status_survive_fork_is_refused ... ok",
                    "test runtime::x16_all_mutations_are_denied_with_fsize_zero ... ok", "X-14 PASS", "X-14", "X-02", "X-32"),
         "shell.yml": ("libc: [gnu, musl]", "--ignore tests/shell/test_collector_security.py"),
-        "bench.yml": ("base_ref:", "--rounds 200", "--base base/target/release/bingsu", "--out candidate/target/f3/m3c-product.json",
+        "bench.yml": ("base_ref:", "--rounds 200", "--base base/target/release/bingsu", "--out ${{ runner.temp }}/measurements/m3c-product.json",
                       "if: always()", "if-no-files-found: error"),
     }
     steps = ci_test_evidence(texts["ci.yml"])
@@ -2093,7 +2093,7 @@ def assert_real_collection_ci(workflow, table):
     assert positions["F2 fixed fuzz seed regression corpus"] < release < positions["Prepare F3 release collection observations"]
     assert positions["Prepare F3 release collection observations"] < positions["Prepare M3b compiler-free product fixtures"] < positions["M3b product security and measurements contracts"]
     assert run_commands(named["Prepare F3 release collection observations"]) == [[
-        "python3", "bench/git-product.py", "--prepare", "target/release/bingsu", "--out", "target/f3/preparation.json"]]
+        "python3", "bench/git-product.py", "--prepare", "target/release/bingsu", "--out", "$RUNNER_TEMP/measurements/preparation.json"]]
     for name, log in (("Assert exact F3 collection passes", "$RUNNER_TEMP/m3b-security.txt"),
                       ("Assert exact F3 musl collection passes", "$RUNNER_TEMP/m3b-musl.txt")):
         commands = run_commands(named[name])

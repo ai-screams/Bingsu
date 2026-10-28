@@ -89,8 +89,13 @@ def test_pair_alternates_and_preserves_raw_observations(monkeypatch, tmp_path):
     monkeypatch.setattr(product, "ROOT", tmp_path)
     (tmp_path / "target").mkdir()
     result = product.measure_pair("base", "candidate", 200)
-    assert calls[:6] == ["base", "candidate", "base", "candidate", "candidate", "base"]
-    assert result["order"] == [name for i in range(200) for name in (("base", "candidate") if i % 2 == 0 else ("candidate", "base"))]
+    assert calls[:2] == ['base', 'candidate']
+    assert calls[2:] == result['order']
+    assert len(result['order']) == 400
+    for block in result['blocks']:
+        first = block['order'][:2]
+        assert first in (['base', 'candidate'], ['candidate', 'base'])
+        assert block['order'] == (first + first[::-1]) * 10
     assert result["milestone"] == "M3b" and result["formal_B5_B7"] is False
     assert set(result["cold_first_process"]) == {"base", "candidate"}
     assert not result["missing"]
@@ -355,3 +360,64 @@ def test_prepare_accepts_external_cargo_target_and_names_expected_path(monkeypat
     copied = tmp_path / "installed" / binary.relative_to(target)
     with pytest.raises(ValueError, match=str(binary)):
         product.build_context(copied)
+
+
+@pytest.fixture(autouse=True)
+def controlled_protocol(monkeypatch):
+    # Product tests exercise real pairing; host probes have dedicated negative controls.
+    p = product.protocol
+    calibration = dict(stable=True, p95_of_medians=100, **p.identity())
+    monkeypatch.setattr(p, 'calibrate', lambda _: calibration)
+    monkeypatch.setattr(p, 'snapshot', lambda _: dict(**p.identity(), power='ac',
+        thermal='normal', load_1m=1., reference=p.summary([100] * 20)))
+
+
+def test_blocked_calibration_preserves_protocol_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(product, 'prepared', lambda _: dict(hashes={}, policy={}, stripped_bytes={}))
+    monkeypatch.setattr(product, 'host', lambda: {})
+    monkeypatch.setattr(product, 'watchdog_evidence', lambda _: {})
+    monkeypatch.setattr(product, 'ROOT', tmp_path)
+    (tmp_path / 'target').mkdir()
+    monkeypatch.setattr(product.protocol, 'calibrate', lambda _: dict(stable=False))
+    got = product.measure_pair('base', 'candidate', 200)
+    assert got['status'] == 'BLOCKED' and got['calibration'] == dict(stable=False)
+    assert got['hypotheses']['base']['ready_p50_within_hypothesis'] is None
+
+
+def test_legacy_host_keeps_unknown_power_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(product.protocol, 'observe_host', lambda: {'power': 'unknown'})
+    def unavailable(*args, **kwargs): raise OSError('pmset unavailable')
+    monkeypatch.setattr(product, 'run', unavailable)
+    assert product.host()['power'] == 'unknown'
+
+
+def test_cli_forwards_mode_and_condition(monkeypatch, tmp_path):
+    import sys
+    received = {}
+    def measure(base, candidate, rounds, **kwargs):
+        received.update(kwargs)
+        return {'status': 'OBSERVED'}
+    monkeypatch.setattr(product, 'measure_pair', measure)
+    monkeypatch.setattr(product.protocol, 'write_output', lambda *_: None)
+    monkeypatch.setattr(sys, 'argv', ['collector-product.py', '--base', 'b', '--candidate', 'c',
+        '--out', str(tmp_path / 'out.json'), '--mode', 'experiment',
+        '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
+    assert product.main() == 0
+    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+
+
+@pytest.mark.parametrize('metric', product.REQUIRED)
+def test_protocol_blocks_missing_collector_metric(monkeypatch, tmp_path, metric):
+    row = sample()
+    # validate_sample computes intervals from events; remove after validation.
+    row = product.validate_sample(row)
+    row.pop(metric)
+    monkeypatch.setattr(product, 'observe', lambda *args: row)
+    monkeypatch.setattr(product, 'prepared', lambda _: dict(hashes={}, policy={}, stripped_bytes={}))
+    monkeypatch.setattr(product, 'host', lambda: {})
+    monkeypatch.setattr(product, 'watchdog_evidence', lambda _: {})
+    monkeypatch.setattr(product, 'ROOT', tmp_path)
+    (tmp_path / 'target').mkdir()
+    result = product.measure_pair('base', 'candidate', 200)
+    assert result['status'] == 'BLOCKED'
+    assert metric in result['reason']

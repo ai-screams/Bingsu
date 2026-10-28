@@ -18,6 +18,10 @@ import statistics
 import subprocess
 import sys
 import time
+import importlib.util
+import tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES, WARMUP = 240, 20
@@ -50,13 +54,22 @@ sys.exit(r.returncode)
     return checked([sys.executable, "-c", script, *command])
 
 
+def diagnostic_only(value):
+    """Legacy batched runners have no admission evidence and cannot certify budgets."""
+    return dict(status='BLOCKED', evidence_use='diagnostic-only', certification_eligible=False,
+                reason='legacy batched runner has no calibration or condition admission',
+                diagnostic_summary=value)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=ROOT / "target/n7/measurements")
+    parser.add_argument("--out", type=Path, default=Path(tempfile.gettempdir()) / "bingsu-n7-measurements")
     parser.add_argument("--baseline", type=Path, help="already built V3 binary; never checks out revisions")
     parser.add_argument("--cold-command", nargs="+", help="page-cache eviction command to run before each cold sample")
+    parser.add_argument("--mode", choices=("gate", "experiment"), default="gate")
+    parser.add_argument("--condition", type=json.loads)
     args = parser.parse_args()
-    out = args.out.resolve()
+    out = protocol.validate_output(args.out)
     out.mkdir(parents=True, exist_ok=True)
     binary = ROOT / "target/release/bingsu"
     front = ROOT / "target/release/examples/n7_front_cost"
@@ -68,7 +81,8 @@ def main():
                               for p in (front, binary) if p.exists()},
                     baseline=str(args.baseline) if args.baseline else None,
                     cold_command=args.cold_command,
-                    maxrss_units="bytes on macOS; KiB on Linux")
+                    maxrss_units="bytes on macOS; KiB on Linux",
+                    legacy_front_publish=diagnostic_only({}))
     (out / "method.json").write_text(json.dumps(metadata, indent=2) + "\n")
     measured = {}
     result = resource_run([str(front), str(out / "front-fixture")])
@@ -83,8 +97,8 @@ def main():
             label = f"{fixture}/{col}"
             if col == "prefilter_ns" and not native:
                 label += " (clock denied; incomplete path)"
-            measured[label] = summary(nums) if nums else {"not_done": "native boot observation denied"}
-        measured[f"{fixture}/compiled_bytes"] = int(selected[0]["compiled_bytes"])
+            measured[label] = diagnostic_only(summary(nums) if nums else {"not_done": "native boot observation denied"})
+        measured[f"{fixture}/compiled_bytes"] = diagnostic_only(int(selected[0]["compiled_bytes"]))
     # The ignored fixture injects identity ONLY; real monotonic elapsed time and
     # the original 500 ms/2 s budgets still apply to actual filesystem publishing.
     built = checked(["cargo", "test", "--release", "-j", "2", "-p", "bingsu", "--bin", "bingsu",
@@ -103,7 +117,7 @@ def main():
         samples = [line.split("\t") for line in result.stdout.decode().splitlines()
                    if line.startswith(f"N7_PUBLISH\t{fixture}\t")]
         for index, phase in ((3, "changed"), (4, "unchanged")):
-            measured[f"{fixture}/publish-{phase} (clock identity DI)"] = (
+            measured[f"{fixture}/publish-{phase} (clock identity DI)"] = diagnostic_only(
                 summary([int(row[index]) for row in samples]) if samples
                 else {"not_done": "publication incomplete; inspect N7_STOP in publish.log; no budget changed"})
     if not native:
@@ -115,49 +129,46 @@ def main():
     print(json.dumps(measured, ensure_ascii=False, indent=2))
 
 
+def _n7_pairs(base: Path, candidate: Path, rounds: int, condition: protocol.Condition, *, redraw=False) -> protocol.Paired:
+    spec = importlib.util.spec_from_file_location('n7_collector', ROOT / 'bench/collector-product.py')
+    product = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(product)
+    (ROOT / 'target').mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='n7-pairs-', dir=ROOT / 'target') as temp:
+        contexts = {}
+        for name, binary in (('base', base), ('candidate', candidate)):
+            directory = Path(temp) / name
+            directory.mkdir(mode=0o700)
+            contexts[name] = product.prompt_context(binary.resolve(), directory)
+        def observe(name, binary):
+            command, env = contexts[name]
+            command = command + (['--redraw'] if redraw else [])
+            start = time.perf_counter_ns()
+            result = checked(command, env=env)
+            elapsed = time.perf_counter_ns() - start
+            if not product.normal_record(result):
+                raise ValueError('normal prompt record unavailable')
+            return dict(prompt_ns=elapsed, command=command)
+        return protocol.paired(base, candidate, rounds, condition, observe,
+                               required_metrics=("prompt_ns",))
+
+
+def n7_pairs(base: Path, candidate: Path, rounds: int, condition: protocol.Condition, *, redraw=False) -> protocol.Paired:
+    try:
+        return _n7_pairs(base, candidate, rounds, condition, redraw=redraw)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return dict(status='BLOCKED', reason=str(error), variants={}, blocks=[])
+
+
 def measure_prompt(args, out, binary, measured):
-    sys.path.insert(0, str(ROOT / "tests/shell"))
-    from snapshot_support import SnapshotSession
-    os.environ["BINGSU_BIN"] = str(binary)
-    session = SnapshotSession(out / "native")
-    session.put("[style]\ntemplate='N7 {char}'\n")
-    session.init()
-    session.await_text("N7")
-    session.wait_quiet()
-    commands = {"N": [str(binary), *session.prompt_args()]}
-    if args.baseline:
-        commands["V3"] = [str(args.baseline.resolve()), *session.prompt_args()]
-    data = []
-    modes = ["common", "redraw"] + (["cold-page-cache"] if args.cold_command else [])
-    for mode in modes:
-        for iteration in range(WARMUP + SAMPLES):
-            names = list(commands)
-            if iteration % 2:
-                names.reverse()
-            for name in names:
-                if mode == "cold-page-cache":
-                    checked(args.cold_command)
-                command = commands[name] + (["--redraw"] if mode == "redraw" else [])
-                start = time.perf_counter_ns()
-                r = checked(command, env=session.env)
-                elapsed = time.perf_counter_ns() - start
-                assert not r.stderr and r.stdout.startswith(b"B1\x1f"), r
-                if name == "N":
-                    assert b"ok:none" in r.stdout, r.stdout
-                if iteration >= WARMUP:
-                    data.append((name, mode, iteration - WARMUP, elapsed))
-    with (out / "prompt.tsv").open("w") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(("build", "mode", "iteration", "ns"))
-        writer.writerows(data)
-    for name in commands:
-        for mode in modes:
-            measured[f"prompt-{mode}/{name}"] = summary([row[3] for row in data if row[:2] == (name, mode)])
-    if not args.cold_command:
-        measured["prompt-cold-page-cache"] = {"not_done": "no permitted verified cache eviction command"}
-    if not args.baseline:
-        measured["V3-comparison"] = {"not_done": "no prebuilt V3 binary supplied; git untouched"}
-    measured["cold-init/warm-init"] = {"not_done": "separate shell-startup baseline required (bench/run-e2e.sh)"}
+    condition = {**protocol.DEFAULT, **(args.condition or {}), 'mode': args.mode}
+    for mode in ('common', 'redraw'):
+        result = n7_pairs(args.baseline or binary, binary, SAMPLES, condition, redraw=mode == 'redraw')
+        raw = protocol.persist_raw(out, result)
+        measured['prompt-' + mode] = dict(status=result['status'], raw=str(raw),
+            variants={n: v['summary'] for n, v in result['variants'].items()})
+    measured['prompt-cold-page-cache'] = dict(status='BLOCKED', reason='cold is record-only; separate permitted cache eviction run required')
+    measured['cold-init/warm-init'] = dict(status='BLOCKED', reason='separate shell-startup baseline required (bench/run-e2e.sh)')
 
 
 if __name__ == "__main__":
