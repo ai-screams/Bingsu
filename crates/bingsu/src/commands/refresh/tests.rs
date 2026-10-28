@@ -1164,18 +1164,31 @@ fn front_matches_checkpoint_control_at_every_kill_point() {
     // The new layout draws ASCII glyphs; the old one draws '❯'.
     assert!(mixed.record.windows(3).all(|w| w != "❯".as_bytes()));
     assert!(old.record.windows(3).any(|w| w == "❯".as_bytes()));
-    for point in [
-        Checkpoint::Before(Slot::Sequence),
-        Checkpoint::After(Slot::Sequence),
+    // Every checkpoint variant, so a new one cannot be left out silently.
+    let points = [
+        Checkpoint::Locked,
+        Checkpoint::Read,
+        Checkpoint::Staged,
         Checkpoint::Validated,
-        Checkpoint::Before(Slot::LastGood),
-        Checkpoint::After(Slot::LastGood),
-        Checkpoint::Before(Slot::Snapshot),
-        Checkpoint::After(Slot::Snapshot),
-        Checkpoint::Before(Slot::Marker),
-        Checkpoint::After(Slot::Marker),
         Checkpoint::Published,
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        Slot::ALL
+            .into_iter()
+            .flat_map(|s| [Checkpoint::Before(s), Checkpoint::After(s)]),
+    );
+    for point in points {
+        // Exhaustive: a new variant fails to compile until it is listed above.
+        match point {
+            Checkpoint::Locked
+            | Checkpoint::Read
+            | Checkpoint::Staged
+            | Checkpoint::Validated
+            | Checkpoint::Published
+            | Checkpoint::Before(_)
+            | Checkpoint::After(_) => {}
+        }
         let f = Fx::new(tag);
         f.put(COMMAND);
         published(f.run());
