@@ -1273,13 +1273,24 @@ def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict
 
 
 # GATE-FS-HELPER.1: helper calls per publication stage of a release build.
-# Calls the classifier never counts (classify.NON_FS) and attribution never
-# reads, left out of the trace with --seccomp-bpf: the collector then meets its
-# 50 ms request deadline more often. Every other call, unknown ones included,
-# is still traced.
-UNTRACED = frozenset({"futex", "rt_sigaction", "rt_sigprocmask", "ppoll", "clock_gettime", "clock_nanosleep",
-                      "nanosleep", "brk", "mprotect", "munmap", "madvise", "gettid", "getrandom",
-                      "sched_getaffinity", "sched_yield"})
+# The helper stage gate traces only calls that can be counted or that
+# attribution needs, with --seccomp-bpf, so the rest never stop the tracee and
+# the collector keeps more of its 50 ms request deadline. Every call of the
+# helper subtree's allowlist (HELPER_CALLS) that the classifier can count is in
+# the set; a call outside that allowlist fails the trace=all path gate above
+# (test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots).
+PROCESS_RECORDS = frozenset({"clone", "clone3", "fork", "vfork", "execve", "execveat", "exit", "exit_group",
+                             "seccomp", "kill", "tgkill"})
+# Calls that create or drop descriptors: attribution follows the fd table.
+FD_TABLE = frozenset({"close", "close_range", "dup", "dup2", "dup3", "pipe", "pipe2", "socket", "socketpair",
+                      "pidfd_open", "accept", "accept4"})
+
+
+def traced_calls():
+    from fsbudget.classify import NON_FS
+    return frozenset(HELPER_CALLS - NON_FS) | PROCESS_RECORDS | FD_TABLE
+
+
 HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
                  "failure-recover": ("failure-recover",)}
@@ -1447,7 +1458,8 @@ class HelperStageFixture:
         f.write_bytes(self.script + b"\n_bingsu_seq=" + str(self.seq).encode() + b"\ncd '"
                       + os.fsencode(str(self.pwd)) + b"'\n" + CALL)
         strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
-                  "-e", "trace=!" + ",".join(sorted(UNTRACED)), "-o", str(trace)] if trace else []
+                  "-e", "trace=" + ",".join("?" + name for name in sorted(traced_calls())),
+                  "-o", str(trace)] if trace else []
         r = subprocess.run(strace + SHELL_CMD["bash"] + [str(f)], env=self.env, capture_output=True, timeout=60)
         assert r.returncode == 0, r.stderr
         return r
@@ -1496,10 +1508,14 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
     return collectors, roles.counts
 
 
-# 이것을 실패시키는 것: 비계수 호출 밖의 호출(파일 시스템·프로세스 기록)을 trace에서 빼는 것.
-def test_untraced_calls_are_never_counted():
+# 이것을 실패시키는 것: 셀 수 있는 도우미 호출(HELPER_CALLS 중 NON_FS가 아닌 것)이나 프로세스·fd 기록 하나를
+# 추적 집합에서 빼는 것, 또는 추적 집합 밖의 호출을 분류기가 세는 것.
+def test_traced_calls_cover_every_counted_call():
     from fsbudget.classify import NON_FS
-    assert UNTRACED <= NON_FS - {"clone", "clone3", "fork", "vfork", "execve", "execveat", "exit", "exit_group"}
+    traced = traced_calls()
+    assert HELPER_CALLS - NON_FS <= traced
+    assert PROCESS_RECORDS | FD_TABLE <= traced
+    assert HELPER_CALLS - traced <= NON_FS
 
 
 # 이것을 실패시키는 것: 도우미 재검증 경로에 같은 파일의 fstat 하나를 더하는 것, 수집 비용을 앞단으로 옮기는 것,
