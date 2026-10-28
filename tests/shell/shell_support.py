@@ -98,3 +98,56 @@ def minimal_record(status=b"ok:none", left=b"> "):
     return b"B1\x1f8\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f" + status + b"\x1e"
 
 
+
+
+class Blocked(Exception):
+    """A fixture the test needs cannot be built on this host (reason in args[0]).
+
+    A test that catches it fails with "BLOCKED: <reason>"; it never skips,
+    because a skip would count a missing fixture as a pass."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _role(pid: str):
+    """Role of a live bingsu process: front, helper or collector (None otherwise).
+
+    A zombie has an empty cmdline and no exe link, so only live parents get a role."""
+    try:
+        argv = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+    name = os.path.basename(exe)
+    if name == "bingsu-collect":
+        return "collector"
+    if name == "bingsu" and argv[1:2] == [b"__refresh-v1"]:
+        return "helper"
+    if name == "bingsu" and argv[1:2] == [b"prompt"]:
+        return "front"
+    return None
+
+
+def zombie_children(roles: set[str]) -> list[int]:
+    """PIDs of zombies whose parent is a live process of one of `roles` (Linux /proc)."""
+    import sys
+    assert sys.platform == "linux", "zombie_children reads /proc"
+    status = {}
+    for entry in pathlib.Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = dict(line.split(":", 1) for line in (entry / "status").read_text().splitlines() if ":" in line)
+        except OSError:
+            continue
+        status[entry.name] = (fields["State"].split()[0], fields["PPid"].strip())
+    return sorted(int(pid) for pid, (state, parent) in status.items()
+                  if state == "Z" and _role(parent) in roles)
+
+
+def role_processes(roles: set[str]) -> list[int]:
+    """PIDs of live processes of one of `roles` (Linux /proc)."""
+    return sorted(int(entry.name) for entry in pathlib.Path("/proc").iterdir()
+                  if entry.name.isdigit() and _role(entry.name) in roles)

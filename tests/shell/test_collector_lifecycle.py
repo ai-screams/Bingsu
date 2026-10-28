@@ -1,16 +1,24 @@
 """Product lifecycle evidence; builds belong to the native test jobs."""
+import contextlib
 from contextlib import nullcontext
 from pathlib import Path
 import re
+import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
+from blocked_mount import blocked_mount
 from conftest import ROOT, minimal_record, real_bin
+from shell_support import Blocked, role_processes, zombie_children
 from snapshot_support import SnapshotSession
+from test_helper_lifecycle import LifetimeSession, fail_blocked, helper_lifetime_s, poll, stop_helpers
+from test_snapshot_refresh import appearance
 
 sys.path.insert(0, str(ROOT / "tools/fsbudget"))
 from fsbudget.strace_parse import parse as parse_trace, scan
@@ -334,3 +342,130 @@ def test_lifecycle_counts_deadline_empty_runs_but_requires_a_record(tmp_path, mo
             tmp_path, SimpleNamespace(disabled=nullcontext))
     report = capsys.readouterr().out
     assert f"records={records}, deadline-empty={400 - records}, traced=400" in report
+
+
+ROLES = {"front", "helper", "collector"}
+
+
+def lingering_zombies(grace=0.25):
+    """Zombies with a role parent that are still there after `grace` seconds.
+
+    A collector that just exited stays a zombie until the helper's next reap
+    poll (1 ms); only one that outlives the grace was left unreaped."""
+    seen = set(zombie_children(ROLES))
+    end = time.monotonic() + grace
+    while seen and time.monotonic() < end:
+        seen &= set(zombie_children(ROLES))
+        time.sleep(0.005)
+    return sorted(seen)
+
+
+@contextlib.contextmanager
+def subreaper():
+    """Make this process the subreaper of its descendants for the block.
+
+    The front never waits for its helper, so helpers' launchers end up here;
+    a collector ends up here only when its helper exited without reaping it.
+    reap_orphans() reaps the zombies that reached this process and returns
+    the PIDs of those that were collectors."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    assert libc.prctl(36, 1, 0, 0, 0) == 0, ctypes.get_errno()  # PR_SET_CHILD_SUBREAPER
+    try:
+        yield
+    finally:
+        libc.prctl(36, 0, 0, 0, 0)
+        reap_orphans()
+
+
+def reap_orphans():
+    collectors = []
+    for entry in Path("/proc").iterdir():
+        try:
+            fields = dict(line.split(":", 1) for line in (entry / "status").read_text().splitlines() if ":" in line)
+        except OSError:
+            continue
+        pid = int(entry.name) if entry.name.isdigit() else None
+        if pid is None or fields["State"].split()[0] != "Z" or int(fields["PPid"]) != os.getpid():
+            continue
+        if fields["Name"].strip() == "bingsu-collect":
+            collectors.append(pid)
+        os.waitpid(pid, os.WNOHANG)
+    return collectors
+
+
+def stalled(pid):
+    """True while the process waits in the kernel on an unanswered FUSE request."""
+    try:
+        channel = Path(f"/proc/{pid}/wchan").read_text()
+    except OSError:
+        return False
+    return "fuse" in channel or "request_wait_answer" in channel
+
+
+# 이것을 실패시키는 것: OwnedChild::reap에서 waitid를 지우는 것(죽인 collector가 도우미 아래 좀비로 남아
+# 회수 시도가 도우미 마감까지 이어진다).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc census and FUSE fixture")
+def test_n_prompts_leave_zero_zombies_including_killed_children(tmp_path, capsys):
+    """GATE-ZOMBIES.1: N=400 product prompts leave no zombie under a role process.
+
+    The run mixes completed collections, collectors killed at their request
+    deadline (their folder is on a stopped FUSE mount) and helpers killed by
+    the watchdog at their 2 s lifetime (their config root is on that mount).
+    After every prompt no zombie with a front, helper or collector parent may
+    outlive a short grace; after the run and one lifetime no role process is left."""
+    holder = {}
+    folders = [f"d{index}" for index in range(40)]
+
+    def prepare(mount):
+        stalled_config = LifetimeSession(tmp_path / "w", tag="w", config=mount / "cfg")
+        stalled_config.put(appearance("WATCHDOG"))
+        stalled_config.init()
+        stalled_config.wait_quiet()
+        for name in folders:
+            (mount / name).mkdir()
+        holder["w"] = stalled_config
+
+    try:
+        with subreaper(), blocked_mount(tmp_path / "fuse", prepare=prepare) as mount:
+            watched = holder["w"]
+            session = LifetimeSession(tmp_path / "s", tag="s")
+            repo = session.base / "repo"
+            try:
+                session.put("[style]\ntemplate='Z {dir} {git} {char}'\n")
+                session.init()
+                session.wait_quiet()
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q", str(repo)], check=True, env={"PATH": os.environ["PATH"]})
+                records = live_samples = 0
+                killed_collectors, seen = set(), set()
+                for index in range(400):
+                    if index % 100 == 50:
+                        watched.prompt()
+                    elif index % 10 == 5:
+                        records += bool(session.prompt_at(mount / folders[index // 10]))
+                    else:
+                        records += bool(session.prompt_at(repo))
+                    collectors = role_processes({"collector"})
+                    seen |= {pid for pid in collectors if stalled(pid)}
+                    # A stalled collector cannot leave the stopped mount on its own: gone means killed.
+                    killed_collectors |= seen - set(collectors)
+                    live_samples += bool(role_processes({"helper"}))
+                    assert not (left := lingering_zombies()), ("zombies left under a role process", index, left)
+                    # 이것을 실패시키는 것: 죽인 collector만 회수하지 않고 회수했다고 보고하는 것(도우미가 끝나며 좀비가 여기로 온다).
+                    assert not (orphaned := reap_orphans()), ("collectors their helper exited without reaping", index, orphaned)
+                poll(lambda: not role_processes(ROLES), helper_lifetime_s() + 1, "role processes outlived the lifetime")
+                assert zombie_children(ROLES) == [] and reap_orphans() == []
+                session.wait_quiet()
+                watched.wait_quiet()
+                watchdog_kills = watched.statuses().count(-signal.SIGKILL)
+                with capsys.disabled():
+                    print(f"\nzombie census: records={records}, live-helper-samples={live_samples}, "
+                          f"collector-kills={len(killed_collectors)}, watchdog-kills={watchdog_kills}")
+                assert records > 0 and live_samples > 0, (records, live_samples)
+                assert killed_collectors, "no collector was seen killed at its deadline"
+                assert watchdog_kills > 0, ("no helper was killed by the watchdog", watched.statuses())
+            finally:
+                stop_helpers(watched, session)
+    except Blocked as error:
+        fail_blocked(error)

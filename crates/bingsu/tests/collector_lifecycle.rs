@@ -1584,24 +1584,43 @@ fn pidfd_failure_child() {
     );
 }
 
-// 이것을 실패시키는 것: 정상 fixture의 회수를 생략하거나 완료 회차 수를 줄이는 것.
+// 이것을 실패시키는 것: 정상 fixture의 회수를 생략하거나 완료 회차 수를 줄이는 것,
+// OwnedChild::reap의 waitid를 지워 죽인 worker를 좀비로 남기는 것.
 #[test]
 fn four_hundred_requests_leave_no_workers_or_zombies() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
     passed(&isolated("four_hundred_child"));
 }
 #[test]
-#[ignore = "isolates the kernel child census after 400 completed exchanges"]
+#[ignore = "isolates the kernel child census after 400 exchanges, killed ones included"]
 fn four_hundred_child() {
-    let mut completed = 0;
-    for _ in 0..400 {
+    // Every tenth exchange ends in a kill at the product deadlines: no Ready
+    // (Ready deadline), an Update and then silence (request deadline), or a
+    // protocol error while the worker keeps running (supervisor kill).
+    let killed_modes = [
+        ("idle", EndReason::Deadline),
+        ("timeout", EndReason::Deadline),
+        ("first-invalid", EndReason::Protocol),
+    ];
+    let (mut completed, mut killed) = (0, [0; 3]);
+    for index in 0..400 {
+        if index % 10 == 5 {
+            let kind = index / 10 % killed_modes.len();
+            let (mode, reason) = killed_modes[kind];
+            let (report, _, _) = run_peer_timed(mode, true, None);
+            assert_eq!(report.reason, reason, "{mode}: {report:?}");
+            assert!(report.reaped && report.kill_requested, "{mode}: {report:?}");
+            killed[kind] += 1;
+            continue;
+        }
         let (report, values, _) = run_peer_timed("normal", true, GENEROUS);
         assert_eq!(report.reason, EndReason::Complete);
         assert!(report.reaped && !report.kill_requested, "{report:?}");
         assert_eq!(values.len(), 1);
         completed += 1;
     }
-    assert_eq!(completed, 400, "the full lifecycle workload must run");
+    assert_eq!(completed, 360, "the full lifecycle workload must run");
+    assert!(killed.iter().all(|&count| count > 0), "{killed:?}");
     // SAFETY: this isolated fixture owns no other children or waiters.
     let rc = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
     assert_eq!(rc, -1, "a worker or zombie remains");
