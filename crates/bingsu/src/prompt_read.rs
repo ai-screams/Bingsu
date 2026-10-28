@@ -1426,6 +1426,11 @@ pub(crate) mod tests {
                 std::process::id(),
                 COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
+            Self::at(base, fixed_clock(None).observe().unwrap(), false)
+        }
+        /// A store published under `clock`; `boundary` uses the 4096-band
+        /// forest of the N1 boundary fixture (crates/bingsu/examples/n7_front_cost.rs).
+        fn at(base: PathBuf, clock: Clock, boundary: bool) -> Self {
             fs::create_dir(&base).unwrap();
             fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
             let base = fs::canonicalize(base).unwrap();
@@ -1436,7 +1441,6 @@ pub(crate) mod tests {
                 fs::create_dir(&store).unwrap();
                 fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).unwrap();
             }
-            let clock = fixed_clock(None).observe().unwrap();
             let roots: Vec<_> = [
                 BUILTIN_TOML,
                 "icons='ascii'\n[layout.line2]\nleft=['char']\n",
@@ -1453,10 +1457,24 @@ pub(crate) mod tests {
                 display: vec![i as u8],
             })
             .collect();
-            let config =
+            let mut config =
                 bingsu_core::config::report::report(roots, &mut NoFiles, [0, 3, 0], Mode::Dark)
                     .snapshot
                     .unwrap();
+            if boundary {
+                let n = bingsu_core::bands::MAX_BANDS;
+                config.bands = (0..n)
+                    .map(|i| bingsu_core::bands::Band {
+                        min_cols: Some(i as u16),
+                        max_cols: Some(10000),
+                        order: None,
+                    })
+                    .collect();
+                config.band_names = (0..n).map(|i| format!("b{i}")).collect();
+                config.band_order = (0..n).rev().collect();
+                config.variants = vec![config.variants[0].clone(); n + 1];
+                config.widths.clear();
+            }
             let snapshot = Snapshot {
                 id: Identity {
                     boot: clock.boot,
@@ -1892,5 +1910,192 @@ pub(crate) mod tests {
             assert!(out.stderr.is_empty());
             assert!(!out.stdout.windows(3).any(|bytes| bytes == b"B1\x1f"));
         }
+    }
+
+    // Segment budget row "front snapshot read" (spec section 8): the window opens when
+    // clock preparation returns, immediately before the first runtime-root
+    // directory open, and closes when the read continuation is done, after the
+    // snapshot, marker and collection reads and the final clock that the pair
+    // and freshness checks of `staged::finish` consume. `finish` is timed next to
+    // it. Delays exist only in this test loop; the shipped `respond` is unchanged.
+    std::thread_local! { static BOUNDARY_START: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+    fn boundary_stamp() {
+        if BOUNDARY_START.get().is_none() {
+            BOUNDARY_START.set(Some(crate::prompt_io::monotonic_ns().unwrap()));
+        }
+    }
+    fn boundary_native_clock(deadline: Option<Deadline>) -> ClockPins {
+        let pins = ClockPins::prepare(deadline);
+        boundary_stamp();
+        pins
+    }
+    fn boundary_fixed_clock(deadline: Option<Deadline>) -> ClockPins {
+        let pins = fixed_clock(deadline);
+        boundary_stamp();
+        pins
+    }
+    #[derive(Clone, Copy, Default)]
+    struct Delays {
+        marker_read: u64,
+        final_clock: u64,
+    }
+    struct Boundary {
+        boundary_ns: u64,
+        read_decode_ns: u64,
+        finish_ns: u64,
+        record: Vec<u8>,
+    }
+    fn boundary_sample(
+        args: &[Vec<u8>],
+        clock: fn(Option<Deadline>) -> ClockPins,
+        deadline: Option<Deadline>,
+        confine: bool,
+        delays: Delays,
+    ) -> Boundary {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Reading {
+            Nothing,
+            Snapshot,
+            Marker,
+        }
+        let now = || crate::prompt_io::monotonic_ns().unwrap();
+        let pause = |ns: u64| {
+            if ns > 0 {
+                std::thread::sleep(std::time::Duration::from_nanos(ns));
+            }
+        };
+        BOUNDARY_START.set(None);
+        let raw = args.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let mut p = prepare_with_clock(&raw, clock, deadline);
+        if confine {
+            assert!(bingsu_core::front::runs_core(crate::sandbox::enter()));
+        }
+        let mut reading = Reading::Nothing;
+        let (mut read_start, mut read_end) = (None, None);
+        loop {
+            match std::mem::replace(&mut p.step, Step::Done(staged::Observed::default())) {
+                Step::Done(observed) => {
+                    let end = now();
+                    let record = staged::finish(p.plan, observed).record;
+                    let finish_ns = now() - end;
+                    let start = BOUNDARY_START.get().expect("clock preparation ran");
+                    return Boundary {
+                        boundary_ns: end - start,
+                        read_decode_ns: read_end.zip(read_start).map_or(0, |(e, s)| e - s),
+                        finish_ns,
+                        record,
+                    };
+                }
+                Step::Read(effect) => {
+                    match effect.operation() {
+                        Operation::OpenFile { name, .. } => {
+                            reading = match *name {
+                                b"marker" => Reading::Marker,
+                                b"snapshot" | b"last-good" => Reading::Snapshot,
+                                _ => Reading::Nothing,
+                            }
+                        }
+                        Operation::Read { .. } if reading == Reading::Marker => {
+                            pause(delays.marker_read)
+                        }
+                        Operation::Read { .. } if reading == Reading::Snapshot => {
+                            read_start.get_or_insert_with(now);
+                        }
+                        // The decode ran in the `next` that asked for this close.
+                        Operation::Close(Slot::File) => {
+                            if reading == Reading::Snapshot && read_end.is_none() {
+                                read_end = Some(now());
+                            }
+                            reading = Reading::Nothing;
+                        }
+                        Operation::Clock => pause(delays.final_clock),
+                        _ => {}
+                    }
+                    let observation = p.after(&effect);
+                    p.step = staged::next(&mut p.plan, Some(observation));
+                }
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: 끝 시각을 마지막 시계 관찰 전(표식을 닫은 직후)으로 당기는 것,
+    // 표식 읽기 지연을 스냅샷 읽기에도 넣는 것.
+    #[test]
+    fn snapshot_boundary_grows_with_injected_marker_delay() {
+        const DELAY: u64 = 20_000_000;
+        let f = Fx::new();
+        let median = |delays: Delays| {
+            let mut rows: Vec<_> = (0..3)
+                .map(|_| {
+                    let b = boundary_sample(&f.args, boundary_fixed_clock, None, false, delays);
+                    assert!(text(b.record).contains("ok:none"));
+                    (b.boundary_ns, b.read_decode_ns)
+                })
+                .collect();
+            rows.sort_unstable();
+            let boundary = rows[1].0;
+            rows.sort_unstable_by_key(|r| r.1);
+            (boundary, rows[1].1)
+        };
+        let base = median(Delays::default());
+        assert!(
+            base.0 < DELAY / 2 && base.1 > 0 && base.1 <= base.0,
+            "{base:?}"
+        );
+        for delays in [
+            Delays {
+                marker_read: DELAY,
+                ..Delays::default()
+            },
+            Delays {
+                final_clock: DELAY,
+                ..Delays::default()
+            },
+        ] {
+            let (boundary, read_decode) = median(delays);
+            assert!(boundary >= DELAY, "boundary {boundary}");
+            assert!(read_decode < DELAY / 2, "read/decode {read_decode}");
+        }
+    }
+
+    /// bench/n7_measure.py runs one child per sample from a private working
+    /// folder named after its fixture (`normal` or `4096-band`). The store is
+    /// published with the native clock, the reader runs the shipped clock pins,
+    /// deadline and (Linux) seccomp filter, and the result leaves by `write`.
+    #[test]
+    #[ignore = "child: one confined snapshot-boundary sample for bench/n7_measure.py"]
+    fn n7_snapshot_boundary_child() {
+        let dir = std::env::current_dir().unwrap();
+        let boundary = match dir.file_name().and_then(|n| n.to_str()) {
+            Some("normal") => false,
+            Some("4096-band") => true,
+            // SAFETY: child-only exit before any measurement.
+            _ => unsafe { libc::_exit(3) },
+        };
+        let out = match crate::prompt_io::observe_clock() {
+            Err(_) => "N7_BOUNDARY_NA native boot observation denied\n".to_owned(),
+            Ok(clock) => {
+                let f = Fx::at(dir.join(std::process::id().to_string()), clock, boundary);
+                let b = boundary_sample(
+                    &f.args,
+                    boundary_native_clock,
+                    crate::prompt_io::entry_deadline(),
+                    true,
+                    Delays::default(),
+                );
+                std::mem::forget(f); // Confined: the parent removes the folder.
+                format!(
+                    "N7_BOUNDARY {{\"snapshot_boundary_ns\":{},\"snapshot_read_decode_ns\":{},\"finish_ns\":{},\"normal_record\":{}}}\n",
+                    b.boundary_ns,
+                    b.read_decode_ns,
+                    b.finish_ns,
+                    b.record.ends_with(b"ok:none\x1e")
+                )
+            }
+        };
+        // SAFETY: a valid buffer of out.len() bytes.
+        unsafe { libc::write(1, out.as_ptr().cast(), out.len()) };
+        // SAFETY: child exit avoids libtest output under the filter.
+        unsafe { libc::_exit(0) }
     }
 }

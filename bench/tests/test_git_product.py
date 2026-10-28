@@ -300,3 +300,73 @@ def test_protocol_blocks_missing_git_metric(pair, monkeypatch, metric):
     assert result['status'] == 'BLOCKED'
     assert result['cases']['git-clean']['status'] == 'BLOCKED'
     assert metric in result['cases']['git-clean']['reason']
+
+
+YY_TRACE = """\
+100   execve("/b/bingsu", ["/b/bingsu", "prompt", "--ctx", "1"], 0x7ffd /* 2 vars */) = 0
+100   openat(AT_FDCWD</>, "/proc/self/fd", O_RDONLY|O_CLOEXEC) = 3</proc/100/fd>
+100   clone(child_stack=0xe250, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+101   execve("/b/bingsu", ["/b/bingsu", "__refresh-v1", "--config-root=/c"], 0x7ffe /* 0 vars */ <unfinished ...>
+100   <... clone resumed>)              = 101
+101   <... execve resumed>)             = 0
+100   write(1<pipe:[1906095]>, "B1\\378\\37"..., 241 <unfinished ...>
+100   +++ exited with 0 +++
+101   clone(child_stack=0xfee2, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD <unfinished ...>
+101   <... clone resumed>, parent_tid=[103], tls=0xfee2, child_tidptr=0xfee1) = 103
+101   vfork( <unfinished ...>
+102   execve("/b/bingsu-collect", ["/b/bingsu-collect", "__collect-v1"], 0x7ffe /* 0 vars */) = 0
+101   <... vfork resumed>)              = 102
+102   write(1<pipe:[9]>, "\\x01", 1) = 1
+102   writev(1<pipe:[9]>, [{iov_base="x", iov_len=1}], 1) = 1
+103   write(43<pipe:[10]>, "BNGIPC05", 518 <unfinished ...>
+102   +++ exited with 1 +++
+101   pwrite64(7</r/store/marker.tmp>, "m", 1, 0) = 1
+103   +++ exited with 0 +++
+101   +++ exited with 0 +++
+"""
+COUNT_TRACE = """\
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 60.00    0.000300          30        10           openat
+ 30.00    0.000150          15        10         2 read
+ 10.00    0.000050           5        10           write
+------ ----------- ----------- --------- --------- ----------------
+100.00    0.000500          16        30         2 total
+"""
+
+
+# 이것을 실패시키는 것: 역할을 exec 인자(prompt·__refresh-v1·bingsu-collect)가 아닌 pid 순서로 정하거나,
+# 끝나지 않은 호출을 두 번 세거나 놓치는 것, exec 전 자식의 쓰기를 다른 역할에 넣는 것.
+def test_process_model_parses_roles_spawns_writes_and_syscall_time():
+    spawns, writes = git.parse_process_trace(YY_TRACE)
+    assert spawns == {"front": 1, "helper": 1, "collector": 1}
+    assert writes == {"front": 1, "helper": 2, "collector": 2}  # helper: its thread 103 and pwrite64
+    assert git.parse_syscall_time(COUNT_TRACE) == {"openat": 300, "read": 150, "write": 50}
+    with pytest.raises(ValueError):
+        git.parse_syscall_time("no summary")
+
+
+# 이것을 실패시키는 것: strace 실행 결과를 지연 요약(summarize·measure_pair)에 넣거나,
+# trace 출력에 지연 필드를 두는 것, Linux가 아닌 host에서 trace를 PASS/skip으로 남기는 것.
+def test_trace_runs_never_feed_latency_summaries(monkeypatch, tmp_path):
+    traced = {"kind": "process-model-trace", "spawns": {}, "write_calls": {}, "syscall_time_us": {}}
+    with pytest.raises(ValueError, match="trace"):
+        git.summarize([{**sample(), **traced}], 200)
+    monkeypatch.setattr(git.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(git, "observe_process_model",
+                        lambda binary, case: git.ProcessModelSample(spawns={"front": 1}, write_calls={"front": 1},
+                                                                     syscall_time_us={"write": 1}))
+    value = git.trace_run("bingsu", ["git-clean"])
+    assert value["status"] == "OBSERVED" and value["kind"] == "process-model-trace"
+    assert value["evidence_use"] == "process model only; never a latency sample"
+    flat = json.dumps(value)
+    for latency in ("prompt_ns", "metrics", "variants", "p50", "collection_ns"):
+        assert latency not in flat
+    monkeypatch.setattr(git.platform, "system", lambda: "Darwin")
+    value = git.trace_run("bingsu", ["git-clean"])
+    assert value["status"] == "BLOCKED" and value["cases"] == {}
+    written = {}
+    monkeypatch.setattr(git.M3B.protocol, "write_output", lambda path, payload: written.update(payload))
+    import sys
+    monkeypatch.setattr(sys, "argv", ["git-product.py", "--x03-trace", "bingsu", "--out", str(tmp_path / "t.json")])
+    assert git.main() == 2 and written["status"] == "BLOCKED"
