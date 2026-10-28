@@ -233,6 +233,9 @@ jobs:
           grep -F 'test commands::refresh::tests::marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test commands::refresh::tests::marker_disagreeing_in_generation_or_summary_launches_no_unit ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test commands::refresh::tests::confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degrades ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::chmod_g_w_after_verified_at_plus_t_approves_no_unit ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::scan_time_chmod_or_replace_keeps_marker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test prompt_read::tests::clock_reads::test_front_clock_reads_per_use_are_fixed ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"
