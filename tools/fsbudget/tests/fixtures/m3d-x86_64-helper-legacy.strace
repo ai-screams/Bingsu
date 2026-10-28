@@ -1,0 +1,13 @@
+101 open("/fx/config.toml", O_RDONLY|O_CLOEXEC) = 3</fx/config.toml>
+101 creat("/fx/stage", 0600) = 4</fx/stage>
+101 stat("/fx/config.toml", {st_mode=S_IFREG|0600, st_size=31, ...}) = 0
+101 lstat("/fx/missing", 0x1) = -1 ENOENT (No such file or directory)
+101 fstat(3</fx/config.toml>, {st_mode=S_IFREG|0600, st_size=31, ...}) = 0
+101 readlink("/fx/link", "/fx/config.toml", 4097) = 15
+101 mkdir("/fx/context", 0700) = -1 EEXIST (File exists)
+101 chmod("/fx/stage", 0600) = 0
+101 unlink("/fx/stage" <unfinished ...>
+101 <... unlink resumed>) = 0
+101 rmdir("/fx/old-context") = 0
+101 rename("/fx/pending", "/fx/current") = 0
+101 getdents(5</fx/context>, [], 32768) = 0

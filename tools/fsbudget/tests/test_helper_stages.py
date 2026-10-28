@@ -96,6 +96,105 @@ def test_helper_vocabulary(c, kind):
     assert helper_kind(c) == kind
 
 
+# Each pair is one operation on the same fixture object. Failed attempts count
+# too. The permission operation's existing formula primitive uses held-fd fchmod.
+LEGACY_EQUIVALENTS = [
+    ("open", '"/r/f", O_RDONLY|O_CLOEXEC', "openat", 'AT_FDCWD, "/r/f", O_RDONLY|O_CLOEXEC', "openat"),
+    ("creat", '"/r/f", 0600', "openat", 'AT_FDCWD, "/r/f", O_WRONLY|O_CREAT|O_TRUNC, 0600', "openat"),
+    ("stat", '"/r/f", {}', "newfstatat", 'AT_FDCWD, "/r/f", {}, 0', "fstat"),
+    ("lstat", '"/r/f", {}', "newfstatat", 'AT_FDCWD, "/r/f", {}, AT_SYMLINK_NOFOLLOW', "fstat"),
+    ("fstat", '3</r/f>, {}', "statx", '3</r/f>, "", AT_EMPTY_PATH, STATX_ALL, {}', "fstat"),
+    ("readlink", '"/r/f", "target", 4097', "readlinkat", '3</r>, "f", "target", 4097', "readlink"),
+    ("mkdir", '"/r/d", 0700', "mkdirat", '3</r>, "d", 0700', "mkdir"),
+    ("chmod", '"/r/f", 0600', "fchmod", '3</r/f>, 0600', "chmod"),
+    ("unlink", '"/r/f"', "unlinkat", '3</r>, "f", 0', "unlinkat"),
+    ("rmdir", '"/r/d"', "unlinkat", '3</r>, "d", AT_REMOVEDIR', "unlinkat"),
+    ("rename", '"/r/a", "/r/b"', "renameat", '3</r>, "a", 3</r>, "b"', "renameat"),
+    ("getdents", '3</r>, [], 32768', "getdents64", '3</r>, [], 32768', "getdents"),
+]
+
+
+# 이것을 실패시키는 것: 아키텍처별 이름만 다른 한 호출을 다른 kind로 세거나 실패한 호출을 버리는 것.
+@pytest.mark.parametrize("legacy,args,modern,modern_args,expected", LEGACY_EQUIVALENTS)
+@pytest.mark.parametrize("ret", ["0", "-1 EACCES (Permission denied)"])
+def test_helper_legacy_equivalence(legacy, args, modern, modern_args, expected, ret):
+    assert helper_kind(call(legacy, args, ret)) == expected
+    assert helper_kind(call(modern, modern_args, ret)) == expected
+
+
+# 이것을 실패시키는 것: helper alias를 다른 역할로 넓히거나 상대 경로까지 신뢰하는 것.
+@pytest.mark.parametrize("name,args", [(n, a) for n, a, *_ in LEGACY_EQUIVALENTS
+                                      if n in {"open", "creat", "stat", "lstat", "mkdir", "chmod", "rmdir"}])
+def test_helper_legacy_scope(name, args):
+    from fsbudget.classify import kind, collector_kind, collector_bootstrap_kind, collection_publication_kind
+    c = call(name, args)
+    for classify in (kind, collector_kind, collector_bootstrap_kind, collection_publication_kind):
+        assert classify(c) == "unknown-fs"
+    assert helper_kind(call(name, args.replace('"/r/', '"'))) == "unknown-fs"
+
+
+# No helper formula operation covers these aliases; do not invent access,
+# ownership, link-creation or timestamp budgets to make a trace pass.
+@pytest.mark.parametrize("name,args", [
+    ("access", '"/r/f", R_OK'), ("faccessat", 'AT_FDCWD, "/r/f", R_OK'),
+    ("faccessat2", 'AT_FDCWD, "/r/f", R_OK, 0'),
+    ("link", '"/r/a", "/r/b"'), ("symlink", '"/r/a", "/r/b"'),
+    ("chown", '"/r/f", 1, 1'), ("lchown", '"/r/f", 1, 1'),
+    ("mknod", '"/r/f", S_IFIFO|0600, 0'), ("utime", '"/r/f", NULL'),
+    ("utimes", '"/r/f", NULL'), ("fchmodat", 'AT_FDCWD, "/r/f", 0600'),
+])
+def test_helper_unreviewed_legacy_operations_stay_unknown(name, args):
+    assert helper_kind(call(name, args)) == "unknown-fs"
+
+
+def legacy_trace_counts():
+    from collections import Counter
+    from pathlib import Path
+    from fsbudget.strace_parse import parse
+    # Handwritten ABI-equivalence fixture, not a new live x86_64 capture.
+    trace = parse((Path(__file__).with_name("fixtures") / "m3d-x86_64-helper-legacy.strace").read_text())
+    assert not trace.errors, trace.errors
+    return trace, Counter(helper_kind(c) for c in trace)
+
+
+# Independent ledger: twelve calls, including one unfinished/resumed unlink.
+LEGACY_EXPECTED = {"openat": 2, "fstat": 3, "readlink": 1, "mkdir": 1,
+                   "chmod": 1, "unlinkat": 2, "renameat": 1, "getdents": 1}
+
+
+# 이것을 실패시키는 것: legacy 호출을 무시하거나 둘로 세거나 추가 호출을 exact가 허용하는 것.
+@pytest.mark.parametrize("name", [row[0] for row in LEGACY_EQUIVALENTS])
+def test_helper_legacy_stored_trace_extra_call_fails_exact(name):
+    from collections import Counter
+    from fsbudget.gate import check
+    from fsbudget.strace_parse import parse
+    trace, counts = legacy_trace_counts()
+    assert sum(counts.values()) == len(trace) == 12
+    assert check({"helper": counts}, {"helper": LEGACY_EXPECTED}, "exact", ["helper"]) == []
+    extra = next(c for c in trace if c.name == name)
+    damaged = parse("\n".join(f"{c.pid} {c.name}({c.args}) = {c.ret}" for c in [*trace, extra]))
+    assert not damaged.errors, damaged.errors
+    counts = Counter(helper_kind(c) for c in damaged)
+    kind = helper_kind(extra)
+    assert check({"helper": counts}, {"helper": LEGACY_EXPECTED}, "exact", ["helper"]) == [
+        f"helper.{kind}: measured {counts[kind]}, formula {LEGACY_EXPECTED[kind]} (exact)"]
+
+
+# 이것을 실패시키는 것: 매핑 삭제를 unknown-fs=0과 원래 kind의 exact가 검출하지 못하는 것.
+@pytest.mark.parametrize("name", ["open", "creat", "stat", "lstat", "mkdir", "chmod", "rmdir"])
+def test_helper_legacy_mapping_removal_fails_exact(monkeypatch, name):
+    from fsbudget.classify import HELPER_LEGACY_PATH_KINDS
+    from fsbudget.gate import check
+    expected_kind = HELPER_LEGACY_PATH_KINDS[name]
+    monkeypatch.delitem(HELPER_LEGACY_PATH_KINDS, name)
+    _, counts = legacy_trace_counts()
+    assert counts["unknown-fs"] == 1
+    assert counts[expected_kind] == LEGACY_EXPECTED[expected_kind] - 1
+    errors = check({"helper": counts}, {"helper": LEGACY_EXPECTED}, "exact", ["helper"])
+    assert len(errors) == 2
+    assert "helper.unknown-fs: measured 1, formula 0 (exact)" in errors
+
+
 # 이것을 실패시키는 것: prefix/tail 분리가 기존 원시 연산 합계나 libc 차이를 넓히는 것.
 @pytest.mark.parametrize("libc", ["gnu", "musl"])
 def test_collect_partition_preserves_primitive_totals(libc):

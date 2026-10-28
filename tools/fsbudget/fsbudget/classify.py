@@ -200,6 +200,17 @@ def collection_publication_kind(c: Call) -> str | None:
     return kind(c)
 
 
+# x86_64 has these path syscalls; aarch64 uses *at calls (or fchmod on
+# the held file). They perform the same formula operations, once per call.
+# Keep aliases here: generic/prompt/collector vocabularies must not grow.
+# access is deliberately absent: helper has no counted faccessat* kind.
+HELPER_LEGACY_PATH_KINDS = {
+    "open": "openat", "creat": "openat",
+    "stat": "fstat", "lstat": "fstat",
+    "mkdir": "mkdir", "chmod": "chmod", "rmdir": "unlinkat",
+}
+
+
 def helper_kind(c: Call) -> str | None:
     """Refresh helper vocabulary for the per-stage gate (spec 8 stage table).
 
@@ -211,6 +222,12 @@ def helper_kind(c: Call) -> str | None:
     unreviewed call still lands in `unknown-fs`.
     """
     args = split_args(c.args)
+    if c.name in HELPER_LEGACY_PATH_KINDS:
+        # Legacy paths have no dirfd capability. As in the existing path
+        # vocabulary, an ambient relative or undecodable path stays unknown.
+        path = args[0] if args else ""
+        return (HELPER_LEGACY_PATH_KINDS[c.name]
+                if path.startswith('"/') and path.endswith('"') else "unknown-fs")
     if c.name == "statx" and len(args) == 5:
         if args[1] == '""' and "AT_EMPTY_PATH" in args[2].split("|"):
             identity = fd_identity(args[0])

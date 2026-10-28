@@ -1598,6 +1598,97 @@ def first_helper_line(lines, pattern):
 STAGE_NAMES = ["unchanged", "publish", "collect", "failure-last-good", "failure-recover"]
 
 
+def legacy_helper_stage_case(stage):
+    """Change three stored helper calls to equivalent x86_64 spellings.
+
+    Keep the capture's plan/libc/counts: this is an ABI spelling mutation of
+    the saved aarch64 capture, not an asserted live x86_64 musl measurement.
+    """
+    import ast
+    import json
+    import posixpath
+    from fsbudget.classify import split_args, fd_identity
+    lines, collector, plan = helper_stage_case(stage)
+    start = first_helper_line(lines, r"umask\(077")
+    pid = lines[start].split()[0]
+    replacements = {}
+    for at in range(start + 1, len(lines)):
+        if lines[at].split()[0] != pid:
+            continue
+        parsed = budget.parse_trace(lines[at])
+        if parsed.errors or len(parsed) != 1:
+            continue  # leave unfinished/resumed records intact
+        c = parsed[0]
+        if c.name not in {"openat", "newfstatat"}:
+            continue
+        args = split_args(c.args)
+        path = ast.literal_eval(args[1])
+        if not path:
+            # A held directory in this symlink-free fixture is the same
+            # object when queried by stat(path). No extra open is introduced.
+            identity = fd_identity(args[0])
+            if (c.name == "newfstatat" and args[-1] == "AT_EMPTY_PATH"
+                    and "S_IFDIR" in args[2] and identity and identity.startswith("file:")
+                    and "stat" not in replacements):
+                lines[at] = f'{pid} stat({json.dumps(identity[5:])}, {args[2]}) = {c.ret}'
+                replacements["stat"] = at
+            continue
+        if not path.startswith("/"):
+            identity = fd_identity(args[0])
+            if not identity or not identity.startswith("file:"):
+                continue
+            path = posixpath.join(identity[5:], path)
+        if c.name == "openat":
+            name, tail = "open", args[2:]
+        else:
+            if args[-1] not in {"0", "AT_SYMLINK_NOFOLLOW"}:
+                continue
+            name = "lstat" if args[-1] == "AT_SYMLINK_NOFOLLOW" else "stat"
+            tail = [args[2]]
+        if name in replacements:
+            continue
+        lines[at] = f'{pid} {name}({", ".join([json.dumps(path), *tail])}) = {c.ret}'
+        replacements[name] = at
+        if len(replacements) == 3:
+            break
+    assert set(replacements) == {"open", "stat", "lstat"}, (stage, replacements)
+    return lines, collector, plan, replacements
+
+
+# 이것을 실패시키는 것: legacy 이름이 역할 집계/실제 단계 판정기를 우회하거나 누락 매핑을 허용하는 것.
+@pytest.mark.parametrize("stage", STAGE_NAMES)
+@pytest.mark.parametrize("name", ["open", "stat", "lstat"])
+@pytest.mark.parametrize("damage", [None, "extra", "remove-mapping"])
+def test_legacy_helper_stage_trace_mutations(monkeypatch, stage, name, damage):
+    from fsbudget.classify import HELPER_LEGACY_PATH_KINDS
+    from fsbudget.formula import helper_stage_expected
+    lines, collector, plan, replacements = legacy_helper_stage_case(stage)
+    original, _, _ = helper_stage_case(stage)
+    _, before = budget.measured_helper_calls(original, HELPER_EXE, collector)
+    _, after = budget.measured_helper_calls(lines, HELPER_EXE, collector)
+    assert before == after  # every role unchanged; each alias counts exactly once
+    assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) == (stage == "collect")
+    kind = HELPER_LEGACY_PATH_KINDS[name]
+    if damage == "extra":
+        at = replacements[name]
+        # A failed open is still one call; reusing its successful fd would
+        # fail descriptor attribution before reaching the exact count gate.
+        extra = lines[at].split(" = ")[0] + " = -1 EACCES (Permission denied)"
+        lines.insert(at + 1, extra)
+    elif damage == "remove-mapping":
+        monkeypatch.delitem(HELPER_LEGACY_PATH_KINDS, name)
+    errors = helper_stage_errors(lines, collector, helper_stage_expected(plan))
+    if damage is None:
+        assert errors == []
+        return
+    assert any(f"helper.{kind}:" in error and "(exact)" in error for error in errors)
+    if damage == "remove-mapping":
+        assert "helper.unknown-fs: measured 1, formula 0 (exact)" in errors
+    phase = "prefix" if stage == "collect" else "helper"
+    with pytest.raises(AssertionError, match=rf"{phase}\.{kind}.*exact"):
+        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
 # 이것을 실패시키는 것: 판정기가 저장 trace의 종류별 호출 수를 공식과 exact로 비교하지 않는 것,
 # 도우미 호출 하나를 더하거나(fstat) 앞단으로 옮기는 것(git 전역 입력 open), helper 어휘 없이 세는 것,
 # umask를 세지 않는 것(더하거나 빼도 통과), 시작 뒤의 loader 모양 접근(/proc/<pid>/maps)을 면제하는 것.
@@ -1694,6 +1785,30 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
     return len(used)
 
 
+# 이것을 실패시키는 것: 업로드가 다른 시험/fixture/환경변수 파일까지 포함하는 것.
+def test_helper_stage_upload_contains_only_fixture_evidence(monkeypatch, tmp_path_factory):
+    import json
+    import yaml
+    root = budget.helper_stage_evidence.__wrapped__(tmp_path_factory)
+    root.mkdir()
+    unrelated = root.parent / "unrelated-secret-canary"
+    unrelated.write_text("not fixture evidence")
+    monkeypatch.setenv("M3D_SECRET_CANARY", "must-not-be-inherited")
+    assert "M3D_SECRET_CANARY" not in budget.trusted_env(root)
+    assert run_helper_captures(monkeypatch, root, [helper_stage_case("collect")]) == 1
+    files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+    assert files == {f"collect/attempt-1/{name}" for name in ("trace.strace", "stdout", "stderr", "attempt.json")}
+    assert not any(p.is_symlink() for p in root.rglob("*"))
+    record = json.loads((root / "collect/attempt-1/attempt.json").read_text())
+    assert record["published"] is True and record["errors"] == []
+    workflow = yaml.safe_load((budget.ROOT / ".github/workflows/shell.yml").read_text())
+    upload, = [s for s in workflow["jobs"]["filter-calls"]["steps"]
+               if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert upload["if"] == "failure()"
+    assert upload["with"]["path"] == "${{ runner.temp }}/helper-stage-pytest/" + root.name + "/"
+    assert unrelated.exists() and unrelated.parent != root
+
+
 def deadline_helper_capture():
     """Synthetic exit-75 variant: retain clock/finish/GC, omit publication.
 
@@ -1762,7 +1877,9 @@ def test_collect_requires_a_publication_within_six_attempts(monkeypatch, tmp_pat
     import json
     from collections import Counter
     for attempt in range(1, 7):
-        artifacts = tmp_path / f"attempt-{attempt}"
+        artifacts = tmp_path / "collect" / f"attempt-{attempt}"
+        assert {p.name for p in artifacts.iterdir()} == {"trace.strace", "stdout", "stderr", "attempt.json"}
+        assert all(p.is_file() and not p.is_symlink() for p in artifacts.iterdir())
         evidence = json.loads((artifacts / "attempt.json").read_text())
         assert evidence["collector_exit"] == 75
         assert evidence["published"] is False
@@ -1830,10 +1947,10 @@ def test_collect_review_missing_boundary_and_umask_bypass(monkeypatch, tmp_path)
     with pytest.raises(AssertionError, match="missing snapshot unlock boundary") as error:
         run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan), helper_stage_case("collect")])
     assert "prefix.umask: measured 0, formula 1 (exact)" in str(error.value)
-    assert not (tmp_path / "attempt-2").exists(), "must fail before the clean second attempt"
+    assert not (tmp_path / "collect" / "attempt-2").exists(), "must fail before the clean second attempt"
     # 이것을 실패시키는 것: 판정 실패 시 trace나 실패 이전 계수를 삭제하는 것.
     import json
-    artifacts = tmp_path / "attempt-1"
+    artifacts = tmp_path / "collect" / "attempt-1"
     evidence = json.loads((artifacts / "attempt.json").read_text())
     assert evidence["collector_exit"] == 75 and evidence["published"] is False
     assert evidence["prefix_complete"] is False

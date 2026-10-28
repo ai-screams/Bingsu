@@ -1524,9 +1524,15 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
 # 공식에 옛 고정 항(e["read"] += 2)을 되살리는 것, debug 바이너리로 재는 것, helper 어휘에서 fd statx나
 # chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것,
 # 마감 회차의 호출을 버리거나 최대 6회에서 실제 응답 발행이 한 번도 없는 것.
+@pytest.fixture
+def helper_stage_evidence(tmp_path_factory):
+    # A dedicated upload root, separate from all other pytest fixtures.
+    return tmp_path_factory.getbasetemp() / "helper-stage-evidence"
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("stage", list(HELPER_STAGES))
-def test_live_helper_calls_match_stage_formula(stage, tmp_path):
+def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     """GATE-FS-HELPER.1: exact stages; collect prefix exact and tail <=.
 
     Every attempt is checked before retrying, including exit 75. At least one
@@ -1539,8 +1545,8 @@ def test_live_helper_calls_match_stage_formula(stage, tmp_path):
     # failed attempt or earlier deadline attempts. --basetemp locates these
     # artifacts for the controller; each invocation needs its own basetemp.
     for attempt in range(1, (6 if stage == "collect" else 1) + 1):
-        artifacts = tmp_path / f"attempt-{attempt}"
-        artifacts.mkdir()
+        artifacts = helper_stage_evidence / stage / f"attempt-{attempt}"
+        artifacts.mkdir(parents=True)
         trace = artifacts / "trace.strace"
         evidence = {"stage": stage, "attempt": attempt, "collector_exit": None,
                     "published": None, "phase_counts": None, "phase_expected": None,
@@ -1566,4 +1572,4 @@ def test_live_helper_calls_match_stage_formula(stage, tmp_path):
             if fixture is not None:
                 wait_helpers(fixture.base)
                 shutil.rmtree(fixture.base, ignore_errors=True)
-    pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {tmp_path}")
+    pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {helper_stage_evidence / stage}")

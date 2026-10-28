@@ -210,12 +210,21 @@ jobs:
         if: matrix.profile == 'release'
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/helper-stage.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' --basetemp="$RUNNER_TEMP/helper-stage-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' "$RUNNER_TEMP/helper-stage.txt"
+      # Only the live fixture's trace, stdout, stderr and attempt.json.
+      - name: Upload failed helper stage evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: helper-stage-${{ matrix.os }}-${{ matrix.libc }}-${{ matrix.profile }}
+          path: ${{ runner.temp }}/helper-stage-pytest/helper-stage-evidence/
+          retention-days: 2
+          if-no-files-found: ignore
       - name: Mounted procfs self with a different visible PID
         if: matrix.libc == 'gnu' && matrix.profile == 'debug'
         run: |
