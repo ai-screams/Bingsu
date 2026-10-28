@@ -216,11 +216,31 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
 # aarch64 glibc captures have maps reads but no seeks. Rust std's
 # install_main_guard_linux_musl returns None on both architectures, so that
 # startup path has neither maps reads nor seeks (also seen in aarch64 musl).
+# Front startup opens/reads are exact too. These entries are used only by
+# the front gate; helper prologue accounting remains unchanged. glibc loads
+# cache, libgcc and libc, then Rust reads maps three times for its stack guard.
+# x86_64 glibc also preads the libc ELF program headers twice; aarch64
+# headers fit the initial read. Static musl builds only list inherited fds,
+# as do the glibc builds.
 STARTUP_PRIMITIVES = {
-    ("x86_64", "gnu"): {"stack_guard": {"seek": 2}},
-    ("aarch64", "gnu"): {"stack_guard": {}},
-    ("x86_64", "musl"): {"stack_guard": {}},
-    ("aarch64", "musl"): {"stack_guard": {}},
+    ("x86_64", "gnu"): {
+        "stack_guard": {"seek": 2},
+        "front_fds": {"openat": 1},
+        "front_cache": {"openat": 1},
+        "front_libgcc": {"openat": 1, "read": 1},
+        "front_libc": {"openat": 1, "read": 1, "pread64": 2},
+        "front_maps": {"openat": 1, "read": 3},
+    },
+    ("aarch64", "gnu"): {
+        "stack_guard": {},
+        "front_fds": {"openat": 1},
+        "front_cache": {"openat": 1},
+        "front_libgcc": {"openat": 1, "read": 1},
+        "front_libc": {"openat": 1, "read": 1},
+        "front_maps": {"openat": 1, "read": 3},
+    },
+    ("x86_64", "musl"): {"stack_guard": {}, "front_fds": {"openat": 1}},
+    ("aarch64", "musl"): {"stack_guard": {}, "front_fds": {"openat": 1}},
 }
 
 

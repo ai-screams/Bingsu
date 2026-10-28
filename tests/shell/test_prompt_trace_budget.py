@@ -2126,6 +2126,8 @@ def front_axis_control():
     dirs, files = budget.prompt_sources(pinned)
     store = Path(next(iter(files))).parent
     lines = ['1 execve("/bin/bingsu", ["/bin/bingsu", "prompt", "--pwd", "/repo"], []) = 0']
+    lines += ['1 openat(AT_FDCWD, "/proc/self/fd", O_RDONLY|O_DIRECTORY) = 3</proc/1/fd>',
+              '1 close(3</proc/1/fd>) = 0']
     fd = 2
     boot = ['/', '/proc', '/proc/1', '/proc/1/ns', '/proc/1/timens_offsets',
             '/proc/sys', '/proc/sys/kernel', '/proc/sys/kernel/random', '/proc/sys/kernel/random/boot_id']
@@ -2156,8 +2158,9 @@ def front_axis_control():
 
 
 # 이것을 실패시키는 것: 정상 종료 레코드를 syscall로 세거나 open/facts/read 누락·중복을 숨기는 것.
-@pytest.mark.parametrize('mutation', ['none', 'extra-open', 'extra-facts', 'missing-read', 'failed-filter'])
-def test_front_axis_capture_counter(monkeypatch, mutation):
+@pytest.mark.parametrize('arch', ['aarch64', 'x86_64'])
+@pytest.mark.parametrize('mutation', ['none', 'extra-open', 'extra-facts', 'missing-read', 'failed-filter', 'untracked-read', 'extra-seek'])
+def test_front_axis_capture_counter(monkeypatch, arch, mutation):
     lines, pinned, store, attempts = front_axis_control()
     # Path confinement has its own live/portable suite; isolate the new counter.
     monkeypatch.setattr(budget, 'prompt_root_io', lambda *args: None)
@@ -2169,11 +2172,15 @@ def test_front_axis_capture_counter(monkeypatch, mutation):
         lines.remove(next(l for l in lines if ' read(' in l))
     elif mutation == 'failed-filter':
         lines = [l.replace('MODE_FILTER, {}) = 0', 'MODE_FILTER, {}) = -1 EINVAL (Invalid)') for l in lines]
+    elif mutation == 'untracked-read':
+        lines.insert(1, '1 read(99</proc/1/maps>, "", 1024) = 0')
+    elif mutation == 'extra-seek':
+        lines.insert(1, '1 lseek(99</proc/1/maps>, 0, SEEK_CUR) = 0')
     if mutation == 'none':
-        budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, evidence={})
+        budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
     else:
         with pytest.raises(AssertionError):
-            budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, evidence={})
+            budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
 
 
 # 이것을 실패시키는 것: 실제 aarch64 glibc 캡처의 kernel 9개 facts/ACL fallback/EOF 비용을 누락하는 것.
@@ -2181,15 +2188,34 @@ def test_front_axis_capture_counter(monkeypatch, mutation):
     (0, '/home/tester/pt/test_prompt_binary_names_only_0'),
     (1, '/home/tester/pt/test_prompt_binary_names_only_1'),
 ])
-@pytest.mark.parametrize('mutation', ['reread', 'mmap', 'unknown'])
-def test_front_axis_archived_capture(capture, base, mutation):
+@pytest.mark.parametrize('arch', ['aarch64', 'x86_64'])
+@pytest.mark.parametrize('mutation', [
+    'reread', 'mmap', 'unknown', 'startup-read', 'startup-open', 'untracked-read',
+    'extra-seek', 'missing-seek', 'snapshot-seek', 'reverse-seeks', 'extra-pread',
+])
+def test_front_axis_archived_capture(capture, base, arch, mutation):
     lines = Path(__file__).with_name('fixtures').joinpath(f'prompt-e4-linux-{capture}.strace').read_text().splitlines()
     pinned = [base + suffix for suffix in ('/run-t/bingsu', '/cfg-t/bingsu', '/state-t/bingsu')]
     _, files = budget.prompt_sources(pinned)
     store = Path(next(iter(files))).parent
     # Published fixture's compiled body is 3008 bytes, not inferred from reads.
     attempts = budget.front_attempt_plan('normal', 3008)
-    budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, evidence={})
+    maps_close = next(i for i, l in enumerate(lines) if ' close(3</proc/' in l and '/maps>' in l)
+    pid = lines[maps_close].split()[0]
+    # Legacy E4 captured two maps reads. Current A2 release front has three
+    # (keep/unchanged.strace pid 1130); CI x86_64 has three too (A2 report).
+    # Replay current startup on this older product-axis fixture explicitly.
+    lines.insert(maps_close, f'{pid} read(3</proc/{pid}/maps>, "<payload>", 1024) = 858')
+    maps_close += 1
+    seek_pair = [f'{pid} lseek(3</proc/{pid}/maps>, 0, SEEK_CUR) = 2906',
+                 f'{pid} lseek(3</proc/{pid}/maps>, 2822, SEEK_SET) = 2822']
+    if arch == 'x86_64':
+        lines[maps_close:maps_close] = seek_pair
+        libc_close = next(i for i, l in enumerate(lines) if ' close(3<' in l and '/libc.so.6>' in l)
+        # Replay x86_64 loader program-header reads; this is no live capture.
+        lines[libc_close:libc_close] = [f'{pid} pread64(3</lib/x86_64-linux-gnu/libc.so.6>, "<payload>", 784, 64) = 784'] * 2
+        maps_close += 2
+    budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
     # 이것을 실패시키는 것: last-good 뒤 재읽기와 같은 추가 current 읽기를 live 판정기가 허용하는 것.
     extra = next(l for l in lines if ' read(' in l and str(store / 'snapshot') + '>' in l)
     pid = extra.split()[0]
@@ -2197,6 +2223,31 @@ def test_front_axis_archived_capture(capture, base, mutation):
         extra = f'{pid} mmap(NULL, 8192, PROT_READ, MAP_PRIVATE, 3<{store / "snapshot"}>, 0) = 0x1000'
     elif mutation == 'unknown':
         extra = f'{pid} io_uring_setup(1, {{}}) = 99'
-    lines.insert(-1, extra)
+    if mutation == 'startup-read':
+        lines.insert(maps_close, next(l for l in lines if ' read(3</proc/' in l and '/maps>' in l))
+    elif mutation == 'startup-open':
+        at = next(i for i, l in enumerate(lines) if ' close(3</etc/ld.so.cache>' in l)
+        lines[at + 1:at + 1] = [next(l for l in lines if ' openat(' in l and '"/etc/ld.so.cache"' in l), lines[at]]
+    elif mutation == 'untracked-read':
+        # A permitted system path must not hide an fd that was never opened.
+        lines.insert(maps_close, f'{pid} read(99</proc/{pid}/maps>, "", 1024) = 0')
+    elif mutation == 'extra-seek':
+        lines.insert(maps_close, seek_pair[0])
+    elif mutation == 'missing-seek':
+        if arch == 'x86_64':
+            lines.remove(seek_pair[0])
+        else:
+            lines.insert(maps_close, seek_pair[1])
+    elif mutation == 'reverse-seeks':
+        if arch == 'x86_64':
+            lines[maps_close:maps_close + 2] = seek_pair[::-1]
+        else:
+            lines[maps_close:maps_close] = seek_pair[::-1]
+    elif mutation == 'extra-pread':
+        lines.insert(maps_close, f'{pid} pread64(3</proc/{pid}/maps>, "", 1024, 0) = 0')
+    elif mutation == 'snapshot-seek':
+        lines.insert(-1, f'{pid} lseek(3<{store / "snapshot"}>, 0, SEEK_CUR) = 0')
+    else:
+        lines.insert(-1, extra)
     with pytest.raises(AssertionError):
-        budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, evidence={})
+        budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})

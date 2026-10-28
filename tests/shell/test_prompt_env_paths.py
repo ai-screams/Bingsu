@@ -3,6 +3,7 @@ repository; the hook must still pass only the roots pinned by init, and the
 binary (with every process and thread it starts) must touch nothing under
 the repository."""
 import os
+import platform
 import ast
 import hashlib
 import re
@@ -1671,10 +1672,10 @@ def front_fact_kind(call):
     raise AssertionError(('unexpected front facts primitive', call))
 
 
-def check_front_capture(lines, exe, pinned, store, attempts, *, evidence):
+def check_front_capture(lines, exe, pinned, store, attempts, *, arch, libc, evidence):
     from collections import Counter
     from fsbudget.strace_parse import Trace
-    from fsbudget.formula import front_attempts_expected, collection_front_expected
+    from fsbudget.formula import front_attempts_expected, collection_front_expected, STARTUP_PRIMITIVES
     _, scoped = tree(lines, exe)
     root = int(next(line.split()[0] for line in scoped if is_root(line, exe)))
     parsed = parse_trace('\n'.join(scoped))
@@ -1683,9 +1684,12 @@ def check_front_capture(lines, exe, pinned, store, attempts, *, evidence):
     front = Trace()
     front.extend(c for c in parsed if c.pid == root and c.name != EXIT_EVENT)
     # 이것을 실패시키는 것: trace=all에 새 syscall을 남겨도 계수 대상이 아니라며 버리는 것.
-    assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
+    startup_model = STARTUP_PRIMITIVES[arch, libc]
+    # lseek is counted below, never ignored or allowed on arbitrary fds.
+    assert all(c.name in ROOT_CALLS | {'lseek'} for c in front), [c for c in front if c.name not in ROOT_CALLS | {'lseek'}]
     # 이것을 실패시키는 것: snapshot을 mmap하여 TrustMetadata 읽기를 read 계수 밖으로 옮기는 것.
     for call in front:
+        assert call.name != 'readv', ('unexpected front read primitive', call)
         if call.name != 'read':
             assert not set(content_paths(call)) & {str(store / n) for n in ('snapshot', 'last-good', 'marker')}, ('front content primitive', call)
     filters = [c.index for c in front if c.name == 'prctl' and 'PR_SET_SECCOMP' in c.args and c.ret == '0']
@@ -1698,23 +1702,60 @@ def check_front_capture(lines, exe, pinned, store, attempts, *, evidence):
                   f'/proc/{root}/timens_offsets', '/proc/sys', '/proc/sys/kernel',
                   '/proc/sys/kernel/random', '/proc/sys/kernel/random/boot_id'}
     held, counts, primitives = {}, Counter(), Counter()
+    startup = {name: Counter() for name in ('front_fds', 'front_cache', 'front_libgcc', 'front_libc', 'front_maps', 'stack_guard')}
+    seeks = []
+
+    def startup_kind(path):
+        if path in ('/proc/self/fd', f'/proc/{root}/fd'):
+            return 'front_fds'
+        if path == '/etc/ld.so.cache':
+            return 'front_cache'
+        if path in ('/proc/self/maps', f'/proc/{root}/maps'):
+            return 'front_maps'
+        for suffix, kind in (('libgcc_s.so.1', 'front_libgcc'), ('libc.so.6', 'front_libc')):
+            if re.fullmatch(r'/(?:usr/)?lib(?:64)?/(?:[^/]+/)?' + re.escape(suffix), path):
+                return kind
+        raise AssertionError(('unaccounted front startup path', path))
     for c in front:
         args = args_of(c)
         paths = call_paths(c)
-        if c.name in OPENS and paths and paths[0] in dirs | files | boot_paths | collection_dirs:
-            counts['openat'] += 1
+        if c.name in OPENS:
+            assert paths, ('unaccounted front open', c)
+            kind = None if paths[0] in dirs | files | boot_paths | collection_dirs else startup_kind(paths[0])
+            if kind is None:
+                counts['openat'] += 1
+            else:
+                assert c.index < filters[0], ('late front startup open', c)
+                startup[kind]['openat'] += 1
             if not c.ret.startswith('-1'):
-                held[int(c.ret.split('<')[0])] = paths[0]
+                held[int(c.ret.split('<')[0])] = kind
             continue
         if c.name == 'getxattr':
             match = re.fullmatch(r'"/proc/self/fd/(\d+)"', args[0])
         else:
             match = re.fullmatch(r'(\d+)(?:<[^<>]*>)?', args[0]) if args else None
         fd = int(match[1]) if match else None
+        if c.name in ('read', 'pread64', 'lseek'):
+            assert fd in held, ('untracked front descriptor', c)
+            kind = held[fd]
+            if c.name == 'lseek':
+                assert kind == 'front_maps' and c.index < filters[0], ('unexpected front seek', c)
+                assert len(args) == 3 and not c.ret.startswith('-1'), ('front startup seek', c)
+                seeks.append(args[2])
+                startup['stack_guard']['seek'] += 1
+            elif kind is None:
+                assert c.name == 'read', ('unexpected front read primitive', c)
+                counts['read'] += 1
+            else:
+                assert c.index < filters[0], ('late front startup read', c)
+                startup[kind][c.name] += 1
+            continue
         if fd not in held:
             continue
         if c.name == 'close':
             held.pop(fd)
+        elif held[fd] is not None:
+            continue
         elif c.name in ('fstat', 'newfstatat', 'statx'):
             counts[front_fact_kind(c)] += 1
             primitives[c.name] += 1
@@ -1723,7 +1764,11 @@ def check_front_capture(lines, exe, pinned, store, attempts, *, evidence):
     expected = Counter(front_attempts_expected(len(dirs), attempts, FRONT_CHUNK))
     # Plain config has no collection store: prefetch still probes its namespace.
     expected.update(collection_front_expected(0, (), (), absent=True))
-    evidence.update(C=len(dirs), counts=counts, expected=expected, fact_primitives=primitives)
+    startup_expected = {name: Counter(startup_model.get(name, {})) for name in startup}
+    evidence.update(C=len(dirs), counts=counts, expected=expected, fact_primitives=primitives,
+                    arch=arch, libc=libc, startup_counts=startup, startup_expected=startup_expected)
+    assert startup == startup_expected, ('front startup primitives', startup, startup_expected)
+    assert seeks == (['SEEK_CUR', 'SEEK_SET'] if startup_model['stack_guard'].get('seek') else []), ('front startup seek pair', seeks)
     # 이것을 실패시키는 것: 앞단 open/facts/read 하나 추가, collection prefetch를 비용에서 빼는 것.
     assert counts == expected, ('front axis C', counts, expected)
     assert_front_reads(front, store, attempts, evidence=evidence)
@@ -1735,12 +1780,12 @@ def front_capture(request, tmp_path_factory):
     import fcntl
     import json
     from dataclasses import asdict
-    require_release_helper(real_bin())
+    libc = require_release_helper(real_bin())
     assert shutil.which('strace'), 'front gate must execute strace'
     case = getattr(request, 'param', 'normal')
     artifacts = tmp_path_factory.getbasetemp() / 'front-evidence' / request.node.name
     artifacts.mkdir(parents=True)
-    evidence = {'case': case, 'chunk': FRONT_CHUNK}
+    evidence = {'case': case, 'chunk': FRONT_CHUNK, 'arch': platform.machine(), 'libc': libc}
     fixture = None
     lock = None
     try:
@@ -1791,11 +1836,11 @@ def front_capture(request, tmp_path_factory):
 @pytest.mark.parametrize('front_capture', FRONT_CASES, indirect=True)
 def test_live_front_attempts_match_axis_c(front_capture):
     lines, exe, pinned, store, attempts, evidence = front_capture
-    check_front_capture(lines, exe, pinned, store, attempts, evidence=evidence)
+    check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
 
 
 # 이것을 실패시키는 것: FrontDecoder의 end에 TrustMetadata 길이를 더하는 것.
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux strace runtime gate')
 def test_front_never_reads_trust_metadata_section(front_capture):
     lines, exe, pinned, store, attempts, evidence = front_capture
-    check_front_capture(lines, exe, pinned, store, attempts, evidence=evidence)
+    check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
