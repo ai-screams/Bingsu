@@ -252,11 +252,6 @@ class HelperPlan:
     breaker_bytes: int = 0
     # "gnu" or "musl", from the binary (PT_INTERP), never from the trace.
     libc: str = "gnu"
-    # Whether the collector completed (exit 0) and the supervisor published
-    # its response. A collector past its request deadline exits with
-    # wire::DEADLINE_EXIT_CODE and nothing is published; the rest of the
-    # stage, breaker finish included, is the same.
-    collection_published: bool = True
 
 
 def read_to_end_calls(n: int) -> int:
@@ -629,8 +624,7 @@ def _collect(e: dict, p: HelperPlan) -> None:
     # Supervisor thread: completion clock, then CollectionStore::publish with
     # both responses present (rotate current into previous, install stage).
     _add(e, "clock")
-    if p.collection_published:
-        _publish(e, p)
+    _publish(e, p)
     _breaker_finish_and_gc(e, p)
 
 

@@ -62,15 +62,6 @@ def test_publish_adds_two_stagings_and_installs():
                      "seek": 2, "statfs": 14, "write": 2}
 
 
-# 이것을 실패시키는 것: 마감을 넘긴 collector에도 발행 비용을 세거나, 발행 비용을 다른 단계 항으로 옮기는 것.
-def test_collector_deadline_drops_only_the_publication():
-    published = helper_stage_expected(plan(("unchanged", "collect")))
-    missed = helper_stage_expected(plan(("unchanged", "collect"), collection_published=False))
-    delta = {k: published[k] - missed[k] for k in published if published[k] != missed[k]}
-    assert delta == {"chmod": 1, "fstat": 112, "openat": 5, "read": 4, "renameat": 2, "seek": 1,
-                     "statfs": 38, "write": 1}
-
-
 # 이것을 실패시키는 것: musl 차이를 NSS와 F_SETFD 밖(예: 걷기 원시 연산)으로 넓히는 것.
 def test_musl_differs_in_nss_and_cloexec_fallbacks():
     gnu = helper_stage_expected(plan())

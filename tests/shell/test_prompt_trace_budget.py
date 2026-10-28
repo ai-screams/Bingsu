@@ -1595,14 +1595,14 @@ def first_helper_line(lines, pattern):
     return next(i for i, l in enumerate(lines) if l.split()[0] == helper and re.search(pattern, l))
 
 
-STAGE_NAMES = ["unchanged", "publish", "collect", "collect-deadline", "failure-last-good", "failure-recover"]
+STAGE_NAMES = ["unchanged", "publish", "collect", "failure-last-good", "failure-recover"]
 
 
 # 이것을 실패시키는 것: 판정기가 저장 trace의 종류별 호출 수를 공식과 exact로 비교하지 않는 것,
 # 도우미 호출 하나를 더하거나(fstat) 앞단으로 옮기는 것(git 전역 입력 open), helper 어휘 없이 세는 것.
 @pytest.mark.parametrize("stage,damage", [
     (stage, damage) for stage in STAGE_NAMES
-    for damage in (None, "extra-fstat", "generic-vocabulary") + (("moved-to-front",) if stage.startswith("collect") else ())])
+    for damage in (None, "extra-fstat", "generic-vocabulary") + (("moved-to-front",) if stage == "collect" else ())])
 def test_stage_formula_checker_regressions(stage, damage):
     from fsbudget.formula import helper_stage_expected
     lines, collector, plan = helper_stage_case(stage)

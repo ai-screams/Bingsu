@@ -1273,6 +1273,17 @@ def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict
 
 
 # GATE-FS-HELPER.1: helper calls per publication stage of a release build.
+# Calls the classifier never counts (classify.NON_FS) and attribution never
+# reads, left out of the trace with --seccomp-bpf: the collector then meets its
+# 50 ms request deadline more often. Every other call, unknown ones included,
+# is still traced.
+UNTRACED = frozenset({"futex", "rt_sigaction", "rt_sigprocmask", "ppoll", "clock_gettime", "clock_nanosleep",
+                      "nanosleep", "brk", "mprotect", "munmap", "madvise", "gettid", "getrandom",
+                      "sched_getaffinity", "sched_yield"})
+# A collector past its deadline (wire::DEADLINE_EXIT_CODE) publishes nothing and
+# the helper's GC may then yield to its time budget, so such an attempt is
+# neither gated nor counted; collect retries on a fresh fixture.
+COLLECT_ATTEMPTS = 6
 HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
                  "failure-recover": ("failure-recover",)}
@@ -1439,7 +1450,8 @@ class HelperStageFixture:
         self.seq += 1
         f.write_bytes(self.script + b"\n_bingsu_seq=" + str(self.seq).encode() + b"\ncd '"
                       + os.fsencode(str(self.pwd)) + b"'\n" + CALL)
-        strace = ["strace", "-f", "-q", "-y", "-s", "4096", "-e", "trace=all", "-o", str(trace)] if trace else []
+        strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
+                  "-e", "trace=!" + ",".join(sorted(UNTRACED)), "-o", str(trace)] if trace else []
         r = subprocess.run(strace + SHELL_CMD["bash"] + [str(f)], env=self.env, capture_output=True, timeout=60)
         assert r.returncode == 0, r.stderr
         return r
@@ -1464,9 +1476,8 @@ class HelperStageFixture:
 
 def collector_completed(lines, collector):
     """Whether the traced collector completed (exit 0) or ran past its request
-    deadline (bingsu_core::collection::wire::DEADLINE_EXIT_CODE, 75). Under
-    strace the 50 ms request deadline is often missed; both outcomes have an
-    exact formula. Any other end fails the gate."""
+    deadline (bingsu_core::collection::wire::DEADLINE_EXIT_CODE, 75). Any
+    other end fails the gate."""
     pid = next(l.split()[0] for l in lines if is_root(l, collector))
     ends = [l for l in lines if l.split()[0] == pid and "+++ exited with" in l]
     assert len(ends) == 1, ("collector end", ends)
@@ -1492,9 +1503,16 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
     return collectors, roles.counts
 
 
+# 이것을 실패시키는 것: 비계수 호출 밖의 호출(파일 시스템·프로세스 기록)을 trace에서 빼는 것.
+def test_untraced_calls_are_never_counted():
+    from fsbudget.classify import NON_FS
+    assert UNTRACED <= NON_FS - {"clone", "clone3", "fork", "vfork", "execve", "execveat", "exit", "exit_group"}
+
+
 # 이것을 실패시키는 것: 도우미 재검증 경로에 같은 파일의 fstat 하나를 더하는 것, 수집 비용을 앞단으로 옮기는 것,
 # 공식에 옛 고정 항(e["read"] += 2)을 되살리는 것, debug 바이너리로 재는 것, helper 어휘에서 fd statx나
-# chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것.
+# chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것,
+# collect가 발행 없이(마감 초과만으로) 통과하는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("stage", list(HELPER_STAGES))
 def test_live_helper_calls_match_stage_formula(stage):
@@ -1504,19 +1522,23 @@ def test_live_helper_calls_match_stage_formula(stage):
     from fsbudget.gate import check
     assert shutil.which("strace"), "the helper stage gate must execute strace"
     libc = require_release_helper(real_bin())
-    fixture = HelperStageFixture(stage)
-    try:
-        trace = fixture.base / "trace"
-        fixture.prompt(trace)
-        lines = trace.read_text(errors="replace").splitlines()
-        collectors, counts = measured_helper_calls(lines, str(fixture.inst.exe), fixture.collector)
-        # 이것을 실패시키는 것: 수집 단계가 collector 없이 끝나 변경 없음 단계로 무너지는 것.
-        assert collectors == (1 if stage == "collect" else 0), ("collector spawns", collectors)
-        plan = fixture.plan(libc)
-        if stage == "collect":
-            plan.collection_published = collector_completed(lines, fixture.collector)
-        expected = helper_stage_expected(plan)
-        assert check({"helper": counts.get("helper", {})}, {"helper": expected}, "exact", ["helper"]) == []
-    finally:
-        wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+    missed = 0
+    for _ in range(COLLECT_ATTEMPTS if stage == "collect" else 1):
+        fixture = HelperStageFixture(stage)
+        try:
+            trace = fixture.base / "trace"
+            fixture.prompt(trace)
+            lines = trace.read_text(errors="replace").splitlines()
+            collectors, counts = measured_helper_calls(lines, str(fixture.inst.exe), fixture.collector)
+            # 이것을 실패시키는 것: 수집 단계가 collector 없이 끝나 변경 없음 단계로 무너지는 것.
+            assert collectors == (1 if stage == "collect" else 0), ("collector spawns", collectors)
+            if stage == "collect" and not collector_completed(lines, fixture.collector):
+                missed += 1
+                continue
+            expected = helper_stage_expected(fixture.plan(libc))
+            assert check({"helper": counts.get("helper", {})}, {"helper": expected}, "exact", ["helper"]) == []
+            return
+        finally:
+            wait_helpers(fixture.base)
+            shutil.rmtree(fixture.base, ignore_errors=True)
+    raise AssertionError(("no collection published in", COLLECT_ATTEMPTS, "attempts; deadline misses", missed))

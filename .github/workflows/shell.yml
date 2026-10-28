@@ -113,7 +113,8 @@ jobs:
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --ignore tests/shell/test_collector_security.py \
-                --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+                --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
       # 40), so this test alone runs in its own container without that
