@@ -101,6 +101,8 @@ M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3
 M3D_SUPPLEMENTARY.update({f"{gate}.1-{case}": "M3d"
                           for gate in ("GATE-FS-FRONT", "GATE-FRONT-READ-BYTES")
                           for case in ("checksum_last_good", "body_limit", "header_only")})
+# 이것을 실패시키는 것: 막힌 마운트 행을 지우고 정상 폴더만으로 GATE-HELPER-LIFETIME.1을 닫는 것.
+M3D_SUPPLEMENTARY["GATE-HELPER-LIFETIME.1-blocked_mount"] = "M3d"
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
@@ -119,7 +121,8 @@ DEFERRED_MILESTONES = ("M4", "M6")
 
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
-M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-READ-BYTES"})
+M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-READ-BYTES",
+                               "GATE-HELPER-LIFETIME", "GATE-ZOMBIES"})
 
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
@@ -129,8 +132,7 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 M3D_PENDING = (
     "GATE-FS-HELPER.2",
     "GATE-FDS.1", "GATE-FDS.2",
-    "GATE-HELPER-LIFETIME.1", "GATE-HELPER-LIFETIME.2", "GATE-HELPER-LIFETIME.3",
-    "GATE-ZOMBIES.1",
+    "GATE-HELPER-LIFETIME.2",
     "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
     "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
     "GATE-CLOCK-READS.1",
@@ -334,11 +336,14 @@ def deferred_lines():
 
 def standing_lines():
     """The real table's deferred rows and the primary rows of closed pairs:
-    the synthetic accounting tables below vary only GATE-ZOMBIES.1."""
+    the synthetic accounting tables below vary only GATE-ZOMBIES.1, so its own
+    rows in the real table are left out."""
+    # 이것을 실패시키는 것: 실제 표의 GATE-ZOMBIES.1 행을 남겨 removed-row 변이가 쌍을 계속 닫는 것.
     table = (ROOT / TABLE).read_text()
     closed = covered(table)
     return "".join(line for line, row in zip(table.splitlines(True)[1:], rows(table))
-                   if is_deferred(row) or row["id"] in closed)
+                   if (is_deferred(row) or row["id"] in closed)
+                   and f'{row["gate"]}.{row["clause"]}' != "GATE-ZOMBIES.1")
 
 
 @pytest.mark.parametrize("damage", ["removed-row", "row-still-pending", "unknown-pending", "duplicate-pending",
