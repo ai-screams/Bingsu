@@ -31,6 +31,9 @@ import statistics
 import subprocess
 import tempfile
 import time
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 EVENTS = ("verify_start", "verify_end", "spawn_enter", "spawn_return", "ready",
@@ -234,7 +237,7 @@ def watchdog_evidence(preparation):
 def host():
     # A caller may supply a public revision label; binary/source hashes remain
     # authoritative. Never read or mutate repository metadata here.
-    power = run(["pmset", "-g", "batt"]).stdout.decode().splitlines()[0] if platform.system() == "Darwin" else "not observed"
+    power = protocol.observe_host()["power"]
     return {"os": platform.system(), "kernel": platform.release(), "arch": platform.machine(),
             "host": platform.node(), "libc": " ".join(platform.libc_ver()) or "libSystem",
             "load": list(os.getloadavg()), "power": power,
@@ -242,27 +245,27 @@ def host():
             "observed_at": datetime.now(timezone.utc).isoformat(), "cpu_count": os.cpu_count()}
 
 
-def measure_pair(base: str, candidate: str, rounds: int) -> dict:
+def measure_pair(base: str, candidate: str, rounds: int, *, condition=None) -> dict:
     if rounds < 200:
         raise ValueError("M3b requires at least 200 warm observations per binary")
     binaries = {"base": str(Path(base).resolve()), "candidate": str(Path(candidate).resolve())}
     preparations = {name: prepared(binary) for name, binary in binaries.items()}
-    samples = {name: [] for name in binaries}
-    cold, order = {}, []
+    (ROOT / "target").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="collector-product-", dir=ROOT / "target") as temp:
-        for name, binary in binaries.items():
-            directory = Path(temp) / name
-            directory.mkdir(mode=0o700)
-            cold[name] = observe(binary, preparations[name], directory)
-        for i in range(rounds):
-            for name in (("base", "candidate") if i % 2 == 0 else ("candidate", "base")):
-                order.append(name)
-                samples[name].append(observe(binaries[name], preparations[name], Path(temp) / name))
+        for name in binaries:
+            (Path(temp) / name).mkdir(mode=0o700)
+        paired = protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
+            lambda name, binary: observe(binary, preparations[name], Path(temp) / name))
+    samples = {n: paired['variants'][n]['samples'] for n in binaries}
+    cold, order = paired.get('cold_first_process', {}), paired['order']
     result = {"comparison": "same-binary-control" if preparations["base"]["hashes"] == preparations["candidate"]["hashes"] else "base-candidate",
-              "schema": 1, "milestone": "M3b", "formal_B5_B7": False, "status": "PASS",
+              "schema": 1, "milestone": "M3b", "formal_B5_B7": False, "status": paired["status"],
               "cold_definition": "first process only; OS caches not flushed; reboot-cold pending",
               "host": host(), "rounds": rounds, "order": order, "cold_first_process": cold,
               "variants": {}, "missing": [], "pending": ["M3c/M3d git 19000-file RSS", "M3d formal B5-B7", "reboot-cold", "whole-prompt peak RSS"]}
+    result.update({k: paired[k] for k in ("condition", "calibration", "seed", "blocks")})
+    if "reason" in paired:
+        result["reason"] = paired["reason"]
     for name in binaries:
         result["variants"][name] = {"hashes": preparations[name]["hashes"],
                                     "policy": preparations[name]["policy"],
@@ -271,6 +274,7 @@ def measure_pair(base: str, candidate: str, rounds: int) -> dict:
                                     "sibling_build_id": preparations[name].get("sibling_build_id"),
                                     "compiler": preparations[name].get("compiler", "unrecorded"),
                                     "samples": samples[name],
+                                    "summary": paired["variants"][name]["summary"],
                                     "metrics": {},
                                     "stripped_bytes": preparations[name]["stripped_bytes"]}
         for metric in REQUIRED:
@@ -289,7 +293,7 @@ def measure_pair(base: str, candidate: str, rounds: int) -> dict:
             result["missing"].append(name + ".memory_watchdog")
             result["status"] = "BLOCKED"
     limit = 1_000_000 if platform.system() == "Linux" else 2_000_000
-    result["hypotheses"] = {name: {"ready_p50_within_hypothesis": v["metrics"]["spawn_to_ready_ns"]["p50"] <= limit,
+    result["hypotheses"] = {name: {"ready_p50_within_hypothesis": (v["metrics"]["spawn_to_ready_ns"]["p50"] <= limit) if v["metrics"]["spawn_to_ready_ns"]["n"] == rounds else None,
                                    "prompt_p50_within_10ms": (v["metrics"]["prompt_ns"]["p50"] <= 10_000_000) if v["metrics"]["prompt_ns"]["n"] == rounds else None,
                                    "prompt_p95_within_15ms": (v["metrics"]["prompt_ns"]["p95"] <= 15_000_000) if v["metrics"]["prompt_ns"]["n"] == rounds else None}
                             for name, v in result["variants"].items()}
@@ -863,25 +867,26 @@ def main():
     parser.add_argument("--base")
     parser.add_argument("--candidate")
     parser.add_argument("--rounds", type=int, default=200)
+    parser.add_argument("--mode", choices=("gate", "experiment"), default="gate")
+    parser.add_argument("--condition", type=json.loads)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     try:
         if args.prepare:
             result = prepare(args.prepare)
             if args.out:
-                args.out.parent.mkdir(parents=True, exist_ok=True)
-                args.out.write_text(json.dumps({"status": "PREPARED", **result}, indent=2) + "\n")
+                protocol.write_output(args.out, {"status": "PREPARED", **result})
             return 0
         if not args.base or not args.candidate or not args.out:
             parser.error("measurement needs --base, --candidate and --out")
-        result = measure_pair(args.base, args.candidate, args.rounds)
-        code = 0 if result["status"] == "PASS" else 2
+        condition = {**protocol.DEFAULT, **(args.condition or {}), "mode": args.mode}
+        result = measure_pair(args.base, args.candidate, args.rounds, condition=condition)
+        code = 0 if result["status"] == "OBSERVED" else 2
     except (ValueError, KeyError, OSError, subprocess.TimeoutExpired) as error:
         result = {"milestone": "M3b", "formal_B5_B7": False, "status": "BLOCKED", "reason": str(error)}
         code = 2
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(result, indent=2) + "\n")
+        protocol.write_output(args.out, result)
     else:
         print(json.dumps(result))
     return code

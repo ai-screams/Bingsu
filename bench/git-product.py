@@ -25,7 +25,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "target/f3"
+OUT = Path(tempfile.gettempdir()) / "bingsu-measurements"
 CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
@@ -496,12 +496,16 @@ def summarize(samples, rounds):
                                "counter_limits": {"status": "BLOCKED", "reason": "shipped wire does not expose the failing budget axis; Partial alone is not a counter overrun"}}}
 
 
-def measure_pair(base: str, candidate: str, rounds: int) -> dict:
+def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, condition=None) -> dict:
     if rounds < 200:
         raise ValueError("M3c requires at least 200 warm rounds")
+    cases = list(CASES if cases is None else cases)
+    if not cases or len(set(cases)) != len(cases) or set(cases) - set(CASES):
+        raise ValueError("unknown or duplicate cases")
     binaries = {"base": str(Path(base).resolve()), "candidate": str(Path(candidate).resolve())}
     preparations = {name: prepared(binary) for name, binary in binaries.items()}
     OUT.mkdir(parents=True, exist_ok=True)
+    (ROOT / "target").mkdir(exist_ok=True)
     result = {"schema": 1, "milestone": "M3c", "formal_B5_B7": False, "status": "OBSERVED", "rounds": rounds,
               "host": M3B.host(), "cold_definition": "first process; filesystem caches not flushed", "cases": {},
               "variants": {name: {key: p[key] for key in ("hashes", "source_hashes", "sibling_build_id", "stripped_bytes", "compiler", "product_mask")} for name, p in preparations.items()},
@@ -510,26 +514,30 @@ def measure_pair(base: str, candidate: str, rounds: int) -> dict:
                          "L": {"stage_durations": {"basis": "separate protected release diagnostic; see per-case raw stage_diagnostic, no substitution for shipped collection"},
                                "front_previous_read": {"basis": "shared confined prompt reader; fixture clock identity; separate from normal prompt wall time"}}},
               "pending": ["M3d formal B5-B7", "whole-prompt peak RSS", "reboot-cold", "minimum supported hosts", "memory hypothesis certification"]}
-    with tempfile.TemporaryDirectory(prefix="observations-", dir=OUT) as scratch:
+    with tempfile.TemporaryDirectory(prefix="observations-", dir=ROOT / "target") as scratch:
         scratch = Path(scratch)
         repos = repositories(scratch)
-        for case, repo in repos.items():
-            cold, samples, order = {}, {name: [] for name in binaries}, []
-            for name, binary in binaries.items():
-                cold[name] = observe(binary, preparations[name], scratch / name / case, repo)
-            for index in range(rounds):
-                for name in (("base", "candidate") if index % 2 == 0 else ("candidate", "base")):
-                    order.append(name)
-                    samples[name].append(observe(binaries[name], preparations[name], scratch / name / case, repo))
-            row = {"cold_first_process": cold, "order": order, "variants": {}}
+        case_seed = M3B.protocol.random.SystemRandom().randrange(2**63)
+        M3B.protocol.random.Random(case_seed).shuffle(cases)
+        result['case_seed'], result['case_order'] = case_seed, cases
+        for case in cases:
+            repo = repos[case]
+            paired = M3B.protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
+                lambda name, binary: observe(binary, preparations[name], scratch / name / case, repo))
+            cold = paired.get('cold_first_process', {})
+            samples = {n: paired['variants'][n]['samples'] for n in binaries}
+            order = paired['order']
+            if paired['status'] == 'BLOCKED':
+                result['status'] = 'BLOCKED'
+            row = {**paired, "cold_first_process": cold, "order": order, "variants": {}}
             for name in binaries:
                 stats = summarize(samples[name], rounds)
-                row["variants"][name] = {"samples": samples[name], **stats}
+                row["variants"][name] = {**paired["variants"][name], "samples": samples[name], **stats}
                 if stats["observed"] != rounds or stats["metrics"]["prompt_ns"]["n"] != rounds:
                     result["status"] = "BLOCKED"
             result["cases"][case] = row
             # Crash recovery never discards already completed cases.
-            (OUT / "latest-partial.json").write_text(json.dumps(result, indent=2) + "\n")
+            M3B.protocol.write_output(OUT / "latest-partial.json", result)
     return result
 
 
@@ -539,16 +547,22 @@ def main():
     parser.add_argument("--base")
     parser.add_argument("--candidate")
     parser.add_argument("--rounds", type=int, default=200)
+    parser.add_argument("--cases", default=",".join(CASES))
+    parser.add_argument("--mode", choices=("gate", "experiment"), default="gate")
+    parser.add_argument("--condition", type=json.loads)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    global OUT
+    OUT = args.out.resolve().parent
     try:
-        value = prepare(args.prepare) if args.prepare else measure_pair(args.base, args.candidate, args.rounds)
+        M3B.protocol.validate_output(OUT)
+        value = prepare(args.prepare) if args.prepare else measure_pair(args.base, args.candidate, args.rounds, cases=args.cases.split(","),
+            condition={**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode})
         code = 2 if value.get("status") == "BLOCKED" else 0
     except (ValueError, OSError, KeyError, subprocess.TimeoutExpired) as error:
         value = {"milestone": "M3c", "formal_B5_B7": False, "status": "BLOCKED", "reason": str(error)}
         code = 2
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(value, indent=2) + "\n")
+    M3B.protocol.write_output(args.out, value)
     return code
 
 

@@ -34,14 +34,15 @@ jobs:
       # rows are na here; the delegated-cgroup rows are measured on the Linux host.
       - name: Run the matrix
         run: |
+          mkdir -p "$RUNNER_TEMP/measurements"
           printf '{"meta":{"host":"github-actions","runner":"ubuntu-24.04","arch":"%s","kernel":"%s","nproc":%s,"commit":"%s"}}\n' \
-            "$(uname -m)" "$(uname -r)" "$(nproc)" "$GITHUB_SHA" > m1-spawn-ci-linux.jsonl
-          target/release/m1-spawn-matrix --dedicated target/release/m1-collect-stub --same target/release/bingsu >> m1-spawn-ci-linux.jsonl
-          cat m1-spawn-ci-linux.jsonl
+            "$(uname -m)" "$(uname -r)" "$(nproc)" "$GITHUB_SHA" > "$RUNNER_TEMP/measurements/m1-spawn-ci-linux.jsonl"
+          target/release/m1-spawn-matrix --dedicated target/release/m1-collect-stub --same target/release/bingsu >> "$RUNNER_TEMP/measurements/m1-spawn-ci-linux.jsonl"
+          cat "$RUNNER_TEMP/measurements/m1-spawn-ci-linux.jsonl"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: m1-spawn-ci-linux
-          path: m1-spawn-ci-linux.jsonl
+          path: ${{ runner.temp }}/measurements/m1-spawn-ci-linux.jsonl
           if-no-files-found: error
 
   collector-product:
@@ -69,22 +70,23 @@ jobs:
       # is BLOCKED, rather than reusing B2 lower-bound numbers as product data.
       - name: Build both sibling pairs and main-thread fixtures
         run: |
+          mkdir -p "$RUNNER_TEMP/measurements"
           cargo build --manifest-path base/Cargo.toml -j 2 --release -p bingsu -p bingsu-collect
           cargo build --manifest-path candidate/Cargo.toml -j 2 --release -p bingsu -p bingsu-collect
-          python3 candidate/bench/git-product.py --prepare base/target/release/bingsu --out candidate/target/f3/base-preparation.json
-          python3 candidate/bench/git-product.py --prepare candidate/target/release/bingsu --out candidate/target/f3/candidate-preparation.json
+          python3 candidate/bench/git-product.py --prepare base/target/release/bingsu --out ${{ runner.temp }}/measurements/base-preparation.json
+          python3 candidate/bench/git-product.py --prepare candidate/target/release/bingsu --out ${{ runner.temp }}/measurements/candidate-preparation.json
       - name: Record 200 alternating warm observations and first-process cold
         env:
           BINGSU_MEASUREMENT_REVISION: ${{ github.sha }}
           BINGSU_BASE_REVISION: ${{ inputs.base_ref }}
           BINGSU_CANDIDATE_REVISION: ${{ github.sha }}
-        run: python3 candidate/bench/git-product.py --base base/target/release/bingsu --candidate candidate/target/release/bingsu --rounds 200 --out candidate/target/f3/m3c-product.json
+        run: python3 candidate/bench/git-product.py --base base/target/release/bingsu --candidate candidate/target/release/bingsu --rounds 200 --out ${{ runner.temp }}/measurements/m3c-product.json
       - name: Preserve M3c observations including BLOCKED evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: m3c-product-${{ matrix.os }}
           path: |
-            candidate/target/f3/*preparation.json
-            candidate/target/f3/m3c-product.json
+            ${{ runner.temp }}/measurements/*preparation.json
+            ${{ runner.temp }}/measurements/m3c-product.json
           if-no-files-found: error

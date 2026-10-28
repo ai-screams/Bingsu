@@ -224,3 +224,60 @@ The replacement first pins a private local control root, then injects non-local
 and unknown observations into the shared creation routine. It requires that
 the locality check was reached and rejects both results without skipping.
 The separate native descriptor test still checks the OS locality observation.
+
+## Controlled paired protocol (M3d D1)
+
+`git-product.py`, `collector-product.py` and `n7_measure.n7_pairs` use
+`protocol.py`. Existing `measure_pair(base, candidate, rounds)` calls still work;
+product-specific metrics and raw observations remain in the result. A successful
+measurement has status `OBSERVED`; missing evidence has status `BLOCKED`, never
+PASS. This does not certify formal B5–B7 or change a product budget.
+
+Build and prepare both release sibling pairs first, then stop builds, tests,
+traces and other measurement processes. Output must be outside every checkout
+and linked worktree (including paths reached through symlinks). Product scratch
+roots remain under `target` for the existing trusted-root checks. For example:
+
+```sh
+python3 bench/git-product.py --base /trusted/base/release/bingsu \
+  --candidate /trusted/candidate/release/bingsu --rounds 200 \
+  --cases no-git,git-clean --mode gate --out /external/measurements/git.json
+```
+
+`--cases no-git,git-clean,git-dirty,tracked-19000,budget-bound` defaults to all
+five cases. Both product CLIs accept `--mode gate|experiment --condition <json>`.
+The JSON condition has `power`, `load_range`, and `synthetic_load`; the CLI mode
+wins over a JSON mode. Gate uses AC, or `mains-assumed` only when no power device
+exists. Load average is a covariate, not a gate threshold. Unknown power, missing
+reference/host fields and thermal warnings block admission. Explicit thermal
+`unavailable` is recorded on hosts without portable telemetry; experiment power
+comparisons require observable normal heat and the declared power/load range.
+
+The same session calibrates the base release binary through rejected command
+dispatch (usage exit 2, no helper), using 5 blocks of 20 invocations. Block 0 is
+discarded, as determined by D0. Admission compares before/after reference medians
+with the `p95_of_medians` of the remaining calibration blocks. Calibration is
+bound to host, kernel, architecture and session. The implementation conservatively
+requires calibration median spread to be within 5%; this operational stability
+check does not raise any product limit.
+
+Each binary's first invocation is retained separately and excluded from warm
+samples. Each row requires at least 200 samples per binary. Measurement blocks
+contain up to 20 alternating pairs; even/odd alternation is preserved. Block and
+case order use recorded random seeds. Invalid blocks, their samples, before/after
+conditions and reasons remain in raw evidence; only accepted blocks contribute
+to summaries. A block has at most 3 attempts before the session becomes BLOCKED.
+
+Experiment transitions poll at most 15 reference blocks for normal heat and
+3 consecutive medians within 5%. Nonzero synthetic load must equal half the
+logical cores (integer division): single-thread CPU processes run with nice 19,
+plus `taskpolicy -b` on macOS, for at most 60 seconds, and are cleaned up on exit.
+If this administrative duration expires, the cell is BLOCKED. Cell selection is
+explicit; callers scheduling multiple conditions must balance and randomize
+cell order. Cold measurements remain separate record-only work.
+
+Raw JSON includes p50, p95, variance, n, min/max, seeds, discarded attempts,
+calibration, host/kernel/libc/architecture, binary hashes, revision labels and
+invocation metadata. `persist_raw` writes unique evidence files; CLI `--out`
+also retains the requested filename. `bench.yml` builds both revisions first and
+writes/uploads evidence under `$RUNNER_TEMP/measurements`.

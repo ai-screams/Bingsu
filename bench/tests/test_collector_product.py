@@ -355,3 +355,47 @@ def test_prepare_accepts_external_cargo_target_and_names_expected_path(monkeypat
     copied = tmp_path / "installed" / binary.relative_to(target)
     with pytest.raises(ValueError, match=str(binary)):
         product.build_context(copied)
+
+
+@pytest.fixture(autouse=True)
+def controlled_protocol(monkeypatch):
+    # Product tests exercise real pairing; host probes have dedicated negative controls.
+    p = product.protocol
+    calibration = dict(stable=True, p95_of_medians=100, **p.identity())
+    monkeypatch.setattr(p, 'calibrate', lambda _: calibration)
+    monkeypatch.setattr(p, 'snapshot', lambda _: dict(**p.identity(), power='ac',
+        thermal='normal', load_1m=1., reference=p.summary([100] * 20)))
+
+
+def test_blocked_calibration_preserves_protocol_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(product, 'prepared', lambda _: dict(hashes={}, policy={}, stripped_bytes={}))
+    monkeypatch.setattr(product, 'host', lambda: {})
+    monkeypatch.setattr(product, 'watchdog_evidence', lambda _: {})
+    monkeypatch.setattr(product, 'ROOT', tmp_path)
+    (tmp_path / 'target').mkdir()
+    monkeypatch.setattr(product.protocol, 'calibrate', lambda _: dict(stable=False))
+    got = product.measure_pair('base', 'candidate', 200)
+    assert got['status'] == 'BLOCKED' and got['calibration'] == dict(stable=False)
+    assert got['hypotheses']['base']['ready_p50_within_hypothesis'] is None
+
+
+def test_legacy_host_keeps_unknown_power_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(product.protocol, 'observe_host', lambda: {'power': 'unknown'})
+    def unavailable(*args, **kwargs): raise OSError('pmset unavailable')
+    monkeypatch.setattr(product, 'run', unavailable)
+    assert product.host()['power'] == 'unknown'
+
+
+def test_cli_forwards_mode_and_condition(monkeypatch, tmp_path):
+    import sys
+    received = {}
+    def measure(base, candidate, rounds, **kwargs):
+        received.update(kwargs)
+        return {'status': 'OBSERVED'}
+    monkeypatch.setattr(product, 'measure_pair', measure)
+    monkeypatch.setattr(product.protocol, 'write_output', lambda *_: None)
+    monkeypatch.setattr(sys, 'argv', ['collector-product.py', '--base', 'b', '--candidate', 'c',
+        '--out', str(tmp_path / 'out.json'), '--mode', 'experiment',
+        '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
+    assert product.main() == 0
+    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
