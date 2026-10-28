@@ -2018,10 +2018,10 @@ def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path)
                               [deadline_helper_capture()] * 5 + [helper_stage_case("collect")]) == 6
 
 
-# 이것을 실패시키는 것: 시도 상한을 12 미만으로 되돌리는 것(12번째 회차의 발행을 못 본다).
-def test_collect_accepts_a_publication_after_eleven_deadline_attempts(monkeypatch, tmp_path):
+# 이것을 실패시키는 것: 시도 상한을 40 미만으로 되돌리는 것(40번째 회차의 발행을 못 본다).
+def test_collect_accepts_a_publication_on_the_last_allowed_attempt(monkeypatch, tmp_path):
     import json
-    n = 11  # the CI failure: later attempts must still be able to publish
+    n = 39  # CI publishes in about 1 of 8 attempts: the last allowed attempt must still count
     assert run_helper_captures(monkeypatch, tmp_path,
                               [deadline_helper_capture()] * n + [helper_stage_case("collect")]) == n + 1
     evidence = json.loads((tmp_path / "collect" / f"attempt-{n + 1}" / "attempt.json").read_text())

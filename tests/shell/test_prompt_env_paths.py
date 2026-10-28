@@ -1622,10 +1622,13 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
 # 이것을 실패시키는 것: 도우미 재검증 경로에 같은 파일의 fstat 하나를 더하는 것, 수집 비용을 앞단으로 옮기는 것,
 # 공식에 옛 고정 항(e["read"] += 2)을 되살리는 것, debug 바이너리로 재는 것, helper 어휘에서 fd statx나
 # chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것,
-# 마감 회차의 호출을 버리거나 최대 COLLECT_ATTEMPTS(12)회에서 실제 응답 발행이 한 번도 없는 것.
+# 마감 회차의 호출을 버리거나 최대 COLLECT_ATTEMPTS(40)회에서 실제 응답 발행이 한 번도 없는 것.
 # Under strace the collector can miss its deadline (exit 75) several times in a
-# row on a loaded runner; every such attempt is still checked in full.
-COLLECT_ATTEMPTS = 12
+# row on a loaded runner; every such attempt is still checked in full. CI musl
+# release published in 1 of 8 attempts: (7/8)**12 is about 0.20 per run, (7/8)**40
+# about 0.005. The loop stops at the first publication, so only runs near failure
+# pay for more attempts (an attempt took about 0.5-0.9 s in CI).
+COLLECT_ATTEMPTS = 40
 
 
 @pytest.fixture
