@@ -200,6 +200,11 @@ pub(super) fn data_verdict(
     }
     Ok(n)
 }
+/// Reads exactly the checked `len` bytes, with no end-check read: store files
+/// are replaced only by rename, so a published file never changes in place
+/// (spec 8 read-count rule). Callers compare the size again afterwards
+/// (`check_file` or the file stamp), which refuses a file that grew; a shorter
+/// file fails here.
 pub(super) fn read_exact_len(f: &mut impl Read, len: usize) -> Result<Vec<u8>, StoreError> {
     let mut bytes = Vec::new();
     bytes
@@ -219,11 +224,6 @@ pub(super) fn read_exact_len(f: &mut impl Read, len: usize) -> Result<Vec<u8>, S
         }
     } else {
         f.read_exact(&mut bytes)?;
-    }
-    let mut extra = [0];
-    sys::collection_ops(1)?;
-    if f.read(&mut extra)? != 0 {
-        return Err(StoreError::Unsafe);
     }
     Ok(bytes)
 }
@@ -376,11 +376,38 @@ mod tests {
             assert!(data_verdict(facts, true, 1, 10, 10, local, 3).is_err());
         }
         assert!(read_exact_len(&mut b"short".as_slice(), 6).is_err());
-        assert!(read_exact_len(&mut b"long".as_slice(), 3).is_err());
+        assert_eq!(read_exact_len(&mut b"long".as_slice(), 3).unwrap(), b"lon");
         assert_eq!(
             read_exact_len(&mut b"exact".as_slice(), 5).unwrap(),
             b"exact"
         );
+    }
+    struct CountingReader<'a> {
+        data: &'a [u8],
+        calls: usize,
+    }
+    impl Read for CountingReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            self.data.read(buf)
+        }
+    }
+
+    // 이것을 실패시키는 것: 이름 바꾸기로만 교체되는 파일을 읽은 뒤 끝 확인 read를 하나 더 하는 것
+    // (스펙 8: 읽기 수는 ⌈바이트 / 버퍼⌉, 끝 확인 없음).
+    #[test]
+    fn published_store_reads_have_no_end_check() {
+        let mut reader = CountingReader {
+            data: b"published bytes and more",
+            calls: 0,
+        };
+        assert_eq!(read_exact_len(&mut reader, 15).unwrap(), b"published bytes");
+        assert_eq!(reader.calls, 1);
+        let mut short = CountingReader {
+            data: b"short",
+            calls: 0,
+        };
+        assert!(read_exact_len(&mut short, 6).is_err());
     }
     fn refuse_same_inode_rewrite(slot: Slot, original: &[u8], changed: &[u8]) {
         let (base, pin) = fixture(slot.name());
@@ -730,7 +757,11 @@ pub(super) fn stage_verified(
     sys::collection_ops(1)?;
     f.rewind()?;
     let actual = read_exact_len(&mut f, len)?;
-    if actual != bytes {
+    // The staging file is not published yet: its readback still proves that
+    // our own write ended where it should.
+    let mut extra = [0];
+    sys::collection_ops(1)?;
+    if actual != bytes || f.read(&mut extra)? != 0 {
         return Err(StoreError::Unsafe);
     }
     validate(&actual)?;
