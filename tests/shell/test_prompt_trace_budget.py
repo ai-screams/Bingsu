@@ -1970,6 +1970,18 @@ def creation_then_failure(capture, damage):
                  "write-absence": "O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)"}[damage]
         lines[at] = lines[at].replace(probe, flags)
         return lines, collector, plan
+    if damage.startswith("truncated-creation"):
+        # Review reproduction: a creation path strace cuts at -s 256, then a
+        # read-only absence probe after the creation reports ENOENT.
+        at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+                  and '".response.stage", O_RDWR|O_CREAT|O_EXCL' in lines[i])
+        dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
+        cut = '"' + ('.//' * 100 + '.response.stage')[:256] + '"...'
+        lines[at] = lines[at].replace('".response.stage", O_RDWR', cut + ", O_RDWR")
+        if damage == "truncated-creation-unannotated":
+            lines[at] = re.sub(r"= (\d+)<[^>]*>$", r"= \1", lines[at])
+        lines.insert(at + 1, f'{supervisor}  openat({dirfd[1]}, ".response.stage", {probe} = -1 ENOENT (No such file or directory)')
+        return lines, collector, plan
     if damage == "open-creation-check":
         lines, collector, plan = failed_before_install((lines, collector, plan), "-1 ENOENT (No such file or directory)")
     at = next(i for i in range(install) if lines[i].split()[0] == supervisor
@@ -2082,6 +2094,18 @@ def test_collect_accepts_musl_absence_probes(capture):
             if line.split()[0] == supervisor else line for line in lines]
     assert musl != lines
     assert budget.check_helper_capture("collect", musl, HELPER_EXE, collector, plan) is True
+
+
+# 이것을 실패시키는 것: 잘린 생성 경로를 fd 주석으로 확인하지 않는 것, 확인할 수 없는 생성을 넘기는 것(fail closed 제거).
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+@pytest.mark.parametrize("damage,message", [
+    ("truncated-creation", "publication after a failed supervisor call"),
+    ("truncated-creation-unannotated", "supervisor open of an unresolved path"),
+])
+def test_collect_rejects_truncated_creation(capture, damage, message):
+    lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
+    with pytest.raises(AssertionError, match=message):
+        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
 
 
 # 이것을 실패시키는 것: 부재 확인 예외의 syscall·flags 고정을 지우는 것, 단계 생성을 openat으로만 추적하는 것.
