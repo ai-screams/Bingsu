@@ -1959,19 +1959,20 @@ def test_collect_attempt_mutations(monkeypatch, tmp_path, deadline, damage, diag
 
 
 # 이것을 실패시키는 것: exit 75 회차를 검사하지 않거나 실제 발행 없이 재시도 한도에서 통과하는 것.
-def test_collect_requires_a_publication_within_six_attempts(monkeypatch, tmp_path):
-    with pytest.raises(pytest.fail.Exception, match="zero publishes.*6"):
-        run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * 6)
-    # All six non-publications remain inspectable after the terminal failure.
+def test_collect_requires_a_publication_within_the_attempt_cap(monkeypatch, tmp_path):
+    with pytest.raises(pytest.fail.Exception, match=f"zero publishes.*{budget.COLLECT_ATTEMPTS}"):
+        run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * budget.COLLECT_ATTEMPTS)
+    # All capped non-publications remain inspectable after the terminal failure.
     import json
     from collections import Counter
-    for attempt in range(1, 7):
+    for attempt in range(1, budget.COLLECT_ATTEMPTS + 1):
         artifacts = tmp_path / "collect" / f"attempt-{attempt}"
         assert {p.name for p in artifacts.iterdir()} == {"trace.strace", "stdout", "stderr", "attempt.json"}
         assert all(p.is_file() and not p.is_symlink() for p in artifacts.iterdir())
         evidence = json.loads((artifacts / "attempt.json").read_text())
         assert evidence["collector_exit"] == 75
         assert evidence["published"] is False
+        assert evidence["publish_attempt"] is None
         assert set(evidence["phase_counts"]) == {"prefix", "supervisor", "finish_gc"}
         assert Counter(evidence["phase_counts"]["prefix"]) == Counter(evidence["phase_expected"]["prefix"])
         assert (artifacts / "trace.strace").read_text().splitlines() == deadline_helper_capture()[0]
@@ -1983,13 +1984,23 @@ def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path)
                               [deadline_helper_capture()] * 5 + [helper_stage_case("collect")]) == 6
 
 
+# 이것을 실패시키는 것: 시도 상한을 12 미만으로 되돌리는 것(12번째 회차의 발행을 못 본다).
+def test_collect_accepts_a_publication_after_eleven_deadline_attempts(monkeypatch, tmp_path):
+    import json
+    n = 11  # the CI failure: later attempts must still be able to publish
+    assert run_helper_captures(monkeypatch, tmp_path,
+                              [deadline_helper_capture()] * n + [helper_stage_case("collect")]) == n + 1
+    evidence = json.loads((tmp_path / "collect" / f"attempt-{n + 1}" / "attempt.json").read_text())
+    assert evidence["published"] is True and evidence["publish_attempt"] == n + 1
+
+
 # 이것을 실패시키는 것: collector exit 0만으로 실제 response rename을 대신하는 것.
 def test_collect_exit_zero_without_publish_does_not_pass(monkeypatch, tmp_path):
     lines, collector, plan = deadline_helper_capture()
     lines = [line.replace('exit_group(75)', 'exit_group(0)').replace('exited with 75', 'exited with 0')
              for line in lines]
     with pytest.raises(pytest.fail.Exception, match="zero publishes"):
-        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)] * 6)
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)] * budget.COLLECT_ATTEMPTS)
 
 
 # 이것을 실패시키는 것: 새 syscall을 볼 수 없는 제한된 strace 집합으로 되돌리는 것.

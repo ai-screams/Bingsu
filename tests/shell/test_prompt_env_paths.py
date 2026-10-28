@@ -1558,7 +1558,12 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
 # 이것을 실패시키는 것: 도우미 재검증 경로에 같은 파일의 fstat 하나를 더하는 것, 수집 비용을 앞단으로 옮기는 것,
 # 공식에 옛 고정 항(e["read"] += 2)을 되살리는 것, debug 바이너리로 재는 것, helper 어휘에서 fd statx나
 # chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것,
-# 마감 회차의 호출을 버리거나 최대 6회에서 실제 응답 발행이 한 번도 없는 것.
+# 마감 회차의 호출을 버리거나 최대 COLLECT_ATTEMPTS(12)회에서 실제 응답 발행이 한 번도 없는 것.
+# Under strace the collector can miss its deadline (exit 75) several times in a
+# row on a loaded runner; every such attempt is still checked in full.
+COLLECT_ATTEMPTS = 12
+
+
 @pytest.fixture
 def helper_stage_evidence(tmp_path_factory):
     # A dedicated upload root, separate from all other pytest fixtures.
@@ -1571,7 +1576,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     """GATE-FS-HELPER.1: exact stages; collect prefix exact and tail <=.
 
     Every attempt is checked before retrying, including exit 75. At least one
-    of at most six fresh collect fixtures must actually rename a response.
+    of at most COLLECT_ATTEMPTS fresh collect fixtures must actually rename a response.
     """
     assert shutil.which("strace"), "the helper stage gate must execute strace"
     libc = require_release_helper(real_bin())
@@ -1579,7 +1584,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     # Traces live outside the product fixture: cleanup must never erase a
     # failed attempt or earlier deadline attempts. --basetemp locates these
     # artifacts for the controller; each invocation needs its own basetemp.
-    for attempt in range(1, (6 if stage == "collect" else 1) + 1):
+    for attempt in range(1, (COLLECT_ATTEMPTS if stage == "collect" else 1) + 1):
         artifacts = helper_stage_evidence / stage / f"attempt-{attempt}"
         artifacts.mkdir(parents=True)
         trace = artifacts / "trace.strace"
@@ -1596,6 +1601,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             lines = trace.read_text(errors="replace").splitlines()
             published = check_helper_capture(stage, lines, str(fixture.inst.exe), fixture.collector,
                                              fixture.plan(libc), evidence=evidence)
+            evidence["publish_attempt"] = attempt if published else None
             if stage != "collect" or published:
                 return
         except BaseException as error:
@@ -1607,7 +1613,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             if fixture is not None:
                 wait_helpers(fixture.base)
                 shutil.rmtree(fixture.base, ignore_errors=True)
-    pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {helper_stage_evidence / stage}")
+    pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
 # Fixture metadata, pinned independently from the product source.
