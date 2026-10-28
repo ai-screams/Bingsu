@@ -269,18 +269,26 @@ def test_shipped_collection_trace_rejects_mutations(damage):
         assert_repository_trace(lines, SHIPPED_CAPS, {})
 
 
-def with_identity_cloexec(after_stat=False, twice=False):
+def with_identity_cloexec(after_stat=False, twice=False, result="-1 EPERM (Operation not permitted)"):
     """musl's open(): fcntl(F_SETFD, FD_CLOEXEC) right after the read layer's
     O_CLOEXEC open of "/" (the collector's filter refuses it: EPERM)."""
     lines = shipped_lines()
     at = next(i for i, line in enumerate(lines) if line.startswith('1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC <'))
-    pair = ["1098  fcntl(6</>, F_SETFD, FD_CLOEXEC) = -1 EPERM (Operation not permitted)"]
+    pair = [f"1098  fcntl(6</>, F_SETFD, FD_CLOEXEC) = {result}"]
     where = at + 4 if after_stat else at + 2  # after the resumed open, or after its newfstatat pair
     return lines[:where] + pair * (2 if twice else 1) + lines[where:]
 
 
-def test_shipped_musl_identity_cloexec_is_allowed_on_musl():
-    assert_repository_trace(with_identity_cloexec(), {**SHIPPED_CAPS, "libc": "musl"}, {})
+@pytest.mark.parametrize("result", ["-1 EPERM (Operation not permitted)", "0"])
+def test_shipped_musl_identity_cloexec_is_allowed_on_musl(result):
+    assert_repository_trace(with_identity_cloexec(result=result), {**SHIPPED_CAPS, "libc": "musl"}, {})
+
+
+# 이것을 실패시키는 것: identity fd의 F_SETFD에서 성공·EPERM 아닌 결과를 받아들이는 것.
+@pytest.mark.parametrize("result", ["-1 EINVAL (Invalid argument)", "-1 EBADF (Bad file descriptor)"])
+def test_shipped_musl_identity_cloexec_refuses_other_results(result):
+    with pytest.raises(AssertionError, match="identity-only"):
+        assert_repository_trace(with_identity_cloexec(result=result), {**SHIPPED_CAPS, "libc": "musl"}, {})
 
 
 # 이것을 실패시키는 것: identity fd의 F_SETFD를 glibc에서도, 두 번, open 바로 뒤가 아닌 자리에서 허용하는 것.

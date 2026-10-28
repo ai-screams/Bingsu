@@ -60,7 +60,8 @@ def test_collector_stack_guard_seeks_pass_on_x86_64_gnu():
     check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"))
 
 
-# 이것을 실패시키는 것: x86_64 glibc 밖에서, 다른 fd·다른 모양으로, 표의 횟수를 넘겨 collector의 lseek을 허용하는 것.
+# 이것을 실패시키는 것: x86_64 glibc 밖에서, 다른 fd(공유 라이브러리 fd 포함)·다른 모양으로, 표의 횟수를 넘겨,
+# 짝 없이 collector의 lseek을 허용하는 것.
 @pytest.mark.parametrize("platform,seeks", [
     (("aarch64", "gnu"), None),
     (("x86_64", "musl"), None),
@@ -70,8 +71,18 @@ def test_collector_stack_guard_seeks_pass_on_x86_64_gnu():
     (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854",
                          "1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854",
                          "1098  lseek(4</proc/1098/maps>, 0, SEEK_SET) = 0"]),
-], ids=["aarch64-gnu", "x86_64-musl", "no-platform", "other-fd", "set-first", "third-seek"])
+    (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854"]),
+    (("x86_64", "gnu"), "libc"),
+], ids=["aarch64-gnu", "x86_64-musl", "no-platform", "other-fd", "set-first", "third-seek", "unpaired",
+        "libc-fd"])
 def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
+    if seeks == "libc":  # a trusted shared-object fd the loader rules admit for reads
+        libc = "4</usr/lib/aarch64-linux-gnu/libc.so.6>"
+        lines = insert_before(collecting_prompt(), f"1098  close({libc}",
+                              [f"1098  lseek({libc}, 0, SEEK_CUR) = 832", f"1098  lseek({libc}, 832, SEEK_SET) = 832"])
+        with pytest.raises(AssertionError):
+            check_collecting_prompt(lines, platform=platform)
+        return
     if seeks == "lock":  # the inherited collection.lock fd, open at that point
         import re
         lock = next(m[1] for line in collecting_prompt()

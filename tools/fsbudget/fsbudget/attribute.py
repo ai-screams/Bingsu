@@ -830,13 +830,15 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         # x86_64 glibc's pthread_getattr_np (Rust std's main-thread stack
         # guard) seeks its own /proc/self/maps twice before any filter
         # (formula.STARTUP_PRIMITIVES stack_guard). Only on the platform the
-        # caller names, only that fd, only SEEK_CUR 0 then SEEK_SET.
+        # caller names, only that fd, only SEEK_CUR 0 then SEEK_SET, and the
+        # whole sequence or none of it (checked after the last record).
         # (A maps fd after the filters would need a maps open the bootstrap
         # vocabulary already refuses.)
-        # 이것을 실패시키는 것: 다른 플랫폼·다른 fd·다른 모양의 lseek, 또는 표의 횟수를 넘는 lseek을 허용하는 것.
+        # 이것을 실패시키는 것: 다른 플랫폼·다른 fd(공유 라이브러리 fd 포함)·다른 모양의 lseek, 표의 횟수를 넘는 lseek,
+        # 끝나지 않은 seek 쌍을 허용하는 것.
         if (role == "collector" and c.name == "lseek"
                 and guard_seeks[process] < guard_allowance
-                and prologue_allowed("read", target(c), c.pid)
+                and target(c) in {"/proc/self/maps", f"/proc/{process}/maps"}
                 and (args[1:] == ["0", "SEEK_CUR"] if guard_seeks[process] == 0
                      else len(args) == 3 and args[1].isdigit() and args[2] == "SEEK_SET")):
             guard_seeks[process] += 1
@@ -885,6 +887,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 bad(c, "collector read outside the M3b bootstrap")
         if k:
             count(role, k, c)
+    errors.extend(f"pid {process} (collector): incomplete stack-guard seeks"
+                  for process, n in guard_seeks.items() if 0 < n < guard_allowance)
     if not seen_exec and not counts:
         errors.append("no product process observed")
     required = pinned.get("collectors", 1)
@@ -1101,8 +1105,10 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
             # one such call, right after the identity fd's open, on musl only.
             # 이것을 실패시키는 것: glibc에서, 두 번, 또는 open 바로 뒤가 아닌 F_SETFD를 identity fd에 허용하는 것.
             # Adjacency to that open is the fcntl branch's check below.
+            # 이것을 실패시키는 것: 성공·EPERM 아닌 결과(EINVAL·EBADF)의 F_SETFD를 받아들이는 것.
             musl_cloexec = (capabilities.get("libc") == "musl" and call.name == "fcntl"
-                            and args[1:] == ["F_SETFD", "FD_CLOEXEC"])
+                            and args[1:] == ["F_SETFD", "FD_CLOEXEC"]
+                            and (call.ret == "0" or call.ret.startswith("-1 EPERM")))
             if subject and int(subject[1]) in identity and not musl_cloexec:
                 assert (call.name == "close" or call.name in {"fstat", "fstat64"}
                         or call.name in {"newfstatat", "statx"} and len(args) > 1 and args[1] == '""'), ("identity-only / fd", call)
