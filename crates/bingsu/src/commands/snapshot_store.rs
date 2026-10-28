@@ -409,6 +409,89 @@ mod tests {
         };
         assert!(read_exact_len(&mut short, 6).is_err());
     }
+
+    thread_local! {
+        static READ_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static APPEND_AT: std::cell::RefCell<Option<(usize, std::path::PathBuf)>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn append_during_read_clock() -> u64 {
+        use std::io::Write;
+        let tick = READ_TICKS.with(|ticks| {
+            ticks.set(ticks.get() + 1);
+            ticks.get()
+        });
+        APPEND_AT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(at, _)| *at == tick) {
+                let (_, path) = slot.take().unwrap();
+                let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                assert_eq!(file.write(b"extra").unwrap(), 5);
+            }
+        });
+        0
+    }
+
+    fn refuse_growth_during_read(locked: bool) {
+        let (base, pin) = fixture(if locked { "locked-growth" } else { "growth" });
+        let c = CheckedContextFd::open(
+            &pin,
+            b"/cfg",
+            b"/state",
+            sys::current_uid(),
+            &mut RefuseGroupWrite,
+            true,
+        )
+        .unwrap();
+        let file = path(&base, b"/cfg", b"/state").join("marker");
+        std::fs::write(&file, b"data").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = locked.then(|| c.try_lock().unwrap());
+        let read = || match &store {
+            Some(store) => store.read(DataFile::Marker).map(Option::unwrap),
+            None => c.read(DataFile::Marker),
+        };
+        assert_eq!(read().unwrap(), b"data");
+
+        READ_TICKS.with(|ticks| ticks.set(0));
+        let meter =
+            sys::CollectionMeter::fixture_clock(4_096, 20_000_000, append_during_read_clock);
+        // Measure the prefix on this platform: ACL/ownership checks can charge
+        // different numbers of operations. The next tick is the first read,
+        // after the length (and, for LockedStore, the initial stamp) was saved.
+        let f = c.open_data(DataFile::Marker).unwrap();
+        if locked {
+            sys::file_stamp(&f).unwrap();
+        }
+        assert_eq!(c.check_file(&f, DataFile::Marker.cap()).unwrap(), 4);
+        let prefix_ticks = READ_TICKS.with(|ticks| ticks.get());
+        APPEND_AT.with(|slot| *slot.borrow_mut() = Some((2 * prefix_ticks + 1, file.clone())));
+        let result = read();
+        drop(meter);
+        assert!(
+            APPEND_AT.with(|slot| slot.borrow().is_none()),
+            "append hook did not run"
+        );
+        // Growth stays below the cap, preserves the inode and leaves the
+        // original prefix readable; only the post-read comparison rejects it.
+        assert_eq!(std::fs::read(&file).unwrap(), b"dataextra");
+        assert!(matches!(result, Err(StoreError::Unsafe)), "{result:?}");
+        drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: CheckedContextFd::read의 post-read check_file 크기 비교 삭제.
+    #[test]
+    fn checked_context_read_rejects_growth_after_length_check() {
+        refuse_growth_during_read(false);
+    }
+
+    // 이것을 실패시키는 것: LockedStore::read의 before/after file_stamp 비교 삭제.
+    #[test]
+    fn locked_store_read_rejects_growth_between_stamps() {
+        refuse_growth_during_read(true);
+    }
+
     fn refuse_same_inode_rewrite(slot: Slot, original: &[u8], changed: &[u8]) {
         let (base, pin) = fixture(slot.name());
         let c = CheckedContextFd::open(
