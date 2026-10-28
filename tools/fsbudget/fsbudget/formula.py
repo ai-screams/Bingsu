@@ -768,7 +768,9 @@ def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
     After that unlock the main thread's Ticket::finish and GC are tail too.
     These are bounded by the 50 ms collector deadline / 20 ms GC budget, so
     they may stop early. No measured count chooses a formula coefficient.
-    Exit 75 cannot publish, but still observes the supervisor completion clock.
+    deadline=True is exit 75 without publication: the supervisor still
+    observes its completion clock. An exit-75 attempt that stored a Deadline
+    partial is judged by the publication formula (gate.check_collect).
     """
     _check_plan(plan)
     if "collect" not in plan.stages:

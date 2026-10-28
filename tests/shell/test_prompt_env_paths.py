@@ -1563,7 +1563,8 @@ class HelperStageFixture:
 
 def collector_exit(lines, collector):
     """The traced collector's exit code. 75 is wire::DEADLINE_EXIT_CODE: the
-    collector ran past its 50 ms request deadline and nothing was published."""
+    collector ran past its 50 ms request deadline. The supervisor still
+    publishes a Deadline partial when a verified update arrived before it."""
     pid = next(l.split()[0] for l in lines if is_root(l, collector))
     ends = [l for l in lines if l.split()[0] == pid and "+++ exited with" in l]
     assert len(ends) == 1, ("collector end", ends)
@@ -1610,8 +1611,9 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
         published = False
     else:
         assert status in (0, 75), ("unexpected collector exit", status)
-        errors, published = check_collect(roles, helper_collect_expected(plan, deadline=status == 75),
-                                          deadline=status == 75, evidence=evidence)
+        deadline = helper_collect_expected(plan, deadline=True) if status == 75 else None
+        errors, published = check_collect(roles, helper_collect_expected(plan),
+                                          deadline=deadline, evidence=evidence)
     evidence.update(published=published, errors=errors)
     assert not errors, errors
     return published

@@ -26,8 +26,15 @@ def check(measured, expected, mode: str, gated_roles) -> list[str]:
     return bad
 
 
-def check_collect(attribution, expected, *, deadline=False, evidence=None):
+def check_collect(attribution, expected, *, deadline=None, evidence=None):
     """Separate concurrent collect streams; never subtract prefix from totals.
+
+    `expected` is the publication formula. `deadline`, given for an exit-75
+    attempt, is the formula without publication. It applies only when the
+    supervisor renamed no response: a collector that sent a verified update
+    and then hit its own stage deadline leaves a Deadline partial, which the
+    supervisor stores after reaping exit 75 (spec message row: the results so
+    far; S-17). That attempt is held to the publication formula, as exit 0 is.
 
     Attribution retains counted helper events in syscall-entry order, including
     pre-exec child setup. The two successful helper thread creations identify
@@ -65,14 +72,16 @@ def check_collect(attribution, expected, *, deadline=False, evidence=None):
         if (c.pid == supervisor and c.name == "renameat" and c.ret == "0"
                 and len(args) == 4 and args[1] == '".response.stage"' and args[3] == '"response"'):
             published = True
+    # 이것을 실패시키는 것: 발행 여부와 무관하게 exit 75에 마감 공식을 쓰는 것(발행한 마감 회차가 실패),
+    # exit 75에 늘 발행 공식을 쓰는 것(발행 없는 마감 회차의 감독 tail 초과를 놓침).
+    if deadline is not None and not published:
+        expected = deadline
     if evidence is not None:
         evidence.update(phase_counts=measured, phase_expected=expected,
                         prefix_complete=unlocked, published=published)
     errors = []
     if not unlocked:
         errors.append("collect: missing snapshot unlock boundary")
-    if deadline and published:
-        errors.append("collect: deadline attempt published")
     # Independent phase and kind limits prevent tail slack hiding a prefix
     # regression, and GC slack hiding an extra supervisor call on exit 75.
     for phase, want in expected.items():

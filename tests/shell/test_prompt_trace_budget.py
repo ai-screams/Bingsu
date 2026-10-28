@@ -1918,6 +1918,26 @@ def deadline_helper_capture():
     return lines, collector, plan
 
 
+def deadline_published_capture():
+    """Synthetic exit-75 variant that keeps the supervisor publication.
+
+    The collector sent a verified update, hit its own stage deadline and exited
+    75; the supervisor reaped it and stored the Deadline partial (spec message
+    row: results so far; S-17: a timeout after verified A). CI run 40730902708
+    attempt 8 traced this order. A checker fixture, not a live capture.
+    """
+    lines, collector, plan = helper_stage_case("collect")
+    pid = next(line.split()[0] for line in lines if budget.is_root(line, collector))
+    lines = [line.replace('exit_group(0)', 'exit_group(75)').replace('exited with 0', 'exited with 75')
+             if line.split()[0] == pid else line for line in lines]
+    return lines, collector, plan
+
+
+COLLECT_CAPTURES = {"published": lambda: helper_stage_case("collect"),
+                    "deadline": deadline_helper_capture,
+                    "deadline-published": deadline_published_capture}
+
+
 def extra_helper_stat(lines, *, tail=False, supervisor=False):
     lines = list(lines)
     if supervisor:
@@ -1934,18 +1954,18 @@ def extra_helper_stat(lines, *, tail=False, supervisor=False):
 
 
 # 이것을 실패시키는 것: prefix 초과/누락, tail 상한 초과, 마감 회차 폐기 후 정상 회차만 검사하는 것.
-@pytest.mark.parametrize("deadline", [False, True], ids=["published", "deadline"])
+@pytest.mark.parametrize("capture", list(COLLECT_CAPTURES))
 @pytest.mark.parametrize("damage,diagnostic", [
     ("extra-prefix", r"prefix.fstat.*exact"),
     ("missing-prefix", r"prefix.fstat.*exact"),
     ("extra-tail", r"finish_gc.fstat.*le"),
     ("extra-supervisor", r"supervisor.fstat.*le"),
 ])
-def test_collect_attempt_mutations(monkeypatch, tmp_path, deadline, damage, diagnostic):
+def test_collect_attempt_mutations(monkeypatch, tmp_path, capture, damage, diagnostic):
     clean = helper_stage_case("collect")
-    lines, collector, plan = deadline_helper_capture() if deadline else clean
-    # Validate the unmodified fixture first, including the deadline attempt.
-    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (not deadline)
+    lines, collector, plan = COLLECT_CAPTURES[capture]()
+    # Validate the unmodified fixture first, including the deadline attempts.
+    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (capture != "deadline")
     if damage == "missing-prefix":
         lines = list(lines)
         at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
@@ -1977,6 +1997,20 @@ def test_collect_requires_a_publication_within_the_attempt_cap(monkeypatch, tmp_
         assert Counter(evidence["phase_counts"]["prefix"]) == Counter(evidence["phase_expected"]["prefix"])
         assert (artifacts / "trace.strace").read_text().splitlines() == deadline_helper_capture()[0]
         assert not (tmp_path / str(attempt)).exists(), "product fixture should be cleaned up"
+
+
+# 이것을 실패시키는 것: exit 75 회차를 발행 여부와 무관하게 마감 공식(감독 tail에 발행 호출 0)으로 재는 것,
+# exit 75 회차의 발행 자체를 오류로 보는 것, 그 발행을 발행 회차로 세지 않는 것.
+def test_collect_accepts_a_deadline_partial_publication(monkeypatch, tmp_path):
+    import json
+    lines, collector, plan = deadline_published_capture()
+    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) is True
+    assert run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)]) == 1
+    evidence = json.loads((tmp_path / "collect" / "attempt-1" / "attempt.json").read_text())
+    assert evidence["collector_exit"] == 75 and evidence["published"] is True
+    assert evidence["publish_attempt"] == 1 and evidence["errors"] == []
+    from fsbudget.formula import helper_collect_expected
+    assert evidence["phase_expected"] == json.loads(json.dumps(helper_collect_expected(plan)))
 
 
 def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
@@ -2030,7 +2064,8 @@ def test_collect_missing_prefix_boundary_is_rejected(deadline):
                     and 'LOCK_UN' in c.args)
     roles.helper_calls = [(c, kind) for i, (c, kind) in enumerate(roles.helper_calls)
                           if c.pid != main or i < boundary]
-    errors, _ = check_collect(roles, helper_collect_expected(plan, deadline=deadline), deadline=deadline)
+    errors, _ = check_collect(roles, helper_collect_expected(plan),
+                              deadline=helper_collect_expected(plan, deadline=True) if deadline else None)
     assert "collect: missing snapshot unlock boundary" in errors
     assert any("prefix.flock" in error and "(exact)" in error for error in errors)
 
