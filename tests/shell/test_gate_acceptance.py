@@ -710,3 +710,14 @@ def test_job_cells_follow_the_include_rule():
     assert len(cells) == 5
     assert {"os": "ubuntu-24.04-arm", "libc": "gnu", "profile": "release"} in cells
     assert sum(cell.get("extra") == "x" for cell in cells) == 2
+
+
+# 이것을 실패시키는 것: ARM matrix 라벨을 남긴 채 모든 칸을 x86_64 runner에서 돌리는 것.
+def test_release_gate_cells_require_effective_matrix_runner():
+    texts = workflows()
+    prefix, job = texts["shell.yml"].split("  filter-calls:\n", 1)
+    runner = "    runs-on: ${{ matrix.os }}\n"
+    assert job.split("  shell-macos:", 1)[0].count(runner) == 1
+    texts["shell.yml"] = prefix + "  filter-calls:\n" + job.replace(runner, "    runs-on: ubuntu-latest\n", 1)
+    with pytest.raises(AssertionError, match="release runner"):
+        assert_gate_table((ROOT / TABLE).read_text(), texts)

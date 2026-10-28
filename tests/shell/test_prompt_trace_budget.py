@@ -1680,6 +1680,7 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
 
         def prompt(self, trace):
             trace.write_text("\n".join(self.lines) + "\n")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
         def plan(self, libc):
             return self.expected_plan
@@ -1689,7 +1690,7 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
     monkeypatch.setattr(budget, "real_bin", lambda: Path(HELPER_EXE))
     monkeypatch.setattr(budget.shutil, "which", lambda _: "/synthetic/strace")
     monkeypatch.setattr(budget, "wait_helpers", lambda _: None)
-    budget.test_live_helper_calls_match_stage_formula("collect")
+    budget.test_live_helper_calls_match_stage_formula("collect", tmp_path)
     return len(used)
 
 
@@ -1757,6 +1758,18 @@ def test_collect_attempt_mutations(monkeypatch, tmp_path, deadline, damage, diag
 def test_collect_requires_a_publication_within_six_attempts(monkeypatch, tmp_path):
     with pytest.raises(pytest.fail.Exception, match="zero publishes.*6"):
         run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * 6)
+    # All six non-publications remain inspectable after the terminal failure.
+    import json
+    from collections import Counter
+    for attempt in range(1, 7):
+        artifacts = tmp_path / f"attempt-{attempt}"
+        evidence = json.loads((artifacts / "attempt.json").read_text())
+        assert evidence["collector_exit"] == 75
+        assert evidence["published"] is False
+        assert set(evidence["phase_counts"]) == {"prefix", "supervisor", "finish_gc"}
+        assert Counter(evidence["phase_counts"]["prefix"]) == Counter(evidence["phase_expected"]["prefix"])
+        assert (artifacts / "trace.strace").read_text().splitlines() == deadline_helper_capture()[0]
+        assert not (tmp_path / str(attempt)).exists(), "product fixture should be cleaned up"
 
 
 def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
@@ -1787,8 +1800,9 @@ def test_helper_stage_capture_traces_all_calls(monkeypatch, tmp_path):
     assert commands[0][commands[0].index("-e") + 1] == "trace=all"
 
 
-# 이것을 실패시키는 것: 마감 회차에서 prefix 완료 경계를 알 수 없을 때 회차를 버리거나 exact로 강제하는 것.
-def test_collect_ambiguous_deadline_prefix_uses_upper_bound():
+# 이것을 실패시키는 것: exit 75를 이유로 누락된 완료 경계와 필수 prefix 호출을 허용하는 것.
+@pytest.mark.parametrize("deadline", [False, True])
+def test_collect_missing_prefix_boundary_is_rejected(deadline):
     from fsbudget.formula import helper_collect_expected
     from fsbudget.gate import check_collect
     lines, collector, plan = deadline_helper_capture()
@@ -1797,19 +1811,38 @@ def test_collect_ambiguous_deadline_prefix_uses_upper_bound():
     boundary = next(i for i, (c, kind) in enumerate(roles.helper_calls)
                     if c.pid == main and c.name == "flock" and '/snapshot.lock>' in c.args
                     and 'LOCK_UN' in c.args)
-    # Synthetic counted-event truncation: all main tail calls and the unlock
-    # are absent, so completion cannot be established. Keep concurrent events.
     roles.helper_calls = [(c, kind) for i, (c, kind) in enumerate(roles.helper_calls)
                           if c.pid != main or i < boundary]
-    expected = helper_collect_expected(plan, deadline=True)
-    assert check_collect(roles, expected, deadline=True) == ([], False)
-    errors, _ = check_collect(roles, expected, deadline=False)
+    errors, _ = check_collect(roles, helper_collect_expected(plan, deadline=deadline), deadline=deadline)
     assert "collect: missing snapshot unlock boundary" in errors
-    # A surplus of a still-full primitive must fail even in ambiguous-prefix le.
-    extra = next(pair for pair in roles.helper_calls if pair[1] == "umask")
-    roles.helper_calls.insert(1, extra)
-    errors, _ = check_collect(roles, expected, deadline=True)
-    assert any("prefix.umask" in error and "(le)" in error for error in errors)
+    assert any("prefix.flock" in error and "(exact)" in error for error in errors)
+
+
+# Re-review's in-memory bypass: omit unlock, subsequent main-thread calls,
+# and startup umask; a later clean publication must not hide attempt 1.
+def test_collect_review_missing_boundary_and_umask_bypass(monkeypatch, tmp_path):
+    lines, collector, plan = deadline_helper_capture()
+    boundary = first_helper_line(lines, r'flock\(.*snapshot.lock>.*LOCK_UN')
+    main = lines[boundary].split()[0]
+    lines = [line for i, line in enumerate(lines)
+             if (i < boundary or line.split()[0] != main)
+             and not (line.split()[0] == main and ('umask(' in line or '<... umask resumed>' in line))]
+    with pytest.raises(AssertionError, match="missing snapshot unlock boundary") as error:
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan), helper_stage_case("collect")])
+    assert "prefix.umask: measured 0, formula 1 (exact)" in str(error.value)
+    assert not (tmp_path / "attempt-2").exists(), "must fail before the clean second attempt"
+    # 이것을 실패시키는 것: 판정 실패 시 trace나 실패 이전 계수를 삭제하는 것.
+    import json
+    artifacts = tmp_path / "attempt-1"
+    evidence = json.loads((artifacts / "attempt.json").read_text())
+    assert evidence["collector_exit"] == 75 and evidence["published"] is False
+    assert evidence["prefix_complete"] is False
+    assert evidence["phase_counts"]["prefix"].get("umask", 0) == 0
+    assert evidence["phase_expected"]["prefix"]["umask"] == 1
+    assert set(evidence["phase_counts"]) == {"prefix", "supervisor", "finish_gc"}
+    assert "missing snapshot unlock boundary" in evidence["failure"]
+    assert (artifacts / "trace.strace").read_text().splitlines() == lines
+    assert not (tmp_path / "1").exists(), "product fixture should be cleaned up"
 
 
 def test_collect_counted_events_preserve_all_helper_counts():

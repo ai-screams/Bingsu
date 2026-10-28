@@ -503,6 +503,10 @@ def shell_test_evidence(text):
         assert [line.strip() for line in strategy if line.strip() and not line.lstrip().startswith("#")] == (matrix or []), job
         platforms = job_platforms(job, meta)
         cells = job_cells(strategy)
+        # Matrix labels prove architecture/libc coverage only when runs-on
+        # actually selects their runner (in particular, the ARM release cells).
+        if cells is not None:
+            assert meta["runs-on"][0] == "${{ matrix.os }}", (job, "release runner", meta["runs-on"][0])
         for step in steps:
             step["_job"] = ("shell.yml", job)
             step["_platforms"] = platforms

@@ -26,15 +26,15 @@ def check(measured, expected, mode: str, gated_roles) -> list[str]:
     return bad
 
 
-def check_collect(attribution, expected, *, deadline=False):
+def check_collect(attribution, expected, *, deadline=False, evidence=None):
     """Separate concurrent collect streams; never subtract prefix from totals.
 
     Attribution retains counted helper events in syscall-entry order, including
     pre-exec child setup. The two successful helper thread creations identify
     watchdog and supervisor; a changed topology fails closed. Main-thread tail
     starts after the successful snapshot.lock unlock (LockedStore::drop).
-    Missing that boundary is ambiguous only on exit 75: check prefix <= then,
-    never discard it. With the boundary present prefix remains exact on 75.
+    Every attempt must reach that boundary, including exit 75. The prefix
+    is always exact; only the supervisor and finish/GC tails use upper bounds.
     """
     from collections import Counter
     from .classify import split_args
@@ -65,15 +65,18 @@ def check_collect(attribution, expected, *, deadline=False):
         if (c.pid == supervisor and c.name == "renameat" and c.ret == "0"
                 and len(args) == 4 and args[1] == '".response.stage"' and args[3] == '"response"'):
             published = True
+    if evidence is not None:
+        evidence.update(phase_counts=measured, phase_expected=expected,
+                        prefix_complete=unlocked, published=published)
     errors = []
-    if not unlocked and not deadline:
+    if not unlocked:
         errors.append("collect: missing snapshot unlock boundary")
     if deadline and published:
         errors.append("collect: deadline attempt published")
     # Independent phase and kind limits prevent tail slack hiding a prefix
     # regression, and GC slack hiding an extra supervisor call on exit 75.
     for phase, want in expected.items():
-        mode = "exact" if phase == "prefix" and unlocked else "le"
+        mode = "exact" if phase == "prefix" else "le"
         got = measured[phase]
         if phase == "prefix" and not got:
             errors.append("prefix: no calls measured")

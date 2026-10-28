@@ -1495,20 +1495,27 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
     return collectors, roles.counts
 
 
-def check_helper_capture(stage, lines, exe, collector, plan):
+def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     from fsbudget.formula import helper_stage_expected, helper_collect_expected
     from fsbudget.gate import check, check_collect
+    if evidence is None:
+        evidence = {}
+    status = collector_exit(lines, collector) if stage == "collect" else None
+    evidence["collector_exit"] = status
     collectors, roles = measured_helper_attribution(lines, exe, collector)
+    evidence["role_counts"] = roles.counts
     assert collectors == int(stage == "collect"), ("collector spawns", collectors)
     if stage != "collect":
-        errors = check({"helper": roles.counts.get("helper", {})},
-                       {"helper": helper_stage_expected(plan)}, "exact", ["helper"])
+        measured = {"helper": roles.counts.get("helper", {})}
+        expected = {"helper": helper_stage_expected(plan)}
+        evidence.update(phase_counts=measured, phase_expected=expected)
+        errors = check(measured, expected, "exact", ["helper"])
         published = False
     else:
-        status = collector_exit(lines, collector)
         assert status in (0, 75), ("unexpected collector exit", status)
         errors, published = check_collect(roles, helper_collect_expected(plan, deadline=status == 75),
-                                          deadline=status == 75)
+                                          deadline=status == 75, evidence=evidence)
+    evidence.update(published=published, errors=errors)
     assert not errors, errors
     return published
 
@@ -1519,7 +1526,7 @@ def check_helper_capture(stage, lines, exe, collector, plan):
 # 마감 회차의 호출을 버리거나 최대 6회에서 실제 응답 발행이 한 번도 없는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("stage", list(HELPER_STAGES))
-def test_live_helper_calls_match_stage_formula(stage):
+def test_live_helper_calls_match_stage_formula(stage, tmp_path):
     """GATE-FS-HELPER.1: exact stages; collect prefix exact and tail <=.
 
     Every attempt is checked before retrying, including exit 75. At least one
@@ -1527,17 +1534,36 @@ def test_live_helper_calls_match_stage_formula(stage):
     """
     assert shutil.which("strace"), "the helper stage gate must execute strace"
     libc = require_release_helper(real_bin())
-    for _ in range(6 if stage == "collect" else 1):
-        fixture = HelperStageFixture(stage)
+    import json
+    # Traces live outside the product fixture: cleanup must never erase a
+    # failed attempt or earlier deadline attempts. --basetemp locates these
+    # artifacts for the controller; each invocation needs its own basetemp.
+    for attempt in range(1, (6 if stage == "collect" else 1) + 1):
+        artifacts = tmp_path / f"attempt-{attempt}"
+        artifacts.mkdir()
+        trace = artifacts / "trace.strace"
+        evidence = {"stage": stage, "attempt": attempt, "collector_exit": None,
+                    "published": None, "phase_counts": None, "phase_expected": None,
+                    "trace": str(trace)}
+        fixture = None
         try:
-            trace = fixture.base / "trace"
-            fixture.prompt(trace)
+            fixture = HelperStageFixture(stage)
+            result = fixture.prompt(trace)
+            evidence["prompt_exit"] = result.returncode
+            (artifacts / "stdout").write_bytes(result.stdout)
+            (artifacts / "stderr").write_bytes(result.stderr)
             lines = trace.read_text(errors="replace").splitlines()
             published = check_helper_capture(stage, lines, str(fixture.inst.exe), fixture.collector,
-                                             fixture.plan(libc))
+                                             fixture.plan(libc), evidence=evidence)
             if stage != "collect" or published:
                 return
+        except BaseException as error:
+            evidence["failure"] = str(error)
+            raise
         finally:
-            wait_helpers(fixture.base)
-            shutil.rmtree(fixture.base, ignore_errors=True)
-    pytest.fail("collect: zero publishes across all 6 checked attempts")
+            (artifacts / "attempt.json").write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+            print(f"helper stage evidence: {artifacts}")
+            if fixture is not None:
+                wait_helpers(fixture.base)
+                shutil.rmtree(fixture.base, ignore_errors=True)
+    pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {tmp_path}")
