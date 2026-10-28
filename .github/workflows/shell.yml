@@ -114,7 +114,9 @@ jobs:
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --ignore tests/shell/test_collector_security.py \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
-                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula \
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c \
+                --deselect tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
       # 40), so this test alone runs in its own container without that
@@ -216,6 +218,18 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' "$RUNNER_TEMP/helper-stage.txt"
+      # 이것을 실패시키는 것: debug 칸에서 계수하거나 매개변수 하나의 PASSED 단언을 빼는 것.
+      - name: Front attempts equal axis C and byte formulas (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[normal]' 'tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[checksum-last-good]' 'tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[body-limit]' 'tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[header-only]' 'tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section' 'tests/shell/test_prompt_env_paths.py::test_front_chunk_matches_product_constant' --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/front" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/front.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[normal]' "$RUNNER_TEMP/front.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[checksum-last-good]' "$RUNNER_TEMP/front.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[body-limit]' "$RUNNER_TEMP/front.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c[header-only]' "$RUNNER_TEMP/front.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section' "$RUNNER_TEMP/front.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_front_chunk_matches_product_constant' "$RUNNER_TEMP/front.txt"
       # Only the live fixture's trace, stdout, stderr and attempt.json.
       - name: Upload failed helper stage evidence
         if: failure()

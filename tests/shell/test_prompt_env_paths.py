@@ -1607,3 +1607,195 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
                 wait_helpers(fixture.base)
                 shutil.rmtree(fixture.base, ignore_errors=True)
     pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {helper_stage_evidence / stage}")
+
+
+# Fixture metadata, pinned independently from the product source.
+FRONT_CHUNK = 16 * 1024
+FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only')
+
+
+# 이것을 실패시키는 것: 제품 READ_CHUNK를 바꾸고 fixture 메타데이터는 그대로 두는 것.
+def test_front_chunk_matches_product_constant():
+    source = (ROOT / 'crates/bingsu-core/src/snapshot.rs').read_text().replace('\r\n', '\n')
+    match = re.search(r'pub const READ_CHUNK: usize = (\d+) \* (\d+);', source)
+    assert match and int(match[1]) * int(match[2]) == FRONT_CHUNK
+
+
+def front_attempt_plan(case, body):
+    from fsbudget.formula import FrontAttempt
+    current = FrontAttempt('current', True, case not in ('header-only', 'body-limit'),
+                           body if case in ('normal', 'checksum-last-good') else 0,
+                           case in ('normal', 'checksum-last-good'))
+    return [current] + ([] if case == 'normal' else [FrontAttempt('last_good', True, True, body, True)])
+
+
+def assert_front_reads(trace, store, attempts, *, evidence=None):
+    from fsbudget.formula import front_read_bytes
+    paths = [str(store / name) for name in ('snapshot', 'last-good', 'marker')]
+    boot = '/proc/sys/kernel/random/boot_id'
+    expected = {path: [] for path in paths}
+    for a in attempts:
+        path = paths[0 if a.copy == 'current' else 1]
+        expected[path] = ([64] if a.header_read else []) + ([128] if a.prefix_read else [])
+        expected[path] += [min(FRONT_CHUNK, a.body_bytes_read - offset)
+                           for offset in range(0, a.body_bytes_read, FRONT_CHUNK)]
+    expected[paths[2]] = [208]
+    expected[boot] = [37, 0]  # in-place procfs boot observation: final EOF required
+    actual = {path: [] for path in expected}
+    for call in trace:
+        args = args_of(call)
+        if call.name == 'read' and args:
+            match = re.fullmatch(r'\d+<(/[^<>]*)>', args[0])
+            if match and match[1] in actual:
+                actual[match[1]].append(int(call.ret))
+    measured = front_read_bytes(trace, list(expected))
+    if evidence is not None:
+        evidence.update(read_chunks=actual, expected_chunks=expected, read_bytes=measured)
+    # 이것을 실패시키는 것: TrustMetadata까지 읽게 길이 계산 변경, last-good 선택 뒤 현재 사본 재읽기.
+    assert actual == expected, ('front read sequence', actual, expected)
+    # 이것을 실패시키는 것: 사본별 바이트를 합산해 초과 읽기를 다른 사본의 여유로 상쇄하는 것.
+    assert measured == {path: sum(chunks) for path, chunks in expected.items()}
+
+
+def front_fact_kind(call):
+    """Count each libc's held-fd primitive; pathname stats cannot substitute."""
+    args = args_of(call)
+    # 이것을 실패시키는 것: 플랫폼 fd stat 변형을 ignore하거나 pathname stat으로 대체하는 것.
+    if call.name == 'fstat':
+        return 'fstat'
+    if call.name == 'newfstatat' and args[1] == '""' and args[3] == 'AT_EMPTY_PATH':
+        return 'fstat'
+    if (call.name == 'statx' and args[1] == '""'
+            and args[2] == 'AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH' and args[3] == 'STATX_BASIC_STATS'):
+        return 'fstat'
+    raise AssertionError(('unexpected front facts primitive', call))
+
+
+def check_front_capture(lines, exe, pinned, store, attempts, *, evidence):
+    from collections import Counter
+    from fsbudget.strace_parse import Trace
+    from fsbudget.formula import front_attempts_expected, collection_front_expected
+    _, scoped = tree(lines, exe)
+    root = int(next(line.split()[0] for line in scoped if is_root(line, exe)))
+    parsed = parse_trace('\n'.join(scoped))
+    # 이것을 실패시키는 것: 불완전 캡처 또는 필터 없이 앞단 계수를 통과시키는 것.
+    assert not parsed.errors, parsed.errors
+    front = Trace()
+    front.extend(c for c in parsed if c.pid == root and c.name != EXIT_EVENT)
+    # 이것을 실패시키는 것: trace=all에 새 syscall을 남겨도 계수 대상이 아니라며 버리는 것.
+    assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
+    # 이것을 실패시키는 것: snapshot을 mmap하여 TrustMetadata 읽기를 read 계수 밖으로 옮기는 것.
+    for call in front:
+        if call.name != 'read':
+            assert not set(content_paths(call)) & {str(store / n) for n in ('snapshot', 'last-good', 'marker')}, ('front content primitive', call)
+    filters = [c.index for c in front if c.name == 'prctl' and 'PR_SET_SECCOMP' in c.args and c.ret == '0']
+    assert len(filters) == 1, filters
+    cwd = prompt_cwd(next(c for c in front if c.name == 'execve'))
+    prompt_root_io(front, filters[0], exe, pinned, root, cwd)
+    dirs, files = prompt_sources(pinned)
+    collection_dirs, _ = prompt_collection_sources(pinned, cwd)
+    boot_paths = {'/', '/proc', f'/proc/{root}', f'/proc/{root}/ns',
+                  f'/proc/{root}/timens_offsets', '/proc/sys', '/proc/sys/kernel',
+                  '/proc/sys/kernel/random', '/proc/sys/kernel/random/boot_id'}
+    held, counts, primitives = {}, Counter(), Counter()
+    for c in front:
+        args = args_of(c)
+        paths = call_paths(c)
+        if c.name in OPENS and paths and paths[0] in dirs | files | boot_paths | collection_dirs:
+            counts['openat'] += 1
+            if not c.ret.startswith('-1'):
+                held[int(c.ret.split('<')[0])] = paths[0]
+            continue
+        if c.name == 'getxattr':
+            match = re.fullmatch(r'"/proc/self/fd/(\d+)"', args[0])
+        else:
+            match = re.fullmatch(r'(\d+)(?:<[^<>]*>)?', args[0]) if args else None
+        fd = int(match[1]) if match else None
+        if fd not in held:
+            continue
+        if c.name == 'close':
+            held.pop(fd)
+        elif c.name in ('fstat', 'newfstatat', 'statx'):
+            counts[front_fact_kind(c)] += 1
+            primitives[c.name] += 1
+        elif c.name in ('fstatfs', 'fgetxattr', 'getxattr', 'readlinkat', 'read'):
+            counts[c.name] += 1
+    expected = Counter(front_attempts_expected(len(dirs), attempts, FRONT_CHUNK))
+    # Plain config has no collection store: prefetch still probes its namespace.
+    expected.update(collection_front_expected(0, (), (), absent=True))
+    evidence.update(C=len(dirs), counts=counts, expected=expected, fact_primitives=primitives)
+    # 이것을 실패시키는 것: 앞단 open/facts/read 하나 추가, collection prefetch를 비용에서 빼는 것.
+    assert counts == expected, ('front axis C', counts, expected)
+    assert_front_reads(front, store, attempts, evidence=evidence)
+
+
+@pytest.fixture
+def front_capture(request, tmp_path_factory):
+    """Use A2's init/warm-up/trace harness; hold its publication lock while corrupting."""
+    import fcntl
+    import json
+    from dataclasses import asdict
+    require_release_helper(real_bin())
+    assert shutil.which('strace'), 'front gate must execute strace'
+    case = getattr(request, 'param', 'normal')
+    artifacts = tmp_path_factory.getbasetemp() / 'front-evidence' / request.node.name
+    artifacts.mkdir(parents=True)
+    evidence = {'case': case, 'chunk': FRONT_CHUNK}
+    fixture = None
+    lock = None
+    try:
+        fixture = HelperStageFixture('unchanged')
+        lock = (fixture.store / 'snapshot.lock').open('rb')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = bytearray((fixture.store / 'snapshot').read_bytes())
+        body = int.from_bytes(data[76:80], 'little')
+        metadata = int.from_bytes(data[80:84], 'little')
+        # 이것을 실패시키는 것: metadata 없는 fixture로 TrustMetadata 0 읽기를 공허하게 증명하는 것.
+        assert metadata > 0 and len(data) == 64 + 128 + body + metadata
+        last = fixture.store / 'last-good'
+        last.write_bytes(data)
+        last.chmod(0o600)
+        if case == 'checksum-last-good':
+            data[160] ^= 1
+        elif case == 'body-limit':
+            limit = 16 * 1024 * 1024 + 1
+            data[60:64] = (128 + limit).to_bytes(4, 'little')
+            data[76:80] = limit.to_bytes(4, 'little')
+            data = data[:192 + body] + bytearray(limit - body) + data[192 + body:]
+        elif case == 'header-only':
+            data[0] ^= 1
+        (fixture.store / 'snapshot').write_bytes(data)
+        attempts = front_attempt_plan(case, body)
+        evidence.update(attempts=[asdict(a) for a in attempts], body=body, metadata=metadata)
+        trace = artifacts / 'trace.strace'
+        result = fixture.prompt(trace)
+        (artifacts / 'stdout').write_bytes(result.stdout)
+        (artifacts / 'stderr').write_bytes(result.stderr)
+        pinned = [os.path.realpath(Path(fixture.env[key]) / 'bingsu')
+                  for key in ('XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME')]
+        yield trace.read_text().splitlines(), str(fixture.inst.exe), pinned, fixture.store, attempts, evidence
+    except BaseException as error:
+        evidence['failure'] = str(error)
+        raise
+    finally:
+        (artifacts / 'attempt.json').write_text(json.dumps(evidence, indent=2) + '\n')
+        if lock is not None:
+            lock.close()
+        if fixture is not None:
+            wait_helpers(fixture.base)
+            shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+# 이것을 실패시키는 것: TrustMetadata 길이 추가, last-good 뒤 현재 사본 재읽기, 사본별 머리/prefix 읽기 생략.
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux strace runtime gate')
+@pytest.mark.parametrize('front_capture', FRONT_CASES, indirect=True)
+def test_live_front_attempts_match_axis_c(front_capture):
+    lines, exe, pinned, store, attempts, evidence = front_capture
+    check_front_capture(lines, exe, pinned, store, attempts, evidence=evidence)
+
+
+# 이것을 실패시키는 것: FrontDecoder의 end에 TrustMetadata 길이를 더하는 것.
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux strace runtime gate')
+def test_front_never_reads_trust_metadata_section(front_capture):
+    lines, exe, pinned, store, attempts, evidence = front_capture
+    check_front_capture(lines, exe, pinned, store, attempts, evidence=evidence)

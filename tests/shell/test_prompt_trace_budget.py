@@ -2057,3 +2057,146 @@ def test_collect_counted_events_preserve_all_helper_counts():
         lines, collector, _ = helper_stage_case(stage)
         _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
         assert Counter(kind for _, kind in roles.helper_calls) == roles.counts["helper"]
+
+
+# 이것을 실패시키는 것: 반환 바이트 대신 요청량, 사본별 ceil 대신 전체 합, metadata 읽기 또는 재읽기 허용.
+def front_read_control(case='checksum-last-good'):
+    attempts = budget.front_attempt_plan(case, 16385)
+    lines = []
+    for a in attempts:
+        path = '/store/' + ('snapshot' if a.copy == 'current' else 'last-good')
+        chunks = [64] + ([128] if a.prefix_read else []) + ([16384, 1] if a.body_bytes_read else [])
+        lines += [f'1 read(3<{path}>, "x"..., {n}) = {n}' for n in chunks]
+    lines += ['1 read(4</store/marker>, "x"..., 208) = 208',
+              '1 read(5</proc/sys/kernel/random/boot_id>, "x"..., 38) = 37',
+              '1 read(5</proc/sys/kernel/random/boot_id>, "", 1) = 0']
+    return lines, attempts
+
+
+@pytest.mark.parametrize('case', budget.FRONT_CASES)
+def test_front_read_control_accepts_each_attempt(case):
+    lines, attempts = front_read_control(case)
+    budget.assert_front_reads(budget.parse_trace('\n'.join(lines)), Path('/store'), attempts)
+
+
+# 이것을 실패시키는 것: TrustMetadata 읽기·last-good 뒤 재읽기·부분 캡처를 통과시키는 것.
+@pytest.mark.parametrize('mutation', ['metadata', 'reread', 'missing-prefix', 'missing-boot-eof', 'borrow-bytes'])
+def test_front_read_control_rejects_mutations(mutation):
+    lines, attempts = front_read_control()
+    if mutation == 'metadata':
+        lines.insert(4, '1 read(3</store/snapshot>, "trust", 5) = 5')
+    elif mutation == 'reread':
+        lines.append('1 read(3</store/snapshot>, "x"..., 64) = 64')
+    elif mutation == 'missing-prefix':
+        del lines[1]
+    elif mutation == 'missing-boot-eof':
+        lines.pop()
+    else:
+        lines[3] = lines[3].replace(', 1) = 1', ', 2) = 2')
+        lines[7] = lines[7].replace(', 1) = 1', ', 1) = 0')
+    with pytest.raises(AssertionError, match='front read sequence'):
+        budget.assert_front_reads(budget.parse_trace('\n'.join(lines)), Path('/store'), attempts)
+
+
+# 이것을 실패시키는 것: libc별 fd facts를 무시하거나 유사한 경로 stat으로 대체하는 것.
+@pytest.mark.parametrize('primitive', [
+    'fstat(3</store/snapshot>, {st_size=1})',
+    'newfstatat(3</store/snapshot>, "", {st_size=1}, AT_EMPTY_PATH)',
+    'statx(3</store/snapshot>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_BASIC_STATS, {stx_size=1})',
+])
+def test_front_platform_facts_counted(primitive):
+    call = budget.parse_trace('1 ' + primitive + ' = 0')[0]
+    assert budget.front_fact_kind(call) == 'fstat'
+    if call.name != 'fstat':
+        call.args = call.args.replace('""', '"sibling"')
+        with pytest.raises(AssertionError, match='unexpected front facts primitive'):
+            budget.front_fact_kind(call)
+
+
+# 이것을 실패시키는 것: fixture의 청크 메타데이터만 바꾸어 제품 청크 변경을 감추는 것.
+def test_front_chunk_metadata_mutation(monkeypatch):
+    monkeypatch.setattr(budget, 'FRONT_CHUNK', 8192)
+    with pytest.raises(AssertionError):
+        budget.test_front_chunk_matches_product_constant()
+
+
+def front_axis_control():
+    """Synthetic syscall control, not a substitute for the required live capture."""
+    pinned = ['/run', '/config', '/state']
+    dirs, files = budget.prompt_sources(pinned)
+    store = Path(next(iter(files))).parent
+    lines = ['1 execve("/bin/bingsu", ["/bin/bingsu", "prompt", "--pwd", "/repo"], []) = 0']
+    fd = 2
+    boot = ['/', '/proc', '/proc/1', '/proc/1/ns', '/proc/1/timens_offsets',
+            '/proc/sys', '/proc/sys/kernel', '/proc/sys/kernel/random', '/proc/sys/kernel/random/boot_id']
+    for path, fallback in [(p, True) for p in sorted(dirs)] + [(p, False) for p in sorted(files)] + [(p, p == '/') for p in boot]:
+        fd += 1
+        lines += [f'1 openat(AT_FDCWD, "{path}", O_RDONLY) = {fd}<{path}>',
+                  f'1 fstat({fd}<{path}>, {{st_size=1}}) = 0',
+                  f'1 fstatfs({fd}<{path}>, {{f_type=EXT4_SUPER_MAGIC}}) = 0',
+                  f'1 fgetxattr({fd}<{path}>, "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data)']
+        if fallback:
+            lines += [f'1 getxattr("/proc/self/fd/{fd}", "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data)']
+    for name in ('self', 'time', 'time_for_children'):
+        lines += [f'1 readlinkat({fd}<{boot[-1]}>, "{name}", "x", 10) = 1']
+    collection, _ = budget.prompt_collection_sources(pinned, b'/repo')
+    lines += [f'1 openat(AT_FDCWD, "{min(collection, key=len)}", O_RDONLY) = -1 ENOENT (No file)',
+              '1 prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {}) = 0']
+    reads, attempts = front_read_control('normal')
+    # Use the actual file descriptors: the counter must attribute every read.
+    for line in reads:
+        line = line.replace('/store/', str(store) + '/')
+        path = budget.args_of(budget.parse_trace(line)[0])[0].split('<')[1][:-1]
+        opened = next(l for l in lines if l.startswith('1 openat(') and l.endswith('<' + path + '>'))
+        number = opened.split(' = ')[1].split('<')[0]
+        line = budget.re.sub(r'read\(\d+<', 'read(' + number + '<', line)
+        lines.append(line)
+    lines += ['1 +++ exited with 0 +++']
+    return lines, pinned, store, attempts
+
+
+# 이것을 실패시키는 것: 정상 종료 레코드를 syscall로 세거나 open/facts/read 누락·중복을 숨기는 것.
+@pytest.mark.parametrize('mutation', ['none', 'extra-open', 'extra-facts', 'missing-read', 'failed-filter'])
+def test_front_axis_capture_counter(monkeypatch, mutation):
+    lines, pinned, store, attempts = front_axis_control()
+    # Path confinement has its own live/portable suite; isolate the new counter.
+    monkeypatch.setattr(budget, 'prompt_root_io', lambda *args: None)
+    if mutation == 'extra-open':
+        lines.insert(1, '1 openat(AT_FDCWD, "/run", O_RDONLY) = 99</run>')
+    elif mutation == 'extra-facts':
+        lines.insert(-1, next(l for l in lines if ' fstat(' in l))
+    elif mutation == 'missing-read':
+        lines.remove(next(l for l in lines if ' read(' in l))
+    elif mutation == 'failed-filter':
+        lines = [l.replace('MODE_FILTER, {}) = 0', 'MODE_FILTER, {}) = -1 EINVAL (Invalid)') for l in lines]
+    if mutation == 'none':
+        budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, evidence={})
+    else:
+        with pytest.raises(AssertionError):
+            budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, evidence={})
+
+
+# 이것을 실패시키는 것: 실제 aarch64 glibc 캡처의 kernel 9개 facts/ACL fallback/EOF 비용을 누락하는 것.
+@pytest.mark.parametrize('capture,base', [
+    (0, '/home/tester/pt/test_prompt_binary_names_only_0'),
+    (1, '/home/tester/pt/test_prompt_binary_names_only_1'),
+])
+@pytest.mark.parametrize('mutation', ['reread', 'mmap', 'unknown'])
+def test_front_axis_archived_capture(capture, base, mutation):
+    lines = Path(__file__).with_name('fixtures').joinpath(f'prompt-e4-linux-{capture}.strace').read_text().splitlines()
+    pinned = [base + suffix for suffix in ('/run-t/bingsu', '/cfg-t/bingsu', '/state-t/bingsu')]
+    _, files = budget.prompt_sources(pinned)
+    store = Path(next(iter(files))).parent
+    # Published fixture's compiled body is 3008 bytes, not inferred from reads.
+    attempts = budget.front_attempt_plan('normal', 3008)
+    budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, evidence={})
+    # 이것을 실패시키는 것: last-good 뒤 재읽기와 같은 추가 current 읽기를 live 판정기가 허용하는 것.
+    extra = next(l for l in lines if ' read(' in l and str(store / 'snapshot') + '>' in l)
+    pid = extra.split()[0]
+    if mutation == 'mmap':
+        extra = f'{pid} mmap(NULL, 8192, PROT_READ, MAP_PRIVATE, 3<{store / "snapshot"}>, 0) = 0x1000'
+    elif mutation == 'unknown':
+        extra = f'{pid} io_uring_setup(1, {{}}) = 99'
+    lines.insert(-1, extra)
+    with pytest.raises(AssertionError):
+        budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, evidence={})
