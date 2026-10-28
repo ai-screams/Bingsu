@@ -287,11 +287,13 @@ jobs:
           args=(--release)
           if [ "$LIBC" = musl ]; then args+=(--target "$(uname -m)-unknown-linux-musl"); fi
           cargo test -p bingsu --test cli_prompt --no-run "${args[@]}"
+      # init warns about an executable path under sticky /tmp, so the fixtures live
+      # under RUNNER_TEMP; a failure uploads them with the helper stage evidence.
       - name: Runtime root gates (release)
         if: matrix.profile == 'release'
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py::test_repo_controlled_xdg_runtime_dir_is_never_opened tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/runtime-root.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py::test_repo_controlled_xdg_runtime_dir_is_never_opened tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/runtime-root" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_repo_controlled_xdg_runtime_dir_is_never_opened' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root' "$RUNNER_TEMP/runtime-root.txt"
