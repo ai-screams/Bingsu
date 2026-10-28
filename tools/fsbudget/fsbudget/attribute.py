@@ -456,7 +456,8 @@ class _RepositoryProbe:
         return "unknown-fs"
 
 
-def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False) -> Attribution:
+def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False,
+                        helper_vocabulary: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
     Work in syscall *entry* order. A vfork child's exec may precede its
@@ -469,9 +470,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
+    `helper_vocabulary` counts helper calls with classify.helper_kind (the
+    per-stage helper gate); other callers keep the generic helper kinds.
     """
     import json
-    from .classify import collector_kind, collector_bootstrap_kind
+    from .classify import collector_kind, collector_bootstrap_kind, helper_kind
     from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
@@ -564,7 +567,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         args = split_args(c.args)
         result = c.ret.split()[0]
         success = bool(re.match(r"^\d+", c.ret))
-        k = collector_bootstrap_kind(c) if role == "collector" else collector_kind(c)
+        k = (collector_bootstrap_kind(c) if role == "collector"
+             else helper_kind(c) if role == "helper" and helper_vocabulary else collector_kind(c))
         if k in {"spawn", "thread"}:
             if k == "spawn" and (role not in {"front", "helper"} or process in confined):
                 bad(c, "spawn outside the pre-filter creation site")

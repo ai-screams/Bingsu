@@ -1562,3 +1562,80 @@ def test_collector_gate_keeps_role_and_kind_budgets_separate():
     reduced["collector"]["read"] = 0
     with pytest.raises(AssertionError, match="collector.read"):
         budget.assert_collector_trace_budget(saved, fixture.PINNED_PRODUCT, reduced)
+
+
+# GATE-FS-HELPER.1 judge regressions on reduced release captures (provenance:
+# fixtures/helper-stage-traces.md). The live gate is
+# test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula.
+HELPER_STAGE_TRACES = Path(__file__).with_name("fixtures") / "helper-stage-traces.json"
+HELPER_EXE = "/fx/bin/bingsu"
+
+
+def helper_stage_case(stage):
+    import json
+    from fsbudget.formula import HelperAxes, HelperPlan
+    meta = json.loads(HELPER_STAGE_TRACES.read_text())[stage]
+    data = (HELPER_STAGE_TRACES.parent / f"helper-stage-{stage}.strace").read_bytes()
+    assert hashlib.sha256(data).hexdigest() == meta["sha256"], stage
+    plan = dict(meta["plan"])
+    plan["stages"] = tuple(plan["stages"])
+    plan["ax"] = HelperAxes(**plan["ax"])
+    return data.decode().splitlines(), meta["collector"], HelperPlan(**plan)
+
+
+def helper_stage_errors(lines, collector, expected, **attribution):
+    from fsbudget.gate import check
+    _, counts = budget.measured_helper_calls(lines, HELPER_EXE, collector, **attribution)
+    return check({"helper": counts.get("helper", {})}, {"helper": expected}, "exact", ["helper"])
+
+
+def first_helper_line(lines, pattern):
+    import re
+    helper = next(l.split()[0] for l in lines if "__refresh-v1" in l and "execve(" in l)
+    return next(i for i, l in enumerate(lines) if l.split()[0] == helper and re.search(pattern, l))
+
+
+STAGE_NAMES = ["unchanged", "publish", "collect", "collect-deadline", "failure-last-good", "failure-recover"]
+
+
+# 이것을 실패시키는 것: 판정기가 저장 trace의 종류별 호출 수를 공식과 exact로 비교하지 않는 것,
+# 도우미 호출 하나를 더하거나(fstat) 앞단으로 옮기는 것(git 전역 입력 open), helper 어휘 없이 세는 것.
+@pytest.mark.parametrize("stage,damage", [
+    (stage, damage) for stage in STAGE_NAMES
+    for damage in (None, "extra-fstat", "generic-vocabulary") + (("moved-to-front",) if stage.startswith("collect") else ())])
+def test_stage_formula_checker_regressions(stage, damage):
+    from fsbudget.formula import helper_stage_expected
+    lines, collector, plan = helper_stage_case(stage)
+    expected = helper_stage_expected(plan)
+    kwargs = {}
+    if damage == "extra-fstat":
+        # A complete fd stat of a held runtime folder, repeated once.
+        at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
+        lines = lines[:at + 1] + [lines[at]] + lines[at + 1:]
+    elif damage == "moved-to-front":
+        # The helper's first global Git input open, made by the live front instead.
+        root = lines[0].split()[0]
+        at = first_helper_line(lines, r'openat\(AT_FDCWD</>, "/fx/(?:cfg|home)-t/[^"]*git[^"]*",.*\) = -1 ENOENT')
+        moved = root + lines[at][len(lines[at].split()[0]):]
+        lines = [lines[0], moved] + lines[1:at] + lines[at + 1:]
+    elif damage == "generic-vocabulary":
+        kwargs["helper_vocabulary"] = False
+    errors = helper_stage_errors(lines, collector, expected, **kwargs)
+    if damage is None:
+        assert errors == []
+    else:
+        assert errors, damage
+
+
+# 이것을 실패시키는 것: 제품 도우미 게이트가 옛 합성 고정 항(잠금 1·머리 1·표식 1, e["read"] += 2)이나
+# 합성 공식(synthetic_helper_expected)을 받아들이는 것.
+@pytest.mark.parametrize("stage", STAGE_NAMES)
+def test_product_helper_gate_rejects_legacy_fixed_terms(stage):
+    from fsbudget.formula import Coeffs, helper_stage_expected, synthetic_helper_expected
+    lines, collector, plan = helper_stage_case(stage)
+    expected = helper_stage_expected(plan)
+    assert helper_stage_errors(lines, collector, expected) == []
+    legacy = dict(expected, read=expected["read"] + 2)
+    assert helper_stage_errors(lines, collector, legacy)
+    synthetic = synthetic_helper_expected(plan.ax, Coeffs(), plan.stages[0] == "publish", 4096, plan.snapshot_bytes)
+    assert helper_stage_errors(lines, collector, synthetic)
