@@ -883,8 +883,9 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
     same path_check rules as acquisition: ancestors (including "/") allow
     only O_DIRECTORY opens and metadata, a .git directly under an ancestor is
     a discovery candidate ("/" may also be opened without O_DIRECTORY for
-    the read layer's identity check, as in F1's read-layer phase; it still
-    cannot be listed or read), everything else must be below the roots, and
+    identity comparison only, as in F1's read-layer phase; that fd admits
+    only fstat-family calls and close), everything else must be below the
+    roots, and
     Landlock rules must name a root exactly. What it loses: phase order. A
     shipped collector that reads ancestor metadata after its read layer, or
     runs stages out of order, passes; F1 phase mode still checks that.
@@ -927,6 +928,7 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
         ancestors -= roots
     active, owner, listing = None, None, None
     seen, held, closed, counts, raw_counts = [], {}, set(), {}, {}
+    identity = set()  # shipped: "/" fds opened without O_DIRECTORY (fstat family and close only)
     first_exec = True
 
     def phase(event):
@@ -955,9 +957,9 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
         elif active in ("acquisition", "shipped") and path in ancestors:
             assert name not in {"read", "pread", "pread64", "readv", "mmap", "getdents", "getdents64", "bulk"}, ("ancestor content", name, path)
             if name in OPEN:
-                # The shipped read layer opens "/" without O_DIRECTORY only to
-                # compare its identity, as F1's read-layer branch allows; any
-                # listing or read of it still fails the content check above.
+                # The shipped read layer opens "/" without O_DIRECTORY for
+                # identity comparison only, as F1's read-layer branch allows;
+                # that fd then admits only fstat-family calls and close.
                 # 이것을 실패시키는 것: 출하 창의 "/" 아닌 조상을 O_DIRECTORY 없이 여는 것.
                 assert "O_DIRECTORY" in flags or (active == "shipped" and path == "/"), ("acquisition content open", name, path)
             allowed = True
@@ -1064,11 +1066,17 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
             if active is None:
                 continue  # C1/B3 separately gate the shipped bootstrap
             assert call.pid == owner, ("other task in repository phase", call)
+            # 이것을 실패시키는 것: identity 비교 전용 "/" fd로 목록·내용·하위 open·fstatfs·dup·fcntl을 허용하는 것.
+            subject = FD_ARG.fullmatch(args[0]) if args else None
+            if subject and int(subject[1]) in identity:
+                assert (call.name == "close" or call.name in {"fstat", "fstat64"}
+                        or call.name in {"newfstatat", "statx"} and len(args) > 1 and args[1] == '""'), ("identity-only / fd", call)
             if call.name == "close":
                 if call.ret == "0":
                     fd = int(args[0].split("<")[0])
                     held.pop(fd, None)
                     closed.add(fd)
+                    identity.discard(fd)
                 continue
             if call.name in {"dup", "dup2", "dup3"} or call.name == "fcntl" and len(args) > 1 and args[1].startswith("F_DUPFD"):
                 source = FD_ARG.fullmatch(args[0])
@@ -1118,6 +1126,8 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 result = FD_ARG.fullmatch(call.ret)
                 assert result and result[2], ("unplaced open result", call)
                 bind(int(result[1]), result[2])
+                if shipped and path == "/" and "O_DIRECTORY" not in call.args:
+                    identity.add(int(result[1]))  # the read layer's identity-comparison-only "/"
             if call.name in {"getdents", "getdents64"}:
                 directory(path, int(args[2]))
             primitive = held_metadata_kind(call, args) or call.name

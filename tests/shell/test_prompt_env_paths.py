@@ -316,7 +316,8 @@ def test_dirfd_walk_resolves_and_stays_under_the_roots():
 SPAWNS = {"clone", "clone3", "fork", "vfork"}
 # A positive allowlist for the entire helper/collector subtree, including libc
 # startup, the watchdog and publication. Network is restricted to failed local
-# nscd discovery below; no Internet socket, wait, arbitrary exec or signal.
+# nscd discovery below; no Internet socket, arbitrary exec or signal, and wait
+# only as pidfd supervision of the audited collector (_assert_prompt_trace_budget).
 # pipe2 is musl posix_spawn's exec-error channel (also used by the root).
 HELPER_CALLS = set("""
 execve clone clone3 exit exit_group arch_prctl set_tid_address set_robust_list
@@ -993,8 +994,12 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     exe_walks = {pid: HelperExecutableWalk(exe) for pid in owners}
     collector_walk = HelperCollectorExecutable(collector_exe) if collector_exe else None
     for c in helper:
-        if c.name == "restart_syscall" and c.args == "<... resuming interrupted futex ...>":
-            continue  # a thread's interrupted wait resumes (strace stops it); no arguments or path
+        if c.name == "restart_syscall":
+            # A thread's interrupted futex wait resumes (strace stops it): no
+            # arguments or path. Any other resumed call is unexplained here.
+            # 이것을 실패시키는 것: futex 아닌 restart 모양을 건너뛰는 것.
+            assert c.args == "<... resuming interrupted futex ...>", ("helper restart", c)
+            continue
         exe_walk = exe_walks[c.pid]
         collector_owner = collector_walk is not None and c.pid == helper_pid
         # 이것을 실패시키는 것: collector 고정 경로의 fd를 관찰 없이 읽거나 쓰기·변경에 쓰는 것.
