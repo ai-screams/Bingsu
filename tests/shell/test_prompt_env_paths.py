@@ -1672,6 +1672,39 @@ def front_fact_kind(call):
     raise AssertionError(('unexpected front facts primitive', call))
 
 
+def front_spawn_pipe_calls(front, boundary, libc, evidence):
+    """Exact parent error channel, never a general pipe exemption."""
+    from collections import Counter
+    from fsbudget.formula import POSIX_SPAWN_PRIMITIVES
+    spawns = successful_spawns(front)
+    assert len(spawns) <= 1, ('front helper spawns', spawns)
+    expected = Counter(POSIX_SPAWN_PRIMITIVES[libc]) if spawns else Counter()
+    pipes = [c for c in front if c.name == 'pipe2']
+    assert len(pipes) == expected['pipe2'], ('front spawn pipe count', pipes, expected)
+    accounted = []
+    for pipe in pipes:
+        match = re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_CLOEXEC', pipe.args)
+        assert match and pipe.ret == '0', ('front spawn pipe creation', pipe)
+        reader, inode, writer = match.groups()
+        assert reader != writer, ('front spawn pipe endpoints', pipe)
+        read_fd, write_fd = (f'{fd}<pipe:[{inode}]>' for fd in (reader, writer))
+        # Include every read/close on this pipe: duplicates cannot borrow slack.
+        channel = [c for c in front if c.name in ('read', 'close')
+                   and args_of(c)[0] in (read_fd, write_fd)]
+        assert [(c.name, args_of(c), c.ret) for c in channel] == [
+            ('close', [write_fd], '0'),
+            ('read', [read_fd, '""', '4'], '0'),
+            ('close', [read_fd], '0'),
+        ], ('front spawn pipe sequence', channel)
+        assert pipe.index < spawns[0].index < channel[0].index, ('front spawn pipe order', pipe, spawns)
+        assert all(c.index < boundary for c in [pipe, *channel]), ('late front spawn pipe', channel)
+        accounted.extend([pipe, *channel])
+    actual = Counter(c.name for c in accounted)
+    evidence.update(spawn_pipe_counts=actual, spawn_pipe_expected=expected)
+    assert actual == expected, ('front spawn pipe primitives', actual, expected)
+    return {c.index for c in accounted}
+
+
 def check_front_capture(lines, exe, pinned, store, attempts, *, arch, libc, evidence):
     from collections import Counter
     from fsbudget.strace_parse import Trace
@@ -1696,6 +1729,7 @@ def check_front_capture(lines, exe, pinned, store, attempts, *, arch, libc, evid
     assert len(filters) == 1, filters
     cwd = prompt_cwd(next(c for c in front if c.name == 'execve'))
     prompt_root_io(front, filters[0], exe, pinned, root, cwd)
+    spawn_pipe_calls = front_spawn_pipe_calls(front, filters[0], libc, evidence)
     dirs, files = prompt_sources(pinned)
     collection_dirs, _ = prompt_collection_sources(pinned, cwd)
     boot_paths = {'/', '/proc', f'/proc/{root}', f'/proc/{root}/ns',
@@ -1717,6 +1751,8 @@ def check_front_capture(lines, exe, pinned, store, attempts, *, arch, libc, evid
                 return kind
         raise AssertionError(('unaccounted front startup path', path))
     for c in front:
+        if c.index in spawn_pipe_calls:
+            continue
         args = args_of(c)
         paths = call_paths(c)
         if c.name in OPENS:

@@ -209,6 +209,15 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
 }
 
+# Parent-side successful posix_spawn exec-error channel, per libc.
+# A2 keep-musl/unchanged.strace, front PID 1838: one CLOEXEC pipe,
+# close writer, read an int (EOF on exec success), close reader.
+# A2 helper accounting excludes supervision pipes; it has no exact table.
+POSIX_SPAWN_PRIMITIVES: dict[str, dict[str, int]] = {
+    "gnu": {},
+    "musl": {"pipe2": 1, "read": 1, "close": 2},
+}
+
 # Rust std main-thread stack guard via glibc pthread_getattr_np. In the
 # x86_64 CI capture, /proc/self/maps stdio teardown calls lseek(SEEK_CUR)
 # then lseek(SEEK_SET). Neither call is a loader exemption. The preceding

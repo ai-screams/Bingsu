@@ -2183,6 +2183,77 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
             budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
 
 
+# A2 keep-musl/unchanged.strace PID 1838, normalized fd/inode/PID.
+# Successful parent channel: pipe2, clone, close writer, EOF read, close reader.
+@pytest.mark.parametrize('arch', ['aarch64', 'x86_64'])
+@pytest.mark.parametrize('libc', ['gnu', 'musl'])
+@pytest.mark.parametrize('spawn', [False, True])
+@pytest.mark.parametrize('mutation', [
+    'none', 'extra-read', 'missing-read', 'missing-pipe', 'missing-close',
+    'extra-pipe', 'wrong-size', 'non-eof', 'late-pipe',
+])
+def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
+    lines, pinned, store, attempts = front_axis_control()
+    monkeypatch.setattr(budget, 'prompt_root_io', lambda *args: None)
+    if libc == 'gnu':
+        startup = []
+        for fd, path, reads in [(80, '/etc/ld.so.cache', 0),
+                                (81, '/lib/libgcc_s.so.1', 1),
+                                (82, '/lib/libc.so.6', 1),
+                                (83, '/proc/1/maps', 3)]:
+            startup += [f'1 openat(AT_FDCWD, "{path}", O_RDONLY) = {fd}<{path}>']
+            startup += [f'1 read({fd}<{path}>, "x", 1) = 1'] * reads
+            if arch == 'x86_64' and fd == 82:
+                startup += [f'1 pread64({fd}<{path}>, "x", 1, 0) = 1'] * 2
+            if arch == 'x86_64' and fd == 83:
+                startup += [f'1 lseek({fd}<{path}>, 0, SEEK_CUR) = 0',
+                            f'1 lseek({fd}<{path}>, 0, SEEK_SET) = 0']
+            startup += [f'1 close({fd}<{path}>) = 0']
+        lines[1:1] = startup
+    pipe = '1 pipe2([90<pipe:[525252]>, 91<pipe:[525252]>], O_CLOEXEC) = 0'
+    read = '1 read(90<pipe:[525252]>, "", 4) = 0'
+    close = '1 close(90<pipe:[525252]>) = 0'
+    channel = ([pipe] if libc == 'musl' and spawn else [])
+    if spawn:
+        channel += ['1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2']
+    if libc == 'musl' and spawn:
+        channel += ['1 close(91<pipe:[525252]>) = 0', read, close]
+    baseline = lines.copy()
+    boundary = next(i for i, l in enumerate(baseline) if 'PR_SET_SECCOMP' in l)
+    baseline[boundary:boundary] = channel
+    budget.check_front_capture(baseline, '/bin/bingsu', pinned, store, attempts,
+                               arch=arch, libc=libc, evidence={})
+    if mutation == 'extra-read':
+        channel.insert(-1, read)
+    elif mutation == 'missing-read':
+        channel = [l for l in channel if l != read]
+    elif mutation == 'missing-pipe':
+        channel = [l for l in channel if l != pipe]
+    elif mutation == 'missing-close':
+        channel = [l for l in channel if l != close]
+    elif mutation == 'extra-pipe':
+        channel.insert(0, pipe)
+    elif mutation == 'wrong-size':
+        channel = [l.replace('"", 4)', '"", 8)') for l in channel]
+    elif mutation == 'non-eof':
+        channel = [l.replace('"", 4) = 0', '"x", 4) = 1') for l in channel]
+    boundary = next(i for i, l in enumerate(lines) if 'PR_SET_SECCOMP' in l)
+    lines[boundary + (mutation == 'late-pipe'):boundary + (mutation == 'late-pipe')] = channel
+    evidence = {}
+    changed = (mutation in ('extra-read', 'extra-pipe')
+               or libc == 'musl' and spawn and mutation != 'none')
+    if changed:
+        with pytest.raises(AssertionError):
+            budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
+                                       arch=arch, libc=libc, evidence=evidence)
+    else:
+        budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
+                                   arch=arch, libc=libc, evidence=evidence)
+        expected = {'pipe2': 1, 'read': 1, 'close': 2} if libc == 'musl' and spawn else {}
+        assert evidence['spawn_pipe_counts'] == expected
+        assert evidence['spawn_pipe_expected'] == expected
+
+
 # 이것을 실패시키는 것: 실제 aarch64 glibc 캡처의 kernel 9개 facts/ACL fallback/EOF 비용을 누락하는 것.
 @pytest.mark.parametrize('capture,base', [
     (0, '/home/tester/pt/test_prompt_binary_names_only_0'),
