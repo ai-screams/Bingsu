@@ -1918,6 +1918,123 @@ def deadline_helper_capture():
     return lines, collector, plan
 
 
+def deadline_published_capture():
+    """Synthetic exit-75 variant that keeps the supervisor publication.
+
+    The collector sent a verified update, hit its own stage deadline and exited
+    75; the supervisor reaped it and stored the Deadline partial (spec message
+    row: results so far; S-17: a timeout after verified A). CI run 40730902708
+    attempt 8 traced this order. A checker fixture, not a live capture.
+    """
+    lines, collector, plan = helper_stage_case("collect")
+    pid = next(line.split()[0] for line in lines if budget.is_root(line, collector))
+    lines = [line.replace('exit_group(0)', 'exit_group(75)').replace('exited with 0', 'exited with 75')
+             if line.split()[0] == pid else line for line in lines]
+    return lines, collector, plan
+
+
+def failed_before_install(capture, result="-1 EIO (Input/output error)"):
+    """The supervisor's last check of the staged name before its installing
+    rename fails, and the rename is kept: publication after failed verification."""
+    lines, collector, plan = capture
+    install = max(i for i, line in enumerate(lines) if 'renameat(' in line and '".response.stage"' in line
+                  and line.rstrip().endswith('"response") = 0'))
+    pid = lines[install].split()[0]
+    check = max(i for i in range(install) if lines[i].split()[0] == pid and 'newfstatat(' in lines[i]
+                and '".response.stage"' in lines[i])
+    assert lines[check].endswith(" = 0"), lines[check]
+    lines = list(lines)
+    lines[check] = lines[check][:-len(" = 0")] + " = " + result
+    return lines, collector, plan
+
+
+def move_absence_probe(lines, supervisor, creation, dirfd):
+    """Move the supervisor's read-only .response.stage absence probe (an
+    entry/resumed pair before the creation) to just after the creation, so
+    every per-kind count stays the same."""
+    entry = max(i for i in range(creation) if lines[i].split()[0] == supervisor
+                and '".response.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC' in lines[i])
+    drop = {entry}
+    if lines[entry].endswith("<unfinished ...>"):
+        drop.add(next(i for i in range(entry + 1, creation) if lines[i].split()[0] == supervisor
+                      and lines[i].split(None, 1)[1].startswith("<... openat resumed>")))
+    probe = (f'{supervisor}  openat({dirfd}, ".response.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)'
+             " = -1 ENOENT (No such file or directory)")
+    moved = []
+    for i, line in enumerate(lines):
+        if i not in drop:
+            moved.append(line)
+        if i == creation:
+            moved.append(probe)
+    return moved
+
+
+def creation_then_failure(capture, damage):
+    """Failures shaped like the stage's absence probe or creation.
+
+    create-absence / write-absence: the supervisor's read-only .stage-request
+    absence probe becomes a failed exclusive create / a failed write open.
+    open-creation: the stage is created through the absolute-path open alias,
+    and its read-only ENOENT absence probe moves after the creation; open-creation-check: the
+    same creation, then its last name check reports ENOENT."""
+    import re
+    lines, collector, plan = capture
+    lines = list(lines)
+    install = max(i for i, line in enumerate(lines) if 'renameat(' in line and '".response.stage"' in line
+                  and line.rstrip().endswith('"response") = 0'))
+    supervisor = lines[install].split()[0]
+    probe = "O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)"
+    if damage in ("create-absence", "write-absence"):
+        at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+                  and '".stage-request", ' + probe in lines[i])
+        flags = {"create-absence": "O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0600)",
+                 "write-absence": "O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)"}[damage]
+        lines[at] = lines[at].replace(probe, flags)
+        return lines, collector, plan
+    if damage == "forged-annotation":
+        # Review reproduction: the creation's fd annotation names another
+        # file (and so does every later use of that fd); a read-only absence
+        # probe after the creation reports ENOENT.
+        at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+                  and '".response.stage", O_RDWR|O_CREAT|O_EXCL' in lines[i])
+        fd = re.search(r"= (\d+)<[^>]*>$", lines[at])[1]
+        held = re.compile(rf"(?<![\d]){fd}<[^<>]*/(?:\.response\.stage|response)>")
+        end = next(i for i in range(at, len(lines)) if lines[i].split()[0] == supervisor
+                   and lines[i].split(None, 1)[1].startswith(f"close({fd}<"))
+        for i in range(at, end + 1):
+            if lines[i].split()[0] == supervisor:
+                lines[i] = held.sub(f"{fd}</forged/other>", lines[i])
+        dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
+        lines = move_absence_probe(lines, supervisor, at, dirfd[1])
+        return lines, collector, plan
+    if damage.startswith("truncated-creation"):
+        # Review reproduction: a creation path strace cuts at -s 256, then a
+        # read-only absence probe after the creation reports ENOENT.
+        at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+                  and '".response.stage", O_RDWR|O_CREAT|O_EXCL' in lines[i])
+        dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
+        cut = '"' + ('.//' * 100 + '.response.stage')[:256] + '"...'
+        lines[at] = lines[at].replace('".response.stage", O_RDWR', cut + ", O_RDWR")
+        if damage == "truncated-creation-unannotated":
+            lines[at] = re.sub(r"= (\d+)<[^>]*>$", r"= \1", lines[at])
+        lines = move_absence_probe(lines, supervisor, at, dirfd[1])
+        return lines, collector, plan
+    if damage == "open-creation-check":
+        lines, collector, plan = failed_before_install((lines, collector, plan), "-1 ENOENT (No such file or directory)")
+    at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+              and '".response.stage", O_RDWR|O_CREAT|O_EXCL' in lines[i])
+    dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
+    lines[at] = lines[at].replace(dirfd[0] + '".response.stage"', f'open("{dirfd[2]}/.response.stage"')
+    if damage == "open-creation":
+        lines = move_absence_probe(lines, supervisor, at, dirfd[1])
+    return lines, collector, plan
+
+
+COLLECT_CAPTURES = {"published": lambda: helper_stage_case("collect"),
+                    "deadline": deadline_helper_capture,
+                    "deadline-published": deadline_published_capture}
+
+
 def extra_helper_stat(lines, *, tail=False, supervisor=False):
     lines = list(lines)
     if supervisor:
@@ -1934,18 +2051,18 @@ def extra_helper_stat(lines, *, tail=False, supervisor=False):
 
 
 # 이것을 실패시키는 것: prefix 초과/누락, tail 상한 초과, 마감 회차 폐기 후 정상 회차만 검사하는 것.
-@pytest.mark.parametrize("deadline", [False, True], ids=["published", "deadline"])
+@pytest.mark.parametrize("capture", list(COLLECT_CAPTURES))
 @pytest.mark.parametrize("damage,diagnostic", [
     ("extra-prefix", r"prefix.fstat.*exact"),
     ("missing-prefix", r"prefix.fstat.*exact"),
     ("extra-tail", r"finish_gc.fstat.*le"),
     ("extra-supervisor", r"supervisor.fstat.*le"),
 ])
-def test_collect_attempt_mutations(monkeypatch, tmp_path, deadline, damage, diagnostic):
+def test_collect_attempt_mutations(monkeypatch, tmp_path, capture, damage, diagnostic):
     clean = helper_stage_case("collect")
-    lines, collector, plan = deadline_helper_capture() if deadline else clean
-    # Validate the unmodified fixture first, including the deadline attempt.
-    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (not deadline)
+    lines, collector, plan = COLLECT_CAPTURES[capture]()
+    # Validate the unmodified fixture first, including the deadline attempts.
+    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (capture != "deadline")
     if damage == "missing-prefix":
         lines = list(lines)
         at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
@@ -1979,15 +2096,76 @@ def test_collect_requires_a_publication_within_the_attempt_cap(monkeypatch, tmp_
         assert not (tmp_path / str(attempt)).exists(), "product fixture should be cleaned up"
 
 
+# 이것을 실패시키는 것: exit 75 회차를 발행 여부와 무관하게 마감 공식(감독 tail에 발행 호출 0)으로 재는 것,
+# exit 75 회차의 발행 자체를 오류로 보는 것, 그 발행을 발행 회차로 세지 않는 것.
+def test_collect_accepts_a_deadline_partial_publication(monkeypatch, tmp_path):
+    import json
+    lines, collector, plan = deadline_published_capture()
+    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) is True
+    assert run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)]) == 1
+    evidence = json.loads((tmp_path / "collect" / "attempt-1" / "attempt.json").read_text())
+    assert evidence["collector_exit"] == 75 and evidence["published"] is True
+    assert evidence["publish_attempt"] == 1 and evidence["errors"] == []
+    from fsbudget.formula import helper_collect_expected
+    assert evidence["phase_expected"] == json.loads(json.dumps(helper_collect_expected(plan)))
+
+
+# 이것을 실패시키는 것: 설치 rename만 보고 발행으로 받는 것(그 앞 감독 검증의 실패를 보지 않음), 만든 뒤의
+# 단계 이름 부재(ENOENT)를 처음의 부재 확인처럼 허용하는 것. exit 0과 exit 75 모두.
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+@pytest.mark.parametrize("result", ["-1 EIO (Input/output error)", "-1 ENOENT (No such file or directory)"])
+def test_collect_rejects_publication_after_failed_verification(capture, result):
+    lines, collector, plan = failed_before_install(COLLECT_CAPTURES[capture](), result)
+    with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
+        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+
+
+# 이것을 실패시키는 것: 부재 확인의 flags 비교에서 musl의 O_LARGEFILE을 빼지 않는 것(CI musl 칸의 정상 발행이 실패).
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+def test_collect_accepts_musl_absence_probes(capture):
+    lines, collector, plan = COLLECT_CAPTURES[capture]()
+    install = max(i for i, line in enumerate(lines) if 'renameat(' in line and '".response.stage"' in line)
+    supervisor = lines[install].split()[0]
+    probe = "O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT"
+    musl = [line.replace(probe, "O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT")
+            if line.split()[0] == supervisor else line for line in lines]
+    assert musl != lines
+    assert budget.check_helper_capture("collect", musl, HELPER_EXE, collector, plan) is True
+
+
+# 이것을 실패시키는 것: 잘린 생성 경로를 fd 주석으로 확인하지 않는 것, 확인할 수 없는 생성을 넘기는 것(fail closed 제거),
+# 단계 이름 인자와 다른 fd 주석을 받아들이는 것.
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+@pytest.mark.parametrize("damage,message", [
+    ("truncated-creation", "publication after a failed supervisor call"),
+    ("truncated-creation-unannotated", "supervisor open of an unresolved path"),
+    ("forged-annotation", "supervisor open annotation disagrees with its path"),
+])
+def test_collect_rejects_truncated_creation(capture, damage, message):
+    lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
+    with pytest.raises(AssertionError, match=message):
+        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+
+
+# 이것을 실패시키는 것: 부재 확인 예외의 syscall·flags 고정을 지우는 것, 단계 생성을 openat으로만 추적하는 것.
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+@pytest.mark.parametrize("damage", ["create-absence", "write-absence", "open-creation", "open-creation-check"])
+def test_collect_rejects_creation_shaped_failures(capture, damage):
+    lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
+    assert lines != COLLECT_CAPTURES[capture]()[0]
+    with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
+        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+
+
 def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
     assert run_helper_captures(monkeypatch, tmp_path,
                               [deadline_helper_capture()] * 5 + [helper_stage_case("collect")]) == 6
 
 
-# 이것을 실패시키는 것: 시도 상한을 12 미만으로 되돌리는 것(12번째 회차의 발행을 못 본다).
-def test_collect_accepts_a_publication_after_eleven_deadline_attempts(monkeypatch, tmp_path):
+# 이것을 실패시키는 것: 시도 상한을 40 미만으로 되돌리는 것(40번째 회차의 발행을 못 본다).
+def test_collect_accepts_a_publication_on_the_last_allowed_attempt(monkeypatch, tmp_path):
     import json
-    n = 11  # the CI failure: later attempts must still be able to publish
+    n = 39  # CI publishes in about 1 of 8 attempts: the last allowed attempt must still count
     assert run_helper_captures(monkeypatch, tmp_path,
                               [deadline_helper_capture()] * n + [helper_stage_case("collect")]) == n + 1
     evidence = json.loads((tmp_path / "collect" / f"attempt-{n + 1}" / "attempt.json").read_text())
@@ -2030,7 +2208,8 @@ def test_collect_missing_prefix_boundary_is_rejected(deadline):
                     and 'LOCK_UN' in c.args)
     roles.helper_calls = [(c, kind) for i, (c, kind) in enumerate(roles.helper_calls)
                           if c.pid != main or i < boundary]
-    errors, _ = check_collect(roles, helper_collect_expected(plan, deadline=deadline), deadline=deadline)
+    errors, _ = check_collect(roles, helper_collect_expected(plan),
+                              deadline=helper_collect_expected(plan, deadline=True) if deadline else None)
     assert "collect: missing snapshot unlock boundary" in errors
     assert any("prefix.flock" in error and "(exact)" in error for error in errors)
 

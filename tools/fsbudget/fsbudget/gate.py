@@ -6,6 +6,28 @@ Calls of a task attribution could not place (role `unresolved`) are a
 violation too, whatever roles the caller gates."""
 
 MODES = ("exact", "le")
+# The supervisor's read-only absence probe of a stage name (musl adds O_LARGEFILE).
+ABSENCE_PROBE = {"O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC"}
+OPEN_ALIASES = {"open", "creat", "openat", "openat2"}
+
+
+def open_names(name, args, ret=""):
+    """Last path components a successful open alias names: (annotation, argument).
+
+    The annotation is the returned fd's -y path (absolute); the argument is
+    the path as passed (open and creat take it first), relative to its dirfd
+    otherwise, so only basenames compare. Either is None when absent or
+    unparsable, such as strace's truncated form `"..."...`."""
+    import ast
+    import posixpath
+    import re
+    opened = re.fullmatch(r"\d+<(/[^<>]*)>", ret)
+    raw = args[0] if name in {"open", "creat"} else args[1] if len(args) > 1 else ""
+    try:
+        argument = posixpath.basename(ast.literal_eval(raw))
+    except (SyntaxError, ValueError):
+        argument = None
+    return (posixpath.basename(opened[1]) if opened else None), argument
 
 
 def check(measured, expected, mode: str, gated_roles) -> list[str]:
@@ -26,8 +48,18 @@ def check(measured, expected, mode: str, gated_roles) -> list[str]:
     return bad
 
 
-def check_collect(attribution, expected, *, deadline=False, evidence=None):
+def check_collect(attribution, expected, *, deadline=None, evidence=None):
     """Separate concurrent collect streams; never subtract prefix from totals.
+
+    `expected` is the publication formula. `deadline`, given for an exit-75
+    attempt, is the formula without publication. It applies only when the
+    supervisor renamed no response: a collector that sent a verified update
+    and then hit its own stage deadline leaves a Deadline partial, which the
+    supervisor stores after reaping exit 75 (spec message row: the results so
+    far; S-17). That attempt is held to the publication formula, as exit 0 is.
+    A rename counts as publication only if every supervisor call before it
+    succeeded; the one tolerated failure is the absence check of the stage
+    and legacy request names (ENOENT) before the stage is created.
 
     Attribution retains counted helper events in syscall-entry order, including
     pre-exec child setup. The two successful helper thread creations identify
@@ -52,6 +84,11 @@ def check_collect(attribution, expected, *, deadline=False, evidence=None):
     measured = {phase: Counter() for phase in expected}
     unlocked = False
     published = False
+    staged = False
+    failed = []  # supervisor calls that failed before the installing rename
+    unverified = []
+    unresolved = []  # supervisor opens whose file could not be named (fail closed)
+    disagreeing = []  # supervisor opens whose annotation and argument disagree on the stage
     for c, kind in calls:
         phase = ("supervisor" if c.pid == supervisor else
                  "finish_gc" if c.pid == main and unlocked else "prefix")
@@ -62,17 +99,48 @@ def check_collect(attribution, expected, *, deadline=False, evidence=None):
             if unlocked:
                 return ["collect: duplicate snapshot unlock boundary"], False
             unlocked = True
+        if c.pid == supervisor and not published:
+            # 이것을 실패시키는 것: 단계 이름 부재 확인의 허용을 지우는 것(정상 발행이 실패), 만든 뒤의
+            # 부재까지 허용하는 것, 쓰기·생성 flags의 실패한 open을 부재 확인으로 보는 것, 실패한 감독 호출을
+            # 보지 않는 것.
+            if c.ret.startswith("-1") and not (
+                    not staged and c.ret.startswith("-1 ENOENT")
+                    and args[1:2] in (['".response.stage"'], ['".stage-request"'])
+                    and set("".join(args[2:3]).split("|")) - {"O_LARGEFILE"} == ABSENCE_PROBE):
+                failed.append(c)
+            # 이것을 실패시키는 것: 생성을 openat으로만 추적하는 것(open·creat·openat2 생성 뒤 부재가 예외를 받음),
+            # 이름을 알 수 없는 open을 생성 아님으로 넘기는 것(잘린 경로 뒤 부재가 예외를 받음).
+            if c.name in OPEN_ALIASES and not c.ret.startswith("-1"):
+                annotation, argument = open_names(c.name, args, c.ret)
+                if annotation is None and argument is None:
+                    unresolved.append(c)
+                # Only the stage name is compared: /proc/self legitimately
+                # resolves to /proc/<pid>, so other names may differ.
+                # 이것을 실패시키는 것: 단계 이름을 가리키는 인자와 다른 fd 주석을 받아들이는 것(생성이 숨겨짐).
+                if annotation and argument and (annotation == ".response.stage") != (argument == ".response.stage"):
+                    disagreeing.append(c)
+                if (annotation or argument) == ".response.stage":
+                    staged = True  # the stage's creation
         if (c.pid == supervisor and c.name == "renameat" and c.ret == "0"
                 and len(args) == 4 and args[1] == '".response.stage"' and args[3] == '"response"'):
             published = True
+            unverified = failed[:1]
+    # 이것을 실패시키는 것: 발행 여부와 무관하게 exit 75에 마감 공식을 쓰는 것(발행한 마감 회차가 실패),
+    # exit 75에 늘 발행 공식을 쓰는 것(발행 없는 마감 회차의 감독 tail 초과를 놓침).
+    if deadline is not None and not published:
+        expected = deadline
     if evidence is not None:
         evidence.update(phase_counts=measured, phase_expected=expected,
                         prefix_complete=unlocked, published=published)
     errors = []
     if not unlocked:
         errors.append("collect: missing snapshot unlock boundary")
-    if deadline and published:
-        errors.append("collect: deadline attempt published")
+    for c in disagreeing:
+        errors.append(f"collect: supervisor open annotation disagrees with its path: {c.name}({c.args}) = {c.ret}")
+    for c in unresolved:
+        errors.append(f"collect: supervisor open of an unresolved path: {c.name}({c.args}) = {c.ret}")
+    for c in unverified:
+        errors.append(f"collect: publication after a failed supervisor call: {c.name}({c.args}) = {c.ret}")
     # Independent phase and kind limits prevent tail slack hiding a prefix
     # regression, and GC slack hiding an extra supervisor call on exit 75.
     for phase, want in expected.items():
