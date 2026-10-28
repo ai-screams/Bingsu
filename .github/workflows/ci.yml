@@ -520,6 +520,7 @@ jobs:
           grep -F 'PASSED tools/fsbudget/tests/test_attribute.py::test_collector_role_mutations_are_refused' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tools/fsbudget/tests/test_attribute.py::test_trace_attributes_spawn_sites_and_fd_lifetimes' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tools/fsbudget/tests/test_gate.py::test_role_and_kind_surplus_is_never_hidden' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tools/fsbudget/tests/test_fd_state.py::test_fd_state_applies_parent_cloexec_and_exec_closure' "$RUNNER_TEMP/m3b-security.txt"
       # 이것을 실패시키는 것: 하나의 PASS로 다른 실제 수집 매개변수의 skip을 숨기는 것.
       - name: Assert exact F3 collection passes
         run: |

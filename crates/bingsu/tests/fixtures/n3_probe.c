@@ -34,9 +34,14 @@ int main(int argc, char **argv) {
     int signal_ok = action.sa_handler == SIG_DFL && !sigismember(&mask, SIGTERM);
     int environment_ok = getenv("BINGSU_ATTACK") == NULL;
     struct stat request_stat = {0}; if (collect) fstat(3, &request_stat);
+    /* How many of fds 0-2 are the null device: the fixed spawn opens its own. */
+    struct stat null_stat, fd_stat; int null_stdio = 0;
+    if (stat("/dev/null", &null_stat)) return 12;
+    for (int fd = 0; fd < 3; fd++)
+        if (!fstat(fd, &fd_stat) && S_ISCHR(fd_stat.st_mode) && fd_stat.st_rdev == null_stat.st_rdev) null_stdio++;
     int out = collect ? openat(4,"probe",O_WRONLY|O_CREAT|O_TRUNC,0600) : open(path,O_WRONLY|O_CREAT|O_TRUNC,0600);
     if (out < 0) return 11;
-    dprintf(out,"%d %d %d %d %d %d %d\n",count,unexpected,mode,signal_ok,environment_ok,(int)getpid(),(int)request_stat.st_nlink); close(out);
+    dprintf(out,"%d %d %d %d %d %d %d %d\n",count,unexpected,mode,signal_ok,environment_ok,(int)getpid(),(int)request_stat.st_nlink,null_stdio); close(out);
     if (slow || collect) sleep(2);
     return 0;
 }
