@@ -1071,6 +1071,259 @@ fn sigkill_before_and_after_every_rename_recovers_fixed_slots() {
         }
     }
 }
+// A second generation with its own command, so units tell the generations apart.
+const NEW_COMMAND: &str = "icons = \"ascii\"\n[segment.\"custom/probe\"]\nkind = \"command\"\ncommand = [\"printf\", \"NEVER_EXECUTE_NEW\"]\n[layout.line1]\nleft = [\"char\", \"custom/probe\"]\n";
+/// What the front decides from the published files: the whole record (status,
+/// warning and layout included), the status, and the execution it approves.
+#[derive(Debug, PartialEq)]
+struct FrontView {
+    record: Vec<u8>,
+    status: bingsu_core::status::Status,
+    units: Vec<bingsu_core::config::compile::ExecUnit>,
+    permit: Option<bingsu_core::handoff::Permit>,
+}
+fn read_front(f: &Fx) -> FrontView {
+    let r = crate::prompt_read::tests::published_response(
+        &f.request.runtime.path,
+        f.request.config_canonical.as_os_str().as_bytes(),
+        f.request.state_root.as_os_str().as_bytes(),
+        clock(),
+    );
+    FrontView {
+        record: r.record,
+        status: r.status,
+        units: r.execution.units().to_vec(),
+        permit: r.execution.permit(),
+    }
+}
+fn argv(front: &FrontView) -> Vec<Vec<String>> {
+    front
+        .units
+        .iter()
+        .map(|u| match &u.policy {
+            bingsu_core::config::compile::ExecPolicy::Command { argv, .. } => argv.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+fn command(word: &str) -> Vec<Vec<String>> {
+    vec![vec!["printf".to_owned(), word.to_owned()]]
+}
+fn kill_at(f: &Fx, point: Checkpoint) {
+    let mut child = spawn_child(f, &format!("{point:?}"));
+    await_ready(f, &mut child);
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+}
+// 세대 일치(GATE-GENERATION.1·2): 어느 중단점에서 죽여도 앞단은 표의 snapshot·marker 조합 하나를
+// 고르고, 그 조합을 죽이지 않고 써 둔 대조와 레코드·상태·실행 단위·permit이 모두 같다.
+// 이것을 실패시키는 것: Marker를 Snapshot보다 먼저 rename하는 것, 앞단의 짝 비교(eligible의 id 비교와
+// staged의 Pair 분기)를 없애는 것, 다음 도우미가 짝을 맞추지 않고 끝내는 것.
+#[test]
+fn front_matches_checkpoint_control_at_every_kill_point() {
+    let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+    // Same tag, so every fixture below has the same paths, context and units.
+    let tag = "kill-front";
+    let (old, mixed, new) = {
+        let f = Fx::new(tag);
+        f.put(COMMAND);
+        published(f.run());
+        let (snapshot, marker) = (f.bytes("snapshot"), f.bytes("marker"));
+        f.put(NEW_COMMAND);
+        published(f.run());
+        let write = |s: &[u8], m: &[u8]| {
+            put(&f.dir().join("snapshot"), s);
+            put(&f.dir().join("marker"), m);
+            read_front(&f)
+        };
+        let (new_snapshot, new_marker) = (f.bytes("snapshot"), f.bytes("marker"));
+        (
+            write(&snapshot, &marker),
+            write(&new_snapshot, &marker),
+            write(&new_snapshot, &new_marker),
+        )
+    };
+    use bingsu_core::status::Status;
+    // 이것을 실패시키는 것: 앞단에 게시자 시계가 닿지 않아 모든 행이 거부되는 것(대조 자체가 빈 것).
+    assert_eq!(
+        (old.status, argv(&old)),
+        (Status::OK_NONE, command("NEVER_EXECUTE"))
+    );
+    assert!(old.permit.is_some());
+    assert_eq!(
+        (new.status, argv(&new)),
+        (Status::OK_NONE, command("NEVER_EXECUTE_NEW"))
+    );
+    assert!(new.permit.is_some());
+    // The mixed control selects the new snapshot (its layout) and approves nothing.
+    assert_eq!(mixed.status, Status::DEGRADED_TRUST_MISMATCH);
+    assert!(mixed.units.is_empty());
+    assert_eq!(mixed.permit, None);
+    assert_ne!(mixed.record, old.record);
+    assert_ne!(mixed.record, new.record);
+    // The new layout draws ASCII glyphs; the old one draws '❯'.
+    assert!(mixed.record.windows(3).all(|w| w != "❯".as_bytes()));
+    assert!(old.record.windows(3).any(|w| w == "❯".as_bytes()));
+    for point in [
+        Checkpoint::Before(Slot::Sequence),
+        Checkpoint::After(Slot::Sequence),
+        Checkpoint::Validated,
+        Checkpoint::Before(Slot::LastGood),
+        Checkpoint::After(Slot::LastGood),
+        Checkpoint::Before(Slot::Snapshot),
+        Checkpoint::After(Slot::Snapshot),
+        Checkpoint::Before(Slot::Marker),
+        Checkpoint::After(Slot::Marker),
+        Checkpoint::Published,
+    ] {
+        let f = Fx::new(tag);
+        f.put(COMMAND);
+        published(f.run());
+        let before = f.state();
+        let first = f.snap().id;
+        f.put(NEW_COMMAND);
+        kill_at(&f, point);
+        let (new_snapshot, new_marker) = match point {
+            Checkpoint::After(Slot::Snapshot) | Checkpoint::Before(Slot::Marker) => (true, false),
+            Checkpoint::After(Slot::Marker) | Checkpoint::Published => (true, true),
+            _ => (false, false),
+        };
+        // Files: exactly the table's combination; last-good is always the old copy.
+        assert_eq!(f.bytes("last-good"), before[1], "{point:?}");
+        assert_eq!(f.bytes("snapshot") == before[0], !new_snapshot, "{point:?}");
+        assert_eq!(f.bytes("marker") == before[2], !new_marker, "{point:?}");
+        let selected = f.snap().id;
+        assert_eq!(
+            (selected.epoch, selected.generation),
+            (first.epoch, if new_snapshot { 2 } else { 1 }),
+            "{point:?}"
+        );
+        if new_marker {
+            assert_eq!(f.marker().id, selected, "{point:?}");
+        }
+        let expected = match (new_snapshot, new_marker) {
+            (false, false) => &old,
+            (true, false) => &mixed,
+            _ => &new,
+        };
+        let got = read_front(&f);
+        assert_eq!(&got, expected, "{point:?}");
+        if new_snapshot && !new_marker {
+            assert_eq!(got.status, Status::DEGRADED_TRUST_MISMATCH, "{point:?}");
+            assert!(got.units.is_empty(), "{point:?}");
+            assert_eq!(got.permit, None, "{point:?}");
+        }
+        // The next helper finishes publication with a matching pair.
+        let next = f.run();
+        assert!(
+            matches!(
+                next,
+                RefreshResult::Published { .. } | RefreshResult::Revalidated { .. }
+            ),
+            "{point:?}: {next:?}"
+        );
+        assert_eq!(f.marker().id, f.snap().id, "{point:?}");
+        assert_eq!(read_front(&f), new, "{point:?}");
+    }
+}
+// 표식 짝(GATE-MARKER-UPDATE.2): 세대만 또는 원본 요약만 다른 표식에도 앞단은 실행 단위를 하나도 승인하지 않는다.
+// 이것을 실패시키는 것: 앞단 짝 비교(eligible과 staged 두 곳)를 세대만 비교하도록 줄이거나 없애는 것.
+#[test]
+fn marker_disagreeing_in_generation_or_summary_launches_no_unit() {
+    use bingsu_core::status::Status;
+    let f = Fx::new("pair-fields");
+    f.put(COMMAND);
+    published(f.run());
+    let good = f.bytes("marker");
+    let allowed = read_front(&f);
+    assert_eq!(
+        (allowed.status, argv(&allowed)),
+        (Status::OK_NONE, command("NEVER_EXECUTE"))
+    );
+    assert!(allowed.permit.is_some());
+    for (what, change) in [
+        (
+            "generation",
+            (|m: &mut Marker| m.id.generation += 1) as fn(&mut Marker),
+        ),
+        ("summary", |m| m.id.source[0] ^= 1),
+    ] {
+        let mut marker = Marker::decode(&good).unwrap();
+        change(&mut marker);
+        put(&f.dir().join("marker"), &marker.encode());
+        let got = read_front(&f);
+        assert_eq!(got.status, Status::DEGRADED_TRUST_MISMATCH, "{what}");
+        assert!(got.units.is_empty(), "{what}");
+        assert_eq!(got.permit, None, "{what}");
+    }
+}
+// 표식 갱신 조건(GATE-MARKER-UPDATE.1): 마감 초과·일부 훑음·ACL 오류·conf.d 목록 실패에서는 Incomplete이고
+// snapshot·last-good·marker·sequence가 한 바이트도 바뀌지 않는다.
+// 이것을 실패시키는 것: Verified::Incomplete를 Invalid 표식으로 바꾸는 것(N-057 모양), 마감 확인을 빼는 것,
+// 훑지 못한 원본이나 conf.d 목록 오류를 확인한 부재로 낮추는 것.
+#[test]
+fn marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure() {
+    struct Late(Rc<Cell<bool>>);
+    impl ClockSource for Late {
+        fn observe(&mut self) -> Result<Clock, ClockError> {
+            let mut now = clock();
+            if self.0.get() {
+                now.now += WORK_NS;
+            }
+            Ok(now)
+        }
+    }
+    for case in ["deadline", "partial-scan", "conf-d-listing"] {
+        let f = Fx::new(&format!("unchanged-{case}"));
+        f.put(COMMAND);
+        published(f.run());
+        let before = (f.state(), f.bytes("sequence"));
+        let late = Rc::new(Cell::new(false));
+        match case {
+            "deadline" => f.put(&format!("icons = \"ascii\"\n{COMMAND}")),
+            // An extends source that cannot be walked leaves the set unscanned.
+            "partial-scan" => f.put(&format!("extends = [\"parts/none.toml\"]\n{COMMAND}")),
+            "conf-d-listing" => put(
+                &f.request.config_canonical.join("conf.d"),
+                b"not a directory",
+            ),
+            _ => unreachable!(),
+        }
+        let got = refresh_with(f.request.clone(), &mut Late(late.clone()), &mut |p| {
+            if case == "deadline" && p == Checkpoint::Read {
+                late.set(true);
+            }
+        });
+        assert_eq!(got, RefreshResult::Incomplete, "{case}");
+        assert_eq!((f.state(), f.bytes("sequence")), before, "{case}");
+    }
+}
+// 확인한 실패(GATE-MARKER-UPDATE.3): 컴파일 실패를 확인하면 무효 표식이 써지고, 바로 다음 앞단 읽기가
+// degraded:trust-invalid이며 실행 단위를 승인하지 않는다. 옛 화면은 남는다.
+// 이것을 실패시키는 것: 확인한 실패를 Incomplete로 낮춰 옛 표식이 T까지 승인되게 하는 것, 앞단이 invalid 표식을 무시하는 것.
+#[test]
+fn confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degrades() {
+    use bingsu_core::status::Status;
+    let f = Fx::new("confirmed-invalid");
+    f.put(COMMAND);
+    published(f.run());
+    let shown = read_front(&f);
+    assert_eq!(
+        (shown.status, argv(&shown)),
+        (Status::OK_NONE, command("NEVER_EXECUTE"))
+    );
+    f.put("[broken\n");
+    assert_eq!(f.run(), RefreshResult::Invalid);
+    assert!(f.marker().invalid);
+    assert_eq!(f.marker().id, f.snap().id);
+    let got = read_front(&f);
+    assert_eq!(got.status, Status::DEGRADED_TRUST_INVALID);
+    assert!(got.units.is_empty());
+    assert_eq!(got.permit, None);
+    // The display stays: the same layout as before, now with the warning.
+    assert!(got.record.windows(3).any(|w| w == "❯".as_bytes()));
+    assert_ne!(got.record, shown.record);
+}
 // 이것을 실패시키는 것: 부모가 요청한 실제 Rust 발행 중단점이나 두 프로세스 Busy 검사를 실행하지 않는 것.
 #[test]
 #[ignore = "child of the bounded lock and SIGKILL parent tests"]
