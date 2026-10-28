@@ -857,12 +857,13 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
 
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
-                               collectors=None, repository_roots=None):
+                               collectors=None, repository_roots=None, repository_evidence=()):
     """`collectors` is the exact count a live capture arranged; stored traces
     leave it None and may hold at most one. With `repository_roots`, a
     collector's calls after its request are audited by assert_repository_trace
     in shipped mode against exactly those roots (the bootstrap stays with
-    collector_attribute)."""
+    collector_attribute). `repository_evidence` names files the collector must
+    read (non-empty) inside that window."""
     from fsbudget.attribute import assert_repository_trace, collector_attribute
     collector_exe = collector_exe or os.path.join(os.path.dirname(exe), "bingsu-collect")
     _, scoped = tree(lines, exe)
@@ -881,7 +882,8 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     if window:
         # 이것을 실패시키는 것: collector가 요청 뒤 roots 밖·조상 내용·쓰기를 여는 것(이 감사를 건너뛰는 것 포함).
         assert_repository_trace([line for line in scoped if line.split()[0] == roots[0]],
-                                {"mode": "shipped", "roots": list(repository_roots)}, {})
+                                {"mode": "shipped", "roots": list(repository_roots),
+                                 "evidence": list(repository_evidence)}, {})
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
                                 collector_exe=collector_exe, check_collection=True,
                                 audited_collector=int(roots[0]) if window else None)
@@ -1200,7 +1202,11 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     real = os.path.realpath(repo)
     assert_prompt_trace_budget(lines, exe, pinned, global_inputs=global_inputs, collector_exe=collector_exe,
                                collectors=int(case != "no-collection"),
-                               repository_roots=[real, real + "/.git"])
+                               repository_roots=[real, real + "/.git"],
+                               # Stage A reads HEAD in every repository it finds (the
+                               # recorded release capture reads 21 bytes from it), so a
+                               # non-empty read proves collection reached this repository.
+                               repository_evidence=[real + "/.git/HEAD"])
     if case != "no-collection":
         assert_global_inputs_exercised(lines, exe, global_inputs, global_present)
 

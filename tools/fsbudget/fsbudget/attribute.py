@@ -576,6 +576,13 @@ def _cloexec_pair(previous: Call | None, current: Call) -> bool:
                 and len(before) > flag_at and "O_CLOEXEC" in before[flag_at].split("|"))
 
 
+def request_handoff(name, args):
+    """The collector's request read: the one boundary where collector_attribute
+    hands calls to assert_repository_trace(mode="shipped") and where that
+    audit's window opens. Any read form on the request fd 3 counts."""
+    return name in {"read", "readv"} and bool(args) and args[0].split("<")[0] == "3"
+
+
 def _probe_flags(text, required, optional=frozenset()):
     flags = text.split("|")
     return len(flags) == len(set(flags)) and required <= set(flags) <= required | optional
@@ -827,11 +834,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             # 늘 실패), 요청 읽기 전 호출까지 넘기는 것(bootstrap 판정이 빠짐).
             if repository_window and process in requested:
                 continue
-            if repository_window and c.name in {"read", "readv"} and args and args[0].split("<")[0] == "3":
+            if repository_window and request_handoff(c.name, args):
                 requested.add(process)
                 continue
-            if (args and (c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
-                          or c.name in {"read", "readv"} and args[0].split("<")[0] == "3")
+            if (args and c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
+                    or request_handoff(c.name, args)
                     or c.name in {"landlock_create_ruleset", "landlock_add_rule"}
                     and any(flag in c.args for flag in ("LANDLOCK_ACCESS_FS_READ_FILE", "LANDLOCK_ACCESS_FS_READ_DIR"))
                     or c.name == "landlock_restrict_self" and filters[process] >= 2):
@@ -929,6 +936,7 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
     active, owner, listing = None, None, None
     seen, held, closed, counts, raw_counts = [], {}, set(), {}, {}
     identity = set()  # shipped: "/" fds opened without O_DIRECTORY (fstat family and close only)
+    evidence_read = set()  # paths with a successful non-empty read inside the window
     first_exec = True
 
     def phase(event):
@@ -1041,8 +1049,9 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 # 다른 pid의 exit로 창을 닫는 것.
                 if call.name == "write" and args and args[0].split("<")[0] == "1":
                     continue  # wire frames; content is the supervisor codec's
-                if call.name == "read" and args and re.fullmatch(r"3<pipe:\[\d+\]>", args[0]):
-                    owner, active = call.pid, "shipped"  # the request pipe opens the window
+                # 이것을 실패시키는 것: 창을 read로만 여는 것(readv(3) 뒤의 호출이 위임됐는데 감사받지 않음).
+                if request_handoff(call.name, args):
+                    owner, active = call.pid, "shipped"  # the request read opens the window
                     seen.append("shipped")
                     counts.setdefault("shipped", Counter())
                     continue
@@ -1130,11 +1139,16 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                     identity.add(int(result[1]))  # the read layer's identity-comparison-only "/"
             if call.name in {"getdents", "getdents64"}:
                 directory(path, int(args[2]))
+            if call.name in {"read", "pread64", "readv"} and re.match(r"[1-9]\d*$", call.ret):
+                evidence_read.add(path)
             primitive = held_metadata_kind(call, args) or call.name
             if primitive == "open" and active == "read-layer" and path == "/":
                 primitive = "openat"  # same fixed-slash libc alias as B3
             counts[active][primitive] += 1
     assert seen and seen[-1] == "end", ("missing repository phase evidence/completion", seen)
+    # 이것을 실패시키는 것: 저장소 작업이 하나도 없는 출하 창을 통과시키는 것.
+    missing = set(capabilities.get("evidence", ())) - evidence_read
+    assert not missing, ("no repository read evidence in the window", sorted(missing))
     for name, axes in expected_axes.items():
         expected = collector_repository_expected(CollectorAxes(**axes))
         assert dict(counts.get(name, {})) == {k: v for k, v in expected.items() if v}, (name, counts.get(name), expected)

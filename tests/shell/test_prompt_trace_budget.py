@@ -33,7 +33,8 @@ def check_collecting_prompt(lines, *, collectors=1, audit=True):
     repo = COLLECT_BASE + "/repo"
     budget.assert_prompt_trace_budget(lines, COLLECT_BASE + "/bin/bingsu", roots, global_inputs=inputs,
                                       collector_exe=COLLECT_PIN, collectors=collectors,
-                                      repository_roots=[repo, repo + "/.git"] if audit else None)
+                                      repository_roots=[repo, repo + "/.git"] if audit else None,
+                                      repository_evidence=[repo + "/.git/HEAD"])
 
 
 def insert_after(lines, pattern, extra):
@@ -53,9 +54,9 @@ def test_collecting_prompt_passes_the_path_allowlist():
 
 
 # 이것을 실패시키는 것: collector 수를 정확히 보지 않는 것, 수집하는 collector를 감사 없이 통과시키는 것,
-# collector가 요청 뒤 roots 밖을 여는 것, collector bootstrap의 읽기를 저장소 감사로 넘기는 것, futex 아닌 restart를 건너뛰는 것, pidfd 아닌 waitid·SIGKILL 아닌 신호·둘째 pidfd_open을 허용하는 것.
+# collector가 요청 뒤 roots 밖을 여는 것, collector bootstrap의 읽기를 저장소 감사로 넘기는 것, futex 아닌 restart를 건너뛰는 것, readv(3)로 위임한 뒤 감사 창을 늦게 여는 것, 시험 저장소의 HEAD를 읽은 증거 없이 통과시키는 것, pidfd 아닌 waitid·SIGKILL 아닌 신호·둘째 pidfd_open을 허용하는 것.
 @pytest.mark.parametrize("damage", ["count-zero", "no-audit", "collector-outside-open", "waitid-by-pid",
-                                    "signal-sigterm", "second-pidfd-open", "collector-bootstrap-read", "restart-other"])
+                                    "signal-sigterm", "second-pidfd-open", "collector-bootstrap-read", "restart-other", "readv-handoff", "empty-head-read"])
 def test_collecting_prompt_rejects_mutations(damage):
     lines, collectors, audit = collecting_prompt(), 1, True
     if damage == "count-zero":
@@ -79,6 +80,15 @@ def test_collecting_prompt_rejects_mutations(damage):
         ready = next(i for i, line in enumerate(lines) if line.startswith("1098  write(1<pipe:"))
         lines = lines[:ready] + ['1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
                                  '1098  close(40</etc/hostname>) = 0'] + lines[ready:]
+    elif damage == "readv-handoff":
+        at = next(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        lines = lines[:at] + [f'1098  readv({lines[at].split("(", 1)[1].split(",")[0]}, [{{iov_base="", iov_len=1}}], 1) = 0',
+                              '1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+                              '1098  read(40</etc/hostname>, "x\\n", 64) = 2',
+                              '1098  close(40</etc/hostname>) = 0'] + lines[at:]
+    elif damage == "empty-head-read":
+        lines = [line.replace('"ref: refs/heads/main\\n", 22) = 21', '"", 22) = 0') for line in lines]
+        assert lines != collecting_prompt()
     elif damage == "restart-other":
         lines = insert_after(lines, "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
                              ["1099  restart_syscall(<... resuming interrupted read ...>) = 0"])

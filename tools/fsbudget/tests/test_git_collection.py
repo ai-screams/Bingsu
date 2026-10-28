@@ -186,7 +186,8 @@ def test_repository_budget_cannot_hide_other_role_surplus(role, kind):
 # Bookworm/aarch64 release prompt with a warm snapshot in a hand-made repository.
 SHIPPED = Path(__file__).parent / "fixtures/m3d-bookworm-aarch64-shipped-collection.strace"
 SHIPPED_REPO = "/home/tester/pt/test_prompt_binary_names_only_1/repo"
-SHIPPED_CAPS = {"mode": "shipped", "roots": [SHIPPED_REPO, SHIPPED_REPO + "/.git"]}
+SHIPPED_CAPS = {"mode": "shipped", "roots": [SHIPPED_REPO, SHIPPED_REPO + "/.git"],
+                "evidence": [SHIPPED_REPO + "/.git/HEAD"]}
 
 
 def shipped_lines():
@@ -208,11 +209,11 @@ def test_shipped_collection_trace_passes_without_phase_markers():
 
 # 이것을 실패시키는 것: 출하 창에서 "/"·조상 폴더의 목록 읽기나 내용 read, roots 밖 open, 쓰기 open,
 # roots가 아닌 Landlock 규칙, "/" 아닌 조상의 O_DIRECTORY 없는 open, identity 전용 "/" fd의 하위 open·하위 stat·fstatfs·dup, 출하 창 미완료(collector exit 없음·다른
-# pid의 exit·요청 읽기 없음), collector exit 뒤의 호출을 허용하는 것.
+# pid의 exit·요청 읽기 없음), collector exit 뒤의 호출, readv(3)로 시작한 창, 저장소 작업이 없는 창, HEAD를 빈 read로만 본 창을 허용하는 것.
 @pytest.mark.parametrize("damage", [
     "root-getdents", "root-read", "ancestor-getdents", "ancestor-read", "outside-open",
     "writable-open", "landlock-outside", "no-exit", "foreign-exit", "after-exit", "no-request",
-    "ancestor-open-without-directory", "identity-fd-walk", "identity-fd-statfs", "identity-fd-dup", "identity-fd-child-stat"])
+    "ancestor-open-without-directory", "readv-first", "no-repository-work", "empty-head-read", "identity-fd-walk", "identity-fd-statfs", "identity-fd-dup", "identity-fd-child-stat"])
 def test_shipped_collection_trace_rejects_mutations(damage):
     lines = shipped_lines()
     home = '1098  openat(4</>, "home", O_RDONLY|O_DIRECTORY|O_CLOEXEC) = 30</home>'
@@ -241,6 +242,21 @@ def test_shipped_collection_trace_rejects_mutations(damage):
     elif damage == "ancestor-open-without-directory":
         lines = [line.replace('openat(4</>, "home", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY',
                               'openat(4</>, "home", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC') for line in lines]
+    elif damage == "readv-first":
+        # Review reproduction: a readv on the request fd hands the collector to
+        # the audit, then an outside read precedes the usual request read.
+        at = next(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        lines = lines[:at] + [f'1098  readv({lines[at].split("(", 1)[1].split(",")[0]}, [{{iov_base="", iov_len=1}}], 1) = 0',
+                              '1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 30</etc/hostname>',
+                              '1098  read(30</etc/hostname>, "x\\n", 64) = 2',
+                              '1098  close(30</etc/hostname>) = 0'] + lines[at:]
+    elif damage == "no-repository-work":
+        # Every call between the request reads and the exit removed.
+        last = max(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        assert lines[last + 1].startswith("1098  <... read resumed>"), lines[last + 1]
+        lines = lines[:last + 2] + [line for line in lines if "+++ exited" in line]
+    elif damage == "empty-head-read":
+        lines = [line.replace('"ref: refs/heads/main\\n", 22) = 21', '"", 22) = 0') for line in lines]
     elif damage.startswith("identity-fd-"):
         extra = {"identity-fd-walk": '1098  openat(6</>, "home", O_RDONLY|O_DIRECTORY|O_CLOEXEC) = 30</home>',
                  "identity-fd-statfs": '1098  fstatfs(6</>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096}) = 0',
