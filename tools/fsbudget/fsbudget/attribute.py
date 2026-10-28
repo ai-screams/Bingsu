@@ -657,6 +657,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
+    `pinned["platform"]`, an (arch, libc) pair, admits that platform's
+    collector stack-guard seeks (STARTUP_PRIMITIVES); without it none.
     `repository_window` leaves a collector's calls from its first request
     read on fd 3 to its exit to assert_repository_trace(mode="shipped"); the
     caller must run that audit on the same collector. Spawn, exec, filter and
@@ -703,6 +705,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             ordered.append((open_ends[at], c, True, False))
     ordered.sort(key=lambda pair: pair[0])
     roles, owner, confined = {}, {}, set()
+    from .formula import STARTUP_PRIMITIVES
+    guard_allowance = STARTUP_PRIMITIVES.get(pinned.get("platform"), {}).get("stack_guard", {}).get("seek", 0)
+    guard_seeks = defaultdict(int)
     descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
     helper_calls = []
@@ -821,6 +826,20 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         # process's first filter. A collector never borrows helper NSS paths.
         helper_startup = not (helper_vocabulary and role == "helper") or process not in started
         if process not in confined and helper_startup and _prologue_call(c, target(c)):
+            continue
+        # x86_64 glibc's pthread_getattr_np (Rust std's main-thread stack
+        # guard) seeks its own /proc/self/maps twice before any filter
+        # (formula.STARTUP_PRIMITIVES stack_guard). Only on the platform the
+        # caller names, only that fd, only SEEK_CUR 0 then SEEK_SET.
+        # (A maps fd after the filters would need a maps open the bootstrap
+        # vocabulary already refuses.)
+        # 이것을 실패시키는 것: 다른 플랫폼·다른 fd·다른 모양의 lseek, 또는 표의 횟수를 넘는 lseek을 허용하는 것.
+        if (role == "collector" and c.name == "lseek"
+                and guard_seeks[process] < guard_allowance
+                and prologue_allowed("read", target(c), c.pid)
+                and (args[1:] == ["0", "SEEK_CUR"] if guard_seeks[process] == 0
+                     else len(args) == 3 and args[1].isdigit() and args[2] == "SEEK_SET")):
+            guard_seeks[process] += 1
             continue
         if helper_vocabulary and role == "helper" and k is not None:
             started.add(process)
@@ -1077,7 +1096,14 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
             assert call.pid == owner, ("other task in repository phase", call)
             # 이것을 실패시키는 것: identity 비교 전용 "/" fd로 목록·내용·하위 open·fstatfs·dup·fcntl을 허용하는 것.
             subject = FD_ARG.fullmatch(args[0]) if args else None
-            if subject and int(subject[1]) in identity:
+            # musl's open() follows an O_CLOEXEC open with fcntl(F_SETFD,
+            # FD_CLOEXEC) on the new fd (the collector's filter may refuse it):
+            # one such call, right after the identity fd's open, on musl only.
+            # 이것을 실패시키는 것: glibc에서, 두 번, 또는 open 바로 뒤가 아닌 F_SETFD를 identity fd에 허용하는 것.
+            # Adjacency to that open is the fcntl branch's check below.
+            musl_cloexec = (capabilities.get("libc") == "musl" and call.name == "fcntl"
+                            and args[1:] == ["F_SETFD", "FD_CLOEXEC"])
+            if subject and int(subject[1]) in identity and not musl_cloexec:
                 assert (call.name == "close" or call.name in {"fstat", "fstat64"}
                         or call.name in {"newfstatat", "statx"} and len(args) > 1 and args[1] == '""'), ("identity-only / fd", call)
             if call.name == "close":

@@ -267,3 +267,25 @@ def test_shipped_collection_trace_rejects_mutations(damage):
     assert lines != shipped_lines()
     with pytest.raises(AssertionError):
         assert_repository_trace(lines, SHIPPED_CAPS, {})
+
+
+def with_identity_cloexec(after_stat=False, twice=False):
+    """musl's open(): fcntl(F_SETFD, FD_CLOEXEC) right after the read layer's
+    O_CLOEXEC open of "/" (the collector's filter refuses it: EPERM)."""
+    lines = shipped_lines()
+    at = next(i for i, line in enumerate(lines) if line.startswith('1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC <'))
+    pair = ["1098  fcntl(6</>, F_SETFD, FD_CLOEXEC) = -1 EPERM (Operation not permitted)"]
+    where = at + 4 if after_stat else at + 2  # after the resumed open, or after its newfstatat pair
+    return lines[:where] + pair * (2 if twice else 1) + lines[where:]
+
+
+def test_shipped_musl_identity_cloexec_is_allowed_on_musl():
+    assert_repository_trace(with_identity_cloexec(), {**SHIPPED_CAPS, "libc": "musl"}, {})
+
+
+# 이것을 실패시키는 것: identity fd의 F_SETFD를 glibc에서도, 두 번, open 바로 뒤가 아닌 자리에서 허용하는 것.
+@pytest.mark.parametrize("libc,after_stat,twice", [("gnu", False, False), (None, False, False),
+                                                   ("musl", True, False), ("musl", False, True)])
+def test_shipped_identity_cloexec_is_refused_elsewhere(libc, after_stat, twice):
+    with pytest.raises(AssertionError):
+        assert_repository_trace(with_identity_cloexec(after_stat, twice), {**SHIPPED_CAPS, "libc": libc}, {})

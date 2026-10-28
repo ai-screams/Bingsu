@@ -27,19 +27,58 @@ def collecting_prompt():
     return data.decode().splitlines()
 
 
-def check_collecting_prompt(lines, *, collectors=1, audit=True):
+def check_collecting_prompt(lines, *, collectors=1, audit=True, platform=None):
     roots = [COLLECT_BASE + suffix for suffix in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")]
     inputs = tuple(COLLECT_BASE + suffix for suffix in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore"))
     repo = COLLECT_BASE + "/repo"
     budget.assert_prompt_trace_budget(lines, COLLECT_BASE + "/bin/bingsu", roots, global_inputs=inputs,
                                       collector_exe=COLLECT_PIN, collectors=collectors,
                                       repository_roots=[repo, repo + "/.git"] if audit else None,
-                                      repository_evidence=[repo + "/.git/HEAD"])
+                                      repository_evidence=[repo + "/.git/HEAD"], platform=platform)
 
 
 def insert_after(lines, pattern, extra):
     at = next(i for i, line in enumerate(lines) if pattern in line)
     return lines[:at + 1] + extra + lines[at + 1:]
+
+
+def with_stack_guard_seeks(seeks=None):
+    """x86_64 glibc pthread_getattr_np: two seeks of the collector's own maps
+    fd before it closes it (CI #167 x86_64 gnu capture: SEEK_CUR 0, then
+    SEEK_SET 2854)."""
+    seeks = seeks or ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854",
+                      "1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854"]
+    return insert_before(collecting_prompt(), "1098  close(4</proc/1098/maps>", seeks)
+
+
+def insert_before(lines, pattern, extra):
+    at = next(i for i, line in enumerate(lines) if pattern in line)
+    return lines[:at] + extra + lines[at:]
+
+
+def test_collector_stack_guard_seeks_pass_on_x86_64_gnu():
+    check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"))
+
+
+# 이것을 실패시키는 것: x86_64 glibc 밖에서, 다른 fd·다른 모양으로, 표의 횟수를 넘겨 collector의 lseek을 허용하는 것.
+@pytest.mark.parametrize("platform,seeks", [
+    (("aarch64", "gnu"), None),
+    (("x86_64", "musl"), None),
+    (None, None),
+    (("x86_64", "gnu"), "lock"),
+    (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854"]),
+    (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854",
+                         "1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854",
+                         "1098  lseek(4</proc/1098/maps>, 0, SEEK_SET) = 0"]),
+], ids=["aarch64-gnu", "x86_64-musl", "no-platform", "other-fd", "set-first", "third-seek"])
+def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
+    if seeks == "lock":  # the inherited collection.lock fd, open at that point
+        import re
+        lock = next(m[1] for line in collecting_prompt()
+                    if (m := re.match(r"1098  newfstatat\((5<[^>]*collection\.lock>)", line)))
+        seeks = [f"1098  lseek({lock}, 0, SEEK_CUR) = 0"]
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform)
 
 
 def test_collecting_prompt_passes_the_path_allowlist():
