@@ -379,6 +379,185 @@ class _Descriptors:
                 description.aliases.update(additions)
 
 
+@dataclass(frozen=True)
+class FdEntry:
+    fd: int
+    path: str
+    cloexec: bool
+    origin: str  # "inherited", "opened", "dup" or "spawn-action"
+
+
+FdTable = dict[int, FdEntry]
+
+
+class FdStateError(ValueError):
+    """The trace does not determine the table: fail closed, never a clean table."""
+
+
+# Calls whose new descriptor is close-on-exec whatever their flags say.
+_ALWAYS_CLOEXEC = {"pidfd_open", "pidfd_getfd", "landlock_create_ruleset", "io_uring_setup"}
+# Calls that return a new descriptor (strace -y names it in the result).
+_FD_CREATORS = OPEN | _ALWAYS_CLOEXEC | {
+    "socket", "accept", "accept4", "memfd_create", "eventfd", "eventfd2", "epoll_create", "epoll_create1",
+    "signalfd", "signalfd4", "timerfd_create", "inotify_init", "inotify_init1", "userfaultfd",
+    "perf_event_open", "fanotify_init", "open_tree", "fsopen", "fsmount", "fspick", "open_by_handle_at"}
+# An fd strace -y names: a number and its <name>, with one nested -yy device level.
+_FD_NAMED = re.compile(r"(?<![\w])(\d+)<((?:[^<>]|<[^<>]*>)*)>")
+_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"(?:\.\.\.)?')
+
+
+class _FdTableState:
+    """One descriptor table; CLONE_FILES tasks hold the same object. Errors
+    travel with copies, so a child of a doubtful table is doubtful too."""
+
+    def __init__(self, entries, errors=()):
+        self.entries, self.errors = dict(entries), list(errors)
+
+    def copy(self):
+        return _FdTableState(self.entries, self.errors)
+
+
+@dataclass
+class _FdTask:
+    table: _FdTableState
+    spawning: bool  # a vfork (posix_spawn) child that has not exec'd yet
+
+
+def _clone_flags(c: Call) -> set[str]:
+    if c.name in {"fork", "vfork"}:
+        return {"CLONE_VFORK"} if c.name == "vfork" else set()
+    match = re.search(r"flags=([A-Z0-9_|]+)", c.args)
+    return set(match[1].split("|")) if match else set()
+
+
+def fd_table_at_exec(trace, pid: int, initial: FdTable) -> FdTable:
+    """The table `pid` holds right after its first successful execve.
+
+    `initial` is the table of `trace.first_pid` at the start of the trace.
+    Every call of every task applies in trace order: open (O_CLOEXEC),
+    fcntl F_SETFD/F_GETFD/F_DUPFD(_CLOEXEC), dup/dup2/dup3, close,
+    close_range, pipe/socketpair. A clone copies the parent's table (shares
+    it with CLONE_FILES) when the child's first record or the clone's return
+    comes, whichever is first: strace can print a vfork child before its
+    parent's return. Opens and dups of a vfork child before its exec are
+    spawn actions. A successful execve unshares the table and drops its
+    close-on-exec entries. A use of an fd the table lacks, an unmodeled
+    descriptor creator, a disagreeing F_GETFD and SCM_RIGHTS mark the table
+    doubtful; the query then raises instead of returning a clean table.
+    """
+    spawns: dict[int, deque] = defaultdict(deque)
+    for c in trace:
+        if c.name in SPAWN and c.ret.split(" ")[0].isdigit():
+            spawns[int(c.ret.split(" ")[0])].append(c)
+    tasks: dict[int, _FdTask] = {}
+    if trace.first_pid is not None:
+        tasks[trace.first_pid] = _FdTask(_FdTableState(initial), False)
+
+    def start(tid, spawn):
+        parent = tasks.get(spawn.pid)
+        flags = _clone_flags(spawn)
+        if parent is None:
+            task = _FdTask(_FdTableState({}, [f"pid {tid}: parent {spawn.pid} has no known table"]), False)
+        elif "CLONE_FILES" in flags:
+            task = _FdTask(parent.table, parent.spawning)
+        else:
+            task = _FdTask(parent.table.copy(), "CLONE_VFORK" in flags)
+        if "CLONE_PIDFD" in flags:
+            task.table.errors.append(f"{spawn.name}: the CLONE_PIDFD descriptor is unmodeled")
+        tasks[tid] = task
+        return task
+
+    for c in trace:
+        if c.name == EXIT_EVENT:
+            tasks.pop(c.pid, None)
+            continue
+        task = tasks.get(c.pid)
+        if task is None:
+            task = (start(c.pid, spawns[c.pid].popleft()) if spawns[c.pid] else
+                    _FdTask(_FdTableState({}, [f"pid {c.pid}: no known parent"]), False))
+            tasks[c.pid] = task
+        if c.name in SPAWN and c.ret.split(" ")[0].isdigit():
+            child = int(c.ret.split(" ")[0])
+            if spawns[child] and spawns[child][0] is c:
+                spawns[child].popleft()
+                start(child, c)
+            continue
+        _apply_fd_call(c, task.table, task.spawning)
+        if c.name == "execve" and c.ret == "0":
+            table = task.table.copy()
+            table.entries = {fd: e for fd, e in table.entries.items() if not e.cloexec}
+            task.table, task.spawning = table, False
+            if c.pid == pid:
+                if table.errors:
+                    raise FdStateError("; ".join(table.errors))
+                return dict(table.entries)
+    raise FdStateError(f"pid {pid}: no exec in the trace")
+
+
+def _apply_fd_call(c: Call, state: _FdTableState, spawning: bool) -> None:
+    entries, errors = state.entries, state.errors
+    args = split_args(c.args)
+    created = (args[0] if c.name in {"pipe", "pipe2"} and args else
+               args[3] if c.name == "socketpair" and len(args) > 3 else "")
+    # Every named fd argument is a live entry, checked against the state before
+    # the call. Quoted strings are data: "3<x>" inside one names no fd.
+    named = _QUOTED.sub('""', c.args.replace(created, "") if created else c.args)
+    for match in _FD_NAMED.finditer(named):
+        fd = int(match[1])
+        if fd not in entries:
+            errors.append(f"{c.name}: fd {fd}<{match[2]}> is used but not in the table")
+        elif entries[fd].path != match[2]:
+            # A rename or unlink renames the open description: keep the latest name.
+            entries[fd] = FdEntry(fd, match[2], entries[fd].cloexec, entries[fd].origin)
+    if "SCM_RIGHTS" in c.args:
+        errors.append(f"{c.name}: SCM_RIGHTS descriptors are unmodeled")
+    if not c.ret or c.ret.startswith("-1") or c.ret == "?":
+        return
+    result = re.fullmatch(r"(\d+)(?:<(.*)>)?", c.ret.split(" (")[0])
+
+    def number(arg):
+        return int(re.match(r"\d+", arg)[0])
+
+    def add(fd, path, cloexec, origin):
+        entries[fd] = FdEntry(fd, path, cloexec, "spawn-action" if spawning else origin)
+
+    fcntl = args[1] if c.name in {"fcntl", "fcntl64"} and len(args) > 1 else None
+    if c.name == "close" and args:
+        entries.pop(number(args[0]), None)
+    elif c.name == "close_range":
+        low, high = int(args[0]), (2**32 - 1 if args[1] in {"~0U", "4294967295"} else int(args[1]))
+        for fd, entry in list(entries.items()):
+            if low <= fd <= high:
+                if "CLOSE_RANGE_CLOEXEC" in c.args:
+                    entries[fd] = FdEntry(fd, entry.path, True, entry.origin)
+                else:
+                    del entries[fd]
+        if "CLOSE_RANGE_UNSHARE" in c.args:
+            errors.append("close_range: CLOSE_RANGE_UNSHARE is unmodeled")
+    elif c.name in {"dup", "dup2", "dup3"} or fcntl in {"F_DUPFD", "F_DUPFD_CLOEXEC"}:
+        source = entries.get(number(args[0]))
+        if source is None or result is None:
+            errors.append(f"{c.name}: duplicate of an fd outside the table")
+        elif not (c.name == "dup2" and int(result[1]) == source.fd):
+            cloexec = (c.name == "dup3" and "O_CLOEXEC" in args[2]) or fcntl == "F_DUPFD_CLOEXEC"
+            add(int(result[1]), source.path, cloexec, "dup")
+    elif fcntl == "F_SETFD":
+        entry = entries.get(number(args[0]))
+        if entry:
+            entries[entry.fd] = FdEntry(entry.fd, entry.path, "FD_CLOEXEC" in args[2], entry.origin)
+    elif fcntl == "F_GETFD":
+        entry = entries.get(number(args[0]))
+        if entry and entry.cloexec != ("FD_CLOEXEC" in c.ret):
+            errors.append(f"F_GETFD: fd {entry.fd} reports {c.ret}, the table has cloexec={entry.cloexec}")
+    elif c.name in {"pipe", "pipe2", "socketpair"}:
+        for match in _FD_NAMED.finditer(created):
+            add(int(match[1]), match[2], "CLOEXEC" in c.args, "opened")
+    elif c.name in _FD_CREATORS and result:
+        add(int(result[1]), result[2] or "", c.name in _ALWAYS_CLOEXEC or "CLOEXEC" in c.args, "opened")
+    elif result and result[2] is not None:
+        errors.append(f"{c.name}: unmodeled descriptor {c.ret}")
+
+
 def _cloexec_pair(previous: Call | None, current: Call) -> bool:
     """musl open's redundant CLOEXEC: one immediate same-PID call, any result.
 

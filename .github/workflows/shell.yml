@@ -99,8 +99,9 @@ jobs:
       # like; --user would need a passwd entry, which init reads for the home.
       # All three images exclude M3b security: no host preparation for the
       # installed pair. The dedicated native collector job prepares and runs it.
-      # The release live gates run in filter-calls; the helper lifetime and
-      # zombie gates also need a FUSE mount these containers do not have.
+      # The release live gates run in filter-calls; the helper lifetime,
+      # zombie and shell-pipe EOF gates also need a FUSE mount these
+      # containers do not have.
       # The test folders live in /root, not in /tmp: init warns about the
       # world-writable /tmp above an executable symlink there as well.
       - name: PTY tests
@@ -121,7 +122,10 @@ jobs:
                 --deselect tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section \
                 --deselect tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount \
                 --deselect tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock \
-                --deselect tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+                --deselect tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children \
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio \
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds \
+                --deselect tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
       # 40), so this test alone runs in its own container without that
@@ -248,6 +252,19 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount[blocked-mount]' "$RUNNER_TEMP/helper-lifetime.txt"
           grep -Fx 'PASSED tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock' "$RUNNER_TEMP/helper-lifetime.txt"
           grep -Fx 'PASSED tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children' "$RUNNER_TEMP/helper-lifetime.txt"
+      # GATE-FDS.1/.2 and GATE-HELPER-LIFETIME.2 on a release build: a real
+      # bash holds pipe write ends at fds 3-9 and 1025 without CLOEXEC. The EOF
+      # case stops a bindfs daemon; a host that cannot mount FUSE fails with
+      # BLOCKED instead of skipping.
+      # 이것을 실패시키는 것: debug 칸에서 돌리거나 시험 하나의 PASSED 단언을 빼는 것.
+      - name: Descriptors the front and helper pass on (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio' 'tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds' 'tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive' --basetemp="$RUNNER_TEMP/fd-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/fds.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio' "$RUNNER_TEMP/fds.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds' "$RUNNER_TEMP/fds.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive' "$RUNNER_TEMP/fds.txt"
       # Only the live fixture's trace, stdout, stderr and attempt.json.
       - name: Upload failed helper stage evidence
         if: failure()
