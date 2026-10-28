@@ -12,6 +12,77 @@ EXE = "/pinned/bin/bingsu"
 ROOTS = ["/pinned/run", "/pinned/config", "/pinned/state"]
 
 
+COLLECT_BASE = "/home/tester/pt/test_prompt_binary_names_only_1"
+COLLECT_PIN = "/home/tester/target/release/bingsu-collect"
+
+
+def collecting_prompt():
+    """A release prompt whose helper started and supervised one collecting
+    collector (global-missing, warm snapshot). read/write payloads are cut to
+    120 characters; provenance: fixtures/prompt-m3d-collect-trace.md."""
+    import gzip
+    data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+        "prompt-m3d-collect-linux-1.strace.gz").read_bytes())
+    assert hashlib.sha256(data).hexdigest() == "18c030e2e135874a418bc047bc6f0dbe731f5821b2bcd9663afefbd3632c8fab"
+    return data.decode().splitlines()
+
+
+def check_collecting_prompt(lines, *, collectors=1, audit=True):
+    roots = [COLLECT_BASE + suffix for suffix in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")]
+    inputs = tuple(COLLECT_BASE + suffix for suffix in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore"))
+    repo = COLLECT_BASE + "/repo"
+    budget.assert_prompt_trace_budget(lines, COLLECT_BASE + "/bin/bingsu", roots, global_inputs=inputs,
+                                      collector_exe=COLLECT_PIN, collectors=collectors,
+                                      repository_roots=[repo, repo + "/.git"] if audit else None)
+
+
+def insert_after(lines, pattern, extra):
+    at = next(i for i, line in enumerate(lines) if pattern in line)
+    return lines[:at + 1] + extra + lines[at + 1:]
+
+
+def test_collecting_prompt_passes_the_path_allowlist():
+    check_collecting_prompt(collecting_prompt())
+    # A thread's interrupted futex wait can resume under strace (seen live once).
+    # 이것을 실패시키는 것: helper 경로 표가 restart_syscall의 빈 인자를 해석하려는 것.
+    check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                                         ["1099  restart_syscall(<... resuming interrupted futex ...>) = 0"]))
+    # The supervisor's SIGKILL of its own child on a deadline is the one allowed signal.
+    check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                                         ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0"]))
+
+
+# 이것을 실패시키는 것: collector 수를 정확히 보지 않는 것, 수집하는 collector를 감사 없이 통과시키는 것,
+# collector가 요청 뒤 roots 밖을 여는 것, collector bootstrap의 읽기를 저장소 감사로 넘기는 것, pidfd 아닌 waitid·SIGKILL 아닌 신호·둘째 pidfd_open을 허용하는 것.
+@pytest.mark.parametrize("damage", ["count-zero", "no-audit", "collector-outside-open", "waitid-by-pid",
+                                    "signal-sigterm", "second-pidfd-open", "collector-bootstrap-read"])
+def test_collecting_prompt_rejects_mutations(damage):
+    lines, collectors, audit = collecting_prompt(), 1, True
+    if damage == "count-zero":
+        collectors = 0
+    elif damage == "no-audit":
+        audit = False
+    elif damage == "collector-outside-open":
+        walk = next(i for i, line in enumerate(lines)
+                    if line.startswith("1098  openat(AT_FDCWD</>, \"/\", O_RDONLY|O_NONBLOCK|O_NOFOLLOW"))
+        at = next(i for i in range(walk, len(lines)) if lines[i].startswith("1098") and lines[i].endswith("= 4</>"))
+        lines = lines[:at + 1] + ['1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+                                  '1098  close(40</etc/hostname>) = 0'] + lines[at + 1:]
+    elif damage == "waitid-by-pid":
+        lines = [line.replace("1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>", "1099  waitid(P_PID, 1098") for line in lines]
+    elif damage == "signal-sigterm":
+        lines = insert_after(lines, "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                             ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGTERM, NULL, 0) = 0"])
+    elif damage == "second-pidfd-open":
+        lines = insert_after(lines, "1096  pidfd_open(1098, 0)", ["1096  pidfd_open(1098, 0) = 34<anon_inode:[pidfd]>"])
+    elif damage == "collector-bootstrap-read":
+        ready = next(i for i, line in enumerate(lines) if line.startswith("1098  write(1<pipe:"))
+        lines = lines[:ready] + ['1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+                                 '1098  close(40</etc/hostname>) = 0'] + lines[ready:]
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(lines, collectors=collectors, audit=audit)
+
+
 # prompt 트리의 read 계열 payload만 줄였다. provenance: fixtures/prompt-e4-trace.md.
 # 컨테이너 경로는 문자열 인자로만 전달하며,
 # macOS의 realpath/stat 또는 현재 빌드 위치로 바꾸지 않는다.

@@ -637,7 +637,7 @@ class _RepositoryProbe:
 
 
 def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False,
-                        helper_vocabulary: bool = False) -> Attribution:
+                        helper_vocabulary: bool = False, repository_window: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
     Work in syscall *entry* order. A vfork child's exec may precede its
@@ -650,6 +650,10 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
+    `repository_window` leaves a collector's calls from its first request
+    read on fd 3 to its exit to assert_repository_trace(mode="shipped"); the
+    caller must run that audit on the same collector. Spawn, exec, filter and
+    descriptor checks still apply in the window.
     `helper_vocabulary` counts helper calls with classify.helper_kind (the
     per-stage helper gate); other callers keep the generic helper kinds. It
     also ends a helper's loader exemption at its first counted call, so a
@@ -712,6 +716,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     filters = defaultdict(int)
     repository_probe = {}
     bootstrap_ended = set()
+    requested = set()  # collectors past their first request read (repository_window)
     started = set()  # helper processes whose loader prologue is over
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
@@ -744,6 +749,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 filters.pop(process, None)
                 repository_probe.pop(process, None)
                 bootstrap_ended.discard(process)
+                requested.discard(process)
             continue
         if unknown_calls[process]:
             bad(c, "call after terminal unknown syscall")
@@ -817,6 +823,13 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             # The first result write is Ready (even a failed attempt ends the
             # window). Do not wait for the subsequent request read. A read
             # ruleset or post-seal restriction also ends it before read-layer IO.
+            # 이것을 실패시키는 것: 요청 읽기 뒤의 저장소 호출을 M3b bootstrap 어휘로 다시 판정하는 것(출하 수집이
+            # 늘 실패), 요청 읽기 전 호출까지 넘기는 것(bootstrap 판정이 빠짐).
+            if repository_window and process in requested:
+                continue
+            if repository_window and c.name in {"read", "readv"} and args and args[0].split("<")[0] == "3":
+                requested.add(process)
+                continue
             if (args and (c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
                           or c.name in {"read", "readv"} and args[0].split("<")[0] == "3")
                     or c.name in {"landlock_create_ruleset", "landlock_add_rule"}
@@ -861,6 +874,20 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
     successful calls. The output dictionary records measured phase counts.
     Linux uses the same parser/held-metadata primitives as the B3 gate.
     Darwin records calls before dispatch, including calls that later fail.
+
+    capabilities["mode"] == "shipped" audits the shipped collector, which
+    writes wire frames instead of F1_PHASE markers (Linux only). Its window
+    opens at the first request read on fd 3 (after Ready) and closes at that
+    process's exit; calls after it fail as another task. Earlier calls are the
+    bootstrap, gated by collector_attribute. The window is one phase with the
+    same path_check rules as acquisition: ancestors (including "/") allow
+    only O_DIRECTORY opens and metadata, a .git directly under an ancestor is
+    a discovery candidate ("/" may also be opened without O_DIRECTORY for
+    the read layer's identity check, as in F1's read-layer phase; it still
+    cannot be listed or read), everything else must be below the roots, and
+    Landlock rules must name a root exactly. What it loses: phase order. A
+    shipped collector that reads ancestor metadata after its read layer, or
+    runs stages out of order, passes; F1 phase mode still checks that.
     """
     import ast
     import posixpath
@@ -891,6 +918,13 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                    "ancestor_names": "ancestor-names", "before_read_layer": "read-layer",
                    "preflight_start": "B", "stage_c": "C", "stage_d": "D", "end": "end"}
     order = list(transitions.values())
+    shipped = capabilities.get("mode") == "shipped"
+    assert capabilities.get("mode", "f1") in {"f1", "shipped"}, "unknown repository trace mode"
+    if shipped:
+        # A worktree root is the parent of its own .git root; it is a root,
+        # not a metadata-only ancestor. F1 capabilities keep their sets.
+        # 이것을 실패시키는 것: 이 줄을 지우는 것(worktree 목록 읽기가 조상 내용으로 거부됨).
+        ancestors -= roots
     active, owner, listing = None, None, None
     seen, held, closed, counts, raw_counts = [], {}, set(), {}, {}
     first_exec = True
@@ -918,12 +952,16 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
         if active == "ancestor-names":
             assert name in {"getdents", "getdents64"}, ("ancestor entry metadata/content; must use already-held fd", name, path)
             allowed = path in names
-        elif active == "acquisition" and path in ancestors:
+        elif active in ("acquisition", "shipped") and path in ancestors:
             assert name not in {"read", "pread", "pread64", "readv", "mmap", "getdents", "getdents64", "bulk"}, ("ancestor content", name, path)
             if name in OPEN:
-                assert "O_DIRECTORY" in flags, ("acquisition content open", name, path)
+                # The shipped read layer opens "/" without O_DIRECTORY only to
+                # compare its identity, as F1's read-layer branch allows; any
+                # listing or read of it still fails the content check above.
+                # 이것을 실패시키는 것: 출하 창의 "/" 아닌 조상을 O_DIRECTORY 없이 여는 것.
+                assert "O_DIRECTORY" in flags or (active == "shipped" and path == "/"), ("acquisition content open", name, path)
             allowed = True
-        elif active == "acquisition" and posixpath.basename(path) == ".git" and posixpath.dirname(path) in ancestors:
+        elif active in ("acquisition", "shipped") and posixpath.basename(path) == ".git" and posixpath.dirname(path) in ancestors:
             allowed = True  # fixed discovery candidate only
         elif active == "read-layer" and path == "/":
             allowed = name in {"open", "openat", "open-result", "fstat", "fstat64", "newfstatat", "statx"}
@@ -996,7 +1034,21 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 first_exec = False
                 continue  # exactly one launch of the fixed worker
             assert effect not in {"exec", "spawn", "thread", "network"}, ("forbidden repository effect (attempt)", effect, call)
-            if call.name == "write" and len(args) == 3 and args[0].split("<")[0] == "1":
+            if shipped:
+                # 이것을 실패시키는 것: 창을 요청 읽기 전부터 여는 것(bootstrap 호출이 경로 규칙에 걸림),
+                # 다른 pid의 exit로 창을 닫는 것.
+                if call.name == "write" and args and args[0].split("<")[0] == "1":
+                    continue  # wire frames; content is the supervisor codec's
+                if call.name == "read" and args and re.fullmatch(r"3<pipe:\[\d+\]>", args[0]):
+                    owner, active = call.pid, "shipped"  # the request pipe opens the window
+                    seen.append("shipped")
+                    counts.setdefault("shipped", Counter())
+                    continue
+                if call.name == EXIT_EVENT and active == "shipped" and call.pid == owner:
+                    active = "end"
+                    seen.append("end")
+                    continue
+            elif call.name == "write" and len(args) == 3 and args[0].split("<")[0] == "1":
                 try:
                     message = ast.literal_eval(args[1])
                 except (SyntaxError, ValueError):
@@ -1043,11 +1095,11 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 continue
             if call.name == "landlock_add_rule":
                 paths = re.findall(r"parent_fd=(\d+)<(/[^>]+)>", call.args)
-                assert active == "read-layer" and len(paths) == 1 and paths[0][1] in roots, ("Landlock root widening", call)
+                assert active in ("read-layer", "shipped") and len(paths) == 1 and paths[0][1] in roots, ("Landlock root widening", call)
                 use(int(paths[0][0]), paths[0][1])
                 assert "LANDLOCK_ACCESS_FS_READ_FILE" in call.args and "LANDLOCK_ACCESS_FS_READ_DIR" in call.args
             if call.name in {"landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self"}:
-                assert active == "read-layer", ("Landlock phase/widening", call)
+                assert active in ("read-layer", "shipped"), ("Landlock phase/widening", call)
                 counts[active][call.name] += 1
                 continue
             allowed = OPEN | {"stat", "lstat", "newfstatat", "fstatat64", "statx", "fstat", "fstat64", "fstatfs", "fstatfs64", "read", "pread64", "readv", "readlink", "readlinkat", "getdents", "getdents64", "faccessat2", "mmap", "lseek"}

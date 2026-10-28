@@ -1,0 +1,799 @@
+1098  rt_sigprocmask(SIG_BLOCK, NULL, ~[KILL STOP], 8) = 0
+1098  rt_sigaction(SIGHUP, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGINT, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGQUIT, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGILL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGTRAP, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGABRT, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGBUS, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGFPE, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGKILL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = -1 EINVAL (Invalid argument)
+1098  rt_sigaction(SIGUSR1, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGSEGV, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGUSR2, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGPIPE, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGTERM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGSTKFLT, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGCHLD, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGCONT, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGSTOP, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = -1 EINVAL (Invalid argument)
+1098  rt_sigaction(SIGTSTP, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGTTIN, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGTTOU, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGURG, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGXCPU, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGXFSZ, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGVTALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGPROF, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGWINCH, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGIO, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGPWR, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGSYS, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRTMIN, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_1, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_2, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_3, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_4, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_5, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_6, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_7, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_8, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_9, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_10, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_11, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_12, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_13, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_14, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_15, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_16, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_17, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_18, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_19, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_20, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_21, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_22, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_23, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_24, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_25, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_26, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_27, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_28, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_29, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_30, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_31, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  rt_sigaction(SIGRT_32, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, NULL, 8) = 0
+1098  close(0</dev/null>)               = 0
+1098  openat(AT_FDCWD</>, "/dev/null", O_RDWR) = 0</dev/null>
+1098  close(2</dev/null>)               = 0
+1098  openat(AT_FDCWD</>, "/dev/null", O_RDWR) = 2</dev/null>
+1098  dup3(30<pipe:[1813043]>, 3</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu>, 0) = 3<pipe:[1813043]>
+1098  dup3(31<pipe:[1813042]>, 1</dev/null>, 0) = 1<pipe:[1813042]>
+1098  dup3(32</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>, 5</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/snapshot.lock>, 0) = 5</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>
+1098  chdir("/")                        = 0
+1098  close(4</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store>) = 0
+1098  close(6</>)                       = 0
+1098  close(7</home>)                   = 0
+1098  close(8</home/tester>)            = 0
+1098  close(9</home/tester/pt>)         = 0
+1098  close(10</home/tester/pt/test_prompt_binary_names_only_1>) = 0
+1098  close(11</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/sequence>) = 0
+1098  close(12</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/.marker.stage>) = 0
+1098  close(13</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu>) = 0
+1098  close(14</>)                      = 0
+1098  close(15</home>)                  = 0
+1098  close(16</home/tester>)           = 0
+1098  close(17</home/tester/target>)    = 0
+1098  close(18</home/tester/target/release>) = 0
+1098  close(19</home/tester/target/release/bingsu-collect>) = 0
+1098  close(20</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>) = 0
+1098  close(21</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store>) = 0
+1098  close(22</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1>) = 0
+1098  close(23</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a>) = 0
+1098  close(24</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store>) = 0
+1098  close(25</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>) = 0
+1098  close(26<pipe:[1813042]>)         = 0
+1098  close(27<pipe:[1813042]>)         = 0
+1098  close(28<pipe:[1813043]>)         = 0
+1098  close(29<pipe:[1813043]>)         = 0
+1098  close(30<pipe:[1813043]>)         = 0
+1098  close(31<pipe:[1813042]>)         = 0
+1098  close(32</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>) = 0
+1098  close(33)                         = -1 EBADF (Bad file descriptor)
+1098  prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=512*1024}) = 0
+1098  rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+1098  execve("/home/tester/target/release/bingsu-collect", ["/home/tester/target/release/bingsu-collect", "__collect-v1"], 0xae3113983e80 /* 0 vars */ <unfinished ...>
+1098  <... execve resumed>)             = 0
+1098  brk(NULL <unfinished ...>
+1098  <... brk resumed>)                = 0xafe8319ea000
+1098  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xf95fd7f11000
+1098  faccessat(AT_FDCWD</>, "/etc/ld.so.preload", R_OK <unfinished ...>
+1098  <... faccessat resumed>)          = -1 ENOENT (No such file or directory)
+1098  openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 4</etc/ld.so.cache>
+1098  newfstatat(4</etc/ld.so.cache>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=9103, ...}, AT_EMPTY_PATH) = 0
+1098  mmap(NULL, 9103, PROT_READ, MAP_PRIVATE, 4</etc/ld.so.cache>, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7f0e000
+1098  close(4</etc/ld.so.cache> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  openat(AT_FDCWD</>, "/lib/aarch64-linux-gnu/libgcc_s.so.1", O_RDONLY|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>
+1098  read(4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>,  <unfinished ...>
+1098  <... read resumed>"\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\310\2\2\0\0\0\0\0\0\0\0\0@\08\0\7\0@\0\32\0\31\0\1\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0h2\1\0\0\0\0\0h2\1\0\0\0\0\0"..., 832) = 832
+1098  newfstatat(4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=133448, ...}, AT_EMPTY_PATH) = 0
+1098  mmap(NULL, 262856, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7e97000
+1098  mmap(0xf95fd7ea0000, 197320, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7ea0000
+1098  munmap(0xf95fd7e97000, 36864)     = 0
+1098  munmap(0xf95fd7ed1000, 25288 <unfinished ...>
+1098  <... munmap resumed>)             = 0
+1098  mprotect(0xf95fd7eb4000, 110592, PROT_NONE <unfinished ...>
+1098  <... mprotect resumed>)           = 0
+1098  mmap(0xf95fd7ecf000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0x1f000 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7ecf000
+1098  close(4</usr/lib/aarch64-linux-gnu/libgcc_s.so.1> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  openat(AT_FDCWD</>, "/lib/aarch64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 4</usr/lib/aarch64-linux-gnu/libc.so.6>
+1098  read(4</usr/lib/aarch64-linux-gnu/libc.so.6>,  <unfinished ...>
+1098  <... read resumed>"\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0000y\2\0\0\0\0\0@\0\0\0\0\0\0\0\20#\31\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0?\0>\0\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0000\2\0\0\0\0\0\0000\2\0\0"..., 832) = 832
+1098  newfstatat(4</usr/lib/aarch64-linux-gnu/libc.so.6>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0755, st_size=1651408, ...}, AT_EMPTY_PATH) = 0
+1098  mmap(NULL, 1826912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7ce1000
+1098  mmap(0xf95fd7cf0000, 1761376, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libc.so.6>, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7cf0000
+1098  munmap(0xf95fd7ce1000, 61440 <unfinished ...>
+1098  <... munmap resumed>)             = 0
+1098  munmap(0xf95fd7e9f000, 96)        = 0
+1098  mprotect(0xf95fd7e7c000, 65536, PROT_NONE <unfinished ...>
+1098  <... mprotect resumed>)           = 0
+1098  mmap(0xf95fd7e8c000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4</usr/lib/aarch64-linux-gnu/libc.so.6>, 0x18c000 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7e8c000
+1098  mmap(0xf95fd7e92000, 49248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7e92000
+1098  close(4</usr/lib/aarch64-linux-gnu/libc.so.6> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7f0c000
+1098  set_tid_address(0xf95fd7f0c0f0 <unfinished ...>
+1098  <... set_tid_address resumed>)    = 1098
+1098  set_robust_list(0xf95fd7f0c100, 24 <unfinished ...>
+1098  <... set_robust_list resumed>)    = 0
+1098  rseq(0xf95fd7f0c740, 0x20, 0, 0xd428bc00 <unfinished ...>
+1098  <... rseq resumed>)               = 0
+1098  mprotect(0xf95fd7e8c000, 16384, PROT_READ) = 0
+1098  mprotect(0xf95fd7ecf000, 4096, PROT_READ <unfinished ...>
+1098  <... mprotect resumed>)           = 0
+1098  mprotect(0xafe80ad18000, 32768, PROT_READ <unfinished ...>
+1098  <... mprotect resumed>)           = 0
+1098  mprotect(0xf95fd7f16000, 8192, PROT_READ <unfinished ...>
+1098  <... mprotect resumed>)           = 0
+1098  prlimit64(0, RLIMIT_STACK, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+1098  munmap(0xf95fd7f0e000, 9103 <unfinished ...>
+1098  <... munmap resumed>)             = 0
+1098  ppoll([{fd=0</dev/null>, events=0}, {fd=1<pipe:[1813042]>, events=0}, {fd=2</dev/null>, events=0}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0 <unfinished ...>
+1098  <... ppoll resumed>)              = 0 (Timeout)
+1098  rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART},  <unfinished ...>
+1098  <... rt_sigaction resumed>{sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+1098  getrandom( <unfinished ...>
+1098  <... getrandom resumed>"\x02\x12\x9e\xe4\x91\xa2\xbb\x4c", 8, GRND_NONBLOCK) = 8
+1098  brk(NULL)                         = 0xafe8319ea000
+1098  brk(0xafe831a0b000 <unfinished ...>
+1098  <... brk resumed>)                = 0xafe831a0b000
+1098  openat(AT_FDCWD</>, "/proc/self/maps", O_RDONLY|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 4</proc/1098/maps>
+1098  prlimit64(0, RLIMIT_STACK, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+1098  newfstatat(4</proc/1098/maps>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1098  read(4</proc/1098/maps>,  <unfinished ...>
+1098  <... read resumed>"afe80abe0000-afe80ad02000 r-xp 00000000 fd:11 4469573                    /home/tester/target/release/bingsu-collect\nafe8"..., 1024) = 1024
+1098  read(4</proc/1098/maps>,  <unfinished ...>
+1098  <... read resumed>"s.so.1\nf95fd7eb4000-f95fd7ecf000 ---p 00014000 00:2a 5509965                    /usr/lib/aarch64-linux-gnu/libgcc_s.so.1"..., 1024) = 1024
+1098  read(4</proc/1098/maps>,  <unfinished ...>
+1098  <... read resumed>"                      [stack]\n", 1024) = 30
+1098  close(4</proc/1098/maps> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  sched_getaffinity(1098, 32,  <unfinished ...>
+1098  <... sched_getaffinity resumed>[0 1 2 3]) = 8
+1098  rt_sigaction(SIGSEGV, NULL,  <unfinished ...>
+1098  <... rt_sigaction resumed>{sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+1098  sigaltstack(NULL,  <unfinished ...>
+1098  <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+1098  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7f07000
+1098  mprotect(0xf95fd7f07000, 4096, PROT_NONE) = 0
+1098  sigaltstack({ss_sp=0xf95fd7f08000, ss_flags=0, ss_size=16384},  <unfinished ...>
+1098  <... sigaltstack resumed>NULL)    = 0
+1098  gettid( <unfinished ...>
+1098  <... gettid resumed>)             = 1098
+1098  rt_sigaction(SIGSEGV, {sa_handler=0xafe80acbc7c8, sa_mask=[], sa_flags=SA_ONSTACK|SA_SIGINFO},  <unfinished ...>
+1098  <... rt_sigaction resumed>NULL, 8) = 0
+1098  rt_sigaction(SIGBUS, NULL,  <unfinished ...>
+1098  <... rt_sigaction resumed>{sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+1098  rt_sigaction(SIGBUS, {sa_handler=0xafe80acbc7c8, sa_mask=[], sa_flags=SA_ONSTACK|SA_SIGINFO},  <unfinished ...>
+1098  <... rt_sigaction resumed>NULL, 8) = 0
+1098  rt_sigaction(SIGALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+1098  <... rt_sigaction resumed>NULL, 8) = 0
+1098  rt_sigprocmask(SIG_UNBLOCK, [ALRM],  <unfinished ...>
+1098  <... rt_sigprocmask resumed>NULL, 8) = 0
+1098  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=1, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=0, tv_usec=0}}) = 0
+1098  getppid( <unfinished ...>
+1098  <... getppid resumed>)            = 1096
+1098  prctl(PR_SET_PDEATHSIG, SIGKILL <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  getppid()                         = 1096
+1098  uname({sysname="Linux", nodename="356703d831b3", ...}) = 0
+1098  getpid( <unfinished ...>
+1098  <... getpid resumed>)             = 1098
+1098  pidfd_open(1098, 0 <unfinished ...>
+1098  <... pidfd_open resumed>)         = 4<anon_inode:[pidfd]>
+1098  close(4<anon_inode:[pidfd]> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(4 <unfinished ...>
+1098  <... close resumed>)              = -1 EBADF (Bad file descriptor)
+1098  close_range(6, 4294967295, 0 <unfinished ...>
+1098  <... close_range resumed>)        = 0
+1098  newfstatat(0</dev/null>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFCHR|0666, st_rdev=makedev(0x1, 0x3), ...}, AT_EMPTY_PATH) = 0
+1098  newfstatat(2</dev/null>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFCHR|0666, st_rdev=makedev(0x1, 0x3), ...}, AT_EMPTY_PATH) = 0
+1098  fcntl(1<pipe:[1813042]>, F_GETFL <unfinished ...>
+1098  <... fcntl resumed>)              = 0x1 (flags O_WRONLY)
+1098  fcntl(3<pipe:[1813043]>, F_GETFL <unfinished ...>
+1098  <... fcntl resumed>)              = 0 (flags O_RDONLY)
+1098  newfstatat(1<pipe:[1813042]>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFIFO|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1098  newfstatat(3<pipe:[1813043]>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFIFO|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1098  fcntl(5</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>, F_GETFL <unfinished ...>
+1098  <... fcntl resumed>)              = 0x28800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW)
+1098  newfstatat(5</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1098  geteuid( <unfinished ...>
+1098  <... geteuid resumed>)            = 1000
+1098  fgetxattr(5</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock>, "system.posix_acl_access",  <unfinished ...>
+1098  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+1098  getcwd("/", 512)                  = 2
+1098  umask(077 <unfinished ...>
+1098  <... umask resumed>)              = 077
+1098  rt_sigaction(SIGXCPU, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+1098  <... rt_sigaction resumed>NULL, 8) = 0
+1098  rt_sigaction(SIGXFSZ, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+1098  <... rt_sigaction resumed>NULL, 8) = 0
+1098  rt_sigaction(SIGALRM, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0},  <unfinished ...>
+1098  <... rt_sigaction resumed>NULL, 8) = 0
+1098  rt_sigprocmask(SIG_UNBLOCK, [ALRM XCPU XFSZ],  <unfinished ...>
+1098  <... rt_sigprocmask resumed>NULL, 8) = 0
+1098  prlimit64(0, RLIMIT_CPU, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+1098  prlimit64(0, RLIMIT_CPU, {rlim_cur=1, rlim_max=1}, NULL) = 0
+1098  prlimit64(0, RLIMIT_CPU, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=1, rlim_max=1}) = 0
+1098  prlimit64(0, RLIMIT_NOFILE, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=1024, rlim_max=512*1024}) = 0
+1098  prlimit64(0, RLIMIT_NOFILE, {rlim_cur=64, rlim_max=64},  <unfinished ...>
+1098  <... prlimit64 resumed>NULL)      = 0
+1098  prlimit64(0, RLIMIT_NOFILE, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=64, rlim_max=64}) = 0
+1098  prlimit64(0, RLIMIT_FSIZE, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+1098  prlimit64(0, RLIMIT_FSIZE, {rlim_cur=0, rlim_max=0},  <unfinished ...>
+1098  <... prlimit64 resumed>NULL)      = 0
+1098  prlimit64(0, RLIMIT_FSIZE, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=0, rlim_max=0}) = 0
+1098  prlimit64(0, RLIMIT_CORE, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=0, rlim_max=0}) = 0
+1098  prlimit64(0, RLIMIT_CORE, {rlim_cur=0, rlim_max=0},  <unfinished ...>
+1098  <... prlimit64 resumed>NULL)      = 0
+1098  prlimit64(0, RLIMIT_CORE, NULL, {rlim_cur=0, rlim_max=0}) = 0
+1098  capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0},  <unfinished ...>
+1098  <... capget resumed>{effective=0, permitted=0, inheritable=0}) = 0
+1098  prctl(PR_CAPBSET_READ, CAP_CHOWN <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_DAC_OVERRIDE <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_DAC_READ_SEARCH) = 0
+1098  prctl(PR_CAPBSET_READ, CAP_FOWNER <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_FSETID <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_KILL <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_SETGID <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_SETUID) = 1
+1098  prctl(PR_CAPBSET_READ, CAP_SETPCAP <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_LINUX_IMMUTABLE <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_NET_BIND_SERVICE <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_NET_BROADCAST <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_NET_ADMIN <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_NET_RAW) = 1
+1098  prctl(PR_CAPBSET_READ, CAP_IPC_LOCK <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_IPC_OWNER <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_MODULE <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_RAWIO <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_CHROOT <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_PTRACE <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_PACCT <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_BOOT <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_NICE <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_RESOURCE <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_TIME <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYS_TTY_CONFIG <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_MKNOD <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_LEASE) = 0
+1098  prctl(PR_CAPBSET_READ, CAP_AUDIT_WRITE) = 1
+1098  prctl(PR_CAPBSET_READ, CAP_AUDIT_CONTROL <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SETFCAP <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  prctl(PR_CAPBSET_READ, CAP_MAC_OVERRIDE <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_MAC_ADMIN <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_SYSLOG <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_WAKE_ALARM <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_BLOCK_SUSPEND <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_AUDIT_READ) = 0
+1098  prctl(PR_CAPBSET_READ, CAP_PERFMON <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_BPF <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, CAP_CHECKPOINT_RESTORE <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAPBSET_READ, 0x29 /* CAP_??? */ <unfinished ...>
+1098  <... prctl resumed>)              = -1 EINVAL (Invalid argument)
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  capset({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, {effective=0, permitted=0, inheritable=0} <unfinished ...>
+1098  <... capset resumed>)             = 0
+1098  capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0},  <unfinished ...>
+1098  <... capget resumed>{effective=0, permitted=0, inheritable=0}) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHOWN, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_DAC_OVERRIDE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_DAC_READ_SEARCH, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_FOWNER, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_FSETID, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_KILL, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETGID, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETUID, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETPCAP, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_LINUX_IMMUTABLE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_BIND_SERVICE, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_BROADCAST, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_ADMIN, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_RAW, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_IPC_LOCK, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_IPC_OWNER, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_MODULE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_RAWIO, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_CHROOT, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_PTRACE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_PACCT, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_ADMIN, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_BOOT, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_NICE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_RESOURCE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_TIME, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_TTY_CONFIG, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MKNOD, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_LEASE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_WRITE, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_CONTROL, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SETFCAP, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MAC_OVERRIDE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_MAC_ADMIN, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYSLOG, 0, 0) = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_WAKE_ALARM, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_BLOCK_SUSPEND, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_AUDIT_READ, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_PERFMON, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_BPF, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHECKPOINT_RESTORE, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 0
+1098  landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION <unfinished ...>
+1098  <... landlock_create_ruleset resumed>) = 4
+1098  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_REMOVE_DIR|LANDLOCK_ACCESS_FS_REMOVE_FILE|LANDLOCK_ACCESS_FS_MAKE_CHAR|LANDLOCK_ACCESS_FS_MAKE_DIR|LANDLOCK_ACCESS_FS_MAKE_REG|LANDLOCK_ACCESS_FS_MAKE_SOCK|LANDLOCK_ACCESS_FS_MAKE_FIFO|LANDLOCK_ACCESS_FS_MAKE_BLOCK|LANDLOCK_ACCESS_FS_MAKE_SYM|LANDLOCK_ACCESS_FS_REFER|0x4000}, 8, 0 <unfinished ...>
+1098  <... landlock_create_ruleset resumed>) = 4<anon_inode:[landlock-ruleset]>
+1098  landlock_restrict_self(4<anon_inode:[landlock-ruleset]>, 0 <unfinished ...>
+1098  <... landlock_restrict_self resumed>) = 0
+1098  close(4<anon_inode:[landlock-ruleset]> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=348, filter=0xafe8319fd570} <unfinished ...>
+1098  <... seccomp resumed>)            = 0
+1098  prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0 <unfinished ...>
+1098  <... prctl resumed>)              = 1
+1098  openat(AT_FDCWD</>, "/proc/self/statm", O_RDONLY|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 4</proc/1098/statm>
+1098  read(4</proc/1098/statm>,  <unfinished ...>
+1098  <... read resumed>"900 556 503 290 0 93 0\n", 256) = 23
+1098  prlimit64(0, RLIMIT_AS, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=RLIM64_INFINITY, rlim_max=RLIM64_INFINITY}) = 0
+1098  prlimit64(0, RLIMIT_AS, {rlim_cur=36368*1024, rlim_max=36368*1024},  <unfinished ...>
+1098  <... prlimit64 resumed>NULL)      = 0
+1098  prlimit64(0, RLIMIT_AS, NULL,  <unfinished ...>
+1098  <... prlimit64 resumed>{rlim_cur=36368*1024, rlim_max=36368*1024}) = 0
+1098  close(4</proc/1098/statm> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=324, filter=0xafe8319fdae0} <unfinished ...>
+1098  <... seccomp resumed>)            = 0
+1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 4</>
+1098  newfstatat(4</>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(4</>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952776, f_bavail=20637986, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(4</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  openat2(4</>, ".", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = 6</>
+1098  close(6</> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(4</>)                       = 0
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\1\0\30\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 104 <unfinished ...>
+1098  <... write resumed>)              = 104
+1098  read(3<pipe:[1813043]>,  <unfinished ...>
+1098  <... read resumed>"BNGIPC05\5\0\2\0\f\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 80) = 80
+1098  read(3<pipe:[1813043]>,  <unfinished ...>
+1098  <... read resumed>"\26\1\0\0\3\0\0\0\0\0\0\0", 12) = 12
+1098  read(3<pipe:[1813043]>,  <unfinished ...>
+1098  <... read resumed>"BNGIPC05\5\0\3\0\32\1\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 80) = 80
+1098  read(3<pipe:[1813043]>,  <unfinished ...>
+1098  <... read resumed>"\0\0\0\0\370\324\360pO\235D\300\205\22\270\273G\355\256[\266J\\1\274\341\262\332$\227\25\237\213\325\352V\1\0\0\0\0\0\0\0K\232c\35\213\303w\331\1sfsn\0\0\0\0Z\2\0\360\0\0"..., 282) = 282
+1098  read(3<pipe:[1813043]>,  <unfinished ...>
+1098  <... read resumed>"BNGIPC05\5\0\4\0\4\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 80) = 80
+1098  read(3<pipe:[1813043]>,  <unfinished ...>
+1098  <... read resumed>"\247x0\324", 4) = 4
+1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 4</>
+1098  newfstatat(4</>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(4</>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952774, f_bavail=20637984, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(4</>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  newfstatat(4</>, "home",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(4</>, "home", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 6</home>
+1098  newfstatat(6</home>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(6</home>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952774, f_bavail=20637984, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(6</home>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  newfstatat(6</home>, "tester",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(6</home>, "tester", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 7</home/tester>
+1098  newfstatat(7</home/tester>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(7</home/tester>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952773, f_bavail=20637983, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(7</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  newfstatat(7</home/tester>, "pt",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(7</home/tester>, "pt", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 8</home/tester/pt>
+1098  newfstatat(8</home/tester/pt>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(8</home/tester/pt>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952773, f_bavail=20637983, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(8</home/tester/pt>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1098  newfstatat(8</home/tester/pt>, "test_prompt_binary_names_only_1",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(8</home/tester/pt>, "test_prompt_binary_names_only_1", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 9</home/tester/pt/test_prompt_binary_names_only_1>
+1098  newfstatat(9</home/tester/pt/test_prompt_binary_names_only_1>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(9</home/tester/pt/test_prompt_binary_names_only_1>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952772, f_bavail=20637982, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(9</home/tester/pt/test_prompt_binary_names_only_1>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1098  newfstatat(9</home/tester/pt/test_prompt_binary_names_only_1>, "repo",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(9</home/tester/pt/test_prompt_binary_names_only_1>, "repo", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 10</home/tester/pt/test_prompt_binary_names_only_1/repo>
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(10</home/tester/pt/test_prompt_binary_names_only_1/repo>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952772, f_bavail=20637982, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".git",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".git", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 11</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>
+1098  newfstatat(11</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(11</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952771, f_bavail=20637981, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(11</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  close(11</home/tester/pt/test_prompt_binary_names_only_1/repo/.git> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(4</> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(6</home> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(7</home/tester> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(8</home/tester/pt> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(9</home/tester/pt/test_prompt_binary_names_only_1> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  geteuid( <unfinished ...>
+1098  <... geteuid resumed>)            = 1000
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".git",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  openat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".git", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1098  <... openat resumed>)             = 4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>
+1098  newfstatat(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952770, f_bavail=20637980, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  newfstatat(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  geteuid( <unfinished ...>
+1098  <... geteuid resumed>)            = 1000
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "commondir", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>
+1098  newfstatat(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=21, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952769, f_bavail=20637979, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=21, ...}) = 0
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"ref: refs/heads/main\n", 22) = 21
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"", 1)          = 0
+1098  close(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "refs/heads/main", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "packed-refs", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "rebase-merge", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "rebase-apply", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "MERGE_HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "CHERRY_PICK_HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "REVERT_HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "BISECT_LOG", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\5\0M\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 157 <unfinished ...>
+1098  <... write resumed>)              = 157
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\7\0\n\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 90 <unfinished ...>
+1098  <... write resumed>)              = 90
+1098  faccessat2(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".", W_OK, AT_EACCESS <unfinished ...>
+1098  <... faccessat2 resumed>)         = 0
+1098  fstatfs(10</home/tester/pt/test_prompt_binary_names_only_1/repo>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952767, f_bavail=20637977, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\5\0\17\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 95 <unfinished ...>
+1098  <... write resumed>)              = 95
+1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC <unfinished ...>
+1098  <... openat resumed>)             = 6</>
+1098  newfstatat(6</>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  newfstatat(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  landlock_create_ruleset({handled_access_fs=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR}, 8, 0 <unfinished ...>
+1098  <... landlock_create_ruleset resumed>) = 7<anon_inode:[landlock-ruleset]>
+1098  landlock_add_rule(7<anon_inode:[landlock-ruleset]>, LANDLOCK_RULE_PATH_BENEATH, {allowed_access=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR, parent_fd=10</home/tester/pt/test_prompt_binary_names_only_1/repo>}, 0 <unfinished ...>
+1098  <... landlock_add_rule resumed>)  = 0
+1098  landlock_add_rule(7<anon_inode:[landlock-ruleset]>, LANDLOCK_RULE_PATH_BENEATH, {allowed_access=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR, parent_fd=4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>}, 0 <unfinished ...>
+1098  <... landlock_add_rule resumed>)  = 0
+1098  landlock_restrict_self(7<anon_inode:[landlock-ruleset]>, 0 <unfinished ...>
+1098  <... landlock_restrict_self resumed>) = 0
+1098  close(7<anon_inode:[landlock-ruleset]>) = 0
+1098  close(6</>)                       = 0
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "config", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "config.worktree", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "reftable", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "reftable", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "objects/info", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "objects/info", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "refs/replace", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "reftable", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "reftable", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "packed-refs", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>
+1098  newfstatat(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=21, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952764, f_bavail=20637974, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=21, ...}) = 0
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"ref: refs/heads/main\n", 22) = 21
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "", 1) = 0
+1098  close(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "refs/heads/main", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "packed-refs", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "config", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "config.worktree", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "index", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>
+1098  newfstatat(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=21, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952762, f_bavail=20637972, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=21, ...}) = 0
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"ref: refs/heads/main\n", 22) = 21
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"", 1)          = 0
+1098  close(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "refs/heads/main", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "packed-refs", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  getrandom( <unfinished ...>
+1098  <... getrandom resumed>"\x96\xf9\xec\x9b\x84\x82\x6b\x18\xa9\xbe\x94\x5c\x15\x81\x83\xab", 16, GRND_INSECURE) = 16
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "info/exclude", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "info/attributes", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24) = -1 ENOENT (No such file or directory)
+1098  openat2(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".", {flags=O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo>
+1098  newfstatat(6</home/tester/pt/test_prompt_binary_names_only_1/repo>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(6</home/tester/pt/test_prompt_binary_names_only_1/repo>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952760, f_bavail=20637970, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(6</home/tester/pt/test_prompt_binary_names_only_1/repo>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1098  getdents64(6</home/tester/pt/test_prompt_binary_names_only_1/repo>,  <unfinished ...>
+1098  <... getdents64 resumed>0xffffce0912d0 /* 3 entries */, 8192) = 72
+1098  newfstatat(6</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".git",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".gitignore",  <unfinished ...>
+1098  <... newfstatat resumed>0xffffce093380, AT_SYMLINK_NOFOLLOW) = -1 ENOENT (No such file or directory)
+1098  newfstatat(10</home/tester/pt/test_prompt_binary_names_only_1/repo>, ".gitattributes",  <unfinished ...>
+1098  <... newfstatat resumed>0xffffce093380, AT_SYMLINK_NOFOLLOW) = -1 ENOENT (No such file or directory)
+1098  getdents64(6</home/tester/pt/test_prompt_binary_names_only_1/repo>,  <unfinished ...>
+1098  <... getdents64 resumed>0xffffce090ee0 /* 0 entries */, 8192) = 0
+1098  close(6</home/tester/pt/test_prompt_binary_names_only_1/repo> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\5\0b\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 178 <unfinished ...>
+1098  <... write resumed>)              = 178
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "HEAD", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>
+1098  newfstatat(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "",  <unfinished ...>
+1098  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=21, ...}, AT_EMPTY_PATH) = 0
+1098  fstatfs(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=21952758, f_bavail=20637968, f_files=6553600, f_ffree=6375831, f_fsid={val=[0xa77b24f3, 0x85ab5109]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1098  statx(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>, "", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH, STATX_MNT_ID,  <unfinished ...>
+1098  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=21, ...}) = 0
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"ref: refs/heads/main\n", 22) = 21
+1098  read(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>,  <unfinished ...>
+1098  <... read resumed>"", 1)          = 0
+1098  close(6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>) = 0
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "config", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "config.worktree", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\5\0b\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 178 <unfinished ...>
+1098  <... write resumed>)              = 178
+1098  mmap(NULL, 266240, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1098  <... mmap resumed>)               = 0xf95fd7caf000
+1098  openat2(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git>, "logs/refs/stash", {flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC, resolve=RESOLVE_NO_XDEV|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24 <unfinished ...>
+1098  <... openat2 resumed>)            = -1 ENOENT (No such file or directory)
+1098  munmap(0xf95fd7caf000, 266240 <unfinished ...>
+1098  <... munmap resumed>)             = 0
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\5\0g\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 183 <unfinished ...>
+1098  <... write resumed>)              = 183
+1098  close(10</home/tester/pt/test_prompt_binary_names_only_1/repo> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(4</home/tester/pt/test_prompt_binary_names_only_1/repo/.git> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  write(1<pipe:[1813042]>, "BNGIPC05\5\0\6\0\0\0\0\0\300&;\276\3269\370\352Hh\363\300t\365\340\271\312\305\201\223\212\330\254 \304\0017\0036\236\347@\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 80 <unfinished ...>
+1098  <... write resumed>)              = 80
+1098  close(1<pipe:[1813042]> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(3<pipe:[1813043]> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  close(5</home/tester/pt/test_prompt_binary_names_only_1/run-t/bingsu/contexts-v2/config/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f6366672d742f62696e677375/state/2f686f6d652f7465737465722f70742f746573745f70726f6d70745f62696e6172795f6e616d65735f6f6e6c795f312f73746174652d742f62696e67/7375/store/collections-v1/2130433fe46940d764394adf887876dc2262906986238b87df37030f8bc5ae7a/store/collection.lock> <unfinished ...>
+1098  <... close resumed>)              = 0
+1098  sigaltstack({ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=16384},  <unfinished ...>
+1098  <... sigaltstack resumed>NULL)    = 0
+1098  munmap(0xf95fd7f07000, 20480 <unfinished ...>
+1098  <... munmap resumed>)             = 0
+1098  exit_group(0 <unfinished ...>
+1098  <... exit_group resumed>)         = ?
+1098  +++ exited with 0 +++
