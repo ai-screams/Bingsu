@@ -1397,6 +1397,68 @@ def warm_collection_previous(store, prompt, wait):
             return {"response_bytes": response_bytes, "previous_bytes": previous_bytes}
 
 
+def bash_prompt_script(script, pwd, seq, probe=b""):
+    import shlex
+    return (script + b"\n_bingsu_seq=" + str(seq).encode() + b"\ncd "
+            + os.fsencode(shlex.quote(str(pwd))) + b"\n" + probe + CALL)
+
+
+def pinned_prompt_argv(script, exe, pwd, seq, env, base):
+    """Ask A2's real hook for its expanded invocation without running product code.
+
+    Bash permits an unquoted pathname as a function name with `function`.
+    Shadow only this fixture's pinned executable; init and _bingsu_call stay
+    intact. The NUL-delimited result preserves empty and quoted arguments.
+    """
+    import shlex
+    exe = str(exe)
+    # Fixture install paths are plain words; never interpolate shell syntax.
+    assert re.fullmatch(r"[/a-zA-Z0-9_.-]+", exe), exe
+    output = base / "prompt-argv.bin"
+    output.unlink(missing_ok=True)
+    probe = (f"function {exe} {{ printf '%s\\0' {shlex.quote(exe)} \"$@\" > "
+             f"{shlex.quote(str(output))}; }}\n").encode()
+    path = base / "prompt-argv.bash"
+    path.write_bytes(bash_prompt_script(script, pwd, seq, probe))
+    result = subprocess.run(SHELL_CMD["bash"] + [str(path)], env=env,
+                            capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    wire = output.read_bytes()
+    assert wire.endswith(b"\0"), wire
+    argv = [os.fsdecode(word) for word in wire[:-1].split(b"\0")]
+    assert argv[:2] == [exe, "prompt"], argv
+    return argv
+
+
+# 이것을 실패시키는 것: init의 다른 root pin 행 수에 의존하거나 실제 prompt argv를 누락하는 것.
+def test_pinned_prompt_argv_from_real_init(tmp_path):
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    # Real init emits shell-encoded pins; exercise quotes and a physical newline.
+    env["XDG_CONFIG_HOME"] += " ' quoted\nconfig"
+    script = inst.init("bash", env)
+    (tmp_path / "init.bash").write_bytes(script)
+    argv = pinned_prompt_argv(script, inst.exe, tmp_path, 7, env, tmp_path)
+    assert argv[:8] == [str(inst.exe), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
+    assert argv[argv.index("--pwd") + 1] == str(tmp_path)
+    assert argv[argv.index("--seq") + 1] == "8"
+    assert re.fullmatch(r"[0-9a-f]{32}", argv[argv.index("--session") + 1])
+    for flag, word in pinned_roots(env).items():
+        assert [os.fsencode(a) for a in argv if os.fsencode(a).startswith(flag)] == [word]
+    assert "--collector-exe=" + init_collector_exe(script) in argv
+    # Extra flag-bearing lines (such as init's exported command roots) cannot
+    # select a different invocation or make extraction ambiguous.
+    extra = b"\n# --runtime-root=decoy --config-root=decoy\n"
+    assert pinned_prompt_argv(script + extra * 3, inst.exe, tmp_path, 7, env, tmp_path) == argv
+    # Compare every word with the same hook calling the existing fake binary.
+    inst.use_fake(minimal_record())
+    path = tmp_path / "actual-prompt.bash"
+    path.write_bytes(bash_prompt_script(script, tmp_path, 7))
+    result = subprocess.run(SHELL_CMD["bash"] + [str(path)], env=env, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert inst.calls() == [[os.fsencode(word) for word in argv[1:]]]
+
+
 class HelperStageFixture:
     """Real init, warm-up prompts and one traced prompt for a helper stage.
 
@@ -1405,7 +1467,7 @@ class HelperStageFixture:
     the stage formula does not include, so the fixture refuses one.
     """
 
-    def __init__(self, stage):
+    def __init__(self, stage, *, template=None):
         import tempfile
         root = real_bin().parent.parent
         self.base = Path(tempfile.mkdtemp(prefix="helper-stage-", dir=root)).resolve()
@@ -1419,7 +1481,7 @@ class HelperStageFixture:
         os.mkdir(self.env["HOME"], 0o700)
         self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, mode=0o700)
-        self.put("collect" if stage == "collect" else "plain")
+        self.put("collect" if stage == "collect" else "plain", template=template)
         self.script = self.inst.init("bash", self.env)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
@@ -1457,10 +1519,11 @@ class HelperStageFixture:
         elif stage == "failure-recover":
             (self.store / "snapshot").chmod(0o644)
 
-    def put(self, name):
+    def put(self, name, *, template=None):
         path = self.config / "config.toml"
         pending = path.with_name("config.toml.new")
-        pending.write_text(TEMPLATES[name])
+        pending.write_text(TEMPLATES[name] if template is None else
+                           f"[style]\ntemplate='{template}'\n[layout.when.narrow.style]\ntemplate='{template}'\n")
         pending.chmod(0o600)
         pending.replace(path)
 
@@ -1470,8 +1533,7 @@ class HelperStageFixture:
         # run's, as one long-lived shell would, so the collection breaker
         # sees a new sequence instead of a replayed one.
         self.seq += 1
-        f.write_bytes(self.script + b"\n_bingsu_seq=" + str(self.seq).encode() + b"\ncd '"
-                      + os.fsencode(str(self.pwd)) + b"'\n" + CALL)
+        f.write_bytes(bash_prompt_script(self.script, self.pwd, self.seq))
         strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
                   "-e", "trace=all",
                   "-o", str(trace)] if trace else []
@@ -1890,7 +1952,6 @@ def test_front_never_reads_trust_metadata_section(front_capture):
 
 @pytest.fixture
 def child_capture(tmp_path):
-    from snapshot_support import SnapshotSession
     # 이것을 실패시키는 것: debug 바이너리 또는 strace 없는 host를 live PASS로 세는 것.
     if sys.platform != "linux":
         pytest.skip("Linux release strace gate; native Linux run required")
@@ -1902,18 +1963,19 @@ def child_capture(tmp_path):
 
     def capture(template="{dir}{git}{char}", invalid=False):
         base = tmp_path / str(len(list(tmp_path.iterdir())))
-        session = SnapshotSession(base)
-        session.put(f"[style]\ntemplate='{template}'\n[layout.when.narrow.style]\ntemplate='{template}'\n")
-        session.init()
-        session.wait_quiet()
-        # Reload prepares a complete, trusted snapshot without a collection
-        # request. Every sample has its own runtime, so no breaker/cache state
-        # from the paired marker sample can suppress admission.
-        loaded = subprocess.run([str(real_bin()), "reload"], cwd=base, env=session.env,
-                                capture_output=True, timeout=5)
-        # 이것을 실패시키는 것: assert loaded.returncode == 0, loaded.stderr 조건을 제거하거나 반전하는 변이.
-        assert loaded.returncode == 0, loaded.stderr
-        marker = session.store() / "marker"
+        base.mkdir()
+        # Reuse A2's real hook, advancing session sequence and untraced warm-up.
+        # A cold admission under strace may defer before it can spawn a worker.
+        fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
+                                     template=template)
+        try:
+            return capture_prompt(fixture, base, invalid)
+        finally:
+            wait_helpers(fixture.base)
+            shutil.rmtree(fixture.base)
+
+    def capture_prompt(fixture, base, invalid):
+        marker = fixture.store / "marker"
         wire = bytearray(marker.read_bytes())
         # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
         assert wire[:8] == b"BNGMRK02" and len(wire) == 208
@@ -1930,11 +1992,16 @@ def child_capture(tmp_path):
             pending.write_bytes(wire)
             pending.chmod(0o600)
             pending.replace(marker)
-        args = session.prompt_args() + ["--collector-exe=" + str(real_bin().with_name("bingsu-collect"))]
         evidence = base / "child-count.strace"
+        # Expand A2's exact hook without tracing bash or running a prompt.
+        # A2 increments fixture.seq before setting the hook's pre-call counter;
+        # use that same next counter so capture cannot replay the last warm-up.
+        argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
+                                  fixture.seq + 1, fixture.env, base)
+        assert "--collector-exe=" + fixture.collector in argv, argv
         result = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
-                                 "-o", str(evidence), str(real_bin()), *args],
-                                cwd=base, env=session.env, capture_output=True, timeout=60)
+                                 "-o", str(evidence), *argv],
+                                cwd=fixture.pwd, env=fixture.env, capture_output=True, timeout=60)
         (base / "stdout").write_bytes(result.stdout)
         (base / "stderr").write_bytes(result.stderr)
         # 이것을 실패시키는 것: assert result.returncode == 0, (result.stderr, evidence) 조건을 제거하거나 반전하는 변이.
@@ -1942,7 +2009,7 @@ def child_capture(tmp_path):
         trace = parse_trace(evidence.read_text())
         # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
         assert not trace.errors, (trace.errors, evidence)
-        return trace, session.store(), result.stdout
+        return trace, fixture.store, result.stdout
     return capture
 
 
