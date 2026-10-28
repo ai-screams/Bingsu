@@ -2,7 +2,8 @@
 
 The live gate (tests/shell/test_prompt_env_paths.py::
 test_live_helper_calls_match_stage_formula) compares release captures with
-helper_stage_expected exactly; these tests pin the pieces it is built from.
+the stage formula (collect: prefix exact, tail upper bound); these tests pin
+the pieces it is built from.
 """
 import pytest
 
@@ -93,3 +94,20 @@ def test_musl_differs_in_nss_and_cloexec_fallbacks():
 ])
 def test_helper_vocabulary(c, kind):
     assert helper_kind(c) == kind
+
+
+# 이것을 실패시키는 것: prefix/tail 분리가 기존 원시 연산 합계나 libc 차이를 넓히는 것.
+@pytest.mark.parametrize("libc", ["gnu", "musl"])
+def test_collect_partition_preserves_primitive_totals(libc):
+    from collections import Counter
+    from fsbudget.formula import helper_collect_expected, PRIMITIVES
+    p = plan(("unchanged", "collect"), libc=libc, nsswitch_reads=2 if libc == "gnu" else 0)
+    phases = helper_collect_expected(p)
+    total = Counter()
+    for counts in phases.values():
+        total.update(counts)
+    assert total == Counter(helper_stage_expected(p))
+    deadline = helper_collect_expected(p, deadline=True)
+    assert deadline["prefix"] == phases["prefix"]
+    assert deadline["finish_gc"] == phases["finish_gc"]
+    assert deadline["supervisor"] == PRIMITIVES["clock"]

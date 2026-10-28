@@ -1273,24 +1273,6 @@ def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict
 
 
 # GATE-FS-HELPER.1: helper calls per publication stage of a release build.
-# The helper stage gate traces only calls that can be counted or that
-# attribution needs, with --seccomp-bpf, so the rest never stop the tracee and
-# the collector keeps more of its 50 ms request deadline. Every call of the
-# helper subtree's allowlist (HELPER_CALLS) that the classifier can count is in
-# the set; a call outside that allowlist fails the trace=all path gate above
-# (test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots).
-PROCESS_RECORDS = frozenset({"clone", "clone3", "fork", "vfork", "execve", "execveat", "exit", "exit_group",
-                             "seccomp", "kill", "tgkill"})
-# Calls that create or drop descriptors: attribution follows the fd table.
-FD_TABLE = frozenset({"close", "close_range", "dup", "dup2", "dup3", "pipe", "pipe2", "socket", "socketpair",
-                      "pidfd_open", "accept", "accept4"})
-
-
-def traced_calls():
-    from fsbudget.classify import NON_FS
-    return frozenset(HELPER_CALLS - NON_FS) | PROCESS_RECORDS | FD_TABLE
-
-
 HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
                  "failure-recover": ("failure-recover",)}
@@ -1458,7 +1440,7 @@ class HelperStageFixture:
         f.write_bytes(self.script + b"\n_bingsu_seq=" + str(self.seq).encode() + b"\ncd '"
                       + os.fsencode(str(self.pwd)) + b"'\n" + CALL)
         strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
-                  "-e", "trace=" + ",".join("?" + name for name in sorted(traced_calls())),
+                  "-e", "trace=all",
                   "-o", str(trace)] if trace else []
         r = subprocess.run(strace + SHELL_CMD["bash"] + [str(f)], env=self.env, capture_output=True, timeout=60)
         assert r.returncode == 0, r.stderr
@@ -1491,7 +1473,7 @@ def collector_exit(lines, collector):
     return int(ends[0].split("exited with")[1].split()[0])
 
 
-def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
+def measured_helper_attribution(lines, exe, collector, helper_vocabulary=True):
     """Helper-role counts of one traced prompt, in the helper vocabulary.
 
     Errors about the front or the helper (and parse or attribution errors)
@@ -1505,45 +1487,57 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
                                          "collectors": collectors}, helper_vocabulary=helper_vocabulary)
     errors = [e for e in roles.errors if "(collector):" not in e]
     assert not errors, errors
+    return collectors, roles
+
+
+def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
+    collectors, roles = measured_helper_attribution(lines, exe, collector, helper_vocabulary)
     return collectors, roles.counts
 
 
-# 이것을 실패시키는 것: 셀 수 있는 도우미 호출(HELPER_CALLS 중 NON_FS가 아닌 것)이나 프로세스·fd 기록 하나를
-# 추적 집합에서 빼는 것, 또는 추적 집합 밖의 호출을 분류기가 세는 것.
-def test_traced_calls_cover_every_counted_call():
-    from fsbudget.classify import NON_FS
-    traced = traced_calls()
-    assert HELPER_CALLS - NON_FS <= traced
-    assert PROCESS_RECORDS | FD_TABLE <= traced
-    assert HELPER_CALLS - traced <= NON_FS
+def check_helper_capture(stage, lines, exe, collector, plan):
+    from fsbudget.formula import helper_stage_expected, helper_collect_expected
+    from fsbudget.gate import check, check_collect
+    collectors, roles = measured_helper_attribution(lines, exe, collector)
+    assert collectors == int(stage == "collect"), ("collector spawns", collectors)
+    if stage != "collect":
+        errors = check({"helper": roles.counts.get("helper", {})},
+                       {"helper": helper_stage_expected(plan)}, "exact", ["helper"])
+        published = False
+    else:
+        status = collector_exit(lines, collector)
+        assert status in (0, 75), ("unexpected collector exit", status)
+        errors, published = check_collect(roles, helper_collect_expected(plan, deadline=status == 75),
+                                          deadline=status == 75)
+    assert not errors, errors
+    return published
 
 
 # 이것을 실패시키는 것: 도우미 재검증 경로에 같은 파일의 fstat 하나를 더하는 것, 수집 비용을 앞단으로 옮기는 것,
 # 공식에 옛 고정 항(e["read"] += 2)을 되살리는 것, debug 바이너리로 재는 것, helper 어휘에서 fd statx나
 # chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것,
-# collector가 마감을 넘겨 발행 없이 끝나는 것(그 경로의 공식이 없어 실패로 센다).
+# 마감 회차의 호출을 버리거나 최대 6회에서 실제 응답 발행이 한 번도 없는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("stage", list(HELPER_STAGES))
 def test_live_helper_calls_match_stage_formula(stage):
-    """GATE-FS-HELPER.1: the release helper's calls of each kind equal the
-    stage formula exactly, on a real init and warm store per stage."""
-    from fsbudget.formula import helper_stage_expected
-    from fsbudget.gate import check
+    """GATE-FS-HELPER.1: exact stages; collect prefix exact and tail <=.
+
+    Every attempt is checked before retrying, including exit 75. At least one
+    of at most six fresh collect fixtures must actually rename a response.
+    """
     assert shutil.which("strace"), "the helper stage gate must execute strace"
     libc = require_release_helper(real_bin())
-    fixture = HelperStageFixture(stage)
-    try:
-        trace = fixture.base / "trace"
-        fixture.prompt(trace)
-        lines = trace.read_text(errors="replace").splitlines()
-        collectors, counts = measured_helper_calls(lines, str(fixture.inst.exe), fixture.collector)
-        # 이것을 실패시키는 것: 수집 단계가 collector 없이 끝나 변경 없음 단계로 무너지는 것.
-        assert collectors == (1 if stage == "collect" else 0), ("collector spawns", collectors)
-        if stage == "collect":
-            # No formula covers a collector past its deadline yet: that run fails, its counts unchecked.
-            assert collector_exit(lines, fixture.collector) == 0, "collector missed its request deadline under strace"
-        expected = helper_stage_expected(fixture.plan(libc))
-        assert check({"helper": counts.get("helper", {})}, {"helper": expected}, "exact", ["helper"]) == []
-    finally:
-        wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+    for _ in range(6 if stage == "collect" else 1):
+        fixture = HelperStageFixture(stage)
+        try:
+            trace = fixture.base / "trace"
+            fixture.prompt(trace)
+            lines = trace.read_text(errors="replace").splitlines()
+            published = check_helper_capture(stage, lines, str(fixture.inst.exe), fixture.collector,
+                                             fixture.plan(libc))
+            if stage != "collect" or published:
+                return
+        finally:
+            wait_helpers(fixture.base)
+            shutil.rmtree(fixture.base, ignore_errors=True)
+    pytest.fail("collect: zero publishes across all 6 checked attempts")

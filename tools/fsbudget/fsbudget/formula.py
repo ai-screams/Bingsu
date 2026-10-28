@@ -2,7 +2,7 @@
 
 Coefficient values and per-axis caps are M3; M1 evaluates the shape with
 caller-provided coefficients (all 1 for the synthetic program)."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 
@@ -560,10 +560,8 @@ def _breaker_save(e: dict, p: HelperPlan) -> None:
     _add(e, "same_name")
 
 
-def _collect(e: dict, p: HelperPlan) -> None:
-    """Conditional collection owned by the supervising helper (spec 8 stage
-    table): admission, the collector's pin, spawn, publication on the
-    supervisor thread and collection GC after the refresh."""
+def _collect_prefix(e: dict, p: HelperPlan) -> None:
+    """Deterministic collection admission, breaker begin, pin and spawn."""
     t, ctx, edges = p.collector_components, p.context_components, 3
     _add(e, "absent_file", 3)  # git_global::attach: three absent global inputs
     _add(e, "dup")  # the runtime descriptor kept for GC
@@ -622,6 +620,9 @@ def _collect(e: dict, p: HelperPlan) -> None:
     _add(e, "dup")
     _add(e, "fd_listing")
     _add(e, "spawn")
+
+
+def _collect_tail(e: dict, p: HelperPlan) -> None:
     # Supervisor thread: completion clock, then CollectionStore::publish with
     # both responses present (rotate current into previous, install stage).
     _add(e, "clock")
@@ -692,15 +693,48 @@ def _breaker_finish_and_gc(e: dict, p: HelperPlan) -> None:
 
 
 def helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
-    """Exact helper-role calls of one release refresh helper run (spec 8 stage
+    """Full-path helper-role calls of one release refresh helper run (spec 8 stage
     table): runtime/context walks and lock, unchanged revalidation, change
     publication and the failure path. Boot-scoped runtime files are never
-    fsynced; renew is absent because the fixture has no approval record."""
+    fsynced; renew is absent because the fixture has no approval record.
+    For collect this is the complete prefix + tail sum; live checks use
+    helper_collect_expected to apply exact/le separately."""
     _check_plan(plan)
     global _primitives
     _primitives = {**PRIMITIVES, **_LIBC[plan.libc]}
     try:
         return _helper_stage_expected(plan)
+    finally:
+        _primitives = PRIMITIVES
+
+
+def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict[str, dict[str, int]]:
+    """Collect prefix exact; each time-bound tail part is an independent cap.
+
+    The prefix contains every unchanged-refresh primitive (including the final
+    snapshot.lock unlock), admission, breaker begin, pin verification, spawn
+    and child setup. The supervisor runs concurrently: its completion clock
+    and publication are tail even before the main thread finishes refresh.
+    After that unlock the main thread's Ticket::finish and GC are tail too.
+    These are bounded by the 50 ms collector deadline / 20 ms GC budget, so
+    they may stop early. No measured count chooses a formula coefficient.
+    Exit 75 cannot publish, but still observes the supervisor completion clock.
+    """
+    _check_plan(plan)
+    if "collect" not in plan.stages:
+        raise ValueError("collect plan required")
+    global _primitives
+    _primitives = {**PRIMITIVES, **_LIBC[plan.libc]}
+    try:
+        prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
+        _collect_prefix(prefix, plan)
+        supervisor: dict[str, int] = {}
+        _add(supervisor, "clock")
+        if not deadline:
+            _publish(supervisor, plan)
+        finish_gc: dict[str, int] = {}
+        _breaker_finish_and_gc(finish_gc, plan)
+        return {"prefix": prefix, "supervisor": supervisor, "finish_gc": finish_gc}
     finally:
         _primitives = PRIMITIVES
 
@@ -797,7 +831,8 @@ def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     _recover(e)  # LockedStore drop
     _add(e, "flock")
     if "collect" in p.stages:
-        _collect(e, p)
+        _collect_prefix(e, p)
+        _collect_tail(e, p)
     e.setdefault("fsync", 0)
     return dict(sorted(e.items()))
 

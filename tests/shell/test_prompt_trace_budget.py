@@ -1653,3 +1653,168 @@ def test_product_helper_gate_rejects_legacy_fixed_terms(stage):
     assert helper_stage_errors(lines, collector, legacy)
     synthetic = synthetic_helper_expected(plan.ax, Coeffs(), plan.stages[0] == "publish", 4096, plan.snapshot_bytes)
     assert helper_stage_errors(lines, collector, synthetic)
+
+
+# 이것을 실패시키는 것: GC 시간 예산으로 tail 호출 하나가 줄어도 collect 전체를 exact로 검사하는 것.
+def test_collect_accepts_short_time_bound_tail(monkeypatch, tmp_path):
+    lines, collector, plan = helper_stage_case("collect")
+    at = max(i for i, line in enumerate(lines) if 'newfstatat(' in line and ' = 0' in line)
+    del lines[at]
+    run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)])
+
+
+def run_helper_captures(monkeypatch, tmp_path, captures):
+    """Run the actual live gate with stored captures, without Linux or a binary."""
+    from types import SimpleNamespace
+    used = []
+
+    class Fixture:
+        def __init__(self, stage):
+            assert stage == "collect"
+            assert len(used) < len(captures), "unexpected extra attempt"
+            self.lines, self.collector, self.expected_plan = captures[len(used)]
+            used.append(self)
+            self.base = tmp_path / str(len(used))
+            self.base.mkdir()
+            self.inst = SimpleNamespace(exe=HELPER_EXE)
+
+        def prompt(self, trace):
+            trace.write_text("\n".join(self.lines) + "\n")
+
+        def plan(self, libc):
+            return self.expected_plan
+
+    monkeypatch.setattr(budget, "HelperStageFixture", Fixture)
+    monkeypatch.setattr(budget, "require_release_helper", lambda _: "gnu")
+    monkeypatch.setattr(budget, "real_bin", lambda: Path(HELPER_EXE))
+    monkeypatch.setattr(budget.shutil, "which", lambda _: "/synthetic/strace")
+    monkeypatch.setattr(budget, "wait_helpers", lambda _: None)
+    budget.test_live_helper_calls_match_stage_formula("collect")
+    return len(used)
+
+
+def deadline_helper_capture():
+    """Synthetic exit-75 variant: retain clock/finish/GC, omit publication.
+
+    This is a checker fixture, not a claim of a live deadline capture.
+    """
+    lines, collector, plan = helper_stage_case("collect")
+    _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+    threads = [c.ret.split()[0] for c, kind in roles.helper_calls
+               if kind == "thread" and c.ret.split()[0].isdigit()]
+    supervisor = threads[1]
+    start = next(i for i, line in enumerate(lines) if line.split()[0] == supervisor
+                 and 'newfstatat(' in line and '/contexts-v2/' in line)
+    lines = [line for i, line in enumerate(lines)
+             if i < start or line.split()[0] != supervisor or 'exit' in line]
+    pid = next(line.split()[0] for line in lines if budget.is_root(line, collector))
+    lines = [line.replace('exit_group(0)', 'exit_group(75)').replace('exited with 0', 'exited with 75')
+             if line.split()[0] == pid else line for line in lines]
+    return lines, collector, plan
+
+
+def extra_helper_stat(lines, *, tail=False, supervisor=False):
+    lines = list(lines)
+    if supervisor:
+        at = next(i for i, line in enumerate(lines) if 'PR_SET_NAME, "collect-supervi"' in line)
+        pid = lines[at].split()[0]
+        at = next(i for i, line in enumerate(lines) if line.split()[0] == pid and 'exit(0)' in line)
+        lines.insert(at, f'{pid} newfstatat(AT_FDCWD</>, "/proc/{pid}/maps", {{}}, 0) = 0')
+    else:
+        matches = [i for i, line in enumerate(lines) if 'newfstatat(' in line
+                   and '</fx/run-t/bingsu>' in line and ' = 0' in line]
+        at = matches[-1] if tail else matches[0]
+        lines.insert(at, lines[at])
+    return lines
+
+
+# 이것을 실패시키는 것: prefix 초과/누락, tail 상한 초과, 마감 회차 폐기 후 정상 회차만 검사하는 것.
+@pytest.mark.parametrize("deadline", [False, True], ids=["published", "deadline"])
+@pytest.mark.parametrize("damage,diagnostic", [
+    ("extra-prefix", r"prefix.fstat.*exact"),
+    ("missing-prefix", r"prefix.fstat.*exact"),
+    ("extra-tail", r"finish_gc.fstat.*le"),
+    ("extra-supervisor", r"supervisor.fstat.*le"),
+])
+def test_collect_attempt_mutations(monkeypatch, tmp_path, deadline, damage, diagnostic):
+    clean = helper_stage_case("collect")
+    lines, collector, plan = deadline_helper_capture() if deadline else clean
+    # Validate the unmodified fixture first, including the deadline attempt.
+    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (not deadline)
+    if damage == "missing-prefix":
+        lines = list(lines)
+        at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
+        del lines[at]
+    else:
+        lines = extra_helper_stat(lines, tail=damage == "extra-tail", supervisor=damage == "extra-supervisor")
+    # The review reproduction is the deadline/extra-prefix cell: attempt 1
+    # has one extra fstat and exits 75; the available clean attempt 2 cannot hide it.
+    with pytest.raises(AssertionError, match=diagnostic):
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan), clean])
+
+
+# 이것을 실패시키는 것: exit 75 회차를 검사하지 않거나 실제 발행 없이 재시도 한도에서 통과하는 것.
+def test_collect_requires_a_publication_within_six_attempts(monkeypatch, tmp_path):
+    with pytest.raises(pytest.fail.Exception, match="zero publishes.*6"):
+        run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * 6)
+
+
+def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
+    assert run_helper_captures(monkeypatch, tmp_path,
+                              [deadline_helper_capture()] * 5 + [helper_stage_case("collect")]) == 6
+
+
+# 이것을 실패시키는 것: collector exit 0만으로 실제 response rename을 대신하는 것.
+def test_collect_exit_zero_without_publish_does_not_pass(monkeypatch, tmp_path):
+    lines, collector, plan = deadline_helper_capture()
+    lines = [line.replace('exit_group(75)', 'exit_group(0)').replace('exited with 75', 'exited with 0')
+             for line in lines]
+    with pytest.raises(pytest.fail.Exception, match="zero publishes"):
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)] * 6)
+
+
+# 이것을 실패시키는 것: 새 syscall을 볼 수 없는 제한된 strace 집합으로 되돌리는 것.
+def test_helper_stage_capture_traces_all_calls(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    fixture = object.__new__(budget.HelperStageFixture)
+    fixture.base, fixture.pwd, fixture.seq, fixture.script, fixture.env = tmp_path, tmp_path, 0, b"", {}
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stderr=b"")
+    monkeypatch.setattr(budget.subprocess, "run", run)
+    fixture.prompt(tmp_path / "trace")
+    assert commands[0][commands[0].index("-e") + 1] == "trace=all"
+
+
+# 이것을 실패시키는 것: 마감 회차에서 prefix 완료 경계를 알 수 없을 때 회차를 버리거나 exact로 강제하는 것.
+def test_collect_ambiguous_deadline_prefix_uses_upper_bound():
+    from fsbudget.formula import helper_collect_expected
+    from fsbudget.gate import check_collect
+    lines, collector, plan = deadline_helper_capture()
+    _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+    main = next(c.pid for c, kind in roles.helper_calls if kind == "exec")
+    boundary = next(i for i, (c, kind) in enumerate(roles.helper_calls)
+                    if c.pid == main and c.name == "flock" and '/snapshot.lock>' in c.args
+                    and 'LOCK_UN' in c.args)
+    # Synthetic counted-event truncation: all main tail calls and the unlock
+    # are absent, so completion cannot be established. Keep concurrent events.
+    roles.helper_calls = [(c, kind) for i, (c, kind) in enumerate(roles.helper_calls)
+                          if c.pid != main or i < boundary]
+    expected = helper_collect_expected(plan, deadline=True)
+    assert check_collect(roles, expected, deadline=True) == ([], False)
+    errors, _ = check_collect(roles, expected, deadline=False)
+    assert "collect: missing snapshot unlock boundary" in errors
+    # A surplus of a still-full primitive must fail even in ambiguous-prefix le.
+    extra = next(pair for pair in roles.helper_calls if pair[1] == "umask")
+    roles.helper_calls.insert(1, extra)
+    errors, _ = check_collect(roles, expected, deadline=True)
+    assert any("prefix.umask" in error and "(le)" in error for error in errors)
+
+
+def test_collect_counted_events_preserve_all_helper_counts():
+    from collections import Counter
+    for stage in STAGE_NAMES:
+        lines, collector, _ = helper_stage_case(stage)
+        _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+        assert Counter(kind for _, kind in roles.helper_calls) == roles.counts["helper"]
