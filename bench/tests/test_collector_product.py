@@ -89,8 +89,13 @@ def test_pair_alternates_and_preserves_raw_observations(monkeypatch, tmp_path):
     monkeypatch.setattr(product, "ROOT", tmp_path)
     (tmp_path / "target").mkdir()
     result = product.measure_pair("base", "candidate", 200)
-    assert calls[:6] == ["base", "candidate", "base", "candidate", "candidate", "base"]
-    assert result["order"] == [name for i in range(200) for name in (("base", "candidate") if i % 2 == 0 else ("candidate", "base"))]
+    assert calls[:2] == ['base', 'candidate']
+    assert calls[2:] == result['order']
+    assert len(result['order']) == 400
+    for block in result['blocks']:
+        first = block['order'][:2]
+        assert first in (['base', 'candidate'], ['candidate', 'base'])
+        assert block['order'] == (first + first[::-1]) * 10
     assert result["milestone"] == "M3b" and result["formal_B5_B7"] is False
     assert set(result["cold_first_process"]) == {"base", "candidate"}
     assert not result["missing"]
@@ -399,3 +404,20 @@ def test_cli_forwards_mode_and_condition(monkeypatch, tmp_path):
         '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
     assert product.main() == 0
     assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+
+
+@pytest.mark.parametrize('metric', product.REQUIRED)
+def test_protocol_blocks_missing_collector_metric(monkeypatch, tmp_path, metric):
+    row = sample()
+    # validate_sample computes intervals from events; remove after validation.
+    row = product.validate_sample(row)
+    row.pop(metric)
+    monkeypatch.setattr(product, 'observe', lambda *args: row)
+    monkeypatch.setattr(product, 'prepared', lambda _: dict(hashes={}, policy={}, stripped_bytes={}))
+    monkeypatch.setattr(product, 'host', lambda: {})
+    monkeypatch.setattr(product, 'watchdog_evidence', lambda _: {})
+    monkeypatch.setattr(product, 'ROOT', tmp_path)
+    (tmp_path / 'target').mkdir()
+    result = product.measure_pair('base', 'candidate', 200)
+    assert result['status'] == 'BLOCKED'
+    assert metric in result['reason']

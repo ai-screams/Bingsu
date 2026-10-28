@@ -40,7 +40,8 @@ def test_protocol_blocks_on_condition_drift_or_short_rounds(damage):
 
 
 def test_short_rounds(controlled):
-    assert p.paired('base', 'candidate', 199, None, lambda *_: {})['status'] == 'BLOCKED'
+    got = p.paired('base', 'candidate', 199, None, lambda *_: {}, required_metrics=('ns',))
+    assert got['status'] == 'BLOCKED' and '200' in got['reason']
 
 
 @pytest.mark.parametrize('side', ['before', 'after'])
@@ -94,12 +95,13 @@ def test_violating_block_is_discarded_and_rerun(controlled, monkeypatch):
     def observe(name, binary):
         calls.append(name)
         return dict(ns=len(calls))
-    got = p.paired('base', 'candidate', 200, None, observe, seed=42)
+    got = p.paired('base', 'candidate', 200, None, observe, required_metrics=("ns",), seed=42)
     assert got['status'] == 'OBSERVED'
     assert len(got['blocks']) == 11 and not got['blocks'][0]['kept']
     assert got['blocks'][1]['attempt'] == 1
     assert [b['index'] for b in got['blocks'][1:]] != list(range(10))
-    assert got['order'] == ['base', 'candidate', 'candidate', 'base'] * 100
+    assert len(got['order']) == 400
+    assert all(b['order'].count('base') == b['order'].count('candidate') for b in got['blocks'])
     for name in ('base', 'candidate'):
         assert len(got['variants'][name]['samples']) == 200
         assert min(s['ns'] for s in got['variants'][name]['samples']) > 42
@@ -107,7 +109,7 @@ def test_violating_block_is_discarded_and_rerun(controlled, monkeypatch):
 
 def test_retries_are_bounded(controlled, monkeypatch):
     monkeypatch.setattr(p, 'snapshot', lambda _: host(power='battery'))
-    got = p.paired('b', 'c', 200, None, lambda *_: {'ns': 1})
+    got = p.paired('b', 'c', 200, None, lambda *_: {'ns': 1}, required_metrics=('ns',))
     assert got['status'] == 'BLOCKED' and len(got['blocks']) == 3
     assert not got['variants']['base']['samples']
 
@@ -154,9 +156,16 @@ def test_seed_replays_random_order_and_warmup_is_discarded(controlled):
         def observe(n, b):
             calls.append(n)
             return {'ns': len(calls)}
-        result = p.paired('b', 'c', 200, None, observe, seed=seed)
+        result = p.paired('b', 'c', 200, None, observe, required_metrics=("ns",), seed=seed)
         assert min(s['ns'] for v in result['variants'].values() for s in v['samples']) == 3
-        return [b['index'] for b in result['blocks']]
+        assert result['status'] == 'OBSERVED' and result['seed'] == seed
+        assert calls[2:] == result['order']
+        starts = [b['order'][0] for b in result['blocks']]
+        assert starts.count('base') == starts.count('candidate')
+        for b in result['blocks']:
+            pairs = [b['order'][i:i+2] for i in range(0, len(b['order']), 2)]
+            assert all(pair == pairs[0][::(-1 if i % 2 else 1)] for i, pair in enumerate(pairs))
+        return calls
     assert run(42) == run(42)
     assert run(42) != run(43)
 
@@ -264,3 +273,59 @@ def test_load_preflight_refuses_concurrent_activity(monkeypatch):
 def test_launcher_shell_is_not_a_second_measurement(monkeypatch):
     monkeypatch.setattr(p, 'command_text', lambda _: '123 zsh zsh -lc python3 bench/git-product.py --base b')
     p.ensure_idle()
+
+
+def test_ci_preparation_outputs_are_external():
+    text = (Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml').read_text()
+    callers = [line.strip() for line in text.splitlines() if 'bench/git-product.py' in line]
+    assert len(callers) == 2
+    assert all('--out "$RUNNER_TEMP/measurements/' in line for line in callers)
+    assert '${{ runner.temp }}/measurements/' in text
+    assert 'target/f3/' not in text
+
+
+@pytest.mark.parametrize('missing', ['all', 'one-row', 'one-variant'])
+def test_adapter_metric_fields_are_required(controlled, missing):
+    calls = 0
+    def observe(name, binary):
+        nonlocal calls
+        calls += 1
+        if missing == 'all' or (missing == 'one-row' and calls == 10) or (missing == 'one-variant' and name == 'candidate'):
+            return {}
+        return {'ns': 1, 'bytes': 2}
+    got = p.paired('b', 'c', 200, None, observe, required_metrics=('ns', 'bytes'))
+    assert got['status'] == 'BLOCKED'
+    assert 'missing required metric' in got['reason']
+
+
+def test_empty_adapter_schema_is_blocked(controlled):
+    got = p.paired('b', 'c', 200, None, lambda *_: {})
+    assert got['status'] == 'BLOCKED' and 'schema' in got['reason']
+
+
+@pytest.mark.parametrize('native', [False, True])
+def test_n7_legacy_rows_are_diagnostic_only(monkeypatch, tmp_path, capsys, native):
+    import json
+    import n7_measure as n7
+    from subprocess import CompletedProcess
+    monkeypatch.setattr(sys, 'argv', ['n7_measure.py', '--out', str(tmp_path)])
+    def checked(command, **kwargs):
+        if command[0] == 'rustc':
+            return CompletedProcess(command, 0, b'rustc test')
+        return CompletedProcess(command, 0, json.dumps(dict(reason='compiler-artifact', executable=__file__, profile=dict(test=True))).encode())
+    monkeypatch.setattr(n7, 'checked', checked)
+    front = 'fixture\tprefilter_ns\tstaged_file_read_decode_ns\trespond_render_ns\tread_ns\tchecksum_decode_ns\tcompiled_bytes\n'
+    front += ''.join(f'{fixture}\t1\t2\t3\t4\t5\t6\n' for fixture in ('normal', '4096-band') for _ in range(240))
+    publish = ''.join(f'N7_PUBLISH\t{fixture}\t0\t1\t2\n' for fixture in ('normal', '4096-band') for _ in range(240))
+    results = iter([CompletedProcess([], 0, front.encode(), b'native_clock_available=true' if native else b''), CompletedProcess([], 0, publish.encode(), b'')])
+    monkeypatch.setattr(n7, 'resource_run', lambda _: next(results))
+    monkeypatch.setattr(n7, 'measure_prompt', lambda *args: None)
+    n7.main()
+    rows = json.loads((tmp_path / 'summary.json').read_text())
+    legacy = {k: v for k, v in rows.items() if k.startswith(('normal/', '4096-band/'))}
+    assert len(legacy) == 16
+    for row in legacy.values():
+        assert row.get('status') == 'BLOCKED'
+        assert row['evidence_use'] == 'diagnostic-only'
+        assert row['certification_eligible'] is False
+    assert json.loads((tmp_path / 'method.json').read_text())['legacy_front_publish']['status'] == 'BLOCKED'

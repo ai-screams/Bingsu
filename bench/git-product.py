@@ -4,7 +4,7 @@
 Prepare release siblings explicitly with --prepare. Runtime measurement never
 builds, retries a failed round, widens a deadline, or substitutes a degraded
 prompt. Test-only helper clock injection is labelled separately from the normal
-product prompt. All generated files and repositories live under target/f3.
+product prompt. Product scratch stays under target; raw measurement output lives outside the checkout.
 """
 from __future__ import annotations
 
@@ -523,7 +523,8 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
         for case in cases:
             repo = repos[case]
             paired = M3B.protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
-                lambda name, binary: observe(binary, preparations[name], scratch / name / case, repo))
+                lambda name, binary: observe(binary, preparations[name], scratch / name / case, repo),
+                required_metrics=("prompt_ns", "admission_gc_ns"))
             cold = paired.get('cold_first_process', {})
             samples = {n: paired['variants'][n]['samples'] for n in binaries}
             order = paired['order']

@@ -54,6 +54,13 @@ sys.exit(r.returncode)
     return checked([sys.executable, "-c", script, *command])
 
 
+def diagnostic_only(value):
+    """Legacy batched runners have no admission evidence and cannot certify budgets."""
+    return dict(status='BLOCKED', evidence_use='diagnostic-only', certification_eligible=False,
+                reason='legacy batched runner has no calibration or condition admission',
+                diagnostic_summary=value)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path(tempfile.gettempdir()) / "bingsu-n7-measurements")
@@ -74,7 +81,8 @@ def main():
                               for p in (front, binary) if p.exists()},
                     baseline=str(args.baseline) if args.baseline else None,
                     cold_command=args.cold_command,
-                    maxrss_units="bytes on macOS; KiB on Linux")
+                    maxrss_units="bytes on macOS; KiB on Linux",
+                    legacy_front_publish=diagnostic_only({}))
     (out / "method.json").write_text(json.dumps(metadata, indent=2) + "\n")
     measured = {}
     result = resource_run([str(front), str(out / "front-fixture")])
@@ -89,8 +97,8 @@ def main():
             label = f"{fixture}/{col}"
             if col == "prefilter_ns" and not native:
                 label += " (clock denied; incomplete path)"
-            measured[label] = summary(nums) if nums else {"not_done": "native boot observation denied"}
-        measured[f"{fixture}/compiled_bytes"] = int(selected[0]["compiled_bytes"])
+            measured[label] = diagnostic_only(summary(nums) if nums else {"not_done": "native boot observation denied"})
+        measured[f"{fixture}/compiled_bytes"] = diagnostic_only(int(selected[0]["compiled_bytes"]))
     # The ignored fixture injects identity ONLY; real monotonic elapsed time and
     # the original 500 ms/2 s budgets still apply to actual filesystem publishing.
     built = checked(["cargo", "test", "--release", "-j", "2", "-p", "bingsu", "--bin", "bingsu",
@@ -109,7 +117,7 @@ def main():
         samples = [line.split("\t") for line in result.stdout.decode().splitlines()
                    if line.startswith(f"N7_PUBLISH\t{fixture}\t")]
         for index, phase in ((3, "changed"), (4, "unchanged")):
-            measured[f"{fixture}/publish-{phase} (clock identity DI)"] = (
+            measured[f"{fixture}/publish-{phase} (clock identity DI)"] = diagnostic_only(
                 summary([int(row[index]) for row in samples]) if samples
                 else {"not_done": "publication incomplete; inspect N7_STOP in publish.log; no budget changed"})
     if not native:
@@ -141,7 +149,8 @@ def _n7_pairs(base: Path, candidate: Path, rounds: int, condition: protocol.Cond
             if not product.normal_record(result):
                 raise ValueError('normal prompt record unavailable')
             return dict(prompt_ns=elapsed, command=command)
-        return protocol.paired(base, candidate, rounds, condition, observe)
+        return protocol.paired(base, candidate, rounds, condition, observe,
+                               required_metrics=("prompt_ns",))
 
 
 def n7_pairs(base: Path, candidate: Path, rounds: int, condition: protocol.Condition, *, redraw=False) -> protocol.Paired:

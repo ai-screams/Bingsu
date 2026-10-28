@@ -255,7 +255,8 @@ def measure_pair(base: str, candidate: str, rounds: int, *, condition=None) -> d
         for name in binaries:
             (Path(temp) / name).mkdir(mode=0o700)
         paired = protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
-            lambda name, binary: observe(binary, preparations[name], Path(temp) / name))
+            lambda name, binary: observe(binary, preparations[name], Path(temp) / name),
+            required_metrics=REQUIRED)
     samples = {n: paired['variants'][n]['samples'] for n in binaries}
     cold, order = paired.get('cold_first_process', {}), paired['order']
     result = {"comparison": "same-binary-control" if preparations["base"]["hashes"] == preparations["candidate"]["hashes"] else "base-candidate",

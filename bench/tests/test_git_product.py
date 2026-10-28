@@ -111,7 +111,12 @@ def test_m3c_measurement_is_not_formal_b5_b7(pair):
     assert "M3d formal B5-B7" in value["pending"]
     assert set(value["cases"]) == set(git.CASES)
     for case in value["cases"].values():
-        assert case["order"] == ["base", "candidate", "candidate", "base"] * 100
+        assert len(case['order']) == 400
+        assert case['order'].count('base') == case['order'].count('candidate') == 200
+        for block in case['blocks']:
+            first = block['order'][:2]
+            assert first in (['base', 'candidate'], ['candidate', 'base'])
+            assert block['order'] == (first + first[::-1]) * 10
         assert set(case["cold_first_process"]) == {"base", "candidate"}
         for row in case["variants"].values():
             assert len(row["samples"]) == row["observed"] == 200
@@ -284,3 +289,14 @@ def test_cli_forwards_cases_mode_and_condition(monkeypatch, tmp_path):
     assert git.main() == 0
     assert received['cases'] == ['git-clean']
     assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+
+
+@pytest.mark.parametrize('metric', ['prompt_ns', 'admission_gc_ns'])
+def test_protocol_blocks_missing_git_metric(pair, monkeypatch, metric):
+    row = sample()
+    row.pop(metric)
+    monkeypatch.setattr(git, 'observe', lambda *args: row)
+    result = git.measure_pair('base', 'candidate', 200, cases=['git-clean'])
+    assert result['status'] == 'BLOCKED'
+    assert result['cases']['git-clean']['status'] == 'BLOCKED'
+    assert metric in result['cases']['git-clean']['reason']

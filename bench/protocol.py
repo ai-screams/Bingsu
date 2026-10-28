@@ -180,11 +180,14 @@ def snapshot(reference):
     return host
 
 
-def _paired(base, candidate, rounds, condition, observe, *, seed=None):
+def _paired(base, candidate, rounds, condition, observe, *, required_metrics=(), seed=None):
     condition = dict(DEFAULT if condition is None else condition)
     seed = random.SystemRandom().randrange(2**63) if seed is None else seed
     result = dict(command=sys.argv, libc=platform.libc_ver(), binaries={n: dict(path=str(b), sha256=hashlib.sha256(Path(b).read_bytes()).hexdigest() if Path(b).is_file() else None, revision=os.environ.get('BINGSU_' + n.upper() + '_REVISION', 'unrecorded')) for n, b in (('base', base), ('candidate', candidate))}, schema=1, condition=condition, calibration={}, seed=seed, order=[], blocks=[],
                   variants={n: dict(samples=[], summary={}) for n in ('base', 'candidate')}, status='BLOCKED')
+    if not required_metrics:
+        result['reason'] = 'adapter metric schema required'
+        return result
     if rounds < 200:
         result['reason'] = 'at least 200 samples required'
         return result
@@ -203,13 +206,17 @@ def _paired(base, candidate, rounds, condition, observe, *, seed=None):
         binaries = dict(base=base, candidate=candidate)
         result['cold_first_process'] = {n: observe(n, b) for n, b in binaries.items()}
         indices = list(range(math.ceil(rounds / 20)))
-        random.Random(seed).shuffle(indices)
-        for index in indices:
+        rng = random.Random(seed)
+        rng.shuffle(indices)
+        # Balance block starts, then shuffle actual execution rather than only labels.
+        starts = [i % 2 for i in range(len(indices))]
+        rng.shuffle(starts)
+        for index, start in zip(indices, starts):
             count = min(20, rounds - index * 20)
             for attempt in range(3):
                 block = dict(index=index, attempt=attempt, before=snapshot(reference), samples={n: [] for n in binaries}, order=[])
                 for i in range(count):
-                    for n in (('base', 'candidate') if (index * 20 + i) % 2 == 0 else ('candidate', 'base')):
+                    for n in (('base', 'candidate') if (start + i) % 2 == 0 else ('candidate', 'base')):
                         block['order'].append(n)
                         block['samples'][n].append(observe(n, binaries[n]))
                 block['after'] = snapshot(reference)
@@ -224,9 +231,14 @@ def _paired(base, candidate, rounds, condition, observe, *, seed=None):
                 return result
         for variant in result['variants'].values():
             rows = variant['samples']
-            keys = set.intersection(*(set(row) for row in rows))
-            variant['summary'] = {k: summary([s[k] for s in rows]) for k in keys
-                                  if all(type(s[k]) in (int, float) for s in rows)}
+            if len(rows) != rounds:
+                raise ValueError('incomplete sample count')
+            for metric in required_metrics:
+                if any(metric not in row for row in rows):
+                    raise ValueError('missing required metric: ' + metric)
+            variant['summary'] = {k: summary([row[k] for row in rows]) for k in required_metrics}
+            if not all(complete_summary(row, rounds) for row in variant['summary'].values()):
+                raise ValueError('incomplete metric summary')
         result['status'] = 'OBSERVED'
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         result['reason'] = str(error)
@@ -295,7 +307,7 @@ def experiment_load(condition):
             worker.wait(timeout=10)
 
 
-def paired(base, candidate, rounds, condition, observe, *, seed=None):
+def paired(base, candidate, rounds, condition, observe, *, required_metrics=(), seed=None):
     condition = dict(DEFAULT if condition is None else condition)
     try:
         # Advisory host session lock: a second harness cannot overlap this one.
@@ -306,7 +318,7 @@ def paired(base, candidate, rounds, condition, observe, *, seed=None):
                     if any(worker.poll() is not None for worker in workers):
                         raise ValueError('bounded synthetic load expired')
                     return observe(name, binary)
-                return _paired(base, candidate, rounds, condition, checked_observe, seed=seed)
+                return _paired(base, candidate, rounds, condition, checked_observe, required_metrics=required_metrics, seed=seed)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return dict(schema=1, status='BLOCKED', reason=str(error), condition=condition,
                     calibration={}, seed=seed, order=[], blocks=[],

@@ -160,7 +160,7 @@ To reproduce the native M3b step, including the five real F3 cases:
 export CARGO_PROFILE_RELEASE_STRIP=none
 cargo build --locked -j 2 --release -p bingsu -p bingsu-collect
 python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu --unstripped-dir target/release/symbol-audit --strip
-python3 bench/git-product.py --prepare target/release/bingsu --out target/f3/preparation.json
+python3 bench/git-product.py --prepare target/release/bingsu --out "${RUNNER_TEMP:-/tmp}/measurements/preparation.json"
 python3 bench/collector-product.py --prepare target/release/bingsu
 CI=1 BINGSU_BIN="$PWD/target/release/bingsu" /tmp/f3-ci-tests/bin/python -m pytest tests/shell/test_collector_security.py bench/tests/test_collector_product.py bench/tests/test_git_product.py tools/fsbudget/tests -q -rA -p no:cacheprovider --basetemp=/tmp/f3-m3b-native
 ```
@@ -231,7 +231,11 @@ The separate native descriptor test still checks the OS locality observation.
 `protocol.py`. Existing `measure_pair(base, candidate, rounds)` calls still work;
 product-specific metrics and raw observations remain in the result. A successful
 measurement has status `OBSERVED`; missing evidence has status `BLOCKED`, never
-PASS. This does not certify formal B5–B7 or change a product budget.
+PASS. Each adapter declares required numeric metrics; any missing field blocks
+the session. Balanced block starts are shuffled using the recorded seed.
+Legacy n7 front/publication batches are `BLOCKED`, `diagnostic-only`, and
+`certification_eligible: false`; their numbers remain under `diagnostic_summary`.
+This does not certify formal B5–B7 or change a product budget.
 
 Build and prepare both release sibling pairs first, then stop builds, tests,
 traces and other measurement processes. Output must be outside every checkout
