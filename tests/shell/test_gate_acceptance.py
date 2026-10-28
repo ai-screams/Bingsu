@@ -122,7 +122,7 @@ DEFERRED_MILESTONES = ("M4", "M6")
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
 M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-READ-BYTES",
-                               "GATE-HELPER-LIFETIME", "GATE-ZOMBIES"})
+                               "GATE-HELPER-LIFETIME", "GATE-ZOMBIES", "GATE-FDS"})
 
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
@@ -131,8 +131,6 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 # its pair.
 M3D_PENDING = (
     "GATE-FS-HELPER.2",
-    "GATE-FDS.1", "GATE-FDS.2",
-    "GATE-HELPER-LIFETIME.2",
     "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
     "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
     "GATE-CLOCK-READS.1",

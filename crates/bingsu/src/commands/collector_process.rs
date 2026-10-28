@@ -495,6 +495,91 @@ mod tests {
         }
     }
 
+    // 이것을 실패시키는 것: Linux 생성의 addclose(fd 4와 fd 6 이상)를 지우는 것. 도우미가 CLOEXEC 없이
+    // 쥔 fd가 자식에 남는다.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_closes_inherited_fds_outside_the_fixed_slots() {
+        let _guard = crate::commands::sys::test_inherited_fd_lock();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::collector_process::tests::inherited_fds_parent",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "isolated parent: leaves descriptors without CLOEXEC at 4, 6 and 1025"]
+    fn inherited_fds_parent() {
+        use std::io::Read;
+        // SAFETY: writable limit storage.
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: valid resource and output pointer.
+        let got = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+        assert_eq!(got, 0);
+        limit.rlim_cur = limit.rlim_max.min(4096);
+        // SAFETY: isolated test process; soft limit within the hard limit.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let null = File::open("/dev/null").unwrap();
+        for slot in [4, 6, 1025] {
+            // SAFETY: read-only query; the slot must be free in this isolated process.
+            let flags = unsafe { libc::fcntl(slot, libc::F_GETFD) };
+            assert!(flags < 0, "fd {slot} in use");
+            // SAFETY: the free slot gets a duplicate without CLOEXEC and no Rust owner.
+            assert_eq!(unsafe { libc::dup2(null.as_raw_fd(), slot) }, slot);
+        }
+        let path = std::env::temp_dir().join(format!("b2-collector-fds-{}", std::process::id()));
+        let lock = File::create(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let (request, _write) = pipe().unwrap();
+        let (mut response, write) = pipe().unwrap();
+        let mut child = spawn_args(
+            std::env::current_exe().unwrap().as_os_str(),
+            &[
+                OsStr::new("--exact"),
+                OsStr::new("commands::collector_process::tests::inherited_fds_child"),
+                OsStr::new("--ignored"),
+                OsStr::new("--nocapture"),
+                OsStr::new("--test-threads=1"),
+            ],
+            &request,
+            &write,
+            &lock,
+            now_ns().unwrap() + 5_000_000_000,
+        )
+        .unwrap();
+        drop(write);
+        let mut bytes = String::new();
+        response.read_to_string(&mut bytes).unwrap();
+        while !child.reap().unwrap() {
+            std::thread::yield_now();
+        }
+        assert!(bytes.contains("collector census passed"), "{bytes}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "isolated child of spawn_closes_inherited_fds_outside_the_fixed_slots"]
+    fn inherited_fds_child() {
+        for fd in 0..2048 {
+            // SAFETY: read-only descriptor query, invalid slots are expected.
+            let open = unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
+            assert_eq!(open, [0, 1, 2, 3, 5].contains(&fd), "fd {fd}");
+        }
+        println!("collector census passed");
+    }
+
     // 이것을 실패시키는 것: signal_copy가 별도 fd 번호를 복제하는 것.
     #[cfg(target_os = "linux")]
     #[test]

@@ -201,6 +201,8 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(1));
         let report = crate::commands::n3_test::wait_report(&base.join("probe"));
         assert_eq!(&report[..5], &[3, 0, 0, 1, 1]);
+        // 이것을 실패시키는 것: fd 0–2 중 하나의 addopen을 지우는 것(시험 부모의 stdout·stderr가 남는다).
+        assert_eq!(report[7], 3, "fds 0-2 must be the spawn's own /dev/null");
         // The slow helper is alive, but the test parent has never waited for it.
         // SAFETY: zero signal only tests the known child's existence.
         assert_eq!(unsafe { libc::kill(report[5], 0) }, 0);

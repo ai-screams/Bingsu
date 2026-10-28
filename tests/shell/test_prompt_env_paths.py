@@ -7,7 +7,9 @@ import platform
 import ast
 import hashlib
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -1527,17 +1529,18 @@ class HelperStageFixture:
         pending.chmod(0o600)
         pending.replace(path)
 
-    def prompt(self, trace=None):
+    def prompt(self, trace=None, prelude=b"", pass_fds=()):
         f = self.base / "prompt.bash"
         # Each run is a fresh bash: start its prompt counter after the last
         # run's, as one long-lived shell would, so the collection breaker
         # sees a new sequence instead of a replayed one.
         self.seq += 1
-        f.write_bytes(bash_prompt_script(self.script, self.pwd, self.seq))
+        f.write_bytes(bash_prompt_script(self.script, self.pwd, self.seq, prelude))
         strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
                   "-e", "trace=all",
                   "-o", str(trace)] if trace else []
-        r = subprocess.run(strace + SHELL_CMD["bash"] + [str(f)], env=self.env, capture_output=True, timeout=60)
+        r = subprocess.run(strace + SHELL_CMD["bash"] + [str(f)], env=self.env, capture_output=True, timeout=60,
+                           pass_fds=pass_fds)
         assert r.returncode == 0, r.stderr
         return r
 
@@ -2107,3 +2110,262 @@ def test_stored_child_timing_control():
     assert_child_timing(passing, Path('/store'))
     with pytest.raises(AssertionError, match='snapshot'):
         assert_child_timing(moved, Path('/store'))
+
+
+# Descriptors the real front hands to the helper, and the helper to the collector.
+# The shell holds a pipe write end at each of these fds, without CLOEXEC.
+SHELL_PIPE_FDS = (3, 4, 5, 6, 7, 8, 9, 1025)
+FD_RECORDER = "bingsu-fd-record"
+# The shell runs this child right before the prompt and waits for it, so the
+# table it reads from /proc is the shell's table at that spawn. strace never
+# sees how the fds came to be (pass_fds), so this record is the initial table.
+RECORDER = """import json, os, sys
+pid = sys.argv[2]
+table = {}
+for name in os.listdir(f"/proc/{pid}/fd"):
+    flags = next(line for line in open(f"/proc/{pid}/fdinfo/{name}") if line.startswith("flags:")).split()[1]
+    table[name] = [os.readlink(f"/proc/{pid}/fd/{name}"), bool(int(flags, 8) & 0o2000000)]
+json.dump(table, sys.stdout)
+"""
+# Exit status of the shell fixture when it cannot raise its soft NOFILE above 1025.
+NOFILE_BLOCKED = 97
+
+
+class ShellPipes:
+    """One pipe per SHELL_PIPE_FDS slot; the test keeps the read ends.
+
+    The write ends reach bash at fds >= 100 (pass_fds) and the shell moves
+    each onto its slot with `exec N>&M M>&-`: a plain redirection, no CLOEXEC."""
+
+    def __init__(self):
+        import fcntl
+        self.read, self.passed, self.inode = {}, {}, {}
+        for slot in SHELL_PIPE_FDS:
+            r, w = os.pipe()
+            high = fcntl.fcntl(w, fcntl.F_DUPFD_CLOEXEC, 100)
+            os.close(w)
+            assert high not in SHELL_PIPE_FDS, ("pass-through fd collides with a slot", high)
+            self.read[slot], self.passed[slot], self.inode[slot] = r, high, os.fstat(r).st_ino
+
+    def prelude(self, record):
+        moves = " ".join(f"{slot}>&{high} {high}>&-" for slot, high in self.passed.items())
+        return (f"_b2_n=$(ulimit -Sn)\n"
+                f"if [[ $_b2_n != unlimited ]] && (( _b2_n < 1026 )); then ulimit -Sn 1026 || exit {NOFILE_BLOCKED}; fi\n"
+                f"exec {moves}\n"
+                f"{shlex.quote(sys.executable)} -I -c {shlex.quote(RECORDER)} {FD_RECORDER} $$ > {shlex.quote(str(record))}\n"
+                ).encode()
+
+    def close_passed(self):
+        for fd in self.passed.values():
+            os.close(fd)
+        self.passed = {}
+
+    def close(self):
+        self.close_passed()
+        for fd in self.read.values():
+            os.close(fd)
+        self.read = {}
+
+    def assert_held(self, initial):
+        # 이것을 실패시키는 것: fixture가 파이프를 셸에 넘기지 않거나 CLOEXEC로 두어 공허하게 통과하는 것.
+        for slot in SHELL_PIPE_FDS:
+            entry = initial.get(slot)
+            assert entry and entry.path == f"pipe:[{self.inode[slot]}]" and not entry.cloexec, (
+                "the shell must hold this pipe write end without CLOEXEC", slot, entry)
+
+
+def shell_initial(record):
+    import json
+    from fsbudget.attribute import FdEntry
+    return {int(fd): FdEntry(int(fd), path, cloexec, "inherited")
+            for fd, (path, cloexec) in json.loads(Path(record).read_text()).items()}
+
+
+def shell_fd_capture(stage, tmp_path):
+    """(trace from the recorder's spawn on, the shell table there, fixture, pipes)
+    for one traced prompt of `stage` through a bash that holds SHELL_PIPE_FDS."""
+    from fsbudget.strace_parse import Trace
+    assert shutil.which("strace"), "this Linux gate must execute strace"
+    require_release_helper(real_bin())
+    fixture = HelperStageFixture(stage)
+    pipes = ShellPipes()
+    try:
+        record, trace_path = fixture.base / "fd-record.json", tmp_path / f"{stage}.strace"
+        print(f"\nfd capture: {trace_path}")
+        fixture.prompt(trace_path, prelude=pipes.prelude(record), pass_fds=tuple(pipes.passed.values()))
+        initial = shell_initial(record)
+        trace = parse_trace(trace_path.read_text(errors="replace"))
+        assert not trace.errors, trace.errors[:5]
+        shell = trace.first_pid
+        recorder, = {c.pid for c in trace if c.name == "execve" and c.ret == "0" and f'"{FD_RECORDER}"' in c.args}
+        spawn, = [c for c in trace if c.pid == shell and c.name in SPAWNS and c.ret.split(" ")[0] == str(recorder)]
+    except BaseException:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+        raise
+    finally:
+        pipes.close()
+    after = Trace()
+    after.extend(c for c in trace if c.index > spawn.index)
+    after.first_pid = shell
+    return after, initial, fixture, pipes
+
+
+def exec_pid(trace, path, verb):
+    pids = {c.pid for c in trace if c.name == "execve" and c.ret == "0"
+            and c.args.startswith(f'"{path}", ') and f'"{verb}"' in c.args}
+    assert len(pids) == 1, ("one exec", path, verb, pids)
+    return pids.pop()
+
+
+def fd_summary(table):
+    return {fd: (entry.path, entry.cloexec, entry.origin) for fd, entry in sorted(table.items())}
+
+
+SPAWNED_DEV_NULL = ("/dev/null", False, "spawn-action")
+
+
+def check_front_receives_shell_pipes(after, initial, pipes, exe):
+    """Non-vacuity: the shell's pipes reach the front's exec, and the front marks each."""
+    from fsbudget.attribute import fd_table_at_exec
+    pipes.assert_held(initial)
+    front = exec_pid(after, exe, "prompt")
+    table = fd_table_at_exec(after, front, initial)
+    for slot in SHELL_PIPE_FDS:
+        assert table.get(slot) == initial[slot], ("the front must start with the shell's pipe", slot, table.get(slot))
+    marked = {int(c.args.split("<")[0]) for c in after if c.pid == front and c.name == "fcntl"
+              and c.args.endswith(", F_SETFD, FD_CLOEXEC") and c.ret == "0"}
+    assert set(SHELL_PIPE_FDS) <= marked, ("the front's F_SETFD loop must mark every shell pipe", sorted(marked))
+
+
+# 이것을 실패시키는 것: 앞단의 fcntl(F_SETFD) 루프를 건너뛰는 것(fd 3–9·1025가 도우미 exec에 남는다),
+# fd 2의 addopen을 지우는 것(bash 훅의 2>/dev/null이 경로를 같게 만들어도 출처가 셸 상속이 된다).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+def test_live_helper_execs_with_only_dev_null_stdio(tmp_path):
+    """GATE-FDS.1: at the helper's execve its table is exactly fds 0-2 on the
+    spawn's own /dev/null, while the shell holds pipe write ends at 3-9 and 1025."""
+    from fsbudget.attribute import fd_table_at_exec
+    after, initial, fixture, pipes = shell_fd_capture("unchanged", tmp_path)
+    try:
+        exe = str(fixture.inst.exe)
+        check_front_receives_shell_pipes(after, initial, pipes, exe)
+        helper = fd_table_at_exec(after, exec_pid(after, exe, "__refresh-v1"), initial)
+        assert fd_summary(helper) == {fd: SPAWNED_DEV_NULL for fd in (0, 1, 2)}, fd_summary(helper)
+    finally:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+# 이것을 실패시키는 것: 잠금의 adddup2 대상을 5에서 4로 바꾸는 것, collector 복사본을 F_DUPFD(CLOEXEC 없이)로
+# 만들고 addclose 루프도 지우는 것(fd 7 이상이 남는다), 앞단 F_SETFD 루프를 건너뛰는 것(도우미 표에서 먼저 실패).
+# 복사본 CLOEXEC와 addclose는 서로를 덮는 두 층이라 하나만 지우면 이 시험은 통과한다. addclose 하나는
+# collector_process.rs의 spawn_closes_inherited_fds_outside_the_fixed_slots가 잡는다.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+def test_live_collector_holds_only_fixed_fds(tmp_path):
+    """GATE-FDS.2: at the collector's execve its table is exactly 0 and 2 on
+    /dev/null, 1 the response pipe, 3 the request pipe and 5 the collection
+    lock, all from the helper's spawn actions. On Linux there is no fd 6:
+    the startup probe fd is macOS-only (collector.rs CollectorProbeFd)."""
+    from fsbudget.attribute import fd_table_at_exec
+    after, initial, fixture, pipes = shell_fd_capture("collect", tmp_path)
+    try:
+        exe = str(fixture.inst.exe)
+        check_front_receives_shell_pipes(after, initial, pipes, exe)
+        helper = fd_table_at_exec(after, exec_pid(after, exe, "__refresh-v1"), initial)
+        assert fd_summary(helper) == {fd: SPAWNED_DEV_NULL for fd in (0, 1, 2)}, fd_summary(helper)
+        collector = fd_summary(fd_table_at_exec(after, exec_pid(after, fixture.collector, "__collect-v1"), initial))
+        assert sorted(collector) == [0, 1, 2, 3, 5], collector
+        assert collector[0] == collector[2] == SPAWNED_DEV_NULL, collector
+        response, request, lock = collector[1], collector[3], collector[5]
+        assert re.fullmatch(r"pipe:\[\d+\]", response[0]) and re.fullmatch(r"pipe:\[\d+\]", request[0]), collector
+        assert response[0] != request[0], ("response and request are different pipes", collector)
+        assert lock[0].endswith("/collection.lock"), collector
+        assert response[1:] == request[1:] == lock[1:] == (False, "spawn-action"), collector
+    finally:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+# How long after the shell exits its pipes must reach EOF. The helper lives
+# 2 s (helper_limits LIFETIME); a helper holding a pipe keeps it open until then.
+SHELL_EOF_WAIT_S = 0.5
+
+
+# 이것을 실패시키는 것: 앞단의 fcntl(F_SETFD) 루프를 건너뛰는 것(막힌 도우미가 쓰지 않는 파이프를 쥐어
+# EOF가 도우미 종료까지 오지 않는다).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux FUSE fixture")
+def test_shell_pipe_reaches_eof_while_helper_is_alive(tmp_path):
+    """GATE-HELPER-LIFETIME.2: the helper never holds the shell's descriptors.
+
+    The config root sits on a FUSE mount whose daemon is stopped, so the
+    prompt's helper waits there. The shell holds pipe write ends at 3-9 and
+    1025 and exits right after the prompt: every read end, and the shell's
+    stdout and stderr, must reach EOF while that helper is still alive."""
+    import select
+    import time
+    from blocked_mount import blocked_mount
+    from shell_support import Blocked
+    base = tmp_path / "s"
+    base.mkdir(mode=0o700)
+    session = {}
+
+    def prepare(mount):
+        env = trusted_env(base)
+        env["HOME"] = str(base / "home-t")
+        os.mkdir(env["HOME"], 0o700)
+        env["XDG_CONFIG_HOME"] = str(mount / "cfg")
+        config = mount / "cfg" / "bingsu"
+        config.mkdir(parents=True, mode=0o700)
+        (config / "config.toml").write_text(TEMPLATES["plain"])
+        (config / "config.toml").chmod(0o600)
+        script = Install(base).init("bash", env)
+        wait_helpers(base)
+        session.update(env=env, script=script)
+
+    try:
+        with blocked_mount(tmp_path / "fuse", prepare=prepare):
+            pipes = ShellPipes()
+            shell = None
+            try:
+                record = base / "fd-record.json"
+                f = base / "prompt.bash"
+                f.write_bytes(bash_prompt_script(session["script"], base, 2, pipes.prelude(record)))
+                shell = subprocess.Popen(SHELL_CMD["bash"] + [str(f)], env=session["env"], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         pass_fds=tuple(pipes.passed.values()))
+                pipes.close_passed()
+                status = shell.wait(timeout=10)
+                exited = time.monotonic()
+                if status == NOFILE_BLOCKED:
+                    raise Blocked("the shell cannot raise its soft NOFILE above 1025")
+                pending = {f"fd {slot}": fd for slot, fd in pipes.read.items()}
+                pending.update(stdout=shell.stdout.fileno(), stderr=shell.stderr.fileno())
+                output = {name: b"" for name in pending}
+                while pending and (left := exited + SHELL_EOF_WAIT_S - time.monotonic()) > 0:
+                    ready, _, _ = select.select(list(pending.values()), [], [], left)
+                    for name, fd in list(pending.items()):
+                        if fd in ready:
+                            data = os.read(fd, 65536)
+                            output[name] += data
+                            if not data:
+                                del pending[name]
+                helpers = helper_processes(base)
+                assert not pending, ("no EOF within the wait: something alive holds the shell's descriptors",
+                                     sorted(pending), helpers)
+                # 이것을 실패시키는 것: 도우미가 이미 끝난 뒤에 EOF를 보고 통과하는 것(막힌 도우미가 없으면 공허하다).
+                assert helpers, "the prompt's helper is not alive on the blocked mount: the EOF proves nothing"
+                assert status == 0, (status, output["stderr"])
+                pipes.assert_held(shell_initial(record))
+            finally:
+                for pid in helper_processes(base):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                wait_helpers(base)
+                if shell is not None:
+                    shell.stdout.close()
+                    shell.stderr.close()
+                pipes.close()
+    except Blocked as error:
+        pytest.fail(f"BLOCKED: {error.reason}", pytrace=False)
