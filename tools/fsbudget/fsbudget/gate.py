@@ -35,6 +35,9 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
     and then hit its own stage deadline leaves a Deadline partial, which the
     supervisor stores after reaping exit 75 (spec message row: the results so
     far; S-17). That attempt is held to the publication formula, as exit 0 is.
+    A rename counts as publication only if every supervisor call before it
+    succeeded; the one tolerated failure is the absence check of the stage
+    and legacy request names (ENOENT) before the stage is created.
 
     Attribution retains counted helper events in syscall-entry order, including
     pre-exec child setup. The two successful helper thread creations identify
@@ -59,6 +62,9 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
     measured = {phase: Counter() for phase in expected}
     unlocked = False
     published = False
+    staged = False
+    failed = []  # supervisor calls that failed before the installing rename
+    unverified = []
     for c, kind in calls:
         phase = ("supervisor" if c.pid == supervisor else
                  "finish_gc" if c.pid == main and unlocked else "prefix")
@@ -69,9 +75,19 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
             if unlocked:
                 return ["collect: duplicate snapshot unlock boundary"], False
             unlocked = True
+        if c.pid == supervisor and not published:
+            # 이것을 실패시키는 것: 단계 이름 부재 확인의 허용을 지우는 것(정상 발행이 실패), 만든 뒤의
+            # 부재까지 허용하는 것, 실패한 감독 호출을 보지 않는 것.
+            if c.ret.startswith("-1") and not (
+                    not staged and c.ret.startswith("-1 ENOENT")
+                    and len(args) >= 2 and args[1] in {'".response.stage"', '".stage-request"'}):
+                failed.append(c)
+            if c.name == "openat" and len(args) >= 2 and args[1] == '".response.stage"' and not c.ret.startswith("-1"):
+                staged = True  # the stage's creation
         if (c.pid == supervisor and c.name == "renameat" and c.ret == "0"
                 and len(args) == 4 and args[1] == '".response.stage"' and args[3] == '"response"'):
             published = True
+            unverified = failed[:1]
     # 이것을 실패시키는 것: 발행 여부와 무관하게 exit 75에 마감 공식을 쓰는 것(발행한 마감 회차가 실패),
     # exit 75에 늘 발행 공식을 쓰는 것(발행 없는 마감 회차의 감독 tail 초과를 놓침).
     if deadline is not None and not published:
@@ -82,6 +98,8 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
     errors = []
     if not unlocked:
         errors.append("collect: missing snapshot unlock boundary")
+    for c in unverified:
+        errors.append(f"collect: publication after a failed supervisor call: {c.name}({c.args}) = {c.ret}")
     # Independent phase and kind limits prevent tail slack hiding a prefix
     # regression, and GC slack hiding an extra supervisor call on exit 75.
     for phase, want in expected.items():

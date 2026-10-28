@@ -1933,6 +1933,21 @@ def deadline_published_capture():
     return lines, collector, plan
 
 
+def failed_before_install(capture, result="-1 EIO (Input/output error)"):
+    """The supervisor's last check of the staged name before its installing
+    rename fails, and the rename is kept: publication after failed verification."""
+    lines, collector, plan = capture
+    install = max(i for i, line in enumerate(lines) if 'renameat(' in line and '".response.stage"' in line
+                  and line.rstrip().endswith('"response") = 0'))
+    pid = lines[install].split()[0]
+    check = max(i for i in range(install) if lines[i].split()[0] == pid and 'newfstatat(' in lines[i]
+                and '".response.stage"' in lines[i])
+    assert lines[check].endswith(" = 0"), lines[check]
+    lines = list(lines)
+    lines[check] = lines[check][:-len(" = 0")] + " = " + result
+    return lines, collector, plan
+
+
 COLLECT_CAPTURES = {"published": lambda: helper_stage_case("collect"),
                     "deadline": deadline_helper_capture,
                     "deadline-published": deadline_published_capture}
@@ -2011,6 +2026,16 @@ def test_collect_accepts_a_deadline_partial_publication(monkeypatch, tmp_path):
     assert evidence["publish_attempt"] == 1 and evidence["errors"] == []
     from fsbudget.formula import helper_collect_expected
     assert evidence["phase_expected"] == json.loads(json.dumps(helper_collect_expected(plan)))
+
+
+# 이것을 실패시키는 것: 설치 rename만 보고 발행으로 받는 것(그 앞 감독 검증의 실패를 보지 않음), 만든 뒤의
+# 단계 이름 부재(ENOENT)를 처음의 부재 확인처럼 허용하는 것. exit 0과 exit 75 모두.
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+@pytest.mark.parametrize("result", ["-1 EIO (Input/output error)", "-1 ENOENT (No such file or directory)"])
+def test_collect_rejects_publication_after_failed_verification(capture, result):
+    lines, collector, plan = failed_before_install(COLLECT_CAPTURES[capture](), result)
+    with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
+        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
 
 
 def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
