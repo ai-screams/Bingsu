@@ -1,5 +1,6 @@
 //! Codec/CRC costs, separate from source parsing and template compilation.
 use bingsu_core::{
+    bands::{Band, MAX_BANDS},
     config::compile::CompiledConfig,
     snapshot::{Clock, Identity, Marker, Refusal, crc32c, eligible},
     snapshot_codec::{Error, decode_compiled, encode_compiled},
@@ -88,13 +89,54 @@ fn eligibility(input: (Identity, Marker, Clock)) -> Result<u64, Refusal> {
 fn snapshot_eligibility(input: (Identity, Marker, Clock)) -> Result<u64, Refusal> {
     black_box(eligibility(black_box(input)))
 }
+// Baseline for the front's whole-config decode: the ordinary config and the
+// 4,096-band ceiling. The selected-band decode is measured against these.
+fn encoded_normal() -> Vec<u8> {
+    encoded()
+}
+fn encoded_4096_bands() -> Vec<u8> {
+    // The built-in theme's variant is small enough that 4,097 copies stay
+    // under the codec's 16 MiB cap, as the selected-variant bench does.
+    let mut c = fixture::compile("");
+    c.bands = (0..MAX_BANDS)
+        .map(|i| Band {
+            min_cols: Some(i as u16 * 16),
+            max_cols: Some(i as u16 * 16 + 15),
+            order: None,
+        })
+        .collect();
+    c.band_names = (0..MAX_BANDS).map(|i| format!("b{i}")).collect();
+    // The built-in widths name the band that was just replaced.
+    c.widths.clear();
+    c.band_order = (0..MAX_BANDS).collect();
+    c.variants = vec![c.variants[0].clone(); MAX_BANDS + 1];
+    let b = encode_compiled(&c).unwrap();
+    assert_eq!(decode_compiled(&b).unwrap().bands.len(), MAX_BANDS);
+    b
+}
+#[library_benchmark]
+#[bench::normal(setup = encoded_normal)]
+fn front_decode_normal(b: Vec<u8>) -> (Vec<u8>, CompiledConfig) {
+    let c = black_box(decode(black_box(&b))).unwrap();
+    assert!(c.bands.len() < 8);
+    (b, c)
+}
+#[library_benchmark]
+#[bench::bands4096(setup = encoded_4096_bands)]
+fn front_decode_4096_bands(b: Vec<u8>) -> (Vec<u8>, CompiledConfig) {
+    let c = black_box(decode(black_box(&b))).unwrap();
+    assert_eq!(c.bands.len(), MAX_BANDS);
+    (b, c)
+}
 library_benchmark_group!(
     name = snapshot,
     benchmarks = [
         snapshot_encode,
         snapshot_decode,
         snapshot_crc,
-        snapshot_eligibility
+        snapshot_eligibility,
+        front_decode_normal,
+        front_decode_4096_bands
     ]
 );
 main!(library_benchmark_groups = snapshot);
