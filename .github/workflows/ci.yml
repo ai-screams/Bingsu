@@ -229,6 +229,10 @@ jobs:
           # tests/gate-acceptance.tsv rows (bin:bingsu).
           grep -F 'test commands::refresh::tests::mutations_after_staging_never_get_a_new_marker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test commands::refresh::tests::invalid_preserves_display_and_advances_only_verification ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::front_matches_checkpoint_control_at_every_kill_point ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::marker_disagreeing_in_generation_or_summary_launches_no_unit ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test commands::refresh::tests::confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degrades ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"

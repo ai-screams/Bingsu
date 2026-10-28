@@ -1344,6 +1344,59 @@ pub(crate) mod tests {
             fds: Vec::new(),
         }
     }
+    std::thread_local! { static PUBLISHER_CLOCK: std::cell::Cell<Option<Clock>> = const { std::cell::Cell::new(None) }; }
+    fn publisher_clock(deadline: Option<Deadline>) -> ClockPins {
+        let at = PUBLISHER_CLOCK.get().expect("publisher clock");
+        ClockPins {
+            deadline,
+            identity: Some(at),
+            fixed_now: Some(at.now),
+            #[cfg(target_os = "linux")]
+            fds: Vec::new(),
+        }
+    }
+    /// The front's whole response from a real read of a store the refresh
+    /// tests published, observing the publisher's own clock at `at`.
+    pub(crate) fn published_response(
+        runtime: &std::path::Path,
+        config: &[u8],
+        state: &[u8],
+        at: Clock,
+    ) -> staged::Response {
+        let m = fs::metadata(runtime).unwrap();
+        let mut args: Vec<Vec<u8>> = [
+            "--ctx", "1", "--record", "B1", "--shell", "bash", "--width", "80",
+        ]
+        .iter()
+        .map(|a| a.as_bytes().to_vec())
+        .collect();
+        args.push([b"--config-root=".as_slice(), config].concat());
+        args.push([b"--state-root=".as_slice(), state].concat());
+        args.push(
+            format!(
+                "--runtime-root={}:{}:{}",
+                m.dev(),
+                m.ino(),
+                runtime.display()
+            )
+            .into_bytes(),
+        );
+        PUBLISHER_CLOCK.set(Some(at));
+        let mut p = prepare_with_clock(
+            &args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            publisher_clock,
+            None,
+        );
+        loop {
+            match std::mem::replace(&mut p.step, Step::Done(staged::Observed::default())) {
+                Step::Done(observed) => break staged::finish(p.plan, observed),
+                Step::Read(effect) => {
+                    let observation = p.after(&effect);
+                    p.step = staged::next(&mut p.plan, Some(observation));
+                }
+            }
+        }
+    }
     fn released(fd: i32, old: FdFacts) {
         // Other tests may reuse this process-global number. A reused descriptor
         // is fine; only the exact unique fixture inode would indicate a leak.
