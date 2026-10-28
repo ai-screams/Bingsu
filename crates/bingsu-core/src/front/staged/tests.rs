@@ -891,4 +891,129 @@ mod cases {
             assert!(!sources.accepts(3, f));
         }
     }
+
+    // C3 (GATE-EXEC-DEADLINE.1, GATE-CLOCK-READS.1): the approval clock samples and the deadline.
+    fn command_harness() -> Harness {
+        let s = snapshot(
+            "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\n[layout.line2]\nleft=['custom/yes','char']",
+        );
+        let mut h = Harness::new();
+        h.current = Some(s.encode(1, 0).unwrap());
+        h.marker = Some(marker(&s).encode().to_vec());
+        h
+    }
+    // 판정 직후 시계가 마감을 넘긴 fixture: 마감 1ns 전 관찰은 그 단위를 승인하고(양성 대조),
+    // 마감 이상이면 permit도 단위도 없다.
+    // 이것을 실패시키는 것: snapshot::eligible의 T 비교를 `>=`에서 `>`로 바꾸는 것, 끝 시계 대신 시작 시계로
+    // 판정하는 것, FinalClock 단계를 생략하는 것.
+    #[test]
+    fn finish_refuses_permit_when_final_clock_reaches_deadline() {
+        let end = 100 + T_NS;
+        for (now, approved) in [(end - 1, true), (end, false), (end + 1, false)] {
+            let mut h = command_harness();
+            h.final_clock.as_mut().unwrap().now = now;
+            let r = h.run(&args(), Mode::Dark);
+            if approved {
+                assert_eq!(r.status, Status::OK_NONE, "{now}");
+                assert_eq!(r.execution.permit().map(|p| p.deadline), Some(end));
+                assert_eq!(
+                    r.execution
+                        .units()
+                        .iter()
+                        .map(|u| u.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["custom/yes"]
+                );
+            } else {
+                assert_eq!(r.status, Status::DEGRADED_TRUST_EXPIRED, "{now}");
+                assert_eq!(r.execution.permit(), None, "{now}");
+                assert!(r.execution.units().is_empty(), "{now}");
+            }
+            assert_eq!(h.clocks, 2);
+        }
+    }
+    // 경로마다 계획이 내는 시계 단계 수가 고정이다: 시작 시계는 UID 바로 뒤 하나, 끝 시계는 모든
+    // 파일을 닫은 뒤 하나이고, runtime root가 거부되거나 boot 정체가 없으면 끝 시계가 없다.
+    // 이것을 실패시키는 것: FinalClock 단계를 생략하는 것(next_file이 Cleanup으로 감), 시계 단계를 더 내는 것,
+    // 끝 시계를 파일을 닫기 전에 내는 것.
+    #[test]
+    fn staged_plan_emits_fixed_clock_operations_per_path() {
+        let mut bad_runtime = args();
+        bad_runtime[8] = b"--runtime-root=1:8:/r";
+        for (case, argv, want) in [
+            ("normal", args(), 2),
+            ("last-good", args(), 2),
+            ("marker-invalid", args(), 2),
+            ("marker-missing", args(), 2),
+            ("runtime-root", bad_runtime, 1),
+            ("no-start-clock", args(), 1),
+            (
+                "bad-args",
+                vec![b"--ctx".as_slice(), b"2", b"--record", b"B1"],
+                0,
+            ),
+        ] {
+            let mut h = command_harness();
+            match case {
+                "last-good" => {
+                    h.last = h.current.clone();
+                    h.current.as_mut().unwrap()[192] ^= 1;
+                }
+                "marker-invalid" => {
+                    let mut m = Marker::decode(h.marker.as_ref().unwrap()).unwrap();
+                    m.invalid = true;
+                    h.marker = Some(m.encode().to_vec());
+                }
+                "marker-missing" => h.marker = None,
+                "no-start-clock" => h.clock = None,
+                _ => {}
+            }
+            let r = h.run(&argv, Mode::Dark);
+            let clocks: Vec<_> = h
+                .calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| matches!(c, Operation::Clock))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(clocks.len(), want, "{case}");
+            assert_eq!(h.clocks, want, "{case}");
+            if want > 0 {
+                assert!(matches!(h.calls[0], Operation::Uid), "{case}");
+                assert_eq!(clocks[0], 1, "{case}: start clock right after the uid");
+            }
+            if want == 2 {
+                // The end clock follows every file effect; after it only directory cleanup runs,
+                // and the harness checks that no file is left open at Done.
+                let last_file = h
+                    .calls
+                    .iter()
+                    .rposition(|c| matches!(c, Operation::Read { .. } | Operation::OpenFile { .. }))
+                    .unwrap();
+                assert!(clocks[1] > last_file, "{case}");
+                assert!(
+                    h.calls[clocks[1] + 1..].iter().all(|c| matches!(
+                        c,
+                        Operation::Close(Slot::Directory0 | Slot::Directory1)
+                    )),
+                    "{case}"
+                );
+            }
+            let expected = match case {
+                "normal" => Status::OK_NONE,
+                "last-good" => Status::ERROR_CONFIG_LAST_GOOD,
+                "marker-invalid" => Status::DEGRADED_TRUST_INVALID,
+                "marker-missing" => Status::DEGRADED_TRUST_UNVERIFIED,
+                "runtime-root" => Status::DEGRADED_RUNTIME_ROOT,
+                "no-start-clock" => Status::ERROR_CONFIG_DEFAULT,
+                _ => Status::ERROR_BAD_ARGS,
+            };
+            assert_eq!(r.status, expected, "{case}");
+            assert_eq!(
+                r.execution.permit().is_some(),
+                case == "normal" || case == "last-good",
+                "{case}"
+            );
+        }
+    }
 }

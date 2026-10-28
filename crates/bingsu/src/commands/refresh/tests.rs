@@ -1083,11 +1083,15 @@ struct FrontView {
     permit: Option<bingsu_core::handoff::Permit>,
 }
 fn read_front(f: &Fx) -> FrontView {
+    read_front_at(f, clock())
+}
+/// The front's view when its own clock (start and end samples) reads `at`.
+fn read_front_at(f: &Fx, at: Clock) -> FrontView {
     let r = crate::prompt_read::tests::published_response(
         &f.request.runtime.path,
         f.request.config_canonical.as_os_str().as_bytes(),
         f.request.state_root.as_os_str().as_bytes(),
-        clock(),
+        at,
     );
     FrontView {
         record: r.record,
@@ -2121,4 +2125,90 @@ fn n7_runtime_fsync_child() {
     f.put(COMMAND);
     published(f.run());
     assert!(matches!(f.run(), RefreshResult::Revalidated { .. }));
+}
+
+// ---- C3: trust revocation past verified_at + T and scan-time changes ----
+// 신뢰 철회(GATE-TRUST-REVOKE.1): 설정 파일에 chmod g+w를 한 뒤 다시 확인할 도우미가 끝나지 못하면
+// (다른 도우미가 문맥 잠금을 쥐고 막혀 Busy) 옛 표식이 그대로 남고, 앞단 시계가 verified_at + T에
+// 닿은 프롬프트부터 그 파일의 실행 단위는 승인되지 않는다. 마감 1ns 전은 아직 승인한다(양성 대조,
+// 스펙이 받아들인 T 창). 도우미가 다시 확인을 끝내는 경로(P-R4, 그 파일만 빠짐)는 C2의
+// confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degrades가 맡는다.
+// 이것을 실패시키는 것: snapshot::eligible의 T 비교를 `>=`에서 `>`로 바꾸는 것.
+#[test]
+fn chmod_g_w_after_verified_at_plus_t_approves_no_unit() {
+    use bingsu_core::status::Status;
+    let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+    let f = Fx::new("revoke-after-t");
+    f.put(COMMAND);
+    published(f.run());
+    let verified = f.marker().verified_at;
+    let before = f.state();
+    mode(&f.request.config_canonical.join("config.toml"), 0o620);
+    {
+        // A helper blocked while holding the context lock (GATE-HELPER-LIFETIME.3).
+        let root = f.open();
+        let _held = root.try_lock().unwrap();
+        assert_eq!(f.run(), RefreshResult::Busy);
+    }
+    assert_eq!(f.state(), before);
+    let at = |now| Clock { now, ..clock() };
+    let inside = read_front_at(&f, at(verified + snapshot::T_NS - 1));
+    assert_eq!(
+        (inside.status, argv(&inside)),
+        (Status::OK_NONE, command("NEVER_EXECUTE"))
+    );
+    assert_eq!(
+        inside.permit.map(|p| p.deadline),
+        Some(verified + snapshot::T_NS)
+    );
+    for now in [verified + snapshot::T_NS, verified + 2 * snapshot::T_NS] {
+        let past = read_front_at(&f, at(now));
+        assert_eq!(past.status, Status::DEGRADED_TRUST_EXPIRED, "{now}");
+        assert!(past.units.is_empty(), "{now}");
+        assert_eq!(past.permit, None, "{now}");
+    }
+}
+// 훑기 중 변경(GATE-EXEC-DEADLINE.2): 원본을 다 읽은 직후(Checkpoint::Read, 최종 재확인 전) 설정 파일에
+// chmod g+w를 하거나 같은 내용의 새 파일로 교체하면 최종 재확인이 실패해 Incomplete이고, snapshot·
+// last-good·marker·sequence가 바이트 단위로 그대로다. 아무것도 바꾸지 않은 대조는 Revalidated이고
+// 표식이 바뀐다(표식이 바뀔 수 있는 실행이었음을 보임). Staged 시점 주입은 GATE-EXEC-DEADLINE.2-m3a 행.
+// 이것을 실패시키는 것: 최종 재확인(Loader::revalidate_with)을 통째로 생략하는 것. 원본 관찰 비교만 끄면
+// 보유한 실행 가능 파일의 재확인이 같은 변화를 잡는다(동등 변이, 보고서 참조).
+#[test]
+fn scan_time_chmod_or_replace_keeps_marker() {
+    let mut seen = Vec::new();
+    for case in ["control", "chmod-g+w", "replace"] {
+        let f = Fx::new(&format!("scan-time-{case}"));
+        f.put(COMMAND);
+        published(f.run());
+        let before = (f.state(), f.bytes("sequence"));
+        let path = f.request.config_canonical.join("config.toml");
+        let got = f.hook(&mut |p| {
+            if p == Checkpoint::Read {
+                match case {
+                    "chmod-g+w" => mode(&path, 0o620),
+                    "replace" => {
+                        let staged = f.request.config_canonical.join("config.toml.new");
+                        put(&staged, COMMAND.as_bytes());
+                        fs::rename(&staged, &path).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+        // Every case is reported together, so one mutation shows each case's outcome.
+        seen.push((case, got, (f.state(), f.bytes("sequence")) == before));
+    }
+    assert_eq!(
+        seen,
+        [
+            (
+                "control",
+                RefreshResult::Revalidated { generation: 1 },
+                false
+            ),
+            ("chmod-g+w", RefreshResult::Incomplete, true),
+            ("replace", RefreshResult::Incomplete, true),
+        ]
+    );
 }

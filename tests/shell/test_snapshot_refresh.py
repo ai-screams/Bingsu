@@ -1,6 +1,7 @@
 """N7 actual helper -> store -> prompt integration (same fixture on every OS)."""
 import concurrent.futures
 import fcntl
+import sys
 
 import pytest
 from snapshot_support import SnapshotSession, require_native_boot
@@ -124,3 +125,87 @@ def test_untrusted_file_is_left_out_and_the_rest_republished(tmp_path):
     record = session.prompt()
     assert b"KEPT" in record and b"degraded:" not in record, record
     session.wait_quiet()
+
+
+REVOKE_CONFIG = ('[segment."custom/probe"]\nkind = "command"\ncommand = ["printf", "NEVER_EXECUTE"]\n'
+                 '[layout.line1]\nleft = ["custom/probe", "char"]\n')
+
+
+def trust_window_ns():
+    """T from the product source (crates/bingsu-core/src/snapshot.rs), not a copy."""
+    import re
+    from conftest import ROOT
+    text = (ROOT / "crates/bingsu-core/src/snapshot.rs").read_text()
+    return int(re.search(r"pub const T_NS: u64 = ([0-9_]+);", text).group(1).replace("_", ""))
+
+
+# GATE-TRUST-REVOKE.2: the config root sits on a FUSE mount whose daemon is stopped, so no helper can
+# re-verify after `chmod g+w` on the config file. The old marker stays byte for byte; prompts before
+# verified_at + T keep ok:none, and from verified_at + T on every prompt is degraded:trust-expired, which
+# in the front (finish) means no permit and no execution unit (units are not visible live before M6; the
+# unit-level assertion is the Rust test chmod_g_w_after_verified_at_plus_t_approves_no_unit). It waits
+# out T (about 60 s) on the real CLOCK_BOOTTIME, the clock of a Linux marker.
+# 이것을 실패시키는 것: snapshot::eligible의 만료 검사(`now >= verified_at + T`)를 지우는 것. 경계에서 정확히
+# 같은 ns를 맞출 수 없으므로 `>=`를 `>`로 바꾸는 변이는 Rust 시험 둘이 잡는다.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux FUSE fixture and CLOCK_BOOTTIME")
+def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
+    import struct
+    import time
+    from blocked_mount import blocked_mount
+    from shell_support import Blocked
+    from test_helper_lifecycle import LifetimeSession, fail_blocked, stop_helpers
+    t_ns = trust_window_ns()
+    holder = {}
+
+    def prepare(mount):
+        session = LifetimeSession(tmp_path / "s", config=mount / "cfg")
+        session.put(REVOKE_CONFIG)
+        session.init()
+        session.wait_quiet()
+        record = session.prompt()
+        assert b"ok:none" in record, record
+        session.wait_quiet()  # that prompt's helper revalidated; no helper is running now
+        holder["session"] = session
+
+    def boottime():
+        return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+
+    def prompt_between():
+        before = boottime()
+        record = session.prompt()
+        return before, record, boottime()
+
+    try:
+        with blocked_mount(tmp_path / "fuse", prepare=prepare):
+            session = holder["session"]
+            try:
+                marker_path = session.store() / "marker"
+                marker = marker_path.read_bytes()
+                assert marker[:8] == b"BNGMRK02" and marker[12] == 1 and marker[13] == 1, marker
+                end = struct.unpack_from("<Q", marker, 32)[0] + t_ns
+                # The daemon is stopped: chmod the file through the mount's source folder.
+                (tmp_path / "fuse/source/cfg/bingsu/config.toml").chmod(0o620)
+                inside = []
+                while True:
+                    before, record, after = prompt_between()
+                    if after < end:
+                        assert b"ok:none" in record, ("inside T", record)
+                        inside.append(record)
+                        inside_end = after
+                    assert marker_path.read_bytes() == marker, "a helper rewrote the marker"
+                    if before >= end:
+                        break
+                    # One prompt shortly before the boundary, then one just past it; never a busy loop.
+                    wait = (end - boottime()) / 1e9
+                    time.sleep(max(0.0, wait - 1.0) if wait > 1.5 else max(0.0, wait) + 0.05)
+                assert inside, "no prompt ran inside T"
+                print(f"\ntrust revocation: {len(inside)} prompts inside T, last {(end - inside_end) / 1e6:.1f} ms "
+                      f"before verified_at + T; first expired {(before - end) / 1e6:.1f} ms after it")
+                assert b"degraded:trust-expired" in record and b"!" in record, record
+                _, again, _ = prompt_between()
+                assert b"degraded:trust-expired" in again, again
+                assert marker_path.read_bytes() == marker, "a helper rewrote the marker"
+            finally:
+                stop_helpers(session)
+    except Blocked as error:
+        fail_blocked(error)
