@@ -104,6 +104,7 @@ class Attribution:
     counts: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     cloexec_pairs: list = field(default_factory=list)
+    helper_calls: list = field(default_factory=list)
 
 
 def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
@@ -456,7 +457,8 @@ class _RepositoryProbe:
         return "unknown-fs"
 
 
-def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False) -> Attribution:
+def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False,
+                        helper_vocabulary: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
     Work in syscall *entry* order. A vfork child's exec may precede its
@@ -469,9 +471,13 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
+    `helper_vocabulary` counts helper calls with classify.helper_kind (the
+    per-stage helper gate); other callers keep the generic helper kinds. It
+    also ends a helper's loader exemption at its first counted call, so a
+    loader-shaped access after startup (say /proc/self/maps) is counted.
     """
     import json
-    from .classify import collector_kind, collector_bootstrap_kind
+    from .classify import collector_kind, collector_bootstrap_kind, helper_kind
     from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
@@ -509,6 +515,13 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     roles, owner, confined = {}, {}, set()
     descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
+    helper_calls = []
+
+    def count(role, kind, call):
+        counts[role][kind] += 1
+        if helper_vocabulary and role == "helper":
+            helper_calls.append((call, kind))
+
     root = trace.first_pid
     if root is not None:
         roles[root], owner[root] = "front", root
@@ -520,6 +533,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     filters = defaultdict(int)
     repository_probe = {}
     bootstrap_ended = set()
+    started = set()  # helper processes whose loader prologue is over
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
 
@@ -557,14 +571,15 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         previous_calls[c.pid] = c
         if c.name == UNKNOWN_SYSCALL:
             unknown_calls[process] += 1
-            counts[role][UNKNOWN_SYSCALL] += 1
+            count(role, UNKNOWN_SYSCALL, c)
             if role != "collector" or not helper_kill or unknown_calls[process] > 1:
                 bad(c, "unknown syscall requires collector helper kill path, once per process")
             continue
         args = split_args(c.args)
         result = c.ret.split()[0]
         success = bool(re.match(r"^\d+", c.ret))
-        k = collector_bootstrap_kind(c) if role == "collector" else collector_kind(c)
+        k = (collector_bootstrap_kind(c) if role == "collector"
+             else helper_kind(c) if role == "helper" and helper_vocabulary else collector_kind(c))
         if k in {"spawn", "thread"}:
             if k == "spawn" and (role not in {"front", "helper"} or process in confined):
                 bad(c, "spawn outside the pre-filter creation site")
@@ -574,7 +589,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 owner[child] = process if k == "thread" else child
                 if k != "thread":
                     descriptors.start(child, process)
-            counts[role][k] += 1
+            count(role, k, c)
             continue
         if k == "exec":
             if result == "0":
@@ -595,8 +610,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 else:
                     roles[c.pid] = role = new
                     seen_exec.add(process)
+                    started.discard(process)
                     collector_execs += int(new == "collector")
-            counts[role]["exec"] += 1
+            count(role, "exec", c)
             continue
         if (c.name == "seccomp" and "SECCOMP_SET_MODE_FILTER" in c.args
                 or c.name == "prctl" and "PR_SET_SECCOMP" in c.args) and result == "0":
@@ -611,8 +627,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
-        if process not in confined and _prologue_call(c, target(c)):
+        helper_startup = not (helper_vocabulary and role == "helper") or process not in started
+        if process not in confined and helper_startup and _prologue_call(c, target(c)):
             continue
+        if helper_vocabulary and role == "helper" and k is not None:
+            started.add(process)
         if role == "collector":
             if c.name == "uname" and process not in confined:
                 k = "kernel_release"
@@ -647,13 +666,13 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             if where and k in {"openat", "read"} and where not in {"/proc/self/statm", f"/proc/{process}/statm"}:
                 bad(c, "collector read outside the M3b bootstrap")
         if k:
-            counts[role][k] += 1
+            count(role, k, c)
     if not seen_exec and not counts:
         errors.append("no product process observed")
     required = pinned.get("collectors", 1)
     if collector_execs != required:
         errors.append(f"collector execs: measured {collector_execs}, expected {required}")
-    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs)
+    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs, helper_calls)
 
 
 def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) -> None:

@@ -172,7 +172,7 @@ def test_b2_lower_bound_is_replaced_by_product_filter_evidence(preparation, tmp_
     assert sample["m1_stub_exit_ns"] > 0 and sample["m1_stub_limits_ns"] > 0
 
 
-def workflow_job(text, job):
+def workflow_job(text, job, *, action_inputs=False):
     """Conservative structural subset, not a general YAML loader.
 
     No YAML parser is hash-pinned in the test requirements. The gate accepts
@@ -180,6 +180,8 @@ def workflow_job(text, job):
     single-line runs. Duplicate keys, anchors, aliases, merges, folded scalars
     and multiline conditions fail closed. actionlint validates the full YAML.
     Comments and metadata can never supply executable evidence.
+    action_inputs additionally exposes simple block-mapping `with` inputs;
+    callers auditing artifact destinations require single-line scalar values.
     """
     header = text.split("\njobs:\n", 1)[0]
     assert not re.search(r"(?m)^defaults:", header), "workflow shell defaults"
@@ -234,7 +236,16 @@ def workflow_job(text, job):
         lines[0] = "        " + lines[0]
         parsed = fields(lines, 8)
         assert_shell_settings(parsed)
-        steps.append({key: value for key, (value, _) in parsed.items()})
+        step = {key: value for key, (value, _) in parsed.items()}
+        if action_inputs and "with" in parsed:
+            value, nested = parsed["with"]
+            assert not value, "inline action inputs are unsupported"
+            inputs = fields(nested, 10)
+            assert all(value and not any(line.strip() for line in nested)
+                       and value[0] not in "|>&*!"
+                       for value, nested in inputs.values()), "single-line action inputs required"
+            step["with"] = {key: value for key, (value, _) in inputs.items()}
+        steps.append(step)
     assert_shell_settings(meta)
     return meta, steps
 
@@ -483,7 +494,10 @@ def job_platforms(job, meta):
 # anti-bypass checks apply to the steps a row actually uses (see
 # acceptance_pair_allowed).
 SHELL_EVIDENCE_JOBS = {
-    "filter-calls": ["fail-fast: false", "matrix:", "libc: [gnu, musl]", "profile: [debug, release]"],
+    "filter-calls": ["fail-fast: false", "matrix:", "os: [ubuntu-latest]", "libc: [gnu, musl]",
+                     "profile: [debug, release]", "include:",
+                     "- os: ubuntu-24.04-arm", "libc: gnu", "profile: release",
+                     "- os: ubuntu-24.04-arm", "libc: musl", "profile: release"],
     "shell-macos": None,
 }
 
@@ -499,9 +513,15 @@ def shell_test_evidence(text):
         strategy = meta.get("strategy", ("", []))[1]
         assert [line.strip() for line in strategy if line.strip() and not line.lstrip().startswith("#")] == (matrix or []), job
         platforms = job_platforms(job, meta)
+        cells = job_cells(strategy)
+        # Matrix labels prove architecture/libc coverage only when runs-on
+        # actually selects their runner (in particular, the ARM release cells).
+        if cells is not None:
+            assert meta["runs-on"][0] == "${{ matrix.os }}", (job, "release runner", meta["runs-on"][0])
         for step in steps:
             step["_job"] = ("shell.yml", job)
             step["_platforms"] = platforms
+            step["_cells"] = cells
             try:
                 run_commands(step)
             except ValueError:
@@ -510,6 +530,94 @@ def shell_test_evidence(text):
                 continue
             evidence.append(step)
     return evidence
+
+
+def job_cells(strategy):
+    """Matrix cells of a job with a `profile` axis, as dicts, or None.
+
+    Reads the pinned subset only: list axes, then `include:` entries of plain
+    `key: value` lines. An entry that changes an original value is its own new
+    cell (GitHub's include rule); one that only adds keys extends the original
+    cells it matches.
+    """
+    lines = [line.strip() for line in strategy if line.strip() and not line.lstrip().startswith("#")]
+    axes, includes, entry = {}, [], None
+    for line in lines[lines.index("matrix:") + 1:] if "matrix:" in lines else []:
+        if line == "include:":
+            entry = False
+        elif entry is not None and line.startswith("- "):
+            entry = {}
+            includes.append(entry)
+            line = line[2:]
+        if line == "include:":
+            continue
+        key, _, value = line.partition(": ")
+        if isinstance(entry, dict):
+            entry[key] = value
+        elif entry is None and (listed := re.fullmatch(r"\[(.*)\]", value)):
+            axes[key] = [v.strip() for v in listed[1].split(",")]
+        elif entry is not False:
+            raise AssertionError(("unsupported matrix line", line))
+    if "profile" not in axes:
+        return None
+    import itertools
+    original = [dict(zip(axes, values)) for values in itertools.product(*axes.values())]
+    added = []
+    for entry in includes:
+        if any(k in axes and entry[k] not in axes[k] for k in entry):
+            added.append(dict(entry))
+        else:
+            # Extra keys apply to the original combinations it matches only.
+            for cell in original:
+                if all(cell.get(k, v) == v for k, v in entry.items() if k in axes):
+                    cell.update(entry)
+    return original + added
+
+
+# The one step condition that narrows a job's profile axis.
+PROFILE_IF = re.compile(r"matrix\.profile == '(debug|release)'")
+
+
+def pair_cells(step, run_step):
+    """Matrix cells this (assertion, run) pair runs in: the job's cells kept
+    by an exact `matrix.profile == '<p>'` condition. A job without a profile
+    axis has no known cells (None)."""
+    # 이것을 실패시키는 것: profile 조건을 무시해 debug 칸의 실행을 release 증거로 세는 것.
+    cells = run_step.get("_cells")
+    if cells is None:
+        return None
+    for entry in (step, run_step):
+        if match := PROFILE_IF.fullmatch(entry.get("if") or ""):
+            cells = [cell for cell in cells if cell.get("profile") == match[1]]
+    return cells
+
+
+# A release gate is measured on each of these (architecture, libc) cells.
+RELEASE_CELLS = frozenset({("x86_64", "gnu"), ("x86_64", "musl"), ("aarch64", "gnu"), ("aarch64", "musl")})
+
+
+def cell_arch(cell):
+    os_label = cell.get("os", "")
+    if os_label.startswith("ubuntu-") and os_label.endswith("-arm"):
+        return "aarch64"
+    if os_label in {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"}:
+        return "x86_64"
+    raise AssertionError(("unknown runner architecture", os_label))
+
+
+def release_cells(step, run_step):
+    """(architecture, libc) cells a pair proves for a release gate, or None
+    when any of its cells is not a release build."""
+    cells = pair_cells(step, run_step)
+    if not cells or any(cell.get("profile") != "release" for cell in cells):
+        return None
+    return {(cell_arch(cell), cell.get("libc")) for cell in cells}
+
+
+def assert_release_cells(row, hits):
+    # 이것을 실패시키는 것: x86_64·aarch64 × glibc·musl 중 한 칸이라도 빠진 release 증거를 받는 것.
+    covered = set().union(*hits) if hits else set()
+    assert RELEASE_CELLS <= covered, (row["id"], "release cells", sorted(RELEASE_CELLS - covered))
 
 
 def acceptance_evidence(workflows):
@@ -531,13 +639,18 @@ def row_platforms(row):
 def acceptance_pair_allowed(row, step, run_step, run):
     """Platforms this (assertion, run) pair proves for the row, or None.
 
-    Only runner.os is checked here; telling release from debug matrix cells is A2's work.
+    A `matrix.profile == '<p>'` condition is accepted only in a job with that
+    matrix axis; pair_cells reports which matrix cells the pair covers.
     """
     # 이것을 실패시키는 것: 증거 step에 continue-on-error·플랫폼 밖 if·`|| true` 같은 상태 대체를 붙이는 것,
     # pipefail 없이 tee 뒤로 실행 실패를 숨기는 것.
     required_if = ("runner.os == 'Linux'" if row["platform"].startswith("Linux") else
                    "runner.os == 'macOS'" if row["platform"] == "macOS" else None)
-    if any(entry.get("if") not in (None, required_if) for entry in (step, run_step)):
+    def condition_allowed(entry):
+        value = entry.get("if")
+        return value in (None, required_if) or (
+            PROFILE_IF.fullmatch(value or "") is not None and run_step.get("_cells") is not None)
+    if not all(condition_allowed(entry) for entry in (step, run_step)):
         return None
     for entry in (step, run_step):
         assert "continue-on-error" not in entry, (row["id"], "skippable evidence step")
@@ -699,13 +812,16 @@ def cargo_test_args_allowed(run, target):
 
 
 def assert_acceptance_table(table, workflows, *, required_ids, required_gates=frozenset(),
-                            read=lambda name: (ROOT / name).read_text(), collected=None):
+                            read=lambda name: (ROOT / name).read_text(), collected=None,
+                            release_gates=frozenset()):
     """Every row names one real test that a CI job runs and asserts as passed.
 
     Rows without a `target` column (the collector table) keep the historical
     `--test` derivation and module table below. Rows with one name it: `lib`,
     `bin:<name>`, `test:<name>` or `pytest`; their Rust `test` is the full
     `file::module::path::name` and the CI assertion is that exact libtest line.
+    Rows of a `release_gates` gate count only evidence pairs that run in
+    release cells alone, and need every RELEASE_CELLS architecture and libc.
     """
     import ast
     import csv
@@ -741,7 +857,7 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
             # Gate rows assert the exact line (`grep -Fx`); historical collector rows
             # may select every parameter with a `grep -F` prefix.
             greps = [["grep", "-Fx"]] if target is not None else [["grep", "-F"], ["grep", "-Fx"]]
-            evidence = []
+            evidence, hits = [], []
             for step, command in commands:
                 if command[:2] not in greps or command[2:3] != ["PASSED " + row["test"]]:
                     continue
@@ -758,9 +874,19 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                     platforms = acceptance_pair_allowed(row, step, run_step, run)
                     if platforms is None:
                         continue
+                    cells = None
+                    if row.get("gate") in release_gates:
+                        # 이것을 실패시키는 것: release 게이트 행을 debug 칸(또는 profile 축이 없는 job)의 증거로 받는 것.
+                        cells = release_cells(step, run_step)
+                        if cells is None:
+                            continue
                     if any(token in {path, row["test"]} or path.startswith(token.rstrip("/") + "/") for token in selected):
                         evidence.append((step, run_step, platforms))
-            assert_platform_evidence(row, evidence, "no asserted CI pytest")
+                        hits.append(cells or set())
+            what = "no asserted CI pytest" + (" in release cells" if row.get("gate") in release_gates else "")
+            assert_platform_evidence(row, evidence, what)
+            if row.get("gate") in release_gates:
+                assert_release_cells(row, hits)
         else:
             groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
             groups = [group for group in groups if group]
@@ -816,7 +942,7 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                         and cargo_test_args_allowed(run, cargo_target)]
             assert runnable, (row["id"], "no CI cargo target", crate, selection)
             label = "test " + module + base + " ... ok"
-            evidence = []
+            evidence, rust_hits = [], []
             for step, grep in commands:
                 if grep[:3] != ["grep", "-F", label]:
                     continue
@@ -826,6 +952,10 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                     platforms = acceptance_pair_allowed(row, step, run_step, run)
                     if platforms is None:
                         continue
+                    if row.get("gate") in release_gates:
+                        if (cells := release_cells(step, run_step)) is None:
+                            continue
+                        rust_hits.append(cells)
                     if ignored:
                         if not ("sudo" == run[0] and "$bin" in run and "--exact" in run and
                                 module + base in run and "--ignored" in run):
@@ -838,7 +968,10 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                     elif run not in runnable:
                         continue
                     evidence.append((step, run_step, platforms))
-            assert_platform_evidence(row, evidence, "no asserted CI Rust pass")
+            assert_platform_evidence(row, evidence, "no asserted CI Rust pass"
+                                     + (" in release cells" if row.get("gate") in release_gates else ""))
+            if row.get("gate") in release_gates:
+                assert_release_cells(row, rust_hits)
 
 
 # 이것을 실패시키는 것: 호출에 넘기는 SEC-* 필수 집합에서 하나를 빼, 그 행 없이도 collector 표가 통과하는 것.

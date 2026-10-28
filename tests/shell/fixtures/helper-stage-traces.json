@@ -1,0 +1,314 @@
+{
+ "collect": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "helper": {
+   "chmod": 10,
+   "cwd": 2,
+   "dup": 15,
+   "exec": 1,
+   "fd_flags": 2,
+   "fd_query": 2,
+   "flock": 16,
+   "fstat": 1448,
+   "getdents": 6,
+   "mkdir": 9,
+   "network": 4,
+   "openat": 388,
+   "read": 100,
+   "readlink": 36,
+   "renameat": 11,
+   "seek": 10,
+   "spawn": 1,
+   "statfs": 259,
+   "thread": 2,
+   "umask": 1,
+   "write": 10
+  },
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     43
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 284,
+   "buf": 2147479552,
+   "catalog_bytes": 723,
+   "collector_bytes": 1249936,
+   "collector_components": 4,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "previous_bytes": 516,
+   "response_bytes": 516,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 20787,
+   "stages": [
+    "unchanged",
+    "collect"
+   ],
+   "state_components": 6
+  },
+  "sha256": "29eb27e314d32d3933a715b753891f741b54473afbe1fd561b46bb3faa6b45ca"
+ },
+ "failure-last-good": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "helper": {
+   "chmod": 2,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "flock": 6,
+   "fstat": 819,
+   "mkdir": 6,
+   "network": 4,
+   "openat": 254,
+   "read": 43,
+   "readlink": 30,
+   "renameat": 2,
+   "seek": 4,
+   "statfs": 86,
+   "thread": 1,
+   "umask": 1,
+   "write": 2
+  },
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     7
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 0,
+   "buf": 2147479552,
+   "catalog_bytes": 0,
+   "collector_bytes": 0,
+   "collector_components": 0,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "previous_bytes": 0,
+   "response_bytes": 0,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 20711,
+   "stages": [
+    "failure-last-good"
+   ],
+   "state_components": 6
+  },
+  "sha256": "b33842a04c18d0af0a167fd738fb651befa60f6dcda530a57e6de46b09379567"
+ },
+ "failure-recover": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "helper": {
+   "cwd": 1,
+   "dup": 2,
+   "exec": 1,
+   "flock": 4,
+   "fstat": 219,
+   "mkdir": 6,
+   "network": 4,
+   "openat": 84,
+   "read": 11,
+   "readlink": 10,
+   "seek": 1,
+   "statfs": 29,
+   "thread": 1,
+   "umask": 1
+  },
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     31
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 0,
+   "buf": 2147479552,
+   "catalog_bytes": 0,
+   "collector_bytes": 0,
+   "collector_components": 0,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "previous_bytes": 0,
+   "response_bytes": 0,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 20711,
+   "stages": [
+    "failure-recover"
+   ],
+   "state_components": 6
+  },
+  "sha256": "78ba5cc4cf1be63c7bb5f89574e1192d3b6b37ce52ad8bdae39a9f7410b2e835"
+ },
+ "publish": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "helper": {
+   "chmod": 4,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "flock": 6,
+   "fstat": 851,
+   "mkdir": 6,
+   "network": 4,
+   "openat": 263,
+   "read": 51,
+   "readlink": 34,
+   "renameat": 4,
+   "seek": 6,
+   "statfs": 100,
+   "thread": 1,
+   "umask": 1,
+   "write": 4
+  },
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     31
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 0,
+   "buf": 2147479552,
+   "catalog_bytes": 0,
+   "collector_bytes": 0,
+   "collector_components": 0,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "previous_bytes": 0,
+   "response_bytes": 0,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 20711,
+   "stages": [
+    "publish"
+   ],
+   "state_components": 6
+  },
+  "sha256": "679948e6fec35c4d4ea27c5d9c7f6d15f4f60b944d84832090acfaba5517c3fe"
+ },
+ "unchanged": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "helper": {
+   "chmod": 2,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "flock": 6,
+   "fstat": 819,
+   "mkdir": 6,
+   "network": 4,
+   "openat": 253,
+   "read": 43,
+   "readlink": 30,
+   "renameat": 2,
+   "seek": 4,
+   "statfs": 86,
+   "thread": 1,
+   "umask": 1,
+   "write": 2
+  },
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     31
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 0,
+   "buf": 2147479552,
+   "catalog_bytes": 0,
+   "collector_bytes": 0,
+   "collector_components": 0,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "previous_bytes": 0,
+   "response_bytes": 0,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 20711,
+   "stages": [
+    "unchanged"
+   ],
+   "state_components": 6
+  },
+  "sha256": "11fcbda701b9fa3933c7e446dbe2eb7d1acfdb6b4fb18367129de77c56800d36"
+ }
+}

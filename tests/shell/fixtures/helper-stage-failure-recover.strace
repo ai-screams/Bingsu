@@ -1,0 +1,1037 @@
+1221  execve("/fx/bin/bingsu", ["/fx/bin/bingsu", "prompt", "--ctx", "1", "--record", "B1", "--width", "80", "--shell", "bash", "--pwd", "/fx", "--colorterm", "", "--colorfgbg", "", "--log-level=off", "--host", "c0fbf5491133", "--venv", "", "--ssh=0", "--session", "a6267230eb59f6d69188a9dae7ba6023", "--seq", "3", "--runtime-root=64785:4597586:/fx/run-t/bingsu", "--runtime-groups=1", "--config-root=/fx/cfg-t/bingsu", "--config-root-written=/fx/cfg-t/bingsu", "--state-root=/fx/state-t/bingsu", "--log-root=/fx/state-t/bingsu/log", "--home=/home/tester", "--git-global-home=/fx/home-t", "--git-global-xdg=/fx/cfg-t", "--collector-exe=/home/tester/target/release/bingsu-collect"], 0xba6fcbde7c30 /* 12 vars */) = 0
+1221  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xff9ab74b5000
+1221  faccessat(AT_FDCWD</fx>, "/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+1221  openat(AT_FDCWD</fx>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+1221  newfstatat(3</etc/ld.so.cache>, "", {st_mode=S_IFREG|0644, st_size=9103, ...}, AT_EMPTY_PATH) = 0
+1221  mmap(NULL, 9103, PROT_READ, MAP_PRIVATE, 3</etc/ld.so.cache>, 0) = 0xff9ab74b2000
+1221  close(3</etc/ld.so.cache>)        = 0
+1221  openat(AT_FDCWD</fx>, "/lib/aarch64-linux-gnu/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>
+1221  read(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "", 832) = 832
+1221  newfstatat(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "", {st_mode=S_IFREG|0644, st_size=133448, ...}, AT_EMPTY_PATH) = 0
+1221  mmap(NULL, 262856, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xff9ab743b000
+1221  mmap(0xff9ab7440000, 197320, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0) = 0xff9ab7440000
+1221  mmap(0xff9ab746f000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0x1f000) = 0xff9ab746f000
+1221  close(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>) = 0
+1221  openat(AT_FDCWD</fx>, "/lib/aarch64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/aarch64-linux-gnu/libc.so.6>
+1221  read(3</usr/lib/aarch64-linux-gnu/libc.so.6>, "", 832) = 832
+1221  newfstatat(3</usr/lib/aarch64-linux-gnu/libc.so.6>, "", {st_mode=S_IFREG|0755, st_size=1651408, ...}, AT_EMPTY_PATH) = 0
+1221  mmap(NULL, 1826912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xff9ab7281000
+1221  mmap(0xff9ab7290000, 1761376, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libc.so.6>, 0) = 0xff9ab7290000
+1221  mmap(0xff9ab742c000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libc.so.6>, 0x18c000) = 0xff9ab742c000
+1221  mmap(0xff9ab7432000, 49248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0xff9ab7432000
+1221  close(3</usr/lib/aarch64-linux-gnu/libc.so.6>) = 0
+1221  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xff9ab74b0000
+1221  set_tid_address(0xff9ab74b00f0)   = 1221
+1221  set_robust_list(0xff9ab74b0100, 24) = 0
+1221  rseq(0xff9ab74b0740, 0x20, 0, 0xd428bc00) = 0
+1221  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+1221  openat(AT_FDCWD</fx>, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 3</proc/1221/maps>
+1221  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+1221  newfstatat(3</proc/1221/maps>, "", {st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1221  read(3</proc/1221/maps>, "", 1024) = 1024
+1221  read(3</proc/1221/maps>, "", 1024) = 1024
+1221  read(3</proc/1221/maps>, "", 1024) = 6
+1221  close(3</proc/1221/maps>)         = 0
+1221  sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+1221  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0xff9ab74ab000
+1221  sigaltstack({ss_sp=0xff9ab74ac000, ss_flags=0, ss_size=16384}, NULL) = 0
+1221  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=1000}, it_value={tv_sec=0, tv_usec=49992}}, NULL) = 0
+1221  prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=512*1024}) = 0
+1221  prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=512*1024}) = 0
+1221  prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=512*1024}) = 0
+1221  openat(AT_FDCWD</fx>, "/proc/self/fd", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 3</proc/1221/fd>
+1221  newfstatat(3</proc/1221/fd>, "", {st_mode=S_IFDIR|0500, st_size=4, ...}, AT_EMPTY_PATH) = 0
+1221  getdents64(3</proc/1221/fd>, 0xca78d2cf2e30 /* 6 entries */, 32768) = 144
+1221  fcntl(3</proc/1221/fd>, F_SETFD, FD_CLOEXEC) = 0
+1221  getdents64(3</proc/1221/fd>, 0xca78d2cf2e30 /* 0 entries */, 32768) = 0
+1221  close(3</proc/1221/fd>)           = 0
+1221  mmap(NULL, 36864, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0xff9ab7473000
+1221  clone(child_stack=0xff9ab747c000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+1222  close(0</dev/null>)               = 0
+1222  openat(AT_FDCWD</fx>, "/dev/null", O_RDWR) = 0</dev/null>
+1222  close(1<pipe:[201101]>)           = 0
+1222  openat(AT_FDCWD</fx>, "/dev/null", O_RDWR) = 1</dev/null>
+1222  close(2</dev/null>)               = 0
+1222  openat(AT_FDCWD</fx>, "/dev/null", O_RDWR) = 2</dev/null>
+1222  execve("/fx/bin/bingsu", ["/fx/bin/bingsu", "__refresh-v1", "--ctx", "1", "--record", "B1", "--width", "80", "--pwd", "/fx", "--log-level=off", "--session", "a6267230eb59f6d69188a9dae7ba6023", "--seq", "3", "--runtime-root=64785:4597586:/fx/run-t/bingsu", "--runtime-groups=1", "--config-root=/fx/cfg-t/bingsu", "--config-root-written=/fx/cfg-t/bingsu", "--state-root=/fx/state-t/bingsu", "--log-root=/fx/state-t/bingsu/log", "--home=/home/tester", "--git-global-home=/fx/home-t", "--git-global-xdg=/fx/cfg-t", "--collector-exe=/home/tester/target/release/bingsu-collect"], 0xfffff429fb78 /* 0 vars */ <unfinished ...>
+1221  <... clone resumed>)              = 1222
+1221  getuid( <unfinished ...>
+1222  <... execve resumed>)             = 0
+1221  <... getuid resumed>)             = 1000
+1221  openat(AT_FDCWD</fx>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1221  <... openat resumed>)             = 3</>
+1222  <... mmap resumed>)               = 0xf2c1ee323000
+1221  newfstatat(3</>, "",  <unfinished ...>
+1222  faccessat(AT_FDCWD</fx>, "/etc/ld.so.preload", R_OK <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  <... faccessat resumed>)          = -1 ENOENT (No such file or directory)
+1221  fstatfs(3</>,  <unfinished ...>
+1222  openat(AT_FDCWD</fx>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC <unfinished ...>
+1221  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640514, f_bavail=22325724, f_files=6553600, f_ffree=6424901, f_fsid={val=[0x3c43c096, 0x7cd6537f]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... openat resumed>)             = 3</etc/ld.so.cache>
+1221  fgetxattr(3</>, "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(3</etc/ld.so.cache>, "",  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=9103, ...}, AT_EMPTY_PATH) = 0
+1222  mmap(NULL, 9103, PROT_READ, MAP_PRIVATE, 3</etc/ld.so.cache>, 0 <unfinished ...>
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  <... mmap resumed>)               = 0xf2c1ee320000
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  close(3</etc/ld.so.cache> <unfinished ...>
+1221  openat(3</>, "proc", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  openat(AT_FDCWD</fx>, "/lib/aarch64-linux-gnu/libgcc_s.so.1", O_RDONLY|O_CLOEXEC <unfinished ...>
+1221  <... openat resumed>)             = 4</proc>
+1221  newfstatat(4</proc>, "",  <unfinished ...>
+1222  <... openat resumed>)             = 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>
+1222  read(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>,  <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0555, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  <... read resumed>"", 832) = 832
+1221  fstatfs(4</proc>,  <unfinished ...>
+1222  newfstatat(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, "",  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=133448, ...}, AT_EMPTY_PATH) = 0
+1221  fgetxattr(4</proc>, "system.posix_acl_access",  <unfinished ...>
+1222  mmap(NULL, 262856, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1222  <... mmap resumed>)               = 0xf2c1ee2a9000
+1221  readlinkat(4</proc>, "self",  <unfinished ...>
+1222  mmap(0xf2c1ee2b0000, 197320, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0 <unfinished ...>
+1221  <... readlinkat resumed>"1221", 11) = 4
+1222  <... mmap resumed>)               = 0xf2c1ee2b0000
+1221  openat(4</proc>, "1221", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  mmap(0xf2c1ee2df000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1>, 0x1f000 <unfinished ...>
+1221  <... openat resumed>)             = 5</proc/1221>
+1222  <... mmap resumed>)               = 0xf2c1ee2df000
+1222  close(3</usr/lib/aarch64-linux-gnu/libgcc_s.so.1> <unfinished ...>
+1221  newfstatat(5</proc/1221>, "",  <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0555, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  openat(AT_FDCWD</fx>, "/lib/aarch64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC <unfinished ...>
+1221  fstatfs(5</proc/1221>,  <unfinished ...>
+1222  <... openat resumed>)             = 3</usr/lib/aarch64-linux-gnu/libc.so.6>
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  read(3</usr/lib/aarch64-linux-gnu/libc.so.6>,  <unfinished ...>
+1221  fgetxattr(5</proc/1221>, "system.posix_acl_access",  <unfinished ...>
+1222  <... read resumed>"", 832) = 832
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1222  newfstatat(3</usr/lib/aarch64-linux-gnu/libc.so.6>, "",  <unfinished ...>
+1221  openat(5</proc/1221>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0755, st_size=1651408, ...}, AT_EMPTY_PATH) = 0
+1221  <... openat resumed>)             = 6</proc/1221/ns>
+1222  mmap(NULL, 1826912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1221  newfstatat(6</proc/1221/ns>, "",  <unfinished ...>
+1222  <... mmap resumed>)               = 0xf2c1ee0f1000
+1222  mmap(0xf2c1ee100000, 1761376, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libc.so.6>, 0 <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0511, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  <... mmap resumed>)               = 0xf2c1ee100000
+1221  fstatfs(6</proc/1221/ns>,  <unfinished ...>
+1222  mmap(0xf2c1ee29c000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</usr/lib/aarch64-linux-gnu/libc.so.6>, 0x18c000 <unfinished ...>
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  <... mmap resumed>)               = 0xf2c1ee29c000
+1221  fgetxattr(6</proc/1221/ns>, "system.posix_acl_access",  <unfinished ...>
+1222  mmap(0xf2c1ee2a2000, 49248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1222  <... mmap resumed>)               = 0xf2c1ee2a2000
+1221  openat(5</proc/1221>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1222  close(3</usr/lib/aarch64-linux-gnu/libc.so.6> <unfinished ...>
+1221  <... openat resumed>)             = 7</proc/1221/timens_offsets>
+1222  <... close resumed>)              = 0
+1221  newfstatat(7</proc/1221/timens_offsets>, "",  <unfinished ...>
+1222  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xf2c1ee31e000
+1221  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  set_tid_address(0xf2c1ee31e0f0 <unfinished ...>
+1221  fstatfs(7</proc/1221/timens_offsets>,  <unfinished ...>
+1222  <... set_tid_address resumed>)    = 1222
+1222  set_robust_list(0xf2c1ee31e100, 24 <unfinished ...>
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  <... set_robust_list resumed>)    = 0
+1222  rseq(0xf2c1ee31e740, 0x20, 0, 0xd428bc00 <unfinished ...>
+1221  fgetxattr(7</proc/1221/timens_offsets>, "system.posix_acl_access",  <unfinished ...>
+1222  <... rseq resumed>)               = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1221  readlinkat(6</proc/1221/ns>, "time", "time:[4026532442]", 28) = 17
+1221  readlinkat(6</proc/1221/ns>, "time_for_children", "time:[4026532442]", 28) = 17
+1222  prlimit64(0, RLIMIT_STACK, NULL,  <unfinished ...>
+1221  openat(4</proc>, "sys", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  <... prlimit64 resumed>{rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+1221  <... openat resumed>)             = 8</proc/sys>
+1221  newfstatat(8</proc/sys>, "", {st_mode=S_IFDIR|0555, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  openat(AT_FDCWD</fx>, "/proc/self/maps", O_RDONLY|O_CLOEXEC <unfinished ...>
+1221  fstatfs(8</proc/sys>,  <unfinished ...>
+1222  <... openat resumed>)             = 3</proc/1222/maps>
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0
+1221  fgetxattr(8</proc/sys>, "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(3</proc/1222/maps>, "",  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1221  openat(8</proc/sys>, "kernel", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  read(3</proc/1222/maps>,  <unfinished ...>
+1221  <... openat resumed>)             = 9</proc/sys/kernel>
+1222  <... read resumed>"", 1024) = 1024
+1222  read(3</proc/1222/maps>,  <unfinished ...>
+1221  newfstatat(9</proc/sys/kernel>, "",  <unfinished ...>
+1222  <... read resumed>"", 1024) = 1024
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0555, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  read(3</proc/1222/maps>,  <unfinished ...>
+1221  fstatfs(9</proc/sys/kernel>,  <unfinished ...>
+1222  <... read resumed>"", 1024) = 6
+1222  close(3</proc/1222/maps> <unfinished ...>
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  <... close resumed>)              = 0
+1221  fgetxattr(9</proc/sys/kernel>, "system.posix_acl_access",  <unfinished ...>
+1222  sigaltstack(NULL,  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1222  <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+1221  openat(9</proc/sys/kernel>, "random", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0xf2c1ee319000
+1221  <... openat resumed>)             = 10</proc/sys/kernel/random>
+1222  sigaltstack({ss_sp=0xf2c1ee31a000, ss_flags=0, ss_size=16384},  <unfinished ...>
+1221  newfstatat(10</proc/sys/kernel/random>, "",  <unfinished ...>
+1222  <... sigaltstack resumed>NULL)    = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0555, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  prlimit64(0, RLIMIT_CORE, {rlim_cur=0, rlim_max=0},  <unfinished ...>
+1221  fstatfs(10</proc/sys/kernel/random>,  <unfinished ...>
+1222  <... prlimit64 resumed>NULL)      = 0
+1221  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  chdir("/" <unfinished ...>
+1221  fgetxattr(10</proc/sys/kernel/random>, "system.posix_acl_access",  <unfinished ...>
+1222  <... chdir resumed>)              = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EOPNOTSUPP (Operation not supported)
+1222  setsid( <unfinished ...>
+1221  openat(10</proc/sys/kernel/random>, "boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1222  <... setsid resumed>)             = 1222
+1221  <... openat resumed>)             = 11</proc/sys/kernel/random/boot_id>
+1222  umask(077)                        = 022
+1221  newfstatat(11</proc/sys/kernel/random/boot_id>, "",  <unfinished ...>
+1222  mmap(NULL, 327680, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0 <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFREG|0444, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  <... mmap resumed>)               = 0xf2c1ee0b0000
+1221  fstatfs(11</proc/sys/kernel/random/boot_id>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  clone(child_stack=0xf2c1ee0fe9a0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID <unfinished ...>
+1221  fgetxattr(11</proc/sys/kernel/random/boot_id>, "system.posix_acl_access", NULL, 0) = -1 EOPNOTSUPP (Operation not supported)
+1223  rseq(0xf2c1ee0ff800, 0x20, 0, 0xd428bc00 <unfinished ...>
+1222  <... clone resumed>, parent_tid=[1223], tls=0xf2c1ee0ff820, child_tidptr=0xf2c1ee0ff1b0) = 1223
+1221  read(11</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1223  <... rseq resumed>)               = 0
+1223  set_robust_list(0xf2c1ee0ff1c0, 24 <unfinished ...>
+1221  <... read resumed>"", 38) = 37
+1223  <... set_robust_list resumed>)    = 0
+1221  read(11</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1223  prctl(PR_SET_NAME, "refresh-watchdo"... <unfinished ...>
+1221  <... read resumed>"", 1)          = 0
+1223  <... prctl resumed>)              = 0
+1221  close(3</> <unfinished ...>
+1223  mmap(NULL, 134217728, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0 <unfinished ...>
+1221  <... close resumed>)              = 0
+1223  <... mmap resumed>)               = 0xf2c1e6000000
+1221  close(4</proc> <unfinished ...>
+1223  sigaltstack(NULL,  <unfinished ...>
+1221  <... close resumed>)              = 0
+1223  <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+1221  close(5</proc/1221> <unfinished ...>
+1223  mmap(NULL, 20480, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0 <unfinished ...>
+1221  <... close resumed>)              = 0
+1223  <... mmap resumed>)               = 0xf2c1ee314000
+1221  close(6</proc/1221/ns> <unfinished ...>
+1223  sigaltstack({ss_sp=0xf2c1ee315000, ss_flags=0, ss_size=16384},  <unfinished ...>
+1221  <... close resumed>)              = 0
+1223  <... sigaltstack resumed>NULL)    = 0
+1221  close(8</proc/sys>)               = 0
+1222  openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1221  close(9</proc/sys/kernel> <unfinished ...>
+1222  <... openat resumed>)             = 3</proc/sys/kernel/random/boot_id>
+1221  <... close resumed>)              = 0
+1222  statx(3</proc/sys/kernel/random/boot_id>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  close(10</proc/sys/kernel/random> <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
+1221  <... close resumed>)              = 0
+1222  fstatfs(3</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1221  openat(AT_FDCWD</fx>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1221  <... openat resumed>)             = 3</>
+1222  read(3</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1221  newfstatat(3</>, "",  <unfinished ...>
+1222  <... read resumed>"", 38) = 37
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  read(3</proc/sys/kernel/random/boot_id>, "", 1) = 0
+1221  fstatfs(3</>,  <unfinished ...>
+1222  close(3</proc/sys/kernel/random/boot_id> <unfinished ...>
+1221  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640509, f_bavail=22325719, f_files=6553600, f_ffree=6424901, f_fsid={val=[0x3c43c096, 0x7cd6537f]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... close resumed>)              = 0
+1221  fgetxattr(3</>, "system.posix_acl_access",  <unfinished ...>
+1222  openat(AT_FDCWD</>, "/proc/self", O_RDONLY|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  <... openat resumed>)             = 3</proc/1222>
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  fstatfs(3</proc/1222>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  openat(3</proc/1222>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1221  openat(3</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... openat resumed>)             = 4</proc/1222/ns>
+1222  fstatfs(4</proc/1222/ns>,  <unfinished ...>
+1221  <... openat resumed>)             = 4</home>
+1222  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1221  newfstatat(4</home>, "",  <unfinished ...>
+1222  openat(3</proc/1222>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  <... openat resumed>)             = 5</proc/1222/timens_offsets>
+1222  statx(5</proc/1222/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  fstatfs(4</home>,  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+1221  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640508, f_bavail=22325718, f_files=6553600, f_ffree=6424901, f_fsid={val=[0x3c43c096, 0x7cd6537f]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  fstatfs(5</proc/1222/timens_offsets>,  <unfinished ...>
+1221  fgetxattr(4</home>, "system.posix_acl_access",  <unfinished ...>
+1222  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  close(5</proc/1222/timens_offsets> <unfinished ...>
+1221  getxattr("/proc/self/fd/4", "system.posix_acl_access",  <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  readlinkat(4</proc/1222/ns>, "time",  <unfinished ...>
+1221  close(3</>)                       = 0
+1222  <... readlinkat resumed>"time:[4026532442]", 28) = 17
+1221  openat(4</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  readlinkat(4</proc/1222/ns>, "time_for_children", "time:[4026532442]", 28) = 17
+1221  <... openat resumed>)             = 3</home/tester>
+1222  close(4</proc/1222/ns> <unfinished ...>
+1221  newfstatat(3</home/tester>, "",  <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  close(3</proc/1222> <unfinished ...>
+1221  fstatfs(3</home/tester>,  <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... fstatfs resumed>{f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640508, f_bavail=22325718, f_files=6553600, f_ffree=6424901, f_fsid={val=[0x3c43c096, 0x7cd6537f]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  getuid( <unfinished ...>
+1221  fgetxattr(3</home/tester>, "system.posix_acl_access",  <unfinished ...>
+1222  <... getuid resumed>)             = 1000
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0 <unfinished ...>
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  <... socket resumed>)             = 3<socket:[201107]>
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  connect(3<socket:[201107]>, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110 <unfinished ...>
+1221  close(4</home>)                   = 0
+1222  <... connect resumed>)            = -1 ENOENT (No such file or directory)
+1221  openat(3</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  close(3<socket:[201107]> <unfinished ...>
+1221  <... openat resumed>)             = 4</home/tester/target>
+1222  <... close resumed>)              = 0
+1221  newfstatat(4</home/tester/target>, "",  <unfinished ...>
+1222  socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0) = 3<socket:[201108]>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  connect(3<socket:[201108]>, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110 <unfinished ...>
+1221  fstatfs(4</home/tester/target>,  <unfinished ...>
+1222  <... connect resumed>)            = -1 ENOENT (No such file or directory)
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640507, f_bavail=22325717, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(3<socket:[201108]> <unfinished ...>
+1221  fgetxattr(4</home/tester/target>, "system.posix_acl_access",  <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  newfstatat(AT_FDCWD</>, "/etc/nsswitch.conf",  <unfinished ...>
+1221  getxattr("/proc/self/fd/4", "system.posix_acl_access",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=494, ...}, 0) = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  newfstatat(AT_FDCWD</>, "/",  <unfinished ...>
+1221  close(3</home/tester> <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, 0) = 0
+1221  <... close resumed>)              = 0
+1222  openat(AT_FDCWD</>, "/etc/nsswitch.conf", O_RDONLY|O_CLOEXEC <unfinished ...>
+1221  openat(4</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... openat resumed>)             = 3</etc/nsswitch.conf>
+1221  <... openat resumed>)             = 3</fx>
+1222  newfstatat(3</etc/nsswitch.conf>, "",  <unfinished ...>
+1221  newfstatat(3</fx>, "",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=494, ...}, AT_EMPTY_PATH) = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  read(3</etc/nsswitch.conf>,  <unfinished ...>
+1221  fstatfs(3</fx>,  <unfinished ...>
+1222  <... read resumed>"", 4096) = 494
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640507, f_bavail=22325717, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  read(3</etc/nsswitch.conf>,  <unfinished ...>
+1221  fgetxattr(3</fx>, "system.posix_acl_access",  <unfinished ...>
+1222  <... read resumed>"", 4096)       = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  newfstatat(3</etc/nsswitch.conf>, "",  <unfinished ...>
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=494, ...}, AT_EMPTY_PATH) = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  close(3</etc/nsswitch.conf> <unfinished ...>
+1221  close(4</home/tester/target> <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... close resumed>)              = 0
+1222  openat(AT_FDCWD</>, "/etc/passwd", O_RDONLY|O_CLOEXEC <unfinished ...>
+1221  openat(3</fx>, "run-t", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... openat resumed>)             = 3</etc/passwd>
+1221  <... openat resumed>)             = 4</fx/run-t>
+1222  newfstatat(3</etc/passwd>, "",  <unfinished ...>
+1221  newfstatat(4</fx/run-t>, "",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=882, ...}, AT_EMPTY_PATH) = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  lseek(3</etc/passwd>, 0, SEEK_SET <unfinished ...>
+1221  fstatfs(4</fx/run-t>,  <unfinished ...>
+1222  <... lseek resumed>)              = 0
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640506, f_bavail=22325716, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  read(3</etc/passwd>,  <unfinished ...>
+1221  fgetxattr(4</fx/run-t>, "system.posix_acl_access",  <unfinished ...>
+1222  <... read resumed>"", 4096) = 882
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  close(3</etc/passwd> <unfinished ...>
+1221  getxattr("/proc/self/fd/4", "system.posix_acl_access",  <unfinished ...>
+1222  <... close resumed>)              = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  getuid( <unfinished ...>
+1221  close(3</fx> <unfinished ...>
+1222  <... getuid resumed>)             = 1000
+1221  <... close resumed>)              = 0
+1222  getuid( <unfinished ...>
+1221  openat(4</fx/run-t>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... getuid resumed>)             = 1000
+1222  openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  <... openat resumed>)             = 3</fx/run-t/bingsu>
+1222  <... openat resumed>)             = 3</>
+1221  newfstatat(3</fx/run-t/bingsu>, "",  <unfinished ...>
+1222  newfstatat(3</>, "",  <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fstatfs(3</fx/run-t/bingsu>,  <unfinished ...>
+1222  statx(3</>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640506, f_bavail=22325716, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  fgetxattr(3</fx/run-t/bingsu>, "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(3</>, "home",  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  openat(3</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  <... openat resumed>)             = 4</home>
+1221  close(4</fx/run-t> <unfinished ...>
+1222  statx(4</home>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(4</home>, "",  <unfinished ...>
+1221  openat(3</fx/run-t/bingsu>, "contexts-v2", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  <... openat resumed>)             = 4</fx/run-t/bingsu/contexts-v2>
+1222  newfstatat(4</home>, "tester",  <unfinished ...>
+1221  newfstatat(4</fx/run-t/bingsu/contexts-v2>, "",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(4</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  fstatfs(4</fx/run-t/bingsu/contexts-v2>,  <unfinished ...>
+1222  <... openat resumed>)             = 5</home/tester>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640505, f_bavail=22325715, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  statx(5</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  fgetxattr(4</fx/run-t/bingsu/contexts-v2>, "system.posix_acl_access",  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  newfstatat(5</home/tester>, "",  <unfinished ...>
+1221  getxattr("/proc/self/fd/4", "system.posix_acl_access",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  newfstatat(5</home/tester>, "target",  <unfinished ...>
+1221  close(3</fx/run-t/bingsu> <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... close resumed>)              = 0
+1222  openat(5</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  openat(4</fx/run-t/bingsu/contexts-v2>, "config", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... openat resumed>)             = 6</home/tester/target>
+1221  <... openat resumed>)             = 3</fx/run-t/bingsu/contexts-v2/config>
+1222  statx(6</home/tester/target>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  newfstatat(3</fx/run-t/bingsu/contexts-v2/config>, "",  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(6</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fstatfs(3</fx/run-t/bingsu/contexts-v2/config>,  <unfinished ...>
+1222  newfstatat(6</home/tester/target>, "helper-stage-qhkrfr7v",  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640504, f_bavail=22325714, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  fgetxattr(3</fx/run-t/bingsu/contexts-v2/config>, "system.posix_acl_access",  <unfinished ...>
+1222  openat(6</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  <... openat resumed>)             = 7</fx>
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  statx(7</fx>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1221  close(4</fx/run-t/bingsu/contexts-v2> <unfinished ...>
+1222  newfstatat(7</fx>, "",  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  openat(3</fx/run-t/bingsu/contexts-v2/config>, "h0", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  newfstatat(7</fx>, "bin",  <unfinished ...>
+1221  <... openat resumed>)             = 4</fx/run-t/bingsu/contexts-v2/config/h0>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  newfstatat(4</fx/run-t/bingsu/contexts-v2/config/h0>, "",  <unfinished ...>
+1222  openat(7</fx>, "bin", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 8</fx/bin>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(8</fx/bin>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  fstatfs(4</fx/run-t/bingsu/contexts-v2/config/h0>,  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640504, f_bavail=22325714, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  newfstatat(8</fx/bin>, "",  <unfinished ...>
+1221  fgetxattr(4</fx/run-t/bingsu/contexts-v2/config/h0>, "system.posix_acl_access",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  newfstatat(8</fx/bin>, "bingsu",  <unfinished ...>
+1221  getxattr("/proc/self/fd/4", "system.posix_acl_access",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFLNK|0777, st_size=34, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  readlinkat(8</fx/bin>, "bingsu",  <unfinished ...>
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  <... readlinkat resumed>"/home/tester/target/release/bingsu", 4097) = 34
+1221  close(3</fx/run-t/bingsu/contexts-v2/config> <unfinished ...>
+1222  newfstatat(8</fx/bin>, "bingsu",  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... newfstatat resumed>{st_mode=S_IFLNK|0777, st_size=34, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  openat(4</fx/run-t/bingsu/contexts-v2/config/h0>, "state", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  newfstatat(3</>, "home",  <unfinished ...>
+1221  <... openat resumed>)             = 3</fx/run-t/bingsu/contexts-v2/config/h0/state>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, "",  <unfinished ...>
+1222  openat(3</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  <... openat resumed>)             = 9</home>
+1221  fstatfs(3</fx/run-t/bingsu/contexts-v2/config/h0/state>,  <unfinished ...>
+1222  statx(9</home>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640503, f_bavail=22325713, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  fgetxattr(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(9</home>, "",  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(9</home>, "tester",  <unfinished ...>
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  close(4</fx/run-t/bingsu/contexts-v2/config/h0> <unfinished ...>
+1222  openat(9</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... openat resumed>)             = 10</home/tester>
+1221  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, "h1", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  statx(10</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... openat resumed>)             = 4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  newfstatat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, "",  <unfinished ...>
+1222  newfstatat(10</home/tester>, "",  <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fstatfs(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>,  <unfinished ...>
+1222  newfstatat(10</home/tester>, "target",  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640502, f_bavail=22325712, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(10</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  fgetxattr(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, "system.posix_acl_access",  <unfinished ...>
+1222  <... openat resumed>)             = 11</home/tester/target>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  statx(11</home/tester/target>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  getxattr("/proc/self/fd/4", "system.posix_acl_access",  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  newfstatat(11</home/tester/target>, "",  <unfinished ...>
+1221  close(3</fx/run-t/bingsu/contexts-v2/config/h0/state> <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  <... close resumed>)              = 0
+1222  newfstatat(11</home/tester/target>, "release",  <unfinished ...>
+1221  openat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, "store", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... openat resumed>)             = 3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>
+1222  openat(11</home/tester/target>, "release", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1221  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "",  <unfinished ...>
+1222  <... openat resumed>)             = 12</home/tester/target/release>
+1221  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(12</home/tester/target/release>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  fstatfs(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>,  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(12</home/tester/target/release>, "",  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640501, f_bavail=22325711, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fgetxattr(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(12</home/tester/target/release>, "bingsu",  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 EBADF (Bad file descriptor)
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0755, st_size=1839840, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  getxattr("/proc/self/fd/3", "system.posix_acl_access",  <unfinished ...>
+1222  openat(12</home/tester/target/release>, "bingsu", O_RDONLY|O_NOCTTY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 13</home/tester/target/release/bingsu>
+1221  <... getxattr resumed>NULL, 0)    = -1 ENODATA (No data available)
+1222  statx(13</home/tester/target/release/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  close(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1> <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0755, stx_size=1839840, ...}) = 0
+1221  <... close resumed>)              = 0
+1222  newfstatat(13</home/tester/target/release/bingsu>, "",  <unfinished ...>
+1221  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot", O_RDONLY|O_NOCTTY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0755, st_size=1839840, ...}, AT_EMPTY_PATH) = 0
+1221  <... openat resumed>)             = 4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>
+1222  statx(13</home/tester/target/release/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  newfstatat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>, "",  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0755, stx_size=1839840, ...}) = 0
+1222  statx(3</>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFREG|0644, st_size=20711, ...}, AT_EMPTY_PATH) = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  fstatfs(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>,  <unfinished ...>
+1222  newfstatat(3</>, "",  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640500, f_bavail=22325710, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fgetxattr(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>, "system.posix_acl_access",  <unfinished ...>
+1222  statx(4</home>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  close(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot> <unfinished ...>
+1222  newfstatat(4</home>, "",  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "last-good", O_RDONLY|O_NOCTTY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1222  statx(5</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  <... openat resumed>)             = 4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>
+1222  newfstatat(5</home/tester>, "",  <unfinished ...>
+1221  newfstatat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>, "",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=20711, ...}, AT_EMPTY_PATH) = 0
+1222  statx(6</home/tester/target>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  fstatfs(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>,  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(6</home/tester/target>, "",  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640499, f_bavail=22325709, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fgetxattr(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>, "system.posix_acl_access",  <unfinished ...>
+1222  statx(7</fx>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1221  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "marker", O_RDONLY|O_NOCTTY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1222  newfstatat(7</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  <... openat resumed>)             = 5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/marker>
+1222  statx(8</fx/bin>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  newfstatat(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/marker>, "",  <unfinished ...>
+1222  newfstatat(8</fx/bin>, "",  <unfinished ...>
+1221  <... newfstatat resumed>{st_mode=S_IFREG|0600, st_size=208, ...}, AT_EMPTY_PATH) = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  fstatfs(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/marker>,  <unfinished ...>
+1222  statx(9</home>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... fstatfs resumed>{f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640498, f_bavail=22325708, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  fgetxattr(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/marker>, "system.posix_acl_access",  <unfinished ...>
+1222  newfstatat(9</home>, "",  <unfinished ...>
+1221  <... fgetxattr resumed>NULL, 0)   = -1 ENODATA (No data available)
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "collections-v1", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY <unfinished ...>
+1222  statx(10</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... openat resumed>)             = -1 ENOENT (No such file or directory)
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  prctl(PR_GET_SECCOMP <unfinished ...>
+1222  newfstatat(10</home/tester>, "",  <unfinished ...>
+1221  <... prctl resumed>)              = 2
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0 <unfinished ...>
+1222  statx(11</home/tester/target>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... prctl resumed>)              = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {len=83, filter=0xca78d2cf3870} <unfinished ...>
+1222  newfstatat(11</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(12</home/tester/target/release>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  <... prctl resumed>)              = 0
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1221  read(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>,  <unfinished ...>
+1222  newfstatat(12</home/tester/target/release>, "",  <unfinished ...>
+1221  <... read resumed>"", 64) = 64
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1221  read(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>,  <unfinished ...>
+1222  newfstatat(3</>, "home",  <unfinished ...>
+1221  <... read resumed>"", 128) = 128
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  read(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good>,  <unfinished ...>
+1222  newfstatat(4</home>, "tester",  <unfinished ...>
+1221  <... read resumed>"", 2817) = 2817
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(5</home/tester>, "target", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  close(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/last-good> <unfinished ...>
+1222  newfstatat(6</home/tester/target>, "helper-stage-qhkrfr7v",  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  read(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/marker>,  <unfinished ...>
+1222  newfstatat(7</fx>, "bin",  <unfinished ...>
+1221  <... read resumed>"", 208) = 208
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  close(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/marker> <unfinished ...>
+1222  newfstatat(8</fx/bin>, "bingsu",  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... newfstatat resumed>{st_mode=S_IFLNK|0777, st_size=34, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  close(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store> <unfinished ...>
+1222  readlinkat(8</fx/bin>, "bingsu",  <unfinished ...>
+1221  <... close resumed>)              = 0
+1222  <... readlinkat resumed>"/home/tester/target/release/bingsu", 4097) = 34
+1222  newfstatat(3</>, "home",  <unfinished ...>
+1221  close(7</proc/1221/timens_offsets> <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... close resumed>)              = 0
+1222  newfstatat(9</home>, "tester",  <unfinished ...>
+1221  close(11</proc/sys/kernel/random/boot_id> <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... close resumed>)              = 0
+1222  newfstatat(10</home/tester>, "target",  <unfinished ...>
+1221  write(1<pipe:[201101]>, "", 175 <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... write resumed>)              = 175
+1222  newfstatat(11</home/tester/target>, "release",  <unfinished ...>
+1221  exit_group(0 <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1221  <... exit_group resumed>)         = ?
+1222  newfstatat(12</home/tester/target/release>, "bingsu", {st_mode=S_IFREG|0755, st_size=1839840, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  statx(13</home/tester/target/release/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1221  +++ exited with 0 +++
+1222  <... statx resumed>{stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0755, stx_size=1839840, ...}) = 0
+1222  newfstatat(13</home/tester/target/release/bingsu>, "",  <unfinished ...>
+1222  <... newfstatat resumed>{st_mode=S_IFREG|0755, st_size=1839840, ...}, AT_EMPTY_PATH) = 0
+1222  close(3</> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(4</home> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(5</home/tester> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(6</home/tester/target>)     = 0
+1222  close(7</fx> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(8</fx/bin> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(9</home> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(10</home/tester>)           = 0
+1222  close(11</home/tester/target> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(12</home/tester/target/release> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  close(13</home/tester/target/release/bingsu> <unfinished ...>
+1222  <... close resumed>)              = 0
+1222  openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC <unfinished ...>
+1222  <... openat resumed>)             = 3</proc/sys/kernel/random/boot_id>
+1222  statx(3</proc/sys/kernel/random/boot_id>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+1222  <... statx resumed>{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
+1222  fstatfs(3</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1222  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  read(3</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1222  <... read resumed>"", 38) = 37
+1222  read(3</proc/sys/kernel/random/boot_id>,  <unfinished ...>
+1222  <... read resumed>"", 1)          = 0
+1222  close(3</proc/sys/kernel/random/boot_id>) = 0
+1222  openat(AT_FDCWD</>, "/proc/self", O_RDONLY|O_CLOEXEC|O_DIRECTORY <unfinished ...>
+1222  <... openat resumed>)             = 3</proc/1222>
+1222  fstatfs(3</proc/1222>,  <unfinished ...>
+1222  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  openat(3</proc/1222>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</proc/1222/ns>
+1222  fstatfs(4</proc/1222/ns>,  <unfinished ...>
+1222  <... fstatfs resumed>{f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  openat(3</proc/1222>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 5</proc/1222/timens_offsets>
+1222  statx(5</proc/1222/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+1222  fstatfs(5</proc/1222/timens_offsets>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  close(5</proc/1222/timens_offsets>) = 0
+1222  readlinkat(4</proc/1222/ns>, "time", "time:[4026532442]", 28) = 17
+1222  readlinkat(4</proc/1222/ns>, "time_for_children", "time:[4026532442]", 28) = 17
+1222  close(4</proc/1222/ns>)           = 0
+1222  close(3</proc/1222>)              = 0
+1222  openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 3</>
+1222  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(3</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 4</home>
+1222  newfstatat(4</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(4</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 5</home/tester>
+1222  newfstatat(5</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(5</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 6</home/tester/target>
+1222  newfstatat(6</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(6</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 7</fx>
+1222  newfstatat(7</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(7</fx>, "run-t", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 8</fx/run-t>
+1222  newfstatat(8</fx/run-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(8</fx/run-t>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 9</fx/run-t/bingsu>
+1222  newfstatat(9</fx/run-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(9</fx/run-t/bingsu>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640492, f_bavail=22325702, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  newfstatat(3</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(4</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(3</>, "home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(5</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(4</home>, "tester", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(6</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(5</home/tester>, "target", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(7</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(6</home/tester/target>, "helper-stage-qhkrfr7v", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(8</fx/run-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(7</fx>, "run-t", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(9</fx/run-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(8</fx/run-t>, "bingsu", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  statx(9</fx/run-t/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1222  close(3</>)                       = 0
+1222  close(4</home>)                   = 0
+1222  close(5</home/tester>)            = 0
+1222  close(6</home/tester/target>)     = 0
+1222  close(7</fx>) = 0
+1222  close(8</fx/run-t>) = 0
+1222  fcntl(9</fx/run-t/bingsu>, F_DUPFD_CLOEXEC, 3) = 3</fx/run-t/bingsu>
+1222  mkdirat(3</fx/run-t/bingsu>, "contexts-v2", 0700) = -1 EEXIST (File exists)
+1222  openat(3</fx/run-t/bingsu>, "contexts-v2", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</fx/run-t/bingsu/contexts-v2>
+1222  newfstatat(4</fx/run-t/bingsu/contexts-v2>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(4</fx/run-t/bingsu/contexts-v2>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640492, f_bavail=22325702, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(3</fx/run-t/bingsu>) = 0
+1222  mkdirat(4</fx/run-t/bingsu/contexts-v2>, "config", 0700) = -1 EEXIST (File exists)
+1222  openat(4</fx/run-t/bingsu/contexts-v2>, "config", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3</fx/run-t/bingsu/contexts-v2/config>
+1222  newfstatat(3</fx/run-t/bingsu/contexts-v2/config>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(3</fx/run-t/bingsu/contexts-v2/config>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640491, f_bavail=22325701, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(4</fx/run-t/bingsu/contexts-v2>) = 0
+1222  mkdirat(3</fx/run-t/bingsu/contexts-v2/config>, "h0", 0700) = -1 EEXIST (File exists)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config>, "h0", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</fx/run-t/bingsu/contexts-v2/config/h0>
+1222  newfstatat(4</fx/run-t/bingsu/contexts-v2/config/h0>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(4</fx/run-t/bingsu/contexts-v2/config/h0>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640491, f_bavail=22325701, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(3</fx/run-t/bingsu/contexts-v2/config>) = 0
+1222  mkdirat(4</fx/run-t/bingsu/contexts-v2/config/h0>, "state", 0700) = -1 EEXIST (File exists)
+1222  openat(4</fx/run-t/bingsu/contexts-v2/config/h0>, "state", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3</fx/run-t/bingsu/contexts-v2/config/h0/state>
+1222  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640491, f_bavail=22325701, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(4</fx/run-t/bingsu/contexts-v2/config/h0>) = 0
+1222  mkdirat(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, "h1", 0700) = -1 EEXIST (File exists)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state>, "h1", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>
+1222  newfstatat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640490, f_bavail=22325700, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(3</fx/run-t/bingsu/contexts-v2/config/h0/state>) = 0
+1222  mkdirat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, "store", 0700) = -1 EEXIST (File exists)
+1222  openat(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>, "store", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>
+1222  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640490, f_bavail=22325700, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(4</fx/run-t/bingsu/contexts-v2/config/h0/state/h1>) = 0
+1222  fcntl(9</fx/run-t/bingsu>, F_DUPFD_CLOEXEC, 3) = 4</fx/run-t/bingsu>
+1222  close(9</fx/run-t/bingsu>) = 0
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot.lock", O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0600) = -1 EEXIST (File exists)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot.lock", O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>
+1222  newfstatat(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  fstatfs(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640489, f_bavail=22325699, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  flock(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, LOCK_EX|LOCK_NB) = 0
+1222  newfstatat(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  fstatfs(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640488, f_bavail=22325698, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot.lock", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  fstatfs(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640488, f_bavail=22325698, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot.lock", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".sequence.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".snapshot.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".last-good.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".marker.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 6</proc/sys/kernel/random/boot_id>
+1222  statx(6</proc/sys/kernel/random/boot_id>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
+1222  fstatfs(6</proc/sys/kernel/random/boot_id>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  read(6</proc/sys/kernel/random/boot_id>, "", 38) = 37
+1222  read(6</proc/sys/kernel/random/boot_id>, "", 1) = 0
+1222  close(6</proc/sys/kernel/random/boot_id>) = 0
+1222  openat(AT_FDCWD</>, "/proc/self", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 6</proc/1222>
+1222  fstatfs(6</proc/1222>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  openat(6</proc/1222>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 7</proc/1222/ns>
+1222  fstatfs(7</proc/1222/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  openat(6</proc/1222>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 8</proc/1222/timens_offsets>
+1222  statx(8</proc/1222/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+1222  fstatfs(8</proc/1222/timens_offsets>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  close(8</proc/1222/timens_offsets>) = 0
+1222  readlinkat(7</proc/1222/ns>, "time", "time:[4026532442]", 28) = 17
+1222  readlinkat(7</proc/1222/ns>, "time_for_children", "time:[4026532442]", 28) = 17
+1222  close(7</proc/1222/ns>)           = 0
+1222  close(6</proc/1222>)              = 0
+1222  openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 6</>
+1222  newfstatat(6</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(6</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 7</home>
+1222  newfstatat(7</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(7</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 8</home/tester>
+1222  newfstatat(8</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(8</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 9</home/tester/target>
+1222  newfstatat(9</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(9</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 10</fx>
+1222  newfstatat(10</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(10</fx>, "state-t", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 11</fx/state-t>
+1222  newfstatat(11</fx/state-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(11</fx/state-t>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 12</fx/state-t/bingsu>
+1222  newfstatat(12</fx/state-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  fstatfs(12</fx/state-t/bingsu>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640486, f_bavail=22325696, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  newfstatat(6</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(7</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(6</>, "home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(8</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(7</home>, "tester", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(9</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(8</home/tester>, "target", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(10</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(9</home/tester/target>, "helper-stage-qhkrfr7v", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(11</fx/state-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(10</fx>, "state-t", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(12</fx/state-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(11</fx/state-t>, "bingsu", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  close(6</>)                       = 0
+1222  close(7</home>)                   = 0
+1222  close(8</home/tester>)            = 0
+1222  close(9</home/tester/target>)     = 0
+1222  close(10</fx>) = 0
+1222  close(11</fx/state-t>) = 0
+1222  close(12</fx/state-t/bingsu>) = 0
+1222  openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 6</>
+1222  newfstatat(6</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(6</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 7</home>
+1222  newfstatat(7</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(7</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 8</home/tester>
+1222  newfstatat(8</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(8</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 9</home/tester/target>
+1222  newfstatat(9</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(9</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 10</fx>
+1222  newfstatat(10</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(10</fx>, "state-t", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 11</fx/state-t>
+1222  newfstatat(11</fx/state-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(11</fx/state-t>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 12</fx/state-t/bingsu>
+1222  newfstatat(12</fx/state-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(12</fx/state-t/bingsu>, "selection.lock", O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0600) = -1 EEXIST (File exists)
+1222  openat(12</fx/state-t/bingsu>, "selection.lock", O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 13</fx/state-t/bingsu/selection.lock>
+1222  statx(13</fx/state-t/bingsu/selection.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  newfstatat(13</fx/state-t/bingsu/selection.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  statx(13</fx/state-t/bingsu/selection.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  flock(13</fx/state-t/bingsu/selection.lock>, LOCK_EX|LOCK_NB) = 0
+1222  newfstatat(6</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(7</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(6</>, "home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(8</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(7</home>, "tester", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(9</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(8</home/tester>, "target", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(10</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(9</home/tester/target>, "helper-stage-qhkrfr7v", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(11</fx/state-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(10</fx>, "state-t", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(12</fx/state-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(11</fx/state-t>, "bingsu", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  statx(13</fx/state-t/bingsu/selection.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  newfstatat(13</fx/state-t/bingsu/selection.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  statx(13</fx/state-t/bingsu/selection.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  newfstatat(12</fx/state-t/bingsu>, "selection.lock", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  statx(13</fx/state-t/bingsu/selection.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 14</>
+1222  newfstatat(14</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(14</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 15</home>
+1222  newfstatat(15</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(15</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 16</home/tester>
+1222  newfstatat(16</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(16</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 17</home/tester/target>
+1222  newfstatat(17</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(17</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 18</fx>
+1222  newfstatat(18</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(18</fx>, "state-t", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 19</fx/state-t>
+1222  newfstatat(19</fx/state-t>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(19</fx/state-t>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 20</fx/state-t/bingsu>
+1222  newfstatat(20</fx/state-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(20</fx/state-t/bingsu>, "config-use", O_RDONLY|O_NOCTTY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  close(14</>)                      = 0
+1222  close(15</home>)                  = 0
+1222  close(16</home/tester>)           = 0
+1222  close(17</home/tester/target>)    = 0
+1222  close(18</fx>) = 0
+1222  close(19</fx/state-t>) = 0
+1222  close(20</fx/state-t/bingsu>) = 0
+1222  close(6</>)                       = 0
+1222  close(7</home>)                   = 0
+1222  close(8</home/tester>)            = 0
+1222  close(9</home/tester/target>)     = 0
+1222  close(10</fx>) = 0
+1222  close(11</fx/state-t>) = 0
+1222  close(12</fx/state-t/bingsu>) = 0
+1222  flock(13</fx/state-t/bingsu/selection.lock>, LOCK_UN) = 0
+1222  close(13</fx/state-t/bingsu/selection.lock>) = 0
+1222  openat(AT_FDCWD</>, "/", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 6</>
+1222  newfstatat(6</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(6</>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(6</>, "home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(6</>, "home", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 7</home>
+1222  statx(7</home>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(7</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(7</home>, "tester", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(7</home>, "tester", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 8</home/tester>
+1222  statx(8</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(8</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(8</home/tester>, "target", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(8</home/tester>, "target", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 9</home/tester/target>
+1222  statx(9</home/tester/target>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(9</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(9</home/tester/target>, "helper-stage-qhkrfr7v", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(9</home/tester/target>, "helper-stage-qhkrfr7v", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 10</fx>
+1222  statx(10</fx>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1222  newfstatat(10</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(10</fx>, "cfg-t", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(10</fx>, "cfg-t", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 11</fx/cfg-t>
+1222  statx(11</fx/cfg-t>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(11</fx/cfg-t>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(11</fx/cfg-t>, "bingsu", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(11</fx/cfg-t>, "bingsu", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 12</fx/cfg-t/bingsu>
+1222  statx(12</fx/cfg-t/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1222  newfstatat(12</fx/cfg-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(6</>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(6</>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(7</home>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(7</home>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(8</home/tester>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(8</home/tester>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(9</home/tester/target>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(9</home/tester/target>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(10</fx>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1222  newfstatat(10</fx>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  statx(11</fx/cfg-t>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=4096, ...}) = 0
+1222  newfstatat(11</fx/cfg-t>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  newfstatat(6</>, "home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(7</home>, "tester", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(8</home/tester>, "target", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(9</home/tester/target>, "helper-stage-qhkrfr7v", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(10</fx>, "cfg-t", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  newfstatat(11</fx/cfg-t>, "bingsu", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  statx(12</fx/cfg-t/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0
+1222  newfstatat(12</fx/cfg-t/bingsu>, "", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0
+1222  openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 13</proc/sys/kernel/random/boot_id>
+1222  statx(13</proc/sys/kernel/random/boot_id>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0444, stx_size=0, ...}) = 0
+1222  fstatfs(13</proc/sys/kernel/random/boot_id>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RDONLY|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  read(13</proc/sys/kernel/random/boot_id>, "", 38) = 37
+1222  read(13</proc/sys/kernel/random/boot_id>, "", 1) = 0
+1222  close(13</proc/sys/kernel/random/boot_id>) = 0
+1222  openat(AT_FDCWD</>, "/proc/self", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 13</proc/1222>
+1222  fstatfs(13</proc/1222>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  openat(13</proc/1222>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 14</proc/1222/ns>
+1222  fstatfs(14</proc/1222/ns>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  openat(13</proc/1222>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 15</proc/1222/timens_offsets>
+1222  statx(15</proc/1222/timens_offsets>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=0, ...}) = 0
+1222  fstatfs(15</proc/1222/timens_offsets>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x35, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0
+1222  close(15</proc/1222/timens_offsets>) = 0
+1222  readlinkat(14</proc/1222/ns>, "time", "time:[4026532442]", 28) = 17
+1222  readlinkat(14</proc/1222/ns>, "time_for_children", "time:[4026532442]", 28) = 17
+1222  close(14</proc/1222/ns>)          = 0
+1222  close(13</proc/1222>)             = 0
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 13</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>
+1222  newfstatat(13</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>, "", {st_mode=S_IFREG|0644, st_size=20711, ...}, AT_EMPTY_PATH) = 0
+1222  statx(13</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=20711, ...}) = 0
+1222  fstatfs(13</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640481, f_bavail=22325691, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  close(13</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot>) = 0
+1222  close(6</>)                       = 0
+1222  close(7</home>)                   = 0
+1222  close(8</home/tester>)            = 0
+1222  close(9</home/tester/target>)     = 0
+1222  close(10</fx>) = 0
+1222  close(11</fx/cfg-t>) = 0
+1222  close(12</fx/cfg-t/bingsu>) = 0
+1222  newfstatat(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  fstatfs(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=23640480, f_bavail=22325690, f_files=6553600, f_ffree=6424901, f_fsid={val=[0xbb22c22e, 0x1695525b]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0
+1222  statx(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0
+1222  newfstatat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, "snapshot.lock", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_SYMLINK_NOFOLLOW) = 0
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".sequence.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".snapshot.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".last-good.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  openat(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>, ".marker.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+1222  flock(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>, LOCK_UN) = 0
+1222  close(5</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store/snapshot.lock>) = 0
+1222  close(3</fx/run-t/bingsu/contexts-v2/config/h0/state/h1/store>) = 0
+1222  close(4</fx/run-t/bingsu>) = 0
+1222  getuid()                          = 1000
+1223  sigaltstack({ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=16384}, NULL) = 0
+1223  exit(0)                           = ?
+1223  +++ exited with 0 +++
+1222  sigaltstack({ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=16384}, NULL) = 0
+1222  exit_group(1)                     = ?
+1222  +++ exited with 1 +++

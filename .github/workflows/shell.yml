@@ -113,7 +113,8 @@ jobs:
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --ignore tests/shell/test_collector_security.py \
-                --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+                --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
       # 40), so this test alone runs in its own container without that
@@ -130,21 +131,31 @@ jobs:
   # Every system call the prompt makes after its seccomp filter is installed
   # is a row of crates/bingsu/prompt-syscalls.tsv and none is refused
   # (tests/shell/test_prompt_env_paths.py::test_calls_after_the_filter_are_in_the_table),
-  # for each x86_64 libc and profile the release ships or tests run. The
-  # binary runs natively on the runner (no container: the runner's own glibc).
+  # for each x86_64 libc and profile the release ships or tests run, plus the
+  # aarch64 release cells the helper stage gate needs. The binary runs
+  # natively on the runner (no container: the runner's own glibc).
   filter-calls:
     # Selects individual shell modules below, never test_collector_security.py;
     # the dedicated collector job owns host preparation and security evidence.
-    name: Prompt filter calls (x86_64 ${{ matrix.libc }} ${{ matrix.profile }})
+    name: Prompt filter calls (${{ matrix.os }} ${{ matrix.libc }} ${{ matrix.profile }})
     needs: detect
     if: needs.detect.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         libc: [gnu, musl]
         profile: [debug, release]
+        # GATE-FS-HELPER.1 counts x86_64 and aarch64, glibc and musl, release.
+        include:
+          - os: ubuntu-24.04-arm
+            libc: gnu
+            profile: release
+          - os: ubuntu-24.04-arm
+            libc: musl
+            profile: release
     env:
       LIBC: ${{ matrix.libc }}
       PROFILE: ${{ matrix.profile }}
@@ -155,16 +166,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.libc }}-${{ matrix.profile }}
+          key: ${{ matrix.os }}-${{ matrix.libc }}-${{ matrix.profile }}
       - name: Build
         run: |
           args=(-p bingsu -p bingsu-collect)
           dir=target
           if [ "$PROFILE" = release ]; then args+=(--release); fi
-          if [ "$LIBC" = musl ]; then args+=(--target x86_64-unknown-linux-musl); dir=target/x86_64-unknown-linux-musl; fi
+          if [ "$LIBC" = musl ]; then musl="$(uname -m)-unknown-linux-musl"; args+=(--target "$musl"); dir="target/$musl"; fi
           cargo build "${args[@]}"
           echo "BINGSU_BIN=$PWD/$dir/$PROFILE/bingsu" >> "$GITHUB_ENV"
       # K82 uses a glibc test binary with LD_PRELOAD; C3 uses a main-thread
@@ -192,6 +203,28 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_gate_acceptance.py -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_every_gate_clause_is_a_row_or_pending' "$RUNNER_TEMP/gate-acceptance.txt"
+      # GATE-FS-HELPER.1 counts a release build: the debug cells would measure
+      # the debug profile's extra fd checks (the test also refuses a debug binary).
+      # 이것을 실패시키는 것: 이 단계를 debug 칸에서도 돌리거나 매개변수 하나의 PASSED 단언을 빼는 것.
+      - name: Helper calls per publication stage equal the formula (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' --basetemp="$RUNNER_TEMP/helper-stage-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[unchanged]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[publish]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' "$RUNNER_TEMP/helper-stage.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' "$RUNNER_TEMP/helper-stage.txt"
+      # Only the live fixture's trace, stdout, stderr and attempt.json.
+      - name: Upload failed helper stage evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: helper-stage-${{ matrix.os }}-${{ matrix.libc }}-${{ matrix.profile }}
+          path: ${{ runner.temp }}/helper-stage-pytest/helper-stage-evidence/
+          retention-days: 2
+          if-no-files-found: ignore
       - name: Mounted procfs self with a different visible PID
         if: matrix.libc == 'gnu' && matrix.profile == 'debug'
         run: |

@@ -93,7 +93,10 @@ M3D_GATES = {
 M3D_GATE_IDS = tuple(M3D_GATES)
 
 # Supplementary rows that must stay, with their stage: existing tests that cover part of a clause.
-M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3a": "M3a"}
+M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3a": "M3a",
+                     # GATE-FS-HELPER.1 is one row per stage parameter; the primary row is unchanged.
+                     "GATE-FS-HELPER.1-publish": "M3d", "GATE-FS-HELPER.1-collect": "M3d",
+                     "GATE-FS-HELPER.1-last_good": "M3d", "GATE-FS-HELPER.1-recover": "M3d"}
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
@@ -110,13 +113,17 @@ M3D_DEFERRED = {
 }
 DEFERRED_MILESTONES = ("M4", "M6")
 
+# Gates whose rows count a live capture of a release build: their evidence must
+# come from steps that run only in release matrix cells (followups 106).
+M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER"})
+
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
 # the final Task asserts this is empty. A supplementary row (id GATE-ID.N-<tag>)
 # points at an existing test that covers part of a clause and does not close
 # its pair.
 M3D_PENDING = (
-    "GATE-FS-HELPER.1", "GATE-FS-HELPER.2",
+    "GATE-FS-HELPER.2",
     "GATE-FS-FRONT.1",
     "GATE-CHILDREN.1", "GATE-CHILDREN.2", "GATE-CHILDREN.3",
     "GATE-FDS.1", "GATE-FDS.2",
@@ -195,7 +202,8 @@ def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
     assert_deferred_rows(table)
     required = clauses() - set(pending) - set(M3D_DEFERRED)
     assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
-                            required_gates=frozenset(M3D_GATE_IDS), collected=collected)
+                            required_gates=frozenset(M3D_GATE_IDS), collected=collected,
+                            release_gates=M3D_RELEASE_GATES)
 
 
 def assert_clauses_accounted(table, pending=M3D_PENDING):
@@ -324,15 +332,24 @@ def deferred_lines():
     return "".join(line for line, row in zip(table.splitlines(True)[1:], rows(table)) if is_deferred(row))
 
 
+def standing_lines():
+    """The real table's deferred rows and the primary rows of closed pairs:
+    the synthetic accounting tables below vary only GATE-ZOMBIES.1."""
+    table = (ROOT / TABLE).read_text()
+    closed = covered(table)
+    return "".join(line for line, row in zip(table.splitlines(True)[1:], rows(table))
+                   if is_deferred(row) or row["id"] in closed)
+
+
 @pytest.mark.parametrize("damage", ["removed-row", "row-still-pending", "unknown-pending", "duplicate-pending",
                                     "supplementary-closes", "unknown-supplementary", "deferred-also-pending",
                                     "deferred-also-primary", "removed-deferred"])
 def test_clause_accounting_rejects_mutations(damage):
     pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
-    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1) + deferred_lines()
+    table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1) + standing_lines()
     assert_clauses_accounted(table, pending)
     if damage == "removed-row":
-        table = HEADER + deferred_lines()
+        table = HEADER + standing_lines()
     elif damage == "deferred-also-pending":
         pending = pending + ("GATE-FDS.3",)
     elif damage == "deferred-also-primary":
@@ -396,7 +413,7 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
 @pytest.mark.parametrize("closed", [False, True], ids=["pending", "closed-by-primary"])
 def test_supplementary_row_keeps_its_pair_pending(closed):
     pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
-    table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1) + deferred_lines()
+    table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1) + standing_lines()
     if closed:
         table += row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1)
     else:
@@ -503,7 +520,12 @@ def test_gate_ci_step_rejects_mutations(job, damage):
     elif damage == "runner":
         runner = {"filter-calls": "ubuntu-latest", "shell-macos": "macos-latest"}[job]
         other = {"filter-calls": "macos-latest", "shell-macos": "ubuntu-latest"}[job]
-        shell = in_job(shell, job, f"    runs-on: {runner}\n", f"    runs-on: {other}\n")
+        if job == "filter-calls":
+            # runs-on is the matrix os here: move every cell to macOS.
+            for label in ("ubuntu-latest", "ubuntu-24.04-arm"):
+                shell = shell.replace(label, other)
+        else:
+            shell = in_job(shell, job, f"    runs-on: {runner}\n", f"    runs-on: {other}\n")
     elif damage == "no-pipefail":
         start, end = job_span(shell, job)
         block = shell[start:end]
@@ -603,3 +625,99 @@ def test_job_platforms_read_lists_and_includes():
     assert job_platforms("synthetic", {"runs-on": ("${{ matrix.os }}", []), "strategy": (
         "", ["matrix:", "  include:", "    - os: ubuntu-24.04", "    - os: macos-latest"])}) == {"linux", "macos"}
     assert job_platforms("synthetic", {"runs-on": ("ubuntu-latest", [])}) == {"linux"}
+
+
+RELEASE_STEP = "      - name: Helper calls per publication stage equal the formula (release)\n"
+RELEASE_IF = "        if: matrix.profile == 'release'\n"
+
+
+# 이것을 실패시키는 것: release 게이트(GATE-FS-HELPER) 행을 debug 칸까지 도는 step, debug 칸만 도는 step,
+# 또는 profile 축이 없는 job의 profile 조건으로 받는 것.
+@pytest.mark.parametrize("damage", ["no-condition", "debug-only", "release-gate-unknown"])
+def test_release_gate_rows_need_release_only_cells(damage):
+    table = (ROOT / TABLE).read_text()
+    texts = workflows()
+    shell = texts["shell.yml"]
+    assert shell.count(RELEASE_STEP + RELEASE_IF) == 1
+    if damage == "no-condition":
+        shell = shell.replace(RELEASE_STEP + RELEASE_IF, RELEASE_STEP)
+    elif damage == "debug-only":
+        shell = shell.replace(RELEASE_STEP + RELEASE_IF, RELEASE_STEP + RELEASE_IF.replace("release", "debug"))
+    texts["shell.yml"] = shell
+    if damage == "release-gate-unknown":
+        # The same evidence without the release-gate set passes: the set is what refuses debug cells.
+        assert_acceptance_table(without_deferred(table), texts,
+                                required_ids=frozenset(covered(table)) | set(M3D_SUPPLEMENTARY),
+                                required_gates=frozenset(M3D_GATE_IDS))
+        return
+    with pytest.raises(AssertionError, match="release cells"):
+        assert_gate_table(table, texts)
+
+
+# 이것을 실패시키는 것: profile 축이 없는 job(shell-macos)의 profile 조건 step을 증거로 받는 것.
+def test_profile_condition_needs_a_profile_axis():
+    from test_collector_security import acceptance_pair_allowed
+    row = {"id": "GATE-FS-HELPER.1", "platform": "Linux"}
+    step = {"if": "matrix.profile == 'release'", "run": "echo ok", "_platforms": {"linux"}, "_cells": None}
+    assert acceptance_pair_allowed(row, step, step, ["echo", "ok"]) is None
+    step["_cells"] = [{"os": "ubuntu-latest", "libc": "gnu", "profile": "release"}]
+    assert acceptance_pair_allowed(row, step, step, ["echo", "ok"]) == {"linux"}
+
+
+HELPER_STAGE_ROWS = ("GATE-FS-HELPER.1", "GATE-FS-HELPER.1-publish", "GATE-FS-HELPER.1-collect",
+                     "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover")
+
+
+# 이것을 실패시키는 것: 다섯 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.
+@pytest.mark.parametrize("row_id", HELPER_STAGE_ROWS)
+def test_every_helper_stage_row_is_required(row_id):
+    table = (ROOT / TABLE).read_text()
+    texts = workflows()
+    line = next(l for l in table.splitlines(True) if l.startswith(row_id + "\t"))
+    node = line.split("\t")[5]
+    shell = texts["shell.yml"]
+    grep = f"          grep -Fx 'PASSED {node}' \"$RUNNER_TEMP/helper-stage.txt\"\n"
+    assert shell.count(grep) == 1 and shell.count(f" '{node}'") == 1
+    texts["shell.yml"] = shell.replace(grep, "").replace(f" '{node}'", "")
+    with pytest.raises(AssertionError):
+        assert_gate_table(table.replace(line, ""), texts)
+
+
+ARM_MUSL = "          - os: ubuntu-24.04-arm\n            libc: musl\n            profile: release\n"
+
+
+# 이것을 실패시키는 것: x86_64·aarch64 × glibc·musl release 칸 중 하나가 빠진 job을 release 게이트 증거로 받는 것.
+# 고정한 matrix 줄도 함께 바꿔, matrix 고정 검사가 아니라 칸 규칙만 거부하게 한다.
+def test_release_gate_rows_need_every_arch_and_libc(monkeypatch):
+    import test_collector_security as security
+    texts = workflows()
+    assert texts["shell.yml"].count(ARM_MUSL) == 1
+    texts["shell.yml"] = texts["shell.yml"].replace(ARM_MUSL, "")
+    pinned = list(security.SHELL_EVIDENCE_JOBS["filter-calls"])
+    at = len(pinned) - 3
+    assert pinned[at:] == ["- os: ubuntu-24.04-arm", "libc: musl", "profile: release"]
+    monkeypatch.setitem(security.SHELL_EVIDENCE_JOBS, "filter-calls", pinned[:at])
+    with pytest.raises(AssertionError, match="release cells"):
+        assert_gate_table((ROOT / TABLE).read_text(), texts)
+
+
+# 이것을 실패시키는 것: include 항목을 새 칸이 아니라 기존 칸에 덮어쓰거나 버리는 것.
+def test_job_cells_follow_the_include_rule():
+    from test_collector_security import job_cells
+    strategy = ["fail-fast: false", "matrix:", "os: [ubuntu-latest]", "libc: [gnu, musl]", "profile: [debug, release]",
+                "include:", "- os: ubuntu-24.04-arm", "  libc: gnu", "  profile: release", "- libc: gnu", "  extra: x"]
+    cells = job_cells(strategy)
+    assert len(cells) == 5
+    assert {"os": "ubuntu-24.04-arm", "libc": "gnu", "profile": "release"} in cells
+    assert sum(cell.get("extra") == "x" for cell in cells) == 2
+
+
+# 이것을 실패시키는 것: ARM matrix 라벨을 남긴 채 모든 칸을 x86_64 runner에서 돌리는 것.
+def test_release_gate_cells_require_effective_matrix_runner():
+    texts = workflows()
+    prefix, job = texts["shell.yml"].split("  filter-calls:\n", 1)
+    runner = "    runs-on: ${{ matrix.os }}\n"
+    assert job.split("  shell-macos:", 1)[0].count(runner) == 1
+    texts["shell.yml"] = prefix + "  filter-calls:\n" + job.replace(runner, "    runs-on: ubuntu-latest\n", 1)
+    with pytest.raises(AssertionError, match="release runner"):
+        assert_gate_table((ROOT / TABLE).read_text(), texts)

@@ -1270,3 +1270,340 @@ def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict
     assert set(measured.counts) == set(expected), ("missing or extra role", measured.counts, expected)
     errors = check(measured.counts, expected, "exact", expected.keys())
     assert not errors, errors
+
+
+# GATE-FS-HELPER.1: helper calls per publication stage of a release build.
+HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
+                 "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
+                 "failure-recover": ("failure-recover",)}
+TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\ntemplate='EDIT {char}'\n",
+             "collect": "[style]\ntemplate='BASE {dir} {git} {char}'\n", "broken": "[broken"}
+
+
+def elf_facts(path):
+    """(has .symtab, PT_INTERP) of a 64-bit little-endian ELF executable."""
+    import struct
+    data = Path(path).read_bytes()
+    assert data[:6] == b"\x7fELF\x02\x01", ("64-bit little-endian ELF", path)
+    phoff, shoff = struct.unpack_from("<QQ", data, 0x20)
+    phentsize, phnum, shentsize, shnum, shstrndx = struct.unpack_from("<HHHHH", data, 0x36)
+    interp = None
+    for i in range(phnum):
+        kind, _, offset, _, _, size = struct.unpack_from("<IIQQQQ", data, phoff + i * phentsize)
+        if kind == 3:
+            interp = data[offset:offset + size].rstrip(b"\0").decode()
+    names_at = struct.unpack_from("<Q", data, shoff + shstrndx * shentsize + 0x18)[0]
+    sections = set()
+    for i in range(shnum):
+        name = struct.unpack_from("<I", data, shoff + i * shentsize)[0]
+        sections.add(data[names_at + name:data.index(b"\0", names_at + name)].decode())
+    return ".symtab" in sections, interp
+
+
+def require_release_helper(exe):
+    # Budget gates count a release build (followups 106): the release profile
+    # strips symbols and a debug build keeps .symtab (and extra fd checks).
+    # 이것을 실패시키는 것: debug 바이너리로 이 게이트를 돌리는 것(.symtab이 남아 있어 실패).
+    symtab, interp = elf_facts(exe)
+    assert not symtab, (f"{exe} keeps .symtab: helper call budgets are measured on the stripped release profile; "
+                        "build with --release")
+    # The product's musl builds are static (no PT_INTERP); its glibc builds are not.
+    return "musl" if interp is None else "gnu"
+
+
+def path_names(path):
+    return len(Path(os.path.realpath(path)).parts) - 1
+
+
+def nss_reads(libc, user_uid):
+    """(nsswitch.conf, /etc/passwd) read calls of the helper's passwd lookup.
+
+    glibc reads nsswitch.conf to EOF and /etc/passwd up to the user's line in
+    st_blksize stdio buffers; musl reads only /etc/passwd, in its 1 KiB BUFSIZ
+    buffer. An nscd socket would add a different exchange, so it must be absent.
+    """
+    for socket_path in ("/var/run/nscd/socket", "/run/nscd/socket"):
+        assert not os.path.exists(socket_path), "an nscd socket changes the NSS calls; run without nscd"
+    data = Path("/etc/passwd").read_bytes()
+    at = next(m.end() for m in re.finditer(rb"(?m)^[^:\n]*:[^:\n]*:(\d+):.*$\n?", data)
+              if int(m.group(1)) == user_uid)
+    if libc == "musl":
+        return 0, -(-at // 1024)
+    nsswitch, passwd = os.stat("/etc/nsswitch.conf"), os.stat("/etc/passwd")
+    return -(-nsswitch.st_size // nsswitch.st_blksize) + 1, -(-at // passwd.st_blksize)
+
+
+def context_store(runtime, config, state):
+    path = Path(runtime) / "bingsu" / "contexts-v2" / "config"
+    for index, value in enumerate((os.fsencode(config), os.fsencode(state))):
+        for i in range(0, len(value), 60):
+            path /= value[i:i + 60].hex()
+        if index == 0:
+            path /= "state"
+    return path / "store"
+
+
+def helper_processes(base):
+    """Running refresh helpers of this fixture (cmdline names its roots)."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        try:
+            line = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if entry.name.isdigit() and b"__refresh-v1" in line and os.fsencode(str(base)) in line:
+            found.append(entry.name)
+    return found
+
+
+def wait_helpers(base, timeout=15):
+    import time
+    end = time.monotonic() + timeout
+    while helper_processes(base):
+        assert time.monotonic() < end, ("refresh helper did not exit", helper_processes(base))
+        time.sleep(0.05)
+
+
+def warm_collection_previous(store, prompt, wait):
+    """Reach the formula's two-publication state before starting any trace.
+
+    CollectionStore::publish rotates only an existing response. Three warm-up
+    prompts need not produce two responses (admission/deadline may defer one).
+    Missing previous is normal; unsafe files and other IO errors are not.
+    Allow at most three further untraced prompts, then fail preparation clearly.
+    """
+    import stat
+
+    def size(name):
+        info = (store / name).lstat()
+        assert stat.S_ISREG(info.st_mode), ("non-regular collection slot", store / name)
+        assert info.st_size >= 64, ("short collection slot", store / name)
+        return info.st_size
+
+    for attempt in range(4):
+        response_bytes = size("response")  # also proves the parent still exists
+        try:
+            previous_bytes = size("previous")
+        except FileNotFoundError:
+            # Only an absent leaf is a preparation state. Recheck the parent
+            # so removal of the store is not silently treated as first publish.
+            assert stat.S_ISDIR(store.lstat().st_mode), ("collection store", store)
+            if attempt == 3:
+                raise AssertionError(f"warm-up did not rotate response into previous: {store}")
+            prompt()
+            wait()
+        else:
+            return {"response_bytes": response_bytes, "previous_bytes": previous_bytes}
+
+
+class HelperStageFixture:
+    """Real init, warm-up prompts and one traced prompt for a helper stage.
+
+    The base lives next to the build output, not under /tmp: a group- or
+    world-writable ancestor makes every trust walk add ACL and group queries
+    the stage formula does not include, so the fixture refuses one.
+    """
+
+    def __init__(self, stage):
+        import tempfile
+        root = real_bin().parent.parent
+        self.base = Path(tempfile.mkdtemp(prefix="helper-stage-", dir=root)).resolve()
+        for ancestor in [self.base, *self.base.parents]:
+            assert not os.stat(ancestor).st_mode & 0o022, ("group/other-writable ancestor", ancestor)
+        self.stage = stage
+        self.seq = 0
+        self.inst = Install(self.base)
+        self.env = trusted_env(self.base)
+        self.env["HOME"] = str(self.base / "home-t")
+        os.mkdir(self.env["HOME"], 0o700)
+        self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
+        self.config.mkdir(parents=True, mode=0o700)
+        self.put("collect" if stage == "collect" else "plain")
+        self.script = self.inst.init("bash", self.env)
+        self.collector = init_collector_exe(self.script)
+        wait_helpers(self.base)
+        self.pwd = self.base
+        if stage == "collect":
+            self.pwd = self.base / "repo"
+            self.pwd.mkdir()
+            subprocess.run(["git", "init", "-q", str(self.pwd)], check=True, env={"PATH": os.environ["PATH"]})
+            (self.pwd / "a").write_text("x")
+        # The first prompts publish and, for collect, admit and store a response
+        # untraced: under strace a cold admission can exceed its 20 ms budget.
+        for _ in range(3 if stage == "collect" else 1):
+            self.prompt()
+            wait_helpers(self.base)
+        self.store = context_store(self.env["XDG_RUNTIME_DIR"], os.path.realpath(self.config),
+                                   os.path.realpath(Path(self.env["XDG_STATE_HOME"]) / "bingsu"))
+        assert (self.store / "snapshot").is_file(), "warm-up did not publish"
+        self.collection = {}
+        if stage == "collect":
+            stores = list((self.store / "collections-v1").glob("*/store"))
+            runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"
+            breakers = list((runtime / "collection-control-v1/sessions").glob("*/breaker"))
+            assert len(stores) == len(breakers) == 1, ("one store and breaker after warm-up", stores, breakers)
+            sizes = warm_collection_previous(stores[0], self.prompt, lambda: wait_helpers(self.base))
+            self.collection = {"catalog_bytes": (runtime / ".collections.catalog").stat().st_size,
+                               "breaker_bytes": breakers[0].stat().st_size,
+                               **sizes,
+                               "collector_components": path_names(Path(self.collector).parent),
+                               "collector_bytes": Path(self.collector).stat().st_size}
+        if stage == "publish":
+            self.put("edited")
+        elif stage == "failure-last-good":
+            (self.store / "snapshot").unlink()
+            self.put("broken")
+        elif stage == "failure-recover":
+            (self.store / "snapshot").chmod(0o644)
+
+    def put(self, name):
+        path = self.config / "config.toml"
+        pending = path.with_name("config.toml.new")
+        pending.write_text(TEMPLATES[name])
+        pending.chmod(0o600)
+        pending.replace(path)
+
+    def prompt(self, trace=None):
+        f = self.base / "prompt.bash"
+        # Each run is a fresh bash: start its prompt counter after the last
+        # run's, as one long-lived shell would, so the collection breaker
+        # sees a new sequence instead of a replayed one.
+        self.seq += 1
+        f.write_bytes(self.script + b"\n_bingsu_seq=" + str(self.seq).encode() + b"\ncd '"
+                      + os.fsencode(str(self.pwd)) + b"'\n" + CALL)
+        strace = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-s", "4096",
+                  "-e", "trace=all",
+                  "-o", str(trace)] if trace else []
+        r = subprocess.run(strace + SHELL_CMD["bash"] + [str(f)], env=self.env, capture_output=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return r
+
+    def plan(self, libc):
+        import platform
+        from fsbudget.formula import HelperAxes, HelperPlan, MAX_RW_COUNT
+        nsswitch_reads, passwd_reads = nss_reads(libc, os.getuid())
+        state = Path(self.env["XDG_STATE_HOME"]) / "bingsu"
+        config_bytes = (self.config / "config.toml").stat().st_size
+        snapshot = self.store / ("last-good" if self.stage == "failure-last-good" else "snapshot")
+        context = 4 + -(-len(os.fsencode(os.path.realpath(self.config))) // 60) + -(-len(os.fsencode(os.path.realpath(state))) // 60)
+        return HelperPlan(
+            stages=HELPER_STAGES[self.stage],
+            ax=HelperAxes(F=1, P=path_names(self.config), L=0, R=3, D=0, M=0, B=[config_bytes]),
+            runtime_components=path_names(Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
+            context_components=context,
+            snapshot_bytes=snapshot.stat().st_size, marker_bytes=208, buf=MAX_RW_COUNT,
+            state_components=path_names(state), exe_link_components=path_names(self.inst.dir),
+            exe_components=path_names(real_bin().parent),
+            nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
+            arch=platform.machine(), **self.collection)
+
+
+def collector_exit(lines, collector):
+    """The traced collector's exit code. 75 is wire::DEADLINE_EXIT_CODE: the
+    collector ran past its 50 ms request deadline and nothing was published."""
+    pid = next(l.split()[0] for l in lines if is_root(l, collector))
+    ends = [l for l in lines if l.split()[0] == pid and "+++ exited with" in l]
+    assert len(ends) == 1, ("collector end", ends)
+    return int(ends[0].split("exited with")[1].split()[0])
+
+
+def measured_helper_attribution(lines, exe, collector, helper_vocabulary=True):
+    """Helper-role counts of one traced prompt, in the helper vocabulary.
+
+    Errors about the front or the helper (and parse or attribution errors)
+    fail the gate; the collector's own calls are gated by the collector
+    security rows, outside this formula.
+    """
+    from fsbudget.attribute import collector_attribute
+    _, scoped = tree(lines, exe)
+    collectors = sum(is_root(line, collector) for line in scoped)
+    roles = collector_attribute(scoped, {"front": exe, "helper": exe, "collector": collector,
+                                         "collectors": collectors}, helper_vocabulary=helper_vocabulary)
+    errors = [e for e in roles.errors if "(collector):" not in e]
+    assert not errors, errors
+    return collectors, roles
+
+
+def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
+    collectors, roles = measured_helper_attribution(lines, exe, collector, helper_vocabulary)
+    return collectors, roles.counts
+
+
+def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
+    from fsbudget.formula import helper_stage_expected, helper_collect_expected
+    from fsbudget.gate import check, check_collect
+    if evidence is None:
+        evidence = {}
+    status = collector_exit(lines, collector) if stage == "collect" else None
+    evidence["collector_exit"] = status
+    collectors, roles = measured_helper_attribution(lines, exe, collector)
+    evidence["role_counts"] = roles.counts
+    assert collectors == int(stage == "collect"), ("collector spawns", collectors)
+    if stage != "collect":
+        measured = {"helper": roles.counts.get("helper", {})}
+        expected = {"helper": helper_stage_expected(plan)}
+        evidence.update(phase_counts=measured, phase_expected=expected)
+        errors = check(measured, expected, "exact", ["helper"])
+        published = False
+    else:
+        assert status in (0, 75), ("unexpected collector exit", status)
+        errors, published = check_collect(roles, helper_collect_expected(plan, deadline=status == 75),
+                                          deadline=status == 75, evidence=evidence)
+    evidence.update(published=published, errors=errors)
+    assert not errors, errors
+    return published
+
+
+# 이것을 실패시키는 것: 도우미 재검증 경로에 같은 파일의 fstat 하나를 더하는 것, 수집 비용을 앞단으로 옮기는 것,
+# 공식에 옛 고정 항(e["read"] += 2)을 되살리는 것, debug 바이너리로 재는 것, helper 어휘에서 fd statx나
+# chdir를 지우는 것, 제품이 chdir·mkdirat·fchmod·lseek·dup 호출을 하나 더 내는 것,
+# 마감 회차의 호출을 버리거나 최대 6회에서 실제 응답 발행이 한 번도 없는 것.
+@pytest.fixture
+def helper_stage_evidence(tmp_path_factory):
+    # A dedicated upload root, separate from all other pytest fixtures.
+    return tmp_path_factory.getbasetemp() / "helper-stage-evidence"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+@pytest.mark.parametrize("stage", list(HELPER_STAGES))
+def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
+    """GATE-FS-HELPER.1: exact stages; collect prefix exact and tail <=.
+
+    Every attempt is checked before retrying, including exit 75. At least one
+    of at most six fresh collect fixtures must actually rename a response.
+    """
+    assert shutil.which("strace"), "the helper stage gate must execute strace"
+    libc = require_release_helper(real_bin())
+    import json
+    # Traces live outside the product fixture: cleanup must never erase a
+    # failed attempt or earlier deadline attempts. --basetemp locates these
+    # artifacts for the controller; each invocation needs its own basetemp.
+    for attempt in range(1, (6 if stage == "collect" else 1) + 1):
+        artifacts = helper_stage_evidence / stage / f"attempt-{attempt}"
+        artifacts.mkdir(parents=True)
+        trace = artifacts / "trace.strace"
+        evidence = {"stage": stage, "attempt": attempt, "collector_exit": None,
+                    "published": None, "phase_counts": None, "phase_expected": None,
+                    "trace": str(trace)}
+        fixture = None
+        try:
+            fixture = HelperStageFixture(stage)
+            result = fixture.prompt(trace)
+            evidence["prompt_exit"] = result.returncode
+            (artifacts / "stdout").write_bytes(result.stdout)
+            (artifacts / "stderr").write_bytes(result.stderr)
+            lines = trace.read_text(errors="replace").splitlines()
+            published = check_helper_capture(stage, lines, str(fixture.inst.exe), fixture.collector,
+                                             fixture.plan(libc), evidence=evidence)
+            if stage != "collect" or published:
+                return
+        except BaseException as error:
+            evidence["failure"] = str(error)
+            raise
+        finally:
+            (artifacts / "attempt.json").write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+            print(f"helper stage evidence: {artifacts}")
+            if fixture is not None:
+                wait_helpers(fixture.base)
+                shutil.rmtree(fixture.base, ignore_errors=True)
+    pytest.fail(f"collect: zero publishes across all 6 checked attempts; evidence: {helper_stage_evidence / stage}")

@@ -1562,3 +1562,498 @@ def test_collector_gate_keeps_role_and_kind_budgets_separate():
     reduced["collector"]["read"] = 0
     with pytest.raises(AssertionError, match="collector.read"):
         budget.assert_collector_trace_budget(saved, fixture.PINNED_PRODUCT, reduced)
+
+
+# GATE-FS-HELPER.1 judge regressions on reduced release captures (provenance:
+# fixtures/helper-stage-traces.md). The live gate is
+# test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula.
+HELPER_STAGE_TRACES = Path(__file__).with_name("fixtures") / "helper-stage-traces.json"
+HELPER_EXE = "/fx/bin/bingsu"
+
+
+def helper_stage_case(stage):
+    import json
+    from fsbudget.formula import HelperAxes, HelperPlan
+    meta = json.loads(HELPER_STAGE_TRACES.read_text())[stage]
+    data = (HELPER_STAGE_TRACES.parent / f"helper-stage-{stage}.strace").read_bytes()
+    assert hashlib.sha256(data).hexdigest() == meta["sha256"], stage
+    plan = dict(meta["plan"])
+    plan["stages"] = tuple(plan["stages"])
+    plan["ax"] = HelperAxes(**plan["ax"])
+    return data.decode().splitlines(), meta["collector"], HelperPlan(**plan)
+
+
+def helper_stage_errors(lines, collector, expected, **attribution):
+    from fsbudget.gate import check
+    _, counts = budget.measured_helper_calls(lines, HELPER_EXE, collector, **attribution)
+    return check({"helper": counts.get("helper", {})}, {"helper": expected}, "exact", ["helper"])
+
+
+def first_helper_line(lines, pattern):
+    import re
+    helper = next(l.split()[0] for l in lines if "__refresh-v1" in l and "execve(" in l)
+    return next(i for i, l in enumerate(lines) if l.split()[0] == helper and re.search(pattern, l))
+
+
+STAGE_NAMES = ["unchanged", "publish", "collect", "failure-last-good", "failure-recover"]
+
+
+# CI 40650736942 unchanged helper pid 2756, lines 730-736: glibc's
+# pthread_getattr_np maps fclose seeks. Replay those call shapes on each
+# saved aarch64 capture; this is a platform mutation, not a new live capture.
+@pytest.mark.parametrize("stage", STAGE_NAMES)
+@pytest.mark.parametrize("damage", [None, "extra-read", "missing-cur", "missing-set", "missing-both"])
+def test_helper_stack_guard_exact(stage, damage):
+    from dataclasses import replace
+    lines, collector, plan = helper_stage_case(stage)
+    at = first_helper_line(lines, r"close\(3</proc/\d+/maps>")
+    pid = lines[at].split()[0]
+    startup = [f'{pid} lseek(3</proc/{pid}/maps>, 0, SEEK_CUR) = 2906',
+               f'{pid} lseek(3</proc/{pid}/maps>, 2822, SEEK_SET) = 2822']
+    if damage == "extra-read":
+        startup.append(f'{pid} read(3</proc/{pid}/maps>, "", 1024) = 0')
+    elif damage == "missing-cur":
+        del startup[0]
+    elif damage == "missing-set":
+        del startup[1]
+    elif damage == "missing-both":
+        startup = []
+    lines[at:at] = startup
+    plan = replace(plan, arch="x86_64")
+    if damage is None:
+        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+    else:
+        kind = "read" if damage == "extra-read" else "seek"
+        with pytest.raises(AssertionError, match=rf"{kind}: measured .*\(exact\)"):
+            budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
+@pytest.mark.parametrize("ready_after", [0, 1, 3])
+def test_collection_warmup_waits_for_rotation(tmp_path, ready_after):
+    (tmp_path / "response").write_bytes(b"r" * 64)
+    prompts, waits = [], []
+
+    def publish():
+        prompts.append(1)
+        if len(prompts) == ready_after:
+            (tmp_path / "response").replace(tmp_path / "previous")
+            (tmp_path / "response").write_bytes(b"n" * 72)
+
+    if ready_after == 0:
+        (tmp_path / "previous").write_bytes(b"p" * 64)
+    sizes = budget.warm_collection_previous(tmp_path, publish, lambda: waits.append(1))
+    assert sizes == {"response_bytes": 72 if ready_after else 64, "previous_bytes": 64}
+    assert len(prompts) == len(waits) == ready_after
+
+
+def test_collection_warmup_never_rotated_fails(tmp_path):
+    (tmp_path / "response").write_bytes(b"r" * 64)
+    prompts = []
+    with pytest.raises(AssertionError, match="warm-up did not rotate"):
+        budget.warm_collection_previous(tmp_path, lambda: prompts.append(1), lambda: None)
+    assert len(prompts) == 3
+
+
+@pytest.mark.parametrize("damage", ["missing-response", "symlink", "directory", "short", "permission", "io"])
+def test_collection_warmup_does_not_swallow_errors(tmp_path, monkeypatch, damage):
+    (tmp_path / "response").write_bytes(b"r" * 64)
+    previous = tmp_path / "previous"
+    error = AssertionError
+    if damage == "missing-response":
+        (tmp_path / "response").unlink()
+        error = FileNotFoundError
+    elif damage == "symlink":
+        previous.symlink_to(tmp_path / "absent")
+    elif damage == "directory":
+        previous.mkdir()
+    elif damage == "short":
+        previous.write_bytes(b"short")
+    else:
+        error = PermissionError if damage == "permission" else OSError
+        original = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if path == previous:
+                raise error("injected slot IO error")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+
+    def unexpected():
+        pytest.fail("a real preparation error must not trigger another prompt")
+
+    with pytest.raises(error):
+        budget.warm_collection_previous(tmp_path, unexpected, unexpected)
+
+
+def legacy_helper_stage_case(stage):
+    """Change three stored helper calls to equivalent x86_64 spellings.
+
+    Keep the capture's plan/libc/counts: this is an ABI spelling mutation of
+    the saved aarch64 capture, not an asserted live x86_64 musl measurement.
+    """
+    import ast
+    import json
+    import posixpath
+    from fsbudget.classify import split_args, fd_identity
+    lines, collector, plan = helper_stage_case(stage)
+    start = first_helper_line(lines, r"umask\(077")
+    pid = lines[start].split()[0]
+    replacements = {}
+    for at in range(start + 1, len(lines)):
+        if lines[at].split()[0] != pid:
+            continue
+        parsed = budget.parse_trace(lines[at])
+        if parsed.errors or len(parsed) != 1:
+            continue  # leave unfinished/resumed records intact
+        c = parsed[0]
+        if c.name not in {"openat", "newfstatat"}:
+            continue
+        args = split_args(c.args)
+        path = ast.literal_eval(args[1])
+        if not path:
+            # A held directory in this symlink-free fixture is the same
+            # object when queried by stat(path). No extra open is introduced.
+            identity = fd_identity(args[0])
+            if (c.name == "newfstatat" and args[-1] == "AT_EMPTY_PATH"
+                    and "S_IFDIR" in args[2] and identity and identity.startswith("file:")
+                    and "stat" not in replacements):
+                lines[at] = f'{pid} stat({json.dumps(identity[5:])}, {args[2]}) = {c.ret}'
+                replacements["stat"] = at
+            continue
+        if not path.startswith("/"):
+            identity = fd_identity(args[0])
+            if not identity or not identity.startswith("file:"):
+                continue
+            path = posixpath.join(identity[5:], path)
+        if c.name == "openat":
+            name, tail = "open", args[2:]
+        else:
+            if args[-1] not in {"0", "AT_SYMLINK_NOFOLLOW"}:
+                continue
+            name = "lstat" if args[-1] == "AT_SYMLINK_NOFOLLOW" else "stat"
+            tail = [args[2]]
+        if name in replacements:
+            continue
+        lines[at] = f'{pid} {name}({", ".join([json.dumps(path), *tail])}) = {c.ret}'
+        replacements[name] = at
+        if len(replacements) == 3:
+            break
+    assert set(replacements) == {"open", "stat", "lstat"}, (stage, replacements)
+    return lines, collector, plan, replacements
+
+
+# 이것을 실패시키는 것: legacy 이름이 역할 집계/실제 단계 판정기를 우회하거나 누락 매핑을 허용하는 것.
+@pytest.mark.parametrize("stage", STAGE_NAMES)
+@pytest.mark.parametrize("name", ["open", "stat", "lstat"])
+@pytest.mark.parametrize("damage", [None, "extra", "remove-mapping"])
+def test_legacy_helper_stage_trace_mutations(monkeypatch, stage, name, damage):
+    from fsbudget.classify import HELPER_LEGACY_PATH_KINDS
+    from fsbudget.formula import helper_stage_expected
+    lines, collector, plan, replacements = legacy_helper_stage_case(stage)
+    original, _, _ = helper_stage_case(stage)
+    _, before = budget.measured_helper_calls(original, HELPER_EXE, collector)
+    _, after = budget.measured_helper_calls(lines, HELPER_EXE, collector)
+    assert before == after  # every role unchanged; each alias counts exactly once
+    assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) == (stage == "collect")
+    kind = HELPER_LEGACY_PATH_KINDS[name]
+    if damage == "extra":
+        at = replacements[name]
+        # A failed open is still one call; reusing its successful fd would
+        # fail descriptor attribution before reaching the exact count gate.
+        extra = lines[at].split(" = ")[0] + " = -1 EACCES (Permission denied)"
+        lines.insert(at + 1, extra)
+    elif damage == "remove-mapping":
+        monkeypatch.delitem(HELPER_LEGACY_PATH_KINDS, name)
+    errors = helper_stage_errors(lines, collector, helper_stage_expected(plan))
+    if damage is None:
+        assert errors == []
+        return
+    assert any(f"helper.{kind}:" in error and "(exact)" in error for error in errors)
+    if damage == "remove-mapping":
+        assert "helper.unknown-fs: measured 1, formula 0 (exact)" in errors
+    phase = "prefix" if stage == "collect" else "helper"
+    with pytest.raises(AssertionError, match=rf"{phase}\.{kind}.*exact"):
+        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
+# 이것을 실패시키는 것: 판정기가 저장 trace의 종류별 호출 수를 공식과 exact로 비교하지 않는 것,
+# 도우미 호출 하나를 더하거나(fstat) 앞단으로 옮기는 것(git 전역 입력 open), helper 어휘 없이 세는 것,
+# umask를 세지 않는 것(더하거나 빼도 통과), 시작 뒤의 loader 모양 접근(/proc/<pid>/maps)을 면제하는 것.
+@pytest.mark.parametrize("stage,damage", [
+    (stage, damage) for stage in STAGE_NAMES
+    for damage in (None, "extra-fstat", "generic-vocabulary", "extra-umask", "missing-umask", "maps-after-startup")
+    + (("moved-to-front",) if stage == "collect" else ())])
+def test_stage_formula_checker_regressions(stage, damage):
+    from fsbudget.formula import helper_stage_expected
+    lines, collector, plan = helper_stage_case(stage)
+    expected = helper_stage_expected(plan)
+    kwargs = {}
+    if damage == "extra-fstat":
+        # A complete fd stat of a held runtime folder, repeated once.
+        at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
+        lines = lines[:at + 1] + [lines[at]] + lines[at + 1:]
+    elif damage == "moved-to-front":
+        # The helper's first global Git input open, made by the live front instead.
+        root = lines[0].split()[0]
+        at = first_helper_line(lines, r'openat\(AT_FDCWD</>, "/fx/(?:cfg|home)-t/[^"]*git[^"]*",.*\) = -1 ENOENT')
+        moved = root + lines[at][len(lines[at].split()[0]):]
+        lines = [lines[0], moved] + lines[1:at] + lines[at + 1:]
+    elif damage == "generic-vocabulary":
+        kwargs["helper_vocabulary"] = False
+    elif damage in ("extra-umask", "missing-umask", "maps-after-startup"):
+        # detach()'s umask(077), split by strace into a call and its resumption.
+        at = first_helper_line(lines, r"umask\(077")
+        end = next(i for i in range(at, len(lines)) if lines[i].split()[0] == lines[at].split()[0] and " = " in lines[i])
+        pid = lines[at].split()[0]
+        if damage == "missing-umask":
+            lines = lines[:at] + lines[at + 1:end] + lines[end + 1:]
+        else:
+            # A loader-allowlisted path after startup must still count (review control).
+            extra = (f"{pid}  umask(077) = 077" if damage == "extra-umask" else
+                     f'{pid}  newfstatat(AT_FDCWD</>, "/proc/{pid}/maps", {{st_mode=S_IFREG|0444, st_size=0, ...}}, 0) = 0')
+            lines = lines[:end + 1] + [extra] + lines[end + 1:]
+    errors = helper_stage_errors(lines, collector, expected, **kwargs)
+    if damage is None:
+        assert errors == []
+    else:
+        assert errors, damage
+
+
+# 이것을 실패시키는 것: 제품 도우미 게이트가 옛 합성 고정 항(잠금 1·머리 1·표식 1, e["read"] += 2)이나
+# 합성 공식(synthetic_helper_expected)을 받아들이는 것.
+@pytest.mark.parametrize("stage", STAGE_NAMES)
+def test_product_helper_gate_rejects_legacy_fixed_terms(stage):
+    from fsbudget.formula import Coeffs, helper_stage_expected, synthetic_helper_expected
+    lines, collector, plan = helper_stage_case(stage)
+    expected = helper_stage_expected(plan)
+    assert helper_stage_errors(lines, collector, expected) == []
+    legacy = dict(expected, read=expected["read"] + 2)
+    assert helper_stage_errors(lines, collector, legacy)
+    synthetic = synthetic_helper_expected(plan.ax, Coeffs(), plan.stages[0] == "publish", 4096, plan.snapshot_bytes)
+    assert helper_stage_errors(lines, collector, synthetic)
+
+
+# 이것을 실패시키는 것: GC 시간 예산으로 tail 호출 하나가 줄어도 collect 전체를 exact로 검사하는 것.
+def test_collect_accepts_short_time_bound_tail(monkeypatch, tmp_path):
+    lines, collector, plan = helper_stage_case("collect")
+    at = max(i for i, line in enumerate(lines) if 'newfstatat(' in line and ' = 0' in line)
+    del lines[at]
+    run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)])
+
+
+def run_helper_captures(monkeypatch, tmp_path, captures):
+    """Run the actual live gate with stored captures, without Linux or a binary."""
+    from types import SimpleNamespace
+    used = []
+
+    class Fixture:
+        def __init__(self, stage):
+            assert stage == "collect"
+            assert len(used) < len(captures), "unexpected extra attempt"
+            self.lines, self.collector, self.expected_plan = captures[len(used)]
+            used.append(self)
+            self.base = tmp_path / str(len(used))
+            self.base.mkdir()
+            self.inst = SimpleNamespace(exe=HELPER_EXE)
+
+        def prompt(self, trace):
+            trace.write_text("\n".join(self.lines) + "\n")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        def plan(self, libc):
+            return self.expected_plan
+
+    monkeypatch.setattr(budget, "HelperStageFixture", Fixture)
+    monkeypatch.setattr(budget, "require_release_helper", lambda _: "gnu")
+    monkeypatch.setattr(budget, "real_bin", lambda: Path(HELPER_EXE))
+    monkeypatch.setattr(budget.shutil, "which", lambda _: "/synthetic/strace")
+    monkeypatch.setattr(budget, "wait_helpers", lambda _: None)
+    budget.test_live_helper_calls_match_stage_formula("collect", tmp_path)
+    return len(used)
+
+
+# 이것을 실패시키는 것: 업로드가 다른 시험/fixture/환경변수 파일까지 포함하는 것.
+def test_helper_stage_upload_contains_only_fixture_evidence(monkeypatch, tmp_path_factory):
+    import json
+    from test_collector_security import workflow_job
+    root = budget.helper_stage_evidence.__wrapped__(tmp_path_factory)
+    root.mkdir()
+    unrelated = root.parent / "unrelated-secret-canary"
+    unrelated.write_text("not fixture evidence")
+    monkeypatch.setenv("M3D_SECRET_CANARY", "must-not-be-inherited")
+    assert "M3D_SECRET_CANARY" not in budget.trusted_env(root)
+    assert run_helper_captures(monkeypatch, root, [helper_stage_case("collect")]) == 1
+    files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+    assert files == {f"collect/attempt-1/{name}" for name in ("trace.strace", "stdout", "stderr", "attempt.json")}
+    assert not any(p.is_symlink() for p in root.rglob("*"))
+    record = json.loads((root / "collect/attempt-1/attempt.json").read_text())
+    assert record["published"] is True and record["errors"] == []
+    _, steps = workflow_job((budget.ROOT / ".github/workflows/shell.yml").read_text(),
+                            "filter-calls", action_inputs=True)
+    upload, = [s for s in steps
+               if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert upload["if"] == "failure()"
+    assert upload["with"]["path"] == "${{ runner.temp }}/helper-stage-pytest/" + root.name + "/"
+    assert unrelated.exists() and unrelated.parent != root
+
+
+def deadline_helper_capture():
+    """Synthetic exit-75 variant: retain clock/finish/GC, omit publication.
+
+    This is a checker fixture, not a claim of a live deadline capture.
+    """
+    lines, collector, plan = helper_stage_case("collect")
+    _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+    threads = [c.ret.split()[0] for c, kind in roles.helper_calls
+               if kind == "thread" and c.ret.split()[0].isdigit()]
+    supervisor = threads[1]
+    start = next(i for i, line in enumerate(lines) if line.split()[0] == supervisor
+                 and 'newfstatat(' in line and '/contexts-v2/' in line)
+    lines = [line for i, line in enumerate(lines)
+             if i < start or line.split()[0] != supervisor or 'exit' in line]
+    pid = next(line.split()[0] for line in lines if budget.is_root(line, collector))
+    lines = [line.replace('exit_group(0)', 'exit_group(75)').replace('exited with 0', 'exited with 75')
+             if line.split()[0] == pid else line for line in lines]
+    return lines, collector, plan
+
+
+def extra_helper_stat(lines, *, tail=False, supervisor=False):
+    lines = list(lines)
+    if supervisor:
+        at = next(i for i, line in enumerate(lines) if 'PR_SET_NAME, "collect-supervi"' in line)
+        pid = lines[at].split()[0]
+        at = next(i for i, line in enumerate(lines) if line.split()[0] == pid and 'exit(0)' in line)
+        lines.insert(at, f'{pid} newfstatat(AT_FDCWD</>, "/proc/{pid}/maps", {{}}, 0) = 0')
+    else:
+        matches = [i for i, line in enumerate(lines) if 'newfstatat(' in line
+                   and '</fx/run-t/bingsu>' in line and ' = 0' in line]
+        at = matches[-1] if tail else matches[0]
+        lines.insert(at, lines[at])
+    return lines
+
+
+# 이것을 실패시키는 것: prefix 초과/누락, tail 상한 초과, 마감 회차 폐기 후 정상 회차만 검사하는 것.
+@pytest.mark.parametrize("deadline", [False, True], ids=["published", "deadline"])
+@pytest.mark.parametrize("damage,diagnostic", [
+    ("extra-prefix", r"prefix.fstat.*exact"),
+    ("missing-prefix", r"prefix.fstat.*exact"),
+    ("extra-tail", r"finish_gc.fstat.*le"),
+    ("extra-supervisor", r"supervisor.fstat.*le"),
+])
+def test_collect_attempt_mutations(monkeypatch, tmp_path, deadline, damage, diagnostic):
+    clean = helper_stage_case("collect")
+    lines, collector, plan = deadline_helper_capture() if deadline else clean
+    # Validate the unmodified fixture first, including the deadline attempt.
+    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (not deadline)
+    if damage == "missing-prefix":
+        lines = list(lines)
+        at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
+        del lines[at]
+    else:
+        lines = extra_helper_stat(lines, tail=damage == "extra-tail", supervisor=damage == "extra-supervisor")
+    # The review reproduction is the deadline/extra-prefix cell: attempt 1
+    # has one extra fstat and exits 75; the available clean attempt 2 cannot hide it.
+    with pytest.raises(AssertionError, match=diagnostic):
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan), clean])
+
+
+# 이것을 실패시키는 것: exit 75 회차를 검사하지 않거나 실제 발행 없이 재시도 한도에서 통과하는 것.
+def test_collect_requires_a_publication_within_six_attempts(monkeypatch, tmp_path):
+    with pytest.raises(pytest.fail.Exception, match="zero publishes.*6"):
+        run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * 6)
+    # All six non-publications remain inspectable after the terminal failure.
+    import json
+    from collections import Counter
+    for attempt in range(1, 7):
+        artifacts = tmp_path / "collect" / f"attempt-{attempt}"
+        assert {p.name for p in artifacts.iterdir()} == {"trace.strace", "stdout", "stderr", "attempt.json"}
+        assert all(p.is_file() and not p.is_symlink() for p in artifacts.iterdir())
+        evidence = json.loads((artifacts / "attempt.json").read_text())
+        assert evidence["collector_exit"] == 75
+        assert evidence["published"] is False
+        assert set(evidence["phase_counts"]) == {"prefix", "supervisor", "finish_gc"}
+        assert Counter(evidence["phase_counts"]["prefix"]) == Counter(evidence["phase_expected"]["prefix"])
+        assert (artifacts / "trace.strace").read_text().splitlines() == deadline_helper_capture()[0]
+        assert not (tmp_path / str(attempt)).exists(), "product fixture should be cleaned up"
+
+
+def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
+    assert run_helper_captures(monkeypatch, tmp_path,
+                              [deadline_helper_capture()] * 5 + [helper_stage_case("collect")]) == 6
+
+
+# 이것을 실패시키는 것: collector exit 0만으로 실제 response rename을 대신하는 것.
+def test_collect_exit_zero_without_publish_does_not_pass(monkeypatch, tmp_path):
+    lines, collector, plan = deadline_helper_capture()
+    lines = [line.replace('exit_group(75)', 'exit_group(0)').replace('exited with 75', 'exited with 0')
+             for line in lines]
+    with pytest.raises(pytest.fail.Exception, match="zero publishes"):
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)] * 6)
+
+
+# 이것을 실패시키는 것: 새 syscall을 볼 수 없는 제한된 strace 집합으로 되돌리는 것.
+def test_helper_stage_capture_traces_all_calls(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    fixture = object.__new__(budget.HelperStageFixture)
+    fixture.base, fixture.pwd, fixture.seq, fixture.script, fixture.env = tmp_path, tmp_path, 0, b"", {}
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stderr=b"")
+    monkeypatch.setattr(budget.subprocess, "run", run)
+    fixture.prompt(tmp_path / "trace")
+    assert commands[0][commands[0].index("-e") + 1] == "trace=all"
+
+
+# 이것을 실패시키는 것: exit 75를 이유로 누락된 완료 경계와 필수 prefix 호출을 허용하는 것.
+@pytest.mark.parametrize("deadline", [False, True])
+def test_collect_missing_prefix_boundary_is_rejected(deadline):
+    from fsbudget.formula import helper_collect_expected
+    from fsbudget.gate import check_collect
+    lines, collector, plan = deadline_helper_capture()
+    _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+    main = next(c.pid for c, kind in roles.helper_calls if kind == "exec")
+    boundary = next(i for i, (c, kind) in enumerate(roles.helper_calls)
+                    if c.pid == main and c.name == "flock" and '/snapshot.lock>' in c.args
+                    and 'LOCK_UN' in c.args)
+    roles.helper_calls = [(c, kind) for i, (c, kind) in enumerate(roles.helper_calls)
+                          if c.pid != main or i < boundary]
+    errors, _ = check_collect(roles, helper_collect_expected(plan, deadline=deadline), deadline=deadline)
+    assert "collect: missing snapshot unlock boundary" in errors
+    assert any("prefix.flock" in error and "(exact)" in error for error in errors)
+
+
+# Re-review's in-memory bypass: omit unlock, subsequent main-thread calls,
+# and startup umask; a later clean publication must not hide attempt 1.
+def test_collect_review_missing_boundary_and_umask_bypass(monkeypatch, tmp_path):
+    lines, collector, plan = deadline_helper_capture()
+    boundary = first_helper_line(lines, r'flock\(.*snapshot.lock>.*LOCK_UN')
+    main = lines[boundary].split()[0]
+    lines = [line for i, line in enumerate(lines)
+             if (i < boundary or line.split()[0] != main)
+             and not (line.split()[0] == main and ('umask(' in line or '<... umask resumed>' in line))]
+    with pytest.raises(AssertionError, match="missing snapshot unlock boundary") as error:
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan), helper_stage_case("collect")])
+    assert "prefix.umask: measured 0, formula 1 (exact)" in str(error.value)
+    assert not (tmp_path / "collect" / "attempt-2").exists(), "must fail before the clean second attempt"
+    # 이것을 실패시키는 것: 판정 실패 시 trace나 실패 이전 계수를 삭제하는 것.
+    import json
+    artifacts = tmp_path / "collect" / "attempt-1"
+    evidence = json.loads((artifacts / "attempt.json").read_text())
+    assert evidence["collector_exit"] == 75 and evidence["published"] is False
+    assert evidence["prefix_complete"] is False
+    assert evidence["phase_counts"]["prefix"].get("umask", 0) == 0
+    assert evidence["phase_expected"]["prefix"]["umask"] == 1
+    assert set(evidence["phase_counts"]) == {"prefix", "supervisor", "finish_gc"}
+    assert "missing snapshot unlock boundary" in evidence["failure"]
+    assert (artifacts / "trace.strace").read_text().splitlines() == lines
+    assert not (tmp_path / "1").exists(), "product fixture should be cleaned up"
+
+
+def test_collect_counted_events_preserve_all_helper_counts():
+    from collections import Counter
+    for stage in STAGE_NAMES:
+        lines, collector, _ = helper_stage_case(stage)
+        _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+        assert Counter(kind for _, kind in roles.helper_calls) == roles.counts["helper"]

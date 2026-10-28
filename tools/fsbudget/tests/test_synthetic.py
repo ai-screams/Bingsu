@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from fsbudget.formula import Coeffs, HelperAxes, front_expected, helper_expected
+from fsbudget.formula import Coeffs, HelperAxes, front_expected, synthetic_helper_expected
 # 이것을 실패시키는 것: conftest를 직접 import하여 통합 pytest 수집 순서에 의존하는 것.
 REQUIRE_STRACE = os.environ.get("FSB_REQUIRE_STRACE") == "1"
 from fsbudget.gate import check
@@ -64,7 +64,7 @@ def run(tmp, env_extra=None, changed=False, acl=False):
     snap = ha.pop("snapshot_bytes")
     expected = {
         "front": front_expected(fa["C"], fa["section"], fa["session"], 4096),
-        "helper": helper_expected(HelperAxes(**ha), Coeffs(), changed, 4096, snap),
+        "helper": synthetic_helper_expected(HelperAxes(**ha), Coeffs(), changed, 4096, snap),
         "writer": WRITER,
         "worker": WORKER,
     }

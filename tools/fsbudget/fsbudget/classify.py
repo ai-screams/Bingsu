@@ -200,6 +200,70 @@ def collection_publication_kind(c: Call) -> str | None:
     return kind(c)
 
 
+# x86_64 has these path syscalls; aarch64 uses *at calls (or fchmod on
+# the held file). They perform the same formula operations, once per call.
+# Keep aliases here: generic/prompt/collector vocabularies must not grow.
+# access is deliberately absent: helper has no counted faccessat* kind.
+HELPER_LEGACY_PATH_KINDS = {
+    "open": "openat", "creat": "openat",
+    "stat": "fstat", "lstat": "fstat",
+    "mkdir": "mkdir", "chmod": "chmod", "rmdir": "unlinkat",
+}
+
+
+def helper_kind(c: Call) -> str | None:
+    """Refresh helper vocabulary for the per-stage gate (spec 8 stage table).
+
+    Each shape is one the helper's own code makes, named by what it does:
+    Rust File::metadata is fd statx; Path::symlink_metadata is absolute-path
+    statx; context creation is mkdirat; staging applies its mode with fchmod
+    and rewinds with lseek; File::try_clone is F_DUPFD_CLOEXEC; detach is
+    chdir("/") and umask, each counted. Any other shape keeps the generic kind, so an
+    unreviewed call still lands in `unknown-fs`.
+    """
+    args = split_args(c.args)
+    if c.name in HELPER_LEGACY_PATH_KINDS:
+        # Legacy paths have no dirfd capability. As in the existing path
+        # vocabulary, an ambient relative or undecodable path stays unknown.
+        path = args[0] if args else ""
+        return (HELPER_LEGACY_PATH_KINDS[c.name]
+                if path.startswith('"/') and path.endswith('"') else "unknown-fs")
+    if c.name == "statx" and len(args) == 5:
+        if args[1] == '""' and "AT_EMPTY_PATH" in args[2].split("|"):
+            identity = fd_identity(args[0])
+            return "fstat" if identity and identity.startswith("file:") else "unknown-fs"
+        if args[0].startswith("AT_FDCWD") and args[1].startswith('"/'):
+            return "fstat"
+        return "unknown-fs"
+    if c.name == "mkdirat":
+        return "mkdir" if _placed_at(args) else "unknown-fs"
+    if c.name in {"fchmod", "lseek"}:
+        identity = fd_identity(args[0]) if args else None
+        return ({"fchmod": "chmod", "lseek": "seek"}[c.name]
+                if identity and identity.startswith("file:") else "unknown-fs")
+    if c.name == "fcntl" and len(args) >= 2:
+        identity = fd_identity(args[0])
+        if identity == "none":
+            return None  # supervision pipes
+        if identity and identity.startswith("file:") and args[1] in {"F_DUPFD_CLOEXEC", "F_GETFD", "F_GETFL", "F_SETFD"}:
+            # F_SETFD: the collection directory handed to the collector.
+            return {"F_DUPFD_CLOEXEC": "dup", "F_SETFD": "fd_flags"}.get(args[1], "fd_query")
+        return "unknown-fs"
+    if c.name == "chdir":
+        return "cwd" if args == ['"/"'] else "unknown-fs"
+    if c.name == "umask":
+        return "umask"
+    return collector_kind(c)
+
+
+def _placed_at(args: list[str]) -> bool:
+    # A dirfd-relative name whose dirfd strace names as a file.
+    if len(args) < 2 or not args[1].startswith('"') or args[1].startswith('"/'):
+        return False
+    identity = fd_identity(args[0])
+    return bool(identity and identity.startswith("file:"))
+
+
 def collector_bootstrap_kind(c: Call) -> str | None:
     """Collector-only vocabulary for the already reviewed bootstrap calls.
 
