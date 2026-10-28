@@ -52,6 +52,125 @@ REQUIRED = tuple(INTERVALS) + ("front_read_ns", "front_prefetch_ns", "filter_ins
                                "m1_stub_exit_ns", "m1_stub_limits_ns", "m1_stub_sandbox_ns",
                                "product_mask0_verify_ns")
 
+# The refresh-helper spawn sample of crates/bingsu/examples/n7_front_cost.rs
+# --helper-spawn, in time order. The interval is derived here, never read.
+HELPER_SPAWN_EVENTS = ("args_ready", "bootstrap_enter", "bootstrap_return", "helpers_gone")
+HELPER_SPAWN_INTERVAL = ("bootstrap_enter", "bootstrap_return")
+
+# Segment budget rows of the spec (section 8 "구간 예산", plus the user-facing
+# rows whose segments M3d records). Budgets in ns, compared with the median;
+# a pair is a (low, high) range whose high end is the limit. Kinds:
+#   direct          the field covers the row's work; it can be met
+#   upper-proxy     the field contains the row's work, so it is an upper bound
+#   unbounded-proxy the field is not proven to bound the row; never met
+#   record          the spec measures it without a budget; recorded only
+#   unmeasurable    nothing in the product to measure, with the basis
+MS = 1_000_000
+SEGMENT_ROWS = (
+    dict(id="start-args", row="프로세스 시작 + 인자 처리", kind="unbounded-proxy",
+         field="start_args_proxy_ns", source="bench/n7_measure.py start-args",
+         budget={"Linux": 1 * MS, "Darwin": 3 * MS},
+         basis="dispatch가 prompt가 아니라고 판단하는 인자의 exec→usage 종료. prompt 인자 해석·bootstrap 제외"),
+    dict(id="write-only-child", row="쓰기 전용 자식 생성", kind="unmeasurable",
+         budget={"Linux": MS // 2, "Darwin": 1 * MS}, basis="제품에 생성 지점 없음(U1)"),
+    dict(id="helper-verification", row="도우미의 수집 생성 전 문맥·화면 검증", kind="record",
+         field="verification_to_spawn_ns", source="bench/collector-product.py",
+         basis="비동기 도우미 구간, 예산 없음(M1 측정)"),
+    dict(id="collector-spawn-ready", row="수집 작업 프로세스 생성 + 보호 장치 + 준비됨", kind="direct",
+         field="spawn_to_ready_ns", source="bench/collector-product.py",
+         budget={"Linux": 1 * MS, "Darwin": 2 * MS}),
+    dict(id="helper-spawn", row="갱신 도우미 생성", kind="direct",
+         field="helper_spawn_ns", source="bench/n7_measure.py helper-spawn",
+         budget={"Linux": (MS // 2, 1 * MS), "Darwin": (1 * MS, 2 * MS)},
+         over="결정 20: 구조를 바꾸지 않고 사용자에게 다시 묻는다"),
+    dict(id="snapshot-read", row="앞단 스냅샷 읽기 (머리·표식 비교 포함)", kind="direct",
+         field="snapshot_boundary_ns", source="bench/n7_measure.py snapshot-boundary",
+         budget={"Linux": MS // 2, "Darwin": 1 * MS}),
+    dict(id="helper-recompile", row="도우미 확인·다시 컴파일", kind="record",
+         field=("publish-changed", "publish-unchanged"), source="bench/n7_measure.py publish",
+         basis="M3 측정, 예산 없음"),
+    dict(id="collection", row="정보 수집 (git 제외)", kind="direct",
+         field="front_read_ns", source="bench/collector-product.py",
+         budget={"Linux": 3 * MS, "Darwin": 3 * MS}),
+    dict(id="render", row="렌더링", kind="direct", field="finish_ns",
+         proxy="respond_render_ns", source="bench/n7_measure.py snapshot-boundary",
+         budget={"Linux": 3 * MS // 10, "Darwin": 3 * MS // 10}),
+    dict(id="total", row="합계", kind="direct", field="prompt_ns",
+         source="bench/n7_measure.py prompt-common (normal_record only)",
+         budget={"Linux": 10 * MS, "Darwin": 10 * MS}, p95={"Linux": 15 * MS, "Darwin": 15 * MS}),
+    dict(id="extension", row="확장 예산", kind="unmeasurable",
+         basis="측정 뒤 정함, 하위 프로젝트 3의 결정"),
+    dict(id="git-included", row="git 포함 실행 시간", kind="record",
+         field=("collection_ns", "prompt_ns"), source="bench/git-product.py",
+         basis="전체 마감 시각(기본 50ms 후보)과 비동기 수집 시간을 모두 기록"),
+    dict(id="git-stages", row="단계 A·PathFacts·B·C·D", kind="record",
+         field="stage_diagnostic.stages", source="bench/git-product.py diagnostic",
+         basis="진단 바이너리, 제품 시간을 대신하지 않음"),
+    dict(id="init", row="init 추가 시간", kind="direct", field="init_added_ns",
+         source="bench/init_cost.py", budget={"Linux": 5 * MS, "Darwin": 8 * MS}),
+    dict(id="redraw", row="redraw", kind="direct", field="redraw",
+         source="bench/n7_measure.py prompt-redraw", budget={"Linux": 3 * MS, "Darwin": 3 * MS}),
+)
+# Fields whose windows share work. Rows are never summed; only prompt_ns is a total.
+OVERLAPS = (
+    ("respond_render_ns", "staged_file_read_decode_ns"),
+    ("snapshot_boundary_ns", "staged_file_read_decode_ns"),
+    ("snapshot_boundary_ns", "front_read_ns"),
+    ("start_args_proxy_ns", "prompt_ns"),
+)
+
+
+def segment_disposition(row, metrics, system):
+    """One row's disposition from {field: summary}. Exceeding is never auto-handled."""
+    kind = row["kind"]
+    if kind == "unmeasurable":
+        return {"status": "NOT-MEASURABLE", "disposition": "측정 대상 없음", "basis": row["basis"]}
+    fields = row["field"] if isinstance(row["field"], tuple) else (row["field"],)
+    chosen = next((f for f in fields if complete_metric(metrics.get(f))), None)
+    proxy = False
+    if kind == "direct" and chosen is None and row.get("proxy") and complete_metric(metrics.get(row["proxy"])):
+        chosen, proxy = row["proxy"], True
+    if chosen is None or (kind == "record" and not all(complete_metric(metrics.get(f)) for f in fields)):
+        return {"status": "BLOCKED", "disposition": "측정 없음", "fields": list(fields)}
+    values = {f: metrics[f] for f in fields if f in metrics} if kind == "record" else {chosen: metrics[chosen]}
+    if kind == "record":
+        return {"status": "RECORDED", "disposition": "기록", "basis": row["basis"], "values": values}
+    if kind == "unbounded-proxy":
+        return {"status": "PROXY", "disposition": "대리 기록, 인증 불가", "basis": row["basis"], "values": values}
+    budget = row["budget"][system]
+    limit = budget[1] if isinstance(budget, tuple) else budget
+    within = metrics[chosen]["p50"] <= limit
+    if "p95" in row:
+        within = within and metrics[chosen]["p95"] <= row["p95"][system]
+    if proxy:
+        # A sum that contains the row's work bounds it from above.
+        verdict = "충족(상한 대리)" if within else "대리 초과, 인증 불가"
+    else:
+        verdict = "충족" if within else "초과, 사용자 처분" + (f" ({row['over']})" if "over" in row else "")
+    return {"status": "MET" if within else "EXCEEDED", "disposition": verdict, "field": chosen,
+            "budget_ns": budget, "values": values}
+
+
+def complete_metric(metric):
+    return (isinstance(metric, dict) and metric.get("n", 0) >= 200 and metric.get("status", "OBSERVED") == "OBSERVED"
+            and all(isinstance(metric.get(k), (int, float)) and math.isfinite(metric[k]) for k in ("p50", "p95")))
+
+
+def validate_helper_spawn(sample):
+    stamps = sample.get("events", {})
+    for name in HELPER_SPAWN_EVENTS:
+        if not isinstance(stamps.get(name), int) or stamps[name] <= 0:
+            raise ValueError(f"missing helper spawn event: {name}")
+    if any(stamps[a] > stamps[b] for a, b in zip(HELPER_SPAWN_EVENTS, HELPER_SPAWN_EVENTS[1:])):
+        raise ValueError("helper spawn event ordering")
+    if sample.get("children_after_spawn") != 1:
+        raise ValueError("bootstrap did not leave exactly one live helper")
+    if sample.get("helpers_reaped") is not True:
+        raise ValueError("the spawned helper outlived the sample")
+    start, end = HELPER_SPAWN_INTERVAL
+    sample["helper_spawn_ns"] = stamps[end] - stamps[start]
+    return sample
+
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()

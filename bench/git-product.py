@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from typing import TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / "bingsu-measurements"
@@ -305,39 +306,40 @@ def observe_stages(preparation, directory, repo):
 
 
 def repositories(directory):
+    return {name: repository(directory, name) for name in CASES}
+
+
+def repository(directory, name):
     corpus = module("f3_corpus", ROOT / "scripts/prepare_git_corpus.py")
-    result = {}
-    for name in CASES:
-        path = directory / name
-        if name == "no-git":
-            # A .git file pointing nowhere would test a malformed repo. Instead
-            # use a private directory with its own filesystem ceiling marker.
-            path.mkdir()
-            # Discovery stops at HOME; the helper's path query uses this cwd.
-        else:
-            corpus.base_repo(path)
-            if name == "git-dirty":
-                (path / "tracked").write_text("dirty\n")
-                (path / "staged").write_text("staged\n")
-                corpus.git(path, "add", "staged")
-                (path / "untracked").write_text("new\n")
-            if name == "tracked-19000":
-                # 190 directories, 100 files each; includes the initial 3 paths.
-                for n in range(18_997):
-                    p = path / f"d{n // 100:03}" / f"f{n:05}"
-                    p.parent.mkdir(exist_ok=True)
-                    p.write_bytes(b"x\n")
-                corpus.git(path, "add", ".")
-                corpus.git(path, "commit", "-qm", "19000 tracked files")
-                corpus.git(path, "branch", "-f", "upstream", "HEAD")
-            if name == "budget-bound":
-                # A real count cap: 257 untracked leaves in one directory.
-                for n in range(257):
-                    p = path / "new" / str(n)
-                    p.parent.mkdir(exist_ok=True)
-                    p.write_bytes(b"x")
-        result[name] = path
-    return result
+    path = directory / name
+    if name == "no-git":
+        # A .git file pointing nowhere would test a malformed repo. Instead
+        # use a private directory with its own filesystem ceiling marker.
+        path.mkdir()
+        # Discovery stops at HOME; the helper's path query uses this cwd.
+    else:
+        corpus.base_repo(path)
+        if name == "git-dirty":
+            (path / "tracked").write_text("dirty\n")
+            (path / "staged").write_text("staged\n")
+            corpus.git(path, "add", "staged")
+            (path / "untracked").write_text("new\n")
+        if name == "tracked-19000":
+            # 190 directories, 100 files each; includes the initial 3 paths.
+            for n in range(18_997):
+                p = path / f"d{n // 100:03}" / f"f{n:05}"
+                p.parent.mkdir(exist_ok=True)
+                p.write_bytes(b"x\n")
+            corpus.git(path, "add", ".")
+            corpus.git(path, "commit", "-qm", "19000 tracked files")
+            corpus.git(path, "branch", "-f", "upstream", "HEAD")
+        if name == "budget-bound":
+            # A real count cap: 257 untracked leaves in one directory.
+            for n in range(257):
+                p = path / "new" / str(n)
+                p.parent.mkdir(exist_ok=True)
+                p.write_bytes(b"x")
+    return path
 
 
 def memory_sample(pid):
@@ -441,6 +443,8 @@ def rate(n, denominator):
 
 
 def summarize(samples, rounds):
+    if any(s.get("kind") == "process-model-trace" for s in samples):
+        raise ValueError("a strace process-model trace is not a latency sample")
     observed = [s for s in samples if s.get("status") == "OBSERVED"]
     published = [s for s in observed if s["published"]]
     reasons = {}
@@ -496,6 +500,116 @@ def summarize(samples, rounds):
                                "counter_limits": {"status": "BLOCKED", "reason": "shipped wire does not expose the failing budget axis; Partial alone is not a counter overrun"}}}
 
 
+class ProcessModelSample(TypedDict):
+    spawns: dict[str, int]
+    write_calls: dict[str, int]
+    syscall_time_us: dict[str, int]
+
+
+TRACE_LINE = re.compile(r"^(\d+)\s+(.*)$")
+WRITES = ("write(", "writev(", "pwrite64(", "pwritev(", "pwritev2(")
+
+
+def trace_role(path, argv):
+    if Path(path).name == "bingsu-collect":
+        return "collector"
+    second = argv[1] if len(argv) > 1 else None
+    return {"prompt": "front", "__refresh-v1": "helper"}.get(second, "other")
+
+
+def parse_process_trace(text):
+    """Roles from `strace -f -yy`: a process takes the role of its last exec;
+    before that, of its parent. Spawns count execs per role, writes count
+    write-family calls per role at the moment of the call."""
+    roles, pending, parents, spawns, writes = {}, {}, {}, {}, {}
+    for line in text.splitlines():
+        match = TRACE_LINE.match(line)
+        if not match:
+            continue
+        pid, call = int(match[1]), match[2]
+        if call.startswith("execve("):
+            exec_match = re.match(r'execve\("([^"]*)", \[((?:"[^"]*"(?:, )?)*)', call)
+            if not exec_match:
+                raise ValueError("unparsed execve: " + line)
+            pending[pid] = trace_role(exec_match[1], re.findall(r'"([^"]*)"', exec_match[2]))
+        if call.startswith("execve(") or call.startswith("<... execve resumed>"):
+            if "<unfinished ...>" not in call:
+                if re.search(r"\)\s+= 0$", call):
+                    roles[pid] = pending.pop(pid)
+                    spawns[roles[pid]] = spawns.get(roles[pid], 0) + 1
+                else:
+                    pending.pop(pid, None)
+            continue
+        child = re.search(r"^(?:clone3?|vfork|fork)\(.*\)\s+= (\d+)$|^<\.\.\. (?:clone3?|vfork|fork) resumed>.*\)\s+= (\d+)$", call)
+        if child:
+            parents[int(child[1] or child[2])] = pid
+        if call.startswith(WRITES):
+            role = roles.get(pid)
+            ancestor = pid
+            while role is None and ancestor in parents:
+                ancestor = parents[ancestor]
+                role = roles.get(ancestor)
+            role = role or "unknown"
+            writes[role] = writes.get(role, 0) + 1
+    return spawns, writes
+
+
+def parse_syscall_time(text):
+    """`strace -f -c` summary: microseconds per system call, all processes."""
+    times = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or not re.fullmatch(r"\d+\.\d+", parts[0]) or parts[-1] == "total":
+            continue
+        times[parts[-1]] = round(float(parts[1]) * 1_000_000)
+    if not times:
+        raise ValueError("no strace -c summary")
+    return times
+
+
+def observe_process_model(binary: str, case: str) -> ProcessModelSample:
+    """Linux only, trace runs only: the normal product prompt for `case` under
+    `strace -f -yy` (process roles, spawns, writes) and then, separately,
+    `strace -f -c` (system call time). Timing under strace is never a latency."""
+    strace = shutil.which("strace")
+    if platform.system() != "Linux" or strace is None:
+        raise ValueError("process model trace needs Linux strace")
+    (ROOT / "target").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="x03-trace-", dir=ROOT / "target") as scratch:
+        scratch = Path(scratch)
+        repo = repository(scratch, case)
+        directory = scratch / "context"
+        directory.mkdir(mode=0o700)
+        command, env = M3B.prompt_context(str(Path(binary).resolve()), directory)
+        command = [str(word) for word in command]
+        command = ["--home=" + str(repo) if word.startswith("--home=") else word for word in command]
+        command[command.index("--pwd") + 1] = str(repo)
+        traces = {}
+        for name, flags in (("yy", ["-f", "-yy", "-s", "64"]), ("count", ["-f", "-c"])):
+            path = scratch / (name + ".trace")
+            result = subprocess.run([strace, *flags, "-o", str(path), "--", *command], env=env,
+                                    capture_output=True, timeout=60)
+            if result.returncode != 0:
+                raise ValueError(f"strace {name} run failed: {result.stderr.decode(errors='replace')[:2000]}")
+            traces[name] = path.read_text(errors="replace")
+    spawns, writes = parse_process_trace(traces["yy"])
+    return ProcessModelSample(spawns=spawns, write_calls=writes, syscall_time_us=parse_syscall_time(traces["count"]))
+
+
+def trace_run(binary, cases):
+    value = {"schema": 1, "milestone": "M3d", "kind": "process-model-trace", "status": "OBSERVED",
+             "evidence_use": "process model only; never a latency sample", "binary": str(binary), "cases": {}}
+    if platform.system() != "Linux":
+        return {**value, "status": "BLOCKED", "reason": "process model trace needs Linux strace"}
+    for case in cases:
+        try:
+            value["cases"][case] = {"status": "OBSERVED", **observe_process_model(binary, case)}
+        except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+            value["cases"][case] = {"status": "BLOCKED", "reason": str(error)}
+            value["status"] = "BLOCKED"
+    return value
+
+
 def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, condition=None) -> dict:
     if rounds < 200:
         raise ValueError("M3c requires at least 200 warm rounds")
@@ -545,6 +659,7 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare")
+    parser.add_argument("--x03-trace", metavar="BINARY", help="Linux strace process-model runs; separate from latency")
     parser.add_argument("--base")
     parser.add_argument("--candidate")
     parser.add_argument("--rounds", type=int, default=200)
@@ -557,7 +672,13 @@ def main():
     OUT = args.out.resolve().parent
     try:
         M3B.protocol.validate_output(OUT)
-        value = prepare(args.prepare) if args.prepare else measure_pair(args.base, args.candidate, args.rounds, cases=args.cases.split(","),
+        if args.x03_trace:
+            cases = args.cases.split(",")
+            if not cases or set(cases) - set(CASES):
+                raise ValueError("unknown cases")
+            value = trace_run(args.x03_trace, cases)
+        else:
+            value = prepare(args.prepare) if args.prepare else measure_pair(args.base, args.candidate, args.rounds, cases=args.cases.split(","),
             condition={**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode})
         code = 2 if value.get("status") == "BLOCKED" else 0
     except (ValueError, OSError, KeyError, subprocess.TimeoutExpired) as error:

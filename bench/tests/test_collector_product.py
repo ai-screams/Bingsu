@@ -421,3 +421,121 @@ def test_protocol_blocks_missing_collector_metric(monkeypatch, tmp_path, metric)
     result = product.measure_pair('base', 'candidate', 200)
     assert result['status'] == 'BLOCKED'
     assert metric in result['reason']
+
+
+# The spec's segment budget rows plus the user-facing rows whose segments M3d records.
+SPEC_ROWS = ("프로세스 시작 + 인자 처리", "쓰기 전용 자식 생성", "도우미의 수집 생성 전 문맥·화면 검증",
+             "수집 작업 프로세스 생성 + 보호 장치 + 준비됨", "갱신 도우미 생성",
+             "앞단 스냅샷 읽기 (머리·표식 비교 포함)", "도우미 확인·다시 컴파일", "정보 수집 (git 제외)",
+             "렌더링", "합계", "확장 예산", "git 포함 실행 시간", "단계 A·PathFacts·B·C·D", "init 추가 시간", "redraw")
+
+
+def metric(p50, p95=None, n=200):
+    return {"n": n, "p50": p50, "p95": p50 if p95 is None else p95, "variance": 0, "min": p50, "max": p50}
+
+
+# 이것을 실패시키는 것: 행 하나를 빠뜨리거나, 측정 불가 행에 근거 없이 처분을 비우는 것,
+# 예산 행에서 OS 하나의 예산을 빼는 것.
+def test_every_segment_row_has_a_field_or_a_disposition():
+    assert [row["row"] for row in product.SEGMENT_ROWS] == list(SPEC_ROWS)
+    assert len({row["id"] for row in product.SEGMENT_ROWS}) == len(SPEC_ROWS)
+    for row in product.SEGMENT_ROWS:
+        if row["kind"] == "unmeasurable":
+            assert row["basis"] and "field" not in row
+            got = product.segment_disposition(row, {}, "Linux")
+            assert got == {"status": "NOT-MEASURABLE", "disposition": "측정 대상 없음", "basis": row["basis"]}
+            continue
+        assert row["field"] and row["source"]
+        fields = row["field"] if isinstance(row["field"], tuple) else (row["field"],)
+        if row["kind"] in ("direct", "unbounded-proxy"):
+            assert set(row["budget"]) == {"Linux", "Darwin"}
+        else:
+            assert row["basis"]
+        # Missing evidence is BLOCKED, never a passing row.
+        assert product.segment_disposition(row, {}, "Darwin")["status"] == "BLOCKED"
+        filled = {f: metric(1) for f in fields}
+        assert product.segment_disposition(row, filled, "Linux")["status"] in ("MET", "RECORDED", "PROXY")
+        short = {f: metric(1, n=199) for f in fields}
+        assert product.segment_disposition(row, short, "Linux")["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 상한이 증명되지 않은 대리값(시작+인자)을 충족으로 처분하는 것,
+# 상한 대리(respond_render_ns)를 직접 측정처럼 "충족"으로 쓰거나 넘을 때 사용자 처분으로 보내는 것.
+def test_proxy_rows_never_report_met_without_a_bound():
+    rows = {row["id"]: row for row in product.SEGMENT_ROWS}
+    start = product.segment_disposition(rows["start-args"], {"start_args_proxy_ns": metric(1)}, "Linux")
+    assert start["status"] == "PROXY" and start["disposition"] == "대리 기록, 인증 불가"
+    render = rows["render"]
+    assert product.segment_disposition(render, {"finish_ns": metric(1)}, "Linux")["disposition"] == "충족"
+    under = product.segment_disposition(render, {"respond_render_ns": metric(300_000)}, "Linux")
+    assert (under["status"], under["disposition"], under["field"]) == ("MET", "충족(상한 대리)", "respond_render_ns")
+    over = product.segment_disposition(render, {"respond_render_ns": metric(300_001)}, "Darwin")
+    assert (over["status"], over["disposition"]) == ("EXCEEDED", "대리 초과, 인증 불가")
+    # The direct field wins over the proxy when both exist.
+    both = product.segment_disposition(render, {"finish_ns": metric(400_000), "respond_render_ns": metric(1)}, "Linux")
+    assert (both["field"], both["disposition"]) == ("finish_ns", "초과, 사용자 처분")
+    spawn = product.segment_disposition(rows["helper-spawn"], {"helper_spawn_ns": metric(1_000_001)}, "Linux")
+    assert spawn["disposition"] == "초과, 사용자 처분 (결정 20: 구조를 바꾸지 않고 사용자에게 다시 묻는다)"
+    total = product.segment_disposition(rows["total"], {"prompt_ns": metric(9_000_000, 15_000_001)}, "Linux")
+    assert total["status"] == "EXCEEDED"
+
+
+def spawn_sample(**events):
+    stamps = dict(zip(product.HELPER_SPAWN_EVENTS, (10, 20, 35, 90)))
+    stamps.update(events)
+    return {"events": stamps, "helpers_reaped": True, "children_after_spawn": 1, "helper_spawn_ns": 999}
+
+
+# 이것을 실패시키는 것: 구간 끝점의 순서 검사를 하나라도 빼는 것, 생성되지 않았거나 남은 도우미를
+# 받는 것, helper_spawn_ns를 표본 값으로 믿거나 bootstrap 밖(인자 준비·도우미 종료 대기)까지 넓히는 것,
+# 예제의 시각 사이에 bootstrap 말고 다른 일을 넣는 것.
+@pytest.mark.parametrize("interval", sorted(product.INTERVALS))
+def test_intervals_follow_event_order_and_contain_their_boundaries(interval):
+    start, end = product.INTERVALS[interval]
+    broken = sample()
+    broken["events"][start], broken["events"][end] = broken["events"][end], broken["events"][start]
+    # The order check itself, not the negative interval that follows from it.
+    with pytest.raises(ValueError, match="ordering"):
+        product.validate_sample(broken)
+    got = product.validate_helper_spawn(spawn_sample())
+    assert got["helper_spawn_ns"] == 15
+    for a, b in zip(product.HELPER_SPAWN_EVENTS, product.HELPER_SPAWN_EVENTS[1:]):
+        swapped = spawn_sample()
+        swapped["events"][a], swapped["events"][b] = swapped["events"][b], swapped["events"][a]
+        with pytest.raises(ValueError):
+            product.validate_helper_spawn(swapped)
+    for key, value in (("helpers_reaped", False), ("children_after_spawn", 0), ("children_after_spawn", 2)):
+        damaged = spawn_sample()
+        damaged[key] = value
+        with pytest.raises(ValueError):
+            product.validate_helper_spawn(damaged)
+    example = (SOURCE.parents[1] / "crates/bingsu/examples/n7_front_cost.rs").read_text()
+    timed = example.split('let bootstrap_enter = stamp();', 1)[1].split('let bootstrap_return = stamp();', 1)[0]
+    assert [line.strip() for line in timed.strip().splitlines()] == ["prompt_spawn::bootstrap(&exe, &raw, deadline);"]
+
+
+# 이것을 실패시키는 것: 정상 B1(ok:none)이 아닌 prompt 표본을 합계 행의 prompt_ns로 받는 것.
+@pytest.mark.parametrize("record", [b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e",
+                                    b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:trust-clock\x1e"], ids=["ok-none", "degraded"])
+def test_prompt_samples_require_normal_record(monkeypatch, tmp_path, record):
+    from subprocess import CompletedProcess
+    import n7_measure
+    monkeypatch.setattr(n7_measure, "checked", lambda command, **_: CompletedProcess(command, 0, record, b""))
+    observed = []
+    def paired(base, candidate, rounds, condition, observe, **kwargs):
+        try:
+            observed.append(observe("base", base))
+        except ValueError as error:
+            return {"status": "BLOCKED", "reason": str(error), "variants": {}, "blocks": []}
+        return {"status": "OBSERVED", "variants": {}, "blocks": []}
+    monkeypatch.setattr(n7_measure.protocol, "paired", paired)
+    monkeypatch.setattr(n7_measure, "ROOT", tmp_path)
+    (tmp_path / "bench").mkdir()
+    # n7_measure loads its own copy; only the product prompt context is replaced.
+    (tmp_path / "bench/collector-product.py").write_text(
+        SOURCE.read_text() + "\n\ndef prompt_context(binary, directory):\n    return ['prompt'], {}\n")
+    got = n7_measure.n7_pairs(Path("b"), Path("c"), 200, {})
+    if record.endswith(b"ok:none\x1e"):
+        assert got["status"] == "OBSERVED" and "prompt_ns" in observed[0]
+    else:
+        assert got["status"] == "BLOCKED" and observed == []

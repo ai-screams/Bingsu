@@ -13,6 +13,9 @@ mod prompt_io;
 #[cfg(all(unix, not(test)))]
 #[path = "../src/prompt_read.rs"]
 mod prompt_read;
+#[cfg(all(unix, not(test)))]
+#[path = "../src/prompt_spawn.rs"]
+mod prompt_spawn;
 
 #[cfg(all(unix, not(test)))]
 fn main() {
@@ -27,11 +30,14 @@ fn main() {
         os::unix::fs::{MetadataExt, PermissionsExt},
         time::Instant,
     };
-    let base = std::path::PathBuf::from(
-        std::env::args_os()
-            .nth(1)
-            .expect("private fixture directory"),
-    );
+    let mut args = std::env::args_os().skip(1);
+    let first = args
+        .next()
+        .expect("private fixture directory or --helper-spawn");
+    if first == "--helper-spawn" {
+        return helper_spawn(args.next().expect("product binary"), args.collect());
+    }
+    let base = std::path::PathBuf::from(first);
     fs::create_dir_all(&base).unwrap();
     fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
     let base = fs::canonicalize(base).unwrap();
@@ -162,6 +168,68 @@ fn main() {
             }
         }
     }
+}
+/// One refresh-helper spawn, as `bingsu prompt` does it, in a fresh process:
+/// `exe` is the product binary and `words` the product prompt's argv after
+/// `prompt` (bench/n7_measure.py takes them from a real `init`). The interval
+/// holds the shipped `bootstrap` only: its fd-table walk, CLOEXEC marking and
+/// posix_spawn. The helper's own work runs after it, outside the interval.
+#[cfg(all(unix, not(test)))]
+fn helper_spawn(exe: std::ffi::OsString, words: Vec<std::ffi::OsString>) {
+    use std::os::unix::ffi::OsStrExt;
+    let stamp = || prompt_io::monotonic_ns().unwrap();
+    let raw: Vec<&[u8]> = words.iter().map(|w| w.as_bytes()).collect();
+    let deadline = prompt_io::entry_deadline();
+    let args_ready = stamp();
+    let bootstrap_enter = stamp();
+    prompt_spawn::bootstrap(&exe, &raw, deadline);
+    let bootstrap_return = stamp();
+    let spawned = children();
+    // bootstrap set SIGCHLD to SA_NOCLDWAIT: wait blocks until every child has
+    // exited, then fails with ECHILD. No helper outlives the sample.
+    let reaped = loop {
+        // SAFETY: a null status pointer is allowed.
+        if unsafe { libc::wait(std::ptr::null_mut()) } == -1 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue,
+                errno => break errno == Some(libc::ECHILD),
+            }
+        }
+    };
+    let helpers_gone = stamp();
+    println!(
+        "{{\"events\":{{\"args_ready\":{args_ready},\"bootstrap_enter\":{bootstrap_enter},\"bootstrap_return\":{bootstrap_return},\"helpers_gone\":{helpers_gone}}},\"helpers_reaped\":{reaped},\"children_after_spawn\":{spawned}}}"
+    );
+}
+
+/// Live children of this process, observed after the interval: the helper is
+/// still running (it takes milliseconds), so 1 proves bootstrap spawned it.
+#[cfg(all(target_os = "macos", not(test)))]
+fn children() -> i32 {
+    let mut pids = [0 as libc::pid_t; 64];
+    let me = std::process::id() as libc::pid_t;
+    // SAFETY: a writable buffer of the stated size.
+    let n = unsafe {
+        libc::proc_listchildpids(
+            me,
+            pids.as_mut_ptr().cast(),
+            std::mem::size_of_val(&pids) as i32,
+        )
+    };
+    pids[..n.clamp(0, 64) as usize]
+        .iter()
+        .filter(|&&p| p > 0)
+        .count() as i32
+}
+#[cfg(all(target_os = "linux", not(test)))]
+fn children() -> i32 {
+    let pid = std::process::id();
+    std::fs::read_to_string(format!("/proc/self/task/{pid}/children"))
+        .map_or(-1, |s| s.split_whitespace().count() as i32)
+}
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux")), not(test)))]
+fn children() -> i32 {
+    -1
 }
 // The shipped readers exist only on Unix; elsewhere this entry is empty.
 #[cfg(not(all(unix, not(test))))]
