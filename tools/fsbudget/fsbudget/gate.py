@@ -11,22 +11,23 @@ ABSENCE_PROBE = {"O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC"}
 OPEN_ALIASES = {"open", "creat", "openat", "openat2"}
 
 
-def open_target(name, args, ret=""):
-    """Last path component a successful open alias opened, or None.
+def open_names(name, args, ret=""):
+    """Last path components a successful open alias names: (annotation, argument).
 
-    The returned fd's -y annotation is the opened file; without one, the
-    path argument (open and creat take it first). strace's truncated form
-    `"..."...` and other unparsable spellings give None."""
+    The annotation is the returned fd's -y path (absolute); the argument is
+    the path as passed (open and creat take it first), relative to its dirfd
+    otherwise, so only basenames compare. Either is None when absent or
+    unparsable, such as strace's truncated form `"..."...`."""
     import ast
     import posixpath
     import re
-    if opened := re.fullmatch(r"\d+<(/[^<>]*)>", ret):
-        return posixpath.basename(opened[1])
+    opened = re.fullmatch(r"\d+<(/[^<>]*)>", ret)
     raw = args[0] if name in {"open", "creat"} else args[1] if len(args) > 1 else ""
     try:
-        return posixpath.basename(ast.literal_eval(raw))
+        argument = posixpath.basename(ast.literal_eval(raw))
     except (SyntaxError, ValueError):
-        return None
+        argument = None
+    return (posixpath.basename(opened[1]) if opened else None), argument
 
 
 def check(measured, expected, mode: str, gated_roles) -> list[str]:
@@ -87,6 +88,7 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
     failed = []  # supervisor calls that failed before the installing rename
     unverified = []
     unresolved = []  # supervisor opens whose file could not be named (fail closed)
+    disagreeing = []  # supervisor opens whose annotation and argument disagree on the stage
     for c, kind in calls:
         phase = ("supervisor" if c.pid == supervisor else
                  "finish_gc" if c.pid == main and unlocked else "prefix")
@@ -109,10 +111,15 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
             # 이것을 실패시키는 것: 생성을 openat으로만 추적하는 것(open·creat·openat2 생성 뒤 부재가 예외를 받음),
             # 이름을 알 수 없는 open을 생성 아님으로 넘기는 것(잘린 경로 뒤 부재가 예외를 받음).
             if c.name in OPEN_ALIASES and not c.ret.startswith("-1"):
-                target = open_target(c.name, args, c.ret)
-                if target is None:
+                annotation, argument = open_names(c.name, args, c.ret)
+                if annotation is None and argument is None:
                     unresolved.append(c)
-                if target == ".response.stage":
+                # Only the stage name is compared: /proc/self legitimately
+                # resolves to /proc/<pid>, so other names may differ.
+                # 이것을 실패시키는 것: 단계 이름을 가리키는 인자와 다른 fd 주석을 받아들이는 것(생성이 숨겨짐).
+                if annotation and argument and (annotation == ".response.stage") != (argument == ".response.stage"):
+                    disagreeing.append(c)
+                if (annotation or argument) == ".response.stage":
                     staged = True  # the stage's creation
         if (c.pid == supervisor and c.name == "renameat" and c.ret == "0"
                 and len(args) == 4 and args[1] == '".response.stage"' and args[3] == '"response"'):
@@ -128,6 +135,8 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
     errors = []
     if not unlocked:
         errors.append("collect: missing snapshot unlock boundary")
+    for c in disagreeing:
+        errors.append(f"collect: supervisor open annotation disagrees with its path: {c.name}({c.args}) = {c.ret}")
     for c in unresolved:
         errors.append(f"collect: supervisor open of an unresolved path: {c.name}({c.args}) = {c.ret}")
     for c in unverified:

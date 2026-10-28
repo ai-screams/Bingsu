@@ -1948,13 +1948,34 @@ def failed_before_install(capture, result="-1 EIO (Input/output error)"):
     return lines, collector, plan
 
 
+def move_absence_probe(lines, supervisor, creation, dirfd):
+    """Move the supervisor's read-only .response.stage absence probe (an
+    entry/resumed pair before the creation) to just after the creation, so
+    every per-kind count stays the same."""
+    entry = max(i for i in range(creation) if lines[i].split()[0] == supervisor
+                and '".response.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC' in lines[i])
+    drop = {entry}
+    if lines[entry].endswith("<unfinished ...>"):
+        drop.add(next(i for i in range(entry + 1, creation) if lines[i].split()[0] == supervisor
+                      and lines[i].split(None, 1)[1].startswith("<... openat resumed>")))
+    probe = (f'{supervisor}  openat({dirfd}, ".response.stage", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)'
+             " = -1 ENOENT (No such file or directory)")
+    moved = []
+    for i, line in enumerate(lines):
+        if i not in drop:
+            moved.append(line)
+        if i == creation:
+            moved.append(probe)
+    return moved
+
+
 def creation_then_failure(capture, damage):
     """Failures shaped like the stage's absence probe or creation.
 
     create-absence / write-absence: the supervisor's read-only .stage-request
     absence probe becomes a failed exclusive create / a failed write open.
     open-creation: the stage is created through the absolute-path open alias,
-    then a read-only probe of it reports ENOENT; open-creation-check: the
+    and its read-only ENOENT absence probe moves after the creation; open-creation-check: the
     same creation, then its last name check reports ENOENT."""
     import re
     lines, collector, plan = capture
@@ -1970,6 +1991,22 @@ def creation_then_failure(capture, damage):
                  "write-absence": "O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)"}[damage]
         lines[at] = lines[at].replace(probe, flags)
         return lines, collector, plan
+    if damage == "forged-annotation":
+        # Review reproduction: the creation's fd annotation names another
+        # file (and so does every later use of that fd); a read-only absence
+        # probe after the creation reports ENOENT.
+        at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+                  and '".response.stage", O_RDWR|O_CREAT|O_EXCL' in lines[i])
+        fd = re.search(r"= (\d+)<[^>]*>$", lines[at])[1]
+        held = re.compile(rf"(?<![\d]){fd}<[^<>]*/(?:\.response\.stage|response)>")
+        end = next(i for i in range(at, len(lines)) if lines[i].split()[0] == supervisor
+                   and lines[i].split(None, 1)[1].startswith(f"close({fd}<"))
+        for i in range(at, end + 1):
+            if lines[i].split()[0] == supervisor:
+                lines[i] = held.sub(f"{fd}</forged/other>", lines[i])
+        dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
+        lines = move_absence_probe(lines, supervisor, at, dirfd[1])
+        return lines, collector, plan
     if damage.startswith("truncated-creation"):
         # Review reproduction: a creation path strace cuts at -s 256, then a
         # read-only absence probe after the creation reports ENOENT.
@@ -1980,7 +2017,7 @@ def creation_then_failure(capture, damage):
         lines[at] = lines[at].replace('".response.stage", O_RDWR', cut + ", O_RDWR")
         if damage == "truncated-creation-unannotated":
             lines[at] = re.sub(r"= (\d+)<[^>]*>$", r"= \1", lines[at])
-        lines.insert(at + 1, f'{supervisor}  openat({dirfd[1]}, ".response.stage", {probe} = -1 ENOENT (No such file or directory)')
+        lines = move_absence_probe(lines, supervisor, at, dirfd[1])
         return lines, collector, plan
     if damage == "open-creation-check":
         lines, collector, plan = failed_before_install((lines, collector, plan), "-1 ENOENT (No such file or directory)")
@@ -1989,7 +2026,7 @@ def creation_then_failure(capture, damage):
     dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
     lines[at] = lines[at].replace(dirfd[0] + '".response.stage"', f'open("{dirfd[2]}/.response.stage"')
     if damage == "open-creation":
-        lines.insert(at + 1, f'{supervisor}  openat({dirfd[1]}, ".response.stage", {probe} = -1 ENOENT (No such file or directory)')
+        lines = move_absence_probe(lines, supervisor, at, dirfd[1])
     return lines, collector, plan
 
 
@@ -2096,11 +2133,13 @@ def test_collect_accepts_musl_absence_probes(capture):
     assert budget.check_helper_capture("collect", musl, HELPER_EXE, collector, plan) is True
 
 
-# 이것을 실패시키는 것: 잘린 생성 경로를 fd 주석으로 확인하지 않는 것, 확인할 수 없는 생성을 넘기는 것(fail closed 제거).
+# 이것을 실패시키는 것: 잘린 생성 경로를 fd 주석으로 확인하지 않는 것, 확인할 수 없는 생성을 넘기는 것(fail closed 제거),
+# 단계 이름 인자와 다른 fd 주석을 받아들이는 것.
 @pytest.mark.parametrize("capture", ["published", "deadline-published"])
 @pytest.mark.parametrize("damage,message", [
     ("truncated-creation", "publication after a failed supervisor call"),
     ("truncated-creation-unannotated", "supervisor open of an unresolved path"),
+    ("forged-annotation", "supervisor open annotation disagrees with its path"),
 ])
 def test_collect_rejects_truncated_creation(capture, damage, message):
     lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
