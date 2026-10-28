@@ -1948,6 +1948,39 @@ def failed_before_install(capture, result="-1 EIO (Input/output error)"):
     return lines, collector, plan
 
 
+def creation_then_failure(capture, damage):
+    """Failures shaped like the stage's absence probe or creation.
+
+    create-absence / write-absence: the supervisor's read-only .stage-request
+    absence probe becomes a failed exclusive create / a failed write open.
+    open-creation: the stage is created through the absolute-path open alias,
+    then a read-only probe of it reports ENOENT; open-creation-check: the
+    same creation, then its last name check reports ENOENT."""
+    import re
+    lines, collector, plan = capture
+    lines = list(lines)
+    install = max(i for i, line in enumerate(lines) if 'renameat(' in line and '".response.stage"' in line
+                  and line.rstrip().endswith('"response") = 0'))
+    supervisor = lines[install].split()[0]
+    probe = "O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)"
+    if damage in ("create-absence", "write-absence"):
+        at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+                  and '".stage-request", ' + probe in lines[i])
+        flags = {"create-absence": "O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0600)",
+                 "write-absence": "O_RDWR|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC)"}[damage]
+        lines[at] = lines[at].replace(probe, flags)
+        return lines, collector, plan
+    if damage == "open-creation-check":
+        lines, collector, plan = failed_before_install((lines, collector, plan), "-1 ENOENT (No such file or directory)")
+    at = next(i for i in range(install) if lines[i].split()[0] == supervisor
+              and '".response.stage", O_RDWR|O_CREAT|O_EXCL' in lines[i])
+    dirfd = re.search(r"openat\((\d+<([^>]+)>), ", lines[at])
+    lines[at] = lines[at].replace(dirfd[0] + '".response.stage"', f'open("{dirfd[2]}/.response.stage"')
+    if damage == "open-creation":
+        lines.insert(at + 1, f'{supervisor}  openat({dirfd[1]}, ".response.stage", {probe} = -1 ENOENT (No such file or directory)')
+    return lines, collector, plan
+
+
 COLLECT_CAPTURES = {"published": lambda: helper_stage_case("collect"),
                     "deadline": deadline_helper_capture,
                     "deadline-published": deadline_published_capture}
@@ -2034,6 +2067,29 @@ def test_collect_accepts_a_deadline_partial_publication(monkeypatch, tmp_path):
 @pytest.mark.parametrize("result", ["-1 EIO (Input/output error)", "-1 ENOENT (No such file or directory)"])
 def test_collect_rejects_publication_after_failed_verification(capture, result):
     lines, collector, plan = failed_before_install(COLLECT_CAPTURES[capture](), result)
+    with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
+        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+
+
+# 이것을 실패시키는 것: 부재 확인의 flags 비교에서 musl의 O_LARGEFILE을 빼지 않는 것(CI musl 칸의 정상 발행이 실패).
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+def test_collect_accepts_musl_absence_probes(capture):
+    lines, collector, plan = COLLECT_CAPTURES[capture]()
+    install = max(i for i, line in enumerate(lines) if 'renameat(' in line and '".response.stage"' in line)
+    supervisor = lines[install].split()[0]
+    probe = "O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT"
+    musl = [line.replace(probe, "O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT")
+            if line.split()[0] == supervisor else line for line in lines]
+    assert musl != lines
+    assert budget.check_helper_capture("collect", musl, HELPER_EXE, collector, plan) is True
+
+
+# 이것을 실패시키는 것: 부재 확인 예외의 syscall·flags 고정을 지우는 것, 단계 생성을 openat으로만 추적하는 것.
+@pytest.mark.parametrize("capture", ["published", "deadline-published"])
+@pytest.mark.parametrize("damage", ["create-absence", "write-absence", "open-creation", "open-creation-check"])
+def test_collect_rejects_creation_shaped_failures(capture, damage):
+    lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
+    assert lines != COLLECT_CAPTURES[capture]()[0]
     with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
         budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
 

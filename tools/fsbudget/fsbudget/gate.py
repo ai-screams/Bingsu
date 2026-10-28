@@ -6,6 +6,20 @@ Calls of a task attribution could not place (role `unresolved`) are a
 violation too, whatever roles the caller gates."""
 
 MODES = ("exact", "le")
+# The supervisor's read-only absence probe of a stage name (musl adds O_LARGEFILE).
+ABSENCE_PROBE = {"O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC"}
+OPEN_ALIASES = {"open", "creat", "openat", "openat2"}
+
+
+def open_target(name, args):
+    """Last path component an open alias names (open and creat take the path first)."""
+    import ast
+    import posixpath
+    raw = args[0] if name in {"open", "creat"} else args[1] if len(args) > 1 else ""
+    try:
+        return posixpath.basename(ast.literal_eval(raw))
+    except (SyntaxError, ValueError):
+        return None
 
 
 def check(measured, expected, mode: str, gated_roles) -> list[str]:
@@ -77,12 +91,15 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
             unlocked = True
         if c.pid == supervisor and not published:
             # 이것을 실패시키는 것: 단계 이름 부재 확인의 허용을 지우는 것(정상 발행이 실패), 만든 뒤의
-            # 부재까지 허용하는 것, 실패한 감독 호출을 보지 않는 것.
+            # 부재까지 허용하는 것, 쓰기·생성 flags의 실패한 open을 부재 확인으로 보는 것, 실패한 감독 호출을
+            # 보지 않는 것.
             if c.ret.startswith("-1") and not (
                     not staged and c.ret.startswith("-1 ENOENT")
-                    and len(args) >= 2 and args[1] in {'".response.stage"', '".stage-request"'}):
+                    and args[1:2] in (['".response.stage"'], ['".stage-request"'])
+                    and set("".join(args[2:3]).split("|")) - {"O_LARGEFILE"} == ABSENCE_PROBE):
                 failed.append(c)
-            if c.name == "openat" and len(args) >= 2 and args[1] == '".response.stage"' and not c.ret.startswith("-1"):
+            # 이것을 실패시키는 것: 생성을 openat으로만 추적하는 것(open·creat·openat2 생성 뒤 부재가 예외를 받음).
+            if c.name in OPEN_ALIASES and not c.ret.startswith("-1") and open_target(c.name, args) == ".response.stage":
                 staged = True  # the stage's creation
         if (c.pid == supervisor and c.name == "renameat" and c.ret == "0"
                 and len(args) == 4 and args[1] == '".response.stage"' and args[3] == '"response"'):
