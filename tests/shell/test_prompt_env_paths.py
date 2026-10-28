@@ -1364,6 +1364,38 @@ def wait_helpers(base, timeout=15):
         time.sleep(0.05)
 
 
+def warm_collection_previous(store, prompt, wait):
+    """Reach the formula's two-publication state before starting any trace.
+
+    CollectionStore::publish rotates only an existing response. Three warm-up
+    prompts need not produce two responses (admission/deadline may defer one).
+    Missing previous is normal; unsafe files and other IO errors are not.
+    Allow at most three further untraced prompts, then fail preparation clearly.
+    """
+    import stat
+
+    def size(name):
+        info = (store / name).lstat()
+        assert stat.S_ISREG(info.st_mode), ("non-regular collection slot", store / name)
+        assert info.st_size >= 64, ("short collection slot", store / name)
+        return info.st_size
+
+    for attempt in range(4):
+        response_bytes = size("response")  # also proves the parent still exists
+        try:
+            previous_bytes = size("previous")
+        except FileNotFoundError:
+            # Only an absent leaf is a preparation state. Recheck the parent
+            # so removal of the store is not silently treated as first publish.
+            assert stat.S_ISDIR(store.lstat().st_mode), ("collection store", store)
+            if attempt == 3:
+                raise AssertionError(f"warm-up did not rotate response into previous: {store}")
+            prompt()
+            wait()
+        else:
+            return {"response_bytes": response_bytes, "previous_bytes": previous_bytes}
+
+
 class HelperStageFixture:
     """Real init, warm-up prompts and one traced prompt for a helper stage.
 
@@ -1410,10 +1442,10 @@ class HelperStageFixture:
             runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"
             breakers = list((runtime / "collection-control-v1/sessions").glob("*/breaker"))
             assert len(stores) == len(breakers) == 1, ("one store and breaker after warm-up", stores, breakers)
+            sizes = warm_collection_previous(stores[0], self.prompt, lambda: wait_helpers(self.base))
             self.collection = {"catalog_bytes": (runtime / ".collections.catalog").stat().st_size,
                                "breaker_bytes": breakers[0].stat().st_size,
-                               "response_bytes": (stores[0] / "response").stat().st_size,
-                               "previous_bytes": (stores[0] / "previous").stat().st_size,
+                               **sizes,
                                "collector_components": path_names(Path(self.collector).parent),
                                "collector_bytes": Path(self.collector).stat().st_size}
         if stage == "publish":
@@ -1447,6 +1479,7 @@ class HelperStageFixture:
         return r
 
     def plan(self, libc):
+        import platform
         from fsbudget.formula import HelperAxes, HelperPlan, MAX_RW_COUNT
         nsswitch_reads, passwd_reads = nss_reads(libc, os.getuid())
         state = Path(self.env["XDG_STATE_HOME"]) / "bingsu"
@@ -1461,7 +1494,8 @@ class HelperStageFixture:
             snapshot_bytes=snapshot.stat().st_size, marker_bytes=208, buf=MAX_RW_COUNT,
             state_components=path_names(state), exe_link_components=path_names(self.inst.dir),
             exe_components=path_names(real_bin().parent),
-            nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc, **self.collection)
+            nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
+            arch=platform.machine(), **self.collection)
 
 
 def collector_exit(lines, collector):

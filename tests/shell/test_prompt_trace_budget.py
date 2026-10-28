@@ -1598,6 +1598,94 @@ def first_helper_line(lines, pattern):
 STAGE_NAMES = ["unchanged", "publish", "collect", "failure-last-good", "failure-recover"]
 
 
+# CI 40650736942 unchanged helper pid 2756, lines 730-736: glibc's
+# pthread_getattr_np maps fclose seeks. Replay those call shapes on each
+# saved aarch64 capture; this is a platform mutation, not a new live capture.
+@pytest.mark.parametrize("stage", STAGE_NAMES)
+@pytest.mark.parametrize("damage", [None, "extra-read", "missing-cur", "missing-set", "missing-both"])
+def test_helper_stack_guard_exact(stage, damage):
+    from dataclasses import replace
+    lines, collector, plan = helper_stage_case(stage)
+    at = first_helper_line(lines, r"close\(3</proc/\d+/maps>")
+    pid = lines[at].split()[0]
+    startup = [f'{pid} lseek(3</proc/{pid}/maps>, 0, SEEK_CUR) = 2906',
+               f'{pid} lseek(3</proc/{pid}/maps>, 2822, SEEK_SET) = 2822']
+    if damage == "extra-read":
+        startup.append(f'{pid} read(3</proc/{pid}/maps>, "", 1024) = 0')
+    elif damage == "missing-cur":
+        del startup[0]
+    elif damage == "missing-set":
+        del startup[1]
+    elif damage == "missing-both":
+        startup = []
+    lines[at:at] = startup
+    plan = replace(plan, arch="x86_64")
+    if damage is None:
+        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+    else:
+        kind = "read" if damage == "extra-read" else "seek"
+        with pytest.raises(AssertionError, match=rf"{kind}: measured .*\(exact\)"):
+            budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
+@pytest.mark.parametrize("ready_after", [0, 1, 3])
+def test_collection_warmup_waits_for_rotation(tmp_path, ready_after):
+    (tmp_path / "response").write_bytes(b"r" * 64)
+    prompts, waits = [], []
+
+    def publish():
+        prompts.append(1)
+        if len(prompts) == ready_after:
+            (tmp_path / "response").replace(tmp_path / "previous")
+            (tmp_path / "response").write_bytes(b"n" * 72)
+
+    if ready_after == 0:
+        (tmp_path / "previous").write_bytes(b"p" * 64)
+    sizes = budget.warm_collection_previous(tmp_path, publish, lambda: waits.append(1))
+    assert sizes == {"response_bytes": 72 if ready_after else 64, "previous_bytes": 64}
+    assert len(prompts) == len(waits) == ready_after
+
+
+def test_collection_warmup_never_rotated_fails(tmp_path):
+    (tmp_path / "response").write_bytes(b"r" * 64)
+    prompts = []
+    with pytest.raises(AssertionError, match="warm-up did not rotate"):
+        budget.warm_collection_previous(tmp_path, lambda: prompts.append(1), lambda: None)
+    assert len(prompts) == 3
+
+
+@pytest.mark.parametrize("damage", ["missing-response", "symlink", "directory", "short", "permission", "io"])
+def test_collection_warmup_does_not_swallow_errors(tmp_path, monkeypatch, damage):
+    (tmp_path / "response").write_bytes(b"r" * 64)
+    previous = tmp_path / "previous"
+    error = AssertionError
+    if damage == "missing-response":
+        (tmp_path / "response").unlink()
+        error = FileNotFoundError
+    elif damage == "symlink":
+        previous.symlink_to(tmp_path / "absent")
+    elif damage == "directory":
+        previous.mkdir()
+    elif damage == "short":
+        previous.write_bytes(b"short")
+    else:
+        error = PermissionError if damage == "permission" else OSError
+        original = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if path == previous:
+                raise error("injected slot IO error")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+
+    def unexpected():
+        pytest.fail("a real preparation error must not trigger another prompt")
+
+    with pytest.raises(error):
+        budget.warm_collection_previous(tmp_path, unexpected, unexpected)
+
+
 def legacy_helper_stage_case(stage):
     """Change three stored helper calls to equivalent x86_64 spellings.
 
@@ -1788,7 +1876,7 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
 # 이것을 실패시키는 것: 업로드가 다른 시험/fixture/환경변수 파일까지 포함하는 것.
 def test_helper_stage_upload_contains_only_fixture_evidence(monkeypatch, tmp_path_factory):
     import json
-    import yaml
+    from test_collector_security import workflow_job
     root = budget.helper_stage_evidence.__wrapped__(tmp_path_factory)
     root.mkdir()
     unrelated = root.parent / "unrelated-secret-canary"
@@ -1801,8 +1889,9 @@ def test_helper_stage_upload_contains_only_fixture_evidence(monkeypatch, tmp_pat
     assert not any(p.is_symlink() for p in root.rglob("*"))
     record = json.loads((root / "collect/attempt-1/attempt.json").read_text())
     assert record["published"] is True and record["errors"] == []
-    workflow = yaml.safe_load((budget.ROOT / ".github/workflows/shell.yml").read_text())
-    upload, = [s for s in workflow["jobs"]["filter-calls"]["steps"]
+    _, steps = workflow_job((budget.ROOT / ".github/workflows/shell.yml").read_text(),
+                            "filter-calls", action_inputs=True)
+    upload, = [s for s in steps
                if s.get("uses", "").startswith("actions/upload-artifact@")]
     assert upload["if"] == "failure()"
     assert upload["with"]["path"] == "${{ runner.temp }}/helper-stage-pytest/" + root.name + "/"

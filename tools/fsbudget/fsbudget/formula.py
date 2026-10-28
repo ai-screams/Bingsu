@@ -122,6 +122,7 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # helper::run before NSS: the watchdog thread (helper_limits::start) and
     # detach's chdir("/") and umask(077).
     "start": {"exec": 1, "thread": 1, "cwd": 1, "umask": 1},
+    "stack_guard": {},  # overridden by the architecture/libc startup table
     # SystemClock::observe: boot_id open, fd statx, fstatfs, read and EOF read;
     # /proc/self, ns and timens_offsets opens with fstatfs, statx on the file;
     # readlinkat of time and time_for_children.
@@ -207,6 +208,20 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
 }
 
+# Rust std main-thread stack guard via glibc pthread_getattr_np. In the
+# x86_64 CI capture, /proc/self/maps stdio teardown calls lseek(SEEK_CUR)
+# then lseek(SEEK_SET). Neither call is a loader exemption. The preceding
+# open/stat/reads retain the existing prologue rules; no new ignores here.
+# aarch64 glibc captures have maps reads but no seeks. Rust std's
+# install_main_guard_linux_musl returns None on both architectures, so that
+# startup path has neither maps reads nor seeks (also seen in aarch64 musl).
+STARTUP_PRIMITIVES = {
+    ("x86_64", "gnu"): {"stack_guard": {"seek": 2}},
+    ("aarch64", "gnu"): {"stack_guard": {}},
+    ("x86_64", "musl"): {"stack_guard": {}},
+    ("aarch64", "musl"): {"stack_guard": {}},
+}
+
 
 @dataclass
 class HelperPlan:
@@ -252,6 +267,9 @@ class HelperPlan:
     breaker_bytes: int = 0
     # "gnu" or "musl", from the binary (PT_INTERP), never from the trace.
     libc: str = "gnu"
+    # Capture/native runner architecture, never inferred from call counts.
+    # The default preserves the original aarch64 captures; live sets it.
+    arch: str = "aarch64"
 
 
 def read_to_end_calls(n: int) -> int:
@@ -402,6 +420,8 @@ def _loader_revalidate(e: dict, k: int) -> None:
 
 
 def _check_plan(p: HelperPlan) -> None:
+    if (p.arch, p.libc) not in STARTUP_PRIMITIVES:
+        raise ValueError("unreviewed helper architecture/libc")
     ax = p.ax
     base = [s for s in p.stages if s != "collect"]
     if (len(base) != 1 or base[0] not in {"unchanged", "publish", "failure-last-good", "failure-recover"}
@@ -701,7 +721,7 @@ def helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     helper_collect_expected to apply exact/le separately."""
     _check_plan(plan)
     global _primitives
-    _primitives = {**PRIMITIVES, **_LIBC[plan.libc]}
+    _primitives = {**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]}
     try:
         return _helper_stage_expected(plan)
     finally:
@@ -724,7 +744,7 @@ def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
     if "collect" not in plan.stages:
         raise ValueError("collect plan required")
     global _primitives
-    _primitives = {**PRIMITIVES, **_LIBC[plan.libc]}
+    _primitives = {**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]}
     try:
         prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
         _collect_prefix(prefix, plan)
@@ -744,6 +764,7 @@ def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     stage = next(s for s in p.stages if s != "collect")
     e: dict[str, int] = {}
     _add(e, "start")
+    _add(e, "stack_guard")
     _add(e, "passwd")
     e["read"] = e.get("read", 0) + p.nsswitch_reads + p.passwd_reads
     # build_identity::read: Resolved walk of the pinned link and its target,

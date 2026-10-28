@@ -25,6 +25,7 @@
    "write": 10
   },
   "plan": {
+   "arch": "aarch64",
    "ax": {
     "B": [
      43
@@ -87,6 +88,7 @@
    "write": 2
   },
   "plan": {
+   "arch": "aarch64",
    "ax": {
     "B": [
      7
@@ -145,6 +147,7 @@
    "umask": 1
   },
   "plan": {
+   "arch": "aarch64",
    "ax": {
     "B": [
      31
@@ -206,6 +209,7 @@
    "write": 4
   },
   "plan": {
+   "arch": "aarch64",
    "ax": {
     "B": [
      31
@@ -267,6 +271,7 @@
    "write": 2
   },
   "plan": {
+   "arch": "aarch64",
    "ax": {
     "B": [
      31

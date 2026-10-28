@@ -172,7 +172,7 @@ def test_b2_lower_bound_is_replaced_by_product_filter_evidence(preparation, tmp_
     assert sample["m1_stub_exit_ns"] > 0 and sample["m1_stub_limits_ns"] > 0
 
 
-def workflow_job(text, job):
+def workflow_job(text, job, *, action_inputs=False):
     """Conservative structural subset, not a general YAML loader.
 
     No YAML parser is hash-pinned in the test requirements. The gate accepts
@@ -180,6 +180,8 @@ def workflow_job(text, job):
     single-line runs. Duplicate keys, anchors, aliases, merges, folded scalars
     and multiline conditions fail closed. actionlint validates the full YAML.
     Comments and metadata can never supply executable evidence.
+    action_inputs additionally exposes simple block-mapping `with` inputs;
+    callers auditing artifact destinations require single-line scalar values.
     """
     header = text.split("\njobs:\n", 1)[0]
     assert not re.search(r"(?m)^defaults:", header), "workflow shell defaults"
@@ -234,7 +236,16 @@ def workflow_job(text, job):
         lines[0] = "        " + lines[0]
         parsed = fields(lines, 8)
         assert_shell_settings(parsed)
-        steps.append({key: value for key, (value, _) in parsed.items()})
+        step = {key: value for key, (value, _) in parsed.items()}
+        if action_inputs and "with" in parsed:
+            value, nested = parsed["with"]
+            assert not value, "inline action inputs are unsupported"
+            inputs = fields(nested, 10)
+            assert all(value and not any(line.strip() for line in nested)
+                       and value[0] not in "|>&*!"
+                       for value, nested in inputs.values()), "single-line action inputs required"
+            step["with"] = {key: value for key, (value, _) in inputs.items()}
+        steps.append(step)
     assert_shell_settings(meta)
     return meta, steps
 

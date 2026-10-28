@@ -6,6 +6,7 @@ the stage formula (collect: prefix exact, tail upper bound); these tests pin
 the pieces it is built from.
 """
 import pytest
+from collections import Counter
 
 from fsbudget.classify import helper_kind
 from fsbudget.formula import (MAX_RW_COUNT, HelperAxes, HelperPlan, helper_stage_expected,
@@ -47,7 +48,7 @@ def test_verify_build_reads():
     {"stages": ("publish", "collect")}, {"stages": ("collect",)}, {"stages": ("unchanged", "failure-recover")},
     {"ax": HelperAxes(F=1, P=6, L=1, R=3, D=0, M=0, B=[31])}, {"ax": HelperAxes(F=1, P=6, L=0, R=3, D=1, M=0, B=[31])},
     {"ax": HelperAxes(F=1, P=6, L=0, R=3, D=0, M=0, B=[31], acl=True)}, {"buf": 4096}, {"libc": "bionic"},
-    {"libc": "musl"}, {"stages": ("unchanged", "collect"), "breaker_bytes": 0}])
+    {"libc": "musl"}, {"arch": "riscv64"}, {"stages": ("unchanged", "collect"), "breaker_bytes": 0}])
 def test_unreviewed_plans_are_refused(change):
     with pytest.raises(ValueError):
         helper_stage_expected(plan(**change))
@@ -69,6 +70,25 @@ def test_musl_differs_in_nss_and_cloexec_fallbacks():
     musl = helper_stage_expected(plan(libc="musl", nsswitch_reads=0))
     delta = {k: musl.get(k, 0) - gnu.get(k, 0) for k in set(gnu) | set(musl) if musl.get(k, 0) != gnu.get(k, 0)}
     assert delta == {"network": -4, "fstat": -5, "openat": -1, "read": -2, "seek": -1, "fd_flags": 7}
+
+
+@pytest.mark.parametrize("libc,seeks", [("gnu", 2), ("musl", 0)])
+@pytest.mark.parametrize("stages", [("unchanged",), ("publish",), ("failure-last-good",),
+                                    ("failure-recover",), ("unchanged", "collect")])
+def test_platform_stack_guard_is_exact_and_only_in_prefix(libc, seeks, stages):
+    from dataclasses import replace
+    from fsbudget.formula import helper_collect_expected
+    arm = plan(stages, arch="aarch64", libc=libc, nsswitch_reads=0 if libc == "musl" else 2)
+    x86 = replace(arm, arch="x86_64")
+    a, x = Counter(helper_stage_expected(arm)), Counter(helper_stage_expected(x86))
+    assert x == a + Counter(seek=seeks)
+    if "collect" in stages:
+        for deadline in (False, True):
+            a = helper_collect_expected(arm, deadline=deadline)
+            x = helper_collect_expected(x86, deadline=deadline)
+            assert Counter(x["prefix"]) == Counter(a["prefix"]) + Counter(seek=seeks)
+            assert x["supervisor"] == a["supervisor"]
+            assert x["finish_gc"] == a["finish_gc"]
 
 
 # 이것을 실패시키는 것: helper 어휘가 다른 모양까지 받아 넓어지는 것(경로 statx의 상대 경로, 파이프가 아닌
