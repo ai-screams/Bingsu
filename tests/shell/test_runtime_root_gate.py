@@ -2,8 +2,36 @@
 import os
 import shutil
 import subprocess
+import time
 
 from shell_support import ROOT, Install, real_bin, run_shell_script, trusted_env
+
+
+def refresh_helpers(base):
+    """Running refresh helpers of this fixture (their argv names its roots)."""
+    marker, needle = b"__refresh-v1", os.fsencode(str(base))
+    if os.path.isdir("/proc/self"):
+        lines = []
+        for entry in os.listdir("/proc"):
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    lines.append(f.read())
+            except OSError:
+                continue
+    else:
+        lines = subprocess.run(["ps", "-A", "-ww", "-o", "command="], capture_output=True, check=True).stdout.splitlines()
+    return [line for line in lines if marker in line and needle in line]
+
+
+def wait_refresh_helpers(base, timeout=15):
+    # A helper the baseline prompt started can still be writing into the root;
+    # removing the root under it races (rmtree: ENOENT or directory not empty).
+    # The race is intermittent, so removing this wait fails only some runs; a
+    # Linux probe saw one live helper right after the baseline prompt.
+    end = time.monotonic() + timeout
+    while refresh_helpers(base):
+        assert time.monotonic() < end, ("refresh helper did not exit", refresh_helpers(base))
+        time.sleep(0.05)
 
 
 # 이것을 실패시키는 것: 고정 dev·ino 비교 제거.
@@ -14,6 +42,7 @@ def test_deleted_and_recreated_runtime_root_degrades_every_prompt(tmp_path):
     baseline = run_shell_script("bash", script + b"\n_bingsu_save; _bingsu_install; printf '%s\\n' \"$_bingsu_rec\"\n", env, tmp_path)
     assert baseline.returncode == 0 and baseline.stdout.startswith(b"B1\x1f8\x1f"), baseline
     assert b"degraded:runtime-root" not in baseline.stdout, baseline.stdout
+    wait_refresh_helpers(tmp_path)
     root = tmp_path / "run-t/bingsu"
     before = root.stat()
     # Hold the removed inode open so immediate inode reuse cannot mask replacement.
@@ -62,6 +91,7 @@ def test_init_again_recovers_runtime_root(tmp_path):
     baseline = run_shell_script("bash", old + call, env, tmp_path)
     assert baseline.returncode == 0, baseline.stderr
     assert b"degraded:runtime-root" not in baseline.stdout
+    wait_refresh_helpers(tmp_path)
     root = tmp_path / "run-t/bingsu"
     fd = os.open(root, os.O_RDONLY)
     try:
