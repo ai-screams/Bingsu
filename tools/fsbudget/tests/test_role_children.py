@@ -43,7 +43,7 @@ def test_role_children_negative_controls(extra, verb, want):
     if verb == 'wrong':
         with pytest.raises(ValueError):
             role_children(trace)
-        with pytest.raises(StopIteration):
+        with pytest.raises(ValueError):
             first_index(trace, 'collector', lambda c: True)
 
 
@@ -83,3 +83,49 @@ def test_thread_exec_is_not_zero_collectors():
 12 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0''')
     with pytest.raises(ValueError, match='thread exec'):
         role_children(source)
+
+
+# A later pinned exec must never erase a shell, including early vfork output.
+@pytest.mark.parametrize('role', ['front', 'helper', 'collector'])
+@pytest.mark.parametrize('before_return', [False, True])
+def test_exec_relays_are_rejected_permanently(role, before_return):
+    lines = [f'{c.pid} {c.name}({c.args}) = {c.ret}' for c in sample()]
+    pid = {'front': 10, 'helper': 11, 'collector': 13}[role]
+    product = next(i for i, line in enumerate(lines) if line.startswith(f'{pid} execve'))
+    shell = f'{pid} execve("/bin/sh", ["/bin/sh", "-c", "relay"], []) = 0'
+    if not before_return and role != 'front':
+        spawn = next(i for i, line in enumerate(lines) if line.endswith(f'= {pid}'))
+        lines[product], lines[spawn] = lines[spawn], lines[product]
+        product = spawn
+    lines.insert(product, shell)
+    trace = parse('\n'.join(lines))
+    for check in (role_children, lambda t: first_index(t, role, lambda c: True)):
+        with pytest.raises(ValueError, match='exec transition'):
+            check(trace)
+
+
+@pytest.mark.parametrize('pid', [10, 11, 13])
+def test_repeated_product_exec_is_rejected(pid):
+    trace = sample()
+    call = next(c for c in trace if c.pid == pid and c.name == 'execve')
+    with pytest.raises(ValueError, match='exec transition'):
+        role_children(sample(f'{pid} execve({call.args}) = 0'))
+
+
+def test_timing_evidence_starts_at_validated_exec():
+    trace = parse('''10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0
+11 read(3</store/snapshot>, "old", 192) = 192
+11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0
+10 vfork() = 11
+11 read(3</store/snapshot>, "new", 192) = 192''')
+    assert first_index(trace, 'helper', lambda c: c.name == 'read') == 4
+
+
+@pytest.mark.parametrize('pid', [10, 11, 13])
+@pytest.mark.parametrize('name,args', [
+    ('execve', '"/bin/sh", ["/bin/sh"], []'),
+    ('execveat', 'AT_FDCWD, "/bin/sh", ["/bin/sh"], [], 0'),
+])
+def test_unexpected_successful_exec_in_any_product_role(pid, name, args):
+    with pytest.raises(ValueError, match='exec transition'):
+        role_children(sample(f'{pid} {name}({args}) = 0'))

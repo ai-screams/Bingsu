@@ -905,7 +905,7 @@ def _product_roles(trace):
 
     A vfork exec can be recorded before the parent's spawn return. Resolve
     the entire lifetime before counting, including watchdog threads. Unknown
-    process execs remain commands; they never disappear from the child count.
+    process execs fail closed; a later product exec cannot erase them.
     """
     import ast
     # 이것을 실패시키는 것: if trace.errors 조건을 제거하거나 반전하는 변이.
@@ -940,7 +940,12 @@ def _product_roles(trace):
             child = min(candidates, key=lambda k: tasks[k][0].index)
             parents[child] = keys[c.index]
             spawns.append((c, child))
+    execs = {key: [c for c in calls if c.name in {"execve", "execveat"} and c.ret == "0"]
+             for key, calls in tasks.items()}
+    if execs[root] != [initial]:
+        raise ValueError("extra root exec transition")
     roles = {root: "front"}
+    starts = {root: initial.index}
     def resolve(key, visiting=frozenset()):
         # 이것을 실패시키는 것: if key in roles 조건을 제거하거나 반전하는 변이.
         if key in roles:
@@ -950,35 +955,39 @@ def _product_roles(trace):
             raise ValueError(f"unresolved task: {key}")
         parent = resolve(parents[key], visiting | {key})
         role = parent
-        for c in tasks[key]:
-            # 이것을 실패시키는 것: if c.name in {"execve", "execveat"} and c.ret == "0" 조건을 제거하거나 반전하는 변이.
-            if c.name in {"execve", "execveat"} and c.ret == "0":
-                args = split_args(c.args)
-                role = "command"
-                # 이것을 실패시키는 것: if c.name == "execve" and len(args) == 3 조건을 제거하거나 반전하는 변이.
-                if c.name == "execve" and len(args) == 3:
-                    path = ast.literal_eval(args[0])
-                    argv = ast.literal_eval(args[1])
-                    empty_env = bool(re.fullmatch(r"(?:0x[0-9a-f]+ /\* 0 vars \*/|\[\])", args[2]))
-                    # 이것을 실패시키는 것: if empty_env and argv[:2] == [exe, "__refresh-v1"] and path == exe and parent == "front" 조건을 제거하거나 반전하는 변이.
-                    if empty_env and argv[:2] == [exe, "__refresh-v1"] and path == exe and parent == "front":
-                        role = "helper"
-                    collector = next((a.split("=", 1)[1] for a in ast.literal_eval(split_args(initial.args)[1])
-                                      # 이것을 실패시키는 것: if a.startswith("--collector-exe=")), exe.rpartition("/")[0] + "/bingsu-collect") 조건을 제거하거나 반전하는 변이.
-                                      if a.startswith("--collector-exe=")), exe.rpartition("/")[0] + "/bingsu-collect")
-                    # 이것을 실패시키는 것: if empty_env and path == collector and argv == [collector, "__collect-v1"] and parent == " 조건을 제거하거나 반전하는 변이.
-                    if empty_env and path == collector and argv == [collector, "__collect-v1"] and parent == "helper":
-                        role = "collector"
+        starts[key] = starts[parents[key]]
+        if len(execs[key]) > 1:
+            raise ValueError(f"extra product exec transition: {key}")
+        for c in execs[key]:
+            args = split_args(c.args)
+            role = "command"
+            # 이것을 실패시키는 것: if c.name == "execve" and len(args) == 3 조건을 제거하거나 반전하는 변이.
+            if c.name == "execve" and len(args) == 3:
+                path = ast.literal_eval(args[0])
+                argv = ast.literal_eval(args[1])
+                empty_env = bool(re.fullmatch(r"(?:0x[0-9a-f]+ /\* 0 vars \*/|\[\])", args[2]))
+                # 이것을 실패시키는 것: if empty_env and argv[:2] == [exe, "__refresh-v1"] and path == exe and parent == "front" 조건을 제거하거나 반전하는 변이.
+                if empty_env and argv[:2] == [exe, "__refresh-v1"] and path == exe and parent == "front":
+                    role = "helper"
+                collector = next((a.split("=", 1)[1] for a in ast.literal_eval(split_args(initial.args)[1])
+                                  # 이것을 실패시키는 것: if a.startswith("--collector-exe=")), exe.rpartition("/")[0] + "/bingsu-collect") 조건을 제거하거나 반전하는 변이.
+                                  if a.startswith("--collector-exe=")), exe.rpartition("/")[0] + "/bingsu-collect")
+                # 이것을 실패시키는 것: if empty_env and path == collector and argv == [collector, "__collect-v1"] and parent == " 조건을 제거하거나 반전하는 변이.
+                if empty_env and path == collector and argv == [collector, "__collect-v1"] and parent == "helper":
+                    role = "collector"
+            if role == "command":
+                raise ValueError(f"unexpected successful exec: {c}")
+            starts[key] = c.index
         roles[key] = role
         return role
     for key in tasks:
         resolve(key)
-    return keys, roles, spawns
+    return keys, roles, spawns, starts
 
 
 def role_children(trace):
     """Successful process creations per parent role; threads are separate."""
-    keys, roles, spawns = _product_roles(trace)
+    keys, roles, spawns, _ = _product_roles(trace)
     counts = dict.fromkeys(("front", "helper", "collector", "command"), 0)
     for call, child in spawns:
         # 이것을 실패시키는 것: watchdog 스레드의 exec로 collector 프로세스 생성을 숨기는 변이.
@@ -999,8 +1008,10 @@ def role_children(trace):
 def first_index(trace, role, predicate):
     """First matching completed call in a role, failing closed if missing.
 
+    Calls before the validated product exec cannot supply timing evidence.
     Timing comparisons use calls in the helper's own main TID; its reads
     cannot execute during its pending process creation syscall.
     """
-    keys, roles, _ = _product_roles(trace)
-    return next(c.index for c in trace if roles[keys[c.index]] == role and predicate(c))
+    keys, roles, _, starts = _product_roles(trace)
+    return next(c.index for c in trace if roles[keys[c.index]] == role
+                and c.index >= starts[keys[c.index]] and predicate(c))

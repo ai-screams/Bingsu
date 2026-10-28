@@ -2093,3 +2093,17 @@ def test_child_timing_negative_controls(mutation):
     else:
         with pytest.raises((AssertionError, StopIteration)):
             assert_child_timing(trace, Path('/store'))
+
+
+# Stored synthetic control: one collector in both traces, only timing differs.
+# No product overlay or warm-up is needed to reach the timing assertion.
+def test_stored_child_timing_control():
+    from fsbudget.attribute import role_children
+    fixtures = Path(__file__).parent / 'fixtures'
+    passing = parse_trace((fixtures / 'b1-child-timing-passing.strace').read_text())
+    moved = parse_trace((fixtures / 'b1-child-timing-before-reads.strace').read_text())
+    expected = {"front": 1, "helper": 1, "collector": 0, "command": 0}
+    assert role_children(passing) == role_children(moved) == expected
+    assert_child_timing(passing, Path('/store'))
+    with pytest.raises(AssertionError, match='snapshot'):
+        assert_child_timing(moved, Path('/store'))
