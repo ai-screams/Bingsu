@@ -101,8 +101,6 @@ M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3
 M3D_SUPPLEMENTARY.update({f"{gate}.1-{case}": "M3d"
                           for gate in ("GATE-FS-FRONT", "GATE-FRONT-READ-BYTES")
                           for case in ("checksum_last_good", "body_limit", "header_only")})
-# GATE-MARKER-UPDATE.1 and .3 rows that cover part of the clause until the ACL and trust cases are ruled.
-M3D_SUPPLEMENTARY.update({"GATE-MARKER-UPDATE.1-deadline_scan_listing": "M3d", "GATE-MARKER-UPDATE.3-compile": "M3d"})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
@@ -139,8 +137,6 @@ M3D_PENDING = (
     "GATE-CLOCK-READS.1",
     "GATE-COLLECTOR-TIMING.1", "GATE-COLLECTOR-TIMING.2", "GATE-COLLECTOR-TIMING.3", "GATE-COLLECTOR-TIMING.4",
     "GATE-RUNTIME-ROOT.1", "GATE-RUNTIME-ROOT.2", "GATE-RUNTIME-ROOT.3", "GATE-RUNTIME-ROOT.4",
-    # ACL error and confirmed trust failure await a ruling (P-R4 versus spec 771).
-    "GATE-MARKER-UPDATE.1", "GATE-MARKER-UPDATE.3",
 )
 
 

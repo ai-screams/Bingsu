@@ -1270,10 +1270,106 @@ fn marker_disagreeing_in_generation_or_summary_launches_no_unit() {
         assert_eq!(got.permit, None, "{what}");
     }
 }
-// 표식 갱신 조건(GATE-MARKER-UPDATE.1): 마감 초과·일부 훑음·ACL 오류·conf.d 목록 실패에서는 Incomplete이고
-// snapshot·last-good·marker·sequence가 한 바이트도 바뀌지 않는다.
+/// P-R4 (user ruling 2026-10-15): a file that fails its safety check or whose
+/// ACL cannot be decided is left out; the rest is verified and marked. Two
+/// approved units, then `damage` takes trust from the conf.d one only.
+fn assert_drops_only_that_files_units(damage: &str) {
+    use bingsu_core::status::Status;
+    let f = Fx::new(&format!("left-out-{damage}"));
+    f.put("[segment.\"custom/keep\"]\nkind = \"command\"\ncommand = [\"printf\", \"KEEP\"]\n[layout.line1]\nleft = [\"custom/keep\", \"custom/drop\", \"char\"]\n");
+    let conf_d = f.request.config_canonical.join("conf.d");
+    fs::create_dir(&conf_d).unwrap();
+    mode(&conf_d, 0o700);
+    let dropped = conf_d.join("drop.toml");
+    put(
+        &dropped,
+        b"[segment.\"custom/drop\"]\nkind = \"command\"\ncommand = [\"printf\", \"DROP\"]\n",
+    );
+    published(f.run());
+    let both = read_front(&f);
+    let mut approved = argv(&both);
+    approved.sort();
+    assert_eq!(
+        approved,
+        [command("DROP"), command("KEEP")].concat(),
+        "{damage}"
+    );
+    let old_marker = f.bytes("marker");
+    match damage {
+        "mode-0646" => mode(&dropped, 0o646),
+        "acl-allows-write" => {
+            let out = std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow write"])
+                .arg(&dropped)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        "acl-undecided" => set_posix_acl(&dropped),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        f.run(),
+        RefreshResult::Published {
+            generation: 2,
+            left_out: vec![dropped.clone()],
+        },
+        "{damage}"
+    );
+    // A fresh valid marker replaces the one that approved the dropped unit.
+    assert_ne!(f.bytes("marker"), old_marker, "{damage}");
+    assert!(!f.marker().invalid, "{damage}");
+    assert_eq!(f.marker().id, f.snap().id, "{damage}");
+    // The very next front read, at the same clock (no wait for T): only the rest.
+    let got = read_front(&f);
+    assert_eq!(
+        (got.status, argv(&got)),
+        (Status::OK_NONE, command("KEEP")),
+        "{damage}"
+    );
+    assert!(got.permit.is_some(), "{damage}");
+}
+/// Linux POSIX access ACL with a named entry, then group write: the mode's
+/// group bits become the mask, which `fs_trust` cannot decide (L-R7).
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn set_posix_acl(path: &Path) {
+    // Version 2, then (tag, perm, id): USER_OBJ rw, USER nobody r, GROUP_OBJ none, MASK rw, OTHER none.
+    let mut blob = 2u32.to_le_bytes().to_vec();
+    for (tag, perm, id) in [
+        (1u16, 6u16, u32::MAX),
+        (2, 4, 65534),
+        (4, 0, u32::MAX),
+        (0x10, 6, u32::MAX),
+        (0x20, 0, u32::MAX),
+    ] {
+        blob.extend(tag.to_le_bytes());
+        blob.extend(perm.to_le_bytes());
+        blob.extend(id.to_le_bytes());
+    }
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: NUL-terminated path and attribute name, initialized value bytes.
+    let rc = unsafe {
+        libc::setxattr(
+            name.as_ptr(),
+            c"system.posix_acl_access".as_ptr(),
+            blob.as_ptr().cast(),
+            blob.len(),
+            0,
+        )
+    };
+    assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+    mode(path, 0o660);
+}
+#[cfg(not(target_os = "linux"))]
+fn set_posix_acl(_: &Path) {
+    unreachable!("Linux POSIX ACL fixture")
+}
+// 표식 갱신 조건(GATE-MARKER-UPDATE.1): 마감 초과·일부 훑음·conf.d 목록 실패에서는 Incomplete이고
+// snapshot·last-good·marker·sequence가 한 바이트도 바뀌지 않는다. ACL 오류(판정 불가)는 P-R4대로 그 파일만
+// 빠지고 그 단위는 바로 다음 앞단에서 승인되지 않는다(Linux POSIX ACL; macOS의 ACL 조회 오류는 주입할 수 없다, M1 L243).
 // 이것을 실패시키는 것: Verified::Incomplete를 Invalid 표식으로 바꾸는 것(N-057 모양), 마감 확인을 빼는 것,
-// 훑지 못한 원본이나 conf.d 목록 오류를 확인한 부재로 낮추는 것.
+// 훑지 못한 원본이나 conf.d 목록 오류를 확인한 부재로 낮추는 것, 판정 불가 ACL 파일을 실행 가능으로 두는 것.
 #[test]
 fn marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure() {
     struct Late(Rc<Cell<bool>>);
@@ -1310,10 +1406,14 @@ fn marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure() {
         assert_eq!(got, RefreshResult::Incomplete, "{case}");
         assert_eq!((f.state(), f.bytes("sequence")), before, "{case}");
     }
+    #[cfg(target_os = "linux")]
+    assert_drops_only_that_files_units("acl-undecided");
 }
 // 확인한 실패(GATE-MARKER-UPDATE.3): 컴파일 실패를 확인하면 무효 표식이 써지고, 바로 다음 앞단 읽기가
-// degraded:trust-invalid이며 실행 단위를 승인하지 않는다. 옛 화면은 남는다.
-// 이것을 실패시키는 것: 확인한 실패를 Incomplete로 낮춰 옛 표식이 T까지 승인되게 하는 것, 앞단이 invalid 표식을 무시하는 것.
+// degraded:trust-invalid이며 실행 단위를 승인하지 않는다. 옛 화면은 남는다. 확인한 신뢰 실패(남 쓰기 0646,
+// macOS ACL 쓰기 허용)는 P-R4대로 그 파일만 빠지고, 바로 다음 앞단에서 그 단위만 승인되지 않는다(T를 기다리지 않음).
+// 이것을 실패시키는 것: 확인한 실패를 Incomplete로 낮춰 옛 표식이 T까지 승인되게 하는 것, 앞단이 invalid 표식을 무시하는 것,
+// 신뢰를 잃은 파일의 단위를 새 표식에 남기는 것(안전 거부 무시, 앞단 not_run 거름 제거).
 #[test]
 fn confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degrades() {
     use bingsu_core::status::Status;
@@ -1336,6 +1436,9 @@ fn confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degr
     // The display stays: the same layout as before, now with the warning.
     assert!(got.record.windows(3).any(|w| w == "❯".as_bytes()));
     assert_ne!(got.record, shown.record);
+    assert_drops_only_that_files_units("mode-0646");
+    #[cfg(target_os = "macos")]
+    assert_drops_only_that_files_units("acl-allows-write");
 }
 // 이것을 실패시키는 것: 부모가 요청한 실제 Rust 발행 중단점이나 두 프로세스 Busy 검사를 실행하지 않는 것.
 #[test]

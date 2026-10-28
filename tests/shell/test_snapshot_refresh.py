@@ -101,3 +101,26 @@ def test_invalid_config_keeps_display_and_recovers(tmp_path):
     session.put(appearance("RECOVERED"))
     session.await_text("RECOVERED")
     session.wait_quiet()
+
+
+# P-R4: a file that fails its safety check is left out and the rest is published
+# with a fresh valid marker; the next prompt keeps the screen and is not degraded.
+# 이것을 실패시키는 것: 확인한 신뢰 실패를 Invalid 표식(전부 철회, degraded)이나 Incomplete(옛 표식 유지)로
+# 처리하는 것, 빠진 파일을 알리지 않는 것.
+def test_untrusted_file_is_left_out_and_the_rest_republished(tmp_path):
+    session = SnapshotSession(tmp_path)
+    session.put(appearance("KEPT"))
+    dropped = session.put('[segment."custom/drop"]\nkind = "command"\ncommand = ["printf", "DROP"]\n',
+                          "conf.d/10.toml")
+    session.init()
+    session.await_text("KEPT")
+    session.wait_quiet()
+    before = session.identity()[1]
+    dropped.chmod(0o646)
+    result = session.run("reload")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert b"left out, nothing in it runs: " in result.stdout and b"conf.d/10.toml" in result.stdout, result.stdout
+    assert session.identity()[1] > before
+    record = session.prompt()
+    assert b"KEPT" in record and b"degraded:" not in record, record
+    session.wait_quiet()
