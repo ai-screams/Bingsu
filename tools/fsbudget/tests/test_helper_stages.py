@@ -89,7 +89,7 @@ def test_musl_differs_in_nss_and_cloexec_fallbacks():
     (call("fcntl", "40<pipe:[1]>, F_DUPFD_CLOEXEC, 3", "41<pipe:[1]>"), None),
     (call("chdir", '"/"'), "cwd"),
     (call("chdir", '"/r"'), "unknown-fs"),
-    (call("umask", "077", "022"), None),
+    (call("umask", "077", "022"), "umask"),
 ])
 def test_helper_vocabulary(c, kind):
     assert helper_kind(c) == kind

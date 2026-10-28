@@ -1599,10 +1599,12 @@ STAGE_NAMES = ["unchanged", "publish", "collect", "failure-last-good", "failure-
 
 
 # 이것을 실패시키는 것: 판정기가 저장 trace의 종류별 호출 수를 공식과 exact로 비교하지 않는 것,
-# 도우미 호출 하나를 더하거나(fstat) 앞단으로 옮기는 것(git 전역 입력 open), helper 어휘 없이 세는 것.
+# 도우미 호출 하나를 더하거나(fstat) 앞단으로 옮기는 것(git 전역 입력 open), helper 어휘 없이 세는 것,
+# umask를 세지 않는 것(더하거나 빼도 통과), 시작 뒤의 loader 모양 접근(/proc/<pid>/maps)을 면제하는 것.
 @pytest.mark.parametrize("stage,damage", [
     (stage, damage) for stage in STAGE_NAMES
-    for damage in (None, "extra-fstat", "generic-vocabulary") + (("moved-to-front",) if stage == "collect" else ())])
+    for damage in (None, "extra-fstat", "generic-vocabulary", "extra-umask", "missing-umask", "maps-after-startup")
+    + (("moved-to-front",) if stage == "collect" else ())])
 def test_stage_formula_checker_regressions(stage, damage):
     from fsbudget.formula import helper_stage_expected
     lines, collector, plan = helper_stage_case(stage)
@@ -1620,6 +1622,18 @@ def test_stage_formula_checker_regressions(stage, damage):
         lines = [lines[0], moved] + lines[1:at] + lines[at + 1:]
     elif damage == "generic-vocabulary":
         kwargs["helper_vocabulary"] = False
+    elif damage in ("extra-umask", "missing-umask", "maps-after-startup"):
+        # detach()'s umask(077), split by strace into a call and its resumption.
+        at = first_helper_line(lines, r"umask\(077")
+        end = next(i for i in range(at, len(lines)) if lines[i].split()[0] == lines[at].split()[0] and " = " in lines[i])
+        pid = lines[at].split()[0]
+        if damage == "missing-umask":
+            lines = lines[:at] + lines[at + 1:end] + lines[end + 1:]
+        else:
+            # A loader-allowlisted path after startup must still count (review control).
+            extra = (f"{pid}  umask(077) = 077" if damage == "extra-umask" else
+                     f'{pid}  newfstatat(AT_FDCWD</>, "/proc/{pid}/maps", {{st_mode=S_IFREG|0444, st_size=0, ...}}, 0) = 0')
+            lines = lines[:end + 1] + [extra] + lines[end + 1:]
     errors = helper_stage_errors(lines, collector, expected, **kwargs)
     if damage is None:
         assert errors == []

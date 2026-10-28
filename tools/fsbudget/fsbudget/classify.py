@@ -207,7 +207,7 @@ def helper_kind(c: Call) -> str | None:
     Rust File::metadata is fd statx; Path::symlink_metadata is absolute-path
     statx; context creation is mkdirat; staging applies its mode with fchmod
     and rewinds with lseek; File::try_clone is F_DUPFD_CLOEXEC; detach is
-    chdir("/") and umask. Any other shape keeps the generic kind, so an
+    chdir("/") and umask, each counted. Any other shape keeps the generic kind, so an
     unreviewed call still lands in `unknown-fs`.
     """
     args = split_args(c.args)
@@ -235,7 +235,7 @@ def helper_kind(c: Call) -> str | None:
     if c.name == "chdir":
         return "cwd" if args == ['"/"'] else "unknown-fs"
     if c.name == "umask":
-        return None
+        return "umask"
     return collector_kind(c)
 
 

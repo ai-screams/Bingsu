@@ -131,21 +131,31 @@ jobs:
   # Every system call the prompt makes after its seccomp filter is installed
   # is a row of crates/bingsu/prompt-syscalls.tsv and none is refused
   # (tests/shell/test_prompt_env_paths.py::test_calls_after_the_filter_are_in_the_table),
-  # for each x86_64 libc and profile the release ships or tests run. The
-  # binary runs natively on the runner (no container: the runner's own glibc).
+  # for each x86_64 libc and profile the release ships or tests run, plus the
+  # aarch64 release cells the helper stage gate needs. The binary runs
+  # natively on the runner (no container: the runner's own glibc).
   filter-calls:
     # Selects individual shell modules below, never test_collector_security.py;
     # the dedicated collector job owns host preparation and security evidence.
-    name: Prompt filter calls (x86_64 ${{ matrix.libc }} ${{ matrix.profile }})
+    name: Prompt filter calls (${{ matrix.os }} ${{ matrix.libc }} ${{ matrix.profile }})
     needs: detect
     if: needs.detect.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         libc: [gnu, musl]
         profile: [debug, release]
+        # GATE-FS-HELPER.1 counts x86_64 and aarch64, glibc and musl, release.
+        include:
+          - os: ubuntu-24.04-arm
+            libc: gnu
+            profile: release
+          - os: ubuntu-24.04-arm
+            libc: musl
+            profile: release
     env:
       LIBC: ${{ matrix.libc }}
       PROFILE: ${{ matrix.profile }}
@@ -156,16 +166,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.libc }}-${{ matrix.profile }}
+          key: ${{ matrix.os }}-${{ matrix.libc }}-${{ matrix.profile }}
       - name: Build
         run: |
           args=(-p bingsu -p bingsu-collect)
           dir=target
           if [ "$PROFILE" = release ]; then args+=(--release); fi
-          if [ "$LIBC" = musl ]; then args+=(--target x86_64-unknown-linux-musl); dir=target/x86_64-unknown-linux-musl; fi
+          if [ "$LIBC" = musl ]; then musl="$(uname -m)-unknown-linux-musl"; args+=(--target "$musl"); dir="target/$musl"; fi
           cargo build "${args[@]}"
           echo "BINGSU_BIN=$PWD/$dir/$PROFILE/bingsu" >> "$GITHUB_ENV"
       # K82 uses a glibc test binary with LD_PRELOAD; C3 uses a main-thread

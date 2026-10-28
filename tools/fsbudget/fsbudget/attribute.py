@@ -471,7 +471,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
     `helper_vocabulary` counts helper calls with classify.helper_kind (the
-    per-stage helper gate); other callers keep the generic helper kinds.
+    per-stage helper gate); other callers keep the generic helper kinds. It
+    also ends a helper's loader exemption at its first counted call, so a
+    loader-shaped access after startup (say /proc/self/maps) is counted.
     """
     import json
     from .classify import collector_kind, collector_bootstrap_kind, helper_kind
@@ -523,6 +525,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     filters = defaultdict(int)
     repository_probe = {}
     bootstrap_ended = set()
+    started = set()  # helper processes whose loader prologue is over
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
 
@@ -599,6 +602,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 else:
                     roles[c.pid] = role = new
                     seen_exec.add(process)
+                    started.discard(process)
                     collector_execs += int(new == "collector")
             counts[role]["exec"] += 1
             continue
@@ -615,8 +619,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
-        if process not in confined and _prologue_call(c, target(c)):
+        helper_startup = not (helper_vocabulary and role == "helper") or process not in started
+        if process not in confined and helper_startup and _prologue_call(c, target(c)):
             continue
+        if helper_vocabulary and role == "helper" and k is not None:
+            started.add(process)
         if role == "collector":
             if c.name == "uname" and process not in confined:
                 k = "kernel_release"

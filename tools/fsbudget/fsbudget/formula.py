@@ -120,8 +120,8 @@ MAX_RW_COUNT = 0x7FFF_F000
 # them. Walk entries are per path name or per descriptor, so axes multiply them.
 PRIMITIVES: dict[str, dict[str, int]] = {
     # helper::run before NSS: the watchdog thread (helper_limits::start) and
-    # detach's chdir("/").
-    "start": {"exec": 1, "thread": 1, "cwd": 1},
+    # detach's chdir("/") and umask(077).
+    "start": {"exec": 1, "thread": 1, "cwd": 1, "umask": 1},
     # SystemClock::observe: boot_id open, fd statx, fstatfs, read and EOF read;
     # /proc/self, ns and timens_offsets opens with fstatfs, statx on the file;
     # readlinkat of time and time_for_children.
@@ -341,12 +341,13 @@ def _recover(e: dict) -> None:
 
 def _store_read(e: dict, size: int, buf: int) -> None:
     # LockedStore::read of a present file: open_data's check, stamp, check,
-    # exact-length read with its EOF read, stamp and name identity.
+    # the exact-length read, stamp and name identity. These files are replaced
+    # only by rename, so there is no end-check read (spec 8 read-count rule).
     _add(e, "open")
     _add(e, "check_data")
     _add(e, "metadata")
     _add(e, "check_data")
-    e["read"] = e.get("read", 0) + ceil_div(size, buf) + 1
+    e["read"] = e.get("read", 0) + ceil_div(size, buf)
     _add(e, "metadata")
     _add(e, "same_name")
 

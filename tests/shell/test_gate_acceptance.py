@@ -93,7 +93,10 @@ M3D_GATES = {
 M3D_GATE_IDS = tuple(M3D_GATES)
 
 # Supplementary rows that must stay, with their stage: existing tests that cover part of a clause.
-M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3a": "M3a"}
+M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3a": "M3a",
+                     # GATE-FS-HELPER.1 is one row per stage parameter; the primary row is unchanged.
+                     "GATE-FS-HELPER.1-publish": "M3d", "GATE-FS-HELPER.1-collect": "M3d",
+                     "GATE-FS-HELPER.1-last_good": "M3d", "GATE-FS-HELPER.1-recover": "M3d"}
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
@@ -517,7 +520,12 @@ def test_gate_ci_step_rejects_mutations(job, damage):
     elif damage == "runner":
         runner = {"filter-calls": "ubuntu-latest", "shell-macos": "macos-latest"}[job]
         other = {"filter-calls": "macos-latest", "shell-macos": "ubuntu-latest"}[job]
-        shell = in_job(shell, job, f"    runs-on: {runner}\n", f"    runs-on: {other}\n")
+        if job == "filter-calls":
+            # runs-on is the matrix os here: move every cell to macOS.
+            for label in ("ubuntu-latest", "ubuntu-24.04-arm"):
+                shell = shell.replace(label, other)
+        else:
+            shell = in_job(shell, job, f"    runs-on: {runner}\n", f"    runs-on: {other}\n")
     elif damage == "no-pipefail":
         start, end = job_span(shell, job)
         block = shell[start:end]
@@ -650,7 +658,55 @@ def test_release_gate_rows_need_release_only_cells(damage):
 def test_profile_condition_needs_a_profile_axis():
     from test_collector_security import acceptance_pair_allowed
     row = {"id": "GATE-FS-HELPER.1", "platform": "Linux"}
-    step = {"if": "matrix.profile == 'release'", "run": "echo ok", "_platforms": {"linux"}, "_profiles": None}
+    step = {"if": "matrix.profile == 'release'", "run": "echo ok", "_platforms": {"linux"}, "_cells": None}
     assert acceptance_pair_allowed(row, step, step, ["echo", "ok"]) is None
-    step["_profiles"] = {"debug", "release"}
+    step["_cells"] = [{"os": "ubuntu-latest", "libc": "gnu", "profile": "release"}]
     assert acceptance_pair_allowed(row, step, step, ["echo", "ok"]) == {"linux"}
+
+
+HELPER_STAGE_ROWS = ("GATE-FS-HELPER.1", "GATE-FS-HELPER.1-publish", "GATE-FS-HELPER.1-collect",
+                     "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover")
+
+
+# 이것을 실패시키는 것: 다섯 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.
+@pytest.mark.parametrize("row_id", HELPER_STAGE_ROWS)
+def test_every_helper_stage_row_is_required(row_id):
+    table = (ROOT / TABLE).read_text()
+    texts = workflows()
+    line = next(l for l in table.splitlines(True) if l.startswith(row_id + "\t"))
+    node = line.split("\t")[5]
+    shell = texts["shell.yml"]
+    grep = f"          grep -Fx 'PASSED {node}' \"$RUNNER_TEMP/helper-stage.txt\"\n"
+    assert shell.count(grep) == 1 and shell.count(f" '{node}'") == 1
+    texts["shell.yml"] = shell.replace(grep, "").replace(f" '{node}'", "")
+    with pytest.raises(AssertionError):
+        assert_gate_table(table.replace(line, ""), texts)
+
+
+ARM_MUSL = "          - os: ubuntu-24.04-arm\n            libc: musl\n            profile: release\n"
+
+
+# 이것을 실패시키는 것: x86_64·aarch64 × glibc·musl release 칸 중 하나가 빠진 job을 release 게이트 증거로 받는 것.
+# 고정한 matrix 줄도 함께 바꿔, matrix 고정 검사가 아니라 칸 규칙만 거부하게 한다.
+def test_release_gate_rows_need_every_arch_and_libc(monkeypatch):
+    import test_collector_security as security
+    texts = workflows()
+    assert texts["shell.yml"].count(ARM_MUSL) == 1
+    texts["shell.yml"] = texts["shell.yml"].replace(ARM_MUSL, "")
+    pinned = list(security.SHELL_EVIDENCE_JOBS["filter-calls"])
+    at = len(pinned) - 3
+    assert pinned[at:] == ["- os: ubuntu-24.04-arm", "libc: musl", "profile: release"]
+    monkeypatch.setitem(security.SHELL_EVIDENCE_JOBS, "filter-calls", pinned[:at])
+    with pytest.raises(AssertionError, match="release cells"):
+        assert_gate_table((ROOT / TABLE).read_text(), texts)
+
+
+# 이것을 실패시키는 것: include 항목을 새 칸이 아니라 기존 칸에 덮어쓰거나 버리는 것.
+def test_job_cells_follow_the_include_rule():
+    from test_collector_security import job_cells
+    strategy = ["fail-fast: false", "matrix:", "os: [ubuntu-latest]", "libc: [gnu, musl]", "profile: [debug, release]",
+                "include:", "- os: ubuntu-24.04-arm", "  libc: gnu", "  profile: release", "- libc: gnu", "  extra: x"]
+    cells = job_cells(strategy)
+    assert len(cells) == 5
+    assert {"os": "ubuntu-24.04-arm", "libc": "gnu", "profile": "release"} in cells
+    assert sum(cell.get("extra") == "x" for cell in cells) == 2
