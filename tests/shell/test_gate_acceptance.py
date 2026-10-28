@@ -80,9 +80,10 @@ M3D_GATES = {
     ),
     "GATE-RUNTIME-ROOT": (
         "A prompt-time XDG_RUNTIME_DIR inside the repository is never opened by the front or the helper",
-        "A deleted and recreated runtime folder degrades every prompt with degraded:runtime-root and one notice",
+        "A deleted and recreated runtime folder degrades every prompt with degraded:runtime-root",
         "Running init again recovers",
         "The five runtime-root path examples hold",
+        "Status-notice hook output prints the fixed runtime-root notice once (M4 zsh, M5 fish/bash)",
     ),
     "GATE-MARKER-UPDATE": (
         "A deadline overrun, partial scan, ACL error or conf.d listing failure leaves the marker unchanged",
@@ -109,6 +110,7 @@ ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 # Clauses deferred to a later milestone, with that milestone. Each has a row
 # whose stage is `deferred:<milestone>`; removing one fails the table check.
 M3D_DEFERRED = {
+    "GATE-RUNTIME-ROOT.5": "M4/M5",
     "GATE-FDS.3": "M4",
     "GATE-TRUST-REVOKE.3": "M6",
     "GATE-EXEC-DEADLINE.3": "M6",
@@ -117,12 +119,12 @@ M3D_DEFERRED = {
     "GATE-CLOCK-READS.3": "M6",
     "GATE-CLOCK-READS.4": "M6",
 }
-DEFERRED_MILESTONES = ("M4", "M6")
+DEFERRED_MILESTONES = ("M4", "M4/M5", "M6")
 
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
 M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-READ-BYTES",
-                               "GATE-HELPER-LIFETIME", "GATE-ZOMBIES", "GATE-FDS"})
+                               "GATE-HELPER-LIFETIME", "GATE-ZOMBIES", "GATE-FDS", "GATE-RUNTIME-ROOT"})
 
 # (gate, clause) pairs without a primary row yet, as "GATE-ID.N". Each gate
 # Task adds its primary rows (id exactly GATE-ID.N) and removes its pairs here;
@@ -134,7 +136,6 @@ M3D_PENDING = (
     "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
     "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
     "GATE-CLOCK-READS.1",
-    "GATE-RUNTIME-ROOT.1", "GATE-RUNTIME-ROOT.2", "GATE-RUNTIME-ROOT.3", "GATE-RUNTIME-ROOT.4",
 )
 
 
@@ -799,3 +800,27 @@ def test_b1_rejects_arch_override():
     text = workflows()["shell.yml"].replace('arch=$(uname -m)\n', 'arch=$(uname -m)\n          arch=x86_64\n')
     with pytest.raises(AssertionError):
         assert_b1_contract(text)
+
+
+# 이것을 실패시키는 것: C1의 네 PASSED 단언 중 하나를 빼도 표가 통과하는 것.
+@pytest.mark.parametrize("clause", [1, 2, 3, 4])
+def test_runtime_root_rows_require_each_pass(clause):
+    table = (ROOT / TABLE).read_text()
+    row = next(r for r in rows(table) if r["id"] == f"GATE-RUNTIME-ROOT.{clause}")
+    texts = workflows()
+    assertion = f"grep -Fx 'PASSED {row['test']}'"
+    assert texts["shell.yml"].count(assertion) == 1
+    texts["shell.yml"] = texts["shell.yml"].replace(assertion, "# " + assertion)
+    with pytest.raises(AssertionError):
+        assert_gate_table(table, texts)
+
+
+# 이것을 실패시키는 것: 상태 알림을 active 또는 pending으로 되돌리는 것, deferred 행을 지우는 것.
+def test_runtime_notice_stays_deferred():
+    table = (ROOT / TABLE).read_text()
+    row = next(r for r in rows(table) if r["id"] == "GATE-RUNTIME-ROOT.5")
+    assert "Status-notice hook output" in row["property"]
+    assert row["stage"] == "deferred:M4/M5"
+    line = next(l for l in table.splitlines(True) if l.startswith(row["id"] + "\t"))
+    with pytest.raises(AssertionError):
+        assert_gate_table(table.replace(line, ""), workflows())
