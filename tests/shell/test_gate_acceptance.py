@@ -128,7 +128,6 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 # its pair.
 M3D_PENDING = (
     "GATE-FS-HELPER.2",
-    "GATE-CHILDREN.1", "GATE-CHILDREN.2", "GATE-CHILDREN.3",
     "GATE-FDS.1", "GATE-FDS.2",
     "GATE-HELPER-LIFETIME.1", "GATE-HELPER-LIFETIME.2", "GATE-HELPER-LIFETIME.3",
     "GATE-ZOMBIES.1",
@@ -136,7 +135,6 @@ M3D_PENDING = (
     "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
     "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
     "GATE-CLOCK-READS.1",
-    "GATE-COLLECTOR-TIMING.1", "GATE-COLLECTOR-TIMING.2", "GATE-COLLECTOR-TIMING.3", "GATE-COLLECTOR-TIMING.4",
     "GATE-RUNTIME-ROOT.1", "GATE-RUNTIME-ROOT.2", "GATE-RUNTIME-ROOT.3", "GATE-RUNTIME-ROOT.4",
     "GATE-MARKER-UPDATE.1", "GATE-MARKER-UPDATE.2", "GATE-MARKER-UPDATE.3",
 )
@@ -201,6 +199,8 @@ def clauses():
 def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
     # Each clause that is neither pending nor deferred keeps a primary row whose id is
     # exactly GATE-ID.N; the listed supplementary rows stay too. Deferred rows name no test.
+    # 이것을 실패시키는 것: B1 release·runs-on 계약 검사를 primary 게이트에서 생략하는 것.
+    assert_b1_contract(texts["shell.yml"])
     assert_deferred_rows(table)
     required = clauses() - set(pending) - set(M3D_DEFERRED)
     assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
@@ -717,10 +717,8 @@ def test_job_cells_follow_the_include_rule():
 # 이것을 실패시키는 것: ARM matrix 라벨을 남긴 채 모든 칸을 x86_64 runner에서 돌리는 것.
 def test_release_gate_cells_require_effective_matrix_runner():
     texts = workflows()
-    prefix, job = texts["shell.yml"].split("  filter-calls:\n", 1)
     runner = "    runs-on: ${{ matrix.os }}\n"
-    assert job.split("  shell-macos:", 1)[0].count(runner) == 1
-    texts["shell.yml"] = prefix + "  filter-calls:\n" + job.replace(runner, "    runs-on: ubuntu-latest\n", 1)
+    texts["shell.yml"] = in_job(texts["shell.yml"], "filter-calls", runner, "    runs-on: ubuntu-latest\n")
     with pytest.raises(AssertionError, match="release runner"):
         assert_gate_table((ROOT / TABLE).read_text(), texts)
 
@@ -753,3 +751,50 @@ def test_front_live_ci_evidence_is_required(mutation):
     texts['shell.yml'] = texts['shell.yml'][:start] + changed + texts['shell.yml'][end:]
     with pytest.raises(AssertionError):
         assert_gate_table((ROOT / TABLE).read_text(), texts)
+
+
+# 이것을 실패시키는 것: release 대신 debug 계측, arm runner를 x86로 교체, trace evidence 삭제.
+def assert_b1_contract(text):
+    start, end = job_span(text, "b1-children")
+    job = text[start:end]
+    # 이것을 실패시키는 것: uname 뒤 arch·target 덮어쓰기 또는 실제 빌드 인자 바꿔치기.
+    expected_build = '''          arch=$(uname -m)
+          target="$arch-unknown-linux-$LIBC"
+          rustup target add "$target"
+          if [ "$LIBC" = musl ]; then sudo apt-get update -q; sudo apt-get install -y musl-tools; fi
+          cargo build -p bingsu -p bingsu-collect --release --target "$target"
+          echo "BINGSU_BIN=$PWD/target/$target/release/bingsu" >> "$GITHUB_ENV"
+'''
+    actual_build = job.split("      - name: Build release siblings\n        run: |\n", 1)[1].split("      - name:", 1)[0]
+    # 이것을 실패시키는 것: assert actual_build == expected_build 조건을 제거하거나 반전하는 변이.
+    assert actual_build == expected_build
+    for required in ("runs-on: ${{ matrix.os }}", "os: [ubuntu-latest, ubuntu-24.04-arm]",
+                     "libc: [gnu, musl]", "PROFILE: release", "arch=$(uname -m)",
+                     'target="$arch-unknown-linux-$LIBC"',
+                     'cargo build -p bingsu -p bingsu-collect --release --target "$target"',
+                     '--basetemp="$RUNNER_TEMP/b1-evidence"', "if: failure()"):
+        # 이것을 실패시키는 것: assert required in job, required 조건을 제거하거나 반전하는 변이.
+        assert required in job, required
+
+
+# 이것을 실패시키는 것: B1 행렬의 유효 runs-on과 계측 빌드의 아키텍처를 분리하는 것.
+def test_b1_release_platform_contract():
+    assert_b1_contract(workflows()["shell.yml"])
+
+
+# 이것을 실패시키는 것: 위 release·플랫폼·evidence 조건 하나를 지워도 checker가 통과하는 것.
+@pytest.mark.parametrize("token", ["runs-on: ${{ matrix.os }}", "ubuntu-24.04-arm", "PROFILE: release",
+                                   "arch=$(uname -m)", "--release --target", "--basetemp="])
+def test_b1_release_platform_contract_rejects_mutations(token):
+    text = workflows()["shell.yml"]
+    start, end = job_span(text, "b1-children")
+    damaged = text[:start] + text[start:end].replace(token, "BROKEN") + text[end:]
+    with pytest.raises(AssertionError):
+        assert_b1_contract(damaged)
+
+
+# 이것을 실패시키는 것: 실제 runs-on과 다른 arch를 uname 뒤에서 덮어쓰는 변이.
+def test_b1_rejects_arch_override():
+    text = workflows()["shell.yml"].replace('arch=$(uname -m)\n', 'arch=$(uname -m)\n          arch=x86_64\n')
+    with pytest.raises(AssertionError):
+        assert_b1_contract(text)

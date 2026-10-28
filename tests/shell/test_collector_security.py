@@ -494,6 +494,7 @@ def job_platforms(job, meta):
 # anti-bypass checks apply to the steps a row actually uses (see
 # acceptance_pair_allowed).
 SHELL_EVIDENCE_JOBS = {
+    "b1-children": ["fail-fast: false", "matrix:", "os: [ubuntu-latest, ubuntu-24.04-arm]", "libc: [gnu, musl]"],
     "filter-calls": ["fail-fast: false", "matrix:", "os: [ubuntu-latest]", "libc: [gnu, musl]",
                      "profile: [debug, release]", "include:",
                      "- os: ubuntu-24.04-arm", "libc: gnu", "profile: release",
@@ -944,7 +945,7 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
             label = "test " + module + base + " ... ok"
             evidence, rust_hits = [], []
             for step, grep in commands:
-                if grep[:3] != ["grep", "-F", label]:
+                if not (grep[:2] in (["grep", "-F"], ["grep", "-Fx"]) and grep[2:3] == [label]):
                     continue
                 for run_step, run in commands:
                     if run_step["_job"] != step["_job"] or "tee" not in run or run[run.index("tee") + 1:] != grep[3:]:

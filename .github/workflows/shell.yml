@@ -256,6 +256,65 @@ jobs:
             done
           done
 
+  b1-children:
+    name: Child counts (${{ matrix.os }} ${{ matrix.libc }} release)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        libc: [gnu, musl]
+    env:
+      PROFILE: release
+      LIBC: ${{ matrix.libc }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - name: Build release siblings
+        run: |
+          arch=$(uname -m)
+          target="$arch-unknown-linux-$LIBC"
+          rustup target add "$target"
+          if [ "$LIBC" = musl ]; then sudo apt-get update -q; sudo apt-get install -y musl-tools; fi
+          cargo build -p bingsu -p bingsu-collect --release --target "$target"
+          echo "BINGSU_BIN=$PWD/target/$target/release/bingsu" >> "$GITHUB_ENV"
+      - name: Prepare tracing and Python
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends strace
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      # 이것을 실패시키는 것: release live 시험 생략·skip을 PASS로 세는 것.
+      - name: Assert B1 release child gates
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role tests/shell/test_prompt_env_paths.py::test_live_no_worker_segment_spawns_zero_collectors tests/shell/test_prompt_env_paths.py::test_live_collector_count_ignores_marker_validity tests/shell/test_prompt_env_paths.py::test_live_collector_spawns_after_helper_header_and_marker_reads --basetemp="$RUNNER_TEMP/b1-evidence" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/b1.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role' "$RUNNER_TEMP/b1.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_no_worker_segment_spawns_zero_collectors' "$RUNNER_TEMP/b1.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_collector_count_ignores_marker_validity' "$RUNNER_TEMP/b1.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_collector_spawns_after_helper_header_and_marker_reads' "$RUNNER_TEMP/b1.txt"
+      # 이것을 실패시키는 것: 무효 표식의 Eligibility::units() 단언을 CI에서 생략하는 것.
+      - name: Assert invalid marker eligibility
+        run: |
+          set -o pipefail
+          cargo test -p bingsu-core --lib --release | tee "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker ... ok' "$RUNNER_TEMP/b1-core.txt"
+      - name: Retain B1 failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: b1-${{ matrix.os }}-${{ matrix.libc }}
+          path: |
+            ${{ runner.temp }}/b1-evidence
+            ${{ runner.temp }}/b1.txt
+
   shell-macos:
     name: Shell PTY (macOS Homebrew)
     needs: detect

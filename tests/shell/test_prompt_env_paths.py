@@ -1886,3 +1886,143 @@ def test_live_front_attempts_match_axis_c(front_capture):
 def test_front_never_reads_trust_metadata_section(front_capture):
     lines, exe, pinned, store, attempts, evidence = front_capture
     check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
+
+
+@pytest.fixture
+def child_capture(tmp_path):
+    from snapshot_support import SnapshotSession
+    # 이것을 실패시키는 것: debug 바이너리 또는 strace 없는 host를 live PASS로 세는 것.
+    if sys.platform != "linux":
+        pytest.skip("Linux release strace gate; native Linux run required")
+    # 이것을 실패시키는 것: if real_bin().parent.name != "release" 조건을 제거하거나 반전하는 변이.
+    if real_bin().parent.name != "release":
+        pytest.skip("child-count measurement requires release")
+    # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
+    assert shutil.which("strace"), "required live tracing tool is missing"
+
+    def capture(template="{dir}{git}{char}", invalid=False):
+        base = tmp_path / str(len(list(tmp_path.iterdir())))
+        session = SnapshotSession(base)
+        session.put(f"[style]\ntemplate='{template}'\n[layout.when.narrow.style]\ntemplate='{template}'\n")
+        session.init()
+        session.wait_quiet()
+        # Reload prepares a complete, trusted snapshot without a collection
+        # request. Every sample has its own runtime, so no breaker/cache state
+        # from the paired marker sample can suppress admission.
+        loaded = subprocess.run([str(real_bin()), "reload"], cwd=base, env=session.env,
+                                capture_output=True, timeout=5)
+        # 이것을 실패시키는 것: assert loaded.returncode == 0, loaded.stderr 조건을 제거하거나 반전하는 변이.
+        assert loaded.returncode == 0, loaded.stderr
+        marker = session.store() / "marker"
+        wire = bytearray(marker.read_bytes())
+        # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
+        assert wire[:8] == b"BNGMRK02" and len(wire) == 208
+        # 이것을 실패시키는 것: if invalid 조건을 제거하거나 반전하는 변이.
+        if invalid:
+            wire[12] = 2
+            crc = 0xffffffff
+            for byte in b"bingsu-marker-v2\0" + wire[:176]:
+                crc ^= byte
+                for _ in range(8):
+                    crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+            wire[176:180] = (crc ^ 0xffffffff).to_bytes(4, "little")
+            pending = marker.with_suffix(".b1")
+            pending.write_bytes(wire)
+            pending.chmod(0o600)
+            pending.replace(marker)
+        args = session.prompt_args() + ["--collector-exe=" + str(real_bin().with_name("bingsu-collect"))]
+        evidence = base / "child-count.strace"
+        result = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
+                                 "-o", str(evidence), str(real_bin()), *args],
+                                cwd=base, env=session.env, capture_output=True, timeout=60)
+        (base / "stdout").write_bytes(result.stdout)
+        (base / "stderr").write_bytes(result.stderr)
+        # 이것을 실패시키는 것: assert result.returncode == 0, (result.stderr, evidence) 조건을 제거하거나 반전하는 변이.
+        assert result.returncode == 0, (result.stderr, evidence)
+        trace = parse_trace(evidence.read_text())
+        # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
+        assert not trace.errors, (trace.errors, evidence)
+        return trace, session.store(), result.stdout
+    return capture
+
+
+# 이것을 실패시키는 것: helper 생략·중복 생성, collector 중복·자식 생성, 쓰기 전용·명령 프로세스 추가.
+def test_live_child_count_is_bounded_per_role(child_capture):
+    from fsbudget.attribute import role_children
+    trace, _, _ = child_capture()
+    children = role_children(trace)
+    # 이것을 실패시키는 것: assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children 조건을 제거하거나 반전하는 변이.
+    assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children
+
+
+# 이것을 실패시키는 것: worker가 없는 화면에도 collector 생성.
+def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
+    from fsbudget.attribute import role_children
+    trace, _, _ = child_capture("{char}")
+    # 이것을 실패시키는 것: assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0} 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
+
+
+# 이것을 실패시키는 것: 표식 무효면 worker mask 0.
+def test_live_collector_count_ignores_marker_validity(child_capture):
+    from fsbudget.attribute import role_children
+    valid, _, _ = child_capture()
+    invalid, _, record = child_capture(invalid=True)
+    # 이것을 실패시키는 것: assert b"degraded:trust-invalid" in record, record 조건을 제거하거나 반전하는 변이.
+    assert b"degraded:trust-invalid" in record, record
+    # 이것을 실패시키는 것: assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1
+
+
+# 이것을 실패시키는 것: 머리 읽기 전에 collector 생성.
+def test_live_collector_spawns_after_helper_header_and_marker_reads(child_capture):
+    from fsbudget.attribute import first_index, role_children
+    trace, store, _ = child_capture()
+    # 이것을 실패시키는 것: assert role_children(trace)["helper"] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace)["helper"] == 1
+    assert_child_timing(trace, store)
+
+
+def assert_child_timing(trace, store):
+    from fsbudget.attribute import first_index
+    helper_exec = first_index(trace, "helper", lambda c: c.name == "execve" and c.ret == "0")
+    main = trace[helper_exec].pid
+    spawn = first_index(trace, "helper", lambda c: c.pid == main and c.name in SPAWNS
+                        and "CLONE_THREAD" not in c.args and re.fullmatch(r"[1-9][0-9]*", c.ret))
+    # The helper verifies its freshly staged marker by same-fd readback before
+    # admission. This is distinct from the front reading the published marker.
+    for name, size in (("snapshot", 192), (".marker.stage", 208)):
+        read = first_index(trace, "helper", lambda c: c.pid == main and c.name == "read"
+                           and args_of(c)[0].endswith("<" + str(store / name) + ">")
+                           and c.ret.isdigit() and int(c.ret) >= size)
+        # 이것을 실패시키는 것: 머리·표식 읽기를 collector 생성 뒤로 옮기는 것.
+        assert read < spawn, (name, read, spawn)
+
+
+# 이것을 실패시키는 것: 앞단의 marker 읽기로 helper 읽기를 대체하거나 읽기 순서·길이를 무시하는 것.
+@pytest.mark.parametrize("mutation", ["none", "early", "front-marker", "short-header", "failed-marker"])
+def test_child_timing_negative_controls(mutation):
+    head = '11 read(3</store/snapshot>, "header", 192) = 192'
+    marker = '11 read(4</store/.marker.stage>, "marker", 208) = 208'
+    spawn = '11 vfork() = 13'
+    # 이것을 실패시키는 것: if mutation == "front-marker" 조건을 제거하거나 반전하는 변이.
+    if mutation == "front-marker":
+        marker = marker.replace('11 read', '10 read')
+    # 이것을 실패시키는 것: elif mutation == "short-header" 조건을 제거하거나 반전하는 변이.
+    elif mutation == "short-header":
+        head = head.replace('= 192', '= 1')
+    # 이것을 실패시키는 것: elif mutation == "failed-marker" 조건을 제거하거나 반전하는 변이.
+    elif mutation == "failed-marker":
+        marker = marker.replace('= 208', '= -1 EBADF (Bad file descriptor)')
+    prefix = ['10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0',
+              '10 vfork() = 11',
+              '11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0']
+    events = [spawn, head, marker] if mutation == "early" else [head, marker, spawn]
+    trace = parse_trace('\n'.join(prefix + events + [
+        '13 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0']))
+    # 이것을 실패시키는 것: if mutation == "none" 조건을 제거하거나 반전하는 변이.
+    if mutation == "none":
+        assert_child_timing(trace, Path('/store'))
+    else:
+        with pytest.raises((AssertionError, StopIteration)):
+            assert_child_timing(trace, Path('/store'))
