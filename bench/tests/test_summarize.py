@@ -298,9 +298,10 @@ def test_reservation_without_row_means_no_cold():
 # 이것을 실패시키는 것: 같은 부팅 phase가 두 번 나오는데 하나를 조용히 고르는 것, 모양이 틀린 줄을 건너뛰는 것.
 @pytest.mark.parametrize("rows", [
     [_fs("b", "cold"), _fs("b", "cold")],
-    [["x", "b", "zsh", "phase=hot", "status=0", "1us"]],
-    [["x", "b", "zsh", "phase=cold", "status=0"]],
-    [["x", "b", "zsh", "phase=cold", "status=0", "1.5us"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=hot", "status=0", "1us"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=cold", "status=0"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=cold", "status=0", "1.5us"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=cold", "status=ok", "1us"]],
 ])
 def test_malformed_first_shell_rows_are_input_errors(rows):
     with pytest.raises(summarize.InputError):
