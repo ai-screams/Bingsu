@@ -164,13 +164,15 @@ def test_collector_stack_guard_seeks_after_the_filter_fail():
 
 
 # 이것을 실패시키는 것: 작업 종료로 인자가 잘린 helper 경로 호출을 IndexError로 끝내거나 일부 인자로 판정하는 것.
-def test_helper_path_call_cut_short_fails_closed():
+@pytest.mark.parametrize("cut", ["after-path", "before-path"])
+def test_helper_path_call_cut_short_fails_closed(cut):
     """m3d-F8 shape: a helper task's newfstatat is still unfinished at its
-    exit record, so strace never printed its flags."""
+    exit record, so strace never printed its flags (after-path) or even its
+    path (before-path)."""
     lines = collecting_prompt()
     at = next(i for i, line in enumerate(lines) if line.startswith("1097  +++ exited with 0 +++"))
     cut = (f'1097  newfstatat(AT_FDCWD</>, "{COLLECT_BASE}/run-t/bingsu/.collections.catalog", '
-           " <unfinished ...>")
+           " <unfinished ...>") if cut == "after-path" else "1097  newfstatat(AT_FDCWD</>,  <unfinished ...>"
     with pytest.raises(AssertionError, match="cut short by its task's exit.*exited with 0"):
         check_collecting_prompt(lines[:at] + [cut] + lines[at:])
 

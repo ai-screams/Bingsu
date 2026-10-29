@@ -1034,9 +1034,10 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
         # A call its task's exit cut short (strace prints `= ?`) has only the
         # arguments printed before <unfinished ...>; the path rules below need
         # all of them, so a path-bearing one fails closed with the exit that
-        # ended it (m3d-F8).
-        # 이것을 실패시키는 것: 인자가 덜 온 경로 호출을 IndexError나 일부 인자로 판정하는 것.
-        if c.ret == "?" and (call_paths(c) or content_paths(c)):
+        # ended it (m3d-F8). Decide that without reading the arguments: the
+        # cut can come before the path itself.
+        # 이것을 실패시키는 것: 인자가 덜 온 경로 호출을 IndexError나 일부 인자로 판정하는 것(경로 인자 전에서 잘린 경우 포함).
+        if c.ret == "?" and (c.name in FILE_ARGS or re.search(r"(?:^|, )\d+</", c.args)):
             ended = next((line.split(None, 1)[1] for line in scoped[::-1]
                           if line.split()[0] == str(c.pid) and line.split(None, 1)[1].startswith("+++ ")), None)
             raise AssertionError(("helper path call cut short by its task's exit", c, ended))
