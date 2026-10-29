@@ -272,3 +272,55 @@ def test_load_merges_given_paths(tmp_path):
     (tmp_path / "notes.txt").write_text("x")
     with pytest.raises(summarize.InputError, match="not a folder, a .jsonl or a .json file"):
         summarize.load(warm, tmp_path / "notes.txt")
+
+
+def _fs(boot, phase, status=0, us=1500):
+    return ["2026-10-29T01:00:00Z", boot, "zsh", f"phase={phase}", f"status={status}", f"{us}us"]
+
+
+# 이것을 실패시키는 것: status가 0이 아닌 줄의 시간을 그 부팅의 phase 값으로 쓰는 것, 실패한 phase 하나 때문에
+# 같은 부팅의 다른 phase나 다른 부팅까지 무효로 만드는 것.
+def test_failed_init_invalidates_that_boot_phase():
+    got = summarize.ingest_first_shell([_fs("b1", "cold", status=3), _fs("b1", "warm"), _fs("b2", "cold")])
+    assert got["b1"]["cold"] == {"na": "init status 3"}
+    assert got["b1"]["warm"] == {"us": 1500} and got["b2"]["cold"] == {"us": 1500}
+
+
+# 이것을 실패시키는 것: 예약 폴더만 있고 줄이 없는 phase를 값이 있는 것으로 세거나 아예 빼는 것, 예약이 없는데
+# 있는 것으로 보는 것(reservations=None이면 검사 생략).
+def test_reservation_without_row_means_no_cold():
+    got = summarize.ingest_first_shell([_fs("b1", "warm")], reservations=[("b1", "cold"), ("b1", "warm")])
+    assert got["b1"]["cold"]["na"].startswith("reserved, no row") and got["b1"]["warm"] == {"us": 1500}
+    assert summarize.ingest_first_shell([_fs("b1", "warm")])["b1"]["cold"] == {"na": "not logged"}
+    assert summarize.ingest_first_shell([], reservations=[("b9", "cold")])["b9"]["cold"]["na"].startswith("reserved")
+
+
+# 이것을 실패시키는 것: 같은 부팅 phase가 두 번 나오는데 하나를 조용히 고르는 것, 모양이 틀린 줄을 건너뛰는 것.
+@pytest.mark.parametrize("rows", [
+    [_fs("b", "cold"), _fs("b", "cold")],
+    [["x", "b", "zsh", "phase=hot", "status=0", "1us"]],
+    [["x", "b", "zsh", "phase=cold", "status=0"]],
+    [["x", "b", "zsh", "phase=cold", "status=0", "1.5us"]],
+])
+def test_malformed_first_shell_rows_are_input_errors(rows):
+    with pytest.raises(summarize.InputError):
+        summarize.ingest_first_shell(rows)
+
+
+def _login(label, ident="id1"):
+    return f"2026-10-29T01:00:00Z\t{label}\t{ident}\t1791259131\n"
+
+
+# 이것을 실패시키는 것: 한 쌍에서 줄이 하나 빠졌는데 판정을 내리는 것, 같은 label이 두 줄인데 하나를 고르는 것,
+# 로그아웃 쌍을 reboot 쌍의 줄로 채우는 것, 식별자 비교를 뒤집는 것.
+def test_judge_login_transition_needs_both_lines():
+    full = _login("before-logout") + _login("after-login") + _login("before-reboot") + _login("after-reboot", "id2")
+    got = summarize.judge_login_transition(full)
+    assert got["logout"][0] == "same-boot" and got["reboot"][0] == "new-boot"
+    got = summarize.judge_login_transition(_login("before-logout") + _login("before-reboot") + _login("after-reboot", "id2"))
+    assert got["logout"][0] == "BLOCKED" and "after-login" in got["logout"][1] and got["reboot"][0] == "new-boot"
+    assert summarize.judge_login_transition(_login("before-logout") * 2 + _login("after-login"))["logout"][0] == "BLOCKED"
+    assert summarize.judge_login_transition("")["logout"][0] == "BLOCKED"
+    assert summarize.judge_login_transition(_login("before-reboot") + _login("after-reboot"))["reboot"][0] == "not-rebooted"
+    with pytest.raises(summarize.InputError):
+        summarize.judge_login_transition("a\tb\n")

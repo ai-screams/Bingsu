@@ -319,6 +319,96 @@ def load(*paths):
     return rows, (oses.pop() if oses else None), sizes
 
 
+FIRST_SHELL_PHASES = ("cold", "warm")
+LOGIN_PAIRS = {"logout": ("before-logout", "after-login"), "reboot": ("before-reboot", "after-reboot")}
+
+
+def ingest_first_shell(rows, reservations=None):
+    """{boot: {"cold": {...}, "warm": {...}}} from first-shell-logger rows
+    (UTC, boot, shell, phase=, status=, <n>us). A phase is `{"us": n}` or
+    `{"na": reason}`: a row whose status is not 0 voids that boot's phase (the
+    failed run already loaded the pages, so a later shell is not cold), and a
+    reservation `(boot, phase)` with no row means the shell died inside init,
+    so that boot has no such phase. `reservations=None` skips the second
+    rule. Malformed or repeated rows are an `InputError`."""
+    out, seen = {}, set()
+    for i, r in enumerate(rows, 1):
+        if len(r) != 6 or not r[1]:
+            raise InputError(f"first-shell row {i}: expected 6 columns with a boot identity, got {list(r)!r}")
+        _, boot, _, phase, status, us = r
+        if not (phase.startswith("phase=") and phase[6:] in FIRST_SHELL_PHASES):
+            raise InputError(f"first-shell row {i}: bad phase {phase!r}")
+        if not (status.startswith("status=") and status[7:].isdigit() and us.endswith("us") and us[:-2].isdigit()):
+            raise InputError(f"first-shell row {i}: bad status or time {status!r} {us!r}")
+        phase = phase[6:]
+        if (boot, phase) in seen:
+            raise InputError(f"first-shell row {i}: boot {boot} phase {phase} twice")
+        seen.add((boot, phase))
+        cell = out.setdefault(boot, {})
+        cell[phase] = {"us": int(us[:-2])} if int(status[7:]) == 0 else {"na": f"init status {int(status[7:])}"}
+    for boot, phase in reservations or ():
+        if phase not in FIRST_SHELL_PHASES:
+            raise InputError(f"reservation {boot}.{phase}: bad phase")
+        if (boot, phase) not in seen:
+            out.setdefault(boot, {})[phase] = {"na": "reserved, no row (shell ended inside init)"}
+    for cell in out.values():
+        for phase in FIRST_SHELL_PHASES:
+            cell.setdefault(phase, {"na": "not logged"})
+    return out
+
+
+def first_shell_file(log):
+    """Rows and reservations of one logger file: the reservation folders sit
+    next to it as `<log>.<boot>.<phase>`."""
+    log = pathlib.Path(log)
+    rows = [line.split("\t") for line in log.read_text().splitlines() if line.strip()] if log.exists() else []
+    res = []
+    for d in log.parent.glob(log.name + ".*"):
+        boot, _, phase = d.name[len(log.name) + 1:].rpartition(".")
+        res.append((boot, phase))
+    return rows, res
+
+
+def judge_login_transition(text):
+    """{"logout": (verdict, why), "reboot": (...)} from login-transition.sh
+    lines (UTC, label, boot identity, boot time). A pair judges only when both
+    of its labels have exactly one line; anything else is BLOCKED, never a
+    guess from the logger. Same identity before and after logout is a login
+    transition, which is not a cold start; a new identity after the reboot is
+    a boot."""
+    by = {}
+    for i, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        c = line.split("\t")
+        if len(c) != 4 or not c[3].isdigit() or not c[2]:
+            raise InputError(f"login-transition line {i}: not 4 columns with an identity and a boot time")
+        by.setdefault(c[1], []).append(c[2])
+    out = {}
+    for name, (a, b) in LOGIN_PAIRS.items():
+        bad = [l for l in (a, b) if len(by.get(l, ())) != 1]
+        if bad:
+            out[name] = ("BLOCKED", f"label {', '.join(bad)} needs exactly one line")
+            continue
+        same = by[a][0] == by[b][0]
+        if name == "logout":
+            out[name] = ("same-boot", "login transition, not a cold start") if same else \
+                ("boot-changed", "the boot identity changed across the logout")
+        else:
+            out[name] = ("not-rebooted", "same boot identity after the reboot") if same else \
+                ("new-boot", "the boot identity changed")
+    return out
+
+
+def first_shell_lines(result):
+    out = []
+    for boot, cell in sorted(result.items()):
+        for phase in FIRST_SHELL_PHASES:
+            v = cell[phase]
+            out.append(f"first-shell {boot} {phase}: " + (f"{v['us'] / 1000:.3f} ms" if "us" in v else f"unavailable ({v['na']})"))
+    return out
+
+
 def table(rows):
     out = ["| row | median ms | p95 ms |", "| -- | -- | -- |"]
     for k, v in rows.items():
@@ -333,8 +423,22 @@ def table(rows):
 
 def main(argv):
     if not argv:
-        print("usage: summarize.py PATH...", file=sys.stderr)
+        print("usage: summarize.py PATH...  |  summarize.py --first-shell LOG.tsv [--login-transition PROBE.tsv]",
+              file=sys.stderr)
         return 2
+    if argv[0] == "--first-shell":
+        try:
+            if len(argv) not in (2, 4) or (len(argv) == 4 and argv[2] != "--login-transition"):
+                raise InputError("usage: --first-shell LOG.tsv [--login-transition PROBE.tsv]")
+            lines = first_shell_lines(ingest_first_shell(*first_shell_file(argv[1])))
+            if len(argv) == 4:
+                lines += [f"login-transition {k}: {v} ({why})" for k, (v, why) in
+                          judge_login_transition(pathlib.Path(argv[3]).read_text()).items()]
+        except (InputError, OSError) as e:
+            print(f"summarize.py: {e}", file=sys.stderr)
+            return 2
+        print("\n".join(lines))
+        return 0
     try:
         rows, os, sizes = load(*map(pathlib.Path, argv))
     except (InputError, OSError) as e:
