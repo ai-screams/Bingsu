@@ -726,6 +726,15 @@ pub(crate) fn run(base: &std::path::Path, home: &std::ffi::OsStr, xdg: &std::ffi
 
 # Only visibility and measurement code are added to the test reader module in
 # the generated translation unit. The shipped TCB files remain byte-identical.
+def read_measurement(source):
+    """READ_MEASUREMENT for the prompt_io of `source`: from C3 on, test builds name
+    each clock read's use (`ClockUse`); a base tip before that takes no argument."""
+    io = (Path(source) / "crates/bingsu/src/prompt_io.rs").read_text()
+    now = ("crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline)"
+           if "pub(crate) enum ClockUse" in io else "crate::prompt_io::monotonic_ns()")
+    return READ_MEASUREMENT.replace("@NOW@", now)
+
+
 READ_MEASUREMENT = r'''
     fn product_reader_clock(deadline:Option<Deadline>)->ClockPins {
         let mut pins=fixed_clock(deadline);
@@ -743,11 +752,11 @@ READ_MEASUREMENT = r'''
         config_value.variants=vec![bingsu_core::template::compile::compile("{fixture}",&crate::SEGMENTS).unwrap()];
         let args=vec!["--ctx".to_owned(),"1".to_owned(),"--record".to_owned(),"B1".to_owned(),"--width".to_owned(),"80".to_owned(),"--shell".to_owned(),"bash".to_owned(),"--pwd".to_owned(),"/repo".to_owned(),format!("--runtime-root={}:{}:{}",meta.dev(),meta.ino(),root.display()),format!("--config-root={}",config.display()),format!("--state-root={}",state.display())];
         let entry=crate::commands::collector_supervisor::fixture_clock().unwrap();
-        let before=crate::prompt_io::monotonic_ns().unwrap();
+        let before=@NOW@.unwrap();
         let mut p=prepare_with_clock(&args.iter().map(|s|s.as_bytes()).collect::<Vec<_>>(),product_reader_clock,None);
         let build=bingsu_core::collection::wire::BuildId(bingsu_core::collection::cwd_hash::sha256(&[crate::build_id().0.as_slice(),b"test-worker"].concat()));
         p.plan=p.plan.with_build_id(build).with_entry(entry).with_catalog(Catalog{segments:&crate::SEGMENTS,workers:TEST_MASK},config_value);
-        let prefetched=crate::prompt_io::monotonic_ns().unwrap();
+        let prefetched=@NOW@.unwrap();
         let installed=crate::sandbox::enter();
         assert!(bingsu_core::front::runs_core(installed));
         let mut start=None; let mut elapsed=None;
@@ -755,8 +764,8 @@ READ_MEASUREMENT = r'''
           match std::mem::replace(&mut p.step,Step::Done(staged::Observed::default())) {
             Step::Done(observed)=>break staged::finish(p.plan,observed).record,
             Step::Read(effect)=> {
-              if matches!(effect.operation(),Operation::OpenCollection(_)) && start.is_none(){start=Some(crate::prompt_io::monotonic_ns().unwrap());}
-              if matches!(effect.operation(),Operation::Clock){elapsed=start.map(|at|crate::prompt_io::monotonic_ns().unwrap()-at);}
+              if matches!(effect.operation(),Operation::OpenCollection(_)) && start.is_none(){start=Some(@NOW@.unwrap());}
+              if matches!(effect.operation(),Operation::Clock){elapsed=start.map(|at|@NOW@.unwrap()-at);}
               let observation=p.after(&effect);p.step=staged::next(&mut p.plan,Some(observation));
             }
           }
@@ -882,7 +891,7 @@ def prepare(binary):
     modules.extend(collector_modules(source, worker_path))
     reader = (source / "crates/bingsu/src/prompt_read.rs").read_text()
     at = reader.rfind("}")
-    reader = reader[:at] + READ_MEASUREMENT + reader[at:]
+    reader = reader[:at] + read_measurement(source) + reader[at:]
     reader_path = directory / "reader.rs"
     reader_path.write_text(reader)
     modules.append(f'#[path={json.dumps(str(reader_path))}] mod prompt_read;')
@@ -1005,6 +1014,9 @@ def main():
     except (ValueError, KeyError, OSError, subprocess.TimeoutExpired) as error:
         result = {"milestone": "M3b", "formal_B5_B7": False, "status": "BLOCKED", "reason": str(error)}
         code = 2
+    if code:
+        # The JSON keeps the whole reason; the job log shows why without opening it.
+        print(f"BLOCKED: {str(result.get('reason', result.get('status')))[:4000]}", file=sys.stderr)
     if args.out:
         protocol.write_output(args.out, result)
     else:
