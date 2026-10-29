@@ -128,7 +128,8 @@ jobs:
                 --deselect tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds \
-                --deselect tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+                --deselect tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive \
+                --deselect tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
       # 40), so this test alone runs in its own container without that
@@ -296,6 +297,15 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples' "$RUNNER_TEMP/runtime-root.txt"
+      # GATE-TRUST-REVOKE.2 on a release build: the config root's FUSE daemon is stopped
+      # and the test waits out T (about 60 s) on CLOCK_BOOTTIME. Without FUSE it fails BLOCKED.
+      # 이것을 실패시키는 것: 막힌 마운트 신뢰 철회 시험을 빼거나 PASSED 단언 없이 돌리는 것.
+      - name: Trust revocation past T on a blocked mount (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t' --basetemp="$RUNNER_TEMP/trust-revoke-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/trust-revoke.txt"
+          grep -Fx 'PASSED tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t' "$RUNNER_TEMP/trust-revoke.txt"
       # Only the live fixture's trace, stdout, stderr and attempt.json.
       - name: Upload failed helper stage evidence
         if: failure()
@@ -372,6 +382,8 @@ jobs:
           set -o pipefail
           cargo test -p bingsu-core --lib --release | tee "$RUNNER_TEMP/b1-core.txt"
           grep -Fx 'test front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker ... ok' "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::cases::finish_refuses_permit_when_final_clock_reaches_deadline ... ok' "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::cases::staged_plan_emits_fixed_clock_operations_per_path ... ok' "$RUNNER_TEMP/b1-core.txt"
       - name: Retain B1 failure evidence
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

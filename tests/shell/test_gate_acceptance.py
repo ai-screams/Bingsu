@@ -104,6 +104,8 @@ M3D_SUPPLEMENTARY.update({f"{gate}.1-{case}": "M3d"
                           for case in ("checksum_last_good", "body_limit", "header_only")})
 # 이것을 실패시키는 것: 막힌 마운트 행을 지우고 정상 폴더만으로 GATE-HELPER-LIFETIME.1을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-HELPER-LIFETIME.1-blocked_mount"] = "M3d"
+# 이것을 실패시키는 것: 계획의 시계 단계 고정 행을 지우고 실행 횟수 계수기 행만으로 GATE-CLOCK-READS.1을 닫는 것.
+M3D_SUPPLEMENTARY["GATE-CLOCK-READS.1-staged_plan"] = "M3d"
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
 
@@ -133,9 +135,6 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 # its pair.
 M3D_PENDING = (
     "GATE-FS-HELPER.2",
-    "GATE-TRUST-REVOKE.1", "GATE-TRUST-REVOKE.2",
-    "GATE-EXEC-DEADLINE.1", "GATE-EXEC-DEADLINE.2",
-    "GATE-CLOCK-READS.1",
 )
 
 
@@ -301,8 +300,13 @@ def test_gate_table_rejects_mutations(damage, reason):
     tag = first["id"][len(f"{gate}.{clause}"):]
     pending = M3D_PENDING
     if damage == "removed-row":
-        # The pair is no longer pending, so its primary row is required.
-        pending = tuple(p for p in pending if p != f"{gate}.{clause}")
+        primary = f"{gate}.{clause}"
+        if primary in pending:
+            # The pair is no longer pending, so its primary row is required.
+            pending = tuple(p for p in pending if p != primary)
+        else:
+            # The pair is closed: delete its primary row, keeping the supplementary one.
+            table = "".join(l for l in table.splitlines(True) if not l.startswith(primary + "\t"))
     elif damage == "removed-supplementary":
         table = table.replace(line, "")
     elif damage == "gate-typo":

@@ -66,9 +66,14 @@ def blocked_mount(base: pathlib.Path, prepare=lambda path: None):
         if stopped:
             daemon.send_signal(signal.SIGCONT)
         if _mounted(mount):
-            done = subprocess.run(["fusermount3", "-u", str(mount)], capture_output=True)
-            if done.returncode:
-                subprocess.run(["fusermount3", "-uz", str(mount)], capture_output=True)
+            # Bounded: an unmount that waits on the daemon must not hang the job.
+            try:
+                done = subprocess.run(["fusermount3", "-u", str(mount)], capture_output=True, timeout=10)
+                lazy = done.returncode != 0
+            except subprocess.TimeoutExpired:
+                lazy = True
+            if lazy:
+                subprocess.run(["fusermount3", "-uz", str(mount)], capture_output=True, timeout=10)
         try:
             daemon.wait(timeout=5)
         except subprocess.TimeoutExpired:

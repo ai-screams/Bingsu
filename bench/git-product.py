@@ -22,6 +22,7 @@ import re
 import select
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import TypedDict
@@ -188,7 +189,7 @@ def prepare(binary):
         path = source / "crates/bingsu/src" / (name + ".rs")
         if name == "prompt_read":
             reader = path.read_text()
-            measurement = M3B.READ_MEASUREMENT
+            measurement = M3B.read_measurement(source)
             measurement = measurement.replace("product_read_measure(base: &std::path::Path)", "f3_read_measure(base: &std::path::Path, repo: &std::path::Path)")
             measurement = measurement.replace('        config_value.bands.clear();config_value.band_order.clear();config_value.collect_mask=TEST_MASK;\n', '')
             measurement = measurement.replace('        config_value.variants=vec![bingsu_core::template::compile::compile("{fixture}",&crate::SEGMENTS).unwrap()];\n', '')
@@ -719,6 +720,9 @@ def main():
         value = {"milestone": "M3c", "formal_B5_B7": False, "status": "BLOCKED", "reason": str(error)}
         code = 2
     M3B.protocol.write_output(args.out, value)
+    if code:
+        # The JSON keeps the whole reason; the job log shows why without opening it.
+        print(f"BLOCKED: {str(value.get('reason', value.get('status')))[:4000]}", file=sys.stderr)
     return code
 
 
