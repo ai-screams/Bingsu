@@ -49,6 +49,9 @@ QUIET_EVENTS = ("pgscan_kswapd", "pgscan_direct", "pgscan_khugepaged", "pgsteal_
                 "thp_collapse_alloc", "thp_file_mapped", "thp_split_pmd", "thp_split_page", "oom_kill",
                 "pswpout", "ksm_swpin_copy")
 # Proof gaps the per-sample checks cannot close on any host this task reached.
+# Every one must be present and proven for an upper bound; a missing entry
+# counts as open.
+UPPER_OBLIGATIONS = ("lifetime_upper", "serial_mutation", "trace_perturbation", "controls")
 OPEN_LIFETIME = ("uprobe page replacement (kernel/events/uprobes.c:199,202) is not excluded: listing registered "
                  "uprobes needs tracefs as root", "decrease sites outside mm, kernel, fs, include, lib, arch/arm64 "
                  "and arch/x86 (drivers and others) were not audited")
@@ -120,6 +123,37 @@ def _group(events):
         if spawn and spawn["kind"] in ("fork", "vfork"):
             tgid[tid] = tid
     return root, tasks, tgid
+
+
+def inconsistencies(events: list[dict]) -> list[str]:
+    """Cross-checks of the tracer's records before any boundary is drawn: a
+    spawn's parent must be the thread group of the task that reported it, a
+    task's thread group must be one value that fits how it was made, and exec
+    reference points need their exec event."""
+    root, tasks, tgid = _group(events)
+    found = []
+    seen = {}
+    for e in events:
+        if e["ev"] in ("start_ref", "exec_ref", "mark_ref", "exit_ref"):
+            seen.setdefault(e["pid"], set()).add(e.get("tgid", -1))
+    for pid, values in seen.items():
+        if len(values) != 1 or min(values) <= 0:
+            found.append(f"pid {pid}: thread group read as {sorted(values)}")
+    for e in events:
+        if e["ev"] != "spawn":
+            continue
+        spawner = tgid.get(e["pid"])
+        if e["parent_tgid"] <= 0 or spawner is None or e["parent_tgid"] != spawner:
+            found.append(f"spawn of {e['child']}: parent {e['parent_tgid']} is not the group of task {e['pid']} ({spawner})")
+        child = seen.get(e["child"], set())
+        if e["kind"] in ("fork", "vfork") and child - {e["child"]}:
+            found.append(f"{e['kind']} child {e['child']} joined thread group {sorted(child)}")
+        if e["kind"] == "clone" and child - {e["child"], spawner}:
+            found.append(f"clone child {e['child']} joined an unrelated thread group {sorted(child)}")
+    execs = {e["pid"] for e in events if e["ev"] == "exec"}
+    for pid in sorted({e["pid"] for e in events if e["ev"] == "exec_ref"} - execs):
+        found.append(f"pid {pid}: exec reference point without its exec event")
+    return found
 
 
 def processes(events: list[dict]) -> dict[int, dict]:
@@ -213,6 +247,7 @@ def observation(events: list[dict]) -> dict:
     stray = sorted({e["pid"] for e in events if e["ev"] in ("reaped", "exec", "start_ref", "exit_ref", "mark_ref")} - spawned)
     if stray:
         problems.append(f"tasks without a spawn event: {stray}")
+    problems += inconsistencies(events)
     # A task whose thread group is unknown cannot be placed inside or outside.
     unplaced = sorted(t for g in groups.values() if g["unknown"] for t in g["tids"])
     if unplaced:
@@ -331,15 +366,17 @@ def certify(obs: dict, proofs: dict, error: int, diagnostic: Diagnostic, method:
     if not obs["complete"]:
         reason = "incomplete: " + "; ".join(obs["problems"])
     else:
-        open_upper = [name for name, p in proofs.items() if name != "lower_bound" and p["status"] != "proven"]
+        def gaps(name):
+            return ", ".join(proofs[name]["gaps"]) if name in proofs else "obligation not evaluated"
+        open_upper = [n for n in UPPER_OBLIGATIONS if proofs.get(n, {}).get("status") != "proven"]
         if open_upper:
-            reason = "BLOCKED: open proof obligations " + "; ".join(f"{n}: {', '.join(proofs[n]['gaps'])}" for n in open_upper)
+            reason = "BLOCKED: open proof obligations " + "; ".join(f"{n}: {gaps(n)}" for n in open_upper)
         else:
             upper = candidate
-        if proofs["lower_bound"]["status"] == "proven" and upper is not None:
+        if proofs.get("lower_bound", {}).get("status") == "proven" and upper is not None:
             lower = max(p["peak_bytes"] for p in obs["per_process_peak"]) - error
         elif upper is not None:
-            reason = "lower bound BLOCKED: " + ", ".join(proofs["lower_bound"]["gaps"])
+            reason = "lower bound BLOCKED: " + gaps("lower_bound")
     return PromptMemory(metric="rss", method=method, rss_upper_bytes=upper, rss_lower_bytes=lower,
                         per_process_peak=obs["per_process_peak"], diagnostic=diagnostic,
                         complete=obs["complete"], reason=reason)
@@ -597,8 +634,9 @@ def summarize_row(case: str, shell: str, rounds: int, samples: list[dict]) -> di
            "candidate_upper_bytes": {"n": len(candidates), "max": max(candidates, default=None),
                                      "p50": sorted(candidates)[len(candidates) // 2] if candidates else None,
                                      "use": "diagnostic; not a certified bound"}}
-    if len(complete) < rounds or len(samples) < rounds:
-        row.update(status="BLOCKED", reason=f"{len(complete)} of {rounds} samples complete")
+    need = max(rounds, ROUNDS)
+    if len(complete) < need or len(samples) < need:
+        row.update(status="BLOCKED", reason=f"{len(complete)} of {need} samples complete")
     elif len(certified) < len(samples):
         reasons = sorted({s["memory"]["reason"] for s in complete if s["memory"]["rss_upper_bytes"] is None})
         row.update(status="BLOCKED", reason="RSS certification blocked: " + " | ".join(reasons[:3]))

@@ -168,13 +168,29 @@ def corrupt(events, how):
         events.insert(-1, {"seq": 10**6, "ev": "overflow", "pid": 999_998})
     elif how == "non-leader-exec":
         next(e for e in events if e["ev"] == "exec" and e["pid"] == collector["tgid"])["former"] = thread
+    elif how in ("unknown-parent", "unreadable-parent"):
+        spawn = next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])
+        spawn["parent_tgid"] = 999_999 if how == "unknown-parent" else -1
+    elif how == "exec-dropped":
+        del events[next(i for i, e in enumerate(events) if e["ev"] == "exec" and e["pid"] == collector["tgid"])]
+    elif how == "group-conflict":
+        # The top shell's stops disagree on its thread group (no spawn edge to compare).
+        next(e for e in events if e.get("pid") == events[0]["pid"] and e["ev"] == "exit_ref")["tgid"] = helper["tgid"]
+    elif how == "fork-joins-group":
+        for e in events:
+            if e.get("pid") == collector["tgid"] and "tgid" in e:
+                e["tgid"] = helper["tgid"]
+    elif how == "clone-joins-unrelated":
+        next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])["kind"] = "clone"
+        for e in events:
+            if e.get("pid") == collector["tgid"] and "tgid" in e:
+                e["tgid"] = events[0]["pid"]
     elif how == "pid-reused":
         spawn = next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])
         events.insert(-1, {**spawn, "seq": 10**6})
     elif how == "no-thread-group":
-        for e in events:
-            if e.get("pid") == collector["tgid"] and "tgid" in e:
-                e["tgid"] = -1
+        # No stop where its thread group was readable, made by a plain clone.
+        events[:] = [e for e in events if not (e.get("pid") == collector["tgid"] and "tgid" in e)]
         for e in events:
             if e["ev"] == "spawn" and e["child"] == collector["tgid"]:
                 e["kind"] = "clone"
@@ -182,7 +198,9 @@ def corrupt(events, how):
 
 
 @pytest.mark.parametrize("how", ["collector-unreaped", "thread-unreaped", "thread-after-leader", "timed-out",
-                                 "stray-task", "overflow", "non-leader-exec", "no-thread-group", "pid-reused"])
+                                 "stray-task", "overflow", "non-leader-exec", "no-thread-group", "pid-reused",
+                                 "unknown-parent", "unreadable-parent", "exec-dropped", "group-conflict",
+                                 "fork-joins-group", "clone-joins-unrelated"])
 def test_incomplete_terminal_observation_blocks_the_row(how):
     # The process list is the tracer's spawn/exec/reap stream: a task it saw
     # without a final record, or a record it cannot place, is a missing sample.
@@ -453,3 +471,34 @@ def test_ci_report_names_why_rows_are_blocked(monkeypatch, tmp_path, capsys):
     assert "unreadable" in out[1] and summary.read_text().count("\n- ") + 1 == 2
     monkeypatch.setattr(pm.platform, "release", lambda: "6.11.0-azure")
     assert pm.main(["--kernel-gate"]) == 0 and "6.11.0-azure" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("missing", list(pm.UPPER_OBLIGATIONS) + ["all"])
+def test_a_missing_obligation_is_an_open_one(missing):
+    # 이것을 실패시키는 것: certify가 넘겨받은 항목만 보고 빠진 의무를 증명된 것으로 치는 것.
+    events, error, _ = recorded("prompt-bash")
+    obs = pm.observation(events)
+    proofs = all_proven()
+    for name in (pm.UPPER_OBLIGATIONS if missing == "all" else [missing]):
+        del proofs[name]
+    memory = pm.certify(obs, proofs, error, no_diagnostic(), "m")
+    assert memory["rss_upper_bytes"] is None and "not evaluated" in memory["reason"]
+    assert pm.verdict(memory, 10**12) == "BLOCKED"
+    only_lower = pm.certify(obs, {"lower_bound": {"status": "open", "gaps": ["x"]}}, error, no_diagnostic(), "m")
+    assert only_lower["rss_upper_bytes"] is None
+    no_lower = all_proven()
+    del no_lower["lower_bound"]
+    memory = pm.certify(obs, no_lower, error, no_diagnostic(), "m")
+    assert memory["rss_upper_bytes"] is not None and memory["rss_lower_bytes"] is None
+    assert "not evaluated" in memory["reason"]
+
+
+def test_the_row_itself_requires_200_complete_samples():
+    # The row function holds the 200-sample floor, whatever count it is asked for.
+    # 이것을 실패시키는 것: 호출자가 넘긴 rounds와만 비교하는 것.
+    events, error, _ = recorded("prompt-bash")
+    good = {"memory": pm.certify(pm.observation(events), all_proven(), error, no_diagnostic(), "m"),
+            "evidence": {"candidate_upper_bytes": 1}}
+    assert pm.summarize_row("git-clean", "bash", 1, [good])["status"] == "BLOCKED"
+    assert pm.summarize_row("git-clean", "bash", 1, [good] * 199)["reason"] == "199 of 200 samples complete"
+    assert pm.summarize_row("git-clean", "bash", 1, [good] * 200)["status"] == "OBSERVED"
