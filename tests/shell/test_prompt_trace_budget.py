@@ -2709,18 +2709,20 @@ def collecting_capture(lines):
         roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
 
 
-def collector_deadline_lines(after_head=False):
-    """The collecting prompt with its collector cut after the request reads
-    (or after its first HEAD read) and exiting 75."""
+def collector_deadline_lines(after_head=False, head_open=False, extra=()):
+    """The collecting prompt with its collector cut after the request reads,
+    after its first HEAD open (head_open), or after its first HEAD read, then
+    `extra` collector lines, then exit 75."""
     lines = collecting_prompt()
     mark = ('1098  <... read resumed>"ref: refs/heads/main\\n"' if after_head
-            else None)
+            else '1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>'
+            if head_open else None)
     if mark:
         cut = next(i for i, line in enumerate(lines) if line.startswith(mark))
     else:
         last = max(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
         cut = next(i for i in range(last, len(lines)) if lines[i].startswith("1098  <... read resumed>"))
-    return [line for i, line in enumerate(lines) if not line.startswith("1098  ") or i <= cut] + \
+    return [line for i, line in enumerate(lines) if not line.startswith("1098  ") or i <= cut] + list(extra) + \
         ["1098  exit_group(75)                     = ?", "1098  +++ exited with 75 +++"]
 
 
@@ -2757,6 +2759,24 @@ def test_deadline_shapes_need_their_proof(damage):
             lines = lines[:at] + [f"{pid}  prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {{len=83, filter=0x1}}) = 0"] + lines[at:]
         cap = front_alarm_capture(lines)
     assert budget.deadline_shape(cap) is None
+
+
+# 이것을 실패시키는 것: 경계를 저장소 접근 전으로 되돌리는 것(HEAD를 열고 읽기 전의 마감이 재시도되지 않음),
+# HEAD를 연 뒤 저장소 밖을 연 마감 시도를 재시도하는 것.
+def test_collector_deadline_boundary_is_the_evidence_read():
+    opened = collecting_capture(collector_deadline_lines(head_open=True))
+    assert budget.deadline_shape(opened) == "collector-deadline"
+    budget.judge_allowlist(opened, "collector-deadline")
+    attempts = iter([opened, collecting_capture(collecting_prompt())])
+    assert budget.run_allowlist(lambda attempt: next(attempts))[0] == 2
+    outside = collecting_capture(collector_deadline_lines(head_open=True, extra=[
+        '1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+        "1098  close(40</etc/hostname>) = 0"]))
+    assert budget.deadline_shape(outside) == "collector-deadline"
+    made = []
+    with pytest.raises(AssertionError, match="outside selected roots"):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or outside)
+    assert made == [1]
 
 
 # 이것을 실패시키는 것: 마감 시도의 판정을 건너뛰는 것(마감 시도의 경로 위반이 통과).

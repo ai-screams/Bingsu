@@ -1240,7 +1240,9 @@ def deadline_shape(cap):
     front-alarm: the front took SIGALRM and then made only rt_sigreturn calls
     up to exit_group(0), with no filter installed (strace can stretch its
     vfork past the deadline). collector-deadline: the collector exited 75
-    without touching the case's repository (its request deadline came first).
+    before its evidence read, a non-empty read of the case's .git/HEAD (its
+    request deadline came first). The partial window is still audited in
+    full; only the missing evidence is waived.
     """
     from fsbudget.classify import repository_path
     _, scoped = tree(cap.lines, cap.exe)
@@ -1262,10 +1264,11 @@ def deadline_shape(cap):
             except AssertionError:  # pipes and other unnamed descriptors
                 return None
         calls = parse_trace("\n".join(mine))
-        touched = any((p := path(c)) and any(p == r or p.startswith(r + "/") for r in cap.roots)
-                      for c in calls if c.name != EXIT_EVENT)
-        # 이것을 실패시키는 것: 저장소를 읽기 시작한 뒤의 exit 75, exit 75 아닌 종료를 마감으로 보는 것.
-        if mine[-1].endswith("+++ exited with 75 +++") and not touched:
+        evidenced = any(c.name in {"read", "pread64", "readv"} and re.match(r"[1-9]\d*$", c.ret)
+                        and path(c) in cap.evidence for c in calls)
+        # 이것을 실패시키는 것: 증거 read 뒤의 exit 75, exit 75 아닌 종료를 마감으로 보는 것,
+        # 경계를 저장소 접근 전으로 되돌리는 것(HEAD를 연 뒤 읽기 전의 마감이 즉시 실패).
+        if mine[-1].endswith("+++ exited with 75 +++") and not evidenced:
             return "collector-deadline"
     return None
 
