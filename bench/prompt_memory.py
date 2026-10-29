@@ -51,13 +51,16 @@ QUIET_EVENTS = ("pgscan_kswapd", "pgscan_direct", "pgscan_khugepaged", "pgsteal_
 # Proof gaps the per-sample checks cannot close on any host this task reached.
 # Every one must be present and proven for an upper bound; a missing entry
 # counts as open.
-UPPER_OBLIGATIONS = ("lifetime_upper", "serial_mutation", "trace_perturbation", "controls")
+UPPER_OBLIGATIONS = ("lifetime_upper", "serial_mutation", "trace_perturbation", "controls", "untraced_creation")
 OPEN_LIFETIME = ("uprobe page replacement (kernel/events/uprobes.c:199,202) is not excluded: listing registered "
                  "uprobes needs tracefs as root", "decrease sites outside mm, kernel, fs, include, lib, arch/arm64 "
                  "and arch/x86 (drivers and others) were not audited")
 OPEN_LOWER = "vfork-inherited high-water (grow-release-spawn) and reaped-child cmaxrss are not separated"
 OPEN_PERTURBATION = ("no proof that a traced prompt allocates at least what an untraced one does; the per-sample "
                      "checks only show the same roles ran and exited cleanly")
+# clone(CLONE_UNTRACED | SIGCHLD) creates a child ptrace never attaches to
+# (kernel/fork.c, clone(2)); a process that reaps it itself leaves no record.
+OPEN_UNTRACED = "CLONE_UNTRACED children are invisible to ptrace auto-attach; no enforced exclusion"
 OPEN_CONTROLS = "shell processes in the command-substitution control have reference points, not a constructed peak"
 
 
@@ -244,7 +247,10 @@ def boundary(events: list[dict], groups: dict[int, dict]) -> list[int]:
 
 def observation(events: list[dict]) -> dict:
     """Per-process peaks and the completeness verdict of one traced prompt.
-    The process list is the tracer's own spawn/exec/reap stream."""
+    The process list is the tracer's own spawn/exec/reap stream, so `complete`
+    means complete with respect to the creation events ptrace reported: a
+    child made with CLONE_UNTRACED never appears here, and that gap is the
+    always-open `untraced_creation` obligation, not a completeness check."""
     groups = processes(events)
     end = events[-1]
     problems = []
@@ -363,7 +369,7 @@ def obligations(before: dict, after: dict, obs: dict) -> dict:
         return {"status": "proven" if not gaps else "open", "gaps": gaps}
     return {"lifetime_upper": status(lifetime_gaps), "serial_mutation": status(serial_gaps),
             "lower_bound": status([OPEN_LOWER]), "trace_perturbation": status(perturbed + [OPEN_PERTURBATION]),
-            "controls": status([OPEN_CONTROLS])}
+            "controls": status([OPEN_CONTROLS]), "untraced_creation": status([OPEN_UNTRACED])}
 
 
 def certify(obs: dict, proofs: dict, error: int, diagnostic: Diagnostic, method: str) -> PromptMemory:

@@ -257,7 +257,7 @@ def test_incomplete_terminal_observation_blocks_the_row(how):
 
 def all_proven():
     return {name: {"status": "proven", "gaps": []}
-            for name in ("lifetime_upper", "serial_mutation", "lower_bound", "trace_perturbation", "controls")}
+            for name in (*pm.UPPER_OBLIGATIONS, "lower_bound")}
 
 
 def no_diagnostic(peak=None, footprint=None):
@@ -274,7 +274,7 @@ def test_diagnostic_metrics_never_certify():
     diagnostic = no_diagnostic(peak=1, footprint={"front": 1})
     proven = pm.certify(obs, all_proven(), error, diagnostic, "m")
     assert proven["rss_upper_bytes"] == candidate and proven["diagnostic"] == diagnostic
-    for name in ("lifetime_upper", "serial_mutation", "trace_perturbation", "controls"):
+    for name in pm.UPPER_OBLIGATIONS:
         proofs = all_proven()
         proofs[name] = {"status": "open", "gaps": ["gap " + name]}
         memory = pm.certify(obs, proofs, error, no_diagnostic(peak=candidate), "m")
@@ -530,3 +530,20 @@ def test_the_row_itself_requires_200_complete_samples():
     assert pm.summarize_row("git-clean", "bash", 1, [good])["status"] == "BLOCKED"
     assert pm.summarize_row("git-clean", "bash", 1, [good] * 199)["reason"] == "199 of 200 samples complete"
     assert pm.summarize_row("git-clean", "bash", 1, [good] * 200)["status"] == "OBSERVED"
+
+
+def test_untraced_creation_keeps_the_bound_blocked():
+    # ptrace never sees a CLONE_UNTRACED child, so a complete sample is complete
+    # only over reported creations; the obligation stays open on every host.
+    # 이것을 실패시키는 것: untraced_creation을 상한 의무에서 빼거나 proven으로 두는 것.
+    events, error, _ = recorded("prompt-bash")
+    obs = pm.observation(events)
+    assert "untraced_creation" in pm.UPPER_OBLIGATIONS
+    proofs = all_proven()
+    proofs["untraced_creation"] = {"status": "open", "gaps": [pm.OPEN_UNTRACED]}
+    memory = pm.certify(obs, proofs, error, no_diagnostic(), "m")
+    assert memory["rss_upper_bytes"] is None and "CLONE_UNTRACED" in memory["reason"]
+    del proofs["untraced_creation"]
+    assert pm.certify(obs, proofs, error, no_diagnostic(), "m")["rss_upper_bytes"] is None
+    host = quiet_host()
+    assert pm.obligations(host, host, single_threaded_prompt())["untraced_creation"] == {"status": "open", "gaps": [pm.OPEN_UNTRACED]}
