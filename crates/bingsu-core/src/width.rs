@@ -113,8 +113,7 @@ pub fn grapheme_width(
 }
 
 /// Printable ASCII (0x20..=0x7E): a cluster of one such byte is 1 cell.
-// DEL(0x7F)을 넣어도 지금은 폭이 같다(제어 문자라 양쪽이 경계이고 표에서 1칸). 빼 두어
-// 빠른 경로가 제어 문자의 표 값에 기대지 않게 한다. CR LF를 가르는 것은 C0 쪽이다.
+// DEL(0x7F)을 넣어도 폭은 같다(Control이라 앞뒤가 늘 경계이고 표에서 1칸). 표 값에 기대지 않게 뺀다.
 fn printable_ascii(b: u8) -> bool {
     (0x20..0x7F).contains(&b)
 }
@@ -217,6 +216,14 @@ pub fn ellipsis(p: WidthProfile, room: u32) -> &'static str {
     } else {
         ""
     }
+}
+
+/// `ellipsis(p, room)` and its width in cells. Each choice is at most one
+/// grapheme cluster, so its width comes from `grapheme_width` (the table
+/// `str_width` uses) without segmenting it.
+pub fn ellipsis_cells(p: WidthProfile, room: u32) -> (&'static str, u32) {
+    let e = ellipsis(p, room);
+    (e, u32::from(grapheme_width(e, p, |_| None).0))
 }
 
 #[cfg(test)]
@@ -579,6 +586,17 @@ mod tests {
     // 이것을 실패시키는 것: 1칸만 남았을 때 ambiguous=2에서 `…`를 쓰는 것(스펙 "생략 기호도 폭 프로필로").
     #[test]
     fn ellipsis_by_profile() {
+        // 이것을 실패시키는 것: ellipsis_cells의 칸 수가 str_width와 다른 것(예: `…`를 늘 1칸으로).
+        for p in PROFILES {
+            for room in 0..4 {
+                let (e, cells) = ellipsis_cells(p, room);
+                assert_eq!(
+                    (e, cells),
+                    (ellipsis(p, room), str_width(e, p)),
+                    "{p:?} {room}"
+                );
+            }
+        }
         assert_eq!(ellipsis(D, 1), "\u{2026}");
         assert_eq!(ellipsis(A2, 1), ".");
         assert_eq!(ellipsis(A2, 2), "\u{2026}");
