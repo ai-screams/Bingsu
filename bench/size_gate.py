@@ -152,7 +152,8 @@ def main(argv=None):
     report = {"schema": 1, "status": verdict, "enforced": args.enforce, "threshold": args.threshold if args.threshold is None or math.isfinite(args.threshold) else str(args.threshold),
               "cap_bytes": args.cap_bytes, "time": time_results, "size": size}
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    print(json.dumps({"status": verdict, "enforced": args.enforce,
+    reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason")})
+    print(json.dumps({"status": verdict, "enforced": args.enforce, "blocked_by": reasons,
                       "time": {c: {k: r.get(k) for k in ("status", "ratio_p50", "ratio_p95", "reason")} for c, r in time_results.items()},
                       "size": {k: size.get(k) for k in ("status", "over", "reason")}}, indent=2))
     if args.enforce and verdict != "PASS":

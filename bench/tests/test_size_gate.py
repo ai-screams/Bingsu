@@ -262,3 +262,13 @@ def test_cli_records_verdict_and_stays_green_until_enforced(tmp_path):
     assert gate.main([*args, "--threshold", "1.1", "--cap-bytes", "30"]) == 0
     assert json.loads((tmp_path / "v.json").read_text())["status"] == "FAIL"
     assert gate.main([*args, "--threshold", "1.1", "--cap-bytes", "30", "--enforce"]) == 1
+
+
+def test_cli_summary_names_why_nothing_was_measured(tmp_path, capsys):
+    sizes = tmp_path / "s.json"
+    sizes.write_text(json.dumps({"stripped_bytes": {"front": 1, "collector": 1, "combined": 2}}))
+    meas = tmp_path / "m.json"
+    meas.write_text(json.dumps({"status": "BLOCKED", "reason": "stale prepared fixture"}))
+    gate.main(["--measurement", str(meas), "--base-preparation", str(sizes), "--candidate-preparation", str(sizes), "--out", str(tmp_path / "v.json")])
+    out = json.loads(capsys.readouterr().out)
+    assert any("stale prepared fixture" in r for r in out["blocked_by"])
