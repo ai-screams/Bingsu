@@ -92,6 +92,32 @@ def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
         check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform)
 
 
+FRONT_GUARD = ["1095  lseek(3</proc/1095/maps>, 0, SEEK_CUR) = 2906",
+               "1095  lseek(3</proc/1095/maps>, 2822, SEEK_SET) = 2822"]
+
+
+def with_front_guard_seeks(seeks=FRONT_GUARD):
+    """The front's x86_64 glibc stack-guard seeks (CI #167 x86_64 gnu: index
+    49 and 50, right after its third maps read)."""
+    return insert_after(collecting_prompt(), '1095  read(3</proc/1095/maps>, "tack]', seeks)
+
+
+def test_front_stack_guard_seeks_pass_on_x86_64_gnu():
+    check_collecting_prompt(with_front_guard_seeks(), platform=("x86_64", "gnu"))
+
+
+# 이것을 실패시키는 것: 다른 플랫폼에서, 앞단 자기 maps 아닌 fd에서, 짝 없이 앞단 lseek을 받는 것.
+@pytest.mark.parametrize("platform,seeks", [
+    (("aarch64", "gnu"), FRONT_GUARD),
+    (None, FRONT_GUARD),
+    (("x86_64", "gnu"), [line.replace("3</proc/1095/maps>", "1<pipe:[1814704]>") for line in FRONT_GUARD]),
+    (("x86_64", "gnu"), FRONT_GUARD[:1]),
+], ids=["aarch64-gnu", "no-platform", "stdout-fd", "unpaired"])
+def test_front_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform)
+
+
 def test_collecting_prompt_passes_the_path_allowlist():
     check_collecting_prompt(collecting_prompt())
     # A thread's interrupted futex wait can resume under strace (seen live once).

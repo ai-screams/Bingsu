@@ -888,7 +888,7 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
                                  "evidence": list(repository_evidence), "libc": platform and platform[1]}, {})
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
                                 collector_exe=collector_exe, check_collection=True,
-                                audited_collector=int(roots[0]) if window else None)
+                                audited_collector=int(roots[0]) if window else None, platform=platform)
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -897,7 +897,7 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
 
 
 def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
-                                collector_exe=None, check_collection=False, audited_collector=None):
+                                collector_exe=None, check_collection=False, audited_collector=None, platform=None):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -923,6 +923,18 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     root = int(scoped[0].split()[0])
     front = [c for c in calls if c.pid == root]
     helper = [c for c in calls if c.pid != root]
+    # The front's own x86_64 glibc stack-guard seeks: the collector's rule
+    # (fsbudget.attribute.stack_guard_seek), for the platform the caller
+    # measured only, and the whole sequence or none.
+    # 이것을 실패시키는 것: 다른 플랫폼·다른 fd의 앞단 lseek, 짝 없는 seek을 받는 것.
+    from fsbudget.attribute import stack_guard_allowance, stack_guard_seek
+    allowance, guard = stack_guard_allowance(platform), []
+    for c in front:
+        if len(guard) < allowance and stack_guard_seek(c, root, len(guard)):
+            guard.append(c)
+    assert len(guard) in (0, allowance), ("incomplete front stack-guard seeks", guard)
+    front = [c for c in front if c not in guard]
+    calls = [c for c in calls if c not in guard]
     assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
     timers = [c for c in front if c.name == "setitimer"]
     assert len(timers) <= 1, ("one entry timer", timers)

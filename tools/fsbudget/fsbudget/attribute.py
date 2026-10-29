@@ -583,6 +583,26 @@ def request_handoff(name, args):
     return name in {"read", "readv"} and bool(args) and args[0].split("<")[0] == "3"
 
 
+def stack_guard_allowance(platform) -> int:
+    """Seeks x86_64 glibc's pthread_getattr_np makes on its own maps
+    (formula.STARTUP_PRIMITIVES stack_guard); 0 for any other or no platform."""
+    from .formula import STARTUP_PRIMITIVES
+    return STARTUP_PRIMITIVES.get(platform, {}).get("stack_guard", {}).get("seek", 0)
+
+
+def stack_guard_seek(c, process, used: int) -> bool:
+    """Whether c is the next stack-guard seek of `process` after `used` of
+    them: its own /proc/self/maps fd, SEEK_CUR 0 first, then N with SEEK_SET.
+    The caller bounds `used` by stack_guard_allowance and requires the whole
+    sequence (or none) once the trace ends."""
+    if c.name != "lseek" or target(c) not in {"/proc/self/maps", f"/proc/{process}/maps"}:
+        return False
+    args = split_args(c.args)
+    if used == 0:
+        return args[1:] == ["0", "SEEK_CUR"]
+    return len(args) == 3 and args[1].isdigit() and args[2] == "SEEK_SET"
+
+
 def _probe_flags(text, required, optional=frozenset()):
     flags = text.split("|")
     return len(flags) == len(set(flags)) and required <= set(flags) <= required | optional
@@ -705,8 +725,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             ordered.append((open_ends[at], c, True, False))
     ordered.sort(key=lambda pair: pair[0])
     roles, owner, confined = {}, {}, set()
-    from .formula import STARTUP_PRIMITIVES
-    guard_allowance = STARTUP_PRIMITIVES.get(pinned.get("platform"), {}).get("stack_guard", {}).get("seek", 0)
+    guard_allowance = stack_guard_allowance(pinned.get("platform"))
     guard_seeks = defaultdict(int)
     descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
@@ -836,11 +855,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         # vocabulary already refuses.)
         # 이것을 실패시키는 것: 다른 플랫폼·다른 fd(공유 라이브러리 fd 포함)·다른 모양의 lseek, 표의 횟수를 넘는 lseek,
         # 끝나지 않은 seek 쌍을 허용하는 것.
-        if (role == "collector" and c.name == "lseek"
-                and guard_seeks[process] < guard_allowance
-                and target(c) in {"/proc/self/maps", f"/proc/{process}/maps"}
-                and (args[1:] == ["0", "SEEK_CUR"] if guard_seeks[process] == 0
-                     else len(args) == 3 and args[1].isdigit() and args[2] == "SEEK_SET")):
+        if (role == "collector" and guard_seeks[process] < guard_allowance
+                and stack_guard_seek(c, process, guard_seeks[process])):
             guard_seeks[process] += 1
             continue
         if helper_vocabulary and role == "helper" and k is not None:
