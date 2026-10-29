@@ -2672,3 +2672,143 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
         lines.insert(-1, extra)
     with pytest.raises(AssertionError):
         budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
+
+
+ALARM_BASE = "/home/tester/pt/r9/test_prompt_binary_names_only_1"
+
+
+def front_alarm_capture(lines=None):
+    """A release glibc aarch64 prompt (global-present) whose front took
+    SIGALRM during a long vfork under strace and exited 0 before its filter.
+    read/write payloads cut to 120 characters; provenance:
+    fixtures/prompt-m3d-collect-trace.md."""
+    import gzip
+    from types import SimpleNamespace
+    if lines is None:
+        data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+            "prompt-m3d-front-alarm-linux.strace.gz").read_bytes())
+        assert hashlib.sha256(data).hexdigest() == "7428a7a1c24de5ff5f05f0f6dcd06e5efc04aa411410b5c8ae113a6c12a3ae25"
+        lines = data.decode().splitlines()
+    repo = ALARM_BASE + "/repo"
+    return SimpleNamespace(
+        lines=lines, exe=ALARM_BASE + "/bin/bingsu", collector_exe="/home/tester/target/release/bingsu-collect",
+        global_inputs=tuple(ALARM_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")),
+        global_present=True, collectors=1,
+        pinned=[ALARM_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
+
+
+def collecting_capture(lines):
+    from types import SimpleNamespace
+    repo = COLLECT_BASE + "/repo"
+    return SimpleNamespace(
+        lines=lines, exe=COLLECT_BASE + "/bin/bingsu", collector_exe=COLLECT_PIN,
+        global_inputs=tuple(COLLECT_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")),
+        global_present=False, collectors=1,
+        pinned=[COLLECT_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
+
+
+def collector_deadline_lines(after_head=False):
+    """The collecting prompt with its collector cut after the request reads
+    (or after its first HEAD read) and exiting 75."""
+    lines = collecting_prompt()
+    mark = ('1098  <... read resumed>"ref: refs/heads/main\\n"' if after_head
+            else None)
+    if mark:
+        cut = next(i for i, line in enumerate(lines) if line.startswith(mark))
+    else:
+        last = max(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        cut = next(i for i in range(last, len(lines)) if lines[i].startswith("1098  <... read resumed>"))
+    return [line for i, line in enumerate(lines) if not line.startswith("1098  ") or i <= cut] + \
+        ["1098  exit_group(75)                     = ?", "1098  +++ exited with 75 +++"]
+
+
+def test_deadline_shapes_are_recognized_and_judged():
+    alarm = front_alarm_capture()
+    assert budget.deadline_shape(alarm) == "front-alarm"
+    budget.judge_allowlist(alarm, "front-alarm")
+    with pytest.raises(AssertionError):
+        budget.judge_allowlist(alarm)
+    deadline = collecting_capture(collector_deadline_lines())
+    assert budget.deadline_shape(deadline) == "collector-deadline"
+    budget.judge_allowlist(deadline, "collector-deadline")
+    with pytest.raises(AssertionError, match="no repository read evidence"):
+        budget.judge_allowlist(deadline)
+    assert budget.deadline_shape(collecting_capture(collecting_prompt())) is None
+
+
+# 이것을 실패시키는 것: SIGALRM 뒤 출력이 있거나 필터를 설치한 앞단, 저장소를 읽은 뒤의 exit 75, exit 0을 마감으로 보는 것.
+@pytest.mark.parametrize("damage", ["alarm-then-write", "filter-then-alarm", "deadline-after-head", "untouched-exit-0"])
+def test_deadline_shapes_need_their_proof(damage):
+    if damage == "deadline-after-head":
+        cap = collecting_capture(collector_deadline_lines(after_head=True))
+    elif damage == "untouched-exit-0":
+        cap = collecting_capture([line.replace("1098  exit_group(75)", "1098  exit_group(0)")
+                                  .replace("1098  +++ exited with 75 +++", "1098  +++ exited with 0 +++")
+                                  for line in collector_deadline_lines()])
+    else:
+        lines = front_alarm_capture().lines
+        at = next(i for i, line in enumerate(lines) if "--- SIGALRM " in line)
+        pid = lines[at].split()[0]
+        if damage == "alarm-then-write":
+            lines = lines[:at + 1] + [f'{pid}  write(1<pipe:[1]>, "x", 1) = 1'] + lines[at + 1:]
+        else:
+            lines = lines[:at] + [f"{pid}  prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {{len=83, filter=0x1}}) = 0"] + lines[at:]
+        cap = front_alarm_capture(lines)
+    assert budget.deadline_shape(cap) is None
+
+
+# 이것을 실패시키는 것: 마감 시도의 판정을 건너뛰는 것(마감 시도의 경로 위반이 통과).
+def test_deadline_attempt_with_a_violation_fails():
+    lines = front_alarm_capture().lines
+    at = next(i for i, line in enumerate(lines) if "--- SIGALRM " in line)
+    pid = lines[at].split()[0]
+    lines = lines[:at] + [f'{pid}  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)'] + lines[at:]
+    cap = front_alarm_capture(lines)
+    assert budget.deadline_shape(cap) == "front-alarm"
+    with pytest.raises(AssertionError):
+        budget.judge_allowlist(cap, "front-alarm")
+    with pytest.raises(AssertionError):
+        budget.run_allowlist(lambda attempt: cap, limit=3)
+
+
+class _Attempts:
+    def __init__(self, outcomes):
+        self.outcomes, self.made = list(outcomes), 0
+
+    def capture(self, attempt):
+        self.made += 1
+        return self.outcomes[attempt - 1]
+
+
+def _judge(cap, shape=None):
+    kind, ok_relaxed = cap
+    if kind == "pass":
+        return
+    if shape is None or not ok_relaxed:
+        raise AssertionError(kind)
+
+
+def _shape(cap):
+    return cap[0] if cap[0] in ("front-alarm", "collector-deadline") else None
+
+
+# 이것을 실패시키는 것: 마감이 증명되지 않은 실패를 재시도하는 것, 마감 시도의 판정을 건너뛰는 것, 상한을 넘기는 것.
+def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
+    runs = _Attempts([("front-alarm", True), ("collector-deadline", True), ("pass", True)])
+    attempt, shapes = budget.run_allowlist(runs.capture, _judge, _shape)
+    assert (attempt, dict(shapes)) == (3, {"front-alarm": 1, "collector-deadline": 1})
+    assert "allowlist attempts: 3, deadline shapes:" in capsys.readouterr().out
+    plain = _Attempts([("other", True), ("pass", True)])
+    with pytest.raises(AssertionError, match="other"):
+        budget.run_allowlist(plain.capture, _judge, _shape)
+    assert plain.made == 1
+    violating = _Attempts([("front-alarm", False), ("pass", True)])
+    with pytest.raises(AssertionError, match="front-alarm"):
+        budget.run_allowlist(violating.capture, _judge, _shape)
+    assert violating.made == 1
+    endless = _Attempts([("collector-deadline", True)] * 12)
+    with pytest.raises(pytest.fail.Exception, match="no attempt without a deadline in 12"):
+        budget.run_allowlist(endless.capture, _judge, _shape)
+    assert endless.made == budget.ALLOWLIST_ATTEMPTS == 12

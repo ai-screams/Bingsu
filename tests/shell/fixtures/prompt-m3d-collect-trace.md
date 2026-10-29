@@ -33,3 +33,18 @@ annotations are unchanged. The file is gzip-compressed (`gzip -n -9`).
 
 `tools/fsbudget/tests/fixtures/m3d-bookworm-aarch64-shipped-collection.strace`
 is the collector task of the reduced trace: every record of pid 1098, in order.
+
+## Front deadline trace
+
+`prompt-m3d-front-alarm-linux.strace.gz` is one traced prompt (global-present,
+release glibc aarch64, the same container image and user) whose front took
+SIGALRM while strace stretched its vfork of the helper, then exited 0 before
+installing its filter. It was captured on 2026-10-29 by an earlier revision
+of the same test (cwd `/home/tester/src`, no warm-up prompt) with
+`--basetemp=/home/tester/pt/r9`; its trace is the `_1` directory. It has no
+collector. The reduction is the same as above.
+
+| Form | SHA-256 | Bytes / records |
+| -- | -- | --: |
+| Raw | `7115dc25b9b048235f4546b3bc353832ef1543679384b5ebdf00ee68ba41afa3` | 269127 / 1577 |
+| Reduced (decompressed fixture) | `7428a7a1c24de5ff5f05f0f6dcd06e5efc04aa411410b5c8ae113a6c12a3ae25` | 199237 / 1577 |
