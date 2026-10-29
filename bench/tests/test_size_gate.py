@@ -137,6 +137,24 @@ def test_summary_must_agree_with_samples(side):
     assert gate.relative_gate(lie, "prompt_ns", 1.10)["status"] == "BLOCKED"
 
 
+# 이것을 실패시키는 것: summary 필드의 형 검사(bool, 200.0)를 빼고 값만 비교하는 것.
+@pytest.mark.parametrize("side", ["base", "candidate"])
+@pytest.mark.parametrize("field,bad", [("n", 200.0), ("n", True), ("variance", False), ("p50", True)])
+def test_summary_field_types_are_checked(side, field, bad):
+    value = paired((1, 1), (1, 1))
+    row = value["variants"][side]["summary"]["prompt_ns"]
+    # the honest value equals the bad one, so only the type can tell them apart
+    row[field] = bad if field == "n" else row[field]
+    if field == "variance":
+        row["variance"] = False
+        assert row["variance"] == 0
+    if field == "p50":
+        value = paired((1, 1), (1, 1))
+        value["variants"][side]["samples"] = [{"prompt_ns": 1}] * 200
+        value["variants"][side]["summary"]["prompt_ns"] = {**row, "p50": True, "p95": True, "min": True, "max": True}
+    assert gate.relative_gate(value, "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
 # 이것을 실패시키는 것: 큰 정수 표본에서 OverflowError를 잡지 않는 것.
 @pytest.mark.parametrize("side", ["base", "candidate"])
 def test_huge_integer_sample_is_blocked_without_raising(side):

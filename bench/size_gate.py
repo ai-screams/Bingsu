@@ -56,6 +56,10 @@ def _recomputed(row, samples, metric):
         got = protocol.summary(values)
     except (KeyError, TypeError, ValueError, ArithmeticError):
         return None
+    # == alone equates True with 1 and 200.0 with 200: check the types first.
+    if type(row.get("n")) is not int or not all(
+            type(row.get(k)) in (int, float) and math.isfinite(row[k]) for k in got if k != "n"):
+        return None
     return got if all(row.get(k) == got[k] for k in got) else None
 
 
