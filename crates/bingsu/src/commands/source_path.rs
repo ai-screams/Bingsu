@@ -3,6 +3,7 @@
 //! parent's whole chain and its own owner must pass before place trust is
 //! granted. Root-owned ancestor links protected by root-only parent chains
 //! use ancestor rules; user links (stow folding) also check the target folder.
+use crate::commands::io_meter::{self, HelperAxis, IoMeter, Meter};
 use crate::commands::sys::{self, Stamp};
 use bingsu_core::fs_trust::{
     AclFacts, Facts, Group, GroupOracle, Last, NextOwner, Refusal, RefuseGroupWrite,
@@ -188,11 +189,31 @@ impl Resolved {
     }
 
     pub fn open(path: &Path, me: u32, groups: &mut dyn GroupOracle) -> io::Result<Self> {
-        Self::open_kind(path, me, groups, false)
+        Self::open_kind(path, me, groups, false, None)
     }
 
     pub fn open_dir(path: &Path, me: u32, groups: &mut dyn GroupOracle) -> io::Result<Self> {
-        Self::open_kind(path, me, groups, true)
+        Self::open_kind(path, me, groups, true, None)
+    }
+
+    /// `open`, charging the walk to a refresh round's meter (F, P, L, M).
+    pub fn open_metered(
+        path: &Path,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+        meter: &mut IoMeter,
+    ) -> io::Result<Self> {
+        Self::open_kind(path, me, groups, false, Some(meter))
+    }
+
+    /// `open_dir`, charging the walk to a refresh round's meter (P, L, M).
+    pub fn open_dir_metered(
+        path: &Path,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+        meter: &mut IoMeter,
+    ) -> io::Result<Self> {
+        Self::open_kind(path, me, groups, true, Some(meter))
     }
 
     fn open_kind(
@@ -200,13 +221,15 @@ impl Resolved {
         me: u32,
         groups: &mut dyn GroupOracle,
         directory: bool,
+        mut meter: Meter<'_>,
     ) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(io::Error::other("not absolute"));
         }
+        io_meter::latch(&meter)?;
         let root = sys::open_dir_at_search_nofollow(None, OsStr::new("/"))?;
         let mut nodes = vec![Node {
-            facts: sys::fd_facts(root.as_fd())?,
+            facts: sys::fd_facts_metered(root.as_fd(), &mut meter)?,
             stamp: sys::file_stamp(&root)?,
             file: root,
             path: PathBuf::from("/"),
@@ -284,6 +307,7 @@ impl Resolved {
                         if !root_ancestor && !link_owner_is_mine(before.uid, me) {
                             refusal = refusal.or(Some(Refusal::Last));
                         }
+                        io_meter::charge(&mut meter, HelperAxis::L, 1)?;
                         let target = sys::read_link_at(dir, &name)?;
                         if sys::at_stamp(dir, &name)? != before {
                             return Err(io::Error::other("link changed"));
@@ -319,6 +343,10 @@ impl Resolved {
                                 "not a regular file"
                             }));
                         }
+                        if !directory {
+                            io_meter::charge_file(&mut meter, &canonical.join(&name))?;
+                        }
+                        io_meter::charge(&mut meter, HelperAxis::P, 1)?;
                         let file = if directory {
                             sys::open_dir_at_search_nofollow(Some(dir), &name)?
                         } else {
@@ -328,7 +356,7 @@ impl Resolved {
                         if stamp != before {
                             return Err(io::Error::other("file changed while opening"));
                         }
-                        let facts = sys::fd_facts(file.as_fd())?;
+                        let facts = sys::fd_facts_metered(file.as_fd(), &mut meter)?;
                         let mut all = chain_facts(&nodes, &stack);
                         all.push(facts);
                         if refusal.is_none()
@@ -373,6 +401,7 @@ impl Resolved {
                     if nodes.len() + 1 >= PATH_FDS_MAX {
                         return Err(io::Error::from_raw_os_error(libc::EMFILE));
                     }
+                    io_meter::charge(&mut meter, HelperAxis::P, 1)?;
                     let file = sys::open_dir_at_search_nofollow(Some(dir), &name)?;
                     let stamp = sys::file_stamp(&file)?;
                     if !directory_stamp_matches(&stamp, &before) {
@@ -386,7 +415,7 @@ impl Resolved {
                     });
                     stack.push(nodes.len());
                     nodes.push(Node {
-                        facts: sys::fd_facts(file.as_fd())?,
+                        facts: sys::fd_facts_metered(file.as_fd(), &mut meter)?,
                         stamp,
                         file,
                         path: canonical.join(&name),
@@ -414,7 +443,17 @@ impl Resolved {
     /// timestamps and a fresh group oracle. No reopened source substitutes
     /// for the source whose bytes were compiled.
     pub fn revalidate(&self, me: u32, groups: &mut dyn GroupOracle) -> io::Result<()> {
-        self.revalidate_with(me, groups, false)
+        self.revalidate_with(me, groups, false, None)
+    }
+
+    /// `revalidate`, charging its link reads (L) and mounts (M) to a meter.
+    pub fn revalidate_metered(
+        &self,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+        meter: &mut IoMeter,
+    ) -> io::Result<()> {
+        self.revalidate_with(me, groups, false, Some(meter))
     }
 
     /// The same checks, with every fact that makes a rule undecidable read
@@ -429,7 +468,17 @@ impl Resolved {
         me: u32,
         groups: &mut dyn GroupOracle,
     ) -> io::Result<()> {
-        self.revalidate_with(me, groups, true)
+        self.revalidate_with(me, groups, true, None)
+    }
+
+    /// `revalidate_assuming_decided`, charged like `revalidate_metered`.
+    pub fn revalidate_assuming_decided_metered(
+        &self,
+        me: u32,
+        groups: &mut dyn GroupOracle,
+        meter: &mut IoMeter,
+    ) -> io::Result<()> {
+        self.revalidate_with(me, groups, true, Some(meter))
     }
 
     /// Facts this walk retained for `path` (a folder it opened or the final
@@ -446,11 +495,16 @@ impl Resolved {
     /// uses it without config's user-only ownership rules; config callers must
     /// use `revalidate` (or `revalidate_assuming_decided`) as before.
     pub fn revalidate_bindings(&self) -> io::Result<()> {
+        self.bindings_metered(&mut None)
+    }
+
+    fn bindings_metered(&self, meter: &mut Meter<'_>) -> io::Result<()> {
         for n in &self.nodes {
             let now = sys::file_stamp(&n.file)?;
             // Directory content times may change because unrelated entries
             // change. Each name we used is checked independently below.
-            if !directory_stamp_matches(&now, &n.stamp) || sys::fd_facts(n.file.as_fd())? != n.facts
+            if !directory_stamp_matches(&now, &n.stamp)
+                || sys::fd_facts_metered(n.file.as_fd(), meter)? != n.facts
             {
                 return Err(io::Error::other("ancestor evidence changed"));
             }
@@ -466,10 +520,11 @@ impl Resolved {
             if !same {
                 return Err(io::Error::other("parent/name binding changed"));
             }
-            if let Some(link) = &e.link
-                && sys::read_link_at(dir, &e.name)? != link.target
-            {
-                return Err(io::Error::other("link evidence changed"));
+            if let Some(link) = &e.link {
+                io_meter::charge(meter, HelperAxis::L, 1)?;
+                if sys::read_link_at(dir, &e.name)? != link.target {
+                    return Err(io::Error::other("link evidence changed"));
+                }
             }
         }
         let now = sys::file_stamp(&self.file)?;
@@ -478,7 +533,7 @@ impl Resolved {
         } else {
             now == self.stamp
         };
-        if !same || sys::fd_facts(self.file.as_fd())? != self.facts {
+        if !same || sys::fd_facts_metered(self.file.as_fd(), meter)? != self.facts {
             return Err(io::Error::other("source evidence changed"));
         }
         Ok(())
@@ -489,8 +544,9 @@ impl Resolved {
         me: u32,
         groups: &mut dyn GroupOracle,
         assume_decided: bool,
+        mut meter: Meter<'_>,
     ) -> io::Result<()> {
-        self.revalidate_bindings()?;
+        self.bindings_metered(&mut meter)?;
         for e in &self.edges {
             if let Some(link) = &e.link
                 && if link.root_ancestor {

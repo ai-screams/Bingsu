@@ -4,6 +4,7 @@ use super::{
     config_load::{Loader, Places, Verified},
     group_policy::SystemGroups,
     init::roots::ConfigRootPin,
+    io_meter::AxisUse,
     runtime_root::Pinned,
     snapshot_store::{CheckedContextFd, DataFile, LockedStore, Slot, StoreError},
     sys,
@@ -283,7 +284,10 @@ fn run(
     b.check(clock)?;
     let compiled = unchanged || report.as_ref().is_some_and(|r| r.snapshot.is_some());
     // Revalidate before considering publication or invalidation.
+    let before = loader.io_used();
     loader.revalidate().map_err(|_| StoreError::Unsafe)?;
+    let after = loader.io_used();
+    let revalidation: AxisUse = std::array::from_fn(|i| after[i] - before[i]);
     let verification = loader.verified(
         report.as_ref().map_or(&[], |r| r.files.as_slice()),
         compiled,
@@ -322,6 +326,12 @@ fn run(
         verified,
         ..seq
     };
+    // The last revalidation before the marker repeats the one measured above.
+    // It must fit now: past this point an exceeded cap would leave a moved
+    // sequence behind an Incomplete round.
+    loader
+        .io_fits(&revalidation)
+        .map_err(|_| StoreError::Unsafe)?;
     store.stage(Slot::Sequence, &reserved.encode())?;
     install(&store, Slot::Sequence, hook)?;
     b.check(clock)?;

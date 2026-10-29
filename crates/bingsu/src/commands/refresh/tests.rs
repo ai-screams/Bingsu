@@ -2212,3 +2212,703 @@ fn scan_time_chmod_or_replace_keeps_marker() {
         ]
     );
 }
+
+mod axes {
+    //! Helper I/O axes over whole refresh rounds (spec 1435, user decision U2).
+    use super::*;
+    use crate::commands::io_meter::{
+        self, AXIS_CAPS, AxisCaps, AxisExceeded, HelperAxis, TestCaps,
+    };
+
+    const UNLIMITED: AxisCaps = AxisCaps {
+        f: u64::MAX,
+        p: u64::MAX,
+        l: u64::MAX,
+        r: u64::MAX,
+        d: u64::MAX,
+        e_n: u64::MAX,
+        e_b: u64::MAX,
+        m: u64::MAX,
+        b: u64::MAX,
+    };
+
+    /// One refresh, and what its session charged.
+    fn metered(f: &Fx, caps: AxisCaps) -> (RefreshResult, AxisUse, Option<AxisExceeded>) {
+        let _caps = TestCaps::set(caps);
+        let r = f.run();
+        let (used, exceeded) = io_meter::last_session().expect("one session");
+        (r, used, exceeded)
+    }
+
+    fn at(used: &AxisUse, axis: HelperAxis) -> u64 {
+        used[axis as usize]
+    }
+
+    fn with_cap(axis: HelperAxis, cap: u64) -> AxisCaps {
+        let mut c = UNLIMITED;
+        *match axis {
+            HelperAxis::F => &mut c.f,
+            HelperAxis::P => &mut c.p,
+            HelperAxis::L => &mut c.l,
+            HelperAxis::R => &mut c.r,
+            HelperAxis::D => &mut c.d,
+            HelperAxis::En => &mut c.e_n,
+            HelperAxis::Eb => &mut c.e_b,
+            HelperAxis::M => &mut c.m,
+            HelperAxis::B => &mut c.b,
+        } = cap;
+        c
+    }
+
+    /// Normal names below "/" of an absolute path.
+    fn depth(p: &Path) -> u64 {
+        p.components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .count() as u64
+    }
+
+    /// The `d_reclen` sum of one listing, counted with libc directly.
+    #[allow(unsafe_code)]
+    fn reclen_sum(dir: &Path) -> u64 {
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c is NUL-terminated; the stream is closed below.
+        let stream = unsafe { libc::opendir(c.as_ptr()) };
+        assert!(!stream.is_null());
+        let mut sum = 0;
+        loop {
+            // SAFETY: stream is live until closedir.
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                break;
+            }
+            // SAFETY: entry is readdir's live record.
+            sum += u64::from(unsafe { (*entry).d_reclen });
+        }
+        // SAFETY: closes the stream opened above once.
+        unsafe { libc::closedir(stream) };
+        sum
+    }
+
+    /// A shape-only theme outside the config root that does not parse: core
+    /// drops it and the config still publishes.
+    const BAD: &[u8] = b"[style\nthis is not toml\n";
+
+    type Setup = Box<dyn Fn(&Fx)>;
+    type Delta = Box<dyn Fn(&Fx) -> Option<u64>>;
+
+    struct Case {
+        axis: HelperAxis,
+        /// The fixture without, then with, the refused or non-config work.
+        base: Setup,
+        extra: Setup,
+        /// What the extra work must add on this axis (None: platform facts).
+        delta: Delta,
+    }
+
+    fn themes(f: &Fx) -> PathBuf {
+        let d = f.base.join("themes");
+        if !d.exists() {
+            fs::create_dir(&d).unwrap();
+            mode(&d, 0o700);
+        }
+        d
+    }
+
+    fn conf_d(f: &Fx, names: &[&str]) -> PathBuf {
+        let d = f.request.config_canonical.join("conf.d");
+        fs::create_dir(&d).unwrap();
+        mode(&d, 0o700);
+        for n in names {
+            if n.ends_with('/') {
+                fs::create_dir(d.join(n.trim_end_matches('/'))).unwrap();
+            } else {
+                put(&d.join(n), b"");
+            }
+        }
+        d
+    }
+
+    fn extends(f: &Fx, refs: &[String]) {
+        let list: Vec<String> = refs.iter().map(|r| format!("{r:?}")).collect();
+        f.put(&format!(
+            "extends = [{}]\nicons = \"ascii\"\n",
+            list.join(", ")
+        ));
+    }
+
+    fn cases() -> Vec<Case> {
+        let bad_theme = |f: &Fx| {
+            let p = themes(f).join("bad.toml");
+            put(&p, BAD);
+            p
+        };
+        vec![
+            // F: a dropped shape-only theme is still a distinct file opened.
+            Case {
+                axis: HelperAxis::F,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(move |f| {
+                    let p = bad_theme(f);
+                    extends(f, &[p.display().to_string()]);
+                }),
+                delta: Box::new(|_| Some(1)),
+            },
+            // P: every name of the dropped theme's path, in the first walk and
+            // in each of the three revalidations.
+            Case {
+                axis: HelperAxis::P,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(move |f| {
+                    let p = bad_theme(f);
+                    extends(f, &[p.display().to_string()]);
+                }),
+                delta: Box::new(|f| Some(4 * depth(&f.base.join("themes/bad.toml")))),
+            },
+            // L: a link to the dropped theme, read in each of the four walks.
+            Case {
+                axis: HelperAxis::L,
+                base: Box::new(move |f| {
+                    let p = bad_theme(f);
+                    extends(f, &[p.display().to_string()]);
+                }),
+                extra: Box::new(move |f| {
+                    bad_theme(f);
+                    let link = themes(f).join("link.toml");
+                    symlink("bad.toml", &link).unwrap();
+                    extends(f, &[link.display().to_string()]);
+                }),
+                delta: Box::new(|_| Some(4)),
+            },
+            // R: entries refused before any lookup still count, one each.
+            Case {
+                axis: HelperAxis::R,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(|f| {
+                    extends(
+                        f,
+                        &[
+                            "$THEME".into(),
+                            "https://x/y.toml".into(),
+                            "~other/z.toml".into(),
+                        ],
+                    )
+                }),
+                delta: Box::new(|_| Some(3)),
+            },
+            // D: the one conf.d, listed four times in a round, is one folder.
+            Case {
+                axis: HelperAxis::D,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(|f| {
+                    f.put("icons = \"ascii\"\n");
+                    conf_d(f, &["a.toml"]);
+                }),
+                delta: Box::new(|_| Some(1)),
+            },
+            // E_n: entries that are not config (hidden, other suffix, folder)
+            // count in each of the four listings.
+            Case {
+                axis: HelperAxis::En,
+                base: Box::new(|f| {
+                    f.put("icons = \"ascii\"\n");
+                    conf_d(f, &["a.toml"]);
+                }),
+                extra: Box::new(|f| {
+                    f.put("icons = \"ascii\"\n");
+                    conf_d(f, &["a.toml", ".hidden.toml", "notes.txt", "sub/"]);
+                }),
+                delta: Box::new(|_| Some(4 * 3)),
+            },
+            // E_b: the same entries' record bytes, four listings.
+            Case {
+                axis: HelperAxis::Eb,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(|f| {
+                    f.put("icons = \"ascii\"\n");
+                    conf_d(f, &["a.toml", ".hidden.toml", "notes.txt", "sub/"]);
+                }),
+                delta: Box::new(|f| {
+                    Some(4 * reclen_sum(&f.request.config_canonical.join("conf.d")))
+                }),
+            },
+            // M: the mounts of every walked folder (macOS reads fstatfs; Linux none).
+            Case {
+                axis: HelperAxis::M,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                delta: Box::new(|_| None),
+            },
+            // B: the dropped theme's bytes are read once.
+            Case {
+                axis: HelperAxis::B,
+                base: Box::new(|f| f.put("icons = \"ascii\"\n")),
+                extra: Box::new(move |f| {
+                    let p = bad_theme(f);
+                    extends(f, &[p.display().to_string()]);
+                }),
+                delta: Box::new(|f| {
+                    let config = fs::metadata(f.request.config_canonical.join("config.toml"));
+                    Some(
+                        BAD.len() as u64 + config.unwrap().len()
+                            - "icons = \"ascii\"\n".len() as u64,
+                    )
+                }),
+            },
+        ]
+    }
+
+    /// Distinct `st_dev` of "/" and every folder down to `p`.
+    fn mounts_down_to(p: &Path) -> u64 {
+        let mut devs: Vec<u64> = p
+            .ancestors()
+            .map(|a| fs::metadata(a).unwrap().dev())
+            .collect();
+        devs.sort_unstable();
+        devs.dedup();
+        devs.len() as u64
+    }
+
+    // 축 아홉 각각: 버린·거부한 참조와 설정이 아닌 항목의 일이 그 축에 들어가고(base 대비 delta), 그 회차의
+    // 사용량 U에서 cap = U는 통과, cap = U − 1은 Incomplete이며 snapshot·last-good·marker·sequence가 그대로다.
+    // 이것을 실패시키는 것: 걸러낸 뒤에만 E_n을 세는 것, 거부된 참조를 R에서 빼는 것, D를 목록마다 세는 것,
+    // 재검증의 걷기·목록을 세지 않는 것, 버린 원본의 바이트를 B에서 빼는 것, 두 축 칸을 합치는 것, cap 비교의
+    // 하나 차이, B 읽기를 남은 여유 + 1바이트로 묶지 않는 것.
+    #[test]
+    fn test_each_axis_counts_rejected_and_non_config_work() {
+        let mut seen = Vec::new();
+        for case in cases() {
+            let tag = format!("{:?}", case.axis).to_lowercase();
+            let base = Fx::new(&format!("axis-{tag}-base"));
+            (case.base)(&base);
+            let (r, base_used, _) = metered(&base, UNLIMITED);
+            published(r);
+            let f = Fx::new(&format!("axis-{tag}"));
+            (case.extra)(&f);
+            published(metered(&f, UNLIMITED).0);
+            let (r, used, exceeded) = metered(&f, UNLIMITED);
+            assert_eq!(r, RefreshResult::Revalidated { generation: 1 }, "{tag}");
+            assert_eq!(exceeded, None);
+            let u = at(&used, case.axis);
+            let delta = u - at(&base_used, case.axis);
+            let expected = (case.delta)(&f).unwrap_or_else(|| {
+                if cfg!(target_os = "macos") {
+                    mounts_down_to(&f.request.config_canonical)
+                } else {
+                    0
+                }
+            });
+            if case.axis == HelperAxis::M {
+                seen.push((case.axis, u, expected));
+            } else {
+                seen.push((case.axis, delta, expected));
+            }
+            // Cap = U passes; on Linux M is 0 and cannot be crossed on disk.
+            let (r, _, exceeded) = metered(&f, with_cap(case.axis, u));
+            assert_eq!(
+                (r, exceeded),
+                (RefreshResult::Revalidated { generation: 1 }, None),
+                "{tag} at cap"
+            );
+            if u == 0 {
+                continue;
+            }
+            let before = (f.state(), f.bytes("sequence"));
+            let (r, _, exceeded) = metered(&f, with_cap(case.axis, u - 1));
+            assert_eq!(r, RefreshResult::Incomplete, "{tag} over cap");
+            assert_eq!(exceeded.map(|e| e.axis), Some(case.axis), "{tag}");
+            assert_eq!((f.state(), f.bytes("sequence")), before, "{tag}");
+            if case.axis == HelperAxis::B {
+                // A read never asks for more than one byte past the room left.
+                let (r, _, exceeded) = metered(&f, with_cap(HelperAxis::B, u - 10));
+                assert_eq!(r, RefreshResult::Incomplete);
+                assert_eq!(exceeded.map(|e| e.used), Some(u - 9));
+            }
+        }
+        let want: Vec<_> = seen.iter().map(|(a, _, e)| (*a, *e)).collect();
+        let got: Vec<_> = seen.iter().map(|(a, d, _)| (*a, *d)).collect();
+        assert_eq!(got, want);
+    }
+
+    /// `n` bytes that do not parse: core drops the file alone.
+    fn unparsable(n: usize) -> Vec<u8> {
+        let mut b = b"[style\n".to_vec();
+        b.resize(n, b'x');
+        b
+    }
+
+    /// `n` bytes of valid TOML (comment lines).
+    fn comments(n: usize) -> Vec<u8> {
+        let mut b = Vec::with_capacity(n);
+        while b.len() < n {
+            let line = n - b.len();
+            b.push(b'#');
+            b.extend(std::iter::repeat_n(b'c', line.min(64).saturating_sub(2)));
+            if b.len() < n {
+                b.push(b'\n');
+            }
+        }
+        b.truncate(n);
+        b
+    }
+
+    fn snapshot_and_sequence(f: &Fx) -> (Vec<Vec<u8>>, Vec<u8>) {
+        (f.state(), f.bytes("sequence"))
+    }
+
+    const KIB256: usize = 256 * 1024;
+
+    /// The config writing `refs` as its extends, `body` after it.
+    fn extends_with(f: &Fx, refs: &[String], body: &str) {
+        let list: Vec<String> = refs.iter().map(|r| format!("{r:?}")).collect();
+        f.put(&format!("extends = [{}]\n{body}", list.join(", ")));
+    }
+
+    // 실제 U2 값에서: 신뢰 파일의 extends로 R을 넘기면 Invalid가 아니라 Incomplete이고, conf.d 항목이 마지막
+    // 재검증에서야 넘는 경우에도 sequence를 옮기기 전에 끝나며, 버린 원본까지 센 B가 2 MiB를 넘으면 끝난다. 모두
+    // snapshot·last-good·marker·sequence가 그대로다. 각 경우 cap에 딱 맞는 설정은 발행된다.
+    // 이것을 실패시키는 것: 상한 초과를 확인한 실패(Invalid)로 내는 것, sequence staging 전 재검증 비용 확인을
+    // 빼는 것(마지막 목록에서 넘어 sequence가 바뀜), B의 읽기 한도를 빼는 것 또는 버린 원본을 세지 않는 것,
+    // cap 비교의 하나 차이, R을 extends마다 세지 않는 것.
+    #[test]
+    fn exceeded_axis_keeps_marker_unchanged() {
+        let mut seen = Vec::new();
+        // R: 2 root candidates (config.toml, absent config.local.toml) + n entries.
+        for n in [254usize, 255] {
+            let f = Fx::new(&format!("cap-r-{n}"));
+            f.put(COMMAND);
+            published(f.run());
+            let before = snapshot_and_sequence(&f);
+            let refs: Vec<String> = (0..n).map(|i| format!("$THEME_{i}")).collect();
+            extends_with(&f, &refs, COMMAND);
+            let r = f.run();
+            seen.push(("R", n, r, snapshot_and_sequence(&f) == before));
+        }
+        // E_n: a.toml, k other entries, `.` and `..`, listed four times a round.
+        // At k = 254 the first three listings fit (771) and the fourth would not.
+        for k in [253usize, 254] {
+            let f = Fx::new(&format!("cap-en-{k}"));
+            f.put(COMMAND);
+            published(f.run());
+            let before = snapshot_and_sequence(&f);
+            let names: Vec<String> = std::iter::once("a.toml".to_string())
+                .chain((0..k).map(|i| format!("n{i:03}.txt")))
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            conf_d(&f, &names);
+            let r = f.run();
+            seen.push(("E_n", k, r, snapshot_and_sequence(&f) == before));
+        }
+        // B: the config, seven dropped 256 KiB themes and one sized to reach 2 MiB.
+        for extra in [0usize, 1] {
+            let f = Fx::new(&format!("cap-b-{extra}"));
+            f.put(COMMAND);
+            published(f.run());
+            let before = snapshot_and_sequence(&f);
+            let dir = themes(&f);
+            let refs: Vec<String> = (0..8)
+                .map(|i| dir.join(format!("t{i}.toml")).display().to_string())
+                .collect();
+            extends_with(&f, &refs, COMMAND);
+            let config = fs::metadata(f.request.config_canonical.join("config.toml"))
+                .unwrap()
+                .len() as usize;
+            for (i, r) in refs.iter().enumerate() {
+                let n = if i < 7 {
+                    KIB256
+                } else {
+                    KIB256 - config + extra
+                };
+                put(Path::new(r), &unparsable(n));
+            }
+            let r = f.run();
+            seen.push(("B", extra, r, snapshot_and_sequence(&f) == before));
+        }
+        let published_at_cap = |r: &RefreshResult| matches!(r, RefreshResult::Published { .. });
+        let got: Vec<_> = seen
+            .iter()
+            .map(|(axis, n, r, same)| {
+                (
+                    *axis,
+                    *n,
+                    published_at_cap(r),
+                    *r == RefreshResult::Incomplete,
+                    *same,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("R", 254, true, false, false),
+                ("R", 255, false, true, true),
+                ("E_n", 253, true, false, false),
+                ("E_n", 254, false, true, true),
+                ("B", 0, true, false, false),
+                ("B", 1, false, true, true),
+            ]
+        );
+    }
+
+    // 오늘 발행되는 설정 모양은 U2 값에서도 발행된다: 내장 설정만, 뿌리 순서(config.toml·conf.d·local), conf.d
+    // 하드 링크 40개, 링크 20개 사슬의 config.toml, 링크로 고정한 설정 뿌리, 4,097개 참조를 가진 버려지는 shape-only 테마, conf.d의
+    // 설정이 아닌 항목 200개, 깊이 8의 큰 shape-only 사슬, 해석 실패 256 KiB 넷 뒤 256 KiB 하나.
+    // 이것을 실패시키는 것: 의미 상한 숫자를 I/O 상한에 대입하는 것(F 32는 하드 링크 40개, B 1 MiB는 1.25 MiB
+    // 묶음에서 실패), D를 목록마다 세는 것, 축을 의도보다 넓게 세는 것, 보유한 증거(실행 원본, 설정 뿌리)의
+    // 재확인에서 링크 읽기를 세지 않는 것.
+    #[test]
+    fn test_configs_published_today_still_publish() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let run = |tag: &str, setup: &dyn Fn(&Fx)| {
+            let f = Fx::new(&format!("compat-{tag}"));
+            setup(&f);
+            let r = f.run();
+            let (used, exceeded) = io_meter::last_session().unwrap();
+            seen.borrow_mut().push((
+                tag.to_string(),
+                matches!(r, RefreshResult::Published { .. }),
+                exceeded,
+            ));
+            used
+        };
+        run("builtin-only", &|_| {});
+        run("roots-in-order", &|f| {
+            f.put(COMMAND);
+            conf_d(f, &["10.toml", "20.toml"]);
+            put(
+                &f.request.config_canonical.join("config.local.toml"),
+                b"icons = \"ascii\"\n",
+            );
+        });
+        let aliases = run("conf-d-hard-links", &|f| {
+            f.put(COMMAND);
+            let d = conf_d(f, &["000.toml"]);
+            for i in 1..40 {
+                fs::hard_link(d.join("000.toml"), d.join(format!("{i:03}.toml"))).unwrap();
+            }
+        });
+        let links = run("link-chain", &|f| {
+            let dots = f.base.join("dotfiles");
+            fs::create_dir(&dots).unwrap();
+            mode(&dots, 0o700);
+            put(&dots.join("real.toml"), COMMAND.as_bytes());
+            let mut target = dots.join("real.toml");
+            for i in 0..19 {
+                let link = dots.join(format!("l{i}.toml"));
+                symlink(&target, &link).unwrap();
+                target = link;
+            }
+            symlink(&target, f.request.config_canonical.join("config.toml")).unwrap();
+        });
+        // A stow-style config root: init pinned the link's spelling.
+        let rooted = {
+            let f = Fx::new("compat-root-link");
+            let link = f.base.join("config-link");
+            symlink(&f.request.config_canonical, &link).unwrap();
+            let mut request = f.request.clone();
+            request.config_written = link;
+            f.put(COMMAND);
+            let r = refresh(request, &mut Fixed(clock()));
+            let (used, exceeded) = io_meter::last_session().unwrap();
+            seen.borrow_mut().push((
+                "root-link".into(),
+                matches!(r, RefreshResult::Published { .. }),
+                exceeded,
+            ));
+            used
+        };
+        run("discarded-theme-fanout", &|f| {
+            let refs: Vec<String> = (0..4097)
+                .map(|i| {
+                    let name = format!("theme-{i}.toml");
+                    put(&f.base.join(&name), b"");
+                    format!("{name:?}")
+                })
+                .collect();
+            put(
+                &f.base.join("theme.toml"),
+                format!("extends = [{}]\n", refs.join(",")).as_bytes(),
+            );
+            f.put("extends = [\"~/theme.toml\"]\n");
+            put(
+                &f.request.config_canonical.join("config.local.toml"),
+                COMMAND.as_bytes(),
+            );
+        });
+        run("conf-d-non-config-200", &|f| {
+            f.put(COMMAND);
+            let names: Vec<String> = std::iter::once("a.toml".to_string())
+                .chain((0..199).map(|i| format!(".n{i:03}")))
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            conf_d(f, &names);
+        });
+        let chain = run("shape-only-chain-8", &|f| {
+            let dir = themes(f);
+            for i in 0..7 {
+                let mut b = format!("extends = [\"c{}.toml\"]\n", i + 1).into_bytes();
+                b.extend(comments(120 * 1024));
+                put(&dir.join(format!("c{i}.toml")), &b);
+            }
+            put(&dir.join("c7.toml"), &comments(120 * 1024));
+            f.put(&format!(
+                "extends = [{:?}]\n{COMMAND}",
+                dir.join("c0.toml").display().to_string()
+            ));
+        });
+        let bytes = run("dropped-four-then-one", &|f| {
+            let dir = themes(f);
+            let refs: Vec<String> = (0..5)
+                .map(|i| dir.join(format!("t{i}.toml")).display().to_string())
+                .collect();
+            for (i, r) in refs.iter().enumerate() {
+                put(
+                    Path::new(r),
+                    &if i < 4 {
+                        unparsable(KIB256)
+                    } else {
+                        comments(KIB256)
+                    },
+                );
+            }
+            extends_with(f, &refs, COMMAND);
+        });
+        let seen = seen.into_inner();
+        assert!(
+            seen.iter()
+                .all(|(_, published, exceeded)| *published && exceeded.is_none()),
+            "{seen:?}"
+        );
+        // The shapes that bind on the semantic numbers this meter must not reuse.
+        assert!(at(&aliases, HelperAxis::F) > 32, "{aliases:?}");
+        assert!(at(&bytes, HelperAxis::B) > 1024 * 1024, "{bytes:?}");
+        // Twenty links behind config.toml, each read in five walks (probe, open
+        // before reading, three revalidations) and four checks of the retained
+        // evidence (after reading, three revalidations).
+        assert_eq!(at(&links, HelperAxis::L), 20 * 9);
+        // The root's own link, read in each of the three revalidations.
+        assert_eq!(at(&rooted, HelperAxis::L), 3);
+        assert!(at(&chain, HelperAxis::B) > 7 * 120 * 1024);
+        for (used, what) in [
+            (aliases, "aliases"),
+            (links, "links"),
+            (rooted, "root link"),
+            (chain, "chain"),
+            (bytes, "bytes"),
+        ] {
+            for axis in HelperAxis::ALL {
+                assert!(
+                    at(&used, axis) <= AXIS_CAPS.cap(axis),
+                    "{what} {axis:?} {used:?}"
+                );
+            }
+        }
+    }
+
+    // 사용자 결정 자료의 "오늘 받아들여지는 설정을 거부하는 경우" 표에서 만들기 싼 행: 기준 revision 1d900e4에서는
+    // 모두 발행됐고(신뢰 conf.d 300개는 Invalid), 이제는 Incomplete이며 snapshot·last-good·marker·sequence가
+    // 그대로다. 넘는 축도 고정한다.
+    // 이것을 실패시키는 것: 상한을 넘은 회차를 발행하거나 Invalid로 확인하는 것, 버린 테마 그래프의 시도를 R에서
+    // 빼는 것, 재검증 목록을 세지 않는 것, 버린 원본 바이트를 B에서 빼는 것.
+    #[test]
+    fn todays_rejected_shapes_are_incomplete_with_marker_unchanged() {
+        type Shape = fn(&Fx);
+        let shapes: [(&str, bool, Shape, HelperAxis); 5] = [
+            (
+                "shape-only root, conf.d of 300 configs",
+                true,
+                |f| {
+                    let names: Vec<String> = (0..300).map(|i| format!("{i:03}.toml")).collect();
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    conf_d(f, &names);
+                },
+                HelperAxis::R,
+            ),
+            (
+                "trusted conf.d of 300 configs",
+                false,
+                |f| {
+                    let names: Vec<String> = (0..300).map(|i| format!("{i:03}.toml")).collect();
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    conf_d(f, &names);
+                },
+                HelperAxis::R,
+            ),
+            (
+                "conf.d with 600 hidden entries",
+                false,
+                |f| {
+                    let names: Vec<String> = std::iter::once("a.toml".to_string())
+                        .chain((0..600).map(|i| format!(".n{i:03}")))
+                        .collect();
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    conf_d(f, &names);
+                },
+                HelperAxis::En,
+            ),
+            (
+                "nine theme graphs of 30 tries that fail",
+                false,
+                |f| {
+                    let dir = themes(f);
+                    let refs: Vec<String> = (0..9)
+                        .map(|i| {
+                            let kids: Vec<String> = (0..29)
+                                .map(|k| {
+                                    let c = dir.join(format!("g{i}-{k}.toml"));
+                                    put(&c, if k == 28 { b"[broken\n" } else { b"" });
+                                    format!("{:?}", c.display().to_string())
+                                })
+                                .collect();
+                            let p = dir.join(format!("g{i}.toml"));
+                            put(&p, format!("extends = [{}]\n", kids.join(",")).as_bytes());
+                            p.display().to_string()
+                        })
+                        .collect();
+                    extends_with(f, &refs, COMMAND);
+                },
+                HelperAxis::R,
+            ),
+            (
+                "eight 256 KiB themes that do not parse",
+                false,
+                |f| {
+                    let dir = themes(f);
+                    let refs: Vec<String> = (0..8)
+                        .map(|i| dir.join(format!("t{i}.toml")).display().to_string())
+                        .collect();
+                    for r in &refs {
+                        put(Path::new(r), &unparsable(KIB256));
+                    }
+                    extends_with(f, &refs, COMMAND);
+                },
+                HelperAxis::B,
+            ),
+        ];
+        let mut seen = Vec::new();
+        for (i, (what, shape_root, shape, _)) in shapes.iter().enumerate() {
+            let mut f = Fx::new(&format!("rejected-{i}"));
+            f.request.config_root_shape_only = *shape_root;
+            f.put(if *shape_root {
+                "icons = \"ascii\"\n"
+            } else {
+                COMMAND
+            });
+            published(f.run());
+            let before = snapshot_and_sequence(&f);
+            shape(&f);
+            let r = f.run();
+            let (_, exceeded) = io_meter::last_session().unwrap();
+            seen.push((
+                *what,
+                r,
+                exceeded.map(|e| e.axis),
+                snapshot_and_sequence(&f) == before,
+            ));
+        }
+        let want: Vec<_> = shapes
+            .iter()
+            .map(|(what, _, _, axis)| (*what, RefreshResult::Incomplete, Some(*axis), true))
+            .collect();
+        assert_eq!(seen, want);
+    }
+}

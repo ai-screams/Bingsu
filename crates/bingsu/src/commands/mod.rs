@@ -56,6 +56,8 @@ pub(crate) mod helper_limits;
 #[cfg(unix)]
 mod init;
 #[cfg(unix)]
+pub(crate) mod io_meter;
+#[cfg(unix)]
 mod log;
 #[cfg(unix)]
 mod messages;
