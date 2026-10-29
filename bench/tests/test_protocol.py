@@ -277,8 +277,9 @@ def test_launcher_shell_is_not_a_second_measurement(monkeypatch):
 
 def test_ci_preparation_outputs_are_external():
     text = (Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml').read_text()
-    callers = [line.strip() for line in text.splitlines() if 'bench/git-product.py' in line]
-    assert len(callers) == 2
+    # A command continued with a trailing backslash is one caller.
+    callers = [line.strip() for line in text.replace('\\\n', ' ').splitlines() if 'bench/git-product.py' in line]
+    assert len(callers) == 5
     assert all('--out "$RUNNER_TEMP/measurements/' in line for line in callers)
     assert '${{ runner.temp }}/measurements/' in text
     assert 'target/f3/' not in text

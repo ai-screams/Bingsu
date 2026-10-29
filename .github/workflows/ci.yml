@@ -982,6 +982,74 @@ jobs:
             exit 1
           fi
 
+  # Spec section 11 gate: full prompt time (base tip against the merge result,
+  # alternated, 200 pairs per case) and stripped binary size. The threshold,
+  # the size cap and enforcement are decision U3: until it sets them the job
+  # runs and records its verdict (BLOCKED, never FAIL) and does not fail the
+  # pull request. Do not register it as a required check before U3.
+  prompt-gate:
+    name: Prompt time and size gate (record only until U3)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Pending U3: leave empty. GATE_TIME_RATIO is the largest accepted
+      # candidate/base ratio of p50 and p95; GATE_SIZE_CAP_BYTES caps the
+      # stripped front, collector and their sum; GATE_ENFORCE=true makes a
+      # FAIL or BLOCKED verdict fail the job.
+      GATE_TIME_RATIO: ''
+      GATE_SIZE_CAP_BYTES: ''
+      GATE_ENFORCE: 'false'
+      GATE_CASES: no-git,git-clean,git-dirty
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the base tip and the merge result
+        run: |
+          # base tip + PR head: three words (the commit and two parents)
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error::HEAD is not a merge commit of the base tip and the PR head"
+            exit 1
+          fi
+          git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
+          mkdir -p "$RUNNER_TEMP/measurements"
+          cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" -j 2 --release -p bingsu -p bingsu-collect
+          cargo build -j 2 --release -p bingsu -p bingsu-collect
+          python3 bench/git-product.py --prepare "$RUNNER_TEMP/base/target/release/bingsu" --out "$RUNNER_TEMP/measurements/base-preparation.json"
+          python3 bench/git-product.py --prepare target/release/bingsu --out "$RUNNER_TEMP/measurements/candidate-preparation.json"
+      - name: Alternate 200 pairs per case in the controlled protocol
+        env:
+          BINGSU_BASE_REVISION: base-tip
+          BINGSU_CANDIDATE_REVISION: merge-result
+        run: |
+          # A BLOCKED measurement (exit 2) is recorded by the verdict step.
+          python3 bench/git-product.py --base "$RUNNER_TEMP/base/target/release/bingsu" --candidate target/release/bingsu \
+            --rounds 200 --cases "$GATE_CASES" --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
+      - name: Record the verdict
+        run: |
+          args=()
+          if [ -n "$GATE_TIME_RATIO" ]; then args+=(--threshold "$GATE_TIME_RATIO"); fi
+          if [ -n "$GATE_SIZE_CAP_BYTES" ]; then args+=(--cap-bytes "$GATE_SIZE_CAP_BYTES"); fi
+          if [ "$GATE_ENFORCE" = true ]; then args+=(--enforce); fi
+          python3 bench/size_gate.py --measurement "$RUNNER_TEMP/measurements/prompt-pairs.json" \
+            --base-preparation "$RUNNER_TEMP/measurements/base-preparation.json" \
+            --candidate-preparation "$RUNNER_TEMP/measurements/candidate-preparation.json" \
+            --out "$RUNNER_TEMP/measurements/verdict.json" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Preserve the pairs and the verdict
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prompt-gate
+          path: ${{ runner.temp }}/measurements/*.json
+          if-no-files-found: error
+
   # Spec section 8 filesystem-call budget scaffold: a synthetic program with
   # known calls runs under strace -f and the counts per role and call kind
   # must match the formulas exactly. Linux only (strace).
