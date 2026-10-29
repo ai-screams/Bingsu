@@ -18,8 +18,8 @@ def summary(p50, p95, n=200):
 
 def paired(base, cand, n=200, status="OBSERVED"):
     return {"status": status, "variants": {
-        "base": {"summary": {"prompt_ns": summary(*base, n=n)}, "samples": [{}] * n},
-        "candidate": {"summary": {"prompt_ns": summary(*cand, n=n)}, "samples": [{}] * n}}}
+        "base": {"summary": {"prompt_ns": summary(*base, n=n)}, "samples": [{"prompt_ns": 1.0}] * n},
+        "candidate": {"summary": {"prompt_ns": summary(*cand, n=n)}, "samples": [{"prompt_ns": 1.0}] * n}}}
 
 
 # 이것을 실패시키는 것: 비율 방향을 뒤집는 것(base/candidate), p50이나 p95 중 하나만 검사하는 것.
@@ -97,6 +97,42 @@ def test_missing_p95_or_samples_is_blocked_without_threshold():
     bad = paired((8e6, 12e6), (9e6, 12e6))
     del bad["variants"]["base"]["samples"]
     assert gate.relative_gate(bad, "prompt_ns", None)["status"] == "BLOCKED"
+
+
+def with_samples(side, samples, n=None):
+    value = paired((8e6, 12e6), (9e6, 12e6))
+    value["variants"][side]["samples"] = samples
+    if n is not None:
+        value["variants"][side]["summary"]["prompt_ns"]["n"] = n
+    return value
+
+
+# 이것을 실패시키는 것: 표본의 metric 값 검증이나 base/candidate 쌍 수 일치 검사를 빼는 것.
+@pytest.mark.parametrize("side", ["base", "candidate"])
+@pytest.mark.parametrize("samples", [[{}] * 200, [{"prompt_ns": NAN}] * 200, [{"prompt_ns": -1}] * 200,
+                                     [{"prompt_ns": None}] * 200, [1] * 200])
+def test_raw_samples_must_carry_finite_metric(side, samples):
+    assert gate.relative_gate(with_samples(side, samples), "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("side", ["base", "candidate"])
+def test_pair_counts_must_match(side):
+    value = with_samples(side, [{"prompt_ns": 1.0}] * 201, n=201)
+    assert gate.relative_gate(value, "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 비율이 유한한지 계산 뒤에 확인하지 않는 것.
+@pytest.mark.parametrize("threshold", [None, 1.1])
+def test_overflowing_ratio_is_blocked_and_serializes(tmp_path, threshold):
+    value = paired((1e-308, 1e-308), (1e308, 1e308))
+    assert gate.relative_gate(value, "prompt_ns", threshold)["status"] == "BLOCKED"
+    sizes = tmp_path / "s.json"
+    sizes.write_text(json.dumps({"stripped_bytes": {"front": 1, "collector": 1, "combined": 2}}))
+    meas = tmp_path / "m.json"
+    meas.write_text(json.dumps({"cases": {"no-git": value}}))
+    args = ["--measurement", str(meas), "--base-preparation", str(sizes), "--candidate-preparation", str(sizes), "--out", str(tmp_path / "v.json")]
+    assert gate.main(args + (["--threshold", str(threshold)] if threshold else [])) == 0
+    assert json.loads((tmp_path / "v.json").read_text())["status"] == "BLOCKED"
 
 
 @pytest.mark.parametrize("threshold", [NAN, INF, -1.0, 0, True])

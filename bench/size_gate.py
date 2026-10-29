@@ -42,8 +42,10 @@ def _number(v):
     return type(v) in (int, float) and math.isfinite(v) and v >= 0
 
 
-def _valid_summary(row, samples):
+def _valid_summary(row, samples, metric):
     if not isinstance(row, dict) or type(row.get("n")) is not int or not isinstance(samples, list) or len(samples) != row["n"]:
+        return False
+    if not all(isinstance(x, dict) and _number(x.get(metric)) for x in samples):
         return False
     return all(_number(row.get(k)) for k in ("p50", "p95", "variance", "min", "max"))
 
@@ -59,19 +61,23 @@ def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateRes
         samples = [r["samples"] for r in rows]
     except (KeyError, TypeError):
         return _blocked(metric, "no summary or raw samples for " + str(metric))
-    if not (_valid_summary(base, samples[0]) and _valid_summary(cand, samples[1])):
-        return _blocked(metric, "invalid evidence: non-finite, incomplete or inconsistent with the raw samples")
+    if not (_valid_summary(base, samples[0], metric) and _valid_summary(cand, samples[1], metric)
+            and base["n"] == cand["n"]):
+        return _blocked(metric, "invalid evidence: non-finite, incomplete, unpaired or inconsistent with the raw samples")
     if paired.get("status") != "OBSERVED" or min(base["n"], cand["n"]) < MIN_PAIRS:
         return _blocked(metric, "fewer than %d alternated pairs or unobserved" % MIN_PAIRS, base=base, candidate=cand)
     if not (base["p50"] > 0 and base["p95"] > 0):
         return _blocked(metric, "base percentile is zero", base=base, candidate=cand)
     if threshold is not None and not (type(threshold) in (int, float) and math.isfinite(threshold) and threshold > 0):
         return _blocked(metric, "invalid threshold", base=base, candidate=cand)
+    ratios = (cand["p50"] / base["p50"], cand["p95"] / base["p95"])
+    if not all(math.isfinite(r) for r in ratios):
+        return _blocked(metric, "ratio overflows")
     observed_ms = cand["p50"] / 1e6
     over = observed_ms > ABSOLUTE_TARGET_MS
     result = GateResult(
         metric=metric, base=base, candidate=cand,
-        ratio_p50=cand["p50"] / base["p50"], ratio_p95=cand["p95"] / base["p95"], threshold=threshold,
+        ratio_p50=ratios[0], ratio_p95=ratios[1], threshold=threshold,
         absolute={"target_ms": ABSOLUTE_TARGET_MS, "observed_ms": observed_ms,
                   "disposition": "recorded over target; needs user disposition, not a failure" if over else None})
     if threshold is None:
