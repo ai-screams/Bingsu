@@ -1031,6 +1031,15 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
             # 이것을 실패시키는 것: futex 아닌 restart 모양을 건너뛰는 것.
             assert c.args == "<... resuming interrupted futex ...>", ("helper restart", c)
             continue
+        # A call its task's exit cut short (strace prints `= ?`) has only the
+        # arguments printed before <unfinished ...>; the path rules below need
+        # all of them, so a path-bearing one fails closed with the exit that
+        # ended it (m3d-F8).
+        # 이것을 실패시키는 것: 인자가 덜 온 경로 호출을 IndexError나 일부 인자로 판정하는 것.
+        if c.ret == "?" and (call_paths(c) or content_paths(c)):
+            ended = next((line.split(None, 1)[1] for line in scoped[::-1]
+                          if line.split()[0] == str(c.pid) and line.split(None, 1)[1].startswith("+++ ")), None)
+            raise AssertionError(("helper path call cut short by its task's exit", c, ended))
         exe_walk = exe_walks[c.pid]
         collector_owner = collector_walk is not None and c.pid == helper_pid
         # 이것을 실패시키는 것: collector 고정 경로의 fd를 관찰 없이 읽거나 쓰기·변경에 쓰는 것.
