@@ -703,6 +703,11 @@ def main():
     OUT = args.out.resolve().parent
     try:
         M3B.protocol.validate_output(OUT)
+        # One request path, and only where it is judged: never dropped silently.
+        if isinstance(args.condition, dict) and "admission" in args.condition:
+            raise ValueError("admission is chosen with --admission, not --condition")
+        if args.admission != "default" and (args.x03_trace or args.prompt_memory or args.prepare):
+            raise ValueError("--admission applies only to a paired --base/--candidate measurement")
         if args.x03_trace:
             cases = args.cases.split(",")
             if not cases or set(cases) - set(CASES):
