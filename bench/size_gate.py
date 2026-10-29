@@ -15,6 +15,9 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import protocol
+
 MIN_PAIRS = 200
 # Spec section 1303: warm prompt median target, recorded next to the verdict only.
 ABSOLUTE_TARGET_MS = 10.0
@@ -38,16 +41,22 @@ def _blocked(metric, reason, **extra):
     return GateResult(status="BLOCKED", metric=metric, reason=reason, **extra)
 
 
-def _number(v):
-    return type(v) in (int, float) and math.isfinite(v) and v >= 0
+def _recomputed(row, samples, metric):
+    """The summary recomputed from the raw samples by the D1 summarizer, or None.
 
-
-def _valid_summary(row, samples, metric):
-    if not isinstance(row, dict) or type(row.get("n")) is not int or not isinstance(samples, list) or len(samples) != row["n"]:
-        return False
-    if not all(isinstance(x, dict) and _number(x.get(metric)) for x in samples):
-        return False
-    return all(_number(row.get(k)) for k in ("p50", "p95", "variance", "min", "max"))
+    None when the samples are missing, malformed, non-finite or too large for a float, or
+    when the given summary disagrees with them: the verdict never trusts a summary alone.
+    """
+    if not isinstance(row, dict) or not isinstance(samples, list):
+        return None
+    try:
+        values = [x[metric] for x in samples]
+        if any(type(v) not in (int, float) for v in values):
+            return None
+        got = protocol.summary(values)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return None
+    return got if all(row.get(k) == got[k] for k in got) else None
 
 
 def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateResult:
@@ -61,9 +70,9 @@ def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateRes
         samples = [r["samples"] for r in rows]
     except (KeyError, TypeError):
         return _blocked(metric, "no summary or raw samples for " + str(metric))
-    if not (_valid_summary(base, samples[0], metric) and _valid_summary(cand, samples[1], metric)
-            and base["n"] == cand["n"]):
-        return _blocked(metric, "invalid evidence: non-finite, incomplete, unpaired or inconsistent with the raw samples")
+    base, cand = _recomputed(base, samples[0], metric), _recomputed(cand, samples[1], metric)
+    if base is None or cand is None or base["n"] != cand["n"]:
+        return _blocked(metric, "invalid evidence: summary disagrees with samples, or samples are malformed or unpaired")
     if paired.get("status") != "OBSERVED" or min(base["n"], cand["n"]) < MIN_PAIRS:
         return _blocked(metric, "fewer than %d alternated pairs or unobserved" % MIN_PAIRS, base=base, candidate=cand)
     if not (base["p50"] > 0 and base["p95"] > 0):

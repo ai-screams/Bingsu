@@ -1,6 +1,7 @@
 """PR time and size gate verdicts; the CI job shape is pinned from ci.yml."""
 import importlib.util
 import json
+import math
 import re
 from pathlib import Path
 
@@ -16,10 +17,15 @@ def summary(p50, p95, n=200):
     return {"n": n, "p50": p50, "p95": p95, "variance": 0.0, "min": p50, "max": p95}
 
 
-def paired(base, cand, n=200, status="OBSERVED"):
-    return {"status": status, "variants": {
-        "base": {"summary": {"prompt_ns": summary(*base, n=n)}, "samples": [{"prompt_ns": 1.0}] * n},
-        "candidate": {"summary": {"prompt_ns": summary(*cand, n=n)}, "samples": [{"prompt_ns": 1.0}] * n}}}
+def variant(p50, p95, n):
+    # nearest-rank p95 is index ceil(.95 n) - 1: the first k values are p50, the rest p95
+    k = math.ceil(.95 * n) - 1
+    samples = [{"prompt_ns": p50}] * k + [{"prompt_ns": p95}] * (n - k)
+    return {"summary": {"prompt_ns": gate.protocol.summary([s["prompt_ns"] for s in samples])}, "samples": samples}
+
+
+def paired(base, cand, n=200, status="OBSERVED", n_cand=None):
+    return {"status": status, "variants": {"base": variant(*base, n), "candidate": variant(*cand, n_cand or n)}}
 
 
 # 이것을 실패시키는 것: 비율 방향을 뒤집는 것(base/candidate), p50이나 p95 중 하나만 검사하는 것.
@@ -99,11 +105,9 @@ def test_missing_p95_or_samples_is_blocked_without_threshold():
     assert gate.relative_gate(bad, "prompt_ns", None)["status"] == "BLOCKED"
 
 
-def with_samples(side, samples, n=None):
+def with_samples(side, samples):
     value = paired((8e6, 12e6), (9e6, 12e6))
     value["variants"][side]["samples"] = samples
-    if n is not None:
-        value["variants"][side]["summary"]["prompt_ns"]["n"] = n
     return value
 
 
@@ -115,10 +119,36 @@ def test_raw_samples_must_carry_finite_metric(side, samples):
     assert gate.relative_gate(with_samples(side, samples), "prompt_ns", 1.10)["status"] == "BLOCKED"
 
 
+def test_pair_counts_must_match():
+    assert gate.relative_gate(paired((8e6, 12e6), (9e6, 12e6), n_cand=201), "prompt_ns", 1.10)["status"] == "BLOCKED"
+    assert gate.relative_gate(paired((8e6, 12e6), (9e6, 12e6), n=201, n_cand=200), "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: summary를 표본에서 다시 계산해 대조하지 않고 믿는 것.
 @pytest.mark.parametrize("side", ["base", "candidate"])
-def test_pair_counts_must_match(side):
-    value = with_samples(side, [{"prompt_ns": 1.0}] * 201, n=201)
+def test_summary_must_agree_with_samples(side):
+    value = paired((8e6, 12e6), (9e6, 12e6))
+    other = variant(800e6, 1200e6, 200)
+    value["variants"][side]["samples"] = other["samples"]
     assert gate.relative_gate(value, "prompt_ns", 1.10)["status"] == "BLOCKED"
+    # all-1 against all-100 samples with a summary that says 1 and 1: ratio is 100, not 1
+    lie = paired((1, 1), (100, 100))
+    lie["variants"]["candidate"]["summary"]["prompt_ns"] = dict(lie["variants"]["base"]["summary"]["prompt_ns"])
+    assert gate.relative_gate(lie, "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 큰 정수 표본에서 OverflowError를 잡지 않는 것.
+@pytest.mark.parametrize("side", ["base", "candidate"])
+def test_huge_integer_sample_is_blocked_without_raising(side):
+    value = paired((8e6, 12e6), (9e6, 12e6))
+    value["variants"][side]["samples"] = [{"prompt_ns": 10**400}] * 200
+    assert gate.relative_gate(value, "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
+def test_huge_integer_size_does_not_raise():
+    big = {"front": 10**400, "collector": 1, "combined": 10**400 + 1}
+    assert gate.size_gate(big, big, 1000)["status"] == "FAIL"
+    assert gate.size_gate(big, big, 10**401)["status"] == "PASS"
 
 
 # 이것을 실패시키는 것: 비율이 유한한지 계산 뒤에 확인하지 않는 것.
