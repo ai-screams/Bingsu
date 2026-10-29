@@ -635,7 +635,8 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
                          "S": {"status": "BLOCKED", "reason": "import per-role Linux strace -f -yy evidence; formula-only rows remain formula-only"},
                          "L": {"stage_durations": {"basis": "separate protected release diagnostic; see per-case raw stage_diagnostic, no substitution for shipped collection"},
                                "front_previous_read": {"basis": "shared confined prompt reader; fixture clock identity; separate from normal prompt wall time"}}},
-              "pending": ["M3d formal B5-B7", "whole-prompt peak RSS", "reboot-cold", "minimum supported hosts", "memory hypothesis certification"]}
+              "pending": ["M3d formal B5-B7", "whole-prompt peak RSS (separate --prompt-memory run; BLOCKED while D5 proof obligations are open)",
+                          "reboot-cold", "minimum supported hosts", "memory hypothesis certification"]}
     with tempfile.TemporaryDirectory(prefix="observations-", dir=ROOT / "target") as scratch:
         scratch = Path(scratch)
         repos = repositories(scratch)
@@ -664,10 +665,29 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
     return result
 
 
+def memory_run(binary: str, cases, rounds: int, shell: str, condition: dict) -> dict:
+    """D5 rows: traced prompts only, never inside latency rounds. The session
+    lock keeps every other measurement harness off the host meanwhile."""
+    memory = module("d5_prompt_memory", ROOT / "bench/prompt_memory.py")
+    value = {"schema": 1, "milestone": "M3d", "kind": "prompt-memory", "status": "OBSERVED", "metric": "rss",
+             "evidence_use": "RSS rows; a row certifies only with every proof obligation proven", "binary": str(binary),
+             "shell": shell, "host": M3B.host(), "condition": condition, "host_condition": M3B.protocol.observe_host(), "cases": {}}
+    with open(Path(tempfile.gettempdir()) / "bingsu-measurement.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for case in cases:
+            row = memory.measure_row(binary, case, rounds, shell=shell)
+            value["cases"][case] = row
+            if row["status"] != "OBSERVED":
+                value["status"] = "BLOCKED"
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare")
     parser.add_argument("--x03-trace", metavar="BINARY", help="Linux strace process-model runs; separate from latency")
+    parser.add_argument("--prompt-memory", metavar="BINARY", help="D5 whole-prompt peak RSS rows (Linux ptrace); separate from latency")
+    parser.add_argument("--shell", choices=("bash", "zsh", "fish"), default="bash")
     parser.add_argument("--base")
     parser.add_argument("--candidate")
     parser.add_argument("--rounds", type=int, default=200)
@@ -685,6 +705,12 @@ def main():
             if not cases or set(cases) - set(CASES):
                 raise ValueError("unknown cases")
             value = trace_run(args.x03_trace, cases)
+        elif args.prompt_memory:
+            cases = args.cases.split(",")
+            if not cases or len(set(cases)) != len(cases) or set(cases) - set(CASES):
+                raise ValueError("unknown or duplicate cases")
+            value = memory_run(args.prompt_memory, cases, args.rounds, args.shell,
+                               {**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode})
         else:
             value = prepare(args.prepare) if args.prepare else measure_pair(args.base, args.candidate, args.rounds, cases=args.cases.split(","),
             condition={**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode})

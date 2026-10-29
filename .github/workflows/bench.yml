@@ -90,3 +90,59 @@ jobs:
             ${{ runner.temp }}/measurements/*preparation.json
             ${{ runner.temp }}/measurements/m3c-product.json
           if-no-files-found: error
+
+  prompt-memory:
+    name: M3d prompt memory rows (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A reason known before measuring (a kernel whose source was not read)
+      # goes first, as an annotation and in the step summary.
+      - name: Report a BLOCKED reason known up front
+        run: python3 bench/prompt_memory.py --kernel-gate
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      # The tracer starts the shell with PTRACE_TRACEME and follows only its own
+      # descendants, which Yama scope 0 or 1 allows without privileges. Scope 2
+      # or 3 needs CAP_SYS_PTRACE; the job fails closed instead of raising it.
+      - name: Prepare ptrace for the tracer
+        run: |
+          scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)
+          echo "yama ptrace_scope: $scope"
+          case $scope in 0|1|absent) ;; *) echo "ptrace_scope $scope blocks the tracer"; exit 1 ;; esac
+          command -v cc
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends zsh fish
+          uname -r; nproc; cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/ksm/run || true
+      - run: cargo build --release -p bingsu -p bingsu-collect
+      # Rows stay BLOCKED until every proof obligation holds on the host; the
+      # raw rows are the record either way.
+      - name: Record 200 traced prompts per case
+        env:
+          BINGSU_MEASUREMENT_REVISION: ${{ github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/measurements"
+          status=0
+          for shell in bash zsh fish; do
+            python3 bench/git-product.py --prompt-memory target/release/bingsu --shell "$shell" --cases no-git,tracked-19000 \
+              --rounds 200 --out "$RUNNER_TEMP/measurements/prompt-memory-$shell.json" || status=$?
+          done
+          exit "$status"
+      - name: Report BLOCKED rows and their open obligations
+        if: always()
+        run: python3 bench/prompt_memory.py --summary "$RUNNER_TEMP"/measurements/prompt-memory-*.json
+      - name: Preserve prompt memory rows including BLOCKED evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prompt-memory-${{ matrix.os }}
+          path: ${{ runner.temp }}/measurements/prompt-memory-*.json
+          if-no-files-found: error
