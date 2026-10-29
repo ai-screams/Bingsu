@@ -272,3 +272,96 @@ def test_load_merges_given_paths(tmp_path):
     (tmp_path / "notes.txt").write_text("x")
     with pytest.raises(summarize.InputError, match="not a folder, a .jsonl or a .json file"):
         summarize.load(warm, tmp_path / "notes.txt")
+
+
+def _fs(boot, phase, status=0, us=1500):
+    return ["2026-10-29T01:00:00Z", boot, "zsh", f"phase={phase}", f"status={status}", f"{us}us"]
+
+
+# 이것을 실패시키는 것: status가 0이 아닌 줄의 시간을 그 부팅의 phase 값으로 쓰는 것, 실패한 phase 하나 때문에
+# 같은 부팅의 다른 phase나 다른 부팅까지 무효로 만드는 것.
+def test_failed_init_invalidates_that_boot_phase():
+    got = summarize.ingest_first_shell([_fs("b1", "cold", status=3), _fs("b1", "warm"), _fs("b2", "cold")])
+    assert got["b1"]["cold"] == {"na": "init status 3"}
+    assert got["b1"]["warm"] == {"us": 1500} and got["b2"]["cold"] == {"us": 1500}
+
+
+# 이것을 실패시키는 것: 예약 폴더만 있고 줄이 없는 phase를 값이 있는 것으로 세거나 아예 빼는 것, 예약이 없는데
+# 있는 것으로 보는 것(reservations=None이면 검사 생략).
+def test_reservation_without_row_means_no_cold():
+    got = summarize.ingest_first_shell([_fs("b1", "warm")], reservations=[("b1", "cold"), ("b1", "warm")])
+    assert got["b1"]["cold"]["na"].startswith("reserved, no row") and got["b1"]["warm"] == {"us": 1500}
+    assert summarize.ingest_first_shell([_fs("b1", "warm")])["b1"]["cold"] == {"na": "not logged"}
+    assert summarize.ingest_first_shell([], reservations=[("b9", "cold")])["b9"]["cold"]["na"].startswith("reserved")
+
+
+# 이것을 실패시키는 것: 같은 부팅 phase가 두 번 나오는데 하나를 조용히 고르는 것, 모양이 틀린 줄을 건너뛰는 것.
+@pytest.mark.parametrize("rows", [
+    [_fs("b", "cold"), _fs("b", "cold")],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=hot", "status=0", "1us"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=cold", "status=0"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=cold", "status=0", "1.5us"]],
+    [["2026-10-29T01:00:00Z", "b", "zsh", "phase=cold", "status=ok", "1us"]],
+])
+def test_malformed_first_shell_rows_are_input_errors(rows):
+    with pytest.raises(summarize.InputError):
+        summarize.ingest_first_shell(rows)
+
+
+def _login(label, ident="id1", utc=None, boot=None):
+    order = ["before-logout", "after-login", "before-reboot", "after-reboot"]
+    utc = utc if utc is not None else f"2026-10-29T01:0{order.index(label)}:00Z"
+    boot = boot if boot is not None else (1791259999 if ident != "id1" else 1791259131)
+    return f"{utc}\t{label}\t{ident}\t{boot}\n"
+
+
+# 이것을 실패시키는 것: 한 쌍에서 줄이 하나 빠졌는데 판정을 내리는 것, 같은 label이 두 줄인데 하나를 고르는 것,
+# 로그아웃 쌍을 reboot 쌍의 줄로 채우는 것, 식별자 비교를 뒤집는 것.
+def test_judge_login_transition_needs_both_lines():
+    full = _login("before-logout") + _login("after-login") + _login("before-reboot") + _login("after-reboot", "id2")
+    got = summarize.judge_login_transition(full)
+    assert got["logout"][0] == "same-boot" and got["reboot"][0] == "new-boot"
+    got = summarize.judge_login_transition(_login("before-logout") + _login("before-reboot") + _login("after-reboot", "id2"))
+    assert got["logout"][0] == "BLOCKED" and "after-login" in got["logout"][1] and got["reboot"][0] == "new-boot"
+    assert summarize.judge_login_transition(_login("before-logout") * 2 + _login("after-login"))["logout"][0] == "BLOCKED"
+    assert summarize.judge_login_transition("")["logout"][0] == "BLOCKED"
+    assert summarize.judge_login_transition(_login("before-reboot") + _login("after-reboot"))["reboot"][0] == "not-rebooted"
+    with pytest.raises(summarize.InputError):
+        summarize.judge_login_transition("a\tb\n")
+
+
+# 이것을 실패시키는 것: 쌍의 시각을 보지 않는 것(거꾸로 찍힌 쌍도 판정함), 시각을 파싱하지 않는 것(빈 값·깨진 값),
+# 같은 identity인데 부팅 시각이 다른 쌍(또는 identity가 다른데 부팅 시각이 앞서는 쌍)을 판정하는 것.
+@pytest.mark.parametrize("text, pair", [
+    (_login("before-logout", utc="2026-10-29T02:00:00Z") + _login("after-login", utc="2026-10-29T01:00:00Z"), "logout"),
+    (_login("before-logout", utc="2026-10-29T01:00:00Z") + _login("after-login", utc="2026-10-29T01:00:00Z"), "logout"),
+    (_login("before-reboot", utc="2026-10-29T02:00:00Z") + _login("after-reboot", "id2", utc="2026-10-29T01:00:00Z"), "reboot"),
+    (_login("before-logout", utc="") + _login("after-login"), "logout"),
+    (_login("before-logout") + _login("after-login", utc="2026-13-45T99:00:00Z"), "logout"),
+    (_login("before-logout") + _login("after-login", boot=1791259000), "logout"),
+    (_login("before-reboot") + _login("after-reboot", "id2", boot=1791259000), "reboot"),
+    (_login("before-logout") + _login("after-login", boot="x"), "logout"),
+    (_login("before-logout") + _login("after-login", ident=" "), "logout"),
+])
+def test_login_transition_pair_evidence_must_agree(text, pair):
+    assert summarize.judge_login_transition(text)[pair][0] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 필수 열(UTC, boot, shell)이 비었거나 모양이 틀린 줄에서 표본을 내는 것.
+@pytest.mark.parametrize("bad", [
+    ["", "id1", "zsh"], ["2026-10-29T01:00:00Z", "", "zsh"], ["2026-10-29T01:00:00Z", "id1", ""],
+    ["yesterday", "id1", "zsh"], ["2026-10-29T01:00:00Z", "id1", "fish"], ["2026-10-29T01:00:00Z", "i d", "zsh"],
+])
+def test_first_shell_required_columns_are_checked(bad):
+    with pytest.raises(summarize.InputError):
+        summarize.ingest_first_shell([bad + ["phase=cold", "status=0", "1500us"]])
+
+
+# 이것을 실패시키는 것: 로그 파일 이름을 glob 패턴으로 읽는 것(대괄호 이름에서 예약을 놓침), 접두만 맞는 다른 파일,
+# 폴더가 아닌 파일을 예약으로 세는 것.
+def test_reservations_match_a_literal_log_name(tmp_path):
+    log = tmp_path / "first[1].tsv"
+    log.write_text("")
+    (tmp_path / "first[1].tsv.b1.cold").mkdir()
+    (tmp_path / "first[1].tsv.b2.cold").write_text("a file, not a reservation")
+    assert summarize.first_shell_file(log) == ([], [("b1", "cold")])

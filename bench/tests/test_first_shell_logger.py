@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -132,3 +133,19 @@ def test_no_clock_logs_nothing_and_says_so(tmp_path):
     r = source("bash", env, tmp_path, pre="unset EPOCHREALTIME; ")
     assert r.returncode == 0 and "no EPOCHREALTIME" in r.stderr, r
     assert rows(tmp_path) == [] and not (tmp_path / "argv").exists()
+
+
+# 이것을 실패시키는 것: logger가 쓰는 줄 모양과 ingest가 읽는 모양이 어긋나는 것(열 수·phase=·status=·us),
+# 실패한 init의 줄이 무효로 읽히지 않는 것, 예약 폴더를 읽어 줄 없는 phase를 찾지 못하는 것.
+@pytest.mark.parametrize("shell", LOGGER_SHELLS)
+def test_logger_output_ingests(shell, tmp_path):
+    sys.path.insert(0, str(ROOT / "bench"))
+    import summarize
+    env = setup(tmp_path)
+    source(shell, dict(env, FAKE_RC="3"), tmp_path)
+    source(shell, env, tmp_path)
+    got = summarize.ingest_first_shell(*summarize.first_shell_file(tmp_path / "first.tsv"))
+    assert got[boot_id()]["cold"] == {"na": "init status 3"} and "us" in got[boot_id()]["warm"]
+    (tmp_path / "first.tsv").write_text("")  # a shell killed in init: reservations stay, no rows
+    got = summarize.ingest_first_shell(*summarize.first_shell_file(tmp_path / "first.tsv"))
+    assert got[boot_id()]["cold"]["na"].startswith("reserved, no row")
