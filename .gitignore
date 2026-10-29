@@ -265,6 +265,7 @@ secrets/
 .superpowers/
 .claude/settings.local.json
 .claude.local.md
+CLAUDE.local.md
 
 # ==============================================================================
 # Misc
