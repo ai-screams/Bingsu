@@ -267,6 +267,37 @@ def controlled_protocol(monkeypatch):
         thermal='normal', load_1m=1., reference=p.summary([100] * 20)))
 
 
+def run_cli(monkeypatch, tmp_path, *argv):
+    import sys
+    calls, written = [], {}
+    for name in ('measure_pair', 'trace_run', 'memory_run', 'prepare'):
+        monkeypatch.setattr(git, name, lambda *a, _n=name, **k: calls.append(_n) or {'status': 'OBSERVED'})
+    monkeypatch.setattr(git.M3B.protocol, 'write_output', lambda _, value: written.update(value))
+    monkeypatch.setattr(sys, 'argv', ['git-product.py', '--out', str(tmp_path / 'out.json'), *argv])
+    return git.main(), calls, written
+
+
+# 이것을 실패시키는 것: --condition JSON의 admission을 받거나(덮어써 default로 기록), 다른 갈래가 --admission을 버린다.
+@pytest.mark.parametrize('argv', [
+    ['--base', 'b', '--candidate', 'c', '--condition', '{"admission":"ci-r2"}'],
+    ['--base', 'b', '--candidate', 'c', '--admission', 'ci-r2', '--condition', '{"admission":"wide"}'],
+    ['--x03-trace', 'bin', '--admission', 'ci-r2'],
+    ['--prompt-memory', 'bin', '--admission', 'ci-r2'],
+    ['--prepare', 'bin', '--admission', 'ci-r2'],
+])
+def test_admission_requests_are_never_dropped(monkeypatch, tmp_path, argv):
+    code, calls, written = run_cli(monkeypatch, tmp_path, *argv)
+    assert code == 2 and calls == [] and written['status'] == 'BLOCKED' and 'admission' in written['reason']
+
+
+@pytest.mark.parametrize('argv,branch', [(['--x03-trace', 'bin'], 'trace_run'), (['--prompt-memory', 'bin'], 'memory_run'),
+                                         (['--prepare', 'bin'], 'prepare'), (['--base', 'b', '--candidate', 'c'], 'measure_pair'),
+                                         (['--x03-trace', 'bin', '--admission', 'default'], 'trace_run')])
+def test_other_branches_run_with_the_default_admission(monkeypatch, tmp_path, argv, branch):
+    code, calls, _ = run_cli(monkeypatch, tmp_path, *argv)
+    assert code == 0 and calls == [branch]
+
+
 # 이것을 실패시키는 것: --cases 선택을 무시하고 모든 칸을 측정한다.
 def test_cases_option_selects_only_named_cases(pair):
     value = git.measure_pair('base', 'candidate', 200, cases=['git-clean'])
@@ -288,7 +319,12 @@ def test_cli_forwards_cases_mode_and_condition(monkeypatch, tmp_path):
         '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
     assert git.main() == 0
     assert received['cases'] == ['git-clean']
-    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0, admission='default')
+    # R2 only by explicit choice: the prompt-gate job passes --admission ci-r2.
+    monkeypatch.setattr(sys, 'argv', ['git-product.py', '--base', 'b', '--candidate', 'c',
+        '--out', str(tmp_path / 'out.json'), '--admission', 'ci-r2'])
+    assert git.main() == 0
+    assert received['condition'] == {**git.M3B.protocol.DEFAULT, 'admission': 'ci-r2'}
 
 
 @pytest.mark.parametrize('metric', ['prompt_ns', 'admission_gc_ns'])

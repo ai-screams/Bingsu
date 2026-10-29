@@ -403,7 +403,7 @@ def test_cli_forwards_mode_and_condition(monkeypatch, tmp_path):
         '--out', str(tmp_path / 'out.json'), '--mode', 'experiment',
         '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
     assert product.main() == 0
-    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0, admission='default')
 
 
 @pytest.mark.parametrize('metric', product.REQUIRED)

@@ -44,6 +44,7 @@ class Condition(TypedDict):
     power: str
     load_range: tuple[float, float] | None
     synthetic_load: int
+    admission: Literal['default', 'ci-r2']
 
 
 Calibration = dict
@@ -51,7 +52,8 @@ Block = dict
 Paired = dict
 Blocked = dict
 SESSION = uuid.uuid4().hex
-DEFAULT = Condition(mode='gate', power='ac', load_range=None, synthetic_load=0)
+DEFAULT = Condition(mode='gate', power='ac', load_range=None, synthetic_load=0, admission='default')
+CI_R2_OUTSIDE = 'ci-r2 requested outside GitHub Actions'
 
 
 def summary(values):
@@ -114,12 +116,45 @@ def calibrate(reference: Path, blocks: int = 5) -> Calibration:
     medians = [r['p50'] for r in rows[1:]]  # D0: first block is discarded.
     return dict(reference_binary=str(reference), reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
                 blocks=rows, discarded=[0], p95_of_medians=summary(medians)['p95'],
+                median_of_medians=statistics.median(medians),
                 stable=min(medians) > 0 and max(medians) / min(medians) <= 1.05, **identity())
 
 
 def complete_summary(row, n):
     return (row.get('n') == n and all(type(row.get(k)) in (int, float) and
             math.isfinite(row[k]) and row[k] >= 0 for k in ('p50', 'p95', 'variance', 'min', 'max')))
+
+
+CI_REFERENCE_FACTOR = 1.03
+
+
+def ci_r2_host(power):
+    """A GitHub Actions runner without a power device: the only host U3 rule R2 may judge."""
+    return power == 'mains-assumed' and os.environ.get('GITHUB_ACTIONS') == 'true'
+
+
+def admission_basis(power, condition):
+    """'ci-r2' when a gate block is judged by U3 rule R2, else 'default'.
+
+    R2 needs both the explicit request (condition admission 'ci-r2') and a
+    hosted runner; an ambient environment alone never selects it.
+    """
+    return 'ci-r2' if condition.get('admission') == 'ci-r2' and ci_r2_host(power) else 'default'
+
+
+def reference_limit(power, calibration, condition):
+    """The largest admitted before/after reference p50 of a gate block, or None.
+
+    Rule R2 compares with 1.03 times the median of the four calibration medians;
+    the default rule keeps the largest calibration median. Only this baseline
+    differs: the caller keeps every other admission check.
+    """
+    if admission_basis(power, condition) == 'ci-r2':
+        median = calibration.get('median_of_medians')
+        if type(median) not in (int, float) or not math.isfinite(median) or median <= 0:
+            return None
+        return median * CI_REFERENCE_FACTOR
+    return calibration['p95_of_medians']
 
 
 def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
@@ -138,7 +173,10 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
                 not math.isfinite(ref['p50']) or ref['p50'] <= 0):
             reason = 'missing telemetry or thermal warning'
         elif condition['mode'] == 'gate':
-            if h['power'] not in ('ac', 'mains-assumed') or ref['p50'] > calibration['p95_of_medians']:
+            limit = reference_limit(h['power'], calibration, condition)
+            if condition.get('admission') == 'ci-r2' and not ci_r2_host(h['power']):
+                reason = CI_R2_OUTSIDE  # requested R2 is never silently the default rule
+            elif h['power'] not in ('ac', 'mains-assumed') or limit is None or ref['p50'] > limit:
                 reason = 'power or reference drift'
         elif condition['mode'] == 'experiment':
             bounds = condition.get('load_range')
@@ -148,6 +186,10 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
         else:
             reason = 'unknown mode'
     block.update(kept=reason is None, reason=reason)
+    if condition.get('mode') == 'gate':
+        # Which drift baseline judged the block; a host whose power changed mid-block is 'mixed'.
+        bases = {admission_basis(block.get(side, {}).get('power'), condition) for side in ('before', 'after')}
+        block['admission_basis'] = bases.pop() if len(bases) == 1 else 'mixed'
     return block['kept']
 
 
@@ -193,6 +235,12 @@ def _paired(base, candidate, rounds, condition, observe, *, required_metrics=(),
         return result
     if condition.get('mode') not in ('gate', 'experiment'):
         result['reason'] = 'unsupported condition; synthetic load requires an external bounded experiment driver'
+        return result
+    if condition.get('admission', 'default') not in ('default', 'ci-r2'):
+        result['reason'] = 'unknown admission'
+        return result
+    if condition.get('admission') == 'ci-r2' and (condition['mode'] != 'gate' or not ci_r2_host(observe_host()['power'])):
+        result['reason'] = CI_R2_OUTSIDE
         return result
     try:
         reference = Path(base).resolve()
@@ -318,11 +366,16 @@ def paired(base, candidate, rounds, condition, observe, *, required_metrics=(), 
                     if any(worker.poll() is not None for worker in workers):
                         raise ValueError('bounded synthetic load expired')
                     return observe(name, binary)
-                return _paired(base, candidate, rounds, condition, checked_observe, required_metrics=required_metrics, seed=seed)
+                result = _paired(base, candidate, rounds, condition, checked_observe, required_metrics=required_metrics, seed=seed)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        return dict(schema=1, status='BLOCKED', reason=str(error), condition=condition,
-                    calibration={}, seed=seed, order=[], blocks=[],
-                    variants={n: dict(samples=[], summary={}) for n in ('base', 'candidate')})
+        result = dict(schema=1, status='BLOCKED', reason=str(error), condition=condition,
+                      calibration={}, seed=seed, order=[], blocks=[],
+                      variants={n: dict(samples=[], summary={}) for n in ('base', 'candidate')})
+    # Requested policy next to the one that admitted the kept blocks (None: no block kept).
+    applied = {b.get('admission_basis') for b in result['blocks'] if b.get('kept')}
+    result.update(admission_requested=condition.get('admission', 'default'),
+                  admission_applied=applied.pop() if len(applied) == 1 else 'mixed' if applied else None)
+    return result
 
 
 def n7_pairs(base: Path, candidate: Path, rounds: int, condition: Condition) -> Paired:

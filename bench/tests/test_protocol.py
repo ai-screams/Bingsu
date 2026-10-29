@@ -11,7 +11,22 @@ import protocol as p
 
 
 def calibration():
-    return dict(stable=True, p95_of_medians=100, **p.identity())
+    return dict(stable=True, p95_of_medians=100, median_of_medians=100, **p.identity())
+
+
+@pytest.fixture(autouse=True)
+def outside_ci(monkeypatch):
+    # Rule R2 needs GITHUB_ACTIONS=true (and the explicit request); tests opt in explicitly.
+    monkeypatch.delenv('CI', raising=False)
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+
+
+R2 = {**p.DEFAULT, 'admission': 'ci-r2'}
+
+
+def on_actions(monkeypatch):
+    monkeypatch.setenv('CI', 'true')
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
 
 
 def host(**kwargs):
@@ -68,6 +83,161 @@ def test_mains_host_is_admitted_by_reference_only():
     assert not p.admit(row, p.DEFAULT, calibration())
 
 
+# Reference p50 of calibration blocks 1-4 and of each block (before, after, kept) of the
+# hosted pull request run that motivated rule R2 (ubuntu-24.04, same binary on both sides).
+HOSTED_RUN = {
+    'git-dirty': ([838577.5, 850971.0, 837084.5, 839960.0], [
+        (861269.0, 847709.0, False), (849412.5, 848670.5, True), (850930.5, 854542.0, False), (827131.0, 862011.0, False), (851666.5, 839795.5, False)]),
+    'git-clean': ([845946.5, 843000.5, 835471.5, 832461.0], [
+        (941524.5, 843341.5, False), (842695.0, 858965.5, False), (842194.0, 833482.5, True), (829631.0, 837125.0, True), (822116.5, 846788.0, False), (847940.0, 834600.0, False), (822783.0, 848615.5, False)]),
+    'no-git': ([850074.0, 842900.5, 846857.5, 841277.0], [
+        (922493.5, 850509.5, False), (846237.0, 853054.5, False), (845735.5, 844403.5, True), (836043.0, 846376.5, True), (830843.0, 852573.5, False), (833869.0, 853841.0, False), (849844.0, 847845.0, True), (846558.0, 856436.0, False), (847699.5, 831564.5, True), (839234.0, 847729.5, True), (838913.0, 837457.5, True), (836696.5, 845227.0, True), (844255.5, 846820.0, True), (835644.5, 857284.5, False), (843954.0, 852165.0, False), (840032.5, 839835.0, True), (838677.5, 853710.5, False), (831965.5, 864660.5, False), (853761.0, 841913.5, False)]),
+}
+
+
+def calibrated(monkeypatch, tmp_path, medians):
+    binary = tmp_path / 'base'; binary.write_bytes(b'base')
+    rows = iter([p.summary([v] * 20) for v in [1, *medians]])
+    monkeypatch.setattr(p, 'reference_block', lambda _: next(rows))
+    return p.calibrate(binary)
+
+
+def hosted(before, after=None, **kwargs):
+    row = block(power='mains-assumed', thermal='unavailable', reference=p.summary([before] * 20), **kwargs)
+    row['after'].update(power='mains-assumed', thermal='unavailable', reference=p.summary([after or before] * 20))
+    return row
+
+
+# 이것을 실패시키는 것: R2 배수를 1.03이 아닌 값(1.05 등)으로 두거나 기준을 보정 최댓값으로 되돌린다.
+@pytest.mark.parametrize('case', HOSTED_RUN)
+def test_ci_rule_admits_the_hosted_run_retrospectively(monkeypatch, tmp_path, case):
+    medians, blocks = HOSTED_RUN[case]
+    cal = calibrated(monkeypatch, tmp_path, medians)
+    on_actions(monkeypatch)
+    # Without the request the recorded verdicts come back, even on the runner: the fixture is the run as judged.
+    assert [p.admit(hosted(b, a), p.DEFAULT, cal) for b, a, _ in blocks] == [k for *_, k in blocks]
+    kept = [p.admit(hosted(b, a), R2, cal) for b, a, _ in blocks]
+    # The two rejected blocks are the 1.12x and 1.09x before-references.
+    assert kept.count(False) == {'git-dirty': 0, 'git-clean': 1, 'no-git': 1}[case]
+    assert all(k or b / cal['median_of_medians'] > 1.09 for (b, _, _), k in zip(blocks, kept))
+
+
+# 이것을 실패시키는 것: 블록에 판정 기준을 기록하지 않거나, 요청 없이·GITHUB_ACTIONS 없이·AC host에서도 'ci-r2'로 적는다.
+def test_block_records_its_admission_basis(monkeypatch, tmp_path):
+    cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
+    on_actions(monkeypatch)
+    for row in (hosted(102), block()):
+        p.admit(row, p.DEFAULT, cal)
+        assert row['admission_basis'] == 'default'
+    kept, rejected, ac = hosted(102), hosted(104), block()
+    assert p.admit(kept, R2, cal) and not p.admit(rejected, R2, cal) and not p.admit(ac, R2, cal)
+    assert kept['admission_basis'] == rejected['admission_basis'] == 'ci-r2'
+    assert ac['admission_basis'] == 'default' and ac['reason'] == p.CI_R2_OUTSIDE
+    mixed = hosted(100)
+    mixed['after']['power'] = 'ac'
+    p.admit(mixed, R2, cal)
+    assert mixed['admission_basis'] == 'mixed'
+    experiment = dict(mode='experiment', power='ac', load_range=(1, 3), synthetic_load=0)
+    row = block()
+    p.admit(row, experiment, cal)
+    assert 'admission_basis' not in row
+
+
+# 이것을 실패시키는 것: R2를 1.05배로 넓히거나, 요청·GITHUB_ACTIONS=true·mains-assumed 중 하나 없이 적용하거나,
+# CI 변수로 켜거나, 요청이 거부될 때 조용히 기본 규칙으로 판정하거나, 보정 최댓값과 OR로 섞는다.
+def test_ci_rule_boundary_and_scope(monkeypatch, tmp_path):
+    cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
+    assert p.admit(hosted(100), p.DEFAULT, cal)
+    monkeypatch.setenv('CI', 'true')
+    assert not p.admit(hosted(102), p.DEFAULT, cal)  # ambient CI alone: today's rule
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    assert not p.admit(hosted(102), p.DEFAULT, cal)  # no request: today's rule
+    monkeypatch.delenv('GITHUB_ACTIONS')
+    row = hosted(100)
+    assert not p.admit(row, R2, cal) and row['reason'] == p.CI_R2_OUTSIDE  # requested off the runner: refused
+    monkeypatch.setenv('GITHUB_ACTIONS', '1')
+    assert not p.admit(hosted(100), R2, cal)
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    monkeypatch.delenv('CI')
+    assert p.admit(hosted(102), R2, cal) and p.admit(hosted(103), R2, cal)  # CI is not consulted
+    assert not p.admit(hosted(103.01), R2, cal) and not p.admit(hosted(104), R2, cal)
+    assert not p.admit(hosted(100, 104), R2, cal)  # the after side is checked too
+    ac = block(reference=p.summary([100] * 20))
+    assert not p.admit(ac, R2, cal) and ac['reason'] == p.CI_R2_OUTSIDE  # AC host
+    assert not p.admit(block(power='battery', reference=p.summary([100] * 20)), R2, cal)
+    # A calibration maximum more than 3% over the median does not widen R2.
+    wide = calibrated(monkeypatch, tmp_path, [100, 100, 100, 104.5])
+    assert wide['stable'] and not p.admit(hosted(104), R2, wide)
+
+
+# 이것을 실패시키는 것: R2 아래에서 보정 안정·identity·host 일치·telemetry·summary 20표본 검사 중 하나를 뺀다.
+@pytest.mark.parametrize('damage', ['unstable', 'foreign session', 'host changed', 'no load', 'no thermal',
+                                    'short summary', 'no median'])
+def test_ci_rule_keeps_every_other_check(monkeypatch, tmp_path, damage):
+    cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
+    on_actions(monkeypatch)
+    # In the R2 band only (above the calibration maximum); without a median even 100 is refused.
+    row = hosted(100 if damage == 'no median' else 102)
+    assert p.admit(copy.deepcopy(row), R2, cal)
+    if damage == 'unstable':
+        cal['stable'] = False
+    elif damage == 'foreign session':
+        cal['session'] = 'other-session'
+    elif damage == 'host changed':
+        row['after']['host'] = 'other-host'
+    elif damage == 'no load':
+        del row['before']['load_1m']
+    elif damage == 'no thermal':
+        row['after']['thermal'] = None
+    elif damage == 'short summary':
+        row['after']['reference'] = p.summary([102] * 19)
+    else:
+        del cal['median_of_medians']
+    assert not p.admit(row, R2, cal) and row['reason']
+
+
+# 이것을 실패시키는 것: 로컬 Linux(전원 장치 없음)에서 ambient CI·GITHUB_ACTIONS만으로 R2가 켜진다.
+def test_local_linux_shape_keeps_the_default_rule(monkeypatch, tmp_path):
+    monkeypatch.setattr(p.platform, 'system', lambda: 'Linux')
+    monkeypatch.setattr(p.Path, 'iterdir', lambda self: iter([]))
+    power = p.observe_host()['power']
+    assert power == 'mains-assumed'
+    on_actions(monkeypatch)
+    assert p.admission_basis(power, p.DEFAULT) == 'default'
+    cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
+    row = hosted(102)
+    assert not p.admit(row, p.DEFAULT, cal) and row['admission_basis'] == 'default'
+
+
+def mains(monkeypatch):
+    monkeypatch.setattr(p, 'observe_host', lambda: host(power='mains-assumed', thermal='unavailable'))
+    monkeypatch.setattr(p, 'snapshot', lambda _: host(power='mains-assumed', thermal='unavailable', reference=p.summary([102] * 20)))
+
+
+# 이것을 실패시키는 것: 측정 시작에서 요청을 검사하지 않거나(GITHUB_ACTIONS·전원·gate 모드), 결과에 요청·적용 정책을 남기지 않는다.
+def test_paired_run_checks_and_records_the_requested_admission(controlled, monkeypatch):
+    run = lambda condition: p.paired('base', 'candidate', 200, condition, lambda *_: dict(ns=1), required_metrics=('ns',), seed=1)
+    mains(monkeypatch)
+    monkeypatch.setenv('CI', 'true')
+    got = run(R2)
+    assert got['status'] == 'BLOCKED' and got['reason'] == p.CI_R2_OUTSIDE and got['blocks'] == []
+    assert got['admission_requested'] == 'ci-r2' and got['admission_applied'] is None
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    got = run(R2)
+    assert got['status'] == 'OBSERVED' and got['admission_requested'] == got['admission_applied'] == 'ci-r2'
+    got = run(None)  # 102 is over the calibration maximum: the default rule blocks
+    assert got['status'] == 'BLOCKED' and got['admission_requested'] == 'default' and got['admission_applied'] is None
+    assert {b['admission_basis'] for b in got['blocks']} == {'default'}
+    monkeypatch.setattr(p, 'observe_host', lambda: host())
+    assert run(R2)['reason'] == p.CI_R2_OUTSIDE  # AC host
+    mains(monkeypatch)
+    assert run({**R2, 'mode': 'experiment', 'load_range': (1, 3)})['reason'] == p.CI_R2_OUTSIDE
+    assert run({**p.DEFAULT, 'admission': 'wide'})['reason'] == 'unknown admission'
+    monkeypatch.setattr(p, 'snapshot', lambda _: host(reference=p.summary([100] * 20)))
+    got = run(None)
+    assert got['status'] == 'OBSERVED' and got['admission_applied'] == 'default'
+
+
 @pytest.mark.parametrize('damage', [dict(power='battery'), dict(thermal='unavailable'), dict(load_1m=4.)])
 def test_experiment_cell_rejects_mismatched_condition(damage):
     condition = dict(mode='experiment', power='ac', load_range=(1, 3), synthetic_load=0)
@@ -82,7 +252,7 @@ def test_calibration_drops_first_block(monkeypatch, tmp_path):
     monkeypatch.setattr(p, 'reference_block', lambda _: next(rows))
     got = p.calibrate(binary)
     assert len(got['blocks']) == 5 and got['discarded'] == [0]
-    assert got['p95_of_medians'] == 103 and got['stable']
+    assert got['p95_of_medians'] == 103 and got['median_of_medians'] == 101.5 and got['stable']
     rows = iter([p.summary([v]*20) for v in [1000, 100, 100, 100, 200]])
     assert not p.calibrate(binary)['stable']
 

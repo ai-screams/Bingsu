@@ -695,12 +695,19 @@ def main():
     parser.add_argument("--cases", default=",".join(CASES))
     parser.add_argument("--mode", choices=("gate", "experiment"), default="gate")
     parser.add_argument("--condition", type=json.loads)
+    parser.add_argument("--admission", choices=("default", "ci-r2"), default="default",
+                        help="drift baseline; ci-r2 (U3 rule R2) only on a GitHub Actions runner without a power device")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     global OUT
     OUT = args.out.resolve().parent
     try:
         M3B.protocol.validate_output(OUT)
+        # One request path, and only where it is judged: never dropped silently.
+        if isinstance(args.condition, dict) and "admission" in args.condition:
+            raise ValueError("admission is chosen with --admission, not --condition")
+        if args.admission != "default" and (args.x03_trace or args.prompt_memory or args.prepare):
+            raise ValueError("--admission applies only to a paired --base/--candidate measurement")
         if args.x03_trace:
             cases = args.cases.split(",")
             if not cases or set(cases) - set(CASES):
@@ -714,7 +721,7 @@ def main():
                                {**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode})
         else:
             value = prepare(args.prepare) if args.prepare else measure_pair(args.base, args.candidate, args.rounds, cases=args.cases.split(","),
-            condition={**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode})
+            condition={**M3B.protocol.DEFAULT, **(args.condition or {}), "mode": args.mode, "admission": args.admission})
         code = 2 if value.get("status") == "BLOCKED" else 0
     except (ValueError, OSError, KeyError, subprocess.TimeoutExpired) as error:
         value = {"milestone": "M3c", "formal_B5_B7": False, "status": "BLOCKED", "reason": str(error)}

@@ -986,23 +986,25 @@ jobs:
           fi
 
   # Spec section 11 gate: full prompt time (base tip against the merge result,
-  # alternated, 200 pairs per case) and stripped binary size. The threshold,
-  # the size cap and enforcement are decision U3: until it sets them the job
-  # runs and records its verdict (BLOCKED, never FAIL) and does not fail the
-  # pull request. Do not register it as a required check before U3.
+  # alternated, 200 pairs per case) and stripped binary size, judged with the
+  # decision U3 limits. The verdict is recorded but does not fail the pull
+  # request until five consecutive pull request runs finish without BLOCKED;
+  # only then turn on GATE_ENFORCE and register it as a required check.
+  # The streak counts runs that end in PASS or FAIL; BLOCKED or a failed verdict step resets it to 0.
   prompt-gate:
-    name: Prompt time and size gate (record only until U3)
+    name: Prompt time and size gate
     needs: detect
     if: needs.detect.outputs.rust == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      # Pending U3: leave empty. GATE_TIME_RATIO is the largest accepted
-      # candidate/base ratio of p50 and p95; GATE_SIZE_CAP_BYTES caps the
-      # stripped front, collector and their sum; GATE_ENFORCE=true makes a
-      # FAIL or BLOCKED verdict fail the job.
-      GATE_TIME_RATIO: ''
-      GATE_SIZE_CAP_BYTES: ''
+      # Decision U3: GATE_RATIO_P50 and GATE_RATIO_P95 are the largest
+      # accepted candidate/base ratios of p50 and p95; GATE_SIZE_CAP_BYTES caps
+      # stripped front + collector (decimal bytes, no per-binary cap);
+      # GATE_ENFORCE=true makes a FAIL or BLOCKED verdict fail the job.
+      GATE_RATIO_P50: '1.03'
+      GATE_RATIO_P95: '1.10'
+      GATE_SIZE_CAP_BYTES: '6000000'
       GATE_ENFORCE: 'false'
       GATE_CASES: no-git,git-clean,git-dirty
     steps:
@@ -1033,18 +1035,27 @@ jobs:
           BINGSU_CANDIDATE_REVISION: merge-result
         run: |
           # A BLOCKED measurement (exit 2) is recorded by the verdict step.
+          # --admission ci-r2: decision U3 rule R2, honoured only on a GitHub Actions runner.
           python3 bench/git-product.py --base "$RUNNER_TEMP/base/target/release/bingsu" --candidate target/release/bingsu \
-            --rounds 200 --cases "$GATE_CASES" --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
+            --rounds 200 --cases "$GATE_CASES" --admission ci-r2 --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
       - name: Record the verdict
         run: |
-          args=()
-          if [ -n "$GATE_TIME_RATIO" ]; then args+=(--threshold "$GATE_TIME_RATIO"); fi
-          if [ -n "$GATE_SIZE_CAP_BYTES" ]; then args+=(--cap-bytes "$GATE_SIZE_CAP_BYTES"); fi
+          args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES")
           if [ "$GATE_ENFORCE" = true ]; then args+=(--enforce); fi
+          status=0
           python3 bench/size_gate.py --measurement "$RUNNER_TEMP/measurements/prompt-pairs.json" \
             --base-preparation "$RUNNER_TEMP/measurements/base-preparation.json" \
             --candidate-preparation "$RUNNER_TEMP/measurements/candidate-preparation.json" \
-            --out "$RUNNER_TEMP/measurements/verdict.json" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+            --out "$RUNNER_TEMP/measurements/verdict.json" "${args[@]}" > "$RUNNER_TEMP/verdict-summary.json" || status=$?
+          verdict=$(jq -r .status "$RUNNER_TEMP/measurements/verdict.json")
+          {
+            echo "### Prompt gate: $verdict (enforced: $GATE_ENFORCE)"
+            echo '```json'
+            cat "$RUNNER_TEMP/verdict-summary.json"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$verdict" != PASS ]; then echo "::warning::prompt gate verdict $verdict (enforced: $GATE_ENFORCE)"; fi
+          exit "$status"
       - name: Preserve the pairs and the verdict
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
