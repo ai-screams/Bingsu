@@ -2,6 +2,7 @@
 temporary output file; it never logs out, reboots or uses sudo."""
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -47,6 +48,7 @@ def test_login_transition_requires_both_labels(tmp_path):
     run("--label", "before-logout", "--out", str(out))
     got = summarize.judge_login_transition(out.read_text())
     assert got["logout"][0] == "BLOCKED" and got["reboot"][0] == "BLOCKED"
+    time.sleep(1.1)  # the pair must be ordered by its second-resolution stamps
     run("--label", "after-login", "--out", str(out))
     got = summarize.judge_login_transition(out.read_text())
     assert got["logout"][0] == "same-boot" and got["reboot"][0] == "BLOCKED"

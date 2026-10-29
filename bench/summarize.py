@@ -15,9 +15,11 @@ number), the same row in two places, rows from two operating systems, a
 hyperfine result without times. A row that was not measured (`na`) stays in
 the table as `unavailable` and every line that needs it says so.
 """
+import datetime
 import json
 import math
 import pathlib
+import re
 import sys
 
 HYP_MS = {
@@ -323,6 +325,21 @@ FIRST_SHELL_PHASES = ("cold", "warm")
 LOGIN_PAIRS = {"logout": ("before-logout", "after-login"), "reboot": ("before-reboot", "after-reboot")}
 
 
+FIRST_SHELL_SHELLS = ("zsh", "bash")
+_TOKEN = re.compile(r"[^\s]+")
+_UTC = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+
+
+def _utc(text):
+    """Seconds since the epoch of a logger/probe UTC stamp, None if it is not one."""
+    if not _UTC.fullmatch(text):
+        return None
+    try:
+        return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
 def ingest_first_shell(rows, reservations=None):
     """{boot: {"cold": {...}, "warm": {...}}} from first-shell-logger rows
     (UTC, boot, shell, phase=, status=, <n>us). A phase is `{"us": n}` or
@@ -333,9 +350,11 @@ def ingest_first_shell(rows, reservations=None):
     rule. Malformed or repeated rows are an `InputError`."""
     out, seen = {}, set()
     for i, r in enumerate(rows, 1):
-        if len(r) != 6 or not r[1]:
-            raise InputError(f"first-shell row {i}: expected 6 columns with a boot identity, got {list(r)!r}")
-        _, boot, _, phase, status, us = r
+        if len(r) != 6:
+            raise InputError(f"first-shell row {i}: expected 6 columns, got {list(r)!r}")
+        utc, boot, shell, phase, status, us = r
+        if _utc(utc) is None or not _TOKEN.fullmatch(boot) or shell not in FIRST_SHELL_SHELLS:
+            raise InputError(f"first-shell row {i}: bad UTC time, boot identity or shell in {list(r)!r}")
         if not (phase.startswith("phase=") and phase[6:] in FIRST_SHELL_PHASES):
             raise InputError(f"first-shell row {i}: bad phase {phase!r}")
         if not (status.startswith("status=") and status[7:].isdigit() and us.endswith("us") and us[:-2].isdigit()):
@@ -363,8 +382,11 @@ def first_shell_file(log):
     log = pathlib.Path(log)
     rows = [line.split("\t") for line in log.read_text().splitlines() if line.strip()] if log.exists() else []
     res = []
-    for d in log.parent.glob(log.name + ".*"):
-        boot, _, phase = d.name[len(log.name) + 1:].rpartition(".")
+    prefix = log.name + "."
+    for d in log.parent.iterdir():  # a literal prefix compare: a name with [ or * is not a pattern
+        if not (d.name.startswith(prefix) and d.is_dir()):
+            continue
+        boot, _, phase = d.name[len(prefix):].rpartition(".")
         res.append((boot, phase))
     return rows, res
 
@@ -381,16 +403,30 @@ def judge_login_transition(text):
         if not line.strip():
             continue
         c = line.split("\t")
-        if len(c) != 4 or not c[3].isdigit() or not c[2]:
-            raise InputError(f"login-transition line {i}: not 4 columns with an identity and a boot time")
-        by.setdefault(c[1], []).append(c[2])
+        if len(c) != 4:
+            raise InputError(f"login-transition line {i}: not 4 columns")
+        by.setdefault(c[1], []).append(c[0::2] + [c[3]])  # (utc, identity, boot time)
     out = {}
     for name, (a, b) in LOGIN_PAIRS.items():
         bad = [l for l in (a, b) if len(by.get(l, ())) != 1]
         if bad:
             out[name] = ("BLOCKED", f"label {', '.join(bad)} needs exactly one line")
             continue
-        same = by[a][0] == by[b][0]
+        (ta, ia, ba), (tb, ib, bb) = by[a][0], by[b][0]
+        ua, ub = _utc(ta), _utc(tb)
+        if ua is None or ub is None:
+            out[name] = ("BLOCKED", "a UTC time is missing or malformed")
+            continue
+        if not ua < ub:
+            out[name] = ("BLOCKED", f"{a} is not earlier than {b}")
+            continue
+        if not (_TOKEN.fullmatch(ia) and _TOKEN.fullmatch(ib) and ba.isdigit() and bb.isdigit()):
+            out[name] = ("BLOCKED", "a boot identity or boot time is missing or malformed")
+            continue
+        same = ia == ib
+        if same != (ba == bb) or (not same and int(bb) <= int(ba)):
+            out[name] = ("BLOCKED", "boot identity and boot time disagree")
+            continue
         if name == "logout":
             out[name] = ("same-boot", "login transition, not a cold start") if same else \
                 ("boot-changed", "the boot identity changed across the logout")
