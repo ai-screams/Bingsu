@@ -71,6 +71,7 @@ Shell tests (`tests/shell`):
 - `tests/hostile/classes.tsv` is the one source for core, golden and PTY hostile-value tests; add a row, not a per-shell case.
 - NUL outcomes per shell, version and locale live in `tests/golden/record/nul_expected.tsv` (first match wins; `*` rows generalise beyond what was observed).
 - Minimum shells (bash 5.1, zsh 5.8, fish 3.6) run in `tests/shell/containers/*.Dockerfile`; in a container run tests as root with a root-owned copy of the binary and `--basetemp` outside `/tmp`, because init warns about a folder above the binary that another user can change.
+- Blocked-mount tests (`blocked_mount.py`): resolve every path under the mount before stopping its daemon; a later `realpath` or `stat` through it hangs.
 - `BINGSU_RECORD_OBSERVATIONS=1` prints `OBSERVE` lines only for unpinned cells; pinned cells still assert.
 - The strace test (Linux) allows only loader/library paths, `/proc/self/maps`, the binary and the four pinned roots; a new distro path needs a reason before it joins the list.
 
@@ -120,6 +121,7 @@ Anything visible must line up. Before changing a segment, a generator or a style
 - For each new test or condition, make it fail once with a deliberate mutation before trusting it.
 - For claims like "none", "all" or "always" in PR bodies or docs, have the search command that proves it.
 - Run actionlint on workflow changes and gitleaks on the working tree before pushing.
+- The core purity gate rejects `static` items and every `cfg` except `test`: build tables with `const fn` into `const` items and keep reference implementations under `#[cfg(test)]`. Core tests also run in release, so a test cannot rely on an overflow panic.
 - Tests that read repository sources and edit them as text normalize `\r\n` to `\n` first; Windows checkouts are CRLF.
 - Changing a hash-pinned prompt file (TCB): review it as a security change, then `scripts/pin_tcb.py --write`.
 - Gate bypass shapes live in `tools/core-cfg-check/tests/fixtures/bypass/` and run through the real gates via `scripts/test_gate_bypass.py`; add a fixture per new rule.
