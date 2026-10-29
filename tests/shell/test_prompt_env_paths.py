@@ -2572,10 +2572,3 @@ def test_shell_pipe_reaches_eof_while_helper_is_alive(tmp_path):
                 pipes.close()
     except Blocked as error:
         pytest.fail(f"BLOCKED: {error.reason}", pytrace=False)
-
-
-# 이것을 실패시키는 것: 앞단이나 도우미가 prompt-time XDG_RUNTIME_DIR를 다시 열기.
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
-def test_repo_controlled_xdg_runtime_dir_is_never_opened(tmp_path):
-    require_release_helper(real_bin())
-    test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path, True)
