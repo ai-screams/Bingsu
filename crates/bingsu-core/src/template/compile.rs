@@ -116,90 +116,15 @@ impl CompiledLine {
         origin: Vec<Span>,
         fill: Option<usize>,
     ) -> Option<Self> {
-        if nodes.len() > super::syntax::MAX_TEMPLATE_BYTES
-            || nodes.len() != origin.len()
-            || origin
-                .iter()
-                .any(|s| s.start > s.end || s.end as usize > super::syntax::MAX_TEMPLATE_BYTES)
-        {
-            return None;
+        let mut check = LineCheck::new(nodes.len());
+        for n in &nodes {
+            check.node(n);
         }
-        let mut stack = [(false, 0); super::syntax::MAX_DEPTH];
-        let mut depth = 0usize;
-        let mut actual_fill = None;
-        let mut text_bytes = 0usize;
-        for (i, n) in nodes.iter().enumerate() {
-            match n {
-                Node::Text(s) => {
-                    text_bytes = text_bytes.checked_add(s.len())?;
-                    if text_bytes > super::syntax::MAX_TEMPLATE_BYTES
-                        || !s.chars().all(|c| !crate::sanitize::is_removed(c))
-                    {
-                        return None;
-                    }
-                }
-                Node::Segment { seg, .. } if usize::from(*seg) >= crate::field::BUILTIN.len() => {
-                    return None;
-                }
-                Node::Field { seg, field } => {
-                    let decl = crate::field::BUILTIN.get(usize::from(*seg))?;
-                    if usize::from(*field) >= decl.fields.len() {
-                        return None;
-                    }
-                }
-                Node::Icon(x) if usize::from(*x) >= crate::icons::ICONS.len() => return None,
-                Node::Style(spec) => {
-                    if (spec.attrs == 0 && spec.fg.is_none() && spec.bg.is_none())
-                        || spec.attrs & !(BOLD | DIM | ITALIC | UNDERLINE) != 0
-                        || [spec.fg, spec.bg]
-                            .iter()
-                            .flatten()
-                            .any(|v| usize::from(*v) >= crate::color::palette::TOKENS.len())
-                    {
-                        return None;
-                    }
-                    *stack.get_mut(depth)? = (false, 0);
-                    depth += 1;
-                }
-                Node::StyleEnd => {
-                    depth = depth.checked_sub(1)?;
-                    if stack[depth].0 {
-                        return None;
-                    }
-                }
-                Node::Group { len } => {
-                    let end = i.checked_add(usize::try_from(*len).ok()?)?;
-                    if !matches!(nodes.get(end), Some(Node::GroupEnd)) {
-                        return None;
-                    }
-                    if !nodes[i + 1..end]
-                        .iter()
-                        .any(|n| matches!(n, Node::Segment { .. } | Node::Field { .. }))
-                    {
-                        return None;
-                    }
-                    *stack.get_mut(depth)? = (true, end);
-                    depth += 1;
-                }
-                Node::GroupEnd => {
-                    depth = depth.checked_sub(1)?;
-                    if stack[depth] != (true, i) {
-                        return None;
-                    }
-                }
-                Node::Fill(_) => {
-                    if depth != 0 || actual_fill.is_some() {
-                        return None;
-                    }
-                    actual_fill = Some(i);
-                }
-                _ => {}
-            }
+        check.spans(origin.len());
+        for s in &origin {
+            check.span(*s);
         }
-        if depth != 0 || actual_fill != fill {
-            return None;
-        }
-        Some(Self {
+        check.finish(fill).then_some(Self {
             nodes,
             origin,
             fill,
@@ -215,6 +140,148 @@ impl CompiledLine {
     /// Index of the `Fill` node, if the line has one.
     pub fn fill(&self) -> Option<usize> {
         self.fill
+    }
+}
+
+/// The N1 line checks, fed one node at a time in wire order, so the snapshot
+/// scan checks a line without building it. Text arrives as a borrowed `&str`.
+/// One failed check marks the line bad; the caller still reads the rest of
+/// the line (the decoder's error order) and asks `finish` once.
+pub(crate) struct LineCheck {
+    len: usize,
+    at: usize,
+    /// Open styles and groups: (group, end index, references seen at open).
+    stack: [(bool, usize, usize); super::syntax::MAX_DEPTH],
+    depth: usize,
+    fill: Option<usize>,
+    text_bytes: usize,
+    references: usize,
+    ok: bool,
+}
+
+impl LineCheck {
+    #[inline(always)]
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            len,
+            at: 0,
+            stack: [(false, 0, 0); super::syntax::MAX_DEPTH],
+            depth: 0,
+            fill: None,
+            text_bytes: 0,
+            references: 0,
+            ok: len <= super::syntax::MAX_TEMPLATE_BYTES,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn text(&mut self, s: &str) {
+        self.ok &= self.text_ok(s);
+        self.at += 1;
+    }
+
+    #[inline(always)]
+    fn text_ok(&mut self, s: &str) -> bool {
+        let Some(n) = self.text_bytes.checked_add(s.len()) else {
+            return false;
+        };
+        self.text_bytes = n;
+        n <= super::syntax::MAX_TEMPLATE_BYTES && s.chars().all(|c| !crate::sanitize::is_removed(c))
+    }
+
+    #[inline(always)]
+    pub(crate) fn node(&mut self, n: &Node) {
+        if let Node::Text(s) = n {
+            return self.text(s);
+        }
+        self.ok &= self.other_ok(n).is_some();
+        self.at += 1;
+    }
+
+    #[inline(always)]
+    fn push(&mut self, entry: (bool, usize, usize)) -> Option<()> {
+        *self.stack.get_mut(self.depth)? = entry;
+        self.depth += 1;
+        Some(())
+    }
+
+    #[inline(always)]
+    fn other_ok(&mut self, n: &Node) -> Option<()> {
+        let i = self.at;
+        match n {
+            Node::Text(_) => return None,
+            Node::Segment { seg, .. } => {
+                if usize::from(*seg) >= crate::field::BUILTIN.len() {
+                    return None;
+                }
+                self.references += 1;
+            }
+            Node::Field { seg, field } => {
+                let decl = crate::field::BUILTIN.get(usize::from(*seg))?;
+                if usize::from(*field) >= decl.fields.len() {
+                    return None;
+                }
+                self.references += 1;
+            }
+            Node::Icon(x) if usize::from(*x) >= crate::icons::ICONS.len() => return None,
+            Node::Style(spec) => {
+                if (spec.attrs == 0 && spec.fg.is_none() && spec.bg.is_none())
+                    || spec.attrs & !(BOLD | DIM | ITALIC | UNDERLINE) != 0
+                    || [spec.fg, spec.bg]
+                        .iter()
+                        .flatten()
+                        .any(|v| usize::from(*v) >= crate::color::palette::TOKENS.len())
+                {
+                    return None;
+                }
+                self.push((false, 0, 0))?;
+            }
+            Node::StyleEnd => {
+                self.depth = self.depth.checked_sub(1)?;
+                if self.stack[self.depth].0 {
+                    return None;
+                }
+            }
+            // `from_snapshot` once looked ahead for the GroupEnd at `end`. A
+            // group without one (also an `end` past the line) never closes:
+            // closing needs a GroupEnd at exactly `end`, so `finish` fails it.
+            Node::Group { len } => {
+                let end = i.checked_add(usize::try_from(*len).ok()?)?;
+                self.push((true, end, self.references))?;
+            }
+            // At least one segment or field strictly inside the group.
+            Node::GroupEnd => {
+                self.depth = self.depth.checked_sub(1)?;
+                let (group, end, seen) = self.stack[self.depth];
+                if !group || end != i || self.references == seen {
+                    return None;
+                }
+            }
+            Node::Fill(_) => {
+                if self.depth != 0 || self.fill.is_some() {
+                    return None;
+                }
+                self.fill = Some(i);
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    /// The origin table's length, then each span.
+    #[inline(always)]
+    pub(crate) fn spans(&mut self, n: usize) {
+        self.ok &= n == self.len;
+    }
+
+    #[inline(always)]
+    pub(crate) fn span(&mut self, s: Span) {
+        self.ok &= s.start <= s.end && s.end as usize <= super::syntax::MAX_TEMPLATE_BYTES;
+    }
+
+    #[inline(always)]
+    pub(crate) fn finish(self, fill: Option<usize>) -> bool {
+        self.ok && self.depth == 0 && self.fill == fill
     }
 }
 

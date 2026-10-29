@@ -2,9 +2,8 @@
 //! overflow or conditional groups. A catalog grants worker capability separately.
 use super::path_facts::PathQuery;
 use crate::{
-    bands,
-    config::compile::CompiledConfig,
     field::{self, SegmentDecl},
+    layout_view::LayoutView,
     template::compile::{CompiledLine, Node},
 };
 
@@ -35,11 +34,8 @@ pub(crate) fn references(lines: &[CompiledLine]) -> u32 {
 // Keep selection specialized for the caller's width even when the front and
 // collector share this entry point (notably the 4,096-band maximum-width scan).
 #[inline]
-pub fn builtin_mask(config: &CompiledConfig, width: u16) -> u32 {
-    let lines = bands::select(&config.band_order, &config.bands, width)
-        .and_then(|band| config.variants.get(band + 1))
-        .or(config.variants.first());
-    lines.map_or(0, |lines| references(lines)) & config.collect_mask
+pub fn builtin_mask<L: LayoutView>(config: &L, width: u16) -> u32 {
+    config.lines_at(width).map_or(0, |lines| references(lines)) & config.shared().collect_mask
 }
 
 impl Catalog<'_> {
@@ -52,7 +48,7 @@ impl Catalog<'_> {
             .unwrap_or(0)
     }
 
-    pub fn worker_mask(&self, config: &CompiledConfig, width: u16, redraw: bool) -> u32 {
+    pub fn worker_mask<L: LayoutView>(&self, config: &L, width: u16, redraw: bool) -> u32 {
         if redraw {
             return 0;
         }
@@ -60,14 +56,14 @@ impl Catalog<'_> {
     }
 }
 
-pub fn worker_mask(config: &CompiledConfig, width: u16, redraw: bool) -> u32 {
+pub fn worker_mask<L: LayoutView>(config: &L, width: u16, redraw: bool) -> u32 {
     PRODUCT.worker_mask(config, width, redraw)
 }
 
 /// Bind the home boundary on both sides of the handoff. Only a selected dir
 /// using unique shortening requests names; readonly and repo facts need no names.
-pub fn path_query(
-    config: &CompiledConfig,
+pub fn path_query<L: LayoutView>(
+    config: &L,
     width: u16,
     pwd: &[u8],
     home: Option<&[u8]>,
@@ -76,6 +72,7 @@ pub fn path_query(
         pwd,
         home,
         config
+            .shared()
             .setup
             .get(1)
             .is_some_and(|setup| setup.methods.contains(&crate::shorten::Method::Unique))

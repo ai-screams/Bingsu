@@ -14,6 +14,7 @@ use crate::default_theme::DefaultTheme;
 use crate::envelope::{self, Envelope, EnvelopeError};
 use crate::field::BUILTIN;
 use crate::layout::{Inputs, Options};
+use crate::layout_view::LayoutView;
 use crate::record::{Fields, encode_b1, write_minimal_b1};
 use crate::recorder::NoopRecorder;
 use crate::render::{Target, render_prompt, to_b1_fields};
@@ -72,11 +73,11 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
 
 /// Shared snapshot/default rendering. Only the staged consumer enables P10;
 /// the legacy adapter remains disconnected pending its syscall-budget ruling.
-pub fn render_selected(
+pub fn render_selected<L: LayoutView>(
     parsed: &Envelope,
     shell: Shell,
     status: Status,
-    compiled: Option<&CompiledConfig>,
+    compiled: Option<&L>,
     mode: Mode,
     collection: Option<&crate::collection::response::Completed>,
     out: &mut Vec<u8>,
@@ -98,11 +99,11 @@ pub fn render_selected(
     clippy::too_many_arguments,
     reason = "fixed pure renderer inputs and adapter catalog"
 )]
-fn render_selected_with_catalog(
+fn render_selected_with_catalog<L: LayoutView>(
     parsed: &Envelope,
     shell: Shell,
     status: Status,
-    compiled: Option<&CompiledConfig>,
+    compiled: Option<&L>,
     mode: Mode,
     collection: Option<&crate::collection::response::Completed>,
     expected: Option<&crate::collection::wire::Binding>,
@@ -112,17 +113,20 @@ fn render_selected_with_catalog(
     let default;
     let setup;
     let (theme, setup, options, duration_min) = if let Some(c) = compiled {
-        setup = c.setup();
+        // The variant is selected here at the envelope's width; the theme
+        // carries only it, so both views lay out the same lines.
+        let shared = c.shared();
+        setup = shared.segment_setup();
         (
-            c.theme_for(mode),
+            shared.theme(c.lines_at(parsed.width), mode),
             setup.as_slice(),
             Options {
                 width: parsed.width,
-                profile: c.profile,
-                icons: c.icons,
-                use_last_column: c.use_last_column,
+                profile: shared.profile,
+                icons: shared.icons,
+                use_last_column: shared.use_last_column,
             },
-            c.duration_min_ms,
+            shared.duration_min_ms,
         )
     } else {
         let Ok(d) = DefaultTheme::new(mode) else {

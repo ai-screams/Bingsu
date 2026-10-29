@@ -106,7 +106,7 @@ mod cases {
             ]);
             b[160..164].copy_from_slice(&sum);
             assert!(
-                Snapshot::decode_front(&b[..b.len() - s.metadata.len()], b.len()).is_err(),
+                Snapshot::decode_front(&b[..b.len() - s.metadata.len()], b.len(), 80).is_err(),
                 "{i}"
             );
         }
@@ -298,11 +298,14 @@ mod cases {
             };
             let b = s.encode(1, 0).unwrap();
             let front = &b[..b.len() - s.metadata.len()];
-            let got = Snapshot::decode_front(front, b.len()).unwrap();
+            let got = Snapshot::decode_front(front, b.len(), 80).unwrap();
             assert_eq!(got.id, id);
-            assert_eq!(got.config, s.config);
+            assert_eq!(
+                got.config,
+                crate::layout_view::FrontConfig::from_compiled(s.config.clone(), 80)
+            );
             assert_eq!((got.clock_kind, got.resume), (1, 0));
-            assert!(Snapshot::decode_front(front, b.len() + 1).is_err());
+            assert!(Snapshot::decode_front(front, b.len() + 1, 80).is_err());
             for i in [
                 0,
                 8,
@@ -330,7 +333,7 @@ mod cases {
             ] {
                 let mut x = front.to_vec();
                 x[i] ^= 0x80;
-                assert!(Snapshot::decode_front(&x, b.len()).is_err(), "{i}");
+                assert!(Snapshot::decode_front(&x, b.len(), 80).is_err(), "{i}");
             }
         }
     }
@@ -388,7 +391,10 @@ mod cases {
             b[at] ^= 0x80;
             let crc = crc32c(&[b"bingsu-snapshot-v2\0", &b[..160], &b[192..end]]);
             b[160..164].copy_from_slice(&crc);
-            assert!(Snapshot::decode_front(&b[..end], b.len()).is_err(), "{at}");
+            assert!(
+                Snapshot::decode_front(&b[..end], b.len(), 80).is_err(),
+                "{at}"
+            );
         }
         // Advertise one extra compiled byte and a matching fstat length, while
         // supplying a complete (shorter) codec with a recomputed frame CRC.
@@ -398,12 +404,12 @@ mod cases {
         short[60..64].copy_from_slice(&((PREFIX + c) as u32).to_le_bytes());
         let sum = crc32c(&[b"bingsu-snapshot-v2\0", &short[..160], &short[192..end]]);
         short[160..164].copy_from_slice(&sum);
-        assert!(Snapshot::decode_front(&short[..end], short.len() + 1).is_err());
+        assert!(Snapshot::decode_front(&short[..end], short.len() + 1, 80).is_err());
         let mut changed = original.clone();
         changed[12] ^= 1;
         let sum = crc32c(&[b"bingsu-snapshot-v2\0", &changed[..160], &changed[192..end]]);
         changed[160..164].copy_from_slice(&sum);
-        assert!(Snapshot::decode_front(&changed[..end], changed.len()).is_err());
+        assert!(Snapshot::decode_front(&changed[..end], changed.len(), 80).is_err());
         for (at, n) in [(76, COMPILED_MAX + 1), (80, META_MAX + 1)] {
             let mut b = original.clone();
             b[at..at + 4].copy_from_slice(&(n as u32).to_le_bytes());
@@ -415,11 +421,11 @@ mod cases {
         for n in 0..original.len() {
             assert!(Snapshot::decode(&original[..n]).is_err(), "{n}");
         }
-        assert!(Snapshot::decode_front(&original[..end - 1], original.len()).is_err());
+        assert!(Snapshot::decode_front(&original[..end - 1], original.len(), 80).is_err());
         let mut b = original.clone();
         b[end + 16] ^= 1;
         assert!(Snapshot::decode(&b).is_err());
-        assert!(Snapshot::decode_front(&b[..end], b.len()).is_ok()); // front cannot inspect trust payload
+        assert!(Snapshot::decode_front(&b[..end], b.len(), 80).is_ok()); // front cannot inspect trust payload
         assert!(s.encode(3, 0).is_err());
         let mut s = s;
         s.metadata = alloc::vec![0;META_MAX+1];

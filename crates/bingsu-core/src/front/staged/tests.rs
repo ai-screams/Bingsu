@@ -289,13 +289,12 @@ mod cases {
                                 s.config.bands.clear();
                                 s.config.band_order.clear();
                                 s.config.collect_mask = 1 << 31;
-                                s.config.variants = vec![
-                                    crate::template::compile::compile(
-                                        "{fixture}",
-                                        catalog.segments,
-                                    )
-                                    .unwrap(),
-                                ];
+                                s.config.band = None;
+                                s.config.lines = crate::template::compile::compile(
+                                    "{fixture}",
+                                    catalog.segments,
+                                )
+                                .unwrap();
                             }
                             return finish_with_catalog(plan, o, catalog);
                         }

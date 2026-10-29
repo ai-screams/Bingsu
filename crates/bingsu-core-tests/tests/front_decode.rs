@@ -1,3 +1,4 @@
+use bingsu_core::layout_view::FrontConfig;
 use bingsu_core::snapshot::{FrontDecoder, HEADER, PREFIX, READ_CHUNK, Snapshot};
 use bingsu_core_tests::snapshot_fixture;
 
@@ -9,7 +10,7 @@ fn staged_decode_preserves_clock_and_never_requests_metadata() {
         let bytes = s.encode(kind, resume).unwrap();
         let (c, _) = bingsu_core::snapshot::lengths(&bytes).unwrap();
         let end = HEADER + PREFIX + c;
-        for chunk in [1, 13, READ_CHUNK] {
+        for (chunk, width) in [(1, 80), (13, 120), (READ_CHUNK, 99)] {
             let mut decoder = FrontDecoder::new(bytes.len() as u64).unwrap();
             let mut offset = 0;
             while decoder.read_len() != 0 {
@@ -19,14 +20,17 @@ fn staged_decode_preserves_clock_and_never_requests_metadata() {
                 offset += n;
             }
             assert_eq!(offset, end);
-            let decoded = decoder.finish().unwrap();
+            let decoded = decoder.finish_for(width).unwrap();
             assert_eq!((decoded.clock_kind, decoded.resume), (kind, resume));
-            assert_eq!(decoded.config, s.config);
+            assert_eq!(
+                decoded.config,
+                FrontConfig::from_compiled(s.config.clone(), width)
+            );
         }
         for length in 0..end {
-            assert!(Snapshot::decode_front(&bytes[..length], bytes.len()).is_err());
+            assert!(Snapshot::decode_front(&bytes[..length], bytes.len(), 80).is_err());
         }
-        assert!(Snapshot::decode_front(&bytes[..end], bytes.len() + 1).is_err());
+        assert!(Snapshot::decode_front(&bytes[..end], bytes.len() + 1, 80).is_err());
     }
 }
 
@@ -63,7 +67,7 @@ fn staged_decode_rejects_overlong_observations_and_corruption() {
         loop {
             let n = decoder.read_len();
             if n == 0 {
-                assert!(decoder.finish().is_err(), "byte {at}");
+                assert!(decoder.finish_for(80).is_err(), "byte {at}");
                 break;
             }
             if offset + n > end || decoder.push(&bad[offset..offset + n]).is_err() {
