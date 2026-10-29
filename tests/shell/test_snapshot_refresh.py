@@ -197,6 +197,8 @@ def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
         assert b"ok:none" in record, record
         session.wait_quiet()  # that prompt's helper revalidated; no helper is running now
         holder["session"] = session
+        # store() resolves the config root, which lies on the mount: resolve it while it answers.
+        holder["marker"] = session.store() / "marker"
 
     def boottime():
         return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
@@ -210,7 +212,7 @@ def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
         with blocked_mount(tmp_path / "fuse", prepare=prepare):
             session = holder["session"]
             try:
-                marker_path = session.store() / "marker"
+                marker_path = holder["marker"]
                 marker = marker_path.read_bytes()
                 assert marker[:8] == b"BNGMRK02" and marker[12] == 1 and marker[13] == 1, marker
                 end = struct.unpack_from("<Q", marker, 32)[0] + t_ns
