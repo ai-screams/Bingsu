@@ -932,15 +932,18 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     # (fsbudget.attribute.stack_guard_seek), for the platform the caller
     # measured only, and the whole sequence or none.
     # 이것을 실패시키는 것: 다른 플랫폼·다른 fd의 앞단 lseek, 짝 없는 seek을 받는 것.
+    # Only before the front's filter (glibc start-up); they stay in every
+    # other check, including the I/O rules, and are left out only of the
+    # root-call table.
+    # 이것을 실패시키는 것: 필터 뒤의 seek 쌍을 받는 것, 받은 seek을 I/O 검사에서 지우는 것.
     from fsbudget.attribute import stack_guard_allowance, stack_guard_seek
+    sealed = next((c.index for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args), float("inf"))
     allowance, guard = stack_guard_allowance(platform), []
     for c in front:
-        if len(guard) < allowance and stack_guard_seek(c, root, len(guard)):
+        if c.index < sealed and len(guard) < allowance and stack_guard_seek(c, root, len(guard)):
             guard.append(c)
     assert len(guard) in (0, allowance), ("incomplete front stack-guard seeks", guard)
-    front = [c for c in front if c not in guard]
-    calls = [c for c in calls if c not in guard]
-    assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
+    assert all(c.name in ROOT_CALLS for c in front if c not in guard), [c for c in front if c.name not in ROOT_CALLS and c not in guard]
     timers = [c for c in front if c.name == "setitimer"]
     assert len(timers) <= 1, ("one entry timer", timers)
     for timer in timers:

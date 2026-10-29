@@ -851,11 +851,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         # (formula.STARTUP_PRIMITIVES stack_guard). Only on the platform the
         # caller names, only that fd, only SEEK_CUR 0 then SEEK_SET, and the
         # whole sequence or none of it (checked after the last record).
-        # (A maps fd after the filters would need a maps open the bootstrap
-        # vocabulary already refuses.)
+        # Only before the collector's first filter: a maps fd opened in the
+        # prologue may stay open past it.
         # 이것을 실패시키는 것: 다른 플랫폼·다른 fd(공유 라이브러리 fd 포함)·다른 모양의 lseek, 표의 횟수를 넘는 lseek,
-        # 끝나지 않은 seek 쌍을 허용하는 것.
-        if (role == "collector" and guard_seeks[process] < guard_allowance
+        # 끝나지 않은 seek 쌍, 필터 뒤의 seek을 허용하는 것.
+        if (role == "collector" and process not in confined and guard_seeks[process] < guard_allowance
                 and stack_guard_seek(c, process, guard_seeks[process])):
             guard_seeks[process] += 1
             continue

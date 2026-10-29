@@ -118,6 +118,51 @@ def test_front_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
         check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform)
 
 
+def front_seeks_after_filter(lines, result="-1 EPERM (Operation not permitted)"):
+    """Review reproduction: the front opens its own maps as fd 40 before its
+    filter and makes the stack-guard pair after it (refused, EPERM)."""
+    sealed = next(i for i, line in enumerate(lines) if line.startswith("1095  prctl(PR_SET_SECCOMP"))
+    done = next(i for i in range(sealed, len(lines)) if lines[i].startswith("1095  <... prctl resumed>"))
+    opened = ['1095  openat(AT_FDCWD</home/tester/pt/test_prompt_binary_names_only_1/repo>, "/proc/self/maps", '
+              'O_RDONLY|O_CLOEXEC) = 40</proc/1095/maps>']
+    seeks = [f"1095  lseek(40</proc/1095/maps>, 0, SEEK_CUR) = {'2906' if result == '0' else result}",
+             f"1095  lseek(40</proc/1095/maps>, 2822, SEEK_SET) = {'2822' if result == '0' else result}"]
+    return lines[:sealed] + opened + lines[sealed:done + 1] + seeks + lines[done + 1:]
+
+
+# 이것을 실패시키는 것: 앞단 seek 쌍을 필터 뒤에서도 받는 것(완전 캡처와 마감 시도 모두), 받은 seek을 I/O 검사에서 지우는 것.
+@pytest.mark.parametrize("result", ["-1 EPERM (Operation not permitted)", "0"], ids=["eperm", "success"])
+def test_front_stack_guard_seeks_after_the_filter_fail(result):
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(front_seeks_after_filter(collecting_prompt(), result), platform=("x86_64", "gnu"))
+    cap = collecting_capture(front_seeks_after_filter(collector_deadline_lines(head_open=True), result))
+    cap.platform = ("x86_64", "gnu")
+    assert budget.deadline_shape(cap) == "collector-deadline"
+    made = []
+    with pytest.raises(AssertionError):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or cap)
+    assert made == [1]
+
+
+def collector_seeks_after_filter():
+    """The collector opens its own maps as fd 41 in its prologue (admitted
+    there) and makes the stack-guard pair after its last filter."""
+    lines = collecting_prompt()
+    first = min(i for i, line in enumerate(lines) if line.startswith("1098  seccomp(SECCOMP_SET_MODE_FILTER"))
+    sealed = max(i for i, line in enumerate(lines) if line.startswith("1098  seccomp(SECCOMP_SET_MODE_FILTER"))
+    done = next(i for i in range(sealed, len(lines)) if lines[i].startswith("1098  <... seccomp resumed>"))
+    opened = ['1098  openat(AT_FDCWD</>, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 41</proc/1098/maps>']
+    seeks = ["1098  lseek(41</proc/1098/maps>, 0, SEEK_CUR) = 2854",
+             "1098  lseek(41</proc/1098/maps>, 2854, SEEK_SET) = 2854", "1098  close(41</proc/1098/maps>) = 0"]
+    return lines[:first] + opened + lines[first:done + 1] + seeks + lines[done + 1:]
+
+
+# 이것을 실패시키는 것: collector가 prologue에서 연 maps fd로 필터 뒤에 seek하는 것을 받는 것.
+def test_collector_stack_guard_seeks_after_the_filter_fail():
+    with pytest.raises(AssertionError, match="collector forbidden effect: lseek"):
+        check_collecting_prompt(collector_seeks_after_filter(), platform=("x86_64", "gnu"))
+
+
 def test_collecting_prompt_passes_the_path_allowlist():
     check_collecting_prompt(collecting_prompt())
     # A thread's interrupted futex wait can resume under strace (seen live once).
@@ -2740,8 +2785,9 @@ def test_deadline_shapes_are_recognized_and_judged():
     assert budget.deadline_shape(collecting_capture(collecting_prompt())) is None
 
 
-# 이것을 실패시키는 것: SIGALRM 뒤 출력이 있거나 필터를 설치한 앞단, 저장소를 읽은 뒤의 exit 75, exit 0을 마감으로 보는 것.
-@pytest.mark.parametrize("damage", ["alarm-then-write", "filter-then-alarm", "deadline-after-head", "untouched-exit-0"])
+# 이것을 실패시키는 것: SIGALRM 뒤 출력이 있거나 필터를 설치하거나 0이 아닌 코드로 끝난 앞단, 저장소를 읽은 뒤의 exit 75, exit 0을 마감으로 보는 것.
+@pytest.mark.parametrize("damage", ["alarm-then-write", "filter-then-alarm", "alarm-exit-1", "deadline-after-head",
+                                    "untouched-exit-0"])
 def test_deadline_shapes_need_their_proof(damage):
     if damage == "deadline-after-head":
         cap = collecting_capture(collector_deadline_lines(after_head=True))
@@ -2755,6 +2801,8 @@ def test_deadline_shapes_need_their_proof(damage):
         pid = lines[at].split()[0]
         if damage == "alarm-then-write":
             lines = lines[:at + 1] + [f'{pid}  write(1<pipe:[1]>, "x", 1) = 1'] + lines[at + 1:]
+        elif damage == "alarm-exit-1":
+            lines = [line.replace(f"{pid}  +++ exited with 0 +++", f"{pid}  +++ exited with 1 +++") for line in lines]
         else:
             lines = lines[:at] + [f"{pid}  prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {{len=83, filter=0x1}}) = 0"] + lines[at:]
         cap = front_alarm_capture(lines)
