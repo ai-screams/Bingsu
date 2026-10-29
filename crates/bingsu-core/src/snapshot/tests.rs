@@ -370,7 +370,8 @@ mod cases {
         assert_eq!(snapshot_codec::decode_compiled(&legacy), Err(Error::Tag));
     }
 
-    // 이것을 실패시키는 것: 재계산 CRC만 믿고 예약 영역·flags/mask·길이·codec 구조 검사를 빼는 것.
+    // 이것을 실패시키는 것: 재계산 CRC만 믿고 예약 영역·flags/mask·길이·codec 구조 검사를 빼는 것(앞단의
+    // 선택 디코드와 도우미의 전체 디코드 어느 쪽에서든).
     #[test]
     fn rechecksummed_frames_and_limits() {
         let (id, _, _) = fixture();
@@ -395,6 +396,8 @@ mod cases {
                 Snapshot::decode_front(&b[..end], b.len(), 80).is_err(),
                 "{at}"
             );
+            // The helper's whole decode shares the frame checks, not the code path.
+            assert!(Snapshot::decode(&b).is_err(), "{at}");
         }
         // Advertise one extra compiled byte and a matching fstat length, while
         // supplying a complete (shorter) codec with a recomputed frame CRC.
@@ -410,6 +413,7 @@ mod cases {
         let sum = crc32c(&[b"bingsu-snapshot-v2\0", &changed[..160], &changed[192..end]]);
         changed[160..164].copy_from_slice(&sum);
         assert!(Snapshot::decode_front(&changed[..end], changed.len(), 80).is_err());
+        assert!(Snapshot::decode(&changed).is_err());
         for (at, n) in [(76, COMPILED_MAX + 1), (80, META_MAX + 1)] {
             let mut b = original.clone();
             b[at..at + 4].copy_from_slice(&(n as u32).to_le_bytes());

@@ -386,6 +386,10 @@ fn scan_rejects_exactly_what_full_decode_rejects() {
     table.extend(u32le(3_000_000));
     table.resize(table.len() + 3_000_000, 0);
     assert_eq!(same_verdict(&table, "variant table"), Err(Error::Limit));
+    // Past the 16 MiB section cap, before any read.
+    let mut big = config_bytes(&[x.clone(), x.clone()]);
+    big.resize(16 * 1024 * 1024 + 1, 0);
+    assert_eq!(same_verdict(&big, "size cap"), Err(Error::Limit));
     let mut trailing = config_bytes(&[x.clone(), x.clone()]);
     trailing.push(0);
     assert_eq!(same_verdict(&trailing, "trailing"), Err(Error::Trailing));
