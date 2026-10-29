@@ -128,8 +128,10 @@ def _group(events):
 def inconsistencies(events: list[dict]) -> list[str]:
     """Cross-checks of the tracer's records before any boundary is drawn: a
     spawn's parent must be the thread group of the task that reported it, a
-    task's thread group must be one value that fits how it was made, and exec
-    reference points need their exec event."""
+    task's thread group must be one value that fits how it was made, an exec
+    must come from the reported task itself under its own group, and exec
+    reference points need their exec event. Runs on the whole trace, so a
+    task that cannot be placed blocks the sample wherever it would fall."""
     root, tasks, tgid = _group(events)
     found = []
     seen = {}
@@ -150,6 +152,16 @@ def inconsistencies(events: list[dict]) -> list[str]:
             found.append(f"{e['kind']} child {e['child']} joined thread group {sorted(child)}")
         if e["kind"] == "clone" and child - {e["child"], spawner}:
             found.append(f"clone child {e['child']} joined an unrelated thread group {sorted(child)}")
+    # Over the whole trace, before any boundary: an exec makes the task its
+    # own thread group leader (fs/exec.c de_thread), so it must be reported
+    # under its own pid, and every record of that pid must name that group.
+    for e in events:
+        if e["ev"] != "exec":
+            continue
+        if e.get("former", e["pid"]) != e["pid"]:
+            found.append(f"exec by task {e['former']} reported as pid {e['pid']} (non-leader exec)")
+        if seen.get(e["pid"], {e["pid"]}) != {e["pid"]}:
+            found.append(f"exec'd task {e['pid']} recorded in thread group {sorted(seen[e['pid']])}")
     execs = {e["pid"] for e in events if e["ev"] == "exec"}
     for pid in sorted({e["pid"] for e in events if e["ev"] == "exec_ref"} - execs):
         found.append(f"pid {pid}: exec reference point without its exec event")
@@ -253,14 +265,6 @@ def observation(events: list[dict]) -> dict:
     if unplaced:
         problems.append(f"tasks without a readable thread group: {unplaced}")
     inside = boundary(events, groups)
-    # An exec makes a task its own process (afterwards its tgid is its pid).
-    # Every exec'd task the boundary's processes spawned must therefore be a
-    # process of its own in the measured set, never folded into another group.
-    _, tasks, task_group = _group(events)
-    for e in events:
-        spawn = tasks.get(e["pid"], {}).get("spawn") if e["ev"] == "exec" else None
-        if spawn and task_group.get(spawn["pid"]) in inside and e["pid"] not in inside:
-            problems.append(f"exec'd task {e['pid']} is not a measured process (group {task_group.get(e['pid'])})")
     peaks, rows = [], []
     for tgid in inside:
         g = groups[tgid]
@@ -272,8 +276,6 @@ def observation(events: list[dict]) -> dict:
             problems.append(f"pid {tgid}: no terminal record for {missing}")
         elif late:
             problems.append(f"pid {tgid}: thread records after the group leader {late}")
-        elif any(e.get("former", e["pid"]) != e["pid"] for e in g["execs"]):
-            problems.append(f"pid {tgid}: exec from a non-leader thread")
         else:
             peak = leader["maxrss_kb"] * 1024
         name = role(g)

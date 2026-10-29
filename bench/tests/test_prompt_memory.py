@@ -176,16 +176,36 @@ def corrupt(events, how):
     elif how == "exec-dropped":
         del events[next(i for i, e in enumerate(events) if e["ev"] == "exec" and e["pid"] == collector["tgid"])]
     elif how == "group-conflict":
-        # The top shell's stops disagree on its thread group (no spawn edge to compare).
-        next(e for e in events if e.get("pid") == events[0]["pid"] and e["ev"] == "exit_ref")["tgid"] = helper["tgid"]
+        # A helper thread's stops disagree: one names the thread itself, which
+        # the clone rule allows on its own, so only the one-value rule fires.
+        next(e for e in events if e.get("pid") == thread and e["ev"] == "exit_ref")["tgid"] = thread
     elif how == "fork-joins-group":
+        # The subshell is forked and never execs: only the fork rule can fire.
+        subshell = next(g for g in groups.values() if pm.role(g) == "subshell")
         for e in events:
-            if e.get("pid") == collector["tgid"] and "tgid" in e:
-                e["tgid"] = helper["tgid"]
+            if e.get("pid") == subshell["tgid"] and "tgid" in e:
+                e["tgid"] = events[0]["pid"]
     elif how == "clone-joins-unrelated":
         for e in events:
             if e.get("pid") == thread and "tgid" in e:
                 e["tgid"] = events[0]["pid"]
+    elif how in ("root-clone-exec", "root-nonleader-exec"):
+        # Second review: shapes placed between the markers, under the root.
+        root = events[0]["pid"]
+        start = next(e["seq"] for e in events if e["ev"] == "exec" and pm.START in e["argv"])
+        at = next(i for i, e in enumerate(events) if e["seq"] > start)
+        exe = {"exe": "/bin/true", "argv": ["/bin/true"]}
+        ref = {"threads": 1, "rollup_rss_kb": 100, "file_pmd_kb": 0, "vmhwm_kb": 100, "vmrss_kb": 100}
+        if how == "root-clone-exec":
+            added = [{"seq": start, "ev": "spawn", "pid": root, "child": 999_999, "kind": "clone", "parent_tgid": root, "parent_threads": 1},
+                     {"seq": start, "ev": "start_ref", "pid": 999_999, "tgid": root, **ref},
+                     {"seq": start, "ev": "exec", "pid": 999_999, "former": 999_999, **exe},
+                     {"seq": start, "ev": "exec_ref", "pid": 999_999, "tgid": root, **ref},
+                     {"seq": start, "ev": "reaped", "pid": 999_999, "maxrss_kb": 100, "exited": 1, "code": 0, "signal": 0}]
+        else:
+            added = [{"seq": start, "ev": "exec", "pid": root, "former": 999_999, **exe},
+                     {"seq": start, "ev": "exec_ref", "pid": root, "tgid": root, **ref}]
+        events[at:at] = added
     elif how == "collector-unknown-parent":
         # The first review's shape: two checks catch it, neither alone is pinned here.
         next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])["parent_tgid"] = 999_999
@@ -208,7 +228,7 @@ def corrupt(events, how):
                                  "stray-task", "overflow", "non-leader-exec", "no-thread-group", "pid-reused",
                                  "unknown-parent", "unreadable-parent", "exec-dropped", "group-conflict",
                                  "fork-joins-group", "clone-joins-unrelated", "clone-exec-merged",
-                                 "collector-unknown-parent"])
+                                 "collector-unknown-parent", "root-clone-exec", "root-nonleader-exec"])
 def test_incomplete_terminal_observation_blocks_the_row(how):
     # The process list is the tracer's spawn/exec/reap stream: a task it saw
     # without a final record, or a record it cannot place, is a missing sample.
