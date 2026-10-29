@@ -224,6 +224,37 @@ fn a_front_config_draws_nothing_at_a_width_it_was_not_selected_for() {
     assert_ne!(empty, record(&c, &args, Status::OK_NONE, Mode::Dark));
 }
 
+// 이것을 실패시키는 것: 공용 view가 segment setup의 우선순위·필수·단축 방법·조건을 바꾸거나 빠뜨리는 것,
+// dark/light 팔레트를 바꿔 쥐는 것, transient·vi를 다른 줄로 잡는 것(두 view가 같은 코드를 지나
+// 비교 시험으로는 보이지 않는 결함).
+#[test]
+fn shared_view_carries_the_stored_setup_and_palettes() {
+    let mut c = fixture::config();
+    c.transient = compile("{dir} ", BUILTIN).unwrap().remove(0);
+    assert_ne!(c.transient, c.vi);
+    let f = FrontConfig::from_compiled(c.clone(), 120);
+    for view in [c.shared(), f.shared()] {
+        let setup = view.segment_setup();
+        assert_eq!(setup.len(), c.setup.len());
+        for (got, want) in setup.iter().zip(&c.setup) {
+            assert_eq!(
+                (got.priority, got.required, got.methods, got.when),
+                (want.priority, want.required, &want.methods[..], want.when)
+            );
+        }
+        assert!(
+            c.setup.iter().any(|s| s.required) && c.setup.iter().any(|s| !s.methods.is_empty())
+        );
+        let lines = c.lines_at(120);
+        for (mode, palette) in [(Mode::Dark, &c.palette), (Mode::Light, &c.light_palette)] {
+            let t = view.theme(lines, mode);
+            assert_eq!(t.palette, palette);
+            assert_eq!((t.transient, t.vi), (&c.transient, &c.vi));
+        }
+    }
+    assert_ne!(c.palette, c.light_palette);
+}
+
 /// `compile("x")`: one Text node, origin 0..1, no fill (23 bytes on the wire).
 const X_LINE: [u8; 23] = [
     1, 0, 0, 0, 0, 1, 0, 0, 0, b'x', 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,

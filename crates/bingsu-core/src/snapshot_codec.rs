@@ -967,7 +967,8 @@ pub fn decode_compiled(bytes: &[u8]) -> Result<CompiledConfig, Error> {
 }
 /// `decode_compiled` without materializing variants or band names: the same
 /// reads in the same order, the same allocation charges and every check,
-/// so it rejects exactly what `decode_compiled` rejects, with the same error.
+/// so it rejects exactly what `decode_compiled` rejects, with the same error
+/// (barring an allocation failure, which only the whole decode can meet).
 /// Each variant is checked line by line and only its offset kept; `select`
 /// then decodes the one variant the width picks (K63).
 pub fn scan_compiled(bytes: &[u8]) -> Result<CompiledLayout<'_>, Error> {
