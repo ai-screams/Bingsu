@@ -143,13 +143,13 @@ pub fn str_width(s: &str, p: WidthProfile) -> u32 {
     loop {
         let run = b[i..].iter().position(|&c| !printable_ascii(c));
         let Some(run) = run else {
-            return w + (b.len() - i) as u32;
+            return add_cells(w, b.len() - i);
         };
         // 끝 바이트는 뒤 글자와 한 cluster일 수 있어 grapheme 경로로 넘긴다. 뒤가 제어 문자면 넘길
         // 필요가 없지만 넘겨도 폭은 같다. 이것을 실패시키는 것(tests::ascii_run_boundaries):
         // 끝 바이트까지 여기서 세는 것("1\u{FE0F}"가 1칸이 된다).
         let start = i + run.saturating_sub(1);
-        w += (start - i) as u32;
+        w = add_cells(w, start - i);
         let mut end = start;
         let mut resume = false;
         for g in s[start..].graphemes(true) {
@@ -166,6 +166,24 @@ pub fn str_width(s: &str, p: WidthProfile) -> u32 {
         }
         i = end;
     }
+}
+
+/// `w` plus `n` one-cell clusters, overflowing as adding them one at a time
+/// does (the grapheme path's `+`): a panic where overflow checks are on, and
+/// the sum modulo 2^32 where they are off.
+fn add_cells(w: u32, n: usize) -> u32 {
+    match run_cells(n) {
+        // One cell at a time overflows u32 for every w here. `+ u32::MAX + 1`
+        // overflows too, and adds 2^32, which is 0 modulo 2^32 when it wraps.
+        (low, true) => w + u32::MAX + 1 + low,
+        (low, false) => w + low,
+    }
+}
+
+/// `n` modulo 2^32, and whether `n` is at least 2^32 (only on 64-bit).
+fn run_cells(n: usize) -> (u32, bool) {
+    let low = n as u32;
+    (low, low as usize != n)
 }
 
 /// The grapheme-only width (before the ASCII fast path), the reference the
@@ -484,6 +502,53 @@ mod tests {
         for (s, want) in cases {
             assert_eq!(str_width_graphemes(s, D), *want, "reference {s:?}");
             assert_eq!(str_width(s, D), *want, "{s:?}");
+        }
+    }
+
+    // 4 GiB를 만들지 않고 구간 길이를 칸 수로 바꾸는 부분만 본다. 2^32 이상은 넘침 표시가 서야
+    // add_cells가 기준 합처럼 overflow한다(검사가 켜지면 panic, 꺼지면 나머지). panic 자체는 빌드
+    // 설정에 따라 갈려서 core의 cfg 규칙(#[cfg(test)]만 허용) 아래에서는 시험하지 않는다.
+    // 이것을 실패시키는 것: run_cells가 넘침을 표시하지 않는 것(`as u32`로 자르기만 하는 것).
+    #[test]
+    fn run_cells_flags_lengths_past_u32() {
+        assert_eq!(run_cells(0), (0, false));
+        assert_eq!(run_cells(u32::MAX as usize), (u32::MAX, false));
+        let Ok(wide) = usize::try_from(u64::from(u32::MAX) + 4) else {
+            return; // 32비트: usize가 2^32에 닿지 않는다.
+        };
+        assert_eq!(run_cells(wide), (3, true));
+        assert_eq!(run_cells(wide - 3), (0, true));
+    }
+
+    // 이것을 실패시키는 것: add_cells가 더하지 않고 큰 쪽을 고르는 것(`w.max(low)`).
+    #[test]
+    fn run_cells_add_below_the_limit() {
+        assert_eq!(add_cells(7, 0), 7);
+        assert_eq!(add_cells(7, 9), 16);
+        assert_eq!(add_cells(0, u32::MAX as usize), u32::MAX);
+    }
+
+    // 원자 조합보다 긴 명시 입력: 빈 문자열, 긴 ASCII 구간 끝의 결합 문자, 짧은 구간과 비ASCII의 반복.
+    // 이것을 실패시키는 것: ascii_run_boundaries 주석의 세 변이(각 입력에 그 경계가 여러 번 있다).
+    #[test]
+    fn long_sequences_equal_grapheme_reference() {
+        let rep = |s: &str, n: usize| s.repeat(n);
+        let cases = [
+            String::new(),
+            rep("a", 4096) + "\u{301}",
+            rep("a", 4095) + "1\u{FE0F}\u{20E3}" + &rep("b", 4096),
+            rep("\u{D55C}a", 300),
+            rep("\u{D55C}ab", 300),
+            rep("e\u{301}", 500),
+            rep("\u{600}ab", 200),
+            rep("ab\r\n", 300),
+            rep("x\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}y", 100),
+            rep("\u{1F1F0}\u{1F1F7}\u{1F1F0}a", 100),
+            rep("/src/\u{E0B0} \u{2026}/", 200),
+            rep("#\u{FE0F}*\u{FE0F}9\u{FE0F}\u{20E3}", 100),
+        ];
+        for s in &cases {
+            check(s);
         }
     }
 
