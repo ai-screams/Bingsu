@@ -112,8 +112,84 @@ pub fn grapheme_width(
     }
 }
 
+/// Printable ASCII (0x20..=0x7E): a cluster of one such byte is 1 cell.
+// DEL(0x7F)을 넣어도 폭은 같다(Control이라 앞뒤가 늘 경계이고 표에서 1칸). 표 값에 기대지 않게 뺀다.
+fn printable_ascii(b: u8) -> bool {
+    (0x20..0x7F).contains(&b)
+}
+
 /// Total cells of `s` under `p`, private use glyphs 1 cell each.
+///
+/// Runs of printable ASCII count one cell a byte without segmentation; the
+/// result equals segmenting the whole string. Between two printable ASCII
+/// bytes there is always a cluster boundary (no ASCII code point is Prepend,
+/// Extend, SpacingMark, ZWJ, a regional indicator or Extended_Pictographic),
+/// and controls end a cluster on both sides except CR LF, so controls stay on
+/// the grapheme path. Two rules keep the fast path exact:
+/// - The last byte of a run goes to the grapheme path, unless the string
+///   ends there: it may begin a cluster (`e` + U+0301, `1` + U+FE0F).
+/// - The grapheme path segments the rest of the string and hands back only at
+///   a boundary it found: a Prepend code point (U+0600) joins the ASCII byte
+///   after it, so a run never starts at an ASCII byte the segmenter has not
+///   reached. Segmenting again from a boundary before printable ASCII gives
+///   the same clusters, because the rules that look back past a boundary
+///   (regional indicator pairs, emoji ZWJ, Indic conjuncts) never start at
+///   ASCII. The grapheme path hands back only before printable ASCII, so
+///   text without ASCII keeps one segmenter.
 pub fn str_width(s: &str, p: WidthProfile) -> u32 {
+    let b = s.as_bytes();
+    let mut w = 0u32;
+    let mut i = 0;
+    loop {
+        let run = b[i..].iter().position(|&c| !printable_ascii(c));
+        let Some(run) = run else {
+            return add_cells(w, b.len() - i);
+        };
+        // 끝 바이트는 뒤 글자와 한 cluster일 수 있어 grapheme 경로로 넘긴다. 뒤가 제어 문자면 넘길
+        // 필요가 없지만 넘겨도 폭은 같다. 이것을 실패시키는 것(tests::ascii_run_boundaries):
+        // 끝 바이트까지 여기서 세는 것("1\u{FE0F}"가 1칸이 된다).
+        let start = i + run.saturating_sub(1);
+        w = add_cells(w, start - i);
+        let mut end = start;
+        let mut resume = false;
+        for g in s[start..].graphemes(true) {
+            w += u32::from(grapheme_width(g, p, |_| None).0);
+            end += g.len();
+            // 성능 조건이다(폭은 같다): 빼면 cluster마다 분할기를 새로 만든다.
+            if b.get(end).is_some_and(|&c| printable_ascii(c)) {
+                resume = true;
+                break;
+            }
+        }
+        if !resume {
+            return w;
+        }
+        i = end;
+    }
+}
+
+/// `w` plus `n` one-cell clusters, overflowing as adding them one at a time
+/// does (the grapheme path's `+`): a panic where overflow checks are on, and
+/// the sum modulo 2^32 where they are off.
+fn add_cells(w: u32, n: usize) -> u32 {
+    match run_cells(n) {
+        // One cell at a time overflows u32 for every w here. `+ u32::MAX + 1`
+        // overflows too, and adds 2^32, which is 0 modulo 2^32 when it wraps.
+        (low, true) => w + u32::MAX + 1 + low,
+        (low, false) => w + low,
+    }
+}
+
+/// `n` modulo 2^32, and whether `n` is at least 2^32 (only on 64-bit).
+fn run_cells(n: usize) -> (u32, bool) {
+    let low = n as u32;
+    (low, low as usize != n)
+}
+
+/// The grapheme-only width (before the ASCII fast path), the reference the
+/// tests compare `str_width` with.
+#[cfg(test)]
+fn str_width_graphemes(s: &str, p: WidthProfile) -> u32 {
     s.graphemes(true)
         .map(|g| u32::from(grapheme_width(g, p, |_| None).0))
         .sum()
@@ -160,10 +236,18 @@ pub fn ellipsis(p: WidthProfile, room: u32) -> &'static str {
     }
 }
 
+/// `ellipsis(p, room)` and its width in cells. Each choice is at most one
+/// grapheme cluster, so its width comes from `grapheme_width` (the table
+/// `str_width` uses) without segmenting it.
+pub fn ellipsis_cells(p: WidthProfile, room: u32) -> (&'static str, u32) {
+    let e = ellipsis(p, room);
+    (e, u32::from(grapheme_width(e, p, |_| None).0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
+    use alloc::string::{String, ToString};
     const A2: WidthProfile = match WidthProfile::new(2, 2) {
         Some(p) => p,
         None => panic!(),
@@ -380,9 +464,204 @@ mod tests {
         assert_eq!(fit_prefix(s, 3, D), (12, 3));
     }
 
+    const PROFILES: [WidthProfile; 4] = [
+        D,
+        A2,
+        E1,
+        WidthProfile {
+            ambiguous: 2,
+            emoji: 1,
+        },
+    ];
+
+    // 빠른 경로 경계를 가르는 입력. "e\u{301}"·"a\u{200d}b"·"a\u{FE0F}"는 잘못 나눠도
+    // 합이 같아(뒤 글자가 0칸) 변이를 못 잡는다. 키캡·SpacingMark·Prepend·CR LF가 가른다.
+    // 이것을 실패시키는 것: 비ASCII 앞 마지막 ASCII 바이트를 빠른 경로가 세는 것("1\u{FE0F}" 2→1),
+    // 빠른 경로가 분할기가 닿지 않은 ASCII 바이트에서 시작하는 것(Prepend와 붙은 "\u{600}ab" 2→3),
+    // 제어 문자를 출력 가능으로 보는 것("\r\n" 1→2).
+    #[test]
+    fn ascii_run_boundaries() {
+        let cases: &[(&str, u32)] = &[
+            ("e\u{301}", 1),
+            ("a\u{200D}b", 2),
+            ("a\u{FE0F}", 1),
+            ("\u{2026}", 1),
+            ("\u{2026}/aaaa", 6),
+            ("aaaa\u{2026}", 5),
+            ("1\u{FE0F}", 2),
+            ("ab1\u{FE0F}cd", 6),
+            ("#\u{FE0F}\u{20E3}", 2),
+            ("x\u{0903}", 1),
+            ("\u{0600}ab", 2),
+            ("\u{0600}\u{0600}ab", 2),
+            ("ab\r\ncd", 5),
+            ("\r\n", 1),
+            ("\x7f", 1),
+            ("a\u{0301}b\u{0301}c", 3),
+        ];
+        for (s, want) in cases {
+            assert_eq!(str_width_graphemes(s, D), *want, "reference {s:?}");
+            assert_eq!(str_width(s, D), *want, "{s:?}");
+        }
+    }
+
+    // 4 GiB를 만들지 않고 구간 길이를 칸 수로 바꾸는 부분만 본다. 2^32 이상은 넘침 표시가 서야
+    // add_cells가 기준 합처럼 overflow한다(검사가 켜지면 panic, 꺼지면 나머지). panic 자체는 빌드
+    // 설정에 따라 갈려서 core의 cfg 규칙(#[cfg(test)]만 허용) 아래에서는 시험하지 않는다.
+    // 이것을 실패시키는 것: run_cells가 넘침을 표시하지 않는 것(`as u32`로 자르기만 하는 것).
+    #[test]
+    fn run_cells_flags_lengths_past_u32() {
+        assert_eq!(run_cells(0), (0, false));
+        assert_eq!(run_cells(u32::MAX as usize), (u32::MAX, false));
+        let Ok(wide) = usize::try_from(u64::from(u32::MAX) + 4) else {
+            return; // 32비트: usize가 2^32에 닿지 않는다.
+        };
+        assert_eq!(run_cells(wide), (3, true));
+        assert_eq!(run_cells(wide - 3), (0, true));
+    }
+
+    // 이것을 실패시키는 것: add_cells가 더하지 않고 큰 쪽을 고르는 것(`w.max(low)`).
+    #[test]
+    fn run_cells_add_below_the_limit() {
+        assert_eq!(add_cells(7, 0), 7);
+        assert_eq!(add_cells(7, 9), 16);
+        assert_eq!(add_cells(0, u32::MAX as usize), u32::MAX);
+    }
+
+    // 원자 조합보다 긴 명시 입력: 빈 문자열, 긴 ASCII 구간 끝의 결합 문자, 짧은 구간과 비ASCII의 반복.
+    // 이것을 실패시키는 것: ascii_run_boundaries 주석의 세 변이(각 입력에 그 경계가 여러 번 있다).
+    #[test]
+    fn long_sequences_equal_grapheme_reference() {
+        let rep = |s: &str, n: usize| s.repeat(n);
+        let cases = [
+            String::new(),
+            rep("a", 4096) + "\u{301}",
+            rep("a", 4095) + "1\u{FE0F}\u{20E3}" + &rep("b", 4096),
+            rep("\u{D55C}a", 300),
+            rep("\u{D55C}ab", 300),
+            rep("e\u{301}", 500),
+            rep("\u{600}ab", 200),
+            rep("ab\r\n", 300),
+            rep("x\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}y", 100),
+            rep("\u{1F1F0}\u{1F1F7}\u{1F1F0}a", 100),
+            rep("/src/\u{E0B0} \u{2026}/", 200),
+            rep("#\u{FE0F}*\u{FE0F}9\u{FE0F}\u{20E3}", 100),
+        ];
+        for s in &cases {
+            check(s);
+        }
+    }
+
+    const ATOMS: &[&str] = &[
+        "a",
+        " ",
+        "~",
+        "#",
+        "*",
+        "1",
+        "\0",
+        "\x1f",
+        "\x7f",
+        "\t",
+        "\r",
+        "\n",
+        "\u{80}",
+        "\u{301}",
+        "\u{903}",
+        "\u{600}",
+        "\u{200D}",
+        "\u{FE0E}",
+        "\u{FE0F}",
+        "\u{20E3}",
+        "\u{1F3FB}",
+        "\u{1F600}",
+        "\u{2764}",
+        "\u{1F1F0}",
+        "\u{1F1F7}",
+        "\u{2026}",
+        "\u{AC00}",
+        "\u{1100}",
+        "\u{1161}",
+        "\u{11A8}",
+        "\u{3000}",
+        "\u{E0B0}",
+        "\u{F0000}",
+        "\u{2FFF0}",
+        "\u{FFFD}",
+        "\u{1F468}",
+        "\u{2500}",
+        // classes.tsv의 적대적 바이트 중 원자에 없던 것: ESC, bidi override, 폭 0 공백, isolate.
+        "\x1b",
+        "\u{202E}",
+        "\u{200B}",
+        "\u{2066}",
+    ];
+
+    fn check(s: &str) {
+        for p in PROFILES {
+            assert_eq!(str_width(s, p), str_width_graphemes(s, p), "{s:?} {p:?}");
+        }
+    }
+
+    // 생성한 문자열마다 빠른 경로와 grapheme 기준 구현이 같은 폭을 내는지 본다.
+    // 길이 3까지는 원자 전부의 조합, 그 뒤는 고정 seed의 xorshift로 4–64 원자.
+    // 이것을 실패시키는 것: ascii_run_boundaries 주석의 세 변이(같은 입력이 원자 조합에 있다).
+    #[test]
+    fn ascii_runs_equal_grapheme_reference() {
+        let n = ATOMS.len();
+        let mut s = String::new();
+        for x in ATOMS {
+            for y in 0..=n {
+                for z in 0..=n {
+                    s.clear();
+                    s.push_str(x);
+                    for k in [y, z] {
+                        if k < n {
+                            s.push_str(ATOMS[k]);
+                        }
+                    }
+                    check(&s);
+                }
+            }
+        }
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            s.clear();
+            let len = 4 + (next() % 61) as usize;
+            for _ in 0..len {
+                // ASCII 쪽으로 기울여 빠른 경로와 grapheme 경로가 한 문자열에서 여러 번 바뀌게 한다.
+                let r = next();
+                let atom = if r % 3 == 0 {
+                    (r >> 8) as usize % 6
+                } else {
+                    (r >> 8) as usize % n
+                };
+                s.push_str(ATOMS[atom]);
+            }
+            check(&s);
+        }
+    }
+
     // 이것을 실패시키는 것: 1칸만 남았을 때 ambiguous=2에서 `…`를 쓰는 것(스펙 "생략 기호도 폭 프로필로").
     #[test]
     fn ellipsis_by_profile() {
+        // 이것을 실패시키는 것: ellipsis_cells의 칸 수가 str_width와 다른 것(예: `…`를 늘 1칸으로).
+        for p in PROFILES {
+            for room in 0..4 {
+                let (e, cells) = ellipsis_cells(p, room);
+                assert_eq!(
+                    (e, cells),
+                    (ellipsis(p, room), str_width(e, p)),
+                    "{p:?} {room}"
+                );
+            }
+        }
         assert_eq!(ellipsis(D, 1), "\u{2026}");
         assert_eq!(ellipsis(A2, 1), ".");
         assert_eq!(ellipsis(A2, 2), "\u{2026}");

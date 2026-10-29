@@ -2,7 +2,7 @@
 //! types; the versioned schema is M3) and the public field names
 //! of the built-in segments (spec section 4 "세그먼트 선언", confirmed in M3).
 use crate::sanitize::sanitize_into_capped;
-use crate::width::{WidthProfile, ellipsis, grapheme_width, str_width};
+use crate::width::{WidthProfile, ellipsis_cells, grapheme_width};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -78,11 +78,11 @@ impl Clean {
 fn cut(text: &mut String, max_cells: u16, p: WidthProfile) {
     let max = u32::from(max_cells);
     let max_bytes = usize::from(max_cells) * 4;
-    let e = ellipsis(p, max);
+    let (e, ew) = ellipsis_cells(p, max);
     // The ellipsis fits both caps: it is chosen to fit `max` cells, and it
     // is at most 3 bytes, while any non-empty one needs `max >= 1` (the
     // ambiguous width is 1 or 2, `WidthProfile::new`).
-    let (room, room_bytes) = (max - str_width(e, p), max_bytes - e.len());
+    let (room, room_bytes) = (max - ew, max_bytes - e.len());
     let (mut used, mut keep) = (0u32, 0usize);
     for (i, g) in text.grapheme_indices(true) {
         let end = i + g.len();
@@ -394,6 +394,7 @@ impl Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::width::str_width;
 
     fn drawn(fl: &Field) -> String {
         let mut s = String::new();
