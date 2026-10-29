@@ -576,6 +576,33 @@ def _cloexec_pair(previous: Call | None, current: Call) -> bool:
                 and len(before) > flag_at and "O_CLOEXEC" in before[flag_at].split("|"))
 
 
+def request_handoff(name, args):
+    """The collector's request read: the one boundary where collector_attribute
+    hands calls to assert_repository_trace(mode="shipped") and where that
+    audit's window opens. Any read form on the request fd 3 counts."""
+    return name in {"read", "readv"} and bool(args) and args[0].split("<")[0] == "3"
+
+
+def stack_guard_allowance(platform) -> int:
+    """Seeks x86_64 glibc's pthread_getattr_np makes on its own maps
+    (formula.STARTUP_PRIMITIVES stack_guard); 0 for any other or no platform."""
+    from .formula import STARTUP_PRIMITIVES
+    return STARTUP_PRIMITIVES.get(platform, {}).get("stack_guard", {}).get("seek", 0)
+
+
+def stack_guard_seek(c, process, used: int) -> bool:
+    """Whether c is the next stack-guard seek of `process` after `used` of
+    them: its own /proc/self/maps fd, SEEK_CUR 0 first, then N with SEEK_SET.
+    The caller bounds `used` by stack_guard_allowance and requires the whole
+    sequence (or none) once the trace ends."""
+    if c.name != "lseek" or target(c) not in {"/proc/self/maps", f"/proc/{process}/maps"}:
+        return False
+    args = split_args(c.args)
+    if used == 0:
+        return args[1:] == ["0", "SEEK_CUR"]
+    return len(args) == 3 and args[1].isdigit() and args[2] == "SEEK_SET"
+
+
 def _probe_flags(text, required, optional=frozenset()):
     flags = text.split("|")
     return len(flags) == len(set(flags)) and required <= set(flags) <= required | optional
@@ -637,7 +664,7 @@ class _RepositoryProbe:
 
 
 def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False,
-                        helper_vocabulary: bool = False) -> Attribution:
+                        helper_vocabulary: bool = False, repository_window: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
 
     Work in syscall *entry* order. A vfork child's exec may precede its
@@ -650,6 +677,12 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     `pinned` contains front/helper/collector paths and optional exact argv verbs.
     `helper_kill` is explicit evidence from the caller's failure mode. Only
     then may a collector's last call lack its syscall number before SIGKILL.
+    `pinned["platform"]`, an (arch, libc) pair, admits that platform's
+    collector stack-guard seeks (STARTUP_PRIMITIVES); without it none.
+    `repository_window` leaves a collector's calls from its first request
+    read on fd 3 to its exit to assert_repository_trace(mode="shipped"); the
+    caller must run that audit on the same collector. Spawn, exec, filter and
+    descriptor checks still apply in the window.
     `helper_vocabulary` counts helper calls with classify.helper_kind (the
     per-stage helper gate); other callers keep the generic helper kinds. It
     also ends a helper's loader exemption at its first counted call, so a
@@ -692,6 +725,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             ordered.append((open_ends[at], c, True, False))
     ordered.sort(key=lambda pair: pair[0])
     roles, owner, confined = {}, {}, set()
+    guard_allowance = stack_guard_allowance(pinned.get("platform"))
+    guard_seeks = defaultdict(int)
     descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
     helper_calls = []
@@ -712,6 +747,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     filters = defaultdict(int)
     repository_probe = {}
     bootstrap_ended = set()
+    requested = set()  # collectors past their first request read (repository_window)
     started = set()  # helper processes whose loader prologue is over
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
     verbs.update(pinned.get("verbs", {}))
@@ -744,6 +780,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 filters.pop(process, None)
                 repository_probe.pop(process, None)
                 bootstrap_ended.discard(process)
+                requested.discard(process)
             continue
         if unknown_calls[process]:
             bad(c, "call after terminal unknown syscall")
@@ -809,6 +846,19 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         helper_startup = not (helper_vocabulary and role == "helper") or process not in started
         if process not in confined and helper_startup and _prologue_call(c, target(c)):
             continue
+        # x86_64 glibc's pthread_getattr_np (Rust std's main-thread stack
+        # guard) seeks its own /proc/self/maps twice before any filter
+        # (formula.STARTUP_PRIMITIVES stack_guard). Only on the platform the
+        # caller names, only that fd, only SEEK_CUR 0 then SEEK_SET, and the
+        # whole sequence or none of it (checked after the last record).
+        # Only before the collector's first filter: a maps fd opened in the
+        # prologue may stay open past it.
+        # 이것을 실패시키는 것: 다른 플랫폼·다른 fd(공유 라이브러리 fd 포함)·다른 모양의 lseek, 표의 횟수를 넘는 lseek,
+        # 끝나지 않은 seek 쌍, 필터 뒤의 seek을 허용하는 것.
+        if (role == "collector" and process not in confined and guard_seeks[process] < guard_allowance
+                and stack_guard_seek(c, process, guard_seeks[process])):
+            guard_seeks[process] += 1
+            continue
         if helper_vocabulary and role == "helper" and k is not None:
             started.add(process)
         if role == "collector":
@@ -817,8 +867,15 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             # The first result write is Ready (even a failed attempt ends the
             # window). Do not wait for the subsequent request read. A read
             # ruleset or post-seal restriction also ends it before read-layer IO.
-            if (args and (c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
-                          or c.name in {"read", "readv"} and args[0].split("<")[0] == "3")
+            # 이것을 실패시키는 것: 요청 읽기 뒤의 저장소 호출을 M3b bootstrap 어휘로 다시 판정하는 것(출하 수집이
+            # 늘 실패), 요청 읽기 전 호출까지 넘기는 것(bootstrap 판정이 빠짐).
+            if repository_window and process in requested:
+                continue
+            if repository_window and request_handoff(c.name, args):
+                requested.add(process)
+                continue
+            if (args and c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
+                    or request_handoff(c.name, args)
                     or c.name in {"landlock_create_ruleset", "landlock_add_rule"}
                     and any(flag in c.args for flag in ("LANDLOCK_ACCESS_FS_READ_FILE", "LANDLOCK_ACCESS_FS_READ_DIR"))
                     or c.name == "landlock_restrict_self" and filters[process] >= 2):
@@ -846,6 +903,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 bad(c, "collector read outside the M3b bootstrap")
         if k:
             count(role, k, c)
+    errors.extend(f"pid {process} (collector): incomplete stack-guard seeks"
+                  for process, n in guard_seeks.items() if 0 < n < guard_allowance)
     if not seen_exec and not counts:
         errors.append("no product process observed")
     required = pinned.get("collectors", 1)
@@ -861,6 +920,21 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
     successful calls. The output dictionary records measured phase counts.
     Linux uses the same parser/held-metadata primitives as the B3 gate.
     Darwin records calls before dispatch, including calls that later fail.
+
+    capabilities["mode"] == "shipped" audits the shipped collector, which
+    writes wire frames instead of F1_PHASE markers (Linux only). Its window
+    opens at the first request read on fd 3 (after Ready) and closes at that
+    process's exit; calls after it fail as another task. Earlier calls are the
+    bootstrap, gated by collector_attribute. The window is one phase with the
+    same path_check rules as acquisition: ancestors (including "/") allow
+    only O_DIRECTORY opens and metadata, a .git directly under an ancestor is
+    a discovery candidate ("/" may also be opened without O_DIRECTORY for
+    identity comparison only, as in F1's read-layer phase; that fd admits
+    only fstat-family calls and close), everything else must be below the
+    roots, and
+    Landlock rules must name a root exactly. What it loses: phase order. A
+    shipped collector that reads ancestor metadata after its read layer, or
+    runs stages out of order, passes; F1 phase mode still checks that.
     """
     import ast
     import posixpath
@@ -891,8 +965,17 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                    "ancestor_names": "ancestor-names", "before_read_layer": "read-layer",
                    "preflight_start": "B", "stage_c": "C", "stage_d": "D", "end": "end"}
     order = list(transitions.values())
+    shipped = capabilities.get("mode") == "shipped"
+    assert capabilities.get("mode", "f1") in {"f1", "shipped"}, "unknown repository trace mode"
+    if shipped:
+        # A worktree root is the parent of its own .git root; it is a root,
+        # not a metadata-only ancestor. F1 capabilities keep their sets.
+        # 이것을 실패시키는 것: 이 줄을 지우는 것(worktree 목록 읽기가 조상 내용으로 거부됨).
+        ancestors -= roots
     active, owner, listing = None, None, None
     seen, held, closed, counts, raw_counts = [], {}, set(), {}, {}
+    identity = set()  # shipped: "/" fds opened without O_DIRECTORY (fstat family and close only)
+    evidence_read = set()  # paths with a successful non-empty read inside the window
     first_exec = True
 
     def phase(event):
@@ -918,12 +1001,16 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
         if active == "ancestor-names":
             assert name in {"getdents", "getdents64"}, ("ancestor entry metadata/content; must use already-held fd", name, path)
             allowed = path in names
-        elif active == "acquisition" and path in ancestors:
+        elif active in ("acquisition", "shipped") and path in ancestors:
             assert name not in {"read", "pread", "pread64", "readv", "mmap", "getdents", "getdents64", "bulk"}, ("ancestor content", name, path)
             if name in OPEN:
-                assert "O_DIRECTORY" in flags, ("acquisition content open", name, path)
+                # The shipped read layer opens "/" without O_DIRECTORY for
+                # identity comparison only, as F1's read-layer branch allows;
+                # that fd then admits only fstat-family calls and close.
+                # 이것을 실패시키는 것: 출하 창의 "/" 아닌 조상을 O_DIRECTORY 없이 여는 것.
+                assert "O_DIRECTORY" in flags or (active == "shipped" and path == "/"), ("acquisition content open", name, path)
             allowed = True
-        elif active == "acquisition" and posixpath.basename(path) == ".git" and posixpath.dirname(path) in ancestors:
+        elif active in ("acquisition", "shipped") and posixpath.basename(path) == ".git" and posixpath.dirname(path) in ancestors:
             allowed = True  # fixed discovery candidate only
         elif active == "read-layer" and path == "/":
             allowed = name in {"open", "openat", "open-result", "fstat", "fstat64", "newfstatat", "statx"}
@@ -996,7 +1083,22 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 first_exec = False
                 continue  # exactly one launch of the fixed worker
             assert effect not in {"exec", "spawn", "thread", "network"}, ("forbidden repository effect (attempt)", effect, call)
-            if call.name == "write" and len(args) == 3 and args[0].split("<")[0] == "1":
+            if shipped:
+                # 이것을 실패시키는 것: 창을 요청 읽기 전부터 여는 것(bootstrap 호출이 경로 규칙에 걸림),
+                # 다른 pid의 exit로 창을 닫는 것.
+                if call.name == "write" and args and args[0].split("<")[0] == "1":
+                    continue  # wire frames; content is the supervisor codec's
+                # 이것을 실패시키는 것: 창을 read로만 여는 것(readv(3) 뒤의 호출이 위임됐는데 감사받지 않음).
+                if request_handoff(call.name, args):
+                    owner, active = call.pid, "shipped"  # the request read opens the window
+                    seen.append("shipped")
+                    counts.setdefault("shipped", Counter())
+                    continue
+                if call.name == EXIT_EVENT and active == "shipped" and call.pid == owner:
+                    active = "end"
+                    seen.append("end")
+                    continue
+            elif call.name == "write" and len(args) == 3 and args[0].split("<")[0] == "1":
                 try:
                     message = ast.literal_eval(args[1])
                 except (SyntaxError, ValueError):
@@ -1012,11 +1114,26 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
             if active is None:
                 continue  # C1/B3 separately gate the shipped bootstrap
             assert call.pid == owner, ("other task in repository phase", call)
+            # 이것을 실패시키는 것: identity 비교 전용 "/" fd로 목록·내용·하위 open·fstatfs·dup·fcntl을 허용하는 것.
+            subject = FD_ARG.fullmatch(args[0]) if args else None
+            # musl's open() follows an O_CLOEXEC open with fcntl(F_SETFD,
+            # FD_CLOEXEC) on the new fd (the collector's filter may refuse it):
+            # one such call, right after the identity fd's open, on musl only.
+            # 이것을 실패시키는 것: glibc에서, 두 번, 또는 open 바로 뒤가 아닌 F_SETFD를 identity fd에 허용하는 것.
+            # Adjacency to that open is the fcntl branch's check below.
+            # 이것을 실패시키는 것: 성공·EPERM 아닌 결과(EINVAL·EBADF)의 F_SETFD를 받아들이는 것.
+            musl_cloexec = (capabilities.get("libc") == "musl" and call.name == "fcntl"
+                            and args[1:] == ["F_SETFD", "FD_CLOEXEC"]
+                            and (call.ret == "0" or call.ret.startswith("-1 EPERM")))
+            if subject and int(subject[1]) in identity and not musl_cloexec:
+                assert (call.name == "close" or call.name in {"fstat", "fstat64"}
+                        or call.name in {"newfstatat", "statx"} and len(args) > 1 and args[1] == '""'), ("identity-only / fd", call)
             if call.name == "close":
                 if call.ret == "0":
                     fd = int(args[0].split("<")[0])
                     held.pop(fd, None)
                     closed.add(fd)
+                    identity.discard(fd)
                 continue
             if call.name in {"dup", "dup2", "dup3"} or call.name == "fcntl" and len(args) > 1 and args[1].startswith("F_DUPFD"):
                 source = FD_ARG.fullmatch(args[0])
@@ -1043,11 +1160,11 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 continue
             if call.name == "landlock_add_rule":
                 paths = re.findall(r"parent_fd=(\d+)<(/[^>]+)>", call.args)
-                assert active == "read-layer" and len(paths) == 1 and paths[0][1] in roots, ("Landlock root widening", call)
+                assert active in ("read-layer", "shipped") and len(paths) == 1 and paths[0][1] in roots, ("Landlock root widening", call)
                 use(int(paths[0][0]), paths[0][1])
                 assert "LANDLOCK_ACCESS_FS_READ_FILE" in call.args and "LANDLOCK_ACCESS_FS_READ_DIR" in call.args
             if call.name in {"landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self"}:
-                assert active == "read-layer", ("Landlock phase/widening", call)
+                assert active in ("read-layer", "shipped"), ("Landlock phase/widening", call)
                 counts[active][call.name] += 1
                 continue
             allowed = OPEN | {"stat", "lstat", "newfstatat", "fstatat64", "statx", "fstat", "fstat64", "fstatfs", "fstatfs64", "read", "pread64", "readv", "readlink", "readlinkat", "getdents", "getdents64", "faccessat2", "mmap", "lseek"}
@@ -1066,13 +1183,20 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
                 result = FD_ARG.fullmatch(call.ret)
                 assert result and result[2], ("unplaced open result", call)
                 bind(int(result[1]), result[2])
+                if shipped and path == "/" and "O_DIRECTORY" not in call.args:
+                    identity.add(int(result[1]))  # the read layer's identity-comparison-only "/"
             if call.name in {"getdents", "getdents64"}:
                 directory(path, int(args[2]))
+            if call.name in {"read", "pread64", "readv"} and re.match(r"[1-9]\d*$", call.ret):
+                evidence_read.add(path)
             primitive = held_metadata_kind(call, args) or call.name
             if primitive == "open" and active == "read-layer" and path == "/":
                 primitive = "openat"  # same fixed-slash libc alias as B3
             counts[active][primitive] += 1
     assert seen and seen[-1] == "end", ("missing repository phase evidence/completion", seen)
+    # 이것을 실패시키는 것: 저장소 작업이 하나도 없는 출하 창을 통과시키는 것.
+    missing = set(capabilities.get("evidence", ())) - evidence_read
+    assert not missing, ("no repository read evidence in the window", sorted(missing))
     for name, axes in expected_axes.items():
         expected = collector_repository_expected(CollectorAxes(**axes))
         assert dict(counts.get(name, {})) == {k: v for k, v in expected.items() if v}, (name, counts.get(name), expected)

@@ -118,6 +118,8 @@ jobs:
                 --ignore tests/shell/test_collector_security.py \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula \
+                --deselect "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]" \
+                --deselect "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]" \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c \
                 --deselect tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section \
                 --deselect tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount \
@@ -265,6 +267,17 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio' "$RUNNER_TEMP/fds.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds' "$RUNNER_TEMP/fds.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive' "$RUNNER_TEMP/fds.txt"
+      # The path allowlist with exactly one collecting collector needs a release
+      # helper (a debug one under strace often defers admission); the PTY
+      # containers run the no-collection cell on their debug build.
+      # 이것을 실패시키는 것: 이 단계를 debug 칸에서 돌리거나 매개변수 하나의 PASSED 단언을 빼는 것.
+      - name: Prompt path allowlist with one collector (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]' 'tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]' --basetemp="$RUNNER_TEMP/allowlist-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/allowlist.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]' "$RUNNER_TEMP/allowlist.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]' "$RUNNER_TEMP/allowlist.txt"
       # Only the live fixture's trace, stdout, stderr and attempt.json.
       - name: Upload failed helper stage evidence
         if: failure()

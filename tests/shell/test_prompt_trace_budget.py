@@ -12,6 +12,211 @@ EXE = "/pinned/bin/bingsu"
 ROOTS = ["/pinned/run", "/pinned/config", "/pinned/state"]
 
 
+COLLECT_BASE = "/home/tester/pt/test_prompt_binary_names_only_1"
+COLLECT_PIN = "/home/tester/target/release/bingsu-collect"
+
+
+def collecting_prompt():
+    """A release prompt whose helper started and supervised one collecting
+    collector (global-missing, warm snapshot). read/write payloads are cut to
+    120 characters; provenance: fixtures/prompt-m3d-collect-trace.md."""
+    import gzip
+    data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+        "prompt-m3d-collect-linux-1.strace.gz").read_bytes())
+    assert hashlib.sha256(data).hexdigest() == "18c030e2e135874a418bc047bc6f0dbe731f5821b2bcd9663afefbd3632c8fab"
+    return data.decode().splitlines()
+
+
+def check_collecting_prompt(lines, *, collectors=1, audit=True, platform=None):
+    roots = [COLLECT_BASE + suffix for suffix in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")]
+    inputs = tuple(COLLECT_BASE + suffix for suffix in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore"))
+    repo = COLLECT_BASE + "/repo"
+    budget.assert_prompt_trace_budget(lines, COLLECT_BASE + "/bin/bingsu", roots, global_inputs=inputs,
+                                      collector_exe=COLLECT_PIN, collectors=collectors,
+                                      repository_roots=[repo, repo + "/.git"] if audit else None,
+                                      repository_evidence=[repo + "/.git/HEAD"], platform=platform)
+
+
+def insert_after(lines, pattern, extra):
+    at = next(i for i, line in enumerate(lines) if pattern in line)
+    return lines[:at + 1] + extra + lines[at + 1:]
+
+
+def with_stack_guard_seeks(seeks=None):
+    """x86_64 glibc pthread_getattr_np: two seeks of the collector's own maps
+    fd before it closes it (CI #167 x86_64 gnu capture: SEEK_CUR 0, then
+    SEEK_SET 2854)."""
+    seeks = seeks or ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854",
+                      "1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854"]
+    return insert_before(collecting_prompt(), "1098  close(4</proc/1098/maps>", seeks)
+
+
+def insert_before(lines, pattern, extra):
+    at = next(i for i, line in enumerate(lines) if pattern in line)
+    return lines[:at] + extra + lines[at:]
+
+
+def test_collector_stack_guard_seeks_pass_on_x86_64_gnu():
+    check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"))
+
+
+# 이것을 실패시키는 것: x86_64 glibc 밖에서, 다른 fd(공유 라이브러리 fd 포함)·다른 모양으로, 표의 횟수를 넘겨,
+# 짝 없이 collector의 lseek을 허용하는 것.
+@pytest.mark.parametrize("platform,seeks", [
+    (("aarch64", "gnu"), None),
+    (("x86_64", "musl"), None),
+    (None, None),
+    (("x86_64", "gnu"), "lock"),
+    (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854"]),
+    (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854",
+                         "1098  lseek(4</proc/1098/maps>, 2854, SEEK_SET) = 2854",
+                         "1098  lseek(4</proc/1098/maps>, 0, SEEK_SET) = 0"]),
+    (("x86_64", "gnu"), ["1098  lseek(4</proc/1098/maps>, 0, SEEK_CUR) = 2854"]),
+    (("x86_64", "gnu"), "libc"),
+], ids=["aarch64-gnu", "x86_64-musl", "no-platform", "other-fd", "set-first", "third-seek", "unpaired",
+        "libc-fd"])
+def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
+    if seeks == "libc":  # a trusted shared-object fd the loader rules admit for reads
+        libc = "4</usr/lib/aarch64-linux-gnu/libc.so.6>"
+        lines = insert_before(collecting_prompt(), f"1098  close({libc}",
+                              [f"1098  lseek({libc}, 0, SEEK_CUR) = 832", f"1098  lseek({libc}, 832, SEEK_SET) = 832"])
+        with pytest.raises(AssertionError):
+            check_collecting_prompt(lines, platform=platform)
+        return
+    if seeks == "lock":  # the inherited collection.lock fd, open at that point
+        import re
+        lock = next(m[1] for line in collecting_prompt()
+                    if (m := re.match(r"1098  newfstatat\((5<[^>]*collection\.lock>)", line)))
+        seeks = [f"1098  lseek({lock}, 0, SEEK_CUR) = 0"]
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform)
+
+
+FRONT_GUARD = ["1095  lseek(3</proc/1095/maps>, 0, SEEK_CUR) = 2906",
+               "1095  lseek(3</proc/1095/maps>, 2822, SEEK_SET) = 2822"]
+
+
+def with_front_guard_seeks(seeks=FRONT_GUARD):
+    """The front's x86_64 glibc stack-guard seeks (CI #167 x86_64 gnu: index
+    49 and 50, right after its third maps read)."""
+    return insert_after(collecting_prompt(), '1095  read(3</proc/1095/maps>, "tack]', seeks)
+
+
+def test_front_stack_guard_seeks_pass_on_x86_64_gnu():
+    check_collecting_prompt(with_front_guard_seeks(), platform=("x86_64", "gnu"))
+
+
+# 이것을 실패시키는 것: 다른 플랫폼에서, 앞단 자기 maps 아닌 fd에서, 짝 없이 앞단 lseek을 받는 것.
+@pytest.mark.parametrize("platform,seeks", [
+    (("aarch64", "gnu"), FRONT_GUARD),
+    (None, FRONT_GUARD),
+    (("x86_64", "gnu"), [line.replace("3</proc/1095/maps>", "1<pipe:[1814704]>") for line in FRONT_GUARD]),
+    (("x86_64", "gnu"), FRONT_GUARD[:1]),
+], ids=["aarch64-gnu", "no-platform", "stdout-fd", "unpaired"])
+def test_front_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform)
+
+
+def front_seeks_after_filter(lines, result="-1 EPERM (Operation not permitted)"):
+    """Review reproduction: the front opens its own maps as fd 40 before its
+    filter and makes the stack-guard pair after it (refused, EPERM)."""
+    sealed = next(i for i, line in enumerate(lines) if line.startswith("1095  prctl(PR_SET_SECCOMP"))
+    done = next(i for i in range(sealed, len(lines)) if lines[i].startswith("1095  <... prctl resumed>"))
+    opened = ['1095  openat(AT_FDCWD</home/tester/pt/test_prompt_binary_names_only_1/repo>, "/proc/self/maps", '
+              'O_RDONLY|O_CLOEXEC) = 40</proc/1095/maps>']
+    seeks = [f"1095  lseek(40</proc/1095/maps>, 0, SEEK_CUR) = {'2906' if result == '0' else result}",
+             f"1095  lseek(40</proc/1095/maps>, 2822, SEEK_SET) = {'2822' if result == '0' else result}"]
+    return lines[:sealed] + opened + lines[sealed:done + 1] + seeks + lines[done + 1:]
+
+
+# 이것을 실패시키는 것: 앞단 seek 쌍을 필터 뒤에서도 받는 것(완전 캡처와 마감 시도 모두), 받은 seek을 I/O 검사에서 지우는 것.
+@pytest.mark.parametrize("result", ["-1 EPERM (Operation not permitted)", "0"], ids=["eperm", "success"])
+def test_front_stack_guard_seeks_after_the_filter_fail(result):
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(front_seeks_after_filter(collecting_prompt(), result), platform=("x86_64", "gnu"))
+    cap = collecting_capture(front_seeks_after_filter(collector_deadline_lines(head_open=True), result))
+    cap.platform = ("x86_64", "gnu")
+    assert budget.deadline_shape(cap) == "collector-deadline"
+    made = []
+    with pytest.raises(AssertionError):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or cap)
+    assert made == [1]
+
+
+def collector_seeks_after_filter():
+    """The collector opens its own maps as fd 41 in its prologue (admitted
+    there) and makes the stack-guard pair after its last filter."""
+    lines = collecting_prompt()
+    first = min(i for i, line in enumerate(lines) if line.startswith("1098  seccomp(SECCOMP_SET_MODE_FILTER"))
+    sealed = max(i for i, line in enumerate(lines) if line.startswith("1098  seccomp(SECCOMP_SET_MODE_FILTER"))
+    done = next(i for i in range(sealed, len(lines)) if lines[i].startswith("1098  <... seccomp resumed>"))
+    opened = ['1098  openat(AT_FDCWD</>, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 41</proc/1098/maps>']
+    seeks = ["1098  lseek(41</proc/1098/maps>, 0, SEEK_CUR) = 2854",
+             "1098  lseek(41</proc/1098/maps>, 2854, SEEK_SET) = 2854", "1098  close(41</proc/1098/maps>) = 0"]
+    return lines[:first] + opened + lines[first:done + 1] + seeks + lines[done + 1:]
+
+
+# 이것을 실패시키는 것: collector가 prologue에서 연 maps fd로 필터 뒤에 seek하는 것을 받는 것.
+def test_collector_stack_guard_seeks_after_the_filter_fail():
+    with pytest.raises(AssertionError, match="collector forbidden effect: lseek"):
+        check_collecting_prompt(collector_seeks_after_filter(), platform=("x86_64", "gnu"))
+
+
+def test_collecting_prompt_passes_the_path_allowlist():
+    check_collecting_prompt(collecting_prompt())
+    # A thread's interrupted futex wait can resume under strace (seen live once).
+    # 이것을 실패시키는 것: helper 경로 표가 restart_syscall의 빈 인자를 해석하려는 것.
+    check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                                         ["1099  restart_syscall(<... resuming interrupted futex ...>) = 0"]))
+    # The supervisor's SIGKILL of its own child on a deadline is the one allowed signal.
+    check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                                         ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0"]))
+
+
+# 이것을 실패시키는 것: collector 수를 정확히 보지 않는 것, 수집하는 collector를 감사 없이 통과시키는 것,
+# collector가 요청 뒤 roots 밖을 여는 것, collector bootstrap의 읽기를 저장소 감사로 넘기는 것, futex 아닌 restart를 건너뛰는 것, readv(3)로 위임한 뒤 감사 창을 늦게 여는 것, 시험 저장소의 HEAD를 읽은 증거 없이 통과시키는 것, pidfd 아닌 waitid·SIGKILL 아닌 신호·둘째 pidfd_open을 허용하는 것.
+@pytest.mark.parametrize("damage", ["count-zero", "no-audit", "collector-outside-open", "waitid-by-pid",
+                                    "signal-sigterm", "second-pidfd-open", "collector-bootstrap-read", "restart-other", "readv-handoff", "empty-head-read"])
+def test_collecting_prompt_rejects_mutations(damage):
+    lines, collectors, audit = collecting_prompt(), 1, True
+    if damage == "count-zero":
+        collectors = 0
+    elif damage == "no-audit":
+        audit = False
+    elif damage == "collector-outside-open":
+        walk = next(i for i, line in enumerate(lines)
+                    if line.startswith("1098  openat(AT_FDCWD</>, \"/\", O_RDONLY|O_NONBLOCK|O_NOFOLLOW"))
+        at = next(i for i in range(walk, len(lines)) if lines[i].startswith("1098") and lines[i].endswith("= 4</>"))
+        lines = lines[:at + 1] + ['1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+                                  '1098  close(40</etc/hostname>) = 0'] + lines[at + 1:]
+    elif damage == "waitid-by-pid":
+        lines = [line.replace("1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>", "1099  waitid(P_PID, 1098") for line in lines]
+    elif damage == "signal-sigterm":
+        lines = insert_after(lines, "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                             ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGTERM, NULL, 0) = 0"])
+    elif damage == "second-pidfd-open":
+        lines = insert_after(lines, "1096  pidfd_open(1098, 0)", ["1096  pidfd_open(1098, 0) = 34<anon_inode:[pidfd]>"])
+    elif damage == "collector-bootstrap-read":
+        ready = next(i for i, line in enumerate(lines) if line.startswith("1098  write(1<pipe:"))
+        lines = lines[:ready] + ['1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+                                 '1098  close(40</etc/hostname>) = 0'] + lines[ready:]
+    elif damage == "readv-handoff":
+        at = next(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        lines = lines[:at] + [f'1098  readv({lines[at].split("(", 1)[1].split(",")[0]}, [{{iov_base="", iov_len=1}}], 1) = 0',
+                              '1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+                              '1098  read(40</etc/hostname>, "x\\n", 64) = 2',
+                              '1098  close(40</etc/hostname>) = 0'] + lines[at:]
+    elif damage == "empty-head-read":
+        lines = [line.replace('"ref: refs/heads/main\\n", 22) = 21', '"", 22) = 0') for line in lines]
+        assert lines != collecting_prompt()
+    elif damage == "restart-other":
+        lines = insert_after(lines, "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
+                             ["1099  restart_syscall(<... resuming interrupted read ...>) = 0"])
+    with pytest.raises(AssertionError):
+        check_collecting_prompt(lines, collectors=collectors, audit=audit)
+
+
 # prompt 트리의 read 계열 payload만 줄였다. provenance: fixtures/prompt-e4-trace.md.
 # 컨테이너 경로는 문자열 인자로만 전달하며,
 # macOS의 realpath/stat 또는 현재 빌드 위치로 바꾸지 않는다.
@@ -2512,3 +2717,166 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
         lines.insert(-1, extra)
     with pytest.raises(AssertionError):
         budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
+
+
+ALARM_BASE = "/home/tester/pt/r9/test_prompt_binary_names_only_1"
+
+
+def front_alarm_capture(lines=None):
+    """A release glibc aarch64 prompt (global-present) whose front took
+    SIGALRM during a long vfork under strace and exited 0 before its filter.
+    read/write payloads cut to 120 characters; provenance:
+    fixtures/prompt-m3d-collect-trace.md."""
+    import gzip
+    from types import SimpleNamespace
+    if lines is None:
+        data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+            "prompt-m3d-front-alarm-linux.strace.gz").read_bytes())
+        assert hashlib.sha256(data).hexdigest() == "7428a7a1c24de5ff5f05f0f6dcd06e5efc04aa411410b5c8ae113a6c12a3ae25"
+        lines = data.decode().splitlines()
+    repo = ALARM_BASE + "/repo"
+    return SimpleNamespace(
+        lines=lines, exe=ALARM_BASE + "/bin/bingsu", collector_exe="/home/tester/target/release/bingsu-collect",
+        global_inputs=tuple(ALARM_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")),
+        global_present=True, collectors=1,
+        pinned=[ALARM_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
+
+
+def collecting_capture(lines):
+    from types import SimpleNamespace
+    repo = COLLECT_BASE + "/repo"
+    return SimpleNamespace(
+        lines=lines, exe=COLLECT_BASE + "/bin/bingsu", collector_exe=COLLECT_PIN,
+        global_inputs=tuple(COLLECT_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")),
+        global_present=False, collectors=1,
+        pinned=[COLLECT_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
+
+
+def collector_deadline_lines(after_head=False, head_open=False, extra=()):
+    """The collecting prompt with its collector cut after the request reads,
+    after its first HEAD open (head_open), or after its first HEAD read, then
+    `extra` collector lines, then exit 75."""
+    lines = collecting_prompt()
+    mark = ('1098  <... read resumed>"ref: refs/heads/main\\n"' if after_head
+            else '1098  <... openat2 resumed>)            = 6</home/tester/pt/test_prompt_binary_names_only_1/repo/.git/HEAD>'
+            if head_open else None)
+    if mark:
+        cut = next(i for i, line in enumerate(lines) if line.startswith(mark))
+    else:
+        last = max(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        cut = next(i for i in range(last, len(lines)) if lines[i].startswith("1098  <... read resumed>"))
+    return [line for i, line in enumerate(lines) if not line.startswith("1098  ") or i <= cut] + list(extra) + \
+        ["1098  exit_group(75)                     = ?", "1098  +++ exited with 75 +++"]
+
+
+def test_deadline_shapes_are_recognized_and_judged():
+    alarm = front_alarm_capture()
+    assert budget.deadline_shape(alarm) == "front-alarm"
+    budget.judge_allowlist(alarm, "front-alarm")
+    with pytest.raises(AssertionError):
+        budget.judge_allowlist(alarm)
+    deadline = collecting_capture(collector_deadline_lines())
+    assert budget.deadline_shape(deadline) == "collector-deadline"
+    budget.judge_allowlist(deadline, "collector-deadline")
+    with pytest.raises(AssertionError, match="no repository read evidence"):
+        budget.judge_allowlist(deadline)
+    assert budget.deadline_shape(collecting_capture(collecting_prompt())) is None
+
+
+# 이것을 실패시키는 것: SIGALRM 뒤 출력이 있거나 필터를 설치하거나 0이 아닌 코드로 끝난 앞단, 저장소를 읽은 뒤의 exit 75, exit 0을 마감으로 보는 것.
+@pytest.mark.parametrize("damage", ["alarm-then-write", "filter-then-alarm", "alarm-exit-1", "deadline-after-head",
+                                    "untouched-exit-0"])
+def test_deadline_shapes_need_their_proof(damage):
+    if damage == "deadline-after-head":
+        cap = collecting_capture(collector_deadline_lines(after_head=True))
+    elif damage == "untouched-exit-0":
+        cap = collecting_capture([line.replace("1098  exit_group(75)", "1098  exit_group(0)")
+                                  .replace("1098  +++ exited with 75 +++", "1098  +++ exited with 0 +++")
+                                  for line in collector_deadline_lines()])
+    else:
+        lines = front_alarm_capture().lines
+        at = next(i for i, line in enumerate(lines) if "--- SIGALRM " in line)
+        pid = lines[at].split()[0]
+        if damage == "alarm-then-write":
+            lines = lines[:at + 1] + [f'{pid}  write(1<pipe:[1]>, "x", 1) = 1'] + lines[at + 1:]
+        elif damage == "alarm-exit-1":
+            lines = [line.replace(f"{pid}  +++ exited with 0 +++", f"{pid}  +++ exited with 1 +++") for line in lines]
+        else:
+            lines = lines[:at] + [f"{pid}  prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, {{len=83, filter=0x1}}) = 0"] + lines[at:]
+        cap = front_alarm_capture(lines)
+    assert budget.deadline_shape(cap) is None
+
+
+# 이것을 실패시키는 것: 경계를 저장소 접근 전으로 되돌리는 것(HEAD를 열고 읽기 전의 마감이 재시도되지 않음),
+# HEAD를 연 뒤 저장소 밖을 연 마감 시도를 재시도하는 것.
+def test_collector_deadline_boundary_is_the_evidence_read():
+    opened = collecting_capture(collector_deadline_lines(head_open=True))
+    assert budget.deadline_shape(opened) == "collector-deadline"
+    budget.judge_allowlist(opened, "collector-deadline")
+    attempts = iter([opened, collecting_capture(collecting_prompt())])
+    assert budget.run_allowlist(lambda attempt: next(attempts))[0] == 2
+    outside = collecting_capture(collector_deadline_lines(head_open=True, extra=[
+        '1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 40</etc/hostname>',
+        "1098  close(40</etc/hostname>) = 0"]))
+    assert budget.deadline_shape(outside) == "collector-deadline"
+    made = []
+    with pytest.raises(AssertionError, match="outside selected roots"):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or outside)
+    assert made == [1]
+
+
+# 이것을 실패시키는 것: 마감 시도의 판정을 건너뛰는 것(마감 시도의 경로 위반이 통과).
+def test_deadline_attempt_with_a_violation_fails():
+    lines = front_alarm_capture().lines
+    at = next(i for i, line in enumerate(lines) if "--- SIGALRM " in line)
+    pid = lines[at].split()[0]
+    lines = lines[:at] + [f'{pid}  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)'] + lines[at:]
+    cap = front_alarm_capture(lines)
+    assert budget.deadline_shape(cap) == "front-alarm"
+    with pytest.raises(AssertionError):
+        budget.judge_allowlist(cap, "front-alarm")
+    with pytest.raises(AssertionError):
+        budget.run_allowlist(lambda attempt: cap, limit=3)
+
+
+class _Attempts:
+    def __init__(self, outcomes):
+        self.outcomes, self.made = list(outcomes), 0
+
+    def capture(self, attempt):
+        self.made += 1
+        return self.outcomes[attempt - 1]
+
+
+def _judge(cap, shape=None):
+    kind, ok_relaxed = cap
+    if kind == "pass":
+        return
+    if shape is None or not ok_relaxed:
+        raise AssertionError(kind)
+
+
+def _shape(cap):
+    return cap[0] if cap[0] in ("front-alarm", "collector-deadline") else None
+
+
+# 이것을 실패시키는 것: 마감이 증명되지 않은 실패를 재시도하는 것, 마감 시도의 판정을 건너뛰는 것, 상한을 넘기는 것.
+def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
+    runs = _Attempts([("front-alarm", True), ("collector-deadline", True), ("pass", True)])
+    attempt, shapes = budget.run_allowlist(runs.capture, _judge, _shape)
+    assert (attempt, dict(shapes)) == (3, {"front-alarm": 1, "collector-deadline": 1})
+    assert "allowlist attempts: 3, deadline shapes:" in capsys.readouterr().out
+    plain = _Attempts([("other", True), ("pass", True)])
+    with pytest.raises(AssertionError, match="other"):
+        budget.run_allowlist(plain.capture, _judge, _shape)
+    assert plain.made == 1
+    violating = _Attempts([("front-alarm", False), ("pass", True)])
+    with pytest.raises(AssertionError, match="front-alarm"):
+        budget.run_allowlist(violating.capture, _judge, _shape)
+    assert violating.made == 1
+    endless = _Attempts([("collector-deadline", True)] * 12)
+    with pytest.raises(pytest.fail.Exception, match="no attempt without a deadline in 12"):
+        budget.run_allowlist(endless.capture, _judge, _shape)
+    assert endless.made == budget.ALLOWLIST_ATTEMPTS == 12

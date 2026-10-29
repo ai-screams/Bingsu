@@ -316,7 +316,8 @@ def test_dirfd_walk_resolves_and_stays_under_the_roots():
 SPAWNS = {"clone", "clone3", "fork", "vfork"}
 # A positive allowlist for the entire helper/collector subtree, including libc
 # startup, the watchdog and publication. Network is restricted to failed local
-# nscd discovery below; no Internet socket, wait, arbitrary exec or signal.
+# nscd discovery below; no Internet socket, arbitrary exec or signal, and wait
+# only as pidfd supervision of the audited collector (_assert_prompt_trace_budget).
 # pipe2 is musl posix_spawn's exec-error channel (also used by the root).
 HELPER_CALLS = set("""
 execve clone clone3 exit exit_group arch_prctl set_tid_address set_robust_list
@@ -855,20 +856,43 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
             acl_fallback.discard(fd)
 
 
-def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None):
-    from fsbudget.attribute import collector_attribute
+def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
+                               collectors=None, repository_roots=None, repository_evidence=(), platform=None,
+                               front_deadline=False):
+    """`collectors` is the exact count a live capture arranged; stored traces
+    leave it None and may hold at most one. With `repository_roots`, a
+    collector's calls after its request are audited by assert_repository_trace
+    in shipped mode against exactly those roots (the bootstrap stays with
+    collector_attribute). `repository_evidence` names files the collector must
+    read (non-empty) inside that window. `platform`, an (arch, libc) pair,
+    admits that platform's exact libc start-up primitives (STARTUP_PRIMITIVES,
+    musl's O_CLOEXEC fcntl); stored traces leave it None. `front_deadline`
+    judges a front that SIGALRM ended before its filter (deadline_shape):
+    no filter and no record, every front call held to the pre-filter rules."""
+    from fsbudget.attribute import assert_repository_trace, collector_attribute
     collector_exe = collector_exe or os.path.join(os.path.dirname(exe), "bingsu-collect")
     _, scoped = tree(lines, exe)
     # E4: a default screen in a Git repository starts at most one collector.
     # Attribution still validates its pinned identity, creation parent and effects.
-    # 이것을 실패시키는 것: collector를 0개로 막거나 두 번째 collector를 허용하는 것.
-    collectors = sum(is_root(line, collector_exe) for line in scoped)
-    assert collectors <= 1, ("extra collector", collectors)
+    # 이것을 실패시키는 것: 시험이 정한 collector 수(0 또는 1)와 다른 수를 허용하는 것, 두 번째 collector를 허용하는 것.
+    roots = [line.split()[0] for line in scoped if is_root(line, collector_exe)]
+    if collectors is not None:
+        assert len(roots) == collectors, ("collector count", len(roots), collectors)
+    assert len(roots) <= 1, ("extra collector", len(roots))
+    window = bool(roots) and repository_roots is not None
     roles = collector_attribute(scoped, {"front": exe, "helper": exe,
-                                "collector": collector_exe, "collectors": collectors})
+                                "collector": collector_exe, "collectors": len(roots), "platform": platform},
+                                repository_window=window)
     assert not roles.errors, roles.errors
+    if window:
+        # 이것을 실패시키는 것: collector가 요청 뒤 roots 밖·조상 내용·쓰기를 여는 것(이 감사를 건너뛰는 것 포함).
+        assert_repository_trace([line for line in scoped if line.split()[0] == roots[0]],
+                                {"mode": "shipped", "roots": list(repository_roots),
+                                 "evidence": list(repository_evidence), "libc": platform and platform[1]}, {})
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
-                                collector_exe=collector_exe, check_collection=True)
+                                collector_exe=collector_exe, check_collection=True,
+                                audited_collector=int(roots[0]) if window else None, platform=platform,
+                                front_deadline=front_deadline)
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -877,16 +901,49 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
 
 
 def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
-                                collector_exe=None, check_collection=False):
+                                collector_exe=None, check_collection=False, audited_collector=None, platform=None,
+                                front_deadline=False):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
     assert not trace.errors, trace.errors
     calls = [c for c in trace if c.name != EXIT_EVENT]
+    supervision = []
+    if audited_collector is not None:
+        # A collecting collector is audited by collector_attribute (bootstrap)
+        # and assert_repository_trace (after its request), not by this helper
+        # table; its exec stays here for the pinned identity checks below.
+        # The helper's supervision of that one child is exact: pidfd_open of
+        # its pid, then waitid and SIGKILL on that pidfd only.
+        # 이것을 실패시키는 것: collector exec까지 빼는 것, 다른 pid·fd·신호의 감독 호출을 허용하는 것.
+        calls = [c for c in calls if c.pid != audited_collector or c.name in {"execve", "execveat"}]
+        opened = [c for c in calls if c.name == "pidfd_open" and args_of(c) == [str(audited_collector), "0"]
+                  and re.fullmatch(r"\d+<anon_inode:\[pidfd\]>", c.ret)]
+        assert len(opened) == 1, ("collector pidfd", opened)
+        pidfd = opened[0].ret
+        supervision = opened + [c for c in calls if c.pid != audited_collector and (
+            c.name == "waitid" and args_of(c)[:2] == ["P_PIDFD", pidfd] and args_of(c)[3:] == ["WNOHANG|WEXITED", "NULL"]
+            or c.name == "pidfd_send_signal" and args_of(c) == [pidfd, "SIGKILL", "NULL", "0"])]
+        calls = [c for c in calls if c not in supervision]
     root = int(scoped[0].split()[0])
     front = [c for c in calls if c.pid == root]
     helper = [c for c in calls if c.pid != root]
-    assert all(c.name in ROOT_CALLS for c in front), [c for c in front if c.name not in ROOT_CALLS]
+    # The front's own x86_64 glibc stack-guard seeks: the collector's rule
+    # (fsbudget.attribute.stack_guard_seek), for the platform the caller
+    # measured only, and the whole sequence or none.
+    # 이것을 실패시키는 것: 다른 플랫폼·다른 fd의 앞단 lseek, 짝 없는 seek을 받는 것.
+    # Only before the front's filter (glibc start-up); they stay in every
+    # other check, including the I/O rules, and are left out only of the
+    # root-call table.
+    # 이것을 실패시키는 것: 필터 뒤의 seek 쌍을 받는 것, 받은 seek을 I/O 검사에서 지우는 것.
+    from fsbudget.attribute import stack_guard_allowance, stack_guard_seek
+    sealed = next((c.index for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args), float("inf"))
+    allowance, guard = stack_guard_allowance(platform), []
+    for c in front:
+        if c.index < sealed and len(guard) < allowance and stack_guard_seek(c, root, len(guard)):
+            guard.append(c)
+    assert len(guard) in (0, allowance), ("incomplete front stack-guard seeks", guard)
+    assert all(c.name in ROOT_CALLS for c in front if c not in guard), [c for c in front if c.name not in ROOT_CALLS and c not in guard]
     timers = [c for c in front if c.name == "setitimer"]
     assert len(timers) <= 1, ("one entry timer", timers)
     for timer in timers:
@@ -905,9 +962,15 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     helper_pid = int(spawn.ret)
     filters = [c for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args]
     # 이것을 실패시키는 것: helper 생성이 prompt seccomp 설치 뒤로 옮겨지거나 필터 설치가 실패하는 것.
-    assert len(filters) == 1 and filters[0].ret == "0", filters
-    assert all(c.index < filters[0].index for c in front if c.name in SPAWNS), spawn
-    assert all(c.index < filters[0].index for c in timers), ("post-filter timer", timers)
+    if front_deadline:
+        # SIGALRM ended the front before its filter (deadline_shape requires
+        # that), so every call is held to the pre-filter rules.
+        boundary = front[-1].index + 1
+    else:
+        assert len(filters) == 1 and filters[0].ret == "0", filters
+        boundary = filters[0].index
+    assert all(c.index < boundary for c in front if c.name in SPAWNS), spawn
+    assert all(c.index < boundary for c in timers), ("post-filter timer", timers)
     execs = [c for c in helper if c.name in {"execve", "execveat"}]
     refresh = [c for c in execs if c.pid == helper_pid]
     # 이것을 실패시키는 것: 고정 exe/argv[1]/빈 환경 계약을 깨거나 helper를 재-exec하는 것.
@@ -917,8 +980,8 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     # entry lines, not the parser's completion order, across these two PIDs.
     exec_entry = next(i for i, line in enumerate(scoped)
                       if line.split()[0] == str(helper_pid) and is_root(line, exe))
-    filter_entry = next(i for i, line in enumerate(scoped)
-                        if line.split()[0] == str(root) and "PR_SET_SECCOMP" in line)
+    filter_entry = next((i for i, line in enumerate(scoped)
+                         if line.split()[0] == str(root) and "PR_SET_SECCOMP" in line), len(scoped))
     assert exec_entry < filter_entry, refresh
     # 이것을 실패시키는 것: root의 다른 exec, 네트워크·signal·wait 호출 또는 표 밖 write/exit를 허용하는 것.
     initial = front[0]
@@ -926,11 +989,12 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     stray = [c for c in front[1:] if c.name in NETWORK_OR_PROCESS - SPAWNS]
     assert not stray, ("root network or process calls", stray)
     seen = {c.name for c in front[1:] if c.name in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}} - SPAWNS
-    assert seen == ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
+    # A front deadline attempt ends before its record write.
+    assert seen == ADAPTER_CALLS or front_deadline and seen <= ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
     cwd = prompt_cwd(initial)
-    prompt_root_io(front, filters[0].index, exe, pinned, root, cwd)
+    prompt_root_io(front, boundary, exe, pinned, root, cwd)
     if check_collection and cwd is not None:
-        assert_collection_trace(front, filters[0].index, pinned, cwd)
+        assert_collection_trace(front, boundary, pinned, cwd)
     # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
     assert all(c.name in HELPER_CALLS | {"kill"} for c in helper), [c for c in helper if c.name not in HELPER_CALLS | {"kill"}]
     # Exactly the pinned collector executable/verb, no additional argv and an
@@ -947,7 +1011,10 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
         assert not made or pid in mains, ("worker spawned a child", made)
         threads = [c for c in made if "CLONE_THREAD" in c.args]
         processes = [c for c in made if c not in threads]
-        assert len(threads) <= 1, ("extra watchdog", threads)
+        # A collecting helper adds its supervisor thread (collector_supervisor) to the watchdog.
+        # 이것을 실패시키는 것: 감사한 collector 없이 둘째 스레드를 허용하는 것, 수집하는 helper의 감독 스레드를 거부하는 것.
+        limit = 2 if audited_collector is not None else 1
+        assert len(threads) <= limit, ("extra watchdog", threads)
         owners.update({int(c.ret): pid for c in threads})
         assert len(processes) <= (collector_limit if pid == helper_pid else 0), processes
         assert all(int(c.ret) in {x.pid for x in collectors} for c in processes), processes
@@ -958,6 +1025,12 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     exe_walks = {pid: HelperExecutableWalk(exe) for pid in owners}
     collector_walk = HelperCollectorExecutable(collector_exe) if collector_exe else None
     for c in helper:
+        if c.name == "restart_syscall":
+            # A thread's interrupted futex wait resumes (strace stops it): no
+            # arguments or path. Any other resumed call is unexplained here.
+            # 이것을 실패시키는 것: futex 아닌 restart 모양을 건너뛰는 것.
+            assert c.args == "<... resuming interrupted futex ...>", ("helper restart", c)
+            continue
         exe_walk = exe_walks[c.pid]
         collector_owner = collector_walk is not None and c.pid == helper_pid
         # 이것을 실패시키는 것: collector 고정 경로의 fd를 관찰 없이 읽거나 쓰기·변경에 쓰는 것.
@@ -1083,22 +1156,19 @@ def assert_global_inputs_exercised(lines, exe, global_inputs, global_present):
                 for p in content_paths(c) if p in global_inputs} == set(global_inputs), "global input reads missing"
 
 
-# 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
-# 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
-@pytest.mark.parametrize("global_present", [False, True], ids=["global-missing", "global-present"])
-def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path, global_present):
-    """Every path argument of every traced call (open, stat, rename, link,
-    ...) of the binary and its threads and children. SYSTEM_PATHS was
-    observed on Debian and Ubuntu glibc (aarch64, the three test images) and
-    takes the loader paths of Fedora (/lib64), Arch (/usr/lib) and Alpine
-    (/lib/ld-musl-*.so.1) by its shape; the CI musl build on x86_64
-    also spawns the fixed helper before its filter. NixOS and Guix
-    (/nix/store, /gnu/store) are not covered and fail here."""
-    assert shutil.which("strace"), "Linux path gate must execute strace"
-    inst = Install(tmp_path)
-    trusted = trusted_env(tmp_path)
-    trusted["HOME"] = str(tmp_path / "home-t")
+# Under strace a run can end at one of two deadlines the trace proves
+# (deadline_shape); such an attempt is judged in full and then retried.
+ALLOWLIST_ATTEMPTS = 12
+
+
+def allowlist_capture(base, case):
+    """One fresh, traced prompt of the allowlist test in `base`."""
+    from types import SimpleNamespace
+    base.mkdir(parents=True)
+    global_present = case == "global-present"
+    inst = Install(base)
+    trusted = trusted_env(base)
+    trusted["HOME"] = str(base / "home-t")
     global_inputs = tuple(str(path) for path in (
         Path(trusted["XDG_CONFIG_HOME"]) / "git/config", Path(trusted["HOME"]) / ".gitconfig",
         Path(trusted["XDG_CONFIG_HOME"]) / "git/ignore",
@@ -1110,27 +1180,155 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
             source = Path(path)
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_text(".DS_Store\n" if source.name == "ignore" else "")
+    if case == "no-collection":
+        config = Path(trusted["XDG_CONFIG_HOME"]) / "bingsu/config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(TEMPLATES["plain"])
+        config.chmod(0o600)
     script = inst.init("bash", trusted)
     collector_exe = init_collector_exe(script)
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    # A hand-made repository (the test images have no git): an unborn branch.
+    repo = base / "repo"
+    for sub in ("objects", "refs/heads"):
+        (repo / ".git" / sub).mkdir(parents=True)
+    (repo / ".git/HEAD").write_text("ref: refs/heads/main\n")
     env = dict(trusted, **{k: str(repo / k.lower()) for k in HOSTILE_VARS})
-    f = tmp_path / "s.bash"
+    f = base / "s.bash"
     f.write_bytes(script + b"\n" + CALL)
-    trace = tmp_path / "trace"
+    if case != "no-collection":
+        warm = subprocess.run(SHELL_CMD["bash"] + [str(f)], env=env, cwd=repo, capture_output=True, timeout=60)
+        assert warm.returncode == 0, warm.stderr
+        wait_helpers(base)
+    trace = base / "trace"
     # Trace all calls; call_paths selects pathname arguments, not quoted data buffers.
     r = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", str(trace)]
-                       + SHELL_CMD["bash"] + [str(f)], env=env, capture_output=True, timeout=60)
+                       + SHELL_CMD["bash"] + [str(f)], env=env, cwd=repo, capture_output=True, timeout=60)
     assert r.returncode == 0, r.stderr
-    # execve names the pinned path (the symlink); its target never shows.
-    exe = str(inst.exe)
-    pinned = [os.path.realpath(trusted[k] + sub) for k, sub in
-              (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
-               ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))]
-    lines = trace.read_text(errors="replace").splitlines()
-    assert_prompt_trace_budget(lines, exe, pinned, global_inputs=global_inputs,
-                               collector_exe=collector_exe)
-    assert_global_inputs_exercised(lines, exe, global_inputs, global_present)
+    wait_helpers(base)
+    real = os.path.realpath(repo)
+    return SimpleNamespace(
+        lines=trace.read_text(errors="replace").splitlines(), trace=trace,
+        # execve names the pinned path (the symlink); its target never shows.
+        exe=str(inst.exe), collector_exe=collector_exe, global_inputs=global_inputs,
+        global_present=global_present, collectors=int(case != "no-collection"),
+        pinned=[os.path.realpath(trusted[k] + sub) for k, sub in
+                (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
+                 ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))],
+        roots=[real, real + "/.git"],
+        # Stage A reads HEAD in every repository it finds (the recorded
+        # release capture reads 21 bytes from it), so a non-empty read
+        # proves collection reached this repository.
+        evidence=[real + "/.git/HEAD"],
+        platform=(platform.machine(), "musl" if elf_facts(real_bin())[1] is None else "gnu"))
+
+
+def judge_allowlist(cap, shape=None):
+    """The whole allowlist judgment of one capture. A deadline shape waives
+    only what that deadline prevents: collector-deadline the repository
+    evidence; front-alarm the front's filter and record, the exact collector
+    count and both coverage checks. Every path, call and audit rule stays."""
+    assert_prompt_trace_budget(cap.lines, cap.exe, cap.pinned, global_inputs=cap.global_inputs,
+                               collector_exe=cap.collector_exe,
+                               collectors=None if shape == "front-alarm" else cap.collectors,
+                               repository_roots=cap.roots,
+                               repository_evidence=() if shape else cap.evidence,
+                               platform=cap.platform, front_deadline=shape == "front-alarm")
+    if cap.collectors and shape != "front-alarm":
+        assert_global_inputs_exercised(cap.lines, cap.exe, cap.global_inputs, cap.global_present)
+
+
+def deadline_shape(cap):
+    """Which deadline, if any, the trace proves.
+
+    front-alarm: the front took SIGALRM and then made only rt_sigreturn calls
+    up to exit_group(0), with no filter installed (strace can stretch its
+    vfork past the deadline). collector-deadline: the collector exited 75
+    before its evidence read, a non-empty read of the case's .git/HEAD (its
+    request deadline came first). The partial window is still audited in
+    full; only the missing evidence is waived.
+    """
+    from fsbudget.classify import repository_path
+    _, scoped = tree(cap.lines, cap.exe)
+    root = scoped[0].split()[0]
+    front = [line for line in scoped if line.split()[0] == root]
+    alarm = next((i for i, line in enumerate(front) if line.split(None, 1)[1].startswith("--- SIGALRM ")), None)
+    # 이것을 실패시키는 것: SIGALRM 뒤 출력·다른 호출이 있거나 필터를 설치한 앞단을 마감으로 보는 것.
+    if alarm is not None and not any("PR_SET_SECCOMP" in line for line in front):
+        after = {m[1] for line in front[alarm:] if (m := re.match(r"\d+\s+([a-z0-9_]+)\(", line))}
+        if after == {"rt_sigreturn", "exit_group"} and front[-1].endswith("+++ exited with 0 +++"):
+            return "front-alarm"
+    collectors = [line.split()[0] for line in scoped if is_root(line, cap.collector_exe)]
+    if collectors:
+        pid = collectors[0]
+        mine = [line for line in scoped if line.split()[0] == pid]
+        def path(c):
+            try:
+                return repository_path(c)
+            except AssertionError:  # pipes and other unnamed descriptors
+                return None
+        calls = parse_trace("\n".join(mine))
+        evidenced = any(c.name in {"read", "pread64", "readv"} and re.match(r"[1-9]\d*$", c.ret)
+                        and path(c) in cap.evidence for c in calls)
+        # 이것을 실패시키는 것: 증거 read 뒤의 exit 75, exit 75 아닌 종료를 마감으로 보는 것,
+        # 경계를 저장소 접근 전으로 되돌리는 것(HEAD를 연 뒤 읽기 전의 마감이 즉시 실패).
+        if mine[-1].endswith("+++ exited with 75 +++") and not evidenced:
+            return "collector-deadline"
+    return None
+
+
+def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit=ALLOWLIST_ATTEMPTS):
+    """Judge every attempt in full; retry only an attempt whose failure the
+    trace proves to be a deadline, and only after it passes its own full
+    judgment. Any other failure, or any violation, ends the test at once."""
+    from collections import Counter
+    shapes = Counter()
+    try:
+        for attempt in range(1, limit + 1):
+            cap = capture(attempt)
+            try:
+                judge(cap)
+            except AssertionError:
+                # 이것을 실패시키는 것: 마감이 증명되지 않은 실패를 재시도하는 것, 마감 시도의 판정을 건너뛰는 것.
+                shape = shape_of(cap)
+                if shape is None:
+                    raise
+                judge(cap, shape)
+                shapes[shape] += 1
+                continue
+            return attempt, shapes
+        pytest.fail(f"allowlist: no attempt without a deadline in {limit}; shapes {dict(shapes)}")
+    finally:
+        print(f"allowlist attempts: {attempt}, deadline shapes: {dict(shapes)}")
+
+
+# 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
+# 상대 경로("x", Path::exists 포함), 환경 변수가 가리키는 폴더(repo 아래), 현재 폴더, 그 접근을 스레드나 자식 프로세스에서 하는 것.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+@pytest.mark.parametrize("case", ["no-collection", "global-missing", "global-present"])
+def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path, case):
+    """Every path argument of every traced call (open, stat, rename, link,
+    ...) of the binary and its threads and children. SYSTEM_PATHS was
+    observed on Debian and Ubuntu glibc (aarch64, the three test images) and
+    takes the loader paths of Fedora (/lib64), Arch (/usr/lib) and Alpine
+    (/lib/ld-musl-*.so.1) by its shape; the CI musl build on x86_64
+    also spawns the fixed helper before its filter. NixOS and Guix
+    (/nix/store, /gnu/store) are not covered and fail here.
+
+    The collector count is fixed per case. no-collection compiles a template
+    without {dir} or {git}: the helper selects no request and starts none.
+    The git cases run one untraced prompt first, so the traced prompt's
+    helper finds a published snapshot and starts exactly one collector in
+    the case's own repository (whether a first prompt after init has time
+    left to admit one varies with the machine). Its calls after the request
+    are audited against that repository's two roots. Each attempt keeps its
+    own folder (attempt-N) and trace."""
+    assert shutil.which("strace"), "Linux path gate must execute strace"
+    if case != "no-collection":
+        # Under strace a debug helper often runs out of time before it admits
+        # the collector (measured: 4 of 6 traced prompts started none), so
+        # the exact-one cells run on release only (shell.yml filter-calls).
+        require_release_helper(real_bin())
+    run_allowlist(lambda attempt: allowlist_capture(tmp_path / f"attempt-{attempt}", case))
 
 
 TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}

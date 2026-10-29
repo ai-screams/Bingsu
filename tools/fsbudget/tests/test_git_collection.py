@@ -1,4 +1,6 @@
 """F1 trace mutations; the primitive model is shared with the B3 gate."""
+from pathlib import Path
+
 import pytest
 
 from fsbudget.attribute import assert_repository_trace
@@ -177,3 +179,121 @@ def test_repository_budget_cannot_hide_other_role_surplus(role, kind):
     measured[role][kind] += 1
     assert check(measured, expected, "le", expected) == [
         f"{role}.{kind}: measured {measured[role][kind]}, formula {expected[role][kind]} (le)"]
+
+
+# The shipped collector writes no F1_PHASE markers. The collector task (its pid's
+# records) of tests/shell/fixtures/prompt-m3d-collect-linux-1.strace.gz: a
+# Bookworm/aarch64 release prompt with a warm snapshot in a hand-made repository.
+SHIPPED = Path(__file__).parent / "fixtures/m3d-bookworm-aarch64-shipped-collection.strace"
+SHIPPED_REPO = "/home/tester/pt/test_prompt_binary_names_only_1/repo"
+SHIPPED_CAPS = {"mode": "shipped", "roots": [SHIPPED_REPO, SHIPPED_REPO + "/.git"],
+                "evidence": [SHIPPED_REPO + "/.git/HEAD"]}
+
+
+def shipped_lines():
+    return SHIPPED.read_text().splitlines()
+
+
+def after_root_open(lines, extra):
+    """Insert after the discovery walk's "/" open, inside the request window."""
+    walk = next(i for i, line in enumerate(lines) if 'openat(AT_FDCWD</>, "/", O_RDONLY|O_NONBLOCK|O_NOFOLLOW' in line)
+    at = next(i for i in range(walk, len(lines)) if lines[i].endswith("= 4</>"))
+    return lines[:at + 1] + extra + lines[at + 1:]
+
+
+def test_shipped_collection_trace_passes_without_phase_markers():
+    phases = {}
+    assert_repository_trace(shipped_lines(), SHIPPED_CAPS, phases)
+    assert set(phases) == {"shipped"} and phases["shipped"]["openat2"] > 0
+
+
+# 이것을 실패시키는 것: 출하 창에서 "/"·조상 폴더의 목록 읽기나 내용 read, roots 밖 open, 쓰기 open,
+# roots가 아닌 Landlock 규칙, "/" 아닌 조상의 O_DIRECTORY 없는 open, identity 전용 "/" fd의 하위 open·하위 stat·fstatfs·dup, 출하 창 미완료(collector exit 없음·다른
+# pid의 exit·요청 읽기 없음), collector exit 뒤의 호출, readv(3)로 시작한 창, 저장소 작업이 없는 창, HEAD를 빈 read로만 본 창을 허용하는 것.
+@pytest.mark.parametrize("damage", [
+    "root-getdents", "root-read", "ancestor-getdents", "ancestor-read", "outside-open",
+    "writable-open", "landlock-outside", "no-exit", "foreign-exit", "after-exit", "no-request",
+    "ancestor-open-without-directory", "readv-first", "no-repository-work", "empty-head-read", "identity-fd-walk", "identity-fd-statfs", "identity-fd-dup", "identity-fd-child-stat"])
+def test_shipped_collection_trace_rejects_mutations(damage):
+    lines = shipped_lines()
+    home = '1098  openat(4</>, "home", O_RDONLY|O_DIRECTORY|O_CLOEXEC) = 30</home>'
+    if damage == "root-getdents":
+        lines = after_root_open(lines, ['1098  getdents64(4</>, 0xffff00000000 /* 3 entries */, 8192) = 72'])
+    elif damage == "root-read":
+        lines = after_root_open(lines, ['1098  read(4</>, "", 32) = 0'])
+    elif damage == "ancestor-getdents":
+        lines = after_root_open(lines, [home, '1098  getdents64(30</home>, 0xffff00000000 /* 3 entries */, 8192) = 72'])
+    elif damage == "ancestor-read":
+        lines = after_root_open(lines, [home, '1098  read(30</home>, "", 32) = 0'])
+    elif damage == "outside-open":
+        lines = after_root_open(lines, ['1098  openat(AT_FDCWD</>, "/etc/passwd", O_RDONLY|O_CLOEXEC) = 30</etc/passwd>'])
+    elif damage == "writable-open":
+        lines = after_root_open(lines, [f'1098  openat(AT_FDCWD</>, "{SHIPPED_REPO}/x", O_WRONLY|O_CREAT|O_CLOEXEC, 0600) = 30<{SHIPPED_REPO}/x>'])
+    elif damage == "landlock-outside":
+        lines = [line.replace(f"parent_fd=10<{SHIPPED_REPO}>", "parent_fd=10</home>") for line in lines]
+    elif damage == "no-exit":
+        lines = [line for line in lines if "+++ exited" not in line]
+    elif damage == "foreign-exit":
+        lines = [line.replace("1098  +++ exited", "1200  +++ exited") for line in lines]
+    elif damage == "after-exit":
+        lines = lines + ['1101  openat(AT_FDCWD</>, "/etc/passwd", O_RDONLY|O_CLOEXEC) = 3</etc/passwd>']
+    elif damage == "no-request":
+        lines = [line.replace("read(3<pipe:", "read(9<pipe:") for line in lines]
+    elif damage == "ancestor-open-without-directory":
+        lines = [line.replace('openat(4</>, "home", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY',
+                              'openat(4</>, "home", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC') for line in lines]
+    elif damage == "readv-first":
+        # Review reproduction: a readv on the request fd hands the collector to
+        # the audit, then an outside read precedes the usual request read.
+        at = next(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        lines = lines[:at] + [f'1098  readv({lines[at].split("(", 1)[1].split(",")[0]}, [{{iov_base="", iov_len=1}}], 1) = 0',
+                              '1098  openat(AT_FDCWD</>, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 30</etc/hostname>',
+                              '1098  read(30</etc/hostname>, "x\\n", 64) = 2',
+                              '1098  close(30</etc/hostname>) = 0'] + lines[at:]
+    elif damage == "no-repository-work":
+        # Every call between the request reads and the exit removed.
+        last = max(i for i, line in enumerate(lines) if line.startswith("1098  read(3<pipe:"))
+        assert lines[last + 1].startswith("1098  <... read resumed>"), lines[last + 1]
+        lines = lines[:last + 2] + [line for line in lines if "+++ exited" in line]
+    elif damage == "empty-head-read":
+        lines = [line.replace('"ref: refs/heads/main\\n", 22) = 21', '"", 22) = 0') for line in lines]
+    elif damage.startswith("identity-fd-"):
+        extra = {"identity-fd-walk": '1098  openat(6</>, "home", O_RDONLY|O_DIRECTORY|O_CLOEXEC) = 30</home>',
+                 "identity-fd-statfs": '1098  fstatfs(6</>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096}) = 0',
+                 "identity-fd-dup": '1098  dup(6</>) = 30</>',
+                 "identity-fd-child-stat": '1098  newfstatat(6</>, "home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0'}[damage]
+        at = next(i for i, line in enumerate(lines) if line.startswith('1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC <'))
+        lines = lines[:at + 2] + [extra] + lines[at + 2:]
+    assert lines != shipped_lines()
+    with pytest.raises(AssertionError):
+        assert_repository_trace(lines, SHIPPED_CAPS, {})
+
+
+def with_identity_cloexec(after_stat=False, twice=False, result="-1 EPERM (Operation not permitted)"):
+    """musl's open(): fcntl(F_SETFD, FD_CLOEXEC) right after the read layer's
+    O_CLOEXEC open of "/" (the collector's filter refuses it: EPERM)."""
+    lines = shipped_lines()
+    at = next(i for i, line in enumerate(lines) if line.startswith('1098  openat(AT_FDCWD</>, "/", O_RDONLY|O_CLOEXEC <'))
+    pair = [f"1098  fcntl(6</>, F_SETFD, FD_CLOEXEC) = {result}"]
+    where = at + 4 if after_stat else at + 2  # after the resumed open, or after its newfstatat pair
+    return lines[:where] + pair * (2 if twice else 1) + lines[where:]
+
+
+@pytest.mark.parametrize("result", ["-1 EPERM (Operation not permitted)", "0"])
+def test_shipped_musl_identity_cloexec_is_allowed_on_musl(result):
+    assert_repository_trace(with_identity_cloexec(result=result), {**SHIPPED_CAPS, "libc": "musl"}, {})
+
+
+# 이것을 실패시키는 것: identity fd의 F_SETFD에서 성공·EPERM 아닌 결과를 받아들이는 것.
+@pytest.mark.parametrize("result", ["-1 EINVAL (Invalid argument)", "-1 EBADF (Bad file descriptor)"])
+def test_shipped_musl_identity_cloexec_refuses_other_results(result):
+    with pytest.raises(AssertionError, match="identity-only"):
+        assert_repository_trace(with_identity_cloexec(result=result), {**SHIPPED_CAPS, "libc": "musl"}, {})
+
+
+# 이것을 실패시키는 것: identity fd의 F_SETFD를 glibc에서도, 두 번, open 바로 뒤가 아닌 자리에서 허용하는 것.
+@pytest.mark.parametrize("libc,after_stat,twice", [("gnu", False, False), (None, False, False),
+                                                   ("musl", True, False), ("musl", False, True)])
+def test_shipped_identity_cloexec_is_refused_elsewhere(libc, after_stat, twice):
+    with pytest.raises(AssertionError):
+        assert_repository_trace(with_identity_cloexec(after_stat, twice), {**SHIPPED_CAPS, "libc": libc}, {})
