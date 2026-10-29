@@ -263,7 +263,7 @@ fn fact_schema_mismatch_recompiles_with_unchanged_source_and_build() {
         assert_eq!(f.snap().config, expected);
         assert_eq!(f.bytes("last-good"), f.bytes("snapshot"));
         assert_eq!(
-            Snapshot::decode_front(&bytes[..end], bytes.len()),
+            Snapshot::decode_front(&bytes[..end], bytes.len(), 80),
             Err(bingsu_core::snapshot_codec::Error::Tag)
         );
         assert_eq!(f.run(), RefreshResult::Revalidated { generation });

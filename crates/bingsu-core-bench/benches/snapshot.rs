@@ -2,8 +2,9 @@
 use bingsu_core::{
     bands::{Band, MAX_BANDS},
     config::compile::CompiledConfig,
+    layout_view::FrontConfig,
     snapshot::{Clock, Identity, Marker, Refusal, crc32c, eligible},
-    snapshot_codec::{Error, decode_compiled, encode_compiled},
+    snapshot_codec::{Error, decode_compiled, encode_compiled, scan_compiled},
 };
 use gungraun::prelude::*;
 use std::hint::black_box;
@@ -26,6 +27,10 @@ fn encode(c: &CompiledConfig) -> Result<Vec<u8>, Error> {
 #[inline(never)]
 fn decode(b: &[u8]) -> Result<CompiledConfig, Error> {
     decode_compiled(b)
+}
+#[inline(never)]
+fn front_decode(b: &[u8], width: u16) -> Result<FrontConfig, Error> {
+    scan_compiled(b)?.select(width)
 }
 #[inline(never)]
 fn crc(b: &[u8]) -> [u8; 4] {
@@ -89,8 +94,9 @@ fn eligibility(input: (Identity, Marker, Clock)) -> Result<u64, Refusal> {
 fn snapshot_eligibility(input: (Identity, Marker, Clock)) -> Result<u64, Refusal> {
     black_box(eligibility(black_box(input)))
 }
-// Baseline for the front's whole-config decode: the ordinary config and the
-// 4,096-band ceiling. The selected-band decode is measured against these.
+// The front's decode of the compiled section: the ordinary config and the
+// 4,096-band ceiling. The front scans the whole section and materializes only
+// the variant its width selects; before, these names measured the whole decode.
 fn encoded_normal() -> Vec<u8> {
     encoded()
 }
@@ -114,18 +120,20 @@ fn encoded_4096_bands() -> Vec<u8> {
     assert_eq!(decode_compiled(&b).unwrap().bands.len(), MAX_BANDS);
     b
 }
+// Width 120 selects the fixture's `wide` band (min_cols 100), not the default.
 #[library_benchmark]
 #[bench::normal(setup = encoded_normal)]
-fn front_decode_normal(b: Vec<u8>) -> (Vec<u8>, CompiledConfig) {
-    let c = black_box(decode(black_box(&b))).unwrap();
-    assert!(c.bands.len() < 8);
+fn front_decode_normal(b: Vec<u8>) -> (Vec<u8>, FrontConfig) {
+    let c = black_box(front_decode(black_box(&b), black_box(120))).unwrap();
+    assert!(c.bands().len() < 8 && c.band().is_some());
     (b, c)
 }
+// The last band (widths 65,520–65,535): selection passes all 4,096 bands.
 #[library_benchmark]
 #[bench::bands4096(setup = encoded_4096_bands)]
-fn front_decode_4096_bands(b: Vec<u8>) -> (Vec<u8>, CompiledConfig) {
-    let c = black_box(decode(black_box(&b))).unwrap();
-    assert_eq!(c.bands.len(), MAX_BANDS);
+fn front_decode_4096_bands(b: Vec<u8>) -> (Vec<u8>, FrontConfig) {
+    let c = black_box(front_decode(black_box(&b), black_box(u16::MAX))).unwrap();
+    assert_eq!(c.band(), Some(MAX_BANDS - 1));
     (b, c)
 }
 library_benchmark_group!(

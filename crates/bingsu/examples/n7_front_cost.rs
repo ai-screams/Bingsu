@@ -141,11 +141,12 @@ fn main() {
             }
             let read_ns = start.elapsed().as_nanos();
             let decode_start = Instant::now();
-            let decoded = decoder.finish().unwrap();
+            // The envelope's width (--width 120 above) selects the decoded variant.
+            let decoded = decoder.finish_for(120).unwrap();
             let decode_ns = decode_start.elapsed().as_nanos();
             let staged_ns = start.elapsed().as_nanos();
             black_box(&decoded);
-            assert_eq!(decoded.config.bands.len(), config.bands.len());
+            assert_eq!(decoded.config.bands().len(), config.bands.len());
             let deadline = prompt_io::entry_deadline().unwrap();
             let start = Instant::now();
             let respond = prompt_read::prepare(&raw, deadline);

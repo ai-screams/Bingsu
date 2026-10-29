@@ -30,6 +30,8 @@ pub mod helper;
 pub mod icons;
 pub mod ident;
 pub mod layout;
+/// What the prompt front reads from a compiled config (K63 selected band).
+pub mod layout_view;
 pub mod record;
 pub mod recorder;
 pub mod render;

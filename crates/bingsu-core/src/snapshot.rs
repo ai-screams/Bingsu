@@ -1,7 +1,8 @@
 //! Version 2 snapshot frames, context addresses and execution eligibility.
 //! Checksums detect damage; checked runtime descriptors establish trust.
 use crate::{
-    config::compile::CompiledConfig,
+    config::compile::{CompiledConfig, ExecUnit},
+    layout_view::FrontConfig,
     snapshot_codec::{self, Error},
 };
 use alloc::vec::Vec;
@@ -255,7 +256,8 @@ pub struct FrontSnapshot {
     pub id: Identity,
     pub clock_kind: u8,
     pub resume: u64,
-    pub config: CompiledConfig,
+    /// Only the variant selected at the envelope's width (K63).
+    pub config: FrontConfig,
 }
 impl FrontSnapshot {
     pub fn eligible(
@@ -334,11 +336,14 @@ impl FrontDecoder {
         }
         Ok(())
     }
-    pub fn finish(self) -> Result<FrontSnapshot, Error> {
+    /// The envelope gives the width before any read, so the decode ends by
+    /// materializing only the variant selected at `width`. Another width
+    /// (a later prompt) selects again from its own read of the same bytes.
+    pub fn finish_for(self, width: u16) -> Result<FrontSnapshot, Error> {
         if self.read_len() != 0 {
             return Err(Error::Short);
         }
-        Snapshot::decode_front(&self.bytes, self.file_len)
+        Snapshot::decode_front(&self.bytes, self.file_len, width)
     }
 }
 
@@ -409,10 +414,12 @@ impl Snapshot {
         if bytes.len() != end + m {
             return Err(Error::Shape);
         }
-        let front = Self::decode_front(&bytes[..end], bytes.len())?;
+        let frame = Frame::check(&bytes[..end], bytes.len())?;
+        let config = snapshot_codec::decode_compiled(frame.compiled)?;
+        frame.matches(config.collect_mask, &config.exec_units)?;
         let mut out = Self {
-            id: front.id,
-            config: front.config,
+            id: frame.id()?,
+            config,
             metadata: Vec::new(),
         };
         decode_metadata(&bytes[end..])?;
@@ -422,7 +429,28 @@ impl Snapshot {
         out.metadata.extend_from_slice(&bytes[end..]);
         Ok(out)
     }
-    pub fn decode_front(bytes: &[u8], file_len: usize) -> Result<FrontSnapshot, Error> {
+    /// The front's read: header, prefix and compiled section (never the
+    /// metadata), with only the variant selected at `width` materialized.
+    /// Rejects exactly what the helper's whole decode of the section rejects.
+    pub fn decode_front(bytes: &[u8], file_len: usize, width: u16) -> Result<FrontSnapshot, Error> {
+        let frame = Frame::check(bytes, file_len)?;
+        let layout = snapshot_codec::scan_compiled(frame.compiled)?;
+        frame.matches(layout.collect_mask(), layout.exec_units())?;
+        Ok(FrontSnapshot {
+            id: frame.id()?,
+            clock_kind: bytes[84],
+            resume: u64at(bytes, 152)?,
+            config: layout.select(width)?,
+        })
+    }
+}
+/// Header, prefix and CRC of a snapshot cut at the end of its compiled section.
+struct Frame<'a> {
+    bytes: &'a [u8],
+    compiled: &'a [u8],
+}
+impl<'a> Frame<'a> {
+    fn check(bytes: &'a [u8], file_len: usize) -> Result<Self, Error> {
         let (c_len, m_len) = lengths(bytes)?;
         if file_len != HEADER + PREFIX + c_len + m_len || bytes.len() != HEADER + PREFIX + c_len {
             return Err(Error::Shape);
@@ -431,23 +459,25 @@ impl Snapshot {
         if crc32c(&[b"bingsu-snapshot-v2\0", &bytes[..160], c]) != bytes[160..164] {
             return Err(Error::Shape);
         }
-        let config = snapshot_codec::decode_compiled(c)?;
-        if config.collect_mask != u32at(bytes, 56)?
-            || u8::from(config.exec_units.iter().any(|u| u.not_run.is_none())) != bytes[12]
+        Ok(Self { bytes, compiled: c })
+    }
+    /// The header's copies of the collect mask and the runnable-unit flag.
+    fn matches(&self, collect_mask: u32, exec_units: &[ExecUnit]) -> Result<(), Error> {
+        if collect_mask != u32at(self.bytes, 56)?
+            || u8::from(exec_units.iter().any(|u| u.not_run.is_none())) != self.bytes[12]
         {
             return Err(Error::Shape);
         }
-        Ok(FrontSnapshot {
-            id: Identity {
-                generation: u64at(bytes, 16)?,
-                source: n(bytes, 24)?,
-                boot: n(bytes, 88)?,
-                epoch: n(bytes, 104)?,
-                context: n(bytes, 120)?,
-            },
-            config,
-            clock_kind: bytes[84],
-            resume: u64at(bytes, 152)?,
+        Ok(())
+    }
+    fn id(&self) -> Result<Identity, Error> {
+        let b = self.bytes;
+        Ok(Identity {
+            generation: u64at(b, 16)?,
+            source: n(b, 24)?,
+            boot: n(b, 88)?,
+            epoch: n(b, 104)?,
+            context: n(b, 120)?,
         })
     }
 }

@@ -164,16 +164,9 @@ impl CompiledConfig {
             },
         }
     }
+    /// The same per-segment setup the prompt front lays out with.
     pub fn setup(&self) -> Vec<SegmentSetup<'_>> {
-        self.setup
-            .iter()
-            .map(|s| SegmentSetup {
-                priority: s.priority,
-                required: s.required,
-                methods: &s.methods,
-                when: s.when,
-            })
-            .collect()
+        crate::layout_view::LayoutView::shared(self).segment_setup()
     }
 }
 

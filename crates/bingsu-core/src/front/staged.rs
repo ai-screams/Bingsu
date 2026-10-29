@@ -13,6 +13,7 @@ use crate::config::compile::ExecUnit;
 use crate::envelope::{self, Envelope, EnvelopeError};
 use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
 use crate::handoff::Permit;
+use crate::layout_view::FrontConfig;
 use crate::snapshot::{self, Clock, FrontDecoder, FrontSnapshot, Marker, Refusal};
 use crate::status::Status;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -631,10 +632,12 @@ impl ReadPlan {
                             return;
                         }
                         if d.read_len() == 0 {
+                            // The envelope's width selects the one variant decoded.
+                            let width = self.parsed.as_ref().map_or(0, |e| e.width);
                             self.observed.selected = self
                                 .decoder
                                 .take()
-                                .and_then(|d| match d.finish() {
+                                .and_then(|d| match d.finish_for(width) {
                                     Ok(plan) => Some(Box::new(plan)),
                                     Err(_) => None,
                                 })
@@ -647,7 +650,7 @@ impl ReadPlan {
                                 });
                             if let Some(selected) = self.observed.selected.as_mut() {
                                 if let Some(config) = self.render_config.take() {
-                                    selected.config = config;
+                                    selected.config = FrontConfig::from_compiled(config, width);
                                 }
                             }
                             self.observed.last_good =
@@ -924,7 +927,7 @@ pub fn finish_with_catalog(
                 });
                 response.execution.units = s
                     .config
-                    .exec_units
+                    .exec_units()
                     .iter()
                     .filter(|u| u.not_run.is_none())
                     .cloned()
