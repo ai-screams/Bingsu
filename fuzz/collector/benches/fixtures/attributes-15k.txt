@@ -1,0 +1,480 @@
+# Section 00: src
+lib/p001/*.py text diff=python
+*.002.md text linguist-documentation
+docs/c003/[a-z]*.png binary
+vendor/k004/** -diff
+/assets/m005/**/*.lock -text merge=union
+web/p006/*.sh text eol=lf
+*.007.svg -diff linguist-generated
+src/c008/[a-z]*.bat text eol=crlf
+lib/k009/** -diff
+/tools/m010/**/*.txt working-tree-encoding=UTF-8
+docs/p011/*.psd lockable filter=lfs
+*.012.go text whitespace=tab-in-indent
+assets/c013/[a-z]*.js linguist-vendored
+web/k014/** -diff
+/tests/m015/**/*.py text diff=python
+src/p016/*.md text linguist-documentation
+*.017.png binary
+tools/c018/[a-z]*.json text -diff
+docs/k019/** -diff
+/vendor/m020/**/*.sh text eol=lf
+assets/p021/*.svg -diff linguist-generated
+*.022.bat text eol=crlf
+tests/c023/[a-z]*.pdf binary export-ignore
+src/k024/** -diff
+/lib/m025/**/*.psd lockable filter=lfs
+tools/p026/*.go text whitespace=tab-in-indent
+*.027.js linguist-vendored
+vendor/c028/[a-z]*.rs text eol=lf diff=rust
+assets/k029/** -diff
+/web/m030/**/*.md text linguist-documentation
+tests/p031/*.png binary
+*.032.json text -diff
+lib/c033/[a-z]*.lock -text merge=union
+tools/k034/** -diff
+/docs/m035/**/*.svg -diff linguist-generated
+vendor/p036/*.bat text eol=crlf
+*.037.pdf binary export-ignore
+web/c038/[a-z]*.txt working-tree-encoding=UTF-8
+
+# Section 01: lib
+lib/p041/*.js linguist-vendored
+*.042.rs text eol=lf diff=rust
+docs/c043/[a-z]*.py text diff=python
+vendor/k044/** -diff
+/assets/m045/**/*.png binary
+web/p046/*.json text -diff
+*.047.lock -text merge=union
+src/c048/[a-z]*.sh text eol=lf
+lib/k049/** -diff
+/tools/m050/**/*.bat text eol=crlf
+docs/p051/*.pdf binary export-ignore
+*.052.txt working-tree-encoding=UTF-8
+assets/c053/[a-z]*.psd lockable filter=lfs
+web/k054/** -diff
+/tests/m055/**/*.js linguist-vendored
+src/p056/*.rs text eol=lf diff=rust
+*.057.py text diff=python
+tools/c058/[a-z]*.md text linguist-documentation
+docs/k059/** -diff
+/vendor/m060/**/*.json text -diff
+assets/p061/*.lock -text merge=union
+*.062.sh text eol=lf
+tests/c063/[a-z]*.svg -diff linguist-generated
+src/k064/** -diff
+/lib/m065/**/*.pdf binary export-ignore
+tools/p066/*.txt working-tree-encoding=UTF-8
+*.067.psd lockable filter=lfs
+vendor/c068/[a-z]*.go text whitespace=tab-in-indent
+assets/k069/** -diff
+/web/m070/**/*.rs text eol=lf diff=rust
+tests/p071/*.py text diff=python
+*.072.md text linguist-documentation
+lib/c073/[a-z]*.png binary
+tools/k074/** -diff
+/docs/m075/**/*.lock -text merge=union
+vendor/p076/*.sh text eol=lf
+*.077.svg -diff linguist-generated
+web/c078/[a-z]*.bat text eol=crlf
+
+# Section 02: tools
+lib/p081/*.psd lockable filter=lfs
+*.082.go text whitespace=tab-in-indent
+docs/c083/[a-z]*.js linguist-vendored
+vendor/k084/** -diff
+/assets/m085/**/*.py text diff=python
+web/p086/*.md text linguist-documentation
+*.087.png binary
+src/c088/[a-z]*.json text -diff
+lib/k089/** -diff
+/tools/m090/**/*.sh text eol=lf
+docs/p091/*.svg -diff linguist-generated
+*.092.bat text eol=crlf
+assets/c093/[a-z]*.pdf binary export-ignore
+web/k094/** -diff
+/tests/m095/**/*.psd lockable filter=lfs
+src/p096/*.go text whitespace=tab-in-indent
+*.097.js linguist-vendored
+tools/c098/[a-z]*.rs text eol=lf diff=rust
+docs/k099/** -diff
+/vendor/m100/**/*.md text linguist-documentation
+assets/p101/*.png binary
+*.102.json text -diff
+tests/c103/[a-z]*.lock -text merge=union
+src/k104/** -diff
+/lib/m105/**/*.svg -diff linguist-generated
+tools/p106/*.bat text eol=crlf
+*.107.pdf binary export-ignore
+vendor/c108/[a-z]*.txt working-tree-encoding=UTF-8
+assets/k109/** -diff
+/web/m110/**/*.go text whitespace=tab-in-indent
+tests/p111/*.js linguist-vendored
+*.112.rs text eol=lf diff=rust
+lib/c113/[a-z]*.py text diff=python
+tools/k114/** -diff
+/docs/m115/**/*.png binary
+vendor/p116/*.json text -diff
+*.117.lock -text merge=union
+web/c118/[a-z]*.sh text eol=lf
+
+# Section 03: docs
+lib/p121/*.pdf binary export-ignore
+*.122.txt working-tree-encoding=UTF-8
+docs/c123/[a-z]*.psd lockable filter=lfs
+vendor/k124/** -diff
+/assets/m125/**/*.js linguist-vendored
+web/p126/*.rs text eol=lf diff=rust
+*.127.py text diff=python
+src/c128/[a-z]*.md text linguist-documentation
+lib/k129/** -diff
+/tools/m130/**/*.json text -diff
+docs/p131/*.lock -text merge=union
+*.132.sh text eol=lf
+assets/c133/[a-z]*.svg -diff linguist-generated
+web/k134/** -diff
+/tests/m135/**/*.pdf binary export-ignore
+src/p136/*.txt working-tree-encoding=UTF-8
+*.137.psd lockable filter=lfs
+tools/c138/[a-z]*.go text whitespace=tab-in-indent
+docs/k139/** -diff
+/vendor/m140/**/*.rs text eol=lf diff=rust
+assets/p141/*.py text diff=python
+*.142.md text linguist-documentation
+tests/c143/[a-z]*.png binary
+src/k144/** -diff
+/lib/m145/**/*.lock -text merge=union
+tools/p146/*.sh text eol=lf
+*.147.svg -diff linguist-generated
+vendor/c148/[a-z]*.bat text eol=crlf
+assets/k149/** -diff
+/web/m150/**/*.txt working-tree-encoding=UTF-8
+tests/p151/*.psd lockable filter=lfs
+*.152.go text whitespace=tab-in-indent
+lib/c153/[a-z]*.js linguist-vendored
+tools/k154/** -diff
+/docs/m155/**/*.py text diff=python
+vendor/p156/*.md text linguist-documentation
+*.157.png binary
+web/c158/[a-z]*.json text -diff
+
+# Section 04: vendor
+lib/p161/*.svg -diff linguist-generated
+*.162.bat text eol=crlf
+docs/c163/[a-z]*.pdf binary export-ignore
+vendor/k164/** -diff
+/assets/m165/**/*.psd lockable filter=lfs
+web/p166/*.go text whitespace=tab-in-indent
+*.167.js linguist-vendored
+src/c168/[a-z]*.rs text eol=lf diff=rust
+lib/k169/** -diff
+/tools/m170/**/*.md text linguist-documentation
+docs/p171/*.png binary
+*.172.json text -diff
+assets/c173/[a-z]*.lock -text merge=union
+web/k174/** -diff
+/tests/m175/**/*.svg -diff linguist-generated
+src/p176/*.bat text eol=crlf
+*.177.pdf binary export-ignore
+tools/c178/[a-z]*.txt working-tree-encoding=UTF-8
+docs/k179/** -diff
+/vendor/m180/**/*.go text whitespace=tab-in-indent
+assets/p181/*.js linguist-vendored
+*.182.rs text eol=lf diff=rust
+tests/c183/[a-z]*.py text diff=python
+src/k184/** -diff
+/lib/m185/**/*.png binary
+tools/p186/*.json text -diff
+*.187.lock -text merge=union
+vendor/c188/[a-z]*.sh text eol=lf
+assets/k189/** -diff
+/web/m190/**/*.bat text eol=crlf
+tests/p191/*.pdf binary export-ignore
+*.192.txt working-tree-encoding=UTF-8
+lib/c193/[a-z]*.psd lockable filter=lfs
+tools/k194/** -diff
+/docs/m195/**/*.js linguist-vendored
+vendor/p196/*.rs text eol=lf diff=rust
+*.197.py text diff=python
+web/c198/[a-z]*.md text linguist-documentation
+
+# Section 05: assets
+lib/p201/*.lock -text merge=union
+*.202.sh text eol=lf
+docs/c203/[a-z]*.svg -diff linguist-generated
+vendor/k204/** -diff
+/assets/m205/**/*.pdf binary export-ignore
+web/p206/*.txt working-tree-encoding=UTF-8
+*.207.psd lockable filter=lfs
+src/c208/[a-z]*.go text whitespace=tab-in-indent
+lib/k209/** -diff
+/tools/m210/**/*.rs text eol=lf diff=rust
+docs/p211/*.py text diff=python
+*.212.md text linguist-documentation
+assets/c213/[a-z]*.png binary
+web/k214/** -diff
+/tests/m215/**/*.lock -text merge=union
+src/p216/*.sh text eol=lf
+*.217.svg -diff linguist-generated
+tools/c218/[a-z]*.bat text eol=crlf
+docs/k219/** -diff
+/vendor/m220/**/*.txt working-tree-encoding=UTF-8
+assets/p221/*.psd lockable filter=lfs
+*.222.go text whitespace=tab-in-indent
+tests/c223/[a-z]*.js linguist-vendored
+src/k224/** -diff
+/lib/m225/**/*.py text diff=python
+tools/p226/*.md text linguist-documentation
+*.227.png binary
+vendor/c228/[a-z]*.json text -diff
+assets/k229/** -diff
+/web/m230/**/*.sh text eol=lf
+tests/p231/*.svg -diff linguist-generated
+*.232.bat text eol=crlf
+lib/c233/[a-z]*.pdf binary export-ignore
+tools/k234/** -diff
+/docs/m235/**/*.psd lockable filter=lfs
+vendor/p236/*.go text whitespace=tab-in-indent
+*.237.js linguist-vendored
+web/c238/[a-z]*.rs text eol=lf diff=rust
+
+# Section 06: web
+lib/p241/*.png binary
+*.242.json text -diff
+docs/c243/[a-z]*.lock -text merge=union
+vendor/k244/** -diff
+/assets/m245/**/*.svg -diff linguist-generated
+web/p246/*.bat text eol=crlf
+*.247.pdf binary export-ignore
+src/c248/[a-z]*.txt working-tree-encoding=UTF-8
+lib/k249/** -diff
+/tools/m250/**/*.go text whitespace=tab-in-indent
+docs/p251/*.js linguist-vendored
+*.252.rs text eol=lf diff=rust
+assets/c253/[a-z]*.py text diff=python
+web/k254/** -diff
+/tests/m255/**/*.png binary
+src/p256/*.json text -diff
+*.257.lock -text merge=union
+tools/c258/[a-z]*.sh text eol=lf
+docs/k259/** -diff
+/vendor/m260/**/*.bat text eol=crlf
+assets/p261/*.pdf binary export-ignore
+*.262.txt working-tree-encoding=UTF-8
+tests/c263/[a-z]*.psd lockable filter=lfs
+src/k264/** -diff
+/lib/m265/**/*.js linguist-vendored
+tools/p266/*.rs text eol=lf diff=rust
+*.267.py text diff=python
+vendor/c268/[a-z]*.md text linguist-documentation
+assets/k269/** -diff
+/web/m270/**/*.json text -diff
+tests/p271/*.lock -text merge=union
+*.272.sh text eol=lf
+lib/c273/[a-z]*.svg -diff linguist-generated
+tools/k274/** -diff
+/docs/m275/**/*.pdf binary export-ignore
+vendor/p276/*.txt working-tree-encoding=UTF-8
+*.277.psd lockable filter=lfs
+web/c278/[a-z]*.go text whitespace=tab-in-indent
+
+# Section 07: tests
+lib/p281/*.py text diff=python
+*.282.md text linguist-documentation
+docs/c283/[a-z]*.png binary
+vendor/k284/** -diff
+/assets/m285/**/*.lock -text merge=union
+web/p286/*.sh text eol=lf
+*.287.svg -diff linguist-generated
+src/c288/[a-z]*.bat text eol=crlf
+lib/k289/** -diff
+/tools/m290/**/*.txt working-tree-encoding=UTF-8
+docs/p291/*.psd lockable filter=lfs
+*.292.go text whitespace=tab-in-indent
+assets/c293/[a-z]*.js linguist-vendored
+web/k294/** -diff
+/tests/m295/**/*.py text diff=python
+src/p296/*.md text linguist-documentation
+*.297.png binary
+tools/c298/[a-z]*.json text -diff
+docs/k299/** -diff
+/vendor/m300/**/*.sh text eol=lf
+assets/p301/*.svg -diff linguist-generated
+*.302.bat text eol=crlf
+tests/c303/[a-z]*.pdf binary export-ignore
+src/k304/** -diff
+/lib/m305/**/*.psd lockable filter=lfs
+tools/p306/*.go text whitespace=tab-in-indent
+*.307.js linguist-vendored
+vendor/c308/[a-z]*.rs text eol=lf diff=rust
+assets/k309/** -diff
+/web/m310/**/*.md text linguist-documentation
+tests/p311/*.png binary
+*.312.json text -diff
+lib/c313/[a-z]*.lock -text merge=union
+tools/k314/** -diff
+/docs/m315/**/*.svg -diff linguist-generated
+vendor/p316/*.bat text eol=crlf
+*.317.pdf binary export-ignore
+web/c318/[a-z]*.txt working-tree-encoding=UTF-8
+
+# Section 08: src
+lib/p321/*.js linguist-vendored
+*.322.rs text eol=lf diff=rust
+docs/c323/[a-z]*.py text diff=python
+vendor/k324/** -diff
+/assets/m325/**/*.png binary
+web/p326/*.json text -diff
+*.327.lock -text merge=union
+src/c328/[a-z]*.sh text eol=lf
+lib/k329/** -diff
+/tools/m330/**/*.bat text eol=crlf
+docs/p331/*.pdf binary export-ignore
+*.332.txt working-tree-encoding=UTF-8
+assets/c333/[a-z]*.psd lockable filter=lfs
+web/k334/** -diff
+/tests/m335/**/*.js linguist-vendored
+src/p336/*.rs text eol=lf diff=rust
+*.337.py text diff=python
+tools/c338/[a-z]*.md text linguist-documentation
+docs/k339/** -diff
+/vendor/m340/**/*.json text -diff
+assets/p341/*.lock -text merge=union
+*.342.sh text eol=lf
+tests/c343/[a-z]*.svg -diff linguist-generated
+src/k344/** -diff
+/lib/m345/**/*.pdf binary export-ignore
+tools/p346/*.txt working-tree-encoding=UTF-8
+*.347.psd lockable filter=lfs
+vendor/c348/[a-z]*.go text whitespace=tab-in-indent
+assets/k349/** -diff
+/web/m350/**/*.rs text eol=lf diff=rust
+tests/p351/*.py text diff=python
+*.352.md text linguist-documentation
+lib/c353/[a-z]*.png binary
+tools/k354/** -diff
+/docs/m355/**/*.lock -text merge=union
+vendor/p356/*.sh text eol=lf
+*.357.svg -diff linguist-generated
+web/c358/[a-z]*.bat text eol=crlf
+
+# Section 09: lib
+lib/p361/*.psd lockable filter=lfs
+*.362.go text whitespace=tab-in-indent
+docs/c363/[a-z]*.js linguist-vendored
+vendor/k364/** -diff
+/assets/m365/**/*.py text diff=python
+web/p366/*.md text linguist-documentation
+*.367.png binary
+src/c368/[a-z]*.json text -diff
+lib/k369/** -diff
+/tools/m370/**/*.sh text eol=lf
+docs/p371/*.svg -diff linguist-generated
+*.372.bat text eol=crlf
+assets/c373/[a-z]*.pdf binary export-ignore
+web/k374/** -diff
+/tests/m375/**/*.psd lockable filter=lfs
+src/p376/*.go text whitespace=tab-in-indent
+*.377.js linguist-vendored
+tools/c378/[a-z]*.rs text eol=lf diff=rust
+docs/k379/** -diff
+/vendor/m380/**/*.md text linguist-documentation
+assets/p381/*.png binary
+*.382.json text -diff
+tests/c383/[a-z]*.lock -text merge=union
+src/k384/** -diff
+/lib/m385/**/*.svg -diff linguist-generated
+tools/p386/*.bat text eol=crlf
+*.387.pdf binary export-ignore
+vendor/c388/[a-z]*.txt working-tree-encoding=UTF-8
+assets/k389/** -diff
+/web/m390/**/*.go text whitespace=tab-in-indent
+tests/p391/*.js linguist-vendored
+*.392.rs text eol=lf diff=rust
+lib/c393/[a-z]*.py text diff=python
+tools/k394/** -diff
+/docs/m395/**/*.png binary
+vendor/p396/*.json text -diff
+*.397.lock -text merge=union
+web/c398/[a-z]*.sh text eol=lf
+
+# Section 10: tools
+lib/p401/*.pdf binary export-ignore
+*.402.txt working-tree-encoding=UTF-8
+docs/c403/[a-z]*.psd lockable filter=lfs
+vendor/k404/** -diff
+/assets/m405/**/*.js linguist-vendored
+web/p406/*.rs text eol=lf diff=rust
+*.407.py text diff=python
+src/c408/[a-z]*.md text linguist-documentation
+lib/k409/** -diff
+/tools/m410/**/*.json text -diff
+docs/p411/*.lock -text merge=union
+*.412.sh text eol=lf
+assets/c413/[a-z]*.svg -diff linguist-generated
+web/k414/** -diff
+/tests/m415/**/*.pdf binary export-ignore
+src/p416/*.txt working-tree-encoding=UTF-8
+*.417.psd lockable filter=lfs
+tools/c418/[a-z]*.go text whitespace=tab-in-indent
+docs/k419/** -diff
+/vendor/m420/**/*.rs text eol=lf diff=rust
+assets/p421/*.py text diff=python
+*.422.md text linguist-documentation
+tests/c423/[a-z]*.png binary
+src/k424/** -diff
+/lib/m425/**/*.lock -text merge=union
+tools/p426/*.sh text eol=lf
+*.427.svg -diff linguist-generated
+vendor/c428/[a-z]*.bat text eol=crlf
+assets/k429/** -diff
+/web/m430/**/*.txt working-tree-encoding=UTF-8
+tests/p431/*.psd lockable filter=lfs
+*.432.go text whitespace=tab-in-indent
+lib/c433/[a-z]*.js linguist-vendored
+tools/k434/** -diff
+/docs/m435/**/*.py text diff=python
+vendor/p436/*.md text linguist-documentation
+*.437.png binary
+web/c438/[a-z]*.json text -diff
+
+# Section 11: docs
+lib/p441/*.svg -diff linguist-generated
+*.442.bat text eol=crlf
+docs/c443/[a-z]*.pdf binary export-ignore
+vendor/k444/** -diff
+/assets/m445/**/*.psd lockable filter=lfs
+web/p446/*.go text whitespace=tab-in-indent
+*.447.js linguist-vendored
+src/c448/[a-z]*.rs text eol=lf diff=rust
+lib/k449/** -diff
+/tools/m450/**/*.md text linguist-documentation
+docs/p451/*.png binary
+*.452.json text -diff
+assets/c453/[a-z]*.lock -text merge=union
+web/k454/** -diff
+/tests/m455/**/*.svg -diff linguist-generated
+src/p456/*.bat text eol=crlf
+*.457.pdf binary export-ignore
+tools/c458/[a-z]*.txt working-tree-encoding=UTF-8
+docs/k459/** -diff
+/vendor/m460/**/*.go text whitespace=tab-in-indent
+assets/p461/*.js linguist-vendored
+*.462.rs text eol=lf diff=rust
+tests/c463/[a-z]*.py text diff=python
+src/k464/** -diff
+/lib/m465/**/*.png binary
+tools/p466/*.json text -diff
+*.467.lock -text merge=union
+vendor/c468/[a-z]*.sh text eol=lf
+assets/k469/** -diff
+/web/m470/**/*.bat text eol=crlf
+tests/p471/*.pdf binary export-ignore
+*.472.txt working-tree-encoding=UTF-8
+lib/c473/[a-z]*.psd lockable filter=lfs
+tools/k474/** -diff
+/docs/m475/**/*.js linguist-vendored
+vendor/p476/*.rs text eol=lf diff=rust
+*.477.py text diff=python
+web/c478/[a-z]*.md text linguist-documentation
+

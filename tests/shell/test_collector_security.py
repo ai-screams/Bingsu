@@ -2043,8 +2043,10 @@ def assert_fuzz_job(text, targets):
 
 
 def test_security_fuzz_job_is_pinned_and_covers_every_target():
-    targets = [line.split('"')[1] for line in (FUZZ / "Cargo.toml").read_text().splitlines()
-               if line.startswith('name = "') and line != 'name = "bingsu-collector-fuzz"' and line != 'name = "write-seeds"']
+    import tomllib
+    # The [[bin]] targets only: the [[bench]] target is not a fuzz target.
+    bins = tomllib.loads((FUZZ / "Cargo.toml").read_text())["bin"]
+    targets = [b["name"] for b in bins if b["name"] != "write-seeds"]
     assert sorted(targets) == sorted(p.stem for p in (FUZZ / "fuzz_targets").glob("*.rs")) and len(targets) == 10
     assert_fuzz_job((ROOT / ".github/workflows/security.yml").read_text(), targets)
 

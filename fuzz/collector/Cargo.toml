@@ -14,6 +14,11 @@ cargo-fuzz = true
 
 [workspace]
 
+# Kept out of `cargo bench --benches`: CI job icount counts summaries against
+# that list, which must hold only the bench targets.
+[lib]
+bench = false
+
 [features]
 # cargo fuzz run --features libfuzzer <target>; the seed writer needs none.
 libfuzzer = ["dep:libfuzzer-sys"]
@@ -120,3 +125,26 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+# Instruction-count bench only (CI job icount): never built by cargo fuzz or
+# the seed writer, and the version equals the root lock's (job icount checks
+# both locks against its gungraun-runner).
+[target.'cfg(unix)'.dev-dependencies]
+gungraun = "=0.20.0"
+
+# A separate copy of the collector's attributes parser, compiled with
+# cfg(collector_fuzz); see the file's header.
+[[bench]]
+name = "attributes"
+harness = false
+test = false
+
+# This crate is its own workspace, so the root profiles do not reach it. Only
+# bench is set, to the root's release + bench values: release stays what
+# cargo fuzz -O builds. strip = false, or Callgrind counts 0.
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = false
+debug = "line-tables-only"
