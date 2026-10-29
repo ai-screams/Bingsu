@@ -154,8 +154,39 @@ def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
     from blocked_mount import blocked_mount
     from shell_support import Blocked
     from test_helper_lifecycle import LifetimeSession, fail_blocked, stop_helpers
+    import faulthandler
+    import os
+    import signal
+    import threading
     t_ns = trust_window_ns()
     holder = {}
+    # The whole test is bounded: past the limit a watchdog records every thread's stack,
+    # resumes the stopped daemon and kills this session's helpers, so a wait on the mount
+    # returns and the test fails with that stack instead of reaching the job timeout.
+    limit_s = t_ns / 1e9 + 60
+    finished, abort, stuck = threading.Event(), threading.Event(), []
+    mount_word = os.fsencode(str(tmp_path / "fuse/mount"))
+
+    def watchdog():
+        if finished.wait(limit_s):
+            return
+        trace = tmp_path / "stuck-stacks.txt"
+        with trace.open("w") as out:
+            faulthandler.dump_traceback(file=out, all_threads=True)
+        stuck.append(trace.read_text())
+        abort.set()
+        for proc in os.listdir("/proc"):
+            try:
+                words = open(f"/proc/{proc}/cmdline", "rb").read().split(b"\0")
+            except (OSError, ValueError):
+                continue
+            if words and words[0].endswith(b"bindfs") and mount_word in words:
+                os.kill(int(proc), signal.SIGCONT)
+        if "session" in holder:
+            stop_helpers(holder["session"])
+
+    guard = threading.Thread(target=watchdog, daemon=True)
+    guard.start()
 
     def prepare(mount):
         session = LifetimeSession(tmp_path / "s", config=mount / "cfg")
@@ -183,6 +214,8 @@ def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
                 marker = marker_path.read_bytes()
                 assert marker[:8] == b"BNGMRK02" and marker[12] == 1 and marker[13] == 1, marker
                 end = struct.unpack_from("<Q", marker, 32)[0] + t_ns
+                # 이것을 실패시키는 것: 표식 시각과 이 시험의 CLOCK_BOOTTIME이 다른 시계라 대기가 T를 크게 넘는 것.
+                assert 0 < end - boottime() <= t_ns, ("marker clock and CLOCK_BOOTTIME disagree", end, boottime())
                 # The daemon is stopped: chmod the file through the mount's source folder.
                 (tmp_path / "fuse/source/cfg/bingsu/config.toml").chmod(0o620)
                 inside = []
@@ -197,7 +230,8 @@ def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
                         break
                     # One prompt shortly before the boundary, then one just past it; never a busy loop.
                     wait = (end - boottime()) / 1e9
-                    time.sleep(max(0.0, wait - 1.0) if wait > 1.5 else max(0.0, wait) + 0.05)
+                    if abort.wait(max(0.0, wait - 1.0) if wait > 1.5 else max(0.0, wait) + 0.05):
+                        break  # the watchdog fired; finally reports its stacks
                 assert inside, "no prompt ran inside T"
                 print(f"\ntrust revocation: {len(inside)} prompts inside T, last {(end - inside_end) / 1e6:.1f} ms "
                       f"before verified_at + T; first expired {(before - end) / 1e6:.1f} ms after it")
@@ -209,3 +243,9 @@ def test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t(tmp_path):
                 stop_helpers(session)
     except Blocked as error:
         fail_blocked(error)
+    finally:
+        finished.set()
+        guard.join(timeout=30)
+        # 이것을 실패시키는 것: 막힌 마운트에서 끝나지 않는 대기(정리 포함)가 job 제한까지 가는 것.
+        if stuck:
+            pytest.fail(f"exceeded {limit_s:.0f} s; stacks when the watchdog fired:\n{stuck[0]}", pytrace=False)
