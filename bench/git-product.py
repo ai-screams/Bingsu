@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import fcntl
+import hashlib
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -138,12 +139,19 @@ fn main() {
 '''
 
 
+def prepared_directory(binary, source):
+    # Keyed by the source tree too: a base and a candidate whose front binaries are
+    # byte-identical (a change that does not reach the product) must not share, and
+    # so overwrite, one fixture.
+    return OUT / "prepared" / (M3B.digest(binary)[:16] + "-" + hashlib.sha256(str(Path(source).resolve()).encode()).hexdigest()[:8])
+
+
 def prepare(binary):
     binary = Path(binary).resolve()
     source = M3B.build_context(binary)
     if binary.parent.name != "release":
         raise ValueError("release sibling pair required")
-    directory = OUT / "prepared" / M3B.digest(binary)[:16]
+    directory = prepared_directory(binary, source)
     directory.mkdir(parents=True, exist_ok=True)
     command = ["cargo", "build", "--locked", "-j", "2", "--release", "-p", "bingsu", "-p", "bingsu-collect", "--message-format=json"]
     triple = binary.parent.parent.name

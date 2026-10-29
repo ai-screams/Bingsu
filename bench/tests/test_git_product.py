@@ -370,3 +370,14 @@ def test_trace_runs_never_feed_latency_summaries(monkeypatch, tmp_path):
     import sys
     monkeypatch.setattr(sys, "argv", ["git-product.py", "--x03-trace", "bingsu", "--out", str(tmp_path / "t.json")])
     assert git.main() == 2 and written["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 준비 폴더를 front 바이너리 해시만으로 정하는 것. 제품에 닿지 않는 변경은 base와
+# candidate의 front가 바이트까지 같아, 같은 폴더를 쓰며 fixture를 덮어쓰고 base 쪽 해시가 낡아진다.
+def test_prepared_directory_differs_for_identical_binaries_from_different_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(git, "OUT", tmp_path / "out")
+    front = tmp_path / "front"
+    front.write_bytes(b"same bytes")
+    base, candidate = git.prepared_directory(front, tmp_path / "base"), git.prepared_directory(front, tmp_path / "candidate")
+    assert base != candidate and base.parent == candidate.parent
+    assert git.prepared_directory(front, tmp_path / "base") == base
