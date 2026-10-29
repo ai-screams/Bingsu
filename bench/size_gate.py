@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import TypedDict
@@ -37,16 +38,35 @@ def _blocked(metric, reason, **extra):
     return GateResult(status="BLOCKED", metric=metric, reason=reason, **extra)
 
 
+def _number(v):
+    return type(v) in (int, float) and math.isfinite(v) and v >= 0
+
+
+def _valid_summary(row, samples):
+    if not isinstance(row, dict) or type(row.get("n")) is not int or not isinstance(samples, list) or len(samples) != row["n"]:
+        return False
+    return all(_number(row.get(k)) for k in ("p50", "p95", "variance", "min", "max"))
+
+
 def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateResult:
-    """FAIL when the candidate/base ratio of p50 or p95 exceeds `threshold`."""
+    """FAIL when the candidate/base ratio of p50 or p95 exceeds `threshold`.
+
+    Missing, non-finite or inconsistent evidence is BLOCKED, never PASS.
+    """
     try:
-        base, cand = (paired["variants"][n]["summary"][metric] for n in ("base", "candidate"))
+        rows = [paired["variants"][n] for n in ("base", "candidate")]
+        base, cand = (r["summary"][metric] for r in rows)
+        samples = [r["samples"] for r in rows]
     except (KeyError, TypeError):
-        return _blocked(metric, "no summary for " + metric)
-    if paired.get("status") != "OBSERVED" or min(base.get("n", 0), cand.get("n", 0)) < MIN_PAIRS:
+        return _blocked(metric, "no summary or raw samples for " + str(metric))
+    if not (_valid_summary(base, samples[0]) and _valid_summary(cand, samples[1])):
+        return _blocked(metric, "invalid evidence: non-finite, incomplete or inconsistent with the raw samples")
+    if paired.get("status") != "OBSERVED" or min(base["n"], cand["n"]) < MIN_PAIRS:
         return _blocked(metric, "fewer than %d alternated pairs or unobserved" % MIN_PAIRS, base=base, candidate=cand)
     if not (base["p50"] > 0 and base["p95"] > 0):
         return _blocked(metric, "base percentile is zero", base=base, candidate=cand)
+    if threshold is not None and not (type(threshold) in (int, float) and math.isfinite(threshold) and threshold > 0):
+        return _blocked(metric, "invalid threshold", base=base, candidate=cand)
     observed_ms = cand["p50"] / 1e6
     over = observed_ms > ABSOLUTE_TARGET_MS
     result = GateResult(
@@ -61,21 +81,29 @@ def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateRes
     return result
 
 
+def _size_ok(v):
+    return type(v) is int and v > 0
+
+
 def size_gate(base: dict, candidate: dict, cap_bytes: int | dict | None) -> GateResult:
     """FAIL when a candidate size exceeds its cap.
 
-    `cap_bytes` is one int for front, collector and their sum alike, or a dict with
-    any of the SIZE_KEYS (a missing key is not checked). U3 picks the reading.
+    `cap_bytes` is one int for front, collector and their sum alike, or a dict
+    holding all of SIZE_KEYS. A missing or invalid cap, a missing size or a
+    combined that is not front + collector is BLOCKED. U3 picks the reading.
     """
     for side in (base, candidate):
-        if not all(type(side.get(k)) is int and side[k] > 0 for k in SIZE_KEYS):
-            return _blocked("stripped_bytes", "missing size", base=base, candidate=candidate)
+        if not (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
+                and side["combined"] == side["front"] + side["collector"]):
+            return _blocked("stripped_bytes", "missing or inconsistent size")
     result = GateResult(metric="stripped_bytes", base=base, candidate=candidate)
     if cap_bytes is None:
         return {**result, "status": "BLOCKED", "reason": "cap " + PENDING}
-    caps = dict.fromkeys(SIZE_KEYS, cap_bytes) if isinstance(cap_bytes, int) else dict(cap_bytes)
+    caps = dict.fromkeys(SIZE_KEYS, cap_bytes) if type(cap_bytes) is int else cap_bytes
+    if not (isinstance(caps, dict) and all(_size_ok(caps.get(k)) for k in SIZE_KEYS)):
+        return {**result, "status": "BLOCKED", "reason": "cap incomplete or invalid, " + PENDING}
     result["cap_bytes"] = caps
-    result["over"] = [k for k in SIZE_KEYS if k in caps and candidate[k] > caps[k]]
+    result["over"] = [k for k in SIZE_KEYS if candidate[k] > caps[k]]
     result["status"] = "FAIL" if result["over"] else "PASS"
     return result
 
@@ -99,10 +127,10 @@ def main(argv=None):
     time_results = {case: relative_gate(row, "prompt_ns", args.threshold) for case, row in measurement.get("cases", {}).items()}
     if not time_results:
         time_results = {"-": _blocked("prompt_ns", "measurement has no cases: " + str(measurement.get("reason", "")))}
-    sizes = [json.loads(f.read_text()).get("stripped_bytes", {}) for f in (args.base_preparation, args.candidate_preparation)]
+    sizes = [json.loads(f.read_text()).get("stripped_bytes") for f in (args.base_preparation, args.candidate_preparation)]
     size = size_gate(sizes[0], sizes[1], args.cap_bytes)
     verdict = aggregate([*time_results.values(), size])
-    report = {"schema": 1, "status": verdict, "enforced": args.enforce, "threshold": args.threshold,
+    report = {"schema": 1, "status": verdict, "enforced": args.enforce, "threshold": args.threshold if args.threshold is None or math.isfinite(args.threshold) else str(args.threshold),
               "cap_bytes": args.cap_bytes, "time": time_results, "size": size}
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(json.dumps({"status": verdict, "enforced": args.enforce,

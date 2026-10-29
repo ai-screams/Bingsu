@@ -18,8 +18,8 @@ def summary(p50, p95, n=200):
 
 def paired(base, cand, n=200, status="OBSERVED"):
     return {"status": status, "variants": {
-        "base": {"summary": {"prompt_ns": summary(*base, n=n)}},
-        "candidate": {"summary": {"prompt_ns": summary(*cand, n=n)}}}}
+        "base": {"summary": {"prompt_ns": summary(*base, n=n)}, "samples": [{}] * n},
+        "candidate": {"summary": {"prompt_ns": summary(*cand, n=n)}, "samples": [{}] * n}}}
 
 
 # 이것을 실패시키는 것: 비율 방향을 뒤집는 것(base/candidate), p50이나 p95 중 하나만 검사하는 것.
@@ -52,7 +52,7 @@ def test_size_gate_checks_each_binary_and_sum():
     one = gate.size_gate(base, {"front": 101, "collector": 50, "combined": 151}, caps)
     assert one["status"] == "FAIL" and one["over"] == ["front"]
     # both under their caps, sum over
-    both = gate.size_gate(base, {"front": 100, "collector": 100, "combined": 201}, {"front": 100, "collector": 100, "combined": 200})
+    both = gate.size_gate(base, {"front": 100, "collector": 101, "combined": 201}, {"front": 100, "collector": 101, "combined": 200})
     assert both["status"] == "FAIL" and both["over"] == ["combined"]
     assert gate.size_gate(base, base, None)["status"] == "BLOCKED"
     assert gate.size_gate(base, {"front": 1}, 10)["status"] == "BLOCKED"
@@ -67,6 +67,80 @@ def test_gate_is_blocked_without_two_hundred_pairs():
     assert pending["status"] == "BLOCKED" and "U3" in pending["reason"]
     assert gate.aggregate([{"status": "PASS"}, {"status": "BLOCKED"}]) == "BLOCKED"
     assert gate.aggregate([{"status": "BLOCKED"}, {"status": "FAIL"}]) == "FAIL"
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+def mutated(side, **changes):
+    value = paired((8e6, 12e6), (9e6, 12e6))
+    if "samples" in changes:
+        value["variants"][side]["samples"] = changes.pop("samples")
+    value["variants"][side]["summary"]["prompt_ns"].update(changes)
+    return value
+
+
+# 이것을 실패시키는 것: 증거 값의 유한성·완전성·원시 표본 수 검증을 빼는 것.
+@pytest.mark.parametrize("bad", [
+    mutated("candidate", p50=NAN, p95=NAN), mutated("base", p50=INF), mutated("candidate", n=NAN),
+    mutated("candidate", p50=-1.0), mutated("candidate", samples=[]), mutated("base", n=True),
+    mutated("candidate", p95=None), mutated("candidate", variance=NAN),
+])
+def test_invalid_evidence_is_blocked_not_passed(bad):
+    assert gate.relative_gate(bad, "prompt_ns", 1.10)["status"] == "BLOCKED"
+
+
+def test_missing_p95_or_samples_is_blocked_without_threshold():
+    bad = paired((8e6, 12e6), (9e6, 12e6))
+    del bad["variants"]["candidate"]["summary"]["prompt_ns"]["p95"]
+    assert gate.relative_gate(bad, "prompt_ns", None)["status"] == "BLOCKED"
+    bad = paired((8e6, 12e6), (9e6, 12e6))
+    del bad["variants"]["base"]["samples"]
+    assert gate.relative_gate(bad, "prompt_ns", None)["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("threshold", [NAN, INF, -1.0, 0, True])
+def test_invalid_threshold_is_blocked(threshold):
+    assert gate.relative_gate(paired((8e6, 9e6), (80e6, 90e6)), "prompt_ns", threshold)["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 빈·부분·NaN cap을 건너뛰는 것, combined를 front+collector와 대조하지 않는 것.
+@pytest.mark.parametrize("cap", [{}, {"combined": 500}, {"front": 100, "collector": 100}, NAN, 0, -5,
+                                 {"front": 100, "collector": 100, "combined": NAN}, True])
+def test_size_gate_blocks_incomplete_or_invalid_cap(cap):
+    side = {"front": 100, "collector": 100, "combined": 200}
+    assert gate.size_gate(side, side, cap)["status"] == "BLOCKED"
+
+
+def test_size_gate_blocks_inconsistent_combined():
+    ok = {"front": 100, "collector": 100, "combined": 200}
+    assert gate.size_gate(ok, {"front": 100, "collector": 100, "combined": 150}, 1000)["status"] == "BLOCKED"
+    assert gate.size_gate({"front": 1, "collector": 1, "combined": 5}, ok, 1000)["status"] == "BLOCKED"
+
+
+def test_cli_blocks_nan_evidence_instead_of_raising(tmp_path):
+    def write(name, text):
+        path = tmp_path / name
+        path.write_text(text)
+        return path
+    sizes = write("s.json", json.dumps({"stripped_bytes": {"front": 1, "collector": 1, "combined": 2}}))
+    meas = write("m.json", '{"cases": {"no-git": %s}}' % json.dumps(mutated("candidate", p50=NAN)).replace("NaN", "NaN"))
+    args = ["--measurement", str(meas), "--base-preparation", str(sizes), "--candidate-preparation", str(sizes),
+            "--out", str(tmp_path / "v.json"), "--threshold", "nan"]
+    assert gate.main(args) == 0
+    assert json.loads((tmp_path / "v.json").read_text())["status"] == "BLOCKED"
+
+
+def workflow_triggers():
+    text = (ROOT / ".github/workflows/ci.yml").read_text().replace("\r\n", "\n")
+    match = re.search(r"^on:\n((?:[ ]+.*\n|\n)+)", text, re.M)
+    assert match, "workflow trigger block missing"
+    return match.group(1)
+
+
+# 이것을 실패시키는 것: workflow의 on.pull_request 삭제.
+def test_workflow_triggers_on_pull_request():
+    assert re.search(r"^  pull_request:", workflow_triggers(), re.M)
 
 
 def job_text():
