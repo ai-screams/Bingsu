@@ -990,6 +990,7 @@ jobs:
   # decision U3 limits. The verdict is recorded but does not fail the pull
   # request until five consecutive pull request runs finish without BLOCKED;
   # only then turn on GATE_ENFORCE and register it as a required check.
+  # The streak counts runs that end in PASS or FAIL; BLOCKED or a failed verdict step resets it to 0.
   prompt-gate:
     name: Prompt time and size gate
     needs: detect

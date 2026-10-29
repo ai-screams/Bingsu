@@ -126,6 +126,11 @@ def complete_summary(row, n):
 CI_REFERENCE_FACTOR = 1.03
 
 
+def admission_basis(power):
+    """'ci-r2' when a gate block on this host is judged by U3 rule R2, else 'default'."""
+    return 'ci-r2' if power == 'mains-assumed' and os.environ.get('CI') == 'true' else 'default'
+
+
 def reference_limit(power, calibration):
     """The largest admitted before/after reference p50 of a gate block, or None.
 
@@ -134,7 +139,7 @@ def reference_limit(power, calibration):
     the largest calibration median. Only this baseline differs: the caller keeps
     every other admission check.
     """
-    if power == 'mains-assumed' and os.environ.get('CI') == 'true':
+    if admission_basis(power) == 'ci-r2':
         median = calibration.get('median_of_medians')
         if type(median) not in (int, float) or not math.isfinite(median) or median <= 0:
             return None
@@ -169,6 +174,10 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
         else:
             reason = 'unknown mode'
     block.update(kept=reason is None, reason=reason)
+    if condition.get('mode') == 'gate':
+        # Which drift baseline judged the block; a host whose power changed mid-block is 'mixed'.
+        bases = {admission_basis(block.get(side, {}).get('power')) for side in ('before', 'after')}
+        block['admission_basis'] = bases.pop() if len(bases) == 1 else 'mixed'
     return block['kept']
 
 

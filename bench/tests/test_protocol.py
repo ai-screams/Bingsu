@@ -113,6 +113,27 @@ def test_ci_rule_admits_the_hosted_run_retrospectively(monkeypatch, tmp_path, ca
     assert all(k or b / cal['median_of_medians'] > 1.09 for (b, _, _), k in zip(blocks, kept))
 
 
+# 이것을 실패시키는 것: 블록에 판정 기준을 기록하지 않거나, CI=true 없이·AC host에서도 'ci-r2'로 적는다.
+def test_block_records_its_admission_basis(monkeypatch, tmp_path):
+    cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
+    for row in (hosted(102), block()):
+        p.admit(row, p.DEFAULT, cal)
+        assert row['admission_basis'] == 'default'
+    monkeypatch.setenv('CI', 'true')
+    kept, rejected, ac = hosted(102), hosted(104), block()
+    assert p.admit(kept, p.DEFAULT, cal) and not p.admit(rejected, p.DEFAULT, cal) and p.admit(ac, p.DEFAULT, cal)
+    assert kept['admission_basis'] == rejected['admission_basis'] == 'ci-r2'
+    assert ac['admission_basis'] == 'default'
+    mixed = hosted(100)
+    mixed['after']['power'] = 'ac'
+    p.admit(mixed, p.DEFAULT, cal)
+    assert mixed['admission_basis'] == 'mixed'
+    experiment = dict(mode='experiment', power='ac', load_range=(1, 3), synthetic_load=0)
+    row = block()
+    p.admit(row, experiment, cal)
+    assert 'admission_basis' not in row
+
+
 # 이것을 실패시키는 것: R2를 1.05배로 넓히거나, CI=true 없이·AC 전원에서도 적용하거나, 보정 최댓값과 OR로 섞는다.
 def test_ci_rule_boundary_and_scope(monkeypatch, tmp_path):
     cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
