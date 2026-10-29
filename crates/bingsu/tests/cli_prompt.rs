@@ -343,7 +343,7 @@ fn rendered_record_for_each_shell() {
 // 이것을 실패시키는 것: 앞단(어댑터나 core)이 환경 변수나 시계로 출력을 바꾸는 것.
 #[test]
 fn output_does_not_depend_on_the_environment() {
-    let hostile: [(&str, &str); 12] = [
+    let hostile: [(&str, &str); 15] = [
         ("HOME", "/repo/evil"),
         ("PWD", "/repo/evil/$(touch x)"),
         ("BINGSU_LOG", "trace"),
@@ -354,6 +354,9 @@ fn output_does_not_depend_on_the_environment() {
         ("TZ", "Asia/Seoul"),
         ("XDG_RUNTIME_DIR", "/repo/evil/run"),
         ("XDG_CONFIG_HOME", "/repo/evil/cfg"),
+        ("XDG_STATE_HOME", "/repo/evil/state"),
+        ("XDG_CACHE_HOME", "/repo/evil/cache"),
+        ("USER", "repo-controlled-user"),
         ("COLUMNS", "3"),
         ("NO_COLOR", "1"),
     ];
@@ -392,4 +395,84 @@ fn output_does_not_depend_on_the_environment() {
             "{extra:?}"
         );
     }
+}
+
+// 이것을 실패시키는 것: sticky 다음 소유자 의무 또는 상위 권한·로컬 검사를 생략하는 것.
+#[test]
+fn runtime_root_path_examples() {
+    use bingsu_core::fs_trust::{AclFacts, Facts, Last, RefuseGroupWrite, walk_verdict};
+    let me = 1000;
+    let fact = |uid: u32, mode: u32| Facts {
+        dev: 1,
+        ino: 1,
+        uid,
+        gid: uid,
+        mode: 0o040000 | mode,
+        acl: AclFacts::None,
+        ownership: Some(true),
+    };
+    let root = fact(0, 0o755);
+    let mine = fact(me, 0o700);
+    let sticky = fact(0, 0o1777);
+    let examples = [
+        (
+            "/run/user/<uid>/bingsu",
+            vec![root, root, root, mine, mine],
+            true,
+        ),
+        (
+            "/private/var/folders/xx/yyy/T/bingsu",
+            vec![root, root, root, root, root, mine, mine, mine],
+            true,
+        ),
+        (
+            "/tmp/<user-owned>/bingsu",
+            vec![root, sticky, mine, mine],
+            true,
+        ),
+        (
+            "/tmp/<root-or-other-owned>/bingsu",
+            vec![root, sticky, root, mine],
+            false,
+        ),
+        (
+            "~/.cache/bingsu/run",
+            vec![root, root, mine, mine, mine, mine],
+            true,
+        ),
+    ];
+    for (path, facts, accepted) in examples {
+        let verdict = walk_verdict(
+            &facts,
+            me,
+            Last::PrivateFolder,
+            Some(true),
+            &mut RefuseGroupWrite,
+        );
+        assert_eq!(verdict.is_ok(), accepted, "{path}: {verdict:?}");
+        println!("{path}: {accepted}");
+    }
+    // The cache example is conditional: neither a writable home nor a network home passes.
+    for (mode, local) in [(0o775, Some(true)), (0o700, Some(false)), (0o700, None)] {
+        assert!(
+            walk_verdict(
+                &[root, fact(me, mode), mine, mine, mine],
+                me,
+                Last::PrivateFolder,
+                local,
+                &mut RefuseGroupWrite
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        walk_verdict(
+            &[root, sticky, fact(2000, 0o700), mine],
+            me,
+            Last::PrivateFolder,
+            Some(true),
+            &mut RefuseGroupWrite
+        )
+        .is_err()
+    );
 }

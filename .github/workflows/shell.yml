@@ -117,6 +117,7 @@ jobs:
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --ignore tests/shell/test_collector_security.py \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
+                --deselect tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula \
                 --deselect "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]" \
                 --deselect "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]" \
@@ -195,7 +196,7 @@ jobs:
       # reader target. Build both before pytest (shell tests never compile).
       - name: Build procfs test profile
         if: matrix.libc == 'gnu' && matrix.profile == 'debug'
-        run: cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --no-run
+        run: cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --test cli_prompt --no-run
       # strace, and a venv with the hash-pinned test dependencies: the system
       # python refuses pip installs (PEP 668).
       - name: Install strace and the test dependencies
@@ -278,6 +279,23 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]' 'tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]' --basetemp="$RUNNER_TEMP/allowlist-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/allowlist.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]' "$RUNNER_TEMP/allowlist.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]' "$RUNNER_TEMP/allowlist.txt"
+      - name: Build runtime path example test (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          args=(--release)
+          if [ "$LIBC" = musl ]; then args+=(--target "$(uname -m)-unknown-linux-musl"); fi
+          cargo test -p bingsu --test cli_prompt --no-run "${args[@]}"
+      # init warns about an executable path under sticky /tmp, so the fixtures live
+      # under RUNNER_TEMP; a failure uploads them with the helper stage evidence.
+      - name: Runtime root gates (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/runtime-root" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/runtime-root.txt"
+          grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt' "$RUNNER_TEMP/runtime-root.txt"
+          grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root' "$RUNNER_TEMP/runtime-root.txt"
+          grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples' "$RUNNER_TEMP/runtime-root.txt"
       # Only the live fixture's trace, stdout, stderr and attempt.json.
       - name: Upload failed helper stage evidence
         if: failure()
@@ -389,7 +407,7 @@ jobs:
       - run: cargo build -p bingsu -p bingsu-collect
       - name: Generate shape-only init fixture
         run: |
-          cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --no-run
+          cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --test cli_prompt --no-run
           fixture=$(mktemp -d "$PWD/target/shape-only-fixture.XXXXXX")
           M3A_FIXTURE_DIR="$fixture" M3A_FIXTURE_ROOT="$fixture" \
             cargo test -j 2 -p bingsu --bin bingsu commands::init::tests::write_shape_only_shell_fixture -- --exact --ignored --test-threads=1
