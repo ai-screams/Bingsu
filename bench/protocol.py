@@ -114,12 +114,32 @@ def calibrate(reference: Path, blocks: int = 5) -> Calibration:
     medians = [r['p50'] for r in rows[1:]]  # D0: first block is discarded.
     return dict(reference_binary=str(reference), reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
                 blocks=rows, discarded=[0], p95_of_medians=summary(medians)['p95'],
+                median_of_medians=statistics.median(medians),
                 stable=min(medians) > 0 and max(medians) / min(medians) <= 1.05, **identity())
 
 
 def complete_summary(row, n):
     return (row.get('n') == n and all(type(row.get(k)) in (int, float) and
             math.isfinite(row[k]) and row[k] >= 0 for k in ('p50', 'p95', 'variance', 'min', 'max')))
+
+
+CI_REFERENCE_FACTOR = 1.03
+
+
+def reference_limit(power, calibration):
+    """The largest admitted before/after reference p50 of a gate block, or None.
+
+    A hosted CI runner (no power device, CI=true) compares with 1.03 times the
+    median of the four calibration medians (U3 rule R2); every other host keeps
+    the largest calibration median. Only this baseline differs: the caller keeps
+    every other admission check.
+    """
+    if power == 'mains-assumed' and os.environ.get('CI') == 'true':
+        median = calibration.get('median_of_medians')
+        if type(median) not in (int, float) or not math.isfinite(median) or median <= 0:
+            return None
+        return median * CI_REFERENCE_FACTOR
+    return calibration['p95_of_medians']
 
 
 def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
@@ -138,7 +158,8 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
                 not math.isfinite(ref['p50']) or ref['p50'] <= 0):
             reason = 'missing telemetry or thermal warning'
         elif condition['mode'] == 'gate':
-            if h['power'] not in ('ac', 'mains-assumed') or ref['p50'] > calibration['p95_of_medians']:
+            limit = reference_limit(h['power'], calibration)
+            if h['power'] not in ('ac', 'mains-assumed') or limit is None or ref['p50'] > limit:
                 reason = 'power or reference drift'
         elif condition['mode'] == 'experiment':
             bounds = condition.get('load_range')

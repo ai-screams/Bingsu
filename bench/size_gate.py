@@ -2,9 +2,10 @@
 """Pull request gate verdicts for full prompt time and stripped binary size.
 
 Pure judgement over D1 `Paired` rows and `git-product.py --prepare` size maps. The
-threshold and the size cap are inputs: until U3 fixes them the verdict is BLOCKED
-("pending U3") and never FAIL, and the CLI exits 0 unless --enforce is given.
-Absolute time is recorded only; it is never a reason to fail.
+p50 and p95 ratio limits and the size cap are inputs (U3: 1.03, 1.10, 6,000,000
+bytes for front + collector); a missing one leaves its verdict BLOCKED, never FAIL.
+The CLI exits 0 unless --enforce is given. Absolute time is recorded only; it is
+never a reason to fail.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ MIN_PAIRS = 200
 # Spec section 1303: warm prompt median target, recorded next to the verdict only.
 ABSOLUTE_TARGET_MS = 10.0
 SIZE_KEYS = ("front", "collector", "combined")
-PENDING = "pending U3"
+PENDING = "not set"
 
 
 class GateResult(TypedDict, total=False):
@@ -32,7 +33,7 @@ class GateResult(TypedDict, total=False):
     candidate: dict
     ratio_p50: float
     ratio_p95: float
-    threshold: float | None
+    threshold: dict | None
     absolute: dict
     reason: str
 
@@ -63,8 +64,8 @@ def _recomputed(row, samples, metric):
     return got if all(row.get(k) == got[k] for k in got) else None
 
 
-def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateResult:
-    """FAIL when the candidate/base ratio of p50 or p95 exceeds `threshold`.
+def relative_gate(paired: dict, metric: str, threshold: tuple | None) -> GateResult:
+    """FAIL when the candidate/base ratio of p50 exceeds `threshold[0]` or that of p95 exceeds `threshold[1]`.
 
     Missing, non-finite or inconsistent evidence is BLOCKED, never PASS.
     """
@@ -81,7 +82,8 @@ def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateRes
         return _blocked(metric, "fewer than %d alternated pairs or unobserved" % MIN_PAIRS, base=base, candidate=cand)
     if not (base["p50"] > 0 and base["p95"] > 0):
         return _blocked(metric, "base percentile is zero", base=base, candidate=cand)
-    if threshold is not None and not (type(threshold) in (int, float) and math.isfinite(threshold) and threshold > 0):
+    if threshold is not None and not (type(threshold) is tuple and len(threshold) == 2 and all(
+            type(t) in (int, float) and math.isfinite(t) and t > 0 for t in threshold)):
         return _blocked(metric, "invalid threshold", base=base, candidate=cand)
     ratios = (cand["p50"] / base["p50"], cand["p95"] / base["p95"])
     if not all(math.isfinite(r) for r in ratios):
@@ -90,13 +92,14 @@ def relative_gate(paired: dict, metric: str, threshold: float | None) -> GateRes
     over = observed_ms > ABSOLUTE_TARGET_MS
     result = GateResult(
         metric=metric, base=base, candidate=cand,
-        ratio_p50=ratios[0], ratio_p95=ratios[1], threshold=threshold,
+        ratio_p50=ratios[0], ratio_p95=ratios[1],
+        threshold=None if threshold is None else {"p50": threshold[0], "p95": threshold[1]},
         absolute={"target_ms": ABSOLUTE_TARGET_MS, "observed_ms": observed_ms,
                   "disposition": "recorded over target; needs user disposition, not a failure" if over else None})
     if threshold is None:
         result.update(status="BLOCKED", reason="threshold " + PENDING)
     else:
-        result["status"] = "FAIL" if max(result["ratio_p50"], result["ratio_p95"]) > threshold else "PASS"
+        result["status"] = "FAIL" if ratios[0] > threshold[0] or ratios[1] > threshold[1] else "PASS"
     return result
 
 
@@ -104,12 +107,11 @@ def _size_ok(v):
     return type(v) is int and v > 0
 
 
-def size_gate(base: dict, candidate: dict, cap_bytes: int | dict | None) -> GateResult:
-    """FAIL when a candidate size exceeds its cap.
+def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
+    """FAIL when the candidate front + collector exceeds `cap_bytes` (U3 S1: no per-binary cap).
 
-    `cap_bytes` is one int for front, collector and their sum alike, or a dict
-    holding all of SIZE_KEYS. A missing or invalid cap, a missing size or a
-    combined that is not front + collector is BLOCKED. U3 picks the reading.
+    A missing or invalid cap, a missing size or a combined that is not
+    front + collector is BLOCKED.
     """
     for side in (base, candidate):
         if not (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
@@ -118,11 +120,10 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | dict | None) -> Gate
     result = GateResult(metric="stripped_bytes", base=base, candidate=candidate)
     if cap_bytes is None:
         return {**result, "status": "BLOCKED", "reason": "cap " + PENDING}
-    caps = dict.fromkeys(SIZE_KEYS, cap_bytes) if type(cap_bytes) is int else cap_bytes
-    if not (isinstance(caps, dict) and all(_size_ok(caps.get(k)) for k in SIZE_KEYS)):
-        return {**result, "status": "BLOCKED", "reason": "cap incomplete or invalid, " + PENDING}
-    result["cap_bytes"] = caps
-    result["over"] = [k for k in SIZE_KEYS if candidate[k] > caps[k]]
+    if not _size_ok(cap_bytes):
+        return {**result, "status": "BLOCKED", "reason": "invalid cap"}
+    result["cap_bytes"] = {"combined": cap_bytes}
+    result["over"] = ["combined"] if candidate["combined"] > cap_bytes else []
     result["status"] = "FAIL" if result["over"] else "PASS"
     return result
 
@@ -137,19 +138,24 @@ def main(argv=None):
     p.add_argument("--measurement", type=Path, required=True, help="git-product.py --base/--candidate output")
     p.add_argument("--base-preparation", type=Path, required=True)
     p.add_argument("--candidate-preparation", type=Path, required=True)
-    p.add_argument("--threshold", type=float, help="max candidate/base ratio of p50 and p95 (U3)")
-    p.add_argument("--cap-bytes", type=int, help="size cap in bytes, applied to front, collector and combined (U3)")
+    p.add_argument("--ratio-p50", type=float, help="max candidate/base ratio of p50 (U3: 1.03)")
+    p.add_argument("--ratio-p95", type=float, help="max candidate/base ratio of p95 (U3: 1.10)")
+    p.add_argument("--cap-bytes", type=int, help="cap on stripped front + collector bytes (U3: 6000000)")
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--enforce", action="store_true", help="exit 1 on FAIL and 2 on BLOCKED (off until U3)")
+    p.add_argument("--enforce", action="store_true", help="exit 1 on FAIL and 2 on BLOCKED")
     args = p.parse_args(argv)
+    if (args.ratio_p50 is None) != (args.ratio_p95 is None):
+        p.error("--ratio-p50 and --ratio-p95 go together")
+    threshold = None if args.ratio_p50 is None else (args.ratio_p50, args.ratio_p95)
     measurement = json.loads(args.measurement.read_text())
-    time_results = {case: relative_gate(row, "prompt_ns", args.threshold) for case, row in measurement.get("cases", {}).items()}
+    time_results = {case: relative_gate(row, "prompt_ns", threshold) for case, row in measurement.get("cases", {}).items()}
     if not time_results:
         time_results = {"-": _blocked("prompt_ns", "measurement has no cases: " + str(measurement.get("reason", "")))}
     sizes = [json.loads(f.read_text()).get("stripped_bytes") for f in (args.base_preparation, args.candidate_preparation)]
     size = size_gate(sizes[0], sizes[1], args.cap_bytes)
     verdict = aggregate([*time_results.values(), size])
-    report = {"schema": 1, "status": verdict, "enforced": args.enforce, "threshold": args.threshold if args.threshold is None or math.isfinite(args.threshold) else str(args.threshold),
+    report = {"schema": 1, "status": verdict, "enforced": args.enforce,
+              "threshold": None if threshold is None else {k: t if math.isfinite(t) else str(t) for k, t in zip(("p50", "p95"), threshold)},
               "cap_bytes": args.cap_bytes, "time": time_results, "size": size}
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason")})
