@@ -122,6 +122,7 @@ def test_boundary_includes_the_live_prompt(tmp_path):
         assert memory["complete"], evidence["problems"]
         assert {"front", "helper", "collector"} <= {p["role"] for p in memory["per_process_peak"]}
         assert memory["rss_upper_bytes"] is None and memory["rss_lower_bytes"] is None
+        assert memory["diagnostic"]["cgroup_peak_bytes"] is None
         assert evidence["candidate_upper_bytes"] >= sum(r["truth_bytes"] for r in evidence["rows"])
 
 

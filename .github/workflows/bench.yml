@@ -115,7 +115,8 @@ jobs:
           echo "yama ptrace_scope: $scope"
           case $scope in 0|1|absent) ;; *) echo "ptrace_scope $scope blocks the tracer"; exit 1 ;; esac
           command -v cc
-          sudo apt-get install -y -qq zsh fish
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends zsh fish
           uname -r; nproc; cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/ksm/run || true
       - run: cargo build --release -p bingsu -p bingsu-collect
       # Rows stay BLOCKED until every proof obligation holds on the host; the

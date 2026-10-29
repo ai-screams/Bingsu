@@ -501,9 +501,13 @@ def observe_prompt_memory(binary: str, case: str, *, shell: str = "bash", tools:
         cpus = online_cpus(before["cpus_online"]) if before["cpus_online"] else 0
         error = counter_error_bytes(cpus, before["page"]) if cpus else 0
         proofs = obligations(before, after, obs)
-        diagnostic = Diagnostic(cgroup_peak_bytes=after["cgroup_peak_bytes"], footprint_bytes={})
+        # The readable memory.peak is the container cgroup's peak since its
+        # creation, not this prompt's; a per-prompt value needs a fresh child
+        # cgroup, which takes privileges this measurer does not have.
+        diagnostic = Diagnostic(cgroup_peak_bytes=None, footprint_bytes={})
         memory = certify(obs, proofs, error, diagnostic, method)
         evidence = {"case": case, "shell": shell, "counter_error_bytes": error,
+                    "container_cgroup_peak_bytes": after["cgroup_peak_bytes"],
                     "candidate_upper_bytes": candidate_upper_bytes(obs["per_process_peak"], error),
                     "rows": obs["rows"], "problems": obs["problems"], "obligations": proofs,
                     "host_before": before, "host_after": after, "trace": events}
