@@ -12,17 +12,59 @@ pub const PREFIX: usize = 128;
 pub const MARKER: usize = 208;
 pub const COMPILED_MAX: usize = 16 * 1024 * 1024;
 pub const META_MAX: usize = 8 * 1024 * 1024;
+/// Reflected Castagnoli polynomial.
+const POLY: u32 = 0x82f6_3b78;
+/// Slicing-by-8 tables: `TABLES[0]` is the byte table; `TABLES[k][i]` is the
+/// CRC of byte `i` followed by `k` zero bytes. Evaluated at compile time.
+const TABLES: [[u32; 256]; 8] = tables();
+const fn tables() -> [[u32; 256]; 8] {
+    let mut t = [[0u32; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            c = (c >> 1) ^ (POLY & 0u32.wrapping_sub(c & 1));
+            bit += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut k = 1;
+    while k < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let prev = t[k - 1][i];
+            t[k][i] = (prev >> 8) ^ t[0][(prev & 0xff) as usize];
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+}
 /// CRC-32C (Castagnoli), reflected polynomial, init/xorout all ones.
 /// Damage detection only: runtime permissions and checked fds enforce trust.
 /// The wire stores the u32 in little-endian order; parts are concatenated.
 pub fn crc32c(parts: &[&[u8]]) -> [u8; 4] {
+    let t = &TABLES;
     let mut crc = u32::MAX;
     for part in parts {
-        for byte in *part {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(crc & 1));
-            }
+        // Eight bytes per step; the state carries across part boundaries.
+        let mut chunks = part.chunks_exact(8);
+        for c in &mut chunks {
+            let lo = crc ^ u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            let hi = u32::from_le_bytes([c[4], c[5], c[6], c[7]]);
+            crc = t[7][usize::from(lo as u8)]
+                ^ t[6][usize::from((lo >> 8) as u8)]
+                ^ t[5][usize::from((lo >> 16) as u8)]
+                ^ t[4][usize::from((lo >> 24) as u8)]
+                ^ t[3][usize::from(hi as u8)]
+                ^ t[2][usize::from((hi >> 8) as u8)]
+                ^ t[1][usize::from((hi >> 16) as u8)]
+                ^ t[0][usize::from((hi >> 24) as u8)];
+        }
+        for byte in chunks.remainder() {
+            crc = (crc >> 8) ^ t[0][usize::from(crc as u8 ^ *byte)];
         }
     }
     (!crc).to_le_bytes()
