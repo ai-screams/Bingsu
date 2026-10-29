@@ -424,3 +424,32 @@ def test_git_product_memory_refuses_unknown_cases(monkeypatch, tmp_path, cases):
     assert git.main() == 2 and "cases" in json.loads(out.read_text())["reason"]
     monkeypatch.setattr(sys, "argv", ["git-product.py", "--prompt-memory", "b", "--cases", "no-git", "--out", str(out)])
     assert git.main() == 0
+
+
+def test_ci_report_names_why_rows_are_blocked(monkeypatch, tmp_path, capsys):
+    # The workflow prints these as annotations and step-summary lines.
+    # 이것을 실패시키는 것: 감사하지 않은 커널을 통과시키는 것, OBSERVED가 아닌 행이나 열린 의무를 빼고 적는 것.
+    monkeypatch.setattr(pm.platform, "system", lambda: "Darwin")
+    assert "Darwin" in pm.kernel_gate("6.8.0-117-generic")
+    monkeypatch.setattr(pm.platform, "system", lambda: "Linux")
+    assert pm.kernel_gate("6.8.0-117-generic") is None
+    assert "6.11.0-azure" in pm.kernel_gate("6.11.0-azure")
+    proofs = {"serial_mutation": {"status": "open", "gaps": ["helper pid 7 had 3 threads"]},
+              "lower_bound": {"status": "proven", "gaps": []}}
+    row = {"status": "BLOCKED", "complete": 200, "rounds": 200, "certified": 0,
+           "samples": [{"evidence": {"obligations": proofs}}] * 2}
+    value = {"status": "BLOCKED", "shell": "bash", "cases": {"no-git": row, "git-clean": {**row, "status": "OBSERVED"}}}
+    lines = pm.blocked_lines(value)
+    assert len(lines) == 1 and "no-git" in lines[0] and "serial_mutation open in 2 (helper pid 7 had 3 threads)" in lines[0]
+    assert "lower_bound" not in lines[0]
+    assert pm.blocked_lines({"status": "OBSERVED", "cases": {}}) == []
+    assert "lock busy" in pm.blocked_lines({"status": "BLOCKED", "reason": "lock busy"})[0]
+    (tmp_path / "r.json").write_text(json.dumps(value))
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    assert pm.main(["--summary", str(tmp_path / "r.json"), str(tmp_path / "missing.json")]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2 and all(line.startswith("::error title=prompt memory BLOCKED::") for line in out)
+    assert "unreadable" in out[1] and summary.read_text().count("\n- ") + 1 == 2
+    monkeypatch.setattr(pm.platform, "release", lambda: "6.11.0-azure")
+    assert pm.main(["--kernel-gate"]) == 0 and "6.11.0-azure" in capsys.readouterr().out

@@ -26,6 +26,7 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import TypedDict
@@ -630,3 +631,67 @@ def control(tools: dict, name: str, out: Path, *, file: Path | None = None) -> d
     command = ["bash", "--norc", "--noprofile", "-c", f"/bin/true {START}; {script}; /bin/true {END}; :"]
     result, text = trace(tools["tracer"], command, out)
     return {"rc": result.returncode, "stdout": result.stdout.decode(errors="replace"), "events": load_trace(text)}
+
+
+def kernel_gate(kernel: str | None = None) -> str | None:
+    """Why every row on this host will be BLOCKED before anything runs, if a
+    reason is known up front."""
+    if platform.system() != "Linux":
+        return f"{platform.system()} RSS has no method meeting the three criteria (D0)"
+    kernel = kernel or platform.release()
+    if kernel not in AUDITED_KERNELS:
+        return f"kernel {kernel} is not a source-audited build ({', '.join(sorted(AUDITED_KERNELS))}); lifetime_upper stays open"
+    return None
+
+
+def blocked_lines(value: dict) -> list[str]:
+    """One line per BLOCKED row of a git-product memory run: the counts and,
+    for each open obligation, how many samples it held back and its first gap."""
+    if value.get("status") != "BLOCKED":
+        return []
+    label = f"prompt memory ({value.get('shell', '?')})"
+    if not value.get("cases"):
+        return [f"{label}: BLOCKED: {value.get('reason', 'no rows')}"]
+    lines = []
+    for case, row in value["cases"].items():
+        if row.get("status") == "OBSERVED":
+            continue
+        opened, first = {}, {}
+        for sample in row.get("samples", []):
+            for name, proof in sample.get("evidence", {}).get("obligations", {}).items():
+                if proof["status"] != "proven":
+                    opened[name] = opened.get(name, 0) + 1
+                    first.setdefault(name, proof["gaps"][0] if proof["gaps"] else "")
+        detail = "; ".join(f"{name} open in {count} ({first[name]})" for name, count in opened.items())
+        lines.append(f"{label} {case}: BLOCKED, {row.get('complete', 0)}/{row.get('rounds', '?')} complete, "
+                     f"{row.get('certified', 0)} certified: {detail or row.get('reason')}")
+    return lines
+
+
+def main(argv: list[str]) -> int:
+    """CI report: `--kernel-gate` before measuring, `--summary FILE...` after.
+    Each BLOCKED reason becomes an error annotation and a step-summary line."""
+    if argv[:1] == ["--kernel-gate"]:
+        reason = kernel_gate()
+        lines = [f"prompt memory rows will be BLOCKED: {reason}"] if reason else []
+    elif argv[:1] == ["--summary"]:
+        lines = []
+        for name in argv[1:]:
+            try:
+                lines += blocked_lines(json.loads(Path(name).read_text()))
+            except (OSError, ValueError) as error:
+                lines.append(f"prompt memory {name}: BLOCKED: unreadable result ({error})")
+    else:
+        print("usage: prompt_memory.py --kernel-gate | --summary FILE...", file=sys.stderr)
+        return 2
+    for line in lines:
+        print(f"::error title=prompt memory BLOCKED::{line}")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary and lines:
+        with open(summary, "a") as out:
+            out.write("".join(f"- {line}\n" for line in lines))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
