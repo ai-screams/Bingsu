@@ -150,6 +150,8 @@ def corrupt(events, how):
     collector = next(g for g in groups.values() if pm.role(g) == "collector")
     helper = next(g for g in groups.values() if pm.role(g) == "helper")
     thread = next(t for t in helper["tids"] if t != helper["tgid"])
+    # Cases about grouping and parents use a helper thread, which never execs
+    # and leaves the boundary as it is, so only the check under test can fire.
     def reaped(pid):
         return next(i for i, e in enumerate(events) if e["ev"] == "reaped" and e["pid"] == pid)
     if how == "collector-unreaped":
@@ -169,7 +171,7 @@ def corrupt(events, how):
     elif how == "non-leader-exec":
         next(e for e in events if e["ev"] == "exec" and e["pid"] == collector["tgid"])["former"] = thread
     elif how in ("unknown-parent", "unreadable-parent"):
-        spawn = next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])
+        spawn = next(e for e in events if e["ev"] == "spawn" and e["child"] == thread)
         spawn["parent_tgid"] = 999_999 if how == "unknown-parent" else -1
     elif how == "exec-dropped":
         del events[next(i for i, e in enumerate(events) if e["ev"] == "exec" and e["pid"] == collector["tgid"])]
@@ -181,26 +183,32 @@ def corrupt(events, how):
             if e.get("pid") == collector["tgid"] and "tgid" in e:
                 e["tgid"] = helper["tgid"]
     elif how == "clone-joins-unrelated":
+        for e in events:
+            if e.get("pid") == thread and "tgid" in e:
+                e["tgid"] = events[0]["pid"]
+    elif how == "collector-unknown-parent":
+        # The first review's shape: two checks catch it, neither alone is pinned here.
+        next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])["parent_tgid"] = 999_999
+    elif how == "clone-exec-merged":
+        # A clone child that execs, recorded in the helper's thread group.
         next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])["kind"] = "clone"
         for e in events:
             if e.get("pid") == collector["tgid"] and "tgid" in e:
-                e["tgid"] = events[0]["pid"]
+                e["tgid"] = helper["tgid"]
     elif how == "pid-reused":
         spawn = next(e for e in events if e["ev"] == "spawn" and e["child"] == collector["tgid"])
         events.insert(-1, {**spawn, "seq": 10**6})
     elif how == "no-thread-group":
-        # No stop where its thread group was readable, made by a plain clone.
-        events[:] = [e for e in events if not (e.get("pid") == collector["tgid"] and "tgid" in e)]
-        for e in events:
-            if e["ev"] == "spawn" and e["child"] == collector["tgid"]:
-                e["kind"] = "clone"
+        # A thread that never stopped where its thread group was readable.
+        events[:] = [e for e in events if not (e.get("pid") == thread and "tgid" in e)]
     return events
 
 
 @pytest.mark.parametrize("how", ["collector-unreaped", "thread-unreaped", "thread-after-leader", "timed-out",
                                  "stray-task", "overflow", "non-leader-exec", "no-thread-group", "pid-reused",
                                  "unknown-parent", "unreadable-parent", "exec-dropped", "group-conflict",
-                                 "fork-joins-group", "clone-joins-unrelated"])
+                                 "fork-joins-group", "clone-joins-unrelated", "clone-exec-merged",
+                                 "collector-unknown-parent"])
 def test_incomplete_terminal_observation_blocks_the_row(how):
     # The process list is the tracer's spawn/exec/reap stream: a task it saw
     # without a final record, or a record it cannot place, is a missing sample.

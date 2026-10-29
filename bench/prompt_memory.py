@@ -253,6 +253,14 @@ def observation(events: list[dict]) -> dict:
     if unplaced:
         problems.append(f"tasks without a readable thread group: {unplaced}")
     inside = boundary(events, groups)
+    # An exec makes a task its own process (afterwards its tgid is its pid).
+    # Every exec'd task the boundary's processes spawned must therefore be a
+    # process of its own in the measured set, never folded into another group.
+    _, tasks, task_group = _group(events)
+    for e in events:
+        spawn = tasks.get(e["pid"], {}).get("spawn") if e["ev"] == "exec" else None
+        if spawn and task_group.get(spawn["pid"]) in inside and e["pid"] not in inside:
+            problems.append(f"exec'd task {e['pid']} is not a measured process (group {task_group.get(e['pid'])})")
     peaks, rows = [], []
     for tgid in inside:
         g = groups[tgid]
