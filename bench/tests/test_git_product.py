@@ -288,7 +288,12 @@ def test_cli_forwards_cases_mode_and_condition(monkeypatch, tmp_path):
         '--condition', '{"power":"battery","load_range":[1,3],"synthetic_load":0}'])
     assert git.main() == 0
     assert received['cases'] == ['git-clean']
-    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0)
+    assert received['condition'] == dict(mode='experiment', power='battery', load_range=[1,3], synthetic_load=0, admission='default')
+    # R2 only by explicit choice: the prompt-gate job passes --admission ci-r2.
+    monkeypatch.setattr(sys, 'argv', ['git-product.py', '--base', 'b', '--candidate', 'c',
+        '--out', str(tmp_path / 'out.json'), '--admission', 'ci-r2'])
+    assert git.main() == 0
+    assert received['condition'] == {**git.M3B.protocol.DEFAULT, 'admission': 'ci-r2'}
 
 
 @pytest.mark.parametrize('metric', ['prompt_ns', 'admission_gc_ns'])

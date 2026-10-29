@@ -253,6 +253,7 @@ def test_pr_job_runs_on_pull_request_trigger():
     assert "GATE_ENFORCE: 'false'" in job and "GATE_RATIO_P50: '1.03'" in job
     assert "GATE_RATIO_P95: '1.10'" in job and "GATE_SIZE_CAP_BYTES: '6000000'" in job
     assert '--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95"' in job
+    assert "--admission ci-r2" in job  # rule R2 is requested only here
     assert "--enforce" in job and '"$GATE_ENFORCE" = true' in job
     for use in re.findall(r"uses: (\S+)", job):
         assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", use), use

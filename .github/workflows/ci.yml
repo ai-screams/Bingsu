@@ -1035,8 +1035,9 @@ jobs:
           BINGSU_CANDIDATE_REVISION: merge-result
         run: |
           # A BLOCKED measurement (exit 2) is recorded by the verdict step.
+          # --admission ci-r2: decision U3 rule R2, honoured only on a GitHub Actions runner.
           python3 bench/git-product.py --base "$RUNNER_TEMP/base/target/release/bingsu" --candidate target/release/bingsu \
-            --rounds 200 --cases "$GATE_CASES" --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
+            --rounds 200 --cases "$GATE_CASES" --admission ci-r2 --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
       - name: Record the verdict
         run: |
           args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES")

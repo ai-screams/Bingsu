@@ -260,9 +260,13 @@ comparisons require observable normal heat and the declared power/load range.
 The same session calibrates the base release binary through rejected command
 dispatch (usage exit 2, no helper), using 5 blocks of 20 invocations. Block 0 is
 discarded, as determined by D0. Admission compares before/after reference medians
-with the `p95_of_medians` of the remaining calibration blocks. A hosted CI
-runner (`mains-assumed` power and `CI=true`) instead compares with 1.03 times
-their `median_of_medians`; every other admission check stays. Calibration is
+with the `p95_of_medians` of the remaining calibration blocks. With
+`git-product.py --admission ci-r2` (the pull request gate job), a GitHub Actions
+runner (`GITHUB_ACTIONS=true` and `mains-assumed` power) instead compares with
+1.03 times their `median_of_medians`; elsewhere the request blocks the run
+rather than widening or being ignored, and every other admission check stays.
+Each gate block records `admission_basis`; the result records
+`admission_requested` and `admission_applied`. Calibration is
 bound to host, kernel, architecture and session. The implementation conservatively
 requires calibration median spread to be within 5%; this operational stability
 check does not raise any product limit.
