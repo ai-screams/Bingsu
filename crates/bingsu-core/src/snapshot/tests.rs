@@ -10,6 +10,71 @@ mod cases {
         assert_eq!(crc32c(&[b"123", b"", b"456789"]), crc32c(&[b"123456789"]));
         assert_eq!(crc32c(&[&[0; 32]]), 0x8a91_36aau32.to_le_bytes());
     }
+    /// The bit-at-a-time CRC-32C the table version replaced; it is the oracle.
+    fn crc32c_bits(parts: &[&[u8]]) -> [u8; 4] {
+        let mut crc = u32::MAX;
+        for part in parts {
+            for byte in *part {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(crc & 1));
+                }
+            }
+        }
+        (!crc).to_le_bytes()
+    }
+    // RFC 3720 B.4 vectors (32 bytes each); each crosses the 8-byte step.
+    // 이것을 실패시키는 것: 8바이트 묶음의 앞 4바이트를 큰 끝(big-endian)으로 읽기.
+    #[test]
+    fn crc32c_rfc3720_vectors() {
+        let up: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let down: [u8; 32] = core::array::from_fn(|i| 31 - i as u8);
+        for (input, want) in [
+            ([0u8; 32], 0x8a91_36aau32),
+            ([0xff; 32], 0x62a8_ab43),
+            (up, 0x46dd_794e),
+            (down, 0x113f_db5c),
+        ] {
+            assert_eq!(crc32c_bits(&[&input]), want.to_le_bytes());
+            assert_eq!(crc32c(&[&input]), want.to_le_bytes());
+        }
+    }
+    // Every length 0..=4096 at three start offsets, then random splits into up to
+    // four parts (some empty, most off the 8-byte grid), against the oracle.
+    // 이것을 실패시키는 것: TABLES[4] 한 항목 변경; 부분마다 crc를 u32::MAX로
+    // 다시 시작; 나머지 바이트를 8바이트 묶음보다 먼저 처리.
+    #[test]
+    fn crc32c_table_matches_bit_loop() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let buf: Vec<u8> = (0..4096 + 8).map(|_| next() as u8).collect();
+        for len in 0..=4096 {
+            for off in [0, 1, 7] {
+                let s = &buf[off..off + len];
+                assert_eq!(crc32c(&[s]), crc32c_bits(&[s]), "len {len} off {off}");
+            }
+            for _ in 0..4 {
+                let mut cut = [0usize; 3];
+                for c in &mut cut {
+                    *c = (next() % (len as u64 + 1)) as usize;
+                }
+                cut.sort_unstable();
+                let s = &buf[..len];
+                let parts = [
+                    &s[..cut[0]],
+                    &s[cut[0]..cut[1]],
+                    &s[cut[1]..cut[2]],
+                    &s[cut[2]..],
+                ];
+                assert_eq!(crc32c(&parts), crc32c_bits(&[s]), "len {len} cut {cut:?}");
+            }
+        }
+    }
     // 이것을 실패시키는 것: 해당 wire·CRC·정체·문맥 검사나 필드 보존을 생략하는 것.
     #[test]
     fn crc_reserved_and_legacy_rejected() {
