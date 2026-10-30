@@ -3014,3 +3014,30 @@ def test_trace_times_are_stripped_before_parsing():
     assert budget.parse_trace(budget.strip_trace_times(timed)) == budget.parse_trace(untimed)
     with pytest.raises(AssertionError, match="untimed line"):
         budget.strip_trace_times(untimed)
+
+
+def silent_deadline_capture():
+    """A release glibc aarch64 invalid-marker capture (untimed, before -ttt)
+    whose front armed its timer, took no SIGALRM, wrote nothing and exited 0;
+    provenance: fixtures/prompt-m3d-front-silent-deadline.md."""
+    import gzip
+    from types import SimpleNamespace
+    data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+        "prompt-m3d-front-silent-deadline-linux.strace.gz").read_bytes())
+    assert hashlib.sha256(data).hexdigest() == "fec18b40e9f44e7ea3010ac4d28ef36984f20f439e854556edf644ab89b68a68"
+    lines = data.decode().splitlines()
+    return SimpleNamespace(trace=budget.parse_trace(data.decode()), lines=lines, record=b"", invalid=True)
+
+
+# 이것을 실패시키는 것: 시각 증거 없는 무출력 종료(SIGALRM 없음)를 마감으로 보고 재시도하는 것.
+def test_untimed_silent_exit_is_not_a_proven_deadline():
+    cap = silent_deadline_capture()
+    front = [line for line in cap.lines if line.split()[0] == cap.lines[0].split()[0]]
+    assert any(line.split(None, 1)[1].startswith("setitimer(ITIMER_REAL,") for line in front)
+    assert not any("SIGALRM {" in line for line in front) and front[-1].endswith("+++ exited with 0 +++")
+    assert budget.front_deadline_exit(cap) is None
+    made = []
+    with pytest.raises(AssertionError, match="degraded:trust-invalid|b''"):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or cap, budget.judge_marker_attempt,
+                             budget.front_deadline_exit, budget.MARKER_ATTEMPTS, label="marker invalid")
+    assert made == [1]
