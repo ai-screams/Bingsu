@@ -99,6 +99,8 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 - `icount` measures the base tip (`HEAD^1` of the PR merge commit) and the merge result in one job and fails when
   instructions grow past `crates/bingsu-core-bench/limits.txt` (`ir=1%`); raise it in the same PR with the reason.
   Callgrind runs only on Linux; locally check `cargo build -p bingsu-core-bench --benches`.
+  It benches two packages: `bingsu-core-bench` and `bingsu-collector-fuzz` (`fuzz/collector/benches/`, collector parsing compiled under
+  `cfg(collector_fuzz)` as a separate copy, for regression comparison only); a package missing from either loop fails the job.
 - Each bench group is its own bench target (`benches/<group>.rs`, `harness = false`), because benches in one binary
   changed each other's inlining and counts. CI runs every bench target of the package; a target new since the base tip records only.
   Put the measured work in an `#[inline(never)]` helper: inlined into the bench wrapper, Callgrind on aarch64 undercounts it.

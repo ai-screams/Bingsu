@@ -834,8 +834,8 @@ jobs:
   # base tip and the PR are measured in this job on this runner and
   # compared. The checkout is the merge commit of the base tip and the PR
   # head, so HEAD^1 is the base tip and HEAD is the code that main becomes.
-  # Every bench target of the package is its own binary (benches in one
-  # binary changed each other's inlining) and is compared on its own; a
+  # Every bench target of each bench package is its own binary (benches in
+  # one binary changed each other's inlining) and is compared on its own; a
   # target the base tip lacks records only. Linux only (Valgrind).
   icount:
     name: Core instruction counts
@@ -849,11 +849,16 @@ jobs:
       # Pinned so the base and the PR, and runs on different days, compare
       # like with like. Bump by hand together with the stable toolchain.
       ICOUNT_RUST: 1.98.1
-      # Decided by package, not by path: a moved manifest must not turn the
-      # gate into record-only.
-      BENCH_PACKAGE: bingsu-core-bench
-      # The bench targets of the package, one name per line, sorted.
-      BENCH_TARGETS_JQ: '.packages[] | select(.name == env.BENCH_PACKAGE) | .targets[] | select(.kind | index("bench")) | .name'
+      # Bench packages as manifest:package, one per word. The root workspace's
+      # package is found by name in its metadata, so a manifest moved inside
+      # the workspace keeps the gate. The second is the collector's attributes
+      # parser, compiled again in the fuzz crate (its own workspace and lock;
+      # fuzz/collector/benches/attributes.rs says why): a move of that
+      # manifest makes the base tip lack it, and that pull request records
+      # only for it.
+      BENCH_PACKAGES: Cargo.toml:bingsu-core-bench fuzz/collector/Cargo.toml:bingsu-collector-fuzz
+      # The bench targets of package $p, one name per line, sorted.
+      BENCH_TARGETS_JQ: '.packages[] | select(.name == $p) | .targets[] | select(.kind | index("bench")) | .name'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -863,26 +868,31 @@ jobs:
         with:
           toolchain: ${{ env.ICOUNT_RUST }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Check the bench package and the runner version
+      - name: Check the bench packages and the runner version
         run: |
           set -o pipefail
-          pkgs=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
-          if ! grep -qx "$BENCH_PACKAGE" <<<"$pkgs"; then
-            echo "::error::package $BENCH_PACKAGE is missing in the pull request"
-            exit 1
-          fi
-          cargo metadata --no-deps --format-version 1 | jq -r "$BENCH_TARGETS_JQ" | sort > "$RUNNER_TEMP/pr.targets"
-          if [ ! -s "$RUNNER_TEMP/pr.targets" ]; then
-            echo "::error::package $BENCH_PACKAGE has no bench targets"
-            exit 1
-          fi
-          # The runner must match the library in Cargo.lock (a dependency
-          # bump of gungraun alone would leave them apart).
-          locked=$(awk '$0 == "name = \"gungraun\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-          if [ "$locked" != "$GUNGRAUN_VERSION" ]; then
-            echo "::error::Cargo.lock has gungraun '$locked' but GUNGRAUN_VERSION is $GUNGRAUN_VERSION"
-            exit 1
-          fi
+          read -ra pairs <<<"$BENCH_PACKAGES"
+          for pair in "${pairs[@]}"; do
+            manifest=${pair%%:*} pkg=${pair#*:}
+            pkgs=$(cargo metadata --manifest-path "$manifest" --no-deps --format-version 1 | jq -r '.packages[].name')
+            if ! grep -qx "$pkg" <<<"$pkgs"; then
+              echo "::error::package $pkg is missing in the pull request"
+              exit 1
+            fi
+            cargo metadata --manifest-path "$manifest" --no-deps --format-version 1 | jq -r --arg p "$pkg" "$BENCH_TARGETS_JQ" | sort > "$RUNNER_TEMP/$pkg.pr.targets"
+            if [ ! -s "$RUNNER_TEMP/$pkg.pr.targets" ]; then
+              echo "::error::package $pkg has no bench targets"
+              exit 1
+            fi
+            # The runner must match the library in each lock (a dependency
+            # bump of gungraun alone would leave them apart).
+            lock="$(dirname "$manifest")/Cargo.lock"
+            locked=$(awk '$0 == "name = \"gungraun\"" { getline; gsub(/version = |"/, ""); print; exit }' "$lock")
+            if [ "$locked" != "$GUNGRAUN_VERSION" ]; then
+              echo "::error::$lock has gungraun '$locked' but GUNGRAUN_VERSION is $GUNGRAUN_VERSION"
+              exit 1
+            fi
+          done
       - name: Install Valgrind and the matching gungraun-runner
         run: |
           sudo apt-get update -q
@@ -900,79 +910,104 @@ jobs:
             exit 1
           fi
           git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
-          # No bench package at the base tip gives no targets: every target
-          # of the pull request records only.
-          (cd "$RUNNER_TEMP/base" && cargo metadata --no-deps --format-version 1) | jq -r "$BENCH_TARGETS_JQ" | sort > "$RUNNER_TEMP/base.targets"
-          if [ ! -s "$RUNNER_TEMP/base.targets" ]; then
-            echo "::warning::base tip has no icount bench targets: this run records only"
-            echo "base tip has no icount bench targets: this run records only" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          mkdir "$RUNNER_TEMP/base-lists"
-          # An array, not `while read` on the file: a command in the loop
-          # that reads stdin would take the rest of the list.
-          mapfile -t targets < "$RUNNER_TEMP/base.targets"
-          for t in "${targets[@]}"; do
-            (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --list --format terse) > "$RUNNER_TEMP/base-lists/$t.list"
-            # A target the pull request drops is only listed, for the
-            # warning in the next step.
-            if grep -Fqx -- "$t" "$RUNNER_TEMP/pr.targets"; then
-              (cd "$RUNNER_TEMP/base" && cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --save-baseline=base)
-              if [ ! -s "$RUNNER_TEMP/base-lists/$t.list" ]; then
-                echo "::warning::bench target $t of the base tip lists no benchmarks: its benchmarks in the pull request have no baseline"
-                echo "bench target $t of the base tip lists no benchmarks: its benchmarks in the pull request have no baseline" >> "$GITHUB_STEP_SUMMARY"
-              fi
+          read -ra pairs <<<"$BENCH_PACKAGES"
+          for pair in "${pairs[@]}"; do
+            manifest=${pair%%:*} pkg=${pair#*:}
+            # No bench package (or manifest) at the base tip gives no
+            # targets: every target of that package records only.
+            if [ -f "$RUNNER_TEMP/base/$manifest" ]; then
+              (cd "$RUNNER_TEMP/base" && cargo metadata --manifest-path "$manifest" --no-deps --format-version 1) | jq -r --arg p "$pkg" "$BENCH_TARGETS_JQ" | sort > "$RUNNER_TEMP/$pkg.base.targets"
+            else
+              : > "$RUNNER_TEMP/$pkg.base.targets"
             fi
+            if [ ! -s "$RUNNER_TEMP/$pkg.base.targets" ]; then
+              echo "::warning::base tip has no icount bench targets in $pkg: this run records only for it"
+              echo "base tip has no icount bench targets in $pkg: this run records only for it" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            mkdir -p "$RUNNER_TEMP/base-lists/$pkg"
+            # An array, not `while read` on the file: a command in the loop
+            # that reads stdin would take the rest of the list.
+            mapfile -t targets < "$RUNNER_TEMP/$pkg.base.targets"
+            for t in "${targets[@]}"; do
+              (cd "$RUNNER_TEMP/base" && cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --list --format terse) > "$RUNNER_TEMP/base-lists/$pkg/$t.list"
+              # A target the pull request drops is only listed, for the
+              # warning in the next step.
+              if grep -Fqx -- "$t" "$RUNNER_TEMP/$pkg.pr.targets"; then
+                (cd "$RUNNER_TEMP/base" && cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --save-baseline=base)
+                if [ ! -s "$RUNNER_TEMP/base-lists/$pkg/$t.list" ]; then
+                  echo "::warning::bench target $t of $pkg at the base tip lists no benchmarks: its benchmarks in the pull request have no baseline"
+                  echo "bench target $t of $pkg at the base tip lists no benchmarks: its benchmarks in the pull request have no baseline" >> "$GITHUB_STEP_SUMMARY"
+                fi
+              fi
+            done
           done
       - name: Pull request against the baseline
         run: |
           set -o pipefail
           export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
-          mkdir "$RUNNER_TEMP/pr-lists"
-          mapfile -t targets < "$RUNNER_TEMP/pr.targets"
-          for t in "${targets[@]}"; do
-            # A bench binary that lists nothing (for example main! wrapped
-            # in a fn) exits 0 without measuring: that must fail, not pass.
-            cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --list --format terse > "$RUNNER_TEMP/pr-lists/$t.list"
-            if [ ! -s "$RUNNER_TEMP/pr-lists/$t.list" ]; then
-              echo "::error::bench target $t lists no benchmarks"
+          read -ra pairs <<<"$BENCH_PACKAGES"
+          for pair in "${pairs[@]}"; do
+            manifest=${pair%%:*} pkg=${pair#*:}
+            base_lists="$RUNNER_TEMP/base-lists/$pkg" pr_lists="$RUNNER_TEMP/pr-lists/$pkg"
+            # A package the baseline step skipped would read as new and
+            # record only, with the summary count still equal.
+            # 이것을 실패시키는 것: baseline 루프가 이 쌍을 건너뛰는 것.
+            if [ ! -f "$RUNNER_TEMP/$pkg.base.targets" ]; then
+              echo "::error::the baseline step did not look at package $pkg"
               exit 1
             fi
-            if ! grep -Fqx -- "$t" "$RUNNER_TEMP/base.targets"; then
-              { echo "Bench target $t is new since the base tip: recorded only, not compared:"; cat "$RUNNER_TEMP/pr-lists/$t.list"; } | tee -a "$GITHUB_STEP_SUMMARY"
-              cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --save-summary=json
-              continue
-            fi
-            # A bench with no entry in the base list has nothing to compare
-            # with; name it in the summary instead of passing it silently.
-            new=$(sort "$RUNNER_TEMP/base-lists/$t.list" | comm -13 - <(sort "$RUNNER_TEMP/pr-lists/$t.list"))
-            if [ -n "$new" ]; then
-              { echo "Benchmarks of $t without a baseline (not compared):"; echo "$new"; } | tee -a "$GITHUB_STEP_SUMMARY"
-            fi
-            # The reverse: a bench of the base that the pull request drops
-            # is no longer gated. Renaming or deleting is allowed, so only
-            # report it; the diff shows it to the reviewer.
-            removed=$(sort "$RUNNER_TEMP/base-lists/$t.list" | comm -23 - <(sort "$RUNNER_TEMP/pr-lists/$t.list"))
-            if [ -n "$removed" ]; then
-              echo "::warning::benchmarks of $t at the base tip are missing in the pull request and no longer gated"
-              { echo "Benchmarks of $t removed since the base tip (no longer gated):"; echo "$removed"; } | tee -a "$GITHUB_STEP_SUMMARY"
-            fi
-            cargo bench -p "$BENCH_PACKAGE" --bench="$t" -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)" --save-summary=json
-          done
-          # A whole bench target of the base that the pull request drops (or
-          # renames) is no longer gated either: report it the same way.
-          comm -23 "$RUNNER_TEMP/base.targets" "$RUNNER_TEMP/pr.targets" | while read -r t; do
-            echo "::warning::bench target $t of the base tip is missing in the pull request and no longer gated"
-            { echo "Bench target $t removed since the base tip (no longer gated):"; cat "$RUNNER_TEMP/base-lists/$t.list"; } | tee -a "$GITHUB_STEP_SUMMARY"
+            mkdir -p "$pr_lists"
+            mapfile -t targets < "$RUNNER_TEMP/$pkg.pr.targets"
+            for t in "${targets[@]}"; do
+              # A bench binary that lists nothing (for example main! wrapped
+              # in a fn) exits 0 without measuring: that must fail, not pass.
+              cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --list --format terse > "$pr_lists/$t.list"
+              if [ ! -s "$pr_lists/$t.list" ]; then
+                echo "::error::bench target $t of $pkg lists no benchmarks"
+                exit 1
+              fi
+              if ! grep -Fqx -- "$t" "$RUNNER_TEMP/$pkg.base.targets"; then
+                { echo "Bench target $t of $pkg is new since the base tip: recorded only, not compared:"; cat "$pr_lists/$t.list"; } | tee -a "$GITHUB_STEP_SUMMARY"
+                cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --save-summary=json
+                continue
+              fi
+              # A bench with no entry in the base list has nothing to compare
+              # with; name it in the summary instead of passing it silently.
+              new=$(sort "$base_lists/$t.list" | comm -13 - <(sort "$pr_lists/$t.list"))
+              if [ -n "$new" ]; then
+                { echo "Benchmarks of $t in $pkg without a baseline (not compared):"; echo "$new"; } | tee -a "$GITHUB_STEP_SUMMARY"
+              fi
+              # The reverse: a bench of the base that the pull request drops
+              # is no longer gated. Renaming or deleting is allowed, so only
+              # report it; the diff shows it to the reviewer.
+              removed=$(sort "$base_lists/$t.list" | comm -23 - <(sort "$pr_lists/$t.list"))
+              if [ -n "$removed" ]; then
+                echo "::warning::benchmarks of $t in $pkg at the base tip are missing in the pull request and no longer gated"
+                { echo "Benchmarks of $t in $pkg removed since the base tip (no longer gated):"; echo "$removed"; } | tee -a "$GITHUB_STEP_SUMMARY"
+              fi
+              cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --baseline=base --callgrind-limits="$(cat crates/bingsu-core-bench/limits.txt)" --save-summary=json
+            done
+            # A whole bench target of the base that the pull request drops (or
+            # renames) is no longer gated either: report it the same way.
+            comm -23 "$RUNNER_TEMP/$pkg.base.targets" "$RUNNER_TEMP/$pkg.pr.targets" | while read -r t; do
+              echo "::warning::bench target $t of $pkg at the base tip is missing in the pull request and no longer gated"
+              { echo "Bench target $t of $pkg removed since the base tip (no longer gated):"; cat "$base_lists/$t.list"; } | tee -a "$GITHUB_STEP_SUMMARY"
+            done
           done
           # A binary the runner cannot find symbols in (a stripped bench
           # profile) counts 0 everywhere and passes; against a baseline 0
           # reads as an improvement. Every listed bench needs one summary
           # (schema 7, gungraun 0.20.0) with a positive Callgrind Ir. Only
           # this step saves summaries, so a stray one fails the count. The
-          # list comes from cargo running every bench target at once, not
-          # from the loop above: a target that the discovery or the loop
-          # skipped has no summaries and fails the count too.
-          cargo bench -p "$BENCH_PACKAGE" --benches -- --list --format terse > "$RUNNER_TEMP/all.list"
+          # list comes from cargo running every bench target of every
+          # package at once, not from the loop above: a target or a package
+          # that the discovery or the loop skipped has no summaries and
+          # fails the count too.
+          # 이것을 실패시키는 것: 위 PR 루프가 한 쌍을 건너뛰는 것(요약이 목록보다 적다).
+          : > "$RUNNER_TEMP/all.list"
+          for pair in "${pairs[@]}"; do
+            cargo bench --manifest-path "${pair%%:*}" -p "${pair#*:}" --benches -- --list --format terse >> "$RUNNER_TEMP/all.list"
+          done
           mapfile -t summaries < <(find "$GUNGRAUN_HOME" -name summary.json)
           listed=$(wc -l < "$RUNNER_TEMP/all.list")
           if [ "${#summaries[@]}" -ne "$listed" ]; then
