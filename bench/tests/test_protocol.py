@@ -108,7 +108,7 @@ def hosted(before, after=None, **kwargs):
     return row
 
 
-# 이것을 실패시키는 것: R2 배수를 1.03이 아닌 값(1.05 등)으로 두거나 기준을 보정 최댓값으로 되돌린다.
+# 이것을 실패시키는 것: R2를 끄거나 기준을 보정 최댓값으로 되돌린다(앞선 run의 kept 판정이 그대로 돌아온다).
 @pytest.mark.parametrize('case', HOSTED_RUN)
 def test_ci_rule_admits_the_hosted_run_retrospectively(monkeypatch, tmp_path, case):
     medians, blocks = HOSTED_RUN[case]
@@ -117,9 +117,33 @@ def test_ci_rule_admits_the_hosted_run_retrospectively(monkeypatch, tmp_path, ca
     # Without the request the recorded verdicts come back, even on the runner: the fixture is the run as judged.
     assert [p.admit(hosted(b, a), p.DEFAULT, cal) for b, a, _ in blocks] == [k for *_, k in blocks]
     kept = [p.admit(hosted(b, a), R2, cal) for b, a, _ in blocks]
-    # The two rejected blocks are the 1.12x and 1.09x before-references.
+    # The two rejected blocks are the 1.12x and 1.09x before-references, each over 5% from its after side.
     assert kept.count(False) == {'git-dirty': 0, 'git-clean': 1, 'no-git': 1}[case]
     assert all(k or b / cal['median_of_medians'] > 1.09 for (b, _, _), k in zip(blocks, kept))
+
+
+# Reference p50 of calibration blocks 1-4 and of each block (before, after, kept) of the first
+# hosted run judged by the earlier R2 (1.03 x median): the runner drifted 2-9% above calibration.
+FIRST_R2_RUN = {
+    'git-dirty': ([890009.5, 866370.0, 868624.5, 891948.0], [
+        (1043128.0, 903875.0, False), (918287.5, 922896.5, False), (898741.0, 903424.5, True), (927308.5, 908448.5, False), (906671.0, 960055.0, False), (930895.5, 933200.0, False)]),
+    'no-git': ([894132.0, 888251.0, 883206.0, 891532.0], [
+        (975183.0, 886883.0, False), (888611.0, 906665.0, True), (910026.5, 935694.5, False), (907842.0, 924709.0, False), (914294.0, 897509.0, True), (898410.0, 935299.5, False), (923648.0, 919670.0, False), (901776.5, 880492.0, True), (888116.5, 951955.5, False), (922405.5, 887891.0, False), (924519.5, 913814.0, False)]),
+    'git-clean': ([886102.0, 880552.5, 877211.0, 888297.0], [
+        (970815.5, 909506.5, False), (879540.5, 898635.5, True), (915282.0, 913859.0, False), (885811.5, 930751.0, False), (900739.5, 901606.0, True), (892800.0, 909886.5, False), (908920.5, 904160.5, True), (919610.0, 888732.0, False), (889869.5, 900133.5, True), (893961.5, 906715.5, True), (889293.5, 918572.5, False), (889308.0, 921498.0, False), (913583.5, 904982.5, False)]),
+}
+
+
+# 이것을 실패시키는 것: 5%를 10%로 넓히거나, 상한을 빼거나 1.20배로 넓히거나, 기준을 보정 p95로 바꾼다.
+@pytest.mark.parametrize('case', FIRST_R2_RUN)
+def test_ci_rule_replays_the_first_r2_run(monkeypatch, tmp_path, case):
+    medians, blocks = FIRST_R2_RUN[case]
+    cal = calibrated(monkeypatch, tmp_path, medians)
+    on_actions(monkeypatch)
+    kept = [p.admit(hosted(b, a), R2, cal) for b, a, _ in blocks]
+    assert (kept.count(True), len(kept)) == {'git-dirty': (4, 6), 'no-git': (9, 11), 'git-clean': (11, 13)}[case]
+    assert all(k == (abs(a / b - 1) <= 0.05 and max(a, b) <= 1.10 * cal['median_of_medians'])
+               for (b, a, _), k in zip(blocks, kept))
 
 
 # 이것을 실패시키는 것: 블록에 판정 기준을 기록하지 않거나, 요청 없이·GITHUB_ACTIONS 없이·AC host에서도 'ci-r2'로 적는다.
@@ -129,7 +153,7 @@ def test_block_records_its_admission_basis(monkeypatch, tmp_path):
     for row in (hosted(102), block()):
         p.admit(row, p.DEFAULT, cal)
         assert row['admission_basis'] == 'default'
-    kept, rejected, ac = hosted(102), hosted(104), block()
+    kept, rejected, ac = hosted(110), hosted(111), block()
     assert p.admit(kept, R2, cal) and not p.admit(rejected, R2, cal) and not p.admit(ac, R2, cal)
     assert kept['admission_basis'] == rejected['admission_basis'] == 'ci-r2'
     assert ac['admission_basis'] == 'default' and ac['reason'] == p.CI_R2_OUTSIDE
@@ -143,8 +167,9 @@ def test_block_records_its_admission_basis(monkeypatch, tmp_path):
     assert 'admission_basis' not in row
 
 
-# 이것을 실패시키는 것: R2를 1.05배로 넓히거나, 요청·GITHUB_ACTIONS=true·mains-assumed 중 하나 없이 적용하거나,
-# CI 변수로 켜거나, 요청이 거부될 때 조용히 기본 규칙으로 판정하거나, 보정 최댓값과 OR로 섞는다.
+# 이것을 실패시키는 것: 블록 안 안정 5%나 상한 1.10배를 넓히거나 빼거나, 한쪽 방향만 보거나,
+# 요청·GITHUB_ACTIONS=true·mains-assumed 중 하나 없이 적용하거나, CI 변수로 켜거나,
+# 요청이 거부될 때 조용히 기본 규칙으로 판정하거나, 상한 기준을 보정 p95·최댓값으로 바꾼다.
 def test_ci_rule_boundary_and_scope(monkeypatch, tmp_path):
     cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
     assert p.admit(hosted(100), p.DEFAULT, cal)
@@ -159,15 +184,22 @@ def test_ci_rule_boundary_and_scope(monkeypatch, tmp_path):
     assert not p.admit(hosted(100), R2, cal)
     monkeypatch.setenv('GITHUB_ACTIONS', 'true')
     monkeypatch.delenv('CI')
-    assert p.admit(hosted(102), R2, cal) and p.admit(hosted(103), R2, cal)  # CI is not consulted
-    assert not p.admit(hosted(103.01), R2, cal) and not p.admit(hosted(104), R2, cal)
-    assert not p.admit(hosted(100, 104), R2, cal)  # the after side is checked too
+    assert p.admit(hosted(102), R2, cal) and p.admit(hosted(110), R2, cal)  # CI is not consulted
+    assert not p.admit(hosted(110.01), R2, cal) and not p.admit(hosted(120), R2, cal)  # the cap
+    assert not p.admit(hosted(100, 110.01), R2, cal) and not p.admit(hosted(110.01, 105), R2, cal)  # either side
+    # In-block stability, both directions: exactly 5% is admitted, just above is not.
+    assert p.admit(hosted(100, 105), R2, cal) and p.admit(hosted(105, 100), R2, cal)
+    assert p.admit(hosted(100, 95), R2, cal) and not p.admit(hosted(95, 100), R2, cal)  # ratio is after/before
+    assert not p.admit(hosted(100, 105.01), R2, cal) and not p.admit(hosted(100, 94.99), R2, cal)
+    assert not p.admit(hosted(104, 110), R2, cal)  # both under the cap, 5.8% apart
+    row = hosted(100, 106)
+    assert not p.admit(row, R2, cal) and row['reason'] == 'power or reference drift'
     ac = block(reference=p.summary([100] * 20))
     assert not p.admit(ac, R2, cal) and ac['reason'] == p.CI_R2_OUTSIDE  # AC host
     assert not p.admit(block(power='battery', reference=p.summary([100] * 20)), R2, cal)
-    # A calibration maximum more than 3% over the median does not widen R2.
-    wide = calibrated(monkeypatch, tmp_path, [100, 100, 100, 104.5])
-    assert wide['stable'] and not p.admit(hosted(104), R2, wide)
+    # The cap follows the median, not the calibration p95 or maximum.
+    wide = calibrated(monkeypatch, tmp_path, [100, 100, 100, 104.9])
+    assert wide['stable'] and wide['p95_of_medians'] > 104 and not p.admit(hosted(111), R2, wide)
 
 
 # 이것을 실패시키는 것: R2 아래에서 보정 안정·identity·host 일치·telemetry·summary 20표본 검사 중 하나를 뺀다.

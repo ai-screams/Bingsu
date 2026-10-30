@@ -696,7 +696,7 @@ def main():
     parser.add_argument("--mode", choices=("gate", "experiment"), default="gate")
     parser.add_argument("--condition", type=json.loads)
     parser.add_argument("--admission", choices=("default", "ci-r2"), default="default",
-                        help="drift baseline; ci-r2 (U3 rule R2) only on a GitHub Actions runner without a power device")
+                        help="gate admission rule; ci-r2 (U3 rule R2: in-block reference stability) only on a GitHub Actions runner without a power device")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     global OUT

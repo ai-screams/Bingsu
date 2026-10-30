@@ -125,7 +125,8 @@ def complete_summary(row, n):
             math.isfinite(row[k]) and row[k] >= 0 for k in ('p50', 'p95', 'variance', 'min', 'max')))
 
 
-CI_REFERENCE_FACTOR = 1.03
+CI_REFERENCE_CAP = 1.10
+CI_REFERENCE_STABILITY = 0.05
 
 
 def ci_r2_host(power):
@@ -145,15 +146,16 @@ def admission_basis(power, condition):
 def reference_limit(power, calibration, condition):
     """The largest admitted before/after reference p50 of a gate block, or None.
 
-    Rule R2 compares with 1.03 times the median of the four calibration medians;
-    the default rule keeps the largest calibration median. Only this baseline
-    differs: the caller keeps every other admission check.
+    Rule R2 caps each side at 1.10 times the median of the four calibration
+    medians (and admit() also requires the two sides within 5% of each other);
+    the default rule keeps the largest calibration median. Only the drift
+    comparison differs: the caller keeps every other admission check.
     """
     if admission_basis(power, condition) == 'ci-r2':
         median = calibration.get('median_of_medians')
         if type(median) not in (int, float) or not math.isfinite(median) or median <= 0:
             return None
-        return median * CI_REFERENCE_FACTOR
+        return median * CI_REFERENCE_CAP
     return calibration['p95_of_medians']
 
 
@@ -185,6 +187,11 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
                 reason = 'experiment condition mismatch or unavailable'
         else:
             reason = 'unknown mode'
+    if reason is None and condition['mode'] == 'gate' and condition.get('admission') == 'ci-r2':
+        # R2 judges in-block stability: |after/before - 1| <= 0.05, written without a division.
+        before, after = (block[side]['reference']['p50'] for side in ('before', 'after'))
+        if abs(after - before) > CI_REFERENCE_STABILITY * before:
+            reason = 'power or reference drift'
     block.update(kept=reason is None, reason=reason)
     if condition.get('mode') == 'gate':
         # Which drift baseline judged the block; a host whose power changed mid-block is 'mixed'.
