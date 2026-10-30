@@ -2897,19 +2897,25 @@ def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
 
 
 def marker_capture(*, alarm=True, write_after=False, exit_code=0, timer=True, helper=True, collectors=1,
-                   record=b"", invalid=True):
+                   record=b"", invalid=True, write_before=None, it_value=27108):
     """A synthetic marker-condition capture: front 10, helper 11, collectors 13...;
     by default a front that took its deadline after the helper spawned one collector."""
     from types import SimpleNamespace
     lines = ['10  execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0']
+    # write_before: a failed fd 1 write before the "timer" or before the "alarm".
+    failed_write = '10  write(1<pipe:[1]>, "B1", 2) = -1 EAGAIN (Resource temporarily unavailable)'
+    if write_before == "timer":
+        lines.append(failed_write)
     if timer:
         lines.append("10  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=1000}, "
-                     "it_value={tv_sec=0, tv_usec=27108}}, NULL) = 0")
+                     f"it_value={{tv_sec=0, tv_usec={it_value}}}}}, NULL) = 0")
     if helper:
         lines += ["10  vfork() = 11", '11  execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0']
         for pid in range(13, 13 + collectors):
             lines += [f"11  vfork() = {pid}",
                       f'{pid}  execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0']
+    if write_before == "alarm":
+        lines.append(failed_write)
     if alarm:
         lines.append("10  --- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL} ---")
     if write_after:
@@ -3041,3 +3047,14 @@ def test_untimed_silent_exit_is_not_a_proven_deadline():
         budget.run_allowlist(lambda attempt: made.append(attempt) or cap, budget.judge_marker_attempt,
                              budget.front_deadline_exit, budget.MARKER_ATTEMPTS, label="marker invalid")
     assert made == [1]
+
+
+# 이것을 실패시키는 것: 앞단의 fd 1 쓰기를 증명 뒤로만 찾는 것(실패한 쓰기 포함), 0인 it_value(타이머 해제)를 증명으로 받는 것.
+@pytest.mark.parametrize("case", ["alarm-write-before-alarm", "alarm-write-before-timer", "time-write-before-timer",
+                                  "alarm-zero-it-value", "time-zero-it-value"])
+def test_front_deadline_rejects_any_write_and_a_disarmed_timer(case):
+    proof, kind = case.split("-", 1)
+    kwargs = {"write-before-alarm": {"write_before": "alarm"}, "write-before-timer": {"write_before": "timer"},
+              "zero-it-value": {"it_value": 0}}[kind]
+    cap = marker_capture(**kwargs) if proof == "alarm" else timed_capture(27_108 + 1, **kwargs)
+    assert budget.front_deadline_exit(cap) is None

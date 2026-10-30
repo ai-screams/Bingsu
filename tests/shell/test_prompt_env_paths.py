@@ -2276,8 +2276,8 @@ def front_deadline_exit(cap):
     """"front-deadline" when the trace proves the front's own deadline ended
     it: it armed ITIMER_REAL (setitimer returned 0), and then either took a
     kernel SIGALRM or, by the -ttt times, began exit_group strictly later
-    than the setitimer start plus its it_value; it started no write to fd 1
-    after that proof, exited 0, and stdout is empty. Anything else is None.
+    than the setitimer start plus its positive it_value; it attempted no
+    write to fd 1 at all, exited 0, and stdout is empty. Anything else is None.
 
     The front computes its remaining time just before setitimer, so its
     deadline cannot end later than setitimer start + it_value. strace times
@@ -2298,7 +2298,8 @@ def front_deadline_exit(cap):
     if armed is None or not front[armed][1].endswith(") = 0") or cap.record:
         return None
     value = re.search(r"it_value=\{tv_sec=(\d+), tv_usec=(\d+)\}", front[armed][1])
-    if not value:
+    # 이것을 실패시키는 것: 0인 it_value(타이머 해제)를 증명으로 받는 것.
+    if not value or int(value[1]) * 1_000_000 + int(value[2]) <= 0:
         return None
     alarm = next((i for i, (_, line) in enumerate(front) if i > armed
                   and line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
@@ -2308,11 +2309,9 @@ def front_deadline_exit(cap):
         # 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것.
         if start is None or at is None or not at > start + int(value[1]) * 1_000_000 + int(value[2]):
             return None
-        proof = armed
-    else:
-        proof = alarm
-    # 이것을 실패시키는 것: 증명 뒤 fd 1 쓰기, 0 아닌 종료, 비지 않은 stdout을 마감으로 보는 것.
-    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for _, line in front[proof:]):
+    # 이것을 실패시키는 것: 앞단의 fd 1 쓰기 시도(실패한 것 포함)를 어디서든 받는 것, 0 아닌 종료,
+    # 비지 않은 stdout을 마감으로 보는 것.
+    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for _, line in front):
         return None
     return "front-deadline" if front[-1][1] == "+++ exited with 0 +++" else None
 
