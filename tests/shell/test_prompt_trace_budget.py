@@ -2979,9 +2979,11 @@ def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
     assert endless.value.made == list(range(1, 9)) and budget.MARKER_ATTEMPTS == 8
 
 
-def timed_capture(after_us, *, setitimer_ret="0", write_after=False, **kwargs):
+def timed_capture(after_us, *, setitimer_ret="0", write_after=False, exit_us=None, **kwargs):
     """marker_capture(alarm=False) with -ttt times: one microsecond per line
-    from 100 s, and exit_group `after_us` after the setitimer start."""
+    from 100 s up to setitimer, and every later line `after_us` after the
+    setitimer start (so the front's last event before exit_group, the
+    proof's lower bound, is there too)."""
     cap = marker_capture(alarm=False, write_after=write_after, **kwargs)
     lines = [line.replace("NULL) = 0", f"NULL) = {setitimer_ret}") if "setitimer(" in line else line
              for line in cap.lines]
@@ -2989,7 +2991,9 @@ def timed_capture(after_us, *, setitimer_ret="0", write_after=False, **kwargs):
     out = []
     for i, line in enumerate(lines):
         pid, rest = line.split(None, 1)
-        at = start + after_us if rest.startswith(("exit_group(", "+++ ")) and pid == "10" else 100_000_000 + i
+        at = start + after_us if 100_000_000 + i > start else 100_000_000 + i
+        if exit_us is not None and pid == "10" and rest.startswith(("exit_group(", "+++ ")):
+            at = start + exit_us  # only the exit itself late
         out.append(f"{pid}  {at // 1_000_000}.{at % 1_000_000:06d} {rest}")
     cap.lines = out
     cap.trace = budget.parse_trace(budget.strip_trace_times("\n".join(out)))
@@ -2997,17 +3001,19 @@ def timed_capture(after_us, *, setitimer_ret="0", write_after=False, **kwargs):
 
 
 # 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것, 실패한 setitimer를 받는 것,
+# 하한으로 exit_group 줄 자신의 시각을 쓰는 것,
 # 시간 증명 뒤의 fd 1 쓰기를 받는 것.
 @pytest.mark.parametrize("case,expected", [
     ("past", "front-deadline"), ("equal", None), ("early", None), ("setitimer-failed", None),
-    ("write-after", None), ("untimed", None)])
+    ("write-after", None), ("untimed", None), ("exit-line-late-only", None)])
 def test_front_deadline_time_proof(case, expected):
     it_value = 27_108  # marker_capture's setitimer it_value
     cap = {"past": lambda: timed_capture(it_value + 1), "equal": lambda: timed_capture(it_value),
            "early": lambda: timed_capture(1_000),
            "setitimer-failed": lambda: timed_capture(it_value + 1, setitimer_ret="-1 EINVAL (Invalid argument)"),
            "write-after": lambda: timed_capture(it_value + 1, write_after=True),
-           "untimed": lambda: marker_capture(alarm=False)}[case]()
+           "untimed": lambda: marker_capture(alarm=False),
+           "exit-line-late-only": lambda: timed_capture(1_000, exit_us=it_value + 50)}[case]()
     assert budget.front_deadline_exit(cap) == expected
     if case == "past":
         role_judge(cap, expected)
@@ -3028,12 +3034,79 @@ def test_trace_times_are_stripped_before_parsing():
         budget.strip_trace_times(untimed)
 
 
-KEEP19_BASE = "/home/tester/target/helper-stage-1s79310i"
-KEEP19_CONTEXT = {
-    "exe": KEEP19_BASE + "/bin/bingsu", "collector_exe": "/home/tester/target/release/bingsu-collect",
-    "pinned": [KEEP19_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
-    "global_inputs": [KEEP19_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")],
-    "roots": [KEEP19_BASE + "/repo", KEEP19_BASE + "/repo/.git"], "platform": ["aarch64", "gnu"]}
+def marker_context(base):
+    """context.json of a stored helper-stage capture in `base`."""
+    return {
+        "exe": base + "/bin/bingsu", "collector_exe": "/home/tester/target/release/bingsu-collect",
+        "pinned": [base + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+        "global_inputs": [base + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")],
+        "roots": [base + "/repo", base + "/repo/.git"], "platform": ["aarch64", "gnu"]}
+
+
+KEEP19_CONTEXT = marker_context("/home/tester/target/helper-stage-1s79310i")
+STORED_MARKER = {
+    # name: (fixture, sha256 of the decompressed trace, helper-stage base)
+    "silent-valid": ("prompt-m3d-front-silent-valid-linux.strace.gz",
+                     "2df69e32dc23f026a746b3345676839007b2b324a808cfa8254c9bd3151e023b",
+                     "/home/tester/target/helper-stage-xjvyu871"),
+    "valid": ("prompt-m3d-marker-valid-linux.strace.gz",
+              "efd968f1e793e2b4ee73b8bb29e68612503fc771f633c97f3fb3d632646cb473",
+              "/home/tester/target/helper-stage-a2jff6bi"),
+}
+RECORD = b"B1\x1f8\x1frecord\x1e"
+
+
+def stored_marker_capture(name, *, record, edit=lambda lines: lines):
+    """A stored timed valid-marker capture (provenance:
+    fixtures/prompt-m3d-front-silent-deadline.md), its lines passed through
+    `edit`, with the given stdout."""
+    import gzip
+    from types import SimpleNamespace
+    fixture, digest, base = STORED_MARKER[name]
+    data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(fixture).read_bytes())
+    assert hashlib.sha256(data).hexdigest() == digest
+    lines = edit(data.decode().splitlines())
+    untimed = budget.strip_trace_times("\n".join(lines)).splitlines()
+    return SimpleNamespace(trace=budget.parse_trace("\n".join(untimed)), lines=lines, untimed=untimed,
+                           context=marker_context(base), record=record, invalid=False)
+
+
+def insert_front_open(lines, path):
+    """A front openat of `path` right after the front's setitimer."""
+    pid = lines[0].split()[0]
+    at = next(i for i, line in enumerate(lines) if line.split()[0] == pid and " setitimer(" in line)
+    stamp = lines[at].split()[1]
+    return lines[:at + 1] + [f'{pid} {stamp} openat(AT_FDCWD</>, "{path}", O_RDONLY|O_CLOEXEC)'
+                             " = -1 ENOENT (No such file or directory)"] + lines[at + 1:]
+
+
+# 이것을 실패시키는 것: 빈 stdout(final-18 모양)에서도 필터·기록 쓰기를 요구하는 것, 빈 stdout 캡처의 경로 판정을 건너뛰는 것,
+# 비지 않은 stdout에서 필터 수 불일치를 면제하는 것, 필터를 설치한 빈 stdout 앞단을 필터 전 규칙으로 보는 것.
+@pytest.mark.parametrize("case", ["silent-valid-passes", "silent-valid-forbidden-open", "record-without-filter",
+                                  "record-filter-removed", "filtered-empty-stdout-passes"])
+def test_marker_full_judgment_waives_only_record_bound_items(case):
+    def drop_filter(lines):
+        """The front's filter prctl, with its resumed half, taken out."""
+        at = next(i for i, line in enumerate(lines) if "PR_SET_SECCOMP" in line)
+        pid = lines[at].split()[0]
+        end = next(i for i in range(at, len(lines)) if lines[i].split()[0] == pid and "<... prctl resumed>" in lines[i])
+        return lines[:at] + lines[at + 1:end] + lines[end + 1:]
+    cap = {"silent-valid-passes": lambda: stored_marker_capture("silent-valid", record=b""),
+           "silent-valid-forbidden-open": lambda: stored_marker_capture(
+               "silent-valid", record=b"", edit=lambda lines: insert_front_open(lines, "/hostile/home/.gitconfig")),
+           "record-without-filter": lambda: stored_marker_capture("silent-valid", record=RECORD),
+           "record-filter-removed": lambda: stored_marker_capture("valid", record=RECORD, edit=drop_filter),
+           "filtered-empty-stdout-passes": lambda: stored_marker_capture("valid", record=b"")}[case]()
+    assert budget.front_deadline_exit(cap) is None
+    if case.endswith("passes"):
+        budget.judge_marker_attempt(cap)
+    else:
+        with pytest.raises(AssertionError) as failure:
+            budget.judge_marker_attempt(cap)
+        if "forbidden" in case:
+            assert "/hostile/home/.gitconfig" in str(failure.value)
+        else:
+            assert "filters" in failure.traceback[-1].statement.lines[0], failure.traceback[-1].statement
 
 
 def silent_deadline_capture(lines=None):

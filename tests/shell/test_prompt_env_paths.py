@@ -963,9 +963,11 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     helper_pid = int(spawn.ret)
     filters = [c for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args]
     # 이것을 실패시키는 것: helper 생성이 prompt seccomp 설치 뒤로 옮겨지거나 필터 설치가 실패하는 것.
-    if front_deadline:
-        # SIGALRM ended the front before its filter (deadline_shape requires
-        # that), so every call is held to the pre-filter rules.
+    if front_deadline and not filters:
+        # The front ended before its filter (deadline_shape requires that),
+        # so every call is held to the pre-filter rules. A front that
+        # installed its filter keeps it as the boundary.
+        # 이것을 실패시키는 것: 필터를 설치한 앞단의 필터 뒤 호출을 필터 전 규칙으로 보는 것.
         boundary = front[-1].index + 1
     else:
         assert len(filters) == 1 and filters[0].ret == "0", filters
@@ -2287,8 +2289,9 @@ MARKER_ATTEMPTS = 8
 def front_deadline_exit(cap):
     """"front-deadline" when the trace proves the front's own deadline ended
     it: it armed ITIMER_REAL (setitimer returned 0), and then either took a
-    kernel SIGALRM or, by the -ttt times, began exit_group strictly later
-    than the setitimer start plus its positive it_value; it attempted no
+    kernel SIGALRM or, by the -ttt times, made its last event before
+    exit_group strictly later than the setitimer start plus its positive
+    it_value; it attempted no
     write to fd 1 at all, exited 0, and stdout is empty. Anything else is None.
 
     The front computes its remaining time just before setitimer, so its
@@ -2316,8 +2319,12 @@ def front_deadline_exit(cap):
     alarm = next((i for i, (_, line) in enumerate(front) if i > armed
                   and line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
     if alarm is None:
+        # The lower bound of the exit is the front's last event before
+        # exit_group: strace reads its time while the tracee is stopped and
+        # resumes it afterwards (stop-then-resume ordering, UNVERIFIED), so
+        # the exit_group line's own time can be later than the exit.
         ends = [i for i, (_, line) in enumerate(front) if line.startswith("exit_group(")]
-        start, at = front[armed][0], front[ends[-1]][0] if ends else None
+        start, at = front[armed][0], front[ends[-1] - 1][0] if ends and ends[-1] > armed else None
         # 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것.
         if start is None or at is None or not at > start + int(value[1]) * 1_000_000 + int(value[2]):
             return None
@@ -2329,10 +2336,11 @@ def front_deadline_exit(cap):
 
 
 def judge_marker_trace(cap, shape=None):
-    """The allowlist judgment of the whole capture: every path, call and
-    audit rule and every upper bound. A proven front deadline waives only
-    the front's filter and record write, and then holds every front call to
-    the pre-filter rules.
+    """The allowlist judgment of the whole capture, deadline or not: every
+    path, call and audit rule and every upper bound. Only an empty stdout
+    waives the two record-bound items, the one filter and the record write
+    in the front's call table; a front without a filter then has every call
+    held to the pre-filter rules.
     The collector count stays with judge_marker_attempt; collection
     coverage (repository and global-input reads) was never this test's."""
     c = cap.context
@@ -2340,7 +2348,8 @@ def judge_marker_trace(cap, shape=None):
     assert_prompt_trace_budget(cap.untimed, c["exe"], c["pinned"], global_inputs=tuple(c["global_inputs"]),
                                collector_exe=c["collector_exe"], collectors=None,
                                repository_roots=c["roots"], repository_evidence=(),
-                               platform=tuple(c["platform"]), front_deadline=shape is not None)
+                               # 이것을 실패시키는 것: 비지 않은 stdout에서 필터·기록 쓰기를 면제하는 것.
+                               platform=tuple(c["platform"]), front_deadline=cap.record == b"")
 
 
 def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
