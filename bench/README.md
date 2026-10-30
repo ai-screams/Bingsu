@@ -262,8 +262,11 @@ dispatch (usage exit 2, no helper), using 5 blocks of 20 invocations. Block 0 is
 discarded, as determined by D0. Admission compares before/after reference medians
 with the `p95_of_medians` of the remaining calibration blocks. With
 `git-product.py --admission ci-r2` (the pull request gate job), a GitHub Actions
-runner (`GITHUB_ACTIONS=true` and `mains-assumed` power) instead compares with
-1.03 times their `median_of_medians`; elsewhere the request blocks the run
+runner (`GITHUB_ACTIONS=true` and `mains-assumed` power) instead admits a block
+when its before and after reference medians are within 5% of each other
+(`|after/before - 1| <= 0.05`) and each is at most 1.10 times the calibration
+`median_of_medians` (rejected blocks record `reference over the 1.10 cap` or
+`reference unstable within the block`); elsewhere the request blocks the run
 rather than widening or being ignored, and every other admission check stays.
 Each gate block records `admission_basis`; the result records
 `admission_requested` and `admission_applied`. Calibration is

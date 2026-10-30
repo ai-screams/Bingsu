@@ -54,6 +54,8 @@ Blocked = dict
 SESSION = uuid.uuid4().hex
 DEFAULT = Condition(mode='gate', power='ac', load_range=None, synthetic_load=0, admission='default')
 CI_R2_OUTSIDE = 'ci-r2 requested outside GitHub Actions'
+CI_R2_OVER_CAP = 'reference over the 1.10 cap'
+CI_R2_UNSTABLE = 'reference unstable within the block'
 
 
 def summary(values):
@@ -125,7 +127,8 @@ def complete_summary(row, n):
             math.isfinite(row[k]) and row[k] >= 0 for k in ('p50', 'p95', 'variance', 'min', 'max')))
 
 
-CI_REFERENCE_FACTOR = 1.03
+CI_REFERENCE_CAP = 1.10
+CI_REFERENCE_STABILITY = 0.05
 
 
 def ci_r2_host(power):
@@ -145,15 +148,16 @@ def admission_basis(power, condition):
 def reference_limit(power, calibration, condition):
     """The largest admitted before/after reference p50 of a gate block, or None.
 
-    Rule R2 compares with 1.03 times the median of the four calibration medians;
-    the default rule keeps the largest calibration median. Only this baseline
-    differs: the caller keeps every other admission check.
+    Rule R2 caps each side at 1.10 times the median of the four calibration
+    medians (and admit() also requires the two sides within 5% of each other);
+    the default rule keeps the largest calibration median. Only the drift
+    comparison differs: the caller keeps every other admission check.
     """
     if admission_basis(power, condition) == 'ci-r2':
         median = calibration.get('median_of_medians')
         if type(median) not in (int, float) or not math.isfinite(median) or median <= 0:
             return None
-        return median * CI_REFERENCE_FACTOR
+        return median * CI_REFERENCE_CAP
     return calibration['p95_of_medians']
 
 
@@ -176,6 +180,8 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
             limit = reference_limit(h['power'], calibration, condition)
             if condition.get('admission') == 'ci-r2' and not ci_r2_host(h['power']):
                 reason = CI_R2_OUTSIDE  # requested R2 is never silently the default rule
+            elif condition.get('admission') == 'ci-r2' and limit is not None and ref['p50'] > limit:
+                reason = CI_R2_OVER_CAP
             elif h['power'] not in ('ac', 'mains-assumed') or limit is None or ref['p50'] > limit:
                 reason = 'power or reference drift'
         elif condition['mode'] == 'experiment':
@@ -185,6 +191,12 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
                 reason = 'experiment condition mismatch or unavailable'
         else:
             reason = 'unknown mode'
+    if reason is None and condition['mode'] == 'gate' and condition.get('admission') == 'ci-r2':
+        # R2 judges in-block stability: |after/before - 1| <= 0.05, written without a division.
+        # The denominator is before, so it is not symmetric: 95 -> 100 (5.26%) fails, 100 -> 95 passes.
+        before, after = (block[side]['reference']['p50'] for side in ('before', 'after'))
+        if abs(after - before) > CI_REFERENCE_STABILITY * before:
+            reason = CI_R2_UNSTABLE
     block.update(kept=reason is None, reason=reason)
     if condition.get('mode') == 'gate':
         # Which drift baseline judged the block; a host whose power changed mid-block is 'mixed'.
