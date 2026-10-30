@@ -133,9 +133,7 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 # the final Task asserts this is empty. A supplementary row (id GATE-ID.N-<tag>)
 # points at an existing test that covers part of a clause and does not close
 # its pair.
-M3D_PENDING = (
-    "GATE-FS-HELPER.2",
-)
+M3D_PENDING = ()
 
 
 def workflows():
@@ -369,7 +367,9 @@ def test_clause_accounting_rejects_mutations(damage):
     elif damage == "unknown-pending":
         pending = pending + ("GATE-ZOMBIES.2",)
     elif damage == "duplicate-pending":
-        pending = pending + pending[:1]
+        # The synthetic pair, pending twice and without its row: only the duplicate is wrong.
+        table = HEADER + standing_lines()
+        pending = pending + ("GATE-ZOMBIES.1", "GATE-ZOMBIES.1")
     elif damage == "supplementary-closes":
         table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1)
     else:

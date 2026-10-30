@@ -2911,4 +2911,72 @@ mod axes {
             .collect();
         assert_eq!(seen, want);
     }
+
+    // 사전 점검을 지난 뒤 설정 트리가 바뀌어 마지막 재검증에서야 상한을 넘는 회차는, 그 시점에 변경을 감지한
+    // 회차와 같은 기존 경로로 끝난다: Incomplete, snapshot·last-good·marker는 그대로, sequence는 이미 설치한 예약
+    // 그대로 남는다(원래 동작). 같은 변경을 상한 없이 하면 다시 확인되므로, 거기서 끝낸 것은 상한이다.
+    // 이것을 실패시키는 것: 마지막 재검증의 실패를 무시하고 표식을 쓰는 것, 마지막 재검증을 세지 않는 것,
+    // 상한 초과에 새 결과 상태를 만드는 것.
+    #[test]
+    fn a_cap_crossed_only_at_the_last_revalidation_ends_like_a_late_change() {
+        let mut seen = Vec::new();
+        for (case, caps) in [
+            ("crossing", AXIS_CAPS),
+            ("unlimited", UNLIMITED),
+            ("late-change", UNLIMITED),
+        ] {
+            let f = Fx::new(&format!("late-{case}"));
+            f.put(COMMAND);
+            // a.toml, 253 others, `.` and `..`: four listings are exactly 1,024.
+            let names: Vec<String> = std::iter::once("a.toml".to_string())
+                .chain((0..253).map(|i| format!("n{i:03}.txt")))
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let d = conf_d(&f, &names);
+            published(f.run());
+            let (state, sequence) = snapshot_and_sequence(&f);
+            let _caps = TestCaps::set(caps);
+            let r = f.hook(&mut |p| {
+                if p == Checkpoint::Staged {
+                    if case == "late-change" {
+                        put(&d.join("b.toml"), b"");
+                    } else {
+                        // Hidden entries: the config names stay the same.
+                        for i in 0..10 {
+                            put(&d.join(format!(".late{i}")), b"");
+                        }
+                    }
+                }
+            });
+            let (_, exceeded) = io_meter::last_session().unwrap();
+            let (state_now, sequence_now) = snapshot_and_sequence(&f);
+            seen.push((
+                case,
+                r,
+                exceeded.map(|e| e.axis),
+                state_now == state,
+                sequence_now == sequence,
+            ));
+        }
+        assert_eq!(
+            seen,
+            [
+                (
+                    "crossing",
+                    RefreshResult::Incomplete,
+                    Some(HelperAxis::En),
+                    true,
+                    false
+                ),
+                (
+                    "unlimited",
+                    RefreshResult::Revalidated { generation: 1 },
+                    None,
+                    false,
+                    false
+                ),
+                ("late-change", RefreshResult::Incomplete, None, true, false),
+            ]
+        );
+    }
 }

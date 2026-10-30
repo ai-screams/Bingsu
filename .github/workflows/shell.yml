@@ -231,6 +231,16 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' "$RUNNER_TEMP/helper-stage.txt"
+      # GATE-FS-HELPER.2 on a release build: past an axis cap the helper's round ends
+      # closed and no config source call follows the crossing.
+      # 이것을 실패시키는 것: 이 단계를 빼거나 debug 칸에서만 돌리거나 PASSED 단언을 빼는 것.
+      - name: Helper axis caps fail closed (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap' 'tests/shell/test_prompt_env_paths.py::test_helper_e_n_cap_matches_product_constant' --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/axis-cap" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/axis-cap.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap' "$RUNNER_TEMP/axis-cap.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_helper_e_n_cap_matches_product_constant' "$RUNNER_TEMP/axis-cap.txt"
       # 이것을 실패시키는 것: debug 칸에서 계수하거나 매개변수 하나의 PASSED 단언을 빼는 것.
       - name: Front attempts equal axis C and byte formulas (release)
         if: matrix.profile == 'release'

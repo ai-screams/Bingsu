@@ -287,7 +287,12 @@ fn run(
     let before = loader.io_used();
     loader.revalidate().map_err(|_| StoreError::Unsafe)?;
     let after = loader.io_used();
-    let revalidation: AxisUse = std::array::from_fn(|i| after[i] - before[i]);
+    // Two more revalidations follow, each repeating the work just measured in
+    // this round: `verified` below and the last one before the marker. Both
+    // must fit now, before the sequence moves; a source tree that changes in
+    // between still ends at the last one, on the path of any other change.
+    let remaining: AxisUse = std::array::from_fn(|i| (after[i] - before[i]).saturating_mul(2));
+    loader.io_fits(&remaining).map_err(|_| StoreError::Unsafe)?;
     let verification = loader.verified(
         report.as_ref().map_or(&[], |r| r.files.as_slice()),
         compiled,
@@ -326,12 +331,6 @@ fn run(
         verified,
         ..seq
     };
-    // The last revalidation before the marker repeats the one measured above.
-    // It must fit now: past this point an exceeded cap would leave a moved
-    // sequence behind an Incomplete round.
-    loader
-        .io_fits(&revalidation)
-        .map_err(|_| StoreError::Unsafe)?;
     store.stage(Slot::Sequence, &reserved.encode())?;
     install(&store, Slot::Sequence, hook)?;
     b.check(clock)?;

@@ -1897,6 +1897,65 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
+# The helper's E_n cap (user decision U2), pinned independently from the product source.
+HELPER_E_N_CAP = 1024
+
+
+# 이것을 실패시키는 것: 제품 AXIS_CAPS의 E_n을 바꾸고 이 게이트의 고정값은 그대로 두는 것.
+def test_helper_e_n_cap_matches_product_constant():
+    source = (ROOT / 'crates/bingsu/src/commands/io_meter.rs').read_text().replace('\r\n', '\n')
+    caps = re.search(r'pub\(crate\) const AXIS_CAPS: AxisCaps = AxisCaps \{(.*?)\};', source, re.S)
+    assert caps and re.search(r'\be_n: ([\d_]+),', caps[1])[1].replace('_', '') == str(HELPER_E_N_CAP)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+def test_live_helper_stops_config_io_past_an_axis_cap(tmp_path):
+    """GATE-FS-HELPER.2: a conf.d past the E_n cap ends the release helper's
+    round closed. The listing stops at the batch holding raw entry cap + 1, no
+    config source call follows it, and snapshot, last-good, marker and
+    sequence keep their bytes.
+
+    이것을 실패시키는 것: 목록 항목을 걸러낸 뒤에만 세거나 세지 않는 것(목록이 끝까지 돌고 재목록이 따름), 상한을
+    넘은 뒤 남은 뿌리 후보나 재검증을 이어 가는 것, 상한 초과에서 표식·snapshot·sequence를 쓰는 것.
+    """
+    assert shutil.which("strace"), "the helper axis gate must execute strace"
+    require_release_helper(real_bin())
+    fixture = HelperStageFixture("unchanged")
+    try:
+        names = ("snapshot", "last-good", "marker", "sequence")
+        before = {n: (fixture.store / n).read_bytes() for n in names if (fixture.store / n).exists()}
+        assert {"snapshot", "marker", "sequence"} <= set(before), sorted(before)
+        conf_d = fixture.config / "conf.d"
+        conf_d.mkdir(mode=0o700)
+        # 1,100 names and `.`, `..`: the first listing alone passes the cap.
+        for i in range(1100):
+            (conf_d / f"n{i:04}.txt").write_bytes(b"")
+        trace = tmp_path / "trace.strace"
+        fixture.prompt(trace)
+        wait_helpers(fixture.base)
+        after = {n: (fixture.store / n).read_bytes() for n in names if (fixture.store / n).exists()}
+        assert after == before, "an exceeded cap changed the store"
+        calls = parse_trace(trace.read_text(errors="replace"))
+        assert not calls.errors, calls.errors[:5]
+        root = os.path.realpath(fixture.config)
+        listing = os.path.realpath(conf_d)
+        reads = [c for c in calls if c.name == "getdents64" and f"<{listing}>" in c.args]
+        assert reads, "the helper never listed conf.d"
+        seen, crossing = 0, None
+        for c in reads:
+            m = re.search(r"/\* (\d+) entries \*/", c.args)
+            assert m, ("getdents64 without an entry count", c)
+            seen += int(m[1])
+            if crossing is None and seen > HELPER_E_N_CAP:
+                crossing = c
+        assert crossing is reads[-1], ("listing went on past the batch holding the cap", len(reads))
+        later = [c for c in calls[crossing.index + 1:] if root in c.args and c.name not in ("close", "exit_group")]
+        assert not later, ("config source calls after the cap", later[:5])
+    finally:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
 # Fixture metadata, pinned independently from the product source.
 FRONT_CHUNK = 16 * 1024
 FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only')
