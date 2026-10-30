@@ -6,6 +6,7 @@ import os
 import platform
 import ast
 import hashlib
+import json
 import re
 import shlex
 import shutil
@@ -2236,6 +2237,17 @@ def child_capture(tmp_path):
         argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
+        # What a full trace judgment needs after the fixture is gone.
+        env, repo = fixture.env, os.path.realpath(fixture.pwd)
+        (base / "context.json").write_text(json.dumps({
+            "exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
+            "pinned": [os.path.realpath(env[k] + sub) for k, sub in
+                       (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
+                        ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))],
+            "global_inputs": [str(Path(env["XDG_CONFIG_HOME"]) / "git/config"), str(Path(env["HOME"]) / ".gitconfig"),
+                              str(Path(env["XDG_CONFIG_HOME"]) / "git/ignore")],
+            "roots": [repo, repo + "/.git"],
+            "platform": [platform.machine(), "musl" if elf_facts(real_bin())[1] is None else "gnu"]}, indent=1) + "\n")
         result = subprocess.run(child_strace_argv(evidence, argv, timestamps),
                                 cwd=fixture.pwd, env=fixture.env, capture_output=True, timeout=60)
         (base / "stdout").write_bytes(result.stdout)
@@ -2316,12 +2328,29 @@ def front_deadline_exit(cap):
     return "front-deadline" if front[-1][1] == "+++ exited with 0 +++" else None
 
 
-def judge_marker_attempt(cap, shape=None):
-    """One marker-condition capture. Every attempt keeps the role bounds;
-    a proven front deadline waives only the record, and the collector spawn
-    only when the front ended before it created the helper (the helper never
-    waits on the front, so a later deadline cannot stop its spawn)."""
+def judge_marker_trace(cap, shape=None):
+    """The allowlist judgment of the whole capture: every path, call and
+    audit rule and every upper bound. A proven front deadline waives only
+    the front's filter and record write, and then holds every front call to
+    the pre-filter rules.
+    The collector count stays with judge_marker_attempt; collection
+    coverage (repository and global-input reads) was never this test's."""
+    c = cap.context
+    # 이것을 실패시키는 것: 버리는 마감 시도의 경로·syscall 금지 판정을 건너뛰는 것.
+    assert_prompt_trace_budget(cap.untimed, c["exe"], c["pinned"], global_inputs=tuple(c["global_inputs"]),
+                               collector_exe=c["collector_exe"], collectors=None,
+                               repository_roots=c["roots"], repository_evidence=(),
+                               platform=tuple(c["platform"]), front_deadline=shape is not None)
+
+
+def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
+    """One marker-condition capture. Every attempt keeps the role bounds and
+    the full trace judgment; a proven front deadline waives only the record,
+    and the collector spawn only when the front ended before it created the
+    helper (the helper never waits on the front, so a later deadline cannot
+    stop its spawn)."""
     from fsbudget.attribute import role_children
+    trace_judge(cap, shape)
     children = role_children(cap.trace)
     # 이것을 실패시키는 것: 마감 시도에서 역할 상한(helper 둘, collector·명령 자식)을 넘기는 것.
     assert children["front"] <= 1 and children["helper"] <= 1, children
@@ -2337,8 +2366,10 @@ def marker_capture(child_capture, tmp_path, invalid, attempt):
     from types import SimpleNamespace
     name = f"{'invalid' if invalid else 'valid'}/attempt-{attempt}"
     trace, _, record = child_capture(invalid=invalid, name=name, timestamps=True)
-    lines = (tmp_path / name / "child-count.strace").read_text(errors="replace").splitlines()
-    return SimpleNamespace(trace=trace, lines=lines, record=record, invalid=invalid)
+    text = (tmp_path / name / "child-count.strace").read_text(errors="replace")
+    return SimpleNamespace(trace=trace, lines=text.splitlines(), untimed=strip_trace_times(text).splitlines(),
+                           context=json.loads((tmp_path / name / "context.json").read_text()),
+                           record=record, invalid=invalid)
 
 
 # 이것을 실패시키는 것: 표식 무효면 worker mask 0.

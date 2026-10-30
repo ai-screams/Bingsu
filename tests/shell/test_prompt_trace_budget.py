@@ -2896,6 +2896,12 @@ def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
     assert endless.made == budget.ALLOWLIST_ATTEMPTS == 12
 
 
+def role_judge(cap, shape=None):
+    """judge_marker_attempt without the full trace judgment: the synthetic
+    captures below carry roles and the front's proof, not a whole prompt."""
+    return budget.judge_marker_attempt(cap, shape, trace_judge=lambda cap, shape: None)
+
+
 def marker_capture(*, alarm=True, write_after=False, exit_code=0, timer=True, helper=True, collectors=1,
                    record=b"", invalid=True, write_before=None, it_value=27108):
     """A synthetic marker-condition capture: front 10, helper 11, collectors 13...;
@@ -2936,13 +2942,13 @@ def test_front_deadline_exit_needs_its_proof(damage):
 
 # 이것을 실패시키는 것: 마감 시도의 판정을 건너뛰는 것, helper가 생긴 뒤의 마감으로 collector 생성을 면제하는 것.
 def test_marker_deadline_attempt_is_judged():
-    budget.judge_marker_attempt(marker_capture(), "front-deadline")
+    role_judge(marker_capture(), "front-deadline")
     with pytest.raises(AssertionError, match="degraded:trust-invalid|b''"):
-        budget.judge_marker_attempt(marker_capture())
-    budget.judge_marker_attempt(marker_capture(helper=False), "front-deadline")
+        role_judge(marker_capture())
+    role_judge(marker_capture(helper=False), "front-deadline")
     for damaged in (marker_capture(collectors=2), marker_capture(collectors=0)):
         with pytest.raises(AssertionError):
-            budget.judge_marker_attempt(damaged, "front-deadline")
+            role_judge(damaged, "front-deadline")
 
 
 # 이것을 실패시키는 것: 마감이 증명되지 않은 실패를 재시도하는 것, 마감 시도의 위반을 넘기는 것, 상한을 넘기는 것.
@@ -2953,7 +2959,7 @@ def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
             made.append(attempt)
             return outcomes[attempt - 1]
         try:
-            return budget.run_allowlist(capture, budget.judge_marker_attempt, budget.front_deadline_exit,
+            return budget.run_allowlist(capture, role_judge, budget.front_deadline_exit,
                                         budget.MARKER_ATTEMPTS, label="marker invalid"), made
         except BaseException as error:
             error.made = made
@@ -3004,7 +3010,7 @@ def test_front_deadline_time_proof(case, expected):
            "untimed": lambda: marker_capture(alarm=False)}[case]()
     assert budget.front_deadline_exit(cap) == expected
     if case == "past":
-        budget.judge_marker_attempt(cap, expected)
+        role_judge(cap, expected)
 
 
 # 이것을 실패시키는 것: 다른 child_capture 시험의 strace 인자에 -ttt를 넣는 것, 시각 열을 떼며 다른 글자를 바꾸는 것,
@@ -3022,17 +3028,37 @@ def test_trace_times_are_stripped_before_parsing():
         budget.strip_trace_times(untimed)
 
 
-def silent_deadline_capture():
+KEEP19_BASE = "/home/tester/target/helper-stage-1s79310i"
+KEEP19_CONTEXT = {
+    "exe": KEEP19_BASE + "/bin/bingsu", "collector_exe": "/home/tester/target/release/bingsu-collect",
+    "pinned": [KEEP19_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+    "global_inputs": [KEEP19_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")],
+    "roots": [KEEP19_BASE + "/repo", KEEP19_BASE + "/repo/.git"], "platform": ["aarch64", "gnu"]}
+
+
+def silent_deadline_capture(lines=None):
     """A release glibc aarch64 invalid-marker capture (untimed, before -ttt)
-    whose front armed its timer, took no SIGALRM, wrote nothing and exited 0;
-    provenance: fixtures/prompt-m3d-front-silent-deadline.md."""
+    whose front armed its timer, took no SIGALRM, installed no filter, wrote
+    nothing and exited 0; provenance: fixtures/prompt-m3d-front-silent-deadline.md."""
     import gzip
     from types import SimpleNamespace
-    data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
-        "prompt-m3d-front-silent-deadline-linux.strace.gz").read_bytes())
-    assert hashlib.sha256(data).hexdigest() == "fec18b40e9f44e7ea3010ac4d28ef36984f20f439e854556edf644ab89b68a68"
-    lines = data.decode().splitlines()
-    return SimpleNamespace(trace=budget.parse_trace(data.decode()), lines=lines, record=b"", invalid=True)
+    if lines is None:
+        data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+            "prompt-m3d-front-silent-deadline-linux.strace.gz").read_bytes())
+        assert hashlib.sha256(data).hexdigest() == "fec18b40e9f44e7ea3010ac4d28ef36984f20f439e854556edf644ab89b68a68"
+        lines = data.decode().splitlines()
+    return SimpleNamespace(trace=budget.parse_trace("\n".join(lines)), lines=lines, untimed=lines,
+                           context=KEEP19_CONTEXT, record=b"", invalid=True)
+
+
+def keep19_with_alarm(extra=()):
+    """keep-19 with a kernel SIGALRM after its setitimer (and `extra` front
+    lines before it): a proven front deadline."""
+    lines = silent_deadline_capture().lines
+    pid = lines[0].split()[0]
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"{pid}  setitimer(")) + 1
+    return silent_deadline_capture(lines[:at] + list(extra)
+                                   + [f"{pid}  --- SIGALRM {{si_signo=SIGALRM, si_code=SI_KERNEL}} ---"] + lines[at:])
 
 
 # 이것을 실패시키는 것: 시각 증거 없는 무출력 종료(SIGALRM 없음)를 마감으로 보고 재시도하는 것.
@@ -3043,9 +3069,28 @@ def test_untimed_silent_exit_is_not_a_proven_deadline():
     assert not any("SIGALRM {" in line for line in front) and front[-1].endswith("+++ exited with 0 +++")
     assert budget.front_deadline_exit(cap) is None
     made = []
-    with pytest.raises(AssertionError, match="degraded:trust-invalid|b''"):
+    with pytest.raises(AssertionError):
         budget.run_allowlist(lambda attempt: made.append(attempt) or cap, budget.judge_marker_attempt,
                              budget.front_deadline_exit, budget.MARKER_ATTEMPTS, label="marker invalid")
+    assert made == [1]
+
+
+# 이것을 실패시키는 것: 버리는 마감 시도에 역할 수만 보고 경로·syscall 금지를 건너뛰는 것.
+def test_discarded_deadline_attempt_gets_the_full_trace_judgment():
+    cap = keep19_with_alarm()
+    assert budget.front_deadline_exit(cap) == "front-deadline"
+    budget.judge_marker_attempt(cap, "front-deadline")
+    pid = cap.lines[0].split()[0]
+    hostile = keep19_with_alarm([f'{pid}  openat(AT_FDCWD</>, "/hostile/home/.gitconfig", O_RDONLY|O_CLOEXEC)'
+                                 " = -1 ENOENT (No such file or directory)"])
+    assert budget.front_deadline_exit(hostile) == "front-deadline"
+    with pytest.raises(AssertionError, match="/hostile/home/.gitconfig"):
+        budget.judge_marker_attempt(hostile, "front-deadline")
+    made = []
+    with pytest.raises(AssertionError, match="/hostile/home/.gitconfig"):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or (hostile if attempt == 1 else cap),
+                             budget.judge_marker_attempt, budget.front_deadline_exit, budget.MARKER_ATTEMPTS,
+                             label="marker invalid")
     assert made == [1]
 
 
