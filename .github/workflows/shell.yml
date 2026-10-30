@@ -65,7 +65,7 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Static musl binary: the runner's glibc is newer than the images'.
       - run: cargo build -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl
       # K60 must round-trip through the minimum shells without Cargo in
@@ -182,7 +182,7 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.os }}-${{ matrix.libc }}-${{ matrix.profile }}
       - name: Build
@@ -386,7 +386,7 @@ jobs:
           grep -Fx 'test front::staged::tests::cases::staged_plan_emits_fixed_clock_operations_per_path ... ok' "$RUNNER_TEMP/b1-core.txt"
       - name: Retain B1 failure evidence
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: b1-${{ matrix.os }}-${{ matrix.libc }}
           path: |
@@ -406,7 +406,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: brew install bash fish
       # One interpreter for every step: a venv with the hash-pinned test
       # dependencies, and the Homebrew shells first in PATH.
