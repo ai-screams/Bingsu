@@ -193,13 +193,25 @@ def test_ci_rule_boundary_and_scope(monkeypatch, tmp_path):
     assert not p.admit(hosted(100, 105.01), R2, cal) and not p.admit(hosted(100, 94.99), R2, cal)
     assert not p.admit(hosted(104, 110), R2, cal)  # both under the cap, 5.8% apart
     row = hosted(100, 106)
-    assert not p.admit(row, R2, cal) and row['reason'] == 'power or reference drift'
+    assert not p.admit(row, R2, cal) and row['reason'] == p.CI_R2_UNSTABLE
     ac = block(reference=p.summary([100] * 20))
     assert not p.admit(ac, R2, cal) and ac['reason'] == p.CI_R2_OUTSIDE  # AC host
     assert not p.admit(block(power='battery', reference=p.summary([100] * 20)), R2, cal)
     # The cap follows the median, not the calibration p95 or maximum.
     wide = calibrated(monkeypatch, tmp_path, [100, 100, 100, 104.9])
     assert wide['stable'] and wide['p95_of_medians'] > 104 and not p.admit(hosted(111), R2, wide)
+
+
+# 이것을 실패시키는 것: R2의 두 거부 사유를 서로 바꾸거나 기존 drift 사유로 합치거나, 기본 규칙의 사유를 바꾼다.
+def test_ci_rule_names_why_a_block_is_rejected(monkeypatch, tmp_path):
+    cal = calibrated(monkeypatch, tmp_path, [100, 100, 100, 100])
+    on_actions(monkeypatch)
+    over = hosted(111, 110)  # 0.9% apart, before over the cap
+    assert not p.admit(over, R2, cal) and over['reason'] == p.CI_R2_OVER_CAP == 'reference over the 1.10 cap'
+    unstable = hosted(100, 106)  # both under the cap
+    assert not p.admit(unstable, R2, cal) and unstable['reason'] == p.CI_R2_UNSTABLE == 'reference unstable within the block'
+    default = hosted(102)
+    assert not p.admit(default, p.DEFAULT, cal) and default['reason'] == 'power or reference drift'
 
 
 # 이것을 실패시키는 것: R2 아래에서 보정 안정·identity·host 일치·telemetry·summary 20표본 검사 중 하나를 뺀다.

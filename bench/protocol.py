@@ -54,6 +54,8 @@ Blocked = dict
 SESSION = uuid.uuid4().hex
 DEFAULT = Condition(mode='gate', power='ac', load_range=None, synthetic_load=0, admission='default')
 CI_R2_OUTSIDE = 'ci-r2 requested outside GitHub Actions'
+CI_R2_OVER_CAP = 'reference over the 1.10 cap'
+CI_R2_UNSTABLE = 'reference unstable within the block'
 
 
 def summary(values):
@@ -178,6 +180,8 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
             limit = reference_limit(h['power'], calibration, condition)
             if condition.get('admission') == 'ci-r2' and not ci_r2_host(h['power']):
                 reason = CI_R2_OUTSIDE  # requested R2 is never silently the default rule
+            elif condition.get('admission') == 'ci-r2' and limit is not None and ref['p50'] > limit:
+                reason = CI_R2_OVER_CAP
             elif h['power'] not in ('ac', 'mains-assumed') or limit is None or ref['p50'] > limit:
                 reason = 'power or reference drift'
         elif condition['mode'] == 'experiment':
@@ -189,9 +193,10 @@ def admit(block: Block, condition: Condition, calibration: Calibration) -> bool:
             reason = 'unknown mode'
     if reason is None and condition['mode'] == 'gate' and condition.get('admission') == 'ci-r2':
         # R2 judges in-block stability: |after/before - 1| <= 0.05, written without a division.
+        # The denominator is before, so it is not symmetric: 95 -> 100 (5.26%) fails, 100 -> 95 passes.
         before, after = (block[side]['reference']['p50'] for side in ('before', 'after'))
         if abs(after - before) > CI_REFERENCE_STABILITY * before:
-            reason = 'power or reference drift'
+            reason = CI_R2_UNSTABLE
     block.update(kept=reason is None, reason=reason)
     if condition.get('mode') == 'gate':
         # Which drift baseline judged the block; a host whose power changed mid-block is 'mixed'.
