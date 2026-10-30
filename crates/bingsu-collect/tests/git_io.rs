@@ -6036,18 +6036,16 @@ fn worktree_bulk_equals_fstatat_on_generated_tree() {
             .unwrap()
             .select_cwd()
             .unwrap();
-        let m = RefCell::new(meter());
-        let port = io(&devroot, &access, &m);
         let dir = fs::File::open("/dev").unwrap();
-        port.worktree_directory_stats(b"", &[b"null"], NamePolicy::default(), |_, observed| {
-            let actual = observed?;
+        let fd = dir.as_raw_fd();
+        let oracle = move || {
             // SAFETY: stat is a plain C output record.
             let mut expected: libc::stat = unsafe { std::mem::zeroed() };
             assert_eq!(
-                // SAFETY: live test directory, terminated name and writable stat.
+                // SAFETY: `dir` outlives every attempt; terminated name and writable stat.
                 unsafe {
                     libc::fstatat(
-                        dir.as_raw_fd(),
+                        fd,
                         c"null".as_ptr(),
                         &mut expected,
                         libc::AT_SYMLINK_NOFOLLOW,
@@ -6055,10 +6053,47 @@ fn worktree_bulk_equals_fstatat_on_generated_tree() {
                 },
                 0
             );
-            assert_bulk_stat_fields(actual, &expected);
-            Ok(())
-        })
-        .unwrap();
+            expected
+        };
+        let times = |s: &libc::stat| (s.st_mtime, s.st_mtime_nsec, s.st_ctime, s.st_ctime_nsec);
+        // Other processes write /dev/null, and devfs moves its mtime and ctime
+        // on every write. fstatat right before and right after each bulk
+        // syscall brackets the batch that observed the leaf: an attempt is
+        // stable when both agree, and a stable attempt must match exactly.
+        // Only unstable attempts are retried, up to the cap.
+        // 이것을 실패시키는 것: 안정된 시도의 불일치를 넘기는 것, 상한 없이 재시도하는 것, 안정 판정에서 ctime을 빼는 것.
+        const DEV_ATTEMPTS: usize = 8;
+        let mut unstable = 0;
+        while unstable < DEV_ATTEMPTS {
+            let bracket = Rc::new(std::cell::Cell::new((None, None)));
+            let mut setup = meter();
+            let hook = bracket.clone();
+            setup.hook = Some(Box::new(move |event| match event {
+                "before_worktree_bulk" => hook.set((Some(oracle()), None)),
+                "after_worktree_bulk" => hook.set((hook.get().0, Some(oracle()))),
+                _ => {}
+            }));
+            let m = RefCell::new(setup);
+            let port = io(&devroot, &access, &m);
+            let mut observed_in = None;
+            port.worktree_directory_stats(b"", &[b"null"], NamePolicy::default(), |_, observed| {
+                observed_in = Some((*observed?, bracket.get()));
+                Ok(())
+            })
+            .unwrap();
+            let (actual, (before, after)) = observed_in.unwrap();
+            let (before, after) = (before.unwrap(), after.unwrap());
+            if times(&before) == times(&after) {
+                assert_bulk_stat_fields(&actual, &before);
+                break;
+            }
+            unstable += 1;
+        }
+        eprintln!("BULK_OTHER_DEVICE_UNSTABLE {unstable}");
+        assert!(
+            unstable < DEV_ATTEMPTS,
+            "/dev/null changed during each of {DEV_ATTEMPTS} bulk reads"
+        );
     }
     eprintln!("BULK_OTHER_DEVICE_TESTED {different}");
 }
