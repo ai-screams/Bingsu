@@ -1286,7 +1286,7 @@ def deadline_shape(cap):
     return None
 
 
-def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit=ALLOWLIST_ATTEMPTS):
+def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit=ALLOWLIST_ATTEMPTS, label="allowlist"):
     """Judge every attempt in full; retry only an attempt whose failure the
     trace proves to be a deadline, and only after it passes its own full
     judgment. Any other failure, or any violation, ends the test at once."""
@@ -1306,9 +1306,9 @@ def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit
                 shapes[shape] += 1
                 continue
             return attempt, shapes
-        pytest.fail(f"allowlist: no attempt without a deadline in {limit}; shapes {dict(shapes)}")
+        pytest.fail(f"{label}: no attempt without a deadline in {limit}; shapes {dict(shapes)}")
     finally:
-        print(f"allowlist attempts: {attempt}, deadline shapes: {dict(shapes)}")
+        print(f"{label} attempts: {attempt}, deadline shapes: {dict(shapes)}")
 
 
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
@@ -2177,9 +2177,10 @@ def child_capture(tmp_path):
     # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
     assert shutil.which("strace"), "required live tracing tool is missing"
 
-    def capture(template="{dir}{git}{char}", invalid=False):
-        base = tmp_path / str(len(list(tmp_path.iterdir())))
-        base.mkdir()
+    def capture(template="{dir}{git}{char}", invalid=False, name=None):
+        # `name` keeps a retried attempt's evidence in its own folder.
+        base = tmp_path / (name or str(len(list(tmp_path.iterdir()))))
+        base.mkdir(parents=True)
         # Reuse A2's real hook, advancing session sequence and untraced warm-up.
         # A cold admission under strace may defer before it can spawn a worker.
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
@@ -2246,15 +2247,65 @@ def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
     assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
 
 
-# 이것을 실패시키는 것: 표식 무효면 worker mask 0.
-def test_live_collector_count_ignores_marker_validity(child_capture):
+# Under strace the front can pass its 50 ms deadline and exit 0 without a
+# record (front_deadline_exit); such an attempt is judged in full and retried.
+MARKER_ATTEMPTS = 8
+
+
+def front_deadline_exit(cap):
+    """"front-deadline" when the trace proves the front's own deadline ended
+    it: it armed ITIMER_REAL, then took a kernel SIGALRM, started no write to
+    fd 1 after it and exited 0, and stdout is empty. Anything else is None."""
+    lines = cap.lines
+    if not lines or not re.match(r'\d+\s+execve\("[^"]*", \["[^"]*", "prompt"', lines[0]):
+        return None
+    root = lines[0].split()[0]
+    front = [parts[1] for line in lines if len(parts := line.split(None, 1)) == 2 and parts[0] == root]
+    armed = next((i for i, line in enumerate(front) if line.startswith("setitimer(ITIMER_REAL,") and line.endswith("= 0")), None)
+    alarm = next((i for i, line in enumerate(front) if line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
+    # 이것을 실패시키는 것: SIGALRM 뒤 fd 1 쓰기, 타이머 없이 받은 SIGALRM, 0 아닌 종료, 비지 않은 stdout을 마감으로 보는 것.
+    if armed is None or alarm is None or alarm < armed or cap.record:
+        return None
+    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for line in front[alarm:]):
+        return None
+    return "front-deadline" if front[-1] == "+++ exited with 0 +++" else None
+
+
+def judge_marker_attempt(cap, shape=None):
+    """One marker-condition capture. Every attempt keeps the role bounds;
+    a proven front deadline waives only the record, and the collector spawn
+    only when the front ended before it created the helper (the helper never
+    waits on the front, so a later deadline cannot stop its spawn)."""
     from fsbudget.attribute import role_children
-    valid, _, _ = child_capture()
-    invalid, _, record = child_capture(invalid=True)
-    # 이것을 실패시키는 것: assert b"degraded:trust-invalid" in record, record 조건을 제거하거나 반전하는 변이.
-    assert b"degraded:trust-invalid" in record, record
-    # 이것을 실패시키는 것: assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1 조건을 제거하거나 반전하는 변이.
-    assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1
+    children = role_children(cap.trace)
+    # 이것을 실패시키는 것: 마감 시도에서 역할 상한(helper 둘, collector·명령 자식)을 넘기는 것.
+    assert children["front"] <= 1 and children["helper"] <= 1, children
+    assert children["collector"] == children["command"] == 0, children
+    if shape is None or children["front"]:
+        # 이것을 실패시키는 것: 표식 무효면 worker mask 0.
+        assert children["helper"] == 1, children
+    if shape is None and cap.invalid:
+        assert b"degraded:trust-invalid" in cap.record, cap.record
+
+
+def marker_capture(child_capture, tmp_path, invalid, attempt):
+    from types import SimpleNamespace
+    name = f"{'invalid' if invalid else 'valid'}/attempt-{attempt}"
+    trace, _, record = child_capture(invalid=invalid, name=name)
+    lines = (tmp_path / name / "child-count.strace").read_text(errors="replace").splitlines()
+    return SimpleNamespace(trace=trace, lines=lines, record=record, invalid=invalid)
+
+
+# 이것을 실패시키는 것: 표식 무효면 worker mask 0.
+def test_live_collector_count_ignores_marker_validity(child_capture, tmp_path):
+    """Both marker conditions start exactly one collector. Each condition
+    must reach that evidence (and the invalid one its degraded record) in at
+    most MARKER_ATTEMPTS attempts; only a trace-proven front deadline is
+    retried, after its own judgment. Attempts stay in valid|invalid/attempt-N."""
+    for invalid in (False, True):
+        run_allowlist(lambda attempt: marker_capture(child_capture, tmp_path, invalid, attempt),
+                      judge_marker_attempt, front_deadline_exit, MARKER_ATTEMPTS,
+                      label=f"marker {'invalid' if invalid else 'valid'}")
 
 
 # 이것을 실패시키는 것: 머리 읽기 전에 collector 생성.

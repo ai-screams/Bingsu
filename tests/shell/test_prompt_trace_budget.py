@@ -2894,3 +2894,74 @@ def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
     with pytest.raises(pytest.fail.Exception, match="no attempt without a deadline in 12"):
         budget.run_allowlist(endless.capture, _judge, _shape)
     assert endless.made == budget.ALLOWLIST_ATTEMPTS == 12
+
+
+def marker_capture(*, alarm=True, write_after=False, exit_code=0, timer=True, helper=True, collectors=1,
+                   record=b"", invalid=True):
+    """A synthetic marker-condition capture: front 10, helper 11, collectors 13...;
+    by default a front that took its deadline after the helper spawned one collector."""
+    from types import SimpleNamespace
+    lines = ['10  execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0']
+    if timer:
+        lines.append("10  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=1000}, "
+                     "it_value={tv_sec=0, tv_usec=27108}}, NULL) = 0")
+    if helper:
+        lines += ["10  vfork() = 11", '11  execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0']
+        for pid in range(13, 13 + collectors):
+            lines += [f"11  vfork() = {pid}",
+                      f'{pid}  execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0']
+    if alarm:
+        lines.append("10  --- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL} ---")
+    if write_after:
+        lines.append('10  write(1<pipe:[1]>, "", 0) = 0')
+    lines += [f"10  exit_group({exit_code}) = ?", f"10  +++ exited with {exit_code} +++"]
+    return SimpleNamespace(trace=budget.parse_trace("\n".join(lines)), lines=lines, record=record, invalid=invalid)
+
+
+# 이것을 실패시키는 것: SIGALRM 뒤 fd 1 쓰기, 타이머 없는 SIGALRM, 0 아닌 종료, 비지 않은 stdout을 마감으로 보는 것.
+@pytest.mark.parametrize("damage", ["none", "write-after-alarm", "no-alarm", "no-timer", "exit-1", "record"])
+def test_front_deadline_exit_needs_its_proof(damage):
+    kwargs = {"none": {}, "write-after-alarm": {"write_after": True}, "no-alarm": {"alarm": False},
+              "no-timer": {"timer": False}, "exit-1": {"exit_code": 1},
+              "record": {"record": b"B1\x1f8\x1fdegraded:trust-invalid\x1e"}}[damage]
+    shape = budget.front_deadline_exit(marker_capture(**kwargs))
+    assert shape == ("front-deadline" if damage == "none" else None)
+
+
+# 이것을 실패시키는 것: 마감 시도의 판정을 건너뛰는 것, helper가 생긴 뒤의 마감으로 collector 생성을 면제하는 것.
+def test_marker_deadline_attempt_is_judged():
+    budget.judge_marker_attempt(marker_capture(), "front-deadline")
+    with pytest.raises(AssertionError, match="degraded:trust-invalid|b''"):
+        budget.judge_marker_attempt(marker_capture())
+    budget.judge_marker_attempt(marker_capture(helper=False), "front-deadline")
+    for damaged in (marker_capture(collectors=2), marker_capture(collectors=0)):
+        with pytest.raises(AssertionError):
+            budget.judge_marker_attempt(damaged, "front-deadline")
+
+
+# 이것을 실패시키는 것: 마감이 증명되지 않은 실패를 재시도하는 것, 마감 시도의 위반을 넘기는 것, 상한을 넘기는 것.
+def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
+    def run(outcomes):
+        made = []
+        def capture(attempt):
+            made.append(attempt)
+            return outcomes[attempt - 1]
+        try:
+            return budget.run_allowlist(capture, budget.judge_marker_attempt, budget.front_deadline_exit,
+                                        budget.MARKER_ATTEMPTS, label="marker invalid"), made
+        except BaseException as error:
+            error.made = made
+            raise
+    complete = marker_capture(alarm=False, record=b"B1\x1f8\x1fdegraded:trust-invalid\x1e")
+    (attempt, shapes), made = run([marker_capture(), complete])
+    assert (attempt, dict(shapes), made) == (2, {"front-deadline": 1}, [1, 2])
+    assert "marker invalid attempts: 2, deadline shapes: {'front-deadline': 1}" in capsys.readouterr().out
+    with pytest.raises(AssertionError) as plain:
+        run([marker_capture(alarm=False), complete])
+    assert plain.value.made == [1]
+    with pytest.raises(AssertionError) as violating:
+        run([marker_capture(collectors=2), complete])
+    assert violating.value.made == [1]
+    with pytest.raises(pytest.fail.Exception, match="marker invalid: no attempt without a deadline in 8") as endless:
+        run([marker_capture()] * 9)
+    assert endless.value.made == list(range(1, 9)) and budget.MARKER_ATTEMPTS == 8
