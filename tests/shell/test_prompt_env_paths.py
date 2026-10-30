@@ -2166,6 +2166,26 @@ def test_front_never_reads_trust_metadata_section(front_capture):
     check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
 
 
+def child_strace_argv(evidence, argv, timestamps=False):
+    """The child_capture strace command; only the marker test adds -ttt."""
+    return ["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
+            *(["-ttt"] if timestamps else []), "-o", str(evidence), *argv]
+
+
+TIMED_LINE = re.compile(r"^(\d+)( +)(\d+)\.(\d{6}) (.*)$")
+
+
+def strip_trace_times(text):
+    """A -ttt trace as the untimed trace parse_trace reads; fails closed on
+    any line without its time column."""
+    out = []
+    for line in text.splitlines():
+        m = TIMED_LINE.match(line)
+        assert m, ("untimed line in a -ttt trace", line)
+        out.append(f"{m[1]}{m[2]}{m[5]}")
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
 @pytest.fixture
 def child_capture(tmp_path):
     # 이것을 실패시키는 것: debug 바이너리 또는 strace 없는 host를 live PASS로 세는 것.
@@ -2177,7 +2197,7 @@ def child_capture(tmp_path):
     # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
     assert shutil.which("strace"), "required live tracing tool is missing"
 
-    def capture(template="{dir}{git}{char}", invalid=False, name=None):
+    def capture(template="{dir}{git}{char}", invalid=False, name=None, timestamps=False):
         # `name` keeps a retried attempt's evidence in its own folder.
         base = tmp_path / (name or str(len(list(tmp_path.iterdir()))))
         base.mkdir(parents=True)
@@ -2186,12 +2206,12 @@ def child_capture(tmp_path):
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
                                      template=template)
         try:
-            return capture_prompt(fixture, base, invalid)
+            return capture_prompt(fixture, base, invalid, timestamps)
         finally:
             wait_helpers(fixture.base)
             shutil.rmtree(fixture.base)
 
-    def capture_prompt(fixture, base, invalid):
+    def capture_prompt(fixture, base, invalid, timestamps):
         marker = fixture.store / "marker"
         wire = bytearray(marker.read_bytes())
         # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
@@ -2216,14 +2236,14 @@ def child_capture(tmp_path):
         argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
-        result = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
-                                 "-o", str(evidence), *argv],
+        result = subprocess.run(child_strace_argv(evidence, argv, timestamps),
                                 cwd=fixture.pwd, env=fixture.env, capture_output=True, timeout=60)
         (base / "stdout").write_bytes(result.stdout)
         (base / "stderr").write_bytes(result.stderr)
         # 이것을 실패시키는 것: assert result.returncode == 0, (result.stderr, evidence) 조건을 제거하거나 반전하는 변이.
         assert result.returncode == 0, (result.stderr, evidence)
-        trace = parse_trace(evidence.read_text())
+        text = evidence.read_text()
+        trace = parse_trace(strip_trace_times(text) if timestamps else text)
         # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
         assert not trace.errors, (trace.errors, evidence)
         return trace, fixture.store, result.stdout
@@ -2254,21 +2274,47 @@ MARKER_ATTEMPTS = 8
 
 def front_deadline_exit(cap):
     """"front-deadline" when the trace proves the front's own deadline ended
-    it: it armed ITIMER_REAL, then took a kernel SIGALRM, started no write to
-    fd 1 after it and exited 0, and stdout is empty. Anything else is None."""
+    it: it armed ITIMER_REAL (setitimer returned 0), and then either took a
+    kernel SIGALRM or, by the -ttt times, began exit_group strictly later
+    than the setitimer start plus its it_value; it started no write to fd 1
+    after that proof, exited 0, and stdout is empty. Anything else is None.
+
+    The front computes its remaining time just before setitimer, so its
+    deadline cannot end later than setitimer start + it_value. strace times
+    are realtime, the product's clock is monotonic: equal or unreadable
+    times prove nothing. A realtime step back can only refuse a retry; a
+    step forward can retry an attempt early, and a retried attempt is
+    still judged in full, so the cost is one more capture of an empty record."""
     lines = cap.lines
-    if not lines or not re.match(r'\d+\s+execve\("[^"]*", \["[^"]*", "prompt"', lines[0]):
+    timed = re.compile(r"(\d+)\s+(?:(\d+)\.(\d{6})\s+)?(.*)$")
+    rows = [(m[1], int(m[2]) * 1_000_000 + int(m[3]) if m[2] else None, m[4])
+            for line in lines if (m := timed.match(line))]
+    if not rows or not re.match(r'execve\("[^"]*", \["[^"]*", "prompt"', rows[0][2]):
         return None
-    root = lines[0].split()[0]
-    front = [parts[1] for line in lines if len(parts := line.split(None, 1)) == 2 and parts[0] == root]
-    armed = next((i for i, line in enumerate(front) if line.startswith("setitimer(ITIMER_REAL,") and line.endswith("= 0")), None)
-    alarm = next((i for i, line in enumerate(front) if line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
-    # 이것을 실패시키는 것: SIGALRM 뒤 fd 1 쓰기, 타이머 없이 받은 SIGALRM, 0 아닌 종료, 비지 않은 stdout을 마감으로 보는 것.
-    if armed is None or alarm is None or alarm < armed or cap.record:
+    root = rows[0][0]
+    front = [(at, line) for pid, at, line in rows if pid == root]
+    armed = next((i for i, (_, line) in enumerate(front) if line.startswith("setitimer(ITIMER_REAL,")), None)
+    # 이것을 실패시키는 것: 실패했거나 없는 setitimer를 마감 증명으로 받는 것.
+    if armed is None or not front[armed][1].endswith(") = 0") or cap.record:
         return None
-    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for line in front[alarm:]):
+    value = re.search(r"it_value=\{tv_sec=(\d+), tv_usec=(\d+)\}", front[armed][1])
+    if not value:
         return None
-    return "front-deadline" if front[-1] == "+++ exited with 0 +++" else None
+    alarm = next((i for i, (_, line) in enumerate(front) if i > armed
+                  and line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
+    if alarm is None:
+        ends = [i for i, (_, line) in enumerate(front) if line.startswith("exit_group(")]
+        start, at = front[armed][0], front[ends[-1]][0] if ends else None
+        # 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것.
+        if start is None or at is None or not at > start + int(value[1]) * 1_000_000 + int(value[2]):
+            return None
+        proof = armed
+    else:
+        proof = alarm
+    # 이것을 실패시키는 것: 증명 뒤 fd 1 쓰기, 0 아닌 종료, 비지 않은 stdout을 마감으로 보는 것.
+    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for _, line in front[proof:]):
+        return None
+    return "front-deadline" if front[-1][1] == "+++ exited with 0 +++" else None
 
 
 def judge_marker_attempt(cap, shape=None):
@@ -2291,7 +2337,7 @@ def judge_marker_attempt(cap, shape=None):
 def marker_capture(child_capture, tmp_path, invalid, attempt):
     from types import SimpleNamespace
     name = f"{'invalid' if invalid else 'valid'}/attempt-{attempt}"
-    trace, _, record = child_capture(invalid=invalid, name=name)
+    trace, _, record = child_capture(invalid=invalid, name=name, timestamps=True)
     lines = (tmp_path / name / "child-count.strace").read_text(errors="replace").splitlines()
     return SimpleNamespace(trace=trace, lines=lines, record=record, invalid=invalid)
 

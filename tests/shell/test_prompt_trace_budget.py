@@ -2965,3 +2965,52 @@ def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
     with pytest.raises(pytest.fail.Exception, match="marker invalid: no attempt without a deadline in 8") as endless:
         run([marker_capture()] * 9)
     assert endless.value.made == list(range(1, 9)) and budget.MARKER_ATTEMPTS == 8
+
+
+def timed_capture(after_us, *, setitimer_ret="0", write_after=False, **kwargs):
+    """marker_capture(alarm=False) with -ttt times: one microsecond per line
+    from 100 s, and exit_group `after_us` after the setitimer start."""
+    cap = marker_capture(alarm=False, write_after=write_after, **kwargs)
+    lines = [line.replace("NULL) = 0", f"NULL) = {setitimer_ret}") if "setitimer(" in line else line
+             for line in cap.lines]
+    start = 100_000_000 + next(i for i, line in enumerate(lines) if "setitimer(" in line)
+    out = []
+    for i, line in enumerate(lines):
+        pid, rest = line.split(None, 1)
+        at = start + after_us if rest.startswith(("exit_group(", "+++ ")) and pid == "10" else 100_000_000 + i
+        out.append(f"{pid}  {at // 1_000_000}.{at % 1_000_000:06d} {rest}")
+    cap.lines = out
+    cap.trace = budget.parse_trace(budget.strip_trace_times("\n".join(out)))
+    return cap
+
+
+# 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것, 실패한 setitimer를 받는 것,
+# 시간 증명 뒤의 fd 1 쓰기를 받는 것.
+@pytest.mark.parametrize("case,expected", [
+    ("past", "front-deadline"), ("equal", None), ("early", None), ("setitimer-failed", None),
+    ("write-after", None), ("untimed", None)])
+def test_front_deadline_time_proof(case, expected):
+    it_value = 27_108  # marker_capture's setitimer it_value
+    cap = {"past": lambda: timed_capture(it_value + 1), "equal": lambda: timed_capture(it_value),
+           "early": lambda: timed_capture(1_000),
+           "setitimer-failed": lambda: timed_capture(it_value + 1, setitimer_ret="-1 EINVAL (Invalid argument)"),
+           "write-after": lambda: timed_capture(it_value + 1, write_after=True),
+           "untimed": lambda: marker_capture(alarm=False)}[case]()
+    assert budget.front_deadline_exit(cap) == expected
+    if case == "past":
+        budget.judge_marker_attempt(cap, expected)
+
+
+# 이것을 실패시키는 것: 다른 child_capture 시험의 strace 인자에 -ttt를 넣는 것, 시각 열을 떼며 다른 글자를 바꾸는 것,
+# 시각 열 없는 줄을 그대로 넘기는 것.
+def test_trace_times_are_stripped_before_parsing():
+    assert budget.child_strace_argv("/e", ["/bin/bingsu", "prompt"]) == [
+        "strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", "/e", "/bin/bingsu", "prompt"]
+    assert budget.child_strace_argv("/e", ["/bin/bingsu"], timestamps=True)[8:10] == ["-ttt", "-o"]
+    untimed = "\n".join(marker_capture().lines) + "\n"
+    timed = "".join(f"{line.split(None, 1)[0]}  1730265432.{i:06d} {line.split(None, 1)[1]}\n"
+                    for i, line in enumerate(untimed.splitlines()))
+    assert budget.strip_trace_times(timed) == untimed
+    assert budget.parse_trace(budget.strip_trace_times(timed)) == budget.parse_trace(untimed)
+    with pytest.raises(AssertionError, match="untimed line"):
+        budget.strip_trace_times(untimed)
