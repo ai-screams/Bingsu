@@ -110,7 +110,7 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # Include Linux-only unit/integration test paths for both sibling crates.
@@ -150,7 +150,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Prepare native musl toolchain
         run: |
           sudo apt-get update -q
@@ -201,7 +201,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # 이것을 실패시키는 것: Rust 행이 미실행/ignored여도 cargo 종료 코드만으로 통과하는 것.
       - run: |
           set -o pipefail
@@ -665,7 +665,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: runner.os == 'Linux'
         run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Install the schema test validator
@@ -742,8 +742,8 @@ jobs:
           # The gate builds bingsu-core and bingsu-identity without std;
           # the front graph remains pinned to 11 packages.
           targets: wasm32v1-none
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-deny@0.20.2
       - run: scripts/check-core-purity.sh
@@ -781,7 +781,7 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown, wasm32-wasip1
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build -p bingsu-core --target wasm32-unknown-unknown
       - run: cargo clippy -p bingsu-core --target wasm32-unknown-unknown -- -D warnings -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros
       # Determinism golden (spec section 7 layer 7, F-06): the native half is
@@ -867,7 +867,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: ${{ env.ICOUNT_RUST }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check the bench packages and the runner version
         run: |
           set -o pipefail
@@ -1050,7 +1050,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build the base tip and the merge result
         run: |
           # base tip + PR head: three words (the commit and two parents)
@@ -1115,7 +1115,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
       - run: sudo apt-get update && sudo apt-get install -y strace
       # A venv with the hash-pinned test dependencies: the system python
