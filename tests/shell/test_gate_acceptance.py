@@ -102,6 +102,8 @@ M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3
 M3D_SUPPLEMENTARY.update({f"{gate}.1-{case}": "M3d"
                           for gate in ("GATE-FS-FRONT", "GATE-FRONT-READ-BYTES")
                           for case in ("checksum_last_good", "body_limit", "header_only")})
+# 이것을 실패시키는 것: R·B 행을 지우고 E_n 하나만으로 GATE-FS-HELPER.2를 닫는 것.
+M3D_SUPPLEMENTARY.update({"GATE-FS-HELPER.2-r": "M3d", "GATE-FS-HELPER.2-b": "M3d"})
 # 이것을 실패시키는 것: 막힌 마운트 행을 지우고 정상 폴더만으로 GATE-HELPER-LIFETIME.1을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-HELPER-LIFETIME.1-blocked_mount"] = "M3d"
 # 이것을 실패시키는 것: 계획의 시계 단계 고정 행을 지우고 실행 횟수 계수기 행만으로 GATE-CLOCK-READS.1을 닫는 것.

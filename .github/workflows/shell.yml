@@ -238,8 +238,10 @@ jobs:
         if: matrix.profile == 'release'
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap' 'tests/shell/test_prompt_env_paths.py::test_helper_e_n_cap_matches_product_constant' --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/axis-cap" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/axis-cap.txt"
-          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap' "$RUNNER_TEMP/axis-cap.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap[E_n]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap[R]' 'tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap[B]' 'tests/shell/test_prompt_env_paths.py::test_helper_e_n_cap_matches_product_constant' --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/axis-cap" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/axis-cap.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap[E_n]' "$RUNNER_TEMP/axis-cap.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap[R]' "$RUNNER_TEMP/axis-cap.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap[B]' "$RUNNER_TEMP/axis-cap.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_helper_e_n_cap_matches_product_constant' "$RUNNER_TEMP/axis-cap.txt"
       # 이것을 실패시키는 것: debug 칸에서 계수하거나 매개변수 하나의 PASSED 단언을 빼는 것.
       - name: Front attempts equal axis C and byte formulas (release)

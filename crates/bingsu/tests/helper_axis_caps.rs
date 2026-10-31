@@ -1,10 +1,11 @@
 //! The helper's I/O caps (user decision U2) through `bingsu reload`, which
 //! publishes with the refresh engine: a config exactly at a cap publishes,
 //! one unit past it ends "not finished" (3) with the context files unchanged.
-//! Only axes a fixture can cross on disk with the real caps are here: R, E_n
-//! and B. F cannot cross before R (each file is a candidate), D is 1 with the
-//! one conf.d, and M needs 17 mounts; the in-crate refresh tests cross those
-//! with lowered caps.
+//! Here: R, E_n and B, whose exact boundaries do not depend on the platform.
+//! E_b, P and L boundaries depend on record sizes and path depth and are not
+//! exercised here at the real caps; F cannot cross before R (each file is a
+//! candidate), D is 1 with the one conf.d, and M needs 17 mounts. The in-crate
+//! refresh tests cross all nine with lowered caps.
 #![cfg(unix)]
 
 #[path = "support/user_env.rs"]
