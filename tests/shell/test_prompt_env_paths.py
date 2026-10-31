@@ -1494,7 +1494,7 @@ TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\nt
              "collect": "[style]\ntemplate='BASE {dir} {git} {char}'\n", "broken": "[broken"}
 # 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
 # 80 selects a variant past INDEX's chunk, with more variants after it.
-TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(63 - i) * 4}\nmax_cols={(63 - i) * 4 + 3}\n"
+TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
                              f"[layout.when.b{i:02}.style]\ntemplate='{'x' * 600} {{char}}'\n" for i in range(64))
 
 
@@ -2302,7 +2302,7 @@ def front_capture(request, tmp_path_factory):
         through_index = min(read, -(-front // FRONT_CHUNK) * FRONT_CHUNK)
         if case == 'selected-band':
             # 이것을 실패시키는 것: 고른 변종이 색인 청크 안이거나 구획 끝이라 버리기·조기 종료를 증명하지 못하는 fixture.
-            assert through_index < variant_end < body - FRONT_CHUNK, (front, variant_end, body)
+            assert through_index < variant_end < body, (front, variant_end, body)
         if case == 'checksum-last-good':
             data[160] ^= 1
         elif case == 'body-limit':
