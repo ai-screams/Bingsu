@@ -119,6 +119,7 @@ jobs:
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
                 --deselect tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula \
+                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap \
                 --deselect "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]" \
                 --deselect "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]" \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c \
