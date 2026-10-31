@@ -224,12 +224,17 @@ mod cases {
         assert_eq!(decode_compiled(&vec![0; MAX_BYTES + 1]), Err(Error::Limit));
     }
 
-    // 이것을 실패시키는 것: 완전한 codec 뒤의 남은 바이트를 허용하는 것.
+    // 이것을 실패시키는 것: 이름 구획 뒤의 남은 바이트를 허용하는 것.
     #[test]
     fn codec_reject_trailing_bytes() {
         let mut b = encode_compiled(&config()).unwrap();
         b.push(0);
-        assert_eq!(decode_compiled(&b), Err(Error::Trailing));
+        assert_eq!(decode_compiled(&b), Err(Error::Shape));
+        let spare = [0; 5];
+        assert_eq!(
+            section::<u32>(&spare, section_sum(&spare), MAX_ALLOC).map(drop),
+            Err(Error::Trailing)
+        );
     }
 
     // 이것을 실패시키는 것: Writer의 길이 덧셈 overflow를 wrapping으로 바꾸는 것.
@@ -246,9 +251,7 @@ mod cases {
     }
 
     fn raw_config(c: &CompiledConfig) -> Vec<u8> {
-        let mut b = b"BNGCFG03\x03\0\x02\0".to_vec();
-        b.extend(bytes(c));
-        b
+        write_compiled(c, compiled_size(c).unwrap()).unwrap()
     }
 
     fn rejected(c: &CompiledConfig) {
@@ -641,7 +644,7 @@ mod cases {
         }
         let mut b = encode_compiled(&base).unwrap();
         b.push(0);
-        assert_eq!(decode_compiled(&b), Err(Error::Trailing));
+        assert_eq!(decode_compiled(&b), Err(Error::Shape));
         for at in [0, 7, 8, 9] {
             let mut b = encode_compiled(&base).unwrap();
             b[at] ^= 1;

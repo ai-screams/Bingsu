@@ -128,7 +128,7 @@ impl Prefetch {
     pub fn accepts(&self, index: usize, facts: FdFacts) -> bool {
         trusted_file(self.uid, facts)
             && match index {
-                0 | 1 => FrontDecoder::new(facts.size).is_ok(),
+                0 | 1 => FrontDecoder::new(facts.size, 0).is_ok(),
                 2 => facts.size == snapshot::MARKER as u64,
                 _ => false,
             }
@@ -429,6 +429,9 @@ impl ReadPlan {
             self.after_close
         };
     }
+    fn width(&self) -> u16 {
+        self.parsed.as_ref().map_or(0, |e| e.width)
+    }
     fn file_facts(&mut self, f: FdFacts) -> bool {
         let Some(uid) = self.uid else {
             return false;
@@ -438,7 +441,8 @@ impl ReadPlan {
         }
         match self.file {
             File::Marker => f.size == snapshot::MARKER as u64,
-            File::Snapshot(_) => match FrontDecoder::new(f.size) {
+            // The envelope's width selects the one variant read and decoded.
+            File::Snapshot(_) => match FrontDecoder::new(f.size, self.width()) {
                 Ok(d) => {
                     self.decoder = Some(d);
                     true
@@ -632,12 +636,11 @@ impl ReadPlan {
                             return;
                         }
                         if d.read_len() == 0 {
-                            // The envelope's width selects the one variant decoded.
-                            let width = self.parsed.as_ref().map_or(0, |e| e.width);
+                            let width = self.width();
                             self.observed.selected = self
                                 .decoder
                                 .take()
-                                .and_then(|d| match d.finish_for(width) {
+                                .and_then(|d| match d.finish() {
                                     Ok(plan) => Some(Box::new(plan)),
                                     Err(_) => None,
                                 })

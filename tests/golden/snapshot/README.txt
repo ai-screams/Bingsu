@@ -1,4 +1,4 @@
-N1 version 2 byte fixture
+N1 frame version 3 byte fixture (markers, sequence and relay stay version 2)
 
 fixture.bin contains one complete frame, followed by a 208-byte marker,
 96-byte sequence and 96-byte relay permit. The frame's CompiledConfig carries

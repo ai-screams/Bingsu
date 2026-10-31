@@ -399,6 +399,45 @@ mod cases {
             Status::ERROR_CONFIG_DEFAULT
         );
     }
+    /// The first byte of the variant selected at `width`.
+    fn variant_at(wire: &[u8], width: u16) -> usize {
+        let (c, _) = snapshot::lengths(wire).unwrap();
+        let compiled = &wire[HEADER + PREFIX..HEADER + PREFIX + c];
+        let front = crate::snapshot_codec::front_len(compiled, c).unwrap();
+        let plan = crate::snapshot_codec::plan_front(&compiled[..front], c, width).unwrap();
+        HEADER + PREFIX + plan.offset
+    }
+    // 이것을 실패시키는 것: last-good만 다른 폭·전체 decode로 읽는 것, 앞단이 고르지 않은 variant의 손상으로
+    // 사본을 버리는 것, 고른 variant의 손상을 받는 것.
+    #[test]
+    fn both_copies_take_the_same_selected_read() {
+        let s = snapshot(
+            "[layout.when.narrow]\nmax_cols=100\n[layout.when.narrow.style]\ntemplate='NARROW {char}'\n",
+        );
+        let wire = s.encode(1, 0).unwrap();
+        assert_ne!(variant_at(&wire, 80), variant_at(&wire, 120));
+        let mut unselected = wire.clone();
+        unselected[variant_at(&wire, 120)] ^= 1;
+        let mut selected = wire.clone();
+        selected[variant_at(&wire, 80)] ^= 1;
+        let mut h = Harness::new();
+        h.marker = Some(marker(&s).encode().to_vec());
+        h.current = Some(unselected.clone());
+        h.last = Some(selected.clone());
+        let r = h.run(&args(), Mode::Dark);
+        assert_eq!(r.status, Status::OK_NONE);
+        assert!(record(&r).contains("NARROW"));
+        h.current = Some(selected.clone());
+        h.last = Some(unselected);
+        let r = h.run(&args(), Mode::Dark);
+        assert_eq!(r.status, Status::ERROR_CONFIG_LAST_GOOD);
+        assert!(record(&r).contains("NARROW"));
+        h.last = Some(selected);
+        assert_eq!(
+            h.run(&args(), Mode::Dark).status,
+            Status::ERROR_CONFIG_DEFAULT
+        );
+    }
     // 이것을 실패시키는 것: 표식 오류/각 정체/시각 오류를 fresh로 렌더하거나 상태 우선순위를 바꾸는 것.
     #[test]
     fn status_priority_and_trust_rejections() {

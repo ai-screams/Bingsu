@@ -1,6 +1,6 @@
 """Independent arithmetic/byte controls for the live front attempt gate."""
 import pytest
-from fsbudget.formula import FrontAttempt, front_attempts_expected, front_read_bytes
+from fsbudget.formula import FrontAttempt, front_attempts_expected, front_body_bytes, front_read_bytes
 from fsbudget.strace_parse import parse
 
 
@@ -55,3 +55,17 @@ def test_front_returned_bytes():
 def test_front_unmeasurable_bytes(line):
     with pytest.raises(ValueError):
         front_read_bytes(parse('1 read(3</snapshot>, "", 1) = 0\n' + line), ['/snapshot'])
+
+
+# 이것을 실패시키는 것: 고른 변종 앞에서 버린 바이트를 세지 않는 것, 색인을 끝낸 읽기의 청크 올림을 빼는 것,
+# 구획 끝을 넘겨 세는 것.
+def test_front_body_bytes_count_dropped_reads_to_the_selected_variant():
+    chunk = 16384
+    assert front_body_bytes(3000, 3008, 3004, chunk) == 3008
+    assert front_body_bytes(3000, 50000, 3004, chunk) == chunk
+    assert front_body_bytes(3000, 50000, 40000, chunk) == 40000
+    assert front_body_bytes(20000, 50000, 20010, chunk) == 2 * chunk
+    assert front_body_bytes(20000, 20100, 20010, chunk) == 20100
+    for args in [(0, 10, 5), (6, 10, 5), (1, 10, 11)]:
+        with pytest.raises(ValueError):
+            front_body_bytes(*args, chunk)

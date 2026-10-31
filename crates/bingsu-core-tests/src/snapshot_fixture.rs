@@ -9,7 +9,12 @@ use bingsu_core::{
     },
     diag::SourceId,
     handoff::Permit,
-    snapshot::{Identity, Marker, Sequence, Snapshot, encode_metadata},
+    layout_view::FrontConfig,
+    snapshot::{
+        FrontDecoder, FrontSnapshot, HEADER, Identity, Marker, PREFIX, Sequence, Snapshot,
+        encode_metadata, lengths,
+    },
+    snapshot_codec::{self, Error},
 };
 struct NoFiles;
 impl Resolver for NoFiles {
@@ -145,4 +150,33 @@ pub fn bytes() -> Vec<u8> {
         .encode(),
     );
     b
+}
+/// The front's decode of a compiled section, CRCs included (the frame checksum
+/// is not part of it).
+pub fn front_compiled(b: &[u8], width: u16) -> Result<FrontConfig, Error> {
+    let front = snapshot_codec::front_len(b, b.len())?;
+    let plan = snapshot_codec::plan_front(&b[..front], b.len(), width)?;
+    let end = plan.offset + plan.len;
+    let variant = b.get(plan.offset..end).ok_or(Error::Short)?;
+    snapshot_codec::finish_front(plan, variant)
+}
+/// Where the variant selected at `width` ends in a well-formed file.
+pub fn selected_end(wire: &[u8], width: u16) -> usize {
+    let (c, _) = lengths(wire).unwrap();
+    let compiled = &wire[HEADER + PREFIX..HEADER + PREFIX + c];
+    let front = snapshot_codec::front_len(compiled, c).unwrap();
+    let plan = snapshot_codec::plan_front(&compiled[..front], c, width).unwrap();
+    HEADER + PREFIX + plan.offset + plan.len
+}
+/// `FrontDecoder` over a whole file, `chunk` bytes per read at most, as the
+/// prompt drives it. Returns the snapshot and the bytes it asked to read.
+pub fn front_read(wire: &[u8], width: u16, chunk: usize) -> Result<(FrontSnapshot, usize), Error> {
+    let mut decoder = FrontDecoder::new(wire.len() as u64, width)?;
+    let mut offset = 0;
+    while decoder.read_len() != 0 {
+        let end = offset + decoder.read_len().min(chunk);
+        decoder.push(wire.get(offset..end).ok_or(Error::Short)?)?;
+        offset = end;
+    }
+    Ok((decoder.finish()?, offset))
 }

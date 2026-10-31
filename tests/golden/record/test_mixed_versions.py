@@ -1,6 +1,7 @@
 """Version mixing (record change plan 12, security impact): the B1 reader of
 M1 (count 7, kept in legacy/ as a fixture) with a new record, and the new
-reader with an old record, both fail and leave the field array empty."""
+reader with an old record, both fail and leave the field array empty. Snapshot
+frames: both sides refuse the other's file and the helper regenerates it."""
 import os
 import pathlib
 import subprocess
@@ -45,3 +46,34 @@ def test_mixed_versions_fail_closed(shell, tmp_path):
     assert frame(shell, legacy, NEW, tmp_path) == "reject 0"
     assert frame(shell, run.READER[shell], NEW, tmp_path) == "accept 10"
     assert frame(shell, run.READER[shell], OLD, tmp_path) == "reject 0"
+
+
+# Frame version 2 starts with these bytes; its header check compares them whole.
+OLD_FRAME = b"BNGSNP02\x02\0\x40\0"
+OLD_PREFIX = b"BNGCMP02\x02\0\x80\0"
+
+
+# 이것을 실패시키는 것: 새 파일이 옛 머리 비교를 통과하는 것(버전을 올리지 않는 것), 도우미가 옛 형식을 그대로
+# 두거나 복사해 last-good을 오염시키는 것, 앞단이 옛 파일을 그려 재생성 없이 끝나는 것.
+def test_old_and_new_snapshot_frames_refuse_each_other(tmp_path):
+    from snapshot_support import SnapshotSession
+    session = SnapshotSession(tmp_path)
+    session.put("[style]\ntemplate='NEWFRAME {char}'\n")
+    session.init()
+    session.await_text("NEWFRAME")
+    session.wait_quiet()
+    store = session.store()
+    wire = bytearray((store / "snapshot").read_bytes())
+    assert wire[:12] != OLD_FRAME and wire[64:76] != OLD_PREFIX
+    assert wire[:8] == b"BNGSNP03" and wire[8:10] == b"\x03\0"
+    wire[:12] = OLD_FRAME
+    wire[64:76] = OLD_PREFIX
+    for name in ("snapshot", "last-good"):
+        (store / name).write_bytes(wire)
+    record = session.prompt()
+    assert b"NEWFRAME" not in record and b"!" in record, record
+    session.wait_quiet()
+    assert b"NEWFRAME" in session.await_text("NEWFRAME")
+    session.wait_quiet()
+    for name in ("snapshot", "last-good"):
+        assert (store / name).read_bytes()[:8] == b"BNGSNP03", name

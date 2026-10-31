@@ -22,6 +22,18 @@ fn native_snapshot_golden() {
     let b = s.encode(1, 0).unwrap();
     assert_eq!(Snapshot::decode(&b).unwrap(), s);
 }
+// 이것을 실패시키는 것: 머리 검사를 옛 매직·버전으로 되돌리는 것(옛 파일을 고쳐 읽게 된다).
+#[test]
+fn frame_version_2_is_refused_at_the_header() {
+    let old = include_bytes!("../../../tests/golden/snapshot/fixture-v2.bin");
+    assert_eq!(&old[..12], b"BNGSNP02\x02\0\x40\0");
+    let le32 = |at: usize| u32::from_le_bytes(old[at..at + 4].try_into().unwrap()) as usize;
+    let frame = &old[..HEADER + PREFIX + le32(76) + le32(80)];
+    let mut decoder = FrontDecoder::new(frame.len() as u64, 80).unwrap();
+    assert_eq!(decoder.read_len(), HEADER);
+    assert_eq!(decoder.push(&frame[..HEADER]), Err(Error::Tag));
+    assert_eq!(Snapshot::decode(frame), Err(Error::Tag));
+}
 // 이것을 실패시키는 것: CompiledConfig 필드·팔레트·템플릿·아이콘·폭 설정을 누락하거나 바꾸는 것.
 #[test]
 fn full_config_roundtrip_preserves_render_bytes() {

@@ -1,9 +1,13 @@
 //! K63: the prompt front materializes only the variant its width selects.
-//! The selected path must draw, collect and reject exactly as the whole
-//! decode does, and allocate nothing for the variants it did not select.
+//! The selected path must draw and collect as the whole decode does, accept
+//! whatever the whole decode accepts, and allocate nothing for the variants it
+//! did not select. The whole decode alone sees the rest of the file.
 #[path = "support/allocation.rs"]
 mod allocation;
+#[path = "support/sections.rs"]
+mod sections;
 use allocation::{Counting, counted};
+use sections::{P, Sections, assemble, names_block, reframe};
 
 use bingsu_core::{
     bands::{Band, order_bands},
@@ -14,8 +18,8 @@ use bingsu_core::{
     field::BUILTIN,
     front,
     layout_view::{FrontConfig, LayoutView},
-    snapshot::{Identity, Snapshot, encode_metadata},
-    snapshot_codec::{Error, decode_compiled, encode_compiled, scan_compiled},
+    snapshot::{Identity, READ_CHUNK, Snapshot, encode_metadata},
+    snapshot_codec::{Error, HEAD, decode_compiled, encode_compiled},
     status::Status,
     template::compile::compile,
 };
@@ -112,7 +116,20 @@ fn record<L: LayoutView>(config: &L, args: &[Vec<u8>], status: Status, mode: Mod
 
 /// The front's decode of `c` at `width`, through the snapshot frame.
 fn front_decode(c: &CompiledConfig, width: u16) -> FrontConfig {
-    let s = Snapshot {
+    let b = wire(c);
+    let end = b.len() - META;
+    Snapshot::decode_front(&b[..end], b.len(), width)
+        .unwrap()
+        .config
+}
+
+/// Length of `encode_metadata(b"m")`.
+const META: usize = 21;
+
+fn wire(c: &CompiledConfig) -> Vec<u8> {
+    let metadata = encode_metadata(b"m").unwrap();
+    assert_eq!(metadata.len(), META);
+    Snapshot {
         id: Identity {
             boot: [1; 16],
             epoch: [2; 16],
@@ -121,13 +138,10 @@ fn front_decode(c: &CompiledConfig, width: u16) -> FrontConfig {
             source: [4; 4],
         },
         config: c.clone(),
-        metadata: encode_metadata(b"m").unwrap(),
-    };
-    let b = s.encode(1, 0).unwrap();
-    let end = b.len() - s.metadata.len();
-    Snapshot::decode_front(&b[..end], b.len(), width)
-        .unwrap()
-        .config
+        metadata,
+    }
+    .encode(1, 0)
+    .unwrap()
 }
 
 fn widths(c: &CompiledConfig) -> Vec<u16> {
@@ -273,9 +287,9 @@ fn variant(lines: &[&[u8]]) -> Vec<u8> {
     v
 }
 
-/// Header and every field after the variants, from a real one-band config
-/// whose two variants are `X_LINE`. The asserts pin the layout used here.
-fn frame() -> (Vec<u8>, Vec<u8>) {
+/// A real one-band config (band "wide", 100 and up) whose two variants are
+/// `X_LINE`, and its compiled section. The asserts pin the layout used here.
+fn one_band() -> (Vec<u8>, Vec<u8>) {
     let mut c = fixture::compile("");
     c.bands = vec![Band {
         min_cols: Some(100),
@@ -287,56 +301,47 @@ fn frame() -> (Vec<u8>, Vec<u8>) {
     c.widths.clear();
     c.variants = vec![compile("x", BUILTIN).unwrap(); 2];
     let b = encode_compiled(&c).unwrap();
-    let head = b[..12].to_vec();
-    assert_eq!(&head[..8], b"BNGCFG03");
+    assert_eq!(&b[..8], b"BNGCFG04");
+    let s = Sections::of(&b);
     let x = variant(&[&X_LINE]);
-    assert_eq!(b[12..16], u32le(2));
-    assert_eq!(b[16..16 + x.len()], x[..]);
-    assert_eq!(b[16 + x.len()..16 + 2 * x.len()], x[..]);
-    let rest = b[16 + 2 * x.len()..].to_vec();
-    // One band (100.., no order), then the names: one, "wide".
     assert_eq!(
-        rest[..21],
-        [
-            1, 0, 0, 0, 1, 100, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, b'w', b'i', b'd', b'e'
-        ]
+        (s.count, s.variant(&b, 0), s.variant(&b, 1)),
+        (2, &x[..], &x[..])
     );
-    (head, rest)
+    (wire(&c), b)
 }
 
-/// `config_bytes` of two `X_LINE` variants with `n` band names "a".
-fn with_names(n: usize) -> Vec<u8> {
-    let (head, rest) = frame();
-    let x = variant(&[&X_LINE]);
-    let mut b = head;
-    b.extend(u32le(2));
-    b.extend(&x);
-    b.extend(&x);
-    b.extend(&rest[..9]);
-    b.extend(u32le(n));
-    for _ in 0..n {
-        b.extend([1, 0, 0, 0, b'a']);
+/// The one-band file with its variants and names replaced.
+fn file(variants: &[Vec<u8>], names: &[u8]) -> Vec<u8> {
+    let (wire, c) = one_band();
+    let s = Sections::of(&c);
+    reframe(&wire, &assemble(&c, &c[HEAD..s.index], variants, names))
+}
+
+fn whole(wire: &[u8]) -> Result<(), Error> {
+    Snapshot::decode(wire).map(drop)
+}
+
+fn front(wire: &[u8], width: u16) -> Result<FrontConfig, Error> {
+    fixture::front_read(wire, width, READ_CHUNK).map(|(s, _)| s.config)
+}
+
+/// The direction the front's smaller check set has to keep: whatever the whole
+/// decode accepts, the front accepts at `width` through every read size, and
+/// gives what the whole config selects there.
+fn implies_front(wire: &[u8], width: u16) {
+    let Ok(s) = Snapshot::decode(wire) else {
+        return;
+    };
+    let want = FrontConfig::from_compiled(s.config, width);
+    for chunk in [1, 13, 4097, READ_CHUNK] {
+        // One-byte reads are only worth their cost on small files.
+        if chunk > 1 || wire.len() < 8 * 1024 {
+            let (got, _) = fixture::front_read(wire, width, chunk)
+                .unwrap_or_else(|e| panic!("width {width} chunk {chunk}: {e:?}"));
+            assert_eq!(got.config, want, "width {width} chunk {chunk}");
+        }
     }
-    b.extend(&rest[21..]);
-    b
-}
-
-fn config_bytes(variants: &[Vec<u8>]) -> Vec<u8> {
-    let (head, rest) = frame();
-    let mut b = head;
-    b.extend(u32le(variants.len()));
-    for v in variants {
-        b.extend(v);
-    }
-    b.extend(rest);
-    b
-}
-
-fn same_verdict(bytes: &[u8], what: &str) -> Result<(), Error> {
-    let full = decode_compiled(bytes).map(drop);
-    let scan = scan_compiled(bytes).map(drop);
-    assert_eq!(scan, full, "{what}");
-    full
 }
 
 /// A line with `n` nodes of tag `tag` and nothing after them.
@@ -346,16 +351,8 @@ fn nodes(n: usize, tag: u8) -> Vec<u8> {
     l
 }
 
-// 이것을 실패시키는 것: scan이 선택하지 않을 variant의 길이 검사·할당 예산 charge·줄 검사(N1)·UTF-8
-// 검사·줄 수 검사를 건너뛰는 것, Trailing·머리 검사를 빠뜨리는 것, 오류 종류를 바꾸는 것.
-#[test]
-fn scan_rejects_exactly_what_full_decode_rejects() {
-    let x = variant(&[&X_LINE]);
-    assert_eq!(
-        same_verdict(&config_bytes(&[x.clone(), x.clone()]), "valid"),
-        Ok(())
-    );
-    // The unselected variant (index 1 at width 80) carries each fault.
+/// Faults a variant can carry, with the error decoding it gives.
+fn variant_faults() -> Vec<(Vec<u8>, Error)> {
     let mut control = X_LINE;
     control[9] = 0x07;
     let mut utf8 = X_LINE;
@@ -373,7 +370,9 @@ fn scan_rejects_exactly_what_full_decode_rejects() {
         l.push(0);
         l
     };
-    let cases: Vec<(Vec<u8>, Error)> = vec![
+    let mut trailing = variant(&[&X_LINE]);
+    trailing.push(0);
+    vec![
         (variant(&[]), Error::Shape),
         (variant(&[&X_LINE, &X_LINE, &X_LINE]), Error::Shape),
         (variant(&[&control]), Error::Shape),
@@ -385,47 +384,92 @@ fn scan_rejects_exactly_what_full_decode_rejects() {
         // A node count past the bytes left.
         (variant(&[&u32le(1 << 30)]), Error::Limit),
         (variant(&[&nodes(3, 12)]), Error::Tag),
-    ];
-    for (i, (bad, error)) in cases.into_iter().enumerate() {
-        let what = format!("case {i}");
-        assert_eq!(
-            same_verdict(&config_bytes(&[x.clone(), bad]), &what),
-            Err(error),
-            "{what}"
+        (trailing, Error::Trailing),
+    ]
+}
+
+// 이것을 실패시키는 것: 고른 variant의 CRC 뒤 줄 수·줄 검사(N1)·UTF-8·Trailing 검사를 빼는 것, 도우미가 안
+// 고른 variant를 건너뛰는 것, 앞단이 고르지 않은 variant를 해석해 폭과 무관한 거부로 만드는 것.
+#[test]
+fn a_fault_reaches_the_front_only_in_the_selected_variant() {
+    let x = variant(&[&X_LINE]);
+    let name = names_block(&["wide"]);
+    assert_eq!(whole(&file(&[x.clone(), x.clone()], &name)), Ok(()));
+    for (i, (bad, error)) in variant_faults().into_iter().enumerate() {
+        // Width 80 selects the default variant, 120 the band's.
+        for (faulty, clean, variants) in [
+            (120, 80, [x.clone(), bad.clone()]),
+            (80, 120, [bad.clone(), x.clone()]),
+        ] {
+            let b = file(&variants, &name);
+            assert_eq!(whole(&b), Err(error), "case {i}");
+            assert_eq!(front(&b, faulty), Err(error), "case {i} selected");
+            assert!(front(&b, clean).is_ok(), "case {i} unselected");
+        }
+    }
+}
+
+// 이것을 실패시키는 것: 앞단이 공통부·색인의 개수 대조를 빼는 것, 도우미가 공통부의 이름 개수와 이름 구획을
+// 대조하지 않는 것(앞단만 거부해 "도우미 통과 ⇒ 앞단 통과"가 깨진다), 이름 구획의 개수·Trailing을 보지 않는 것.
+#[test]
+fn counts_names_and_cap_are_checked_where_their_bytes_are() {
+    let x = variant(&[&X_LINE]);
+    let name = names_block(&["wide"]);
+    // More variants than bands + 1 is in the front's reach.
+    let b = file(&vec![x.clone(); 3], &name);
+    assert_eq!(
+        (whole(&b), front(&b, 80).err()),
+        (Err(Error::Shape), Some(Error::Shape))
+    );
+    // Past what any index can name, before any entry is read.
+    let b = file(&vec![x.clone(); 5000], &name);
+    assert_eq!(
+        (whole(&b), front(&b, 80).err()),
+        (Err(Error::Limit), Some(Error::Limit))
+    );
+    // COMMON's name count disagrees with the bands.
+    let (wire, c) = one_band();
+    let s = Sections::of(&c);
+    let mut common = c[HEAD..s.index].to_vec();
+    let at = common.len() - 12;
+    common[at..at + 4].copy_from_slice(&u32le(2));
+    let b = reframe(
+        &wire,
+        &assemble(&c, &common, &[x.clone(), x.clone()], &name),
+    );
+    assert_eq!(
+        (whole(&b), front(&b, 80).err()),
+        (Err(Error::Shape), Some(Error::Shape))
+    );
+    // What only the name block shows belongs to the helper, as the band-name
+    // references do; the front neither reads nor needs it.
+    let mut padded = name.clone();
+    padded.push(0);
+    for (names, error) in [
+        (names_block(&["wide", "tall"]), Error::Shape),
+        (names_block(&["a"; 5000]), Error::Shape),
+        (padded, Error::Trailing),
+    ] {
+        let b = file(&[x.clone(), x.clone()], &names);
+        assert_eq!(whole(&b), Err(error));
+        assert!(front(&b, 80).is_ok());
+    }
+    // Past the 16 MiB section cap, before any read.
+    let mut big = encode_compiled(&fixture::config()).unwrap();
+    big.resize(16 * 1024 * 1024 + 1, 0);
+    assert_eq!(decode_compiled(&big), Err(Error::Limit));
+    // A section cut anywhere, through the compiled-level API and the frame.
+    let c = encode_compiled(&fixture::config()).unwrap();
+    for end in 0..c.len() {
+        assert!(decode_compiled(&c[..end]).is_err(), "cut {end}");
+        assert!(
+            fixture::front_compiled(&c[..end], 120).is_err(),
+            "cut {end}"
         );
     }
-    // More variants than bands + 1, and past the 4,097 offsets the scan keeps.
-    assert_eq!(
-        same_verdict(&config_bytes(&vec![x.clone(); 3]), "3 variants"),
-        Err(Error::Shape)
-    );
-    assert_eq!(
-        same_verdict(&config_bytes(&vec![x.clone(); 5000]), "5000 variants"),
-        Err(Error::Shape)
-    );
-    assert_eq!(
-        same_verdict(&with_names(2), "two names, one band"),
-        Err(Error::Shape)
-    );
-    assert_eq!(
-        same_verdict(&with_names(5000), "5000 names"),
-        Err(Error::Shape)
-    );
-    // 3M variants: 3 MB of wire, past the 64 MiB charge for the variant table.
-    let (head, _) = frame();
-    let mut table = head;
-    table.extend(u32le(3_000_000));
-    table.resize(table.len() + 3_000_000, 0);
-    assert_eq!(same_verdict(&table, "variant table"), Err(Error::Limit));
-    // Past the 16 MiB section cap, before any read.
-    let mut big = config_bytes(&[x.clone(), x.clone()]);
-    big.resize(16 * 1024 * 1024 + 1, 0);
-    assert_eq!(same_verdict(&big, "size cap"), Err(Error::Limit));
-    let mut trailing = config_bytes(&[x.clone(), x.clone()]);
-    trailing.push(0);
-    assert_eq!(same_verdict(&trailing, "trailing"), Err(Error::Trailing));
+}
 
-    // Every truncation and one bit flip per byte of real configs.
+fn wide_config() -> CompiledConfig {
     let mut wide = banded(
         &(0..16)
             .map(|i| Band {
@@ -446,23 +490,123 @@ fn scan_rejects_exactly_what_full_decode_rejects() {
             }
         }
     }
-    for c in [fixture::config(), wide] {
-        let b = encode_compiled(&c).unwrap();
-        for end in 0..b.len() {
-            assert!(same_verdict(&b[..end], &format!("cut {end}")).is_err());
-        }
-        for at in 0..b.len() {
-            for bit in [0x01, 0x80] {
-                let mut x = b.clone();
-                x[at] ^= bit;
-                let _ = same_verdict(&x, &format!("flip {at} {bit:#x}"));
+    wide
+}
+
+// 이것을 실패시키는 것: 머리 체크섬이 공통부·색인 일부를 덮지 않는 것, 변종 CRC·이름 CRC 비교를 빼는 것,
+// 앞단이 고르지 않은 variant·이름을 읽어 거부하는 것, 도우미가 구획 하나의 CRC를 건너뛰는 것.
+#[test]
+fn a_bit_flip_stops_whole_decode_and_the_front_exactly_where_it_reads() {
+    for c in [fixture::config(), wide_config()] {
+        let b = wire(&c);
+        let end = b.len() - META;
+        for width in [15u16, 120] {
+            let good = front(&b, width).unwrap();
+            let selected = fixture::selected_end(&b, width);
+            let first = selected - good_variant_len(&b, width);
+            let covered = |at: usize| {
+                let s = Sections::of(&b[P..end]);
+                at < P + s.front || (first..selected).contains(&at)
+            };
+            for at in 0..end {
+                for bit in [0x01, 0x80] {
+                    let mut x = b.clone();
+                    x[at] ^= bit;
+                    assert!(whole(&x).is_err(), "flip {at} {bit:#x}");
+                    match front(&x, width) {
+                        Ok(got) => {
+                            assert!(!covered(at), "front took {at} {bit:#x}");
+                            assert_eq!(got, good, "flip {at} {bit:#x}");
+                        }
+                        Err(_) => assert!(covered(at), "front refused {at} {bit:#x}"),
+                    }
+                }
             }
         }
     }
 }
 
-// 이것을 실패시키는 것: select가 모든 variant를 materialize한 뒤 고른 것만 남기는 것, scan이 variant·
-// band 이름을 복사하는 것, 남기는 offset·이름 수의 상한을 없애는 것(4,097을 넘는 variant 수에서 재할당).
+fn good_variant_len(b: &[u8], width: u16) -> usize {
+    let (c, _) = bingsu_core::snapshot::lengths(b).unwrap();
+    let compiled = &b[P..P + c];
+    let s = Sections::of(compiled);
+    let end = fixture::selected_end(b, width) - P;
+    (0..s.count)
+        .map(|i| s.variant(compiled, i))
+        .find(|v| v.as_ptr_range().end == compiled[end..].as_ptr())
+        .unwrap()
+        .len()
+}
+
+// 이것을 실패시키는 것: 이름 CRC 비교를 빼는 것(공통부에 저장한 값과 구획을 대조하지 않으면 유효한 UTF-8·
+// 고유 이름으로 바뀐 뒤집기를 도우미가 받아 last-good으로 복사된다).
+#[test]
+fn every_bit_of_the_name_block_stops_the_whole_decode() {
+    let b = wire(&wide_config());
+    let (c, _) = bingsu_core::snapshot::lengths(&b).unwrap();
+    let names = P + Sections::of(&b[P..P + c]).names;
+    assert!(P + c - names > 16);
+    for at in names..P + c {
+        for bit in 0..8 {
+            let mut x = b.clone();
+            x[at] ^= 1 << bit;
+            assert!(whole(&x).is_err(), "{at} bit {bit}");
+            assert!(front(&x, 15).is_ok(), "{at} bit {bit}");
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+
+    // 이것을 실패시키는 것: 앞단이 도우미에 없는 조건으로 거부하는 것(폭·색인 값으로 거부), 앞단 예산이
+    // 도우미보다 작아지는 것, 청크 경계에서 구획을 잘못 나누는 것, 다른 variant를 고르는 것.
+    #[test]
+    fn whole_decode_accepting_implies_the_front_at_every_width(
+        bands in prop::collection::vec(band(), 0..6),
+        default in 0..TEMPLATES.len(),
+        templates in prop::collection::vec(0..TEMPLATES.len(), 6),
+        names in prop::collection::vec("[a-z]{1,3}", 6),
+        flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..3),
+    ) {
+        let Some(mut c) = banded(&bands, default, &templates[..bands.len()]) else {
+            return Err(TestCaseError::reject("bands do not order"));
+        };
+        for (i, name) in c.band_names.iter_mut().enumerate() {
+            *name = format!("{}{i}", names[i]);
+        }
+        let mut b = wire(&c);
+        let end = b.len() - META;
+        // Flips resealed: a damaged file whose frame checksum still matches.
+        let front_end = P + Sections::of(&b[P..end]).front;
+        for (at, xor) in flips {
+            b[P + HEAD + at.index(front_end - P - HEAD)] ^= xor;
+        }
+        sections::resign(&mut b, front_end - P);
+        for width in widths(&c) {
+            implies_front(&b, width);
+        }
+    }
+}
+
+// 이것을 실패시키는 것: 앞단이 특정 폭에서만 다른 variant를 고르거나 거부하는 것(경곗값 표본을 벗어난 폭).
+#[test]
+fn whole_decode_accepting_implies_the_front_at_every_u16_width() {
+    let c = wide_config();
+    let b = wire(&c);
+    let full = Snapshot::decode(&b).unwrap().config;
+    for width in 0..=u16::MAX {
+        let got = front(&b, width).unwrap();
+        assert_eq!(
+            got,
+            FrontConfig::from_compiled(full.clone(), width),
+            "{width}"
+        );
+    }
+}
+
+// 이것을 실패시키는 것: 앞단이 고르지 않은 variant·이름을 복사하는 것, 색인이 고른 variant 크기에 비례하지
+// 않는 버퍼를 잡는 것, 머리 거부 전에 색인을 할당하는 것.
 #[test]
 fn selected_band_allocates_only_selected_variant() {
     let bands = |n: u16| -> Vec<Band> {
@@ -483,7 +627,7 @@ fn selected_band_allocates_only_selected_variant() {
     let (small, large) = (config(2), config(64));
     let front = |b: &[u8]| {
         let mut out = None;
-        let counts = counted(|| out = Some(scan_compiled(b).unwrap().select(15).unwrap()));
+        let counts = counted(|| out = Some(fixture::front_compiled(b, 15).unwrap()));
         assert_eq!(out.unwrap().band(), Some(1));
         counts
     };
@@ -491,24 +635,117 @@ fn selected_band_allocates_only_selected_variant() {
     let (fs, fl) = (front(&small), front(&large));
     let (ds, dl) = (full(&small), full(&large));
     // The whole decode allocates at least three times per unselected variant
-    // (lines, nodes, spans). What the front adds per band is the name
-    // uniqueness set (one node per several names, as in the whole decode).
+    // (lines, nodes, spans). The front allocates the same for any band count.
     assert!(dl.0 > ds.0 + 62 * 3, "full {ds:?} {dl:?}");
-    assert!(fl.0 <= fs.0 + 62 / 4, "front {fs:?} {fl:?}");
+    assert_eq!(fl.0, fs.0, "front {fs:?} {fl:?}");
     assert_eq!((fs.1, fl.1), (0, 0));
-    // Per band: the band, its order entry, its offset, its name reference and
-    // its share of the set, not a variant.
+    // Per band: the band and its order entry, not a variant.
     assert!(fl.2 <= fs.2 + 62 * 128, "front peak {fs:?} {fl:?}");
 
-    // Past the kept offsets and names the scan still reads, never grows.
+    // A variant count past any index stops at HEAD.
     let x = variant(&[&X_LINE]);
-    let many = config_bytes(&vec![x; 5000]);
-    let (_, reallocs, peak) = counted(|| assert!(scan_compiled(&many).is_err()));
+    let many = file(&vec![x; 5000], &names_block(&["wide"]));
+    let (_, reallocs, peak) = counted(|| assert!(front_err(&many)));
     assert_eq!(reallocs, 0);
     assert!(peak < 64 * 1024, "{peak}");
-    assert!(scan_compiled(&with_names(1)).is_ok());
-    let names = with_names(5000);
-    let (_, reallocs, peak) = counted(|| assert!(scan_compiled(&names).is_err()));
-    assert_eq!(reallocs, 0);
-    assert!(peak < 128 * 1024, "{peak}");
+}
+
+fn front_err(wire: &[u8]) -> bool {
+    fixture::front_read(wire, 80, READ_CHUNK).is_err()
+}
+
+const MAX_ALLOC: usize = 64 * 1024 * 1024;
+
+/// One line of `n` one-byte StyleEnd nodes, no spans, no fill: it charges
+/// `n * size_of::<Node>()` and then fails `from_snapshot`.
+fn charged_line(n: usize) -> Vec<u8> {
+    let mut l = nodes(n, 9);
+    l.extend([0; 5]);
+    l
+}
+
+// 이것을 실패시키는 것: 공통부 뒤 예산을 MAX_ALLOC으로 되돌리는 것(앞단 variant, 도우미 variant·이름이 각자
+// 새 상한을 갖게 되는 것), variant 표의 charge를 빼는 것.
+#[test]
+fn the_section_has_one_allocation_budget() {
+    let (wire, c) = one_band();
+    let s = Sections::of(&c);
+    let (node, line) = (size_of::<bingsu_core::template::compile::Node>(), 96);
+    // COMMON's widths take most of the budget, the selected variant the rest
+    // and more: either alone fits 64 MiB, together they do not.
+    let run = size_of::<bingsu_core::diag_widths::WidthRun>();
+    let runs = (MAX_ALLOC - 2 * 1024 * 1024) / run;
+    let widths_at = s.index - HEAD - 16;
+    let common = &c[HEAD..s.index];
+    assert_eq!(
+        common[widths_at..widths_at + 4],
+        [0; 4],
+        "empty widths last"
+    );
+    let mut forged = common[..widths_at].to_vec();
+    forged.extend(u32le(runs));
+    forged.resize(forged.len() + runs * 5, 0);
+    forged.extend(&common[widths_at + 4..]);
+    let nn = (MAX_ALLOC - line) / node - 8;
+    let v = variant(&[&charged_line(nn)]);
+    let name = names_block(&["wide"]);
+    let b = reframe(&wire, &assemble(&c, &forged, &[v.clone(), v], &name));
+    let mut got = None;
+    let (_, _, peak) = counted(|| got = Some(front(&b, 80).err()));
+    assert_eq!(got, Some(Some(Error::Limit)));
+    assert!(peak <= MAX_ALLOC + b.len(), "front peak {peak}");
+
+    // 4,096 bands whose variants fit the wire but not, together, the budget:
+    // each is `k` empty lines.
+    let n = bingsu_core::bands::MAX_BANDS;
+    let bands: Vec<Band> = (0..n as u32)
+        .map(|i| Band {
+            min_cols: Some(i as u16),
+            max_cols: Some(i as u16),
+            order: None,
+        })
+        .collect();
+    let base = banded(&bands, 2, &vec![2; n]).unwrap();
+    let w = self::wire(&base);
+    let (cl, _) = bingsu_core::snapshot::lengths(&w).unwrap();
+    let c = &w[P..P + cl];
+    let s = Sections::of(c);
+    let empty_line = [0u8; 9];
+    let k = 448;
+    let lines: Vec<&[u8]> = vec![&empty_line; k];
+    let v = variant(&lines);
+    assert!(v.len() * (n + 1) + s.front < 16 * 1024 * 1024);
+    let b = reframe(
+        &w,
+        &assemble(c, &c[HEAD..s.index], &vec![v; n + 1], &c[s.names..]),
+    );
+    let mut got = None;
+    let (_, _, peak) = counted(|| got = Some(whole(&b)));
+    assert_eq!(got, Some(Err(Error::Limit)));
+    assert!(peak <= MAX_ALLOC + b.len(), "helper peak {peak}");
+}
+
+// 이것을 실패시키는 것: 색인 뒤 읽기 한도를 고른 variant 끝으로 줄이지 않는 것, 한도가 metadata까지 넘는 것.
+#[test]
+fn reads_end_at_the_selected_variant() {
+    let n = bingsu_core::bands::MAX_BANDS;
+    let bands: Vec<Band> = (0..n as u32)
+        .map(|i| Band {
+            min_cols: Some((i * 16) as u16),
+            max_cols: Some((i * 16 + 15) as u16),
+            order: None,
+        })
+        .collect();
+    let c = banded(&bands, 2, &vec![2; n]).unwrap();
+    let b = wire(&c);
+    let (cl, _) = bingsu_core::snapshot::lengths(&b).unwrap();
+    let front_end = P + Sections::of(&b[P..P + cl]).front;
+    for width in [0, 16, 2000, 40_000, u16::MAX] {
+        let (_, read) = fixture::front_read(&b, width, READ_CHUNK).unwrap();
+        let selected = fixture::selected_end(&b, width);
+        // Chunks count from the compiled section's start.
+        let chunks = (front_end - P).next_multiple_of(READ_CHUNK);
+        assert_eq!(read, selected.max(P + chunks.min(cl)), "{width}");
+        assert!(read <= P + cl);
+    }
 }

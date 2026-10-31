@@ -164,17 +164,18 @@ mod cases {
         for i in [28, 124, 164] {
             let mut b = s.encode(1, 0).unwrap();
             b[i] ^= 0x80;
-            let sum = crc32c(&[
-                b"bingsu-snapshot-v2\0",
-                &b[..160],
-                &b[192..b.len() - s.metadata.len()],
-            ]);
-            b[160..164].copy_from_slice(&sum);
+            resign(&mut b);
             assert!(
                 Snapshot::decode_front(&b[..b.len() - s.metadata.len()], b.len(), 80).is_err(),
                 "{i}"
             );
         }
+    }
+    /// Recompute the frame checksum, as anyone who may write the file can.
+    fn resign(b: &mut [u8]) {
+        let front = snapshot_codec::front_len(&b[192..], b.len() - 192).unwrap();
+        let sum = frame_sum(b, &b[192..192 + front]);
+        b[160..164].copy_from_slice(&sum);
     }
     fn valid_header() -> Vec<u8> {
         let (id, _, _) = fixture();
@@ -240,8 +241,8 @@ mod cases {
     #[test]
     fn wire_reject_file_capacity() {
         let cap = (HEADER + PREFIX + COMPILED_MAX + META_MAX) as u64;
-        assert!(FrontDecoder::new(cap).is_ok());
-        assert!(matches!(FrontDecoder::new(cap + 1), Err(Error::Limit)));
+        assert!(FrontDecoder::new(cap, 80).is_ok());
+        assert!(matches!(FrontDecoder::new(cap + 1, 80), Err(Error::Limit)));
     }
 
     fn fixture() -> (Identity, Marker, Clock) {
@@ -394,13 +395,21 @@ mod cases {
                 152,
                 160,
                 192,
-                front.len() - 1,
+                selected_end(&s, 80) - 1,
             ] {
                 let mut x = front.to_vec();
                 x[i] ^= 0x80;
                 assert!(Snapshot::decode_front(&x, b.len(), 80).is_err(), "{i}");
             }
         }
+    }
+
+    /// Where the variant selected at `width` ends in the file.
+    fn selected_end(s: &Snapshot, width: u16) -> usize {
+        let b = snapshot_codec::encode_compiled(&s.config).unwrap();
+        let front = snapshot_codec::front_len(&b, b.len()).unwrap();
+        let plan = snapshot_codec::plan_front(&b[..front], b.len(), width).unwrap();
+        HEADER + PREFIX + plan.offset + plan.len
     }
 
     // 이것을 실패시키는 것: fact schema 저장·읽기 검사를 빼거나 구 codec의 field index를 허용하는 것.
@@ -415,7 +424,7 @@ mod cases {
         let original = snapshot_codec::encode_compiled(&config).unwrap();
         // 이것을 실패시키는 것: 크기 사전 계산에서 schema bytes를 빼 재할당하게 만드는 것.
         assert_eq!(original.capacity(), original.len());
-        assert_eq!(&original[..12], b"BNGCFG03\x03\0\x02\0");
+        assert_eq!(&original[..12], b"BNGCFG04\x04\0\x02\0");
         assert_eq!(snapshot_codec::decode_compiled(&original), Ok(config));
         for version in [0u16, 1, 3, u16::MAX] {
             let mut bytes = original.clone();
@@ -450,13 +459,14 @@ mod cases {
         let original = s.encode(1, 0).unwrap();
         assert_eq!(Snapshot::decode(&original).unwrap(), s);
         let end = original.len() - s.metadata.len();
+        let front = snapshot_codec::front_len(&original[192..], end - 192).unwrap();
         for at in [
             0, 8, 10, 12, 13, 28, 56, 60, 64, 72, 74, 76, 80, 84, 85, 124, 164, 192, 200,
         ] {
             let mut b = original.clone();
             b[at] ^= 0x80;
-            let crc = crc32c(&[b"bingsu-snapshot-v2\0", &b[..160], &b[192..end]]);
-            b[160..164].copy_from_slice(&crc);
+            let sum = frame_sum(&b, &b[192..192 + front]);
+            b[160..164].copy_from_slice(&sum);
             assert!(
                 Snapshot::decode_front(&b[..end], b.len(), 80).is_err(),
                 "{at}"
@@ -470,12 +480,12 @@ mod cases {
         let c = end - HEADER - PREFIX + 1;
         short[76..80].copy_from_slice(&(c as u32).to_le_bytes());
         short[60..64].copy_from_slice(&((PREFIX + c) as u32).to_le_bytes());
-        let sum = crc32c(&[b"bingsu-snapshot-v2\0", &short[..160], &short[192..end]]);
+        let sum = frame_sum(&short, &short[192..192 + front]);
         short[160..164].copy_from_slice(&sum);
         assert!(Snapshot::decode_front(&short[..end], short.len() + 1, 80).is_err());
         let mut changed = original.clone();
         changed[12] ^= 1;
-        let sum = crc32c(&[b"bingsu-snapshot-v2\0", &changed[..160], &changed[192..end]]);
+        let sum = frame_sum(&changed, &changed[192..192 + front]);
         changed[160..164].copy_from_slice(&sum);
         assert!(Snapshot::decode_front(&changed[..end], changed.len(), 80).is_err());
         assert!(Snapshot::decode(&changed).is_err());
