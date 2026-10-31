@@ -855,6 +855,7 @@ impl Wire for Node {
             Self::GroupEnd => 11u8.put(o),
         }
     }
+    #[inline(always)]
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match u8::get(r)? {
             0 => Self::Text(Wire::get(r)?),
