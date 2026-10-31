@@ -2894,3 +2894,285 @@ def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
     with pytest.raises(pytest.fail.Exception, match="no attempt without a deadline in 12"):
         budget.run_allowlist(endless.capture, _judge, _shape)
     assert endless.made == budget.ALLOWLIST_ATTEMPTS == 12
+
+
+def role_judge(cap, shape=None):
+    """judge_marker_attempt without the full trace judgment: the synthetic
+    captures below carry roles and the front's proof, not a whole prompt."""
+    return budget.judge_marker_attempt(cap, shape, trace_judge=lambda cap, shape: None)
+
+
+def marker_capture(*, alarm=True, write_after=False, exit_code=0, timer=True, helper=True, collectors=1,
+                   record=b"", invalid=True, write_before=None, it_value=27108):
+    """A synthetic marker-condition capture: front 10, helper 11, collectors 13...;
+    by default a front that took its deadline after the helper spawned one collector."""
+    from types import SimpleNamespace
+    lines = ['10  execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0']
+    # write_before: a failed fd 1 write before the "timer" or before the "alarm".
+    failed_write = '10  write(1<pipe:[1]>, "B1", 2) = -1 EAGAIN (Resource temporarily unavailable)'
+    if write_before == "timer":
+        lines.append(failed_write)
+    if timer:
+        lines.append("10  setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=1000}, "
+                     f"it_value={{tv_sec=0, tv_usec={it_value}}}}}, NULL) = 0")
+    if helper:
+        lines += ["10  vfork() = 11", '11  execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0']
+        for pid in range(13, 13 + collectors):
+            lines += [f"11  vfork() = {pid}",
+                      f'{pid}  execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0']
+    if write_before == "alarm":
+        lines.append(failed_write)
+    if alarm:
+        lines.append("10  --- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL} ---")
+    if write_after:
+        lines.append('10  write(1<pipe:[1]>, "", 0) = 0')
+    lines += [f"10  exit_group({exit_code}) = ?", f"10  +++ exited with {exit_code} +++"]
+    return SimpleNamespace(trace=budget.parse_trace("\n".join(lines)), lines=lines, record=record, invalid=invalid)
+
+
+# 이것을 실패시키는 것: SIGALRM 뒤 fd 1 쓰기, 타이머 없는 SIGALRM, 0 아닌 종료, 비지 않은 stdout을 마감으로 보는 것.
+@pytest.mark.parametrize("damage", ["none", "write-after-alarm", "no-alarm", "no-timer", "exit-1", "record"])
+def test_front_deadline_exit_needs_its_proof(damage):
+    kwargs = {"none": {}, "write-after-alarm": {"write_after": True}, "no-alarm": {"alarm": False},
+              "no-timer": {"timer": False}, "exit-1": {"exit_code": 1},
+              "record": {"record": b"B1\x1f8\x1fdegraded:trust-invalid\x1e"}}[damage]
+    shape = budget.front_deadline_exit(marker_capture(**kwargs))
+    assert shape == ("front-deadline" if damage == "none" else None)
+
+
+# 이것을 실패시키는 것: 마감 시도의 판정을 건너뛰는 것, helper가 생긴 뒤의 마감으로 collector 생성을 면제하는 것.
+def test_marker_deadline_attempt_is_judged():
+    role_judge(marker_capture(), "front-deadline")
+    with pytest.raises(AssertionError, match="degraded:trust-invalid|b''"):
+        role_judge(marker_capture())
+    role_judge(marker_capture(helper=False), "front-deadline")
+    for damaged in (marker_capture(collectors=2), marker_capture(collectors=0)):
+        with pytest.raises(AssertionError):
+            role_judge(damaged, "front-deadline")
+
+
+# 이것을 실패시키는 것: 마감이 증명되지 않은 실패를 재시도하는 것, 마감 시도의 위반을 넘기는 것, 상한을 넘기는 것.
+def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
+    def run(outcomes):
+        made = []
+        def capture(attempt):
+            made.append(attempt)
+            return outcomes[attempt - 1]
+        try:
+            return budget.run_allowlist(capture, role_judge, budget.front_deadline_exit,
+                                        budget.MARKER_ATTEMPTS, label="marker invalid"), made
+        except BaseException as error:
+            error.made = made
+            raise
+    complete = marker_capture(alarm=False, record=b"B1\x1f8\x1fdegraded:trust-invalid\x1e")
+    (attempt, shapes), made = run([marker_capture(), complete])
+    assert (attempt, dict(shapes), made) == (2, {"front-deadline": 1}, [1, 2])
+    assert "marker invalid attempts: 2, deadline shapes: {'front-deadline': 1}" in capsys.readouterr().out
+    with pytest.raises(AssertionError) as plain:
+        run([marker_capture(alarm=False), complete])
+    assert plain.value.made == [1]
+    with pytest.raises(AssertionError) as violating:
+        run([marker_capture(collectors=2), complete])
+    assert violating.value.made == [1]
+    with pytest.raises(pytest.fail.Exception, match="marker invalid: no attempt without a deadline in 8") as endless:
+        run([marker_capture()] * 9)
+    assert endless.value.made == list(range(1, 9)) and budget.MARKER_ATTEMPTS == 8
+
+
+def timed_capture(after_us, *, setitimer_ret="0", write_after=False, exit_us=None, **kwargs):
+    """marker_capture(alarm=False) with -ttt times: one microsecond per line
+    from 100 s up to setitimer, and every later line `after_us` after the
+    setitimer start (so the front's last event before exit_group, the
+    proof's lower bound, is there too)."""
+    cap = marker_capture(alarm=False, write_after=write_after, **kwargs)
+    lines = [line.replace("NULL) = 0", f"NULL) = {setitimer_ret}") if "setitimer(" in line else line
+             for line in cap.lines]
+    start = 100_000_000 + next(i for i, line in enumerate(lines) if "setitimer(" in line)
+    out = []
+    for i, line in enumerate(lines):
+        pid, rest = line.split(None, 1)
+        at = start + after_us if 100_000_000 + i > start else 100_000_000 + i
+        if exit_us is not None and pid == "10" and rest.startswith(("exit_group(", "+++ ")):
+            at = start + exit_us  # only the exit itself late
+        out.append(f"{pid}  {at // 1_000_000}.{at % 1_000_000:06d} {rest}")
+    cap.lines = out
+    cap.trace = budget.parse_trace(budget.strip_trace_times("\n".join(out)))
+    return cap
+
+
+# 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것, 실패한 setitimer를 받는 것,
+# 하한으로 exit_group 줄 자신의 시각을 쓰는 것,
+# 시간 증명 뒤의 fd 1 쓰기를 받는 것.
+@pytest.mark.parametrize("case,expected", [
+    ("past", "front-deadline"), ("equal", None), ("early", None), ("setitimer-failed", None),
+    ("write-after", None), ("untimed", None), ("exit-line-late-only", None)])
+def test_front_deadline_time_proof(case, expected):
+    it_value = 27_108  # marker_capture's setitimer it_value
+    cap = {"past": lambda: timed_capture(it_value + 1), "equal": lambda: timed_capture(it_value),
+           "early": lambda: timed_capture(1_000),
+           "setitimer-failed": lambda: timed_capture(it_value + 1, setitimer_ret="-1 EINVAL (Invalid argument)"),
+           "write-after": lambda: timed_capture(it_value + 1, write_after=True),
+           "untimed": lambda: marker_capture(alarm=False),
+           "exit-line-late-only": lambda: timed_capture(1_000, exit_us=it_value + 50)}[case]()
+    assert budget.front_deadline_exit(cap) == expected
+    if case == "past":
+        role_judge(cap, expected)
+
+
+# 이것을 실패시키는 것: 다른 child_capture 시험의 strace 인자에 -ttt를 넣는 것, 시각 열을 떼며 다른 글자를 바꾸는 것,
+# 시각 열 없는 줄을 그대로 넘기는 것.
+def test_trace_times_are_stripped_before_parsing():
+    assert budget.child_strace_argv("/e", ["/bin/bingsu", "prompt"]) == [
+        "strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", "/e", "/bin/bingsu", "prompt"]
+    assert budget.child_strace_argv("/e", ["/bin/bingsu"], timestamps=True)[8:10] == ["-ttt", "-o"]
+    untimed = "\n".join(marker_capture().lines) + "\n"
+    timed = "".join(f"{line.split(None, 1)[0]}  1730265432.{i:06d} {line.split(None, 1)[1]}\n"
+                    for i, line in enumerate(untimed.splitlines()))
+    assert budget.strip_trace_times(timed) == untimed
+    assert budget.parse_trace(budget.strip_trace_times(timed)) == budget.parse_trace(untimed)
+    with pytest.raises(AssertionError, match="untimed line"):
+        budget.strip_trace_times(untimed)
+
+
+def marker_context(base):
+    """context.json of a stored helper-stage capture in `base`."""
+    return {
+        "exe": base + "/bin/bingsu", "collector_exe": "/home/tester/target/release/bingsu-collect",
+        "pinned": [base + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
+        "global_inputs": [base + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")],
+        "roots": [base + "/repo", base + "/repo/.git"], "platform": ["aarch64", "gnu"]}
+
+
+KEEP19_CONTEXT = marker_context("/home/tester/target/helper-stage-1s79310i")
+STORED_MARKER = {
+    # name: (fixture, sha256 of the decompressed trace, helper-stage base)
+    "silent-valid": ("prompt-m3d-front-silent-valid-linux.strace.gz",
+                     "2df69e32dc23f026a746b3345676839007b2b324a808cfa8254c9bd3151e023b",
+                     "/home/tester/target/helper-stage-xjvyu871"),
+    "valid": ("prompt-m3d-marker-valid-linux.strace.gz",
+              "efd968f1e793e2b4ee73b8bb29e68612503fc771f633c97f3fb3d632646cb473",
+              "/home/tester/target/helper-stage-a2jff6bi"),
+}
+RECORD = b"B1\x1f8\x1frecord\x1e"
+
+
+def stored_marker_capture(name, *, record, edit=lambda lines: lines):
+    """A stored timed valid-marker capture (provenance:
+    fixtures/prompt-m3d-front-silent-deadline.md), its lines passed through
+    `edit`, with the given stdout."""
+    import gzip
+    from types import SimpleNamespace
+    fixture, digest, base = STORED_MARKER[name]
+    data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(fixture).read_bytes())
+    assert hashlib.sha256(data).hexdigest() == digest
+    lines = edit(data.decode().splitlines())
+    untimed = budget.strip_trace_times("\n".join(lines)).splitlines()
+    return SimpleNamespace(trace=budget.parse_trace("\n".join(untimed)), lines=lines, untimed=untimed,
+                           context=marker_context(base), record=record, invalid=False)
+
+
+def insert_front_open(lines, path):
+    """A front openat of `path` right after the front's setitimer."""
+    pid = lines[0].split()[0]
+    at = next(i for i, line in enumerate(lines) if line.split()[0] == pid and " setitimer(" in line)
+    stamp = lines[at].split()[1]
+    return lines[:at + 1] + [f'{pid} {stamp} openat(AT_FDCWD</>, "{path}", O_RDONLY|O_CLOEXEC)'
+                             " = -1 ENOENT (No such file or directory)"] + lines[at + 1:]
+
+
+# 이것을 실패시키는 것: 빈 stdout(final-18 모양)에서도 필터·기록 쓰기를 요구하는 것, 빈 stdout 캡처의 경로 판정을 건너뛰는 것,
+# 비지 않은 stdout에서 필터 수 불일치를 면제하는 것, 필터를 설치한 빈 stdout 앞단을 필터 전 규칙으로 보는 것.
+@pytest.mark.parametrize("case", ["silent-valid-passes", "silent-valid-forbidden-open", "record-without-filter",
+                                  "record-filter-removed", "filtered-empty-stdout-passes"])
+def test_marker_full_judgment_waives_only_record_bound_items(case):
+    def drop_filter(lines):
+        """The front's filter prctl, with its resumed half, taken out."""
+        at = next(i for i, line in enumerate(lines) if "PR_SET_SECCOMP" in line)
+        pid = lines[at].split()[0]
+        end = next(i for i in range(at, len(lines)) if lines[i].split()[0] == pid and "<... prctl resumed>" in lines[i])
+        return lines[:at] + lines[at + 1:end] + lines[end + 1:]
+    cap = {"silent-valid-passes": lambda: stored_marker_capture("silent-valid", record=b""),
+           "silent-valid-forbidden-open": lambda: stored_marker_capture(
+               "silent-valid", record=b"", edit=lambda lines: insert_front_open(lines, "/hostile/home/.gitconfig")),
+           "record-without-filter": lambda: stored_marker_capture("silent-valid", record=RECORD),
+           "record-filter-removed": lambda: stored_marker_capture("valid", record=RECORD, edit=drop_filter),
+           "filtered-empty-stdout-passes": lambda: stored_marker_capture("valid", record=b"")}[case]()
+    assert budget.front_deadline_exit(cap) is None
+    if case.endswith("passes"):
+        budget.judge_marker_attempt(cap)
+    else:
+        with pytest.raises(AssertionError) as failure:
+            budget.judge_marker_attempt(cap)
+        if "forbidden" in case:
+            assert "/hostile/home/.gitconfig" in str(failure.value)
+        else:
+            assert "filters" in failure.traceback[-1].statement.lines[0], failure.traceback[-1].statement
+
+
+def silent_deadline_capture(lines=None):
+    """A release glibc aarch64 invalid-marker capture (untimed, before -ttt)
+    whose front armed its timer, took no SIGALRM, installed no filter, wrote
+    nothing and exited 0; provenance: fixtures/prompt-m3d-front-silent-deadline.md."""
+    import gzip
+    from types import SimpleNamespace
+    if lines is None:
+        data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
+            "prompt-m3d-front-silent-deadline-linux.strace.gz").read_bytes())
+        assert hashlib.sha256(data).hexdigest() == "fec18b40e9f44e7ea3010ac4d28ef36984f20f439e854556edf644ab89b68a68"
+        lines = data.decode().splitlines()
+    return SimpleNamespace(trace=budget.parse_trace("\n".join(lines)), lines=lines, untimed=lines,
+                           context=KEEP19_CONTEXT, record=b"", invalid=True)
+
+
+def keep19_with_alarm(extra=()):
+    """keep-19 with a kernel SIGALRM after its setitimer (and `extra` front
+    lines before it): a proven front deadline."""
+    lines = silent_deadline_capture().lines
+    pid = lines[0].split()[0]
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"{pid}  setitimer(")) + 1
+    return silent_deadline_capture(lines[:at] + list(extra)
+                                   + [f"{pid}  --- SIGALRM {{si_signo=SIGALRM, si_code=SI_KERNEL}} ---"] + lines[at:])
+
+
+# 이것을 실패시키는 것: 시각 증거 없는 무출력 종료(SIGALRM 없음)를 마감으로 보고 재시도하는 것.
+def test_untimed_silent_exit_is_not_a_proven_deadline():
+    cap = silent_deadline_capture()
+    front = [line for line in cap.lines if line.split()[0] == cap.lines[0].split()[0]]
+    assert any(line.split(None, 1)[1].startswith("setitimer(ITIMER_REAL,") for line in front)
+    assert not any("SIGALRM {" in line for line in front) and front[-1].endswith("+++ exited with 0 +++")
+    assert budget.front_deadline_exit(cap) is None
+    made = []
+    with pytest.raises(AssertionError):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or cap, budget.judge_marker_attempt,
+                             budget.front_deadline_exit, budget.MARKER_ATTEMPTS, label="marker invalid")
+    assert made == [1]
+
+
+# 이것을 실패시키는 것: 버리는 마감 시도에 역할 수만 보고 경로·syscall 금지를 건너뛰는 것.
+def test_discarded_deadline_attempt_gets_the_full_trace_judgment():
+    cap = keep19_with_alarm()
+    assert budget.front_deadline_exit(cap) == "front-deadline"
+    budget.judge_marker_attempt(cap, "front-deadline")
+    pid = cap.lines[0].split()[0]
+    hostile = keep19_with_alarm([f'{pid}  openat(AT_FDCWD</>, "/hostile/home/.gitconfig", O_RDONLY|O_CLOEXEC)'
+                                 " = -1 ENOENT (No such file or directory)"])
+    assert budget.front_deadline_exit(hostile) == "front-deadline"
+    with pytest.raises(AssertionError, match="/hostile/home/.gitconfig"):
+        budget.judge_marker_attempt(hostile, "front-deadline")
+    made = []
+    with pytest.raises(AssertionError, match="/hostile/home/.gitconfig"):
+        budget.run_allowlist(lambda attempt: made.append(attempt) or (hostile if attempt == 1 else cap),
+                             budget.judge_marker_attempt, budget.front_deadline_exit, budget.MARKER_ATTEMPTS,
+                             label="marker invalid")
+    assert made == [1]
+
+
+# 이것을 실패시키는 것: 앞단의 fd 1 쓰기를 증명 뒤로만 찾는 것(실패한 쓰기 포함), 0인 it_value(타이머 해제)를 증명으로 받는 것.
+@pytest.mark.parametrize("case", ["alarm-write-before-alarm", "alarm-write-before-timer", "time-write-before-timer",
+                                  "alarm-zero-it-value", "time-zero-it-value"])
+def test_front_deadline_rejects_any_write_and_a_disarmed_timer(case):
+    proof, kind = case.split("-", 1)
+    kwargs = {"write-before-alarm": {"write_before": "alarm"}, "write-before-timer": {"write_before": "timer"},
+              "zero-it-value": {"it_value": 0}}[kind]
+    cap = marker_capture(**kwargs) if proof == "alarm" else timed_capture(27_108 + 1, **kwargs)
+    assert budget.front_deadline_exit(cap) is None

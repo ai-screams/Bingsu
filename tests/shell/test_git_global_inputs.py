@@ -82,8 +82,14 @@ def test_invalid_global_location_pins_unknown_and_renders(shell, names, value, r
     notices = [line for line in result.stderr.splitlines() if b"pinning unknown for global Git excludes" in line]
     assert notices == [f"bingsu: {name} {reason}; pinning unknown for global Git excludes".encode() for name in names]
     probe, words = tmp_path / "probe", tmp_path / "words"
+    # The probe runs the binary as its child and keeps its own rc and stderr,
+    # so an empty record says whether the binary exited 0 without output
+    # (a deadline exit), failed to start, or died by a signal.
+    binary_rc, binary_err = tmp_path / "binary.rc", tmp_path / "binary.stderr"
     probe.write_text("#!/bin/sh\n" + f"printf '%s\\0' \"$@\" > {shlex.quote(str(words))}\n"
-                     + f"exec {shlex.quote(str(binary))} \"$@\"\n")
+                     + f"{shlex.quote(str(binary))} \"$@\" 2> {shlex.quote(str(binary_err))}\n"
+                     + f"rc=$?\nprintf '%s' \"$rc\" > {shlex.quote(str(binary_rc))}\n"
+                     + f"cat {shlex.quote(str(binary_err))} >&2\nexit \"$rc\"\n")
     probe.chmod(0o700)
     script = result.stdout.replace(os.fsencode(binary), os.fsencode(probe))
     # Same built-in render fixture as above: sandbox config trust is independent
@@ -100,7 +106,11 @@ def test_invalid_global_location_pins_unknown_and_renders(shell, names, value, r
     argv = words.read_bytes().split(b"\0")[:-1]
     for name, flag in [("HOME", b"--git-global-home="), ("XDG_CONFIG_HOME", b"--git-global-xdg=")]:
         assert [word for word in argv if word.startswith(flag)] == [flag + (b"!invalid" if name in names else os.fsencode(env[name]))]
-    assert_record(rendered.stdout)
+    # 이것을 실패시키는 것: 빈 레코드의 실패 메시지에서 바이너리의 rc·stderr를 빼는 것.
+    assert_record(rendered.stdout, {
+        "binary rc": binary_rc.read_text() if binary_rc.exists() else "missing (the probe never ran it)",
+        "binary stderr": binary_err.read_bytes() if binary_err.exists() else None,
+        "shell rc": rendered.returncode, "shell stderr": rendered.stderr})
 
 
 # Mutation: omit explicit empty pins and accidentally revive the legacy home,
@@ -148,8 +158,8 @@ def test_legacy_hook_without_global_words_still_renders(shell, tmp_path):
     assert_record(result.stdout)
 
 
-def assert_record(record):
-    assert record.startswith(b"B1\x1f8\x1f") and record.endswith(b"\x1e"), record
+def assert_record(record, context=None):
+    assert record.startswith(b"B1\x1f8\x1f") and record.endswith(b"\x1e"), (record, context)
     fields = record[:-1].split(b"\x1f")
-    assert len(fields) == 10 and fields[2], record
-    assert fields[-1].startswith((b"ok:", b"degraded:")), fields[-1]
+    assert len(fields) == 10 and fields[2], (record, context)
+    assert fields[-1].startswith((b"ok:", b"degraded:")), (fields[-1], context)

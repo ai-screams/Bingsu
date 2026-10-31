@@ -6,6 +6,7 @@ import os
 import platform
 import ast
 import hashlib
+import json
 import re
 import shlex
 import shutil
@@ -962,9 +963,11 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     helper_pid = int(spawn.ret)
     filters = [c for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args]
     # 이것을 실패시키는 것: helper 생성이 prompt seccomp 설치 뒤로 옮겨지거나 필터 설치가 실패하는 것.
-    if front_deadline:
-        # SIGALRM ended the front before its filter (deadline_shape requires
-        # that), so every call is held to the pre-filter rules.
+    if front_deadline and not filters:
+        # The front ended before its filter (deadline_shape requires that),
+        # so every call is held to the pre-filter rules. A front that
+        # installed its filter keeps it as the boundary.
+        # 이것을 실패시키는 것: 필터를 설치한 앞단의 필터 뒤 호출을 필터 전 규칙으로 보는 것.
         boundary = front[-1].index + 1
     else:
         assert len(filters) == 1 and filters[0].ret == "0", filters
@@ -1286,7 +1289,7 @@ def deadline_shape(cap):
     return None
 
 
-def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit=ALLOWLIST_ATTEMPTS):
+def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit=ALLOWLIST_ATTEMPTS, label="allowlist"):
     """Judge every attempt in full; retry only an attempt whose failure the
     trace proves to be a deadline, and only after it passes its own full
     judgment. Any other failure, or any violation, ends the test at once."""
@@ -1306,9 +1309,9 @@ def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit
                 shapes[shape] += 1
                 continue
             return attempt, shapes
-        pytest.fail(f"allowlist: no attempt without a deadline in {limit}; shapes {dict(shapes)}")
+        pytest.fail(f"{label}: no attempt without a deadline in {limit}; shapes {dict(shapes)}")
     finally:
-        print(f"allowlist attempts: {attempt}, deadline shapes: {dict(shapes)}")
+        print(f"{label} attempts: {attempt}, deadline shapes: {dict(shapes)}")
 
 
 # 이것을 실패시키는 것: prompt가 시스템 경로와 init이 박은 네 뿌리 밖의 경로를 건드리는 것 —
@@ -2166,6 +2169,26 @@ def test_front_never_reads_trust_metadata_section(front_capture):
     check_front_capture(lines, exe, pinned, store, attempts, arch=evidence['arch'], libc=evidence['libc'], evidence=evidence)
 
 
+def child_strace_argv(evidence, argv, timestamps=False):
+    """The child_capture strace command; only the marker test adds -ttt."""
+    return ["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
+            *(["-ttt"] if timestamps else []), "-o", str(evidence), *argv]
+
+
+TIMED_LINE = re.compile(r"^(\d+)( +)(\d+)\.(\d{6}) (.*)$")
+
+
+def strip_trace_times(text):
+    """A -ttt trace as the untimed trace parse_trace reads; fails closed on
+    any line without its time column."""
+    out = []
+    for line in text.splitlines():
+        m = TIMED_LINE.match(line)
+        assert m, ("untimed line in a -ttt trace", line)
+        out.append(f"{m[1]}{m[2]}{m[5]}")
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
 @pytest.fixture
 def child_capture(tmp_path):
     # 이것을 실패시키는 것: debug 바이너리 또는 strace 없는 host를 live PASS로 세는 것.
@@ -2177,20 +2200,21 @@ def child_capture(tmp_path):
     # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
     assert shutil.which("strace"), "required live tracing tool is missing"
 
-    def capture(template="{dir}{git}{char}", invalid=False):
-        base = tmp_path / str(len(list(tmp_path.iterdir())))
-        base.mkdir()
+    def capture(template="{dir}{git}{char}", invalid=False, name=None, timestamps=False):
+        # `name` keeps a retried attempt's evidence in its own folder.
+        base = tmp_path / (name or str(len(list(tmp_path.iterdir()))))
+        base.mkdir(parents=True)
         # Reuse A2's real hook, advancing session sequence and untraced warm-up.
         # A cold admission under strace may defer before it can spawn a worker.
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
                                      template=template)
         try:
-            return capture_prompt(fixture, base, invalid)
+            return capture_prompt(fixture, base, invalid, timestamps)
         finally:
             wait_helpers(fixture.base)
             shutil.rmtree(fixture.base)
 
-    def capture_prompt(fixture, base, invalid):
+    def capture_prompt(fixture, base, invalid, timestamps):
         marker = fixture.store / "marker"
         wire = bytearray(marker.read_bytes())
         # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
@@ -2215,14 +2239,25 @@ def child_capture(tmp_path):
         argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
-        result = subprocess.run(["strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all",
-                                 "-o", str(evidence), *argv],
+        # What a full trace judgment needs after the fixture is gone.
+        env, repo = fixture.env, os.path.realpath(fixture.pwd)
+        (base / "context.json").write_text(json.dumps({
+            "exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
+            "pinned": [os.path.realpath(env[k] + sub) for k, sub in
+                       (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
+                        ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))],
+            "global_inputs": [str(Path(env["XDG_CONFIG_HOME"]) / "git/config"), str(Path(env["HOME"]) / ".gitconfig"),
+                              str(Path(env["XDG_CONFIG_HOME"]) / "git/ignore")],
+            "roots": [repo, repo + "/.git"],
+            "platform": [platform.machine(), "musl" if elf_facts(real_bin())[1] is None else "gnu"]}, indent=1) + "\n")
+        result = subprocess.run(child_strace_argv(evidence, argv, timestamps),
                                 cwd=fixture.pwd, env=fixture.env, capture_output=True, timeout=60)
         (base / "stdout").write_bytes(result.stdout)
         (base / "stderr").write_bytes(result.stderr)
         # 이것을 실패시키는 것: assert result.returncode == 0, (result.stderr, evidence) 조건을 제거하거나 반전하는 변이.
         assert result.returncode == 0, (result.stderr, evidence)
-        trace = parse_trace(evidence.read_text())
+        text = evidence.read_text()
+        trace = parse_trace(strip_trace_times(text) if timestamps else text)
         # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
         assert not trace.errors, (trace.errors, evidence)
         return trace, fixture.store, result.stdout
@@ -2246,15 +2281,116 @@ def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
     assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
 
 
-# 이것을 실패시키는 것: 표식 무효면 worker mask 0.
-def test_live_collector_count_ignores_marker_validity(child_capture):
+# Under strace the front can pass its 50 ms deadline and exit 0 without a
+# record (front_deadline_exit); such an attempt is judged in full and retried.
+MARKER_ATTEMPTS = 8
+
+
+def front_deadline_exit(cap):
+    """"front-deadline" when the trace proves the front's own deadline ended
+    it: it armed ITIMER_REAL (setitimer returned 0), and then either took a
+    kernel SIGALRM or, by the -ttt times, made its last event before
+    exit_group strictly later than the setitimer start plus its positive
+    it_value; it attempted no
+    write to fd 1 at all, exited 0, and stdout is empty. Anything else is None.
+
+    The front computes its remaining time just before setitimer, so its
+    deadline cannot end later than setitimer start + it_value. strace times
+    are realtime, the product's clock is monotonic: equal or unreadable
+    times prove nothing. A realtime step back can only refuse a retry; a
+    step forward can retry an attempt early, and a retried attempt is
+    still judged in full, so the cost is one more capture of an empty record."""
+    lines = cap.lines
+    timed = re.compile(r"(\d+)\s+(?:(\d+)\.(\d{6})\s+)?(.*)$")
+    rows = [(m[1], int(m[2]) * 1_000_000 + int(m[3]) if m[2] else None, m[4])
+            for line in lines if (m := timed.match(line))]
+    if not rows or not re.match(r'execve\("[^"]*", \["[^"]*", "prompt"', rows[0][2]):
+        return None
+    root = rows[0][0]
+    front = [(at, line) for pid, at, line in rows if pid == root]
+    armed = next((i for i, (_, line) in enumerate(front) if line.startswith("setitimer(ITIMER_REAL,")), None)
+    # 이것을 실패시키는 것: 실패했거나 없는 setitimer를 마감 증명으로 받는 것.
+    if armed is None or not front[armed][1].endswith(") = 0") or cap.record:
+        return None
+    value = re.search(r"it_value=\{tv_sec=(\d+), tv_usec=(\d+)\}", front[armed][1])
+    # 이것을 실패시키는 것: 0인 it_value(타이머 해제)를 증명으로 받는 것.
+    if not value or int(value[1]) * 1_000_000 + int(value[2]) <= 0:
+        return None
+    alarm = next((i for i, (_, line) in enumerate(front) if i > armed
+                  and line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
+    if alarm is None:
+        # The lower bound of the exit is the front's last event before
+        # exit_group: strace reads its time while the tracee is stopped and
+        # resumes it afterwards (stop-then-resume ordering, UNVERIFIED), so
+        # the exit_group line's own time can be later than the exit.
+        ends = [i for i, (_, line) in enumerate(front) if line.startswith("exit_group(")]
+        start, at = front[armed][0], front[ends[-1] - 1][0] if ends and ends[-1] > armed else None
+        # 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것.
+        if start is None or at is None or not at > start + int(value[1]) * 1_000_000 + int(value[2]):
+            return None
+    # 이것을 실패시키는 것: 앞단의 fd 1 쓰기 시도(실패한 것 포함)를 어디서든 받는 것, 0 아닌 종료,
+    # 비지 않은 stdout을 마감으로 보는 것.
+    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for _, line in front):
+        return None
+    return "front-deadline" if front[-1][1] == "+++ exited with 0 +++" else None
+
+
+def judge_marker_trace(cap, shape=None):
+    """The allowlist judgment of the whole capture, deadline or not: every
+    path, call and audit rule and every upper bound. Only an empty stdout
+    waives the two record-bound items, the one filter and the record write
+    in the front's call table; a front without a filter then has every call
+    held to the pre-filter rules.
+    The collector count stays with judge_marker_attempt; collection
+    coverage (repository and global-input reads) was never this test's."""
+    c = cap.context
+    # 이것을 실패시키는 것: 버리는 마감 시도의 경로·syscall 금지 판정을 건너뛰는 것.
+    assert_prompt_trace_budget(cap.untimed, c["exe"], c["pinned"], global_inputs=tuple(c["global_inputs"]),
+                               collector_exe=c["collector_exe"], collectors=None,
+                               repository_roots=c["roots"], repository_evidence=(),
+                               # 이것을 실패시키는 것: 비지 않은 stdout에서 필터·기록 쓰기를 면제하는 것.
+                               platform=tuple(c["platform"]), front_deadline=cap.record == b"")
+
+
+def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
+    """One marker-condition capture. Every attempt keeps the role bounds and
+    the full trace judgment; a proven front deadline waives only the record,
+    and the collector spawn only when the front ended before it created the
+    helper (the helper never waits on the front, so a later deadline cannot
+    stop its spawn)."""
     from fsbudget.attribute import role_children
-    valid, _, _ = child_capture()
-    invalid, _, record = child_capture(invalid=True)
-    # 이것을 실패시키는 것: assert b"degraded:trust-invalid" in record, record 조건을 제거하거나 반전하는 변이.
-    assert b"degraded:trust-invalid" in record, record
-    # 이것을 실패시키는 것: assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1 조건을 제거하거나 반전하는 변이.
-    assert role_children(valid)["helper"] == role_children(invalid)["helper"] == 1
+    trace_judge(cap, shape)
+    children = role_children(cap.trace)
+    # 이것을 실패시키는 것: 마감 시도에서 역할 상한(helper 둘, collector·명령 자식)을 넘기는 것.
+    assert children["front"] <= 1 and children["helper"] <= 1, children
+    assert children["collector"] == children["command"] == 0, children
+    if shape is None or children["front"]:
+        # 이것을 실패시키는 것: 표식 무효면 worker mask 0.
+        assert children["helper"] == 1, children
+    if shape is None and cap.invalid:
+        assert b"degraded:trust-invalid" in cap.record, cap.record
+
+
+def marker_capture(child_capture, tmp_path, invalid, attempt):
+    from types import SimpleNamespace
+    name = f"{'invalid' if invalid else 'valid'}/attempt-{attempt}"
+    trace, _, record = child_capture(invalid=invalid, name=name, timestamps=True)
+    text = (tmp_path / name / "child-count.strace").read_text(errors="replace")
+    return SimpleNamespace(trace=trace, lines=text.splitlines(), untimed=strip_trace_times(text).splitlines(),
+                           context=json.loads((tmp_path / name / "context.json").read_text()),
+                           record=record, invalid=invalid)
+
+
+# 이것을 실패시키는 것: 표식 무효면 worker mask 0.
+def test_live_collector_count_ignores_marker_validity(child_capture, tmp_path):
+    """Both marker conditions start exactly one collector. Each condition
+    must reach that evidence (and the invalid one its degraded record) in at
+    most MARKER_ATTEMPTS attempts; only a trace-proven front deadline is
+    retried, after its own judgment. Attempts stay in valid|invalid/attempt-N."""
+    for invalid in (False, True):
+        run_allowlist(lambda attempt: marker_capture(child_capture, tmp_path, invalid, attempt),
+                      judge_marker_attempt, front_deadline_exit, MARKER_ATTEMPTS,
+                      label=f"marker {'invalid' if invalid else 'valid'}")
 
 
 # 이것을 실패시키는 것: 머리 읽기 전에 collector 생성.
