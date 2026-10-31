@@ -13,6 +13,8 @@ use bingsu_core::{
 use bingsu_core_tests::snapshot_fixture as fixture;
 use sections::{P, Sections, assemble, le32, put32, reframe, resign};
 
+type Forge = fn(&mut Vec<u8>, usize);
+
 const ROUNDS: u64 = if cfg!(debug_assertions) {
     20_000
 } else {
@@ -73,9 +75,9 @@ fn forged_integers_never_panic_or_overrun() {
             16 << 20,
             (16 << 20) + 1,
             base.len(),
-            v + 1,
+            v.wrapping_add(1),
             v.wrapping_sub(1),
-            v + 16,
+            v.wrapping_add(16),
             v.wrapping_sub(16),
         ];
         list[(r % list.len() as u64) as usize]
@@ -134,7 +136,7 @@ fn shifted_boundaries_with_good_checksums_are_refused() {
     let c_len = le32(&base, 76);
     let s = Sections::of(&base[P..P + c_len]);
     let index = P + s.index;
-    let cases: [(&str, fn(&mut Vec<u8>, usize)); 5] = [
+    let cases: [(&str, Forge); 5] = [
         ("overlap", |b, i| {
             let v = le32(b, i + 16);
             put32(b, i + 16, v - 1)
@@ -151,11 +153,33 @@ fn shifted_boundaries_with_good_checksums_are_refused() {
         let mut b = base.clone();
         forge(&mut b, index);
         resign(&mut b, s.front);
+        // A length that overflows a 32-bit usize is Limit; everywhere else, Shape.
+        let refused = |e: Option<Error>| matches!(e, Some(Error::Shape | Error::Limit));
         for width in [0, 1, 2, 3, 120] {
-            assert_eq!(front(&b, width).err(), Some(Error::Shape), "{name} {width}");
+            assert!(refused(front(&b, width).err()), "{name} {width}");
         }
-        assert_eq!(Snapshot::decode(&b).err(), Some(Error::Shape), "{name}");
+        assert!(refused(Snapshot::decode(&b).err()), "{name}");
     }
+}
+
+// 이것을 실패시키는 것: 색인 합산의 `checked_add`를 감기는 덧셈으로 바꾸는 것. 64비트 usize에서는 다음 항목의
+// 연속성 비교가 거부하고, 32비트(wasm32-wasip1)에서는 합이 한 바퀴 돌아 그 비교를 통과하므로 여기서만 죽는다.
+#[test]
+fn a_length_that_steps_back_by_wrapping_is_refused() {
+    let base = wire(2);
+    let c_len = le32(&base, 76);
+    let s = Sections::of(&base[P..P + c_len]);
+    let i = P + s.index;
+    let mut b = base.clone();
+    let (second, third_end) = (le32(&b, i + 16), le32(&b, i + 32) + le32(&b, i + 36));
+    put32(&mut b, i + 16 + 4, 0xffff_ffff);
+    put32(&mut b, i + 32, second - 1);
+    put32(&mut b, i + 32 + 4, third_end - (second - 1));
+    resign(&mut b, s.front);
+    for width in [0, 1, 2, 120] {
+        assert!(front(&b, width).is_err(), "{width}");
+    }
+    assert!(Snapshot::decode(&b).is_err());
 }
 
 // 이것을 실패시키는 것: 길이 0 variant를 받는 것, 구획 길이가 머리보다 짧을 때 앞단이 완료로 끝나는 것,

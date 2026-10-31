@@ -101,10 +101,10 @@ impl Writer {
         }
     }
     fn sum_since(&self, at: usize) -> [u8; 4] {
-        self.bytes
-            .as_ref()
-            .and_then(|out| out.get(at..))
-            .map_or([0; 4], section_sum)
+        match self.bytes.as_ref().and_then(|out| out.get(at..)) {
+            Some(written) => section_sum(written),
+            None => [0; 4],
+        }
     }
 }
 fn put_slice<T: Wire>(items: &[T], o: &mut Writer) {
@@ -224,7 +224,14 @@ impl<T: Wire> Wire for Vec<T> {
         put_slice(self, o)
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
-        let n = get_len::<T>(r)?;
+        let n = usize::get(r)?;
+        if n > r.rest.len() {
+            return Err(Error::Limit);
+        }
+        r.charge(
+            n.checked_mul(core::mem::size_of::<T>())
+                .ok_or(Error::Limit)?,
+        )?;
         let mut v = Vec::new();
         v.try_reserve_exact(n).map_err(|_| Error::Limit)?;
         for _ in 0..n {
@@ -239,31 +246,14 @@ impl Wire for String {
         o.extend_from_slice(self.as_bytes())
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
-        let s = get_str(r)?;
+        let n = usize::get(r)?;
+        r.charge(n)?;
+        let s = core::str::from_utf8(r.take(n)?).map_err(|_| Error::Utf8)?;
         let mut out = String::new();
         out.try_reserve_exact(s.len()).map_err(|_| Error::Limit)?;
         out.push_str(s);
         Ok(out)
     }
-}
-/// `String::get` without the copy: the same charge and checks, borrowed.
-#[inline(always)]
-fn get_str<'a>(r: &mut Reader<'a>) -> Result<&'a str, Error> {
-    let n = usize::get(r)?;
-    r.charge(n)?;
-    core::str::from_utf8(r.take(n)?).map_err(|_| Error::Utf8)
-}
-/// `Vec::<T>::get`'s length checks and charge, before any element is read.
-fn get_len<T>(r: &mut Reader<'_>) -> Result<usize, Error> {
-    let n = usize::get(r)?;
-    if n > r.rest.len() {
-        return Err(Error::Limit);
-    }
-    r.charge(
-        n.checked_mul(core::mem::size_of::<T>())
-            .ok_or(Error::Limit)?,
-    )?;
-    Ok(n)
 }
 impl<A: Wire, B: Wire> Wire for (A, B) {
     fn put(&self, o: &mut Writer) {
@@ -865,8 +855,6 @@ impl Wire for Node {
             Self::GroupEnd => 11u8.put(o),
         }
     }
-    // Two callers (the line decode and the scan); keep each one's loop flat.
-    #[inline(always)]
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match u8::get(r)? {
             0 => Self::Text(Wire::get(r)?),

@@ -84,12 +84,12 @@ pub fn assemble(head: &[u8], common: &[u8], variants: &[Vec<u8>], names: &[u8]) 
 /// Recompute the frame checksum over the front part the compiled section names.
 /// A front part that runs past the file falls back to `fallback` bytes.
 pub fn resign(b: &mut [u8], fallback: usize) {
-    let front = HEAD + le32(b, P + 12).saturating_add(le32(b, P + 16).saturating_mul(ENTRY));
-    let front = if P.saturating_add(front) <= b.len() {
-        front
-    } else {
-        fallback
-    };
+    let front = le32(b, P + 16)
+        .checked_mul(ENTRY)
+        .and_then(|index| index.checked_add(le32(b, P + 12)))
+        .and_then(|n| n.checked_add(HEAD))
+        .filter(|n| n.checked_add(P).is_some_and(|end| end <= b.len()))
+        .unwrap_or(fallback);
     let sum = crc32c(&[b"bingsu-snapshot-v3\0", &b[..160], &b[P..P + front]]);
     b[160..164].copy_from_slice(&sum);
 }
