@@ -1189,7 +1189,7 @@ pub fn plan_front(front: &[u8], c_len: usize, width: u16) -> Result<FrontPlan, E
 /// The selected variant's CRC, then its lines (each checked by `from_snapshot`).
 /// It spends what COMMON left of the budget: the section has one `MAX_ALLOC`.
 pub fn finish_front(mut plan: FrontPlan, variant: &[u8]) -> Result<FrontConfig, Error> {
-    if variant.len() != plan.len || section_sum(variant) != plan.crc {
+    if section_sum(variant) != plan.crc {
         return Err(Error::Shape);
     }
     let mut r = Reader {

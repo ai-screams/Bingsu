@@ -438,9 +438,6 @@ impl FrontDecoder {
                 if self.file_len != HEADER + PREFIX + c + m {
                     return Err(Error::Shape);
                 }
-                if c < snapshot_codec::HEAD {
-                    return Err(Error::Short);
-                }
                 self.end += snapshot_codec::HEAD;
                 self.limit = HEADER + PREFIX + c;
                 self.stage = Stage::Head;

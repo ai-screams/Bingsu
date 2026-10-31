@@ -8,10 +8,10 @@ use bingsu_core::{
     bands::Band,
     config::compile::CompiledConfig,
     snapshot::{READ_CHUNK, Snapshot, crc32c},
-    snapshot_codec::Error,
+    snapshot_codec::{Error, HEAD},
 };
 use bingsu_core_tests::snapshot_fixture as fixture;
-use sections::{P, Sections, le32, put32, reframe, resign};
+use sections::{P, Sections, assemble, le32, put32, reframe, resign};
 
 const ROUNDS: u64 = if cfg!(debug_assertions) {
     20_000
@@ -156,6 +156,40 @@ fn shifted_boundaries_with_good_checksums_are_refused() {
         }
         assert_eq!(Snapshot::decode(&b).err(), Some(Error::Shape), "{name}");
     }
+}
+
+// 이것을 실패시키는 것: 길이 0 variant를 받는 것, 구획 길이가 머리보다 짧을 때 앞단이 완료로 끝나는 것,
+// 공통부 끝의 남는 바이트를 받는 것.
+#[test]
+fn an_empty_variant_and_a_section_shorter_than_its_head_are_refused() {
+    let base = wire(2);
+    let c_len = le32(&base, 76);
+    let c = &base[P..P + c_len];
+    let s = Sections::of(c);
+    let x = s.variant(c, 0).to_vec();
+    let b = reframe(
+        &base,
+        &assemble(
+            c,
+            &c[HEAD..s.index],
+            &[x.clone(), Vec::new(), x],
+            &c[s.names..],
+        ),
+    );
+    for width in [0, 1, 2, 120] {
+        assert_eq!(front(&b, width).err(), Some(Error::Shape), "{width}");
+    }
+    assert_eq!(Snapshot::decode(&b).err(), Some(Error::Shape));
+    let b = reframe(&base, &[0; 10]);
+    assert_eq!(front(&b, 80).err(), Some(Error::Short));
+    assert_eq!(Snapshot::decode(&b).err(), Some(Error::Short));
+    // COMMON's own fields are intact; `assemble` seals the spare bytes after them.
+    let mut spare = c[HEAD..s.index].to_vec();
+    spare.extend([0; 8]);
+    let variants: Vec<_> = (0..s.count).map(|i| s.variant(c, i).to_vec()).collect();
+    let b = reframe(&base, &assemble(c, &spare, &variants, &c[s.names..]));
+    assert_eq!(front(&b, 80).err(), Some(Error::Trailing));
+    assert_eq!(Snapshot::decode(&b).err(), Some(Error::Trailing));
 }
 
 // 이것을 실패시키는 것: 경계 비교를 `end > c_len`으로 되돌리는 것(변종과 이름 사이, 이름 뒤의 남는 바이트를
