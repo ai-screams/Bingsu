@@ -6,6 +6,12 @@
 //! exercised here at the real caps; F cannot cross before R (each file is a
 //! candidate), D is 1 with the one conf.d, and M needs 17 mounts. The in-crate
 //! refresh tests cross all nine with lowered caps.
+//!
+//! B exactly at the cap runs on release builds only: its round takes 29-52 ms
+//! there and about 500 ms on a debug build, where it would measure the
+//! machine against the helper's work budget. The CI release cells assert that
+//! test ran. `exceeded_axis_keeps_marker_unchanged` proves the same boundary
+//! in process on every build, without a wall clock.
 #![cfg(unix)]
 
 #[path = "support/user_env.rs"]
@@ -59,6 +65,35 @@ fn reload_settled(e: &Env) -> (Option<i32>, String) {
     last
 }
 
+/// The config and eight dropped themes: together exactly 2 MiB plus `extra`.
+fn b_themes(e: &Env, extra: usize) {
+    let refs: Vec<String> = (0..8)
+        .map(|i| {
+            e.base
+                .join(format!("themes/t{i}.toml"))
+                .display()
+                .to_string()
+        })
+        .collect();
+    let config = extends(&refs, COMMAND);
+    e.put_config("config.toml", &config);
+    for (i, r) in refs.iter().enumerate() {
+        let n = if i < 7 {
+            KIB256
+        } else {
+            KIB256 - config.len() + extra
+        };
+        e.put(
+            &std::path::Path::new(r)
+                .strip_prefix(&e.base)
+                .unwrap()
+                .display()
+                .to_string(),
+            &unparsable(n),
+        );
+    }
+}
+
 /// Publishes `COMMAND`, applies `past`, reloads: the outcome and whether
 /// the context files stayed as they were.
 fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
@@ -100,38 +135,10 @@ fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
         });
         seen.push(("E_n", k, code, same, out));
     }
-    // B: the config and eight dropped themes, together exactly 2 MiB, or one more.
-    for extra in [0, 1] {
-        let e = Env::new("helper_axis_caps", &format!("b-{extra}"));
-        let (code, same, out) = after(&e, |e| {
-            let refs: Vec<String> = (0..8)
-                .map(|i| {
-                    e.base
-                        .join(format!("themes/t{i}.toml"))
-                        .display()
-                        .to_string()
-                })
-                .collect();
-            let config = extends(&refs, COMMAND);
-            e.put_config("config.toml", &config);
-            for (i, r) in refs.iter().enumerate() {
-                let n = if i < 7 {
-                    KIB256
-                } else {
-                    KIB256 - config.len() + extra
-                };
-                e.put(
-                    &std::path::Path::new(r)
-                        .strip_prefix(&e.base)
-                        .unwrap()
-                        .display()
-                        .to_string(),
-                    &unparsable(n),
-                );
-            }
-        });
-        seen.push(("B", extra, code, same, out));
-    }
+    // B: the config and eight dropped themes, one byte past 2 MiB.
+    let e = Env::new("helper_axis_caps", "b-1");
+    let (code, same, out) = after(&e, |e| b_themes(e, 1));
+    seen.push(("B", 1, code, same, out));
     let got: Vec<_> = seen
         .iter()
         .map(|(axis, n, code, same, _)| (*axis, *n, *code, *same))
@@ -143,9 +150,23 @@ fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
             ("R", 255, Some(3), true),
             ("E_n", 253, Some(0), false),
             ("E_n", 254, Some(3), true),
-            ("B", 0, Some(0), false),
             ("B", 1, Some(3), true),
         ],
         "{seen:#?}"
     );
+}
+
+// B가 정확히 2 MiB인 설정은 실제 프로세스·실제 시계로 발행된다. debug 빌드는 이 회차가 약 500 ms라 상한이 아니라
+// 기계 속도를 재므로 release에서만 돈다. CI release 칸이 이 시험의 ok 줄을 단언한다.
+// 이것을 실패시키는 것: B 비교의 하나 차이(cap에서 거부), 버린 원본이나 config.toml의 바이트를 이중으로 세는 것,
+// release에서도 ignore하는 것(CI grep이 실패).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a debug build measures machine speed against the 500 ms work budget here; release takes 29-52 ms"
+)]
+fn reload_publishes_at_exactly_the_b_cap() {
+    let e = Env::new("helper_axis_caps", "b-0");
+    let (code, same, out) = after(&e, |e| b_themes(e, 0));
+    assert_eq!((code, same), (Some(0), false), "{out}");
 }
