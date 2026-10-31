@@ -697,6 +697,10 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+      # 이것을 실패시키는 것: 오버플로 검사가 꺼지는 release에서 코어와 색인 범위 시험을 돌리지 않는 것.
+      - name: Core tests without overflow checks (release)
+        if: runner.os == 'Linux'
+        run: cargo test -j 2 --release -p bingsu-core -p bingsu-core-tests
       - name: Detach the X-11 filesystem
         if: always() && runner.os == 'macOS' && env.BINGSU_X11_MOUNT != ''
         run: |
