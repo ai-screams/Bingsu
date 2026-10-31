@@ -864,6 +864,36 @@ mod tests {
         Some(Err(std::io::Error::from_raw_os_error(libc::EIO)))
     }
 
+    // R 거부는 걸쇠와 별개로 세션을 미완료로 둔다. 걸쇠를 끈 계수기로 거부 뒤의 후보가 통과하게 해도, 뿌리
+    // 후보 거부와 extends 항목 거부 각각이 Incomplete로 끝난다.
+    // 이것을 실패시키는 것: 두 R 거부 경로에서 `self.complete = false`를 빼는 것(걸쇠만 믿게 됨).
+    #[test]
+    fn r_refusals_leave_the_session_incomplete_without_the_latch() {
+        use crate::commands::io_meter::{AXIS_CAPS, AxisCaps, TestCaps};
+        let mut seen = Vec::new();
+        for (case, r, text) in [
+            ("root candidate", 1, "icons = \"ascii\"\n"),
+            (
+                "extends entry",
+                3,
+                "extends = [\"$A\", \"$B\"]\nicons = \"ascii\"\n",
+            ),
+        ] {
+            let fx = Fx::new(&format!("unlatched-r-{r}"));
+            fx.put(&fx.root.join("config.toml"), text);
+            let _caps = TestCaps::unlatched(AxisCaps { r, ..AXIS_CAPS });
+            let (g, l) = fx.read(None);
+            seen.push((case, l.verified(&g.files, g.succeeded)));
+        }
+        assert_eq!(
+            seen,
+            [
+                ("root candidate", Verified::Incomplete),
+                ("extends entry", Verified::Incomplete)
+            ]
+        );
+    }
+
     // 앞부분을 읽고 오류로 끝나는 읽기도 읽은 바이트를 B에 센다. 240 KiB를 읽고 EIO인 shape-only 참조 10개는
     // 2 MiB에 닿는 9번째에서 걸쇠가 걸리고, 10번째는 열지 않는다.
     // 이것을 실패시키는 것: read_to_end가 성공할 때만 B를 세는 것(10개 모두 읽고 B는 config.toml 몫만 남음).

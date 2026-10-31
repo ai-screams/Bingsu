@@ -125,6 +125,8 @@ pub(crate) struct IoMeter {
     caps: AxisCaps,
     used: AxisUse,
     exceeded: Option<AxisExceeded>,
+    #[cfg(test)]
+    unlatched: bool,
     files: BTreeSet<PathBuf>,
     folders: BTreeSet<PathBuf>,
     mounts: BTreeSet<u64>,
@@ -132,7 +134,7 @@ pub(crate) struct IoMeter {
 
 #[cfg(test)]
 thread_local! {
-    static TEST_CAPS: std::cell::Cell<Option<AxisCaps>> = const { std::cell::Cell::new(None) };
+    static TEST_CAPS: std::cell::Cell<Option<(AxisCaps, bool)>> = const { std::cell::Cell::new(None) };
 }
 
 /// Test builds only: refresh sessions on this thread use `caps` until the
@@ -143,7 +145,14 @@ pub(crate) struct TestCaps;
 #[cfg(test)]
 impl TestCaps {
     pub(crate) fn set(caps: AxisCaps) -> Self {
-        TEST_CAPS.with(|c| c.set(Some(caps)));
+        TEST_CAPS.with(|c| c.set(Some((caps, false))));
+        Self
+    }
+
+    /// As `set`, with the latch off: a refused charge does not refuse the
+    /// next one. Pins the guards that must hold without the latch.
+    pub(crate) fn unlatched(caps: AxisCaps) -> Self {
+        TEST_CAPS.with(|c| c.set(Some((caps, true))));
         Self
     }
 }
@@ -180,6 +189,8 @@ impl IoMeter {
             caps,
             used: [0; 9],
             exceeded: None,
+            #[cfg(test)]
+            unlatched: false,
             files: BTreeSet::new(),
             folders: BTreeSet::new(),
             mounts: BTreeSet::new(),
@@ -189,14 +200,20 @@ impl IoMeter {
     /// The meter of one refresh round: `AXIS_CAPS`, or a test override.
     pub(crate) fn session() -> Self {
         #[cfg(test)]
-        if let Some(caps) = TEST_CAPS.with(std::cell::Cell::get) {
-            return Self::new(caps);
+        if let Some((caps, unlatched)) = TEST_CAPS.with(std::cell::Cell::get) {
+            let mut m = Self::new(caps);
+            m.unlatched = unlatched;
+            return m;
         }
         Self::new(AXIS_CAPS)
     }
 
     /// The latch: `Err` once any axis refused a charge.
     pub(crate) fn check(&self) -> Result<(), AxisExceeded> {
+        #[cfg(test)]
+        if self.unlatched {
+            return Ok(());
+        }
         self.exceeded.map_or(Ok(()), Err)
     }
 

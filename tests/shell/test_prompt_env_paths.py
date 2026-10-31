@@ -1920,15 +1920,20 @@ def write_private(path, data):
     pending.replace(path)
 
 
-def stat_target(call):
-    """The path a fstat, statx or newfstatat call looks at (fd paths from -y)."""
-    fd = re.match(r"(?:\d+|AT_FDCWD)(?:<([^<>]*)>)?(?:, \"([^\"]*)\")?", call.args)
-    if not fd:
-        return None
-    base, name = fd[1], fd[2]
-    if not name:
-        return base
-    return name if name.startswith("/") else f"{base}/{name}"
+def held_recheck(call, held):
+    """Whether `call` rechecks retained evidence: fstat of a held descriptor,
+    statx or newfstatat of a held descriptor itself (empty name, AT_EMPTY_PATH)
+    or of one held name relative to a held folder descriptor. A lookup by path
+    (AT_FDCWD, or a name with a slash) is not."""
+    m = re.match(r'(\d+)<([^<>]*)>(?:, "([^"]*)")?', call.args)
+    if call.name not in ("fstat", "statx", "newfstatat") or not m:
+        return False
+    base, name = m[2], m[3]
+    if call.name == "fstat":
+        return name is None and base in held
+    if name == "":
+        return "AT_EMPTY_PATH" in call.args and base in held
+    return name is not None and "/" not in name and base in held and f"{base}/{name}" in held
 
 
 def axis_cap_case(axis, fixture):
@@ -1968,11 +1973,11 @@ def axis_cap_case(axis, fixture):
             assert reads, "the helper never read config.toml"
             return reads[-1]
         # The refused entry has no call of its own. Between the read and it the
-        # trusted file's retained evidence is checked again: fstat, statx and
-        # newfstatat on config.toml and the folders above it, nothing else.
+        # trusted file's retained evidence is checked again: its descriptors
+        # and the names that bind them (config.toml and the folders above it).
         held = {str(p) for p in [Path(os.path.realpath(fixture.config / "config.toml")),
                                  *Path(os.path.realpath(fixture.config / "config.toml")).parents]}
-        return [root], crossing, lambda c: c.name in ("fstat", "statx", "newfstatat") and stat_target(c) in held
+        return [root], crossing, lambda c: held_recheck(c, held)
     assert axis == "B"
     themes = fixture.base / "themes"
     refs = [themes / f"t{i}.toml" for i in range(8)]
