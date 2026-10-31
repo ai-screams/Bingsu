@@ -4,6 +4,8 @@ fixture.bin contains one complete frame, followed by a 208-byte marker,
 96-byte sequence and 96-byte relay permit. The frame's CompiledConfig carries
 both palettes, executable and language policies, provenance and palette warnings.
 The shared fixture is crates/bingsu-core-tests/src/snapshot_fixture.rs.
+fixture-v2.bin is the same bytes as frame version 2 wrote them, kept to prove the
+header refuses them; never regenerate it.
 
 Regenerate and review every changed byte:
   cargo run -j 2 -q -p bingsu-core-tests --example snapshot_fixture > tests/golden/snapshot/fixture.bin
