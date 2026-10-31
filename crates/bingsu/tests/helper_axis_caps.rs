@@ -44,15 +44,30 @@ fn unparsable(n: usize) -> String {
     s
 }
 
+/// `reload` on the real clock: a busy machine can pass the helper's 500 ms
+/// work budget, which also ends 3, so a 3 is tried again. A refused cap ends 3
+/// on every attempt, so it stays 3 here; one other outcome on any attempt is
+/// what comes back. A budget stop cannot turn an over-cap cell into a 0.
+fn reload_settled(e: &Env) -> (Option<i32>, String) {
+    let mut last = reload(e);
+    for _ in 0..4 {
+        if last.0 != Some(3) {
+            break;
+        }
+        last = reload(e);
+    }
+    last
+}
+
 /// Publishes `COMMAND`, applies `past`, reloads: the outcome and whether
 /// the context files stayed as they were.
 fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
     e.put_config("config.toml", COMMAND);
-    let (code, out) = reload(e);
+    let (code, out) = reload_settled(e);
     assert_eq!(code, Some(0), "{out}");
     let before = context(e);
     past(e);
-    let (code, out) = reload(e);
+    let (code, out) = reload_settled(e);
     (code, context(e) == before, out)
 }
 
@@ -60,7 +75,8 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
 // snapshot·last-good·marker·sequence가 그대로다.
 // 이것을 실패시키는 것: 거부된 extends 항목이나 없는 뿌리 후보를 R에서 빼는 것, conf.d의 설정이 아닌 항목을
 // 세지 않거나 재검증 목록을 세지 않는 것, 버린 원본의 바이트를 B에서 빼는 것, cap 비교의 하나 차이, 상한
-// 초과를 확인한 실패(1, 무효 표식)로 내는 것, sequence를 옮긴 뒤에 상한을 넘는 것.
+// 초과를 확인한 실패(1, 무효 표식)로 내는 것, sequence를 옮긴 뒤에 상한을 넘는 것, 상한 거부가 시도에 따라
+// 풀리는 것(재시도가 그 0을 돌려줘 실패한다).
 #[test]
 fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
     let mut seen = Vec::new();
