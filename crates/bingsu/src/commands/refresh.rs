@@ -4,6 +4,7 @@ use super::{
     config_load::{Loader, Places, Verified},
     group_policy::SystemGroups,
     init::roots::ConfigRootPin,
+    io_meter::{AxisUse, IoMeter},
     runtime_root::Pinned,
     snapshot_store::{CheckedContextFd, DataFile, LockedStore, Slot, StoreError},
     sys,
@@ -214,12 +215,15 @@ fn run(
     // Other contexts sharing this state root may compile concurrently. The
     // immutable record fd (or checked absence) survives this short lock.
     drop(selection);
-    let pin = ConfigRootPin::reopen(
+    // One meter for the round's config-source I/O, the root walk included.
+    let mut meter = IoMeter::session();
+    let pin = ConfigRootPin::reopen_metered(
         &r.config_written,
         &r.config_canonical,
         r.config_root_shape_only,
         r.me,
         &mut groups,
+        &mut meter,
     )?;
     let places = Places {
         config_root: pin,
@@ -228,8 +232,8 @@ fn run(
         user: r.user.clone(),
     };
     let mut loader = match record {
-        Some(e) => Loader::with_record(places, e),
-        None => Loader::new(places),
+        Some(e) => Loader::with_record_metered(places, e, meter),
+        None => Loader::new_metered(places, meter),
     };
     b.check(clock)?;
     let previous = store.read(DataFile::Snapshot)?;
@@ -283,7 +287,15 @@ fn run(
     b.check(clock)?;
     let compiled = unchanged || report.as_ref().is_some_and(|r| r.snapshot.is_some());
     // Revalidate before considering publication or invalidation.
+    let before = loader.io_used();
     loader.revalidate().map_err(|_| StoreError::Unsafe)?;
+    let after = loader.io_used();
+    // Two more revalidations follow, each repeating the work just measured in
+    // this round: `verified` below and the last one before the marker. Both
+    // must fit now, before the sequence moves; a source tree that changes in
+    // between still ends at the last one, on the path of any other change.
+    let remaining: AxisUse = std::array::from_fn(|i| (after[i] - before[i]).saturating_mul(2));
+    loader.io_fits(&remaining).map_err(|_| StoreError::Unsafe)?;
     let verification = loader.verified(
         report.as_ref().map_or(&[], |r| r.files.as_slice()),
         compiled,

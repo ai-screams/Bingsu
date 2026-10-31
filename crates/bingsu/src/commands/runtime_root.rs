@@ -10,6 +10,7 @@
 //! and the write child (Part N) open the root with `open_runtime_root`. The
 //! prompt front end makes the same observations through its read plan
 //! (Task N4) and applies the same core rule, so the three cannot disagree.
+use crate::commands::io_meter::{self, HelperAxis, IoMeter, Meter};
 use crate::commands::sys;
 use bingsu_core::fs_trust::{Facts, GroupOracle, Last, Refusal, walk_verdict};
 use std::ffi::OsStr;
@@ -50,8 +51,17 @@ pub struct Chain {
 
 impl Chain {
     pub fn revalidate(&self) -> std::io::Result<()> {
+        self.revalidate_with(&mut None)
+    }
+
+    /// `revalidate`, charging mounts (M) to a refresh round's meter.
+    pub fn revalidate_metered(&self, meter: &mut IoMeter) -> std::io::Result<()> {
+        self.revalidate_with(&mut Some(meter))
+    }
+
+    fn revalidate_with(&self, meter: &mut Meter<'_>) -> std::io::Result<()> {
         for (i, f) in self.fds.iter().enumerate() {
-            if sys::fd_facts(f.as_fd())? != self.facts[i] {
+            if sys::fd_facts_metered(f.as_fd(), meter)? != self.facts[i] {
                 return Err(std::io::Error::other("chain facts changed"));
             }
             if i > 0 {
@@ -94,6 +104,16 @@ fn names(path: &Path) -> Result<Vec<&OsStr>, RootError> {
 /// Opens `path` from "/" without following any symlink, reading the facts
 /// of every folder on the way.
 pub fn open_chain(path: &Path) -> Result<Chain, RootError> {
+    open_chain_with(path, None)
+}
+
+/// `open_chain`, charging each name (P) and mount (M) to a refresh round's
+/// meter. A refused charge is `Open` with errno 0 at the name it stopped.
+pub fn open_chain_metered(path: &Path, meter: &mut IoMeter) -> Result<Chain, RootError> {
+    open_chain_with(path, Some(meter))
+}
+
+fn open_chain_with(path: &Path, mut meter: Meter<'_>) -> Result<Chain, RootError> {
     let err = |at: usize| {
         move |e: std::io::Error| RootError::Open {
             at,
@@ -103,16 +123,17 @@ pub fn open_chain(path: &Path) -> Result<Chain, RootError> {
     let names = names(path)?;
     let root = sys::open_dir_at_search_nofollow(None, OsStr::new("/")).map_err(err(0))?;
     let mut chain = Chain {
-        facts: vec![sys::fd_facts(root.as_fd()).map_err(err(0))?],
+        facts: vec![sys::fd_facts_metered(root.as_fd(), &mut meter).map_err(err(0))?],
         fds: vec![root],
         names: names.iter().map(|n| n.to_os_string()).collect(),
     };
     for (i, name) in names.iter().enumerate() {
+        io_meter::charge(&mut meter, HelperAxis::P, 1).map_err(err(i + 1))?;
         let next = sys::open_dir_at_search_nofollow(Some(chain.last().as_fd()), name)
             .map_err(err(i + 1))?;
         chain
             .facts
-            .push(sys::fd_facts(next.as_fd()).map_err(err(i + 1))?);
+            .push(sys::fd_facts_metered(next.as_fd(), &mut meter).map_err(err(i + 1))?);
         chain.fds.push(next);
     }
     Ok(chain)

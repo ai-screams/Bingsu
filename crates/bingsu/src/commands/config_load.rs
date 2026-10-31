@@ -23,9 +23,16 @@
 //! retain descriptors; shape-only or excluded candidates close immediately.
 //! Loader retains execution source, root, parent, link, listing and approval evidence until
 //! N2 calls verified immediately before publication.
+//!
+//! Every walk, listing, read and revalidation here is charged to the
+//! session's `IoMeter` (`io_meter`, units and caps there). A refused charge
+//! makes the session incomplete and, through the meter's latch, stops all
+//! further source I/O of the session; the trust record's own state-root
+//! evidence is not a config source and is not charged.
 use super::evidence::{Encoder, EvidenceExport};
 use crate::commands::group_policy::SystemGroups;
-use crate::commands::runtime_root::{Chain, open_chain};
+use crate::commands::io_meter::{AxisExceeded, AxisUse, HelperAxis, IoMeter};
+use crate::commands::runtime_root::{Chain, open_chain_metered};
 use crate::commands::source_path::Resolved;
 use crate::commands::sys;
 use crate::commands::trust_record::{Record, RecordEvidence};
@@ -99,13 +106,19 @@ struct Planned {
 
 struct Listing {
     chain: Chain,
+    canonical: PathBuf,
     path_evidence: Vec<u8>,
     file: std::fs::File,
     names: Vec<OsString>,
 }
 
-fn config_names(file: &std::fs::File) -> std::io::Result<Vec<OsString>> {
-    let mut names: Vec<_> = sys::directory_names(file.as_fd())?
+fn config_names(
+    file: &std::fs::File,
+    canonical: &Path,
+    meter: &mut IoMeter,
+) -> std::io::Result<Vec<OsString>> {
+    meter.charge_folder(canonical)?;
+    let mut names: Vec<_> = sys::directory_names_metered(file.as_fd(), meter)?
         .into_iter()
         .filter(|n| n.as_bytes().ends_with(b".toml") && !n.as_bytes().starts_with(b"."))
         .collect();
@@ -144,6 +157,8 @@ pub struct Loader {
     observed: BTreeMap<PathBuf, Vec<u8>>,
     absent: BTreeMap<PathBuf, (PathBuf, Vec<u8>)>,
     edges: Vec<(FileKey, ExtendsRef, PathBuf)>,
+    /// The session's source I/O; `revalidate` charges it through `&self`.
+    meter: std::cell::RefCell<IoMeter>,
 }
 
 fn open_error(reason: impl Into<String>, trust: Trust) -> OpenError {
@@ -153,6 +168,19 @@ fn open_error(reason: impl Into<String>, trust: Trust) -> OpenError {
     }
 }
 
+/// Reads at most `limit` bytes; on an error `bytes` keeps what was read.
+fn read_source(
+    file: &mut std::fs::File,
+    limit: u64,
+    bytes: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    #[cfg(test)]
+    if let Some(r) = tests::faulty_read(file, limit, bytes) {
+        return r;
+    }
+    file.by_ref().take(limit).read_to_end(bytes)
+}
+
 fn errno_text(e: &std::io::Error) -> String {
     e.raw_os_error()
         .map_or_else(|| e.to_string(), |n| format!("errno {n}"))
@@ -160,6 +188,12 @@ fn errno_text(e: &std::io::Error) -> String {
 
 impl Loader {
     pub fn new(places: Places) -> Self {
+        Self::new_metered(places, IoMeter::session())
+    }
+
+    /// A Loader that continues a meter which already charged the round's
+    /// config root walk (`ConfigRootPin::reopen_metered`).
+    pub(crate) fn new_metered(places: Places, meter: IoMeter) -> Self {
         let mut loader = Self {
             #[cfg(test)]
             groups: None,
@@ -180,6 +214,7 @@ impl Loader {
             observed: BTreeMap::new(),
             absent: BTreeMap::new(),
             edges: Vec::new(),
+            meter: std::cell::RefCell::new(meter),
         };
         if loader.places.config_root.evidence.canonical != loader.places.config_root.path {
             let missing = loader.places.config_root.path.clone();
@@ -200,7 +235,15 @@ impl Loader {
 
     /// The only production interface for an approved external config.
     pub fn with_record(places: Places, evidence: RecordEvidence) -> Self {
-        let mut loader = Self::new(places);
+        Self::with_record_metered(places, evidence, IoMeter::session())
+    }
+
+    pub(crate) fn with_record_metered(
+        places: Places,
+        evidence: RecordEvidence,
+        meter: IoMeter,
+    ) -> Self {
+        let mut loader = Self::new_metered(places, meter);
         loader.record = Some(evidence.record.clone());
         loader.fds += evidence.fd_count();
         loader.record_evidence = Some(evidence);
@@ -214,12 +257,24 @@ impl Loader {
         self.with_groups(|groups| self.revalidate_with(groups))
     }
 
+    /// What this session has charged so far, per axis.
+    pub(crate) fn io_used(&self) -> AxisUse {
+        self.meter.borrow().all_used()
+    }
+
+    /// Whether `more` still fits on every axis (nothing is charged).
+    pub(crate) fn io_fits(&self, more: &AxisUse) -> Result<(), AxisExceeded> {
+        self.meter.borrow_mut().fits(more)
+    }
+
     fn revalidate_with(&self, groups: &mut dyn GroupOracle) -> Result<(), String> {
         if !self.complete {
             return Err("incomplete session".into());
         }
+        let meter = &mut *self.meter.borrow_mut();
         for (path, before) in &self.observed {
-            let now = Resolved::open(path, self.places.me, groups).map_err(|e| e.to_string())?;
+            let now = Resolved::open_metered(path, self.places.me, groups, meter)
+                .map_err(|e| e.to_string())?;
             if now.evidence_export().map_err(|e| e.to_string())? != *before {
                 return Err("source observation changed".into());
             }
@@ -230,24 +285,30 @@ impl Loader {
             {
                 return Err("absence changed".into());
             }
-            let now =
-                Resolved::open_dir(prefix, self.places.me, groups).map_err(|e| e.to_string())?;
+            let now = Resolved::open_dir_metered(prefix, self.places.me, groups, meter)
+                .map_err(|e| e.to_string())?;
             if now.evidence_export().map_err(|e| e.to_string())? != *before {
                 return Err("absence parent changed".into());
             }
         }
         if let Some(listing) = &self.listing {
-            let now = Resolved::open_dir(
+            let now = Resolved::open_dir_metered(
                 &self.places.config_root.path.join("conf.d"),
                 self.places.me,
                 groups,
+                meter,
             )
             .map_err(|e| e.to_string())?;
             if now.evidence_export().map_err(|e| e.to_string())? != listing.path_evidence {
                 return Err("conf.d path changed".into());
             }
-            listing.chain.revalidate().map_err(|e| e.to_string())?;
-            if config_names(&listing.file).map_err(|e| e.to_string())? != listing.names {
+            listing
+                .chain
+                .revalidate_metered(meter)
+                .map_err(|e| e.to_string())?;
+            if config_names(&listing.file, &listing.canonical, meter).map_err(|e| e.to_string())?
+                != listing.names
+            {
                 return Err("conf.d names changed".into());
             }
         }
@@ -256,9 +317,10 @@ impl Loader {
         // refusal other than `Undecided`, and its evidence must not change.
         if root.shape_only {
             root.evidence
-                .revalidate_assuming_decided(self.places.me, groups)
+                .revalidate_assuming_decided_metered(self.places.me, groups, meter)
         } else {
-            root.evidence.revalidate(self.places.me, groups)
+            root.evidence
+                .revalidate_metered(self.places.me, groups, meter)
         }
         .map_err(|e| format!("config root: {e}"))?;
         if let Some(record) = &self.record_evidence {
@@ -270,7 +332,7 @@ impl Loader {
         }
         for c in self.held.values().filter(|c| c.trust == Trust::Executable) {
             c.evidence
-                .revalidate(self.places.me, groups)
+                .revalidate_metered(self.places.me, groups, meter)
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -279,7 +341,14 @@ impl Loader {
     fn observe_absence(&mut self, path: &Path) {
         let mut prefix = path.parent();
         while let Some(parent) = prefix {
-            match self.with_groups(|groups| Resolved::open_dir(parent, self.places.me, groups)) {
+            match self.with_groups(|groups| {
+                Resolved::open_dir_metered(
+                    parent,
+                    self.places.me,
+                    groups,
+                    &mut self.meter.borrow_mut(),
+                )
+            }) {
                 Ok(e) => {
                     match e.evidence_export() {
                         Ok(bytes) => {
@@ -404,7 +473,14 @@ impl Loader {
 
     fn check(&mut self, written: &Path) -> Result<Checked, OpenError> {
         let evidence = self
-            .with_groups(|groups| Resolved::open(written, self.places.me, groups))
+            .with_groups(|groups| {
+                Resolved::open_metered(
+                    written,
+                    self.places.me,
+                    groups,
+                    &mut self.meter.borrow_mut(),
+                )
+            })
             .map_err(|e| {
                 // A failed walk proves neither a trusted place nor a stable
                 // absence. ENOENT can be a concurrent save or a broken link.
@@ -469,26 +545,30 @@ impl Loader {
 
     fn read_candidate(&mut self, mut c: Checked) -> Result<Opened, OpenError> {
         let mut bytes = Vec::new();
-        c.evidence
-            .file
-            .rewind()
-            .and_then(|()| {
-                c.evidence
-                    .file
-                    .by_ref()
-                    .take(FILE_BYTES_MAX as u64 + 1)
-                    .read_to_end(&mut bytes)
-            })
+        // Never ask for more than one byte past what B has left.
+        let meter = self.meter.get_mut();
+        let room = meter.room(HelperAxis::B);
+        let read = c.evidence.file.rewind().and_then(|()| {
+            let limit = (FILE_BYTES_MAX as u64 + 1).min(room.saturating_add(1));
+            read_source(&mut c.evidence.file, limit, &mut bytes)
+        });
+        // `read_to_end` keeps the bytes it read before an error: they count
+        // too, so failing reads cannot go on past B.
+        let charged = meter.charge(HelperAxis::B, bytes.len() as u64);
+        read.and(charged.map_err(std::io::Error::from))
             .map_err(|e| {
                 self.complete = false;
                 open_error(errno_text(&e), c.trust)
             })?;
         if c.trust == Trust::Executable {
-            self.with_groups(|groups| c.evidence.revalidate(self.places.me, groups))
-                .map_err(|e| {
-                    self.complete = false;
-                    open_error(e.to_string(), c.trust)
-                })?;
+            self.with_groups(|groups| {
+                c.evidence
+                    .revalidate_metered(self.places.me, groups, &mut self.meter.borrow_mut())
+            })
+            .map_err(|e| {
+                self.complete = false;
+                open_error(e.to_string(), c.trust)
+            })?;
             if let Some(r) = self.record.as_ref().filter(|r| r.path == c.canonical)
                 && (r.dev, r.ino) != (c.key.dev, c.key.ino)
             {
@@ -529,17 +609,19 @@ impl Loader {
             None => paths.push(root.join("config.toml")),
         }
         let listed = (|| -> std::io::Result<Listing> {
+            let meter = &mut *self.meter.borrow_mut();
             let evidence = self.with_groups(|groups| {
-                Resolved::open_dir(&root.join("conf.d"), self.places.me, groups)
+                Resolved::open_dir_metered(&root.join("conf.d"), self.places.me, groups, meter)
             })?;
             let path_evidence = evidence.evidence_export()?;
             let canonical = evidence.canonical;
-            let chain =
-                open_chain(&canonical).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            let chain = open_chain_metered(&canonical, meter)
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             let file = sys::open_dir_at_nofollow(chain.last().as_fd(), std::ffi::OsStr::new("."))?;
-            let names = config_names(&file)?;
+            let names = config_names(&file, &canonical, meter)?;
             Ok(Listing {
                 chain,
+                canonical,
                 path_evidence,
                 file,
                 names,
@@ -560,6 +642,11 @@ impl Loader {
         }
         paths.push(root.join("config.local.toml"));
         for p in paths {
+            // Every candidate counts, the absent optional ones included.
+            if self.meter.get_mut().charge(HelperAxis::R, 1).is_err() {
+                self.complete = false;
+                break;
+            }
             let selected = self.record.as_ref().is_some_and(|r| r.path == p);
             let optional =
                 !selected && (p == root.join("config.toml") || p == root.join("config.local.toml"));
@@ -713,6 +800,14 @@ impl Resolver for Loader {
     }
 
     fn open(&mut self, from: &Opened, r: &ExtendsRef) -> Result<Opened, OpenError> {
+        // Charged before resolving: refused, duplicate and cyclic entries count.
+        if let Err(e) = self.meter.get_mut().charge(HelperAxis::R, 1) {
+            self.complete = false;
+            return Err(open_error(
+                errno_text(&std::io::Error::from(e)),
+                Trust::ShapeOnly,
+            ));
+        }
         let lexical = self.resolve(from, &r.text);
         let path = lexical.map_err(|why| open_error(why, Trust::ShapeOnly))?;
         self.edges.push((from.key, r.clone(), path.clone()));
@@ -743,6 +838,87 @@ impl Resolver for Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file of exactly this size reads `FAULT_AFTER` bytes, then fails (EIO).
+    const FAULT_SIZE: u64 = 240 * 1024 + 1;
+    const FAULT_AFTER: usize = 240 * 1024;
+    thread_local! {
+        static FAULTY_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn faulty_read(
+        file: &mut std::fs::File,
+        limit: u64,
+        bytes: &mut Vec<u8>,
+    ) -> Option<std::io::Result<usize>> {
+        if file.metadata().ok()?.len() != FAULT_SIZE {
+            return None;
+        }
+        FAULTY_READS.with(|n| n.set(n.get() + 1));
+        let want = FAULT_AFTER.min(usize::try_from(limit).unwrap_or(usize::MAX));
+        let before = bytes.len();
+        bytes.resize(before + want, 0);
+        if let Err(e) = file.read_exact(&mut bytes[before..]) {
+            return Some(Err(e));
+        }
+        Some(Err(std::io::Error::from_raw_os_error(libc::EIO)))
+    }
+
+    // R 거부는 걸쇠와 별개로 세션을 미완료로 둔다. 걸쇠를 끈 계수기로 거부 뒤의 후보가 통과하게 해도, 뿌리
+    // 후보 거부와 extends 항목 거부 각각이 Incomplete로 끝난다.
+    // 이것을 실패시키는 것: 두 R 거부 경로에서 `self.complete = false`를 빼는 것(걸쇠만 믿게 됨).
+    #[test]
+    fn r_refusals_leave_the_session_incomplete_without_the_latch() {
+        use crate::commands::io_meter::{AXIS_CAPS, AxisCaps, TestCaps};
+        let mut seen = Vec::new();
+        for (case, r, text) in [
+            ("root candidate", 1, "icons = \"ascii\"\n"),
+            (
+                "extends entry",
+                3,
+                "extends = [\"$A\", \"$B\"]\nicons = \"ascii\"\n",
+            ),
+        ] {
+            let fx = Fx::new(&format!("unlatched-r-{r}"));
+            fx.put(&fx.root.join("config.toml"), text);
+            let _caps = TestCaps::unlatched(AxisCaps { r, ..AXIS_CAPS });
+            let (g, l) = fx.read(None);
+            seen.push((case, l.verified(&g.files, g.succeeded)));
+        }
+        assert_eq!(
+            seen,
+            [
+                ("root candidate", Verified::Incomplete),
+                ("extends entry", Verified::Incomplete)
+            ]
+        );
+    }
+
+    // 앞부분을 읽고 오류로 끝나는 읽기도 읽은 바이트를 B에 센다. 240 KiB를 읽고 EIO인 shape-only 참조 10개는
+    // 2 MiB에 닿는 9번째에서 걸쇠가 걸리고, 10번째는 열지 않는다.
+    // 이것을 실패시키는 것: read_to_end가 성공할 때만 B를 세는 것(10개 모두 읽고 B는 config.toml 몫만 남음).
+    #[test]
+    fn failing_reads_still_count_their_bytes() {
+        let fx = Fx::new("failing-reads");
+        let refs: Vec<String> = (0..10)
+            .map(|i| {
+                let p = fx.home.join(format!("t{i}.toml"));
+                fx.put(&p, &"#".repeat(FAULT_SIZE as usize));
+                format!("{:?}", p.display().to_string())
+            })
+            .collect();
+        fx.put(
+            &fx.root.join("config.toml"),
+            &format!("extends = [{}]\n", refs.join(", ")),
+        );
+        FAULTY_READS.with(|n| n.set(0));
+        let (r, l) = fx.read(None);
+        let attempts = FAULTY_READS.with(std::cell::Cell::get);
+        let used = l.io_used()[HelperAxis::B as usize];
+        assert_eq!(attempts, 9);
+        assert!(used <= crate::commands::io_meter::AXIS_CAPS.b, "{used}");
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
+    }
     use bingsu_core::config::source::{Found, load};
     use bingsu_core::diag::{Diagnostic, SourceId};
 
@@ -1026,18 +1202,21 @@ mod tests {
     }
 
     // 큰 conf.d는 메타데이터 계획만 만들고 fd를 보유하지 않는다. Part S가 고유 파일 예산을 정한다.
-    // 이것을 실패시키는 것: 모든 뿌리를 열어 fd를 쥐는 것, 열지 못한 이유를 일반 문구로 바꾸는 것.
+    // 후보가 R 상한(256)을 넘는 conf.d는 의미 예산 판정 전에 Incomplete다(U2): 300개는 오늘까지 확인한 실패
+    // (EXTENDS_TOO_MANY, 무효 표식)였고 이제 표식을 바꾸지 않는다.
+    // 이것을 실패시키는 것: 모든 뿌리를 열어 fd를 쥐는 것, 열지 못한 이유를 일반 문구로 바꾸는 것, 뿌리 후보를
+    // R에 세지 않는 것(300개가 끝까지 계획됨).
     #[test]
     fn a_large_conf_d_opens_only_up_to_the_limit() {
         let fx = Fx::new("many");
-        for i in 0..300 {
+        for i in 0..250 {
             fx.put(&fx.root.join(format!("conf.d/{i:03}.toml")), "");
         }
         let mut l = fx.loader(None);
         let roots = l.roots(b"");
-        assert_eq!(roots.len(), 301);
+        assert_eq!(roots.len(), 251);
         assert!(l.held.is_empty());
-        assert_eq!(l.plan.len(), 300);
+        assert_eq!(l.plan.len(), 250);
         let r = read_graph(roots, &mut l);
         assert!(!r.succeeded);
         assert!(
@@ -1045,6 +1224,16 @@ mod tests {
             "{:?}",
             codes_of(&r)
         );
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Invalid);
+        for i in 250..300 {
+            fx.put(&fx.root.join(format!("conf.d/{i:03}.toml")), "");
+        }
+        let mut l = fx.loader(None);
+        let roots = l.roots(b"");
+        // config.toml (absent) and 255 conf.d names; the 256th name is refused.
+        assert_eq!(l.plan.len(), 255);
+        let r = read_graph(roots, &mut l);
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
         // A root that is there but is not a regular file keeps its reason.
         let fx = Fx::new("fifo");
         std::fs::create_dir(fx.root.join("config.toml")).unwrap();
@@ -1557,6 +1746,52 @@ mod tests {
         let (r, l) = fx.read(None);
         assert!(r.succeeded);
         assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
+    }
+
+    // 상한을 한 번 넘으면 그 세션은 원본 I/O를 더 하지 않는다: core가 남은 뿌리를 열려 해도, 발행 전 재확인도
+    // 시스템 호출 래퍼를 부르지 않고 Incomplete로 끝난다. 래퍼 호출은 수집 계수기로 센다.
+    // 이것을 실패시키는 것: 걷기 시작 전 걸쇠 확인을 빼는 것(남은 뿌리마다 "/"를 엶), 거부한 뒤 뿌리 후보를 계속
+    // 살피는 것, 걸쇠가 다른 축을 막지 않는 것.
+    #[test]
+    fn no_source_io_after_a_refused_charge() {
+        use crate::commands::io_meter::{AXIS_CAPS, AxisCaps, TestCaps};
+        let fx = Fx::new("latched");
+        fx.put(&fx.root.join("config.toml"), "icons = \"ascii\"\n");
+        for n in ["a", "b", "c"] {
+            fx.put(&fx.root.join(format!("conf.d/{n}.toml")), "");
+        }
+        fx.put(&fx.root.join("config.local.toml"), "");
+        let _caps = TestCaps::set(AxisCaps { r: 2, ..AXIS_CAPS });
+        let mut l = fx.loader(None);
+        let roots = l.roots(b"");
+        // Built-in, config.toml and a.toml; b.toml was refused before its probe.
+        assert_eq!(roots.len(), 3);
+        let ops = sys::CollectionMeter::fixture_operations(u32::MAX);
+        let r = read_graph(roots, &mut l);
+        let verdict = l.verified(&r.files, r.succeeded);
+        assert_eq!(ops.used(), 0);
+        assert_eq!(verdict, Verified::Incomplete);
+    }
+
+    // 뿌리 찾기의 P는 걷기마다 이름 하나에 1이다: 빈 conf.d를 걷기(open_dir)와 목록용 사슬(open_chain)로 두 번,
+    // 없는 config.toml·config.local.toml은 부재를 확인하는 설정 뿌리 걷기로 한 번씩.
+    // 이것을 실패시키는 것: 목록용 사슬을 세지 않는 것, 부재 확인 걷기를 세지 않는 것, "/" 열기를 P에 세는 것.
+    #[test]
+    fn root_discovery_charges_each_name_walked() {
+        use crate::commands::io_meter::HelperAxis;
+        let fx = Fx::new("discovery-p");
+        let mut l = fx.loader(None);
+        l.roots(b"");
+        let names = fx
+            .root
+            .join("conf.d")
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .count() as u64;
+        assert_eq!(
+            l.io_used()[HelperAxis::P as usize],
+            2 * names + 2 * (names - 1)
+        );
     }
 
     // 이것을 실패시키는 것: 같은 FileKey 별칭을 중복 계획하거나 Unsafe가 신뢰 예산을 차지하는 것.

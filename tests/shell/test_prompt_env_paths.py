@@ -1897,6 +1897,144 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
+# The helper's E_n cap (user decision U2), pinned independently from the product source.
+HELPER_E_N_CAP = 1024
+
+
+# 이것을 실패시키는 것: 제품 AXIS_CAPS의 E_n을 바꾸고 이 게이트의 고정값은 그대로 두는 것.
+def test_helper_e_n_cap_matches_product_constant():
+    source = (ROOT / 'crates/bingsu/src/commands/io_meter.rs').read_text().replace('\r\n', '\n')
+    caps = re.search(r'pub\(crate\) const AXIS_CAPS: AxisCaps = AxisCaps \{(.*?)\};', source, re.S)
+    assert caps and re.search(r'\be_n: ([\d_]+),', caps[1])[1].replace('_', '') == str(HELPER_E_N_CAP)
+
+
+HELPER_B_CAP = 2 * 1024 * 1024
+KIB256 = 256 * 1024
+
+
+def write_private(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pending = path.with_name(path.name + ".new")
+    pending.write_bytes(data)
+    pending.chmod(0o600)
+    pending.replace(path)
+
+
+def held_recheck(call, held):
+    """Whether `call` rechecks retained evidence: fstat of a held descriptor,
+    statx or newfstatat of a held descriptor itself (empty name, AT_EMPTY_PATH)
+    or of one held name relative to a held folder descriptor. A lookup by path
+    (AT_FDCWD, or a name with a slash) is not."""
+    m = re.match(r'(\d+)<([^<>]*)>(?:, "([^"]*)")?', call.args)
+    if call.name not in ("fstat", "statx", "newfstatat") or not m:
+        return False
+    base, name = m[2], m[3]
+    if call.name == "fstat":
+        return name is None and base in held
+    if name == "":
+        return "AT_EMPTY_PATH" in call.args and base in held
+    return name is not None and "/" not in name and base in held and f"{base}/{name}" in held
+
+
+def axis_cap_case(axis, fixture):
+    """Make `fixture`'s config cross `axis`; return (paths the helper must stop
+    touching, the crossing call finder, the call kinds still allowed after it)."""
+    root = os.path.realpath(fixture.config)
+    plain = TEMPLATES["plain"].encode()
+    if axis == "E_n":
+        conf_d = fixture.config / "conf.d"
+        conf_d.mkdir(mode=0o700)
+        # 1,100 names and `.`, `..`: the first listing alone passes the cap.
+        for i in range(1100):
+            (conf_d / f"n{i:04}.txt").write_bytes(b"")
+        listing = f"<{os.path.realpath(conf_d)}>"
+
+        def crossing(calls):
+            reads = [c for c in calls if c.name == "getdents64" and listing in c.args]
+            assert reads, "the helper never listed conf.d"
+            seen = 0
+            for c in reads:
+                m = re.search(r"/\* (\d+) entries \*/", c.args)
+                assert m, ("getdents64 without an entry count", c)
+                seen += int(m[1])
+                if seen > HELPER_E_N_CAP:
+                    assert c is reads[-1], ("listing went on past the batch holding the cap", len(reads))
+                    return c
+            pytest.fail(f"the listing never passed the cap: {seen} entries")
+        return [root], crossing, None
+    if axis == "R":
+        # config.toml, the absent config.local.toml and 255 refused entries: 257.
+        refs = ", ".join(f'"$THEME_{i}"' for i in range(255))
+        write_private(fixture.config / "config.toml", f"extends = [{refs}]\n".encode() + plain)
+        config = f"<{os.path.realpath(fixture.config / 'config.toml')}>"
+
+        def crossing(calls):
+            reads = [c for c in calls if c.name == "read" and config in c.args]
+            assert reads, "the helper never read config.toml"
+            return reads[-1]
+        # The refused entry has no call of its own. Between the read and it the
+        # trusted file's retained evidence is checked again: its descriptors
+        # and the names that bind them (config.toml and the folders above it).
+        held = {str(p) for p in [Path(os.path.realpath(fixture.config / "config.toml")),
+                                 *Path(os.path.realpath(fixture.config / "config.toml")).parents]}
+        return [root], crossing, lambda c: held_recheck(c, held)
+    assert axis == "B"
+    themes = fixture.base / "themes"
+    refs = [themes / f"t{i}.toml" for i in range(8)]
+    text = ("extends = [" + ", ".join(f'"{os.path.realpath(themes)}/t{i}.toml"' for i in range(8)) + "]\n").encode() + plain
+    write_private(fixture.config / "config.toml", text)
+    for r in refs:
+        write_private(r, b"[style\n" + b"x" * (KIB256 - 7))
+    last = f"<{os.path.realpath(refs[-1])}>"
+    # The eighth theme gets one byte past what B has left, never its whole size.
+    room = HELPER_B_CAP - len(text) - 7 * KIB256
+
+    def crossing(calls):
+        reads = [c for c in calls if c.name == "read" and last in c.args]
+        assert reads, "the helper never read the eighth theme"
+        got = sum(int(c.ret) for c in reads if c.ret.isdigit())
+        assert got == room + 1, ("bytes read from the crossing theme", got, room + 1)
+        return reads[-1]
+    return [root, os.path.realpath(themes)], crossing, None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+@pytest.mark.parametrize("axis", ["E_n", "R", "B"])
+def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
+    """GATE-FS-HELPER.2: a config past one axis cap ends the release helper's
+    round closed. After the call that crosses the cap (the conf.d batch holding
+    raw entry cap + 1, the last read of config.toml before the refused extends
+    entry, the read of the theme that passes 2 MiB) no config source call
+    follows, and snapshot, last-good, marker and sequence keep their bytes.
+
+    이것을 실패시키는 것: 목록 항목을 걸러낸 뒤에만 세거나 세지 않는 것(목록이 끝까지 돌고 재목록이 따름), 거부된
+    extends 항목을 R에서 빼는 것(재검증 걷기가 따름), B 읽기를 남은 여유 + 1바이트로 묶지 않는 것, 상한을 넘은 뒤
+    남은 뿌리 후보나 재검증을 이어 가는 것, 상한 초과에서 표식·snapshot·sequence를 쓰는 것.
+    """
+    assert shutil.which("strace"), "the helper axis gate must execute strace"
+    require_release_helper(real_bin())
+    fixture = HelperStageFixture("unchanged")
+    try:
+        names = ("snapshot", "last-good", "marker", "sequence")
+        before = {n: (fixture.store / n).read_bytes() for n in names if (fixture.store / n).exists()}
+        assert {"snapshot", "marker", "sequence"} <= set(before), sorted(before)
+        watched, crossing, allowed = axis_cap_case(axis, fixture)
+        trace = tmp_path / "trace.strace"
+        fixture.prompt(trace)
+        wait_helpers(fixture.base)
+        after = {n: (fixture.store / n).read_bytes() for n in names if (fixture.store / n).exists()}
+        assert after == before, "an exceeded cap changed the store"
+        calls = parse_trace(trace.read_text(errors="replace"))
+        assert not calls.errors, calls.errors[:5]
+        at = crossing(calls)
+        later = [c for c in calls[at.index + 1:] if c.name not in ("close", "exit_group")
+                 and not (allowed and allowed(c)) and any(path in c.args for path in watched)]
+        assert not later, ("config source calls after the cap", later[:5])
+    finally:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
 # Fixture metadata, pinned independently from the product source.
 FRONT_CHUNK = 16 * 1024
 FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only')

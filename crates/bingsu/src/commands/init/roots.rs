@@ -2,6 +2,7 @@
 //! folders and secure the final folder, then judge the retained no-follow
 //! chain with the same rules as the helper (including local file system).
 use super::trusted_env::TrustedEnv;
+use crate::commands::io_meter::IoMeter;
 use crate::commands::{
     group_policy::{Recording, SystemGroups},
     runtime_root, sys,
@@ -54,10 +55,26 @@ impl ConfigRootPin {
         me: u32,
         groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
     ) -> std::io::Result<Self> {
+        Self::check_with(written, me, groups, None)
+    }
+
+    /// `check`, charging every walk (one per missing suffix name) and both
+    /// rechecks to a refresh round's meter.
+    fn check_with(
+        written: &Path,
+        me: u32,
+        groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+        mut meter: Option<&mut IoMeter>,
+    ) -> std::io::Result<Self> {
+        use crate::commands::source_path::Resolved;
         let mut prefix = written.to_path_buf();
         let mut missing = Vec::new();
         loop {
-            match crate::commands::source_path::Resolved::open_dir(&prefix, me, groups) {
+            let walked = match meter.as_deref_mut() {
+                Some(m) => Resolved::open_dir_metered(&prefix, me, groups, m),
+                None => Resolved::open_dir(&prefix, me, groups),
+            };
+            match walked {
                 Ok(evidence) => {
                     // `refusal` is the first refusal only; an `Undecided`
                     // one can hide a later `Ancestor` or `Last`, so the
@@ -65,11 +82,19 @@ impl ConfigRootPin {
                     // read as decided.
                     let shape_only = match evidence.refusal {
                         None => {
-                            evidence.revalidate(me, groups)?;
+                            match meter.as_deref_mut() {
+                                Some(m) => evidence.revalidate_metered(me, groups, m),
+                                None => evidence.revalidate(me, groups),
+                            }?;
                             false
                         }
                         Some(Refusal::Undecided { .. }) => {
-                            evidence.revalidate_assuming_decided(me, groups)?;
+                            match meter.as_deref_mut() {
+                                Some(m) => {
+                                    evidence.revalidate_assuming_decided_metered(me, groups, m)
+                                }
+                                None => evidence.revalidate_assuming_decided(me, groups),
+                            }?;
                             true
                         }
                         Some(_) => {
@@ -115,7 +140,31 @@ impl ConfigRootPin {
         me: u32,
         groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
     ) -> std::io::Result<Self> {
-        let mut pin = Self::check(written, me, groups)?;
+        Self::reopen_with(written, canonical, shape_only, me, groups, None)
+    }
+
+    /// `reopen` for the refresh helper: the walks are charged to the round's
+    /// meter, which the round's `Loader` then takes over.
+    pub fn reopen_metered(
+        written: &Path,
+        canonical: &Path,
+        shape_only: bool,
+        me: u32,
+        groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+        meter: &mut IoMeter,
+    ) -> std::io::Result<Self> {
+        Self::reopen_with(written, canonical, shape_only, me, groups, Some(meter))
+    }
+
+    fn reopen_with(
+        written: &Path,
+        canonical: &Path,
+        shape_only: bool,
+        me: u32,
+        groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+        meter: Option<&mut IoMeter>,
+    ) -> std::io::Result<Self> {
+        let mut pin = Self::check_with(written, me, groups, meter)?;
         if pin.path != canonical {
             return Err(std::io::Error::other("config root target changed"));
         }

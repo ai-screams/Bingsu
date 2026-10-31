@@ -87,6 +87,7 @@ pub fn write_fd(fd: i32, mut buf: &[u8]) -> WriteOutcome {
 }
 
 use crate::commands::group_policy::Account;
+use crate::commands::io_meter::{self, HelperAxis, IoMeter};
 #[cfg(target_os = "macos")]
 use bingsu_core::fs_trust::{AclEntry, fold_acl};
 use bingsu_core::fs_trust::{AclFacts, Facts};
@@ -492,12 +493,20 @@ pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
 
 /// `fstat` and the ACL of an open descriptor (search-only descriptors
 /// included).
+pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
+    fd_facts_metered(fd, &mut None)
+}
+
+/// `fd_facts`, charging the mount (axis M) before macOS reads its `fstatfs`.
 #[allow(
     clippy::useless_conversion,
     clippy::unnecessary_cast,
     reason = "st_mode, st_dev and st_ino differ in type between macOS and Linux"
 )]
-pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
+pub fn fd_facts_metered(
+    fd: std::os::fd::BorrowedFd<'_>,
+    meter: &mut io_meter::Meter<'_>,
+) -> std::io::Result<Facts> {
     collection_ops(1)?;
     use std::os::fd::AsRawFd;
     // SAFETY: an all-zero stat is a valid out-parameter value.
@@ -505,6 +514,9 @@ pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
     // SAFETY: `fd` is open and `st` is a writable stat.
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    if cfg!(target_os = "macos") {
+        io_meter::charge_mount(meter, st.st_dev as u64)?;
     }
     Ok(Facts {
         dev: st.st_dev as u64,
@@ -1103,8 +1115,34 @@ pub fn read_link_at(
     Ok(PathBuf::from(OsString::from_vec(out)))
 }
 
-/// Enumerate through an already held readable directory fd (N2 evidence).
+/// Enumerate through an already held readable directory fd, unmetered.
+#[allow(
+    dead_code,
+    reason = "the collection store tests list fixture folders; config listings are metered"
+)]
 pub fn directory_names(dir: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Vec<OsString>> {
+    directory_names_with(dir, &mut |_| Ok(()))
+}
+
+/// `directory_names`, charging every raw entry before filtering, `.` and
+/// `..` included: one to E_n and its `d_reclen` to E_b. A refused charge
+/// ends the listing before the next `readdir`.
+pub fn directory_names_metered(
+    dir: std::os::fd::BorrowedFd<'_>,
+    meter: &mut IoMeter,
+) -> std::io::Result<Vec<OsString>> {
+    meter.check()?;
+    directory_names_with(dir, &mut |reclen| {
+        meter.charge(HelperAxis::En, 1)?;
+        meter.charge(HelperAxis::Eb, reclen)?;
+        Ok(())
+    })
+}
+
+fn directory_names_with(
+    dir: std::os::fd::BorrowedFd<'_>,
+    entry_read: &mut dyn FnMut(u64) -> std::io::Result<()>,
+) -> std::io::Result<Vec<OsString>> {
     use std::os::fd::AsRawFd;
     // SAFETY: duplicating a borrowed open fd does not transfer its ownership.
     let copy = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -1146,6 +1184,10 @@ pub fn directory_names(dir: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Vec<
             } else {
                 Err(std::io::Error::last_os_error())
             };
+        }
+        // SAFETY: entry is readdir's live record until the next call.
+        if let Err(e) = entry_read(u64::from(unsafe { (*entry).d_reclen })) {
+            break Err(e);
         }
         // SAFETY: readdir's name is NUL-terminated and valid until next call.
         let name_ptr = unsafe { (*entry).d_name.as_ptr() };
