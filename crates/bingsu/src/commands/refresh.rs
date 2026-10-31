@@ -4,7 +4,7 @@ use super::{
     config_load::{Loader, Places, Verified},
     group_policy::SystemGroups,
     init::roots::ConfigRootPin,
-    io_meter::AxisUse,
+    io_meter::{AxisUse, IoMeter},
     runtime_root::Pinned,
     snapshot_store::{CheckedContextFd, DataFile, LockedStore, Slot, StoreError},
     sys,
@@ -215,12 +215,15 @@ fn run(
     // Other contexts sharing this state root may compile concurrently. The
     // immutable record fd (or checked absence) survives this short lock.
     drop(selection);
-    let pin = ConfigRootPin::reopen(
+    // One meter for the round's config-source I/O, the root walk included.
+    let mut meter = IoMeter::session();
+    let pin = ConfigRootPin::reopen_metered(
         &r.config_written,
         &r.config_canonical,
         r.config_root_shape_only,
         r.me,
         &mut groups,
+        &mut meter,
     )?;
     let places = Places {
         config_root: pin,
@@ -229,8 +232,8 @@ fn run(
         user: r.user.clone(),
     };
     let mut loader = match record {
-        Some(e) => Loader::with_record(places, e),
-        None => Loader::new(places),
+        Some(e) => Loader::with_record_metered(places, e, meter),
+        None => Loader::new_metered(places, meter),
     };
     b.check(clock)?;
     let previous = store.read(DataFile::Snapshot)?;

@@ -1920,6 +1920,17 @@ def write_private(path, data):
     pending.replace(path)
 
 
+def stat_target(call):
+    """The path a fstat, statx or newfstatat call looks at (fd paths from -y)."""
+    fd = re.match(r"(?:\d+|AT_FDCWD)(?:<([^<>]*)>)?(?:, \"([^\"]*)\")?", call.args)
+    if not fd:
+        return None
+    base, name = fd[1], fd[2]
+    if not name:
+        return base
+    return name if name.startswith("/") else f"{base}/{name}"
+
+
 def axis_cap_case(axis, fixture):
     """Make `fixture`'s config cross `axis`; return (paths the helper must stop
     touching, the crossing call finder, the call kinds still allowed after it)."""
@@ -1957,9 +1968,11 @@ def axis_cap_case(axis, fixture):
             assert reads, "the helper never read config.toml"
             return reads[-1]
         # The refused entry has no call of its own. Between the read and it the
-        # trusted file's retained descriptors and names are checked again
-        # (fstat, statx, newfstatat); no walk, listing or read may follow.
-        return [root], crossing, lambda c: c.name not in ("openat", "getdents64", "read", "readlinkat")
+        # trusted file's retained evidence is checked again: fstat, statx and
+        # newfstatat on config.toml and the folders above it, nothing else.
+        held = {str(p) for p in [Path(os.path.realpath(fixture.config / "config.toml")),
+                                 *Path(os.path.realpath(fixture.config / "config.toml")).parents]}
+        return [root], crossing, lambda c: c.name in ("fstat", "statx", "newfstatat") and stat_target(c) in held
     assert axis == "B"
     themes = fixture.base / "themes"
     refs = [themes / f"t{i}.toml" for i in range(8)]

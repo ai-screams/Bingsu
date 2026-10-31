@@ -168,6 +168,19 @@ fn open_error(reason: impl Into<String>, trust: Trust) -> OpenError {
     }
 }
 
+/// Reads at most `limit` bytes; on an error `bytes` keeps what was read.
+fn read_source(
+    file: &mut std::fs::File,
+    limit: u64,
+    bytes: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    #[cfg(test)]
+    if let Some(r) = tests::faulty_read(file, limit, bytes) {
+        return r;
+    }
+    file.by_ref().take(limit).read_to_end(bytes)
+}
+
 fn errno_text(e: &std::io::Error) -> String {
     e.raw_os_error()
         .map_or_else(|| e.to_string(), |n| format!("errno {n}"))
@@ -175,6 +188,12 @@ fn errno_text(e: &std::io::Error) -> String {
 
 impl Loader {
     pub fn new(places: Places) -> Self {
+        Self::new_metered(places, IoMeter::session())
+    }
+
+    /// A Loader that continues a meter which already charged the round's
+    /// config root walk (`ConfigRootPin::reopen_metered`).
+    pub(crate) fn new_metered(places: Places, meter: IoMeter) -> Self {
         let mut loader = Self {
             #[cfg(test)]
             groups: None,
@@ -195,7 +214,7 @@ impl Loader {
             observed: BTreeMap::new(),
             absent: BTreeMap::new(),
             edges: Vec::new(),
-            meter: std::cell::RefCell::new(IoMeter::session()),
+            meter: std::cell::RefCell::new(meter),
         };
         if loader.places.config_root.evidence.canonical != loader.places.config_root.path {
             let missing = loader.places.config_root.path.clone();
@@ -216,7 +235,15 @@ impl Loader {
 
     /// The only production interface for an approved external config.
     pub fn with_record(places: Places, evidence: RecordEvidence) -> Self {
-        let mut loader = Self::new(places);
+        Self::with_record_metered(places, evidence, IoMeter::session())
+    }
+
+    pub(crate) fn with_record_metered(
+        places: Places,
+        evidence: RecordEvidence,
+        meter: IoMeter,
+    ) -> Self {
+        let mut loader = Self::new_metered(places, meter);
         loader.record = Some(evidence.record.clone());
         loader.fds += evidence.fd_count();
         loader.record_evidence = Some(evidence);
@@ -521,17 +548,14 @@ impl Loader {
         // Never ask for more than one byte past what B has left.
         let meter = self.meter.get_mut();
         let room = meter.room(HelperAxis::B);
-        c.evidence
-            .file
-            .rewind()
-            .and_then(|()| {
-                c.evidence
-                    .file
-                    .by_ref()
-                    .take((FILE_BYTES_MAX as u64 + 1).min(room.saturating_add(1)))
-                    .read_to_end(&mut bytes)
-            })
-            .and_then(|_| Ok(meter.charge(HelperAxis::B, bytes.len() as u64)?))
+        let read = c.evidence.file.rewind().and_then(|()| {
+            let limit = (FILE_BYTES_MAX as u64 + 1).min(room.saturating_add(1));
+            read_source(&mut c.evidence.file, limit, &mut bytes)
+        });
+        // `read_to_end` keeps the bytes it read before an error: they count
+        // too, so failing reads cannot go on past B.
+        let charged = meter.charge(HelperAxis::B, bytes.len() as u64);
+        read.and(charged.map_err(std::io::Error::from))
             .map_err(|e| {
                 self.complete = false;
                 open_error(errno_text(&e), c.trust)
@@ -814,6 +838,57 @@ impl Resolver for Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file of exactly this size reads `FAULT_AFTER` bytes, then fails (EIO).
+    const FAULT_SIZE: u64 = 240 * 1024 + 1;
+    const FAULT_AFTER: usize = 240 * 1024;
+    thread_local! {
+        static FAULTY_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn faulty_read(
+        file: &mut std::fs::File,
+        limit: u64,
+        bytes: &mut Vec<u8>,
+    ) -> Option<std::io::Result<usize>> {
+        if file.metadata().ok()?.len() != FAULT_SIZE {
+            return None;
+        }
+        FAULTY_READS.with(|n| n.set(n.get() + 1));
+        let want = FAULT_AFTER.min(usize::try_from(limit).unwrap_or(usize::MAX));
+        let before = bytes.len();
+        bytes.resize(before + want, 0);
+        if let Err(e) = file.read_exact(&mut bytes[before..]) {
+            return Some(Err(e));
+        }
+        Some(Err(std::io::Error::from_raw_os_error(libc::EIO)))
+    }
+
+    // 앞부분을 읽고 오류로 끝나는 읽기도 읽은 바이트를 B에 센다. 240 KiB를 읽고 EIO인 shape-only 참조 10개는
+    // 2 MiB에 닿는 9번째에서 걸쇠가 걸리고, 10번째는 열지 않는다.
+    // 이것을 실패시키는 것: read_to_end가 성공할 때만 B를 세는 것(10개 모두 읽고 B는 config.toml 몫만 남음).
+    #[test]
+    fn failing_reads_still_count_their_bytes() {
+        let fx = Fx::new("failing-reads");
+        let refs: Vec<String> = (0..10)
+            .map(|i| {
+                let p = fx.home.join(format!("t{i}.toml"));
+                fx.put(&p, &"#".repeat(FAULT_SIZE as usize));
+                format!("{:?}", p.display().to_string())
+            })
+            .collect();
+        fx.put(
+            &fx.root.join("config.toml"),
+            &format!("extends = [{}]\n", refs.join(", ")),
+        );
+        FAULTY_READS.with(|n| n.set(0));
+        let (r, l) = fx.read(None);
+        let attempts = FAULTY_READS.with(std::cell::Cell::get);
+        let used = l.io_used()[HelperAxis::B as usize];
+        assert_eq!(attempts, 9);
+        assert!(used <= crate::commands::io_meter::AXIS_CAPS.b, "{used}");
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
+    }
     use bingsu_core::config::source::{Found, load};
     use bingsu_core::diag::{Diagnostic, SourceId};
 

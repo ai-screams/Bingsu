@@ -2785,8 +2785,9 @@ mod axes {
         // before reading, three revalidations) and four checks of the retained
         // evidence (after reading, three revalidations).
         assert_eq!(at(&links, HelperAxis::L), 20 * 9);
-        // The root's own link, read in each of the three revalidations.
-        assert_eq!(at(&rooted, HelperAxis::L), 3);
+        // The root's own link: read by the reopen walk and its recheck, then in
+        // each of the three revalidations.
+        assert_eq!(at(&rooted, HelperAxis::L), 5);
         assert!(at(&chain, HelperAxis::B) > 7 * 120 * 1024);
         for (used, what) in [
             (aliases, "aliases"),
@@ -2978,5 +2979,46 @@ mod axes {
                 ("late-change", RefreshResult::Incomplete, None, true, false),
             ]
         );
+    }
+
+    // 설정 뿌리 다시 열기(없는 접미 이름마다 걷기를 한 번 더 함)도 회차 계수기가 센다. 링크를 거쳐 쓴 뿌리
+    // 아래에 없는 이름이 여섯 개면 다시 열기가 일곱 번 걷고, P 상한을 그 합 − 1로 낮추면 다시 열기만으로 넘는다.
+    // 그때 링크 읽기(L)는 다시 열기의 걷기 일곱 번만큼이고(Loader는 정규 경로만 걸어 링크를 읽지 않음), R은 0,
+    // store는 그대로다.
+    // 이것을 실패시키는 것: 다시 열기를 계수기 밖에서 하는 것, 접미 이름마다 하는 재걷기나 끝의 재확인을 세지
+    // 않는 것, 다시 열기의 계수기를 Loader가 이어받지 않는 것.
+    #[test]
+    fn the_config_root_reopen_alone_can_cross_p() {
+        let mut f = Fx::new("reopen-p");
+        let link = f.base.join("config-link");
+        symlink(f.base.join("config"), &link).unwrap();
+        let tail = |p: PathBuf| (1..=6).fold(p, |p, i| p.join(format!("m{i}")));
+        f.request.config_written = tail(link);
+        f.request.config_canonical = tail(f.base.join("config"));
+        let (r, used, exceeded) = metered(&f, UNLIMITED);
+        published(r);
+        assert_eq!(exceeded, None);
+        let before = snapshot_and_sequence(&f);
+        // Each walk descends to the link's folder, reads the link and walks its
+        // absolute target from "/" again. Reopen walks seven times (six
+        // missing suffixes, then the root) and rechecks once.
+        let one_walk = depth(&f.base) + depth(&f.base.join("config"));
+        let reopen = 7 * one_walk;
+        assert!(at(&used, HelperAxis::P) > reopen, "{used:?}");
+        let (r, used, exceeded) = metered(&f, with_cap(HelperAxis::P, reopen - 1));
+        assert_eq!(r, RefreshResult::Incomplete);
+        assert_eq!(exceeded.map(|e| e.axis), Some(HelperAxis::P));
+        assert_eq!(
+            [HelperAxis::L, HelperAxis::R].map(|a| at(&used, a)),
+            [7, 0],
+            "{used:?}"
+        );
+        assert_eq!(snapshot_and_sequence(&f), before);
+        // The recheck after the seventh walk reads the link an eighth time.
+        let (r, used, exceeded) = metered(&f, with_cap(HelperAxis::L, 7));
+        assert_eq!(r, RefreshResult::Incomplete);
+        assert_eq!(exceeded.map(|e| e.axis), Some(HelperAxis::L));
+        assert_eq!(at(&used, HelperAxis::R), 0, "{used:?}");
+        assert_eq!(snapshot_and_sequence(&f), before);
     }
 }
