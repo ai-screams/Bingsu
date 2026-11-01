@@ -253,6 +253,60 @@ fn envelope_golden_vectors() {
     );
 }
 
+// 이것을 실패시키는 것: `front::spawns_helper`를 무시하고 언제나 도우미를 띄우는 것, 값 자리의 `--redraw`로
+// 도우미를 건너뛰는 것.
+#[test]
+fn only_a_redraw_flag_skips_the_helper_spawn() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("helper-spawn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n: > '{}.ran'\n", path.display())).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+    let prompt = |exe: &std::path::Path, extra: &[&str]| {
+        let status = Command::new(env!("CARGO_BIN_EXE_bingsu"))
+            .arg0(exe)
+            .arg("prompt")
+            .args(BASE)
+            .args([
+                "--config-root=/c",
+                "--config-root-written=/c",
+                "--state-root=/s",
+                "--home=/h",
+            ])
+            .args(extra)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    let ran = |exe: &std::path::Path| {
+        let mut path = exe.as_os_str().to_owned();
+        path.push(".ran");
+        std::path::PathBuf::from(path).exists()
+    };
+    let wait = |exe: &std::path::Path| {
+        for _ in 0..500 {
+            if ran(exe) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    };
+    let (flag, value) = (stub("flag"), stub("value"));
+    prompt(&flag, &["--redraw"]);
+    prompt(&value, &["--host", "--redraw"]);
+    assert!(wait(&value), "a value word is not the flag");
+    assert!(!ran(&flag), "a redraw starts no helper");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // 이것을 실패시키는 것: prompt가 fd 1에 O_NONBLOCK 등 상태 플래그를 바꾸는 것.
 #[test]
 fn prompt_does_not_change_stdout_flags() {

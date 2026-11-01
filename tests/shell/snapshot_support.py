@@ -47,10 +47,10 @@ class SnapshotSession:
         self._launcher.chmod(0o700)
 
     def run(self, *args, timeout=5):
-        # Every prompt asks for one helper. A cold init does too; warm init
-        # deliberately does not. Count before launch, so an unscheduled wrapper
-        # cannot make wait_quiet pass by leaving no PID/completion file yet.
-        if args[0] in ("prompt", "__refresh-v1") or (
+        # Every prompt but a redraw asks for one helper. A cold init does too;
+        # warm init deliberately does not. Count before launch, so an unscheduled
+        # wrapper cannot make wait_quiet pass by leaving no PID/completion file yet.
+        if (args[0] in ("prompt", "__refresh-v1") and "--redraw" not in args) or (
                 args[0] == "init" and not (self.store() / "snapshot").exists()):
             with self._count_lock:
                 self._helper_count += 1

@@ -2406,7 +2406,7 @@ def child_capture(tmp_path):
     # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
     assert shutil.which("strace"), "required live tracing tool is missing"
 
-    def capture(template="{dir}{git}{char}", invalid=False, name=None, timestamps=False):
+    def capture(template="{dir}{git}{char}", invalid=False, name=None, timestamps=False, redraw=False):
         # `name` keeps a retried attempt's evidence in its own folder.
         base = tmp_path / (name or str(len(list(tmp_path.iterdir()))))
         base.mkdir(parents=True)
@@ -2415,12 +2415,12 @@ def child_capture(tmp_path):
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
                                      template=template)
         try:
-            return capture_prompt(fixture, base, invalid, timestamps)
+            return capture_prompt(fixture, base, invalid, timestamps, redraw)
         finally:
             wait_helpers(fixture.base)
             shutil.rmtree(fixture.base)
 
-    def capture_prompt(fixture, base, invalid, timestamps):
+    def capture_prompt(fixture, base, invalid, timestamps, redraw):
         marker = fixture.store / "marker"
         wire = bytearray(marker.read_bytes())
         # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
@@ -2445,6 +2445,8 @@ def child_capture(tmp_path):
         argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
+        if redraw:
+            argv = [*argv, "--redraw"]
         # What a full trace judgment needs after the fixture is gone.
         env, repo = fixture.env, os.path.realpath(fixture.pwd)
         (base / "context.json").write_text(json.dumps({
@@ -2477,6 +2479,28 @@ def test_live_child_count_is_bounded_per_role(child_capture):
     children = role_children(trace)
     # 이것을 실패시키는 것: assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children 조건을 제거하거나 반전하는 변이.
     assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children
+
+
+# 이것을 실패시키는 것: redraw에서 도우미를 띄우는 것, redraw 앞단이 설정 원본 폴더를 건드리는 것.
+def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_path):
+    from fsbudget.attribute import role_children
+
+    def config_calls(name, trace):
+        root = json.loads((tmp_path / name / "context.json").read_text())["pinned"][1]
+        # The bytes a read returned do not count: a snapshot quotes its roots.
+        def named(c):
+            return re.sub(r'"(?:[^"\\]|\\.)*"', '""', c.args) if c.name in {"read", "pread64"} else c.args
+        return [c for c in trace if c.name not in {"execve", "execveat"} and root in named(c)]
+
+    trace, _, record = child_capture(name="prompt")
+    assert role_children(trace)["front"] == 1
+    # 양성 대조: 같은 검사가 일반 프롬프트 도우미의 설정 원본 읽기를 본다.
+    assert config_calls("prompt", trace)
+    trace, _, record = child_capture(name="redraw", redraw=True)
+    assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e")
+    assert role_children(trace) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
+    assert len({c.pid for c in trace}) == 1, "a redraw is one process"
+    assert not config_calls("redraw", trace)
 
 
 # 이것을 실패시키는 것: worker가 없는 화면에도 collector 생성.

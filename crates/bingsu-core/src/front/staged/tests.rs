@@ -511,81 +511,86 @@ mod cases {
             }
         }
     }
+    const TRUST_CASES: u8 = 15;
+    fn trust_case(case: u8) -> (Harness, Status) {
+        let mut h = Harness::new();
+        let s = snapshot("");
+        let mut m = marker(&s);
+        let want = match case {
+            0 => {
+                h.marker = None;
+                Status::DEGRADED_TRUST_UNVERIFIED
+            }
+            1 => {
+                h.marker.as_mut().unwrap()[0] ^= 1;
+                Status::DEGRADED_TRUST_UNVERIFIED
+            }
+            2 => {
+                m.invalid = true;
+                m.id.generation = 0;
+                h.marker = Some(m.encode().to_vec());
+                Status::DEGRADED_TRUST_INVALID
+            }
+            3 => {
+                m.id.generation += 1;
+                h.marker = Some(m.encode().to_vec());
+                Status::DEGRADED_TRUST_MISMATCH
+            }
+            4 => {
+                m.domain = [9; 16];
+                h.marker = Some(m.encode().to_vec());
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            5 => {
+                m.resume = 1;
+                h.marker = Some(m.encode().to_vec());
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            6 => {
+                m.verified_at = 102;
+                h.marker = Some(m.encode().to_vec());
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            7 => {
+                h.final_clock.as_mut().unwrap().now = 100 + T_NS;
+                Status::DEGRADED_TRUST_EXPIRED
+            }
+            8 => {
+                h.final_clock = None;
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            9 => {
+                h.final_clock.as_mut().unwrap().now = 100;
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            10 => {
+                h.current = Some(s.encode(2, 0).unwrap());
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            11 => {
+                h.current = Some(s.encode(1, 1).unwrap());
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            12 => {
+                h.clock.as_mut().unwrap().domain = [9; 16];
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            13 => {
+                h.clock.as_mut().unwrap().resume = 1;
+                Status::DEGRADED_TRUST_CLOCK
+            }
+            _ => {
+                h.clock.as_mut().unwrap().kind = 2;
+                Status::DEGRADED_TRUST_CLOCK
+            }
+        };
+        (h, want)
+    }
     // 이것을 실패시키는 것: 표식 오류/각 정체/시각 오류를 fresh로 렌더하거나 상태 우선순위를 바꾸는 것.
     #[test]
     fn status_priority_and_trust_rejections() {
-        for case in 0..15 {
-            let mut h = Harness::new();
-            let s = snapshot("");
-            let mut m = marker(&s);
-            let want = match case {
-                0 => {
-                    h.marker = None;
-                    Status::DEGRADED_TRUST_UNVERIFIED
-                }
-                1 => {
-                    h.marker.as_mut().unwrap()[0] ^= 1;
-                    Status::DEGRADED_TRUST_UNVERIFIED
-                }
-                2 => {
-                    m.invalid = true;
-                    m.id.generation = 0;
-                    h.marker = Some(m.encode().to_vec());
-                    Status::DEGRADED_TRUST_INVALID
-                }
-                3 => {
-                    m.id.generation += 1;
-                    h.marker = Some(m.encode().to_vec());
-                    Status::DEGRADED_TRUST_MISMATCH
-                }
-                4 => {
-                    m.domain = [9; 16];
-                    h.marker = Some(m.encode().to_vec());
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                5 => {
-                    m.resume = 1;
-                    h.marker = Some(m.encode().to_vec());
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                6 => {
-                    m.verified_at = 102;
-                    h.marker = Some(m.encode().to_vec());
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                7 => {
-                    h.final_clock.as_mut().unwrap().now = 100 + T_NS;
-                    Status::DEGRADED_TRUST_EXPIRED
-                }
-                8 => {
-                    h.final_clock = None;
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                9 => {
-                    h.final_clock.as_mut().unwrap().now = 100;
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                10 => {
-                    h.current = Some(s.encode(2, 0).unwrap());
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                11 => {
-                    h.current = Some(s.encode(1, 1).unwrap());
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                12 => {
-                    h.clock.as_mut().unwrap().domain = [9; 16];
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                13 => {
-                    h.clock.as_mut().unwrap().resume = 1;
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-                _ => {
-                    h.clock.as_mut().unwrap().kind = 2;
-                    Status::DEGRADED_TRUST_CLOCK
-                }
-            };
+        for case in 0..TRUST_CASES {
+            let (mut h, want) = trust_case(case);
             let r = h.run(&args(), Mode::Dark);
             assert_eq!(r.status, want, "case {case}");
             assert!(r.execution.permit().is_none(), "case {case}");
@@ -593,6 +598,28 @@ mod cases {
             // A safe compiled screen collects independently of command eligibility.
             assert_eq!(r.worker_mask, 10);
         }
+    }
+    // 이것을 실패시키는 것: redraw에서 표식·시각 판정을 건너뛰어 fresh로 그리거나 다른 상태를 내는 것.
+    #[test]
+    fn test_redraw_uses_same_eligibility_as_prompt() {
+        let mut redraw = args();
+        redraw.push(b"--redraw");
+        for case in 0..TRUST_CASES {
+            let (mut h, want) = trust_case(case);
+            let r = h.run(&redraw, Mode::Dark);
+            assert_eq!(r.status, want, "case {case}");
+            assert!(r.execution.permit().is_none(), "case {case}");
+            assert_eq!(r.worker_mask, 0, "case {case}");
+            let (mut plain, _) = trust_case(case);
+            assert_eq!(
+                r.record,
+                plain.run(&args(), Mode::Dark).record,
+                "case {case}"
+            );
+        }
+        let fresh = Harness::new().run(&redraw, Mode::Dark);
+        assert_eq!(fresh.status, Status::OK_NONE);
+        assert_eq!(fresh.record, Harness::new().run(&args(), Mode::Dark).record);
     }
     // 이것을 실패시키는 것: 부팅/현재 셸 문맥을 선택에서 빼거나 외부 문맥의 일치하는 짝을 허용하는 것.
     #[test]
