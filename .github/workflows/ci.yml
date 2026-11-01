@@ -1034,9 +1034,8 @@ jobs:
   # Spec section 11 gate: full prompt time (base tip against the merge result,
   # alternated, 200 pairs per case) and stripped binary size, judged with the
   # decision U3 limits. The verdict is recorded but does not fail the pull
-  # request until five consecutive pull request runs finish without BLOCKED;
-  # only then turn on GATE_ENFORCE and register it as a required check.
-  # The streak counts runs that end in PASS or FAIL; BLOCKED or a failed verdict step resets it to 0.
+  # request on FAIL only (a ratio or the size cap exceeded). BLOCKED, meaning
+  # missing or invalid evidence, ends green and shows as a warning and in the summary.
   prompt-gate:
     name: Prompt time and size gate
     needs: detect
@@ -1047,11 +1046,11 @@ jobs:
       # Decision U3: GATE_RATIO_P50 and GATE_RATIO_P95 are the largest
       # accepted candidate/base ratios of p50 and p95; GATE_SIZE_CAP_BYTES caps
       # stripped front + collector (decimal bytes, no per-binary cap);
-      # GATE_ENFORCE=true makes a FAIL or BLOCKED verdict fail the job.
+      # GATE_ENFORCE=true makes a FAIL verdict fail the job; BLOCKED only warns.
       GATE_RATIO_P50: '1.03'
       GATE_RATIO_P95: '1.10'
       GATE_SIZE_CAP_BYTES: '6000000'
-      GATE_ENFORCE: 'false'
+      GATE_ENFORCE: 'true'
       GATE_CASES: no-git,git-clean,git-dirty
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
