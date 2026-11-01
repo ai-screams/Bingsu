@@ -14,11 +14,12 @@ use bingsu_core::{
     collection::selection,
     color::palette::Mode,
     config::compile::CompiledConfig,
+    diag_widths::WidthRun,
     envelope,
     field::BUILTIN,
     front,
     layout_view::{FrontConfig, LayoutView},
-    snapshot::{Identity, READ_CHUNK, Snapshot, encode_metadata},
+    snapshot::{FrontDecoder, Identity, READ_CHUNK, Snapshot, encode_metadata},
     snapshot_codec::{Error, HEAD, decode_compiled, encode_compiled},
     status::Status,
     template::compile::compile,
@@ -744,5 +745,110 @@ fn reads_end_at_the_selected_variant() {
         let chunks = (front_end - P).next_multiple_of(READ_CHUNK);
         assert_eq!(read, selected.max(P + chunks.min(cl)), "{width}");
         assert!(read <= P + cl);
+    }
+}
+
+/// A file whose INDEX ends one byte into its second chunk and whose selected
+/// variant (width 80, the default) comes first: the read that finishes INDEX
+/// passes that variant by as much as any read can.
+fn longest_tail() -> (CompiledConfig, usize) {
+    let mut c = fixture::compile("");
+    c.bands = (0..8)
+        .map(|i| Band {
+            min_cols: Some(100 + i * 10),
+            max_cols: Some(109 + i * 10),
+            order: None,
+        })
+        .collect();
+    c.band_names = (0..8).map(|i| format!("b{i}")).collect();
+    c.band_order = (0..8).collect();
+    c.widths.clear();
+    c.variants = vec![compile(&"y".repeat(3000), BUILTIN).unwrap(); 9];
+    c.variants[0] = compile("x", BUILTIN).unwrap();
+    let b = encode_compiled(&c).unwrap();
+    // Plain runs take 5 bytes, runs naming "b0" take 11: any length past 40.
+    let need = READ_CHUNK + 1 - Sections::of(&b).front;
+    let named = (0..5).find(|n| (need - n * 11) % 5 == 0).unwrap();
+    let run = |band: Option<&str>| WidthRun {
+        from: 0,
+        to: 0,
+        band: band.map(Into::into),
+    };
+    c.widths = vec![run(None); (need - named * 11) / 5];
+    c.widths.extend(vec![run(Some("b0")); named]);
+    let front = Sections::of(&encode_compiled(&c).unwrap()).front;
+    assert_eq!(front, READ_CHUNK + 1);
+    (c, front)
+}
+
+// 이것을 실패시키는 것: 앞단이 고른 variant 뒤로 받은 바이트를 해석하는 것(다음 variant의 줄 수를 읽어 거부).
+#[test]
+fn the_tail_read_past_the_selected_variant_changes_nothing() {
+    let (c, front_end) = longest_tail();
+    let b = wire(&c);
+    let (good, read) = fixture::front_read(&b, 80, READ_CHUNK).unwrap();
+    let selected = fixture::selected_end(&b, 80);
+    // Bytes the last read brought past the variant, up to READ_CHUNK - 1.
+    let tail = read - selected;
+    assert_eq!(read, P + 2 * READ_CHUNK);
+    assert_eq!(selected - P - front_end + tail, READ_CHUNK - 1);
+    let mut x = b.clone();
+    for byte in &mut x[selected..selected + READ_CHUNK - 1] {
+        *byte ^= 0xff;
+    }
+    assert_eq!(fixture::front_read(&x, 80, READ_CHUNK), Ok((good, read)));
+    assert!(whole(&x).is_err());
+}
+
+// 이것을 실패시키는 것: 색인 전 읽기 한도가 `c_len`을 넘어 metadata까지 가는 것, 색인을 끝낸 다음 읽기가 옛 한도를
+// 쓰는 것, 한도를 고른 variant 끝으로 줄이지 않는 것.
+#[test]
+fn bytes_and_reads_are_exact_per_fixture() {
+    let bands = |n: u32| -> Vec<Band> {
+        (0..n)
+            .map(|i| Band {
+                min_cols: Some((i * 16 + 1) as u16),
+                max_cols: Some((i * 16 + 15) as u16),
+                order: None,
+            })
+            .collect()
+    };
+    let cases: Vec<(CompiledConfig, &[u16])> = vec![
+        (fixture::compile(""), &[80]),
+        (fixture::config(), &[80, 120]),
+        (banded(&bands(1), 2, &[2]).unwrap(), &[1, 80]),
+        (banded(&bands(64), 2, &[2; 64]).unwrap(), &[1, 80, 1024]),
+        (
+            banded(&bands(4096), 2, &[2; 4096]).unwrap(),
+            &[1, 40_000, u16::MAX],
+        ),
+        (longest_tail().0, &[80, 105]),
+    ];
+    for (c, widths) in cases {
+        let b = wire(&c);
+        let (body, _) = bingsu_core::snapshot::lengths(&b).unwrap();
+        let front = Sections::of(&b[P..P + body]).front;
+        for &width in widths {
+            let variant_end = fixture::selected_end(&b, width) - P;
+            for chunk in [13, 4097, READ_CHUNK] {
+                let want = variant_end.max(front.next_multiple_of(chunk).min(body));
+                let mut d = FrontDecoder::new(b.len() as u64, width).unwrap();
+                let (mut at, mut reads) = (0, 0);
+                while d.read_len() != 0 {
+                    let n = d.read_len().min(chunk);
+                    assert!(at + d.read_len() <= P + body, "past c_len at {at}");
+                    d.push(&b[at..at + n]).unwrap();
+                    at += n;
+                    reads += usize::from(at > P);
+                }
+                d.finish().unwrap();
+                assert_eq!(at, P + want, "bytes, width {width} chunk {chunk}");
+                assert_eq!(
+                    reads,
+                    want.div_ceil(chunk),
+                    "reads, width {width} chunk {chunk}"
+                );
+            }
+        }
     }
 }

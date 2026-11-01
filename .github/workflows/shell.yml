@@ -255,6 +255,14 @@ jobs:
           if [ "$LIBC" = musl ]; then args+=(--target "$(uname -m)-unknown-linux-musl"); fi
           cargo test -p bingsu --test helper_axis_caps "${args[@]}" | tee "$RUNNER_TEMP/b-cap.txt"
           grep -Fx 'test reload_publishes_at_exactly_the_b_cap ... ok' "$RUNNER_TEMP/b-cap.txt"
+      # 짧은 읽기는 정규 파일의 strace로 만들 수 없어 앞단 계획 시험으로 고정한다. 코어는 libc에 닿지 않아 host target으로 돈다.
+      # 이것을 실패시키는 것: 이 단계를 빼거나 debug 칸에서만 돌리거나 ok 단언을 빼는 것.
+      - name: Front short reads keep the read limit (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          cargo test -p bingsu-core --lib --release | tee "$RUNNER_TEMP/short-read.txt"
+          grep -Fx 'test front::staged::tests::cases::short_reads_keep_the_read_limit ... ok' "$RUNNER_TEMP/short-read.txt"
       # 이것을 실패시키는 것: debug 칸에서 계수하거나 매개변수 하나의 PASSED 단언을 빼는 것.
       - name: Front attempts equal axis C and byte formulas (release)
         if: matrix.profile == 'release'

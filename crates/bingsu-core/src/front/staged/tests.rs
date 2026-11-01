@@ -437,6 +437,80 @@ mod cases {
             Status::ERROR_CONFIG_DEFAULT
         );
     }
+    /// 64 bands of 4 columns, keyed in width order or against it.
+    fn banded_text(rising: bool) -> String {
+        let mut text = String::new();
+        for i in 0..64 {
+            let min = if rising { i + 1 } else { 64 - i } * 4;
+            let x = "x".repeat(600);
+            text += &format!(
+                "[layout.when.b{i:02}]\nmin_cols={min}\nmax_cols={}\n[layout.when.b{i:02}.style]\ntemplate='{x} {{char}}'\n",
+                min + 3
+            );
+        }
+        text
+    }
+    /// What the read plan asks for when each read returns at most `short`
+    /// bytes. `front` and `end` are file offsets: the end of INDEX and of the
+    /// variant selected at width 80; `body` the end of the compiled section.
+    fn read_plan(short: usize, front: usize, end: usize, body: usize) -> Vec<usize> {
+        let (mut plan, mut at) = (Vec::new(), 0);
+        for limit in [HEADER, HEADER + PREFIX] {
+            while at < limit {
+                plan.push(limit - at);
+                at += (limit - at).min(short);
+            }
+        }
+        while at < if at < front { body } else { end } {
+            let limit = if at < front { body } else { end };
+            let ask = (limit - at).min(snapshot::READ_CHUNK);
+            plan.push(ask);
+            at += ask.min(short);
+        }
+        plan
+    }
+    // 이것을 실패시키는 것: 받은 바이트가 아닌 요청량으로 위치를 세는 것, 색인을 끝낸 다음 읽기가 옛 한도를 쓰는 것,
+    // 짧은 읽기 뒤 한도를 잃는 것, 한도를 `c_len` 너머로 두는 것.
+    #[test]
+    fn short_reads_keep_the_read_limit() {
+        for rising in [true, false] {
+            let s = snapshot(&banded_text(rising));
+            let wire = s.encode(1, 0).unwrap();
+            let (c, _) = snapshot::lengths(&wire).unwrap();
+            let compiled = &wire[HEADER + PREFIX..HEADER + PREFIX + c];
+            let front = crate::snapshot_codec::front_len(compiled, c).unwrap();
+            let plan = crate::snapshot_codec::plan_front(&compiled[..front], c, 80).unwrap();
+            let (front, end) = (
+                HEADER + PREFIX + front,
+                HEADER + PREFIX + plan.offset + plan.len,
+            );
+            let body = HEADER + PREFIX + c;
+            assert!(front < end && end < body);
+            // The one-sized first body read that ends exactly at INDEX's end
+            // makes the next read the first under the variant's limit.
+            for short in [usize::MAX, 1 << 13, 4097, 251, front - HEADER - PREFIX] {
+                let mut h = Harness::new();
+                h.marker = Some(marker(&s).encode().to_vec());
+                h.current = Some(wire.clone());
+                h.short = short;
+                assert_eq!(
+                    h.run(&args(), Mode::Dark).status,
+                    Status::OK_NONE,
+                    "{short}"
+                );
+                let asked: Vec<usize> = h
+                    .reads
+                    .iter()
+                    .filter(|(name, ..)| *name == b"snapshot")
+                    .map(|(_, _, len)| *len)
+                    .collect();
+                assert_eq!(asked, read_plan(short, front, end, body), "{short}");
+                let last = h.reads.iter().rfind(|(name, ..)| *name == b"snapshot");
+                let &(_, offset, len) = last.unwrap();
+                assert!(offset + len.min(short) <= body, "{short}");
+            }
+        }
+    }
     // 이것을 실패시키는 것: 표식 오류/각 정체/시각 오류를 fresh로 렌더하거나 상태 우선순위를 바꾸는 것.
     #[test]
     fn status_priority_and_trust_rejections() {
