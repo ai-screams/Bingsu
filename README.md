@@ -12,7 +12,7 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in early development (M3a, M3b and M3c done, M3d next).** `bingsu prompt` draws the built-in default prompt
+> **bingsu is in early development (M3a, M3b, M3c and M3d done, M4 next).** `bingsu prompt` draws the built-in default prompt
 > in bash, zsh and fish, or your own look from a TOML config file, with git status collected in the background. There is
 > no release yet, and command segments are checked but not run yet. Published performance numbers do not exist yet.
 > This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
@@ -85,7 +85,8 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Background collection (M3b) | Done: the helper runs a separate collector process with time, memory and file limits (and a system-call filter on Linux), and the prompt shows only results finished before it started |
 | Git and folder collection (M3c) | Done: the collector reads git state through bounded, read-only file access (no `git` process) and reports branch or commit, staged, modified, untracked and conflicted counts, ahead/behind and stash, plus whether the folder is read-only or inside a repository; values it cannot finish in time show as unknown (`?`) |
 | Git segment | Shown after the folder in the built-in default theme from the second prompt in a repository |
-| Performance measurement (M1 Part B) | Measurement tools in progress, no published numbers yet |
+| Performance and process gates (M3d) | Done for Linux: CI runs gates for filesystem call budgets per role, child process count, inherited descriptors, helper lifetime, zombies, snapshot read bytes, trust revocation, execution approval deadlines, the marker update rule and instruction counts, and fails when one breaks. Not complete: memory certification, macOS latency, cold-cache runs and a network home directory were not certified. No published numbers yet |
+| Performance measurement (M1 Part B) | Measurement tools in place; no published numbers yet |
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width |
 | Theme selection and customization | Partly: style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
 | Terminal and CLI generators, Studio | Not started |

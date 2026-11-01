@@ -140,6 +140,11 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 M3D_PENDING = ()
 
 
+def test_no_m3d_gate_clause_is_pending():
+    # Fails when: a gate clause is parked in M3D_PENDING instead of getting a row.
+    assert M3D_PENDING == ()
+
+
 def workflows():
     return {name: (ROOT / ".github/workflows" / name).read_text() for name in WORKFLOWS}
 
