@@ -111,13 +111,14 @@ def _size_ok(v):
 def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
     """FAIL when the candidate front + collector exceeds `cap_bytes` (U3 S1: no per-binary cap).
 
-    A missing or invalid cap, a missing size or a combined that is not
-    front + collector is BLOCKED.
+    A missing or invalid cap, a missing candidate size or a combined that is not
+    front + collector is BLOCKED; so is a bad base size, unless the candidate is over the cap.
     """
-    for side in (base, candidate):
-        if not (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
-                and side["combined"] == side["front"] + side["collector"]):
-            return _blocked("stripped_bytes", "missing or inconsistent size")
+    def valid(side):
+        return (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
+                and side["combined"] == side["front"] + side["collector"])
+    if not valid(candidate):
+        return _blocked("stripped_bytes", "missing or inconsistent size")
     result = GateResult(metric="stripped_bytes", base=base, candidate=candidate)
     if cap_bytes is None:
         return {**result, "status": "BLOCKED", "reason": "cap " + PENDING}
@@ -125,6 +126,9 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
         return {**result, "status": "BLOCKED", "reason": "invalid cap"}
     result["cap_bytes"] = {"combined": cap_bytes}
     result["over"] = ["combined"] if candidate["combined"] > cap_bytes else []
+    # The cap judges the candidate alone; a missing base only blocks a candidate that fits.
+    if not result["over"] and not valid(base):
+        return {**result, "status": "BLOCKED", "reason": "missing or inconsistent size"}
     result["status"] = "FAIL" if result["over"] else "PASS"
     return result
 

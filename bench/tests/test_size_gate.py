@@ -74,6 +74,18 @@ def test_size_gate_caps_the_sum_only():
     assert gate.size_gate(base, {"front": 1}, 10)["status"] == "BLOCKED"
 
 
+# 이것을 실패시키는 것: 기준 크기 검증을 후보의 상한 판정보다 앞에 두는 것(기준 누락이 확정된 초과를 BLOCKED로 덮음).
+def test_candidate_over_cap_fails_even_without_base_size():
+    over = {"front": 3_000_001, "collector": 3_000_000, "combined": 6_000_001}
+    for base in (None, {}, {"front": 1}):
+        r = gate.size_gate(base, over, 6_000_000)
+        assert r["status"] == "FAIL" and r["over"] == ["combined"]
+    fits = {"front": 3_000_000, "collector": 3_000_000, "combined": 6_000_000}
+    assert gate.size_gate(None, fits, 6_000_000)["status"] == "BLOCKED"
+    assert gate.size_gate(None, {"front": 1}, 6_000_000)["status"] == "BLOCKED"  # bad candidate stays BLOCKED
+    assert gate.size_gate(None, over, None)["status"] == "BLOCKED"  # no cap, no verdict
+
+
 # 이것을 실패시키는 것: 200쌍 미만이나 관측 안 된 측정을 PASS로 세는 것, 임계값 미정을 PASS/FAIL로 세는 것.
 def test_gate_is_blocked_without_two_hundred_pairs():
     assert gate.relative_gate(paired((8e6, 9e6), (8e6, 9e6), n=199), "prompt_ns", (1.10, 1.10))["status"] == "BLOCKED"

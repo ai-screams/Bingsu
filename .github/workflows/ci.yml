@@ -1033,8 +1033,8 @@ jobs:
 
   # Spec section 11 gate: full prompt time (base tip against the merge result,
   # alternated, 200 pairs per case) and stripped binary size, judged with the
-  # decision U3 limits. The verdict is recorded but does not fail the pull
-  # request on FAIL only (a ratio or the size cap exceeded). BLOCKED, meaning
+  # decision U3 limits. The job fails the pull request on FAIL only (a ratio
+  # or the size cap exceeded). BLOCKED, meaning
   # missing or invalid evidence, ends green and shows as a warning and in the summary.
   prompt-gate:
     name: Prompt time and size gate
