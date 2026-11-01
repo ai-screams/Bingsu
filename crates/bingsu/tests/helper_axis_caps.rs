@@ -16,12 +16,16 @@
 
 #[path = "support/user_env.rs"]
 mod user_env;
+use std::time::{Duration, Instant};
 use user_env::{Env, quiet, text};
 
 const COMMAND: &str = "[segment.\"custom/probe\"]\nkind = \"command\"\ncommand = [\"printf\", \"NEVER_EXECUTE\"]\n[layout.line1]\nleft = [\"custom/probe\", \"char\"]\n";
 const KIB256: usize = 256 * 1024;
 /// The words of a refused cap; a budget stop ends 3 in other words.
 const OVER_CAP: &str = "more file reads than one refresh may make";
+const NOT_READ: &str = "could not be read to the end";
+/// The helper's work budget (`WORK_NS`), the least a budget stop can take.
+const WORK_BUDGET: Duration = Duration::from_millis(500);
 
 fn reload(e: &Env) -> (Option<i32>, String) {
     let o = e.run(&["reload"]);
@@ -70,48 +74,102 @@ fn unparsable(n: usize) -> String {
     s
 }
 
-/// `reload` on the real clock: a busy machine can pass the helper's 500 ms
-/// work budget, which also ends 3, so a 3 in other words than a refused cap's
-/// is tried again. A refused cap comes back at once, also in a cell at the cap.
+/// One `reload` and how long it took.
+struct Attempt {
+    code: Option<i32>,
+    out: String,
+    took: Duration,
+}
+
+/// `reload` on the real clock: a busy machine can pass the helper's work
+/// budget, which ends 3 too. Only such a stop is tried again: it took the
+/// budget, says "not read to the end", and left the published files alone. Any
+/// other outcome comes back at once, a refused cap in a cell at the cap too.
 fn reload_settled(e: &Env) -> (Option<i32>, String) {
-    settle(|| reload(e))
+    let published = || {
+        let dir = e.find_context_dir();
+        ["snapshot", "last-good", "marker"]
+            .map(|n| dir.as_ref().and_then(|d| std::fs::read(d.join(n)).ok()))
+    };
+    settle(|| {
+        let before = published();
+        let started = Instant::now();
+        let (code, out) = reload(e);
+        (
+            Attempt {
+                code,
+                out,
+                took: started.elapsed(),
+            },
+            published() == before,
+        )
+    })
 }
 
-fn settle(mut reload: impl FnMut() -> (Option<i32>, String)) -> (Option<i32>, String) {
-    let mut last = reload();
-    for _ in 0..4 {
-        if last.0 != Some(3) || last.1.contains(OVER_CAP) {
-            break;
+fn stopped_by_the_budget(a: &Attempt) -> bool {
+    a.code == Some(3) && a.out.contains(NOT_READ) && a.took >= WORK_BUDGET
+}
+
+fn settle(mut attempt: impl FnMut() -> (Attempt, bool)) -> (Option<i32>, String) {
+    let mut last = None;
+    for _ in 0..5 {
+        let (now, unmoved) = attempt();
+        if !stopped_by_the_budget(&now) {
+            return (now.code, now.out);
         }
-        last = reload();
+        assert!(unmoved, "a budget stop moved published files: {}", now.out);
+        last = Some(now);
     }
-    last
+    last.map_or((None, String::new()), |a| (a.code, a.out))
 }
 
-// 이것을 실패시키는 것: 상한 거부를 재시도해 거짓 거부를 가리는 것, 예산 정지(3)를 재시도하지 않는 것,
-// 3이 아닌 결과 뒤에도 계속 시도하는 것.
+// 이것을 실패시키는 것: 근거 없는 3(예산보다 빠른 종료, 상한 문구, 다른 문구)을 재시도해 거짓 거부를 가리는 것, 예산
+// 정지를 재시도하지 않는 것, 발행 파일을 바꾼 시도를 다음 시도로 덮는 것, 3이 아닌 결과 뒤에도 시도하는 것.
 #[test]
-fn only_a_stop_that_is_no_cap_refusal_is_tried_again() {
-    let mut outcomes = vec![
-        (Some(0), String::new()),
-        (Some(3), format!("x {OVER_CAP} x")),
-        (Some(3), "stopped".to_owned()),
-    ];
-    let first = settle(|| outcomes.pop().unwrap());
-    assert_eq!(first.0, Some(3));
-    assert!(first.1.contains(OVER_CAP), "{first:?}");
-    assert_eq!(outcomes.len(), 1);
-    let mut outcomes = vec![
-        (Some(0), "done".to_owned()),
-        (Some(3), "stopped".to_owned()),
-    ];
-    assert_eq!(settle(|| outcomes.pop().unwrap()).1, "done");
-    let mut calls = 0;
-    let stopped = settle(|| {
-        calls += 1;
-        (Some(0), String::new())
-    });
-    assert_eq!((stopped.0, calls), (Some(0), 1));
+fn only_a_stop_the_budget_explains_is_tried_again() {
+    let at = |code, out: &str, ms| Attempt {
+        code: Some(code),
+        out: out.to_owned(),
+        took: Duration::from_millis(ms),
+    };
+    let run = |mut outcomes: Vec<(Attempt, bool)>| {
+        let total = outcomes.len();
+        outcomes.reverse();
+        let got = settle(|| outcomes.pop().unwrap());
+        (got.0, got.1, total - outcomes.len())
+    };
+    for (first, why) in [
+        (at(3, NOT_READ, 499), "faster than the budget"),
+        (at(3, OVER_CAP, 900), "a refused cap"),
+        (at(3, "another refresh is running", 900), "other words"),
+        (at(1, NOT_READ, 900), "another exit code"),
+    ] {
+        let code = first.code;
+        let got = run(vec![(first, true), (at(0, "done", 10), true)]);
+        assert_eq!((got.0, got.2), (code, 1), "{why}");
+    }
+    let got = run(vec![
+        (at(3, NOT_READ, 500), true),
+        (at(0, "done", 10), true),
+    ]);
+    assert_eq!((got.0, got.1.as_str(), got.2), (Some(0), "done", 2));
+    assert_eq!(
+        run(vec![(at(0, "done", 900), true), (at(3, "", 0), true)]).2,
+        1
+    );
+    let spent = run((0..5).map(|_| (at(3, NOT_READ, 500), true)).collect());
+    assert_eq!((spent.0, spent.2), (Some(3), 5));
+    let mut last_moved: Vec<_> = (0..4).map(|_| (at(3, NOT_READ, 500), true)).collect();
+    last_moved.push((at(3, NOT_READ, 500), false));
+    let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(last_moved)));
+    assert!(moved.is_err(), "the last attempt is judged too");
+    let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(vec![
+            (at(3, NOT_READ, 500), false),
+            (at(0, "done", 10), true),
+        ])
+    }));
+    assert!(moved.is_err());
 }
 
 /// The config and eight dropped themes: together exactly 2 MiB plus `extra`.

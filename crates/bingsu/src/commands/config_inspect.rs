@@ -55,7 +55,8 @@ pub struct Inspection {
     pub report: ConfigReport,
     pub lines: Vec<FileLine>,
     pub verdict: Verified,
-    /// Read to the end, but past what a refresh round may spend on it.
+    /// A cap refused this reading, or the two source checks a refresh adds to
+    /// it would pass one.
     pub over_cap: bool,
     pub remedies: Vec<String>,
 }
