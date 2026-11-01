@@ -62,3 +62,4 @@ GATE-RUNTIME-ROOT.3	GATE-RUNTIME-ROOT	3	Re-init recovers the pinned runtime root
 GATE-RUNTIME-ROOT.4	GATE-RUNTIME-ROOT	4	Five spec runtime path examples hold under the product trust rules	Linux	tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples	pytest	M3d
 GATE-RUNTIME-ROOT.5	GATE-RUNTIME-ROOT	5	Status-notice hook output: fixed runtime-root notice once in zsh, gone after init runs again (spec sections 4 and 5)	Linux	tests/shell/test_zsh_notices.py::test_runtime_root_notice_once_then_reinit_recovers	pytest	M4
 GATE-RUNTIME-ROOT.6	GATE-RUNTIME-ROOT	6	Status-notice hook output: fixed runtime-root notice once in fish and bash (spec sections 4 and 5)	-	-	-	deferred:M5
+GATE-SHELL-TIME.1	GATE-SHELL-TIME	1	The shell time job and its recorded verdict exist; the timing result is not asserted here	Unix	tests/shell/test_gate_acceptance.py::test_shell_time_job_records_a_verdict	pytest	M4
