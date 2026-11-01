@@ -72,7 +72,7 @@
   {
     "id": "K26-zsh",
     "kind": "python",
-    "anchor": "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-zsh]",
+    "anchor": "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[notice:future-zsh]",
     "command": [
       "uv",
       "run",
@@ -87,7 +87,7 @@
       "python",
       "-m",
       "pytest",
-      "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[ok:none-zsh]",
+      "tests/shell/test_signal_fallback.py::test_other_statuses_never_report_sandbox[notice:future-zsh]",
       "-vv",
       "-p",
       "no:cacheprovider",
@@ -97,8 +97,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/shell/zsh/hooks.zsh",
-        "before": "${_bingsu_f[10]-} == @STATUS_SANDBOX@",
-        "after": "${_bingsu_f[10]-} == 'ok:none'"
+        "before": "$_bingsu_note == @STATUS_SANDBOX@",
+        "after": "-n $_bingsu_note"
       }
     ],
     "timeout": 180,
