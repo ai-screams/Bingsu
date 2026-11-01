@@ -3,10 +3,12 @@ hooks, section 7 security table rows for zsh). Runs on zsh 5.8 (container)
 and the current zsh."""
 import itertools
 import os
+import re
+import subprocess
 
 import pytest
 
-from conftest import Install, minimal_record, run_shell_script, short_dir, trusted_env
+from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, trusted_env
 from pty_session import Session, visible
 
 pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split(),
@@ -20,7 +22,7 @@ def hostile_record(c1, c2, c3):
     return b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
-def start(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
+def start(tmp_path, rc_before="", rc_after="", record=None, inherit=None, load="source {}"):
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)
     (tmp_path / "init.zsh").write_bytes(inst.init("zsh", env))
@@ -28,7 +30,7 @@ def start(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
     cdir = short_dir()
     canaries = [cdir / f"c{i}" for i in (1, 2, 3)]
     inst.use_fake(record or hostile_record(*[str(c).encode() for c in canaries]))
-    (tmp_path / "rc.zsh").write_text(f"{rc_before}\nsource {tmp_path / 'init.zsh'}\n{rc_after}\n")
+    (tmp_path / "rc.zsh").write_text(f"{rc_before}\n{load.format(tmp_path / 'init.zsh')}\n{rc_after}\n")
     s = Session("zsh", env, cols=200)  # RPROMPT is dropped when the line is too wide
     s.run(f"source {tmp_path / 'rc.zsh'}")
     return s, inst, canaries
@@ -316,6 +318,154 @@ def test_duration_excludes_hooks_between_save_and_install(tmp_path):
     # hook gives 600 or more, 250 ms of slack on a loaded machine.
     assert ms and max(ms) < 350, ms
     assert any(m >= 80 for m in ms), ms
+
+
+# A clock that stepped back: the wall clock moves under EPOCHREALTIME, and a
+# negative duration used to turn the whole prompt into error:bad-args.
+# 이것을 실패시키는 것: `ms < 0` 조건을 지우는 것.
+def test_clock_step_back_drops_duration_and_keeps_record(tmp_path):
+    body = b'_bingsu_t0=$(( EPOCHREALTIME + 1.5 )); _bingsu_save; _bingsu_install; print -r -- "STATUS=$_bingsu_f[-1]"\n'
+    r, argv = install_once(tmp_path, body)
+    assert opt(argv, b"--status") is not None and opt(argv, b"--duration-ms") is None, argv
+    assert r.stdout == b"STATUS=ok:none\n", r.stdout
+    real = tmp_path / "real"
+    real.mkdir()
+    inst = Install(real)
+    env = trusted_env(real)
+    r = run_shell_script("zsh", inst.init("zsh", env) + b"\n" + body, env, real)
+    assert r.stdout == b"STATUS=ok:none\n" and r.stderr == b"", r
+
+
+def decimal_locale():
+    """A locale whose decimal point is not `.`. None if this host has none."""
+    names = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.split()
+    return next((n for n in names if re.match(r"(fa_IR|ps_AF|de_DE|fr_FR)\.(UTF-8|utf8)", n)), None)
+
+
+# 이것을 실패시키는 것: 시각 계산이 로캘의 소수점에 기대는 것(`,`를 만나 산술 오류로 프롬프트가 사라짐).
+def test_duration_under_comma_decimal_locale(tmp_path):
+    loc = decimal_locale()
+    if loc is None:
+        pytest.skip("NO locale with a non-dot decimal point here: NOT TESTED")
+    rc = f"export LC_NUMERIC={loc}\n"
+    s, inst, canaries = start(tmp_path, rc_before=rc, inherit={"LC_ALL": ""})
+    s.run("sleep 0.2")
+    s.run("true")
+    out = visible(s.close())
+    assert want_left(canaries) in out and b"bad math" not in out, out
+    ms = [int(opt(c, b"--duration-ms")) for c in inst.calls() if opt(c, b"--duration-ms")]
+    assert any(150 <= m < 5000 for m in ms), (loc, ms)
+
+
+# 이것을 실패시키는 것: 경계에서 정수 변환을 바꾸는 것, 큰 값을 그대로 넘겨 봉투가 레코드를 거부하는 것.
+@pytest.mark.parametrize("t0,t1,want", [("100.5", "100.5", b"0"), ("100.0004", "100.0", b"0"),
+                                        ("100.002", "100.0", None), ("-1e300", "1e300", "any")],
+                         ids=["zero", "under-one-ms-back", "one-ms-back", "over-integer-range"])
+def test_duration_at_its_edges(tmp_path, t0, t1, want):
+    body = f'_bingsu_t0={t0} _bingsu_t1={t1}; _bingsu_install; print -r -- "STATUS=$_bingsu_f[-1]"\n'.encode()
+    r, argv = install_once(tmp_path, body)
+    assert r.stdout == b"STATUS=ok:none\n", r.stdout
+    if want != "any":
+        assert opt(argv, b"--duration-ms") == want, argv
+    real = tmp_path / "real"
+    real.mkdir()
+    inst = Install(real)
+    env = trusted_env(real)
+    r = run_shell_script("zsh", inst.init("zsh", env) + b"\n" + body, env, real)
+    assert r.stdout == b"STATUS=ok:none\n" and r.stderr == b"", r
+
+
+# Every word of the bootstrap is a target of a global alias, and the parsed body too.
+# 이것을 실패시키는 것: 머리의 단어 하나라도 따옴표 없이 두는 것(본문이 출력되거나 aliases가 꺼진 채 남음).
+@pytest.mark.parametrize("load", ["source {}", '\\eval "$(<{})"'], ids=["source", "eval"])
+@pytest.mark.parametrize("word", ["eval", "local_options", "no_aliases", "no_warn_create_global", "no_csh_junkie_quotes", "setopt", "builtin"])
+def test_init_survives_global_aliases(tmp_path, word, load):
+    rc_before = f"alias -g {word}='print -r -- HIJACK'"
+    s, inst, _ = start(tmp_path, rc_before=rc_before, load=load, record=minimal_record(left=b"ALIAS-OK> "))
+    s.run(f"unalias \\{word}")
+    s.run('[[ -o aliases ]] && print -r -- ALIASES_"ON"')
+    out = visible(s.close())
+    assert b"HIJACK" not in out and b"ALIAS-OK> " in out and b"ALIASES_ON" in out, out
+
+
+# Options that change how quotes parse apply before the script can set anything.
+# 이것을 실패시키는 것: 본문을 줄바꿈이 든 일반 따옴표로 내는 것(unmatched), 머리에서 파싱 옵션에 기대는 것.
+@pytest.mark.parametrize("option", ["csh_junkie_quotes", "rc_quotes", "ignore_braces", "ignore_close_braces"])
+def test_init_parses_under_quote_and_brace_options(tmp_path, option):
+    s, inst, _ = start(tmp_path, rc_before=f"setopt {option}", record=minimal_record(left=b"PARSED> "))
+    s.run("true")
+    out = visible(s.close())
+    assert b"PARSED> " in out and b"unmatched" not in out and b"parse error" not in out, out
+
+
+# 이것을 실패시키는 것: 본문을 파싱할 때 CSH_JUNKIE_QUOTES를 끄지 않는 것(줄바꿈이 든 경로 단어에서 파싱 실패).
+def test_path_with_a_newline_parses_under_csh_junkie_quotes(tmp_path):
+    inst = Install(tmp_path)
+    env = {**trusted_env(tmp_path), "HOME": "/tmp/a\nb"}
+    r = run_shell_script("zsh", b"setopt csh_junkie_quotes\n" + inst.init("zsh", env) + b"\nprint -r -- ${+functions[_bingsu_install]}\n", env, tmp_path)
+    assert r.stdout == b"1\n" and r.stderr == b"", r
+
+
+# A body parsed with the user's aliases runs the alias, not the builtin. The
+# canary shows it, and the notice and the status show the hooks still work.
+# 이것을 실패시키는 것: init 머리의 `no_aliases`를 지우는 것, `_bingsu_call`의 `no_aliases`를 지우는 것
+# (zsh는 `$(…)`를 실행할 때 파싱한다: print, exit).
+@pytest.mark.parametrize("load", ["source {}", 'eval "$(<{})"'], ids=["source", "eval"])
+@pytest.mark.parametrize("name", ["print", "local", "typeset", "emulate", "return", "exit"])
+def test_hooks_survive_user_aliases(tmp_path, name, load):
+    canary = short_dir() / "c"
+    rc_before = f"alias {name}='touch {canary}; :'"
+    rc_after = '_after() { builtin print -u2 -r -- "after=$?" }\nprecmd_functions=($precmd_functions[1] _after $precmd_functions[2,-1])'
+    s, inst, _ = start(tmp_path, rc_before=rc_before, rc_after=rc_after, load=load,
+                       record=minimal_record(status=b"degraded:sandbox", left=b"ALIAS-OK> "))
+    s.run("false")
+    s.run(f"unalias {name}")
+    out = visible(s.close())
+    assert not canary.exists(), "an alias ran inside a hook"
+    assert b"ALIAS-OK> " in out and b"after=1" in out, out
+    assert out.count(b"could not start its system call filter") == 1, out
+
+
+# 이것을 실패시키는 것: init 머리의 `local_options`를 지우는 것(init 뒤로 사용자 alias가 꺼짐).
+def test_user_aliases_keep_working_after_init(tmp_path):
+    s, _, _ = start(tmp_path, rc_before="alias zz='print -r -- ALIAS_""WORKS'", record=minimal_record())
+    s.run("zz")
+    assert b"ALIAS_WORKS" in visible(s.close())
+
+
+# init under the option that warns about globals made inside a function.
+# 이것을 실패시키는 것: init 머리의 `no_warn_create_global`을 지우는 것(셸 시작마다 경고 줄).
+def test_init_is_quiet_under_warn_create_global(tmp_path):
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    r = run_shell_script("zsh", b"setopt warn_create_global\n" + inst.init("zsh", env), env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r.stderr
+
+
+COEXIST = ROOT / "tests/shell/fixtures/zsh_coexist"
+
+
+# Spec section 7, coexistence rows. Real frameworks are test D4's; these are their shapes.
+# 이것을 실패시키는 것: 저장 hook을 맨 앞으로 옮기지 않는 것, 설치 hook이 저장한 값을 돌려주지 않는 것,
+# hook을 다시 등록하는 것, preexec 체인을 덮는 것, late hook 경고를 반복하는 것.
+@pytest.mark.parametrize("inits", [1, 2], ids=["init-once", "init-twice"])
+def test_coexists_with_framework_shapes(tmp_path, inits):
+    log = tmp_path / "hooks.log"
+    init = tmp_path / "init.zsh"
+    rc_before = f"source {COEXIST}/omz_like.zsh\nsource {COEXIST}/prompt_tool.zsh"
+    rc_after = "\n".join([f"source {init}"] * (inits - 1) + ["_tool_attach"])
+    s, inst, _ = start(tmp_path, rc_before=rc_before, rc_after=rc_after, inherit={"BINGSU_T_LOG": str(log)},
+                       record=minimal_record(left=b"BINGSU> "))
+    s.run("(exit 7)")
+    s.run("true")
+    s.run('print -r -- "FUNCS=$precmd_functions[1]:${#precmd_functions}:${#preexec_functions}"')
+    out = visible(s.close())
+    lines = log.read_text().splitlines()
+    at = lines.index("omz-precmd 7")
+    assert lines[at + 1] == "tool-precmd 7", lines
+    assert "omz-preexec" in lines and b"BINGSU> " in out and b"tool> " not in out.split(b"BINGSU> ", 1)[1], out
+    assert b"FUNCS=_bingsu_save:4:2" in out, out
+    assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1, out
 
 
 # Inherited exported names stay in the shell but leave the environment.

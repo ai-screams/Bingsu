@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from conftest import SHELL_CMD, real_bin, run_shell_script, trusted_env
+from shell_support import plain_script, rewrapped_script
 
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 
@@ -29,7 +30,7 @@ def test_prompt_time_global_locations_stay_pinned(shell, names, later, tmp_path)
     probe.write_text("#!/bin/sh\n" + f"printf '%s\\0' \"$@\" > {shlex.quote(str(words))}\n"
                      + f"exec {shlex.quote(str(binary))} \"$@\"\n")
     probe.chmod(0o700)
-    script = init.stdout.replace(os.fsencode(binary), os.fsencode(probe))
+    script = plain_script(shell, init.stdout).replace(os.fsencode(binary), os.fsencode(probe))
     assert os.fsencode(probe) in script
     # Exercise the built-in prompt without snapshot/config trust prerequisites.
     # Only init-pinned roots are omitted; the real embedded hook, observed
@@ -91,7 +92,7 @@ def test_invalid_global_location_pins_unknown_and_renders(shell, names, value, r
                      + f"rc=$?\nprintf '%s' \"$rc\" > {shlex.quote(str(binary_rc))}\n"
                      + f"cat {shlex.quote(str(binary_err))} >&2\nexit \"$rc\"\n")
     probe.chmod(0o700)
-    script = result.stdout.replace(os.fsencode(binary), os.fsencode(probe))
+    script = plain_script(shell, result.stdout).replace(os.fsencode(binary), os.fsencode(probe))
     # Same built-in render fixture as above: sandbox config trust is independent
     # of the real init, hook, pin, envelope and prompt-render path exercised here.
     script = re.sub(rb"'--(?:runtime-root|runtime-groups|config-root|config-root-written|state-root|log-root|collector-exe)=[^']*'", b"", script)
@@ -99,7 +100,7 @@ def test_invalid_global_location_pins_unknown_and_renders(shell, names, value, r
     # Fish may create its own config under a relative XDG path on startup.
     # Keep that shell behavior inside the fixture, away from the checkout.
     script_file = tmp_path / f"script.{shell}"
-    script_file.write_bytes(script + b'\n_bingsu_call --width 80\nprintf "%s" "$_bingsu_rec"\n')
+    script_file.write_bytes(rewrapped_script(shell, result.stdout, script) + b'\n_bingsu_call --width 80\nprintf "%s" "$_bingsu_rec"\n')
     rendered = subprocess.run(SHELL_CMD[shell] + [str(script_file)], env=env,
                               cwd=tmp_path, capture_output=True, timeout=60)
     assert rendered.returncode == 0, rendered.stderr
@@ -130,9 +131,9 @@ def test_empty_global_locations_stay_pinned(shell, value, tmp_path):
     words = tmp_path / "words"
     probe.write_text("#!/bin/sh\n" + f"printf '%s\\0' \"$@\" > {shlex.quote(str(words))}\n")
     probe.chmod(0o700)
-    script = init.stdout.replace(os.fsencode(binary), os.fsencode(probe))
+    script = plain_script(shell, init.stdout).replace(os.fsencode(binary), os.fsencode(probe))
     env.update(HOME="/hostile/home", XDG_CONFIG_HOME="/hostile/xdg")
-    result = run_shell_script(shell, script + b"\n_bingsu_call --width 80\n", env, tmp_path)
+    result = run_shell_script(shell, rewrapped_script(shell, init.stdout, script) + b"\n_bingsu_call --width 80\n", env, tmp_path)
     assert result.returncode == 0, result.stderr
     argv = words.read_bytes().split(b"\0")[:-1]
     assert [word for word in argv if word.startswith(b"--git-global-")] == [
@@ -148,12 +149,12 @@ def test_legacy_hook_without_global_words_still_renders(shell, tmp_path):
     env = trusted_env(tmp_path)
     env["HOME"] = str(tmp_path / "init-home")
     init = subprocess.run([str(real_bin()), "init", shell], env=env, capture_output=True, check=True)
-    script, count = re.subn(rb"'--git-global-(?:home|xdg)=[^']*'", b"", init.stdout)
+    script, count = re.subn(rb"'--git-global-(?:home|xdg)=[^']*'", b"", plain_script(shell, init.stdout))
     assert count == 2
     script = re.sub(rb"'--(?:runtime-root|runtime-groups|config-root|config-root-written|state-root|log-root|collector-exe)=[^']*'", b"", script)
     script = script.replace(b"'--config-root-shape-only'", b"")
     env.update(HOME="/hostile/home", XDG_CONFIG_HOME="/hostile/xdg")
-    result = run_shell_script(shell, script + b'\n_bingsu_call --width 80\nprintf "%s" "$_bingsu_rec"\n', env, tmp_path)
+    result = run_shell_script(shell, rewrapped_script(shell, init.stdout, script) + b'\n_bingsu_call --width 80\nprintf "%s" "$_bingsu_rec"\n', env, tmp_path)
     assert result.returncode == 0, result.stderr
     assert_record(result.stdout)
 

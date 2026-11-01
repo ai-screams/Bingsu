@@ -14,6 +14,7 @@ import tempfile
 import pytest
 
 from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin, real_collector
+from shell_support import plain_script
 
 # The golden runner's reader rendering (T-A7 below compares against it).
 _spec = importlib.util.spec_from_file_location("golden_record_run", ROOT / "tests/golden/record/run.py")
@@ -280,7 +281,7 @@ def test_zsh_inherited_session_glob_survives_glob_subst(tmp_path, shells):
     inst = Install(base)
     env = trusted_env(base, "glob")
     script = inst.init("zsh", env)
-    session = re.search(rb"_bingsu_session='([0-9a-f]{32})'", script).group(1)
+    session = re.search(rb"_bingsu_session=\\'([0-9a-f]{32})\\'", script).group(1)
     inst.use_fake(minimal_record())
     init_file = base / "init.sh"
     init_file.write_bytes(script)
@@ -302,6 +303,8 @@ def test_reader_substitution_matches_golden_runner(tmp_path, shells):
         script = inst.init(shell, trusted_env(base))
         if shell == "bash":
             script = script.split(b"\n", 1)[1]  # the version guard's first line
+        if shell == "zsh":
+            script = plain_script(shell, script)
         golden.render_reader(shell, base / "reader")
         want = (base / "reader").read_bytes() + b"\n"
         assert script[: len(want)] == want, shell

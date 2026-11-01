@@ -32,8 +32,29 @@ fn install(base: &Path, dir_name: &[u8]) -> PathBuf {
     exe
 }
 
+/// The zsh script is one `$'…'` word: back to the text these tests read.
+fn zsh_text(script: Vec<u8>) -> Vec<u8> {
+    let start = b"eval $'";
+    let Some(at) = script.windows(start.len()).position(|w| w == start) else {
+        return script;
+    };
+    let mut text = Vec::new();
+    let mut bytes = script[at + start.len()..].iter();
+    while let Some(&b) = bytes.next() {
+        match (b, b == b'\\') {
+            (_, true) => match bytes.next() {
+                Some(b'n') => text.push(b'\n'),
+                Some(&c) => text.push(c),
+                None => {}
+            },
+            _ => text.push(b),
+        }
+    }
+    text
+}
+
 fn init(exe: &Path, shell: &str, base: &Path) -> Output {
-    Command::new(exe)
+    let mut out = Command::new(exe)
         .args(["init", shell])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -42,7 +63,9 @@ fn init(exe: &Path, shell: &str, base: &Path) -> Output {
         .env("XDG_STATE_HOME", base.join("state"))
         .env("XDG_CACHE_HOME", base.join("cache"))
         .output()
-        .unwrap()
+        .unwrap();
+    out.stdout = zsh_text(out.stdout);
+    out
 }
 
 fn has(hay: &[u8], needle: &[u8]) -> bool {
@@ -760,7 +783,10 @@ fn state_root_with_dotdot_after_missing_name_is_not_pinned() {
             .join("missing/x/bingsu")
             .display()
     );
-    assert!(has(&out.stdout, want.as_bytes()), "missing {want}");
+    assert!(
+        has(&zsh_text(out.stdout), want.as_bytes()),
+        "missing {want}"
+    );
 }
 
 // A candidate the walk refuses must be refused before anything is created:
