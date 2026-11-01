@@ -1152,7 +1152,7 @@ jobs:
         env:
           FSB_REQUIRE_STRACE: "1"
         run: |
-          "$RUNNER_TEMP/venv/bin/python" -m pytest tools/fsbudget -q -rs -p no:cacheprovider
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tools/fsbudget tests/n7/test_run_mutations.py -q -rs -p no:cacheprovider
       # FSB_REQUIRE_STRACE fails the read-count test instead of skipping it;
       # BINGSU_TEST_SHELLS (as in tests/shell) fails a listed shell that is
       # missing; BINGSU_REQUIRE_NONROOT_TESTS fails the tests that skip as

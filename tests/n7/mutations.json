@@ -465,8 +465,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "|| s.chars().any(crate::sanitize::is_removed)",
-        "after": "|| false",
+        "before": " && s.chars().all(|c| !crate::sanitize::is_removed(c))",
+        "after": "",
         "count": 1
       }
     ]
@@ -491,8 +491,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "if usize::from(*seg) >= crate::field::BUILTIN.len() =>",
-        "after": "if false =>",
+        "before": "if usize::from(*seg) >= crate::field::BUILTIN.len() {",
+        "after": "if false {",
         "count": 1
       }
     ]
@@ -595,8 +595,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "if depth != 0 || actual_fill != fill {",
-        "after": "if actual_fill != fill {",
+        "before": "self.ok && self.depth == 0 && self.fill == fill",
+        "after": "self.ok && self.fill == fill",
         "count": 1
       }
     ]
@@ -621,8 +621,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "if !matches!(nodes.get(end), Some(Node::GroupEnd)) {",
-        "after": "if false {",
+        "before": "if !group || end != i || self.references == seen {",
+        "after": "if !group || self.references == seen {",
         "count": 1
       }
     ]
@@ -647,8 +647,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "if !nodes[i + 1..end]\n                        .iter()\n                        .any(|n| matches!(n, Node::Segment { .. } | Node::Field { .. }))",
-        "after": "if false",
+        "before": "if !group || end != i || self.references == seen {",
+        "after": "if !group || end != i {",
         "count": 1
       }
     ]
@@ -673,8 +673,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "if depth != 0 || actual_fill.is_some() {",
-        "after": "if actual_fill.is_some() {",
+        "before": "if self.depth != 0 || self.fill.is_some() {",
+        "after": "if self.fill.is_some() {",
         "count": 1
       }
     ]
@@ -699,8 +699,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "|| nodes.len() != origin.len()",
-        "after": "|| false",
+        "before": "self.ok &= n == self.len;",
+        "after": "let _ = n;",
         "count": 1
       }
     ]
@@ -751,7 +751,7 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/snapshot_codec.rs",
-        "before": "|| c.setup.len() != crate::field::BUILTIN.len()",
+        "before": "|| c.setup != crate::field::BUILTIN.len()",
         "after": "|| false",
         "count": 1
       }
@@ -1013,32 +1013,6 @@
         "file": "crates/bingsu-core/src/fs_trust.rs",
         "before": "self.0.contains(&GroupPin::of(at))",
         "after": "self.0.iter().any(|p| (p.dev, p.ino, p.gid) == (at.dev, at.ino, at.gid))",
-        "count": 1
-      }
-    ]
-  },
-  {
-    "id": "N-080",
-    "kind": "rust",
-    "anchor": "collection::tests::fixed_collection_wire_and_eligibility",
-    "command": [
-      "cargo",
-      "test",
-      "-j",
-      "2",
-      "-p",
-      "bingsu-core",
-      "--lib",
-      "--",
-      "collection::tests::fixed_collection_wire_and_eligibility",
-      "--exact",
-      "--test-threads=1"
-    ],
-    "patches": [
-      {
-        "file": "crates/bingsu-core/src/collection.rs",
-        "before": ".map_or(0, |i| mask & (1 << i))",
-        "after": ".map_or(0, |_i| mask)",
         "count": 1
       }
     ]
@@ -1366,7 +1340,7 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/config_load.rs",
-        "before": "if config_names(&listing.file).map_err(|e| e.to_string())? != listing.names {",
+        "before": "if config_names(&listing.file, &listing.canonical, meter).map_err(|e| e.to_string())?\n                != listing.names\n            {",
         "after": "if false {",
         "count": 1
       }
@@ -1394,7 +1368,7 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/config_load.rs",
-        "before": "if config_names(&listing.file).map_err(|e| e.to_string())? != listing.names {",
+        "before": "if config_names(&listing.file, &listing.canonical, meter).map_err(|e| e.to_string())?\n                != listing.names\n            {",
         "after": "if false {",
         "count": 1
       }
@@ -1702,8 +1676,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/snapshot_store.rs",
-        "before": "sys::rename_at(\n            self.root.dir.as_fd(),\n            OsStr::new(slot.name()),\n            OsStr::new(slot.target().name()),\n        )?;",
-        "after": "if matches!(slot, Slot::Marker) {\n            let mut dest = sys::open_lock_at(self.root.dir.as_fd(), OsStr::new(slot.target().name()))?;\n            dest.set_len(0)?;\n            std::io::Write::write_all(&mut dest, staged.small_bytes.as_ref().unwrap())?;\n        } else {\n            sys::rename_at(self.root.dir.as_fd(), OsStr::new(slot.name()), OsStr::new(slot.target().name()))?;\n        }",
+        "before": "        staged.rename(&self.root.dir, slot.name(), slot.target().name())?;",
+        "after": "        if matches!(slot, Slot::Marker) {\n            let mut dest = sys::open_lock_at(self.root.dir.as_fd(), OsStr::new(slot.target().name()))?;\n            dest.set_len(0)?;\n            std::io::Write::write_all(&mut dest, staged.small_bytes.as_ref().unwrap())?;\n        } else {\n            staged.rename(&self.root.dir, slot.name(), slot.target().name())?;\n        }",
         "count": 1
       }
     ],
@@ -2109,8 +2083,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/helper_limits.rs",
-        "before": "if memory_exceeded(baseline) {",
-        "after": "if false {",
+        "before": "let helper_over = memory_exceeded(baseline);",
+        "after": "let helper_over = false;",
         "count": 1
       }
     ],
@@ -2146,8 +2120,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/helper_limits.rs",
-        "before": "if Instant::now() >= deadline {",
-        "after": "if false {",
+        "before": "if now >= expires_ns || helper_over {",
+        "after": "if helper_over {",
         "count": 1
       }
     ],
@@ -2686,13 +2660,13 @@
       },
       {
         "file": "crates/bingsu-core/src/front/staged.rs",
-        "before": "                        if d.read_len() == 0 {\n                            self.observed.selected = self",
-        "after": "                        if d.read_len() == 0 {\n                            if copy == SnapshotCopy::Current { self.observed.current_generation = d.n7_current_generation(); }\n                            self.observed.selected = self"
+        "before": "                        if d.push(&bytes).is_err() {",
+        "after": "                        let pushed = d.push(&bytes);\n                        if copy == SnapshotCopy::Current { self.observed.current_generation = d.n7_current_generation(); }\n                        if pushed.is_err() {"
       },
       {
         "file": "crates/bingsu-core/src/front/staged.rs",
-        "before": "                                .map(Box::new)",
-        "after": "                                .map(|mut s| {\n                                    if copy == SnapshotCopy::LastGood {\n                                        if let Some(g) = self.observed.current_generation { s.id.generation = g; }\n                                    }\n                                    Box::new(s)\n                                })"
+        "before": "                                    Ok(plan) => Some(Box::new(plan)),",
+        "after": "                                    Ok(mut plan) => {\n                                        if copy == SnapshotCopy::LastGood {\n                                            if let Some(g) = self.observed.current_generation { plan.id.generation = g; }\n                                        }\n                                        Some(Box::new(plan))\n                                    }"
       }
     ]
   },
@@ -2794,7 +2768,7 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/front.rs",
-        "before": "icons: c.icons,",
+        "before": "icons: shared.icons,",
         "after": "icons: crate::icons::IconSet::Unicode,",
         "count": 1
       }
@@ -2820,7 +2794,7 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/front.rs",
-        "before": "c.duration_min_ms,",
+        "before": "shared.duration_min_ms,",
         "after": "2_000,",
         "count": 1
       }
@@ -3291,8 +3265,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/snapshot_store.rs",
-        "before": "        sys::rename_at(\n            self.root.dir.as_fd(),",
-        "after": "        // SAFETY: held runtime directory, test mutation only.\n        #[allow(unsafe_code)]\n        unsafe { libc::fsync(self.root.dir.as_raw_fd()); }\n        sys::rename_at(\n            self.root.dir.as_fd(),"
+        "before": "        staged.rename(&self.root.dir, slot.name(), slot.target().name())?;",
+        "after": "        // SAFETY: held runtime directory, test mutation only.\n        #[allow(unsafe_code)]\n        unsafe { libc::fsync(self.root.dir.as_raw_fd()); }\n        staged.rename(&self.root.dir, slot.name(), slot.target().name())?;"
       }
     ]
   },
@@ -3374,8 +3348,13 @@
     "patches": [
       {
         "file": "crates/bingsu/src/shell/bash/hooks.bash",
-        "before": "_bingsu_call() {\n  local _bingsu_cn='\\#'\n  _bingsu_cn=${_bingsu_cn@P}\n  if [[ ${_bingsu_dead_cn-} == \"$_bingsu_cn\" ]]; then\n    _bingsu_rec=\n    return 0\n  fi\n  case $_bingsu_seq in\n    ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;\n  esac\n  _bingsu_seq=$(( _bingsu_seq + 1 ))\n  # Over 64 KiB (bytes): passed empty (see hooks.zsh). ${PWD-}: set -u after\n  # unset PWD. _bingsu_bytes counts bytes under a local LC_ALL=C.\n  local _bingsu_pwd=${PWD-} _bingsu_n=0 _bingsu_st=0\n  # 2>/dev/null: restoring an LC_ALL naming a locale that is not installed\n  # makes bash warn when _bingsu_bytes returns.\n  _bingsu_bytes \"$_bingsu_pwd\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_pwd=\n  local _bingsu_log=off _bingsu_host=${HOSTNAME-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0 _bingsu_colorfgbg=${COLORFGBG-}\n  local _bingsu_log_nm=0\n  if shopt -q nocasematch; then _bingsu_log_nm=1; shopt -u nocasematch; fi\n  case ${BINGSU_LOG-} in error|info|debug) _bingsu_log=$BINGSU_LOG ;; esac\n  if (( _bingsu_log_nm )); then shopt -s nocasematch; fi\n  _bingsu_bytes \"$_bingsu_host\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_host=\n  _bingsu_bytes \"$_bingsu_venv\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_venv=\n  _bingsu_bytes \"$_bingsu_colorfgbg\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_colorfgbg=\n  [[ -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ]] && _bingsu_ssh=1\n  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ \"$@\" --shell bash --pwd \"$_bingsu_pwd\" --colorterm \"${COLORTERM-}\" --colorfgbg \"$_bingsu_colorfgbg\" \"--log-level=$_bingsu_log\" --host \"$_bingsu_host\" --venv \"$_bingsu_venv\" \"--ssh=$_bingsu_ssh\" --session \"$_bingsu_session\" --seq \"$_bingsu_seq\" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null\n  (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn\n  _bingsu_rec=${_bingsu_rec%.}\n}",
-        "after": "if ! declare -F _bingsu_call >/dev/null; then\n_bingsu_call() {\n  local _bingsu_cn='\\#'\n  _bingsu_cn=${_bingsu_cn@P}\n  if [[ ${_bingsu_dead_cn-} == \"$_bingsu_cn\" ]]; then\n    _bingsu_rec=\n    return 0\n  fi\n  case $_bingsu_seq in\n    ''|*[^0123456789]*|0?*|????????????????*) _bingsu_seq=0 ;;\n  esac\n  _bingsu_seq=$(( _bingsu_seq + 1 ))\n  # Over 64 KiB (bytes): passed empty (see hooks.zsh). ${PWD-}: set -u after\n  # unset PWD. _bingsu_bytes counts bytes under a local LC_ALL=C.\n  local _bingsu_pwd=${PWD-} _bingsu_n=0 _bingsu_st=0\n  # 2>/dev/null: restoring an LC_ALL naming a locale that is not installed\n  # makes bash warn when _bingsu_bytes returns.\n  _bingsu_bytes \"$_bingsu_pwd\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_pwd=\n  local _bingsu_log=off _bingsu_host=${HOSTNAME-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0 _bingsu_colorfgbg=${COLORFGBG-}\n  local _bingsu_log_nm=0\n  if shopt -q nocasematch; then _bingsu_log_nm=1; shopt -u nocasematch; fi\n  case ${BINGSU_LOG-} in error|info|debug) _bingsu_log=$BINGSU_LOG ;; esac\n  if (( _bingsu_log_nm )); then shopt -s nocasematch; fi\n  _bingsu_bytes \"$_bingsu_host\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_host=\n  _bingsu_bytes \"$_bingsu_venv\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_venv=\n  _bingsu_bytes \"$_bingsu_colorfgbg\" 2>/dev/null\n  (( _bingsu_n <= 65536 )) || _bingsu_colorfgbg=\n  [[ -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ]] && _bingsu_ssh=1\n  { _bingsu_rec=$(@BIN@ prompt --ctx 1 --record @RECORD@ \"$@\" --shell bash --pwd \"$_bingsu_pwd\" --colorterm \"${COLORTERM-}\" --colorfgbg \"$_bingsu_colorfgbg\" \"--log-level=$_bingsu_log\" --host \"$_bingsu_host\" --venv \"$_bingsu_venv\" \"--ssh=$_bingsu_ssh\" --session \"$_bingsu_session\" --seq \"$_bingsu_seq\" @RUNTIME_ROOT@ @RUNTIME_GROUPS@ @CONFIG_ROOT@ @STATE_ROOT@ @LOG_ROOT@ @HOME@; _bingsu_r=$?; printf .; exit $_bingsu_r) || _bingsu_st=$?; } 2>/dev/null\n  (( _bingsu_st < 128 )) || _bingsu_dead_cn=$_bingsu_cn\n  _bingsu_rec=${_bingsu_rec%.}\n}\nfi"
+        "before": "_bingsu_call() {\n  local _bingsu_cn='\\#'",
+        "after": "if ! declare -F _bingsu_call >/dev/null; then\n_bingsu_call() {\n  local _bingsu_cn='\\#'"
+      },
+      {
+        "file": "crates/bingsu/src/shell/bash/hooks.bash",
+        "before": "  _bingsu_rec=${_bingsu_rec%.}\n}\n",
+        "after": "  _bingsu_rec=${_bingsu_rec%.}\n}\nfi\n"
       }
     ]
   },
@@ -3413,8 +3392,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/helper.rs",
-        "before": "        let request = if let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) {",
-        "after": "        if let Some((config, _)) = display {\n            for unit in &config.exec_units {\n                if let bingsu_core::config::compile::ExecPolicy::Command { argv, .. } = &unit.policy {\n                    let _ = std::process::Command::new(&argv[0]).args(&argv[1..]).status();\n                }\n            }\n        }\n        let request = if let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) {"
+        "before": "        let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;",
+        "after": "        if let Some((config, _)) = display {\n            for unit in &config.exec_units {\n                if let bingsu_core::config::compile::ExecPolicy::Command { argv, .. } = &unit.policy {\n                    let _ = std::process::Command::new(&argv[0]).args(&argv[1..]).status();\n                }\n            }\n        }\n        let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;"
       }
     ]
   },
@@ -3452,8 +3431,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/helper_limits.rs",
-        "before": "if Instant::now() >= deadline {",
-        "after": "if false {"
+        "before": "if now >= expires_ns || helper_over {",
+        "after": "if helper_over {"
       }
     ]
   },

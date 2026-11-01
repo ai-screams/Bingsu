@@ -166,6 +166,36 @@ WELL_FORMED = [
 ]
 
 
+# helper가 collector를 SIGKILL한 순간 시작과 끝이 한 줄에 찍힌 호출(저장된 실제 줄).
+# 이것을 실패시키는 것: 한 줄 형태를 알아보지 못하는 것, 호출을 세지 않고 버리는 것.
+def test_call_cut_short_on_its_own_record_parses():
+    text = "16050 read(3<pipe:[4894640]>,  <unfinished ...>) = ?\n16050 +++ killed by SIGKILL +++\n"
+    calls = parse(text)
+    assert calls.errors == []
+    assert [(c.name, c.ret, c.args) for c in calls] == [("read", "?", "3<pipe:[4894640]>,"), (EXIT_EVENT, "", "killed by SIGKILL")]
+
+
+CUT_SHORT_REFUSED = {
+    "next record is a call": ("11 read(3</x>,  <unfinished ...>) = ?\n11 close(3</x>) = 0\n11 +++ exited with 0 +++\n",
+                              "cut-short call without its exit record"),
+    "no next record": ("11 read(3</x>,  <unfinished ...>) = ?\n", "cut-short call without its exit record"),
+    "other pid exits": ("11 read(3</x>,  <unfinished ...>) = ?\n12 +++ exited with 0 +++\n",
+                        "cut-short call without its exit record"),
+    "another call open": ("11 write(4</y>, \"a\", 1 <unfinished ...>\n11 read(3</x>,  <unfinished ...>) = ?\n"
+                          "11 +++ killed by SIGKILL +++\n", "cut-short call without its exit record"),
+    "malformed head": ('11 read(3</x>, "ab <unfinished ...>) = ?\n11 +++ killed by SIGKILL +++\n', "unparsed record"),
+}
+
+
+# 이것을 실패시키는 것: 다음 기록이 그 PID의 종료가 아니어도, 다른 호출이 열려 있어도 한 줄 형태를 받는 것,
+# 앞 인자의 구조 검사를 건너뛰는 것.
+@pytest.mark.parametrize("name", list(CUT_SHORT_REFUSED))
+def test_call_cut_short_on_its_own_record_needs_its_exit(name):
+    text, want = CUT_SHORT_REFUSED[name]
+    errors = parse(text).errors
+    assert any(want in e for e in errors), (name, errors)
+
+
 # 이것을 실패시키는 것: 인자를 탐욕 정규식으로 자르는 것(fd 이름 안의 ") = "에서 끊김), fd 이름 안의 ","에서 나누는 것.
 @pytest.mark.parametrize(("line", "args", "ret"), WELL_FORMED)
 def test_well_formed_records_split_exactly(line, args, ret):

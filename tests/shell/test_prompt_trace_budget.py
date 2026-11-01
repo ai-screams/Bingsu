@@ -1,6 +1,7 @@
 """Portable regression/mutation fixtures for the Linux strace gate."""
 from pathlib import Path
 from collections import Counter
+from types import SimpleNamespace
 import hashlib
 
 import pytest
@@ -3081,7 +3082,8 @@ def insert_front_open(lines, path):
 
 
 # 이것을 실패시키는 것: 빈 stdout(final-18 모양)에서도 필터·기록 쓰기를 요구하는 것, 빈 stdout 캡처의 경로 판정을 건너뛰는 것,
-# 비지 않은 stdout에서 필터 수 불일치를 면제하는 것, 필터를 설치한 빈 stdout 앞단을 필터 전 규칙으로 보는 것.
+# 비지 않은 stdout에서 필터 수 불일치를 면제하는 것, 필터를 설치한 빈 stdout 앞단을 필터 전 규칙으로 보는 것,
+# 마감 모양이 없는 빈 stdout을 레코드 없이 통과시키는 것.
 @pytest.mark.parametrize("case", ["silent-valid-passes", "silent-valid-forbidden-open", "record-without-filter",
                                   "record-filter-removed", "filtered-empty-stdout-passes"])
 def test_marker_full_judgment_waives_only_record_bound_items(case):
@@ -3098,8 +3100,10 @@ def test_marker_full_judgment_waives_only_record_bound_items(case):
            "record-filter-removed": lambda: stored_marker_capture("valid", record=RECORD, edit=drop_filter),
            "filtered-empty-stdout-passes": lambda: stored_marker_capture("valid", record=b"")}[case]()
     assert budget.front_deadline_exit(cap) is None
-    if case.endswith("passes"):
-        budget.judge_marker_attempt(cap)
+    if case == "silent-valid-passes":
+        budget.judge_marker_attempt(cap, budget.marker_shape(cap))
+    elif case == "filtered-empty-stdout-passes":
+        budget.judge_marker_trace(cap)
     else:
         with pytest.raises(AssertionError) as failure:
             budget.judge_marker_attempt(cap)
@@ -3176,3 +3180,90 @@ def test_front_deadline_rejects_any_write_and_a_disarmed_timer(case):
               "zero-it-value": {"it_value": 0}}[kind]
     cap = marker_capture(**kwargs) if proof == "alarm" else timed_capture(27_108 + 1, **kwargs)
     assert budget.front_deadline_exit(cap) is None
+
+
+def at_time(line, us):
+    pid, _, rest = line.split(None, 2)
+    return f"{pid}  {us // 1_000_000}.{us % 1_000_000:06d} {rest}"
+
+
+def silent_valid(edit=lambda lines: lines):
+    return stored_marker_capture("silent-valid", record=b"", edit=edit)
+
+
+def last_event_at(us_from_earliest):
+    """silent-valid with the front's last event before exit_group this many µs
+    past the earliest its deadline could be, and exit_group after it."""
+    def edit(lines):
+        pid = lines[0].split()[0]
+        front = [i for i, line in enumerate(lines) if line.split()[0] == pid]
+        armed = next(n for n, i in enumerate(front) if " setitimer(" in lines[i])
+        earliest = int(lines[front[armed - 1]].split()[1].replace(".", "")) + 49_105
+        end = next(n for n, i in enumerate(front) if " exit_group(" in lines[i])
+        out = list(lines)
+        out[front[end - 1]] = at_time(lines[front[end - 1]], earliest + us_from_earliest)
+        return out
+    return edit
+
+
+def without_times(cap):
+    cap.lines = cap.untimed
+    return cap
+
+
+# 이것을 실패시키는 것: 경계 값을 빼는 것(>), it_value를 빼는 것, 하한을 setitimer 자신의 시각으로 올리는 것(저장된
+# run 18이 빠짐), 시각을 못 읽어도 모양을 주는 것, invalid·레코드·fd 1 쓰기·0 아닌 종료에 모양을 주는 것.
+@pytest.mark.parametrize("case,expected", [
+    ("stored", "front-deadline-window"), ("boundary", "front-deadline-window"), ("one-before", None),
+    ("early", None), ("untimed", None), ("invalid", None), ("record", None), ("write", None), ("exit-1", None)])
+def test_front_deadline_window_does_not_contradict_the_deadline(case, expected):
+    def wrote(lines):
+        pid = lines[0].split()[0]
+        at = next(i for i, line in enumerate(lines) if " exit_group(" in line and line.split()[0] == pid)
+        stamp = lines[at].split()[1]
+        return lines[:at - 1] + [f'{pid}  {stamp} write(1<pipe:[1]>, "B1", 2) = -1 EAGAIN (Resource temporarily unavailable)'] + lines[at - 1:]
+
+    def exit_1(lines):
+        return [line.replace("exit_group(0", "exit_group(1").replace("exited with 0", "exited with 1")
+                if line.split()[0] == lines[0].split()[0] else line for line in lines]
+    cap = {"stored": silent_valid, "boundary": lambda: silent_valid(last_event_at(0)),
+           "one-before": lambda: silent_valid(last_event_at(-1)), "early": lambda: silent_valid(last_event_at(-40_000)),
+           "untimed": lambda: without_times(silent_valid()),
+           "invalid": lambda: SimpleNamespace(**{**vars(silent_valid()), "invalid": True}),
+           "record": lambda: stored_marker_capture("silent-valid", record=RECORD),
+           "write": lambda: silent_valid(wrote), "exit-1": lambda: silent_valid(exit_1)}[case]()
+    assert budget.front_deadline_window(cap) == expected
+    assert budget.front_deadline_exit(cap) is None
+
+
+def run_marker_attempts(captures):
+    made = []
+
+    def capture(attempt):
+        made.append(attempt)
+        return captures[attempt - 1]
+    try:
+        return budget.run_allowlist(capture, budget.judge_marker_attempt, budget.marker_shape,
+                                    budget.MARKER_ATTEMPTS, label="marker valid"), made
+    except BaseException as error:
+        error.made = made
+        raise
+
+
+# 이것을 실패시키는 것: 레코드 없는 시도를 끝까지 통과시키는 것, 8회를 넘겨 시도하는 것, 소진을 통과로 보는 것,
+# 창 안의 무출력을 재시도하지 않는 것, 마감보다 이른 무출력을 재시도하는 것, 재시도 횟수를 출력하지 않는 것.
+def test_valid_marker_needs_a_record_within_its_attempts(capsys):
+    record = stored_marker_capture("valid", record=RECORD)
+    (attempt, shapes), made = run_marker_attempts([silent_valid(), silent_valid(), record])
+    assert (attempt, dict(shapes), made) == (3, {"front-deadline-window": 2}, [1, 2, 3])
+    assert "marker valid attempts: 3, deadline shapes: {'front-deadline-window': 2}" in capsys.readouterr().out
+    with pytest.raises(pytest.fail.Exception, match="no attempt without a deadline in 8") as spent:
+        run_marker_attempts([silent_valid()] * 8)
+    assert spent.value.made == list(range(1, 9))
+    with pytest.raises(AssertionError, match="no record and no deadline shape") as early:
+        run_marker_attempts([silent_valid(last_event_at(-40_000)), record])
+    assert early.value.made == [1]
+    with pytest.raises(AssertionError, match="no record and no deadline shape") as untimed:
+        run_marker_attempts([without_times(silent_valid()), record])
+    assert untimed.value.made == [1]
+

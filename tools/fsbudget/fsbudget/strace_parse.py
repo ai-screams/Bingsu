@@ -12,7 +12,9 @@ the end of the trace.
 Exit records become `EXIT` events in the call list, so attribution can close
 a TID's state before the kernel hands the number to another task. A call
 still unfinished at its process's exit record is kept as a call with result
-`?` (it was made; it counts).
+`?` (it was made; it counts). So is the one-line form strace prints when the
+task dies as the call starts, `name(args <unfinished ...>) = ?`, but only with
+that PID's exit record as its next record and no other call open.
 
 The exact argument-free `???() = ?` record (whole or unfinished/resumed) is
 an `unknown-syscall` with empty args/result only when that PID's next record
@@ -31,6 +33,8 @@ UNFINISHED = re.compile(r"^(\w+)\((.*?)\s*<unfinished \.\.\.>$")
 RESUMED = re.compile(r"^<\.\.\. (\w+) resumed>(.*)$")
 # strace 5.16 and 6.13 close a call cut short by death this way.
 CUT_SHORT = re.compile(r"^\s*<unfinished \.\.\.>\)\s+=\s+\?$")
+# The same end on the call's own record (observed as a helper SIGKILLed its collector).
+CUT_SHORT_WHOLE = re.compile(r"^(\w+)\((.*?)\s*<unfinished \.\.\.>\)\s+=\s+\?$")
 RESULT = re.compile(r"^\s+=\s+(\S.*)$")
 # strace's own annotation, not an fd or a syscall argument. Recognize it
 # only in restart_syscall, leaving angle-bracket validation strict elsewhere.
@@ -269,6 +273,13 @@ def parse(text: str) -> Trace:
                 calls.errors.append(f"line {n}: pid {pid}: unparsed record: {name}: {err}")
                 continue
             add(pid, name, args, ret)
+            continue
+        if w := CUT_SHORT_WHOLE.match(rest):
+            # 이것을 실패시키는 것: 다음 기록이 종료가 아닌 줄이나 열린 호출 위의 줄을 끝나지 않은 호출로 받는 것.
+            if pid in pending or not EXIT.match(next_record[n][1]):
+                calls.errors.append(f"line {n}: pid {pid}: cut-short call without its exit record: {rest[:80]}")
+                continue
+            cut_short(n, pid, w.group(1), w.group(2))
             continue
         if h := CALL_HEAD.match(rest):
             try:
