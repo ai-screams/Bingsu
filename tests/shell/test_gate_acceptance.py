@@ -282,20 +282,38 @@ def assert_m4_pending_shrinks(table, pending):
     assert_clauses_accounted(table, pending)
 
 
-# 이것을 실패시키는 것: 행을 더하고 pending을 남기는 것, 닫힌 행을 지우는 것, M3d 절의 행을 지우고 M4_PENDING에 넣는 것.
-@pytest.mark.parametrize("damage", [None, "row-still-pending", "removed-row", "parked-m3d-clause"])
+def open_pair(table, pair):
+    """The table and pending list with `pair` open: no row, still pending. A
+    test that varies one M4 pair starts here, so it holds before and after the
+    Task that closes the pair."""
+    kept = [table.splitlines(True)[0]] + [line for line, row in zip(table.splitlines(True)[1:], rows(table))
+                                          if f'{row["gate"]}.{row["clause"]}' != pair]
+    return "".join(kept), tuple(p for p in PENDING if p != pair) + (pair,)
+
+
+def close_pair(table, pending, pair):
+    """The same table with `pair` closed by a primary row."""
+    gate, clause = pair.rsplit(".", 1)
+    return table + row_line(pair, gate, clause), tuple(p for p in pending if p != pair)
+
+
+# 이것을 실패시키는 것: 행을 더하고 pending을 남기는 것, 닫힌 행을 지우는 것, M3d 절의 행을 지우고 M4_PENDING에 넣는 것,
+# 절이 닫힌 뒤의 표를 거부하는 것.
+@pytest.mark.parametrize("damage", [None, "closed", "row-still-pending", "removed-row", "parked-m3d-clause"])
 def test_m4_pending_only_shrinks(damage):
-    table = (ROOT / TABLE).read_text()
-    pending = M4_PENDING
+    pair = "GATE-SHELL-CALLS.1"
+    table, pending = open_pair((ROOT / TABLE).read_text(), pair)
     zombie = next(line for line in table.splitlines(True) if line.startswith("GATE-ZOMBIES.1\t"))
-    if damage == "row-still-pending":
-        table += row_line("GATE-SHELL-CALLS.1", "GATE-SHELL-CALLS", 1)
+    if damage == "closed":
+        table, pending = close_pair(table, pending, pair)
+    elif damage == "row-still-pending":
+        table = close_pair(table, pending, pair)[0]
     elif damage == "removed-row":
         table = table.replace(zombie, "")
     elif damage == "parked-m3d-clause":
         table = table.replace(zombie, "")
         pending += ("GATE-ZOMBIES.1",)
-    if damage is None:
+    if damage in (None, "closed"):
         assert_m4_pending_shrinks(table, pending)
     else:
         with pytest.raises(AssertionError):
@@ -541,8 +559,9 @@ def lib_case(damage):
 def test_m4_row_closes_its_pair_through_the_real_checks():
     synthetic, texts, _ = lib_case(None)
     line = synthetic.splitlines(True)[1].replace("GATE-ZOMBIES.1\tGATE-ZOMBIES", "GATE-SHELL-CALLS.1\tGATE-SHELL-CALLS")
-    table = (ROOT / TABLE).read_text() + line.replace("\tM3d\n", "\tM4\n")
-    pending = tuple(p for p in PENDING if p != "GATE-SHELL-CALLS.1")
+    table, pending = open_pair((ROOT / TABLE).read_text(), "GATE-SHELL-CALLS.1")
+    table += line.replace("\tM3d\n", "\tM4\n")
+    pending = pending[:-1]
     assert_gate_table(table, texts, pending=pending)
     assert_clauses_accounted(table, pending)
 
@@ -731,7 +750,7 @@ def test_release_gate_rows_need_release_only_cells(damage):
         # The same evidence without the release-gate set passes: the set is what refuses debug cells.
         assert_acceptance_table(without_deferred(table), texts,
                                 required_ids=frozenset(covered(table)) | set(M3D_SUPPLEMENTARY),
-                                required_gates=frozenset(M3D_GATE_IDS))
+                                required_gates=frozenset(GATE_IDS))
         return
     with pytest.raises(AssertionError, match="release cells"):
         assert_gate_table(table, texts)
@@ -895,17 +914,21 @@ def test_runtime_root_rows_require_each_pass(clause):
 
 
 # 이것을 실패시키는 것: fish·bash 절을 active 또는 pending으로 되돌리는 것, deferred 행을 지우는 것,
-# zsh 절을 pending에서 빼고도 행이 없는 것, zsh 절을 다시 deferred로 두는 것.
-def test_runtime_notice_splits_zsh_pending_and_the_rest_deferred():
-    table = (ROOT / TABLE).read_text()
-    row = next(r for r in rows(table) if r["id"] == "GATE-RUNTIME-ROOT.6")
+# zsh 절이 pending도 행도 아닌 것, zsh 절을 다시 deferred로 두는 것, zsh 절이 행으로 닫힌 표를 거부하는 것.
+def test_runtime_notice_splits_zsh_and_defers_the_rest():
+    pair = "GATE-RUNTIME-ROOT.5"
+    real = (ROOT / TABLE).read_text()
+    row = next(r for r in rows(real) if r["id"] == "GATE-RUNTIME-ROOT.6")
     assert "Status-notice hook output" in row["property"] and "fish and bash" in row["property"]
     assert row["stage"] == "deferred:M5"
-    assert "GATE-RUNTIME-ROOT.5" in M4_PENDING and "GATE-RUNTIME-ROOT.5" not in named(table)
-    line = next(l for l in table.splitlines(True) if l.startswith(row["id"] + "\t"))
+    assert (pair in M4_PENDING) != (pair in covered(real))
+    line = next(l for l in real.splitlines(True) if l.startswith(row["id"] + "\t"))
     with pytest.raises(AssertionError):
-        assert_gate_table(table.replace(line, ""), workflows())
+        assert_gate_table(real.replace(line, ""), workflows())
+    table, pending = open_pair(real, pair)
+    assert_clauses_accounted(table, pending)
+    assert_clauses_accounted(*close_pair(table, pending, pair))
     with pytest.raises(AssertionError):
-        assert_clauses_accounted(table, tuple(p for p in PENDING if p != "GATE-RUNTIME-ROOT.5"))
+        assert_clauses_accounted(table, pending[:-1])
     with pytest.raises(AssertionError):
-        assert_gate_table(table + line.replace("ROOT.6", "ROOT.5").replace("\t6\t", "\t5\t"), workflows())
+        assert_gate_table(table + line.replace("ROOT.6", "ROOT.5").replace("\t6\t", "\t5\t"), workflows(), pending=pending[:-1])
