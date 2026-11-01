@@ -201,10 +201,12 @@ jobs:
         run: cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --test cli_prompt --no-run
       # strace, and a venv with the hash-pinned test dependencies: the system
       # python refuses pip installs (PEP 668).
-      - name: Install strace and the test dependencies
+      # zsh: the evidence steps of the shell gates run it on the host.
+      - name: Install strace, zsh and the test dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends strace bindfs fuse3
+          sudo apt-get install -y -q --no-install-recommends strace bindfs fuse3 zsh
+          zsh --version
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
       # The test skips without strace; here a skip is a failure.
@@ -480,4 +482,6 @@ jobs:
           BINGSU_TEST_SHELLS: zsh bash fish
         # Exclude M3b security for this unprepared debug pair. ci.yml's native
         # macOS collector job prepares its release siblings and runs the file.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        # tmux is a Linux image row: this job installs none, and the test
+        # fails as BLOCKED without it.
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
