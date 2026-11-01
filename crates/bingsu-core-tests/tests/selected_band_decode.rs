@@ -388,8 +388,7 @@ fn variant_faults() -> Vec<(Vec<u8>, Error)> {
     ]
 }
 
-// 이것을 실패시키는 것: 고른 variant의 CRC 뒤 줄 수·줄 검사(N1)·UTF-8·Trailing 검사를 빼는 것, 도우미가 안
-// 고른 variant를 건너뛰는 것, 앞단이 고르지 않은 variant를 해석해 폭과 무관한 거부로 만드는 것.
+// 이것을 실패시키는 것: 고른 variant의 줄 수·Trailing 검사를 빼는 것.
 #[test]
 fn a_fault_reaches_the_front_only_in_the_selected_variant() {
     let x = variant(&[&X_LINE]);
@@ -409,8 +408,8 @@ fn a_fault_reaches_the_front_only_in_the_selected_variant() {
     }
 }
 
-// 이것을 실패시키는 것: 앞단이 공통부·색인의 개수 대조를 빼는 것, 도우미가 공통부의 이름 개수와 이름 구획을
-// 대조하지 않는 것(앞단만 거부해 "도우미 통과 ⇒ 앞단 통과"가 깨진다), 이름 구획의 개수·Trailing을 보지 않는 것.
+// 이것을 실패시키는 것: 앞단이 공통부의 이름 개수나 variant 상한을 대조하지 않는 것, 도우미가 공통부의 이름 개수와
+// 이름 구획을 대조하지 않는 것(앞단만 거부해 "도우미 통과 ⇒ 앞단 통과"가 깨진다).
 #[test]
 fn counts_names_and_cap_are_checked_where_their_bytes_are() {
     let x = variant(&[&X_LINE]);
@@ -493,8 +492,8 @@ fn wide_config() -> CompiledConfig {
     wide
 }
 
-// 이것을 실패시키는 것: 머리 체크섬이 공통부·색인 일부를 덮지 않는 것, 변종 CRC·이름 CRC 비교를 빼는 것,
-// 앞단이 고르지 않은 variant·이름을 읽어 거부하는 것, 도우미가 구획 하나의 CRC를 건너뛰는 것.
+// 이것을 실패시키는 것: 머리 체크섬이 앞부분 일부를 덮지 않는 것, 앞단이 고른 variant의 CRC를 비교하지 않는 것,
+// 도우미가 구획 CRC를 비교하지 않는 것.
 #[test]
 fn a_bit_flip_stops_whole_decode_and_the_front_exactly_where_it_reads() {
     for c in [fixture::config(), wide_config()] {
@@ -559,8 +558,8 @@ fn every_bit_of_the_name_block_stops_the_whole_decode() {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
 
-    // 이것을 실패시키는 것: 앞단이 도우미에 없는 조건으로 거부하는 것(폭·색인 값으로 거부), 앞단 예산이
-    // 도우미보다 작아지는 것, 청크 경계에서 구획을 잘못 나누는 것, 다른 variant를 고르는 것.
+    // 이것을 실패시키는 것: 앞단이 도우미에 없는 조건으로 거부하는 것, 앞단 예산이 도우미보다 작아지는 것,
+    // 건너뛰는 바이트를 잘못 세는 것, 다른 variant를 고르는 것.
     #[test]
     fn whole_decode_accepting_implies_the_front_at_every_width(
         bands in prop::collection::vec(band(), 0..6),
@@ -605,8 +604,7 @@ fn whole_decode_accepting_implies_the_front_at_every_u16_width() {
     }
 }
 
-// 이것을 실패시키는 것: 앞단이 고르지 않은 variant·이름을 복사하는 것, 색인이 고른 variant 크기에 비례하지
-// 않는 버퍼를 잡는 것, 머리 거부 전에 색인을 할당하는 것.
+// 이것을 실패시키는 것: 앞단이 고르지 않은 variant마다 할당하는 것.
 #[test]
 fn selected_band_allocates_only_selected_variant() {
     let bands = |n: u16| -> Vec<Band> {
@@ -664,8 +662,7 @@ fn charged_line(n: usize) -> Vec<u8> {
     l
 }
 
-// 이것을 실패시키는 것: 공통부 뒤 예산을 MAX_ALLOC으로 되돌리는 것(앞단 variant, 도우미 variant·이름이 각자
-// 새 상한을 갖게 되는 것), variant 표의 charge를 빼는 것.
+// 이것을 실패시키는 것: 공통부 뒤 예산을 넘겨받지 않는 것(앞단 variant, 도우미 variant가 각자 새 상한을 갖게 된다).
 #[test]
 fn the_section_has_one_allocation_budget() {
     let (wire, c) = one_band();
@@ -725,7 +722,7 @@ fn the_section_has_one_allocation_budget() {
     assert!(peak <= MAX_ALLOC + b.len(), "helper peak {peak}");
 }
 
-// 이것을 실패시키는 것: 색인 뒤 읽기 한도를 고른 variant 끝으로 줄이지 않는 것, 한도가 metadata까지 넘는 것.
+// 이것을 실패시키는 것: 색인 뒤 읽기 한도를 고른 variant 끝으로 줄이지 않는 것.
 #[test]
 fn reads_end_at_the_selected_variant() {
     let n = bingsu_core::bands::MAX_BANDS;

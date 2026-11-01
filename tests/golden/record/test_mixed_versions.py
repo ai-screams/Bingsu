@@ -53,8 +53,7 @@ OLD_FRAME = b"BNGSNP02\x02\0\x40\0"
 OLD_PREFIX = b"BNGCMP02\x02\0\x80\0"
 
 
-# 이것을 실패시키는 것: 새 파일이 옛 머리 비교를 통과하는 것(버전을 올리지 않는 것), 도우미가 옛 형식을 그대로
-# 두거나 복사해 last-good을 오염시키는 것, 앞단이 옛 파일을 그려 재생성 없이 끝나는 것.
+# 이것을 실패시키는 것: 프레임 매직을 올리지 않는 것, 도우미가 옛 형식을 last-good으로 복사해 오염시키는 것.
 def test_old_and_new_snapshot_frames_refuse_each_other(tmp_path):
     from snapshot_support import SnapshotSession
     session = SnapshotSession(tmp_path)

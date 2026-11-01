@@ -48,8 +48,8 @@ fn front(b: &[u8], width: u16) -> Result<(bingsu_core::layout_view::FrontConfig,
     fixture::front_read(b, width, READ_CHUNK).map(|(s, read)| (s.config, read))
 }
 
-// 이것을 실패시키는 것: 색인 연속성 조건(`e.offset != end`)을 빼는 것(읽기가 metadata로 넘거나 슬라이스가
-// panic한다), `checked_add`를 감기는 덧셈으로 바꿔 32비트에서 범위가 감기는 것, 정확한 경계 비교를 빼는 것.
+// 이것을 실패시키는 것: 색인 연속성 조건(`e.offset != end`)이나 `front > c_len` 검사를 빼는 것(슬라이스 panic),
+// 항목의 예약 바이트 검사를 빼는 것(위조 파일을 도우미가 받는다).
 #[test]
 fn forged_integers_never_panic_or_overrun() {
     let base = wire(8);
@@ -182,8 +182,7 @@ fn a_length_that_steps_back_by_wrapping_is_refused() {
     assert!(Snapshot::decode(&b).is_err());
 }
 
-// 이것을 실패시키는 것: 길이 0 variant를 받는 것, 구획 길이가 머리보다 짧을 때 앞단이 완료로 끝나는 것,
-// 공통부 끝의 남는 바이트를 받는 것.
+// 이것을 실패시키는 것: 길이 0 variant를 받는 것, 공통부 끝의 남는 바이트를 받는 것.
 #[test]
 fn an_empty_variant_and_a_section_shorter_than_its_head_are_refused() {
     let base = wire(2);
