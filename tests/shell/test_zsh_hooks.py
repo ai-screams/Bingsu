@@ -319,16 +319,37 @@ def test_duration_excludes_hooks_between_save_and_install(tmp_path):
 
 
 # Inherited exported names stay in the shell but leave the environment.
-# 이것을 실패시키는 것: hooks.zsh 머리의 `typeset -g +x …` 줄이나 reader.zsh의 `typeset -g +x …` 줄을 지우는 것.
-def test_owned_globals_are_not_exported(tmp_path):
+# 이것을 실패시키는 것: hooks.zsh 머리의 `typeset -g +x …` 줄이나 reader.zsh의 `typeset -g +x …` 줄을 지우는 것
+# (ALL_EXPORT 아래), 머리의 unset을 지우고 물려받은 값을 남기는 것.
+@pytest.mark.parametrize("rc_before", ["", "setopt all_export"], ids=["inherited", "all-export"])
+def test_owned_globals_are_not_exported(tmp_path, rc_before):
     inherit = {n: "1" for n in ("_bingsu_rec", "_bingsu_s", "_bingsu_p", "_bingsu_t0", "_bingsu_t1",
                                 "_bingsu_ps1", "_bingsu_rps1", "_bingsu_warned_last", "_bingsu_seq",
                                 "_bingsu_f", "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
     inherit["_bingsu_session"] = "0123456789abcdef0123456789abcdef"
-    s, _, _ = start(tmp_path, record=minimal_record(), inherit=inherit)
+    s, _, _ = start(tmp_path, rc_before=rc_before, record=minimal_record(), inherit=inherit)
     s.run('print -r -- "EXPORTED=$(env | grep -c \'^_bingsu_\')"')
     out = visible(s.close())
     assert b"EXPORTED=0" in out, out
+
+
+OWNED = {name: "scalar" for name in ("_bingsu_session", "_bingsu_warned_last", "_bingsu_rec", "_bingsu_s", "_bingsu_t0",
+                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev",
+                                     "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
+OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_seq="integer")
+
+
+# Attributes set in this shell before init; the environment cannot carry them.
+# 이것을 실패시키는 것: hooks.zsh나 reader.zsh 머리의 unset에서 이름 하나를 빼는 것.
+@pytest.mark.parametrize("attr", ["i", "F", "l", "u", "a"])
+def test_owned_globals_lose_earlier_attributes(tmp_path, attr):
+    rc_before = f"typeset -g{attr} {' '.join(OWNED)}"
+    s, _, _ = start(tmp_path, rc_before=rc_before, record=minimal_record(left=b"KEPT> "))
+    s.run("true")
+    s.run("print -r -- TYPES=" + ",".join(f"${{(t){name}}}" for name in OWNED))
+    out = visible(s.close())
+    assert b"TYPES=" + ",".join(OWNED.values()).encode() in out, out
+    assert b"KEPT> " in out and b"bad math" not in out and b"inconsistent" not in out, out
 
 
 # A hook between the save and install hooks flips one prompt option either

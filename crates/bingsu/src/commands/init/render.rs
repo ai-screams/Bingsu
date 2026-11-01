@@ -53,6 +53,58 @@ const FISH: [&str; 2] = [
 const BASH_PRELUDE: &str = "if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501 )); then\n";
 const BASH_EPILOGUE: &str = "else\n  printf '%s\\n' @MSG_BASH_TOO_OLD@ >&2\nfi\n";
 
+/// Each known non-ok status with its fixed line (spec section 5 receive table).
+const NOTICES: [(&[u8], Status, MsgId); 12] = [
+    (b"BAD_ARGS", Status::ERROR_BAD_ARGS, MsgId::NoticeBadArgs),
+    (b"INTERNAL", Status::ERROR_INTERNAL, MsgId::NoticeInternal),
+    (
+        b"RUNTIME_ROOT",
+        Status::DEGRADED_RUNTIME_ROOT,
+        MsgId::NoticeRuntimeRoot,
+    ),
+    (
+        b"OVERSIZE",
+        Status::DEGRADED_OVERSIZE,
+        MsgId::NoticeOversize,
+    ),
+    (
+        b"TRUST_UNVERIFIED",
+        Status::DEGRADED_TRUST_UNVERIFIED,
+        MsgId::NoticeTrustUnverified,
+    ),
+    (
+        b"TRUST_EXPIRED",
+        Status::DEGRADED_TRUST_EXPIRED,
+        MsgId::NoticeTrustExpired,
+    ),
+    (
+        b"TRUST_INVALID",
+        Status::DEGRADED_TRUST_INVALID,
+        MsgId::TrustInvalid,
+    ),
+    (
+        b"TRUST_MISMATCH",
+        Status::DEGRADED_TRUST_MISMATCH,
+        MsgId::TrustMismatch,
+    ),
+    (
+        b"TRUST_CLOCK",
+        Status::DEGRADED_TRUST_CLOCK,
+        MsgId::TrustClock,
+    ),
+    (b"SANDBOX", Status::DEGRADED_SANDBOX, MsgId::NoSandbox),
+    (
+        b"CONFIG_LAST_GOOD",
+        Status::ERROR_CONFIG_LAST_GOOD,
+        MsgId::NoticeConfigLastGood,
+    ),
+    (
+        b"CONFIG_DEFAULT",
+        Status::ERROR_CONFIG_DEFAULT,
+        MsgId::NoticeConfigDefault,
+    ),
+];
+
 fn prefixed(shell: Shell, prefix: &[u8], value: &[u8], out: &mut Vec<u8>) {
     let mut w = prefix.to_vec();
     w.extend_from_slice(value);
@@ -115,11 +167,8 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
         b"MSG_LATE_HOOK_ZSH" => encode_word(sh, en(MsgId::LateHookZsh).as_bytes(), out),
         b"MSG_LATE_HOOK_BASH" => encode_word(sh, en(MsgId::LateHookBash).as_bytes(), out),
         b"MSG_NO_SANDBOX" => encode_word(sh, en(MsgId::NoSandbox).as_bytes(), out),
-        b"STATUS_SANDBOX" => {
-            let mut b = Vec::new();
-            Status::DEGRADED_SANDBOX.write_to(&mut b);
-            encode_word(sh, &b, out);
-        }
+        b"MSG_NOTICE_GENERIC" => encode_word(sh, en(MsgId::NoticeGeneric).as_bytes(), out),
+        b"MSG_NO_RECORD" => encode_word(sh, en(MsgId::NoRecord).as_bytes(), out),
         b"KNOWN_CODES" => {
             for (n, s) in Status::KNOWN_NON_OK.iter().enumerate() {
                 if n > 0 {
@@ -130,9 +179,26 @@ fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
                 encode_word(sh, &b, out);
             }
         }
-        _ => return false,
+        _ => return emit_notice(sh, name, out),
     }
     true
+}
+
+/// `@STATUS_<NAME>@` and `@MSG_NOTICE_<NAME>@`: the constants of the hooks'
+/// notice chain.
+fn emit_notice(sh: Shell, name: &[u8], out: &mut Vec<u8>) -> bool {
+    let row = |suffix: &[u8]| NOTICES.iter().find(|(n, _, _)| *n == suffix);
+    if let Some((_, status, _)) = name.strip_prefix(b"STATUS_").and_then(row) {
+        let mut b = Vec::new();
+        status.write_to(&mut b);
+        encode_word(sh, &b, out);
+        return true;
+    }
+    if let Some((_, _, id)) = name.strip_prefix(b"MSG_NOTICE_").and_then(row) {
+        encode_word(sh, en(*id).as_bytes(), out);
+        return true;
+    }
+    false
 }
 
 fn substitute(inp: &ScriptInputs<'_>, tpl: &[u8], out: &mut Vec<u8>) {
@@ -330,6 +396,21 @@ mod tests {
             };
             assert_eq!(count(&out, clear), 1, "{shell:?}");
             assert_eq!(count(&out, b"BINGSU_ROOTS"), 1, "{shell:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 아는 상태를 표에서 빼거나 다른 상태에 묶는 것, 사슬에서 가지를 빼거나 다른 문구를 고르는 것.
+    #[test]
+    fn notice_chain_has_one_branch_per_known_status() {
+        assert_eq!(NOTICES.len(), Status::KNOWN_NON_OK.len());
+        let hooks = include_str!("../../shell/zsh/hooks.zsh");
+        for (row, known) in NOTICES.iter().zip(Status::KNOWN_NON_OK) {
+            assert_eq!(row.1, *known);
+            let name = core::str::from_utf8(row.0).unwrap();
+            let branch = format!(
+                "elif [[ $_bingsu_note == @STATUS_{name}@ ]]; then print -u2 -r -- @MSG_NOTICE_{name}@\n"
+            );
+            assert_eq!(hooks.matches(&branch).count(), 1, "{name}");
         }
     }
 

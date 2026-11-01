@@ -2,7 +2,9 @@
 P19): the shell draws its own fallback and does not call the binary again
 until the next command. Before this rule fish 3.6 reported the signal,
 redrew the prompt, called the binary again and looped (a defect since M1).
-Also: a `degraded:sandbox` record is reported once per session."""
+Also: a run of `degraded:sandbox` records is reported once. zsh reports it
+again after it went away (test_zsh_notices.py); bash and fish move to that key
+rule in M5."""
 import os
 
 import pexpect

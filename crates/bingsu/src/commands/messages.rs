@@ -32,6 +32,16 @@ pub enum MsgId {
     UseSavedInvalid,
     RootsFromEnvironment,
     UseShapeOnlyRoot,
+    NoticeBadArgs,
+    NoticeInternal,
+    NoticeRuntimeRoot,
+    NoticeOversize,
+    NoticeTrustUnverified,
+    NoticeTrustExpired,
+    NoticeConfigLastGood,
+    NoticeConfigDefault,
+    NoticeGeneric,
+    NoRecord,
 }
 
 #[cfg_attr(
@@ -41,7 +51,7 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 26] = [
+pub const ALL: [MsgId; 36] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
@@ -68,9 +78,19 @@ pub const ALL: [MsgId; 26] = [
     MsgId::UseSavedInvalid,
     MsgId::RootsFromEnvironment,
     MsgId::UseShapeOnlyRoot,
+    MsgId::NoticeBadArgs,
+    MsgId::NoticeInternal,
+    MsgId::NoticeRuntimeRoot,
+    MsgId::NoticeOversize,
+    MsgId::NoticeTrustUnverified,
+    MsgId::NoticeTrustExpired,
+    MsgId::NoticeConfigLastGood,
+    MsgId::NoticeConfigDefault,
+    MsgId::NoticeGeneric,
+    MsgId::NoRecord,
 ];
 
-const EN: [(MsgId, &str); 26] = [
+const EN: [(MsgId, &str); 36] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -174,6 +194,46 @@ const EN: [(MsgId, &str); 26] = [
     (
         MsgId::UseShapeOnlyRoot,
         "bingsu: not using {path}: it is inside the settings folder, which could not be confirmed safe, so nothing in it runs. Run: bingsu config check",
+    ),
+    (
+        MsgId::NoticeBadArgs,
+        "bingsu: the shell hook and the bingsu program do not match, so a minimal prompt is drawn. Open a new shell or evaluate your bingsu init line again",
+    ),
+    (
+        MsgId::NoticeInternal,
+        "bingsu: the prompt hit an internal error, so a minimal prompt is drawn. Open a new shell",
+    ),
+    (
+        MsgId::NoticeRuntimeRoot,
+        "bingsu: the runtime folder changed, so the prompt runs without saved state. Open a new shell or evaluate your bingsu init line again",
+    ),
+    (
+        MsgId::NoticeOversize,
+        "bingsu: the prompt grew too large, so a minimal prompt is drawn. Use a shorter layout",
+    ),
+    (
+        MsgId::NoticeTrustUnverified,
+        "bingsu: settings are not verified yet; configured commands are paused. Run: bingsu reload",
+    ),
+    (
+        MsgId::NoticeTrustExpired,
+        "bingsu: settings verification is out of date; configured commands are paused. Run: bingsu reload",
+    ),
+    (
+        MsgId::NoticeConfigLastGood,
+        "bingsu: your settings are not valid, so the prompt keeps the last good settings. Run: bingsu config check",
+    ),
+    (
+        MsgId::NoticeConfigDefault,
+        "bingsu: your settings are not valid, so the prompt uses the built-in look. Run: bingsu config check",
+    ),
+    (
+        MsgId::NoticeGeneric,
+        "bingsu: a status notice is waiting. Run: bingsu config check",
+    ),
+    (
+        MsgId::NoRecord,
+        "bingsu: the prompt gave no usable answer, so a minimal prompt is drawn. Open a new shell or evaluate your bingsu init line again",
     ),
 ];
 

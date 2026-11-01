@@ -1,6 +1,16 @@
 # bingsu hooks for zsh (spec section 5). init redefines every function on
 # each run; hook registration happens once (F-23). @…@ markers are literal
 # shell words embedded by init.
+# typeset keeps attributes set earlier in this shell (an integer would evaluate
+# the prompt text as arithmetic), so every owned name starts over; the three
+# that outlive a re-init keep their value.
+() {
+  emulate -L zsh
+  local session=${_bingsu_session-} seq=${_bingsu_seq-} warned=${_bingsu_warned_last-}
+  unset _bingsu_session _bingsu_seq _bingsu_warned_last _bingsu_rec _bingsu_s _bingsu_p \
+    _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_dead _bingsu_key_prev
+  typeset -g _bingsu_session=$session _bingsu_seq=$seq _bingsu_warned_last=$warned
+}
 : "${_bingsu_session:=@SESSION@}"
 # Both may come from the environment. Only init's own shapes are kept: a
 # 32-digit lowercase hex session and a short decimal counter (a value with
@@ -55,12 +65,12 @@ zmodload zsh/datetime 2>/dev/null || :
 # the first duration negative or huge. _bingsu_warned_last is reset on
 # first registration only (below): a re-init keeps the late-hook warning
 # quiet once it has been shown (spec section 5, same order stays silent).
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead=
-typeset -g _bingsu_warned_last _bingsu_warned_sandbox
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead= _bingsu_key_prev=
+typeset -g _bingsu_warned_last
 typeset -ga _bingsu_p
-# typeset keeps an inherited export flag; without +x the rendered prompt
+# Under ALL_EXPORT a new name is exported; without +x the rendered prompt
 # and the timings would reach the environment of every child process.
-typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_warned_sandbox
+typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_key_prev
 
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost (emulate itself sets $? to
@@ -69,6 +79,7 @@ typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bings
 _bingsu_save() {
   _bingsu_s=$? _bingsu_p=("${pipestatus[@]}")
   emulate -L zsh
+  typeset -g +x _bingsu_s  # the assignment above ran under the user's ALL_EXPORT
   _bingsu_t1=${EPOCHREALTIME-}
   return $_bingsu_s
 }
@@ -76,6 +87,41 @@ _bingsu_save() {
 _bingsu_preexec() {
   emulate -L zsh
   _bingsu_t0=${EPOCHREALTIME-} _bingsu_dead=
+}
+
+# Status notices (spec section 5): one fixed line when the key changes to a
+# non-empty value. A failed frame is the key no-record, which no status can
+# equal (a status has a colon). The status is read as the last field, and
+# selects a line only by exact comparison with init's constants. init resets
+# the key, so running it again tells a lasting problem once more. Only a
+# prompt of the interactive shell itself counts: a subshell's key is lost, and
+# its stderr may be someone's capture.
+_bingsu_notify() {
+  emulate -L zsh
+  [[ -o interactive ]] && (( ! ZSH_SUBSHELL )) || return 0
+  if (( $1 )); then
+    _bingsu_classify "$_bingsu_f[-1]"
+  else
+    _bingsu_key=no-record _bingsu_note=no-record
+  fi
+  if _bingsu_notice_due "$_bingsu_key_prev" "$_bingsu_key"; then
+    if [[ $_bingsu_note == no-record ]]; then print -u2 -r -- @MSG_NO_RECORD@
+    elif [[ $_bingsu_note == @STATUS_RUNTIME_ROOT@ ]]; then print -u2 -r -- @MSG_NOTICE_RUNTIME_ROOT@
+    elif [[ $_bingsu_note == @STATUS_BAD_ARGS@ ]]; then print -u2 -r -- @MSG_NOTICE_BAD_ARGS@
+    elif [[ $_bingsu_note == @STATUS_INTERNAL@ ]]; then print -u2 -r -- @MSG_NOTICE_INTERNAL@
+    elif [[ $_bingsu_note == @STATUS_OVERSIZE@ ]]; then print -u2 -r -- @MSG_NOTICE_OVERSIZE@
+    elif [[ $_bingsu_note == @STATUS_TRUST_UNVERIFIED@ ]]; then print -u2 -r -- @MSG_NOTICE_TRUST_UNVERIFIED@
+    elif [[ $_bingsu_note == @STATUS_TRUST_EXPIRED@ ]]; then print -u2 -r -- @MSG_NOTICE_TRUST_EXPIRED@
+    elif [[ $_bingsu_note == @STATUS_TRUST_INVALID@ ]]; then print -u2 -r -- @MSG_NOTICE_TRUST_INVALID@
+    elif [[ $_bingsu_note == @STATUS_TRUST_MISMATCH@ ]]; then print -u2 -r -- @MSG_NOTICE_TRUST_MISMATCH@
+    elif [[ $_bingsu_note == @STATUS_TRUST_CLOCK@ ]]; then print -u2 -r -- @MSG_NOTICE_TRUST_CLOCK@
+    elif [[ $_bingsu_note == @STATUS_SANDBOX@ ]]; then print -u2 -r -- @MSG_NOTICE_SANDBOX@
+    elif [[ $_bingsu_note == @STATUS_CONFIG_LAST_GOOD@ ]]; then print -u2 -r -- @MSG_NOTICE_CONFIG_LAST_GOOD@
+    elif [[ $_bingsu_note == @STATUS_CONFIG_DEFAULT@ ]]; then print -u2 -r -- @MSG_NOTICE_CONFIG_DEFAULT@
+    else print -u2 -r -- @MSG_NOTICE_GENERIC@
+    fi
+  fi
+  _bingsu_key_prev=$_bingsu_key
 }
 
 # Install hook, last in precmd_functions. Prompt options are read here,
@@ -123,12 +169,7 @@ _bingsu_install() {
     # a constant instead (option (b), question Q4).
     PROMPT='❯ ' RPROMPT=
   fi
-  # The prompt ran without its system call filter (decision P18): said once
-  # per session, with a constant from init.
-  if [[ ${_bingsu_f[10]-} == @STATUS_SANDBOX@ && -z $_bingsu_warned_sandbox ]]; then
-    _bingsu_warned_sandbox=1
-    print -u2 -r -- @MSG_NO_SANDBOX@
-  fi
+  _bingsu_notify $framed
   if [[ ${precmd_functions[-1]} != _bingsu_install && -z $_bingsu_warned_last ]]; then
     _bingsu_warned_last=1
     print -u2 -r -- @MSG_LATE_HOOK_ZSH@
@@ -143,7 +184,7 @@ _bingsu_install() {
   emulate -L zsh
   if (( ! ${precmd_functions[(Ie)_bingsu_install]:-0} )); then
     # First registration: an inherited value would silence the warning.
-    _bingsu_warned_last= _bingsu_warned_sandbox=
+    _bingsu_warned_last=
     precmd_functions=(_bingsu_save ${precmd_functions:#_bingsu_save} _bingsu_install)
   fi
   if (( ! ${preexec_functions[(Ie)_bingsu_preexec]:-0} )); then
