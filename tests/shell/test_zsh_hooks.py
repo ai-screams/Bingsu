@@ -10,6 +10,8 @@ import pytest
 
 from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, trusted_env
 from pty_session import Session, visible
+from screen_session import ScreenSession
+from test_zsh_screen import enter, settle
 
 pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split(),
                                 reason="zsh not under test")
@@ -502,7 +504,7 @@ def test_owned_globals_are_not_exported(tmp_path, rc_before):
 
 
 OWNED = {name: "scalar" for name in ("_bingsu_session", "_bingsu_warned_last", "_bingsu_rec", "_bingsu_s", "_bingsu_t0",
-                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev",
+                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested",
                                      "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
 OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_seq="integer")
 
@@ -575,3 +577,304 @@ def test_coexists_with_add_zsh_hook_after_init(tmp_path):
     assert b"USER_HOOK" in out and want_left(canaries) in out
     assert out.count(b"bingsu: another prompt hook runs after bingsu") == 1
     assert not any(c.exists() for c in canaries)
+
+
+def fields(left=b"LONG> ", right=b"", tleft=b"T> ", tright=b"", upper=b"", status=b"ok:none"):
+    return b"\x1f".join([b"B1", b"8", left, right, tleft, tright, b"", b"", upper, status]) + b"\x1e"
+
+
+def typed_screen(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
+    s, inst, _ = start(tmp_path, rc_before, rc_after, record=record or fields(), inherit=inherit)
+    return s, inst, ScreenSession(s, 24, 200)
+
+
+def interrupted(screen, text):
+    """Type `text`, wait until it is drawn, then Ctrl-C: a signal outruns typed input."""
+    settle(screen)
+    screen.session.p.send(text)
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith(text), stable=True), screen.lines()
+    screen.session.p.sendcontrol("c")
+
+
+# A record's transient field, or an option changed by a widget that runs just before ours.
+# 이것을 실패시키는 것: 옵션을 설치 hook에서 한 번만 읽어 위젯 대입에 넘기는 것(값 대입 경로에서 데이터가 실행되거나 `%`가 글자로 남음).
+@pytest.mark.parametrize("widget_option,want", [("setopt prompt_subst", b"D:$(touch "), ("unsetopt prompt_percent", "❯ ".encode())],
+                         ids=["subst-on", "percent-off"])
+def test_paint_reads_options_at_each_assignment(tmp_path, widget_option, want):
+    canary = short_dir() / "c"
+    rc_before = f"_flip() {{ {widget_option} }}\nzle -N zle-line-finish _flip\nsetopt no_prompt_subst"
+    tleft = b"%{\x1b[31m%}D:$(touch " + str(canary).encode() + b")%{\x1b[0m%}> "
+    s, _, _ = start(tmp_path, rc_before, record=fields(tleft=tleft))
+    s.p.sendline("print DONE")
+    s.expect(b"\r\nDONE")
+    out = visible(s.close())
+    assert want in out, out
+    assert not canary.exists(), "data was executed"
+    assert b"%{" not in out and b"31m" not in out, out
+
+
+# 이것을 실패시키는 것: 위젯 경로에서 프레임 실패의 상수 대입을 빼는 것(`%~ ❯ `가 글자로 남음).
+def test_frame_failure_then_option_off_installs_constant(tmp_path):
+    rc_before = "_flip() { unsetopt prompt_percent }\nzle -N zle-line-finish _flip"
+    s, _, screen = typed_screen(tmp_path, rc_before, record=b"not a record")
+    enter(screen, "print DONE")
+    lines = screen.lines()
+    s.close()
+    assert not any("%~" in line for line in lines), lines
+    assert any(line == "❯ print DONE" for line in lines), lines
+
+
+# 이것을 실패시키는 것: 기존 위젯 호출을 지우는 것, 우리 대입 뒤에 부르는 것, 저장한 위젯을 `-w`로 불러 $WIDGET을 바꾸는 것
+# (add-zle-hook-widget은 그 이름으로 자기 목록을 찾는다).
+@pytest.mark.parametrize("rc_before", [
+    '_mine() { builtin print -r -- "mine $PROMPT" >>"$BINGSU_T_LOG" }\nzle -N zle-line-finish _mine',
+    '_mine() { builtin print -r -- "mine $PROMPT" >>"$BINGSU_T_LOG" }\nzle -N _mine\n'
+    'autoload -Uz add-zle-hook-widget\nadd-zle-hook-widget line-finish _mine',
+], ids=["plain", "add-zle-hook-widget"])
+def test_existing_line_finish_runs_first(tmp_path, rc_before):
+    log = tmp_path / "widget.log"
+    s, _, _ = start(tmp_path, rc_before, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    s.run("true")
+    s.close()
+    assert "mine LONG> " in log.read_text().splitlines(), log.read_text()
+
+
+# init 뒤에 위젯을 다시 정의한 사용자: 사용자 쪽이 살고, 다음 프롬프트는 정상이며 오류 출력이 없다.
+# 이것을 실패시키는 것: precmd가 위젯을 다시 차지하는 것, 복원 표시 없이는 프롬프트가 짧은 채 남는 것.
+def test_widget_redefined_after_init_keeps_user_widget(tmp_path):
+    log = tmp_path / "widget.log"
+    rc_after = '_later() { builtin print -r -- later >>"$BINGSU_T_LOG" }\nzle -N zle-line-finish _later'
+    s, _, screen = typed_screen(tmp_path, rc_after=rc_after, inherit={"BINGSU_T_LOG": str(log)})
+    enter(screen, "print DONE")
+    lines = screen.lines()
+    out = visible(s.close())
+    assert lines[screen.cursor()[0]] == "LONG>" and "LONG> print DONE" in lines, lines
+    assert "later" in log.read_text() and b"zle:" not in out and b"_bingsu" not in out, out
+
+
+# 이것을 실패시키는 것: `_bingsu_zle_wrap`의 이미 우리 것 검사를 지우는 것(저장 이름이 우리 함수를 가리켜 무한 재귀).
+def test_init_twice_wraps_once(tmp_path):
+    log = tmp_path / "widget.log"
+    rc_before = '_mine() { builtin print -r -- mine >>"$BINGSU_T_LOG" }\nzle -N zle-line-finish _mine'
+    rc_after = f"source {tmp_path / 'init.zsh'}"
+    s, _, _ = start(tmp_path, rc_before, rc_after, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    s.run("print -r -- WIDGET=$widgets[zle-line-finish],$widgets[_bingsu_saved_zle-line-finish]")
+    out = visible(s.close())
+    assert b"WIDGET=user:_bingsu_line_finish,user:_mine" in out, out
+    assert b"maximum nested" not in out and b"recursion" not in out, out
+
+
+# Ctrl-C ends the line, so its new prompt makes the one call a prompt makes
+# (precmd_functions run; only a `precmd` function is skipped after an interrupt).
+# 이것을 실패시키는 것: transient가 bingsu를 부르는 것(스펙 1313행, 호출 0).
+def test_transient_makes_no_bingsu_call(tmp_path):
+    s, inst, screen = typed_screen(tmp_path)
+    settle(screen)
+    before = len(inst.calls())
+    interrupted(screen, "abc")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]] == "LONG>", stable=True), screen.lines()
+    interrupted(screen, "def")
+    assert screen.wait(lambda v: "T> def" in v.lines() and v.lines()[v.cursor()[0]] == "LONG>", stable=True), screen.lines()
+    assert len(inst.calls()) == before + 2
+    s.close()
+
+
+# 이것을 실패시키는 것: transient에 일반 왼쪽이나 오른쪽을 대입하는 것.
+def test_transient_fields_replace_left_and_right(tmp_path):
+    s, _, screen = typed_screen(tmp_path, record=fields(right=b"LONG-RIGHT", tright=b"T-RIGHT"))
+    enter(screen, "print DONE")
+    lines = screen.lines()
+    s.close()
+    row = next(i for i, line in enumerate(lines) if line.startswith("T> print DONE"))
+    assert lines[row].endswith("T-RIGHT") and "LONG" not in lines[row], lines
+
+
+# 이것을 실패시키는 것: 빈 transient로 바꿔 지나간 줄의 프롬프트가 사라지는 것.
+def test_record_without_transient_keeps_the_prompt(tmp_path):
+    s, _, screen = typed_screen(tmp_path, record=fields(tleft=b""))
+    enter(screen, "print DONE")
+    lines = screen.lines()
+    s.close()
+    assert "LONG> print DONE" in lines, lines
+
+
+# 이것을 실패시키는 것: 설치 hook이 Ctrl-C 뒤에 돌지 않아 입력 줄이 짧은 채 남는 것, 윗줄을 빠뜨리는 것.
+def test_interrupt_restores_the_full_prompt_on_the_next_line(tmp_path):
+    s, _, screen = typed_screen(tmp_path, record=fields(upper=b"UPPER"))
+    interrupted(screen, "abc")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]] == "LONG>" and v.lines()[v.cursor()[0] - 1] == "UPPER", stable=True), screen.lines()
+    assert "T> abc" in screen.lines(), screen.lines()
+    s.close()
+
+
+LOGGER = 'builtin print -r -- {word} >>"$BINGSU_T_LOG"'
+
+
+def logger(name):
+    return f"{name}() {{ {LOGGER.format(word=name)} }}\nzle -N {name}\n"
+
+
+def one_enter(tmp_path, rc_before="", rc_after=""):
+    """The widgets the line editor ran for one Enter, with the screen after it."""
+    log = tmp_path / "widget.log"
+    s, _, screen = typed_screen(tmp_path, rc_before, rc_after, inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    log.write_text("")
+    enter(screen, "print DONE")
+    lines = screen.lines()
+    ran = log.read_text().split()
+    out = visible(s.close())
+    assert b"maximum nested" not in out and b"zle:" not in out, out
+    assert "T> print DONE" in lines, lines
+    return ran
+
+
+AZHW = "autoload -Uz add-zle-hook-widget\n"
+
+
+# 이것을 실패시키는 것: add-zle-hook-widget 목록에 들어가지 않고 저장 복사본을 부르는 것(뒤에 더한 훅이 우리를 거쳐 디스패처로 돌아옴).
+def test_hook_widgets_added_around_init_run_once(tmp_path):
+    rc_before = AZHW + logger("_first") + "add-zle-hook-widget line-finish _first"
+    rc_after = logger("_second") + "add-zle-hook-widget line-finish _second"
+    assert one_enter(tmp_path, rc_before, rc_after) == ["_first", "_second"]
+
+
+PLUGIN = """_plug() {{ {log}; zle _plug_saved -- "$@" }}
+zle -A {widget} _plug_saved
+zle -N {widget} _plug
+"""
+
+
+# A plugin wrapped us, then init ran again.
+# 이것을 실패시키는 것: 다시 init할 때 플러그인의 감싸기를 저장하는 것(자기 자신을 부르고, 사용자의 원래 위젯을 잃음).
+def test_plugin_around_bingsu_survives_init_again(tmp_path):
+    rc_before = logger("_mine") + "zle -N zle-line-finish _mine"
+    rc_after = PLUGIN.format(log=LOGGER.format(word="_plug"), widget="zle-line-finish") + f"source {tmp_path / 'init.zsh'}"
+    assert one_enter(tmp_path, rc_before, rc_after) == ["_plug", "_mine"]
+
+
+# A dispatcher of its own, the shape add-zle-hook-widget has: a later add puts
+# our widget on its list while our saved copy is the dispatcher.
+# 이것을 실패시키는 것: `_bingsu_nested` 검사를 지우는 것(Enter나 Ctrl-G마다 재귀 오류).
+@pytest.mark.parametrize("widget", ["zle-line-finish", "send-break"])
+def test_foreign_dispatcher_does_not_recurse(tmp_path, widget):
+    log = tmp_path / "widget.log"
+    rc_before = (logger("_one") + '_list=(_one)\n_disp() { local w; for w in $_list; do zle $w -- "$@"; done }\n'
+                 + (f"zle -N {widget} _disp\n"))
+    rc_after = f"zle -A {widget} _ours\n_list+=(_ours)\nzle -N {widget} _disp"
+    s, _, screen = typed_screen(tmp_path, rc_before, rc_after, inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    if widget == "zle-line-finish":
+        enter(screen, "print DONE")
+    else:
+        s.p.send("abc")
+        assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("abc"), stable=True), screen.lines()
+        s.p.sendcontrol("g")
+        assert screen.wait(lambda v: v.lines()[v.cursor()[0]] == "LONG>", stable=True), screen.lines()
+    lines = screen.lines()
+    ran = log.read_text().split()
+    out = visible(s.close())
+    assert b"maximum nested" not in out and len(ran) <= 8, (out, len(ran))  # setup Enters, then one dispatch and one re-entry
+    assert "T> print DONE" in lines or "T> abc" in lines, lines
+
+
+# Continuation lines reach the widget with no prompt between them.
+# 이것을 실패시키는 것: 위젯이 끝나도 재귀 표시를 지우지 않는 것(둘째 줄의 사용자 위젯이 건너뜀).
+def test_user_widget_runs_on_each_continuation_line(tmp_path):
+    log = tmp_path / "widget.log"
+    s, _, screen = typed_screen(tmp_path, logger("_mine") + "zle -N zle-line-finish _mine", inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    log.write_text("")
+    s.p.send('echo "a\r')
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].startswith("dquote>"), stable=True), screen.lines()
+    enter(screen, 'b"')
+    ran = log.read_text().split()
+    s.close()
+    assert ran == ["_mine", "_mine"]
+
+
+# 이것을 실패시키는 것: 재귀 표시를 프롬프트에서 지우지 않는 것(한 번 끊긴 뒤 위젯이 영영 건너뜀).
+def test_abort_inside_a_widget_leaves_the_next_line_working(tmp_path):
+    assert one_enter(tmp_path, rc_after="_bingsu_nested=1") == []
+
+
+TRAP_LOG = LOGGER.format(word="trapped")
+
+
+# 사용자 TRAPINT의 반환값이 그대로 결정한다: 0이면 줄이 살고, 0이 아니면 끊긴다.
+# 이것을 실패시키는 것: 저장한 trap을 부르지 않는 것, 그 반환값을 가리는 것, 사용자 trap이 있는데 128+신호를 돌려주는 것.
+@pytest.mark.parametrize("returned,aborts", [(0, False), (130, True), (7, True)], ids=["keeps-line", "interrupt", "other"])
+def test_user_trapint_decides(tmp_path, returned, aborts):
+    log = tmp_path / "trap.log"
+    rc_before = f"TRAPINT() {{ {TRAP_LOG}; return {returned} }}"
+    s, _, _ = start(tmp_path, rc_before, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    screen = ScreenSession(s, 24, 200)
+    settle(screen)
+    s.p.send("print KEPT")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("print KEPT"), stable=True), screen.lines()
+    s.p.sendcontrol("c")
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.p.send("\r")
+    s.run("true")
+    out = visible(s.close())
+    assert log.read_text() == "trapped\n"
+    assert (b"\nKEPT" in out) != aborts, out
+
+
+# 이것을 실패시키는 것: 진입 상태를 저장하지 않거나 사용자 trap 직전에 되돌리지 않는 것(언제나 0을 받음).
+@pytest.mark.parametrize("entry", [42, 0])
+def test_user_trapint_sees_the_status_it_would_see(tmp_path, entry):
+    log = tmp_path / "trap.log"
+    rc_before = 'TRAPINT() { builtin print -r -- "status=$?" >>"$BINGSU_T_LOG"; return 130 }'
+    s, _, screen = typed_screen(tmp_path, rc_before, inherit={"BINGSU_T_LOG": str(log)})
+    enter(screen, f"(exit {entry})")
+    interrupted(screen, "abc")
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.kill()
+    assert log.read_text() == f"status={entry}\n"
+
+
+# 이것을 실패시키는 것: 문자열 trap을 보지 못해 TRAPINT 함수로 지우는 것(같이 있을 수 없다).
+def test_string_int_trap_stays(tmp_path):
+    log = tmp_path / "trap.log"
+    rc_before = f"trap '{TRAP_LOG}' INT"
+    s, _, screen = typed_screen(tmp_path, rc_before, inherit={"BINGSU_T_LOG": str(log)})
+    s.run("print -r -- F=${+functions[TRAPINT]}")
+    interrupted(screen, "abc")
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    out = visible(s.log.getvalue())
+    s.kill()
+    assert b"F=0" in out and log.read_text() == "trapped\n", out
+
+
+# 이것을 실패시키는 것: TRAPINT가 0을 돌려주는 것(Ctrl-C가 무시되어 줄이 끊기지 않고 반복문이 멈추지 않음).
+def test_interrupt_acts_as_without_a_trap(tmp_path):
+    s, _, screen = typed_screen(tmp_path)
+    settle(screen)
+    s.p.sendline("while true; do :; done; print NOT''REACHED")
+    assert screen.wait(lambda v: any("while true" in line for line in v.lines()), stable=True), screen.lines()
+    s.p.sendcontrol("c")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]] == "LONG>", timeout=5, stable=True), screen.lines()
+    out = visible(s.close())
+    assert b"NOTREACHED" not in out, out
+
+
+# Status after Ctrl-C at an empty prompt: the same with and without bingsu.
+# 이것을 실패시키는 것: TRAPINT가 128+신호와 다른 값을 돌려주는 것.
+def test_status_after_interrupt_matches_plain_zsh(tmp_path):
+    env = trusted_env(tmp_path)
+    plain = Session("zsh", env, cols=200)
+    plain.p.sendcontrol("c")
+    plain.p.sendline('print -r -- "DOLLAR=$?"')
+    plain.expect(rb"DOLLAR=(\d+)\r")
+    want = plain.p.match.group(1)
+    plain.kill()
+    (tmp_path / "b").mkdir()
+    s, _, screen = typed_screen(tmp_path / "b")
+    settle(screen)
+    s.p.sendcontrol("c")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]] == "LONG>", stable=True), screen.lines()
+    s.p.sendline('print -r -- "DOLLAR=$?"')
+    s.expect(rb"DOLLAR=(\d+)\r")
+    assert s.p.match.group(1) == want
+    s.kill()

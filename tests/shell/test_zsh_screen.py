@@ -296,6 +296,73 @@ def test_band_boundary_59_60_on_the_next_prompt(tmp_path):
         assert FAIL_CHAR in lines[row], (cols, lines)
 
 
+# 이것을 실패시키는 것: transient에 윗줄을 넘기는 것, 오른쪽을 지우지 않는 것.
+def test_transient_replaces_upper_and_right_in_scrollback(tmp_path):
+    cols = 70
+    _, screen = start(tmp_path, cols=cols)
+    enter(screen, "false")
+    enter(screen, "print MA''RK")
+    lines = screen.lines()
+    row = lines.index("MARK")
+    assert lines[row - 1].endswith("print MA''RK") and FAIL_CHAR in lines[row - 1], lines
+    assert BLOCK_END not in lines[row - 1], lines
+    assert BLOCK_END not in lines[row - 2] or not lines[row - 2].endswith("1"), lines
+    assert right_edge(screen, row - 1) < cols - 2, lines
+
+
+# Spec section 5 and rulings of the probe: Enter forms take `zle-line-finish`, Ctrl-C the
+# trap, Ctrl-G `send-break`. An empty line's Ctrl-D ends the shell with no transition.
+# 이것을 실패시키는 것: `send-break`나 TRAPINT 감싸기를 지우는 것(그 줄이 긴 프롬프트로 남음).
+@pytest.mark.parametrize("key", ["c", "g"], ids=["ctrl-c", "ctrl-g"])
+def test_transient_on_interrupt(tmp_path, key):
+    s, screen = start(tmp_path, cols=70)
+    settle(screen)
+    row = screen.cursor()[0]
+    s.p.send("abc")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("abc"), stable=True), screen.lines()  # a signal outruns typed input
+    s.p.sendcontrol(key)
+    assert screen.wait(lambda v: v.cursor()[0] > row and BLOCK_END in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    lines = screen.lines()
+    assert lines[row - 1].endswith("abc") and BLOCK_END not in lines[row - 1], lines
+
+
+def test_transient_on_interrupt_eof_and_empty_line(tmp_path):
+    s, screen = start(tmp_path, cols=70)
+    settle(screen)
+    enter(screen, "")  # an empty line: one short row, then a full prompt
+    row = screen.cursor()[0]
+    lines = screen.lines()
+    assert BLOCK_END in lines[row] and BLOCK_END in lines[row - 1] and BLOCK_END not in lines[row - 2], lines
+    s.p.send('print "a\r')  # a continuation: the first line goes short, PS2 stays
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].startswith("dquote>"), stable=True), screen.lines()
+    assert BLOCK_END not in screen.lines()[screen.cursor()[0] - 1], screen.lines()
+    enter(screen, 'b"')
+    lines = screen.lines()
+    assert 'dquote> b"' in lines and "a" in lines and "b" in lines, lines
+    s.p.send('echo "c\r')  # Ctrl-C on a continuation line ends in a full prompt
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]] == "dquote>", stable=True), screen.lines()
+    s.p.sendcontrol("c")
+    assert screen.wait(lambda v: BLOCK_END in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    last = screen.cursor()[0]
+    s.p.send("\x04")  # Ctrl-D on an empty line: the shell ends and the prompt stays as drawn
+    s.p.expect(pexpect.EOF)
+    screen.feed()
+    assert BLOCK_END in screen.lines()[last] and BLOCK_END in screen.lines()[last - 1], screen.lines()
+
+
+# 이것을 실패시키는 것: 두 줄에서 한 줄로 줄이는 다시 그리기가 맨 아래 줄에서 어긋나는 것.
+def test_transient_at_bottom_row(tmp_path):
+    rows = 8
+    _, screen = start(tmp_path, cols=70, rows=rows)
+    for _ in range(4):
+        enter(screen, "print filler")
+    assert screen.cursor()[0] == rows - 1, screen.lines()
+    enter(screen, "print MA''RK")
+    lines = screen.lines()
+    assert screen.cursor()[0] == rows - 1 and BLOCK_END in lines[rows - 1] and BLOCK_END in lines[rows - 2], lines
+    assert lines[rows - 3] == "MARK" and lines[rows - 4].endswith("print MA''RK") and BLOCK_END not in lines[rows - 4], lines
+
+
 def tmux(socket, *args):
     return subprocess.run(["tmux", "-S", str(socket), *args], capture_output=True, text=True, timeout=10, check=True).stdout
 

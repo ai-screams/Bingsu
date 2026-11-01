@@ -11,6 +11,8 @@ import subprocess
 from conftest import ROOT, Install, minimal_record, trusted_env
 from test_init_words import source
 from pty_session import Session
+from screen_session import ScreenSession
+from test_zsh_screen import enter
 
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 COLS, ROWS = 100, 30
@@ -46,8 +48,15 @@ def start(tmp_path, shell, folder):
 def test_default_prompt_is_drawn(tmp_path, shell):
     folder = tmp_path / "vis-prompt"
     s = start(tmp_path, shell, folder)
-    s.run("false")
-    rows = screen_rows(s.close())
+    if shell == "zsh":
+        # zsh shortens a finished line, so the prompt is judged while it is the last one.
+        screen = ScreenSession(s, ROWS, COLS)
+        enter(screen, "false")
+        rows = screen.lines()
+        s.kill()
+    else:
+        s.run("false")
+        rows = screen_rows(s.close())
     # The prompt after `false`: its upper row holds the folder and the
     # status 1, the row below starts with the failure char.
     hits = [i for i, r in enumerate(rows) if "vis-prompt" in r and r.endswith(" 1")]
