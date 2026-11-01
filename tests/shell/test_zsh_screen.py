@@ -363,6 +363,17 @@ def test_transient_at_bottom_row(tmp_path):
     assert lines[rows - 3] == "MARK" and lines[rows - 4].endswith("print MA''RK") and BLOCK_END not in lines[rows - 4], lines
 
 
+# 이것을 실패시키는 것: 크기 변경에서 다시 그리지 않는 것, 구간을 고르는 폭을 넘기지 않는 것.
+def test_resize_redraws_across_the_band_edge(tmp_path):
+    s, screen = start(tmp_path, cols=60)
+    settle(screen)
+    assert BLOCK_END in screen.lines()[screen.cursor()[0]], screen.lines()
+    screen.resize(30, 59)
+    assert screen.wait(lambda v: BLOCK_END not in v.lines()[v.cursor()[0]] and OK_CHAR in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    screen.resize(30, 60)
+    assert screen.wait(lambda v: BLOCK_END in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+
+
 VICMD_CHAR = "\u276e"
 VI_KEYS = "bindkey -v; KEYTIMEOUT=1"
 

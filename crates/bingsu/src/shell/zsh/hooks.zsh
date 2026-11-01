@@ -8,7 +8,8 @@
   emulate -L zsh
   local session=${_bingsu_session-} seq=${_bingsu_seq-} warned=${_bingsu_warned_last-}
   unset _bingsu_session _bingsu_seq _bingsu_warned_last _bingsu_rec _bingsu_s _bingsu_p \
-    _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_dead _bingsu_key_prev _bingsu_nested _bingsu_keymap
+    _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_dead _bingsu_key_prev _bingsu_nested _bingsu_keymap \
+    _bingsu_ctx _bingsu_drawn_cols
   typeset -g _bingsu_session=$session _bingsu_seq=$seq _bingsu_warned_last=$warned
 }
 : "${_bingsu_session:=@SESSION@}"
@@ -66,12 +67,13 @@ zmodload zsh/datetime 2>/dev/null || :
 # the first duration negative or huge. _bingsu_warned_last is reset on
 # first registration only (below): a re-init keeps the late-hook warning
 # quiet once it has been shown (spec section 5, same order stays silent).
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead= _bingsu_key_prev= _bingsu_nested= _bingsu_keymap=main
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead= _bingsu_key_prev= _bingsu_nested= _bingsu_keymap=main \
+  _bingsu_drawn_cols=
 typeset -g _bingsu_warned_last
-typeset -ga _bingsu_p
+typeset -ga _bingsu_p _bingsu_ctx
 # Under ALL_EXPORT a new name is exported; without +x the rendered prompt
 # and the timings would reach the environment of every child process.
-typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_key_prev _bingsu_nested _bingsu_keymap
+typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_key_prev _bingsu_nested _bingsu_keymap _bingsu_ctx _bingsu_drawn_cols
 
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost (emulate itself sets $? to
@@ -164,15 +166,16 @@ _bingsu_render() {
   local -i ms
   local pst=${(j:,:)_bingsu_p}
   [[ -n $pst ]] || pst=$_bingsu_s
-  ctx=(--width "${COLUMNS:-0}" --status "$_bingsu_s" --pipestatus "$pst"
-       --jobs "${(%):-%j}" --keymap main)
+  ctx=(--status "$_bingsu_s" --pipestatus "$pst" --jobs "${(%):-%j}" --keymap main)
   if [[ -n $_bingsu_t0 && -n $_bingsu_t1 ]]; then
     (( ms = (_bingsu_t1 - _bingsu_t0) * 1000 ))
     # A wall clock can step back; the envelope takes no negative value.
     (( ms < 0 )) || ctx+=(--duration-ms "$ms")
   fi
   _bingsu_t0= _bingsu_t1= _bingsu_nested= _bingsu_keymap=main
-  _bingsu_call "${ctx[@]}"
+  # A size change draws this prompt again from the same words (spec section 3).
+  _bingsu_ctx=("${ctx[@]}") _bingsu_drawn_cols=${COLUMNS:-0}
+  _bingsu_call --width "$_bingsu_drawn_cols" "${ctx[@]}"
   # The record is checked whatever the options are, so the status notices
   # see it; only installing it on screen depends on PROMPT_PERCENT.
   _bingsu_frame "$_bingsu_rec" || :
@@ -274,6 +277,51 @@ _bingsu_keymap_select() {
   zle reset-prompt
 }
 
+# One redraw when the width is not the drawn one and the record frames; a
+# failed frame keeps the fields on screen. Set before the call: a size change
+# during it shows as a different width on the next round.
+_bingsu_redraw_step() {
+  emulate -L zsh
+  [[ ${COLUMNS:-0} != $_bingsu_drawn_cols ]] || return 1
+  _bingsu_drawn_cols=${COLUMNS:-0}
+  local -a kept
+  kept=("${_bingsu_f[@]}")
+  _bingsu_call "${_bingsu_ctx[@]}" --width "$_bingsu_drawn_cols" --redraw
+  _bingsu_frame "$_bingsu_rec" && return 0
+  _bingsu_f=("${kept[@]}")
+  return 1
+}
+
+# Only the first prompt line: PS2 and vared draw something else, and precmd
+# draws the next prompt at the new width anyway. zsh does not run a trap inside
+# itself, so a signal during the call waits; the loop reads the width again.
+_bingsu_redraw() {
+  zle && [[ ${CONTEXT-} == start ]] && (( ${#_bingsu_ctx} )) || return 0
+  while _bingsu_redraw_step; do
+    _bingsu_paint_mode
+    zle reset-prompt
+  done
+}
+
+# Whether trap $1 can be ours; $2 is a word of our own body. A function moves
+# to a saved name. A string trap cannot sit beside the function (defining one
+# removes the other), so it stays and we install nothing; `trap |` sees it, a
+# substitution would not.
+_bingsu_trap_free() {
+  emulate -L zsh
+  local line
+  [[ ${functions[$1]-} != *$2* ]] || return 1
+  if (( ${+functions[$1]} )); then
+    functions -c $1 _bingsu_saved_$1
+    return 0
+  fi
+  unset -f _bingsu_saved_$1 2>/dev/null
+  trap | while IFS= read -r line; do
+    [[ $line != *" ${1#TRAP}" ]] || return 1
+  done
+  return 0
+}
+
 # Takes over widget $1 once per shell (F-23): after a first run the chain may
 # hold a plugin that wraps us, and saving that would make it call itself. The
 # mark is a widget, so no environment can carry it. add-zle-hook-widget keeps
@@ -307,43 +355,43 @@ _bingsu_zle_wrap() {
   fi
 }
 
-# The widgets need the line editor and its parameters. zsh runs a TRAPINT
-# function in place of the default: a value above 0 goes on as an interrupt, so
-# without a user trap this returns what the signal itself would. A saved user
-# trap decides by its own return value. A string trap cannot sit beside the
-# function (defining one removes the other), so it stays and Ctrl-C keeps the
-# long form; `trap |` sees it, a substitution would not. Outside `emulate`,
-# whose local traps would remove the function again.
+# The widgets need the line editor and its parameters. zsh runs a TRAP function
+# in place of the default action and a value above 0 goes on as an interrupt:
+# without a user trap TRAPINT returns what the signal itself would, TRAPWINCH 0
+# (the default ignores it, and $? and $pipestatus stay). A saved user trap runs
+# with the status it would have seen, and its return value decides. Defined
+# outside `emulate`, whose local traps would remove them again.
 if [[ -o interactive && -o zle ]] && zmodload zsh/zleparameter 2>/dev/null; then
   _bingsu_zle_wrap zle-line-finish _bingsu_line_finish
   _bingsu_zle_wrap zle-keymap-select _bingsu_keymap_select
   _bingsu_zle_wrap send-break _bingsu_send_break
-  if [[ ${functions[TRAPINT]-} != *_bingsu_transient* ]]; then
-    _bingsu_int=0
-    if (( ${+functions[TRAPINT]} )); then
-      functions -c TRAPINT _bingsu_saved_TRAPINT
-    else
-      unset -f _bingsu_saved_TRAPINT 2>/dev/null
-      trap | while IFS= read -r _bingsu_line; do
-        [[ $_bingsu_line != *' INT' ]] || _bingsu_int=1
-      done
-    fi
-    if (( ! _bingsu_int )); then
-      TRAPINT() {
-        local _bingsu_entry=$?
-        ! zle || _bingsu_transient
-        if (( ${+functions[_bingsu_saved_TRAPINT]} )); then
-          # The user's trap sees the status it would have seen without us.
-          if _bingsu_status $_bingsu_entry; then
-            _bingsu_saved_TRAPINT "$@"
-          else
-            _bingsu_saved_TRAPINT "$@"
-          fi
-          return $?
+  if _bingsu_trap_free TRAPINT _bingsu_transient; then
+    TRAPINT() {
+      local _bingsu_entry=$?
+      ! zle || _bingsu_transient
+      if (( ${+functions[_bingsu_saved_TRAPINT]} )); then
+        if _bingsu_status $_bingsu_entry; then
+          _bingsu_saved_TRAPINT "$@"
+        else
+          _bingsu_saved_TRAPINT "$@"
         fi
-        return $(( 128 + $1 ))
-      }
-    fi
-    unset _bingsu_int _bingsu_line
+        return $?
+      fi
+      return $(( 128 + $1 ))
+    }
+  fi
+  if _bingsu_trap_free TRAPWINCH _bingsu_redraw; then
+    TRAPWINCH() {
+      local _bingsu_entry=$? _bingsu_user=0
+      if (( ${+functions[_bingsu_saved_TRAPWINCH]} )); then
+        if _bingsu_status $_bingsu_entry; then
+          _bingsu_saved_TRAPWINCH "$@" || _bingsu_user=$?
+        else
+          _bingsu_saved_TRAPWINCH "$@" || _bingsu_user=$?
+        fi
+      fi
+      _bingsu_redraw
+      return $_bingsu_user
+    }
   fi
 fi

@@ -4,7 +4,8 @@ interactive zsh, with bingsu replaced by a stand-in that prints a fixed record,
 so the hooks are what is timed. The base and candidate hooks alternate in the
 controlled protocol (bench/protocol.py), blocks it does not admit stay in the
 output, and a verdict compares candidate and base. Absolute time is recorded
-only. Rows: `prompt` (a record with no transient) and `transient-enter`.
+only. Rows: `prompt` (a record with no transient), `transient-enter`, and
+`resize-fake`: a width change to the redraw of the prompt.
 
 The CLI measures, or with --measurement judges a measurement it wrote.
 """
@@ -36,7 +37,9 @@ TIMEOUT = 10
 RECORDS = {
     "prompt": ("LONG> ", "", ""),
     "transient-enter": ("LONG> ", "T> ", "UPPER"),
+    "resize-fake": ("LONG> ", "", ""),
 }
+WIDTHS = (120, 121)
 
 
 def record(left, transient, upper):
@@ -44,16 +47,26 @@ def record(left, transient, upper):
     return "\037".join(fields) + "\036"
 
 
-def stand_in(text):
-    """A stand-in that only prints: a shell builtin, so it adds one exec and no more."""
-    octal = "".join(f"\\{ord(c):03o}" for c in text)
-    return f"#!/bin/sh\nprintf '{octal}'\n"
+def octal(text):
+    return "".join(f"\\{ord(c):03o}" for c in text)
+
+
+def stand_in(case):
+    """A stand-in that only prints: a shell builtin, so it adds one exec and no more.
+    For a resize the prompt names the width it was asked for: zsh redraws the old
+    prompt by itself on the signal, and only the new text shows the hook is done."""
+    if case != "resize-fake":
+        return f"#!/bin/sh\nprintf '{octal(record(*RECORDS[case]))}'\n"
+    arms = "".join(f"  *' --width {w} '*) printf '{octal(record(f'LONG{w}> ', '', ''))}' ;;\n" for w in WIDTHS)
+    return f'#!/bin/sh\ncase " $* " in\n{arms}esac\n'
 
 
 class Session:
     """zsh -f -i in a PTY with the hooks of one binary and a fixed record."""
 
     def __init__(self, binary, case, root):
+        self.case = case
+        self.width = 0  # index into WIDTHS
         folder = root / "bin"
         folder.mkdir(parents=True)
         exe = folder / "bingsu"
@@ -66,12 +79,12 @@ class Session:
             raise ValueError("init failed: " + init.stderr[-200:].decode(errors="replace"))
         (root / "init.zsh").write_bytes(init.stdout)
         fake = root / "fake"
-        fake.write_text(stand_in(record(*RECORDS[case])))
+        fake.write_text(stand_in(case))
         fake.chmod(0o700)
         exe.unlink()
         exe.symlink_to(fake)
         self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, WIDTHS[0], 0, 0))
         self.shell = subprocess.Popen(["zsh", "-f", "-i"], stdin=slave, stdout=slave, stderr=slave, env=env, cwd=root,
                                       start_new_session=True, close_fds=True,
                                       preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
@@ -82,6 +95,9 @@ class Session:
             self.read_prompt()
             self.enter()
             self.seen = self.output
+            if case == "resize-fake":
+                self.resize()
+                self.seen = self.output
         except (OSError, ValueError):
             self.close()
             raise
@@ -108,13 +124,25 @@ class Session:
         self.output = self.read_prompt()
         return time.perf_counter_ns() - start
 
+    def resize(self):
+        """To the other width: the kernel signals the shell, and the prompt comes again."""
+        self.width = 1 - self.width
+        start = time.perf_counter_ns()
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, WIDTHS[self.width], 0, 0))
+        marker = f"LONG{WIDTHS[self.width]}> ".encode()
+        self.output = self.read_until(lambda data: marker in data)
+        return time.perf_counter_ns() - start
+
+    def step(self):
+        return self.resize() if self.case == "resize-fake" else self.enter()
+
     def close(self):
         try:
             os.killpg(self.shell.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        os.close(self.master)  # first: a dying shell can wait for its output to be read
         self.shell.wait(timeout=10)
-        os.close(self.master)
 
 
 def measure_case(case, base, candidate, rounds, condition):
@@ -123,14 +151,14 @@ def measure_case(case, base, candidate, rounds, condition):
     try:
         for name, binary in (("base", base), ("candidate", candidate)):
             sessions[name] = Session(binary, case, root / name)
-        drawn = {name: b"LONG> " in s.seen for name, s in sessions.items()}
+        drawn = {name: b"LONG" in s.seen for name, s in sessions.items()}
         if not all(drawn.values()):
             raise ValueError("the hooks did not draw the record: " + str(drawn))
         transient = {name: b"T> " in s.seen for name, s in sessions.items()}
         # A hook that skips the work would pass on the time it saved.
         if case == "transient-enter" and not all(transient.values()):
             raise ValueError("no transient drawn: " + str(transient))
-        result = protocol.paired(base, candidate, rounds, condition, lambda name, _: {METRIC: sessions[name].enter()},
+        result = protocol.paired(base, candidate, rounds, condition, lambda name, _: {METRIC: sessions[name].step()},
                                  required_metrics=(METRIC,))
         return {**result, "transient_drawn": transient, "shell": subprocess.run(["zsh", "--version"], capture_output=True, text=True).stdout.strip()}
     except (OSError, ValueError, subprocess.SubprocessError) as error:

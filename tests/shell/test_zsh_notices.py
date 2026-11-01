@@ -149,6 +149,20 @@ def test_noninteractive_shell_prints_no_notice(tmp_path):
     assert r.returncode == 0 and r.stderr == b"" and inst.calls(), r
 
 
+# 이것을 실패시키는 것: redraw가 알림 경로를 지나는 것.
+def test_redraw_repeats_no_notice(tmp_path):
+    s, inst, err = start(tmp_path, [A])
+    s.run(f'source "{tmp_path / "rc.zsh"}"')
+    screen = ScreenSession(s, 30, 200)
+    enter(screen, "true")
+    for n, width in enumerate((120, 130), 1):
+        screen.resize(30, width)
+        redraws = inst.dir / "redraws"
+        assert screen.wait(lambda v: redraws.exists() and len(redraws.read_text().split()) >= n), screen.lines()
+    out = s.close()
+    assert err.read_bytes() == lines(RUNTIME_ROOT) and RUNTIME_ROOT.encode() not in out
+
+
 # 이것을 실패시키는 것: 모드 전환이 알림 경로를 지나는 것.
 def test_vi_switch_repeats_no_notice(tmp_path):
     switched = tmp_path / "switched"

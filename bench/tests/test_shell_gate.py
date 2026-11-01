@@ -107,6 +107,14 @@ def test_real_session_times_enter_to_prompt(controlled):
         assert row["transient_drawn"] == dict(base=case == "transient-enter", candidate=case == "transient-enter")
 
 
+# 이것을 실패시키는 것: 크기 변경에서 다시 그리지 않아도 표본을 내는 것, 같은 폭을 다시 보내는 것(신호가 없어 시간 초과).
+def test_resize_row_times_the_redraw(controlled):
+    binary = real_binary()
+    row = g.measure_case("resize-fake", str(binary), str(binary), 200, dict(p.DEFAULT))
+    assert row["status"] == "OBSERVED", row
+    assert row["variants"]["candidate"]["summary"][g.METRIC]["min"] > 100_000
+
+
 # 이것을 실패시키는 것: hook이 레코드를 그리지 않았는데 빈 프롬프트 시간을 재는 것.
 def test_hooks_that_draw_nothing_block(controlled, tmp_path):
     shim = tmp_path / "bingsu"

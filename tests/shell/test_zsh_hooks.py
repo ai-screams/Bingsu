@@ -504,9 +504,9 @@ def test_owned_globals_are_not_exported(tmp_path, rc_before):
 
 
 OWNED = {name: "scalar" for name in ("_bingsu_session", "_bingsu_warned_last", "_bingsu_rec", "_bingsu_s", "_bingsu_t0",
-                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested", "_bingsu_keymap",
+                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested", "_bingsu_keymap", "_bingsu_drawn_cols",
                                      "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
-OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_seq="integer")
+OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_ctx="array", _bingsu_seq="integer")
 
 
 # Attributes set in this shell before init; the environment cannot carry them.
@@ -1022,3 +1022,202 @@ def test_envelope_keymap_is_always_main(tmp_path):
     calls = inst.calls()
     s.kill()
     assert calls and all(opt(c, b"--keymap") == b"main" for c in calls), calls
+
+
+def redraws(inst):
+    return [c for c in inst.calls() if b"--redraw" in c]
+
+
+def resize(screen, cols, rows=24):
+    """A new width; fake prompts look alike, so the caller waits on its own condition."""
+    screen.resize(rows, cols)
+
+
+def width_of(call):
+    return int(opt(call, b"--width"))
+
+
+def wait_redraws(screen, inst, n):
+    assert screen.wait(lambda v: len(redraws(inst)) >= n, stable=True), (redraws(inst), screen.lines())
+
+
+# 이것을 실패시키는 것: 저장한 봉투를 넘기지 않는 것, `--redraw` 없이 일반 호출을 하는 것, 새 폭을 넘기지 않는 것.
+def test_resize_redraws_at_new_width(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    enter(screen, "(exit 3)")
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    call, normal = redraws(inst)[0], inst.calls()[-2]
+    assert width_of(call) == 120, call
+    for word in (b"--status", b"--pipestatus", b"--jobs", b"--keymap"):
+        assert opt(call, word) == opt(normal, word), (word, call, normal)
+    assert opt(call, b"--status") == b"3"
+    resize(screen, 130)
+    wait_redraws(screen, inst, 2)
+    s.kill()
+
+
+# 이것을 실패시키는 것: 폭 비교를 지우는 것.
+def test_same_width_makes_no_call(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    s.p.setwinsize(30, 200)  # taller, same width
+    s.run("true")
+    assert not redraws(inst), inst.calls()
+    s.kill()
+
+
+# 신호를 합친 결과는 시간이 아니라 호출 수로 판정한다(스펙 581행).
+# 이것을 실패시키는 것: 끝난 뒤 폭을 다시 보지 않는 것(마지막 폭이 그려지지 않음).
+def test_winch_burst_ends_at_final_width(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    widths = [150, 151, 152, 153, 154, 155]
+    for width in widths:
+        s.p.setwinsize(24, width)
+    assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == widths[-1], stable=True), redraws(inst)
+    drawn = [width_of(c) for c in redraws(inst)]
+    assert len(drawn) <= len(widths) and len(set(drawn)) == len(drawn), drawn
+    s.kill()
+
+
+# 이것을 실패시키는 것: `zle` 활성 판정을 지우는 것(명령 실행 중에 redraw가 돈다).
+def test_winch_while_command_runs_calls_nothing(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    s.p.sendline("print STARTED; read -t 2 x; print ENDED")
+    assert screen.wait(lambda v: "STARTED" in v.lines(), stable=False), screen.lines()
+    s.p.setwinsize(24, 120)
+    s.p.kill(28)  # the shell itself: a size change reaches only the foreground group
+    assert screen.wait(lambda v: "ENDED" in v.lines() and v.lines()[v.cursor()[0]].startswith("LONG>"), timeout=8, stable=True), screen.lines()
+    assert not redraws(inst), redraws(inst)
+    assert width_of(inst.calls()[-1]) == 120, inst.calls()[-1]
+    s.kill()
+
+
+# 사용자 함수는 먼저 돌고 진입 상태를 받으며, 그 반환값이 그대로 나간다.
+# 이것을 실패시키는 것: 저장 trap을 부르지 않는 것, redraw 뒤에 부르는 것, `$?`를 복원하지 않는 것, 반환값을 가리는 것.
+@pytest.mark.parametrize("returned", [0, 130])
+def test_existing_trapwinch_function_runs_first(tmp_path, returned):
+    log = tmp_path / "trap.log"
+    rc = f'TRAPWINCH() {{ builtin print -r -- "user status=$?" >>"$BINGSU_T_LOG"; return {returned} }}'
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    enter(screen, "(exit 42)")
+    s.p.send("print KEPT")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("print KEPT"), stable=True), screen.lines()
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.p.send("\r")
+    s.run("true")
+    out = visible(s.close())
+    assert log.read_text() == "user status=42\n"
+    assert (b"\nKEPT" in out) == (returned == 0), out
+
+
+# Environment pin, not a mutation target: zsh does not run a trap inside itself,
+# so a signal during the call waits and no reentry flag is needed. If a zsh
+# changes this the depth log fills.
+def test_winch_during_a_redraw_does_not_nest(tmp_path):
+    log = tmp_path / "depth.log"
+    rc_after = ('functions[_t_step]=$functions[_bingsu_redraw_step]\n'
+                '_bingsu_redraw_step() { local r; (( ++_depth > 1 )) && builtin print -r -- nested >>"$BINGSU_T_LOG"; '
+                '_t_step; r=$?; (( _depth-- )); return r }\n_depth=0')
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    slow = tmp_path / "slow.sh"
+    fake = (ROOT / "tests/shell/fake_bingsu.sh").read_text()
+    slow.write_text(fake.replace("here=", 'case " $* " in *" --redraw "*) sleep 0.4 ;; esac\nhere=', 1))
+    slow.chmod(0o755)
+    (inst.dir / "bingsu").unlink()
+    (inst.dir / "bingsu").symlink_to(slow)
+    s.p.setwinsize(24, 150)
+    screen.wait(lambda v: False, timeout=0.15)  # inside the sleep
+    s.p.setwinsize(24, 151)
+    assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == 151, stable=True), redraws(inst)
+    s.kill()
+    assert not log.exists(), log.read_text()
+
+
+# 이것을 실패시키는 것: 문자열 trap을 보지 못해 TRAPWINCH 함수로 지우는 것.
+def test_string_winch_trap_stays(tmp_path):
+    log = tmp_path / "trap.log"
+    rc = "trap 'builtin print -r -- trapped >>\"$BINGSU_T_LOG\"' WINCH"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    s.run("print -r -- F=${+functions[TRAPWINCH]}")
+    settle(screen)
+    resize(screen, 120)
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.run("true")
+    assert not redraws(inst) and width_of(inst.calls()[-1]) == 120, inst.calls()
+    out = visible(s.close())
+    assert b"F=0" in out, out
+
+
+# 이것을 실패시키는 것: precmd가 trap을 다시 차지하는 것, 오류를 내는 것.
+def test_trapwinch_redefined_after_init_falls_back_to_next_prompt(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, rc_after="TRAPWINCH() { : }", record=fields())
+    settle(screen)
+    resize(screen, 120)
+    enter(screen, "true")
+    assert not redraws(inst) and width_of(inst.calls()[-1]) == 120, inst.calls()
+    out = visible(s.close())
+    assert b"TRAPWINCH" not in out, out
+
+
+# 이것을 실패시키는 것: init을 다시 해도 우리 trap을 저장 이름으로 옮기는 것(자기 자신을 부름).
+def test_init_twice_installs_trapwinch_once(tmp_path):
+    rc_after = f"source {tmp_path / 'init.zsh'}"
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields())
+    settle(screen)
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    out = visible(s.close())
+    assert len(redraws(inst)) == 1 and b"maximum nested" not in out, out
+
+
+# 이것을 실패시키는 것: 레코드가 깨졌을 때 지금 필드를 지우는 것(프롬프트가 상수로 떨어짐).
+def test_failed_redraw_keeps_the_fields(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    (inst.dir / "record.bin").write_bytes(b"not a record")
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    s.run('print -r -- "KEPT=$_bingsu_f[3]"')
+    assert b"KEPT=LONG> " in visible(s.close())
+
+
+# 이것을 실패시키는 것: 계속되는 줄에서 다시 그리는 것(PS2가 `dquote then>`으로 바뀜).
+def test_winch_on_a_continuation_line_leaves_it_alone(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    s.p.send('echo "a\r')
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].startswith("dquote>"), stable=True), screen.lines()
+    resize(screen, 120)
+    enter(screen, 'b"')
+    lines = screen.lines()
+    s.close()
+    assert not redraws(inst) and not any("then" in line for line in lines), lines
+
+
+# 스펙 3절: 저장한 봉투가 없으면 다시 그리지 않는다.
+# 이것을 실패시키는 것: 빈 봉투로 부르는 것(종료 코드 없는 redraw).
+def test_no_saved_words_no_redraw(tmp_path):
+    rc_after = "_drop() { _bingsu_ctx=() }\nprecmd_functions+=(_drop)"
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields())
+    settle(screen)
+    resize(screen, 120)
+    enter(screen, "true")
+    assert not redraws(inst), redraws(inst)
+    s.kill()
+
+
+# 이것을 실패시키는 것: redraw가 vicmd 모드를 잊는 것.
+def test_vi_symbol_kept_after_redraw(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
+    to_vicmd(screen)
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    assert screen.wait(lambda v: "CMD>" in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    to_main(screen)
+    s.kill()
