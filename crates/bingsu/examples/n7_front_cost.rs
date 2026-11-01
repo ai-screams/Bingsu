@@ -132,7 +132,7 @@ fn main() {
             // Descriptor setup is outside the staged read/decode measurement.
             let mut fd = fs::File::open(store.join("snapshot")).unwrap();
             let start = Instant::now();
-            let mut decoder = FrontDecoder::new(wire.len() as u64).unwrap();
+            let mut decoder = FrontDecoder::new(wire.len() as u64, 120).unwrap();
             let mut buffer = [0; snapshot::READ_CHUNK];
             while decoder.read_len() != 0 {
                 let len = decoder.read_len();
@@ -141,8 +141,8 @@ fn main() {
             }
             let read_ns = start.elapsed().as_nanos();
             let decode_start = Instant::now();
-            // The envelope's width (--width 120 above) selects the decoded variant.
-            let decoded = decoder.finish_for(120).unwrap();
+            // The envelope's width (--width 120 above) selected the variant.
+            let decoded = decoder.finish().unwrap();
             let decode_ns = decode_start.elapsed().as_nanos();
             let staged_ns = start.elapsed().as_nanos();
             black_box(&decoded);

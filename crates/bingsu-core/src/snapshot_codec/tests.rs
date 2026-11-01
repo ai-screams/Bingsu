@@ -224,12 +224,77 @@ mod cases {
         assert_eq!(decode_compiled(&vec![0; MAX_BYTES + 1]), Err(Error::Limit));
     }
 
-    // 이것을 실패시키는 것: 완전한 codec 뒤의 남은 바이트를 허용하는 것.
+    // 이것을 실패시키는 것: 구획 안의 남는 바이트를 허용하는 것.
     #[test]
     fn codec_reject_trailing_bytes() {
         let mut b = encode_compiled(&config()).unwrap();
         b.push(0);
-        assert_eq!(decode_compiled(&b), Err(Error::Trailing));
+        assert_eq!(decode_compiled(&b), Err(Error::Shape));
+        let spare = [0; 5];
+        assert_eq!(
+            section::<u32>(&spare, section_sum(&spare), MAX_ALLOC).map(drop),
+            Err(Error::Trailing)
+        );
+    }
+
+    // 이것을 실패시키는 것: 색인이 없는 구획을 머리에서 거부하지 않는 것, plan_front가 정확한 앞부분이 아닌
+    // 조각을 받는 것.
+    #[test]
+    fn head_refuses_no_variants_and_plan_takes_the_exact_front() {
+        let mut b = encode_compiled(&config()).unwrap();
+        let front = front_len(&b, b.len()).unwrap();
+        assert!(plan_front(&b[..front], b.len(), 80).is_ok());
+        assert_eq!(
+            plan_front(&b[..front - 1], b.len(), 80).err(),
+            Some(Error::Shape)
+        );
+        assert_eq!(
+            plan_front(&b[..front + 1], b.len(), 80).err(),
+            Some(Error::Shape)
+        );
+        b[16..20].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(front_len(&b, b.len()), Err(Error::Limit));
+    }
+
+    // 이것을 실패시키는 것: variant 표의 charge를 빼는 것(남은 예산이 표보다 작아도 도우미가 받는다), 표 charge를
+    // 공통부에서 넘겨받은 예산이 아닌 새 예산에서 빼는 것.
+    #[test]
+    fn the_variant_table_is_charged_to_the_one_budget() {
+        let mut c = config();
+        c.widths.clear();
+        let b = encode_compiled(&c).unwrap();
+        let s = parse_sections(&b[..front_len(&b, b.len()).unwrap()], b.len()).unwrap();
+        let mut left = s.budget;
+        for i in 0..s.variants() {
+            let e = s.entry(i);
+            left = section::<Vec<CompiledLine>>(&b[e.offset..e.offset + e.len], e.crc, left)
+                .unwrap()
+                .1;
+        }
+        left = section::<Vec<String>>(&b[s.names..], s.common.names_crc, left)
+            .unwrap()
+            .1;
+        let run = size_of::<WidthRun>();
+        let table = s.variants() * size_of::<Vec<CompiledLine>>();
+        assert!(run < table, "{run} {table}");
+        let runs = |n| {
+            vec![
+                WidthRun {
+                    from: 0,
+                    to: 0,
+                    band: None,
+                };
+                n
+            ]
+        };
+        // These runs leave less than the table needs, though all else fits.
+        c.widths = runs(left / run);
+        assert_eq!(
+            decode_compiled(&encode_compiled(&c).unwrap()),
+            Err(Error::Limit)
+        );
+        c.widths = runs((left - table) / run);
+        assert!(decode_compiled(&encode_compiled(&c).unwrap()).is_ok());
     }
 
     // 이것을 실패시키는 것: Writer의 길이 덧셈 overflow를 wrapping으로 바꾸는 것.
@@ -246,9 +311,7 @@ mod cases {
     }
 
     fn raw_config(c: &CompiledConfig) -> Vec<u8> {
-        let mut b = b"BNGCFG03\x03\0\x02\0".to_vec();
-        b.extend(bytes(c));
-        b
+        write_compiled(c, compiled_size(c).unwrap()).unwrap()
     }
 
     fn rejected(c: &CompiledConfig) {
@@ -641,7 +704,7 @@ mod cases {
         }
         let mut b = encode_compiled(&base).unwrap();
         b.push(0);
-        assert_eq!(decode_compiled(&b), Err(Error::Trailing));
+        assert_eq!(decode_compiled(&b), Err(Error::Shape));
         for at in [0, 7, 8, 9] {
             let mut b = encode_compiled(&base).unwrap();
             b[at] ^= 1;

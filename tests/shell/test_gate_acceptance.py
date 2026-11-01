@@ -101,7 +101,9 @@ M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3
 # 이것을 실패시키는 것: fallback/상한/머리 거부 행을 지우고 normal만으로 게이트를 닫는 것.
 M3D_SUPPLEMENTARY.update({f"{gate}.1-{case}": "M3d"
                           for gate in ("GATE-FS-FRONT", "GATE-FRONT-READ-BYTES")
-                          for case in ("checksum_last_good", "body_limit", "header_only")})
+                          for case in ("checksum_last_good", "body_limit", "header_only", "selected_band")})
+# 이것을 실패시키는 것: 짧은 읽기 행을 지워 live fixture의 온전한 read만으로 읽기 한도를 닫는 것.
+M3D_SUPPLEMENTARY["GATE-FRONT-READ-BYTES.1-short_read"] = "M3d"
 # 이것을 실패시키는 것: R·B 행을 지우고 E_n 하나만으로 GATE-FS-HELPER.2를 닫는 것.
 M3D_SUPPLEMENTARY.update({"GATE-FS-HELPER.2-r": "M3d", "GATE-FS-HELPER.2-b": "M3d"})
 # 이것을 실패시키는 것: 막힌 마운트 행을 지우고 정상 폴더만으로 GATE-HELPER-LIFETIME.1을 닫는 것.
@@ -733,7 +735,7 @@ def test_release_gate_cells_require_effective_matrix_runner():
 
 # 이것을 실패시키는 것: A4 fallback/상한/머리 거부 행을 삭제하는 것.
 @pytest.mark.parametrize('gate', ['GATE-FS-FRONT', 'GATE-FRONT-READ-BYTES'])
-@pytest.mark.parametrize('suffix', ['', '-checksum_last_good', '-body_limit', '-header_only'])
+@pytest.mark.parametrize('suffix', ['', '-checksum_last_good', '-body_limit', '-header_only', '-selected_band'])
 def test_every_front_attempt_row_is_required(gate, suffix):
     row_id = gate + '.1' + suffix
     table = (ROOT / TABLE).read_text()

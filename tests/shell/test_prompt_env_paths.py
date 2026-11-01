@@ -1492,6 +1492,10 @@ HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "failure-recover": ("failure-recover",)}
 TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\ntemplate='EDIT {char}'\n",
              "collect": "[style]\ntemplate='BASE {dir} {git} {char}'\n", "broken": "[broken"}
+# 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
+# 80 selects a variant past INDEX's chunk, with more variants after it.
+TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
+                             f"[layout.when.b{i:02}.style]\ntemplate='{'x' * 600} {{char}}'\n" for i in range(64))
 
 
 def elf_facts(path):
@@ -1680,7 +1684,7 @@ class HelperStageFixture:
     the stage formula does not include, so the fixture refuses one.
     """
 
-    def __init__(self, stage, *, template=None):
+    def __init__(self, stage, *, template=None, config="plain"):
         import tempfile
         root = real_bin().parent.parent
         self.base = Path(tempfile.mkdtemp(prefix="helper-stage-", dir=root)).resolve()
@@ -1694,7 +1698,7 @@ class HelperStageFixture:
         os.mkdir(self.env["HOME"], 0o700)
         self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, mode=0o700)
-        self.put("collect" if stage == "collect" else "plain", template=template)
+        self.put("collect" if stage == "collect" else config, template=template)
         self.script = self.inst.init("bash", self.env)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
@@ -2037,7 +2041,7 @@ def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
 
 # Fixture metadata, pinned independently from the product source.
 FRONT_CHUNK = 16 * 1024
-FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only')
+FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only', 'selected-band')
 
 
 # 이것을 실패시키는 것: 제품 READ_CHUNK를 바꾸고 fixture 메타데이터는 그대로 두는 것.
@@ -2047,12 +2051,43 @@ def test_front_chunk_matches_product_constant():
     assert match and int(match[1]) * int(match[2]) == FRONT_CHUNK
 
 
-def front_attempt_plan(case, body):
+def front_attempt_plan(case, body, through_index=None):
+    """`body` bytes read through the selected variant; a checksum failure stops
+    the current copy at `through_index` bytes."""
     from fsbudget.formula import FrontAttempt
-    current = FrontAttempt('current', True, case not in ('header-only', 'body-limit'),
-                           body if case in ('normal', 'checksum-last-good') else 0,
-                           case in ('normal', 'checksum-last-good'))
-    return [current] + ([] if case == 'normal' else [FrontAttempt('last_good', True, True, body, True)])
+    read = {'normal': body, 'selected-band': body, 'body-limit': 0, 'header-only': 0,
+            'checksum-last-good': body if through_index is None else through_index}[case]
+    current = FrontAttempt('current', True, case not in ('header-only', 'body-limit'), read, read > 0)
+    one_copy = case in ('normal', 'selected-band')
+    return [current] + ([] if one_copy else [FrontAttempt('last_good', True, True, body, True)])
+
+
+def snapshot_layout(data, width):
+    """(front, compiled length, end of the variant selected at width), from the
+    file's bytes and the wire layout, without the product's decoder."""
+    import struct
+    body = int.from_bytes(data[76:80], 'little')
+    c = bytes(data[192:192 + body])
+    common, count = struct.unpack_from('<II', c, 12)
+    index = 20 + common
+    at = 20
+
+    def option(form, size):
+        nonlocal at
+        at += 1
+        if not c[at - 1]:
+            return None
+        at += size
+        return struct.unpack_from(form, c, at - size)[0]
+    bands, at = [None] * int.from_bytes(c[at:at + 4], 'little'), at + 4
+    for i in range(len(bands)):
+        bands[i] = option('<H', 2), option('<H', 2), option('<i', 4)
+    length = int.from_bytes(c[at:at + 4], 'little')
+    order = struct.unpack_from(f'<{length}I', c, at + 4)
+    assert length == len(bands) and count == length + 1
+    band = next((i for i in order if (bands[i][0] or 0) <= width <= (0xffff if bands[i][1] is None else bands[i][1])), None)
+    offset, size = struct.unpack_from('<II', c, index + (0 if band is None else band + 1) * 16)
+    return index + count * 16, body, offset + size
 
 
 def assert_front_reads(trace, store, attempts, *, evidence=None):
@@ -2241,6 +2276,7 @@ def front_capture(request, tmp_path_factory):
     import fcntl
     import json
     from dataclasses import asdict
+    from fsbudget.formula import front_body_bytes
     libc = require_release_helper(real_bin())
     assert shutil.which('strace'), 'front gate must execute strace'
     case = getattr(request, 'param', 'normal')
@@ -2250,7 +2286,7 @@ def front_capture(request, tmp_path_factory):
     fixture = None
     lock = None
     try:
-        fixture = HelperStageFixture('unchanged')
+        fixture = HelperStageFixture('unchanged', config='bands' if case == 'selected-band' else 'plain')
         lock = (fixture.store / 'snapshot.lock').open('rb')
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = bytearray((fixture.store / 'snapshot').read_bytes())
@@ -2261,6 +2297,12 @@ def front_capture(request, tmp_path_factory):
         last = fixture.store / 'last-good'
         last.write_bytes(data)
         last.chmod(0o600)
+        front, _, variant_end = snapshot_layout(data, 80)
+        read = front_body_bytes(front, body, variant_end, FRONT_CHUNK)
+        through_index = min(read, -(-front // FRONT_CHUNK) * FRONT_CHUNK)
+        if case == 'selected-band':
+            # 이것을 실패시키는 것: 고른 변종이 색인 청크 안이거나 구획 끝이라 버리기·조기 종료를 증명하지 못하는 fixture.
+            assert through_index < variant_end < body, (front, variant_end, body)
         if case == 'checksum-last-good':
             data[160] ^= 1
         elif case == 'body-limit':
@@ -2271,7 +2313,7 @@ def front_capture(request, tmp_path_factory):
         elif case == 'header-only':
             data[0] ^= 1
         (fixture.store / 'snapshot').write_bytes(data)
-        attempts = front_attempt_plan(case, body)
+        attempts = front_attempt_plan(case, read, through_index)
         evidence.update(attempts=[asdict(a) for a in attempts], body=body, metadata=metadata)
         trace = artifacts / 'trace.strace'
         result = fixture.prompt(trace)

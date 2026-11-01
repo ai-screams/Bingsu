@@ -1089,8 +1089,23 @@ class FrontAttempt:
     copy: Literal["current", "last_good"]
     header_read: bool
     prefix_read: bool
+    # Bytes read after the prefix, parsed or dropped; see front_body_bytes.
     body_bytes_read: int
     checksum_checked: bool
+
+
+def front_body_bytes(front: int, body: int, variant_end: int, chunk: int) -> int:
+    """Bytes the front reads of a compiled section of `body` bytes.
+
+    Reads are whole chunks from the section's start until INDEX is complete at
+    `front`, which names the selected variant; they then stop at `variant_end`.
+    Bytes before the variant are read and dropped, so they count (seek is not in
+    the filter), and the last read before the plan can pass the variant.
+    """
+    # 이것을 실패시키는 것: 버린 바이트를 빼거나 구획 끝 너머(TrustMetadata)까지 세는 것.
+    if not 0 < front <= variant_end <= body or chunk <= 0:
+        raise ValueError("invalid front layout")
+    return max(min(ceil_div(front, chunk) * chunk, body), variant_end)
 
 
 def front_attempts_expected(C: int, attempts: list[FrontAttempt], chunk: int,

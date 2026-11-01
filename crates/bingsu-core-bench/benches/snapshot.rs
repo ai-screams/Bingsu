@@ -4,7 +4,7 @@ use bingsu_core::{
     config::compile::CompiledConfig,
     layout_view::FrontConfig,
     snapshot::{Clock, Identity, Marker, Refusal, crc32c, eligible},
-    snapshot_codec::{Error, decode_compiled, encode_compiled, scan_compiled},
+    snapshot_codec::{Error, decode_compiled, encode_compiled},
 };
 use gungraun::prelude::*;
 use std::hint::black_box;
@@ -30,7 +30,7 @@ fn decode(b: &[u8]) -> Result<CompiledConfig, Error> {
 }
 #[inline(never)]
 fn front_decode(b: &[u8], width: u16) -> Result<FrontConfig, Error> {
-    scan_compiled(b)?.select(width)
+    fixture::front_compiled(b, width)
 }
 #[inline(never)]
 fn crc(b: &[u8]) -> [u8; 4] {
@@ -95,7 +95,7 @@ fn snapshot_eligibility(input: (Identity, Marker, Clock)) -> Result<u64, Refusal
     black_box(eligibility(black_box(input)))
 }
 // The front's decode of the compiled section: the ordinary config and the
-// 4,096-band ceiling. The front scans the whole section and materializes only
+// 4,096-band ceiling. The front decodes COMMON and INDEX and materializes only
 // the variant its width selects; before, these names measured the whole decode.
 fn encoded_normal() -> Vec<u8> {
     encoded()

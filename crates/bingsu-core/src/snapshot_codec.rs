@@ -1,4 +1,10 @@
-//! BNGCFG03: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG04: bounded CompiledConfig codec with an explicit fact schema version.
+//!
+//! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
+//! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
+//! the name block have their own CRC, kept in INDEX and COMMON. So the front
+//! decodes COMMON and one variant and proves both without touching the rest,
+//! and the helper's whole decode checks every section.
 use crate::{
     bands::Band,
     color::{
@@ -19,7 +25,7 @@ use crate::{
     layout_view::FrontConfig,
     shorten::{Keep, Method},
     template::{
-        compile::{CompiledLine, FillKind, LineCheck, MAX_LINES, Node, Shape, StyleSpec},
+        compile::{CompiledLine, FillKind, MAX_LINES, Node, Shape, StyleSpec},
         syntax::{Mode, Span},
     },
     width::WidthProfile,
@@ -36,6 +42,16 @@ pub enum Error {
 }
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ALLOC: usize = 64 * 1024 * 1024;
+/// Magic, version, fact schema, COMMON length, variant count.
+pub const HEAD: usize = 20;
+/// Offset, length and CRC of one variant, then four reserved zero bytes.
+const ENTRY: usize = 16;
+const MAGIC: &[u8; 8] = b"BNGCFG04";
+const VERSION: u16 = 4;
+/// CRC of one variant or of the name block.
+pub fn section_sum(section: &[u8]) -> [u8; 4] {
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v4\0", section])
+}
 struct Reader<'a> {
     rest: &'a [u8],
     budget: usize,
@@ -73,6 +89,22 @@ impl Writer {
             out.extend_from_slice(b);
         }
         self.len = n;
+    }
+    /// Fills bytes reserved earlier; the sizing pass has none to fill.
+    fn patch(&mut self, at: usize, b: &[u8]) {
+        if let Some(slot) = self
+            .bytes
+            .as_mut()
+            .and_then(|out| out.get_mut(at..at + b.len()))
+        {
+            slot.copy_from_slice(b);
+        }
+    }
+    fn sum_since(&self, at: usize) -> [u8; 4] {
+        match self.bytes.as_ref().and_then(|out| out.get(at..)) {
+            Some(written) => section_sum(written),
+            None => [0; 4],
+        }
     }
 }
 fn put_slice<T: Wire>(items: &[T], o: &mut Writer) {
@@ -192,7 +224,14 @@ impl<T: Wire> Wire for Vec<T> {
         put_slice(self, o)
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
-        let n = get_len::<T>(r)?;
+        let n = usize::get(r)?;
+        if n > r.rest.len() {
+            return Err(Error::Limit);
+        }
+        r.charge(
+            n.checked_mul(core::mem::size_of::<T>())
+                .ok_or(Error::Limit)?,
+        )?;
         let mut v = Vec::new();
         v.try_reserve_exact(n).map_err(|_| Error::Limit)?;
         for _ in 0..n {
@@ -207,31 +246,14 @@ impl Wire for String {
         o.extend_from_slice(self.as_bytes())
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
-        let s = get_str(r)?;
+        let n = usize::get(r)?;
+        r.charge(n)?;
+        let s = core::str::from_utf8(r.take(n)?).map_err(|_| Error::Utf8)?;
         let mut out = String::new();
         out.try_reserve_exact(s.len()).map_err(|_| Error::Limit)?;
         out.push_str(s);
         Ok(out)
     }
-}
-/// `String::get` without the copy: the same charge and checks, borrowed.
-#[inline(always)]
-fn get_str<'a>(r: &mut Reader<'a>) -> Result<&'a str, Error> {
-    let n = usize::get(r)?;
-    r.charge(n)?;
-    core::str::from_utf8(r.take(n)?).map_err(|_| Error::Utf8)
-}
-/// `Vec::<T>::get`'s length checks and charge, before any element is read.
-fn get_len<T>(r: &mut Reader<'_>) -> Result<usize, Error> {
-    let n = usize::get(r)?;
-    if n > r.rest.len() {
-        return Err(Error::Limit);
-    }
-    r.charge(
-        n.checked_mul(core::mem::size_of::<T>())
-            .ok_or(Error::Limit)?,
-    )?;
-    Ok(n)
 }
 impl<A: Wire, B: Wire> Wire for (A, B) {
     fn put(&self, o: &mut Writer) {
@@ -459,46 +481,6 @@ impl Wire for ResolvedPalette {
             tokens: Wire::get(r)?,
             background: Wire::get(r)?,
             warnings: Wire::get(r)?,
-        })
-    }
-}
-impl Wire for CompiledConfig {
-    fn put(&self, o: &mut Writer) {
-        self.variants.put(o);
-        self.bands.put(o);
-        self.band_names.put(o);
-        self.band_order.put(o);
-        self.transient.put(o);
-        self.vi.put(o);
-        self.palette.put(o);
-        self.light_palette.put(o);
-        self.setup.put(o);
-        self.collect_mask.put(o);
-        self.icons.put(o);
-        self.profile.put(o);
-        self.use_last_column.put(o);
-        self.duration_min_ms.put(o);
-        self.exec_units.put(o);
-        self.widths.put(o);
-    }
-    fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
-        Ok(Self {
-            variants: Wire::get(r)?,
-            bands: Wire::get(r)?,
-            band_names: Wire::get(r)?,
-            band_order: Wire::get(r)?,
-            transient: Wire::get(r)?,
-            vi: Wire::get(r)?,
-            palette: Wire::get(r)?,
-            light_palette: Wire::get(r)?,
-            setup: Wire::get(r)?,
-            collect_mask: Wire::get(r)?,
-            icons: Wire::get(r)?,
-            profile: Wire::get(r)?,
-            use_last_column: Wire::get(r)?,
-            duration_min_ms: Wire::get(r)?,
-            exec_units: Wire::get(r)?,
-            widths: Wire::get(r)?,
         })
     }
 }
@@ -873,7 +855,6 @@ impl Wire for Node {
             Self::GroupEnd => 11u8.put(o),
         }
     }
-    // Two callers (the line decode and the scan); keep each one's loop flat.
     #[inline(always)]
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match u8::get(r)? {
@@ -909,184 +890,125 @@ impl Wire for CompiledLine {
         CompiledLine::from_snapshot(Wire::get(r)?, Wire::get(r)?, Wire::get(r)?).ok_or(Error::Shape)
     }
 }
+/// Writes the sections in order. Offsets and CRCs need the written bytes, so
+/// they go into space reserved for them; the sizing pass leaves it zero.
+fn put_compiled(c: &CompiledConfig, o: &mut Writer) {
+    o.extend_from_slice(MAGIC);
+    VERSION.put(o);
+    FACT_SCHEMA_VERSION.put(o);
+    let common_len_at = o.len;
+    0usize.put(o);
+    c.variants.len().put(o);
+    let common = o.len;
+    c.bands.put(o);
+    c.band_order.put(o);
+    c.transient.put(o);
+    c.vi.put(o);
+    c.palette.put(o);
+    c.light_palette.put(o);
+    c.setup.put(o);
+    c.collect_mask.put(o);
+    c.icons.put(o);
+    c.profile.put(o);
+    c.use_last_column.put(o);
+    c.duration_min_ms.put(o);
+    c.exec_units.put(o);
+    c.widths.put(o);
+    c.band_names.len().put(o);
+    let names_seal = o.len;
+    o.extend_from_slice(&[0; 8]);
+    o.patch(common_len_at, &((o.len - common) as u32).to_le_bytes());
+    let index = o.len;
+    for _ in &c.variants {
+        o.extend_from_slice(&[0; ENTRY]);
+    }
+    for (i, v) in c.variants.iter().enumerate() {
+        let at = o.len;
+        v.put(o);
+        let seal = index + i * ENTRY;
+        o.patch(seal, &(at as u32).to_le_bytes());
+        o.patch(seal + 4, &((o.len - at) as u32).to_le_bytes());
+        o.patch(seal + 8, &o.sum_since(at));
+    }
+    let at = o.len;
+    c.band_names.put(o);
+    o.patch(names_seal, &((o.len - at) as u32).to_le_bytes());
+    o.patch(names_seal + 4, &o.sum_since(at));
+}
 /// Size first, then one fallible allocation. No cloned nodes or partial oversized buffer.
 pub fn encode_compiled(c: &CompiledConfig) -> Result<Vec<u8>, Error> {
+    let size = compiled_size(c)?;
+    validate(c)?;
+    write_compiled(c, size)
+}
+fn compiled_size(c: &CompiledConfig) -> Result<usize, Error> {
     let mut size = Writer {
         bytes: None,
         len: 0,
         error: None,
     };
-    size.extend_from_slice(b"BNGCFG03");
-    3u16.put(&mut size);
-    FACT_SCHEMA_VERSION.put(&mut size);
-    c.put(&mut size);
-    if let Some(e) = size.error {
-        return Err(e);
+    put_compiled(c, &mut size);
+    match size.error {
+        Some(e) => Err(e),
+        None => Ok(size.len),
     }
-    validate(c)?;
+}
+fn write_compiled(c: &CompiledConfig, size: usize) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(size.len)
-        .map_err(|_| Error::Limit)?;
+    bytes.try_reserve_exact(size).map_err(|_| Error::Limit)?;
     let mut out = Writer {
         bytes: Some(bytes),
         len: 0,
         error: None,
     };
-    out.extend_from_slice(b"BNGCFG03");
-    3u16.put(&mut out);
-    FACT_SCHEMA_VERSION.put(&mut out);
-    c.put(&mut out);
+    put_compiled(c, &mut out);
     if let Some(e) = out.error {
         return Err(e);
     }
     out.bytes.ok_or(Error::Limit)
 }
-pub fn decode_compiled(bytes: &[u8]) -> Result<CompiledConfig, Error> {
-    if bytes.len() > MAX_BYTES {
-        return Err(Error::Limit);
-    }
-    let mut r = Reader {
-        rest: bytes,
-        budget: MAX_ALLOC,
-    };
-    if r.take(8)? != b"BNGCFG03" || u16::get(&mut r)? != 3 {
+struct Head {
+    common: usize,
+    variants: usize,
+    /// HEAD + COMMON + INDEX; at most `c_len`.
+    front: usize,
+}
+fn le32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+fn parse_head(c: &[u8], c_len: usize) -> Result<Head, Error> {
+    let h = c.get(..HEAD).ok_or(Error::Short)?;
+    if h[..8] != *MAGIC || h[8..10] != VERSION.to_le_bytes() {
         return Err(Error::Tag);
     }
     // Field nodes store indices. Reject before decoding any nodes so an older
     // schema takes the caller's existing snapshot miss/recompile path.
-    if u16::get(&mut r)? != FACT_SCHEMA_VERSION {
+    if h[10..12] != FACT_SCHEMA_VERSION.to_le_bytes() {
         return Err(Error::Tag);
     }
-    let c = CompiledConfig::get(&mut r)?;
-    if !r.rest.is_empty() {
-        return Err(Error::Trailing);
-    }
-    validate(&c)?;
-    Ok(c)
-}
-/// `decode_compiled` without materializing variants or band names: the same
-/// reads in the same order, the same allocation charges and every check,
-/// so it rejects exactly what `decode_compiled` rejects, with the same error
-/// (barring an allocation failure, which only the whole decode can meet).
-/// Each variant is checked line by line and only its offset kept; `select`
-/// then decodes the one variant the width picks (K63).
-pub fn scan_compiled(bytes: &[u8]) -> Result<CompiledLayout<'_>, Error> {
-    if bytes.len() > MAX_BYTES {
+    let common = usize::try_from(le32(h, 12)).map_err(|_| Error::Limit)?;
+    let variants = usize::try_from(le32(h, 16)).map_err(|_| Error::Limit)?;
+    if !(1..=crate::bands::MAX_BANDS + 1).contains(&variants) {
         return Err(Error::Limit);
     }
-    let mut r = Reader {
-        rest: bytes,
-        budget: MAX_ALLOC,
-    };
-    if r.take(8)? != b"BNGCFG03" || u16::get(&mut r)? != 3 {
-        return Err(Error::Tag);
+    let front = (HEAD + variants * ENTRY)
+        .checked_add(common)
+        .ok_or(Error::Limit)?;
+    if front > c_len {
+        return Err(Error::Shape);
     }
-    if u16::get(&mut r)? != FACT_SCHEMA_VERSION {
-        return Err(Error::Tag);
-    }
-    let n = get_len::<Vec<CompiledLine>>(&mut r)?;
-    // More than MAX_BANDS + 1 variants fails `check`; keep reading for the
-    // decoder's error order, but record no more offsets than can be used.
-    let kept = n.min(crate::bands::MAX_BANDS + 1);
-    let mut offsets = Vec::new();
-    offsets.try_reserve_exact(kept).map_err(|_| Error::Limit)?;
-    let mut variant_lines = true;
-    for _ in 0..n {
-        if offsets.len() < kept {
-            // MAX_BYTES bounds the offset.
-            offsets.push((bytes.len() - r.rest.len()) as u32);
-        }
-        let lines = get_len::<CompiledLine>(&mut r)?;
-        variant_lines &= (1..=MAX_LINES).contains(&lines);
-        for _ in 0..lines {
-            scan_line(&mut r)?;
-        }
-    }
-    let bands: Vec<Band> = Wire::get(&mut r)?;
-    // Names are borrowed for `check`; past MAX_BANDS + 1 the count fails it.
-    let names = get_len::<String>(&mut r)?;
-    let kept = names.min(crate::bands::MAX_BANDS + 1);
-    let mut band_names = Vec::new();
-    band_names
-        .try_reserve_exact(kept)
-        .map_err(|_| Error::Limit)?;
-    for _ in 0..names {
-        let name = get_str(&mut r)?;
-        if band_names.len() < kept {
-            band_names.push(name);
-        }
-    }
-    let layout = CompiledLayout {
-        bytes,
-        offsets,
-        band_order: Wire::get(&mut r)?,
-        transient: Wire::get(&mut r)?,
-        vi: Wire::get(&mut r)?,
-        palette: Wire::get(&mut r)?,
-        light_palette: Wire::get(&mut r)?,
-        setup: Wire::get(&mut r)?,
-        collect_mask: Wire::get(&mut r)?,
-        icons: Wire::get(&mut r)?,
-        profile: Wire::get(&mut r)?,
-        use_last_column: Wire::get(&mut r)?,
-        duration_min_ms: Wire::get(&mut r)?,
-        exec_units: Wire::get(&mut r)?,
-        widths: Wire::get(&mut r)?,
-        bands,
-    };
-    if !r.rest.is_empty() {
-        return Err(Error::Trailing);
-    }
-    check(&Parts {
-        variants: n,
-        variant_lines,
-        bands: &layout.bands,
-        band_names: &band_names,
-        band_order: &layout.band_order,
-        setup: layout.setup.len(),
-        palette: &layout.palette,
-        light_palette: &layout.light_palette,
-        collect_mask: layout.collect_mask,
-        exec_units: &layout.exec_units,
-        widths: &layout.widths,
-    })?;
-    Ok(layout)
+    Ok(Head {
+        common,
+        variants,
+        front,
+    })
 }
-/// `CompiledLine::get` without building it: the reads, charges and the N1
-/// line checks of `from_snapshot`, in the same order.
-fn scan_line(r: &mut Reader<'_>) -> Result<(), Error> {
-    let n = get_len::<Node>(r)?;
-    let mut line = LineCheck::new(n);
-    for _ in 0..n {
-        // Only `Text` (tag 0) owns heap memory; every other node is read as
-        // `Node::get` reads it.
-        if r.rest.first() == Some(&0) {
-            r.take(1)?;
-            line.text(get_str(r)?);
-        } else {
-            line.node(&Node::get(r)?);
-        }
-    }
-    let spans = get_len::<Span>(r)?;
-    line.spans(spans);
-    for _ in 0..spans {
-        line.span(Span::get(r)?);
-    }
-    let fill = Option::<usize>::get(r)?;
-    if line.finish(fill) {
-        Ok(())
-    } else {
-        Err(Error::Shape)
-    }
+/// Length of HEAD + COMMON + INDEX, read from HEAD. `c_len` is the whole section.
+pub fn front_len(head: &[u8], c_len: usize) -> Result<usize, Error> {
+    Ok(parse_head(head, c_len)?.front)
 }
-/// A checked compiled config with every field but the variants and band
-/// names decoded. Only `scan_compiled` makes one, from the bytes it holds.
-#[derive(Debug)]
-pub struct CompiledLayout<'a> {
-    bytes: &'a [u8],
-    /// Where variant i starts in `bytes`; `check` made it `bands.len() + 1` long.
-    offsets: Vec<u32>,
+/// Every field of COMMON, in wire order.
+struct Common {
     bands: Vec<Band>,
     band_order: Vec<usize>,
     transient: CompiledLine,
@@ -1101,46 +1023,237 @@ pub struct CompiledLayout<'a> {
     duration_min_ms: u64,
     exec_units: Vec<ExecUnit>,
     widths: Vec<WidthRun>,
+    name_count: usize,
+    names_len: usize,
+    names_crc: [u8; 4],
 }
-impl CompiledLayout<'_> {
-    pub fn collect_mask(&self) -> u32 {
-        self.collect_mask
+fn get_common(r: &mut Reader<'_>) -> Result<Common, Error> {
+    Ok(Common {
+        bands: Wire::get(r)?,
+        band_order: Wire::get(r)?,
+        transient: Wire::get(r)?,
+        vi: Wire::get(r)?,
+        palette: Wire::get(r)?,
+        light_palette: Wire::get(r)?,
+        setup: Wire::get(r)?,
+        collect_mask: Wire::get(r)?,
+        icons: Wire::get(r)?,
+        profile: Wire::get(r)?,
+        use_last_column: Wire::get(r)?,
+        duration_min_ms: Wire::get(r)?,
+        exec_units: Wire::get(r)?,
+        widths: Wire::get(r)?,
+        name_count: Wire::get(r)?,
+        names_len: Wire::get(r)?,
+        names_crc: r.take(4)?.try_into().map_err(|_| Error::Short)?,
+    })
+}
+struct Entry {
+    offset: usize,
+    len: usize,
+    crc: [u8; 4],
+    pad: u32,
+}
+/// COMMON decoded and INDEX proved; nothing past INDEX has been looked at.
+struct Sections<'a> {
+    common: Common,
+    index: &'a [u8],
+    /// Where the name block starts: right after the last variant.
+    names: usize,
+    budget: usize,
+}
+impl Sections<'_> {
+    fn entry(&self, i: usize) -> Entry {
+        let e = &self.index[i * ENTRY..(i + 1) * ENTRY];
+        Entry {
+            offset: le32(e, 0) as usize,
+            len: le32(e, 4) as usize,
+            crc: [e[8], e[9], e[10], e[11]],
+            pad: le32(e, 12),
+        }
     }
-    pub fn exec_units(&self) -> &[ExecUnit] {
-        &self.exec_units
+    fn variants(&self) -> usize {
+        self.index.len() / ENTRY
     }
-    /// Materialize the variant `bands::select` picks at `width` (else the
-    /// default), as `CompiledConfig`'s selection would. The scan already
-    /// checked and charged it; this decode only fails if allocation does.
-    pub fn select(self, width: u16) -> Result<FrontConfig, Error> {
-        let band = crate::bands::select(&self.band_order, &self.bands, width);
-        let at = band
-            .and_then(|b| self.offsets.get(b + 1))
-            .or(self.offsets.first())
-            .ok_or(Error::Shape)?;
-        let mut r = Reader {
-            rest: self.bytes.get(*at as usize..).ok_or(Error::Shape)?,
-            budget: MAX_ALLOC,
-        };
-        Ok(FrontConfig {
-            lines: Wire::get(&mut r)?,
+}
+/// `front` is exactly HEAD + COMMON + INDEX, already proved by the header
+/// checksum on the front. Every later section slice relies on the tiling
+/// checked here, so this is the memory-safety condition, not only a shape
+/// check: variants start at the end of INDEX, each where the one before ended,
+/// and the name block ends exactly at `c_len`.
+fn parse_sections(front: &[u8], c_len: usize) -> Result<Sections<'_>, Error> {
+    let head = parse_head(front, c_len)?;
+    if front.len() != head.front {
+        return Err(Error::Shape);
+    }
+    let mut r = Reader {
+        rest: &front[HEAD..HEAD + head.common],
+        budget: MAX_ALLOC,
+    };
+    let common = get_common(&mut r)?;
+    if !r.rest.is_empty() {
+        return Err(Error::Trailing);
+    }
+    let budget = r.budget;
+    let mut sections = Sections {
+        common,
+        index: &front[HEAD + head.common..],
+        names: 0,
+        budget,
+    };
+    let mut end = head.front;
+    for i in 0..head.variants {
+        let e = sections.entry(i);
+        if e.offset != end || e.len == 0 || e.pad != 0 {
+            return Err(Error::Shape);
+        }
+        end = end.checked_add(e.len).ok_or(Error::Limit)?;
+    }
+    if end.checked_add(sections.common.names_len) != Some(c_len) {
+        return Err(Error::Shape);
+    }
+    sections.names = end;
+    Ok(sections)
+}
+/// What the front holds between INDEX and the selected variant.
+#[derive(Debug)]
+pub struct FrontPlan {
+    pub config: FrontConfig,
+    /// Where the selected variant starts in the compiled section.
+    pub offset: usize,
+    pub len: usize,
+    crc: [u8; 4],
+    budget: usize,
+}
+/// The front's checks over `front` (see `parse_sections`): everything
+/// `validate` checks but what needs the names or unselected variants.
+pub fn plan_front(front: &[u8], c_len: usize, width: u16) -> Result<FrontPlan, Error> {
+    let s = parse_sections(front, c_len)?;
+    let c = &s.common;
+    check(&Parts {
+        variants: s.variants(),
+        // `finish_front` checks the selected variant's line count.
+        variant_lines: true,
+        bands: &c.bands,
+        band_names: None,
+        name_count: c.name_count,
+        band_order: &c.band_order,
+        setup: c.setup.len(),
+        palette: &c.palette,
+        light_palette: &c.light_palette,
+        collect_mask: c.collect_mask,
+        exec_units: &c.exec_units,
+        widths: &c.widths,
+    })?;
+    let band = crate::bands::select(&c.band_order, &c.bands, width);
+    // `check` made the count `bands.len() + 1`; `select` returns a band index.
+    let e = s.entry(band.map_or(0, |b| b + 1));
+    let budget = s.budget;
+    let c = s.common;
+    Ok(FrontPlan {
+        config: FrontConfig {
+            lines: Vec::new(),
             band,
-            bands: self.bands,
-            band_order: self.band_order,
-            transient: self.transient,
-            vi: self.vi,
-            palette: self.palette,
-            light_palette: self.light_palette,
-            setup: self.setup,
-            collect_mask: self.collect_mask,
-            icons: self.icons,
-            profile: self.profile,
-            use_last_column: self.use_last_column,
-            duration_min_ms: self.duration_min_ms,
-            exec_units: self.exec_units,
-            widths: self.widths,
-        })
+            bands: c.bands,
+            band_order: c.band_order,
+            transient: c.transient,
+            vi: c.vi,
+            palette: c.palette,
+            light_palette: c.light_palette,
+            setup: c.setup,
+            collect_mask: c.collect_mask,
+            icons: c.icons,
+            profile: c.profile,
+            use_last_column: c.use_last_column,
+            duration_min_ms: c.duration_min_ms,
+            exec_units: c.exec_units,
+            widths: c.widths,
+        },
+        offset: e.offset,
+        len: e.len,
+        crc: e.crc,
+        budget,
+    })
+}
+/// The selected variant's CRC, then its lines (each checked by `from_snapshot`).
+/// It spends what COMMON left of the budget: the section has one `MAX_ALLOC`.
+pub fn finish_front(mut plan: FrontPlan, variant: &[u8]) -> Result<FrontConfig, Error> {
+    if section_sum(variant) != plan.crc {
+        return Err(Error::Shape);
     }
+    let mut r = Reader {
+        rest: variant,
+        budget: plan.budget,
+    };
+    let lines: Vec<CompiledLine> = Wire::get(&mut r)?;
+    if !r.rest.is_empty() {
+        return Err(Error::Trailing);
+    }
+    if !(1..=MAX_LINES).contains(&lines.len()) {
+        return Err(Error::Shape);
+    }
+    plan.config.lines = lines;
+    Ok(plan.config)
+}
+/// The helper's whole decode: every CRC and section the front skips, under the
+/// one budget COMMON started, then all of `validate`. Whatever passes here
+/// passes the front at every width, with the same result.
+pub fn decode_compiled(c: &[u8]) -> Result<CompiledConfig, Error> {
+    if c.len() > MAX_BYTES {
+        return Err(Error::Limit);
+    }
+    let s = parse_sections(&c[..parse_head(c, c.len())?.front], c.len())?;
+    let n = s.variants();
+    let mut budget = n
+        .checked_mul(size_of::<Vec<CompiledLine>>())
+        .and_then(|table| s.budget.checked_sub(table))
+        .ok_or(Error::Limit)?;
+    let mut variants = Vec::new();
+    variants.try_reserve_exact(n).map_err(|_| Error::Limit)?;
+    for i in 0..n {
+        let e = s.entry(i);
+        let (lines, left) = section(&c[e.offset..e.offset + e.len], e.crc, budget)?;
+        variants.push(lines);
+        budget = left;
+    }
+    let (band_names, _): (Vec<String>, _) = section(&c[s.names..], s.common.names_crc, budget)?;
+    let m = s.common;
+    // The front's `check` used this count; the file must agree with itself.
+    if m.name_count != band_names.len() {
+        return Err(Error::Shape);
+    }
+    let out = CompiledConfig {
+        variants,
+        bands: m.bands,
+        band_names,
+        band_order: m.band_order,
+        transient: m.transient,
+        vi: m.vi,
+        palette: m.palette,
+        light_palette: m.light_palette,
+        setup: m.setup,
+        collect_mask: m.collect_mask,
+        icons: m.icons,
+        profile: m.profile,
+        use_last_column: m.use_last_column,
+        duration_min_ms: m.duration_min_ms,
+        exec_units: m.exec_units,
+        widths: m.widths,
+    };
+    validate(&out)?;
+    Ok(out)
+}
+/// One CRC-covered section, spending from `budget`; returns what is left.
+fn section<T: Wire>(body: &[u8], crc: [u8; 4], budget: usize) -> Result<(T, usize), Error> {
+    if section_sum(body) != crc {
+        return Err(Error::Shape);
+    }
+    let mut r = Reader { rest: body, budget };
+    let value = T::get(&mut r)?;
+    if !r.rest.is_empty() {
+        return Err(Error::Trailing);
+    }
+    Ok((value, r.budget))
 }
 pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
     check(&Parts {
@@ -1150,7 +1263,8 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
             .iter()
             .all(|v| (1..=MAX_LINES).contains(&v.len())),
         bands: &c.bands,
-        band_names: &c.band_names,
+        band_names: Some(&c.band_names),
+        name_count: c.band_names.len(),
         band_order: &c.band_order,
         setup: c.setup.len(),
         palette: &c.palette,
@@ -1160,14 +1274,17 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
         widths: &c.widths,
     })
 }
-/// What `validate` reads. The scan fills it without materializing variants
-/// or band names, so both paths run one set of checks.
-struct Parts<'c, N> {
+/// What `validate` reads. The front fills it from COMMON without the variants
+/// or the band names, so both paths run one set of checks.
+struct Parts<'c> {
     variants: usize,
     /// Every variant has 1..=MAX_LINES lines.
     variant_lines: bool,
     bands: &'c [Band],
-    band_names: &'c [N],
+    /// None on the front: the helper's decode and publishing check the names,
+    /// their uniqueness and every band-name reference.
+    band_names: Option<&'c [String]>,
+    name_count: usize,
     band_order: &'c [usize],
     setup: usize,
     palette: &'c ResolvedPalette,
@@ -1176,11 +1293,11 @@ struct Parts<'c, N> {
     exec_units: &'c [ExecUnit],
     widths: &'c [WidthRun],
 }
-fn check<N: AsRef<str>>(c: &Parts<'_, N>) -> Result<(), Error> {
-    let named = |n: &String| c.band_names.iter().any(|b| b.as_ref() == n.as_str());
+fn check(c: &Parts<'_>) -> Result<(), Error> {
+    let named = |n: &String| c.band_names.is_none_or(|names| names.contains(n));
     if c.bands.len() > crate::bands::MAX_BANDS
         || c.variants != c.bands.len() + 1
-        || c.band_names.len() != c.bands.len()
+        || c.name_count != c.bands.len()
         || c.setup != crate::field::BUILTIN.len()
         || c.palette.tokens.len() != crate::color::palette::TOKENS.len()
         || c.light_palette.tokens.len() != crate::color::palette::TOKENS.len()
@@ -1190,7 +1307,11 @@ fn check<N: AsRef<str>>(c: &Parts<'_, N>) -> Result<(), Error> {
     // Band names are arbitrary TOML keys, not segment ids. The source
     // table and merge guarantee uniqueness, including for quoted keys.
     let mut names = BTreeSet::new();
-    if c.band_names.iter().any(|name| !names.insert(name.as_ref())) {
+    if c.band_names
+        .into_iter()
+        .flatten()
+        .any(|name| !names.insert(name.as_str()))
+    {
         return Err(Error::Shape);
     }
     // Validate the supplied order without allocating a graph or recompiling it.

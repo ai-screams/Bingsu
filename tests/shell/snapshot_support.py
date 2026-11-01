@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 
-from conftest import COLD_INIT_NOTICE, real_bin, trusted_env
+from shell_support import COLD_INIT_NOTICE, real_bin, trusted_env
 
 
 class SnapshotSession:
@@ -113,7 +113,7 @@ class SnapshotSession:
 
     def identity(self):
         wire = (self.store() / "snapshot").read_bytes()
-        assert wire[:8] == b"BNGSNP02"
+        assert wire[:8] == b"BNGSNP03"
         return wire[88:120], struct.unpack_from("<Q", wire, 16)[0]
 
     def await_text(self, text, timeout=4):

@@ -697,6 +697,10 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+      # 이것을 실패시키는 것: 오버플로 검사가 꺼지는 release에서 코어와 색인 범위 시험을 돌리지 않는 것.
+      - name: Core tests without overflow checks (release)
+        if: runner.os == 'Linux'
+        run: cargo test -j 2 --release -p bingsu-core -p bingsu-core-tests
       - name: Detach the X-11 filesystem
         if: always() && runner.os == 'macOS' && env.BINGSU_X11_MOUNT != ''
         run: |
@@ -801,6 +805,13 @@ jobs:
           cargo build -p bingsu-golden --release --target wasm32-wasip1
           wasmtime run target/wasm32-wasip1/release/bingsu-golden.wasm > "$RUNNER_TEMP/render-wasm.tsv"
           cmp "$RUNNER_TEMP/render-wasm.tsv" tests/golden/render/render.tsv
+
+      # 이것을 실패시키는 것: 색인 범위 계산이 32비트 usize에서 감기는 것을 64비트 시험만으로 넘기는 것.
+      - name: Forged band index (wasm32-wasip1 under wasmtime)
+        env:
+          CARGO_BUILD_JOBS: 2
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+        run: cargo test -p bingsu-core-tests --test snapshot_forge --target wasm32-wasip1
 
       # 이것을 실패시키는 것: snapshot codec의 native/WASM 바이트 차이.
       - name: Snapshot golden (native and wasm32-unknown-unknown)

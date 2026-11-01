@@ -1,4 +1,4 @@
-//! Version 2 snapshot frames, context addresses and execution eligibility.
+//! Version 3 snapshot frames, context addresses and execution eligibility.
 //! Checksums detect damage; checked runtime descriptors establish trust.
 use crate::{
     config::compile::{CompiledConfig, ExecUnit},
@@ -329,63 +329,174 @@ impl FrontSnapshot {
 /// Maximum single read, independent of attacker-controlled wire lengths.
 pub const READ_CHUNK: usize = 16 * 1024;
 
-/// Sequential front decoder: header, prefix, then only the compiled section.
+#[derive(Clone, Copy, PartialEq)]
+enum Stage {
+    Header,
+    Prefix,
+    /// The fixed start of the compiled section, which sizes the front part.
+    Head,
+    /// The rest of HEAD + COMMON + INDEX.
+    Front,
+    /// Bytes before the selected variant.
+    Skip,
+    Variant,
+    Done,
+}
+/// Sequential front decoder: header, prefix, HEAD, COMMON and INDEX, then only
+/// the variant selected at the envelope's width, which arrives before any read.
+/// `read` is the one call the filter allows here, so bytes before the variant
+/// are read and dropped. After the prefix each read asks for a full chunk, up
+/// to the end of the compiled section until INDEX names the selected variant's
+/// end; what the last of those reads brings past that end is dropped unparsed.
 /// Construct only after the descriptor's owner/mode/type/link/ACL/size checks.
 /// No body allocation is approved until BOTH fixed parts and file size agree.
 pub struct FrontDecoder {
+    /// Header, prefix, then the compiled section through INDEX.
     bytes: Vec<u8>,
     file_len: usize,
+    width: u16,
+    stage: Stage,
+    /// Where `bytes` ends for the current stage.
     end: usize,
+    /// File offset read so far, and the offset reads stop at.
+    pos: usize,
+    limit: usize,
+    skip: usize,
+    plan: Option<snapshot_codec::FrontPlan>,
+    variant: Vec<u8>,
 }
 impl FrontDecoder {
-    pub fn new(file_len: u64) -> Result<Self, Error> {
+    pub fn new(file_len: u64, width: u16) -> Result<Self, Error> {
         let file_len = usize::try_from(file_len).map_err(|_| Error::Limit)?;
         if !(HEADER + PREFIX..=HEADER + PREFIX + COMPILED_MAX + META_MAX).contains(&file_len) {
             return Err(Error::Limit);
         }
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(HEADER + PREFIX)
+            .try_reserve_exact(HEADER + PREFIX + snapshot_codec::HEAD)
             .map_err(|_| Error::Limit)?;
         Ok(Self {
             bytes,
             file_len,
+            width,
+            stage: Stage::Header,
             end: HEADER,
+            pos: 0,
+            limit: HEADER,
+            skip: 0,
+            plan: None,
+            variant: Vec::new(),
         })
     }
     /// Zero means complete. Short reads are accepted; EOF before zero is failure.
     pub fn read_len(&self) -> usize {
-        self.end.saturating_sub(self.bytes.len()).min(READ_CHUNK)
+        self.limit.saturating_sub(self.pos).min(READ_CHUNK)
     }
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
         if bytes.is_empty() || bytes.len() > self.read_len() {
             return Err(Error::Short);
         }
-        self.bytes.extend_from_slice(bytes);
-        if self.bytes.len() != self.end {
-            return Ok(());
-        }
-        if self.end == HEADER {
-            header(&self.bytes)?;
-            self.end = HEADER + PREFIX;
-        } else if self.end == HEADER + PREFIX {
-            let (c, m) = lengths(&self.bytes)?;
-            if self.file_len != HEADER + PREFIX + c + m {
-                return Err(Error::Shape);
+        self.pos += bytes.len();
+        let mut rest = bytes;
+        while !rest.is_empty() && self.stage != Stage::Done {
+            let n = match self.stage {
+                Stage::Skip => self.skip,
+                Stage::Variant => self.plan_len() - self.variant.len(),
+                _ => self.end - self.bytes.len(),
             }
-            self.bytes.try_reserve_exact(c).map_err(|_| Error::Limit)?;
-            self.end += c;
+            .min(rest.len());
+            let (now, after) = rest.split_at(n);
+            rest = after;
+            match self.stage {
+                Stage::Skip => self.skip -= n,
+                Stage::Variant => self.variant.extend_from_slice(now),
+                _ => self.bytes.extend_from_slice(now),
+            }
+            self.advance()?;
         }
         Ok(())
     }
-    /// The envelope gives the width before any read, so the decode ends by
-    /// materializing only the variant selected at `width`. Another width
-    /// (a later prompt) selects again from its own read of the same bytes.
-    pub fn finish_for(self, width: u16) -> Result<FrontSnapshot, Error> {
-        if self.read_len() != 0 {
+    fn plan_len(&self) -> usize {
+        self.plan.as_ref().map_or(0, |p| p.len)
+    }
+    /// Leaves a stage whose bytes are complete.
+    fn advance(&mut self) -> Result<(), Error> {
+        match self.stage {
+            Stage::Header | Stage::Prefix | Stage::Head | Stage::Front
+                if self.bytes.len() != self.end =>
+            {
+                return Ok(());
+            }
+            Stage::Header => {
+                header(&self.bytes)?;
+                self.end = HEADER + PREFIX;
+                self.limit = self.end;
+                self.stage = Stage::Prefix;
+            }
+            Stage::Prefix => {
+                let (c, m) = lengths(&self.bytes)?;
+                if self.file_len != HEADER + PREFIX + c + m {
+                    return Err(Error::Shape);
+                }
+                self.end += snapshot_codec::HEAD;
+                self.limit = HEADER + PREFIX + c;
+                self.stage = Stage::Head;
+            }
+            Stage::Head => {
+                let compiled = self.limit - HEADER - PREFIX;
+                let front = snapshot_codec::front_len(&self.bytes[HEADER + PREFIX..], compiled)?;
+                self.bytes
+                    .try_reserve_exact(front - snapshot_codec::HEAD)
+                    .map_err(|_| Error::Limit)?;
+                self.end = HEADER + PREFIX + front;
+                self.stage = Stage::Front;
+            }
+            Stage::Front => {
+                let frame = Frame {
+                    bytes: &self.bytes,
+                    compiled: &self.bytes[HEADER + PREFIX..],
+                };
+                frame.check_sum(frame.compiled)?;
+                let compiled = self.limit - HEADER - PREFIX;
+                let plan = snapshot_codec::plan_front(frame.compiled, compiled, self.width)?;
+                frame.matches(plan.config.collect_mask, &plan.config.exec_units)?;
+                // `plan_front` proved the variant starts at or after INDEX's end
+                // and ends inside the section.
+                self.skip = HEADER + PREFIX + plan.offset - self.end;
+                self.limit = HEADER + PREFIX + plan.offset + plan.len;
+                self.variant
+                    .try_reserve_exact(plan.len)
+                    .map_err(|_| Error::Limit)?;
+                self.plan = Some(plan);
+                self.stage = if self.skip == 0 {
+                    Stage::Variant
+                } else {
+                    Stage::Skip
+                };
+            }
+            Stage::Skip if self.skip == 0 => self.stage = Stage::Variant,
+            Stage::Variant if self.variant.len() == self.plan_len() => self.stage = Stage::Done,
+            Stage::Skip | Stage::Variant | Stage::Done => {}
+        }
+        Ok(())
+    }
+    /// The variant selected at the width given to `new`. Another width (a later
+    /// prompt) selects again from its own read of the same bytes.
+    pub fn finish(self) -> Result<FrontSnapshot, Error> {
+        if self.stage != Stage::Done {
             return Err(Error::Short);
         }
-        Snapshot::decode_front(&self.bytes, self.file_len, width)
+        let plan = self.plan.ok_or(Error::Short)?;
+        let frame = Frame {
+            bytes: &self.bytes,
+            compiled: &self.bytes[HEADER + PREFIX..],
+        };
+        Ok(FrontSnapshot {
+            id: frame.id()?,
+            clock_kind: self.bytes[84],
+            resume: u64at(&self.bytes, 152)?,
+            config: snapshot_codec::finish_front(plan, &self.variant)?,
+        })
     }
 }
 
@@ -393,8 +504,8 @@ fn header(b: &[u8]) -> Result<(), Error> {
     if b.len() < HEADER {
         return Err(Error::Short);
     }
-    if &b[..8] != b"BNGSNP02"
-        || b[8..12] != [2, 0, 64, 0]
+    if &b[..8] != b"BNGSNP03"
+        || b[8..12] != [3, 0, 64, 0]
         || b[12] > 1
         || b[13..16] != [0; 3]
         || b[28..56] != [0; 28]
@@ -424,8 +535,8 @@ impl Snapshot {
         let mut out = Vec::new();
         out.try_reserve_exact(len).map_err(|_| Error::Limit)?;
         out.resize(HEADER + PREFIX, 0);
-        set(&mut out, 0, b"BNGSNP02");
-        set(&mut out, 8, &2u16.to_le_bytes());
+        set(&mut out, 0, b"BNGSNP03");
+        set(&mut out, 8, &3u16.to_le_bytes());
         set(&mut out, 10, &64u16.to_le_bytes());
         out[12] = u8::from(self.config.exec_units.iter().any(|u| u.not_run.is_none()));
         set(&mut out, 16, &self.id.generation.to_le_bytes());
@@ -433,8 +544,8 @@ impl Snapshot {
         set(&mut out, 56, &self.config.collect_mask.to_le_bytes());
         set(&mut out, 60, &((PREFIX + c.len()) as u32).to_le_bytes());
         let p = &mut out[HEADER..];
-        set(p, 0, b"BNGCMP02");
-        set(p, 8, &2u16.to_le_bytes());
+        set(p, 0, b"BNGCMP03");
+        set(p, 8, &3u16.to_le_bytes());
         set(p, 10, &128u16.to_le_bytes());
         set(p, 12, &(c.len() as u32).to_le_bytes());
         set(p, 16, &(self.metadata.len() as u32).to_le_bytes());
@@ -443,7 +554,8 @@ impl Snapshot {
         set(p, 40, &self.id.epoch);
         set(p, 56, &self.id.context);
         set(p, 88, &resume.to_le_bytes());
-        let sum = crc32c(&[b"bingsu-snapshot-v2\0", &out[..160], &c]);
+        let front = snapshot_codec::front_len(&c, c.len())?;
+        let sum = frame_sum(&out, &c[..front]);
         set(&mut out, 160, &sum);
         out.extend_from_slice(&c);
         out.extend_from_slice(&self.metadata);
@@ -471,20 +583,37 @@ impl Snapshot {
         out.metadata.extend_from_slice(&bytes[end..]);
         Ok(out)
     }
-    /// The front's read: header, prefix and compiled section (never the
-    /// metadata), with only the variant selected at `width` materialized.
-    /// Rejects exactly what the helper's whole decode of the section rejects.
+    /// `FrontDecoder` over `bytes`, which end with the compiled section (the
+    /// front never reads the metadata): only the variant selected at `width`
+    /// is materialized. It may read fewer bytes than `bytes` has, and accepts
+    /// damage in sections it does not read. Whatever `decode` accepts it
+    /// accepts at every width, with the same result.
     pub fn decode_front(bytes: &[u8], file_len: usize, width: u16) -> Result<FrontSnapshot, Error> {
-        let frame = Frame::check(bytes, file_len)?;
-        let layout = snapshot_codec::scan_compiled(frame.compiled)?;
-        frame.matches(layout.collect_mask(), layout.exec_units())?;
-        Ok(FrontSnapshot {
-            id: frame.id()?,
-            clock_kind: bytes[84],
-            resume: u64at(bytes, 152)?,
-            config: layout.select(width)?,
-        })
+        cut_at_compiled_end(bytes, file_len)?;
+        let mut decoder = FrontDecoder::new(file_len as u64, width)?;
+        let mut rest = bytes;
+        while decoder.read_len() != 0 {
+            let (now, after) = rest
+                .split_at_checked(decoder.read_len())
+                .ok_or(Error::Short)?;
+            decoder.push(now)?;
+            rest = after;
+        }
+        decoder.finish()
     }
+}
+/// `bytes` is exactly a file of `file_len` bytes up to the end of its compiled section.
+fn cut_at_compiled_end(bytes: &[u8], file_len: usize) -> Result<(), Error> {
+    let (c_len, m_len) = lengths(bytes)?;
+    if file_len != HEADER + PREFIX + c_len + m_len || bytes.len() != HEADER + PREFIX + c_len {
+        return Err(Error::Shape);
+    }
+    Ok(())
+}
+/// The header's checksum covers the header, the prefix and the compiled
+/// section's HEAD, COMMON and INDEX; those carry the other sections' CRCs.
+fn frame_sum(fixed: &[u8], front: &[u8]) -> [u8; 4] {
+    crc32c(&[b"bingsu-snapshot-v3\0", &fixed[..160], front])
 }
 /// Header, prefix and CRC of a snapshot cut at the end of its compiled section.
 struct Frame<'a> {
@@ -493,15 +622,18 @@ struct Frame<'a> {
 }
 impl<'a> Frame<'a> {
     fn check(bytes: &'a [u8], file_len: usize) -> Result<Self, Error> {
-        let (c_len, m_len) = lengths(bytes)?;
-        if file_len != HEADER + PREFIX + c_len + m_len || bytes.len() != HEADER + PREFIX + c_len {
+        cut_at_compiled_end(bytes, file_len)?;
+        let compiled = &bytes[HEADER + PREFIX..];
+        let frame = Self { bytes, compiled };
+        let front = snapshot_codec::front_len(compiled, compiled.len())?;
+        frame.check_sum(&compiled[..front])?;
+        Ok(frame)
+    }
+    fn check_sum(&self, front: &[u8]) -> Result<(), Error> {
+        if frame_sum(self.bytes, front) != self.bytes[160..164] {
             return Err(Error::Shape);
         }
-        let c = &bytes[HEADER + PREFIX..];
-        if crc32c(&[b"bingsu-snapshot-v2\0", &bytes[..160], c]) != bytes[160..164] {
-            return Err(Error::Shape);
-        }
-        Ok(Self { bytes, compiled: c })
+        Ok(())
     }
     /// The header's copies of the collect mask and the runnable-unit flag.
     fn matches(&self, collect_mask: u32, exec_units: &[ExecUnit]) -> Result<(), Error> {
@@ -528,12 +660,12 @@ pub fn lengths(b: &[u8]) -> Result<(usize, usize), Error> {
     if b.len() < HEADER + PREFIX {
         return Err(Error::Short);
     }
-    if &b[..8] != b"BNGSNP02"
-        || b[8..12] != [2, 0, 64, 0]
+    if &b[..8] != b"BNGSNP03"
+        || b[8..12] != [3, 0, 64, 0]
         || b[12] > 1
         || b[13..16] != [0; 3]
-        || &b[64..72] != b"BNGCMP02"
-        || b[72..76] != [2, 0, 128, 0]
+        || &b[64..72] != b"BNGCMP03"
+        || b[72..76] != [3, 0, 128, 0]
         || ![1, 2].contains(&b[84])
         || b[85..88] != [0; 3]
         || b[28..56] != [0; 28]
