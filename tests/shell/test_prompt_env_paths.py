@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+import zlib
 
 import pytest
 
@@ -2406,7 +2407,7 @@ def child_capture(tmp_path):
     # 이것을 실패시키는 것: assert shutil.which("strace"), "required live tracing tool is missing" 조건을 제거하거나 반전하는 변이.
     assert shutil.which("strace"), "required live tracing tool is missing"
 
-    def capture(template="{dir}{git}{char}", invalid=False, name=None, timestamps=False):
+    def capture(template="{dir}{git}{char}", invalid=False, name=None, timestamps=False, redraw=False):
         # `name` keeps a retried attempt's evidence in its own folder.
         base = tmp_path / (name or str(len(list(tmp_path.iterdir()))))
         base.mkdir(parents=True)
@@ -2415,12 +2416,12 @@ def child_capture(tmp_path):
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
                                      template=template)
         try:
-            return capture_prompt(fixture, base, invalid, timestamps)
+            return capture_prompt(fixture, base, invalid, timestamps, redraw)
         finally:
             wait_helpers(fixture.base)
             shutil.rmtree(fixture.base)
 
-    def capture_prompt(fixture, base, invalid, timestamps):
+    def capture_prompt(fixture, base, invalid, timestamps, redraw):
         marker = fixture.store / "marker"
         wire = bytearray(marker.read_bytes())
         # 이것을 실패시키는 것: assert wire[:8] == b"BNGMRK02" and len(wire) == 208 조건을 제거하거나 반전하는 변이.
@@ -2445,6 +2446,8 @@ def child_capture(tmp_path):
         argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
+        if redraw:
+            argv = [*argv, "--redraw"]
         # What a full trace judgment needs after the fixture is gone.
         env, repo = fixture.env, os.path.realpath(fixture.pwd)
         (base / "context.json").write_text(json.dumps({
@@ -2477,6 +2480,91 @@ def test_live_child_count_is_bounded_per_role(child_capture):
     children = role_children(trace)
     # 이것을 실패시키는 것: assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children 조건을 제거하거나 반전하는 변이.
     assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children
+
+
+# 이것을 실패시키는 것: redraw에서 도우미를 띄우는 것, redraw 앞단이 설정 원본 폴더를 건드리는 것.
+def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_path):
+    from fsbudget.attribute import role_children
+
+    def config_calls(name, trace):
+        root = json.loads((tmp_path / name / "context.json").read_text())["pinned"][1]
+        # The bytes a read returned do not count: a snapshot quotes its roots.
+        def named(c):
+            return re.sub(r'"(?:[^"\\]|\\.)*"', '""', c.args) if c.name in {"read", "pread64"} else c.args
+        return [c for c in trace if c.name not in {"execve", "execveat"} and root in named(c)]
+
+    trace, _, record = child_capture(name="prompt")
+    assert role_children(trace)["front"] == 1
+    # 양성 대조: 같은 검사가 일반 프롬프트 도우미의 설정 원본 읽기를 본다.
+    assert config_calls("prompt", trace)
+    trace, _, record = child_capture(name="redraw", redraw=True)
+    assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e")
+    assert role_children(trace) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
+    assert len({c.pid for c in trace}) == 1, "a redraw is one process"
+    assert not config_calls("redraw", trace)
+
+
+BRANCH = "redrawbranch"
+
+
+def git_repo(path):
+    """A hand-made repository with one commit on BRANCH: the test images have no git."""
+    def loose(kind, body):
+        data = f"{kind} {len(body)}\0".encode() + body
+        name = hashlib.sha1(data).hexdigest()
+        target = path / ".git/objects" / name[:2] / name[2:]
+        target.parent.mkdir(parents=True)
+        target.write_bytes(zlib.compress(data))
+        return name
+
+    who = b"t <t@t> 0 +0000"
+    tree = loose("tree", b"")
+    commit = loose("commit", b"tree %s\nauthor %s\ncommitter %s\n\nc\n" % (tree.encode(), who, who))
+    (path / ".git/refs/heads").mkdir(parents=True)
+    (path / ".git/refs/heads" / BRANCH).write_text(commit + "\n")
+    (path / ".git/HEAD").write_text(f"ref: refs/heads/{BRANCH}\n")
+    return path
+
+
+# 이것을 실패시키는 것: redraw가 저장 봉투 값이나 이전 수집 응답을 버리는 것, 새 폭을 쓰지 않는 것.
+def test_redraw_renders_new_width_from_same_values(tmp_path):
+    # A debug collector is too large to verify inside the helper's CPU limit.
+    if real_bin().parent.name != "release":
+        pytest.skip("real collection requires release")
+    from test_helper_lifecycle import LifetimeSession, poll
+    session = LifetimeSession(tmp_path / "s", tag="r")
+    session.put("[layout.line1]\nleft=['dir']\nright=['git']\n[layout.line2]\nleft=['duration','char']\nright=[]\n")
+    session.init()
+    session.wait_quiet()
+    repo = git_repo(session.base / "repo")
+    stored = ["--status", "3", "--pipestatus", "3", "--duration-ms", "5000", "--jobs", "2"]
+
+    def prompt(width, *extra):
+        args = session.prompt_args(repo)
+        args[args.index("--width") + 1] = str(width)
+        result = session.run(*args, *stored, *extra, timeout=2)
+        assert result.returncode == 0 and result.stderr == b"", result
+        return result.stdout
+
+    def collected():
+        record = prompt(100)
+        session.wait_quiet()
+        return BRANCH.encode() in record and record
+
+    wide = poll(collected, 20, "the first prompts never collected git")
+    assert b"5.0s" in wide
+    redraw = prompt(90, "--redraw")
+    assert BRANCH.encode() in redraw and b"5.0s" in redraw
+    assert redraw != wide, "the new width was not used"
+    assert redraw == prompt(90), "a redraw differs from a prompt with the same envelope"
+    session.wait_quiet()
+    # 이것을 실패시키는 것: 세션의 도우미 집계가 값 자리의 `--redraw`를 플래그로 보는 것.
+    before = session._helper_count
+    prompt(90, "--redraw")
+    assert session._helper_count == before
+    prompt(90, "--host", "--redraw")
+    assert session._helper_count == before + 1
+    session.wait_quiet()
 
 
 # 이것을 실패시키는 것: worker가 없는 화면에도 collector 생성.

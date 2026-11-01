@@ -13,7 +13,9 @@ pub fn bootstrap(
     raw: &[&[u8]],
     deadline: Option<bingsu_core::front::output::Deadline>,
 ) {
-    let _ = spawn_until(exe, raw, deadline);
+    if bingsu_core::front::spawns_helper(raw) {
+        let _ = spawn_until(exe, raw, deadline);
+    }
 }
 #[cfg(test)]
 pub(crate) fn spawn_for_test(exe: &OsStr, raw: &[&[u8]]) -> Result<(), ()> {

@@ -895,6 +895,10 @@ def test_front_live_ci_evidence_is_required(mutation):
 
 
 # 이것을 실패시키는 것: release 대신 debug 계측, arm runner를 x86로 교체, trace evidence 삭제.
+REDRAW_RELEASE_TESTS = ("test_redraw_spawns_no_process_and_reads_no_config_source",
+                        "test_redraw_renders_new_width_from_same_values")
+
+
 def assert_b1_contract(text):
     start, end = job_span(text, "b1-children")
     job = text[start:end]
@@ -916,11 +920,26 @@ def assert_b1_contract(text):
                      '--basetemp="$RUNNER_TEMP/b1-evidence"', "if: failure()"):
         # 이것을 실패시키는 것: assert required in job, required 조건을 제거하거나 반전하는 변이.
         assert required in job, required
+    # 이것을 실패시키는 것: redraw live 시험을 실행 목록이나 PASSED 단언에서 빼는 것(release 밖에서는 skip이다).
+    for test in REDRAW_RELEASE_TESTS:
+        assert f" tests/shell/test_prompt_env_paths.py::{test} " in job, test
+        assert f"grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::{test}' \"$RUNNER_TEMP/b1.txt\"\n" in job, test
 
 
 # 이것을 실패시키는 것: B1 행렬의 유효 runs-on과 계측 빌드의 아키텍처를 분리하는 것.
 def test_b1_release_platform_contract():
     assert_b1_contract(workflows()["shell.yml"])
+
+
+# 이것을 실패시키는 것: redraw 시험을 실행 목록이나 PASSED 단언에서 빼도 checker가 통과하는 것.
+@pytest.mark.parametrize("test", REDRAW_RELEASE_TESTS)
+@pytest.mark.parametrize("form", ["tests/shell/test_prompt_env_paths.py::{} ", "grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::{}'"])
+def test_b1_contract_requires_the_redraw_tests(form, test):
+    text = workflows()["shell.yml"]
+    needle = form.format(test)
+    assert text.count(needle) == 1, needle
+    with pytest.raises(AssertionError):
+        assert_b1_contract(text.replace(needle, form.format("test_other")))
 
 
 # 이것을 실패시키는 것: 위 release·플랫폼·evidence 조건 하나를 지워도 checker가 통과하는 것.

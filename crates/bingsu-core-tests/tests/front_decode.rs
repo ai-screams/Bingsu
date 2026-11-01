@@ -1,6 +1,26 @@
 use bingsu_core::layout_view::FrontConfig;
 use bingsu_core::snapshot::{FrontDecoder, HEADER, PREFIX, READ_CHUNK, Snapshot};
+use bingsu_core::{envelope, front};
 use bingsu_core_tests::snapshot_fixture;
+use proptest::prelude::*;
+
+proptest! {
+    // 이것을 실패시키는 것: `front::spawns_helper`의 단어 순회가 `envelope::parse`와 갈리는 것(값 플래그
+    // 하나를 빼거나 값 자리를 건너뛰지 않는 것).
+    #[test]
+    fn spawns_helper_agrees_with_every_accepted_envelope(
+        words in prop::collection::vec(prop::sample::select(vec![
+            "--redraw", "--host", "--venv", "--pwd", "--session", "--keymap", "--colorterm",
+            "--colorfgbg", "--ctx-ext", "x", "/x", "a=1",
+        ]), 0..8),
+    ) {
+        let mut argv: Vec<&[u8]> = vec![b"--ctx", b"1", b"--record", b"B1", b"--width", b"80"];
+        argv.extend(words.iter().map(|w| w.as_bytes()));
+        if let Ok(e) = envelope::parse(&argv) {
+            prop_assert_eq!(front::spawns_helper(&argv), !e.redraw);
+        }
+    }
+}
 
 // 이것을 실패시키는 것: compiled clock kind/resume 누락, metadata 읽기, EOF/전체 fd 길이 불일치 허용.
 #[test]

@@ -203,6 +203,21 @@ pub struct ReadPlan {
 #[derive(Default)]
 pub struct Observed {}
 
+/// Whether this run starts the refresh helper. A `--redraw` in flag position
+/// never does: a drag sends dozens of redraws, and the next ordinary prompt
+/// refreshes. The walk is `envelope::parse`'s, so a value word cannot pass for
+/// the flag.
+pub fn spawns_helper(argv: &[&[u8]]) -> bool {
+    let mut i = 0;
+    while let Some(a) = argv.get(i) {
+        if *a == b"--redraw" {
+            return false;
+        }
+        i += if envelope::is_value_flag(a) { 2 } else { 1 };
+    }
+    true
+}
+
 /// What the connected adapter does next: write `record` and exit. The helper
 /// already starts before the filter; no response grants process creation.
 /// `staged::Response` additionally carries the snapshot's execution eligibility.
@@ -294,6 +309,34 @@ pub fn without_sandbox(argv: &[&[u8]]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 값 자리의 `--redraw`를 플래그로 보는 것, 값 플래그 뒤의 진짜 플래그를 놓치는 것,
+    // 플래그 위치 판정을 빼고 포함 여부만 보는 것.
+    #[test]
+    fn only_a_redraw_flag_skips_the_helper() {
+        let plain: &[&[u8]] = &[b"--ctx", b"1", b"--width", b"80"];
+        assert!(spawns_helper(plain));
+        assert!(spawns_helper(&[]));
+        assert!(!spawns_helper(&[b"--redraw"]));
+        assert!(!spawns_helper(&[
+            b"--ctx",
+            b"1",
+            b"--redraw",
+            b"--width",
+            b"80"
+        ]));
+        assert!(!spawns_helper(&[
+            b"--ctx",
+            b"1",
+            b"--host",
+            b"h",
+            b"--redraw"
+        ]));
+        assert!(spawns_helper(&[b"--ctx", b"1", b"--host", b"--redraw"]));
+        assert!(spawns_helper(&[b"--pwd", b"--redraw", b"--ctx", b"1"]));
+        assert!(!spawns_helper(&[b"--unknown", b"--redraw"]));
+        assert!(spawns_helper(&[b"--redraw=1", b"--no-redraw"]));
+    }
 
     fn b(a: &[&'static str]) -> Vec<&'static [u8]> {
         a.iter().map(|s| s.as_bytes()).collect()
