@@ -124,6 +124,7 @@ mod tests {
         assert_eq!(code(Applied::Invalid), 1);
         assert_eq!(code(Applied::Busy), 3);
         assert_eq!(code(Applied::Incomplete), 3);
+        assert_eq!(code(Applied::OverCap), 3);
         assert_eq!(code(Applied::Unavailable(MsgId::NoRuntimeRoot)), 3);
         assert_eq!(code(Applied::Unavailable(MsgId::UnconfirmedRoot)), 1);
     }

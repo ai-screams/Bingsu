@@ -45,6 +45,24 @@ fn extends(refs: &[String], body: &str) -> String {
     format!("extends = [{}]\n{body}", list.join(", "))
 }
 
+// 상한을 넘긴 `config use`는 선택을 저장하고 reload와 같은 3으로 끝나며, 적용은 끝나지 않았다고 말한다.
+// 이것을 실패시키는 것: OverCap을 "선택 저장, 적용 미완료"가 아닌 갈래로 보내는 것.
+#[test]
+fn config_use_past_a_cap_saves_the_choice_and_says_it_is_unfinished() {
+    let e = Env::new("helper_axis_caps", "use-over");
+    let chosen = e.put_config("config.toml", COMMAND);
+    let (code, out) = reload_settled(&e);
+    assert_eq!(code, Some(0), "{out}");
+    for i in 0..254 {
+        e.put_config(&format!("conf.d/n{i:03}.txt"), "");
+    }
+    e.put_config("conf.d/a.toml", "");
+    let o = e.run(&["config", "use", chosen.to_str().unwrap()]);
+    let shown = quiet(&o.stderr);
+    assert_eq!(o.status.code(), Some(3), "{shown}");
+    assert!(shown.contains("your choice was saved"), "{shown}");
+}
+
 /// `n` bytes that do not parse: core drops the file alone and publishes.
 fn unparsable(n: usize) -> String {
     let mut s = String::from("[style\n");
@@ -83,7 +101,10 @@ fn only_a_stop_that_is_no_cap_refusal_is_tried_again() {
     assert_eq!(first.0, Some(3));
     assert!(first.1.contains(OVER_CAP), "{first:?}");
     assert_eq!(outcomes.len(), 1);
-    let mut outcomes = vec![(Some(0), "done".to_owned()), (Some(3), "stopped".to_owned())];
+    let mut outcomes = vec![
+        (Some(0), "done".to_owned()),
+        (Some(3), "stopped".to_owned()),
+    ];
     assert_eq!(settle(|| outcomes.pop().unwrap()).1, "done");
     let mut calls = 0;
     let stopped = settle(|| {
@@ -123,7 +144,7 @@ fn b_themes(e: &Env, extra: usize) {
 }
 
 /// Publishes `COMMAND`, applies `past`, reloads: the outcome and whether the
-/// context files stayed as they were.
+/// context files stayed as they were. `config check` must draw the same line.
 fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
     e.put_config("config.toml", COMMAND);
     let (code, out) = reload_settled(e);
@@ -131,7 +152,18 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
     let before = context(e);
     past(e);
     let (code, out) = reload_settled(e);
-    assert_eq!(out.contains(OVER_CAP), code == Some(3), "{out}");
+    let check = e.run(&["config", "check"]);
+    let over = out.contains(OVER_CAP);
+    assert_eq!(over, code == Some(3), "{out}");
+    let words = text(&check.stdout);
+    assert_eq!(
+        check.status.code(),
+        Some(if over { 3 } else { 0 }),
+        "{words}"
+    );
+    assert_eq!(words.contains(OVER_CAP), over, "{words}");
+    let result = "result: too many file reads for one refresh";
+    assert_eq!(words.contains(result), over, "{words}");
     (code, context(e) == before, out)
 }
 
@@ -140,7 +172,8 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
 // 이것을 실패시키는 것: 거부된 extends 항목이나 없는 뿌리 후보를 R에서 빼는 것, conf.d의 설정이 아닌 항목을
 // 세지 않거나 재검증 목록을 세지 않는 것, 버린 원본의 바이트를 B에서 빼는 것, cap 비교의 하나 차이, 상한
 // 초과를 확인한 실패(1, 무효 표식)로 내는 것, sequence를 옮긴 뒤에 상한을 넘는 것, 상한 거부를 예산 정지와 같은
-// 말로 내는 것.
+// 말로 내는 것, `config check`가 refresh의 재확인 두 번을 세지 않아 경계가 갈리는 것, 다 읽은 `config path`까지
+// 미완료로 내는 것.
 #[test]
 fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
     let mut seen = Vec::new();
@@ -162,6 +195,9 @@ fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
                 e.put_config(&format!("conf.d/n{i:03}.txt"), "");
             }
         });
+        // `config path` read every entry and lists them: past the cap only `check` refuses.
+        let path = e.run(&["config", "path"]);
+        assert_eq!(path.status.code(), Some(0), "{}", text(&path.stdout));
         seen.push(("E_n", k, code, same, out));
     }
     // B: the config and eight dropped themes, one byte past 2 MiB.
