@@ -26,6 +26,7 @@ pub enum MsgId {
     ReloadInvalid,
     ReloadBusy,
     ReloadIncomplete,
+    ReloadOverCap,
     DeadlineReached,
     UseSavedUnfinished,
     UseSavedInvalid,
@@ -40,7 +41,7 @@ pub enum MsgId {
         reason = "the completeness list for message tables; only tests read it in M1"
     )
 )]
-pub const ALL: [MsgId; 25] = [
+pub const ALL: [MsgId; 26] = [
     MsgId::UnsupportedShell,
     MsgId::NoHome,
     MsgId::NoExePath,
@@ -61,6 +62,7 @@ pub const ALL: [MsgId; 25] = [
     MsgId::ReloadInvalid,
     MsgId::ReloadBusy,
     MsgId::ReloadIncomplete,
+    MsgId::ReloadOverCap,
     MsgId::DeadlineReached,
     MsgId::UseSavedUnfinished,
     MsgId::UseSavedInvalid,
@@ -68,7 +70,7 @@ pub const ALL: [MsgId; 25] = [
     MsgId::UseShapeOnlyRoot,
 ];
 
-const EN: [(MsgId, &str); 25] = [
+const EN: [(MsgId, &str); 26] = [
     (
         MsgId::UnsupportedShell,
         "bingsu: unsupported shell. Supported: zsh, bash, fish",
@@ -148,6 +150,10 @@ const EN: [(MsgId, &str); 25] = [
     (
         MsgId::ReloadIncomplete,
         "bingsu: the settings could not be read to the end, so nothing changed. Run: bingsu config check",
+    ),
+    (
+        MsgId::ReloadOverCap,
+        "bingsu: the settings need more file reads than one refresh may make, so nothing is published. Use fewer entries in conf.d or extends",
     ),
     (
         MsgId::DeadlineReached,

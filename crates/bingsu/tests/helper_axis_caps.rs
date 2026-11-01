@@ -20,6 +20,8 @@ use user_env::{Env, quiet, text};
 
 const COMMAND: &str = "[segment.\"custom/probe\"]\nkind = \"command\"\ncommand = [\"printf\", \"NEVER_EXECUTE\"]\n[layout.line1]\nleft = [\"custom/probe\", \"char\"]\n";
 const KIB256: usize = 256 * 1024;
+/// The words of a refused cap; a budget stop ends 3 in other words.
+const OVER_CAP: &str = "more file reads than one refresh may make";
 
 fn reload(e: &Env) -> (Option<i32>, String) {
     let o = e.run(&["reload"]);
@@ -51,18 +53,44 @@ fn unparsable(n: usize) -> String {
 }
 
 /// `reload` on the real clock: a busy machine can pass the helper's 500 ms
-/// work budget, which also ends 3, so a 3 is tried again. A refused cap ends 3
-/// on every attempt, so it stays 3 here; one other outcome on any attempt is
-/// what comes back. A budget stop cannot turn an over-cap cell into a 0.
+/// work budget, which also ends 3, so a 3 in other words than a refused cap's
+/// is tried again. A refused cap comes back at once, also in a cell at the cap.
 fn reload_settled(e: &Env) -> (Option<i32>, String) {
-    let mut last = reload(e);
+    settle(|| reload(e))
+}
+
+fn settle(mut reload: impl FnMut() -> (Option<i32>, String)) -> (Option<i32>, String) {
+    let mut last = reload();
     for _ in 0..4 {
-        if last.0 != Some(3) {
+        if last.0 != Some(3) || last.1.contains(OVER_CAP) {
             break;
         }
-        last = reload(e);
+        last = reload();
     }
     last
+}
+
+// 이것을 실패시키는 것: 상한 거부를 재시도해 거짓 거부를 가리는 것, 예산 정지(3)를 재시도하지 않는 것,
+// 3이 아닌 결과 뒤에도 계속 시도하는 것.
+#[test]
+fn only_a_stop_that_is_no_cap_refusal_is_tried_again() {
+    let mut outcomes = vec![
+        (Some(0), String::new()),
+        (Some(3), format!("x {OVER_CAP} x")),
+        (Some(3), "stopped".to_owned()),
+    ];
+    let first = settle(|| outcomes.pop().unwrap());
+    assert_eq!(first.0, Some(3));
+    assert!(first.1.contains(OVER_CAP), "{first:?}");
+    assert_eq!(outcomes.len(), 1);
+    let mut outcomes = vec![(Some(0), "done".to_owned()), (Some(3), "stopped".to_owned())];
+    assert_eq!(settle(|| outcomes.pop().unwrap()).1, "done");
+    let mut calls = 0;
+    let stopped = settle(|| {
+        calls += 1;
+        (Some(0), String::new())
+    });
+    assert_eq!((stopped.0, calls), (Some(0), 1));
 }
 
 /// The config and eight dropped themes: together exactly 2 MiB plus `extra`.
@@ -94,8 +122,8 @@ fn b_themes(e: &Env, extra: usize) {
     }
 }
 
-/// Publishes `COMMAND`, applies `past`, reloads: the outcome and whether
-/// the context files stayed as they were.
+/// Publishes `COMMAND`, applies `past`, reloads: the outcome and whether the
+/// context files stayed as they were.
 fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
     e.put_config("config.toml", COMMAND);
     let (code, out) = reload_settled(e);
@@ -103,6 +131,7 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
     let before = context(e);
     past(e);
     let (code, out) = reload_settled(e);
+    assert_eq!(out.contains(OVER_CAP), code == Some(3), "{out}");
     (code, context(e) == before, out)
 }
 
@@ -110,8 +139,8 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
 // snapshot·last-good·marker·sequence가 그대로다.
 // 이것을 실패시키는 것: 거부된 extends 항목이나 없는 뿌리 후보를 R에서 빼는 것, conf.d의 설정이 아닌 항목을
 // 세지 않거나 재검증 목록을 세지 않는 것, 버린 원본의 바이트를 B에서 빼는 것, cap 비교의 하나 차이, 상한
-// 초과를 확인한 실패(1, 무효 표식)로 내는 것, sequence를 옮긴 뒤에 상한을 넘는 것, 상한 거부가 시도에 따라
-// 풀리는 것(재시도가 그 0을 돌려줘 실패한다).
+// 초과를 확인한 실패(1, 무효 표식)로 내는 것, sequence를 옮긴 뒤에 상한을 넘는 것, 상한 거부를 예산 정지와 같은
+// 말로 내는 것.
 #[test]
 fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
     let mut seen = Vec::new();

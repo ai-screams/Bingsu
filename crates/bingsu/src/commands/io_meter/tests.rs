@@ -79,6 +79,25 @@ fn axis_slack_never_covers_another_axis() {
     }
 }
 
+// 이것을 실패시키는 것: 거부한 meter가 사라져도 알리지 않는 것, 거부 없는 meter도 알리는 것, 알린 뒤 지우지 않는 것,
+// fits의 거부를 빼는 것.
+#[test]
+fn a_dropped_meter_reports_a_refusal_once() {
+    assert!(!take_refused());
+    drop(IoMeter::new(caps(1)));
+    assert!(!take_refused());
+    let mut m = IoMeter::new(caps(1));
+    m.charge(HelperAxis::R, 2).unwrap_err();
+    assert!(!take_refused(), "the meter is still counting");
+    drop(m);
+    assert!(take_refused());
+    assert!(!take_refused());
+    let mut m = IoMeter::new(caps(1));
+    m.fits(&[2; 9]).unwrap_err();
+    drop(m);
+    assert!(take_refused());
+}
+
 // 이것을 실패시키는 것: 거부 뒤에도 다른 축의 계수를 받는 것(초과 뒤 I/O가 이어짐), 고유 키 축이 이미 본 키에서
 // 걸쇠를 건너뛰는 것.
 #[test]

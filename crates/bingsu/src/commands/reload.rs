@@ -34,6 +34,7 @@ pub fn report(applied: &Applied, what: &str) -> Result<String, (String, u8)> {
         Applied::Invalid => Err((en(MsgId::ReloadInvalid).to_owned(), EXIT_FAILED)),
         Applied::Busy => Err((en(MsgId::ReloadBusy).to_owned(), EXIT_UNFINISHED)),
         Applied::Incomplete => Err((en(MsgId::ReloadIncomplete).to_owned(), EXIT_UNFINISHED)),
+        Applied::OverCap => Err((en(MsgId::ReloadOverCap).to_owned(), EXIT_UNFINISHED)),
         Applied::Unavailable(m) => Err((
             en(*m).to_owned(),
             if *m == MsgId::UnconfirmedRoot {
