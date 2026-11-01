@@ -2492,13 +2492,50 @@ def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
 MARKER_ATTEMPTS = 8
 
 
+def silent_armed_front(cap):
+    """(front events, setitimer index, it_value in µs) of a capture whose front
+    armed ITIMER_REAL with a positive it_value (setitimer returned 0), attempted
+    no write to fd 1 at all, exited 0, and left stdout empty. Anything else is
+    None. Each event is (time in µs or None, line)."""
+    timed = re.compile(r"(\d+)\s+(?:(\d+)\.(\d{6})\s+)?(.*)$")
+    rows = [(m[1], int(m[2]) * 1_000_000 + int(m[3]) if m[2] else None, m[4])
+            for line in cap.lines if (m := timed.match(line))]
+    if not rows or not re.match(r'execve\("[^"]*", \["[^"]*", "prompt"', rows[0][2]):
+        return None
+    root = rows[0][0]
+    front = [(at, line) for pid, at, line in rows if pid == root]
+    armed = next((i for i, (_, line) in enumerate(front) if line.startswith("setitimer(ITIMER_REAL,")), None)
+    # 이것을 실패시키는 것: 실패했거나 없는 setitimer를 받는 것.
+    if armed is None or not front[armed][1].endswith(") = 0") or cap.record:
+        return None
+    value = re.search(r"it_value=\{tv_sec=(\d+), tv_usec=(\d+)\}", front[armed][1])
+    # 이것을 실패시키는 것: 0인 it_value(타이머 해제)를 받는 것.
+    if not value or int(value[1]) * 1_000_000 + int(value[2]) <= 0:
+        return None
+    # 이것을 실패시키는 것: 앞단의 fd 1 쓰기 시도(실패한 것 포함)를 어디서든 받는 것, 0 아닌 종료,
+    # 비지 않은 stdout을 받는 것.
+    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for _, line in front):
+        return None
+    if front[-1][1] != "+++ exited with 0 +++":
+        return None
+    return front, armed, int(value[1]) * 1_000_000 + int(value[2])
+
+
+def last_event_before_exit(front, armed):
+    """The time of the front's last event before exit_group, after setitimer.
+    strace reads a line's time while the tracee is stopped and resumes it
+    afterwards (stop-then-resume ordering, UNVERIFIED), so the exit_group
+    line's own time can be later than the exit."""
+    ends = [i for i, (_, line) in enumerate(front) if line.startswith("exit_group(")]
+    return front[ends[-1] - 1][0] if ends and ends[-1] > armed else None
+
+
 def front_deadline_exit(cap):
     """"front-deadline" when the trace proves the front's own deadline ended
-    it: it armed ITIMER_REAL (setitimer returned 0), and then either took a
+    it: a silent armed front (silent_armed_front) that then either took a
     kernel SIGALRM or, by the -ttt times, made its last event before
     exit_group strictly later than the setitimer start plus its positive
-    it_value; it attempted no
-    write to fd 1 at all, exited 0, and stdout is empty. Anything else is None.
+    it_value. Anything else is None.
 
     The front computes its remaining time just before setitimer, so its
     deadline cannot end later than setitimer start + it_value. strace times
@@ -2506,39 +2543,46 @@ def front_deadline_exit(cap):
     times prove nothing. A realtime step back can only refuse a retry; a
     step forward can retry an attempt early, and a retried attempt is
     still judged in full, so the cost is one more capture of an empty record."""
-    lines = cap.lines
-    timed = re.compile(r"(\d+)\s+(?:(\d+)\.(\d{6})\s+)?(.*)$")
-    rows = [(m[1], int(m[2]) * 1_000_000 + int(m[3]) if m[2] else None, m[4])
-            for line in lines if (m := timed.match(line))]
-    if not rows or not re.match(r'execve\("[^"]*", \["[^"]*", "prompt"', rows[0][2]):
+    silent = silent_armed_front(cap)
+    if silent is None:
         return None
-    root = rows[0][0]
-    front = [(at, line) for pid, at, line in rows if pid == root]
-    armed = next((i for i, (_, line) in enumerate(front) if line.startswith("setitimer(ITIMER_REAL,")), None)
-    # 이것을 실패시키는 것: 실패했거나 없는 setitimer를 마감 증명으로 받는 것.
-    if armed is None or not front[armed][1].endswith(") = 0") or cap.record:
-        return None
-    value = re.search(r"it_value=\{tv_sec=(\d+), tv_usec=(\d+)\}", front[armed][1])
-    # 이것을 실패시키는 것: 0인 it_value(타이머 해제)를 증명으로 받는 것.
-    if not value or int(value[1]) * 1_000_000 + int(value[2]) <= 0:
-        return None
+    front, armed, it_value = silent
     alarm = next((i for i, (_, line) in enumerate(front) if i > armed
                   and line.startswith("--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL")), None)
     if alarm is None:
-        # The lower bound of the exit is the front's last event before
-        # exit_group: strace reads its time while the tracee is stopped and
-        # resumes it afterwards (stop-then-resume ordering, UNVERIFIED), so
-        # the exit_group line's own time can be later than the exit.
-        ends = [i for i, (_, line) in enumerate(front) if line.startswith("exit_group(")]
-        start, at = front[armed][0], front[ends[-1] - 1][0] if ends and ends[-1] > armed else None
+        start, at = front[armed][0], last_event_before_exit(front, armed)
         # 이것을 실패시키는 것: 경계 같음을 증명으로 보는 것(>=), it_value를 빼는 것.
-        if start is None or at is None or not at > start + int(value[1]) * 1_000_000 + int(value[2]):
+        if start is None or at is None or not at > start + it_value:
             return None
-    # 이것을 실패시키는 것: 앞단의 fd 1 쓰기 시도(실패한 것 포함)를 어디서든 받는 것, 0 아닌 종료,
-    # 비지 않은 stdout을 마감으로 보는 것.
-    if any(re.match(r"(write|writev|pwrite64|pwritev2?)\(1[<,]", line) for _, line in front):
+    return "front-deadline"
+
+
+def front_deadline_window(cap):
+    """"front-deadline-window" when a silent valid-marker exit does not
+    contradict the front's deadline. That is all it says about the deadline;
+    the record it lacks must still come in another of MARKER_ATTEMPTS attempts.
+
+    The front reads its remaining time after the event before setitimer, so
+    its deadline cannot come before that event + it_value: its last event
+    before exit_group reaching that time, boundary included, leaves the exit
+    no earlier than the deadline could be. The upper end of the same deadline
+    is what front_deadline_exit needs, and the stored run 18 stops 62 µs short
+    of it. An exit before the window, or unreadable times, is not this shape."""
+    silent = silent_armed_front(cap)
+    # 이것을 실패시키는 것: invalid 조건에도 이 모양을 주는 것.
+    if cap.invalid or silent is None:
         return None
-    return "front-deadline" if front[-1][1] == "+++ exited with 0 +++" else None
+    front, armed, it_value = silent
+    earliest, at = front[armed - 1][0], last_event_before_exit(front, armed)
+    # 이것을 실패시키는 것: 경계 같음을 빼는 것(>), it_value를 빼는 것, 시각 없는 trace를 받는 것,
+    # 하한을 setitimer 자신의 시각으로 올리는 것.
+    if earliest is None or at is None or at < earliest + it_value:
+        return None
+    return "front-deadline-window"
+
+
+def marker_shape(cap):
+    return front_deadline_exit(cap) or front_deadline_window(cap)
 
 
 def judge_marker_trace(cap, shape=None):
@@ -2560,10 +2604,10 @@ def judge_marker_trace(cap, shape=None):
 
 def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
     """One marker-condition capture. Every attempt keeps the role bounds and
-    the full trace judgment; a proven front deadline waives only the record,
-    and the collector spawn only when the front ended before it created the
-    helper (the helper never waits on the front, so a later deadline cannot
-    stop its spawn)."""
+    the full trace judgment; a deadline shape (marker_shape) waives only the
+    record, and the collector spawn only when the front ended before it
+    created the helper (the helper never waits on the front, so a later
+    deadline cannot stop its spawn)."""
     from fsbudget.attribute import role_children
     trace_judge(cap, shape)
     children = role_children(cap.trace)
@@ -2573,6 +2617,9 @@ def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
     if shape is None or children["front"]:
         # 이것을 실패시키는 것: 표식 무효면 worker mask 0.
         assert children["helper"] == 1, children
+    # 이것을 실패시키는 것: 마감 모양이 아닌 빈 stdout을 통과시키는 것(레코드 소실 회귀).
+    if shape is None:
+        assert cap.record, "no record and no deadline shape"
     if shape is None and cap.invalid:
         assert b"degraded:trust-invalid" in cap.record, cap.record
 
@@ -2590,12 +2637,14 @@ def marker_capture(child_capture, tmp_path, invalid, attempt):
 # 이것을 실패시키는 것: 표식 무효면 worker mask 0.
 def test_live_collector_count_ignores_marker_validity(child_capture, tmp_path):
     """Both marker conditions start exactly one collector. Each condition
-    must reach that evidence (and the invalid one its degraded record) in at
-    most MARKER_ATTEMPTS attempts; only a trace-proven front deadline is
-    retried, after its own judgment. Attempts stay in valid|invalid/attempt-N."""
+    must reach that evidence with a record (the invalid one its degraded
+    record) in at most MARKER_ATTEMPTS attempts. Only a deadline shape is
+    retried, after its own judgment: a trace-proven front deadline, or in the
+    valid condition an exit that does not contradict the deadline
+    (front_deadline_window). Attempts stay in valid|invalid/attempt-N."""
     for invalid in (False, True):
         run_allowlist(lambda attempt: marker_capture(child_capture, tmp_path, invalid, attempt),
-                      judge_marker_attempt, front_deadline_exit, MARKER_ATTEMPTS,
+                      judge_marker_attempt, marker_shape, MARKER_ATTEMPTS,
                       label=f"marker {'invalid' if invalid else 'valid'}")
 
 
