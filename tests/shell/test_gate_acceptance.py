@@ -83,7 +83,8 @@ M3D_GATES = {
         "A deleted and recreated runtime folder degrades every prompt with degraded:runtime-root",
         "Running init again recovers",
         "The five runtime-root path examples hold",
-        "Status-notice hook output prints the fixed runtime-root notice once (M4 zsh, M5 fish/bash)",
+        "Status-notice hook output prints the fixed runtime-root notice once in zsh",
+        "Status-notice hook output prints the fixed runtime-root notice once in fish and bash",
     ),
     "GATE-MARKER-UPDATE": (
         "A deadline overrun, partial scan, ACL error or conf.d listing failure leaves the marker unchanged",
@@ -92,6 +93,26 @@ M3D_GATES = {
     ),
 }
 M3D_GATE_IDS = tuple(M3D_GATES)
+
+# Shell-side gates. Same shape as M3D_GATES; a row closes its pair in M4_PENDING.
+M4_GATES = {
+    "GATE-SHELL-CALLS": (
+        "N prompts make N bingsu calls; keystrokes, vi switches and transient make none",
+    ),
+    "GATE-SHELL-EXTERNAL": (
+        "The hooks run no external command",
+    ),
+    "GATE-SHELL-REDRAW": (
+        "The redraw count per size change is fixed",
+    ),
+    "GATE-SHELL-NOTICE": (
+        "A notice prints exactly once and redraw, transient and vi do not repeat it",
+    ),
+    "GATE-SHELL-TIME": (
+        "The shell time gate exists",
+    ),
+}
+GATE_IDS = M3D_GATE_IDS + tuple(M4_GATES)
 
 # Supplementary rows that must stay, with their stage: existing tests that cover part of a clause.
 M3D_SUPPLEMENTARY = {"GATE-EXEC-DEADLINE.2-m3a": "M3a", "GATE-MARKER-UPDATE.3-m3a": "M3a",
@@ -111,12 +132,12 @@ M3D_SUPPLEMENTARY["GATE-HELPER-LIFETIME.1-blocked_mount"] = "M3d"
 # 이것을 실패시키는 것: 계획의 시계 단계 고정 행을 지우고 실행 횟수 계수기 행만으로 GATE-CLOCK-READS.1을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-CLOCK-READS.1-staged_plan"] = "M3d"
 # Stages an active row may name: the milestone whose work added the test.
-ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d")
+ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4")
 
 # Clauses deferred to a later milestone, with that milestone. Each has a row
 # whose stage is `deferred:<milestone>`; removing one fails the table check.
 M3D_DEFERRED = {
-    "GATE-RUNTIME-ROOT.5": "M4/M5",
+    "GATE-RUNTIME-ROOT.6": "M5",
     "GATE-FDS.3": "M4",
     "GATE-TRUST-REVOKE.3": "M6",
     "GATE-EXEC-DEADLINE.3": "M6",
@@ -125,7 +146,7 @@ M3D_DEFERRED = {
     "GATE-CLOCK-READS.3": "M6",
     "GATE-CLOCK-READS.4": "M6",
 }
-DEFERRED_MILESTONES = ("M4", "M4/M5", "M6")
+DEFERRED_MILESTONES = ("M4", "M5", "M6")
 
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
@@ -138,6 +159,11 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 # points at an existing test that covers part of a clause and does not close
 # its pair.
 M3D_PENDING = ()
+# Same rule for the M4 clauses. A clause that a row has closed leaves this
+# list; nothing else may join it.
+M4_PENDING = ("GATE-RUNTIME-ROOT.5", "GATE-SHELL-CALLS.1", "GATE-SHELL-EXTERNAL.1", "GATE-SHELL-REDRAW.1",
+              "GATE-SHELL-NOTICE.1", "GATE-SHELL-TIME.1")
+PENDING = M3D_PENDING + M4_PENDING
 
 
 def test_no_m3d_gate_clause_is_pending():
@@ -173,7 +199,7 @@ def without_deferred(table):
 
 
 def assert_deferred_rows(table):
-    # 이것을 실패시키는 것: deferred 행 삭제·추가·중복, M4·M6 밖 마일스톤, 시험을 가진 deferred 행,
+    # 이것을 실패시키는 것: deferred 행 삭제·추가·중복, 목록 밖 마일스톤, 시험을 가진 deferred 행,
     # gate.clause와 다른 id, 마일스톤 밖 active stage, 보조 행 stage 변경.
     ids = [row["id"] for row in rows(table)]
     assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
@@ -198,10 +224,10 @@ def named(table):
 
 
 def clauses():
-    return {f"{gate}.{index}" for gate, texts in M3D_GATES.items() for index in range(1, len(texts) + 1)}
+    return {f"{gate}.{index}" for gate, texts in (M3D_GATES | M4_GATES).items() for index in range(1, len(texts) + 1)}
 
 
-def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
+def assert_gate_table(table, texts, *, pending=PENDING, collected=None):
     # Each clause that is neither pending nor deferred keeps a primary row whose id is
     # exactly GATE-ID.N; the listed supplementary rows stay too. Deferred rows name no test.
     # 이것을 실패시키는 것: B1 release·runs-on 계약 검사를 primary 게이트에서 생략하는 것.
@@ -209,11 +235,11 @@ def assert_gate_table(table, texts, *, pending=M3D_PENDING, collected=None):
     assert_deferred_rows(table)
     required = clauses() - set(pending) - set(M3D_DEFERRED)
     assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
-                            required_gates=frozenset(M3D_GATE_IDS), collected=collected,
+                            required_gates=frozenset(GATE_IDS), collected=collected,
                             release_gates=M3D_RELEASE_GATES)
 
 
-def assert_clauses_accounted(table, pending=M3D_PENDING):
+def assert_clauses_accounted(table, pending=PENDING):
     # 이것을 실패시키는 것: 행 삭제(쌍이 행도 pending도 아님), primary 행을 더하고 pending을 남김,
     # 없는 절을 pending이나 표에 둠(합집합 비교), pending 중복, 보조 행만으로 쌍을 닫음,
     # deferred 절을 pending으로 셈.
@@ -241,9 +267,57 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
+    assert len(GATE_IDS) == 19
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)
+
+
+M4_PENDING_FROM = frozenset({f"{gate}.{index}" for gate, texts in M4_GATES.items() for index in range(1, len(texts) + 1)}
+                            | {"GATE-RUNTIME-ROOT.5"})
+
+
+def assert_m4_pending_shrinks(table, pending):
+    assert set(pending) <= M4_PENDING_FROM, sorted(set(pending) - M4_PENDING_FROM)
+    assert_clauses_accounted(table, pending)
+
+
+def open_pair(table, pair):
+    """The table and pending list with `pair` open: no row, still pending. A
+    test that varies one M4 pair starts here, so it holds before and after the
+    Task that closes the pair."""
+    kept = [table.splitlines(True)[0]] + [line for line, row in zip(table.splitlines(True)[1:], rows(table))
+                                          if f'{row["gate"]}.{row["clause"]}' != pair]
+    return "".join(kept), tuple(p for p in PENDING if p != pair) + (pair,)
+
+
+def close_pair(table, pending, pair):
+    """The same table with `pair` closed by a primary row."""
+    gate, clause = pair.rsplit(".", 1)
+    return table + row_line(pair, gate, clause), tuple(p for p in pending if p != pair)
+
+
+# 이것을 실패시키는 것: 행을 더하고 pending을 남기는 것, 닫힌 행을 지우는 것, M3d 절의 행을 지우고 M4_PENDING에 넣는 것,
+# 절이 닫힌 뒤의 표를 거부하는 것.
+@pytest.mark.parametrize("damage", [None, "closed", "row-still-pending", "removed-row", "parked-m3d-clause"])
+def test_m4_pending_only_shrinks(damage):
+    pair = "GATE-SHELL-CALLS.1"
+    table, pending = open_pair((ROOT / TABLE).read_text(), pair)
+    zombie = next(line for line in table.splitlines(True) if line.startswith("GATE-ZOMBIES.1\t"))
+    if damage == "closed":
+        table, pending = close_pair(table, pending, pair)
+    elif damage == "row-still-pending":
+        table = close_pair(table, pending, pair)[0]
+    elif damage == "removed-row":
+        table = table.replace(zombie, "")
+    elif damage == "parked-m3d-clause":
+        table = table.replace(zombie, "")
+        pending += ("GATE-ZOMBIES.1",)
+    if damage in (None, "closed"):
+        assert_m4_pending_shrinks(table, pending)
+    else:
+        with pytest.raises(AssertionError):
+            assert_m4_pending_shrinks(table, pending)
 
 
 SELF_STEP = "      - name: Gate acceptance rows map every clause to a CI-asserted test\n"
@@ -305,7 +379,7 @@ def test_gate_table_rejects_mutations(damage, reason):
     line = next(line for line in table.splitlines(True) if line.startswith(first["id"] + "\t"))
     gate, clause = first["gate"], first["clause"]
     tag = first["id"][len(f"{gate}.{clause}"):]
-    pending = M3D_PENDING
+    pending = PENDING
     if damage == "removed-row":
         primary = f"{gate}.{clause}"
         if primary in pending:
@@ -360,7 +434,7 @@ def standing_lines():
                                     "supplementary-closes", "unknown-supplementary", "deferred-also-pending",
                                     "deferred-also-primary", "removed-deferred"])
 def test_clause_accounting_rejects_mutations(damage):
-    pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
+    pending = tuple(p for p in PENDING if p != "GATE-ZOMBIES.1")
     table = HEADER + row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1) + standing_lines()
     assert_clauses_accounted(table, pending)
     if damage == "removed-row":
@@ -408,8 +482,8 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
         table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM3b\n"))
     elif damage == "milestone":
         # The pinned list moves too, so only the milestone rule can refuse it.
-        monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.3", "M5")
-        table = table.replace(line, line.replace("deferred:M6", "deferred:M5"))
+        monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.3", "M7")
+        table = table.replace(line, line.replace("deferred:M6", "deferred:M7"))
     elif damage == "named-test":
         table = table.replace(line, line.replace("\t-\t-\t-\t", "\tUnix\tcrates/x/src/main.rs::t\tbin:x\t"))
     elif damage == "extra":
@@ -429,7 +503,7 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
 # 또는 나중에 primary 행이 그 쌍을 닫는 것을 거부하는 것.
 @pytest.mark.parametrize("closed", [False, True], ids=["pending", "closed-by-primary"])
 def test_supplementary_row_keeps_its_pair_pending(closed):
-    pending = tuple(p for p in M3D_PENDING if p != "GATE-ZOMBIES.1")
+    pending = tuple(p for p in PENDING if p != "GATE-ZOMBIES.1")
     table = HEADER + row_line("GATE-ZOMBIES.1-m3a", "GATE-ZOMBIES", 1) + standing_lines()
     if closed:
         table += row_line("GATE-ZOMBIES.1", "GATE-ZOMBIES", 1)
@@ -479,6 +553,17 @@ def lib_case(damage):
     for path, text in sources.items():
         assert text != (ROOT / path).read_text(), damage
     return table, texts, (lambda p: sources[p] if p in sources else (ROOT / p).read_text())
+
+
+# 이것을 실패시키는 것: M4를 active stage에서 빼는 것, M4 게이트를 필수 게이트 집합이나 절 집합에서 빼는 것.
+def test_m4_row_closes_its_pair_through_the_real_checks():
+    synthetic, texts, _ = lib_case(None)
+    line = synthetic.splitlines(True)[1].replace("GATE-ZOMBIES.1\tGATE-ZOMBIES", "GATE-SHELL-CALLS.1\tGATE-SHELL-CALLS")
+    table, pending = open_pair((ROOT / TABLE).read_text(), "GATE-SHELL-CALLS.1")
+    table += line.replace("\tM3d\n", "\tM4\n")
+    pending = pending[:-1]
+    assert_gate_table(table, texts, pending=pending)
+    assert_clauses_accounted(table, pending)
 
 
 def test_lib_row_is_accepted_with_its_exact_ci_assertion():
@@ -665,7 +750,7 @@ def test_release_gate_rows_need_release_only_cells(damage):
         # The same evidence without the release-gate set passes: the set is what refuses debug cells.
         assert_acceptance_table(without_deferred(table), texts,
                                 required_ids=frozenset(covered(table)) | set(M3D_SUPPLEMENTARY),
-                                required_gates=frozenset(M3D_GATE_IDS))
+                                required_gates=frozenset(GATE_IDS))
         return
     with pytest.raises(AssertionError, match="release cells"):
         assert_gate_table(table, texts)
@@ -828,12 +913,22 @@ def test_runtime_root_rows_require_each_pass(clause):
         assert_gate_table(table, texts)
 
 
-# 이것을 실패시키는 것: 상태 알림을 active 또는 pending으로 되돌리는 것, deferred 행을 지우는 것.
-def test_runtime_notice_stays_deferred():
-    table = (ROOT / TABLE).read_text()
-    row = next(r for r in rows(table) if r["id"] == "GATE-RUNTIME-ROOT.5")
-    assert "Status-notice hook output" in row["property"]
-    assert row["stage"] == "deferred:M4/M5"
-    line = next(l for l in table.splitlines(True) if l.startswith(row["id"] + "\t"))
+# 이것을 실패시키는 것: fish·bash 절을 active 또는 pending으로 되돌리는 것, deferred 행을 지우는 것,
+# zsh 절이 pending도 행도 아닌 것, zsh 절을 다시 deferred로 두는 것, zsh 절이 행으로 닫힌 표를 거부하는 것.
+def test_runtime_notice_splits_zsh_and_defers_the_rest():
+    pair = "GATE-RUNTIME-ROOT.5"
+    real = (ROOT / TABLE).read_text()
+    row = next(r for r in rows(real) if r["id"] == "GATE-RUNTIME-ROOT.6")
+    assert "Status-notice hook output" in row["property"] and "fish and bash" in row["property"]
+    assert row["stage"] == "deferred:M5"
+    assert (pair in M4_PENDING) != (pair in covered(real))
+    line = next(l for l in real.splitlines(True) if l.startswith(row["id"] + "\t"))
     with pytest.raises(AssertionError):
-        assert_gate_table(table.replace(line, ""), workflows())
+        assert_gate_table(real.replace(line, ""), workflows())
+    table, pending = open_pair(real, pair)
+    assert_clauses_accounted(table, pending)
+    assert_clauses_accounted(*close_pair(table, pending, pair))
+    with pytest.raises(AssertionError):
+        assert_clauses_accounted(table, pending[:-1])
+    with pytest.raises(AssertionError):
+        assert_gate_table(table + line.replace("ROOT.6", "ROOT.5").replace("\t6\t", "\t5\t"), workflows(), pending=pending[:-1])

@@ -8,11 +8,11 @@ import subprocess
 import time
 import warnings
 
-import pyte
 import pytest
 
 from conftest import Install, minimal_record, run_shell_script, short_dir, trusted_env
 from pty_session import Session, visible
+from screen_session import ScreenSession
 
 pytestmark = pytest.mark.skipif("bash" not in os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split(),
                                 reason="bash not under test")
@@ -279,62 +279,18 @@ def test_reinit_after_prompt_command_reset_keeps_one_prefix(tmp_path):
     assert b"PREFIX=1" in out, out
 
 
-# pyte's own model is verified before it judges bash (pyte behaviour is UNVERIFIED until this passes).
-def test_pyte_wraps_like_a_vt100():
-    screen = pyte.Screen(10, 3)
-    stream = pyte.ByteStream(screen)
-    stream.feed(b"\x1b[31mAB\x1b[0m" + b"x" * 8)
-    assert screen.display[0] == "ABxxxxxxxx"
-    stream.feed(b"y")
-    assert screen.display[1][0] == "y"
-
-
-def wait_screen(s, cols, done, timeout=10, stable=False):
-    """Feed the transcript to a pyte screen until done(screen) holds (a
-    condition, not a fixed sleep). With stable=True the screen and cursor
-    must also be the same on two polls in a row, so a redraw in progress is
-    not judged. Returns the screen, or None on timeout."""
-    screen = pyte.Screen(cols, 24)
-    stream = pyte.ByteStream(screen)
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        try:
-            s.p.read_nonblocking(65536, timeout=0.2)
-        except Exception:
-            pass
-        screen.reset()
-        stream.feed(s.log.getvalue())
-        if done(screen):
-            snap = (tuple(screen.display), screen.cursor.x, screen.cursor.y)
-            if not stable or snap == last:
-                return screen
-            last = snap
-        else:
-            last = None
-    return None
-
-
-def screen_now(transcript, cols):
-    """The screen the transcript draws now, with the cursor, for messages."""
-    screen = pyte.Screen(cols, 24)
-    pyte.ByteStream(screen).feed(transcript)
-    return [row.rstrip() for row in screen.display if row.strip()], (screen.cursor.x, screen.cursor.y)
-
-
 def typed_screen(s, cols, k, tmp_path, prompt="AB> "):
     """Wait until `prompt` is drawn with the cursor right after it, type k
     characters, then wait until the screen shows all of them. Characters
     typed before readline draws the prompt are echoed by the terminal on
     their own row and already count toward k, so the prompt row is never
-    found. Returns the pyte screen."""
-    drawn = wait_screen(s, cols, lambda sc: sc.display[sc.cursor.y].rstrip() == prompt.rstrip() and sc.cursor.x == len(prompt), stable=True)
-    if drawn is None:
+    found. Returns the ScreenSession."""
+    screen = ScreenSession(s, 24, cols)
+    if not screen.wait(lambda v: v.lines()[v.cursor()[0]] == prompt.rstrip() and v.cursor()[1] == len(prompt), stable=True):
         (tmp_path / "transcript.bin").write_bytes(s.log.getvalue())
         raise AssertionError(f"prompt {prompt!r} never drawn; transcript: {tmp_path / 'transcript.bin'}")
     s.p.send("x" * k)
-    screen = wait_screen(s, cols, lambda sc: sum(row.count("x") for row in sc.display) >= k)
-    if screen is None:
+    if not screen.wait(lambda v: sum(row.count("x") for row in v.lines()) >= k):
         (tmp_path / "transcript.bin").write_bytes(s.log.getvalue())
         raise AssertionError(f"screen never showed {k} typed chars; transcript: {tmp_path / 'transcript.bin'}")
     return screen
@@ -348,8 +304,8 @@ def test_raw_soh_stx_are_zero_width(tmp_path, extra):
     s, _, _ = start(tmp_path, record=rec, cols=cols)
     k = cols - 4 + extra  # "AB> " is 4 visible cells
     screen = typed_screen(s, cols, k, tmp_path)
-    prompt_row = next(i for i, row in enumerate(screen.display) if row.startswith("AB> x"))
-    rows = screen.display
+    rows = screen.lines()
+    prompt_row = next(i for i, row in enumerate(rows) if row.startswith("AB> x"))
     # The terminal wraps typed text by itself, so the rows above look right
     # even when readline miscounts the prompt. Moving to the line start and
     # inserting makes readline place the cursor from its own width count.
@@ -357,24 +313,24 @@ def test_raw_soh_stx_are_zero_width(tmp_path, extra):
     # Judged only once readline has finished redrawing: Y visible, the cursor
     # in column 5 and the screen and cursor unchanged across two polls. On a
     # timeout the last screen is shown with the failure.
-    screen = wait_screen(s, cols, lambda sc: any("Y" in r for r in sc.display) and sc.cursor.x == 5, stable=True)
-    last = None if screen is not None else screen_now(s.log.getvalue(), cols)
+    settled = screen.wait(lambda v: any("Y" in r for r in v.lines()) and v.cursor()[1] == 5, stable=True)
+    last = None if settled else ([r for r in screen.lines() if r], screen.cursor())
     s.p.sendcontrol("c")
     s.close()
     (tmp_path / "transcript.bin").write_bytes(s.log.getvalue())
     where = f"transcript: {tmp_path / 'transcript.bin'}"
     if extra < 0:
-        assert rows[prompt_row] == "AB> " + "x" * k + " ", where
+        assert rows[prompt_row] == "AB> " + "x" * k, where
     else:
         assert rows[prompt_row] == "AB> " + "x" * (cols - 4), where
-        assert rows[prompt_row + 1].rstrip() == "x" * extra, where
-    assert screen is not None, f"no stable screen with Y and the cursor in column 5: {last}; {where}"
-    assert screen.display[screen.cursor.y].startswith("AB> Yx") and screen.cursor.x == 5, where
+        assert rows[prompt_row + 1] == "x" * extra, where
+    assert settled, f"no stable screen with Y and the cursor in column 5: {last}; {where}"
+    assert screen.lines()[screen.cursor()[0]].startswith("AB> Yx") and screen.cursor()[1] == 5, where
 
 
 # typed_screen must wait for a prompt that is drawn late (a 0.5 s hook before
 # it): characters typed earlier are echoed by the terminal on their own row.
-# 이것을 실패시키는 것: typed_screen의 프롬프트 대기(`drawn = wait_screen(...)`와 그 검사)를 지우는 것.
+# 이것을 실패시키는 것: typed_screen의 프롬프트 대기(첫 `screen.wait`와 그 검사)를 지우는 것.
 def test_typed_screen_waits_for_a_late_prompt(tmp_path):
     cols, k = 40, 36
     late = "PROMPT_COMMAND=(\"${PROMPT_COMMAND[0]}\" 'sleep 0.5' \"${PROMPT_COMMAND[@]:1}\")"
@@ -382,7 +338,7 @@ def test_typed_screen_waits_for_a_late_prompt(tmp_path):
     screen = typed_screen(s, cols, k, tmp_path, prompt="> ")
     s.p.sendcontrol("c")
     s.close()
-    rows = [r.rstrip() for r in screen.display if r.strip()]
+    rows = [r for r in screen.lines() if r]
     assert any(r.startswith("> " + "x" * k) for r in rows), rows
 
 
