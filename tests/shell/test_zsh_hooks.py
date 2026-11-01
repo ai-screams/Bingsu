@@ -406,6 +406,24 @@ def test_path_with_a_newline_parses_under_csh_junkie_quotes(tmp_path):
     assert r.stdout == b"1\n" and r.stderr == b"", r
 
 
+# The script is one `$'…'` word that an eval runs, so a byte the encoder gets
+# wrong is code. Every byte a word can hold goes through init and the shell and
+# comes back as one argument of the prompt call.
+# 이것을 실패시키는 것: `$'…'` 인코더에서 작은따옴표, 역슬래시, 줄바꿈 처리를 빼는 것.
+@pytest.mark.parametrize("option", ["no_rc_quotes", "rc_quotes", "csh_junkie_quotes"])
+def test_every_byte_survives_the_script_word(tmp_path, option):
+    value = b"/" + bytes(range(1, 256))
+    inst = Install(tmp_path)
+    env = trusted_env(tmp_path)
+    script = inst.init("zsh", {**env, "HOME": value})
+    assert b"\n" not in script.split(b"eval $'", 1)[1].rsplit(b"'\n}\n", 1)[0]
+    inst.use_fake(minimal_record())
+    r = run_shell_script("zsh", f"setopt {option}\n".encode() + script + b"\n_bingsu_call --width 80\n", env, tmp_path)
+    assert r.returncode == 0 and r.stderr == b"", r
+    (argv,) = inst.calls()
+    assert [word for word in argv if word.startswith(b"--git-global-home=")] == [b"--git-global-home=" + value], argv
+
+
 # A body parsed with the user's aliases runs the alias, not the builtin. The
 # canary shows it, and the notice and the status show the hooks still work.
 # 이것을 실패시키는 것: init 머리의 `no_aliases`를 지우는 것, `_bingsu_call`의 `no_aliases`를 지우는 것
