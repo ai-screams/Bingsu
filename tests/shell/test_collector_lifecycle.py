@@ -524,3 +524,10 @@ def test_redraw_renders_new_width_from_same_values(tmp_path):
     assert redraw != wide, "the new width was not used"
     assert redraw == prompt(90), "a redraw differs from a prompt with the same envelope"
     session.wait_quiet()
+    # 이것을 실패시키는 것: 세션의 도우미 집계가 값 자리의 `--redraw`를 플래그로 보는 것.
+    before = session._helper_count
+    prompt(90, "--redraw")
+    assert session._helper_count == before
+    prompt(90, "--host", "--redraw")
+    assert session._helper_count == before + 1
+    session.wait_quiet()

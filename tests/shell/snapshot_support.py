@@ -1,6 +1,7 @@
 """Real CLI fixtures shared by N7 shell tests and measurements."""
 import os
 import pathlib
+import re
 import shlex
 import struct
 import subprocess
@@ -9,7 +10,21 @@ import tempfile
 import threading
 import time
 
-from shell_support import COLD_INIT_NOTICE, real_bin, trusted_env
+from shell_support import COLD_INIT_NOTICE, ROOT, real_bin, trusted_env
+
+# The two-word flags, read from the parser so this walk cannot drift from it.
+VALUE_FLAGS = frozenset(re.findall(r'b"(--[a-z-]+)"', re.search(
+    r"fn is_value_flag.*?\n}\n", (ROOT / "crates/bingsu-core/src/envelope.rs").read_text(), re.S)[0]))
+
+
+def spawns_helper(words):
+    """`front::spawns_helper` for the words after `prompt`."""
+    index = 0
+    while index < len(words):
+        if words[index] == "--redraw":
+            return False
+        index += 2 if words[index] in VALUE_FLAGS else 1
+    return True
 
 
 class SnapshotSession:
@@ -50,7 +65,7 @@ class SnapshotSession:
         # Every prompt but a redraw asks for one helper. A cold init does too;
         # warm init deliberately does not. Count before launch, so an unscheduled
         # wrapper cannot make wait_quiet pass by leaving no PID/completion file yet.
-        if (args[0] in ("prompt", "__refresh-v1") and "--redraw" not in args) or (
+        if args[0] == "__refresh-v1" or (args[0] == "prompt" and spawns_helper(args[1:])) or (
                 args[0] == "init" and not (self.store() / "snapshot").exists()):
             with self._count_lock:
                 self._helper_count += 1
