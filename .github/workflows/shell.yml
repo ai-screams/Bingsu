@@ -124,6 +124,17 @@ jobs:
       # Two files do not depend on the shell or the image: the step below runs
       # test_prompt_trace_budget.py once, and the gate table steps of
       # filter-calls and shell-macos run test_gate_acceptance.py.
+      - name: Fetch the pinned oh-my-zsh
+        run: |
+          read -r commit < tests/shell/ohmyzsh.pin
+          git init -q target/ohmyzsh
+          for _ in 1 2 3; do
+            git -C target/ohmyzsh fetch -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$commit" && break
+            sleep 5
+          done
+          { git -C target/ohmyzsh checkout -q --detach FETCH_HEAD &&
+            [ "$(git -C target/ohmyzsh rev-parse HEAD)" = "$commit" ]; } ||
+            echo "::warning::oh-my-zsh fetch failed; its tests fail as BLOCKED"
       - name: PTY tests
         if: success() || failure()
         run: |
@@ -516,6 +527,17 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_every_gate_clause_is_a_row_or_pending' "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_shell_time_job_records_a_verdict' "$RUNNER_TEMP/gate-acceptance.txt"
+      - name: Fetch the pinned oh-my-zsh
+        run: |
+          read -r commit < tests/shell/ohmyzsh.pin
+          git init -q target/ohmyzsh
+          for _ in 1 2 3; do
+            git -C target/ohmyzsh fetch -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$commit" && break
+            sleep 5
+          done
+          { git -C target/ohmyzsh checkout -q --detach FETCH_HEAD &&
+            [ "$(git -C target/ohmyzsh rev-parse HEAD)" = "$commit" ]; } ||
+            echo "::warning::oh-my-zsh fetch failed; its tests fail as BLOCKED"
       - name: PTY tests
         if: success() || failure()
         env:
@@ -568,6 +590,17 @@ jobs:
       # BINGSU_PY (set above through GITHUB_ENV) makes run-all.sh use the venv.
       - name: Record golden vectors
         run: SHELLS="${{ matrix.shell }}" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+      - name: Fetch the pinned oh-my-zsh
+        run: |
+          read -r commit < tests/shell/ohmyzsh.pin
+          git init -q target/ohmyzsh
+          for _ in 1 2 3; do
+            git -C target/ohmyzsh fetch -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$commit" && break
+            sleep 5
+          done
+          { git -C target/ohmyzsh checkout -q --detach FETCH_HEAD &&
+            [ "$(git -C target/ohmyzsh rev-parse HEAD)" = "$commit" ]; } ||
+            echo "::warning::oh-my-zsh fetch failed; its tests fail as BLOCKED"
       - name: PTY tests
         if: success() || failure()
         env:
