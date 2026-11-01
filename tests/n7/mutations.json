@@ -74,7 +74,7 @@
       {
         "file": "crates/bingsu-core/src/snapshot.rs",
         "before": "|| b[8..12] != [3, 0, 64, 0]",
-        "after": "|| b[8..10] != [2, 0]",
+        "after": "|| b[8..10] != [3, 0]",
         "count": 2,
         "replace": 1
       }
