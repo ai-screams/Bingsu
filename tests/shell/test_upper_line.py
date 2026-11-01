@@ -14,7 +14,7 @@ SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 
 
 def upper_record(upper, left=b"> "):
-    return b"B1\x1f8\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f" + upper + b"\x1fok:none\x1e"
+    return b"B1\x1f12\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f" + upper + b"\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def last_line_with(out, mark):

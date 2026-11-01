@@ -19,7 +19,9 @@ use bingsu_core::field::{BUILTIN, Field, FieldValue, Value, segment};
 use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, Options, SegmentSetup, When};
 use bingsu_core::recorder::NoopRecorder;
-use bingsu_core::render::{Target, Theme, render_prompt};
+use bingsu_core::render::{
+    RenderedPrompt, Target, Theme, ViInputs, ViVariants, render_prompt, render_vi_variants,
+};
 use bingsu_core::shell_word::Shell;
 use bingsu_core::shorten::{Anchor, Keep, Method, PathFacts};
 use bingsu_core::style::{LineLayout, StyleOptions, generate, preset};
@@ -109,6 +111,27 @@ fn warning_text(w: &PaletteWarning) -> String {
         PaletteWarning::MarkContrast { token, milli } => format!("mark:{token}:{milli}"),
         PaletteWarning::BackgroundClipped => "background".to_owned(),
     }
+}
+
+/// The eleven display fields of a cell, in hex, each followed by a space.
+fn push_fields(out: &mut String, r: &RenderedPrompt, vi: &ViVariants) {
+    for f in [
+        &r.upper,
+        &r.left,
+        &r.right,
+        &r.transient_left,
+        &r.transient_right,
+        &r.vi_insert,
+        &r.vi_command,
+        &vi.upper,
+        &vi.left,
+        &vi.right,
+        &vi.lines,
+    ] {
+        out.push_str(&hex(f));
+        out.push(' ');
+    }
+    out.push('\n');
 }
 
 fn color_cases(out: &mut String) {
@@ -236,6 +259,7 @@ fn render_cases(out: &mut String) {
         setup: &setup,
     };
     let tr = compile("{char}", BUILTIN).expect("transient").remove(0);
+    let mut vi_values = values.clone();
     for preset_name in ["lean", "triangle"] {
         let t = generate(
             preset(preset_name).expect("preset"),
@@ -283,14 +307,23 @@ fn render_cases(out: &mut String) {
                                 icons: IconSet::Nerd,
                                 use_last_column: false,
                             };
-                            let r = render_prompt(
+                            let t = Target {
+                                shell,
+                                depth,
+                                options: o,
+                            };
+                            let r = render_prompt(&theme, &inputs, &t, &mut NoopRecorder);
+                            let vi = render_vi_variants(
                                 &theme,
-                                &inputs,
-                                &Target {
-                                    shell,
-                                    depth,
-                                    options: o,
+                                ViInputs {
+                                    catalog: BUILTIN,
+                                    values: &mut vi_values,
+                                    facts: &facts,
+                                    setup: &setup,
                                 },
+                                &t,
+                                None,
+                                &r,
                                 &mut NoopRecorder,
                             );
                             let _ = write!(
@@ -300,19 +333,7 @@ fn render_cases(out: &mut String) {
                                 depth_name(depth),
                                 shell.as_str()
                             );
-                            for f in [
-                                &r.upper,
-                                &r.left,
-                                &r.right,
-                                &r.transient_left,
-                                &r.transient_right,
-                                &r.vi_insert,
-                                &r.vi_command,
-                            ] {
-                                out.push_str(&hex(f));
-                                out.push(' ');
-                            }
-                            out.push('\n');
+                            push_fields(out, &r, &vi);
                         }
                     }
                 }
@@ -382,37 +403,36 @@ fn git_cases(out: &mut String) {
                     facts: &collected.facts,
                     setup: theme.setup(),
                 };
+                let mut vi_values = collected.values.clone();
                 for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
                     for width in [0, 1, 2, 3, 59, 60, 120] {
-                        let rendered = render_prompt(
-                            &theme.theme(),
-                            &inputs,
-                            &Target {
-                                shell,
-                                depth: ColorDepth::TrueColor,
-                                options: Options {
-                                    width,
-                                    profile,
-                                    icons,
-                                    use_last_column: false,
-                                },
+                        let t = Target {
+                            shell,
+                            depth: ColorDepth::TrueColor,
+                            options: Options {
+                                width,
+                                profile,
+                                icons,
+                                use_last_column: false,
                             },
+                        };
+                        let view = theme.theme();
+                        let r = render_prompt(&view, &inputs, &t, &mut NoopRecorder);
+                        let vi = render_vi_variants(
+                            &view,
+                            ViInputs {
+                                catalog: BUILTIN,
+                                values: &mut vi_values,
+                                facts: &collected.facts,
+                                setup: theme.setup(),
+                            },
+                            &t,
+                            None,
+                            &r,
                             &mut NoopRecorder,
                         );
                         let _ = write!(out, "git {name} {set} {amb} {} {width}\t", shell.as_str());
-                        for bytes in [
-                            &rendered.upper,
-                            &rendered.left,
-                            &rendered.right,
-                            &rendered.transient_left,
-                            &rendered.transient_right,
-                            &rendered.vi_insert,
-                            &rendered.vi_command,
-                        ] {
-                            out.push_str(&hex(bytes));
-                            out.push(' ');
-                        }
-                        out.push('\n');
+                        push_fields(out, &r, &vi);
                     }
                 }
             }

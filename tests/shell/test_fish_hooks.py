@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from conftest import Install, minimal_record, run_shell_script, short_dir, trusted_env
+from conftest import Install, minimal_record, run_shell_script, short_dir, status_bait_record, trusted_env
 from pty_session import Session, visible
 
 pytestmark = pytest.mark.skipif("fish" not in os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split(),
@@ -21,7 +21,7 @@ SEP = b"<<SEP>>"
 
 
 def record(left, right=b""):
-    return b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    return b"B1\x1f12\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def start(tmp_path, record, rc_after=""):
@@ -58,7 +58,7 @@ def test_fish_prints_fields_without_interpreting(tmp_path):
     c1, c2 = cdir / "c1", cdir / "c2"
     left = f"D:$(touch {c1});(touch {c2});{{a,b}};$HOME;%s;\\n> ".encode()
     right = b"R:%d"
-    rec = b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    rec = b"B1\x1f12\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
     s, _ = start(tmp_path, rec)
     s.run("true")
     out = visible(s.close())
@@ -226,7 +226,7 @@ def test_bind_mode_outside_the_envelope_is_left_out(tmp_path, mode):
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)
     script = inst.init("fish", env)
-    body = f"set -g fish_bind_mode {mode}\nfish_prompt >/dev/null\nprintf '%s' $_bingsu_f[10]\n".encode()
+    body = f"set -g fish_bind_mode {mode}\nfish_prompt >/dev/null\nprintf '%s' $_bingsu_f[-1]\n".encode()
     r = run_shell_script("fish", script + b"\n" + body, env, tmp_path)
     assert r.returncode == 0 and r.stderr == b"", r.stderr
     assert r.stdout.startswith(b"ok:"), r.stdout
@@ -337,3 +337,16 @@ def test_refused_record_fallback_never_prints_the_directory(tmp_path):
     assert name.encode() not in out
     assert b"\x1b]0;PWNED" not in out and "\u202e".encode() not in out, out
     assert "❯ ".encode() in visible(out)
+
+
+# 이것을 실패시키는 것: hook이 상태를 옛 첨자(10)로 읽는 것. 앞쪽 경우는 알림이 사라지고, 뒤쪽 경우는 필드 글자로
+# 없는 경고를 낸다.
+@pytest.mark.parametrize("status,bait,warned", [
+    (b"degraded:sandbox", b"", 1),
+    (b"ok:none", b"degraded:sandbox", 0),
+], ids=["status-is-last", "old-place-holds-status-text"])
+def test_sandbox_warning_reads_last_element(tmp_path, status, bait, warned):
+    s, _ = start(tmp_path, status_bait_record(status, bait))
+    s.run("true")
+    out = visible(s.close())
+    assert out.count(b"could not start its system call filter") == warned

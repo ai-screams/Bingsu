@@ -23,7 +23,7 @@ def test_prompt_context_preserves_collector_pin(monkeypatch, tmp_path):
         calls.append(command)
         output = (b"'--runtime-root=1:2:/r' '--config-root=/c' "
                   b"'--collector-exe=/trusted/semi;colon/bingsu-collect';\n") if command[1] == "init" else (
-                      b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e")
+                      b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e")
         return CompletedProcess(command, 0, output, b"")
     monkeypatch.setattr(product, "run", run)
     command, _ = product.prompt_context("/trusted/bingsu", tmp_path)
@@ -274,7 +274,7 @@ def test_unavailable_normal_prompt_keeps_evidence_but_blocks_acceptance(monkeypa
 @pytest.mark.parametrize("damage", ["degraded", "version", "field-count", "stderr", "exit"])
 def test_normal_product_measurement_refuses_fallback_and_broken_records(damage):
     from subprocess import CompletedProcess
-    record = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    record = b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
     result = CompletedProcess([], 0, record, b"")
     assert product.normal_record(result)
     if damage == "degraded":
@@ -515,8 +515,8 @@ def test_intervals_follow_event_order_and_contain_their_boundaries(interval):
 
 
 # 이것을 실패시키는 것: 정상 B1(ok:none)이 아닌 prompt 표본을 합계 행의 prompt_ns로 받는 것.
-@pytest.mark.parametrize("record", [b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e",
-                                    b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:trust-clock\x1e"], ids=["ok-none", "degraded"])
+@pytest.mark.parametrize("record", [b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e",
+                                    b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:trust-clock\x1e"], ids=["ok-none", "degraded"])
 def test_prompt_samples_require_normal_record(monkeypatch, tmp_path, record):
     from subprocess import CompletedProcess
     import n7_measure

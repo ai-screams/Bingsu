@@ -66,7 +66,7 @@ def run_reader(trace_binary, tmp_path, mode="current", length=4, shell="bash", p
     assert result.stdout.count(b"C3-BEGIN\n") == result.stdout.count(b"C3-PREPARED\n") == 1
     record = result.stdout.split(b"C3-PREPARED\n", 1)[1]
     assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e")
-    assert record.count(b"\x1f") == 9 and b"ok:none" in record
+    assert record.count(b"\x1f") == 13 and b"ok:none" in record
     return record, trace_path, scratch
 
 

@@ -17,7 +17,7 @@ use crate::layout::{Inputs, Options};
 use crate::layout_view::LayoutView;
 use crate::record::{Fields, encode_b1, write_minimal_b1};
 use crate::recorder::NoopRecorder;
-use crate::render::{Target, render_prompt, to_b1_fields};
+use crate::render::{Target, ViVariants, render_prompt, to_b1_fields};
 use crate::shell_values;
 use crate::shell_word::Shell;
 use crate::status::Status;
@@ -68,7 +68,7 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
         },
     };
     let r = render_prompt(&theme.theme(), &inputs, &t, &mut NoopRecorder);
-    encode_or_internal(&to_b1_fields(&r), status, out);
+    encode_or_internal(&to_b1_fields(&r, &ViVariants::default()), status, out);
 }
 
 /// Shared snapshot/default rendering. Only the staged consumer enables P10;
@@ -189,7 +189,20 @@ fn render_selected_with_catalog<L: LayoutView>(
         notice,
         &mut NoopRecorder,
     );
-    encode_or_internal(&to_b1_fields(&rendered), status, out);
+    let vi = crate::render::render_vi_variants(
+        &theme,
+        crate::render::ViInputs {
+            catalog: catalog.segments,
+            values: &mut collected.values,
+            facts: &collected.facts,
+            setup,
+        },
+        &target,
+        notice,
+        &rendered,
+        &mut NoopRecorder,
+    );
+    encode_or_internal(&to_b1_fields(&rendered, &vi), status, out);
 }
 
 /// The legacy adapter plan, which carries only a parsed envelope. The snapshot
@@ -299,7 +312,8 @@ mod tests {
         a.iter().map(|s| s.as_bytes()).collect()
     }
 
-    const B1_INTERNAL: &[u8] = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:internal\x1e";
+    const B1_INTERNAL: &[u8] =
+        b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:internal\x1e";
 
     // 이것을 실패시키는 것: 패닉 뒤 협상을 쌍 규칙 없이 하는 것(raw.windows(2)), 협상이 없는데 레코드를 내는 것.
     #[test]
@@ -391,7 +405,7 @@ mod tests {
         ]);
         assert_eq!(
             without_sandbox(&ok),
-            b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:sandbox\x1e"
+            b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:sandbox\x1e"
         );
         let hidden = b(&["--ctx", "1", "--width", "80", "--keymap", "--record", "B1"]);
         assert_eq!(without_sandbox(&hidden), b"");
@@ -422,7 +436,10 @@ mod tests {
             "80",
             "--runtime-root=1:2:/r",
         ]));
-        assert_eq!(old, b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e");
+        assert_eq!(
+            old,
+            b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+        );
         let new = respond(&b(&[
             "--ctx",
             "1",
@@ -438,7 +455,7 @@ mod tests {
         ]));
         let s = alloc::string::String::from_utf8_lossy(&new);
         assert!(
-            s.starts_with("B1\x1f8\x1f") && s.ends_with("ok:none\x1e"),
+            s.starts_with("B1\x1f12\x1f") && s.ends_with("ok:none\x1e"),
             "{s:?}"
         );
         assert!(s.contains("proj") && s.contains('\u{276F}'), "{s:?}");

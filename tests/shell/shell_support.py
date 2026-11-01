@@ -113,9 +113,15 @@ def short_dir():
 
 
 def minimal_record(status=b"ok:none", left=b"> "):
-    return b"B1\x1f8\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f" + status + b"\x1e"
+    return b"B1\x1f12\x1f" + left + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f" + status + b"\x1e"
 
 
+
+
+def status_bait_record(status, bait=b""):
+    """A record with `bait` in left_vicmd, the element that held the status
+    before the vi command mode fields came (bash 9, zsh and fish 10)."""
+    return b"\x1f".join([b"B1", b"12", b"> ", *[b""] * 6, bait, b"", b"", b"", status]) + b"\x1e"
 
 
 class Blocked(Exception):

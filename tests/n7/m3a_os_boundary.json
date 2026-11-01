@@ -54,8 +54,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/shell/bash/hooks.bash",
-        "before": "${_bingsu_f[9]-} == @STATUS_SANDBOX@",
-        "after": "${_bingsu_f[9]-} == 'ok:none'"
+        "before": "${_bingsu_f[13]-} == @STATUS_SANDBOX@",
+        "after": "${_bingsu_f[13]-} == 'ok:none'"
       }
     ],
     "timeout": 180,
@@ -140,8 +140,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/shell/fish/hooks.fish",
-        "before": "\"$_bingsu_f[10]\" = @STATUS_SANDBOX@",
-        "after": "\"$_bingsu_f[10]\" = 'ok:none'"
+        "before": "\"$_bingsu_f[-1]\" = @STATUS_SANDBOX@",
+        "after": "\"$_bingsu_f[-1]\" = 'ok:none'"
       }
     ],
     "timeout": 180,

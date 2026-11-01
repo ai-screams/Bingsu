@@ -1,15 +1,16 @@
-//! One render: every line of the layout, the transient prompt and the vi
-//! symbols, written for one shell (spec section 1 "호출은 한 번"). The
-//! mapping to record fields is `to_b1_fields`.
+//! One render: every line of the layout, the transient prompt, the vi
+//! symbols and the vi command mode lines, written for one shell (spec section
+//! 1 "호출은 한 번"). The mapping to record fields is `to_b1_fields`.
 use crate::bands::Band;
 use crate::color::palette::ResolvedPalette;
 use crate::color::sgr::ColorDepth;
 use crate::emit::{emit, readline_mode_string};
-use crate::field::{Field, FieldValue, Value};
-use crate::layout::{Inputs, Options, Run, layout, layout_line};
+use crate::field::{Field, FieldValue, SegmentDecl, Value};
+use crate::layout::{Inputs, Options, Run, SegmentSetup, layout, layout_line};
 use crate::recorder::{NoopRecorder, Recorder};
 use crate::shell_word::Shell;
-use crate::template::compile::CompiledLine;
+use crate::shorten::PathFacts;
+use crate::template::compile::{CompiledLine, Node};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -17,6 +18,13 @@ use alloc::vec::Vec;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notice {
     Warning,
+}
+
+/// The lines of a selected band; the default layout when it has no variant.
+fn band_lines<'a>(theme: &Theme<'a>, band: Option<usize>) -> &'a [CompiledLine] {
+    band.and_then(|b| theme.variants.get(b + 1))
+        .or(theme.variants.first())
+        .map_or(&[][..], |v| v.as_slice())
 }
 
 fn notice_layout<R: Recorder>(
@@ -32,10 +40,7 @@ fn notice_layout<R: Recorder>(
         r.begin();
         r.band(band);
     }
-    let lines = band
-        .and_then(|b| theme.variants.get(b + 1))
-        .or(theme.variants.first())
-        .map_or(&[][..], |v| v.as_slice());
+    let lines = band_lines(theme, band);
     let budget = crate::layout::target(&t.options);
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
@@ -100,6 +105,29 @@ pub struct RenderedPrompt {
     pub vi_command: Vec<u8>,
 }
 
+/// The prompt in vi command mode, for the lines where it differs from the
+/// main fields. `lines` names those lines with `l`, `r` and `u`, in that
+/// order; a named line with an empty field is really empty, and the field of
+/// an unnamed line is empty and unused.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViVariants {
+    pub left: Vec<u8>,
+    pub right: Vec<u8>,
+    pub upper: Vec<u8>,
+    pub lines: Vec<u8>,
+}
+
+/// `Inputs` with the values lent mutably, so the second layout copies none of
+/// them. `render_vi_variants` leaves `char` in command mode: it is the last
+/// draw of a prompt.
+#[derive(Debug)]
+pub struct ViInputs<'a> {
+    pub catalog: &'a [SegmentDecl],
+    pub values: &'a mut [Option<Value>],
+    pub facts: &'a [Option<PathFacts>],
+    pub setup: &'a [SegmentSetup<'a>],
+}
+
 /// Room for the text and about one SGR per run, so a field is usually
 /// written without growing.
 fn capacity(runs: &[Run]) -> usize {
@@ -145,6 +173,29 @@ fn vi_symbols(theme: &Theme<'_>, inp: &Inputs<'_>, t: &Target) -> (Vec<u8>, Vec<
     (draw(false), draw(true))
 }
 
+/// Every line of the prompt for `t`, with the input-line cell of `notice`.
+#[inline]
+fn laid_lines<R: Recorder>(
+    theme: &Theme<'_>,
+    inp: &Inputs<'_>,
+    t: &Target,
+    notice: Option<Notice>,
+    r: &mut R,
+) -> Vec<crate::layout::LaidLine> {
+    if notice.is_some() {
+        notice_layout(theme, inp, t, r)
+    } else {
+        layout(
+            theme.variants,
+            theme.bands,
+            theme.band_order,
+            inp,
+            &t.options,
+            r,
+        )
+    }
+}
+
 /// Lays out the prompt and writes every display field for `t.shell`.
 /// Decisions of the main layout go to `r`; the transient and vi lines are
 /// laid out with `NoopRecorder`.
@@ -167,18 +218,7 @@ pub fn render_prompt_with_notice<R: Recorder>(
     notice: Option<Notice>,
     r: &mut R,
 ) -> RenderedPrompt {
-    let lines = if notice.is_some() {
-        notice_layout(theme, inp, t, r)
-    } else {
-        layout(
-            theme.variants,
-            theme.bands,
-            theme.band_order,
-            inp,
-            &t.options,
-            r,
-        )
-    };
+    let lines = laid_lines(theme, inp, t, notice, r);
     let p = theme.palette;
     // At most two lines (template::compile::MAX_LINES): the last is the
     // input line, one before it the upper line. A dropped upper line has
@@ -207,9 +247,91 @@ pub fn render_prompt_with_notice<R: Recorder>(
     }
 }
 
-/// The seven B1 display fields (record change plan 12: `upper` is the
-/// seventh).
-pub fn to_b1_fields(r: &RenderedPrompt) -> crate::record::Fields<'_> {
+/// Lays out the whole prompt again with `char` in vi command mode and keeps
+/// the lines that come out different from `main`. The whole prompt, because
+/// another symbol can change what fits on a line; a layout that draws neither
+/// `char` nor one of its fields has nothing to change and costs no layout.
+/// `notice` must be the one `main` was rendered with, or every input line
+/// would differ by the `!` and its cell. Decisions of this layout go to `r`.
+pub fn render_vi_variants<R: Recorder>(
+    theme: &Theme<'_>,
+    inp: ViInputs<'_>,
+    t: &Target,
+    notice: Option<Notice>,
+    main: &RenderedPrompt,
+    r: &mut R,
+) -> ViVariants {
+    let Some(ci) = inp.catalog.iter().position(|d| d.id == "char") else {
+        return ViVariants::default();
+    };
+    let Some(k) = inp.catalog[ci].field_index("vicmd") else {
+        return ViVariants::default();
+    };
+    let band = crate::bands::select(theme.band_order, theme.bands, t.options.width);
+    let draws_char = band_lines(theme, band).iter().any(|line| {
+        line.nodes().iter().any(|n| {
+            matches!(*n, Node::Segment { seg, .. } | Node::Field { seg, .. }
+                if usize::from(seg) == ci)
+        })
+    });
+    if !draws_char {
+        return ViVariants::default();
+    }
+    let Some(vicmd) = inp
+        .values
+        .get_mut(ci)
+        .and_then(|v| v.as_mut())
+        .and_then(|v| v.fields.get_mut(k))
+    else {
+        return ViVariants::default();
+    };
+    *vicmd = Field::known(FieldValue::Bool(true));
+    let vi_inp = Inputs {
+        catalog: inp.catalog,
+        values: inp.values,
+        facts: inp.facts,
+        setup: inp.setup,
+    };
+    let lines = laid_lines(theme, &vi_inp, t, notice, r);
+    let p = theme.palette;
+    let (input, upper) = match lines.split_last() {
+        Some((l, u)) => (Some(l), u.last()),
+        None => (None, None),
+    };
+    let mut named = Vec::new();
+    let mut keep = |mark: u8, drawn: Vec<u8>, shown: &[u8]| {
+        if drawn == shown {
+            return Vec::new();
+        }
+        named.push(mark);
+        drawn
+    };
+    let left = keep(
+        b'l',
+        input.map(|l| field(t, p, &l.left)).unwrap_or_default(),
+        &main.left,
+    );
+    let right = keep(
+        b'r',
+        input.map(|l| field(t, p, &l.right)).unwrap_or_default(),
+        &main.right,
+    );
+    let upper = keep(
+        b'u',
+        upper.map(|l| field(t, p, &l.left)).unwrap_or_default(),
+        &main.upper,
+    );
+    ViVariants {
+        left,
+        right,
+        upper,
+        lines: named,
+    }
+}
+
+/// The eleven B1 display fields: the prompt's seven (record change plan 12:
+/// `upper` is the seventh), then `vi`'s three lines and their names.
+pub fn to_b1_fields<'a>(r: &'a RenderedPrompt, vi: &'a ViVariants) -> crate::record::Fields<'a> {
     crate::record::Fields {
         left: &r.left,
         right: &r.right,
@@ -218,12 +340,17 @@ pub fn to_b1_fields(r: &RenderedPrompt) -> crate::record::Fields<'_> {
         vi_insert: &r.vi_insert,
         vi_command: &r.vi_command,
         upper: &r.upper,
+        left_vicmd: &vi.left,
+        right_vicmd: &vi.right,
+        upper_vicmd: &vi.upper,
+        vi_lines: &vi.lines,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bands::order_bands;
     use crate::color::palette::{Knobs, Mode, PaletteInput, resolve_palette};
     use crate::field::BUILTIN;
     use crate::layout::tests::{fixture, opts};
@@ -257,8 +384,8 @@ mod tests {
         render_prompt(&theme, &f.inputs(), &t, &mut NoopRecorder)
     }
 
-    // 이것을 실패시키는 것: 일곱 필드 중 어느 둘을 바꿔 싣는 것(예: vi_insert·vi_command,
-    // right·transient_right), 윗줄을 B1 필드에 싣지 않는 것. 필드마다 바이트가 달라 어느 맞바꿈도 갈린다.
+    // 이것을 실패시키는 것: 열한 필드 중 어느 둘을 바꿔 싣는 것(예: vi_insert·vi_command,
+    // right·right_vicmd), 윗줄을 B1 필드에 싣지 않는 것. 필드마다 바이트가 달라 어느 맞바꿈도 갈린다.
     #[test]
     fn b1_fields_map_one_to_one() {
         let r = RenderedPrompt {
@@ -270,7 +397,13 @@ mod tests {
             vi_insert: b"vins".to_vec(),
             vi_command: b"vcmd".to_vec(),
         };
-        let f = to_b1_fields(&r);
+        let vi = ViVariants {
+            left: b"lvi".to_vec(),
+            right: b"rvi".to_vec(),
+            upper: b"uvi".to_vec(),
+            lines: b"lru".to_vec(),
+        };
+        let f = to_b1_fields(&r, &vi);
         assert_eq!(
             [
                 f.upper,
@@ -279,7 +412,11 @@ mod tests {
                 f.transient_left,
                 f.transient_right,
                 f.vi_insert,
-                f.vi_command
+                f.vi_command,
+                f.left_vicmd,
+                f.right_vicmd,
+                f.upper_vicmd,
+                f.vi_lines
             ],
             [
                 &b"upper"[..],
@@ -288,9 +425,94 @@ mod tests {
                 b"tleft",
                 b"tright",
                 b"vins",
-                b"vcmd"
+                b"vcmd",
+                b"lvi",
+                b"rvi",
+                b"uvi",
+                b"lru"
             ]
         );
+    }
+
+    /// Counts the layouts that report to it.
+    #[derive(Default)]
+    struct Layouts(u32);
+
+    impl Recorder for Layouts {
+        const ENABLED: bool = true;
+        fn begin(&mut self) {
+            self.0 += 1;
+        }
+        fn band(&mut self, _: Option<usize>) {}
+        fn step(&mut self, _: usize, _: crate::recorder::Step) {}
+        fn hidden(&mut self, _: usize, _: usize, _: crate::recorder::HideReason) {}
+        fn shortened(&mut self, _: usize, _: usize, _: usize) {}
+    }
+
+    /// Second layouts of a theme with `wide` from 60 columns and `narrow`
+    /// below, at `width`, and the lines they named.
+    fn vi_layouts(wide: &str, narrow: &str, width: u16) -> (u32, Vec<u8>) {
+        let mut f = fixture(&["Works"], "main");
+        let pal = resolve_palette(&PaletteInput {
+            mode: Mode::Dark,
+            knobs: Knobs::default(),
+            overrides: &[],
+            roles: &[],
+        })
+        .unwrap();
+        let variants = [
+            compile(wide, BUILTIN).unwrap(),
+            compile(narrow, BUILTIN).unwrap(),
+        ];
+        let bands = [Band {
+            min_cols: None,
+            max_cols: Some(59),
+            order: None,
+        }];
+        let order = order_bands(&bands).unwrap();
+        let ch = compile("{char}", BUILTIN).unwrap().remove(0);
+        let theme = Theme {
+            variants: &variants,
+            bands: &bands,
+            band_order: &order,
+            transient: &ch,
+            vi: &ch,
+            palette: &pal,
+        };
+        let t = Target {
+            shell: Shell::Zsh,
+            depth: ColorDepth::TrueColor,
+            options: opts(width),
+        };
+        let main = render_prompt(&theme, &f.inputs(), &t, &mut NoopRecorder);
+        let mut log = Layouts::default();
+        let vi = render_vi_variants(
+            &theme,
+            ViInputs {
+                catalog: BUILTIN,
+                values: &mut f.values,
+                facts: &f.facts,
+                setup: &f.setup,
+            },
+            &t,
+            None,
+            &main,
+            &mut log,
+        );
+        (log.0, vi.lines)
+    }
+
+    // 이것을 실패시키는 것: 조기 반환을 지우는 것(배치·필드 쓰기·비교를 그대로 치른다), 판단을 선택되지 않은 구간으로
+    // 하는 것(`char` 있는 구간에서 건너뛰면 기호가 안 바뀐다), `{char.vicmd}` 참조를 판단에서 빼는 것.
+    #[test]
+    fn only_a_drawn_char_costs_a_second_layout() {
+        let (with, without) = ("{dir} {char}", "{dir}");
+        assert_eq!(vi_layouts(without, without, 80), (0, Vec::new()));
+        assert_eq!(vi_layouts(with, with, 80), (1, b"l".to_vec()));
+        assert_eq!(vi_layouts(with, without, 40), (0, Vec::new()));
+        assert_eq!(vi_layouts(without, with, 40), (1, b"l".to_vec()));
+        let field = "{dir}{@group}{char.vicmd}*{@end}";
+        assert_eq!(vi_layouts(field, field, 80), (1, b"l".to_vec()));
     }
 
     // 이것을 실패시키는 것: 윗줄이 없는 프롬프트(한 줄 템플릿, 단계 7이 윗줄을 버린 폭)에 윗줄 필드 바이트를

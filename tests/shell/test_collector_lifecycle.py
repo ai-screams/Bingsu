@@ -116,9 +116,9 @@ def assert_no_collection_wait(text, *, deadline_empty=False):
 
 
 def assert_prompt_record(output):
-    assert (len(output) <= 65536 and output.startswith(b"B1\x1f8\x1f")
+    assert (len(output) <= 65536 and output.startswith(b"B1\x1f12\x1f")
             and output.endswith(b"\x1e") and output.count(b"\x1e") == 1
-            and output.count(b"\x1f") == 9), ("malformed prompt record", output)
+            and output.count(b"\x1f") == 13), ("malformed prompt record", output)
     assert re.fullmatch(rb"[a-z]+:[a-z-]+\x1e", output.rsplit(b"\x1f", 1)[1]), (
         "malformed prompt status", output)
 

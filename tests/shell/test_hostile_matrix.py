@@ -51,7 +51,7 @@ def record(shell, data):
     if shell == "zsh":
         # what a correct core emits for zsh data
         left, upper = left.replace(b"%", b"%%"), upper.replace(b"%", b"%%")
-    return b"B1\x1f8\x1f" + left + b"\x1fRMARK\x1f\x1f\x1f\x1f\x1f" + upper + b"\x1fok:none\x1e"
+    return b"B1\x1f12\x1f" + left + b"\x1fRMARK\x1f\x1f\x1f\x1f\x1f" + upper + b"\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def drawn(shell, out, data):

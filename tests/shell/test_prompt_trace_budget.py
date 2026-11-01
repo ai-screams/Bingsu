@@ -2936,7 +2936,7 @@ def marker_capture(*, alarm=True, write_after=False, exit_code=0, timer=True, he
 def test_front_deadline_exit_needs_its_proof(damage):
     kwargs = {"none": {}, "write-after-alarm": {"write_after": True}, "no-alarm": {"alarm": False},
               "no-timer": {"timer": False}, "exit-1": {"exit_code": 1},
-              "record": {"record": b"B1\x1f8\x1fdegraded:trust-invalid\x1e"}}[damage]
+              "record": {"record": b"B1\x1f12\x1fdegraded:trust-invalid\x1e"}}[damage]
     shape = budget.front_deadline_exit(marker_capture(**kwargs))
     assert shape == ("front-deadline" if damage == "none" else None)
 
@@ -2965,7 +2965,7 @@ def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
         except BaseException as error:
             error.made = made
             raise
-    complete = marker_capture(alarm=False, record=b"B1\x1f8\x1fdegraded:trust-invalid\x1e")
+    complete = marker_capture(alarm=False, record=b"B1\x1f12\x1fdegraded:trust-invalid\x1e")
     (attempt, shapes), made = run([marker_capture(), complete])
     assert (attempt, dict(shapes), made) == (2, {"front-deadline": 1}, [1, 2])
     assert "marker invalid attempts: 2, deadline shapes: {'front-deadline': 1}" in capsys.readouterr().out
@@ -3054,7 +3054,7 @@ STORED_MARKER = {
               "efd968f1e793e2b4ee73b8bb29e68612503fc771f633c97f3fb3d632646cb473",
               "/home/tester/target/helper-stage-a2jff6bi"),
 }
-RECORD = b"B1\x1f8\x1frecord\x1e"
+RECORD = b"B1\x1f12\x1frecord\x1e"
 
 
 def stored_marker_capture(name, *, record, edit=lambda lines: lines):

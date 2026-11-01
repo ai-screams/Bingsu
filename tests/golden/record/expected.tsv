@@ -1,11 +1,13 @@
 # name	frame	disp	note	overrides
 good	accept	ok	-	-
 good_utf8	accept	ok	-	-
-seven_empty	accept	ok	-	-
+eleven_empty	accept	ok	-	-
 upper_only	accept	ok	-	-
 st_after_upper	accept	error	generic	-
+st_after_vi_lines	accept	error	generic	-
 upper_lf	reject	-	-	-
 old_b1	reject	-	-	-
+old_b1_count8	reject	-	-	-
 lit_dot	accept	ok	-	-
 cr	accept	ok	-	-
 bad_utf8	accept	ok	-	-
@@ -20,6 +22,8 @@ rs_lflf	reject	-	-	-
 no_rs	reject	-	-	-
 nine	reject	-	-	-
 eleven	reject	-	-	-
+thirteen	reject	-	-	-
+fifteen	reject	-	-	-
 bad_hdr	reject	-	-	-
 bad_count	reject	-	-	-
 empty	reject	-	-	-

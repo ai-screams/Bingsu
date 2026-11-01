@@ -59,8 +59,8 @@ fn producer_column_matches() {
         seen.push(class);
         let p = payload(c[1]);
         // Every display field, the upper line (record change plan 12) included.
-        for field in 0..7 {
-            let mut parts: [&[u8]; 7] = [b""; 7];
+        for field in 0..11 {
+            let mut parts: [&[u8]; 11] = [b""; 11];
             parts[field] = &p;
             let f = Fields {
                 left: parts[0],
@@ -70,11 +70,19 @@ fn producer_column_matches() {
                 vi_insert: parts[4],
                 vi_command: parts[5],
                 upper: parts[6],
+                left_vicmd: parts[7],
+                right_vicmd: parts[8],
+                upper_vicmd: parts[9],
+                vi_lines: parts[10],
             };
             let mut out = Vec::new();
             let got = match encode_b1(&f, Status::OK_NONE, &mut out) {
                 Ok(Encoded::Full) => "accept",
-                Ok(Encoded::ReplacedBySizeLimit) => "replaced",
+                // The vi fields alone never cost the record.
+                Ok(Encoded::ViFieldsDropped) if field >= 7 => "replaced",
+                Ok(Encoded::ViFieldsDropped) => "dropped outside the vi fields",
+                Ok(Encoded::ReplacedBySizeLimit) if field < 7 => "replaced",
+                Ok(Encoded::ReplacedBySizeLimit) => "replaced by a vi field",
                 Err(_) => "reject",
             };
             assert_eq!(got, want, "{class} field {field}");

@@ -20,7 +20,7 @@ fn native_output_matches_committed_golden() {
         .expect("run bingsu-golden");
     assert!(out.status.success(), "bingsu-golden failed");
     // Keep coverage even if both the generator and golden are regenerated after
-    // accidentally deleting a matrix axis. Every cell has seven rendered fields.
+    // accidentally deleting a matrix axis. Every cell has eleven rendered fields.
     let text = std::str::from_utf8(&out.stdout).unwrap();
     let rows: Vec<_> = text
         .lines()
@@ -64,7 +64,7 @@ fn native_output_matches_committed_golden() {
                             .iter()
                             .find(|r| r.starts_with(&key))
                             .expect("git golden matrix cell");
-                        assert_eq!(row.split_once('\t').unwrap().1.split(' ').count(), 8);
+                        assert_eq!(row.split_once('\t').unwrap().1.split(' ').count(), 12);
                     }
                 }
             }

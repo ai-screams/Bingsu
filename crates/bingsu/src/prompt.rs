@@ -164,8 +164,10 @@ pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
 mod tests {
     use super::*;
 
-    const INTERNAL: &[u8] = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:internal\x1e";
-    const SANDBOX: &[u8] = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:sandbox\x1e";
+    const INTERNAL: &[u8] =
+        b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:internal\x1e";
+    const SANDBOX: &[u8] =
+        b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:sandbox\x1e";
 
     fn args() -> Vec<OsString> {
         [

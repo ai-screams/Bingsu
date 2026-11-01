@@ -160,7 +160,7 @@ def test_legacy_hook_without_global_words_still_renders(shell, tmp_path):
 
 
 def assert_record(record, context=None):
-    assert record.startswith(b"B1\x1f8\x1f") and record.endswith(b"\x1e"), (record, context)
+    assert record.startswith(b"B1\x1f12\x1f") and record.endswith(b"\x1e"), (record, context)
     fields = record[:-1].split(b"\x1f")
-    assert len(fields) == 10 and fields[2], (record, context)
+    assert len(fields) == 14 and fields[2], (record, context)
     assert fields[-1].startswith((b"ok:", b"degraded:")), (fields[-1], context)

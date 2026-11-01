@@ -1,6 +1,6 @@
-"""Version mixing (record change plan 12, security impact): the B1 reader of
-M1 (count 7, kept in legacy/ as a fixture) with a new record, and the new
-reader with an old record, both fail and leave the field array empty. The new
+"""Version mixing (record change plan 12, security impact): the B1 readers of
+M1 and M3 (counts 7 and 8, kept in legacy/ as fixtures) with a new record, and
+the new reader with an old record, all fail and leave the field array empty. The new
 binary refuses an old snapshot frame and its helper regenerates the file."""
 import functools
 import os
@@ -15,8 +15,9 @@ sys.path.insert(0, str(HERE))
 import run  # noqa: E402
 
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
-NEW = b"B1\x1f8\x1fL\x1f\x1f\x1f\x1f\x1f\x1fU\x1fok:none\x1e"
-OLD = b"B1\x1f7\x1fL\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+NEW = b"B1\x1f12\x1fL\x1f\x1f\x1f\x1f\x1f\x1fU\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+OLDER = b"B1\x1f7\x1fL\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+OLD = b"B1\x1f8\x1fL\x1f\x1f\x1f\x1f\x1f\x1fU\x1fok:none\x1e"
 SCRIPT = {
     "zsh": 'source "$1"; rec=$(cat -- "$2"; print -n .); rec=${rec%.}; '
            'if _bingsu_frame "$rec"; then r=accept; else r=reject; fi; print -r -- "$r ${#_bingsu_f}"',
@@ -38,15 +39,16 @@ def frame(shell, reader_src, record, tmp_path):
     return r.stdout.decode().strip()
 
 
-# 이것을 실패시키는 것: 새 reader가 옛 레코드(개수 7)를 받거나, 옛 reader가 새 레코드(개수 8)를 받는 것,
+# 이것을 실패시키는 것: 새 reader가 옛 레코드(개수 7·8)를 받거나, 옛 reader가 새 레코드(개수 12)를 받는 것,
 # 거부한 뒤 필드 배열을 비우지 않는 것.
 @pytest.mark.parametrize("shell", SHELLS)
 def test_mixed_versions_fail_closed(shell, tmp_path):
-    legacy = HERE / "legacy" / f"reader-b1-count7.{shell}"
-    assert frame(shell, legacy, OLD, tmp_path) == "accept 9"
-    assert frame(shell, legacy, NEW, tmp_path) == "reject 0"
-    assert frame(shell, run.READER[shell], NEW, tmp_path) == "accept 10"
-    assert frame(shell, run.READER[shell], OLD, tmp_path) == "reject 0"
+    for name, record, elements in [("count7", OLDER, 9), ("count8", OLD, 10)]:
+        legacy = HERE / "legacy" / f"reader-b1-{name}.{shell}"
+        assert frame(shell, legacy, record, tmp_path) == f"accept {elements}"
+        assert frame(shell, legacy, NEW, tmp_path) == "reject 0"
+        assert frame(shell, run.READER[shell], record, tmp_path) == "reject 0"
+    assert frame(shell, run.READER[shell], NEW, tmp_path) == "accept 14"
 
 
 # The old binary's side of the mix needs an old build, so CI cannot run it. It was

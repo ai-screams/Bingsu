@@ -159,7 +159,7 @@ def test_worker_limits_fail_without_blocking_front():
                              "--record", "B1", "--width", "80", "--runtime-root=1:2:/r"],
                             env={}, stdin=subprocess.DEVNULL, capture_output=True, timeout=2)
     assert prompt.returncode == 0 and prompt.stderr == b""
-    assert prompt.stdout == b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:runtime-root\x1e"
+    assert prompt.stdout == b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fdegraded:runtime-root\x1e"
 
 
 # 이것을 실패시키는 것: 제품·시험 공통 경로의 생성 호출 또는 canary 변이를 놓치는 것.

@@ -43,7 +43,7 @@ def test_observe_normalizes_path_argv_before_retargeting(monkeypatch, tmp_path, 
             return SimpleNamespace(stdout=b'{"front_read_ns": 12}')
         assert argv == [str(binary), "prompt", "--home=" + str(repo), "--pwd", str(repo)]
         assert kwargs["env"] is env
-        return SimpleNamespace(returncode=0, stderr=b"", stdout=b"B1\x1f" + b"\x1f" * 8 + b"ok:none\x1e")
+        return SimpleNamespace(returncode=0, stderr=b"", stdout=b"B1\x1f" + b"\x1f" * 12 + b"ok:none\x1e")
     monkeypatch.setattr(git.subprocess, "Popen", popen)
     monkeypatch.setattr(git.M3B, "run", run)
     monkeypatch.setattr(git.M3B, "prompt_context", lambda *args: (command, env))

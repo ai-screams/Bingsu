@@ -252,7 +252,7 @@ def validate_sample(sample, *, require_prompt=True):
 
 def normal_record(result):
     return (result.returncode == 0 and result.stderr == b"" and result.stdout.startswith(b"B1\x1f")
-            and result.stdout.endswith(b"ok:none\x1e") and result.stdout.count(b"\x1f") == 9)
+            and result.stdout.endswith(b"ok:none\x1e") and result.stdout.count(b"\x1f") == 13)
 
 
 def prompt_context(binary, directory):
