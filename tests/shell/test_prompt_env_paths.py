@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+import zlib
 
 import pytest
 
@@ -2501,6 +2502,69 @@ def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_
     assert role_children(trace) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
     assert len({c.pid for c in trace}) == 1, "a redraw is one process"
     assert not config_calls("redraw", trace)
+
+
+BRANCH = "redrawbranch"
+
+
+def git_repo(path):
+    """A hand-made repository with one commit on BRANCH: the test images have no git."""
+    def loose(kind, body):
+        data = f"{kind} {len(body)}\0".encode() + body
+        name = hashlib.sha1(data).hexdigest()
+        target = path / ".git/objects" / name[:2] / name[2:]
+        target.parent.mkdir(parents=True)
+        target.write_bytes(zlib.compress(data))
+        return name
+
+    who = b"t <t@t> 0 +0000"
+    tree = loose("tree", b"")
+    commit = loose("commit", b"tree %s\nauthor %s\ncommitter %s\n\nc\n" % (tree.encode(), who, who))
+    (path / ".git/refs/heads").mkdir(parents=True)
+    (path / ".git/refs/heads" / BRANCH).write_text(commit + "\n")
+    (path / ".git/HEAD").write_text(f"ref: refs/heads/{BRANCH}\n")
+    return path
+
+
+# 이것을 실패시키는 것: redraw가 저장 봉투 값이나 이전 수집 응답을 버리는 것, 새 폭을 쓰지 않는 것.
+def test_redraw_renders_new_width_from_same_values(tmp_path):
+    # A debug collector is too large to verify inside the helper's CPU limit.
+    if real_bin().parent.name != "release":
+        pytest.skip("real collection requires release")
+    from test_helper_lifecycle import LifetimeSession, poll
+    session = LifetimeSession(tmp_path / "s", tag="r")
+    session.put("[layout.line1]\nleft=['dir']\nright=['git']\n[layout.line2]\nleft=['duration','char']\nright=[]\n")
+    session.init()
+    session.wait_quiet()
+    repo = git_repo(session.base / "repo")
+    stored = ["--status", "3", "--pipestatus", "3", "--duration-ms", "5000", "--jobs", "2"]
+
+    def prompt(width, *extra):
+        args = session.prompt_args(repo)
+        args[args.index("--width") + 1] = str(width)
+        result = session.run(*args, *stored, *extra, timeout=2)
+        assert result.returncode == 0 and result.stderr == b"", result
+        return result.stdout
+
+    def collected():
+        record = prompt(100)
+        session.wait_quiet()
+        return BRANCH.encode() in record and record
+
+    wide = poll(collected, 20, "the first prompts never collected git")
+    assert b"5.0s" in wide
+    redraw = prompt(90, "--redraw")
+    assert BRANCH.encode() in redraw and b"5.0s" in redraw
+    assert redraw != wide, "the new width was not used"
+    assert redraw == prompt(90), "a redraw differs from a prompt with the same envelope"
+    session.wait_quiet()
+    # 이것을 실패시키는 것: 세션의 도우미 집계가 값 자리의 `--redraw`를 플래그로 보는 것.
+    before = session._helper_count
+    prompt(90, "--redraw")
+    assert session._helper_count == before
+    prompt(90, "--host", "--redraw")
+    assert session._helper_count == before + 1
+    session.wait_quiet()
 
 
 # 이것을 실패시키는 것: worker가 없는 화면에도 collector 생성.

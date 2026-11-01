@@ -443,7 +443,9 @@ jobs:
       - name: Assert B1 release child gates
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role tests/shell/test_prompt_env_paths.py::test_live_no_worker_segment_spawns_zero_collectors tests/shell/test_prompt_env_paths.py::test_live_collector_count_ignores_marker_validity tests/shell/test_prompt_env_paths.py::test_live_collector_spawns_after_helper_header_and_marker_reads --basetemp="$RUNNER_TEMP/b1-evidence" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/b1.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py::test_redraw_spawns_no_process_and_reads_no_config_source tests/shell/test_prompt_env_paths.py::test_redraw_renders_new_width_from_same_values tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role tests/shell/test_prompt_env_paths.py::test_live_no_worker_segment_spawns_zero_collectors tests/shell/test_prompt_env_paths.py::test_live_collector_count_ignores_marker_validity tests/shell/test_prompt_env_paths.py::test_live_collector_spawns_after_helper_header_and_marker_reads --basetemp="$RUNNER_TEMP/b1-evidence" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/b1.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_redraw_spawns_no_process_and_reads_no_config_source' "$RUNNER_TEMP/b1.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_redraw_renders_new_width_from_same_values' "$RUNNER_TEMP/b1.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_child_count_is_bounded_per_role' "$RUNNER_TEMP/b1.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_no_worker_segment_spawns_zero_collectors' "$RUNNER_TEMP/b1.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_collector_count_ignores_marker_validity' "$RUNNER_TEMP/b1.txt"
