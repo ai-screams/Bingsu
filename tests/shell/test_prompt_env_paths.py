@@ -1940,6 +1940,11 @@ def held_recheck(call, held):
     return name is not None and "/" not in name and base in held and f"{base}/{name}" in held
 
 
+def held_chain(fixture):
+    config = Path(os.path.realpath(fixture.config / "config.toml"))
+    return {str(p) for p in [config, *config.parents]}
+
+
 def axis_cap_case(axis, fixture):
     """Make `fixture`'s config cross `axis`; return (paths the helper must stop
     touching, the crossing call finder, the call kinds still allowed after it)."""
@@ -1966,6 +1971,27 @@ def axis_cap_case(axis, fixture):
                     return c
             pytest.fail(f"the listing never passed the cap: {seen} entries")
         return [root], crossing, None
+    if axis.startswith("R-"):
+        # Entries that pass the lexical check and are walked before R counts the
+        # next one: the 255th stops with no call of its own, the 254th is the last walked.
+        written = {"R-missing": [f"parts/none-{i:03}.toml" for i in range(255)],
+                   "R-duplicate": ["parts/same.toml"] * 255, "R-cycle": ["config.toml"] * 255}[axis]
+        (fixture.config / "parts").mkdir(mode=0o700)
+        write_private(fixture.config / "parts/same.toml", b"")
+        refs = ", ".join(f'"{r}"' for r in written)
+        write_private(fixture.config / "config.toml", f"extends = [{refs}]\n".encode() + plain)
+        last = {"R-missing": '"none-253.toml"', "R-duplicate": '"same.toml"', "R-cycle": '"config.toml"'}[axis]
+
+        def crossing(calls):
+            walked = [c for c in calls if c.name in ("openat", "newfstatat", "statx") and last in c.args]
+            assert walked, f"the helper never walked {last}"
+            missing = {m[0] for c in calls if (m := re.search(r'"none-\d+\.toml"', c.args))}
+            opens = sum(c.name == "openat" for c in walked)
+            # The root reads config.toml twice more than the list names it.
+            assert (len(missing), opens) == {"R-missing": (254, 0), "R-duplicate": (0, 254), "R-cycle": (0, 256)}[axis]
+            return walked[-1]
+        held = held_chain(fixture) | {root + "/parts", root + "/parts/same.toml"}
+        return [root], crossing, lambda c: held_recheck(c, held)
     if axis == "R":
         # config.toml, the absent config.local.toml and 255 refused entries: 257.
         refs = ", ".join(f'"$THEME_{i}"' for i in range(255))
@@ -1979,9 +2005,7 @@ def axis_cap_case(axis, fixture):
         # The refused entry has no call of its own. Between the read and it the
         # trusted file's retained evidence is checked again: its descriptors
         # and the names that bind them (config.toml and the folders above it).
-        held = {str(p) for p in [Path(os.path.realpath(fixture.config / "config.toml")),
-                                 *Path(os.path.realpath(fixture.config / "config.toml")).parents]}
-        return [root], crossing, lambda c: held_recheck(c, held)
+        return [root], crossing, lambda c: held_recheck(c, held_chain(fixture))
     assert axis == "B"
     themes = fixture.base / "themes"
     refs = [themes / f"t{i}.toml" for i in range(8)]
@@ -2003,16 +2027,18 @@ def axis_cap_case(axis, fixture):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
-@pytest.mark.parametrize("axis", ["E_n", "R", "B"])
+@pytest.mark.parametrize("axis", ["E_n", "R", "R-missing", "R-duplicate", "R-cycle", "B"])
 def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
     """GATE-FS-HELPER.2: a config past one axis cap ends the release helper's
     round closed. After the call that crosses the cap (the conf.d batch holding
-    raw entry cap + 1, the last read of config.toml before the refused extends
-    entry, the read of the theme that passes 2 MiB) no config source call
-    follows, and snapshot, last-good, marker and sequence keep their bytes.
+    raw entry cap + 1, the last read of config.toml before a lexically refused
+    extends entry, the last walk before a missing, duplicate or cyclic one, the
+    read of the theme that passes 2 MiB) no config source call follows, and
+    snapshot, last-good, marker and sequence keep their bytes.
 
     이것을 실패시키는 것: 목록 항목을 걸러낸 뒤에만 세거나 세지 않는 것(목록이 끝까지 돌고 재목록이 따름), 거부된
-    extends 항목을 R에서 빼는 것(재검증 걷기가 따름), B 읽기를 남은 여유 + 1바이트로 묶지 않는 것, 상한을 넘은 뒤
+    extends 항목을 R에서 빼는 것(재검증 걷기가 따름), 없는·중복·순환 항목을 걷기 뒤에 세거나 세지 않는 것(255번째가
+    걸어짐), B 읽기를 남은 여유 + 1바이트로 묶지 않는 것, 상한을 넘은 뒤
     남은 뿌리 후보나 재검증을 이어 가는 것, 상한 초과에서 표식·snapshot·sequence를 쓰는 것.
     """
     assert shutil.which("strace"), "the helper axis gate must execute strace"
