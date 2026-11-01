@@ -489,8 +489,8 @@ def job_platforms(job, meta):
 
 
 # The shell.yml jobs whose steps may carry acceptance evidence, with their
-# pinned matrix (None: no matrix). shell-macos is a required check;
-# filter-calls is not. Their other steps predate the evidence rules, so the
+# pinned matrix (None: no matrix). All of them are required checks.
+# Their other steps predate the evidence rules, so the
 # anti-bypass checks apply to the steps a row actually uses (see
 # acceptance_pair_allowed).
 SHELL_EVIDENCE_JOBS = {
