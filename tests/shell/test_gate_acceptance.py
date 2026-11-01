@@ -8,13 +8,14 @@ Task proves the behaviour with its own live test and product mutations.
 import csv
 import io
 import re
+import shlex
 import subprocess
 import sys
 
 import pytest
 
 # Helpers only: importing test_* names here would collect them twice.
-from test_collector_security import ROOT, assert_acceptance_table, job_platforms
+from test_collector_security import ROOT, assert_acceptance_table, job_platforms, workflow_job
 
 TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
@@ -932,3 +933,254 @@ def test_runtime_notice_splits_zsh_and_defers_the_rest():
         assert_clauses_accounted(table, pending[:-1])
     with pytest.raises(AssertionError):
         assert_gate_table(table + line.replace("ROOT.6", "ROOT.5").replace("\t6\t", "\t5\t"), workflows(), pending=pending[:-1])
+
+
+# Required check names of the PTY jobs; each stays on exactly one cell.
+REQUIRED_PTY_CHECKS = ("Shell PTY (min-u22)", "Shell PTY (min-d12)", "Shell PTY (cur-d13)", "Shell PTY (macOS Homebrew)")
+# What each image's cells must cover together.
+PTY_SHELLS = {"min-u22": {"bash", "zsh"}, "min-d12": {"fish"}, "cur-d13": {"bash", "zsh", "fish"},
+              "macOS": {"bash", "zsh", "fish"}}
+PTY_VERSIONS = {"min-u22": {"bash=5.1", "zsh=5.8"}, "min-d12": {"fish=3.6"}, "cur-d13": set(), "macOS": set()}
+# Files a PTY run leaves out. The first two have their own gates in ci.yml; assert_pty_split
+# finds the place that runs the other two.
+PTY_IGNORED = {"tests/shell/test_collector_no_spawn_macos.py", "tests/shell/test_collector_security.py",
+               "tests/shell/test_gate_acceptance.py", "tests/shell/test_prompt_trace_budget.py"}
+# Exact pytest arguments of a PTY run, apart from PTY_IGNORED. A test leaves these runs
+# only by changing this list.
+PTY_PYTEST = ("tests/shell", "tests/golden/record/test_overrides.py", "tests/golden/record/test_mixed_versions.py",
+              "-q", "-rf", "-p", "no:cacheprovider", "--durations=0", "--durations-min=0.1")
+LINUX_DESELECTED = (
+    "tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty",
+    "tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples",
+    "tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula",
+    "tests/shell/test_prompt_env_paths.py::test_live_helper_stops_config_io_past_an_axis_cap",
+    "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-missing]",
+    "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]",
+    "tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c",
+    "tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section",
+    "tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount",
+    "tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock",
+    "tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children",
+    "tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio",
+    "tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds",
+    "tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive",
+    "tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t",
+)
+MACOS_DESELECTED = ("tests/shell/test_zsh_screen.py::test_prompt_inside_tmux",)
+LINUX_PTY_RUN = re.compile(r"exec python3 -m pytest (.*) \"\$@\"' sh \$\{BINGSU_RECORD_OBSERVATIONS:\+-s\}", re.S)
+MACOS_PTY_RUN = re.compile(r"\"\$BINGSU_PY\" -m pytest (.*) \$\{BINGSU_RECORD_OBSERVATIONS:\+-s\}", re.S)
+PTY_ALWAYS = "success() || failure()"
+# Every condition a step of a PTY job may carry. Any other step runs in every cell.
+LINUX_CONDITIONS = {"Assert minimum versions": "matrix.versions != ''", "PTY tests": PTY_ALWAYS,
+                    "Shell-independent tests": "(success() || failure()) && matrix.image == 'min-d12'",
+                    "Long folder test (AppArmor unconfined)": PTY_ALWAYS}
+MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS}
+LONG_FOLDER_RUN = "-m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q"
+SHELL_FREE_STEP = "      - name: Shell-independent tests\n"
+SHELL_FREE_RUN = "-m pytest tests/shell/test_prompt_trace_budget.py -q"
+SHELL_FREE_GREP = "grep -Eq '^[0-9]+ passed in ' \"$RUNNER_TEMP/shell-independent.txt\""
+MACOS_JOB = "  shell-macos:\n    name: Shell PTY (macOS Homebrew)\n"
+MACOS_SHELLS_JOB = "  shell-macos-shells:\n    name: Shell PTY (macOS Homebrew ${{ matrix.shell }})\n"
+MACOS_MATRIX = "    strategy:\n      fail-fast: false\n      matrix:\n        shell: [bash, fish]\n"
+LINUX_CELL = re.compile(r"(?m)^          - label: (.+)\n            image: (.+)\n"
+                        r"            versions: (.+)\n            shells: (.+)\n")
+
+
+def job_block(text, job):
+    start, end = job_span(text, job)
+    return text[start:end]
+
+
+def pty_cells(text):
+    """(check name, image, shells, versions) of every PTY cell."""
+    block = job_block(text, "shell-linux")
+    assert "    name: Shell PTY (${{ matrix.label }})\n" in block
+    entries = LINUX_CELL.findall(block)
+    assert len(entries) == block.count("          - label:"), "matrix row shape"
+    cells = [(f"Shell PTY ({label})", image, shells.split(), set(versions.strip('"').split()))
+             for label, image, versions, shells in entries]
+    cells.append(("Shell PTY (macOS Homebrew)", "macOS", ["zsh"], set()))
+    shells, = re.findall(r"(?m)^        shell: \[(.*)\]$", job_block(text, "shell-macos-shells"))
+    return cells + [(f"Shell PTY (macOS Homebrew {shell})", "macOS", [shell], set()) for shell in shells.split(", ")]
+
+
+def assert_pty_steps(text, job, conditions):
+    # 이것을 실패시키는 것: 칸의 단계나 job에 조건을 붙이거나 실패를 숨겨 시험이 돌지 않는 것.
+    meta, steps = workflow_job(text, job)
+    assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
+    assert not any("continue-on-error" in entry for entry in (meta, *steps)), job
+    found = {step.get("name"): step["if"] for step in steps if "if" in step}
+    assert found == conditions, (job, found)
+    assert "Record golden vectors" in [step.get("name") for step in steps], job
+    return next(step["run"] for step in steps if step.get("name") == "PTY tests")
+
+
+def assert_pty_selection(run, pattern, deselected, ignored):
+    # 이것을 실패시키는 것: -k·-m·--maxfail·--deselect 추가, 시험 경로 축소처럼 PTY 실행의 선택을 좁히는 것,
+    # 명령 뒤에 `|| true`를 붙이는 것.
+    match = pattern.search(run)
+    assert match and not run[match.end():].strip(" '\n"), run
+    want = [*PTY_PYTEST, *(arg for path in ignored for arg in ("--ignore", path)),
+            *(arg for node in deselected for arg in ("--deselect", node))]
+    got = shlex.split(match[1].replace("\\\n", " "))
+    if pattern is LINUX_PTY_RUN:
+        want.append("--basetemp=/root/pytest")
+    assert sorted(got) == sorted(want), sorted(set(got) ^ set(want))
+
+
+def assert_macos_jobs_match(text):
+    # 이것을 실패시키는 것: 두 macOS job의 단계가 갈라져 한쪽 칸만 다른 환경에서 도는 것.
+    kept = drop_gate_step(text, "shell-macos")
+    kept = re.sub(r"(?m)^      # 이것을 실패시키는 것: 필수 job에서 게이트 행 표.*\n", "", job_block(kept, "shell-macos"))
+    assert MACOS_JOB in kept
+    want = (kept.replace(MACOS_JOB, MACOS_SHELLS_JOB).replace("    steps:\n", MACOS_MATRIX + "    steps:\n", 1)
+            .replace('SHELLS="zsh" LOCALES', 'SHELLS="${{ matrix.shell }}" LOCALES')
+            .replace("BINGSU_TEST_SHELLS: zsh\n", "BINGSU_TEST_SHELLS: ${{ matrix.shell }}\n"))
+    assert 'SHELLS="zsh" LOCALES' in kept and "BINGSU_TEST_SHELLS: zsh\n" in kept
+    assert want.rstrip() == job_block(text, "shell-macos-shells").rstrip(), "macOS jobs differ"
+
+
+def assert_pty_split(text, ignored=PTY_IGNORED):
+    cells = pty_cells(text)
+    names = [cell[0] for cell in cells]
+    assert len(names) == len(set(names)), names
+    assert set(REQUIRED_PTY_CHECKS) <= set(names), names
+    assert all(len(cell[2]) == 1 for cell in cells), cells
+    for image, shells in PTY_SHELLS.items():
+        found = [shell for cell in cells if cell[1] == image for shell in cell[2]]
+        assert sorted(found) == sorted(shells), (image, found)
+        versions = [v for cell in cells if cell[1] == image for v in cell[3]]
+        assert sorted(versions) == sorted(PTY_VERSIONS[image]), (image, versions)
+    assert {cell[1] for cell in cells} == set(PTY_SHELLS)
+    linux = job_block(text, "shell-linux")
+    for token in ('-e BINGSU_TEST_SHELLS="${{ matrix.shells }}"', '-e SHELLS="${{ matrix.shells }}"',
+                  '-e LOCALES="C.UTF-8 C ko_KR.UTF-8"', "tests/shell/check_versions.py ${{ matrix.versions }}", LONG_FOLDER_RUN):
+        assert token in linux, token
+    assert_macos_jobs_match(text)
+    assert 'LOCALES="en_US.UTF-8 C ko_KR.UTF-8"' in job_block(text, "shell-macos")
+    # pytest reads this variable; a value in the workflow would narrow every run without changing the commands.
+    assert "PYTEST_ADDOPTS" not in text
+    assert_pty_selection(assert_pty_steps(text, "shell-linux", LINUX_CONDITIONS), LINUX_PTY_RUN, LINUX_DESELECTED, ignored)
+    for job in ("shell-macos", "shell-macos-shells"):
+        assert_pty_selection(assert_pty_steps(text, job, MACOS_CONDITIONS), MACOS_PTY_RUN, MACOS_DESELECTED, ignored)
+    assert all((ROOT / path).is_file() for path in ignored), "no such file"
+    # The two left-out files that have no gate of their own run in required cells.
+    assert [cell[0] for cell in cells if cell[1] == "min-d12"] == ["Shell PTY (min-d12)"]
+    assert text.count(SHELL_FREE_STEP) == 1 and SHELL_FREE_STEP in linux
+    step = linux.split(SHELL_FREE_STEP)[1].split("      # The one test")[0]
+    assert "        if: (success() || failure()) && matrix.image == 'min-d12'\n" in step
+    assert "set -o pipefail" in step and SHELL_FREE_GREP in step
+    assert step.count(SHELL_FREE_RUN) == 1 and text.count("tests/shell/test_prompt_trace_budget.py -q") == 1
+    for job in GATE_STEP_JOBS:
+        assert "-m pytest tests/shell/test_gate_acceptance.py -q" in job_block(text, job), job
+
+
+# 이것을 실패시키는 것: 칸 이름·셸 분할이 어긋나는 것, 셸 무관 시험이 필수 칸에서 빠지는 것.
+def test_pty_cells_cover_every_shell_and_shell_free_file():
+    assert_pty_split(workflows()["shell.yml"])
+
+
+# 이것을 실패시키는 것: 아래 변경 하나를 assert_pty_split이 받는 것.
+@pytest.mark.parametrize("old,new,job", [
+    pytest.param(*case, id=name) for name, case in {
+        "drop-shell-cell": ('          - label: cur-d13 fish\n            image: cur-d13\n            versions: ""\n'
+                            "            shells: fish\n", "", "shell-linux"),
+        "drop-required-name": ("label: min-d12\n", "label: min-d12 fish\n", "shell-linux"),
+        "duplicate-name": ("label: cur-d13 bash\n", "label: cur-d13\n", "shell-linux"),
+        "two-shells-in-a-cell": ("shells: fish\n          - label: cur-d13", "shells: fish zsh\n          - label: cur-d13",
+                                 "shell-linux"),
+        "unknown-image": ("          - label: min-d12\n", '          - label: cur-d14\n            image: cur-d14\n'
+                          '            versions: ""\n            shells: fish\n          - label: min-d12\n', "shell-linux"),
+        "drop-version": ("versions: bash=5.1\n", 'versions: ""\n', "shell-linux"),
+        "fixed-test-shells": ('-e BINGSU_TEST_SHELLS="${{ matrix.shells }}"', '-e BINGSU_TEST_SHELLS="zsh"', "shell-linux"),
+        "fixed-golden-shells": ('-e SHELLS="${{ matrix.shells }}"', '-e SHELLS="zsh"', "shell-linux"),
+        "linux-keeps-trace-budget": ("                --ignore tests/shell/test_prompt_trace_budget.py \\\n", "", "shell-linux"),
+        "linux-keeps-gate-file": ("                --ignore tests/shell/test_gate_acceptance.py \\\n", "", "shell-linux"),
+        "ignore-a-shell-test": ("                --durations=0", "                --ignore tests/shell/test_hostile_pwd.py \\\n"
+                                "                --durations=0", "shell-linux"),
+        "ignore-missing-file": ("--ignore tests/shell/test_gate_acceptance.py", "--ignore tests/shell/test_gate_acceptances.py",
+                                "shell-linux"),
+        "no-durations": ("                --durations=0 --durations-min=0.1 \\\n", "", "shell-linux"),
+        "skippable-job": ("    timeout-minutes: 45\n", "    timeout-minutes: 45\n    continue-on-error: true\n", "shell-linux"),
+        "move-home-cell": ("matrix.image == 'min-d12'", "matrix.image == 'cur-d13'", "shell-linux"),
+        "drop-home-step": (SHELL_FREE_STEP, "      - name: Other tests\n", "shell-linux"),
+        "drop-home-file": (SHELL_FREE_RUN, "-m pytest -q", "shell-linux"),
+        "narrow-home-run": (SHELL_FREE_RUN, "-m pytest tests/shell/test_prompt_trace_budget.py -k first -q", "shell-linux"),
+        "count-skips-as-passes": ("          " + SHELL_FREE_GREP + "\n", "", "shell-linux"),
+        "home-without-pipefail": ("          set -o pipefail\n          docker run", "          docker run", "shell-linux"),
+        "skip-pty-step": ("      - name: PTY tests\n        if: success() || failure()\n",
+                          "      - name: PTY tests\n        if: false\n", "shell-linux"),
+        "pty-step-one-image": ("      - name: PTY tests\n        if: success() || failure()\n",
+                               "      - name: PTY tests\n        if: matrix.image == 'min-d12'\n", "shell-linux"),
+        "pty-step-after-success": ("      - name: PTY tests\n        if: success() || failure()\n",
+                                   "      - name: PTY tests\n", "shell-linux"),
+        "skip-golden-step": ("      - name: Record golden vectors\n", "      - name: Record golden vectors\n        if: false\n",
+                             "shell-linux"),
+        "skip-long-folder": ("      - name: Long folder test (AppArmor unconfined)\n        if: success() || failure()\n",
+                             "      - name: Long folder test (AppArmor unconfined)\n        if: false\n", "shell-linux"),
+        "skip-unnamed-step": ("      - run: tests/shell/containers/check-digests.sh\n",
+                              "      - run: tests/shell/containers/check-digests.sh\n        if: false\n", "shell-linux"),
+        "skip-job": ("    if: needs.detect.outputs.rust == 'true'\n", "    if: false\n", "shell-linux"),
+        "skippable-pty-step": ("      - name: PTY tests\n        if: success() || failure()\n",
+                               "      - name: PTY tests\n        if: success() || failure()\n        continue-on-error: true\n",
+                               "shell-linux"),
+        "narrow-by-keyword": ("-q -rf -p no:cacheprovider --basetemp=/root/pytest \\\n                --ignore",
+                              "-k first -q -rf -p no:cacheprovider --basetemp=/root/pytest \\\n                --ignore", "shell-linux"),
+        "narrow-by-marker": ("-q -rf -p no:cacheprovider --basetemp=/root/pytest \\\n                --ignore",
+                             "-m slow -q -rf -p no:cacheprovider --basetemp=/root/pytest \\\n                --ignore", "shell-linux"),
+        "stop-early": ("-q -rf -p no:cacheprovider --basetemp=/root/pytest \\\n                --ignore",
+                       "--maxfail=1 -q -rf -p no:cacheprovider --basetemp=/root/pytest \\\n                --ignore", "shell-linux"),
+        "narrow-test-path": ("exec python3 -m pytest tests/shell tests/golden", "exec python3 -m pytest tests/shell/test_zsh_hooks.py tests/golden",
+                             "shell-linux"),
+        "add-deselect": ("                --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \\\n",
+                         "                --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \\\n"
+                         "                --deselect tests/shell/test_zsh_hooks.py \\\n", "shell-linux"),
+        "hide-failure": ("sh ${BINGSU_RECORD_OBSERVATIONS:+-s}\n", "sh ${BINGSU_RECORD_OBSERVATIONS:+-s} || true\n", "shell-linux"),
+        "pytest-addopts": ("-e CI=true ", "-e CI=true -e PYTEST_ADDOPTS='-k first' ", "shell-linux"),
+        "drop-locale": ('-e LOCALES="C.UTF-8 C ko_KR.UTF-8"', '-e LOCALES="C.UTF-8"', "shell-linux"),
+        "narrow-long-folder": (LONG_FOLDER_RUN, LONG_FOLDER_RUN.replace(" -q", " -k first -q"), "shell-linux"),
+        "macos-narrow-by-keyword": (" -q -rf -p no:cacheprovider --ignore", " -k first -q -rf -p no:cacheprovider --ignore", "both-macos-jobs"),
+        "macos-add-deselect": (" --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux",
+                               " --deselect tests/shell/test_zsh_screen.py", "both-macos-jobs"),
+        "macos-skip-pty-step": ("      - name: PTY tests\n        if: success() || failure()\n",
+                                "      - name: PTY tests\n        if: false\n", "both-macos-jobs"),
+        "macos-skippable-step": ("      - name: PTY tests\n        if: success() || failure()\n",
+                                 "      - name: PTY tests\n        if: success() || failure()\n        continue-on-error: true\n",
+                                 "both-macos-jobs"),
+        "macos-hide-failure": ("${BINGSU_RECORD_OBSERVATIONS:+-s}'", "${BINGSU_RECORD_OBSERVATIONS:+-s} || true'", "both-macos-jobs"),
+        "macos-drop-locale": ('LOCALES="en_US.UTF-8 C ko_KR.UTF-8"', 'LOCALES="C"', "both-macos-jobs"),
+        "macos-drop-cell": ("shell: [bash, fish]", "shell: [bash]", "shell-macos-shells"),
+        "macos-fixed-shell": ("BINGSU_TEST_SHELLS: ${{ matrix.shell }}", "BINGSU_TEST_SHELLS: zsh", "shell-macos-shells"),
+        "macos-zsh-job-all-shells": ("BINGSU_TEST_SHELLS: zsh\n", "BINGSU_TEST_SHELLS: zsh bash fish\n", "shell-macos"),
+        "macos-steps-differ": ("      - run: brew install bash fish\n", "", "shell-macos-shells"),
+        "macos-keeps-trace-budget": (" --ignore tests/shell/test_prompt_trace_budget.py", "", "shell-macos"),
+        "macos-narrow-gate-run": ("tests/shell/test_gate_acceptance.py -q", "tests/shell/test_gate_acceptance.py -k first -q",
+                                  "shell-macos"),
+    }.items()])
+def test_pty_split_rejects_mutations(old, new, job):
+    text = workflows()["shell.yml"]
+    # The same damage in both macOS jobs gets past assert_macos_jobs_match.
+    start, end = (text.index(MACOS_JOB), len(text)) if job == "both-macos-jobs" else job_span(text, job)
+    block = text[start:end]
+    assert old in block, old
+    with pytest.raises(AssertionError):
+        assert_pty_split(text[:start] + block.replace(old, new) + text[end:])
+
+
+# 이것을 실패시키는 것: 셸 무관 시험을 맡은 칸이 필수 이름을 다른 칸에 넘기는 것.
+def test_shell_free_cell_keeps_a_required_name():
+    text = workflows()["shell.yml"]
+    assert_pty_split(text)
+    swapped = (text.replace("label: min-d12\n", "label: swap\n").replace("label: cur-d13 fish\n", "label: min-d12\n")
+               .replace("label: swap\n", "label: cur-d13 fish\n"))
+    with pytest.raises(AssertionError, match="Shell PTY"):
+        assert_pty_split(swapped)
+
+
+# 이것을 실패시키는 것: 이름이 바뀐 시험 파일을 --ignore 목록에 그대로 두어 아무것도 빠지지 않은 것처럼 보이는 것.
+def test_pty_ignored_files_exist():
+    missing = "tests/shell/test_no_such_file.py"
+    text = workflows()["shell.yml"].replace("tests/shell/test_gate_acceptance.py \\\n", f"{missing} \\\n")
+    text = text.replace(" --ignore tests/shell/test_gate_acceptance.py ", f" --ignore {missing} ")
+    with pytest.raises(AssertionError, match="no such file"):
+        assert_pty_split(text, ignored=PTY_IGNORED - {"tests/shell/test_gate_acceptance.py"} | {missing})

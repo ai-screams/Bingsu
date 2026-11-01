@@ -1325,7 +1325,7 @@ def assert_ci_contract(texts):
                                  "$RUNNER_TEMP/m3b-traces", "$RUNNER_TEMP/m3b-security-traces.tar.gz", "--traces-only"]]
     # Both full-suite jobs must exclude the unprepared security module. The
     # Linux job applies the same invocation to all three container images.
-    for job in ("shell-linux", "shell-macos"):
+    for job in ("shell-linux", "shell-macos", "shell-macos-shells"):
         block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [\w-]+:|\Z)", texts["shell.yml"])
         assert block, job
         assert "--ignore tests/shell/test_collector_security.py" in block[1], job
@@ -1374,7 +1374,7 @@ def test_missing_ci_cell_is_refused(file, token):
     assert saved[file] == (ROOT / ".github/workflows" / file).read_text()
 
 
-@pytest.mark.parametrize("job", ["shell-linux", "shell-macos"])
+@pytest.mark.parametrize("job", ["shell-linux", "shell-macos", "shell-macos-shells"])
 def test_each_unprepared_shell_job_must_exclude_security(job):
     texts = {name: (ROOT / ".github/workflows" / name).read_text()
              for name in ("ci.yml", "shell.yml", "bench.yml")}

@@ -39,7 +39,7 @@ jobs:
           if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
 
   shell-linux:
-    name: Shell PTY (${{ matrix.image }})
+    name: Shell PTY (${{ matrix.label }})
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
@@ -47,16 +47,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # One cell per shell; a bare image label is that image's required check.
+        # tests/shell/test_gate_acceptance.py pins these cells.
         include:
-          - image: min-u22
-            versions: bash=5.1 zsh=5.8
-            shells: bash zsh
-          - image: min-d12
+          - label: min-u22
+            image: min-u22
+            versions: zsh=5.8
+            shells: zsh
+          - label: min-u22 bash
+            image: min-u22
+            versions: bash=5.1
+            shells: bash
+          - label: min-d12
+            image: min-d12
             versions: fish=3.6
             shells: fish
-          - image: cur-d13
+          - label: cur-d13
+            image: cur-d13
             versions: ""
-            shells: bash zsh fish
+            shells: zsh
+          - label: cur-d13 bash
+            image: cur-d13
+            versions: ""
+            shells: bash
+          - label: cur-d13 fish
+            image: cur-d13
+            versions: ""
+            shells: fish
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,6 +121,9 @@ jobs:
       # containers do not have.
       # The test folders live in /root, not in /tmp: init warns about the
       # world-writable /tmp above an executable symlink there as well.
+      # Two files do not depend on the shell or the image: the step below runs
+      # test_prompt_trace_budget.py once, and the gate table steps of
+      # filter-calls and shell-macos run test_gate_acceptance.py.
       - name: PTY tests
         if: success() || failure()
         run: |
@@ -116,6 +136,9 @@ jobs:
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --ignore tests/shell/test_collector_security.py \
+                --ignore tests/shell/test_gate_acceptance.py \
+                --ignore tests/shell/test_prompt_trace_budget.py \
+                --durations=0 --durations-min=0.1 \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
                 --deselect tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula \
@@ -131,6 +154,16 @@ jobs:
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds \
                 --deselect tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive \
                 --deselect tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+      # Python only: recorded traces and the workflow files, no shell and no binary.
+      # 이것을 실패시키는 것: 이 파일을 다른 칸으로 옮기거나 빼는 것, skip을 통과로 세는 것.
+      - name: Shell-independent tests
+        if: (success() || failure()) && matrix.image == 'min-d12'
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 -e LC_ALL=C.UTF-8 "bingsu-${{ matrix.image }}" \
+            python3 -m pytest tests/shell/test_prompt_trace_budget.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
+            --durations=0 --durations-min=0.1 | tee "$RUNNER_TEMP/shell-independent.txt"
+          grep -Eq '^[0-9]+ passed in ' "$RUNNER_TEMP/shell-independent.txt"
       # The one test that needs a folder deeper than 64 KiB. Docker's default
       # AppArmor profile refuses paths over about 8 KB (mkdir stops at depth
       # 40), so this test alone runs in its own container without that
@@ -431,6 +464,9 @@ jobs:
             ${{ runner.temp }}/b1-evidence
             ${{ runner.temp }}/b1.txt
 
+  # zsh, and the required check. shell-macos-shells repeats these steps, without
+  # the gate table step, for the other shells; test_gate_acceptance.py keeps the
+  # two jobs equal. A matrix here would put the evidence step in three cells.
   shell-macos:
     name: Shell PTY (macOS Homebrew)
     needs: detect
@@ -467,7 +503,7 @@ jobs:
           { echo "### macOS shell versions"; echo; echo '```'; "$BINGSU_PY" tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # BINGSU_PY (set above through GITHUB_ENV) makes run-all.sh use the venv.
       - name: Record golden vectors
-        run: SHELLS="bash zsh fish" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+        run: SHELLS="zsh" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
       # 이것을 실패시키는 것: 필수 job에서 게이트 행 표의 검사를 빼거나 그 skip을 통과로 세는 것.
       - name: Gate acceptance rows map every clause to a CI-asserted test
         run: |
@@ -479,9 +515,61 @@ jobs:
         if: success() || failure()
         env:
           BINGSU_TEST_LOCALE: en_US.UTF-8
-          BINGSU_TEST_SHELLS: zsh bash fish
+          BINGSU_TEST_SHELLS: zsh
         # Exclude M3b security for this unprepared debug pair. ci.yml's native
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+
+  shell-macos-shells:
+    name: Shell PTY (macOS Homebrew ${{ matrix.shell }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [bash, fish]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: brew install bash fish
+      # One interpreter for every step: a venv with the hash-pinned test
+      # dependencies, and the Homebrew shells first in PATH.
+      - name: Set up the test environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
+      - run: cargo build -p bingsu -p bingsu-collect
+      - name: Generate shape-only init fixture
+        run: |
+          cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --test cli_prompt --no-run
+          fixture=$(mktemp -d "$PWD/target/shape-only-fixture.XXXXXX")
+          M3A_FIXTURE_DIR="$fixture" M3A_FIXTURE_ROOT="$fixture" \
+            cargo test -j 2 -p bingsu --bin bingsu commands::init::tests::write_shape_only_shell_fixture -- --exact --ignored --test-threads=1
+          echo "BINGSU_SHAPE_ONLY_FIXTURE=$fixture" >> "$GITHUB_ENV"
+      - name: Record shell versions
+        run: |
+          { echo "### macOS shell versions"; echo; echo '```'; "$BINGSU_PY" tests/shell/check_versions.py --record; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # BINGSU_PY (set above through GITHUB_ENV) makes run-all.sh use the venv.
+      - name: Record golden vectors
+        run: SHELLS="${{ matrix.shell }}" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
+      - name: PTY tests
+        if: success() || failure()
+        env:
+          BINGSU_TEST_LOCALE: en_US.UTF-8
+          BINGSU_TEST_SHELLS: ${{ matrix.shell }}
+        # Exclude M3b security for this unprepared debug pair. ci.yml's native
+        # macOS collector job prepares its release siblings and runs the file.
+        # tmux is a Linux image row: this job installs none, and the test
+        # fails as BLOCKED without it.
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
