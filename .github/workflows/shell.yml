@@ -364,10 +364,11 @@ jobs:
         if: matrix.profile == 'release'
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/runtime-root" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/runtime-root.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples tests/shell/test_zsh_notices.py::test_runtime_root_notice_once_then_reinit_recovers --basetemp="$RUNNER_TEMP/helper-stage-pytest/helper-stage-evidence/runtime-root" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples' "$RUNNER_TEMP/runtime-root.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_notices.py::test_runtime_root_notice_once_then_reinit_recovers' "$RUNNER_TEMP/runtime-root.txt"
       # GATE-TRUST-REVOKE.2 on a release build: the config root's FUSE daemon is stopped
       # and the test waits out T (about 60 s) on CLOCK_BOOTTIME. Without FUSE it fails BLOCKED.
       # 이것을 실패시키는 것: 막힌 마운트 신뢰 철회 시험을 빼거나 PASSED 단언 없이 돌리는 것.

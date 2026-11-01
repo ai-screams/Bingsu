@@ -29,7 +29,8 @@ def test_reader_unexports_inherited_globals(tmp_path, shell):
     reader = tmp_path / f"reader.{shell}"
     golden.render_reader(shell, reader)
     script = tmp_path / f"s.{shell}"
-    script.write_text(f"source {reader}\n" + COUNT[shell])
+    # A plain inherited name is gone with the reader's unset; ALL_EXPORT needs the +x.
+    script.write_text(("setopt all_export\n" if shell == "zsh" else "") + f"source {reader}\n" + COUNT[shell])
     env = {"PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8", **{n: "1" for n in NAMES}}
     r = subprocess.run(SHELL_CMD[shell] + [str(script)], env=env, capture_output=True, timeout=60)
     assert r.returncode == 0 and r.stderr == b"", r.stderr

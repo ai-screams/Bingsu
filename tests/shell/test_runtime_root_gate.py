@@ -1,4 +1,4 @@
-"""C1 pinned runtime root; status-notice hook output belongs to M4/M5."""
+"""C1 pinned runtime root. The zsh status notice is in test_zsh_notices.py; fish and bash follow in M5."""
 import os
 import shutil
 import subprocess

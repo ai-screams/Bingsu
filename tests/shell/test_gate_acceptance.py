@@ -162,7 +162,7 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 M3D_PENDING = ()
 # Same rule for the M4 clauses. A clause that a row has closed leaves this
 # list; nothing else may join it.
-M4_PENDING = ("GATE-RUNTIME-ROOT.5", "GATE-SHELL-CALLS.1", "GATE-SHELL-EXTERNAL.1", "GATE-SHELL-REDRAW.1",
+M4_PENDING = ("GATE-SHELL-CALLS.1", "GATE-SHELL-EXTERNAL.1", "GATE-SHELL-REDRAW.1",
               "GATE-SHELL-NOTICE.1", "GATE-SHELL-TIME.1")
 PENDING = M3D_PENDING + M4_PENDING
 
@@ -901,8 +901,8 @@ def test_b1_rejects_arch_override():
         assert_b1_contract(text)
 
 
-# 이것을 실패시키는 것: C1의 네 PASSED 단언 중 하나를 빼도 표가 통과하는 것.
-@pytest.mark.parametrize("clause", [1, 2, 3, 4])
+# 이것을 실패시키는 것: 다섯 PASSED 단언 중 하나를 빼도 표가 통과하는 것.
+@pytest.mark.parametrize("clause", [1, 2, 3, 4, 5])
 def test_runtime_root_rows_require_each_pass(clause):
     table = (ROOT / TABLE).read_text()
     row = next(r for r in rows(table) if r["id"] == f"GATE-RUNTIME-ROOT.{clause}")

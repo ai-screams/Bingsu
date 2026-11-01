@@ -60,4 +60,5 @@ GATE-RUNTIME-ROOT.1	GATE-RUNTIME-ROOT	1	Prompt-time repository XDG_RUNTIME_DIR i
 GATE-RUNTIME-ROOT.2	GATE-RUNTIME-ROOT	2	Deleted and recreated runtime root degrades every prompt	Linux	tests/shell/test_runtime_root_gate.py::test_deleted_and_recreated_runtime_root_degrades_every_prompt	pytest	M3d
 GATE-RUNTIME-ROOT.3	GATE-RUNTIME-ROOT	3	Re-init recovers the pinned runtime root	Linux	tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root	pytest	M3d
 GATE-RUNTIME-ROOT.4	GATE-RUNTIME-ROOT	4	Five spec runtime path examples hold under the product trust rules	Linux	tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples	pytest	M3d
+GATE-RUNTIME-ROOT.5	GATE-RUNTIME-ROOT	5	Status-notice hook output: fixed runtime-root notice once in zsh, gone after init runs again (spec sections 4 and 5)	Linux	tests/shell/test_zsh_notices.py::test_runtime_root_notice_once_then_reinit_recovers	pytest	M4
 GATE-RUNTIME-ROOT.6	GATE-RUNTIME-ROOT	6	Status-notice hook output: fixed runtime-root notice once in fish and bash (spec sections 4 and 5)	-	-	-	deferred:M5

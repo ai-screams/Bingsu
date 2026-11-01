@@ -1,9 +1,12 @@
 # bingsu record reader (spec section 3) and status receive semantics
 # (spec section 5). Embedded by `bingsu init zsh`; @KNOWN_CODES@ is
 # replaced with the known non-ok status strings as quoted words.
+# typeset keeps attributes set earlier in this shell: an integer key would
+# evaluate a status string as arithmetic, so the names start over.
+unset _bingsu_f _bingsu_disp _bingsu_note _bingsu_key
 typeset -ga _bingsu_f
 typeset -g _bingsu_disp= _bingsu_note= _bingsu_key=
-# typeset keeps an inherited export flag; without +x the fields and the
+# Under ALL_EXPORT a new name is exported; without +x the fields and the
 # status keys would reach the environment of every child process.
 typeset -g +x _bingsu_f _bingsu_disp _bingsu_note _bingsu_key
 
