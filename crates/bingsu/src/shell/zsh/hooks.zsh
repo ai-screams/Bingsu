@@ -44,8 +44,9 @@ _bingsu_call() {
   # and can hit ARG_MAX. no_multibyte (local, emulate -L) makes ${#} count
   # bytes. An exported PWD over MAX_ARG_STRLEN (32 pages, about 128 KiB with
   # 4 KiB pages) cannot reach any exec on Linux, whatever this hook passes.
+  # zsh parses $(…) when it runs, under emulate's aliases, not with this body.
   local _bingsu_pwd=$PWD _bingsu_st=0
-  setopt no_multibyte
+  setopt no_multibyte no_aliases
   (( ${#_bingsu_pwd} <= 65536 )) || _bingsu_pwd=
   local _bingsu_log=off _bingsu_host=${HOST-} _bingsu_venv=${VIRTUAL_ENV-} _bingsu_ssh=0 _bingsu_colorfgbg=${COLORFGBG-}
   case ${BINGSU_LOG-} in error|info|debug) _bingsu_log=$BINGSU_LOG ;; esac
@@ -142,7 +143,8 @@ _bingsu_install() {
        --jobs "${(%):-%j}" --keymap "${KEYMAP:-main}")
   if [[ -n $_bingsu_t0 && -n $_bingsu_t1 ]]; then
     (( ms = (_bingsu_t1 - _bingsu_t0) * 1000 ))
-    ctx+=(--duration-ms "$ms")
+    # A wall clock can step back; the envelope takes no negative value.
+    (( ms < 0 )) || ctx+=(--duration-ms "$ms")
   fi
   _bingsu_t0= _bingsu_t1=
   _bingsu_call "${ctx[@]}"

@@ -2,6 +2,7 @@
 environment: containers for minimum versions, Homebrew on macOS."""
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 
@@ -16,6 +17,23 @@ def real_bin():
 
 def real_collector():
     return pathlib.Path(os.environ.get("BINGSU_COLLECTOR_BIN", real_bin().with_name("bingsu-collect"))).resolve()
+
+
+def plain_script(shell, script):
+    """The init script as text: zsh's is one `$'…'` word for an eval."""
+    if shell != "zsh":
+        return script
+    word = script.split(b"eval $'", 1)[1].rsplit(b"'\n}\n", 1)[0]
+    return re.sub(rb"\\(.)", lambda m: b"\n" if m[1] == b"n" else m[1], word, flags=re.S)
+
+
+def rewrapped_script(shell, script, text):
+    """`text`, an edited plain_script(shell, script), in the form init gives it,
+    so a test of the edit also runs the real bootstrap."""
+    if shell != "zsh":
+        return text
+    word = text.replace(b"\\", b"\\\\").replace(b"'", b"\\'").replace(b"\n", b"\\n")
+    return script.split(b"eval $'", 1)[0] + b"eval $'" + word + b"'\n}\n"
 
 
 COLD_INIT_NOTICE = (b"bingsu: reading your settings did not finish in time; the prompt starts with "

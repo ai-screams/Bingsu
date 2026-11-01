@@ -105,6 +105,31 @@ const NOTICES: [(&[u8], Status, MsgId); 12] = [
     ),
 ];
 
+// zsh expands the user's aliases when it parses a function body, and it parses
+// all of `eval "$(bingsu init zsh)"` before running any of it, so an option set
+// in the script is too late. The script is one quoted word instead, parsed by
+// an eval that runs with aliases off. Every word here is quoted, because a
+// global alias matches any unquoted word. Inside this function new globals
+// are meant.
+const ZSH_PRELUDE: &str = "() {\n  \\builtin \\setopt \\local_options \\no_aliases \\no_warn_create_global \\no_csh_junkie_quotes\n  \\builtin \\eval ";
+const ZSH_EPILOGUE: &str = "\n}\n";
+
+/// One `$'…'` word on one line: CSH_JUNKIE_QUOTES refuses a newline inside
+/// plain quotes before anything in the script can turn the option off. For
+/// the words in the body, which can hold a newline, the prelude turns it off.
+fn zsh_ansi_word(text: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(b"$'");
+    for &b in text {
+        match b {
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\'' => out.extend_from_slice(b"\\'"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            _ => out.push(b),
+        }
+    }
+    out.push(b'\'');
+}
+
 fn prefixed(shell: Shell, prefix: &[u8], value: &[u8], out: &mut Vec<u8>) {
     let mut w = prefix.to_vec();
     w.extend_from_slice(value);
@@ -221,22 +246,30 @@ fn substitute(inp: &ScriptInputs<'_>, tpl: &[u8], out: &mut Vec<u8>) {
 }
 
 pub fn render(inp: &ScriptInputs<'_>, out: &mut Vec<u8>) {
-    let parts = match inp.shell {
-        Shell::Zsh => ZSH,
-        Shell::Bash => BASH,
-        Shell::Fish => FISH,
-    };
+    if inp.shell == Shell::Zsh {
+        let mut body = Vec::new();
+        render_parts(inp, ZSH, &mut body);
+        out.extend_from_slice(ZSH_PRELUDE.as_bytes());
+        zsh_ansi_word(&body, out);
+        out.extend_from_slice(ZSH_EPILOGUE.as_bytes());
+        return;
+    }
+    let parts = if inp.shell == Shell::Bash { BASH } else { FISH };
     if inp.shell == Shell::Bash {
         out.extend_from_slice(BASH_PRELUDE.as_bytes());
     }
+    render_parts(inp, parts, out);
+    if inp.shell == Shell::Bash {
+        substitute(inp, BASH_EPILOGUE.as_bytes(), out);
+    }
+}
+
+fn render_parts(inp: &ScriptInputs<'_>, parts: [&str; 2], out: &mut Vec<u8>) {
     for t in parts {
         substitute(inp, t.as_bytes(), out);
         out.push(b'\n');
     }
     export_roots(inp, out);
-    if inp.shell == Shell::Bash {
-        substitute(inp, BASH_EPILOGUE.as_bytes(), out);
-    }
 }
 
 /// One exported variable the commands read; a re-init replaces or clears it.
@@ -275,25 +308,59 @@ mod tests {
         config_root: Option<(&[u8], &[u8], bool)>,
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        render(
-            &ScriptInputs {
-                shell,
-                exe: b"/bin/bingsu",
-                collector_exe: Some(b"/bin/bingsu-collect"),
-                runtime_groups: &[],
-                runtime_root: Some((1, 2, b"/r")),
-                config_root,
-                state_root: Some(b"/s"),
-                log_root: Some(b"/l"),
-                roots_var: Some(b"5:a\nb'c"),
-                session_hex: &[b'0'; 32],
-                home,
-                git_global_home: home,
-                git_global_xdg: b"/xdg",
-            },
-            &mut out,
-        );
+        script_text(&inputs(shell, home, config_root), &mut out);
         out
+    }
+
+    fn inputs<'a>(
+        shell: Shell,
+        home: &'a [u8],
+        config_root: Option<(&'a [u8], &'a [u8], bool)>,
+    ) -> ScriptInputs<'a> {
+        ScriptInputs {
+            shell,
+            exe: b"/bin/bingsu",
+            collector_exe: Some(b"/bin/bingsu-collect"),
+            runtime_groups: &[],
+            runtime_root: Some((1, 2, b"/r")),
+            config_root,
+            state_root: Some(b"/s"),
+            log_root: Some(b"/l"),
+            roots_var: Some(b"5:a\nb'c"),
+            session_hex: &[b'0'; 32],
+            home,
+            git_global_home: home,
+            git_global_xdg: b"/xdg",
+        }
+    }
+
+    fn sample(shell: Shell) -> ScriptInputs<'static> {
+        inputs(shell, b"/h", Some((b"/c", b"/original/c", false)))
+    }
+
+    /// The text these tests read; zsh's output wraps it in one quoted word.
+    fn script_text(inp: &ScriptInputs<'_>, out: &mut Vec<u8>) {
+        if inp.shell == Shell::Zsh {
+            render_parts(inp, ZSH, out);
+        } else {
+            render(inp, out);
+        }
+    }
+
+    // 이것을 실패시키는 것: 본문을 줄바꿈이 든 따옴표로 내는 것(CSH_JUNKIE_QUOTES에서 파싱 실패), 치환이 빠진 본문을 내는 것.
+    #[test]
+    fn zsh_body_is_one_line_word() {
+        let mut text = Vec::new();
+        script_text(&sample(Shell::Zsh), &mut text);
+        let mut word = Vec::new();
+        zsh_ansi_word(&text, &mut word);
+        assert_eq!(count(&word, b"\n"), 0);
+        let mut out = Vec::new();
+        render(&sample(Shell::Zsh), &mut out);
+        assert_eq!(
+            out,
+            [ZSH_PRELUDE.as_bytes(), &word, ZSH_EPILOGUE.as_bytes()].concat()
+        );
     }
 
     fn count(hay: &[u8], needle: &[u8]) -> usize {
@@ -371,7 +438,7 @@ mod tests {
             assert_eq!(count(&s, &want), 1, "{shell:?}");
             assert_eq!(count(&s, b"BINGSU_ROOTS"), 1, "{shell:?}");
             let mut out = Vec::new();
-            render(
+            script_text(
                 &ScriptInputs {
                     shell,
                     exe: b"/bin/bingsu",
