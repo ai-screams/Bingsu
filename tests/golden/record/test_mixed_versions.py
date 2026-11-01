@@ -110,7 +110,7 @@ def test_genuine_old_frame_is_refused_and_regenerated(tmp_path):
 # A checksum, codec or identity refusal would hide a missing version check in a
 # real old file, so each case differs from a valid new file by one old header
 # field, resealed: that field is the only thing left to refuse it.
-# 이것을 실패시키는 것: 머리·접두의 매직이나 버전 비교 하나를 빼는 것(새 시험 파일을 정상으로 그린다).
+# 이것을 실패시키는 것: 그 필드의 비교를 전부 빼는 것(프레임 매직·버전은 header와 lengths 둘 다, 새 파일로 그린다).
 @pytest.mark.parametrize("at, old", [(0, b"BNGSNP02"), (8, b"\x02\0"), (64, b"BNGCMP02"), (72, b"\x02\0")],
                          ids=["frame-magic", "frame-version", "prefix-magic", "prefix-version"])
 def test_each_old_header_field_alone_is_refused(tmp_path, at, old):
