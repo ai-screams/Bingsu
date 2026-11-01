@@ -407,8 +407,7 @@ mod cases {
         let plan = crate::snapshot_codec::plan_front(&compiled[..front], c, width).unwrap();
         HEADER + PREFIX + plan.offset
     }
-    // 이것을 실패시키는 것: last-good만 다른 폭·전체 decode로 읽는 것, 앞단이 고르지 않은 variant의 손상으로
-    // 사본을 버리는 것, 고른 variant의 손상을 받는 것.
+    // 이것을 실패시키는 것: last-good만 다른 폭으로 읽는 것, 앞단이 envelope의 폭 대신 고정 폭으로 고르는 것.
     #[test]
     fn both_copies_take_the_same_selected_read() {
         let s = snapshot(

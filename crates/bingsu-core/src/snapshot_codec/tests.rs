@@ -224,7 +224,7 @@ mod cases {
         assert_eq!(decode_compiled(&vec![0; MAX_BYTES + 1]), Err(Error::Limit));
     }
 
-    // 이것을 실패시키는 것: 이름 구획 뒤의 남은 바이트를 허용하는 것.
+    // 이것을 실패시키는 것: 구획 안의 남는 바이트를 허용하는 것.
     #[test]
     fn codec_reject_trailing_bytes() {
         let mut b = encode_compiled(&config()).unwrap();
