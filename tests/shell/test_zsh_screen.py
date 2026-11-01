@@ -282,16 +282,17 @@ def test_prompt_after_alternate_screen(tmp_path):
     assert OK_CHAR in lines[row] and BLOCK_END in lines[row - 1], lines
 
 
-# 이것을 실패시키는 것: 다음 프롬프트가 새 폭을 넘기지 않는 것(hook의 `--width`), 구간 경계를 `≤ 59`에서 옮기는 것.
+# 이것을 실패시키는 것: 다음 프롬프트가 새 폭을 넘기지 않는 것(hook의 `--width`), 구간 경계를 `≤ 59`에서 옮기는 것,
+# 오른쪽 블록을 글자로 판정하는 것(임시 폴더 이름이 1로 끝나면 좁은 구간에서 틀림).
 def test_band_boundary_59_60_on_the_next_prompt(tmp_path):
     _, screen = start(tmp_path, cols=60)
     for cols, wide in ((60, True), (59, False), (60, True), (59, False)):
         screen.resize(30, cols)
-        enter(screen, "true")  # a line typed right after SIGWINCH can reach precmd before COLUMNS changes
         enter(screen, "false")
         row = screen.cursor()[0]
         lines = screen.lines()
-        assert (BLOCK_END in lines[row], lines[row - 1].endswith("1")) == (wide, wide), (cols, lines)
+        # The right block by its cell: the narrow row ends in the folder name, which can end in "1" too.
+        assert (BLOCK_END in lines[row], right_edge(screen, row - 1) == cols - 2) == (wide, wide), (cols, lines)
         assert FAIL_CHAR in lines[row], (cols, lines)
 
 
