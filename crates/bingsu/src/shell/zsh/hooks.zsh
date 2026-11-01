@@ -8,7 +8,7 @@
   emulate -L zsh
   local session=${_bingsu_session-} seq=${_bingsu_seq-} warned=${_bingsu_warned_last-}
   unset _bingsu_session _bingsu_seq _bingsu_warned_last _bingsu_rec _bingsu_s _bingsu_p \
-    _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_dead _bingsu_key_prev _bingsu_nested
+    _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_dead _bingsu_key_prev _bingsu_nested _bingsu_keymap
   typeset -g _bingsu_session=$session _bingsu_seq=$seq _bingsu_warned_last=$warned
 }
 : "${_bingsu_session:=@SESSION@}"
@@ -66,12 +66,12 @@ zmodload zsh/datetime 2>/dev/null || :
 # the first duration negative or huge. _bingsu_warned_last is reset on
 # first registration only (below): a re-init keeps the late-hook warning
 # quiet once it has been shown (spec section 5, same order stays silent).
-typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead= _bingsu_key_prev= _bingsu_nested=
+typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead= _bingsu_key_prev= _bingsu_nested= _bingsu_keymap=main
 typeset -g _bingsu_warned_last
 typeset -ga _bingsu_p
 # Under ALL_EXPORT a new name is exported; without +x the rendered prompt
 # and the timings would reach the environment of every child process.
-typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_key_prev _bingsu_nested
+typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bingsu_t0 _bingsu_t1 _bingsu_ps1 _bingsu_rps1 _bingsu_warned_last _bingsu_dead _bingsu_key_prev _bingsu_nested _bingsu_keymap
 
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost (emulate itself sets $? to
@@ -165,13 +165,13 @@ _bingsu_render() {
   local pst=${(j:,:)_bingsu_p}
   [[ -n $pst ]] || pst=$_bingsu_s
   ctx=(--width "${COLUMNS:-0}" --status "$_bingsu_s" --pipestatus "$pst"
-       --jobs "${(%):-%j}" --keymap "${KEYMAP:-main}")
+       --jobs "${(%):-%j}" --keymap main)
   if [[ -n $_bingsu_t0 && -n $_bingsu_t1 ]]; then
     (( ms = (_bingsu_t1 - _bingsu_t0) * 1000 ))
     # A wall clock can step back; the envelope takes no negative value.
     (( ms < 0 )) || ctx+=(--duration-ms "$ms")
   fi
-  _bingsu_t0= _bingsu_t1= _bingsu_nested=
+  _bingsu_t0= _bingsu_t1= _bingsu_nested= _bingsu_keymap=main
   _bingsu_call "${ctx[@]}"
   # The record is checked whatever the options are, so the status notices
   # see it; only installing it on screen depends on PROMPT_PERCENT.
@@ -185,6 +185,22 @@ _bingsu_tell() {
     _bingsu_warned_last=1
     print -u2 -r -- @MSG_LATE_HOOK_ZSH@
   fi
+}
+
+# The fields of the mode: vi_lines names the lines the renderer drew apart for
+# vicmd, and an empty vicmd field is a really empty line. For the caller's locals.
+_bingsu_mode_fields() {
+  emulate -L zsh
+  [[ $_bingsu_keymap == vicmd ]] || return 0
+  [[ $_bingsu_f[13] != *u* ]] || _bingsu_upper=12
+  [[ $_bingsu_f[13] != *l* ]] || _bingsu_left=10
+  [[ $_bingsu_f[13] != *r* ]] || _bingsu_right=11
+}
+
+_bingsu_paint_mode() {
+  local _bingsu_upper=9 _bingsu_left=3 _bingsu_right=4
+  _bingsu_mode_fields
+  _bingsu_paint $_bingsu_upper $_bingsu_left $_bingsu_right
 }
 
 # Install hook, last in precmd_functions. No `emulate` here: see _bingsu_paint.
@@ -241,6 +257,23 @@ _bingsu_send_break() {
   _bingsu_nest
 }
 
+# A keymap that is not vicmd draws like main.
+_bingsu_mode_to() {
+  emulate -L zsh
+  _bingsu_keymap=main
+  [[ $1 != vicmd ]] || _bingsu_keymap=vicmd
+}
+
+_bingsu_keymap_select() {
+  zle && [[ -z $_bingsu_nested ]] || return 0
+  _bingsu_nest 1
+  (( ! ${+widgets[_bingsu_saved_zle-keymap-select]} )) || zle _bingsu_saved_zle-keymap-select -- "$@"
+  _bingsu_nest
+  _bingsu_mode_to "$KEYMAP"
+  _bingsu_paint_mode
+  zle reset-prompt
+}
+
 # Takes over widget $1 once per shell (F-23): after a first run the chain may
 # hold a plugin that wraps us, and saving that would make it call itself. The
 # mark is a widget, so no environment can carry it. add-zle-hook-widget keeps
@@ -283,6 +316,7 @@ _bingsu_zle_wrap() {
 # whose local traps would remove the function again.
 if [[ -o interactive && -o zle ]] && zmodload zsh/zleparameter 2>/dev/null; then
   _bingsu_zle_wrap zle-line-finish _bingsu_line_finish
+  _bingsu_zle_wrap zle-keymap-select _bingsu_keymap_select
   _bingsu_zle_wrap send-break _bingsu_send_break
   if [[ ${functions[TRAPINT]-} != *_bingsu_transient* ]]; then
     _bingsu_int=0
