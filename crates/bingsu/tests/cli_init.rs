@@ -101,7 +101,7 @@ fn init_embeds_invoked_symlink_path_not_target() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        out.stderr.is_empty(),
+        after_cold(&out.stderr).is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -272,7 +272,7 @@ fn tamper_rows_warn_on_stderr_only() {
         assert_eq!(out.status.code(), Some(0), "{row}");
         assert!(!out.stdout.is_empty(), "{row}");
         assert_eq!(
-            out.stderr,
+            clean_row_stderr(&out.stderr, want),
             *want,
             "{row}: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -353,7 +353,7 @@ fn macos_acl_rows() {
             .arg(exe.parent().unwrap())
             .status();
         assert_eq!(
-            !out.stderr.is_empty(),
+            !clean_row_stderr(&out.stderr, if want_warn { TAMPER_LINE } else { b"" }).is_empty(),
             want_warn,
             "{row}: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -410,7 +410,7 @@ fn concurrent_init_pins_same_runtime_root() {
     let first = word(&outs[0]);
     for o in &outs {
         assert!(
-            o.stderr.is_empty(),
+            after_cold(&o.stderr).is_empty(),
             "{}",
             String::from_utf8_lossy(&o.stderr)
         );
@@ -445,7 +445,7 @@ fn symlink_chain_hops_are_checked() {
         chmod(&base.join("hop"), 0o755);
         assert_eq!(out.status.code(), Some(0), "{row}");
         assert_eq!(
-            out.stderr,
+            clean_row_stderr(&out.stderr, want),
             want,
             "{row}: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -584,7 +584,7 @@ fn macos_admin_group_with_only_root_and_me_is_safe() {
     let out = init(&exe, "zsh", &base);
     assert_eq!(out.status.code(), Some(0));
     assert!(
-        out.stderr.is_empty(),
+        after_cold(&out.stderr).is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -610,7 +610,7 @@ fn runtime_root_is_0700_under_any_umask() {
             .unwrap();
         assert_eq!(out.status.code(), Some(0), "umask {mask}");
         assert!(
-            out.stderr.is_empty(),
+            after_cold(&out.stderr).is_empty(),
             "umask {mask}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
@@ -651,7 +651,7 @@ fn dotdot_after_symlinked_folder_follows_the_kernel() {
         chmod(&base.join("real"), 0o755);
         assert_eq!(out.status.code(), Some(0), "{row}");
         assert_eq!(
-            out.stderr,
+            clean_row_stderr(&out.stderr, want),
             want,
             "{row}: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -679,7 +679,7 @@ fn relative_path_entry_falls_back_to_resolved_executable() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
-        out.stderr,
+        after_cold(&out.stderr),
         b"bingsu: could not find the path you ran bingsu from; using the resolved executable path. Check your PATH and open a new shell or evaluate your bingsu init line again\n"
     );
     assert!(!has(&out.stdout, exe.as_os_str().as_bytes()));
@@ -731,7 +731,7 @@ fn missing_parents_of_runtime_root_are_0700_under_umask_0177() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(
-        out.stderr.is_empty(),
+        after_cold(&out.stderr).is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -772,7 +772,7 @@ fn state_root_with_dotdot_after_missing_name_is_not_pinned() {
     assert!(has(&out.stdout, b"--config-root="));
     let out = run("cl/missing/x");
     assert!(
-        out.stderr.is_empty(),
+        after_cold(&out.stderr).is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -910,6 +910,45 @@ fn exec_file_copy_survives_forking_threads() {
 
 const INIT_TIMEOUT: &str = "bingsu: reading your settings did not finish in time; the prompt starts with the built-in look and takes your settings when they are ready\n";
 const INIT_INVALID: &str = "bingsu: your settings are not valid, so the prompt starts with the built-in look. Run: bingsu config check\n";
+
+/// `stderr` without the line init adds when the first compile takes longer
+/// than INIT_LIMIT: on a busy machine that is the normal path of any cold init,
+/// and only tests about the wait itself may ask for it.
+fn after_cold(stderr: &[u8]) -> &[u8] {
+    match stderr.strip_suffix(INIT_TIMEOUT.as_bytes()) {
+        Some(head) if head.is_empty() || head.ends_with(b"\n") => head,
+        _ => stderr,
+    }
+}
+
+/// A row that expects silence runs the cold path. A row with a warning does
+/// not (init starts no helper for a binary it warned about), so it stays exact.
+fn clean_row_stderr<'a>(stderr: &'a [u8], want: &[u8]) -> &'a [u8] {
+    if want.is_empty() {
+        after_cold(stderr)
+    } else {
+        stderr
+    }
+}
+
+// 이것을 실패시키는 것: 그 한 줄 말고 다른 내용까지 지우는 것, 줄 중간에서 끝이 같은 글자를 지우는 것,
+// 경고가 있는 행에서도 지우는 것.
+#[test]
+fn only_the_cold_line_is_set_aside() {
+    let notice = INIT_TIMEOUT.as_bytes();
+    assert_eq!(after_cold(notice), b"");
+    assert_eq!(after_cold(b"other\n"), b"other\n");
+    let warned = [b"warning\n", notice].concat();
+    assert_eq!(after_cold(&warned), b"warning\n");
+    let twice = [notice, notice].concat();
+    assert_eq!(after_cold(&twice), notice);
+    let before = [notice, b"warning\n"].concat();
+    assert_eq!(after_cold(&before), &before[..]);
+    let glued = [b"warning without a newline: ", notice].concat();
+    assert_eq!(after_cold(&glued), &glued[..]);
+    assert_eq!(clean_row_stderr(notice, b""), b"");
+    assert_eq!(clean_row_stderr(notice, b"warning\n"), notice);
+}
 
 fn allowed_cold_message(stderr: &str, invalid: bool) -> bool {
     stderr == INIT_TIMEOUT
