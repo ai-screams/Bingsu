@@ -163,7 +163,7 @@ M3D_PENDING = ()
 # Same rule for the M4 clauses. A clause that a row has closed leaves this
 # list; nothing else may join it.
 M4_PENDING = ("GATE-SHELL-CALLS.1", "GATE-SHELL-EXTERNAL.1", "GATE-SHELL-REDRAW.1",
-              "GATE-SHELL-NOTICE.1", "GATE-SHELL-TIME.1")
+              "GATE-SHELL-NOTICE.1")
 PENDING = M3D_PENDING + M4_PENDING
 
 
@@ -319,6 +319,46 @@ def test_m4_pending_only_shrinks(damage):
     else:
         with pytest.raises(AssertionError):
             assert_m4_pending_shrinks(table, pending)
+
+
+def shell_time_job(text):
+    start, end = job_span(text, "shell-time-gate")
+    return text[start:end]
+
+
+# Proves the job and its recorded verdict exist; the timing result itself is U-8's.
+# 이것을 실패시키는 것: job을 지우거나 PR에서 돌지 않게 하는 것, U-4 값을 바꾸는 것, 200쌍·R2를 바꾸는 것,
+# 칸을 빼거나 macOS를 더하는 것, 기록 전용을 강제로 바꾸는 것, 판정·보존 단계를 지우는 것.
+def test_shell_time_job_records_a_verdict():
+    assert_shell_time_job(workflows()["ci.yml"])
+
+
+def assert_shell_time_job(text):
+    job = shell_time_job(text)
+    assert "github.event_name == 'pull_request'" in job
+    assert "runs-on: ubuntu-24.04\n" in job and "macos" not in job
+    assert "cell: [runner, min-u22]\n" in job
+    assert "GATE_RATIO_P50: '1.25'\n" in job and "GATE_RATIO_P95: '1.50'\n" in job
+    assert "GATE_ENFORCE: 'false'\n" in job
+    assert "run=(--rounds 200 --admission ci-r2)\n" in job and job.count('"${run[@]}"') == 2
+    assert job.count('|| test "$?" -eq 2') == 2
+    assert 'python3 bench/shell_gate.py --measurement "$RUNNER_TEMP/measurements/shell-pairs.json"' in job
+    assert '--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95"' in job
+    assert "name: shell-gate-${{ matrix.cell }}\n" in job and "if: always()\n" in job
+
+
+@pytest.mark.parametrize("before,after", [
+    ("GATE_RATIO_P50: '1.25'", "GATE_RATIO_P50: '1.30'"), ("GATE_RATIO_P95: '1.50'", "GATE_RATIO_P95: '1.60'"),
+    ("GATE_ENFORCE: 'false'", "GATE_ENFORCE: 'true'"), ("cell: [runner, min-u22]", "cell: [runner]"),
+    ("--rounds 200", "--rounds 100"), ("if: always()", "if: success()"),
+    ("runs-on: ubuntu-24.04", "runs-on: macos-latest"),
+])
+def test_shell_time_job_rejects_mutations(before, after):
+    text = workflows()["ci.yml"]
+    job = shell_time_job(text)
+    assert before in job
+    with pytest.raises(AssertionError):
+        assert_shell_time_job(text.replace(job, job.replace(before, after)))
 
 
 SELF_STEP = "      - name: Gate acceptance rows map every clause to a CI-asserted test\n"

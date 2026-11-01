@@ -1110,6 +1110,99 @@ jobs:
           path: ${{ runner.temp }}/measurements/*.json
           if-no-files-found: error
 
+  # Spec section 8 shell-side time: Enter to the next prompt with a stand-in
+  # binary, zsh on the runner and the minimum zsh in its image. The verdict is
+  # recorded only; this job is not a required check.
+  shell-time-gate:
+    name: Shell time gate (${{ matrix.cell }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [runner, min-u22]
+    env:
+      CELL: ${{ matrix.cell }}
+      # U-4: the largest accepted candidate/base ratios of p50 and p95.
+      # GATE_ENFORCE=true makes a FAIL or BLOCKED verdict fail the job.
+      GATE_RATIO_P50: '1.25'
+      GATE_RATIO_P95: '1.50'
+      GATE_ENFORCE: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Static musl binaries run on the runner and in the older image alike.
+      - name: Build the base tip and the merge result
+        run: |
+          # base tip + PR head: three words (the commit and two parents)
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error::HEAD is not a merge commit of the base tip and the PR head"
+            exit 1
+          fi
+          git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
+          cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" -j 2 --release -p bingsu --target x86_64-unknown-linux-musl
+          cargo build -j 2 --release -p bingsu --target x86_64-unknown-linux-musl
+          mkdir -p "$RUNNER_TEMP/measurements" "$RUNNER_TEMP/bins"
+          install -m 0755 "$RUNNER_TEMP/base/target/x86_64-unknown-linux-musl/release/bingsu" "$RUNNER_TEMP/bins/base"
+          install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu "$RUNNER_TEMP/bins/candidate"
+      - name: Prepare the shell
+        run: |
+          if [ "$CELL" = runner ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends zsh
+            zsh --version
+          else
+            tests/shell/containers/check-digests.sh
+            docker build -f "tests/shell/containers/$CELL.Dockerfile" -t "bingsu-$CELL" tests/shell/containers
+          fi
+      - name: Alternate 200 pairs per row in the controlled protocol
+        run: |
+          # A BLOCKED measurement (exit 2) is recorded by the verdict step.
+          # --admission ci-r2: decision U3 rule R2, honoured only on a GitHub Actions runner.
+          run=(--rounds 200 --admission ci-r2)
+          if [ "$CELL" = runner ]; then
+            python3 bench/shell_gate.py --base "$RUNNER_TEMP/bins/base" --candidate "$RUNNER_TEMP/bins/candidate" "${run[@]}" \
+              --out "$RUNNER_TEMP/measurements/shell-pairs.json" || test "$?" -eq 2
+          else
+            # Root-owned copies: init warns about a folder another user can change.
+            docker run --rm -v "$PWD:/w:ro" -v "$RUNNER_TEMP:/t" -w /w -e GITHUB_ACTIONS -e PYTHONDONTWRITEBYTECODE=1 "bingsu-$CELL" \
+              sh -c 'mkdir -p /root/bins && install -m 0755 /t/bins/base /t/bins/candidate /root/bins/ &&
+                exec python3 bench/shell_gate.py --base /root/bins/base --candidate /root/bins/candidate "$@" --out /t/measurements/shell-pairs.json' \
+              sh "${run[@]}" || test "$?" -eq 2
+          fi
+      - name: Record the verdict
+        run: |
+          args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95")
+          if [ "$GATE_ENFORCE" = true ]; then args+=(--enforce); fi
+          status=0
+          python3 bench/shell_gate.py --measurement "$RUNNER_TEMP/measurements/shell-pairs.json" \
+            --out "$RUNNER_TEMP/measurements/shell-verdict.json" "${args[@]}" > "$RUNNER_TEMP/shell-summary.json" || status=$?
+          verdict=$(jq -r .status "$RUNNER_TEMP/measurements/shell-verdict.json")
+          {
+            echo "### Shell time gate ($CELL): $verdict (enforced: $GATE_ENFORCE)"
+            echo '```json'
+            cat "$RUNNER_TEMP/shell-summary.json"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$verdict" != PASS ]; then echo "::warning::shell time gate verdict $verdict (enforced: $GATE_ENFORCE)"; fi
+          exit "$status"
+      - name: Preserve the pairs and the verdict
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shell-gate-${{ matrix.cell }}
+          path: ${{ runner.temp }}/measurements/*.json
+          if-no-files-found: error
+
   # Spec section 8 filesystem-call budget scaffold: a synthetic program with
   # known calls runs under strace -f and the counts per role and call kind
   # must match the formulas exactly. Linux only (strace).

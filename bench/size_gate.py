@@ -64,10 +64,11 @@ def _recomputed(row, samples, metric):
     return got if all(row.get(k) == got[k] for k in got) else None
 
 
-def relative_gate(paired: dict, metric: str, threshold: tuple | None) -> GateResult:
+def relative_gate(paired: dict, metric: str, threshold: tuple | None, target_ms=ABSOLUTE_TARGET_MS) -> GateResult:
     """FAIL when the candidate/base ratio of p50 exceeds `threshold[0]` or that of p95 exceeds `threshold[1]`.
 
     Missing, non-finite or inconsistent evidence is BLOCKED, never PASS.
+    `target_ms` is the absolute target recorded beside it; None records no target.
     """
     try:
         rows = [paired["variants"][n] for n in ("base", "candidate")]
@@ -89,12 +90,12 @@ def relative_gate(paired: dict, metric: str, threshold: tuple | None) -> GateRes
     if not all(math.isfinite(r) for r in ratios):
         return _blocked(metric, "ratio overflows")
     observed_ms = cand["p50"] / 1e6
-    over = observed_ms > ABSOLUTE_TARGET_MS
+    over = target_ms is not None and observed_ms > target_ms
     result = GateResult(
         metric=metric, base=base, candidate=cand,
         ratio_p50=ratios[0], ratio_p95=ratios[1],
         threshold=None if threshold is None else {"p50": threshold[0], "p95": threshold[1]},
-        absolute={"target_ms": ABSOLUTE_TARGET_MS, "observed_ms": observed_ms,
+        absolute={"target_ms": target_ms, "observed_ms": observed_ms,
                   "disposition": "recorded over target; needs user disposition, not a failure" if over else None})
     if threshold is None:
         result.update(status="BLOCKED", reason="threshold " + PENDING)
