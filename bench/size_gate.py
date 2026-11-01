@@ -4,7 +4,8 @@
 Pure judgement over D1 `Paired` rows and `git-product.py --prepare` size maps. The
 p50 and p95 ratio limits and the size cap are inputs (U3: 1.03, 1.10, 6,000,000
 bytes for front + collector); a missing one leaves its verdict BLOCKED, never FAIL.
-The CLI exits 0 unless --enforce is given. Absolute time is recorded only; it is
+The CLI exits 0 unless --enforce is given, and then exits 1 only on FAIL; BLOCKED
+stays visible in the report and summary but passes. Absolute time is recorded only; it is
 never a reason to fail.
 """
 from __future__ import annotations
@@ -111,13 +112,14 @@ def _size_ok(v):
 def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
     """FAIL when the candidate front + collector exceeds `cap_bytes` (U3 S1: no per-binary cap).
 
-    A missing or invalid cap, a missing size or a combined that is not
-    front + collector is BLOCKED.
+    A missing or invalid cap, a missing candidate size or a combined that is not
+    front + collector is BLOCKED; so is a bad base size, unless the candidate is over the cap.
     """
-    for side in (base, candidate):
-        if not (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
-                and side["combined"] == side["front"] + side["collector"]):
-            return _blocked("stripped_bytes", "missing or inconsistent size")
+    def valid(side):
+        return (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
+                and side["combined"] == side["front"] + side["collector"])
+    if not valid(candidate):
+        return _blocked("stripped_bytes", "missing or inconsistent size")
     result = GateResult(metric="stripped_bytes", base=base, candidate=candidate)
     if cap_bytes is None:
         return {**result, "status": "BLOCKED", "reason": "cap " + PENDING}
@@ -125,6 +127,9 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
         return {**result, "status": "BLOCKED", "reason": "invalid cap"}
     result["cap_bytes"] = {"combined": cap_bytes}
     result["over"] = ["combined"] if candidate["combined"] > cap_bytes else []
+    # The cap judges the candidate alone; a missing base only blocks a candidate that fits.
+    if not result["over"] and not valid(base):
+        return {**result, "status": "BLOCKED", "reason": "missing or inconsistent size"}
     result["status"] = "FAIL" if result["over"] else "PASS"
     return result
 
@@ -143,7 +148,7 @@ def main(argv=None):
     p.add_argument("--ratio-p95", type=float, help="max candidate/base ratio of p95 (U3: 1.10)")
     p.add_argument("--cap-bytes", type=int, help="cap on stripped front + collector bytes (U3: 6000000)")
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--enforce", action="store_true", help="exit 1 on FAIL and 2 on BLOCKED")
+    p.add_argument("--enforce", action="store_true", help="exit 1 on FAIL; BLOCKED and PASS exit 0")
     args = p.parse_args(argv)
     if (args.ratio_p50 is None) != (args.ratio_p95 is None):
         p.error("--ratio-p50 and --ratio-p95 go together")
@@ -163,9 +168,8 @@ def main(argv=None):
     print(json.dumps({"status": verdict, "enforced": args.enforce, "blocked_by": reasons,
                       "time": {c: {k: r.get(k) for k in ("status", "ratio_p50", "ratio_p95", "reason")} for c, r in time_results.items()},
                       "size": {k: size.get(k) for k in ("status", "over", "reason")}}, indent=2))
-    if args.enforce and verdict != "PASS":
-        return 1 if verdict == "FAIL" else 2
-    return 0
+    # BLOCKED (no usable evidence) is reported in the report and summary but does not fail the run.
+    return 1 if args.enforce and verdict == "FAIL" else 0
 
 
 if __name__ == "__main__":

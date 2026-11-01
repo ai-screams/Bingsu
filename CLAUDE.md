@@ -86,7 +86,7 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 
 | Workflow | Jobs | Notes |
 | -- | -- | -- |
-| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build (also runs the render golden under wasmtime as wasm32-wasip1), Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace) | Rust jobs run only when `Cargo.toml` exists (detect job) |
+| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build (also runs the render golden under wasmtime as wasm32-wasip1), Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace), Prompt time and size gate (`prompt-gate`, PRs only: fails on FAIL, warns on BLOCKED) | Rust jobs run only when `Cargo.toml` exists (detect job) |
 | `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew, one job per shell; Prompt filter calls (Linux x86_64, GNU and musl, debug and release) | `workflow_dispatch` input `record_observations` prints unpinned cells; a split job keeps the required check on its bare name (`Shell PTY (cur-d13)`), and `test_gate_acceptance.py` pins the cells and where shell-independent files run |
 | `security.yml` | Secret scan (gitleaks), Dependency advisories (cargo-audit) | gitleaks scans full history; weekly cron; cargo-audit needs `Cargo.lock` |
 | `dependabot.yml` | github-actions and cargo, weekly | |

@@ -74,6 +74,18 @@ def test_size_gate_caps_the_sum_only():
     assert gate.size_gate(base, {"front": 1}, 10)["status"] == "BLOCKED"
 
 
+# 이것을 실패시키는 것: 기준 크기 검증을 후보의 상한 판정보다 앞에 두는 것(기준 누락이 확정된 초과를 BLOCKED로 덮음).
+def test_candidate_over_cap_fails_even_without_base_size():
+    over = {"front": 3_000_001, "collector": 3_000_000, "combined": 6_000_001}
+    for base in (None, {}, {"front": 1}):
+        r = gate.size_gate(base, over, 6_000_000)
+        assert r["status"] == "FAIL" and r["over"] == ["combined"]
+    fits = {"front": 3_000_000, "collector": 3_000_000, "combined": 6_000_000}
+    assert gate.size_gate(None, fits, 6_000_000)["status"] == "BLOCKED"
+    assert gate.size_gate(None, {"front": 1}, 6_000_000)["status"] == "BLOCKED"  # bad candidate stays BLOCKED
+    assert gate.size_gate(None, over, None)["status"] == "BLOCKED"  # no cap, no verdict
+
+
 # 이것을 실패시키는 것: 200쌍 미만이나 관측 안 된 측정을 PASS로 세는 것, 임계값 미정을 PASS/FAIL로 세는 것.
 def test_gate_is_blocked_without_two_hundred_pairs():
     assert gate.relative_gate(paired((8e6, 9e6), (8e6, 9e6), n=199), "prompt_ns", (1.10, 1.10))["status"] == "BLOCKED"
@@ -249,18 +261,19 @@ def test_pr_job_runs_on_pull_request_trigger():
     assert "github.event_name == 'pull_request'" in job
     assert "--rounds 200" in job and "bench/size_gate.py" in job
     assert "persist-credentials: false" in job
-    # U3 values; enforcement stays off until five pull request runs finish without BLOCKED.
-    assert "GATE_ENFORCE: 'false'" in job and "GATE_RATIO_P50: '1.03'" in job
+    # U3 values; FAIL fails the job, BLOCKED only warns.
+    assert "GATE_ENFORCE: 'true'" in job and "GATE_RATIO_P50: '1.03'" in job
     assert "GATE_RATIO_P95: '1.10'" in job and "GATE_SIZE_CAP_BYTES: '6000000'" in job
     assert '--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95"' in job
     assert "--admission ci-r2" in job  # rule R2 is requested only here
     assert "--enforce" in job and '"$GATE_ENFORCE" = true' in job
+    assert "::warning::prompt gate verdict" in job  # BLOCKED stays visible
     for use in re.findall(r"uses: (\S+)", job):
         assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", use), use
     assert "permissions" not in job  # inherits workflow-level contents: read
 
 
-def test_cli_records_verdict_and_stays_green_until_enforced(tmp_path):
+def test_cli_records_verdict_and_fails_only_on_enforced_fail(tmp_path):
     def write(name, value):
         path = tmp_path / name
         path.write_text(json.dumps(value))
@@ -277,7 +290,9 @@ def test_cli_records_verdict_and_stays_green_until_enforced(tmp_path):
     report = json.loads((tmp_path / "v.json").read_text())
     assert report["status"] == "FAIL" and report["threshold"] == {"p50": 1.03, "p95": 1.10}
     assert report["size"]["over"] == ["combined"]
-    assert gate.main([*args, *limits, "--enforce"]) == 1
+    assert gate.main([*args, *limits, "--enforce"]) == 1  # FAIL
+    assert gate.main([*args, "--enforce"]) == 0  # BLOCKED: no limits given
+    assert json.loads((tmp_path / "v.json").read_text())["status"] == "BLOCKED"
     with pytest.raises(SystemExit):
         gate.main([*args, "--ratio-p50", "1.03"])
 
@@ -290,3 +305,27 @@ def test_cli_summary_names_why_nothing_was_measured(tmp_path, capsys):
     gate.main(["--measurement", str(meas), "--base-preparation", str(sizes), "--candidate-preparation", str(sizes), "--out", str(tmp_path / "v.json")])
     out = json.loads(capsys.readouterr().out)
     assert any("stale prepared fixture" in r for r in out["blocked_by"])
+
+
+# 이것을 실패시키는 것: --enforce에서 PASS/BLOCKED 구분 없이 0 아닌 코드로 끝내기, 빈 증거를 PASS로 치기.
+def test_enforced_pass_and_empty_evidence(tmp_path, capsys):
+    sizes = tmp_path / "s.json"
+    sizes.write_text(json.dumps({"stripped_bytes": {"front": 10, "collector": 20, "combined": 30}}))
+    common = ["--base-preparation", str(sizes), "--candidate-preparation", str(sizes), "--out", str(tmp_path / "v.json"),
+              "--ratio-p50", "1.03", "--ratio-p95", "1.10", "--cap-bytes", "30", "--enforce"]
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"cases": {"no-git": paired((8e6, 9e6), (8e6, 9e6))}}))
+    assert gate.main(["--measurement", str(ok), *common]) == 0
+    assert json.loads((tmp_path / "v.json").read_text())["status"] == "PASS"
+    for empty in ({}, {"cases": {}}):
+        meas = tmp_path / "e.json"
+        meas.write_text(json.dumps(empty))
+        capsys.readouterr()
+        assert gate.main(["--measurement", str(meas), *common]) == 0
+        assert json.loads((tmp_path / "v.json").read_text())["status"] == "BLOCKED"
+        assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: aggregate에서 `not statuses`(증거 0건)를 PASS로 떨어뜨리기.
+def test_aggregate_of_no_results_is_blocked():
+    assert gate.aggregate([]) == "BLOCKED"
