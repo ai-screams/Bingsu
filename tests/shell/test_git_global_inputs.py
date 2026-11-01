@@ -46,7 +46,7 @@ def test_prompt_time_global_locations_stay_pinned(shell, names, later, tmp_path)
         else:
             env[name] = "x" * 70_000
     suffix = (b'\n_bingsu_call --width 80\nprintf "%s" "$_bingsu_rec"\n')
-    result = run_shell_script(shell, script + suffix, env, tmp_path)
+    result = run_shell_script(shell, rewrapped_script(shell, init.stdout, script) + suffix, env, tmp_path)
     assert result.returncode == 0, result.stderr
     argv = words.read_bytes().split(b"\0")[:-1]
     for name, flag in [("HOME", b"--git-global-home="), ("XDG_CONFIG_HOME", b"--git-global-xdg=")]:
