@@ -287,6 +287,7 @@ def test_band_boundary_59_60_on_the_next_prompt(tmp_path):
     _, screen = start(tmp_path, cols=60)
     for cols, wide in ((60, True), (59, False), (60, True), (59, False)):
         screen.resize(30, cols)
+        enter(screen, "true")  # a line typed right after SIGWINCH can reach precmd before COLUMNS changes
         enter(screen, "false")
         row = screen.cursor()[0]
         lines = screen.lines()
