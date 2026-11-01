@@ -139,6 +139,8 @@ pub enum Applied {
     Invalid,
     Busy,
     Incomplete,
+    /// Incomplete because the settings passed a helper I/O cap.
+    OverCap,
     Unavailable(MsgId),
 }
 
@@ -163,6 +165,7 @@ pub fn apply(
             RefreshResult::Revalidated { generation } => Applied::Unchanged { generation },
             RefreshResult::Invalid => Applied::Invalid,
             RefreshResult::Busy => Applied::Busy,
+            RefreshResult::Incomplete if super::io_meter::take_refused() => Applied::OverCap,
             RefreshResult::Incomplete => Applied::Incomplete,
         },
         Err(m) => Applied::Unavailable(m),

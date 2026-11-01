@@ -15,6 +15,7 @@ use super::{
     runtime_root::RootError,
     trust_record::{self, Record, RecordError},
 };
+use crate::commands::io_meter::AxisUse;
 use bingsu_core::{
     color::palette::Mode,
     config::{
@@ -54,6 +55,9 @@ pub struct Inspection {
     pub report: ConfigReport,
     pub lines: Vec<FileLine>,
     pub verdict: Verified,
+    /// A cap refused this reading, or the two source checks a refresh adds to
+    /// it would pass one.
+    pub over_cap: bool,
     pub remedies: Vec<String>,
 }
 
@@ -136,12 +140,21 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
     let roots_in = loader.roots(BUILTIN_TOML.as_bytes());
     let loaded = load(roots_in, &mut loader, ctx::version());
     let report = report::from_loaded(loaded, Mode::Dark);
+    let before = loader.io_used();
     let verdict = if matches!(selection, Selection::Incomplete) {
         Verified::Incomplete
     } else {
         loader.verified(&report.files, report.snapshot.is_some())
     };
+    // A refresh round checks its sources three times, this reading once: the
+    // other two count here, so `check` refuses what a refresh would.
+    let after = loader.io_used();
+    let remaining: AxisUse = std::array::from_fn(|i| (after[i] - before[i]).saturating_mul(2));
+    let over_cap = loader.io_fits(&remaining).is_err();
     let mut remedies: Vec<String> = Vec::new();
+    if over_cap {
+        remedies.push(en(MsgId::ReloadOverCap).to_owned());
+    }
     for (_, r) in &loader.remedies {
         if !remedies.contains(r) {
             remedies.push(r.clone());
@@ -191,6 +204,7 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
         report,
         lines,
         verdict,
+        over_cap,
         remedies,
     })
 }
@@ -341,6 +355,7 @@ pub fn render_check(i: &Inspection) -> String {
 fn verdict_text(i: &Inspection) -> &'static str {
     match (&i.selection, &i.verdict) {
         (Selection::Unusable(_), _) => "not usable until the selection record is fixed",
+        _ if i.over_cap => "too many file reads for one refresh; nothing would be published",
         (_, Verified::Incomplete) => "could not read everything; nothing would be published",
         (_, Verified::Invalid) => "invalid; the prompt keeps the last good settings",
         (_, Verified::Publish { left_out }) if left_out.is_empty() => "valid",
@@ -351,7 +366,9 @@ fn verdict_text(i: &Inspection) -> &'static str {
 /// 0 valid, 1 a confirmed settings or trust problem, 3 not read to the end.
 pub fn exit_for(i: &Inspection) -> u8 {
     match (&i.selection, &i.verdict) {
-        (Selection::Unusable(_), _) | (_, Verified::Invalid) => EXIT_FAILED,
+        (Selection::Unusable(_), _) => EXIT_FAILED,
+        _ if i.over_cap => EXIT_UNFINISHED,
+        (_, Verified::Invalid) => EXIT_FAILED,
         (_, Verified::Incomplete) => EXIT_UNFINISHED,
         (_, Verified::Publish { .. }) => 0,
     }
@@ -414,6 +431,7 @@ mod tests {
             },
             lines: vec![],
             verdict: Verified::Incomplete,
+            over_cap: false,
             remedies: vec![],
         };
         assert_eq!(path_exit(&i), 3);

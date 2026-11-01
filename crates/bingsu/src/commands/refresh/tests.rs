@@ -1413,6 +1413,8 @@ fn marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure() {
             }
         });
         assert_eq!(got, RefreshResult::Incomplete, "{case}");
+        // 이것을 실패시키는 것: 상한을 넘지 않은 Incomplete를 상한 거부로 알리는 것.
+        assert!(!crate::commands::io_meter::take_refused(), "{case}");
         assert_eq!((f.state(), f.bytes("sequence")), before, "{case}");
     }
     #[cfg(target_os = "linux")]
@@ -2904,6 +2906,8 @@ mod axes {
             shape(&f);
             let r = f.run();
             let (_, exceeded) = io_meter::last_session().unwrap();
+            // 이것을 실패시키는 것: 상한 거부로 끝난 회차가 그 사실을 남기지 않는 것.
+            assert_eq!(io_meter::take_refused(), exceeded.is_some(), "{what}");
             seen.push((
                 *what,
                 r,

@@ -164,6 +164,17 @@ impl Drop for TestCaps {
     }
 }
 
+thread_local! {
+    static REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a meter dropped on this thread refused a charge, since the last
+/// call. Both an axis cap and the work budget end a round Incomplete; only a
+/// meter that outlived the round can tell a command which one it was.
+pub(crate) fn take_refused() -> bool {
+    REFUSED.take()
+}
+
 #[cfg(test)]
 thread_local! {
     static LAST: std::cell::Cell<Option<(AxisUse, Option<AxisExceeded>)>> =
@@ -176,9 +187,12 @@ pub(crate) fn last_session() -> Option<(AxisUse, Option<AxisExceeded>)> {
     LAST.with(std::cell::Cell::take)
 }
 
-#[cfg(test)]
 impl Drop for IoMeter {
     fn drop(&mut self) {
+        if self.exceeded.is_some() {
+            REFUSED.set(true);
+        }
+        #[cfg(test)]
         LAST.with(|l| l.set(Some((self.used, self.exceeded))));
     }
 }

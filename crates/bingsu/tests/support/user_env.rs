@@ -79,6 +79,10 @@ impl Env {
 
     /// The one context folder (it holds `snapshot.lock`) below the runtime root.
     pub fn context_dir(&self) -> PathBuf {
+        self.find_context_dir().expect("a context folder")
+    }
+
+    pub fn find_context_dir(&self) -> Option<PathBuf> {
         fn find(dir: &Path) -> Option<PathBuf> {
             for e in std::fs::read_dir(dir).ok()? {
                 let p = e.ok()?.path();
@@ -93,7 +97,7 @@ impl Env {
             }
             None
         }
-        find(&self.base.join("run")).expect("a context folder")
+        find(&self.base.join("run"))
     }
 
     /// Every file and folder below the base with what a write would change:
