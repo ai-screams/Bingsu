@@ -22,6 +22,11 @@ pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS"
 BLOCK_END = "▸"  # the block separator of the wide band; the narrow band has none
 OK_CHAR, FAIL_CHAR = "❯", "✗"
 ELLIPSIS = "…"
+# A long machine name fills the row and takes the right block off the wide
+# band; these rows judge the block, so the shell gets a short name. zsh keeps
+# a HOST it inherits.
+# 이것을 실패시키는 것: 환경에서 HOST를 빼는 것(긴 호스트 이름의 러너에서 오른쪽 블록이 사라짐).
+SHORT_HOST = {"HOST": "h"}
 EDITOR_ON, EDITOR_OFF = b"\x1b[?2004h", b"\x1b[?2004l"
 
 
@@ -111,7 +116,7 @@ def start(tmp_path, cols=100, rows=30):
     env = trusted_env(tmp_path)
     init = tmp_path / "init.zsh"
     init.write_bytes(inst.init("zsh", env))
-    env["BINGSU_T_DIR"] = str(short_dir())
+    env.update(SHORT_HOST, BINGSU_T_DIR=str(short_dir()))
     s = Session("zsh", env, cols=cols, rows=rows)
     s.run(f'source "{init}"')
     s.run('cd -- "$BINGSU_T_DIR"')
@@ -307,7 +312,7 @@ def test_prompt_inside_tmux(tmp_path):
     folder = short_dir()
     socket = folder / "s"
     subprocess.run(["tmux", "-u", "-S", str(socket), "-f", "/dev/null", "new-session", "-d", "-x", str(cols), "-y", str(rows),
-                    "zsh", "-f", "-i"], env={**env, "TERM": "xterm-256color"}, check=True, timeout=10)
+                    "zsh", "-f", "-i"], env={**env, **SHORT_HOST, "TERM": "xterm-256color"}, check=True, timeout=10)
     try:
         for line in (f'source "{init}"', f'cd -- "{folder}"', "false"):
             tmux(socket, "send-keys", "-l", line)
