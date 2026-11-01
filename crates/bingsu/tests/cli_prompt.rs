@@ -31,7 +31,7 @@ fn run(args: &[&[u8]]) -> std::process::Output {
 }
 
 fn minimal(status: &str) -> Vec<u8> {
-    let mut v = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f".to_vec();
+    let mut v = b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f".to_vec();
     v.extend_from_slice(status.as_bytes());
     v.push(0x1e);
     v
@@ -360,7 +360,7 @@ fn closed_stdout_is_silent_and_exits_zero() {
 }
 
 // 이것을 실패시키는 것: `--shell`이 있는 봉투에 최소 레코드를 내는 것, 레코드 틀(머리·필드 수·끝)이나 상태를 바꾸는 것,
-// 프롬프트 중 stderr에 쓰는 것.
+// 프롬프트 중 stderr에 쓰는 것, 앞단이 vi 명령 모드 줄을 레코드에 싣지 않는 것.
 #[test]
 fn rendered_record_for_each_shell() {
     for shell in ["zsh", "bash", "fish"] {
@@ -378,14 +378,23 @@ fn rendered_record_for_each_shell() {
         assert!(out.stderr.is_empty(), "{shell}");
         let rec = out.stdout;
         assert!(
-            rec.starts_with(b"B1\x1f8\x1f") && rec.ends_with(b"\x1fdegraded:runtime-root\x1e"),
+            rec.starts_with(b"B1\x1f12\x1f") && rec.ends_with(b"\x1fdegraded:runtime-root\x1e"),
             "{shell}"
         );
-        assert_eq!(rec.iter().filter(|&&b| b == 0x1f).count(), 9, "{shell}");
+        assert_eq!(rec.iter().filter(|&&b| b == 0x1f).count(), 13, "{shell}");
         let text = String::from_utf8_lossy(&rec);
         assert!(
             text.contains("vis-prompt") && text.contains('\u{2717}'),
             "{shell}: {text:?}"
+        );
+        // The real binary, on a degraded status: the vi command mode fields
+        // reach the record with the notice mark.
+        let fields: Vec<&[u8]> = rec[..rec.len() - 1].split(|&b| b == 0x1f).collect();
+        assert_eq!(fields[12], b"l", "{shell}");
+        let vicmd = String::from_utf8_lossy(fields[9]);
+        assert!(
+            vicmd.contains('\u{276E}') && vicmd.contains('!'),
+            "{shell}: {vicmd:?}"
         );
     }
 }

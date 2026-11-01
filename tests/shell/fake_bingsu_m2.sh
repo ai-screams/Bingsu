@@ -13,4 +13,4 @@ for a in "$@"; do
     --shell|--pwd|--colorterm|--home=*) status=error:bad-args ;;
   esac
 done
-printf 'B1\0378\037> \037\037\037\037\037\037\037%s\036' "$status"
+printf 'B1\03712\037> \037\037\037\037\037\037\037\037\037\037\037%s\036' "$status"

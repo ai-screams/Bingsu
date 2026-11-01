@@ -9,6 +9,7 @@ pub const RS: u8 = 0x1E;
 /// Left field of the minimal record. Plain ASCII so it is one cell per byte
 /// under every width profile.
 pub const MINIMAL_LEFT: &[u8] = b"> ";
+const FIELD_COUNT: usize = 11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordVersion {
@@ -26,9 +27,12 @@ impl RecordVersion {
     }
 }
 
-/// The seven display fields, in record order. `upper` is the line above the
-/// input line (record change plan 12, R-01); it is last so the other fields keep
-/// their places, and an empty `upper` means a one-line prompt.
+/// The eleven display fields, in record order. `upper` is the line above the
+/// input line (record change plan 12, R-01); an empty `upper` means a one-line
+/// prompt. The last four describe vi command mode and stand after `upper`, so
+/// the other fields keep their places: each `*_vicmd` is that line drawn whole,
+/// and `vi_lines` (`l`, `r`, `u`) names the lines that use it. A line it does
+/// not name keeps its main value; a named line with an empty field is empty.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Fields<'a> {
     pub left: &'a [u8],
@@ -38,10 +42,18 @@ pub struct Fields<'a> {
     pub vi_insert: &'a [u8],
     pub vi_command: &'a [u8],
     pub upper: &'a [u8],
+    pub left_vicmd: &'a [u8],
+    pub right_vicmd: &'a [u8],
+    pub upper_vicmd: &'a [u8],
+    pub vi_lines: &'a [u8],
 }
 
+/// Position in `Fields::in_order` of `left_vicmd`, the first field an
+/// oversize record gives up.
+const FIRST_VI_FIELD: usize = 7;
+
 impl<'a> Fields<'a> {
-    fn in_order(&self) -> [&'a [u8]; 7] {
+    fn in_order(&self) -> [&'a [u8]; FIELD_COUNT] {
         [
             self.left,
             self.right,
@@ -50,6 +62,10 @@ impl<'a> Fields<'a> {
             self.vi_insert,
             self.vi_command,
             self.upper,
+            self.left_vicmd,
+            self.right_vicmd,
+            self.upper_vicmd,
+            self.vi_lines,
         ]
     }
 }
@@ -76,7 +92,11 @@ pub enum FieldError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoded {
     Full,
-    /// The record exceeded RECORD_MAX_BYTES; `out` holds the minimal record
+    /// The record exceeded RECORD_MAX_BYTES with the vi command mode fields
+    /// and fits without them; `out` holds it with those fields empty, so
+    /// every mode shows the main fields.
+    ViFieldsDropped,
+    /// The record exceeded RECORD_MAX_BYTES even without them; `out` holds the minimal record
     /// with `degraded:oversize` instead.
     ReplacedBySizeLimit,
 }
@@ -120,10 +140,10 @@ fn check_field(field: usize, bytes: &[u8]) -> Result<(), FieldError> {
     Ok(())
 }
 
-fn push_b1(fields: [&[u8]; 7], status: Status, out: &mut Vec<u8>) {
+fn push_b1(fields: [&[u8]; FIELD_COUNT], status: Status, out: &mut Vec<u8>) {
     out.extend_from_slice(b"B1");
     out.push(US);
-    out.push(b'8');
+    out.extend_from_slice(b"12");
     out.push(US);
     for f in fields {
         out.extend_from_slice(f);
@@ -133,10 +153,10 @@ fn push_b1(fields: [&[u8]; 7], status: Status, out: &mut Vec<u8>) {
     out.push(RS);
 }
 
-/// Exact encoded length, or `None` on overflow: the frame (`B1`, `US`, `8`,
+/// Exact encoded length, or `None` on overflow: the frame (`B1`, `US`, `12`,
 /// `US`), each field plus its `US`, the status and the closing `RS`.
-fn encoded_len(parts: &[&[u8]; 7], status: Status) -> Option<usize> {
-    let mut n: usize = 5;
+fn encoded_len(parts: &[&[u8]; FIELD_COUNT], status: Status) -> Option<usize> {
+    let mut n: usize = 6;
     for f in parts {
         n = n.checked_add(f.len())?.checked_add(1)?;
     }
@@ -146,9 +166,9 @@ fn encoded_len(parts: &[&[u8]; 7], status: Status) -> Option<usize> {
         .checked_add(1)
 }
 
-/// Appends a B1 record to `out`. Records over RECORD_MAX_BYTES are replaced
-/// by the minimal record (spec section 3, size rule; the only formal bound).
-/// The length is computed before anything is copied; `out` keeps its prefix.
+/// Appends a B1 record to `out`. A record over RECORD_MAX_BYTES first loses
+/// its vi command mode fields; if it is still over, the minimal record replaces
+/// it (spec section 3, size rule; the only formal bound). The length is computed before anything is copied; `out` keeps its prefix.
 pub fn encode_b1(
     fields: &Fields<'_>,
     status: Status,
@@ -159,15 +179,21 @@ pub fn encode_b1(
         status.write_to(&mut s);
         is_valid_status(&s)
     });
-    let parts = fields.in_order();
+    let mut parts = fields.in_order();
     for (i, f) in parts.iter().enumerate() {
         check_field(i, f)?;
     }
     // The precomputed length is the real bound: an oversize field is never
     // copied, so `out` does not grow to the oversize size first.
-    if encoded_len(&parts, status).is_none_or(|n| n > RECORD_MAX_BYTES) {
-        write_minimal_b1(Status::DEGRADED_OVERSIZE, out);
-        return Ok(Encoded::ReplacedBySizeLimit);
+    let fits = |parts: &_| encoded_len(parts, status).is_some_and(|n| n <= RECORD_MAX_BYTES);
+    let mut encoded = Encoded::Full;
+    if !fits(&parts) {
+        parts[FIRST_VI_FIELD..].fill(b"");
+        encoded = Encoded::ViFieldsDropped;
+        if !fits(&parts) {
+            write_minimal_b1(Status::DEGRADED_OVERSIZE, out);
+            return Ok(Encoded::ReplacedBySizeLimit);
+        }
     }
     let start = out.len();
     push_b1(parts, status, out);
@@ -177,7 +203,7 @@ pub fn encode_b1(
         encoded_len(&parts, status),
         "encoded_len must match the bytes push_b1 writes"
     );
-    Ok(Encoded::Full)
+    Ok(encoded)
 }
 
 /// Appends the minimal record: left = MINIMAL_LEFT, other fields (the upper
@@ -188,7 +214,9 @@ pub fn write_minimal_b1(status: Status, out: &mut Vec<u8>) {
         status.write_to(&mut s);
         is_valid_status(&s)
     });
-    push_b1([MINIMAL_LEFT, b"", b"", b"", b"", b"", b""], status, out);
+    let mut fields: [&[u8]; FIELD_COUNT] = [b""; FIELD_COUNT];
+    fields[0] = MINIMAL_LEFT;
+    push_b1(fields, status, out);
 }
 
 #[cfg(test)]
@@ -207,7 +235,10 @@ mod tests {
     fn empty_fields_layout_is_exact() {
         let (r, out) = enc(&Fields::default());
         assert_eq!(r, Ok(Encoded::Full));
-        assert_eq!(out, b"B1\x1f8\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e");
+        assert_eq!(
+            out,
+            b"B1\x1f12\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+        );
     }
 
     #[test]
@@ -216,7 +247,7 @@ mod tests {
         write_minimal_b1(Status::ERROR_BAD_ARGS, &mut out);
         assert_eq!(
             out,
-            b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:bad-args\x1e"
+            b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1ferror:bad-args\x1e"
         );
     }
 
@@ -275,6 +306,87 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    // 이것을 실패시키는 것: 새 네 필드의 순서를 바꾸거나 상태 뒤로 옮기는 것, 윗줄과 기존 필드의 자리를 바꾸는 것.
+    #[test]
+    fn vi_fields_stand_between_the_upper_line_and_the_status() {
+        let (r, out) = enc(&Fields {
+            upper: b"u",
+            left_vicmd: b"a",
+            right_vicmd: b"b",
+            upper_vicmd: b"c",
+            vi_lines: b"lru",
+            ..Fields::default()
+        });
+        assert_eq!(r, Ok(Encoded::Full));
+        assert_eq!(
+            out,
+            b"B1\x1f12\x1f\x1f\x1f\x1f\x1f\x1f\x1fu\x1fa\x1fb\x1fc\x1flru\x1fok:none\x1e"
+        );
+    }
+
+    // 이것을 실패시키는 것: 넘친 레코드를 곧바로 최소 레코드로 바꾸는 것(vi 필드 재시도 삭제), `vi_lines`를 남기는 것
+    // (남으면 hook이 빈 vicmd 필드로 줄을 지운다), vi 필드 하나를 안 비우는 것, 윗줄까지 비우는 것.
+    #[test]
+    fn oversize_vi_fields_go_first() {
+        let main = Fields {
+            left: b"L",
+            upper: b"U",
+            ..Fields::default()
+        };
+        let a = vec![b'x'; 30_000];
+        let (r, out) = enc(&Fields {
+            left_vicmd: &a,
+            right_vicmd: &a,
+            upper_vicmd: &a,
+            vi_lines: b"lru",
+            ..main
+        });
+        assert_eq!(r, Ok(Encoded::ViFieldsDropped));
+        assert_eq!(out, enc(&main).1);
+    }
+
+    // 이것을 실패시키는 것: 재시도 뒤 상한 재확인을 빼는 것, main 필드까지 비우는 것(최소 레코드 대신 빈 프롬프트),
+    // vi 필드를 비운 레코드에 `degraded:oversize`를 쓰지 않는 것.
+    #[test]
+    fn a_record_still_over_after_the_vi_fields_is_minimal() {
+        let main = vec![b'x'; RECORD_MAX_BYTES];
+        let (r, out) = enc(&Fields {
+            left: &main,
+            vi_lines: b"l",
+            ..Fields::default()
+        });
+        assert_eq!(r, Ok(Encoded::ReplacedBySizeLimit));
+        let mut want = Vec::new();
+        write_minimal_b1(Status::DEGRADED_OVERSIZE, &mut want);
+        assert_eq!(out, want);
+    }
+
+    // 이것을 실패시키는 것: 바이트 상한을 글자 수로 세는 것. 한글 22,000자는 글자 수로는 상한 안이지만 vi 필드와 합쳐
+    // 바이트로 넘는다.
+    #[test]
+    fn vi_retry_counts_bytes() {
+        let hangul = "가".repeat(11_000);
+        let (r, out) = enc(&Fields {
+            left_vicmd: hangul.as_bytes(),
+            right_vicmd: hangul.as_bytes(),
+            ..Fields::default()
+        });
+        assert_eq!(r, Ok(Encoded::ViFieldsDropped));
+        assert_eq!(out, enc(&Fields::default()).1);
+    }
+
+    // 이것을 실패시키는 것: 상한 비교를 `>=`로 바꾸어 정확히 상한인 레코드의 vi 필드를 버리는 것, 틀 길이를 잘못 세는 것.
+    #[test]
+    fn vi_fields_stay_at_the_exact_bound() {
+        let overhead = enc(&Fields::default()).1.len();
+        let exact = vec![b'x'; RECORD_MAX_BYTES - overhead];
+        let (r, out) = enc(&Fields {
+            upper_vicmd: &exact,
+            ..Fields::default()
+        });
+        assert_eq!((r, out.len()), (Ok(Encoded::Full), RECORD_MAX_BYTES));
     }
 
     // 이것을 실패시키는 것: 바이트 상한 비교를 `>=`로 바꾸거나 글자 수로 세는 것.
@@ -350,8 +462,8 @@ mod tests {
     // 이것을 실패시키는 것: `in_order()`에서 필드 하나를 빼먹는 것, 필드 번호를 어긋나게 보고하는 것.
     #[test]
     fn forbidden_byte_reports_each_field_index() {
-        for idx in 0..7 {
-            let mut parts: [&[u8]; 7] = [b""; 7];
+        for idx in 0..FIELD_COUNT {
+            let mut parts: [&[u8]; FIELD_COUNT] = [b""; FIELD_COUNT];
             parts[idx] = b"a\x1fb";
             let f = Fields {
                 left: parts[0],
@@ -361,6 +473,10 @@ mod tests {
                 vi_insert: parts[4],
                 vi_command: parts[5],
                 upper: parts[6],
+                left_vicmd: parts[7],
+                right_vicmd: parts[8],
+                upper_vicmd: parts[9],
+                vi_lines: parts[10],
             };
             assert_eq!(
                 enc(&f).0,
@@ -373,7 +489,7 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: 윗줄을 상태 앞 일곱째 자리가 아닌 곳에 두거나, 윗줄의 줄바꿈을 받는 것
+    // 이것을 실패시키는 것: 윗줄을 일곱째 자리가 아닌 곳에 두거나, 윗줄의 줄바꿈을 받는 것
     // (변경안 12판 R-01·R-03).
     #[test]
     fn upper_line_is_the_seventh_field_without_newlines() {
@@ -385,7 +501,7 @@ mod tests {
         assert_eq!(r, Ok(Encoded::Full));
         assert_eq!(
             out,
-            b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1fline 1\x1fok:none\x1e"
+            b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1fline 1\x1f\x1f\x1f\x1f\x1fok:none\x1e"
         );
         let (r, _) = enc(&Fields {
             upper: b"line\n1",

@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, trusted_env
+from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, status_bait_record, trusted_env
 from pty_session import Session, visible
 from screen_session import ScreenSession
 from test_zsh_screen import enter, settle
@@ -21,7 +21,7 @@ def hostile_record(c1, c2, c3):
     """What a correct core emits for zsh: data % doubled, SGR in %{ %}."""
     left = (b"%{\x1b[31m%}D:$(touch " + c1 + b");`touch " + c2 + b"`;${HOME};$[1+1];%%F{red};!;\\u%{\x1b[0m%}> ")
     right = b"R:$(touch " + c3 + b")%%"
-    return b"B1\x1f8\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
+    return b"B1\x1f12\x1f" + left + b"\x1f" + right + b"\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e"
 
 
 def start(tmp_path, rc_before="", rc_after="", record=None, inherit=None, load="source {}"):
@@ -580,7 +580,7 @@ def test_coexists_with_add_zsh_hook_after_init(tmp_path):
 
 
 def fields(left=b"LONG> ", right=b"", tleft=b"T> ", tright=b"", upper=b"", status=b"ok:none"):
-    return b"\x1f".join([b"B1", b"8", left, right, tleft, tright, b"", b"", upper, status]) + b"\x1e"
+    return b"\x1f".join([b"B1", b"12", left, right, tleft, tright, b"", b"", upper, b"", b"", b"", b"", status]) + b"\x1e"
 
 
 def typed_screen(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
@@ -878,3 +878,16 @@ def test_status_after_interrupt_matches_plain_zsh(tmp_path):
     s.expect(rb"DOLLAR=(\d+)\r")
     assert s.p.match.group(1) == want
     s.kill()
+
+
+# 이것을 실패시키는 것: hook이 상태를 옛 첨자(10)로 읽는 것. 앞쪽 경우는 알림이 사라지고, 뒤쪽 경우는 필드 글자로
+# 없는 경고를 낸다.
+@pytest.mark.parametrize("status,bait,warned", [
+    (b"degraded:sandbox", b"", 1),
+    (b"ok:none", b"degraded:sandbox", 0),
+], ids=["status-is-last", "old-place-holds-status-text"])
+def test_sandbox_warning_reads_last_element(tmp_path, status, bait, warned):
+    s, _, _ = start(tmp_path, record=status_bait_record(status, bait))
+    s.run("true")
+    out = visible(s.close())
+    assert out.count(b"could not start its system call filter") == warned

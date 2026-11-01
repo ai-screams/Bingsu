@@ -40,7 +40,7 @@ def test_deleted_and_recreated_runtime_root_degrades_every_prompt(tmp_path):
     env = trusted_env(tmp_path)
     script = inst.init("bash", env)
     baseline = run_shell_script("bash", script + b"\n_bingsu_save; _bingsu_install; printf '%s\\n' \"$_bingsu_rec\"\n", env, tmp_path)
-    assert baseline.returncode == 0 and baseline.stdout.startswith(b"B1\x1f8\x1f"), baseline
+    assert baseline.returncode == 0 and baseline.stdout.startswith(b"B1\x1f12\x1f"), baseline
     assert b"degraded:runtime-root" not in baseline.stdout, baseline.stdout
     wait_refresh_helpers(tmp_path)
     root = tmp_path / "run-t/bingsu"
@@ -104,7 +104,7 @@ def test_init_again_recovers_runtime_root(tmp_path):
         records = result.stdout.splitlines()
         assert len(records) == 2, records
         assert records[0].endswith(b"\x1fdegraded:runtime-root\x1e"), records
-        assert records[1].startswith(b"B1\x1f8\x1f"), records
+        assert records[1].startswith(b"B1\x1f12\x1f"), records
         assert records[1] == baseline.stdout.rstrip(b"\n"), records
     finally:
         os.close(fd)

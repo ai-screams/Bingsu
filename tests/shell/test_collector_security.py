@@ -124,7 +124,7 @@ def test_security_table_resource_failures_preserve_front(preparation, tmp_path, 
     reader = product.run([preparation["fixture"], "--read", scratch], env={**os.environ, "TMPDIR": str(scratch)})
     assert reader.returncode == 0 and reader.stderr == b""
     record = bytes.fromhex(json.loads(reader.stdout)["record_hex"])
-    assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e") and record.count(b"\x1f") == 9
+    assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e") and record.count(b"\x1f") == 13
     assert f"probe-{mode}-pass".encode() in record, record
 
 

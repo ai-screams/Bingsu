@@ -109,7 +109,7 @@ function fish_prompt
         set -g _bingsu_rps1 $_bingsu_f[4]
         # The prompt ran without its system call filter (decision P18): said
         # once per session, with a constant from init.
-        if test "$_bingsu_f[10]" = @STATUS_SANDBOX@; and not set -q _bingsu_warned_sandbox[1]
+        if test "$_bingsu_f[-1]" = @STATUS_SANDBOX@; and not set -q _bingsu_warned_sandbox[1]
             set -g _bingsu_warned_sandbox 1
             printf '%s\n' @MSG_NO_SANDBOX@ >&2
         end

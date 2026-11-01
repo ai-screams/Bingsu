@@ -174,7 +174,7 @@ mod tests {
     // 이것을 실패시키는 것: EINTR 뒤 접두부를 다시 쓰거나 만료 뒤 두 번째 레코드를 붙이는 것.
     #[test]
     fn partial_writes_and_interrupts_preserve_the_record_prefix() {
-        let record = b"B1\x1f8\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e";
+        let record = b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e";
         let mut offset = 0;
         let mut written = alloc::vec::Vec::new();
         for (result, now) in [

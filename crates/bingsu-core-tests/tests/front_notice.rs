@@ -5,7 +5,7 @@ use bingsu_core::{
     layout::{Inputs, Options, target},
     record::encode_b1,
     recorder::NoopRecorder,
-    render::{Notice, Target, render_prompt, render_prompt_with_notice, to_b1_fields},
+    render::{Notice, Target, ViVariants, render_prompt, render_prompt_with_notice, to_b1_fields},
     shell_values,
     shell_word::Shell,
     status::Status,
@@ -93,7 +93,7 @@ fn warning_reserves_only_the_input_line_and_keeps_shell_grammar() {
                                 }
                                 let mut record = Vec::new();
                                 encode_b1(
-                                    &to_b1_fields(&warning),
+                                    &to_b1_fields(&warning, &ViVariants::default()),
                                     Status::ERROR_CONFIG_LAST_GOOD,
                                     &mut record,
                                 )

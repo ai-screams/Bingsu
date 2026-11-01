@@ -12,7 +12,10 @@ use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, Options, SegmentSetup, When, target};
 use bingsu_core::record::{Encoded, encode_b1};
 use bingsu_core::recorder::NoopRecorder;
-use bingsu_core::render::{RenderedPrompt, Target, Theme, render_prompt, to_b1_fields};
+use bingsu_core::render::{
+    RenderedPrompt, Target, Theme, ViInputs, ViVariants, render_prompt, render_vi_variants,
+    to_b1_fields,
+};
 use bingsu_core::sanitize::sanitize;
 use bingsu_core::shell_word::Shell;
 use bingsu_core::shorten::{Anchor, PathFacts};
@@ -105,7 +108,7 @@ fn render_with(
     template: &str,
     transient: &str,
     width: u16,
-) -> RenderedPrompt {
+) -> (RenderedPrompt, ViVariants) {
     let pal = pal();
     let mut values = vec![None; BUILTIN.len()];
     let mut facts = vec![None; BUILTIN.len()];
@@ -142,20 +145,29 @@ fn render_with(
         vi: &vi,
         palette: &pal,
     };
-    let o = Options { width, ..opts() };
-    render_prompt(
+    let t = Target {
+        shell,
+        depth: ColorDepth::TrueColor,
+        options: Options { width, ..opts() },
+    };
+    let r = render_prompt(&theme, &inputs, &t, &mut NoopRecorder);
+    let vi = render_vi_variants(
         &theme,
-        &inputs,
-        &Target {
-            shell,
-            depth: ColorDepth::TrueColor,
-            options: o,
+        ViInputs {
+            catalog: BUILTIN,
+            values: &mut values,
+            facts: &facts,
+            setup: &setup,
         },
+        &t,
+        None,
+        &r,
         &mut NoopRecorder,
-    )
+    );
+    (r, vi)
 }
 
-fn render(shell: Shell, path: Path, p: &[u8], width: u16) -> RenderedPrompt {
+fn render(shell: Shell, path: Path, p: &[u8], width: u16) -> (RenderedPrompt, ViVariants) {
     // The value is in the upper line and on both sides of the input line;
     // the transient line carries it on both sides too.
     let (b, f, d, seg) = match path {
@@ -164,7 +176,10 @@ fn render(shell: Shell, path: Path, p: &[u8], width: u16) -> RenderedPrompt {
         Path::Folder => (&b"main"[..], &b"main"[..], p, "{dir}"),
     };
     let tr = format!("{seg} {{char}}{{@fill}}{seg}");
-    let t = format!("{seg}{{@nl}}{tr}");
+    // The marks show only in command mode, so all three vicmd fields hold the
+    // value and go through the same checks as the main fields.
+    let mark = "{@group}{char.vicmd}*{@end}";
+    let t = format!("{seg}{mark}{{@nl}}{tr}{mark}");
     render_with(shell, b, f, d, &t, &tr, width)
 }
 
@@ -177,6 +192,15 @@ fn named(r: &RenderedPrompt) -> [(&'static str, &[u8]); 7] {
         ("vi_insert", &r.vi_insert),
         ("vi_command", &r.vi_command),
         ("upper", &r.upper),
+    ]
+}
+
+/// The vi command mode lines: ordinary fields, unlike the two vi symbols.
+fn named_vicmd(vi: &ViVariants) -> [(&'static str, &[u8]); 3] {
+    [
+        ("left_vicmd", &vi.left),
+        ("right_vicmd", &vi.right),
+        ("upper_vicmd", &vi.upper),
     ]
 }
 
@@ -224,9 +248,16 @@ fn hostile_values_render_safely() {
             for shell in SHELLS {
                 for width in WIDTHS {
                     let at = format!("{class} {path:?} {shell:?} {width}");
-                    let r = render(shell, path, &p, width);
-                    for (name, f) in named(&r) {
+                    let (r, vi) = render(shell, path, &p, width);
+                    for (name, f) in named(&r).into_iter().chain(named_vicmd(&vi)) {
                         shown(shell, name, f).unwrap_or_else(|e| panic!("{at} {name}: {e}: {f:?}"));
+                    }
+                    // 이것을 실패시키는 것: `vi_lines`에 없는 줄을 그리거나 정해진 순서를 어기는 것.
+                    let mut unseen = &b"lru"[..];
+                    for c in &vi.lines {
+                        let next = unseen.iter().position(|x| x == c);
+                        let next = next.unwrap_or_else(|| panic!("{at}: {:?}", vi.lines));
+                        unseen = &unseen[next + 1..];
                     }
                     let target = target(&Options { width, ..opts() });
                     let line = cells(shell, "left", &r.left) + cells(shell, "right", &r.right);
@@ -237,8 +268,19 @@ fn hostile_values_render_safely() {
                         line <= target && tr <= target && up <= target,
                         "{at}: {up} {line} {tr} cells, target {target}"
                     );
+                    let vi_left = cells(shell, "left_vicmd", &vi.left);
+                    let vi_right = if vi.lines.contains(&b'r') {
+                        cells(shell, "right_vicmd", &vi.right)
+                    } else {
+                        cells(shell, "right", &r.right)
+                    };
+                    let vi_up = cells(shell, "upper_vicmd", &vi.upper);
+                    assert!(
+                        vi_left + vi_right <= target && vi_up <= target,
+                        "{at}: {vi_up} {vi_left} {vi_right} vi cells, target {target}"
+                    );
                     let mut out = Vec::new();
-                    let enc = encode_b1(&to_b1_fields(&r), Status::OK_NONE, &mut out)
+                    let enc = encode_b1(&to_b1_fields(&r, &vi), Status::OK_NONE, &mut out)
                         .unwrap_or_else(|e| panic!("{at}: {e:?}"));
                     assert_eq!(enc, Encoded::Full, "{at}");
                     if width != u16::MAX {
@@ -246,7 +288,8 @@ fn hostile_values_render_safely() {
                     }
                     // The widest: every value is whole, or cut by its byte cap.
                     assert!(!r.upper.is_empty(), "{at}: no upper line");
-                    for (name, f) in named(&r) {
+                    assert_eq!(vi.lines, b"lru", "{at}");
+                    for (name, f) in named(&r).into_iter().chain(named_vicmd(&vi)) {
                         if name.starts_with("vi_") {
                             continue;
                         }
@@ -301,7 +344,7 @@ fn theme_text_is_checked_and_escaped() {
                 );
                 accepted += 1;
                 for shell in SHELLS {
-                    let r = render_with(shell, b"main", b"main", b"w", &t, "{char}", u16::MAX);
+                    let (r, _) = render_with(shell, b"main", b"main", b"w", &t, "{char}", u16::MAX);
                     let left = parse_field(shell, &r.left).unwrap();
                     assert!(left.contains(text), "{class} {shell:?}: {left:?}");
                     if shell == Shell::Zsh {
@@ -325,7 +368,7 @@ fn oversize_render_becomes_minimal_record() {
     let line = "{dir}{git}".repeat(200);
     let t = format!("{line}{{@nl}}{line}");
     for shell in SHELLS {
-        let r = render_with(
+        let (r, vi) = render_with(
             shell,
             wide.as_bytes(),
             b"main",
@@ -349,10 +392,52 @@ fn oversize_render_becomes_minimal_record() {
         assert!(total > 65_536, "{shell:?}: {total}");
         let mut out = Vec::new();
         assert_eq!(
-            encode_b1(&to_b1_fields(&r), Status::OK_NONE, &mut out),
+            encode_b1(&to_b1_fields(&r, &vi), Status::OK_NONE, &mut out),
             Ok(Encoded::ReplacedBySizeLimit),
             "{shell:?}"
         );
+    }
+}
+
+// 이것을 실패시키는 것: 넘친 레코드를 vi 필드부터 버리지 않고 최소 레코드로 바꾸는 것, `vi_lines`를 남기는 것. main만이면
+// 상한 안이고 왼쪽 vicmd 필드까지 실으면 넘는 레코드다. 세 셸 모두 프롬프트는 그대로 뜨고 모드 전환만 멈춘다.
+#[test]
+fn oversize_vi_fields_leave_the_main_prompt() {
+    let wide = "한".repeat(13);
+    let line = "{dir}{git}".repeat(200);
+    let t = format!("{line}{{@nl}}{{char}}{line}");
+    for shell in SHELLS {
+        let (r, vi) = render_with(
+            shell,
+            wide.as_bytes(),
+            b"main",
+            wide.as_bytes(),
+            &t,
+            "{char}",
+            u16::MAX,
+        );
+        assert_eq!(vi.lines, b"l", "{shell:?}");
+        assert!(
+            r.upper.len() + r.left.len() < 60_000
+                && r.upper.len() + r.left.len() + vi.left.len() > 65_536,
+            "{shell:?}: {} {}",
+            r.upper.len(),
+            r.left.len()
+        );
+        let mut out = Vec::new();
+        assert_eq!(
+            encode_b1(&to_b1_fields(&r, &vi), Status::OK_NONE, &mut out),
+            Ok(Encoded::ViFieldsDropped),
+            "{shell:?}"
+        );
+        let mut plain = Vec::new();
+        encode_b1(
+            &to_b1_fields(&r, &ViVariants::default()),
+            Status::OK_NONE,
+            &mut plain,
+        )
+        .unwrap();
+        assert_eq!(out, plain, "{shell:?}");
     }
 }
 
@@ -364,7 +449,7 @@ fn combining_flood_stays_under_the_byte_cap() {
     let flood = [&b"a"[..], &"\u{301}".repeat(40_000).into_bytes()].concat();
     for shell in SHELLS {
         for path in [Path::Segment, Path::BranchField, Path::Folder] {
-            let r = render(shell, path, &flood, u16::MAX);
+            let (r, vi) = render(shell, path, &flood, u16::MAX);
             assert!(
                 r.left.len() < 20_000,
                 "{shell:?} {path:?}: {}",
@@ -374,7 +459,7 @@ fn combining_flood_stays_under_the_byte_cap() {
             assert!(shown.contains('\u{2026}'), "{shell:?} {path:?}: {shown:?}");
             let mut out = Vec::new();
             assert_eq!(
-                encode_b1(&to_b1_fields(&r), Status::OK_NONE, &mut out),
+                encode_b1(&to_b1_fields(&r, &vi), Status::OK_NONE, &mut out),
                 Ok(Encoded::Full),
                 "{shell:?} {path:?}"
             );

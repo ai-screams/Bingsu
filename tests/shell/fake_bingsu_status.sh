@@ -10,4 +10,4 @@ total=$(wc -l < "$here/statuses.txt")
 [ "$n" -le "$total" ] || n=$total
 status=$(sed -n "${n}p" "$here/statuses.txt")
 [ "$status" = no-record ] && exit 0
-printf 'B1\0378\037> \037\037\037\037\037\037\037%s\036' "$status"
+printf 'B1\03712\037> \037\037\037\037\037\037\037\037\037\037\037%s\036' "$status"
