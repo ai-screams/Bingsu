@@ -381,6 +381,22 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_init_again_recovers_runtime_root' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples' "$RUNNER_TEMP/runtime-root.txt"
           grep -Fx 'PASSED tests/shell/test_zsh_notices.py::test_runtime_root_notice_once_then_reinit_recovers' "$RUNNER_TEMP/runtime-root.txt"
+      # Shell gates count calls and executed files, so debug and release cells both prove them.
+      # 이것을 실패시키는 것: 시험 하나를 실행 목록이나 PASSED 단언에서 빼는 것, strace 시험의 skip을 통과로 세는 것.
+      - name: Shell call, exec, redraw and notice gates
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_zsh_gates.py::test_zsh_hooks_exec_only_pinned_binary tests/shell/test_zsh_gates.py::test_zsh_call_count_per_prompt tests/shell/test_zsh_gates.py::test_zsh_hooks_run_with_empty_path tests/shell/test_zsh_gates.py::test_zsh_notice_once_across_redraw_transient_vi tests/shell/test_zsh_hooks.py::test_resize_redraws_at_new_width tests/shell/test_zsh_hooks.py::test_same_width_makes_no_call tests/shell/test_zsh_hooks.py::test_winch_burst_ends_at_final_width tests/shell/test_zsh_hooks.py::test_redraw_yields_to_a_key_and_skips_the_same_width tests/shell/test_zsh_hooks.py::test_width_that_keeps_changing_does_not_hold_input tests/shell/test_zsh_hooks.py::test_width_changed_during_a_call_is_drawn --basetemp="$RUNNER_TEMP/shell-gates-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_hooks_exec_only_pinned_binary' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_call_count_per_prompt' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_hooks_run_with_empty_path' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_notice_once_across_redraw_transient_vi' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_resize_redraws_at_new_width' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_same_width_makes_no_call' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_winch_burst_ends_at_final_width' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_redraw_yields_to_a_key_and_skips_the_same_width' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_width_that_keeps_changing_does_not_hold_input' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_width_changed_during_a_call_is_drawn' "$RUNNER_TEMP/shell-gates.txt"
       # GATE-TRUST-REVOKE.2 on a release build: the config root's FUSE daemon is stopped
       # and the test waits out T (about 60 s) on CLOCK_BOOTTIME. Without FUSE it fails BLOCKED.
       # 이것을 실패시키는 것: 막힌 마운트 신뢰 철회 시험을 빼거나 PASSED 단언 없이 돌리는 것.
@@ -527,6 +543,16 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_gate_rows_exist_and_run_in_ci' "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_every_gate_clause_is_a_row_or_pending' "$RUNNER_TEMP/gate-acceptance.txt"
           grep -Fx 'PASSED tests/shell/test_gate_acceptance.py::test_shell_time_job_records_a_verdict' "$RUNNER_TEMP/gate-acceptance.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_zsh_gates.py::test_zsh_call_count_per_prompt tests/shell/test_zsh_gates.py::test_zsh_hooks_run_with_empty_path tests/shell/test_zsh_gates.py::test_zsh_notice_once_across_redraw_transient_vi tests/shell/test_zsh_hooks.py::test_resize_redraws_at_new_width tests/shell/test_zsh_hooks.py::test_same_width_makes_no_call tests/shell/test_zsh_hooks.py::test_winch_burst_ends_at_final_width tests/shell/test_zsh_hooks.py::test_redraw_yields_to_a_key_and_skips_the_same_width tests/shell/test_zsh_hooks.py::test_width_that_keeps_changing_does_not_hold_input tests/shell/test_zsh_hooks.py::test_width_changed_during_a_call_is_drawn --basetemp="$RUNNER_TEMP/shell-gates-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_call_count_per_prompt' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_hooks_run_with_empty_path' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_gates.py::test_zsh_notice_once_across_redraw_transient_vi' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_resize_redraws_at_new_width' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_same_width_makes_no_call' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_winch_burst_ends_at_final_width' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_redraw_yields_to_a_key_and_skips_the_same_width' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_width_that_keeps_changing_does_not_hold_input' "$RUNNER_TEMP/shell-gates.txt"
+          grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_width_changed_during_a_call_is_drawn' "$RUNNER_TEMP/shell-gates.txt"
       - name: Fetch the pinned oh-my-zsh
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
