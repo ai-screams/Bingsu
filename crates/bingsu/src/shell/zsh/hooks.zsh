@@ -229,10 +229,6 @@ _bingsu_transient() {
   zle reset-prompt
 }
 
-_bingsu_status() {
-  return $1
-}
-
 # In a function so the user's ALL_EXPORT does not reach the assignment.
 _bingsu_nest() {
   emulate -L zsh
@@ -282,7 +278,7 @@ _bingsu_keymap_select() {
 # during it shows as a different width on the next round.
 _bingsu_redraw_step() {
   emulate -L zsh
-  [[ ${COLUMNS:-0} != $_bingsu_drawn_cols ]] || return 1
+  (( $#_bingsu_ctx )) && [[ ${COLUMNS:-0} != $_bingsu_drawn_cols ]] || return 1
   _bingsu_drawn_cols=${COLUMNS:-0}
   local -a kept
   kept=("${_bingsu_f[@]}")
@@ -294,32 +290,43 @@ _bingsu_redraw_step() {
 
 # Only the first prompt line: PS2 and vared draw something else, and precmd
 # draws the next prompt at the new width anyway. zsh does not run a trap inside
-# itself, so a signal during the call waits; the loop reads the width again.
+# itself, so a signal during the call waits, and it runs as soon as the trap
+# ends: a width that keeps changing would hold the keyboard across traps too.
+# So a waiting key goes first, which $PENDING tells only inside a widget, and
+# one trap makes at most two calls. The next signal or prompt draws what is left.
 _bingsu_redraw() {
-  zle && [[ ${CONTEXT-} == start ]] && (( ${#_bingsu_ctx} )) || return 0
-  while _bingsu_redraw_step; do
+  zle && [[ ${CONTEXT-} == start ]] || return 0
+  zle _bingsu_redraw_keys
+}
+
+_bingsu_redraw_keys() {
+  repeat 2 do
+    (( ! PENDING )) || return 0
+    _bingsu_redraw_step || return 0
     _bingsu_paint_mode
     zle reset-prompt
   done
 }
 
-# Whether trap $1 can be ours; $2 is a word of our own body. A function moves
-# to a saved name. A string trap cannot sit beside the function (defining one
-# removes the other), so it stays and we install nothing; `trap |` sees it, a
-# substitution would not.
+# Takes trap $1 once per shell, as _bingsu_zle_wrap takes a widget: a plugin may
+# wrap us after a first run, and saving that would make it call itself. A
+# function moves to a saved name; without one the saved name gets body $2, what
+# the signal would do. A string trap cannot sit beside the function (defining
+# one removes the other), so it stays and we install nothing; `trap |` sees it,
+# a substitution would not.
 _bingsu_trap_free() {
   emulate -L zsh
   local line
-  [[ ${functions[$1]-} != *$2* ]] || return 1
+  (( ! ${+functions[_bingsu_wrapped_$1]} )) || return 1
   if (( ${+functions[$1]} )); then
     functions -c $1 _bingsu_saved_$1
-    return 0
+  else
+    trap | while IFS= read -r line; do
+      [[ $line != *" ${1#TRAP}" ]] || return 1
+    done
+    functions[_bingsu_saved_$1]=$2
   fi
-  unset -f _bingsu_saved_$1 2>/dev/null
-  trap | while IFS= read -r line; do
-    [[ $line != *" ${1#TRAP}" ]] || return 1
-  done
-  return 0
+  functions[_bingsu_wrapped_$1]=:
 }
 
 # Takes over widget $1 once per shell (F-23): after a first run the chain may
@@ -357,38 +364,33 @@ _bingsu_zle_wrap() {
 
 # The widgets need the line editor and its parameters. zsh runs a TRAP function
 # in place of the default action and a value above 0 goes on as an interrupt:
-# without a user trap TRAPINT returns what the signal itself would, TRAPWINCH 0
-# (the default ignores it, and $? and $pipestatus stay). A saved user trap runs
-# with the status it would have seen, and its return value decides. Defined
-# outside `emulate`, whose local traps would remove them again.
+# TRAPINT without a user trap returns what the signal itself would, TRAPWINCH 0
+# (the default ignores it, and $? and $pipestatus stay). The saved trap is the
+# first command, so a user trap sees $? and $pipestatus as they were, and its
+# return value decides. Defined outside `emulate`, whose local traps would
+# remove them again.
 if [[ -o interactive && -o zle ]] && zmodload zsh/zleparameter 2>/dev/null; then
   _bingsu_zle_wrap zle-line-finish _bingsu_line_finish
   _bingsu_zle_wrap zle-keymap-select _bingsu_keymap_select
   _bingsu_zle_wrap send-break _bingsu_send_break
-  if _bingsu_trap_free TRAPINT _bingsu_transient; then
+  zle -N _bingsu_redraw_keys
+  if _bingsu_trap_free TRAPINT 'return $(( 128 + $1 ))'; then
     TRAPINT() {
-      local _bingsu_entry=$?
-      ! zle || _bingsu_transient
-      if (( ${+functions[_bingsu_saved_TRAPINT]} )); then
-        if _bingsu_status $_bingsu_entry; then
-          _bingsu_saved_TRAPINT "$@"
-        else
-          _bingsu_saved_TRAPINT "$@"
-        fi
-        return $?
+      if _bingsu_saved_TRAPINT "$@"; then
+        local _bingsu_user=0
+      else
+        local _bingsu_user=$?
       fi
-      return $(( 128 + $1 ))
+      ! zle || _bingsu_transient
+      return $_bingsu_user
     }
   fi
-  if _bingsu_trap_free TRAPWINCH _bingsu_redraw; then
+  if _bingsu_trap_free TRAPWINCH 'return 0'; then
     TRAPWINCH() {
-      local _bingsu_entry=$? _bingsu_user=0
-      if (( ${+functions[_bingsu_saved_TRAPWINCH]} )); then
-        if _bingsu_status $_bingsu_entry; then
-          _bingsu_saved_TRAPWINCH "$@" || _bingsu_user=$?
-        else
-          _bingsu_saved_TRAPWINCH "$@" || _bingsu_user=$?
-        fi
+      if _bingsu_saved_TRAPWINCH "$@"; then
+        local _bingsu_user=0
+      else
+        local _bingsu_user=$?
       fi
       _bingsu_redraw
       return $_bingsu_user
