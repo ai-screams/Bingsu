@@ -127,6 +127,8 @@ jobs:
       - name: Fetch the pinned oh-my-zsh
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
+          # The Rust cache can restore this folder from an earlier run.
+          rm -rf target/ohmyzsh
           git init -q target/ohmyzsh
           for _ in 1 2 3; do
             git -C target/ohmyzsh fetch -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$commit" && break
@@ -556,6 +558,8 @@ jobs:
       - name: Fetch the pinned oh-my-zsh
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
+          # The Rust cache can restore this folder from an earlier run.
+          rm -rf target/ohmyzsh
           git init -q target/ohmyzsh
           for _ in 1 2 3; do
             git -C target/ohmyzsh fetch -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$commit" && break
@@ -619,6 +623,8 @@ jobs:
       - name: Fetch the pinned oh-my-zsh
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
+          # The Rust cache can restore this folder from an earlier run.
+          rm -rf target/ohmyzsh
           git init -q target/ohmyzsh
           for _ in 1 2 3; do
             git -C target/ohmyzsh fetch -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$commit" && break
