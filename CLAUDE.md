@@ -13,13 +13,13 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
   M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets) and M4 (zsh integration) are done;
   M5 (bash and fish integration) is next. M4 is closed with open items: the shell time gate runs on Linux only and records its
-  verdict without failing the job, some of its runs end BLOCKED, and the redraw time has no recorded value on Linux or macOS.
+  verdict without failing the job, some of its runs can end BLOCKED, and the redraw time has no recorded value on Linux or macOS.
   `bingsu prompt` renders the built-in default
   theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
   `bingsu-collect` worker under its sandbox for screens that show `dir` or `git`, and the prompt shows the collected git
   status and folder facts from the next prompt on; zsh also prints status notices, keeps the exit status and duration, shortens
   past prompts (transient line), switches the vi mode prompt without calling `bingsu`, and redraws on a width change without
-  starting the refresh helper; bash and fish do not have these yet (M5);
+  starting the refresh helper; bash and fish already handle the exit status and duration, but the fixed notices, transient line, vi mode switch and width redraw stay for M5;
   command segments are checked but not run (M6); there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
