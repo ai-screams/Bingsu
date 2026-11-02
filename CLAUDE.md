@@ -11,10 +11,16 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 - **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
-  M3c (git, path facts, safe reads) and M3d (performance and process gates, measured budgets) are done; M4 (zsh integration) is next. `bingsu prompt` renders the built-in default
+  M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets) and M4 (zsh integration) are done;
+  M5 (bash and fish integration) is next. M4 is closed with open items: the shell time gate runs on Linux only and records its
+  verdict without failing the job, some of its runs end BLOCKED, and the redraw time has no recorded value on Linux or macOS.
+  `bingsu prompt` renders the built-in default
   theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
   `bingsu-collect` worker under its sandbox for screens that show `dir` or `git`, and the prompt shows the collected git
-  status and folder facts from the next prompt on; command segments are checked but not run (M6); there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
+  status and folder facts from the next prompt on; zsh also prints status notices, keeps the exit status and duration, shortens
+  past prompts (transient line), switches the vi mode prompt without calling `bingsu`, and redraws on a width change without
+  starting the refresh helper; bash and fish do not have these yet (M5);
+  command segments are checked but not run (M6); there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout
@@ -22,14 +28,14 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 | Path | What |
 | -- | -- |
 | `crates/bingsu-core` | I/O-free core (no files, processes, clocks, environment, network or threads; the purity gate enforces it): `front` makes prompt decisions, `envelope` parses shell input, `shell_values` fills segments; `config` (merge, check, compile, edit, schema), `template`, `layout`/`render`/`bands`, `snapshot`/`snapshot_codec` (helper to prompt hand-off), `diag*`; status grammar, B1 record encoder, shell words, sanitize, width, icons, color, built-in default theme |
-| `crates/bingsu` | CLI: `src/prompt.rs` renders a record from the envelope and the published snapshot (`prompt_read.rs` reads it, `prompt_spawn.rs` starts the refresh helper before the filter, `prompt_io.rs` writes under the deadline; these and `sandbox.rs` are hash-pinned); `src/commands/` holds `init` (pins the binary path and four roots), `config`/`reload`/`refresh`/`helper` (load, trust, publish), `collector_process`/`collector_supervisor` (spawn, pidfd supervision, deadlines), `collection_store`/`collection_gc` (per-folder responses, reclaim), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
+| `crates/bingsu` | CLI: `src/prompt.rs` renders a record from the envelope and the published snapshot (`prompt_read.rs` reads it, `prompt_spawn.rs` starts the refresh helper before the filter unless the shell passed `--redraw`, `prompt_io.rs` writes under the deadline; these and `sandbox.rs` are hash-pinned); `src/commands/` holds `init` (pins the binary path and four roots), `config`/`reload`/`refresh`/`helper` (load, trust, publish), `collector_process`/`collector_supervisor` (spawn, pidfd supervision, deadlines), `collection_store`/`collection_gc` (per-folder responses, reclaim), messages and libc wrappers; `src/sandbox.rs` installs the Linux seccomp filter, with allowed calls in `prompt-syscalls.tsv`; shell scripts are embedded from `src/shell/{zsh,bash,fish}` |
 | `crates/bingsu-core-tests` | Property and byte-golden tests of core, kept out of core's dependency graph |
 | `crates/bingsu-core-bench` | Callgrind instruction-count benches (gungraun) for CI job `icount` |
 | `crates/bingsu-golden` | Prints render output for fixed inputs; native (its test) and wasm32-wasip1 (CI) must equal `tests/golden/render/render.tsv` byte for byte; regenerate with `cargo run -q -p bingsu-golden --release > tests/golden/render/render.tsv` and review the diff |
 | `crates/bingsu-collect` | Collector worker binary pinned by `init`: startup limits, then on Linux Landlock and seccomp (`collector-syscalls.tsv`), then one request/response exchange with the helper; the product and bench dependency graphs are pinned in `dependencies.allowlist.tsv` (`scripts/check_collector_dependencies.py`) |
 | `crates/bingsu-bench` | M1 measurement code |
 | `tests/golden/record` | Reader golden vectors run in each shell (`run.py`, `run-all.sh`) |
-| `tests/shell` | PTY tests (`pty_session.py`), minimum-shell containers, X-01 probes; `test_collector_security.py` maps the collector security rows (`tests/collector-acceptance.tsv`) to tests |
+| `tests/shell` | PTY tests (`pty_session.py`) and screen tests (`screen_session.py`, a terminal model), a pinned oh-my-zsh run, minimum-shell containers, X-01 probes; `test_collector_security.py` maps the collector security rows (`tests/collector-acceptance.tsv`) to tests |
 | `tests/hostile` | Hostile-value matrix shared by core, golden and PTY tests |
 | `scripts/`, `tools/core-cfg-check` | Purity, prompt-forbid and diagnostic-code gates; `scripts/pin_tcb.py` re-pins TCB hashes |
 | `tools/fsbudget`, `tools/gen-ucd-tables` | strace filesystem budget check; generator for `src/ucd.rs` |
@@ -86,7 +92,7 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 
 | Workflow | Jobs | Notes |
 | -- | -- | -- |
-| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build (also runs the render golden under wasmtime as wasm32-wasip1), Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace), Prompt time and size gate (`prompt-gate`, PRs only: fails on FAIL, warns on BLOCKED) | Rust jobs run only when `Cargo.toml` exists (detect job) |
+| `ci.yml` | Detect project, Lint workflows (actionlint), Lint (rustfmt, clippy, musl check), Test on ubuntu, macos, windows, Core purity gate, Core wasm32 build (also runs the render golden under wasmtime as wasm32-wasip1), Unicode tables (`ucd`), Core instruction counts (`icount`, PRs only), Filesystem budget (strace), Prompt time and size gate (`prompt-gate`, PRs only: fails on FAIL, warns on BLOCKED), Shell time gate (`shell-time-gate`, PRs only, zsh on the runner and in the min-u22 image: compares the zsh hook cost of base and candidate with a stand-in binary; the verdict is recorded and never fails the job) | Rust jobs run only when `Cargo.toml` exists (detect job) |
 | `shell.yml` | Golden vectors and PTY tests in the min-u22, min-d12 and cur-d13 containers and on macOS Homebrew, one job per shell; Prompt filter calls (Linux x86_64, GNU and musl, debug and release) | `workflow_dispatch` input `record_observations` prints unpinned cells; a split job keeps the required check on its bare name (`Shell PTY (cur-d13)`), and `test_gate_acceptance.py` pins the cells and where shell-independent files run |
 | `security.yml` | Secret scan (gitleaks), Dependency advisories (cargo-audit) | gitleaks scans full history; weekly cron; cargo-audit needs `Cargo.lock` |
 | `dependabot.yml` | github-actions and cargo, weekly | |
