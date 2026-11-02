@@ -290,19 +290,17 @@ _bingsu_redraw_step() {
 
 # Only the first prompt line: PS2 and vared draw something else, and precmd
 # draws the next prompt at the new width anyway. zsh does not run a trap inside
-# itself, so a signal during the call waits, and it runs as soon as the trap
-# ends: a width that keeps changing would hold the keyboard across traps too.
-# So a waiting key goes first, which $PENDING tells only inside a widget, and
-# one trap makes at most two calls. The next signal or prompt draws what is left.
+# itself: a size change while the call runs moves COLUMNS and its signal is
+# gone, so the width is read again until it stops. A waiting key goes first,
+# which $PENDING tells only inside a widget; the next signal or prompt then
+# draws what is left.
 _bingsu_redraw() {
   zle && [[ ${CONTEXT-} == start ]] || return 0
   zle _bingsu_redraw_keys
 }
 
 _bingsu_redraw_keys() {
-  repeat 2 do
-    (( ! PENDING )) || return 0
-    _bingsu_redraw_step || return 0
+  while (( ! PENDING )) && _bingsu_redraw_step; do
     _bingsu_paint_mode
     zle reset-prompt
   done
