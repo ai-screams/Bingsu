@@ -5,6 +5,7 @@
 # gets no record.
 here=${0%/*}
 printf 'END\0' >> "$here/argv.log"
+case " $* " in *" --redraw "*) echo x >> "$here/redraws" ;; esac
 n=$(tr -cd '\0' < "$here/argv.log" | wc -c)
 total=$(wc -l < "$here/statuses.txt")
 [ "$n" -le "$total" ] || n=$total

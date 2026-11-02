@@ -5,7 +5,9 @@ import itertools
 import os
 import re
 import subprocess
+import threading
 
+import pexpect
 import pytest
 
 from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, status_bait_record, trusted_env
@@ -504,9 +506,9 @@ def test_owned_globals_are_not_exported(tmp_path, rc_before):
 
 
 OWNED = {name: "scalar" for name in ("_bingsu_session", "_bingsu_warned_last", "_bingsu_rec", "_bingsu_s", "_bingsu_t0",
-                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested", "_bingsu_keymap",
+                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested", "_bingsu_keymap", "_bingsu_drawn_cols",
                                      "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
-OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_seq="integer")
+OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_ctx="array", _bingsu_seq="integer")
 
 
 # Attributes set in this shell before init; the environment cannot carry them.
@@ -1022,3 +1024,326 @@ def test_envelope_keymap_is_always_main(tmp_path):
     calls = inst.calls()
     s.kill()
     assert calls and all(opt(c, b"--keymap") == b"main" for c in calls), calls
+
+
+def redraws(inst):
+    return [c for c in inst.calls() if b"--redraw" in c]
+
+
+def resize(screen, cols, rows=24):
+    """A new width; fake prompts look alike, so the caller waits on its own condition."""
+    screen.resize(rows, cols)
+
+
+def width_of(call):
+    return int(opt(call, b"--width"))
+
+
+def wait_redraws(screen, inst, n):
+    assert screen.wait(lambda v: len(redraws(inst)) >= n, stable=True), (redraws(inst), screen.lines())
+
+
+# 이것을 실패시키는 것: 저장한 봉투를 넘기지 않는 것, `--redraw` 없이 일반 호출을 하는 것, 새 폭을 넘기지 않는 것.
+def test_resize_redraws_at_new_width(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    enter(screen, "(exit 3)")
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    call, normal = redraws(inst)[0], inst.calls()[-2]
+    assert width_of(call) == 120, call
+    for word in (b"--status", b"--pipestatus", b"--jobs", b"--keymap"):
+        assert opt(call, word) == opt(normal, word), (word, call, normal)
+    assert opt(call, b"--status") == b"3"
+    resize(screen, 130)
+    wait_redraws(screen, inst, 2)
+    s.kill()
+
+
+# 이것을 실패시키는 것: 폭 비교를 지우는 것.
+def test_same_width_makes_no_call(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    s.p.setwinsize(30, 200)  # taller, same width
+    s.run("true")
+    assert not redraws(inst), inst.calls()
+    s.kill()
+
+
+# 신호를 합친 결과는 시간이 아니라 호출 수로 판정한다(스펙 581행).
+# 이것을 실패시키는 것: 끝난 뒤 폭을 다시 보지 않는 것(마지막 폭이 그려지지 않음).
+def test_winch_burst_ends_at_final_width(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    widths = [150, 151, 152, 153, 154, 155]
+    for width in widths:
+        s.p.setwinsize(24, width)
+    assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == widths[-1], stable=True), redraws(inst)
+    drawn = [width_of(c) for c in redraws(inst)]
+    assert len(drawn) <= len(widths) and len(set(drawn)) == len(drawn), drawn
+    s.kill()
+
+
+def slow_redraw(tmp_path, inst, seconds):
+    slow = tmp_path / "slow.sh"
+    fake = (ROOT / "tests/shell/fake_bingsu.sh").read_text()
+    slow.write_text(fake.replace("here=", f'case " $* " in *" --redraw "*) sleep {seconds} ;; esac\nhere=', 1))
+    slow.chmod(0o755)
+    (inst.dir / "bingsu").unlink()
+    (inst.dir / "bingsu").symlink_to(slow)
+
+
+def changing_width(s, turns):
+    done = threading.Event()
+
+    def change():
+        for turn in range(turns):
+            s.p.setwinsize(24, 150 + turn)
+            if done.wait(0.02):
+                return
+
+    driver = threading.Thread(target=change)
+    driver.start()
+    return done, driver
+
+
+# 계속 바뀌는 폭이 키 입력을 막지 않는다: 호출 수로 판정한다(지연은 그 수와 호출 시간의 곱이다).
+# 신호는 trap이 끝나자마자 다시 돌므로 trap당 상한만으로는 막히지 않는다(19–25번 호출).
+# 이것을 실패시키는 것: 기다리는 키를 먼저 보내지 않는 것.
+def test_width_that_keeps_changing_does_not_hold_input(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    slow_redraw(tmp_path, inst, 0.04)
+    done, driver = changing_width(s, 100)
+    assert screen.wait(lambda v: redraws(inst), timeout=5), inst.calls()
+    s.p.send("Q")
+    shown = screen.wait(lambda v: "Q" in v.lines()[v.cursor()[0]], timeout=5)
+    calls = len(redraws(inst))
+    done.set()
+    driver.join()
+    s.kill()
+    assert shown and calls <= 4, (calls, screen.lines())
+
+
+# 이것을 실패시키는 것: 신호 하나의 호출 상한을 지우는 것.
+def test_one_signal_makes_at_most_two_calls(tmp_path):
+    log = tmp_path / "enter.log"
+    rc_after = ('functions -c _bingsu_redraw _t_redraw\n'
+                '_bingsu_redraw() { builtin print -r -- in >>"$BINGSU_T_LOG"; _t_redraw }')
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    slow_redraw(tmp_path, inst, 0.04)
+    _, driver = changing_width(s, 30)
+    assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == 179, stable=True), redraws(inst)
+    driver.join()
+    s.kill()
+    entered = len(log.read_text().splitlines())
+    assert len(redraws(inst)) <= 2 * entered, (redraws(inst), entered)
+
+
+# 이것을 실패시키는 것: `zle` 활성 판정을 지우는 것(명령 실행 중에 redraw가 돈다).
+def test_winch_while_command_runs_calls_nothing(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    s.p.sendline("print STARTED; read -t 2 x; print ENDED")
+    assert screen.wait(lambda v: "STARTED" in v.lines(), stable=False), screen.lines()
+    s.p.setwinsize(24, 120)
+    s.p.kill(28)  # the shell itself: a size change reaches only the foreground group
+    assert screen.wait(lambda v: "ENDED" in v.lines() and v.lines()[v.cursor()[0]].startswith("LONG>"), timeout=8, stable=True), screen.lines()
+    assert not redraws(inst), redraws(inst)
+    assert width_of(inst.calls()[-1]) == 120, inst.calls()[-1]
+    s.kill()
+
+
+# 사용자 함수는 먼저 돌고 진입 상태를 받으며, 그 반환값이 그대로 나간다.
+# 이것을 실패시키는 것: 저장 trap을 부르지 않는 것, redraw 뒤에 부르는 것, `$?`를 복원하지 않는 것, 반환값을 가리는 것.
+@pytest.mark.parametrize("returned", [0, 130])
+def test_existing_trapwinch_function_runs_first(tmp_path, returned):
+    log = tmp_path / "trap.log"
+    rc = f'TRAPWINCH() {{ builtin print -r -- "user status=$?" >>"$BINGSU_T_LOG"; return {returned} }}'
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    enter(screen, "(exit 42)")
+    s.p.send("print KEPT")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("print KEPT"), stable=True), screen.lines()
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.p.send("\r")
+    s.run("true")
+    out = visible(s.close())
+    assert log.read_text() == "user status=42\n"
+    assert (b"\nKEPT" in out) == (returned == 0), out
+
+
+# Environment pin, not a mutation target: zsh does not run a trap inside itself,
+# so a signal during the call waits and no reentry flag is needed. If a zsh
+# changes this the depth log fills.
+def test_winch_during_a_redraw_does_not_nest(tmp_path):
+    log = tmp_path / "depth.log"
+    rc_after = ('functions[_t_step]=$functions[_bingsu_redraw_step]\n'
+                '_bingsu_redraw_step() { local r; (( ++_depth > 1 )) && builtin print -r -- nested >>"$BINGSU_T_LOG"; '
+                '_t_step; r=$?; (( _depth-- )); return r }\n_depth=0')
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    slow_redraw(tmp_path, inst, 0.4)
+    s.p.setwinsize(24, 150)
+    screen.wait(lambda v: False, timeout=0.15)  # inside the sleep
+    s.p.setwinsize(24, 151)
+    assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == 151, stable=True), redraws(inst)
+    s.kill()
+    assert not log.exists(), log.read_text()
+
+
+# 사용자 trap 안의 err_exit는 그대로 듣는다. 이것을 실패시키는 것: 저장 trap을 조건으로 부르는 것(`if`, `||`).
+@pytest.mark.parametrize("signal,name", [(28, "TRAPWINCH"), (2, "TRAPINT")])
+def test_err_exit_inside_a_user_trap_still_works(tmp_path, signal, name):
+    log = tmp_path / "trap.log"
+    rc = f'{name}() {{ setopt localoptions err_exit; false; builtin print -r -- BAD >>"$BINGSU_T_LOG"; return 0 }}'
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    s.p.kill(signal)
+    s.expect(pexpect.EOF)
+    assert not log.exists(), log.read_text()
+    s.kill()
+
+
+# 사용자 trap이 0이 아닌 값을 돌려줘도 우리 쪽 일은 끝난다.
+# 이것을 실패시키는 것: `always` 없이 부르는 것(ERR_RETURN이 함수를 끝내 redraw·transient가 빠진다).
+def test_err_return_keeps_redraw_after_a_user_trap(tmp_path):
+    rc = "TRAPWINCH() { return 130 }\nsetopt err_return"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields())
+    settle(screen)
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    s.kill()
+
+
+def test_err_return_keeps_transient_after_a_user_trap(tmp_path):
+    rc = "TRAPINT() { return 130 }\nsetopt err_return"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields())
+    interrupted(screen, "typed")
+    assert screen.wait(lambda v: "T> typed" in v.lines(), stable=True), screen.lines()
+    s.kill()
+
+
+TRAP_PIPE = 'builtin print -r -- "user $?:${(j:,:)pipestatus}" >>"$BINGSU_T_LOG"; return 0'
+
+
+# 사용자 trap은 저장 없이 원래 파이프 상태를 본다. 이것을 실패시키는 것: 저장 trap보다 앞에 명령을 두는 것.
+@pytest.mark.parametrize("signal,name", [(28, "TRAPWINCH"), (2, "TRAPINT")])
+def test_user_trap_sees_pipestatus(tmp_path, signal, name):
+    log = tmp_path / "trap.log"
+    rc = f"{name}() {{ {TRAP_PIPE} }}"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    s.p.sendline("print STARTED; (sleep 0.4; exit 3) | (sleep 0.4; exit 7); print -r -- after=$?")
+    assert screen.wait(lambda v: "STARTED" in v.lines(), stable=False), screen.lines()
+    s.p.kill(signal)  # the shell itself, so the pipeline still ends with its own codes
+    assert screen.wait(lambda v: log.exists() and "after=7" in v.lines(), timeout=5), screen.lines()
+    s.kill()
+    assert log.read_text() == "user 7:3,7\n"
+
+
+# 플러그인이 우리 trap을 감싼 뒤 init을 다시 해도 체인은 그대로다.
+# 이것을 실패시키는 것: init마다 trap을 저장 이름으로 옮기는 것(플러그인과 우리가 서로를 부른다).
+@pytest.mark.parametrize("name", ["TRAPWINCH", "TRAPINT"])
+def test_plugin_wrapped_trap_survives_a_second_init(tmp_path, name):
+    log = tmp_path / "trap.log"
+    rc_after = (f'functions -c {name} _plugin_old\n'
+                f'{name}() {{ builtin print -r -- plugin >>"$BINGSU_T_LOG"; _plugin_old "$@" }}\n'
+                f"source {tmp_path / 'init.zsh'}")
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    if name == "TRAPWINCH":
+        resize(screen, 120)
+        wait_redraws(screen, inst, 1)
+    else:
+        interrupted(screen, "typed")
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.run("true", timeout=8)  # zle drops what was typed ahead of a Ctrl-C
+    out = visible(s.close())
+    assert b"maximum nested" not in out and log.read_text() == "plugin\n", (out, log.read_text())
+
+
+# 이것을 실패시키는 것: 문자열 trap을 보지 못해 TRAPWINCH 함수로 지우는 것.
+def test_string_winch_trap_stays(tmp_path):
+    log = tmp_path / "trap.log"
+    rc = "trap 'builtin print -r -- trapped >>\"$BINGSU_T_LOG\"' WINCH"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    s.run("print -r -- F=${+functions[TRAPWINCH]}")
+    settle(screen)
+    resize(screen, 120)
+    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    s.run("true")
+    assert not redraws(inst) and width_of(inst.calls()[-1]) == 120, inst.calls()
+    out = visible(s.close())
+    assert b"F=0" in out, out
+
+
+# 이것을 실패시키는 것: precmd가 trap을 다시 차지하는 것, 오류를 내는 것.
+def test_trapwinch_redefined_after_init_falls_back_to_next_prompt(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, rc_after="TRAPWINCH() { : }", record=fields())
+    settle(screen)
+    resize(screen, 120)
+    enter(screen, "true")
+    assert not redraws(inst) and width_of(inst.calls()[-1]) == 120, inst.calls()
+    out = visible(s.close())
+    assert b"TRAPWINCH" not in out, out
+
+
+# 이것을 실패시키는 것: init을 다시 해도 우리 trap을 저장 이름으로 옮기는 것(자기 자신을 부름).
+def test_init_twice_installs_trapwinch_once(tmp_path):
+    rc_after = f"source {tmp_path / 'init.zsh'}"
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields())
+    settle(screen)
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    out = visible(s.close())
+    assert len(redraws(inst)) == 1 and b"maximum nested" not in out, out
+
+
+# 이것을 실패시키는 것: 레코드가 깨졌을 때 지금 필드를 지우는 것(프롬프트가 상수로 떨어짐).
+def test_failed_redraw_keeps_the_fields(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    (inst.dir / "record.bin").write_bytes(b"not a record")
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    s.run('print -r -- "KEPT=$_bingsu_f[3]"')
+    assert b"KEPT=LONG> " in visible(s.close())
+
+
+# 이것을 실패시키는 것: 계속되는 줄에서 다시 그리는 것(PS2가 `dquote then>`으로 바뀜).
+def test_winch_on_a_continuation_line_leaves_it_alone(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    s.p.send('echo "a\r')
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].startswith("dquote>"), stable=True), screen.lines()
+    resize(screen, 120)
+    enter(screen, 'b"')
+    lines = screen.lines()
+    s.close()
+    assert not redraws(inst) and not any("then" in line for line in lines), lines
+
+
+# 스펙 3절: 저장한 봉투가 없으면 다시 그리지 않는다.
+# 이것을 실패시키는 것: 빈 봉투로 부르는 것(종료 코드 없는 redraw), 그 판정을 사용자 옵션 아래에서 하는 것.
+@pytest.mark.parametrize("options", ["", "setopt no_unset ksh_arrays"])
+def test_no_saved_words_no_redraw(tmp_path, options):
+    rc_after = f"_drop() {{ _bingsu_ctx=() }}\nprecmd_functions+=(_drop)\n{options}"
+    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields())
+    settle(screen)
+    resize(screen, 120)
+    enter(screen, "true")
+    assert not redraws(inst), redraws(inst)
+    assert b"parameter not set" not in visible(s.close())
+
+
+# 이것을 실패시키는 것: redraw가 vicmd 모드를 잊는 것.
+def test_vi_symbol_kept_after_redraw(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
+    to_vicmd(screen)
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    assert screen.wait(lambda v: "CMD>" in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    to_main(screen)
+    s.kill()
