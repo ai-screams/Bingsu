@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import threading
+import warnings
 
 import pexpect
 import pytest
@@ -324,6 +325,34 @@ def test_duration_excludes_hooks_between_save_and_install(tmp_path):
     assert any(m >= 80 for m in ms), ms
 
 
+FRAMED_RUNS = 5
+EMPTY_STATUS = b"STATUS=\n"
+
+
+def framed_run(script, env, tmp):
+    """Run `script` with the real binary. A front past its 50 ms deadline exits
+    0 and prints nothing by design, which a loaded debug build can do; such a
+    run says nothing about the record, so it is repeated and counted. Five
+    empty runs stay empty for the caller to refuse, and any other result
+    returns at once."""
+    for empty in range(FRAMED_RUNS):
+        r = run_shell_script("zsh", script, env, tmp)
+        if r.stdout != EMPTY_STATUS:
+            break
+        warnings.warn(f"empty record, run {empty + 1} of {FRAMED_RUNS}")
+    return r
+
+
+# 이것을 실패시키는 것: 빈 결과 밖에서도 다시 돌리는 것, 횟수 상한을 지우는 것.
+@pytest.mark.parametrize("printed,runs", [(b"", FRAMED_RUNS), (b"error:bad-args", 1)], ids=["empty", "refused"])
+def test_framed_run_repeats_only_an_empty_record(tmp_path, printed, runs):
+    env = trusted_env(tmp_path)
+    log = tmp_path / "runs"
+    script = f'print -r -- x >>"{log}"; print -r -- "STATUS={printed.decode()}"\n'.encode()
+    r = framed_run(script, env, tmp_path)
+    assert r.stdout == b"STATUS=" + printed + b"\n" and len(log.read_text().split()) == runs
+
+
 # A clock that stepped back: the wall clock moves under EPOCHREALTIME, and a
 # negative duration used to turn the whole prompt into error:bad-args.
 # 이것을 실패시키는 것: `ms < 0` 조건을 지우는 것.
@@ -336,7 +365,7 @@ def test_clock_step_back_drops_duration_and_keeps_record(tmp_path):
     real.mkdir()
     inst = Install(real)
     env = trusted_env(real)
-    r = run_shell_script("zsh", inst.init("zsh", env) + b"\n" + body, env, real)
+    r = framed_run(inst.init("zsh", env) + b"\n" + body, env, real)
     assert r.stdout == b"STATUS=ok:none\n" and r.stderr == b"", r
 
 
@@ -375,7 +404,7 @@ def test_duration_at_its_edges(tmp_path, t0, t1, want):
     real.mkdir()
     inst = Install(real)
     env = trusted_env(real)
-    r = run_shell_script("zsh", inst.init("zsh", env) + b"\n" + body, env, real)
+    r = framed_run(inst.init("zsh", env) + b"\n" + body, env, real)
     assert r.stdout == b"STATUS=ok:none\n" and r.stderr == b"", r
 
 
@@ -590,6 +619,12 @@ def fields(left=b"LONG> ", right=b"", tleft=b"T> ", tright=b"", upper=b"", statu
 def typed_screen(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
     s, inst, _ = start(tmp_path, rc_before, rc_after, record=record or fields(), inherit=inherit)
     return s, inst, ScreenSession(s, 24, 200)
+
+
+def line_written(log):
+    """`>>` makes the file before it writes. Read the log before Session.kill,
+    whose signals include SIGINT: a shell slow to end runs TRAPINT once more."""
+    return log.exists() and log.read_text().endswith("\n")
 
 
 def interrupted(screen, text):
@@ -817,7 +852,7 @@ def test_user_trapint_decides(tmp_path, returned, aborts):
     s.p.send("print KEPT")
     assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("print KEPT"), stable=True), screen.lines()
     s.p.sendcontrol("c")
-    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    assert screen.wait(lambda v: line_written(log), timeout=5), screen.lines()
     s.p.send("\r")
     s.run("true")
     out = visible(s.close())
@@ -833,9 +868,9 @@ def test_user_trapint_sees_the_status_it_would_see(tmp_path, entry):
     s, _, screen = typed_screen(tmp_path, rc_before, inherit={"BINGSU_T_LOG": str(log)})
     enter(screen, f"(exit {entry})")
     interrupted(screen, "abc")
-    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
-    s.kill()
+    assert screen.wait(lambda v: line_written(log), timeout=5), screen.lines()
     assert log.read_text() == f"status={entry}\n"
+    s.kill()
 
 
 # 이것을 실패시키는 것: 문자열 trap을 보지 못해 TRAPINT 함수로 지우는 것(같이 있을 수 없다).
@@ -845,10 +880,10 @@ def test_string_int_trap_stays(tmp_path):
     s, _, screen = typed_screen(tmp_path, rc_before, inherit={"BINGSU_T_LOG": str(log)})
     s.run("print -r -- F=${+functions[TRAPINT]}")
     interrupted(screen, "abc")
-    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    assert screen.wait(lambda v: line_written(log), timeout=5), screen.lines()
     out = visible(s.log.getvalue())
-    s.kill()
     assert b"F=0" in out and log.read_text() == "trapped\n", out
+    s.kill()
 
 
 # 이것을 실패시키는 것: TRAPINT가 0을 돌려주는 것(Ctrl-C가 무시되어 줄이 끊기지 않고 반복문이 멈추지 않음).
@@ -951,12 +986,20 @@ def test_vi_mode_clears_a_really_empty_line(tmp_path):
 def test_only_named_lines_change(tmp_path, lines, left, right, upper):
     record = fields(left=b"INS> ", vi_left=b"CMD> ", right=b"RIGHT", vi_right=b"CMDR", upper=b"UP", vi_upper=b"CMDU", vi_lines=lines)
     s, _, screen = typed_screen(tmp_path, VI, record=record)
-    to_vicmd(screen, left)
-    row = screen.cursor()[0]
+    settle(screen)
+    s.p.send("\x1b")
+
+    def drawn(view):
+        row = view.cursor()[0]
+        return (view.lines()[row].startswith(left) and view.lines()[row].endswith(right)
+                and view.lines()[row - 1] == upper)
+
+    # The same frame shows every line, and the lines named in `lines` differ
+    # from the frame before, so a key not handled yet cannot pass. `none` has
+    # no such line and waits instead.
     if not lines:
         screen.wait(lambda v: False, timeout=0.3)
-    assert screen.lines()[row].startswith(left) and screen.lines()[row].endswith(right), screen.lines()
-    assert screen.lines()[row - 1] == upper, screen.lines()
+    assert screen.wait(drawn, stable=True), screen.lines()
     s.kill()
 
 
@@ -1107,7 +1150,6 @@ def changing_width(s, turns):
 
 
 # 계속 바뀌는 폭이 키 입력을 막지 않는다: 호출 수로 판정한다(지연은 그 수와 호출 시간의 곱이다).
-# 신호는 trap이 끝나자마자 다시 돌므로 trap당 상한만으로는 막히지 않는다(19–25번 호출).
 # 이것을 실패시키는 것: 기다리는 키를 먼저 보내지 않는 것.
 def test_width_that_keeps_changing_does_not_hold_input(tmp_path):
     s, inst, screen = typed_screen(tmp_path, record=fields())
@@ -1124,20 +1166,55 @@ def test_width_that_keeps_changing_does_not_hold_input(tmp_path):
     assert shown and calls <= 4, (calls, screen.lines())
 
 
-# 이것을 실패시키는 것: 신호 하나의 호출 상한을 지우는 것.
-def test_one_signal_makes_at_most_two_calls(tmp_path):
-    log = tmp_path / "enter.log"
-    rc_after = ('functions -c _bingsu_redraw _t_redraw\n'
-                '_bingsu_redraw() { builtin print -r -- in >>"$BINGSU_T_LOG"; _t_redraw }')
-    s, inst, screen = typed_screen(tmp_path, rc_after=rc_after, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+def scripted_redraw(tmp_path, inst, step):
+    """A stand-in that runs shell `step` on each redraw, with $n the count so far."""
+    script = tmp_path / "scripted.sh"
+    fake = (ROOT / "tests/shell/fake_bingsu.sh").read_text()
+    script.write_text(fake.replace("here=", f'case " $* " in *" --redraw "*) echo x >>"${{0%/*}}/steps"; '
+                                            f'n=$(wc -l <"${{0%/*}}/steps"); {step} ;; esac\nhere=', 1))
+    script.chmod(0o755)
+    (inst.dir / "bingsu").unlink()
+    (inst.dir / "bingsu").symlink_to(script)
+
+
+# 첫 호출 중에 폭이 바뀌고 키가 도착하면 그 호출로 멈추고, 폭이 틀어진 채 키를 먼저 처리한다.
+# 다음 신호는 남은 폭을 그리고, 그 뒤 높이만 바뀌면 호출이 없다.
+# 이것을 실패시키는 것: 다시 부르기 전에 기다리는 키를 보지 않는 것, 폭이 같아도 부르는 것.
+def test_redraw_yields_to_a_key_and_skips_the_same_width(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
     settle(screen)
-    slow_redraw(tmp_path, inst, 0.04)
-    _, driver = changing_width(s, 30)
-    assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == 179, stable=True), redraws(inst)
-    driver.join()
+    go = tmp_path / "go"
+    started = inst.dir / "steps"
+    scripted_redraw(tmp_path, inst, f'[ "$n" -gt 1 ] || {{ stty cols 151 </dev/tty; '
+                                    f'until [ -e "{go}" ]; do sleep 0.01; done; }}')
+    s.p.setwinsize(24, 149)
+    assert screen.wait(lambda v: started.exists(), timeout=5), inst.calls()
+    s.p.send("Q")
+    go.touch()
+    assert screen.wait(lambda v: "Q" in v.lines()[v.cursor()[0]], timeout=5, stable=True), screen.lines()
+    assert [width_of(c) for c in redraws(inst)] == [149], redraws(inst)
+    s.p.setwinsize(25, 151)
+    wait_redraws(screen, inst, 2)
+    assert width_of(redraws(inst)[-1]) == 151, redraws(inst)
+    s.p.setwinsize(26, 151)
+    screen.wait(lambda v: False, timeout=0.3)
+    assert len(redraws(inst)) == 2, redraws(inst)
     s.kill()
-    entered = len(log.read_text().splitlines())
-    assert len(redraws(inst)) <= 2 * entered, (redraws(inst), entered)
+
+
+# 호출 중에 온 크기 변경은 신호로 다시 오지 않는다: `$(…)`를 기다리는 동안 zsh가 COLUMNS만 바꾸고 trap은 돌리지 않는다.
+# 폭이 멈추면 반복도 끝난다.
+# 이것을 실패시키는 것: 호출 뒤 폭을 다시 보지 않는 것, 호출 수에 상한을 두는 것, 폭이 같아도 반복하는 것.
+def test_width_changed_during_a_call_is_drawn(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, record=fields())
+    settle(screen)
+    scripted_redraw(tmp_path, inst, '[ "$n" -ge 9 ] || stty cols $((150 + n)) </dev/tty')
+    s.p.setwinsize(24, 149)
+    want = [149, *range(151, 159)]
+    assert screen.wait(lambda v: [width_of(c) for c in redraws(inst)] == want, timeout=5, stable=True), redraws(inst)
+    screen.wait(lambda v: False, timeout=0.3)
+    assert [width_of(c) for c in redraws(inst)] == want, redraws(inst)
+    s.kill()
 
 
 # 이것을 실패시키는 것: `zle` 활성 판정을 지우는 것(명령 실행 중에 redraw가 돈다).
@@ -1166,7 +1243,7 @@ def test_existing_trapwinch_function_runs_first(tmp_path, returned):
     assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("print KEPT"), stable=True), screen.lines()
     resize(screen, 120)
     wait_redraws(screen, inst, 1)
-    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    assert screen.wait(lambda v: line_written(log), timeout=5), screen.lines()
     s.p.send("\r")
     s.run("true")
     out = visible(s.close())
@@ -1175,8 +1252,7 @@ def test_existing_trapwinch_function_runs_first(tmp_path, returned):
 
 
 # Environment pin, not a mutation target: zsh does not run a trap inside itself,
-# so a signal during the call waits and no reentry flag is needed. If a zsh
-# changes this the depth log fills.
+# so no reentry flag is needed. If a zsh changes this the depth log fills.
 def test_winch_during_a_redraw_does_not_nest(tmp_path):
     log = tmp_path / "depth.log"
     rc_after = ('functions[_t_step]=$functions[_bingsu_redraw_step]\n'
@@ -1238,9 +1314,9 @@ def test_user_trap_sees_pipestatus(tmp_path, signal, name):
     s.p.sendline("print STARTED; (sleep 0.4; exit 3) | (sleep 0.4; exit 7); print -r -- after=$?")
     assert screen.wait(lambda v: "STARTED" in v.lines(), stable=False), screen.lines()
     s.p.kill(signal)  # the shell itself, so the pipeline still ends with its own codes
-    assert screen.wait(lambda v: log.exists() and "after=7" in v.lines(), timeout=5), screen.lines()
-    s.kill()
+    assert screen.wait(lambda v: line_written(log) and "after=7" in v.lines(), timeout=5), screen.lines()
     assert log.read_text() == "user 7:3,7\n"
+    s.kill()
 
 
 # 플러그인이 우리 trap을 감싼 뒤 init을 다시 해도 체인은 그대로다.
@@ -1258,7 +1334,7 @@ def test_plugin_wrapped_trap_survives_a_second_init(tmp_path, name):
         wait_redraws(screen, inst, 1)
     else:
         interrupted(screen, "typed")
-    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    assert screen.wait(lambda v: line_written(log), timeout=5), screen.lines()
     s.run("true", timeout=8)  # zle drops what was typed ahead of a Ctrl-C
     out = visible(s.close())
     assert b"maximum nested" not in out and log.read_text() == "plugin\n", (out, log.read_text())
@@ -1272,7 +1348,7 @@ def test_string_winch_trap_stays(tmp_path):
     s.run("print -r -- F=${+functions[TRAPWINCH]}")
     settle(screen)
     resize(screen, 120)
-    assert screen.wait(lambda v: log.exists(), timeout=5), screen.lines()
+    assert screen.wait(lambda v: line_written(log), timeout=5), screen.lines()
     s.run("true")
     assert not redraws(inst) and width_of(inst.calls()[-1]) == 120, inst.calls()
     out = visible(s.close())
