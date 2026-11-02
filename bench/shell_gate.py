@@ -40,7 +40,7 @@ RECORDS = {
 
 
 def record(left, transient, upper):
-    fields = ["B1", "8", left, "", transient, "", "", "", upper, "ok:none"]
+    fields = ["B1", "12", left, "", transient, "", "", "", upper, "", "", "", "", "ok:none"]
     return "\037".join(fields) + "\036"
 
 
