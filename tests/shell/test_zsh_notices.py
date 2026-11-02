@@ -11,7 +11,7 @@ from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir,
 from pty_session import Session
 from screen_session import ScreenSession
 from test_runtime_root_gate import wait_refresh_helpers
-from test_zsh_screen import enter
+from test_zsh_screen import enter, settle
 
 pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split(),
                                 reason="zsh not under test")
@@ -147,6 +147,23 @@ def test_noninteractive_shell_prints_no_notice(tmp_path):
     inst.use_fake(minimal_record(status=A.encode()))
     r = run_shell_script("zsh", script + b"\n_bingsu_save; _bingsu_install\n", env, tmp_path)
     assert r.returncode == 0 and r.stderr == b"" and inst.calls(), r
+
+
+# 이것을 실패시키는 것: 모드 전환이 알림 경로를 지나는 것.
+def test_vi_switch_repeats_no_notice(tmp_path):
+    switched = tmp_path / "switched"
+    rc_before = f"bindkey -v\nKEYTIMEOUT=1\n_count() {{ builtin print -r -- x >>{switched} }}\nzle -N zle-keymap-select _count"
+    s, inst, err = start(tmp_path, [A], rc_before=rc_before)
+    s.run(f'source "{tmp_path / "rc.zsh"}"')
+    screen = ScreenSession(s, 24, 200)
+    enter(screen, "true")
+    settle(screen)
+    for n, key in enumerate(("\x1b", "i", "\x1b", "i"), 1):
+        s.p.send(key)
+        assert screen.wait(lambda v: switched.exists() and len(switched.read_text().split()) >= n), screen.lines()
+    out = s.close()
+    # The hook's own stderr goes to the file, so any line on the terminal came from a widget.
+    assert err.read_bytes() == lines(RUNTIME_ROOT) and RUNTIME_ROOT.encode() not in out
 
 
 # 이것을 실패시키는 것: 열쇠 변수를 자식 프로세스 환경에 남기는 것.

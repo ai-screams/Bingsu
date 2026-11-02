@@ -363,6 +363,58 @@ def test_transient_at_bottom_row(tmp_path):
     assert lines[rows - 3] == "MARK" and lines[rows - 4].endswith("print MA''RK") and BLOCK_END not in lines[rows - 4], lines
 
 
+VICMD_CHAR = "\u276e"
+VI_KEYS = "bindkey -v; KEYTIMEOUT=1"
+
+
+def vi_switch(s, screen, key, char):
+    settle(screen)
+    s.p.send(key)
+    assert screen.wait(lambda v: char in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+
+
+# 이것을 실패시키는 것: `zle-keymap-select`를 감싸지 않는 것, vicmd 필드를 대입하지 않는 것, main으로 돌아오지 않는 것.
+@pytest.mark.parametrize("cols", [80, 50])
+def test_vi_mode_switch_changes_symbol_without_call(tmp_path, cols):
+    s, screen = start(tmp_path, cols=cols)
+    enter(screen, VI_KEYS)
+    enter(screen, 'print -r -- "BEFORE=$_bingsu_seq"')
+    vi_switch(s, screen, "\x1b", VICMD_CHAR)
+    assert OK_CHAR not in screen.lines()[screen.cursor()[0]], screen.lines()
+    vi_switch(s, screen, "i", OK_CHAR)
+    vi_switch(s, screen, "\x1b", VICMD_CHAR)
+    vi_switch(s, screen, "i", OK_CHAR)
+    enter(screen, 'print -r -- "AFTER=$_bingsu_seq"')
+    log = s.log.getvalue()
+    before = int(log.split(b"\nBEFORE=")[1].split(b"\r")[0])
+    after = int(log.split(b"\nAFTER=")[1].split(b"\r")[0])
+    assert after == before + 1  # the one prompt after the first print, none from the switches
+
+
+# Degraded on every prompt: the runtime folder was replaced.
+# 이것을 실패시키는 것: vicmd 필드가 `!`나 폭 예약을 잃는 것, 왕복 뒤 정렬이 달라지는 것.
+def test_vi_round_trip_under_degraded_status(tmp_path):
+    s, screen = start(tmp_path, cols=80)
+    enter(screen, VI_KEYS)
+    root = tmp_path / "run-t/bingsu"
+    fd = os.open(root, os.O_RDONLY)
+    try:
+        shutil.rmtree(root)
+        root.mkdir(mode=0o700)
+        enter(screen, "false")
+        row = screen.cursor()[0]
+        before = screen.lines()
+        edge = right_edge(screen, row - 1)
+        assert "!" in before[row - 1] + before[row], before
+        vi_switch(s, screen, "\x1b", VICMD_CHAR)
+        assert "!" in screen.lines()[row - 1] + screen.lines()[row], screen.lines()
+        assert right_edge(screen, row - 1) == edge, screen.lines()
+        vi_switch(s, screen, "i", FAIL_CHAR)
+        assert (screen.lines(), right_edge(screen, row - 1)) == (before, edge)
+    finally:
+        os.close(fd)
+
+
 def tmux(socket, *args):
     return subprocess.run(["tmux", "-S", str(socket), *args], capture_output=True, text=True, timeout=10, check=True).stdout
 

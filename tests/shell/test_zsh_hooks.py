@@ -504,7 +504,7 @@ def test_owned_globals_are_not_exported(tmp_path, rc_before):
 
 
 OWNED = {name: "scalar" for name in ("_bingsu_session", "_bingsu_warned_last", "_bingsu_rec", "_bingsu_s", "_bingsu_t0",
-                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested",
+                                     "_bingsu_t1", "_bingsu_ps1", "_bingsu_rps1", "_bingsu_dead", "_bingsu_key_prev", "_bingsu_nested", "_bingsu_keymap",
                                      "_bingsu_disp", "_bingsu_note", "_bingsu_key")}
 OWNED.update(_bingsu_p="array", _bingsu_f="array", _bingsu_seq="integer")
 
@@ -579,8 +579,10 @@ def test_coexists_with_add_zsh_hook_after_init(tmp_path):
     assert not any(c.exists() for c in canaries)
 
 
-def fields(left=b"LONG> ", right=b"", tleft=b"T> ", tright=b"", upper=b"", status=b"ok:none"):
-    return b"\x1f".join([b"B1", b"12", left, right, tleft, tright, b"", b"", upper, b"", b"", b"", b"", status]) + b"\x1e"
+def fields(left=b"LONG> ", right=b"", tleft=b"T> ", tright=b"", upper=b"", status=b"ok:none",
+           vi_left=b"", vi_right=b"", vi_upper=b"", vi_lines=b""):
+    return b"\x1f".join([b"B1", b"12", left, right, tleft, tright, b"", b"", upper,
+                         vi_left, vi_right, vi_upper, vi_lines, status]) + b"\x1e"
 
 
 def typed_screen(tmp_path, rc_before="", rc_after="", record=None, inherit=None):
@@ -891,3 +893,132 @@ def test_sandbox_warning_reads_last_element(tmp_path, status, bait, warned):
     s.run("true")
     out = visible(s.close())
     assert out.count(b"could not start its system call filter") == warned
+
+
+VI = "bindkey -v\nKEYTIMEOUT=1\n"
+VI_RECORD = dict(left=b"INS> ", vi_left=b"CMD> ", right=b"RIGHT", vi_right=b"", upper=b"UP", vi_upper=b"", vi_lines=b"lru")
+
+
+def to_vicmd(screen, want="CMD>"):
+    settle(screen)
+    screen.session.p.send("\x1b")
+    assert screen.wait(lambda v: want in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+
+
+def to_main(screen, want="INS>"):
+    screen.session.p.send("i")
+    assert screen.wait(lambda v: want in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+
+
+# 스펙 1313행: 모드 전환은 bingsu를 부르지 않는다.
+# 이것을 실패시키는 것: 위젯이 `_bingsu_call`을 부르는 것, 키 입력마다 그리는 것.
+def test_vi_switch_makes_no_bingsu_call(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
+    settle(screen)
+    before = len(inst.calls())
+    for _ in range(3):
+        to_vicmd(screen)
+        to_main(screen)
+    s.p.send("abc")
+    assert screen.wait(lambda v: "abc" in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    assert len(inst.calls()) == before
+    s.p.sendcontrol("c")
+    s.kill()
+
+
+# vi_lines에 있는 줄의 빈 vicmd 필드는 실제로 빈 줄이다.
+# 이것을 실패시키는 것: 빈 vicmd 필드를 main 값으로 되돌리는 것, vi_lines를 보지 않는 것, main 복귀를 빼는 것.
+def test_vi_mode_clears_a_really_empty_line(tmp_path):
+    s, _, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
+    settle(screen)
+    row = screen.cursor()[0]
+    assert screen.lines()[row - 1] == "UP" and screen.lines()[row].endswith("RIGHT"), screen.lines()
+    to_vicmd(screen)
+    row = screen.cursor()[0]
+    assert screen.lines()[row] == "CMD>" and screen.lines()[row - 1] != "UP", screen.lines()
+    to_main(screen)
+    row = screen.cursor()[0]
+    assert screen.lines()[row - 1] == "UP" and screen.lines()[row].endswith("RIGHT"), screen.lines()
+    s.kill()
+
+
+# 이것을 실패시키는 것: vi_lines에 없는 줄까지 vicmd 필드로 바꾸는 것(l, r, u 각각).
+@pytest.mark.parametrize("lines,left,right,upper", [(b"l", "CMD>", "RIGHT", "UP"), (b"r", "INS>", "CMDR", "UP"),
+                                                    (b"u", "INS>", "RIGHT", "CMDU"), (b"", "INS>", "RIGHT", "UP")],
+                         ids=["left", "right", "upper", "none"])
+def test_only_named_lines_change(tmp_path, lines, left, right, upper):
+    record = fields(left=b"INS> ", vi_left=b"CMD> ", right=b"RIGHT", vi_right=b"CMDR", upper=b"UP", vi_upper=b"CMDU", vi_lines=lines)
+    s, _, screen = typed_screen(tmp_path, VI, record=record)
+    to_vicmd(screen, left)
+    row = screen.cursor()[0]
+    if not lines:
+        screen.wait(lambda v: False, timeout=0.3)
+    assert screen.lines()[row].startswith(left) and screen.lines()[row].endswith(right), screen.lines()
+    assert screen.lines()[row - 1] == upper, screen.lines()
+    s.kill()
+
+
+# 위젯 함수는 어디서든 부를 수 있다: 줄 편집기 밖이면 아무것도 하지 않고 오류도 없다.
+# 이것을 실패시키는 것: `zle` 활성 검사를 지우는 것(`widgets can only be called when ZLE is active`).
+def test_keymap_select_outside_the_line_editor_is_silent(tmp_path):
+    s, _, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
+    enter(screen, 'KEYMAP=vicmd _bingsu_keymap_select; print -r -- "RC=$? MODE=$_bingsu_keymap"')
+    out = visible(s.close())
+    assert b"RC=0 MODE=main" in out and b"widgets can only" not in out, out
+
+
+# 이것을 실패시키는 것: 저장한 위젯을 지우는 것, 우리 대입 뒤에 부르는 것, 그 위젯을 `-w`로 부르는 것.
+@pytest.mark.parametrize("rc", ['_mine() { builtin print -r -- "mine $PROMPT" >>"$BINGSU_T_LOG" }\nzle -N zle-keymap-select _mine',
+                                '_mine() { builtin print -r -- "mine $PROMPT" >>"$BINGSU_T_LOG" }\nzle -N _mine\n'
+                                + AZHW + "add-zle-hook-widget keymap-select _mine"], ids=["plain", "add-zle-hook-widget"])
+def test_existing_keymap_select_runs_first(tmp_path, rc):
+    log = tmp_path / "widget.log"
+    s, _, screen = typed_screen(tmp_path, VI + rc, record=fields(**VI_RECORD), inherit={"BINGSU_T_LOG": str(log)})
+    to_vicmd(screen)
+    s.kill()
+    assert "mine UP\nINS> " in log.read_text() and "CMD" not in log.read_text(), log.read_text()
+
+
+# 이것을 실패시키는 것: vicmd에서 Enter를 친 줄이 긴 프롬프트로 남는 것, 다음 프롬프트가 vicmd로 남는 것.
+def test_accept_in_vicmd_shows_transient(tmp_path):
+    s, _, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
+    s.p.send("print DONE")
+    assert screen.wait(lambda v: v.lines()[v.cursor()[0]].endswith("RIGHT") or "print DONE" in v.lines()[v.cursor()[0]], stable=True), screen.lines()
+    to_vicmd(screen)
+    enter(screen, "")
+    lines = screen.lines()
+    row = screen.cursor()[0]
+    s.kill()
+    assert "T> print DONE" in lines and lines[row].startswith("INS>") and lines[row - 1] == "UP", lines
+
+
+# 이것을 실패시키는 것: 설치 hook이 모드를 main으로 되돌리지 않는 것(다음 위젯이 필드를 잘못 고름).
+def test_install_hook_puts_the_mode_back(tmp_path):
+    log = tmp_path / "widget.log"
+    rc_after = '_after() { builtin print -r -- "mode=$_bingsu_keymap" >>"$BINGSU_T_LOG" }\nprecmd_functions+=(_after)'
+    s, _, screen = typed_screen(tmp_path, VI, rc_after, record=fields(**VI_RECORD), inherit={"BINGSU_T_LOG": str(log)})
+    to_vicmd(screen)
+    enter(screen, "")
+    s.kill()
+    assert log.read_text().splitlines()[-1] == "mode=main", log.read_text()
+
+
+# 이것을 실패시키는 것: 모드 대입을 emulate 밖에서 하는 것(사용자 ALL_EXPORT로 환경에 나감).
+def test_vi_switch_exports_nothing(tmp_path):
+    s, _, screen = typed_screen(tmp_path, VI + "setopt all_export", record=fields(**VI_RECORD))
+    to_vicmd(screen)
+    to_main(screen)
+    enter(screen, """print -r -- "EXPORTED=$(env | grep -c '^_bingsu_')" """)
+    out = visible(s.close())
+    assert b"EXPORTED=0" in out, out
+
+
+# 사용자의 이전 키맵 값이나 환경은 봉투에 들어가지 않는다: 렌더러가 vicmd를 따로 주고, vicmd를 넘기면 vi_lines가 빈다.
+# 이것을 실패시키는 것: hook이 `$KEYMAP`을 넘기는 것.
+def test_envelope_keymap_is_always_main(tmp_path):
+    s, inst, screen = typed_screen(tmp_path, VI + "KEYMAP=vicmd", record=fields(**VI_RECORD), inherit={"KEYMAP": "vicmd"})
+    to_vicmd(screen)
+    enter(screen, "")
+    calls = inst.calls()
+    s.kill()
+    assert calls and all(opt(c, b"--keymap") == b"main" for c in calls), calls
