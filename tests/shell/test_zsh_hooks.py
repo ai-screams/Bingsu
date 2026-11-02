@@ -7,6 +7,7 @@ import re
 import subprocess
 import threading
 
+import pexpect
 import pytest
 
 from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, status_bait_record, trusted_env
@@ -1190,6 +1191,38 @@ def test_winch_during_a_redraw_does_not_nest(tmp_path):
     assert screen.wait(lambda v: redraws(inst) and width_of(redraws(inst)[-1]) == 151, stable=True), redraws(inst)
     s.kill()
     assert not log.exists(), log.read_text()
+
+
+# 사용자 trap 안의 err_exit는 그대로 듣는다. 이것을 실패시키는 것: 저장 trap을 조건으로 부르는 것(`if`, `||`).
+@pytest.mark.parametrize("signal,name", [(28, "TRAPWINCH"), (2, "TRAPINT")])
+def test_err_exit_inside_a_user_trap_still_works(tmp_path, signal, name):
+    log = tmp_path / "trap.log"
+    rc = f'{name}() {{ setopt localoptions err_exit; false; builtin print -r -- BAD >>"$BINGSU_T_LOG"; return 0 }}'
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields(), inherit={"BINGSU_T_LOG": str(log)})
+    settle(screen)
+    s.p.kill(signal)
+    s.expect(pexpect.EOF)
+    assert not log.exists(), log.read_text()
+    s.kill()
+
+
+# 사용자 trap이 0이 아닌 값을 돌려줘도 우리 쪽 일은 끝난다.
+# 이것을 실패시키는 것: `always` 없이 부르는 것(ERR_RETURN이 함수를 끝내 redraw·transient가 빠진다).
+def test_err_return_keeps_redraw_after_a_user_trap(tmp_path):
+    rc = "TRAPWINCH() { return 130 }\nsetopt err_return"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields())
+    settle(screen)
+    resize(screen, 120)
+    wait_redraws(screen, inst, 1)
+    s.kill()
+
+
+def test_err_return_keeps_transient_after_a_user_trap(tmp_path):
+    rc = "TRAPINT() { return 130 }\nsetopt err_return"
+    s, inst, screen = typed_screen(tmp_path, rc, record=fields())
+    interrupted(screen, "typed")
+    assert screen.wait(lambda v: "T> typed" in v.lines(), stable=True), screen.lines()
+    s.kill()
 
 
 TRAP_PIPE = 'builtin print -r -- "user $?:${(j:,:)pipestatus}" >>"$BINGSU_T_LOG"; return 0'

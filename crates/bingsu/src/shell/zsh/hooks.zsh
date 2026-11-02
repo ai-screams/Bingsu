@@ -367,8 +367,9 @@ _bingsu_zle_wrap() {
 # TRAPINT without a user trap returns what the signal itself would, TRAPWINCH 0
 # (the default ignores it, and $? and $pipestatus stay). The saved trap is the
 # first command, so a user trap sees $? and $pipestatus as they were, and its
-# return value decides. Defined outside `emulate`, whose local traps would
-# remove them again.
+# return value decides. It is no condition, which would switch off err_exit
+# inside it; `always` runs our part when ERR_RETURN ends the try list. Defined
+# outside `emulate`, whose local traps would remove them again.
 if [[ -o interactive && -o zle ]] && zmodload zsh/zleparameter 2>/dev/null; then
   _bingsu_zle_wrap zle-line-finish _bingsu_line_finish
   _bingsu_zle_wrap zle-keymap-select _bingsu_keymap_select
@@ -376,24 +377,24 @@ if [[ -o interactive && -o zle ]] && zmodload zsh/zleparameter 2>/dev/null; then
   zle -N _bingsu_redraw_keys
   if _bingsu_trap_free TRAPINT 'return $(( 128 + $1 ))'; then
     TRAPINT() {
-      if _bingsu_saved_TRAPINT "$@"; then
-        local _bingsu_user=0
-      else
+      {
+        _bingsu_saved_TRAPINT "$@"
+      } always {
         local _bingsu_user=$?
-      fi
-      ! zle || _bingsu_transient
-      return $_bingsu_user
+        ! zle || _bingsu_transient
+        return $_bingsu_user
+      }
     }
   fi
   if _bingsu_trap_free TRAPWINCH 'return 0'; then
     TRAPWINCH() {
-      if _bingsu_saved_TRAPWINCH "$@"; then
-        local _bingsu_user=0
-      else
+      {
+        _bingsu_saved_TRAPWINCH "$@"
+      } always {
         local _bingsu_user=$?
-      fi
-      _bingsu_redraw
-      return $_bingsu_user
+        _bingsu_redraw
+        return $_bingsu_user
+      }
     }
   fi
 fi
