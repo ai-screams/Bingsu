@@ -132,6 +132,10 @@ M3D_SUPPLEMENTARY.update({"GATE-FS-HELPER.2-r": "M3d", "GATE-FS-HELPER.2-b": "M3
 M3D_SUPPLEMENTARY["GATE-HELPER-LIFETIME.1-blocked_mount"] = "M3d"
 # 이것을 실패시키는 것: 계획의 시계 단계 고정 행을 지우고 실행 횟수 계수기 행만으로 GATE-CLOCK-READS.1을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-CLOCK-READS.1-staged_plan"] = "M3d"
+# 이것을 실패시키는 것: 재시도·입력·호출 수 행을 지우고 크기 변경 하나만으로 GATE-SHELL-REDRAW.1을 닫는 것.
+M3D_SUPPLEMENTARY.update({f"GATE-SHELL-REDRAW.1-{case}": "M4" for case in ("same_width", "burst", "signal", "input", "settled")})
+# 이것을 실패시키는 것: 빈 PATH 행을 지워 Linux trace만으로 macOS까지 외부 명령 0을 닫는 것.
+M3D_SUPPLEMENTARY["GATE-SHELL-EXTERNAL.1-empty_path"] = "M4"
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4")
 
@@ -139,7 +143,7 @@ ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4")
 # whose stage is `deferred:<milestone>`; removing one fails the table check.
 M3D_DEFERRED = {
     "GATE-RUNTIME-ROOT.6": "M5",
-    "GATE-FDS.3": "M4",
+    "GATE-FDS.3": "M6",
     "GATE-TRUST-REVOKE.3": "M6",
     "GATE-EXEC-DEADLINE.3": "M6",
     "GATE-EXEC-DEADLINE.4": "M6",
@@ -147,7 +151,7 @@ M3D_DEFERRED = {
     "GATE-CLOCK-READS.3": "M6",
     "GATE-CLOCK-READS.4": "M6",
 }
-DEFERRED_MILESTONES = ("M4", "M5", "M6")
+DEFERRED_MILESTONES = ("M5", "M6")
 
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
@@ -162,14 +166,13 @@ M3D_RELEASE_GATES = frozenset({"GATE-FS-HELPER", "GATE-FS-FRONT", "GATE-FRONT-RE
 M3D_PENDING = ()
 # Same rule for the M4 clauses. A clause that a row has closed leaves this
 # list; nothing else may join it.
-M4_PENDING = ("GATE-SHELL-CALLS.1", "GATE-SHELL-EXTERNAL.1", "GATE-SHELL-REDRAW.1",
-              "GATE-SHELL-NOTICE.1")
+M4_PENDING = ()
 PENDING = M3D_PENDING + M4_PENDING
 
 
-def test_no_m3d_gate_clause_is_pending():
-    # Fails when: a gate clause is parked in M3D_PENDING instead of getting a row.
-    assert M3D_PENDING == ()
+def test_no_gate_clause_is_pending():
+    # Fails when: a gate clause is parked in a pending list instead of getting a row.
+    assert M3D_PENDING == () and M4_PENDING == ()
 
 
 def workflows():
@@ -969,6 +972,22 @@ def test_runtime_root_rows_require_each_pass(clause):
     assertion = f"grep -Fx 'PASSED {row['test']}'"
     assert texts["shell.yml"].count(assertion) == 1
     texts["shell.yml"] = texts["shell.yml"].replace(assertion, "# " + assertion)
+    with pytest.raises(AssertionError):
+        assert_gate_table(table, texts)
+
+
+SHELL_GATE_JOBS = [(row["id"], job) for row in rows((ROOT / TABLE).read_text()) if row["gate"].startswith("GATE-SHELL-")
+                   and row["gate"] != "GATE-SHELL-TIME" for job in GATE_STEP_JOBS if row["platform"] == "Unix" or job == "filter-calls"]
+
+
+# 이것을 실패시키는 것: 셸 게이트 행의 PASSED 단언을 어느 한 job에서라도 빼도 표가 통과하는 것.
+@pytest.mark.parametrize("row_id,job", SHELL_GATE_JOBS)
+def test_shell_rows_require_each_pass(row_id, job):
+    table = (ROOT / TABLE).read_text()
+    row = next(r for r in rows(table) if r["id"] == row_id)
+    assertion = f"grep -Fx 'PASSED {row['test']}'"
+    texts = workflows()
+    texts["shell.yml"] = in_job(texts["shell.yml"], job, assertion, "# " + assertion)
     with pytest.raises(AssertionError):
         assert_gate_table(table, texts)
 

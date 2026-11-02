@@ -1086,12 +1086,14 @@ def wait_redraws(screen, inst, n):
     assert screen.wait(lambda v: len(redraws(inst)) >= n, stable=True), (redraws(inst), screen.lines())
 
 
-# 이것을 실패시키는 것: 저장한 봉투를 넘기지 않는 것, `--redraw` 없이 일반 호출을 하는 것, 새 폭을 넘기지 않는 것.
+# 이것을 실패시키는 것: 저장한 봉투를 넘기지 않는 것, `--redraw` 없이 일반 호출을 하는 것, 새 폭을 넘기지 않는 것,
+# 크기 변경 하나에 두 번 부르는 것.
 def test_resize_redraws_at_new_width(tmp_path):
     s, inst, screen = typed_screen(tmp_path, record=fields())
     enter(screen, "(exit 3)")
     resize(screen, 120)
     wait_redraws(screen, inst, 1)
+    assert len(redraws(inst)) == 1, redraws(inst)
     call, normal = redraws(inst)[0], inst.calls()[-2]
     assert width_of(call) == 120, call
     for word in (b"--status", b"--pipestatus", b"--jobs", b"--keymap"):
@@ -1099,6 +1101,7 @@ def test_resize_redraws_at_new_width(tmp_path):
     assert opt(call, b"--status") == b"3"
     resize(screen, 130)
     wait_redraws(screen, inst, 2)
+    assert len(redraws(inst)) == 2, redraws(inst)
     s.kill()
 
 
