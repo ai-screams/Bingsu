@@ -120,6 +120,9 @@ OVERLAPS = (
 )
 
 
+# commands::run names crate::relay on Linux; the relay itself is not part of this build.
+RELAY_STUB = '#[cfg(target_os = "linux")] mod relay {pub(crate) fn run(_: &[std::ffi::OsString]) -> std::process::ExitCode {unreachable!("the relay runs only in the bingsu binary")}}'
+
 def segment_disposition(row, metrics, system):
     """One row's disposition from {field: summary}. Exceeding is never auto-handled."""
     kind = row["kind"]
@@ -862,6 +865,7 @@ def prepare(binary):
             module_path = copied / "mod.rs"
             module_path.write_text(commands + GLOBAL_INPUT_FIXTURE)
         modules.append(f'#[path={json.dumps(str(module_path))}] mod {name};')
+    modules.append(RELAY_STUB)
     if platform.system() == "Linux":
         modules.append(f'#[path={json.dumps(str(source / "crates/bingsu/src/sandbox.rs"))}] mod sandbox;')
     else:

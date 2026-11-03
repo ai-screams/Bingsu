@@ -32,6 +32,9 @@ OUT = Path(tempfile.gettempdir()) / "bingsu-measurements"
 CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
+# commands::run names crate::relay on Linux; the relay itself is not part of this build.
+RELAY_STUB = '#[cfg(target_os = "linux")] mod relay {pub(crate) fn run(_: &[std::ffi::OsString]) -> std::process::ExitCode {unreachable!("the relay runs only in the bingsu binary")}}'
+
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     value = importlib.util.module_from_spec(spec)
@@ -184,7 +187,7 @@ def prepare(binary):
     process = copied / "collector_process.rs"
     process.write_text(M3B.replace_required(process.read_text(), "    fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {",
         '    fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {\n        println!("F3_PID {pid}");'))
-    modules = [f'#[path={json.dumps(str(mod))}] mod commands;']
+    modules = [f'#[path={json.dumps(str(mod))}] mod commands;', RELAY_STUB]
     for name in ("prompt", "prompt_io", "prompt_read", "prompt_spawn"):
         path = source / "crates/bingsu/src" / (name + ".rs")
         if name == "prompt_read":

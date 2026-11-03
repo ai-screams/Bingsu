@@ -273,6 +273,7 @@ LINUX_SECURITY_STEPS = {
     "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
     "Path facts ACL and read-only mount oracles",
     "Assert native Linux F1 collection passes", "Assert exact F3 musl collection passes",
+    "Assert native Linux trusted relay passes",
 }
 MACOS_SECURITY_STEPS = {"Assert native macOS M3b security passes",
                         "Assert native macOS F1 collection passes"}
