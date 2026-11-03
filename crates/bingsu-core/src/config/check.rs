@@ -216,22 +216,56 @@ fn type_ok(ty: Ty, n: &MNode, path: &str, out: &mut Vec<Diagnostic>) {
 }
 
 /// The array a string `command` most likely means, as TOML: its words split
-/// at spaces. Text with quoting, expansion or other shell syntax has no
-/// such reading, so it gets no suggestion.
+/// at spaces and tabs. Text a shell would read differently gets no
+/// suggestion: quoting, expansion and other shell syntax, any other
+/// whitespace, control or format (Cf, bidi) characters, an assignment in
+/// the first word or a word starting with `=`, and a reserved first word.
 fn argv_fix(s: &str) -> Option<String> {
     const SHELL: &[char] = &[
         '"', '\'', '\\', '`', '$', '|', '&', ';', '<', '>', '(', ')', '*', '?', '[', ']', '~', '#',
+        '{', '}', '!',
     ];
-    if s.chars()
-        .any(|c| SHELL.contains(&c) || (c.is_control() && !c.is_ascii_whitespace()))
+    // Reserved words of bash and zsh together.
+    const RESERVED: &[&str] = &[
+        "case",
+        "coproc",
+        "do",
+        "done",
+        "elif",
+        "else",
+        "end",
+        "esac",
+        "fi",
+        "for",
+        "foreach",
+        "function",
+        "if",
+        "in",
+        "nocorrect",
+        "repeat",
+        "select",
+        "then",
+        "time",
+        "until",
+        "while",
+    ];
+    let blank = |c: char| c == ' ' || c == '\t';
+    if s.chars().any(|c| {
+        SHELL.contains(&c)
+            || (c.is_whitespace() && !blank(c))
+            || (crate::sanitize::is_removed(c) && c != '\t')
+            || c == '\u{200D}'
+    }) {
+        return None;
+    }
+    let words: Vec<&str> = s.split(blank).filter(|w| !w.is_empty()).collect();
+    let first = *words.first()?;
+    if first.contains('=') || words.iter().any(|w| w.starts_with('=')) || RESERVED.contains(&first)
     {
         return None;
     }
-    let words: Vec<String> = s
-        .split_ascii_whitespace()
-        .map(|w| format!("\"{w}\""))
-        .collect();
-    (!words.is_empty()).then(|| format!("[{}]", words.join(", ")))
+    let quoted: Vec<String> = words.iter().map(|w| format!("\"{w}\"")).collect();
+    Some(format!("[{}]", quoted.join(", ")))
 }
 
 fn is_line_name(k: &str) -> bool {
@@ -788,7 +822,9 @@ cache = "30s"
     // 문자열 `command`는 E202 오류이고, 셸 문법이 없으면 argv 배열을 제안한다(자동 변환 없음).
     // 이것을 실패시키는 것: fix 생성을 지우는 것, 셸 문자 검사를 지우는 것(인용이 든 글을 쪼개 제안),
     // 키 조건을 지우는 것(`env_allow` 같은 다른 목록에도 제안), 제어 문자 검사를 지우는 것,
-    // 빈 단어 목록 검사를 지우는 것(`[]` 제안).
+    // 빈 단어 목록 검사를 지우는 것(`[]` 제안), `{` `}` `!`를 셸 문자에서 빼는 것, 공백·탭 밖의 공백류 검사를 지우는 것,
+    // 서식 문자(Cf, ZWJ 포함) 검사를 지우는 것, 첫 단어 `=`·`=`로 시작하는 단어·예약어 검사를 각각 지우는 것,
+    // 탭을 구분자에서 빼는 것.
     #[test]
     fn test_string_command_quick_fix() {
         let one = |body: &str| {
@@ -827,10 +863,50 @@ cache = "30s"
         // suggested TOML would carry raw.
         assert_eq!(one("command = \"   \"\n"), None);
         assert_eq!(one("command = \"a\\u0001b\"\n"), None);
+        // Text a shell reads differently (from the security review's table).
+        for shell in [
+            "echo {a,b}",
+            "x{1..3}",
+            "FOO=1 kubectl ctx",
+            "=ls -l",
+            "ls =x",
+            "! false",
+            "echo !!",
+            "if true",
+            "time ls",
+            "a\nb",
+            "a\rb",
+            "a\u{c}b",
+            "a\u{b}b",
+            "a\u{a0}b",
+            "a\u{200e}b",
+            "a\u{200d}b",
+            "a\u{2066}b",
+        ] {
+            let body = alloc::format!("command = {}\n", toml_str(shell));
+            assert_eq!(one(&body), None, "{shell:?}");
+        }
+        // Plain words still get one: tabs split, `=` later in a word stays.
+        let fix = one("command = \"kubectl\\tctx --x=1\"\n").expect("a suggestion");
+        assert_eq!(fix.text, "[\"kubectl\", \"ctx\", \"--x=1\"]");
     }
 
+    /// `s` as a TOML basic string, every character outside printable ASCII
+    /// written as `\uXXXX`.
     fn toml_str(s: &str) -> String {
-        alloc::format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '\\' | '"' => {
+                    out.push('\\');
+                    out.push(c)
+                }
+                ' '..='~' => out.push(c),
+                _ => out.push_str(&alloc::format!("\\u{:04X}", c as u32)),
+            }
+        }
+        out.push('"');
+        out
     }
 
     // 이것을 실패시키는 것: 단위 없는 값·1시간 넘는 값·소수를 받는 것.

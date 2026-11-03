@@ -1214,11 +1214,11 @@ const PLACEHOLDER: &str = "{dir}";
 
 /// The form rules of one `kind = "command"` segment (spec section 3 "사용자
 /// 명령 실행 모델"): `command` or `shell`, never both; `shell` only with
-/// `unsafe_shell = true`; a placeholder only as one whole `command` element
+/// `unsafe_shell = true`; one of the two, with at least one word; a placeholder only as one whole `command` element
 /// and never in `shell`; `env_allow` names that can be variable names.
 /// Problems are errors and warnings in `notes`; `true` when `shell` lacks its
 /// explicit allowance, so the unit never runs.
-fn command_form(id: &str, t: &MTable, notes: &mut Vec<Diagnostic>) -> bool {
+fn command_form(id: &str, seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) -> bool {
     let shell = t.get("shell");
     let allow = t.get("unsafe_shell");
     let allowed = boolean(t, &["unsafe_shell"]) == Some(true);
@@ -1239,6 +1239,19 @@ fn command_form(id: &str, t: &MTable, notes: &mut Vec<Diagnostic>) -> bool {
     };
     if let (Some(sh), Some(_)) = (shell, t.get("command")) {
         notes.push(conflict(sh, "`command` and `shell` are both set"));
+    }
+    match (t.get("command"), shell) {
+        (None, None) => notes.push(conflict(seg, "neither `command` nor `shell` is set")),
+        (
+            Some(
+                c @ MNode {
+                    value: MValue::Array(words),
+                    ..
+                },
+            ),
+            None,
+        ) if words.is_empty() => notes.push(conflict(c, "`command` is empty")),
+        _ => {}
     }
     if let (None, Some(a), true) = (shell, allow, allowed) {
         notes.push(conflict(a, "`unsafe_shell = true` is set without `shell`"));
@@ -1283,6 +1296,13 @@ fn command_form(id: &str, t: &MTable, notes: &mut Vec<Diagnostic>) -> bool {
                         "env_allow",
                         &alloc::format!("\"{v}\""),
                         "a variable name: not empty, without `=` or NUL",
+                    ));
+                } else if crate::command::grant::forbidden(v.as_bytes()) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "env_allow",
+                        &alloc::format!("\"{v}\""),
+                        "a name a command may receive: loader, language and shell startup settings never pass",
                     ));
                 }
             }
@@ -1338,9 +1358,11 @@ fn exec_units(
         let origins = exec_origins(&e.key, t);
         let approved_by = approved.get(&e.key).cloned().unwrap_or_default();
         let shown_at = shown.get(&e.key).cloned().unwrap_or_default();
-        // A language segment cannot hold these keys (E206), so this judges
-        // command segments alone.
-        let not_run = if command_form(&e.key, t, notes) {
+        // Only a command segment needs `command` or `shell`; a language
+        // segment cannot hold them (E206).
+        let not_run = if matches!(&policy, ExecPolicy::Command { .. })
+            && command_form(&e.key, &e.node, t, notes)
+        {
             Some(NotRun::ShellNotAllowed)
         } else if let Some(k) = unsafe_exec_key(&e.key, &origins, notes) {
             Some(NotRun::UnsafeFile { key: k })
@@ -1738,6 +1760,19 @@ mod tests {
         assert_eq!(form_codes(&read(&off, &[])), []);
     }
 
+    // 실행할 것이 없는 command 세그먼트(command·shell 둘 다 없음, `command = []`)는 E212다.
+    // 이것을 실패시키는 것: 두 경우의 진단 push를 각각 지우는 것.
+    #[test]
+    fn test_command_segment_needs_something_to_run() {
+        for body in ["", "command = []\n", "timeout = \"200ms\"\n"] {
+            let r = read(&command_seg(body), &[]);
+            assert_eq!(form_codes(&r), [codes::COMMAND_FORM_CONFLICT], "{body:?}");
+            assert!(r.snapshot.is_none(), "{body:?}");
+        }
+        let r = read(&command_seg("command = [\"k\"]\n"), &[]);
+        assert_eq!(form_codes(&r), []);
+    }
+
     // `shell` 텍스트 안의 자리표시자는 E213이다(허용이 있어도).
     // 이것을 실패시키는 것: shell 분기의 자리표시자 검사를 지우는 것.
     #[test]
@@ -1794,7 +1829,8 @@ mod tests {
     // 형식이 방어다: 컴파일 검사를 우회해 `unsafe_shell = false`인 shell 정책을 실행 대상으로 넣은 스냅샷도
     // 허가 형식으로 옮길 변형이 없어 허가 목록에 들어가지 못한다(대상 카나리 단언은 허가를 만드는 C 단계 몫).
     // 이것을 실패시키는 것: from_config의 UnsafeShell 갈래에서 `unsafe_shell: true` 조건을 지우는 것,
-    // shell이 있어도 Argv로 옮기는 것(`shell: None` 조건 삭제), argv와 shell이 함께 있어도 UnsafeShell로 옮기는 것.
+    // shell이 있어도 Argv로 옮기는 것(`shell: None` 조건 삭제), argv와 shell이 함께 있어도 UnsafeShell로 옮기는 것,
+    // 빈 argv를 Argv로 옮기는 것.
     #[test]
     fn test_plain_shell_never_reaches_grant() {
         use crate::command::wire::Policy;
@@ -1812,6 +1848,16 @@ mod tests {
                 argv: vec![b"k".to_vec()]
             }]
         );
+        // An empty argv has no grant form either (argc 0).
+        let mut empty = c.clone();
+        empty.exec_units[0].policy = ExecPolicy::Command {
+            argv: Vec::new(),
+            cwd: None,
+            env_allow: Vec::new(),
+            shell: None,
+            unsafe_shell: false,
+        };
+        assert_eq!(grantable(&empty), []);
         for (argv, allowed) in [
             (vec![], false),
             (vec![String::from("k")], false),
@@ -1845,6 +1891,33 @@ mod tests {
                 script: b"kubectl ctx | head -1".to_vec()
             }]
         );
+    }
+
+    // 감독이 끝내 거부할 env_allow 이름(실행기 주입, 언어·셸 시작 설정)은 config check에서 오류다.
+    // 표는 감독의 것(`command::grant`)을 그대로 쓴다.
+    // 이것을 실패시키는 것: config 쪽 금지 검사를 지우는 것, 접두사 비교만 빠진 판정을 쓰는 것.
+    #[test]
+    fn env_allow_forbidden_names_rejected() {
+        let names = crate::command::grant::FORBIDDEN
+            .iter()
+            .map(|n| core::str::from_utf8(n).unwrap())
+            .chain(["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "BASH_FUNC_x%%"]);
+        for name in names {
+            let r = read(
+                &command_seg(&alloc::format!(
+                    "command = [\"k\"]\nenv_allow = [\"{name}\"]\n"
+                )),
+                &[],
+            );
+            assert_eq!(form_codes(&r), [codes::BAD_VALUE], "{name}");
+            assert!(r.snapshot.is_none(), "{name}");
+        }
+        // Credentials may come back (they are warned about later, U-13 V2).
+        let r = read(
+            &command_seg("command = [\"k\"]\nenv_allow = [\"SSH_AUTH_SOCK\", \"LDX\"]\n"),
+            &[],
+        );
+        assert_eq!(form_codes(&r), []);
     }
 
     // env_allow 이름은 비지 않고 `=`·NUL이 없다(정제 환경의 `NAME=VALUE\0` 틀을 깨지 않게).

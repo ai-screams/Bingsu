@@ -33,13 +33,13 @@ pub enum Policy {
 }
 impl Policy {
     /// The grant form of a compiled unit's policy. A `shell` without
-    /// `unsafe_shell = true`, a unit that sets both `command` and `shell`, and
-    /// a language unit have none, so the helper cannot put them in a grant.
+    /// `unsafe_shell = true`, a unit that sets both `command` and `shell`, an
+    /// empty argv and a language unit have none, so the helper cannot put them in a grant.
     pub fn from_config(p: &ExecPolicy) -> Option<Self> {
         match p {
             ExecPolicy::Command {
                 argv, shell: None, ..
-            } => Some(Self::Argv {
+            } if !argv.is_empty() => Some(Self::Argv {
                 argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
             }),
             ExecPolicy::Command {

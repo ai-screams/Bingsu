@@ -396,15 +396,24 @@ fn locate(word: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
 /// inputs of this crate: nonblocking, no controlling terminal, a regular file
 /// only, and at most the first line's worth of bytes.
 fn starts_with_env_shebang(file: &std::path::Path) -> bool {
-    use std::io::Read as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    let Ok(mut f) = std::fs::OpenOptions::new()
+    // A FIFO or device is never opened; the open file is checked again.
+    // No test tells this name check from the fstat after the open (both
+    // turn the same inputs away); it keeps devices from being opened.
+    if !std::fs::metadata(file).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(file)
-    else {
-        return false;
-    };
+        .is_ok_and(|f| head_is_env_shebang(&f))
+}
+
+/// The first line test on an open file, which must still be a regular file
+/// (it may have been replaced since the check by name).
+fn head_is_env_shebang(mut f: &std::fs::File) -> bool {
+    use std::io::Read as _;
     if !f.metadata().is_ok_and(|m| m.is_file()) {
         return false;
     }
@@ -539,7 +548,7 @@ mod tests {
     // 실행 파일의 첫 줄이 `#!/usr/bin/env`이면 config check가 W411로 미리 알린다(실행기는 그 스크립트를 거부).
     // 이것을 실패시키는 것: W411 push를 지우는 것, 인터프리터 비교를 `starts_with(b"/usr/bin/env")`로 넓히는 것
     // (`/usr/bin/envx`도 경고), PATH 찾기를 지우는 것(맨 이름이 경고 없이 지나감), 상대 PATH 폴더 제외를 지우는 것,
-    // PATH 폴더에 그 파일이 있는지 보지 않는 것(빈 폴더에서 멈춤), 일반 파일 검사를 지우는 것(FIFO를 읽음),
+    // PATH 폴더에 그 파일이 있는지 보지 않는 것(빈 폴더에서 멈춤), 연 뒤의 일반 파일 검사를 지우는 것(FIFO를 읽음),
     // 실행하지 않는 단위까지 보는 것, 상대 argv[0]을 PATH에서 찾는 것.
     #[test]
     fn test_env_shebang_warned() {
@@ -626,6 +635,14 @@ mod tests {
             crate::commands::sys::WriteOutcome::Done
         ));
         assert!(!starts_with_env_shebang(&fifo));
+        // The open-file check alone: a FIFO that got past the name check.
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
+        assert!(!head_is_env_shebang(&opened));
         drop(keep);
         // A unit that does not run is not looked at.
         let off = seg("a", &path(&env)).replace("kind = ", "enabled = false\nkind = ");
