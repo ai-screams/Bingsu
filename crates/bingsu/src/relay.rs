@@ -15,7 +15,7 @@
     clippy::disallowed_macros
 )]
 use bingsu_core::fs_trust::{AclFacts, Facts, RefuseGroupWrite, Verdict, entry_verdict};
-use bingsu_core::handoff::{PERMIT_FD, parse_relay_args, read_relay_input};
+use bingsu_core::handoff::{ExecFrame, PERMIT_FD, Permit, parse_relay_args, read_relay_input};
 use std::ffi::{CString, OsString};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -45,9 +45,13 @@ fn relay(args: &[OsString]) -> u8 {
     }
 }
 
-/// A checked target, ready for `execveat`. The pointer arrays point into
-/// `argv` and `envp`, whose heap buffers do not move with the struct.
+/// A checked target, ready for the clock check and `execveat`. The pointer
+/// arrays point into `argv` and `envp`, whose heap buffers do not move with
+/// the struct. `frame` keeps only its deadline and origin (its environment is
+/// moved into `envp`), so dropping it frees nothing.
 pub(crate) struct Target {
+    permit: Permit,
+    frame: ExecFrame,
     fd: OwnedFd,
     _argv: Vec<CString>,
     _envp: Vec<CString>,
@@ -56,7 +60,8 @@ pub(crate) struct Target {
 }
 
 /// Spec order: signals, fd 3 read and closed, the executable opened and
-/// checked, descriptors past 2 marked close-on-exec, then the fresh clock.
+/// checked, descriptors past 2 marked close-on-exec. Every buffer of this
+/// stage is freed when it returns; the fresh clock comes after, in `exec`.
 /// The relay never changes folder: the supervisor spawns it in the unit's
 /// working folder (the neutral folder, or the shell's folder for
 /// `untrusted-current`), and the target inherits that folder.
@@ -68,27 +73,23 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let input = input.ok_or(RELAY_INPUT)?;
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
-    let (permit, frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
+    let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
     let fd = open_target(parsed.executable)?;
     let argv = parsed
         .argv
         .iter()
         .map(|w| CString::new(*w).map_err(|_| RELAY_INPUT))
         .collect::<Result<Vec<_>, _>>()?;
-    let envp = environment(&frame.environment)?;
+    let envp = environment(&std::mem::take(&mut frame.environment))?;
     let argv_ptrs = pointers(&argv);
     let envp_ptrs = pointers(&envp);
     // The target gets 0, 1 and 2 only; the executable's fd is close-on-exec.
     if !cloexec_from_3(close_range_cloexec()) {
         return Err(RELAY_EXEC);
     }
-    // Last before exec: a fresh clock. Config units need the trust deadline
-    // and E, builtin probes E only, both on the permit's boot, resume and domain.
-    let now = crate::prompt_io::observe_clock().map_err(|_| RELAY_EXPIRED)?;
-    if !frame.allows(permit, now) {
-        return Err(RELAY_EXPIRED);
-    }
     Ok(Target {
+        permit,
+        frame,
         fd,
         _argv: argv,
         _envp: envp,
@@ -98,7 +99,18 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
 }
 
 impl Target {
+    /// The fresh clock. Config units need the trust deadline and E, builtin
+    /// probes E only, both on the permit's boot, resume and domain.
+    fn clock_allows(&self) -> bool {
+        crate::prompt_io::observe_clock().is_ok_and(|now| self.frame.allows(self.permit, now))
+    }
+
+    /// The clock check and `execveat` back to back: nothing is built or
+    /// freed between them (`self` drops only after a failed exec).
     fn exec(self) -> u8 {
+        if !self.clock_allows() {
+            return RELAY_EXPIRED;
+        }
         // SAFETY: the fd is open; both arrays are NULL-terminated and point
         // at NUL-terminated strings owned by `self`, alive for the call.
         unsafe {
@@ -166,37 +178,47 @@ fn close_range_cloexec() -> Result<(), i32> {
     }
 }
 
-/// Most descriptors the fallback walks; a larger soft limit fails closed.
-const FALLBACK_FD_CAP: u64 = 65_536;
-
-/// Every descriptor from 3 up is close-on-exec. Kernels before 5.11 have no
-/// close_range (ENOSYS; the spec supports 5.7 and later): then each number
-/// below the RLIMIT_NOFILE soft limit gets FD_CLOEXEC. Any other error, or a
-/// limit we cannot read or above `FALLBACK_FD_CAP`, fails closed.
+/// Every descriptor from 3 up is close-on-exec. Without close_range (ENOSYS
+/// before 5.9) or without its CLOEXEC flag (EINVAL on 5.9 and 5.10; the spec
+/// supports 5.7 and later) every open descriptor listed in /proc/self/fd gets
+/// FD_CLOEXEC. Any other error, an unreadable listing or a failed fcntl
+/// fails closed.
 fn cloexec_from_3(close_range: Result<(), i32>) -> bool {
     match close_range {
         Ok(()) => true,
-        Err(libc::ENOSYS) => {
-            // SAFETY: an all-zero rlimit is a valid out-parameter value.
-            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
-            // SAFETY: `lim` is writable.
-            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
-                return false;
-            }
-            cloexec_below(lim.rlim_cur)
-        }
+        Err(libc::ENOSYS | libc::EINVAL) => cloexec_listed(open_fds(), set_cloexec),
         Err(_) => false,
     }
 }
 
-/// FD_CLOEXEC on 3..limit (closed numbers answer EBADF, which is fine).
-fn cloexec_below(limit: u64) -> bool {
-    if limit > FALLBACK_FD_CAP {
-        return false;
+/// The numbers in /proc/self/fd, or `None` when the listing fails.
+fn open_fds() -> Option<Vec<i32>> {
+    std::fs::read_dir("/proc/self/fd")
+        .ok()?
+        .map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+fn set_cloexec(fd: i32) -> Result<(), i32> {
+    // SAFETY: F_SETFD only changes this number's descriptor flags.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
     }
-    for fd in 3..limit as i32 {
-        // SAFETY: F_SETFD only changes this number's descriptor flags.
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+}
+
+/// `set` on every listed number above 2. EBADF is the listing's own
+/// descriptor, closed once the listing ends; any other error fails closed.
+fn cloexec_listed(fds: Option<Vec<i32>>, mut set: impl FnMut(i32) -> Result<(), i32>) -> bool {
+    let Some(fds) = fds else {
+        return false;
+    };
+    for fd in fds.into_iter().filter(|&fd| fd > 2) {
+        match set(fd) {
+            Ok(()) | Err(libc::EBADF) => {}
+            Err(_) => return false,
+        }
     }
     true
 }
@@ -273,7 +295,7 @@ fn open_target(path: &[u8]) -> Result<OwnedFd, u8> {
         let mut head = [0u8; 2];
         // SAFETY: `head` is writable for 2 bytes; `fd` is open for reading.
         let n = unsafe { libc::pread(fd.as_raw_fd(), head.as_mut_ptr().cast(), 2, 0) };
-        if n == 2 && head == *b"#!" {
+        if n < 0 || (n == 2 && head == *b"#!") {
             return Err(RELAY_TARGET);
         }
     }
@@ -751,7 +773,8 @@ mod tests {
 
     // 이것을 실패시키는 것: open_target의 entry_verdict 확인을 지우는 것(남이 쓸 수 있는 파일 실행),
     // shebang 거부를 지우는 것(종료 코드가 RELAY_EXEC로 바뀜), O_NONBLOCK을 지우는 것(FIFO에서
-    // 멈춤), S_IFREG 비교를 지우는 것(FIFO가 RELAY_EXEC로 끝남).
+    // 멈춤), S_IFREG 비교를 지우는 것(FIFO가 RELAY_EXEC로 끝남), pread 실패를 통과로 보는 것
+    // (/proc/self/mem이 RELAY_EXEC로 끝남).
     #[test]
     fn test_relay_refuses_unsafe_targets() {
         let dir = fresh_dir("unsafe");
@@ -765,7 +788,10 @@ mod tests {
         let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
         // SAFETY: `c` is NUL-terminated.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o755) }, 0);
-        for exe in [&writable, &script, &fifo, &dir.join("missing")] {
+        // /proc/self/mem is a regular 0600 file of the relay's own user whose
+        // read at offset 0 fails (EIO): the shebang check cannot answer.
+        let unreadable = PathBuf::from("/proc/self/mem");
+        for exe in [&writable, &script, &fifo, &dir.join("missing"), &unreadable] {
             let (_, bytes) = input(Origin::Config, LIVE, b"");
             let got = outcome(spawn_relay(&bytes, &args(exe, &[b"cat"]), &[]));
             assert!(
@@ -792,24 +818,54 @@ mod tests {
     }
 
     /// The close_range fallback, in a child because it changes every
-    /// descriptor's flags: ENOSYS walks the soft limit, other errors and a
-    /// limit above the cap fail closed.
+    /// descriptor's flags. fd 200 sits above a soft RLIMIT_NOFILE of 64, which
+    /// a walk up to the limit would miss.
     #[test]
     #[ignore = "child: changes this process's descriptor flags"]
     fn cloexec_child() {
-        // SAFETY: fd 0 is open; the duplicate is not close-on-exec.
-        let fd = unsafe { libc::dup(0) };
+        // SAFETY: fd 0 is open; the duplicates are not close-on-exec.
+        let low = unsafe { libc::dup(0) };
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::dup2(0, 200) }, 200);
+        let lim = libc::rlimit {
+            rlim_cur: 64,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        // SAFETY: `lim` is initialized; lowering the soft limit leaves fd 200 open.
+        let mut lowered = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) } == 0;
+        if !lowered {
+            let hard = libc::rlimit {
+                rlim_cur: 64,
+                rlim_max: 4096,
+            };
+            // SAFETY: as above, for a finite hard limit.
+            lowered = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &hard) } == 0;
+        }
         let cloexec = |fd| {
             // SAFETY: F_GETFD only reads flags.
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             flags & libc::FD_CLOEXEC != 0
         };
-        let before = cloexec(fd);
-        let enosys = cloexec_from_3(Err(libc::ENOSYS));
-        let after = cloexec(fd);
-        let einval = cloexec_from_3(Err(libc::EINVAL));
-        let over = cloexec_below(FALLBACK_FD_CAP + 1);
-        let line = format!("{CLOCK_TAG} {before} {enosys} {after} {einval} {over}\n");
+        let clear = || {
+            for fd in [low, 200] {
+                // SAFETY: F_SETFD only changes this descriptor's flags.
+                unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+            }
+        };
+        let marked = || cloexec(low) && cloexec(200) && ![0, 1, 2].into_iter().any(cloexec);
+        let mut got = vec![lowered, !cloexec(low) && !cloexec(200)];
+        for errno in [libc::ENOSYS, libc::EINVAL] {
+            clear();
+            got.push(cloexec_from_3(Err(errno)));
+            got.push(marked());
+        }
+        got.push(cloexec_from_3(Err(libc::EPERM)));
+        got.push(cloexec_listed(None, |_| Ok(())));
+        got.push(cloexec_listed(Some(vec![5]), |_| Err(libc::EPERM)));
+        got.push(cloexec_listed(Some(vec![5]), |_| Err(libc::EBADF)));
+        got.push(cloexec_listed(Some(vec![0, 1, 2]), |_| Err(libc::EPERM)));
+        let words: Vec<String> = got.iter().map(bool::to_string).collect();
+        let line = format!("{CLOCK_TAG} {}\n", words.join(" "));
         put(
             // SAFETY: fd 1 is the parent's capture pipe; ManuallyDrop keeps it open.
             &std::mem::ManuallyDrop::new(unsafe { OwnedFd::from_raw_fd(1) }),
@@ -819,9 +875,10 @@ mod tests {
         unsafe { libc::_exit(0) }
     }
 
-    // 이것을 실패시키는 것: cloexec_from_3의 ENOSYS 분기를 지우는 것(5.11 미만 커널에서 실행 불가),
-    // 대체 루프를 지우는 것(fd가 close-on-exec가 아님), 다른 오류를 통과시키는 것, 상한 검사를
-    // 지우는 것.
+    // 이것을 실패시키는 것: 대체 경로에서 ENOSYS나 EINVAL 분기를 지우는 것(5.11 미만 커널에서
+    // 실행 불가), /proc/self/fd 열거 대신 소프트 상한까지만 도는 것(fd 200을 놓침), fcntl 오류를
+    // 무시하거나 EBADF까지 거부하는 것, 열거 실패를 통과시키는 것, 0·1·2를 건드리는 것, 그 밖의
+    // close_range 오류를 통과시키는 것.
     #[test]
     fn test_relay_close_range_fallback() {
         let out = Command::new(std::env::current_exe().unwrap())
@@ -841,7 +898,9 @@ mod tests {
         let lines: Vec<&str> = text.lines().filter(|l| l.starts_with(CLOCK_TAG)).collect();
         assert_eq!(
             lines,
-            [format!("{CLOCK_TAG} false true true false false")],
+            [format!(
+                "{CLOCK_TAG} true true true true true true false false false true true"
+            )],
             "{text}"
         );
     }
@@ -890,19 +949,39 @@ mod tests {
                 .into_iter()
                 .map(OsString::from_vec)
                 .collect();
+            // SAFETY: fd 0 is open; the duplicate is not close-on-exec.
+            let leak = unsafe { libc::dup(0) };
             let before = crate::prompt_io::clock_reads();
-            let code = match prepare(&words) {
-                Ok(_) => 0,
+            let prepared = prepare(&words);
+            let mid = crate::prompt_io::clock_reads();
+            // fd 3 is no longer the input pipe: closed, or reused by the
+            // executable's descriptor (the lowest free number after the close).
+            // SAFETY: an all-zero stat is a valid out-parameter value.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: `st` is writable; a closed fd 3 answers -1.
+            let closed = unsafe { libc::fstat(3, &mut st) } != 0
+                || st.st_mode & libc::S_IFMT != libc::S_IFIFO;
+            // SAFETY: F_GETFD only reads flags.
+            let marked = unsafe { libc::fcntl(leak, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+            let code = match prepared {
+                Ok(target) if target.clock_allows() => 0,
+                Ok(_) => RELAY_EXPIRED,
                 Err(c) => c,
             };
             let after = crate::prompt_io::clock_reads();
-            // SAFETY: F_GETFD only reads flags; -1 means fd 3 is closed.
-            let closed = unsafe { libc::fcntl(3, libc::F_GETFD) } == -1;
-            let reads: Vec<String> = (0..4).map(|i| (after[i] - before[i]).to_string()).collect();
+            let delta = |a: [u32; 4], b: [u32; 4]| {
+                (0..4)
+                    .map(|i| (b[i] - a[i]).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
             out.push_str(&format!(
-                "{CLOCK_TAG} {name} {code} {} {closed}\n",
-                reads.join(",")
+                "{CLOCK_TAG} {name} {code} {} {} {closed} {marked}\n",
+                delta(before, mid),
+                delta(mid, after)
             ));
+            // SAFETY: `leak` is this loop's duplicate, closed once.
+            unsafe { libc::close(leak) };
         }
         put(
             // SAFETY: fd 1 is the parent's capture pipe; ManuallyDrop keeps it open.
@@ -913,10 +992,11 @@ mod tests {
         unsafe { libc::_exit(0) }
     }
 
-    // GATE-CLOCK-READS.4. 실행 단위마다 exec 전 시계 읽기는 Identity 한 번이고, 실행 파일 확인이
-    // 실패한 단위는 시계를 읽지 않는다(시계가 마지막). 이것을 실패시키는 것: prepare에 시계 읽기를
-    // 하나 더하거나 지우는 것, 시계 읽기를 open_target 앞으로 옮기는 것(missing이 RELAY_EXPIRED와
-    // 읽기 1로 바뀜), fd 3 close를 지우는 것(close_range는 close-on-exec만 켠다).
+    // GATE-CLOCK-READS.4. 실행 단위마다 exec 전 시계 읽기는 Identity 한 번이고, prepare(fd 3 닫기,
+    // 실행 파일 확인, close-on-exec)는 시계를 읽지 않으며, 실행 파일 확인이 실패한 단위는 시계를
+    // 읽지 않는다(시계가 마지막). 이것을 실패시키는 것: 시계 읽기를 하나 더하거나 지우는 것, 시계
+    // 확인을 prepare 안(open_target 앞이나 close-on-exec 앞)으로 옮기는 것, fd 3 close를 지우는
+    // 것(close_range는 close-on-exec만 켠다), close-on-exec 처리를 지우는 것.
     #[test]
     fn test_relay_pre_exec_clock_reads() {
         let out = Command::new(std::env::current_exe().unwrap())
@@ -937,9 +1017,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                format!("{CLOCK_TAG} live 0 0,0,0,1 true"),
-                format!("{CLOCK_TAG} expired {RELAY_EXPIRED} 0,0,0,1 true"),
-                format!("{CLOCK_TAG} missing {RELAY_TARGET} 0,0,0,0 true"),
+                format!("{CLOCK_TAG} live 0 0,0,0,0 0,0,0,1 true true"),
+                format!("{CLOCK_TAG} expired {RELAY_EXPIRED} 0,0,0,0 0,0,0,1 true true"),
+                format!("{CLOCK_TAG} missing {RELAY_TARGET} 0,0,0,0 0,0,0,0 true false"),
             ],
             "{text}\n{}",
             String::from_utf8_lossy(&out.stderr)
