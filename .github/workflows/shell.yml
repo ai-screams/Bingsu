@@ -486,7 +486,7 @@ jobs:
           set -o pipefail
           cargo test -p bingsu-core --lib --release | tee "$RUNNER_TEMP/b1-core.txt"
           grep -Fx 'test front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker ... ok' "$RUNNER_TEMP/b1-core.txt"
-          grep -Fx 'test front::staged::tests::cases::finish_refuses_permit_when_final_clock_reaches_deadline ... ok' "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::cases::finish_refuses_units_when_final_clock_reaches_deadline ... ok' "$RUNNER_TEMP/b1-core.txt"
           grep -Fx 'test front::staged::tests::cases::staged_plan_emits_fixed_clock_operations_per_path ... ok' "$RUNNER_TEMP/b1-core.txt"
       - name: Retain B1 failure evidence
         if: failure()
