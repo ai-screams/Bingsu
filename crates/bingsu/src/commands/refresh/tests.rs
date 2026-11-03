@@ -254,7 +254,7 @@ fn fact_schema_mismatch_recompiles_with_unchanged_source_and_build() {
     for (version, generation) in [(1u16, 2), (3, 3)] {
         let mut bytes = f.bytes("snapshot");
         let end = bytes.len() - f.snap().metadata.len();
-        assert_eq!(&bytes[192..204], b"BNGCFG04\x04\0\x02\0");
+        assert_eq!(&bytes[192..204], b"BNGCFG05\x05\0\x02\0");
         let front = bingsu_core::snapshot_codec::front_len(&bytes[192..end], end - 192).unwrap();
         bytes[202..204].copy_from_slice(&version.to_le_bytes());
         let crc = snapshot::crc32c(&[
@@ -1085,7 +1085,6 @@ struct FrontView {
     record: Vec<u8>,
     status: bingsu_core::status::Status,
     units: Vec<bingsu_core::config::compile::ExecUnit>,
-    permit: Option<bingsu_core::handoff::Permit>,
 }
 fn read_front(f: &Fx) -> FrontView {
     read_front_at(f, clock())
@@ -1102,7 +1101,6 @@ fn read_front_at(f: &Fx, at: Clock) -> FrontView {
         record: r.record,
         status: r.status,
         units: r.execution.units().to_vec(),
-        permit: r.execution.permit(),
     }
 }
 fn argv(front: &FrontView) -> Vec<Vec<String>> {
@@ -1125,7 +1123,7 @@ fn kill_at(f: &Fx, point: Checkpoint) {
     assert!(!child.wait().unwrap().success());
 }
 // 세대 일치(GATE-GENERATION.1·2): 어느 중단점에서 죽여도 앞단은 표의 snapshot·marker 조합 하나를
-// 고르고, 그 조합을 죽이지 않고 써 둔 대조와 레코드·상태·실행 단위·permit이 모두 같다.
+// 고르고, 그 조합을 죽이지 않고 써 둔 대조와 레코드·상태·실행 단위가 모두 같다.
 // 이것을 실패시키는 것: Marker를 Snapshot보다 먼저 rename하는 것, 앞단의 짝 비교(eligible의 id 비교와
 // staged의 Pair 분기)를 없애는 것, 다음 도우미가 짝을 맞추지 않고 끝내는 것.
 #[test]
@@ -1158,16 +1156,16 @@ fn front_matches_checkpoint_control_at_every_kill_point() {
         (old.status, argv(&old)),
         (Status::OK_NONE, command("NEVER_EXECUTE"))
     );
-    assert!(old.permit.is_some());
+    assert!(!old.units.is_empty());
     assert_eq!(
         (new.status, argv(&new)),
         (Status::OK_NONE, command("NEVER_EXECUTE_NEW"))
     );
-    assert!(new.permit.is_some());
+    assert!(!new.units.is_empty());
     // The mixed control selects the new snapshot (its layout) and approves nothing.
     assert_eq!(mixed.status, Status::DEGRADED_TRUST_MISMATCH);
     assert!(mixed.units.is_empty());
-    assert_eq!(mixed.permit, None);
+    assert!(mixed.units.is_empty());
     assert_ne!(mixed.record, old.record);
     assert_ne!(mixed.record, new.record);
     // The new layout draws ASCII glyphs; the old one draws '❯'.
@@ -1233,7 +1231,7 @@ fn front_matches_checkpoint_control_at_every_kill_point() {
         if new_snapshot && !new_marker {
             assert_eq!(got.status, Status::DEGRADED_TRUST_MISMATCH, "{point:?}");
             assert!(got.units.is_empty(), "{point:?}");
-            assert_eq!(got.permit, None, "{point:?}");
+            assert!(got.units.is_empty(), "{point:?}");
         }
         // The next helper finishes publication with a matching pair.
         let next = f.run();
@@ -1262,7 +1260,7 @@ fn marker_disagreeing_in_generation_or_summary_launches_no_unit() {
         (allowed.status, argv(&allowed)),
         (Status::OK_NONE, command("NEVER_EXECUTE"))
     );
-    assert!(allowed.permit.is_some());
+    assert!(!allowed.units.is_empty());
     for (what, change) in [
         (
             "generation",
@@ -1276,7 +1274,7 @@ fn marker_disagreeing_in_generation_or_summary_launches_no_unit() {
         let got = read_front(&f);
         assert_eq!(got.status, Status::DEGRADED_TRUST_MISMATCH, "{what}");
         assert!(got.units.is_empty(), "{what}");
-        assert_eq!(got.permit, None, "{what}");
+        assert!(got.units.is_empty(), "{what}");
     }
 }
 /// P-R4 (user ruling 2026-10-15): a file that fails its safety check or whose
@@ -1336,7 +1334,7 @@ fn assert_drops_only_that_files_units(damage: &str) {
         (Status::OK_NONE, command("KEEP")),
         "{damage}"
     );
-    assert!(got.permit.is_some(), "{damage}");
+    assert!(!got.units.is_empty(), "{damage}");
 }
 /// Linux POSIX access ACL with a named entry, then group write: the mode's
 /// group bits become the mask, which `fs_trust` cannot decide (L-R7).
@@ -1443,7 +1441,7 @@ fn confirmed_trust_or_compile_failure_writes_invalid_marker_and_next_prompt_degr
     let got = read_front(&f);
     assert_eq!(got.status, Status::DEGRADED_TRUST_INVALID);
     assert!(got.units.is_empty());
-    assert_eq!(got.permit, None);
+    assert!(got.units.is_empty());
     // The display stays: the same layout as before, now with the warning.
     assert!(got.record.windows(3).any(|w| w == "❯".as_bytes()));
     assert_ne!(got.record, shown.record);
@@ -2164,15 +2162,10 @@ fn chmod_g_w_after_verified_at_plus_t_approves_no_unit() {
         (inside.status, argv(&inside)),
         (Status::OK_NONE, command("NEVER_EXECUTE"))
     );
-    assert_eq!(
-        inside.permit.map(|p| p.deadline),
-        Some(verified + snapshot::T_NS)
-    );
     for now in [verified + snapshot::T_NS, verified + 2 * snapshot::T_NS] {
         let past = read_front_at(&f, at(now));
         assert_eq!(past.status, Status::DEGRADED_TRUST_EXPIRED, "{now}");
         assert!(past.units.is_empty(), "{now}");
-        assert_eq!(past.permit, None, "{now}");
     }
 }
 // 훑기 중 변경(GATE-EXEC-DEADLINE.2): 원본을 다 읽은 직후(Checkpoint::Read, 최종 재확인 전) 설정 파일에

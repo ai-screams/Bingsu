@@ -430,6 +430,56 @@ mod cases {
         rejected(&c);
     }
 
+    // 이것을 실패시키는 것: id 중복 검사를 지우는 것(같은 id가 둘이면 id 조회가 모호해진다).
+    #[test]
+    fn test_validate_rejects_duplicate_exec_id() {
+        let mut c = runnable_config();
+        let twin = c.exec_units[0].clone();
+        c.exec_units.push(twin);
+        rejected(&c);
+    }
+
+    // 이것을 실패시키는 것: namespace 검사를 지우는 것(내장·플러그인 id를 실행 단위로 받는다).
+    #[test]
+    fn test_validate_rejects_non_custom_namespace() {
+        for id in ["git", "dir", "vendor/name"] {
+            let mut c = runnable_config();
+            c.exec_units[0].id = id.into();
+            rejected(&c);
+        }
+    }
+
+    // 이것을 실패시키는 것: origins 검사를 지우는 것(컴파일러는 `kind` 키 출처를 항상 남긴다).
+    #[test]
+    fn test_validate_rejects_empty_origins() {
+        for not_run in [None, Some(NotRun::Disabled)] {
+            let mut c = runnable_config();
+            c.exec_units[0].origins.clear();
+            c.exec_units[0].not_run = not_run;
+            rejected(&c);
+        }
+    }
+
+    // 이것을 실패시키는 것: `>= bands.len()` 검사를 지우거나 `>`로 바꾸는 것(없는 구간 참조를 실행 가능으로 받는다),
+    // UnknownBand 단위까지 거부해 컴파일러가 만든 스냅샷이 되읽히지 않는 것.
+    #[test]
+    fn unknown_band_reference_is_kept_only_on_a_unit_that_never_runs() {
+        let mut c = runnable_config();
+        let n = c.bands.len() as u16;
+        assert!(n > 0);
+        for r in c.exec_units[0].shown_at.iter_mut() {
+            r.band = Some(n);
+        }
+        rejected(&c);
+        c.exec_units[0].not_run = Some(NotRun::UnknownBand);
+        assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
+        for r in c.exec_units[0].shown_at.iter_mut() {
+            r.band = Some(n - 1);
+        }
+        c.exec_units[0].not_run = None;
+        assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
+    }
+
     // 이것을 실패시키는 것: 거부 사유가 출처에 없는 실행 키를 가리켜도 받는 것.
     #[test]
     fn unsafe_file_reason_requires_origin_key() {
@@ -696,7 +746,7 @@ mod cases {
         });
         bad.push(c.clone());
         c.exec_units[0].shown_at[0].line = 1;
-        c.exec_units[0].shown_at[0].band = Some("absent".into());
+        c.exec_units[0].shown_at[0].band = Some(c.bands.len() as u16);
         bad.push(c);
         for (i, c) in bad.iter().enumerate() {
             assert!(encode_compiled(c).is_err(), "encode {i}");

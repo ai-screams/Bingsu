@@ -54,7 +54,7 @@ pub fn config() -> CompiledConfig {
         trust,
     };
     c.exec_units.push(ExecUnit {
-        id: "lang/demo".into(),
+        id: "custom/demo".into(),
         policy: ExecPolicy::Language {
             interpreter: Some("python".into()),
             version_argv: vec!["--version".into()],
@@ -67,7 +67,7 @@ pub fn config() -> CompiledConfig {
             ("detect_files".into(), origin(Trust::Unsafe)),
         ],
         approved_by: vec![LayoutRef {
-            band: Some("wide".into()),
+            band: Some(0),
             line: 1,
             side: Side::Right,
             origin: Some(origin(Trust::Executable)),

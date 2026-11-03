@@ -1,4 +1,4 @@
-//! BNGCFG04: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG05: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -20,7 +20,7 @@ use crate::{
     diag::SourceId,
     diag_widths::WidthRun,
     icons::IconSet,
-    ident::parse_segment_id,
+    ident::{Namespace, parse_segment_id},
     layout::When,
     layout_view::FrontConfig,
     shorten::{Keep, Method},
@@ -46,11 +46,11 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG04";
-const VERSION: u16 = 4;
+const MAGIC: &[u8; 8] = b"BNGCFG05";
+const VERSION: u16 = 5;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
-    crate::snapshot::crc32c(&[b"bingsu-compiled-v4\0", section])
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v5\0", section])
 }
 struct Reader<'a> {
     rest: &'a [u8],
@@ -701,6 +701,7 @@ impl Wire for NotRun {
                 2u8.put(o);
                 key.put(o)
             }
+            Self::UnknownBand => 3u8.put(o),
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -708,6 +709,7 @@ impl Wire for NotRun {
             0 => Self::Disabled,
             1 => Self::NotInTrustedLayout,
             2 => Self::UnsafeFile { key: Wire::get(r)? },
+            3 => Self::UnknownBand,
             _ => return Err(Error::Tag),
         })
     }
@@ -1414,8 +1416,14 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
             }
         }
     }
+    let mut ids = BTreeSet::new();
     for u in c.exec_units {
-        if parse_segment_id(&u.id).is_err() {
+        // A unit is looked up by id, and the compiler always writes at least
+        // the `kind` key of a custom segment.
+        if !parse_segment_id(&u.id).is_ok_and(|id| id.namespace() == Namespace::Custom)
+            || !ids.insert(u.id.as_str())
+            || u.origins.is_empty()
+        {
             return Err(Error::Shape);
         }
         // Recheck the source compiler's permission boundary for either
@@ -1436,7 +1444,9 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
             valid_origin(o)?;
         }
         for r in u.approved_by.iter().chain(&u.shown_at) {
-            if r.line > 2 || r.band.as_ref().is_some_and(|n| !named(n)) {
+            // An unknown band index is kept only on a unit that never runs for it.
+            let unknown = r.band.is_some_and(|b| usize::from(b) >= c.bands.len());
+            if r.line > 2 || (unknown && u.not_run != Some(NotRun::UnknownBand)) {
                 return Err(Error::Shape);
             }
             if let Some(o) = &r.origin {
