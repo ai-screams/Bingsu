@@ -125,7 +125,16 @@ impl Cwd {
 /// Relay arguments after argv[0]:
 /// `__exec-v2 --permit-fd=3 <version> <executable> <cwd> -- <argv...>`.
 /// Deadlines and the environment never travel in argv.
-pub fn relay_args<'a>(executable: &'a [u8], cwd: Cwd, argv: &[&'a [u8]]) -> Vec<&'a [u8]> {
+/// A NUL in the executable or a word is refused: the C string would end
+/// there and the bytes after it would become separate words.
+pub fn relay_args<'a>(
+    executable: &'a [u8],
+    cwd: Cwd,
+    argv: &[&'a [u8]],
+) -> Result<Vec<&'a [u8]>, FrameError> {
+    if executable.contains(&0) || argv.iter().any(|w| w.contains(&0)) {
+        return Err(FrameError::Utf8);
+    }
     let mut out = Vec::with_capacity(6 + argv.len());
     out.extend([
         ENTRY.as_bytes(),
@@ -136,7 +145,7 @@ pub fn relay_args<'a>(executable: &'a [u8], cwd: Cwd, argv: &[&'a [u8]]) -> Vec<
         b"--",
     ]);
     out.extend_from_slice(argv);
-    out
+    Ok(out)
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct RelayArgs<'a> {
@@ -377,7 +386,7 @@ mod tests {
     #[test]
     fn relay_args_fixed_positions() {
         let argv: [&[u8]; 3] = [b"kubectl", b"--", b"--context=x"];
-        let args = relay_args(b"/usr/bin/kubectl", Cwd::UntrustedCurrent, &argv);
+        let args = relay_args(b"/usr/bin/kubectl", Cwd::UntrustedCurrent, &argv).unwrap();
         let parsed = parse_relay_args(&args).unwrap();
         assert_eq!(parsed.executable, b"/usr/bin/kubectl");
         assert_eq!(parsed.cwd, Cwd::UntrustedCurrent);
@@ -391,9 +400,30 @@ mod tests {
         let mut bad = args.clone();
         bad[4] = b"current";
         assert_eq!(parse_relay_args(&bad), Err(FrameError::Kind));
-        let empty = relay_args(b"/bin/true", Cwd::Neutral, &[]);
+        let empty = relay_args(b"/bin/true", Cwd::Neutral, &[]).unwrap();
         assert_eq!(parse_relay_args(&empty), Err(FrameError::Short));
         assert_eq!(parse_relay_args(&args[..5]), Err(FrameError::Short));
+    }
+
+    // 이것을 실패시키는 것: relay_args의 NUL 검사(실행 파일 또는 단어) 하나를 지우는 것. C 문자열로
+    // 넘기면 NUL에서 끊겨, 실행 파일 안에 숨긴 `neutral`·`--`가 cwd·구분자 자리를 차지하고 나머지가
+    // 대상 argv가 된다.
+    #[test]
+    fn relay_args_refuse_nul() {
+        let words: [&[u8]; 1] = [b"kubectl"];
+        assert_eq!(
+            relay_args(
+                b"/bin/sh\0neutral\0--\0-c\0id",
+                Cwd::UntrustedCurrent,
+                &words
+            ),
+            Err(FrameError::Utf8)
+        );
+        let words: [&[u8]; 2] = [b"kubectl", b"ctx\0--evil"];
+        assert_eq!(
+            relay_args(b"/usr/bin/kubectl", Cwd::Neutral, &words),
+            Err(FrameError::Utf8)
+        );
     }
 
     // 이것을 실패시키는 것: relay_input의 `total > cap` 검사를 지우거나 read_relay_input의 cap 검사를

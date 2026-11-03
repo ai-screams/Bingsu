@@ -39,8 +39,10 @@ impl Policy {
     }
 }
 
-/// One config unit of the grant. `digest` is what the helper approved;
-/// the supervisor recomputes it from the other fields before spawning.
+/// One config unit of the grant. The supervisor recomputes `digest` from
+/// the other fields: a consistency check between the policy and its digest
+/// inside one frame. That nothing outside the grant runs rests on the fixed
+/// lists of this single frame and its single writer, the helper.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit {
     pub id: String,
@@ -234,8 +236,8 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
 }
 
 /// One whole frame. Refused before any allocation unless the header, the
-/// exact length and the CRC agree; the body then allocates at most its own
-/// bytes.
+/// exact length and the CRC agree; the body then allocates a constant
+/// multiple of its own size.
 pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
     let total = frame_len(bytes)?;
     if bytes.len() < total {
@@ -263,12 +265,12 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                         let n = r.u8()?;
                         let mut argv = Vec::new();
                         for _ in 0..n {
-                            argv.push(r.bytes16()?.to_vec());
+                            argv.push(no_nul(r.bytes16()?)?.to_vec());
                         }
                         Policy::Argv { argv }
                     }
                     1 => Policy::UnsafeShell {
-                        script: r.bytes16()?.to_vec(),
+                        script: no_nul(r.bytes16()?)?.to_vec(),
                     },
                     _ => return Err(Error::Kind),
                 };
@@ -278,7 +280,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                 let n = r.u8()?;
                 let mut env_allow = Vec::new();
                 for _ in 0..n {
-                    env_allow.push(r.bytes16()?.to_vec());
+                    env_allow.push(no_nul(r.bytes16()?)?.to_vec());
                 }
                 units.push(Unit {
                     id,
@@ -295,7 +297,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                 let profile = r.u8()?;
                 probes.push(Probe {
                     profile,
-                    executable: r.bytes16()?.to_vec(),
+                    executable: no_nul(r.bytes16()?)?.to_vec(),
                 });
             }
             Message::Grant(Grant {
@@ -341,6 +343,14 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
         return Err(Error::Trailing);
     }
     Ok(m)
+}
+
+/// A word with a NUL would end early in a C string and shift the words after it.
+fn no_nul(w: &[u8]) -> Result<&[u8], Error> {
+    if w.contains(&0) {
+        return Err(Error::Utf8);
+    }
+    Ok(w)
 }
 
 fn refusal_tag(r: Refusal) -> u8 {
@@ -558,6 +568,36 @@ mod tests {
             policy_digest(&one, Cwd::Neutral, 0, &[Vec::new()]),
             policy_digest(&two, Cwd::Neutral, 0, &[])
         );
+    }
+
+    // 이것을 실패시키는 것: decode의 argv 단어·script·env_allow 이름·실행 파일 경로 no_nul 검사
+    // 하나를 지우는 것(NUL 뒤 바이트가 C 문자열에서 다른 단어가 됨).
+    #[test]
+    fn decode_refuses_nul_in_words() {
+        let Message::Grant(base) = grant() else {
+            unreachable!()
+        };
+        let mut cases = Vec::new();
+        let mut g = base.clone();
+        g.units[0].policy = Policy::Argv {
+            argv: vec![b"kubectl\0--".to_vec()],
+        };
+        cases.push(g);
+        let mut g = base.clone();
+        g.units[1].policy = Policy::UnsafeShell {
+            script: b"true\0rm".to_vec(),
+        };
+        cases.push(g);
+        let mut g = base.clone();
+        g.units[0].env_allow = vec![b"KUBE\0LD_PRELOAD".to_vec()];
+        cases.push(g);
+        let mut g = base.clone();
+        g.probes[0].executable = b"/usr/bin/go\0neutral".to_vec();
+        cases.push(g);
+        for g in cases {
+            let b = encode(&Message::Grant(g)).unwrap();
+            assert_eq!(decode(&b), Err(Error::Utf8));
+        }
     }
 
     // 이것을 실패시키는 것: decode의 `bytes.len() < total` 검사를 지우는 것

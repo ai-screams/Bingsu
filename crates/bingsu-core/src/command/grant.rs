@@ -3,12 +3,13 @@
 //! to both kinds.
 use super::{
     deadline::{self, Budget},
-    wire::{Grant, policy_digest},
+    wire::{Grant, Policy, policy_digest},
 };
 use crate::{
     handoff::{Origin, Permit},
     snapshot::Clock,
 };
+use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -50,6 +51,52 @@ pub fn approve(
     Ok(deadline::run_deadline(now.now, timeout, limit))
 }
 
+/// Names every config unit may pass (spec, sanitized environment: keep
+/// list), plus every `LC_*`.
+const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
+const KEEP_PREFIX: &[u8] = b"LC_";
+/// Never passed, not even through `env_allow` (U-13 V2): loader injection
+/// and language startup settings. The spec ends the second list with "etc.";
+/// only the names it spells out are here.
+const FORBIDDEN: [&[u8]; 7] = [
+    b"GLIBC_TUNABLES",
+    b"GCONV_PATH",
+    b"NODE_OPTIONS",
+    b"PYTHONSTARTUP",
+    b"PYTHONPATH",
+    b"RUBYOPT",
+    b"PERL5OPT",
+];
+const FORBIDDEN_PREFIX: [&[u8]; 2] = [b"LD_", b"DYLD_"];
+
+fn forbidden(name: &[u8]) -> bool {
+    FORBIDDEN.contains(&name) || FORBIDDEN_PREFIX.iter().any(|p| name.starts_with(p))
+}
+
+/// The target environment of a config unit: `NAME=VALUE\0` entries whose
+/// names are in the keep list or the unit's `env_allow`, and an `env_allow`
+/// with no forbidden name (such a unit is refused as a whole).
+pub fn target_environment_allowed(environment: &[u8], env_allow: &[Vec<u8>]) -> bool {
+    if env_allow.iter().any(|n| forbidden(n)) {
+        return false;
+    }
+    if environment.is_empty() {
+        return true;
+    }
+    let Some(body) = environment.strip_suffix(b"\0") else {
+        return false;
+    };
+    body.split(|&b| b == 0).all(|entry| {
+        let Some(eq) = entry.iter().position(|&b| b == b'=') else {
+            return false;
+        };
+        let name = &entry[..eq];
+        KEEP.contains(&name)
+            || name.starts_with(KEEP_PREFIX)
+            || env_allow.iter().any(|n| n.as_slice() == name)
+    })
+}
+
 /// Approve config unit `index` of `grant`: a unit can only be named by its
 /// place in the grant, its carried policy must hash to the digest the
 /// helper approved, then the trust deadline and budget apply.
@@ -60,7 +107,14 @@ pub fn approve_unit(
     budget: Budget,
 ) -> Result<u64, Refusal> {
     let unit = grant.units.get(index).ok_or(Refusal::Policy)?;
+    // An empty argv would give the target argc 0.
+    if matches!(&unit.policy, Policy::Argv { argv } if argv.is_empty()) {
+        return Err(Refusal::Policy);
+    }
     if policy_digest(&unit.policy, unit.cwd, unit.timeout, &unit.env_allow) != unit.digest {
+        return Err(Refusal::Policy);
+    }
+    if !target_environment_allowed(&unit.environment, &unit.env_allow) {
         return Err(Refusal::Policy);
     }
     approve(
@@ -99,7 +153,7 @@ pub fn approve_probe(
 mod tests {
     use super::*;
     use crate::{
-        command::wire::{Policy, Probe, Unit},
+        command::wire::{Probe, Unit},
         handoff::Cwd,
     };
     use alloc::{vec, vec::Vec};
@@ -264,6 +318,96 @@ mod tests {
             approve_probe(clock(MS), &g, 1, 200 * MS, B),
             Err(Refusal::Policy)
         );
+    }
+
+    fn reseal(u: &mut Unit) {
+        u.digest = policy_digest(&u.policy, u.cwd, u.timeout, &u.env_allow);
+    }
+
+    // 이것을 실패시키는 것: 시계 검사를 신뢰·예산 검사 뒤로 옮기거나, 예산 검사를 신뢰 검사 앞으로
+    // 옮기는 것(겹친 실패의 이유가 바뀜).
+    #[test]
+    fn grant_refusal_order() {
+        let g = grant(TRUST);
+        let late = H - B.reserve;
+        let mut other = clock(late);
+        other.resume = 1;
+        assert_eq!(approve_unit(other, &g, 0, B), Err(Refusal::Clock));
+        assert_eq!(approve_unit(clock(late), &g, 0, B), Err(Refusal::Trust));
+    }
+
+    // 이것을 실패시키는 것: approve_unit의 빈 argv 거부를 지우는 것(대상 argc 0).
+    #[test]
+    fn grant_refuses_empty_argv() {
+        let mut g = grant(TRUST);
+        g.units[0].policy = Policy::Argv { argv: Vec::new() };
+        reseal(&mut g.units[0]);
+        assert_eq!(approve_unit(clock(MS), &g, 0, B), Err(Refusal::Policy));
+    }
+
+    // 이것을 실패시키는 것: approve_unit의 target_environment_allowed 호출을 지우는 것.
+    #[test]
+    fn grant_refuses_environment_outside_rules() {
+        let mut g = grant(TRUST);
+        g.units[0].environment = b"SSH_AUTH_SOCK=/tmp/a\0".to_vec();
+        assert_eq!(approve_unit(clock(MS), &g, 0, B), Err(Refusal::Policy));
+        // Allowed by name: the same unit runs.
+        g.units[0].env_allow = vec![b"SSH_AUTH_SOCK".to_vec()];
+        reseal(&mut g.units[0]);
+        assert!(approve_unit(clock(MS), &g, 0, B).is_ok());
+        // A forbidden name in env_allow refuses the unit even with no value.
+        g.units[0].env_allow.push(b"LD_PRELOAD".to_vec());
+        reseal(&mut g.units[0]);
+        assert_eq!(approve_unit(clock(MS), &g, 0, B), Err(Refusal::Policy));
+    }
+
+    // 이것을 실패시키는 것: env_allow 금지 검사(`env_allow.iter().any(forbidden)`)를 지우는 것,
+    // FORBIDDEN 비교나 FORBIDDEN_PREFIX 비교 하나를 지우는 것.
+    #[test]
+    fn target_environment_forbidden_names_never_pass() {
+        for name in [
+            &b"LD_PRELOAD"[..],
+            b"LD_LIBRARY_PATH",
+            b"DYLD_INSERT_LIBRARIES",
+            b"GLIBC_TUNABLES",
+            b"GCONV_PATH",
+            b"NODE_OPTIONS",
+            b"PYTHONSTARTUP",
+            b"PYTHONPATH",
+            b"RUBYOPT",
+            b"PERL5OPT",
+        ] {
+            let mut entry = name.to_vec();
+            entry.extend_from_slice(b"=x\0");
+            assert!(!target_environment_allowed(&entry, &[name.to_vec()]));
+            assert!(!target_environment_allowed(b"", &[name.to_vec()]));
+        }
+        // Credentials and tool settings can be allowed (V2).
+        assert!(target_environment_allowed(
+            b"GIT_DIR=/r\0",
+            &[b"GIT_DIR".to_vec()]
+        ));
+    }
+
+    // 이것을 실패시키는 것: 빈 환경의 조기 승인을 지우는 것, 끝 NUL 요구(strip_suffix)를 지우는 것,
+    // `=` 없는 항목 거부를 지우는 것, KEEP·LC_ 접두·env_allow 비교 하나를 지우거나 늘 참으로 하는 것.
+    #[test]
+    fn target_environment_format_and_names() {
+        let allow = [b"KUBECONFIG".to_vec()];
+        assert!(target_environment_allowed(b"", &allow));
+        assert!(target_environment_allowed(
+            b"HOME=/h\0USER=u\0LANG=C\0TERM=xterm\0TZ=UTC\0PATH=/usr/bin\0LC_ALL=C\0KUBECONFIG=/k\0",
+            &allow
+        ));
+        // No final NUL, no `=`, an empty entry.
+        assert!(!target_environment_allowed(b"HOME=/h", &allow));
+        assert!(!target_environment_allowed(b"HOME\0", &allow));
+        assert!(!target_environment_allowed(b"HOME=/h\0\0", &allow));
+        // A name outside the keep list and env_allow.
+        assert!(!target_environment_allowed(b"EDITOR=vi\0", &allow));
+        assert!(!target_environment_allowed(b"KUBECONFIG=/k\0", &[]));
+        // A name is compared whole: no prefix of a kept name passes.
+        assert!(!target_environment_allowed(b"HOMEX=/h\0", &allow));
     }
 
     // 이것을 실패시키는 것: run_deadline의 `.min(limit)`을 지우는 것

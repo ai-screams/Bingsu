@@ -21,6 +21,7 @@ pub enum Error {
     Checksum,
     /// A count or size above what the caller allows.
     Limit,
+    /// Not UTF-8, or a NUL byte in a word, script, path or name.
     Utf8,
     /// Bytes after the last field.
     Trailing,
