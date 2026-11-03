@@ -397,12 +397,6 @@ fn locate(word: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
 /// only, and at most the first line's worth of bytes.
 fn starts_with_env_shebang(file: &std::path::Path) -> bool {
     use std::os::unix::fs::OpenOptionsExt as _;
-    // A FIFO or device is never opened; the open file is checked again.
-    // No test tells this name check from the fstat after the open (both
-    // turn the same inputs away); it keeps devices from being opened.
-    if !std::fs::metadata(file).is_ok_and(|m| m.is_file()) {
-        return false;
-    }
     std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
