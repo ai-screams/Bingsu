@@ -200,7 +200,7 @@ fn type_ok(ty: Ty, n: &MNode, path: &str, out: &mut Vec<Diagnostic>) {
             // A string `command` is an error with a suggested array; nothing
             // converts it, since a shell would read the text differently.
             if let MValue::Scalar(Value::Str(s)) = &n.value {
-                if path.starts_with("segment.") && path.ends_with(".command") {
+                if path.ends_with(".command") {
                     d.fix = argv_fix(s).map(|text| crate::diag::Fix {
                         span: n.origin.span,
                         text,
@@ -787,7 +787,8 @@ cache = "30s"
 
     // 문자열 `command`는 E202 오류이고, 셸 문법이 없으면 argv 배열을 제안한다(자동 변환 없음).
     // 이것을 실패시키는 것: fix 생성을 지우는 것, 셸 문자 검사를 지우는 것(인용이 든 글을 쪼개 제안),
-    // 키 조건을 지우는 것(`env_allow` 같은 다른 목록에도 제안).
+    // 키 조건을 지우는 것(`env_allow` 같은 다른 목록에도 제안), 제어 문자 검사를 지우는 것,
+    // 빈 단어 목록 검사를 지우는 것(`[]` 제안).
     #[test]
     fn test_string_command_quick_fix() {
         let one = |body: &str| {
@@ -822,6 +823,10 @@ cache = "30s"
             assert_eq!(one(&body), None, "{shell}");
         }
         assert_eq!(one("env_allow = \"A B\"\ncommand = [\"k\"]\n"), None);
+        // No suggestion without words, or with a control character the
+        // suggested TOML would carry raw.
+        assert_eq!(one("command = \"   \"\n"), None);
+        assert_eq!(one("command = \"a\\u0001b\"\n"), None);
     }
 
     fn toml_str(s: &str) -> String {

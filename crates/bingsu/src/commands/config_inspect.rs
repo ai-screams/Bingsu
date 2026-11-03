@@ -383,7 +383,7 @@ fn locate(word: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     if word.starts_with('/') {
         return Some(PathBuf::from(word));
     }
-    if word.contains('/') || word.is_empty() {
+    if word.contains('/') {
         return None;
     }
     std::env::split_paths(path?)
@@ -435,10 +435,7 @@ fn env_shebang_notes(report: &ConfigReport, path: Option<&std::ffi::OsStr>) -> V
     };
     let mut out = Vec::new();
     for u in c.exec_units.iter().filter(|u| u.not_run.is_none()) {
-        let ExecPolicy::Command {
-            argv, shell: None, ..
-        } = &u.policy
-        else {
+        let ExecPolicy::Command { argv, .. } = &u.policy else {
             continue;
         };
         let (Some(word), Some((_, o))) =
@@ -543,7 +540,7 @@ mod tests {
     // 이것을 실패시키는 것: W411 push를 지우는 것, 인터프리터 비교를 `starts_with(b"/usr/bin/env")`로 넓히는 것
     // (`/usr/bin/envx`도 경고), PATH 찾기를 지우는 것(맨 이름이 경고 없이 지나감), 상대 PATH 폴더 제외를 지우는 것,
     // PATH 폴더에 그 파일이 있는지 보지 않는 것(빈 폴더에서 멈춤), 일반 파일 검사를 지우는 것(FIFO를 읽음),
-    // 실행하지 않는 단위까지 보는 것.
+    // 실행하지 않는 단위까지 보는 것, 상대 argv[0]을 PATH에서 찾는 것.
     #[test]
     fn test_env_shebang_warned() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -597,6 +594,11 @@ mod tests {
         assert!(std::path::Path::new(&relative).join("env-py").is_file());
         let found = std::ffi::OsString::from(format!("{}:{}", empty.display(), dir.display()));
         assert_eq!(warned(&seg("a", "env-py"), Some(&found)), ["custom/a"]);
+        // A relative argv[0] is never looked up, even where PATH has it.
+        assert_eq!(
+            warned(&seg("a", "./env-py"), Some(&found)),
+            Vec::<String>::new()
+        );
         let rel = std::ffi::OsString::from(relative);
         assert_eq!(
             warned(&seg("a", "env-py"), Some(&rel)),

@@ -1776,7 +1776,7 @@ mod tests {
     }
 
     // `cwd = "untrusted-current"`는 경고 W410, 목록 밖 값은 E203이다.
-    // 이것을 실패시키는 것: W410 push를 지우는 것, cwd 키를 다시 자유 문자열로 두는 것.
+    // 이것을 실패시키는 것: W410 push를 지우는 것, W410을 `neutral`에도 내는 것, cwd 키를 다시 자유 문자열로 두는 것.
     #[test]
     fn test_untrusted_current_warns() {
         let r = read(
@@ -1794,7 +1794,7 @@ mod tests {
     // 형식이 방어다: 컴파일 검사를 우회해 `unsafe_shell = false`인 shell 정책을 실행 대상으로 넣은 스냅샷도
     // 허가 형식으로 옮길 변형이 없어 허가 목록에 들어가지 못한다(대상 카나리 단언은 허가를 만드는 C 단계 몫).
     // 이것을 실패시키는 것: from_config의 UnsafeShell 갈래에서 `unsafe_shell: true` 조건을 지우는 것,
-    // shell이 있어도 Argv로 옮기는 것(`shell: None` 조건 삭제).
+    // shell이 있어도 Argv로 옮기는 것(`shell: None` 조건 삭제), argv와 shell이 함께 있어도 UnsafeShell로 옮기는 것.
     #[test]
     fn test_plain_shell_never_reaches_grant() {
         use crate::command::wire::Policy;
