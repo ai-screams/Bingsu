@@ -2617,11 +2617,11 @@ fn object_index_parser_peaks_are_precharged() {
                 &mut out,
                 &mut inflate,
                 &|id, _| {
-                    idx.lookup(id).map(|n| {
+                    Ok(idx.lookup(id).map(|n| {
                         gix_pack::data::decode::entry::ResolvedBase::InPack(
                             pack.entry(idx.pack_offset_at_index(n)).unwrap(),
                         )
-                    })
+                    }))
                 },
                 &mut gix_pack::cache::Never,
             )

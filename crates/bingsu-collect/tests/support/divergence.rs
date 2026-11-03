@@ -792,7 +792,7 @@ fn exhausted_proof_still_validates_cycles() {
             &self,
             oid: &gix_index::hash::oid,
             buffer: &'a mut Vec<u8>,
-        ) -> gix_error::ExnResult<Option<gix_object::Data<'a>>> {
+        ) -> gix_error::Result<Option<gix_object::Data<'a>>> {
             buffer.clear();
             buffer.extend(b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n");
             if oid == id(1) {

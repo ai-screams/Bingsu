@@ -496,7 +496,7 @@ impl gix_object::Find for Synthetic {
         &self,
         oid: &gix_index::hash::oid,
         buffer: &'a mut Vec<u8>,
-    ) -> gix_error::ExnResult<Option<gix_object::Data<'a>>> {
+    ) -> gix_error::Result<Option<gix_object::Data<'a>>> {
         let n = u32::from_str_radix(&oid.to_string()[32..], 16).unwrap();
         if n == 0 || n > self.count + u32::from(self.cycle) {
             return Ok(None);

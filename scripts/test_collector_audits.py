@@ -171,7 +171,7 @@ def test_collector_git_dependency_features_are_exact(tmp_path):
         shutil.copyfile(ROOT / relative, dest)
     workspace = tmp_path / "Cargo.toml"
     original = workspace.read_text().replace("\r\n", "\n")
-    for before, after in [('"=0.56.0"', '"0.56.0"'),
+    for before, after in [('"=0.58.0"', '"0.58.0"'),
                           ('default-features = false', 'default-features = true'),
                           ('features = ["sha1"]', 'features = ["sha1", "sha256"]')]:
         try:
@@ -182,9 +182,9 @@ def test_collector_git_dependency_features_are_exact(tmp_path):
     for name in audit.FORBIDDEN_PACKAGES:
         assert audit.git_policy({f"node\t{name}@1.0.0\t-\t-"}), name
     for feature in (*audit.FORBIDDEN_FEATURES, "parallel-walkdir"):
-        assert audit.git_policy({f"node\tgix-features@0.50.0\t{feature}\t-"}), feature
+        assert audit.git_policy({f"node\tgix-parallel@0.50.1\t{feature}\t-"}), feature
     for name, version in audit.GIT_PINS.items():
-        features = {"gix-object": "sha1", "gix-utils": "bstr"}.get(name, "-")
+        features = audit.GIT_FEATURES.get(name, "-")
         good = f"node\t{name}@{version}\t{features}\t-"
         assert not audit.git_policy({good})
         assert audit.git_policy({good}, front=True)

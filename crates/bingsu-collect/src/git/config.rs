@@ -14,7 +14,7 @@ use bingsu_core::collection::budget::{CONFIG_BYTES, OBJECT_ALLOC};
 pub const SECTION_LIMIT: usize = 256;
 pub const LINE_LIMIT: usize = 1024;
 pub const WORD_LIMIT: usize = 4096;
-// gix-config 0.61.0 (lossy, Events::from_bytes) keeps events in one 56 B-per-
+// gix-config 0.62.2 (lossy, Events::from_bytes) keeps events in one 56 B-per-
 // event scratch Vec. Front matter fills it from capacity 256; the first
 // header collects it into a SmallVec rounded up to a power of two and leaves
 // an empty Vec. Section events then grow that Vec by doubling, and
@@ -73,7 +73,7 @@ pub const WORD_LIMIT: usize = 4096;
 // several implicit keys per line can be refused.
 // git_parser_charges_cover_counted_peak guards these with an allocator, and
 // git_config_derivation_is_pinned ties them to the locked gix-config version.
-pub const GIX_CONFIG_VERSION: &str = "0.61.0";
+pub const GIX_CONFIG_VERSION: &str = "0.62.2";
 const EVENT_BYTES: usize = 56;
 const EVENT_SCRATCH: usize = 256;
 const SECTION_BYTES: usize = 768;

@@ -286,9 +286,9 @@ impl gix_object::Find for SafeObjectDb<'_> {
         &self,
         id: &oid,
         buffer: &'b mut Vec<u8>,
-    ) -> gix_error::ExnResult<Option<Data<'b>>> {
+    ) -> gix_error::Result<Option<Data<'b>>> {
         self.find(id, buffer)
-            .map_err(|error| ObjectError(error).raise_erased())
+            .map_err(|error| ObjectError(error).raise_erased().into_error())
     }
 }
 #[derive(Debug)]
@@ -523,9 +523,11 @@ pub(crate) fn decode<'b>(
     // A thin pack with an external base is unsupported (Partial); it must never
     // trigger a recursive path lookup, alternate, or unmetered allocation.
     let resolve = |base: &oid, _: &mut Vec<u8>| {
-        let position = index.lookup(base)?;
-        let entry = checked_entry(&file, data, index.pack_offset_at_index(position)).ok()?;
-        Some(gix_pack::data::decode::entry::ResolvedBase::InPack(entry))
+        // A base lookup failure stays a missing base; the caller maps both to INVALID.
+        let entry = index.lookup(base).and_then(|position| {
+            checked_entry(&file, data, index.pack_offset_at_index(position)).ok()
+        });
+        Ok(entry.map(gix_pack::data::decode::entry::ResolvedBase::InPack))
     };
     let outcome = file
         .decode_entry(
@@ -603,7 +605,9 @@ pub(crate) fn validate_midx(
         if midx.lookup(id) != Some(n) {
             return Err(INVALID);
         }
-        let (pack, offset) = midx.pack_id_and_pack_offset_at_index(n);
+        let (pack, offset) = midx
+            .pack_id_and_pack_offset_at_index(n)
+            .map_err(|_| INVALID)?;
         let name = midx
             .index_names()
             .get(pack as usize)

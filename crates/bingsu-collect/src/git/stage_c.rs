@@ -253,7 +253,7 @@ impl<T: gix_object::Find> gix_object::Find for CheckedFind<'_, T> {
         &self,
         id: &gix_index::hash::oid,
         buffer: &'b mut Vec<u8>,
-    ) -> gix_error::ExnResult<Option<gix_object::Data<'b>>> {
+    ) -> gix_error::Result<Option<gix_object::Data<'b>>> {
         let data = self.objects.try_find(id, buffer).inspect_err(|error| {
             if let Some(error) = error.downcast_any_ref::<super::io::objects::ObjectError>() {
                 self.error.set(Some(error.0));
@@ -263,7 +263,9 @@ impl<T: gix_object::Find> gix_object::Find for CheckedFind<'_, T> {
             let checked = self.io.account(|meter| checked_commit(data, meter));
             if let Err(error) = checked {
                 self.error.set(Some(error));
-                return Err(super::io::objects::ObjectError(error).raise_erased());
+                return Err(super::io::objects::ObjectError(error)
+                    .raise_erased()
+                    .into_error());
             }
         }
         Ok(data)
