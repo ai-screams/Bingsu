@@ -853,6 +853,31 @@ mod cases {
         rejected(&c);
     }
 
+    // 이것을 실패시키는 것: encode가 transient·vi에도 custom 번호를 허용하는 것(디코드는 COMMON을 내장 번호로만
+    // 읽으므로 인코드는 되고 디코드에서 거부되는 비대칭).
+    #[test]
+    fn transient_and_vi_may_not_name_custom_segments() {
+        let custom = |c: &mut CompiledConfig| {
+            c.custom = vec![CustomText {
+                id: "custom/a".into(),
+                text: "x".into(),
+            }];
+            crate::template::compile::compile_with(
+                "{custom/a}",
+                crate::field::BUILTIN,
+                &["custom/a"],
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let mut c = config();
+        c.transient = custom(&mut c);
+        rejected(&c);
+        let mut c = config();
+        c.vi = custom(&mut c);
+        rejected(&c);
+    }
+
     fn line_bytes(nodes: Vec<Node>, origin: Vec<Span>, fill: Option<usize>) -> Vec<u8> {
         let mut b = bytes(&nodes);
         b.extend(bytes(&origin));

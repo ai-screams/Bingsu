@@ -1313,15 +1313,10 @@ fn nodes_in_range(lines: &[CompiledLine], custom: usize) -> bool {
     })
 }
 pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
-    if !c
-        .variants
-        .iter()
-        .map(|v| v.as_slice())
-        .chain([
-            core::slice::from_ref(&c.transient),
-            core::slice::from_ref(&c.vi),
-        ])
-        .all(|l| nodes_in_range(l, c.custom.len()))
+    // COMMON's own lines are read with built-in numbers only (`parse_sections`).
+    if !c.variants.iter().all(|l| nodes_in_range(l, c.custom.len()))
+        || !nodes_in_range(core::slice::from_ref(&c.transient), 0)
+        || !nodes_in_range(core::slice::from_ref(&c.vi), 0)
     {
         return Err(Error::Shape);
     }
