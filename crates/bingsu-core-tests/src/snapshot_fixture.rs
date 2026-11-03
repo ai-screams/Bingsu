@@ -55,10 +55,6 @@ pub fn config() -> CompiledConfig {
         span: Span { start: 25, end: 99 },
         trust,
     };
-    c.custom.push(bingsu_core::config::compile::CustomText {
-        id: "custom/note".into(),
-        text: "빙수 %!".into(),
-    });
     c.exec_units.push(ExecUnit {
         id: "custom/demo".into(),
         policy: ExecPolicy::Language {

@@ -831,13 +831,18 @@ pub fn compile(
     let base_preset = s(r, &["style", "preset"]).unwrap_or(default_str("style.preset"));
     let banded = bands_of(m)?;
     notes.extend(banded.notes.iter().cloned());
-    let drawn_all = drawn(r, &banded.names);
     let profile = WidthProfile::new(
         int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
         int(r, &["width", "emoji"]).unwrap_or(2) as u8,
     )
     .unwrap_or(WidthProfile::DEFAULT);
-    let custom = text_segments(r, &drawn_all, profile, &mut notes)?;
+    // Without a declared text segment nothing is looked up, so the usual
+    // config compiles exactly as it did before text segments.
+    let custom = if declares_text(r) {
+        text_segments(r, &drawn(r, &banded.names), profile, &mut notes)?
+    } else {
+        Vec::new()
+    };
     let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
     let mut variants = Vec::new();
     let mut mask = 0u32;
@@ -963,8 +968,8 @@ pub fn compile(
         }
         variants.push(compiled);
     }
-    for (id, refs) in &drawn_all {
-        if id.starts_with("custom/") && declared(r, id) && !texts.contains(&id.as_str()) {
+    for (id, refs) in drawn(r, &banded.names) {
+        if id.starts_with("custom/") && declared(r, &id) && !texts.contains(&id.as_str()) {
             let place = refs
                 .first()
                 .and_then(|r| r.origin)
@@ -972,7 +977,7 @@ pub fn compile(
                     id: o.source,
                     span: o.span,
                 });
-            notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id.clone()));
+            notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
         }
     }
     let shown_bands = selectable(&banded.order, &banded.bands);
@@ -1104,6 +1109,14 @@ pub(crate) fn layout_verdict(
         |v: &[LayoutRef], set: &BTreeSet<Option<u16>>| v.iter().any(|r| set.contains(&r.band));
     (!live(approved_by, &reach.approved) || !live(shown_at, &reach.shown))
         .then_some(NotRun::NotInTrustedLayout)
+}
+
+/// Whether any `custom/…` segment is declared with `kind = "text"`.
+fn declares_text(r: &MTable) -> bool {
+    entries(r, &["segment"]).iter().any(|e| {
+        e.key.starts_with("custom/")
+            && matches!(&e.node.value, MValue::Table(t) if s(t, &["kind"]) == Some("text"))
+    })
 }
 
 /// The `kind = "text"` segments some layout draws, sorted by id. A text

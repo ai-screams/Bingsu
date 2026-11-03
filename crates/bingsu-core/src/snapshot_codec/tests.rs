@@ -9,6 +9,7 @@ mod cases {
             bytes: Some(Vec::new()),
             len: 0,
             error: None,
+            segs: usize::MAX,
         };
         v.put(&mut w);
         assert_eq!(w.error, None);
@@ -195,6 +196,7 @@ mod cases {
             bytes: None,
             len: MAX_BYTES,
             error: None,
+            segs: usize::MAX,
         };
         1u8.put(&mut w);
         assert_eq!(w.error, Some(Error::Limit));
@@ -202,6 +204,7 @@ mod cases {
             bytes: None,
             len: 0,
             error: None,
+            segs: usize::MAX,
         };
         // On wasm32 every usize fits the wire; native also verifies failed conversion.
         if let Some(too_large) = (u32::MAX as usize).checked_add(1) {
@@ -312,6 +315,7 @@ mod cases {
             bytes: None,
             len: usize::MAX,
             error: None,
+            segs: usize::MAX,
         };
         w.extend_from_slice(&[0]);
         assert_eq!(w.error, Some(Error::Limit));
@@ -833,24 +837,23 @@ mod cases {
         assert!(!line(n + 1, Some(0), n + 1));
     }
 
-    // 이것을 실패시키는 것: encode의 `validate`가 노드 번호를 보지 않는 것(목록에 없는 custom 번호를 쓰는
-    // 설정이 인코드되고 디코드에서야 거부된다).
+    // 이것을 실패시키는 것: encode가 세그먼트 노드나 필드 노드의 번호를 보지 않는 것(목록에 없는 custom 번호를
+    // 쓰는 설정이 인코드되고 디코드에서야 거부된다). 두 노드 종류를 따로 본다.
     #[test]
     fn encode_rejects_node_numbers_past_the_list() {
-        let mut c = config();
-        c.custom = vec![CustomText {
-            id: "custom/a".into(),
-            text: "x".into(),
-        }];
-        c.variants[0] = crate::template::compile::compile_with(
-            "{custom/a}{custom/a.value}",
-            crate::field::BUILTIN,
-            &["custom/a"],
-        )
-        .unwrap();
-        assert!(encode_compiled(&c).is_ok());
-        c.custom.clear();
-        rejected(&c);
+        for src in ["{custom/a}", "{custom/a.value}"] {
+            let mut c = config();
+            c.custom = vec![CustomText {
+                id: "custom/a".into(),
+                text: "x".into(),
+            }];
+            c.variants[0] =
+                crate::template::compile::compile_with(src, crate::field::BUILTIN, &["custom/a"])
+                    .unwrap();
+            assert!(encode_compiled(&c).is_ok(), "{src}");
+            c.custom.clear();
+            assert_eq!(encode_compiled(&c), Err(Error::Shape), "{src}");
+        }
     }
 
     // 이것을 실패시키는 것: encode가 transient·vi에도 custom 번호를 허용하는 것(디코드는 COMMON을 내장 번호로만
@@ -872,10 +875,10 @@ mod cases {
         };
         let mut c = config();
         c.transient = custom(&mut c);
-        rejected(&c);
+        assert_eq!(encode_compiled(&c), Err(Error::Shape));
         let mut c = config();
         c.vi = custom(&mut c);
-        rejected(&c);
+        assert_eq!(encode_compiled(&c), Err(Error::Shape));
     }
 
     fn line_bytes(nodes: Vec<Node>, origin: Vec<Span>, fill: Option<usize>) -> Vec<u8> {

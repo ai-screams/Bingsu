@@ -79,6 +79,12 @@ struct Writer {
     bytes: Option<Vec<u8>>,
     len: usize,
     error: Option<Error>,
+    /// Segment numbers below this exist where nodes are written now: the
+    /// built-ins in COMMON, then the config's text segments in the variants.
+    /// Checked while writing, not while sizing; the decode checks the same
+    /// per line (`LineCheck`). `usize::MAX` checks nothing (tests that forge
+    /// bytes).
+    segs: usize,
 }
 impl Writer {
     fn extend_from_slice(&mut self, b: &[u8]) {
@@ -832,11 +838,17 @@ impl Wire for Node {
                 v.put(o)
             }
             Self::Segment { seg, mode } => {
+                if o.bytes.is_some() && usize::from(*seg) >= o.segs {
+                    o.error.get_or_insert(Error::Shape);
+                }
                 1u8.put(o);
                 seg.put(o);
                 mode.put(o)
             }
             Self::Field { seg, field } => {
+                if o.bytes.is_some() && usize::from(*seg) >= o.segs {
+                    o.error.get_or_insert(Error::Shape);
+                }
                 2u8.put(o);
                 seg.put(o);
                 field.put(o)
@@ -943,6 +955,7 @@ fn put_compiled(c: &CompiledConfig, o: &mut Writer) {
     for _ in &c.variants {
         o.extend_from_slice(&[0; ENTRY]);
     }
+    o.segs = crate::field::BUILTIN.len() + c.custom.len();
     for (i, v) in c.variants.iter().enumerate() {
         let at = o.len;
         v.put(o);
@@ -967,6 +980,7 @@ fn compiled_size(c: &CompiledConfig) -> Result<usize, Error> {
         bytes: None,
         len: 0,
         error: None,
+        segs: crate::field::BUILTIN.len(),
     };
     put_compiled(c, &mut size);
     match size.error {
@@ -981,6 +995,7 @@ fn write_compiled(c: &CompiledConfig, size: usize) -> Result<Vec<u8>, Error> {
         bytes: Some(bytes),
         len: 0,
         error: None,
+        segs: crate::field::BUILTIN.len(),
     };
     put_compiled(c, &mut out);
     if let Some(e) = out.error {
@@ -1295,31 +1310,7 @@ fn section<T: Wire>(
     }
     Ok((value, r.budget))
 }
-/// Every segment and field a node names exists: segment numbers are the
-/// built-ins and then the config's text segments (the decode checks the
-/// same per line, `LineCheck`).
-fn nodes_in_range(lines: &[CompiledLine], custom: usize) -> bool {
-    let segs = crate::field::BUILTIN.len() + custom;
-    lines.iter().flat_map(|l| l.nodes()).all(|n| match n {
-        Node::Segment { seg, .. } => usize::from(*seg) < segs,
-        Node::Field { seg, field } => {
-            let seg = usize::from(*seg);
-            let decl = crate::field::BUILTIN
-                .get(seg)
-                .unwrap_or(&crate::field::CUSTOM_TEXT);
-            seg < segs && usize::from(*field) < decl.fields.len()
-        }
-        _ => true,
-    })
-}
 pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
-    // COMMON's own lines are read with built-in numbers only (`parse_sections`).
-    if !c.variants.iter().all(|l| nodes_in_range(l, c.custom.len()))
-        || !nodes_in_range(core::slice::from_ref(&c.transient), 0)
-        || !nodes_in_range(core::slice::from_ref(&c.vi), 0)
-    {
-        return Err(Error::Shape);
-    }
     check(&Parts {
         variants: c.variants.len(),
         variant_lines: c
