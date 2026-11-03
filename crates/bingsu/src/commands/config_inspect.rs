@@ -23,7 +23,8 @@ use bingsu_core::{
         report::{self, ConfigReport},
         source::{Catalog, FileKey, Found, Status, Trust, load},
     },
-    diag::{Severity, render_human},
+    diag::{Diagnostic, Place, Severity, render_human},
+    diag_codes as codes,
     fs_trust::Refusal,
 };
 use std::fmt::Write as _;
@@ -374,13 +375,111 @@ pub fn exit_for(i: &Inspection) -> u8 {
     }
 }
 
-fn run_with(render: fn(&Inspection) -> String, exit: fn(&Inspection) -> u8) -> ExitCode {
+/// Where `word` (a unit's `argv[0]`) would be found: an absolute path as
+/// written, a bare name in the first absolute `PATH` folder that has it as a
+/// file. A relative path is never looked up. Only `config check` asks, to
+/// warn early; finding the file a unit runs is the executor's own step.
+fn locate(word: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if word.starts_with('/') {
+        return Some(PathBuf::from(word));
+    }
+    if word.contains('/') || word.is_empty() {
+        return None;
+    }
+    std::env::split_paths(path?)
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(word))
+        .find(|f| f.is_file())
+}
+
+/// Whether the file starts with `#!/usr/bin/env`. Read like other optional
+/// inputs of this crate: nonblocking, no controlling terminal, a regular file
+/// only, and at most the first line's worth of bytes.
+fn starts_with_env_shebang(file: &std::path::Path) -> bool {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(file)
+    else {
+        return false;
+    };
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    // One read: a regular file gives the whole first 256 bytes at once.
+    let mut head = [0u8; 256];
+    let Ok(n) = f.read(&mut head) else {
+        return false;
+    };
+    let Some(rest) = head[..n].strip_prefix(b"#!") else {
+        return false;
+    };
+    let rest = rest.trim_ascii_start();
+    let end = rest
+        .iter()
+        .position(|b| b.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    &rest[..end] == b"/usr/bin/env"
+}
+
+/// W411 for each unit that would run a script whose first line is
+/// `#!/usr/bin/env`: the executor refuses such a script, so `config check`
+/// says so before it is ever tried. Reads files only here, never in a
+/// refresh or the prompt.
+fn env_shebang_notes(report: &ConfigReport, path: Option<&std::ffi::OsStr>) -> Vec<Diagnostic> {
+    use bingsu_core::config::compile::ExecPolicy;
+    let Some(c) = &report.snapshot else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for u in c.exec_units.iter().filter(|u| u.not_run.is_none()) {
+        let ExecPolicy::Command {
+            argv, shell: None, ..
+        } = &u.policy
+        else {
+            continue;
+        };
+        let (Some(word), Some((_, o))) =
+            (argv.first(), u.origins.iter().find(|(k, _)| k == "command"))
+        else {
+            continue;
+        };
+        let Some(file) = locate(word, path).filter(|f| starts_with_env_shebang(f)) else {
+            continue;
+        };
+        out.push(
+            Diagnostic::new(
+                codes::ENV_SHEBANG,
+                Place::Source {
+                    id: o.source,
+                    span: o.span,
+                },
+            )
+            .arg("id", u.id.clone())
+            .arg("path", ctx::show(&file)),
+        );
+    }
+    out
+}
+
+fn run_with(
+    render: fn(&Inspection) -> String,
+    exit: fn(&Inspection) -> u8,
+    scripts: bool,
+) -> ExitCode {
     let Some(user) = User::current() else {
         eprintln!("{}", en(MsgId::NoHome));
         return ctx::code(EXIT_FAILED);
     };
-    match inspect_config(&user, &TrustedEnv::capture()) {
-        Ok(i) => {
+    let env = TrustedEnv::capture();
+    match inspect_config(&user, &env) {
+        Ok(mut i) => {
+            if scripts {
+                let notes = env_shebang_notes(&i.report, env.path.as_deref());
+                i.report.diagnostics.extend(notes);
+            }
             if !ctx::print(&render(&i)) {
                 return ctx::code(EXIT_FAILED);
             }
@@ -394,13 +493,13 @@ fn run_with(render: fn(&Inspection) -> String, exit: fn(&Inspection) -> u8) -> E
 }
 
 pub fn check() -> ExitCode {
-    run_with(render_check, exit_for)
+    run_with(render_check, exit_for, true)
 }
 
 /// `config path` lists; it does not judge, so it succeeds whenever it could
 /// read the folder.
 pub fn path() -> ExitCode {
-    run_with(render_path, path_exit)
+    run_with(render_path, path_exit, false)
 }
 
 fn path_exit(i: &Inspection) -> u8 {
@@ -414,6 +513,123 @@ fn path_exit(i: &Inspection) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bingsu_core::config::source::{ExtendsRef, OpenError, Opened, Resolver};
+
+    struct NoFiles;
+    impl Resolver for NoFiles {
+        fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
+            panic!("no source files")
+        }
+    }
+
+    fn report_of(user: &str) -> ConfigReport {
+        let roots: Vec<_> = [BUILTIN_TOML, user]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| Opened {
+                key: FileKey {
+                    dev: 1,
+                    ino: i as u64,
+                },
+                bytes: text.as_bytes().to_vec(),
+                trust: Trust::Executable,
+                display: vec![b'a' + i as u8],
+            })
+            .collect();
+        report::report(roots, &mut NoFiles, [0, 3, 0], Mode::Dark)
+    }
+
+    // 실행 파일의 첫 줄이 `#!/usr/bin/env`이면 config check가 W411로 미리 알린다(실행기는 그 스크립트를 거부).
+    // 이것을 실패시키는 것: W411 push를 지우는 것, 인터프리터 비교를 `starts_with(b"/usr/bin/env")`로 넓히는 것
+    // (`/usr/bin/envx`도 경고), PATH 찾기를 지우는 것(맨 이름이 경고 없이 지나감), 상대 PATH 폴더 제외를 지우는 것,
+    // PATH 폴더에 그 파일이 있는지 보지 않는 것(빈 폴더에서 멈춤), 일반 파일 검사를 지우는 것(FIFO를 읽음),
+    // 실행하지 않는 단위까지 보는 것.
+    #[test]
+    fn test_env_shebang_warned() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("bingsu-env-shebang-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let script = |name: &str, text: &str| {
+            let f = dir.join(name);
+            std::fs::write(&f, text).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            f
+        };
+        let env = script("env-py", "#!/usr/bin/env python3\nprint(1)\n");
+        let spaced = script("env-sp", "#! /usr/bin/env  sh\n");
+        let abs = script("abs-sh", "#!/bin/sh\necho 1\n");
+        let other = script("envx", "#!/usr/bin/envx sh\n");
+        let seg = |id: &str, word: &str| {
+            format!(
+                "[segment.\"custom/{id}\"]\nkind = \"command\"\ncommand = [\"{word}\"]\n[layout.line1]\nleft = [\"custom/{id}\"]\n"
+            )
+        };
+        let warned = |user: &str, path: Option<&std::ffi::OsStr>| -> Vec<String> {
+            env_shebang_notes(&report_of(user), path)
+                .iter()
+                .map(|d| {
+                    assert_eq!(d.code, codes::ENV_SHEBANG);
+                    d.args
+                        .iter()
+                        .find(|a| a.name == "id")
+                        .unwrap()
+                        .value
+                        .clone()
+                })
+                .collect()
+        };
+        let path = |f: &std::path::Path| f.to_str().unwrap().to_owned();
+        assert_eq!(warned(&seg("a", &path(&env)), None), ["custom/a"]);
+        assert_eq!(warned(&seg("a", &path(&spaced)), None), ["custom/a"]);
+        assert_eq!(warned(&seg("a", &path(&abs)), None), Vec::<String>::new());
+        assert_eq!(warned(&seg("a", &path(&other)), None), Vec::<String>::new());
+        // A bare name is looked up in PATH: the first absolute folder that
+        // has it as a file. A relative folder is skipped even when it names
+        // the same folder from here.
+        let empty = dir.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let up = std::env::current_dir().unwrap().components().count() - 1;
+        let relative = format!(
+            "{}{}",
+            "../".repeat(up),
+            dir.to_str().unwrap().trim_start_matches('/')
+        );
+        assert!(std::path::Path::new(&relative).join("env-py").is_file());
+        let found = std::ffi::OsString::from(format!("{}:{}", empty.display(), dir.display()));
+        assert_eq!(warned(&seg("a", "env-py"), Some(&found)), ["custom/a"]);
+        let rel = std::ffi::OsString::from(relative);
+        assert_eq!(
+            warned(&seg("a", "env-py"), Some(&rel)),
+            Vec::<String>::new()
+        );
+        // Only a regular file is read: a FIFO holding the same first line is not.
+        let fifo = dir.join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let keep = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        assert!(matches!(
+            crate::commands::sys::write_fd(
+                std::os::fd::AsRawFd::as_raw_fd(&keep),
+                b"#!/usr/bin/env sh\n"
+            ),
+            crate::commands::sys::WriteOutcome::Done
+        ));
+        assert!(!starts_with_env_shebang(&fifo));
+        drop(keep);
+        // A unit that does not run is not looked at.
+        let off = seg("a", &path(&env)).replace("kind = ", "enabled = false\nkind = ");
+        assert_eq!(warned(&off, None), Vec::<String>::new());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn incomplete_path_explains_the_partial_list_and_exits_3() {

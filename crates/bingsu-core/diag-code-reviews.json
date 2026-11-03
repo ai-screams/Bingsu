@@ -1,0 +1,8 @@
+[
+  {
+    "before": "5b41d5bdc8111553a2a6caae02d2b6e3c448076a3d61e7a50fb79edaaa20835b",
+    "after": "0120cb9e3b3b54aa1fc4510aa8a53950e54a2fd6b0f3f04ae31515fbd310f34b",
+    "kind": "meaning",
+    "reason": "Adds E211 (shell without unsafe_shell = true), E212 (command and shell forms conflict), E213 (placeholder not a whole command element or inside shell text), W409 (unsafe_shell in use), W410 (cwd = untrusted-current) and W411 (script starts with #!/usr/bin/env). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  }
+]

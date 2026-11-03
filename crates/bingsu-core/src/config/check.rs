@@ -196,12 +196,42 @@ fn type_ok(ty: Ty, n: &MNode, path: &str, out: &mut Vec<Diagnostic>) {
         (Ty::Bool, _) => out.push(wrong("true or false", kind)),
         (Ty::Table, _) => out.push(wrong("a table", kind)),
         (Ty::Strings | Ty::Segments | Ty::EnumList(_), _) => {
-            out.push(wrong("an array of strings", kind))
+            let mut d = wrong("an array of strings", kind);
+            // A string `command` is an error with a suggested array; nothing
+            // converts it, since a shell would read the text differently.
+            if let MValue::Scalar(Value::Str(s)) = &n.value {
+                if path.starts_with("segment.") && path.ends_with(".command") {
+                    d.fix = argv_fix(s).map(|text| crate::diag::Fix {
+                        span: n.origin.span,
+                        text,
+                    });
+                }
+            }
+            out.push(d)
         }
         (Ty::Str | Ty::Text | Ty::Enum(_) | Ty::Duration | Ty::Color, _) => {
             out.push(wrong("a string", kind))
         }
     }
+}
+
+/// The array a string `command` most likely means, as TOML: its words split
+/// at spaces. Text with quoting, expansion or other shell syntax has no
+/// such reading, so it gets no suggestion.
+fn argv_fix(s: &str) -> Option<String> {
+    const SHELL: &[char] = &[
+        '"', '\'', '\\', '`', '$', '|', '&', ';', '<', '>', '(', ')', '*', '?', '[', ']', '~', '#',
+    ];
+    if s.chars()
+        .any(|c| SHELL.contains(&c) || (c.is_control() && !c.is_ascii_whitespace()))
+    {
+        return None;
+    }
+    let words: Vec<String> = s
+        .split_ascii_whitespace()
+        .map(|w| format!("\"{w}\""))
+        .collect();
+    (!words.is_empty()).then(|| format!("[{}]", words.join(", ")))
 }
 
 fn is_line_name(k: &str) -> bool {
@@ -753,6 +783,49 @@ cache = "30s"
             .map(|d| d.code)
             .collect();
         assert_eq!(got, [codes::WRONG_TYPE, codes::UNKNOWN_KEY]);
+    }
+
+    // 문자열 `command`는 E202 오류이고, 셸 문법이 없으면 argv 배열을 제안한다(자동 변환 없음).
+    // 이것을 실패시키는 것: fix 생성을 지우는 것, 셸 문자 검사를 지우는 것(인용이 든 글을 쪼개 제안),
+    // 키 조건을 지우는 것(`env_allow` 같은 다른 목록에도 제안).
+    #[test]
+    fn test_string_command_quick_fix() {
+        let one = |body: &str| {
+            let d = check(&merged_with(
+                &alloc::format!("[segment.\"custom/k\"]\nkind = \"command\"\n{body}"),
+                &[],
+            ));
+            assert_eq!(d.len(), 1, "{d:?}");
+            assert_eq!(d[0].code, codes::WRONG_TYPE);
+            d[0].fix.clone()
+        };
+        let fix = one("command = \"kubectl  ctx\"\n").expect("a suggestion");
+        assert_eq!(fix.text, "[\"kubectl\", \"ctx\"]");
+        // The span is the string value, so the suggestion replaces it whole.
+        let src = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = \"kubectl  ctx\"\n";
+        assert_eq!(
+            &src[fix.span.start as usize..fix.span.end as usize],
+            "\"kubectl  ctx\""
+        );
+        // The suggestion is a valid TOML array.
+        assert!(
+            crate::config::tree::parse(alloc::format!("x = {}\n", fix.text).as_bytes()).is_ok()
+        );
+        for shell in [
+            "git log --format='%h'",
+            "ls *.txt",
+            "a | b",
+            "echo $HOME",
+            "a \\\" b",
+        ] {
+            let body = alloc::format!("command = {}\n", toml_str(shell));
+            assert_eq!(one(&body), None, "{shell}");
+        }
+        assert_eq!(one("env_allow = \"A B\"\ncommand = [\"k\"]\n"), None);
+    }
+
+    fn toml_str(s: &str) -> String {
+        alloc::format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
 
     // 이것을 실패시키는 것: 단위 없는 값·1시간 넘는 값·소수를 받는 것.

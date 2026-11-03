@@ -570,10 +570,10 @@
             "x-bingsu-exec": true
           },
           "cwd": {
-            "type": "string",
-            "examples": ["~/work"],
-            "description": "Folder to run in.",
-            "x-bingsu-description-ko": "실행할 폴더.",
+            "enum": ["neutral", "untrusted-current"],
+            "examples": ["neutral"],
+            "description": "Folder to run in: an empty private folder, or the current folder (warned).",
+            "x-bingsu-description-ko": "실행할 폴더: 비어 있는 개인 폴더, 또는 현재 폴더(경고).",
             "x-bingsu-level": "expert",
             "x-bingsu-exec": true
           },
@@ -604,9 +604,9 @@
           },
           "shell": {
             "type": "string",
-            "examples": ["sh"],
-            "description": "Run through this shell (needs unsafe_shell).",
-            "x-bingsu-description-ko": "이 셸로 실행(unsafe_shell 필요).",
+            "examples": ["kubectl config current-context | cut -d/ -f2"],
+            "description": "A shell command line, instead of `command` (needs unsafe_shell).",
+            "x-bingsu-description-ko": "`command` 대신 셸 명령 줄(unsafe_shell 필요).",
             "x-bingsu-level": "expert",
             "x-bingsu-exec": true
           },

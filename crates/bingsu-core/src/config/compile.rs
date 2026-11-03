@@ -95,6 +95,8 @@ pub enum NotRun {
     UnsafeFile { key: String },
     /// A reference names a band index the config does not have.
     UnknownBand,
+    /// `shell` without `unsafe_shell = true` (an error, E211).
+    ShellNotAllowed,
 }
 
 /// One user segment that runs something, with its whole policy, where each
@@ -1206,6 +1208,95 @@ fn unsafe_exec_key(
     Some(k.clone())
 }
 
+/// The placeholder this version replaces (`{branch}` and others come with
+/// the facts they need).
+const PLACEHOLDER: &str = "{dir}";
+
+/// The form rules of one `kind = "command"` segment (spec section 3 "사용자
+/// 명령 실행 모델"): `command` or `shell`, never both; `shell` only with
+/// `unsafe_shell = true`; a placeholder only as one whole `command` element
+/// and never in `shell`; `env_allow` names that can be variable names.
+/// Problems are errors and warnings in `notes`; `true` when `shell` lacks its
+/// explicit allowance, so the unit never runs.
+fn command_form(id: &str, t: &MTable, notes: &mut Vec<Diagnostic>) -> bool {
+    let shell = t.get("shell");
+    let allow = t.get("unsafe_shell");
+    let allowed = boolean(t, &["unsafe_shell"]) == Some(true);
+    let item = |n: &MNode, span| Place::Source {
+        id: n.origin.source,
+        span,
+    };
+    let conflict = |n: &MNode, problem: &'static str| {
+        Diagnostic::new(codes::COMMAND_FORM_CONFLICT, at(n))
+            .arg("id", id)
+            .arg("problem", problem)
+    };
+    let mid = |p: Place, place: &'static str| {
+        Diagnostic::new(codes::PLACEHOLDER_NOT_WHOLE, p)
+            .arg("id", id)
+            .arg("placeholder", PLACEHOLDER)
+            .arg("place", place)
+    };
+    if let (Some(sh), Some(_)) = (shell, t.get("command")) {
+        notes.push(conflict(sh, "`command` and `shell` are both set"));
+    }
+    if let (None, Some(a), true) = (shell, allow, allowed) {
+        notes.push(conflict(a, "`unsafe_shell = true` is set without `shell`"));
+    }
+    if let Some(sh) = shell {
+        if allowed {
+            notes.push(Diagnostic::new(codes::UNSAFE_SHELL_USED, at(sh)).arg("id", id));
+        } else {
+            notes.push(Diagnostic::new(codes::SHELL_NOT_ALLOWED, at(sh)).arg("id", id));
+        }
+        if matches!(&sh.value, MValue::Scalar(Value::Str(v)) if v.contains(PLACEHOLDER)) {
+            notes.push(mid(at(sh), "in `shell` text"));
+        }
+    }
+    if let Some(
+        n @ MNode {
+            value: MValue::Array(words),
+            ..
+        },
+    ) = t.get("command")
+    {
+        for w in words {
+            if let Value::Str(v) = &w.value {
+                if v != PLACEHOLDER && v.contains(PLACEHOLDER) {
+                    notes.push(mid(item(n, w.span), "inside a longer element"));
+                }
+            }
+        }
+    }
+    if let Some(
+        n @ MNode {
+            value: MValue::Array(names),
+            ..
+        },
+    ) = t.get("env_allow")
+    {
+        for w in names {
+            if let Value::Str(v) = &w.value {
+                if v.is_empty() || v.contains(['=', '\0']) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "env_allow",
+                        &alloc::format!("\"{v}\""),
+                        "a variable name: not empty, without `=` or NUL",
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(c) = t
+        .get("cwd")
+        .filter(|c| matches!(&c.value, MValue::Scalar(Value::Str(v)) if v == "untrusted-current"))
+    {
+        notes.push(Diagnostic::new(codes::CWD_UNTRUSTED_CURRENT, at(c)).arg("id", id));
+    }
+    shell.is_some() && !allowed
+}
+
 fn exec_units(
     r: &MTable,
     trusted: &MTable,
@@ -1247,7 +1338,11 @@ fn exec_units(
         let origins = exec_origins(&e.key, t);
         let approved_by = approved.get(&e.key).cloned().unwrap_or_default();
         let shown_at = shown.get(&e.key).cloned().unwrap_or_default();
-        let not_run = if let Some(k) = unsafe_exec_key(&e.key, &origins, notes) {
+        // A language segment cannot hold these keys (E206), so this judges
+        // command segments alone.
+        let not_run = if command_form(&e.key, t, notes) {
+            Some(NotRun::ShellNotAllowed)
+        } else if let Some(k) = unsafe_exec_key(&e.key, &origins, notes) {
             Some(NotRun::UnsafeFile { key: k })
         } else if boolean(t, &["enabled"]) == Some(false) {
             Some(NotRun::Disabled)
@@ -1560,16 +1655,228 @@ mod tests {
         assert_eq!(codes_of(&r), [codes::KEY_PLANNED]);
     }
 
+    /// The codes of a report, without the N502 every drawn command segment
+    /// gets until commands are drawn.
+    fn form_codes(r: &crate::config::report::ConfigReport) -> Vec<crate::diag::DiagCode> {
+        codes_of(r)
+            .into_iter()
+            .filter(|c| *c != codes::CUSTOM_DRAWN_LATER)
+            .collect()
+    }
+
+    /// One drawn command segment with `body` as its keys.
+    fn command_seg(body: &str) -> String {
+        alloc::format!(
+            "[segment.\"custom/k\"]\nkind = \"command\"\n{body}[layout.line1]\nleft = [\"custom/k\"]\n"
+        )
+    }
+
+    /// The compile result even when an error withholds the snapshot: what
+    /// the unit's verdict is and which codes compiling adds.
+    fn compiled_anyway(user: &str) -> (Option<NotRun>, Vec<crate::diag::DiagCode>) {
+        let r = read(user, &[]);
+        let mut f = crate::config::source::tests::files(&[]);
+        let g = crate::config::source::load(
+            vec![
+                crate::config::report::tests::builtin(),
+                crate::config::source::tests::opened("root", user, 1),
+            ],
+            &mut f,
+            [0, 3, 0],
+        )
+        .unwrap();
+        let m = crate::config::merge::merge(&g, &[], &keys::slot);
+        let (c, _) = compile(&m, &m, Mode::Dark).unwrap();
+        (c.exec_units[0].not_run.clone(), form_codes(&r))
+    }
+
+    // 명시 허용(`unsafe_shell = true`) 없는 `shell`은 컴파일 오류 E211이고 그 단위는 실행 대상이 아니다.
+    // 이것을 실패시키는 것: command_form의 E211 push를 지우는 것(오류 없이 snapshot 발행),
+    // exec_units의 ShellNotAllowed 분기를 지우는 것(not_run None).
+    #[test]
+    fn test_shell_without_unsafe_rejected() {
+        for allow in ["", "unsafe_shell = false\n"] {
+            let user = command_seg(&alloc::format!(
+                "shell = \"kubectl ctx | head -1\"\n{allow}"
+            ));
+            let (not_run, codes) = compiled_anyway(&user);
+            assert_eq!(not_run, Some(NotRun::ShellNotAllowed), "{allow:?}");
+            assert!(
+                codes.contains(&codes::SHELL_NOT_ALLOWED),
+                "{allow:?} {codes:?}"
+            );
+            assert!(read(&user, &[]).snapshot.is_none(), "{allow:?}");
+        }
+    }
+
+    // 양성 대조: 명시 허용이 있으면 경고 W409만 내고 실행 대상이다.
+    // 이것을 실패시키는 것: W409 push를 지우는 것, 허용 판정을 `== Some(false)`로 뒤집는 것.
+    #[test]
+    fn test_shell_with_unsafe_warns_and_runs() {
+        let r = read(
+            &command_seg("shell = \"kubectl ctx | head -1\"\nunsafe_shell = true\n"),
+            &[],
+        );
+        assert_eq!(form_codes(&r), [codes::UNSAFE_SHELL_USED]);
+        let c = r.snapshot.unwrap();
+        assert_eq!(c.exec_units[0].not_run, None);
+    }
+
+    // `command`와 `shell`을 함께 쓰거나 `shell` 없이 `unsafe_shell = true`만 쓰면 E212다.
+    // 이것을 실패시키는 것: 두 conflict push 중 하나를 지우는 것.
+    #[test]
+    fn test_command_and_shell_together_rejected() {
+        let both = command_seg("command = [\"k\"]\nshell = \"k\"\nunsafe_shell = true\n");
+        assert!(form_codes(&read(&both, &[])).contains(&codes::COMMAND_FORM_CONFLICT));
+        let alone = command_seg("command = [\"k\"]\nunsafe_shell = true\n");
+        assert_eq!(
+            form_codes(&read(&alone, &[])),
+            [codes::COMMAND_FORM_CONFLICT]
+        );
+        // `unsafe_shell = false` alone says nothing to conflict with.
+        let off = command_seg("command = [\"k\"]\nunsafe_shell = false\n");
+        assert_eq!(form_codes(&read(&off, &[])), []);
+    }
+
+    // `shell` 텍스트 안의 자리표시자는 E213이다(허용이 있어도).
+    // 이것을 실패시키는 것: shell 분기의 자리표시자 검사를 지우는 것.
+    #[test]
+    fn test_shell_mode_rejects_placeholder() {
+        let r = read(
+            &command_seg("shell = \"echo {dir}\"\nunsafe_shell = true\n"),
+            &[],
+        );
+        assert!(
+            form_codes(&r).contains(&codes::PLACEHOLDER_NOT_WHOLE),
+            "{:?}",
+            form_codes(&r)
+        );
+        assert!(r.snapshot.is_none());
+        // Other braces are shell syntax, not placeholders.
+        let r = read(
+            &command_seg("shell = \"echo {a,b} ${HOME}\"\nunsafe_shell = true\n"),
+            &[],
+        );
+        assert_eq!(form_codes(&r), [codes::UNSAFE_SHELL_USED]);
+    }
+
+    // 자리표시자는 argv 원소 하나 전체로만 쓴다. 원소 전체 `{dir}`과 다른 중괄호(awk)는 받는다.
+    // 이것을 실패시키는 것: `v != PLACEHOLDER` 조건을 지우는 것(전체 원소도 거부),
+    // `contains`를 `starts_with`로 바꾸는 것(`a{dir}` 통과).
+    #[test]
+    fn test_placeholder_mid_string_rejected() {
+        let r = read(&command_seg("command = [\"ls\", \"a{dir}\"]\n"), &[]);
+        assert_eq!(form_codes(&r), [codes::PLACEHOLDER_NOT_WHOLE]);
+        assert!(r.snapshot.is_none());
+        let ok = read(
+            &command_seg("command = [\"awk\", \"{print $1}\", \"{dir}\"]\n"),
+            &[],
+        );
+        assert_eq!(form_codes(&ok), []);
+    }
+
+    // `cwd = "untrusted-current"`는 경고 W410, 목록 밖 값은 E203이다.
+    // 이것을 실패시키는 것: W410 push를 지우는 것, cwd 키를 다시 자유 문자열로 두는 것.
+    #[test]
+    fn test_untrusted_current_warns() {
+        let r = read(
+            &command_seg("command = [\"k\"]\ncwd = \"untrusted-current\"\n"),
+            &[],
+        );
+        assert_eq!(form_codes(&r), [codes::CWD_UNTRUSTED_CURRENT]);
+        assert!(r.snapshot.is_some());
+        let r = read(&command_seg("command = [\"k\"]\ncwd = \"neutral\"\n"), &[]);
+        assert_eq!(form_codes(&r), []);
+        let r = read(&command_seg("command = [\"k\"]\ncwd = \"/w\"\n"), &[]);
+        assert_eq!(form_codes(&r), [codes::BAD_VALUE]);
+    }
+
+    // 형식이 방어다: 컴파일 검사를 우회해 `unsafe_shell = false`인 shell 정책을 실행 대상으로 넣은 스냅샷도
+    // 허가 형식으로 옮길 변형이 없어 허가 목록에 들어가지 못한다(대상 카나리 단언은 허가를 만드는 C 단계 몫).
+    // 이것을 실패시키는 것: from_config의 UnsafeShell 갈래에서 `unsafe_shell: true` 조건을 지우는 것,
+    // shell이 있어도 Argv로 옮기는 것(`shell: None` 조건 삭제).
+    #[test]
+    fn test_plain_shell_never_reaches_grant() {
+        use crate::command::wire::Policy;
+        let mut c = compiled(&command_seg("command = [\"k\"]\n"));
+        let grantable = |c: &CompiledConfig| -> Vec<Policy> {
+            c.exec_units
+                .iter()
+                .filter(|u| u.not_run.is_none())
+                .filter_map(|u| Policy::from_config(&u.policy))
+                .collect()
+        };
+        assert_eq!(
+            grantable(&c),
+            [Policy::Argv {
+                argv: vec![b"k".to_vec()]
+            }]
+        );
+        for (argv, allowed) in [
+            (vec![], false),
+            (vec![String::from("k")], false),
+            (vec![String::from("k")], true),
+        ] {
+            c.exec_units[0].policy = ExecPolicy::Command {
+                argv,
+                cwd: None,
+                env_allow: Vec::new(),
+                shell: Some(String::from("kubectl ctx | head -1")),
+                unsafe_shell: allowed,
+            };
+            assert_eq!(c.exec_units[0].not_run, None);
+            let fixture = crate::snapshot_codec::decode_compiled(
+                &crate::snapshot_codec::encode_compiled(&c).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(grantable(&fixture), [], "{:?}", c.exec_units[0].policy);
+        }
+        // Control: the explicit allowance alone has a grant form.
+        c.exec_units[0].policy = ExecPolicy::Command {
+            argv: Vec::new(),
+            cwd: None,
+            env_allow: Vec::new(),
+            shell: Some(String::from("kubectl ctx | head -1")),
+            unsafe_shell: true,
+        };
+        assert_eq!(
+            grantable(&c),
+            [Policy::UnsafeShell {
+                script: b"kubectl ctx | head -1".to_vec()
+            }]
+        );
+    }
+
+    // env_allow 이름은 비지 않고 `=`·NUL이 없다(정제 환경의 `NAME=VALUE\0` 틀을 깨지 않게).
+    // 이것을 실패시키는 것: 빈 이름·`=`·NUL 조건 중 하나를 지우는 것.
+    #[test]
+    fn env_allow_names_are_variable_names() {
+        for bad in ["", "A=B", "A\\u0000B"] {
+            let r = read(
+                &command_seg(&alloc::format!(
+                    "command = [\"k\"]\nenv_allow = [\"{bad}\"]\n"
+                )),
+                &[],
+            );
+            assert_eq!(form_codes(&r), [codes::BAD_VALUE], "{bad:?}");
+        }
+        let r = read(
+            &command_seg("command = [\"k\"]\nenv_allow = [\"KUBECONFIG\"]\n"),
+            &[],
+        );
+        assert_eq!(form_codes(&r), []);
+    }
+
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.
     #[test]
     fn exec_units_keep_their_whole_policy() {
         let c = compiled(
-            "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\", \"x\"]\ncwd = \"/w\"\nenv_allow = [\"KUBECONFIG\"]\ntimeout = \"200ms\"\ncache = \"30s\"\n[layout.line1]\nleft = [\"custom/k\"]\n",
+            "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\", \"x\"]\ncwd = \"neutral\"\nenv_allow = [\"KUBECONFIG\"]\ntimeout = \"200ms\"\ncache = \"30s\"\n[layout.line1]\nleft = [\"custom/k\"]\n",
         );
         let u = &c.exec_units[0];
         let want = ExecPolicy::Command {
             argv: vec![String::from("k"), String::from("x")],
-            cwd: Some(String::from("/w")),
+            cwd: Some(String::from("neutral")),
             env_allow: vec![String::from("KUBECONFIG")],
             shell: None,
             unsafe_shell: false,
