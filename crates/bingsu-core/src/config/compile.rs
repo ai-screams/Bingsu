@@ -941,7 +941,27 @@ pub fn compile(
             notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
         }
     }
-    let selectable = selectable(&banded.order, &banded.bands);
+    let shown_bands = selectable(&banded.order, &banded.bands);
+    // What a trusted layout can draw is judged on the trusted merge alone: a
+    // shape-only source may re-order or resize bands, but must not make a band
+    // reachable that the trusted sources never reach. A trusted merge whose
+    // bands fail to order approves nothing.
+    let approved_bands = bands_of(trusted).map_or_else(
+        |_| BTreeSet::new(),
+        |t| {
+            let full = &banded.names;
+            crate::bands::selection_table(&t.order, &t.bands)
+                .into_iter()
+                .filter_map(|(_, _, b)| match b {
+                    None => Some(None),
+                    Some(i) => full
+                        .iter()
+                        .position(|n| *n == t.names[i])
+                        .map(|j| Some(j as u16)),
+                })
+                .collect()
+        },
+    );
     let Bands {
         bands,
         names: band_names,
@@ -979,7 +999,16 @@ pub fn compile(
             }
         }
     }
-    let exec_units = exec_units(r, &trusted.root, &band_names, &selectable, &mut notes);
+    let exec_units = exec_units(
+        r,
+        &trusted.root,
+        &band_names,
+        &Reach {
+            approved: approved_bands,
+            shown: shown_bands,
+        },
+        &mut notes,
+    );
     let profile = WidthProfile::new(
         int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
         int(r, &["width", "emoji"]).unwrap_or(2) as u8,
@@ -1013,6 +1042,13 @@ pub fn compile(
     ))
 }
 
+/// The layouts a width can choose, for the trusted merge (what approves a
+/// unit) and for the full merge (what is on screen).
+pub(crate) struct Reach {
+    approved: BTreeSet<Option<u16>>,
+    shown: BTreeSet<Option<u16>>,
+}
+
 /// The layouts a width can choose: `None` is the default layout, `Some(i)` band `i`.
 fn selectable(order: &[usize], bands: &[Band]) -> BTreeSet<Option<u16>> {
     crate::bands::selection_table(order, bands)
@@ -1028,21 +1064,23 @@ pub(crate) fn layout_verdict(
     approved_by: &[LayoutRef],
     shown_at: &[LayoutRef],
     band_count: usize,
-    selectable: &BTreeSet<Option<u16>>,
+    reach: &Reach,
 ) -> Option<NotRun> {
     let refs = || approved_by.iter().chain(shown_at);
     if refs().any(|r| r.band.is_some_and(|b| usize::from(b) >= band_count)) {
         return Some(NotRun::UnknownBand);
     }
-    let live = |v: &[LayoutRef]| v.iter().any(|r| selectable.contains(&r.band));
-    (!live(approved_by) || !live(shown_at)).then_some(NotRun::NotInTrustedLayout)
+    let live =
+        |v: &[LayoutRef], set: &BTreeSet<Option<u16>>| v.iter().any(|r| set.contains(&r.band));
+    (!live(approved_by, &reach.approved) || !live(shown_at, &reach.shown))
+        .then_some(NotRun::NotInTrustedLayout)
 }
 
 fn exec_units(
     r: &MTable,
     trusted: &MTable,
     names: &[String],
-    selectable: &BTreeSet<Option<u16>>,
+    reach: &Reach,
     notes: &mut Vec<Diagnostic>,
 ) -> Vec<ExecUnit> {
     // A unit runs when a trusted layout draws it and it is still drawn.
@@ -1102,9 +1140,7 @@ fn exec_units(
             Some(NotRun::UnsafeFile { key: k.clone() })
         } else if boolean(t, &["enabled"]) == Some(false) {
             Some(NotRun::Disabled)
-        } else if let why @ Some(_) =
-            layout_verdict(&approved_by, &shown_at, names.len(), selectable)
-        {
+        } else if let why @ Some(_) = layout_verdict(&approved_by, &shown_at, names.len(), reach) {
             notes.push(
                 Diagnostic::new(codes::NOT_RUN_UNTRUSTED_LAYOUT, place).arg("id", e.key.clone()),
             );
@@ -1566,7 +1602,11 @@ mod tests {
     // 취급), 신뢰 참조나 표시 참조 한쪽의 검사를 지우는 것.
     #[test]
     fn test_unknown_band_index_never_runs() {
-        let all: BTreeSet<Option<u16>> = [None, Some(0), Some(1), Some(2)].into();
+        let set: BTreeSet<Option<u16>> = [None, Some(0), Some(1), Some(2)].into();
+        let all = Reach {
+            approved: set.clone(),
+            shown: set,
+        };
         // Two bands: indexes 0 and 1 exist, 2 does not (even though a width "chooses" it here).
         let verdict = |a, s| layout_verdict(&unit_ref(a), &unit_ref(s), 2, &all);
         assert_eq!(verdict(Some(1), None), None);
@@ -1608,6 +1648,28 @@ mod tests {
             run(
                 "[layout.line1]\nleft = [\"custom/u\", \"char\"]\n[layout.when.cover]\norder = 1\n[layout.when.cover.line1]\nleft = [\"char\"]\n"
             ),
+            Some(NotRun::NotInTrustedLayout)
+        );
+    }
+
+    // 이것을 실패시키는 것: 승인 참조의 도달 가능성을 전체 병합으로 판정하는 것(모양 전용 파일이 구간의 폭만 바꿔
+    // 신뢰 설정에서 가려진 구간을 되살린다). 양성 대조: 같은 모양 파일이 없으면 가려진 채로, 신뢰 설정 안에서 도달 가능하면 실행.
+    #[test]
+    fn test_shape_only_file_cannot_make_a_hidden_band_approve() {
+        let root = alloc::format!(
+            "{UNIT}[layout.line1]\nleft = [\"char\"]\n[layout.when.cover]\norder = 1\n[layout.when.hidden]\norder = 2\nmin_cols = 120\nmax_cols = 130\n[layout.when.hidden.line1]\nleft = [\"custom/u\", \"char\"]\n"
+        );
+        let shape = "[layout.when.cover]\nmax_cols = 100\n";
+        let not_run = |extends: &str, list: &[(&'static str, &str)]| {
+            let r = read(&alloc::format!("{extends}{root}"), list);
+            let codes = codes_of(&r);
+            r.snapshot.unwrap_or_else(|| panic!("{codes:?}")).exec_units[0]
+                .not_run
+                .clone()
+        };
+        assert_eq!(not_run("", &[]), Some(NotRun::NotInTrustedLayout));
+        assert_eq!(
+            not_run("extends = [\"shape-order\"]\n", &[("shape-order", shape)]),
             Some(NotRun::NotInTrustedLayout)
         );
     }
