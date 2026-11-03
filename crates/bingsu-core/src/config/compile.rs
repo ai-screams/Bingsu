@@ -1731,4 +1731,19 @@ mod tests {
             [Some(NotRun::NotInTrustedLayout)]
         );
     }
+
+    // 이것을 실패시키는 것: 표시 참조의 도달 가능성 검사를 `shown_at.is_empty()`로 약화하는 것(모양 전용 파일이
+    // 모든 폭을 덮는 구간에서 줄을 바꿔 명령을 화면에서 지웠는데도 신뢰 설정의 승인만으로 실행된다).
+    // 양성 대조: 같은 신뢰 설정에 모양 파일이 없으면 실행한다.
+    #[test]
+    fn test_shape_only_cover_band_hides_the_unit() {
+        let root = alloc::format!("{UNIT}[layout.line1]\nleft = [\"custom/u\", \"char\"]\n");
+        let cover =
+            "[layout.when.cover]\norder = 0\n[layout.when.cover.line1]\nleft = [\"char\"]\n";
+        assert_eq!(exec_not_run(&root, "").as_slice(), [None]);
+        assert_eq!(
+            exec_not_run(&root, cover),
+            [Some(NotRun::NotInTrustedLayout)]
+        );
+    }
 }
