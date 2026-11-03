@@ -5,7 +5,7 @@
 //! Data types only: no config parsing, merging, checking or compiling.
 use crate::bands::{self, Band};
 use crate::color::palette::{Mode, ResolvedPalette};
-use crate::config::compile::{CompiledConfig, ExecUnit, Setup};
+use crate::config::compile::{CompiledConfig, CustomText, ExecUnit, Setup};
 use crate::diag_widths::WidthRun;
 use crate::icons::IconSet;
 use crate::layout::SegmentSetup;
@@ -28,6 +28,8 @@ pub struct Shared<'a> {
     pub use_last_column: bool,
     pub duration_min_ms: u64,
     pub exec_units: &'a [ExecUnit],
+    /// Drawn text segments; segment `BUILTIN.len() + i` is `custom[i]`.
+    pub custom: &'a [CustomText],
 }
 
 impl<'a> Shared<'a> {
@@ -88,6 +90,7 @@ impl LayoutView for CompiledConfig {
             use_last_column: self.use_last_column,
             duration_min_ms: self.duration_min_ms,
             exec_units: &self.exec_units,
+            custom: &self.custom,
         }
     }
 }
@@ -113,6 +116,7 @@ pub struct FrontConfig {
     pub(crate) use_last_column: bool,
     pub(crate) duration_min_ms: u64,
     pub(crate) exec_units: Vec<ExecUnit>,
+    pub(crate) custom: Vec<CustomText>,
     pub(crate) widths: Vec<WidthRun>,
 }
 
@@ -145,6 +149,7 @@ impl FrontConfig {
             use_last_column: c.use_last_column,
             duration_min_ms: c.duration_min_ms,
             exec_units: c.exec_units,
+            custom: c.custom,
             widths: c.widths,
         }
     }
@@ -188,6 +193,7 @@ impl LayoutView for FrontConfig {
             use_last_column: self.use_last_column,
             duration_min_ms: self.duration_min_ms,
             exec_units: &self.exec_units,
+            custom: &self.custom,
         }
     }
 }

@@ -24,6 +24,9 @@ pub(crate) fn references(lines: &[CompiledLine]) -> u32 {
         .iter()
         .flat_map(|line| line.nodes())
         .fold(0, |mask, node| match node {
+            // A user text segment's number is past the built-ins: its bit
+            // (or none, from 32) is dropped by `collect_mask`, which has
+            // only built-in bits (`snapshot_codec::check`).
             Node::Segment { seg, .. } | Node::Field { seg, .. } => {
                 mask | 1u32.checked_shl(u32::from(*seg)).unwrap_or(0)
             }

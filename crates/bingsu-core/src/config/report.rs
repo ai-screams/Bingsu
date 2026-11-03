@@ -333,7 +333,7 @@ pub(crate) mod tests {
     // 빈 그룹을 남기는 것(그룹은 참조가 있어야 컴파일된다), 다른 참조가 있는 그룹까지 지우는 것.
     #[test]
     fn custom_ids_in_a_template_drop_only_that_reference() {
-        let decl = "[segment.\"custom/t\"]\nkind = \"text\"\ntext = \"hi\"\n";
+        let decl = "[segment.\"custom/t\"]\nkind = \"command\"\ncommand = [\"t\"]\n";
         let tpl = |t: &str| alloc::format!("[style]\ntemplate = \"{t}\"\n");
         let want = nodes_of(&read(&tpl("{dir} {@group}<{git}>{@end}{@nl}{char}"), &[]));
         let with = "{@group}[{custom/t}]{@end}{dir} {@group}<{git}{custom/t.x}>{@end}{@nl}{char}";
@@ -603,6 +603,39 @@ pub(crate) mod tests {
         assert!(codes_of(&r).contains(&codes::NOT_RUN_UNSAFE_FILE));
     }
 
+    // 안전 검사에 실패한 파일(남이 쓸 수 있는 conf.d)이 `kind = "text"`로 실행 종류를 바꿔도 그 세그먼트는
+    // 그려지지 않고 W405가 나온다. `kind`는 실행 키다.
+    // 이것을 실패시키는 것: Unsafe 판정을 `enabled`에만 거는 것(`kind`·`text`가 Unsafe 출처여도 그려지고 W405가 사라진다).
+    #[test]
+    fn text_kind_from_an_unsafe_file_is_not_drawn() {
+        let root = "[segment.\"custom/k\"]\nkind = \"language\"\n[layout.line2]\nleft = ['custom/k', 'char']\n";
+        let unsafe_text = "[segment.\"custom/k\"]\nkind = \"text\"\ntext = \"Y\"\n";
+        let r = report(
+            vec![
+                builtin(),
+                opened("root", root, 1),
+                opened("unsafe-wide", unsafe_text, 2),
+            ],
+            &mut files(&[]),
+            [0, 3, 0],
+            Mode::Dark,
+        );
+        assert!(r.snapshot.as_ref().unwrap().custom.is_empty());
+        assert!(codes_of(&r).contains(&codes::NOT_RUN_UNSAFE_FILE));
+        // The same text from a trusted file is drawn (positive control).
+        let r = report(
+            vec![
+                builtin(),
+                opened("root", root, 1),
+                opened("root2", unsafe_text, 2),
+            ],
+            &mut files(&[]),
+            [0, 3, 0],
+            Mode::Dark,
+        );
+        assert_eq!(r.snapshot.unwrap().custom.len(), 1);
+    }
+
     // 이것을 실패시키는 것: 검사·컴파일 진단이 승리한 값의 원본·범위·extends 경로를 잃는 것.
     #[test]
     fn diagnostics_keep_winning_key_origins_and_chains() {
@@ -645,7 +678,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(d.via.len(), 2);
         let r = read(
-            "[segment.\"custom/t\"]\nkind='text'\ntext='hi'\n[style]\ntemplate='{dir}{custom/t}'\n",
+            "[segment.\"custom/t\"]\nkind='command'\ncommand=['t']\n[style]\ntemplate='{dir}{custom/t}'\n",
             &[],
         );
         let d = r

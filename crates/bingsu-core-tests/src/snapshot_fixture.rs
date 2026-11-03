@@ -26,6 +26,10 @@ impl Resolver for NoFiles {
     }
 }
 pub fn compile(text: &str) -> CompiledConfig {
+    report(text).snapshot.expect("fixture compiles")
+}
+/// The whole report of the built-in config with `text` over it.
+pub fn report(text: &str) -> bingsu_core::config::report::ConfigReport {
     let roots = [BUILTIN_TOML, text]
         .iter()
         .enumerate()
@@ -40,8 +44,6 @@ pub fn compile(text: &str) -> CompiledConfig {
         })
         .collect();
     bingsu_core::config::report::report(roots, &mut NoFiles, [0, 3, 0], Mode::Dark)
-        .snapshot
-        .expect("fixture compiles")
 }
 pub fn config() -> CompiledConfig {
     let mut c = compile(

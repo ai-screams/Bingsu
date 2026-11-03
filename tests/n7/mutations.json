@@ -491,8 +491,8 @@
     "patches": [
       {
         "file": "crates/bingsu-core/src/template/compile.rs",
-        "before": "if usize::from(*seg) >= crate::field::BUILTIN.len() {",
-        "after": "if false {",
+        "before": "Node::Segment { seg, .. } => {\n                if usize::from(*seg) >= self.segs {",
+        "after": "Node::Segment { seg, .. } => {\n                if false {",
         "count": 1
       }
     ]

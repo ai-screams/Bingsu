@@ -61,7 +61,7 @@ const PROMPT_PATH: [(&str, &str); 7] = [
 // 매 프롬프트는 설정을 파싱하지 않는다: 앞단은 컴파일된 snapshot만 읽는다(N4). 파서·합치기·검사는
 // 설정이 바뀔 때 갱신 도우미에서만 돈다.
 // N4 reads the existing compiled DATA types; their definitions live beside the
-// compiler. Only these three exact imports are allowed, not a compiler call or a
+// compiler. Only these exact data-type imports are allowed, not a compiler call or a
 // module import. The syscall/adapter forbid gates are independent and unchanged.
 // 이것을 실패시키는 것: 앞단이 데이터 타입 이외의 config API(파서·합치기·검사·컴파일)를 부르는 것(layout_view.rs에
 // config::check import 하나, 또는 그 파일의 면제 줄 삭제로 확인).
@@ -72,7 +72,7 @@ fn the_prompt_path_never_reads_config() {
             "front.rs" => text.replace("use crate::config::compile::CompiledConfig;", ""),
             "front/staged.rs" => text.replace("use crate::config::compile::ExecUnit;", ""),
             "layout_view.rs" => text.replace(
-                "use crate::config::compile::{CompiledConfig, ExecUnit, Setup};",
+                "use crate::config::compile::{CompiledConfig, CustomText, ExecUnit, Setup};",
                 "",
             ),
             _ => text.to_owned(),

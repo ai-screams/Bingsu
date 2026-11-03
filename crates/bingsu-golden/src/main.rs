@@ -347,6 +347,7 @@ fn main() {
     color_cases(&mut out);
     render_cases(&mut out);
     git_cases(&mut out);
+    custom_text_cases(&mut out);
     // A closed stdout (a pipe that went away) is not an error worth a panic.
     let _ = std::io::stdout().write_all(out.as_bytes());
 }
@@ -505,5 +506,84 @@ fn filesystem_sibling_order_matches_the_full_shortener() {
         .text();
         assert_eq!(shown, expected);
         names.reverse();
+    }
+}
+
+struct NoFiles;
+impl bingsu_core::config::source::Resolver for NoFiles {
+    fn open(
+        &mut self,
+        _: &bingsu_core::config::source::Opened,
+        _: &bingsu_core::config::source::ExtendsRef,
+    ) -> Result<bingsu_core::config::source::Opened, bingsu_core::config::source::OpenError> {
+        Err(bingsu_core::config::source::OpenError {
+            reason: "no extends".into(),
+            trust: bingsu_core::config::source::Trust::Executable,
+        })
+    }
+}
+
+/// User text segments through the whole front: config text, compile, then
+/// the B1 record the front writes, hex, once per shell.
+fn custom_text_cases(out: &mut String) {
+    use bingsu_core::config::source::{FileKey, Opened, Trust};
+    let cases: [(&str, &str); 5] = [
+        ("plain", "X"),
+        ("empty", ""),
+        ("percent_bang", "%F{red}!"),
+        ("shell_chars", "$(x) `y` \\\\ !!"),
+        ("wide", "\u{1F366}\u{D55C}\u{AE00}"),
+    ];
+    for (name, text) in cases {
+        let toml = format!(
+            "[segment.\"custom/a\"]\nkind = \"text\"\ntext = \"{}\"\n[layout.line2]\nleft = [\"custom/a\", \"char\"]\n",
+            text.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let roots = [bingsu_core::config::compile::BUILTIN_TOML, toml.as_str()]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Opened {
+                key: FileKey {
+                    dev: 1,
+                    ino: i as u64,
+                },
+                bytes: s.as_bytes().to_vec(),
+                trust: Trust::Executable,
+                display: vec![i as u8],
+            })
+            .collect();
+        let config =
+            bingsu_core::config::report::report(roots, &mut NoFiles, [0, 3, 0], Mode::Dark)
+                .snapshot
+                .expect("golden config compiles");
+        for shell in ["zsh", "bash", "fish"] {
+            let args: Vec<Vec<u8>> = [
+                "--ctx",
+                "1",
+                "--record",
+                "B1",
+                "--width",
+                "80",
+                "--runtime-root=1:2:/r",
+                "--shell",
+                shell,
+            ]
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect();
+            let argv: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            let e = bingsu_core::envelope::parse(&argv).expect("envelope");
+            let mut rec = Vec::new();
+            bingsu_core::front::render_selected(
+                &e,
+                e.shell.expect("shell"),
+                bingsu_core::status::Status::OK_NONE,
+                Some(&config),
+                Mode::Dark,
+                None,
+                &mut rec,
+            );
+            let _ = writeln!(out, "custom_text {name} {shell}\t{}", hex(&rec));
+        }
     }
 }

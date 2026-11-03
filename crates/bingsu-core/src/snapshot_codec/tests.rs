@@ -9,6 +9,7 @@ mod cases {
             bytes: Some(Vec::new()),
             len: 0,
             error: None,
+            segs: usize::MAX,
         };
         v.put(&mut w);
         assert_eq!(w.error, None);
@@ -18,6 +19,7 @@ mod cases {
         T::get(&mut Reader {
             rest: b,
             budget: MAX_ALLOC,
+            segs: crate::field::BUILTIN.len(),
         })
     }
     fn round<T: Wire + PartialEq + core::fmt::Debug>(v: T) {
@@ -176,7 +178,8 @@ mod cases {
         assert_eq!(
             Vec::<u64>::get(&mut Reader {
                 rest: &b,
-                budget: 7
+                budget: 7,
+                segs: 0,
             }),
             Err(Error::Limit)
         );
@@ -184,7 +187,8 @@ mod cases {
         assert_eq!(
             String::get(&mut Reader {
                 rest: &b,
-                budget: 2
+                budget: 2,
+                segs: 0,
             }),
             Err(Error::Limit)
         );
@@ -192,6 +196,7 @@ mod cases {
             bytes: None,
             len: MAX_BYTES,
             error: None,
+            segs: usize::MAX,
         };
         1u8.put(&mut w);
         assert_eq!(w.error, Some(Error::Limit));
@@ -199,6 +204,7 @@ mod cases {
             bytes: None,
             len: 0,
             error: None,
+            segs: usize::MAX,
         };
         // On wasm32 every usize fits the wire; native also verifies failed conversion.
         if let Some(too_large) = (u32::MAX as usize).checked_add(1) {
@@ -232,7 +238,7 @@ mod cases {
         assert_eq!(decode_compiled(&b), Err(Error::Shape));
         let spare = [0; 5];
         assert_eq!(
-            section::<u32>(&spare, section_sum(&spare), MAX_ALLOC).map(drop),
+            section::<u32>(&spare, section_sum(&spare), MAX_ALLOC, 0).map(drop),
             Err(Error::Trailing)
         );
     }
@@ -267,11 +273,16 @@ mod cases {
         let mut left = s.budget;
         for i in 0..s.variants() {
             let e = s.entry(i);
-            left = section::<Vec<CompiledLine>>(&b[e.offset..e.offset + e.len], e.crc, left)
-                .unwrap()
-                .1;
+            left = section::<Vec<CompiledLine>>(
+                &b[e.offset..e.offset + e.len],
+                e.crc,
+                left,
+                crate::field::BUILTIN.len() + s.common.custom.len(),
+            )
+            .unwrap()
+            .1;
         }
-        left = section::<Vec<String>>(&b[s.names..], s.common.names_crc, left)
+        left = section::<Vec<String>>(&b[s.names..], s.common.names_crc, left, 0)
             .unwrap()
             .1;
         let run = size_of::<WidthRun>();
@@ -304,6 +315,7 @@ mod cases {
             bytes: None,
             len: usize::MAX,
             error: None,
+            segs: usize::MAX,
         };
         w.extend_from_slice(&[0]);
         assert_eq!(w.error, Some(Error::Limit));
@@ -760,6 +772,113 @@ mod cases {
             b[at] ^= 1;
             assert!(decode_compiled(&b).is_err());
         }
+    }
+
+    fn with_custom(list: &[(&str, &str)]) -> CompiledConfig {
+        let mut c = config();
+        c.custom = list
+            .iter()
+            .map(|(id, text)| CustomText {
+                id: (*id).into(),
+                text: (*text).into(),
+            })
+            .collect();
+        c
+    }
+
+    // 이것을 실패시키는 것: custom 목록 검사 삭제. 정렬 아닌 목록, 중복, custom이 아닌 id, 제어 문자가
+    // 든 글, 칸 상한의 4배 바이트를 넘는 글, 개수 상한 초과를 인코드와 디코드 둘 다 거부해야 한다.
+    #[test]
+    fn custom_list_is_checked_on_both_sides() {
+        let ok = with_custom(&[("custom/a", "x"), ("custom/b", "")]);
+        assert_eq!(decode_compiled(&encode_compiled(&ok).unwrap()).unwrap(), ok);
+        let long = "a".repeat(usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4 + 1);
+        for bad in [
+            with_custom(&[("custom/b", "x"), ("custom/a", "x")]),
+            with_custom(&[("custom/a", "x"), ("custom/a", "y")]),
+            with_custom(&[("git", "x")]),
+            with_custom(&[("acme/a", "x")]),
+            with_custom(&[("custom/a", "e\u{1b}")]),
+            with_custom(&[("custom/a", &long)]),
+        ] {
+            rejected(&bad);
+        }
+        let many: Vec<(String, &str)> = (0..=crate::config::compile::MAX_CUSTOM_TEXT)
+            .map(|i| (alloc::format!("custom/t{i:04}"), "x"))
+            .collect();
+        let refs: Vec<(&str, &str)> = many.iter().map(|(a, b)| (a.as_str(), *b)).collect();
+        rejected(&with_custom(&refs));
+    }
+
+    // 이것을 실패시키는 것: 노드 번호 상한을 `BUILTIN.len()`에 고정하는 것(선언된 custom 번호 거부) 또는
+    // 상한 검사를 빼는 것(선언 밖 번호와 custom의 둘째 필드 통과).
+    #[test]
+    fn node_numbers_follow_the_declared_custom_count() {
+        let n = crate::field::BUILTIN.len();
+        let line = |seg: usize, field: Option<u16>, segs: usize| {
+            let node = match field {
+                None => Node::Segment {
+                    seg: seg as u16,
+                    mode: Mode::Plain,
+                },
+                Some(field) => Node::Field {
+                    seg: seg as u16,
+                    field,
+                },
+            };
+            CompiledLine::from_snapshot(vec![node], vec![Span { start: 0, end: 0 }], None, segs)
+                .is_some()
+        };
+        assert!(!line(n, None, n));
+        assert!(line(n, None, n + 1));
+        assert!(!line(n + 1, None, n + 1));
+        assert!(line(n, Some(0), n + 1));
+        assert!(!line(n, Some(1), n + 1));
+        assert!(!line(n + 1, Some(0), n + 1));
+    }
+
+    // 이것을 실패시키는 것: encode가 세그먼트 노드나 필드 노드의 번호를 보지 않는 것(목록에 없는 custom 번호를
+    // 쓰는 설정이 인코드되고 디코드에서야 거부된다). 두 노드 종류를 따로 본다.
+    #[test]
+    fn encode_rejects_node_numbers_past_the_list() {
+        for src in ["{custom/a}", "{custom/a.value}"] {
+            let mut c = config();
+            c.custom = vec![CustomText {
+                id: "custom/a".into(),
+                text: "x".into(),
+            }];
+            c.variants[0] =
+                crate::template::compile::compile_with(src, crate::field::BUILTIN, &["custom/a"])
+                    .unwrap();
+            assert!(encode_compiled(&c).is_ok(), "{src}");
+            c.custom.clear();
+            assert_eq!(encode_compiled(&c), Err(Error::Shape), "{src}");
+        }
+    }
+
+    // 이것을 실패시키는 것: encode가 transient·vi에도 custom 번호를 허용하는 것(디코드는 COMMON을 내장 번호로만
+    // 읽으므로 인코드는 되고 디코드에서 거부되는 비대칭).
+    #[test]
+    fn transient_and_vi_may_not_name_custom_segments() {
+        let custom = |c: &mut CompiledConfig| {
+            c.custom = vec![CustomText {
+                id: "custom/a".into(),
+                text: "x".into(),
+            }];
+            crate::template::compile::compile_with(
+                "{custom/a}",
+                crate::field::BUILTIN,
+                &["custom/a"],
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let mut c = config();
+        c.transient = custom(&mut c);
+        assert_eq!(encode_compiled(&c), Err(Error::Shape));
+        let mut c = config();
+        c.vi = custom(&mut c);
+        assert_eq!(encode_compiled(&c), Err(Error::Shape));
     }
 
     fn line_bytes(nodes: Vec<Node>, origin: Vec<Span>, fill: Option<usize>) -> Vec<u8> {

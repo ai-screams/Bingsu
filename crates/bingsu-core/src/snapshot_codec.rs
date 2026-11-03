@@ -1,4 +1,4 @@
-//! BNGCFG05: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG06: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -12,7 +12,9 @@ use crate::{
         palette::{AnsiSlot, PaletteWarning, ResolvedPalette, ResolvedToken},
     },
     config::{
-        compile::{CompiledConfig, ExecPolicy, ExecUnit, LayoutRef, NotRun, Setup, Side},
+        compile::{
+            CompiledConfig, CustomText, ExecPolicy, ExecUnit, LayoutRef, NotRun, Setup, Side,
+        },
         merge::Origin,
         schema::FACT_SCHEMA_VERSION,
         source::Trust,
@@ -46,15 +48,17 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG05";
-const VERSION: u16 = 5;
+const MAGIC: &[u8; 8] = b"BNGCFG06";
+const VERSION: u16 = 6;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
-    crate::snapshot::crc32c(&[b"bingsu-compiled-v5\0", section])
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v6\0", section])
 }
 struct Reader<'a> {
     rest: &'a [u8],
     budget: usize,
+    /// Segment numbers below this exist (built-ins, then user text segments).
+    segs: usize,
 }
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
@@ -75,6 +79,12 @@ struct Writer {
     bytes: Option<Vec<u8>>,
     len: usize,
     error: Option<Error>,
+    /// Segment numbers below this exist where nodes are written now: the
+    /// built-ins in COMMON, then the config's text segments in the variants.
+    /// Checked while writing, not while sizing; the decode checks the same
+    /// per line (`LineCheck`). `usize::MAX` checks nothing (tests that forge
+    /// bytes).
+    segs: usize,
 }
 impl Writer {
     fn extend_from_slice(&mut self, b: &[u8]) {
@@ -413,6 +423,18 @@ impl Wire for Setup {
             required: Wire::get(r)?,
             methods: Wire::get(r)?,
             when: Wire::get(r)?,
+        })
+    }
+}
+impl Wire for CustomText {
+    fn put(&self, o: &mut Writer) {
+        self.id.put(o);
+        self.text.put(o);
+    }
+    fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            id: Wire::get(r)?,
+            text: Wire::get(r)?,
         })
     }
 }
@@ -816,11 +838,17 @@ impl Wire for Node {
                 v.put(o)
             }
             Self::Segment { seg, mode } => {
+                if o.bytes.is_some() && usize::from(*seg) >= o.segs {
+                    o.error.get_or_insert(Error::Shape);
+                }
                 1u8.put(o);
                 seg.put(o);
                 mode.put(o)
             }
             Self::Field { seg, field } => {
+                if o.bytes.is_some() && usize::from(*seg) >= o.segs {
+                    o.error.get_or_insert(Error::Shape);
+                }
                 2u8.put(o);
                 seg.put(o);
                 field.put(o)
@@ -889,7 +917,9 @@ impl Wire for CompiledLine {
         self.fill().put(o)
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
-        CompiledLine::from_snapshot(Wire::get(r)?, Wire::get(r)?, Wire::get(r)?).ok_or(Error::Shape)
+        let segs = r.segs;
+        CompiledLine::from_snapshot(Wire::get(r)?, Wire::get(r)?, Wire::get(r)?, segs)
+            .ok_or(Error::Shape)
     }
 }
 /// Writes the sections in order. Offsets and CRCs need the written bytes, so
@@ -915,6 +945,7 @@ fn put_compiled(c: &CompiledConfig, o: &mut Writer) {
     c.use_last_column.put(o);
     c.duration_min_ms.put(o);
     c.exec_units.put(o);
+    c.custom.put(o);
     c.widths.put(o);
     c.band_names.len().put(o);
     let names_seal = o.len;
@@ -924,6 +955,7 @@ fn put_compiled(c: &CompiledConfig, o: &mut Writer) {
     for _ in &c.variants {
         o.extend_from_slice(&[0; ENTRY]);
     }
+    o.segs = crate::field::BUILTIN.len() + c.custom.len();
     for (i, v) in c.variants.iter().enumerate() {
         let at = o.len;
         v.put(o);
@@ -948,6 +980,7 @@ fn compiled_size(c: &CompiledConfig) -> Result<usize, Error> {
         bytes: None,
         len: 0,
         error: None,
+        segs: crate::field::BUILTIN.len(),
     };
     put_compiled(c, &mut size);
     match size.error {
@@ -962,6 +995,7 @@ fn write_compiled(c: &CompiledConfig, size: usize) -> Result<Vec<u8>, Error> {
         bytes: Some(bytes),
         len: 0,
         error: None,
+        segs: crate::field::BUILTIN.len(),
     };
     put_compiled(c, &mut out);
     if let Some(e) = out.error {
@@ -1024,6 +1058,7 @@ struct Common {
     use_last_column: bool,
     duration_min_ms: u64,
     exec_units: Vec<ExecUnit>,
+    custom: Vec<CustomText>,
     widths: Vec<WidthRun>,
     name_count: usize,
     names_len: usize,
@@ -1044,6 +1079,7 @@ fn get_common(r: &mut Reader<'_>) -> Result<Common, Error> {
         use_last_column: Wire::get(r)?,
         duration_min_ms: Wire::get(r)?,
         exec_units: Wire::get(r)?,
+        custom: Wire::get(r)?,
         widths: Wire::get(r)?,
         name_count: Wire::get(r)?,
         names_len: Wire::get(r)?,
@@ -1091,6 +1127,8 @@ fn parse_sections(front: &[u8], c_len: usize) -> Result<Sections<'_>, Error> {
     let mut r = Reader {
         rest: &front[HEAD..HEAD + head.common],
         budget: MAX_ALLOC,
+        // COMMON's own lines (`transient`, `vi`) draw only built-ins.
+        segs: crate::field::BUILTIN.len(),
     };
     let common = get_common(&mut r)?;
     if !r.rest.is_empty() {
@@ -1145,6 +1183,7 @@ pub fn plan_front(front: &[u8], c_len: usize, width: u16) -> Result<FrontPlan, E
         light_palette: &c.light_palette,
         collect_mask: c.collect_mask,
         exec_units: &c.exec_units,
+        custom: &c.custom,
         widths: &c.widths,
     })?;
     let band = crate::bands::select(&c.band_order, &c.bands, width);
@@ -1169,6 +1208,7 @@ pub fn plan_front(front: &[u8], c_len: usize, width: u16) -> Result<FrontPlan, E
             use_last_column: c.use_last_column,
             duration_min_ms: c.duration_min_ms,
             exec_units: c.exec_units,
+            custom: c.custom,
             widths: c.widths,
         },
         offset: e.offset,
@@ -1186,6 +1226,7 @@ pub fn finish_front(mut plan: FrontPlan, variant: &[u8]) -> Result<FrontConfig, 
     let mut r = Reader {
         rest: variant,
         budget: plan.budget,
+        segs: crate::field::BUILTIN.len() + plan.config.custom.len(),
     };
     let lines: Vec<CompiledLine> = Wire::get(&mut r)?;
     if !r.rest.is_empty() {
@@ -1210,15 +1251,17 @@ pub fn decode_compiled(c: &[u8]) -> Result<CompiledConfig, Error> {
         .checked_mul(size_of::<Vec<CompiledLine>>())
         .and_then(|table| s.budget.checked_sub(table))
         .ok_or(Error::Limit)?;
+    let segs = crate::field::BUILTIN.len() + s.common.custom.len();
     let mut variants = Vec::new();
     variants.try_reserve_exact(n).map_err(|_| Error::Limit)?;
     for i in 0..n {
         let e = s.entry(i);
-        let (lines, left) = section(&c[e.offset..e.offset + e.len], e.crc, budget)?;
+        let (lines, left) = section(&c[e.offset..e.offset + e.len], e.crc, budget, segs)?;
         variants.push(lines);
         budget = left;
     }
-    let (band_names, _): (Vec<String>, _) = section(&c[s.names..], s.common.names_crc, budget)?;
+    let (band_names, _): (Vec<String>, _) =
+        section(&c[s.names..], s.common.names_crc, budget, segs)?;
     let m = s.common;
     // The front's `check` used this count; the file must agree with itself.
     if m.name_count != band_names.len() {
@@ -1240,17 +1283,27 @@ pub fn decode_compiled(c: &[u8]) -> Result<CompiledConfig, Error> {
         use_last_column: m.use_last_column,
         duration_min_ms: m.duration_min_ms,
         exec_units: m.exec_units,
+        custom: m.custom,
         widths: m.widths,
     };
     validate(&out)?;
     Ok(out)
 }
 /// One CRC-covered section, spending from `budget`; returns what is left.
-fn section<T: Wire>(body: &[u8], crc: [u8; 4], budget: usize) -> Result<(T, usize), Error> {
+fn section<T: Wire>(
+    body: &[u8],
+    crc: [u8; 4],
+    budget: usize,
+    segs: usize,
+) -> Result<(T, usize), Error> {
     if section_sum(body) != crc {
         return Err(Error::Shape);
     }
-    let mut r = Reader { rest: body, budget };
+    let mut r = Reader {
+        rest: body,
+        budget,
+        segs,
+    };
     let value = T::get(&mut r)?;
     if !r.rest.is_empty() {
         return Err(Error::Trailing);
@@ -1273,6 +1326,7 @@ pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
         light_palette: &c.light_palette,
         collect_mask: c.collect_mask,
         exec_units: &c.exec_units,
+        custom: &c.custom,
         widths: &c.widths,
     })
 }
@@ -1293,6 +1347,7 @@ struct Parts<'c> {
     light_palette: &'c ResolvedPalette,
     collect_mask: u32,
     exec_units: &'c [ExecUnit],
+    custom: &'c [CustomText],
     widths: &'c [WidthRun],
 }
 fn check(c: &Parts<'_>) -> Result<(), Error> {
@@ -1387,6 +1442,17 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
                 }
             }
         }
+    }
+    // Text segments take numbers after the built-ins and never a mask bit.
+    if c.custom.len() > crate::config::compile::MAX_CUSTOM_TEXT
+        || !c.custom.windows(2).all(|w| w[0].id < w[1].id)
+        || c.custom.iter().any(|t| {
+            parse_segment_id(&t.id).map(|id| id.namespace()) != Ok(Namespace::Custom)
+                || !t.text.chars().all(|c| !crate::sanitize::is_removed(c))
+                || t.text.len() > usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4
+        })
+    {
+        return Err(Error::Shape);
     }
     const _: () = assert!(crate::field::BUILTIN.len() < 32);
     if c.collect_mask >> crate::field::BUILTIN.len() != 0 {

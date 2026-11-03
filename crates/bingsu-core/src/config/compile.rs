@@ -35,7 +35,7 @@ use crate::layout::{SegmentSetup, When};
 use crate::render::Theme;
 use crate::shorten::Method;
 use crate::style::{Joining, LineLayout, StyleOptions, generate, preset};
-use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile as compile_template};
+use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile_with};
 use crate::template::syntax::{Span as TSpan, Syntax, parse as parse_template};
 use crate::width::WidthProfile;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -115,6 +115,18 @@ pub struct ExecUnit {
     pub not_run: Option<NotRun>,
 }
 
+/// Most user text segments a config draws (the snapshot carries each one).
+pub const MAX_CUSTOM_TEXT: usize = 256;
+
+/// A user `kind = "text"` segment a layout draws. Its segment number is
+/// `field::BUILTIN.len()` plus its place in `CompiledConfig::custom`, which
+/// is sorted by id; the one field is `value` (`field::CUSTOM_TEXT`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomText {
+    pub id: String,
+    pub text: String,
+}
+
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Setup {
@@ -146,6 +158,8 @@ pub struct CompiledConfig {
     pub use_last_column: bool,
     pub duration_min_ms: u64,
     pub exec_units: Vec<ExecUnit>,
+    /// Drawn text segments, sorted by id.
+    pub custom: Vec<CustomText>,
     pub widths: Vec<WidthRun>,
 }
 
@@ -392,17 +406,25 @@ pub(crate) fn template_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` without custom references (drawn from M6) or disabled built-ins:
+/// `text` without custom references other than the drawn text segments
+/// `texts` (command and language segments are drawn from M6) or disabled built-ins:
 /// each is cut out, and so is a group left without a reference (a
 /// group needs one to compile). A template that does not parse is kept as
 /// it is, so the compile reports it.
-fn without_hidden(text: &str, off: &BTreeSet<&str>) -> String {
-    fn cuts(items: &[(Syntax, TSpan)], off: &BTreeSet<&str>, out: &mut Vec<TSpan>) -> bool {
+fn without_hidden(text: &str, off: &BTreeSet<&str>, texts: &[&str]) -> String {
+    fn cuts(
+        items: &[(Syntax, TSpan)],
+        off: &BTreeSet<&str>,
+        texts: &[&str],
+        out: &mut Vec<TSpan>,
+    ) -> bool {
         let mut kept = false;
         for (syn, sp) in items {
             match syn {
                 Syntax::Segment { id, .. } | Syntax::Field { segment: id, .. } => {
-                    if id.starts_with("custom/") || off.contains(id.as_str()) {
+                    if (id.starts_with("custom/") && !texts.contains(&id.as_str()))
+                        || off.contains(id.as_str())
+                    {
                         out.push(*sp);
                     } else {
                         kept = true;
@@ -410,14 +432,14 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>) -> String {
                 }
                 Syntax::Group(body) => {
                     let mut inner = Vec::new();
-                    if cuts(body, off, &mut inner) || inner.is_empty() {
+                    if cuts(body, off, texts, &mut inner) || inner.is_empty() {
                         out.extend(inner);
                         kept = true;
                     } else {
                         out.push(*sp);
                     }
                 }
-                Syntax::Style { body, .. } => kept |= cuts(body, off, out),
+                Syntax::Style { body, .. } => kept |= cuts(body, off, texts, out),
                 _ => {}
             }
         }
@@ -427,7 +449,7 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>) -> String {
         return String::from(text);
     };
     let mut gone = Vec::new();
-    cuts(&tree, off, &mut gone);
+    cuts(&tree, off, texts, &mut gone);
     gone.sort_by_key(|sp| sp.start);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
@@ -809,6 +831,19 @@ pub fn compile(
     let base_preset = s(r, &["style", "preset"]).unwrap_or(default_str("style.preset"));
     let banded = bands_of(m)?;
     notes.extend(banded.notes.iter().cloned());
+    let profile = WidthProfile::new(
+        int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
+        int(r, &["width", "emoji"]).unwrap_or(2) as u8,
+    )
+    .unwrap_or(WidthProfile::DEFAULT);
+    // Without a declared text segment nothing is looked up, so the usual
+    // config compiles exactly as it did before text segments.
+    let custom = if declares_text(r) {
+        text_segments(r, &drawn(r, &banded.names), profile, &mut notes)?
+    } else {
+        Vec::new()
+    };
+    let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
     let mut variants = Vec::new();
     let mut mask = 0u32;
     for lay in layouts(r) {
@@ -822,10 +857,14 @@ pub fn compile(
         // A template replaces preset and options (spec section 2 "스타일 세
         // 단계"); a band's own template wins over the default's.
         let template = lay.template.as_ref();
-        // User segments are drawn from M6; built-ins turned off are not drawn.
+        // Command and language segments are drawn from M6, text segments now;
+        // built-ins turned off are not drawn.
         let keep = |ids: &[String]| -> Vec<String> {
             ids.iter()
-                .filter(|id| !id.contains('/') && !off.contains(id.as_str()))
+                .filter(|id| {
+                    (!id.contains('/') || texts.contains(&id.as_str()))
+                        && !off.contains(id.as_str())
+                })
                 .cloned()
                 .collect()
         };
@@ -882,7 +921,7 @@ pub fn compile(
                 }
                 // `custom/…` is drawn from M6 (N502 when declared, W408 when
                 // not): only that reference goes, the rest compiles.
-                without_hidden(t, &off)
+                without_hidden(t, &off, &texts)
             }
             _ => {
                 let pr =
@@ -891,7 +930,7 @@ pub fn compile(
                     .map_err(|_| vec![bad(where_, "layout", "", "a layout that fits a template")])?
             }
         };
-        let compiled = compile_template(&text, BUILTIN)
+        let compiled = compile_with(&text, BUILTIN, &texts)
             .map_err(|_| vec![bad(where_, "layout", "", "a layout that compiles")])?;
         // A theme may change how the prompt looks, never erase it: a
         // shape-only template that draws none of the required segments
@@ -930,7 +969,7 @@ pub fn compile(
         variants.push(compiled);
     }
     for (id, refs) in drawn(r, &banded.names) {
-        if id.starts_with("custom/") && declared(r, &id) {
+        if id.starts_with("custom/") && declared(r, &id) && !texts.contains(&id.as_str()) {
             let place = refs
                 .first()
                 .and_then(|r| r.origin)
@@ -969,7 +1008,7 @@ pub fn compile(
         widths,
         ..
     } = banded;
-    let one = |src: &str| compile_template(src, BUILTIN).map(|mut v| v.remove(0));
+    let one = |src: &str| compile_with(src, BUILTIN, &[]).map(|mut v| v.remove(0));
     let transient = one("{char}").map_err(|_| Vec::new())?;
     let vi = one("{char}").map_err(|_| Vec::new())?;
     let dir_methods: Vec<Method> = match get(r, &["segment", "dir", "shorten"]) {
@@ -1009,11 +1048,6 @@ pub fn compile(
         },
         &mut notes,
     );
-    let profile = WidthProfile::new(
-        int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
-        int(r, &["width", "emoji"]).unwrap_or(2) as u8,
-    )
-    .unwrap_or(WidthProfile::DEFAULT);
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1036,6 +1070,7 @@ pub fn compile(
             use_last_column: boolean(r, &["layout", "use_last_column"]).unwrap_or(false),
             duration_min_ms,
             exec_units,
+            custom,
             widths,
         },
         notes,
@@ -1076,6 +1111,101 @@ pub(crate) fn layout_verdict(
         .then_some(NotRun::NotInTrustedLayout)
 }
 
+/// Whether any `custom/…` segment is declared with `kind = "text"`.
+fn declares_text(r: &MTable) -> bool {
+    entries(r, &["segment"]).iter().any(|e| {
+        e.key.starts_with("custom/")
+            && matches!(&e.node.value, MValue::Table(t) if s(t, &["kind"]) == Some("text"))
+    })
+}
+
+/// The `kind = "text"` segments some layout draws, sorted by id. A text
+/// segment turned off (`enabled = false`, or from a file that failed the
+/// safety check) is not drawn; a missing `text` shows nothing.
+fn text_segments(
+    r: &MTable,
+    drawn: &BTreeMap<String, Vec<LayoutRef>>,
+    profile: WidthProfile,
+    notes: &mut Vec<Diagnostic>,
+) -> Result<Vec<CustomText>, Vec<Diagnostic>> {
+    let mut out: Vec<CustomText> = Vec::new();
+    for e in entries(r, &["segment"]) {
+        let MValue::Table(t) = &e.node.value else {
+            continue;
+        };
+        if !e.key.starts_with("custom/")
+            || !drawn.contains_key(&e.key)
+            || s(t, &["kind"]) != Some("text")
+        {
+            continue;
+        }
+        // `kind` and `enabled` are execution keys: one written by a file
+        // that failed the safety check keeps the segment from being drawn.
+        if unsafe_exec_key(&e.key, &exec_origins(&e.key, t), notes).is_some()
+            || boolean(t, &["enabled"]) == Some(false)
+        {
+            continue;
+        }
+        out.push(CustomText {
+            id: e.key.clone(),
+            // Cut here, to the cells the field shows, so the stored text is
+            // what the front draws and always fits the codec's byte cap
+            // (`Clean` keeps at most `CUSTOM_TEXT_CELLS * 4` bytes).
+            text: crate::field::Clean::new(
+                s(t, &["text"]).unwrap_or_default().as_bytes(),
+                crate::field::CUSTOM_TEXT_CELLS,
+                profile,
+            )
+            .as_str()
+            .into(),
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
+    if out.len() > MAX_CUSTOM_TEXT {
+        return Err(vec![bad(
+            place_of(r, &["segment"]),
+            "segment",
+            &alloc::format!("{}", out.len()),
+            "at most 256 drawn text segments",
+        )]);
+    }
+    Ok(out)
+}
+
+/// Each execution key written for a segment and its origin.
+fn exec_origins(id: &str, t: &MTable) -> Vec<(String, Origin)> {
+    t.entries
+        .iter()
+        .filter(|k| keys::classify(&["segment", id, &k.key]) == KeyClass::Exec)
+        .map(|k| (k.key.clone(), k.node.origin))
+        .collect()
+}
+
+/// The first execution key written by a file that failed the safety check,
+/// with the W405 note that says the segment is not used for it. Every kind
+/// of segment, drawn text included, goes through this one judgement.
+fn unsafe_exec_key(
+    id: &str,
+    origins: &[(String, Origin)],
+    notes: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let (k, origin) = origins.iter().find(|(_, o)| o.trust == Trust::Unsafe)?;
+    notes.push(
+        Diagnostic::new(
+            codes::NOT_RUN_UNSAFE_FILE,
+            Place::Source {
+                id: origin.source,
+                span: origin.span,
+            },
+        )
+        .arg("id", id)
+        .arg("key", k.clone())
+        .arg("reason", "the file failed the owner and permission check"),
+    );
+    Some(k.clone())
+}
+
 fn exec_units(
     r: &MTable,
     trusted: &MTable,
@@ -1114,30 +1244,11 @@ fn exec_units(
             _ => continue,
         };
         let place = at(&e.node);
-        let origins: Vec<(String, Origin)> = t
-            .entries
-            .iter()
-            .filter(|k| keys::classify(&["segment", &e.key, &k.key]) == KeyClass::Exec)
-            .map(|k| (k.key.clone(), k.node.origin))
-            .collect();
+        let origins = exec_origins(&e.key, t);
         let approved_by = approved.get(&e.key).cloned().unwrap_or_default();
         let shown_at = shown.get(&e.key).cloned().unwrap_or_default();
-        let not_run = if let Some((k, origin)) =
-            origins.iter().find(|(_, o)| o.trust == Trust::Unsafe)
-        {
-            notes.push(
-                Diagnostic::new(
-                    codes::NOT_RUN_UNSAFE_FILE,
-                    Place::Source {
-                        id: origin.source,
-                        span: origin.span,
-                    },
-                )
-                .arg("id", e.key.clone())
-                .arg("key", k.clone())
-                .arg("reason", "the file failed the owner and permission check"),
-            );
-            Some(NotRun::UnsafeFile { key: k.clone() })
+        let not_run = if let Some(k) = unsafe_exec_key(&e.key, &origins, notes) {
+            Some(NotRun::UnsafeFile { key: k })
         } else if boolean(t, &["enabled"]) == Some(false) {
             Some(NotRun::Disabled)
         } else if let why @ Some(_) = layout_verdict(&approved_by, &shown_at, names.len(), reach) {

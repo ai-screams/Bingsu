@@ -223,7 +223,7 @@ pub fn write_duration(ms: u64, out: &mut String) {
     };
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FieldDecl {
     pub name: &'static str,
     pub ty: FieldType,
@@ -232,7 +232,7 @@ pub struct FieldDecl {
 /// Display contract of a built-in segment (no execution, permissions or
 /// cost: sub-project 3). `role` is the color token for its text in plain
 /// mode and its background in block mode.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SegmentDecl {
     pub id: &'static str,
     pub role: &'static str,
@@ -323,6 +323,24 @@ pub const BUILTIN: &[SegmentDecl] = &[
         fields: &[f("name", t(64))],
     },
 ];
+
+/// Cells a user text segment may show (`value`, cut with an ellipsis).
+pub const CUSTOM_TEXT_CELLS: u16 = 64;
+
+/// The declaration every user `kind = "text"` segment shares. Its segment
+/// number is `BUILTIN.len()` plus its place in `CompiledConfig::custom`, so
+/// no built-in number moves and no collection mask bit is used. `id` only
+/// stands in for the per-segment ids, which live in the compiled list.
+pub const CUSTOM_TEXT: SegmentDecl = SegmentDecl {
+    id: "custom",
+    role: "fg",
+    fields: &[FieldDecl {
+        name: "value",
+        ty: FieldType::Text {
+            max_cells: CUSTOM_TEXT_CELLS,
+        },
+    }],
+};
 
 pub fn segment(id: &str) -> Option<&'static SegmentDecl> {
     BUILTIN
