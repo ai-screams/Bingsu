@@ -512,7 +512,7 @@ fn front_refuses_all_binding_mismatches_without_wait() {
     h.marker = m.encode().to_vec();
     let out = h.run();
     assert!(String::from_utf8(out.record).unwrap().contains("EXCHANGE"));
-    assert!(out.execution.permit().is_none());
+    assert!(out.execution.units().is_empty());
 }
 
 // 이것을 실패시키는 것: 재사용 mask 계산에 redraw를 적용하거나 변경된 폭의 mask를 무시하는 것.

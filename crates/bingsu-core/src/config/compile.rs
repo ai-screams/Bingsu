@@ -93,6 +93,8 @@ pub enum NotRun {
     /// An execution key of it comes from a file that failed the safety
     /// check (owner, permissions).
     UnsafeFile { key: String },
+    /// A reference names a band index the config does not have.
+    UnknownBand,
 }
 
 /// One user segment that runs something, with its whole policy, where each
@@ -357,12 +359,13 @@ pub enum Side {
     Right,
 }
 
-/// Where a segment id is drawn: the layout (`band` None is the default),
-/// line 1 or 2 (0: named by a template, which replaces the lines), the
-/// side, and the array or template that put it there.
+/// Where a segment id is drawn: the layout (`band` None is the default, else
+/// the index into `CompiledConfig::bands`), line 1 or 2 (0: named by a
+/// template, which replaces the lines), the side, and the array or template
+/// that put it there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutRef {
-    pub band: Option<String>,
+    pub band: Option<u16>,
     pub line: u8,
     pub side: Side,
     pub origin: Option<Origin>,
@@ -444,16 +447,24 @@ fn declared(r: &MTable, id: &str) -> bool {
     )
 }
 
-/// Every id on a drawn line, with where.
-fn drawn(r: &MTable) -> BTreeMap<String, Vec<LayoutRef>> {
+/// The index of a band name; a name `names` lacks gets `names.len()`, which
+/// `layout_verdict` treats as unknown.
+fn band_index(names: &[String], name: &Option<String>) -> Option<u16> {
+    name.as_ref()
+        .map(|n| names.iter().position(|x| x == n).unwrap_or(names.len()) as u16)
+}
+
+/// Every id on a drawn line, with where. Bands are indexed by `names`.
+fn drawn(r: &MTable, names: &[String]) -> BTreeMap<String, Vec<LayoutRef>> {
     let mut out: BTreeMap<String, Vec<LayoutRef>> = BTreeMap::new();
     for lay in layouts(r) {
+        let band = band_index(names, &lay.name);
         if let Some(t) = &lay.template {
             // A template replaces the lines: what it names is what is drawn.
             if let MValue::Scalar(Value::Str(text)) = &t.value {
                 for id in template_ids(text) {
                     out.entry(id).or_default().push(LayoutRef {
-                        band: lay.name.clone(),
+                        band,
                         line: 0,
                         side: Side::Left,
                         origin: Some(t.origin),
@@ -469,7 +480,7 @@ fn drawn(r: &MTable) -> BTreeMap<String, Vec<LayoutRef>> {
             ] {
                 for id in ids {
                     out.entry(id.clone()).or_default().push(LayoutRef {
-                        band: lay.name.clone(),
+                        band,
                         line: n as u8 + 1,
                         side,
                         origin,
@@ -918,7 +929,7 @@ pub fn compile(
         }
         variants.push(compiled);
     }
-    for (id, refs) in drawn(r) {
+    for (id, refs) in drawn(r, &banded.names) {
         if id.starts_with("custom/") && declared(r, &id) {
             let place = refs
                 .first()
@@ -930,6 +941,27 @@ pub fn compile(
             notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
         }
     }
+    let shown_bands = selectable(&banded.order, &banded.bands);
+    // What a trusted layout can draw is judged on the trusted merge alone: a
+    // shape-only source may re-order or resize bands, but must not make a band
+    // reachable that the trusted sources never reach. A trusted merge whose
+    // bands fail to order approves nothing.
+    let approved_bands = bands_of(trusted).map_or_else(
+        |_| BTreeSet::new(),
+        |t| {
+            let full = &banded.names;
+            crate::bands::selection_table(&t.order, &t.bands)
+                .into_iter()
+                .filter_map(|(_, _, b)| match b {
+                    None => Some(None),
+                    Some(i) => full
+                        .iter()
+                        .position(|n| *n == t.names[i])
+                        .map(|j| Some(j as u16)),
+                })
+                .collect()
+        },
+    );
     let Bands {
         bands,
         names: band_names,
@@ -967,7 +999,16 @@ pub fn compile(
             }
         }
     }
-    let exec_units = exec_units(r, &trusted.root, &mut notes);
+    let exec_units = exec_units(
+        r,
+        &trusted.root,
+        &band_names,
+        &Reach {
+            approved: approved_bands,
+            shown: shown_bands,
+        },
+        &mut notes,
+    );
     let profile = WidthProfile::new(
         int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
         int(r, &["width", "emoji"]).unwrap_or(2) as u8,
@@ -1001,9 +1042,49 @@ pub fn compile(
     ))
 }
 
-fn exec_units(r: &MTable, trusted: &MTable, notes: &mut Vec<Diagnostic>) -> Vec<ExecUnit> {
+/// The layouts a width can choose, for the trusted merge (what approves a
+/// unit) and for the full merge (what is on screen).
+pub(crate) struct Reach {
+    approved: BTreeSet<Option<u16>>,
+    shown: BTreeSet<Option<u16>>,
+}
+
+/// The layouts a width can choose: `None` is the default layout, `Some(i)` band `i`.
+fn selectable(order: &[usize], bands: &[Band]) -> BTreeSet<Option<u16>> {
+    crate::bands::selection_table(order, bands)
+        .into_iter()
+        .map(|(_, _, b)| b.map(|i| i as u16))
+        .collect()
+}
+
+/// Whether a unit with these references may run, judged on layout alone.
+/// Every kind of unit goes through this one function. A reference counts only
+/// where a width can choose that layout, since no other line is ever drawn.
+pub(crate) fn layout_verdict(
+    approved_by: &[LayoutRef],
+    shown_at: &[LayoutRef],
+    band_count: usize,
+    reach: &Reach,
+) -> Option<NotRun> {
+    let refs = || approved_by.iter().chain(shown_at);
+    if refs().any(|r| r.band.is_some_and(|b| usize::from(b) >= band_count)) {
+        return Some(NotRun::UnknownBand);
+    }
+    let live =
+        |v: &[LayoutRef], set: &BTreeSet<Option<u16>>| v.iter().any(|r| set.contains(&r.band));
+    (!live(approved_by, &reach.approved) || !live(shown_at, &reach.shown))
+        .then_some(NotRun::NotInTrustedLayout)
+}
+
+fn exec_units(
+    r: &MTable,
+    trusted: &MTable,
+    names: &[String],
+    reach: &Reach,
+    notes: &mut Vec<Diagnostic>,
+) -> Vec<ExecUnit> {
     // A unit runs when a trusted layout draws it and it is still drawn.
-    let (approved, shown) = (drawn(trusted), drawn(r));
+    let (approved, shown) = (drawn(trusted, names), drawn(r, names));
     let mut out = Vec::new();
     for e in entries(r, &["segment"]) {
         let MValue::Table(t) = &e.node.value else {
@@ -1059,11 +1140,11 @@ fn exec_units(r: &MTable, trusted: &MTable, notes: &mut Vec<Diagnostic>) -> Vec<
             Some(NotRun::UnsafeFile { key: k.clone() })
         } else if boolean(t, &["enabled"]) == Some(false) {
             Some(NotRun::Disabled)
-        } else if approved_by.is_empty() || shown_at.is_empty() {
+        } else if let why @ Some(_) = layout_verdict(&approved_by, &shown_at, names.len(), reach) {
             notes.push(
                 Diagnostic::new(codes::NOT_RUN_UNTRUSTED_LAYOUT, place).arg("id", e.key.clone()),
             );
-            Some(NotRun::NotInTrustedLayout)
+            why
         } else {
             None
         };
@@ -1388,7 +1469,7 @@ mod tests {
         );
         // The trusted reference that lets it run, and where it shows.
         let r = &u.approved_by[0];
-        assert_eq!((r.band.as_deref(), r.line, r.side), (None, 1, Side::Left));
+        assert_eq!((r.band, r.line, r.side), (None, 1, Side::Left));
         assert_eq!(r.origin.map(|o| o.source), Some(crate::diag::SourceId(1)));
         assert_eq!(u.approved_by, u.shown_at);
         let keys: Vec<&str> = u.origins.iter().map(|(k, _)| k.as_str()).collect();
@@ -1505,6 +1586,164 @@ mod tests {
             ),
             "{:?}",
             d.at
+        );
+    }
+
+    fn unit_ref(band: Option<u16>) -> Vec<LayoutRef> {
+        vec![LayoutRef {
+            band,
+            line: 1,
+            side: Side::Left,
+            origin: None,
+        }]
+    }
+
+    // 이것을 실패시키는 것: `>= band_count` 비교를 `>`로 바꾸는 것(인덱스가 구간 수와 같은 참조를 아는 구간으로
+    // 취급), 신뢰 참조나 표시 참조 한쪽의 검사를 지우는 것.
+    #[test]
+    fn test_unknown_band_index_never_runs() {
+        let set: BTreeSet<Option<u16>> = [None, Some(0), Some(1), Some(2)].into();
+        let all = Reach {
+            approved: set.clone(),
+            shown: set,
+        };
+        // Two bands: indexes 0 and 1 exist, 2 does not (even though a width "chooses" it here).
+        let verdict = |a, s| layout_verdict(&unit_ref(a), &unit_ref(s), 2, &all);
+        assert_eq!(verdict(Some(1), None), None);
+        assert_eq!(verdict(Some(2), None), Some(NotRun::UnknownBand));
+        assert_eq!(verdict(None, Some(2)), Some(NotRun::UnknownBand));
+        assert_eq!(verdict(Some(u16::MAX), Some(0)), Some(NotRun::UnknownBand));
+    }
+
+    const UNIT: &str = "[segment.\"custom/u\"]\nkind = \"command\"\ncommand = [\"u\"]\n";
+
+    // 이것을 실패시키는 것: 도달 가능성 필터를 지워 폭이 고를 수 없는 구간(다른 구간에 가려진 구간, 구간이 모든 폭을
+    // 덮어 쓸 수 없게 된 기본 레이아웃)에만 그려진 단위를 실행하는 것. 양성 대조: 같은 구간이 고를 수 있으면 실행한다.
+    #[test]
+    fn test_unreachable_band_unit_not_run() {
+        let run = |layout: &str| {
+            compiled(&alloc::format!("{UNIT}{layout}")).exec_units[0]
+                .not_run
+                .clone()
+        };
+        let hidden = "[layout.when.hidden]\nmin_cols = 120\nmax_cols = 130\n[layout.when.hidden.line1]\nleft = [\"custom/u\", \"char\"]\n";
+        // Reachable: no other band takes widths 120 to 130 first.
+        assert_eq!(
+            run(&alloc::format!(
+                "[layout.line1]\nleft = [\"char\"]\n{hidden}"
+            )),
+            None
+        );
+        // `cover` has the lower order and takes every width, so `hidden` is never chosen.
+        let cover = "[layout.when.cover]\norder = 1\n";
+        let hidden = hidden.replace("min_cols", "order = 2\nmin_cols");
+        assert_eq!(
+            run(&alloc::format!(
+                "[layout.line1]\nleft = [\"char\"]\n{cover}{hidden}"
+            )),
+            Some(NotRun::NotInTrustedLayout)
+        );
+        // The default layout draws the unit, but a band takes every width.
+        assert_eq!(
+            run(
+                "[layout.line1]\nleft = [\"custom/u\", \"char\"]\n[layout.when.cover]\norder = 1\n[layout.when.cover.line1]\nleft = [\"char\"]\n"
+            ),
+            Some(NotRun::NotInTrustedLayout)
+        );
+    }
+
+    // 이것을 실패시키는 것: 승인 참조의 도달 가능성을 전체 병합으로 판정하는 것(모양 전용 파일이 구간의 폭만 바꿔
+    // 신뢰 설정에서 가려진 구간을 되살린다). 양성 대조: 같은 모양 파일이 없으면 가려진 채로, 신뢰 설정 안에서 도달 가능하면 실행.
+    #[test]
+    fn test_shape_only_file_cannot_make_a_hidden_band_approve() {
+        let root = alloc::format!(
+            "{UNIT}[layout.line1]\nleft = [\"char\"]\n[layout.when.cover]\norder = 1\n[layout.when.hidden]\norder = 2\nmin_cols = 120\nmax_cols = 130\n[layout.when.hidden.line1]\nleft = [\"custom/u\", \"char\"]\n"
+        );
+        let shape = "[layout.when.cover]\nmax_cols = 100\n";
+        let not_run = |extends: &str, list: &[(&'static str, &str)]| {
+            let r = read(&alloc::format!("{extends}{root}"), list);
+            let codes = codes_of(&r);
+            r.snapshot.unwrap_or_else(|| panic!("{codes:?}")).exec_units[0]
+                .not_run
+                .clone()
+        };
+        assert_eq!(not_run("", &[]), Some(NotRun::NotInTrustedLayout));
+        assert_eq!(
+            not_run("extends = [\"shape-order\"]\n", &[("shape-order", shape)]),
+            Some(NotRun::NotInTrustedLayout)
+        );
+    }
+
+    fn exec_not_run(root: &str, shape: &str) -> Vec<Option<NotRun>> {
+        let src = alloc::format!("extends = [\"shape-x\"]\n{root}");
+        let r = read(&src, &[("shape-x", shape)]);
+        let codes = codes_of(&r);
+        let c = r.snapshot.unwrap_or_else(|| panic!("{codes:?}"));
+        let mut units: Vec<_> = c
+            .exec_units
+            .iter()
+            .map(|u| (u.id.clone(), u.not_run.clone()))
+            .collect();
+        units.sort_by(|a, b| a.0.cmp(&b.0));
+        units.into_iter().map(|u| u.1).collect()
+    }
+
+    // 이것을 실패시키는 것: 신뢰 merge의 구간 번호를 전체 merge의 번호로 이름 없이 복사하는 것(모양 파일이 앞에
+    // 구간을 더해 번호가 밀리면 승인돼야 할 단위가 거부되고 거부돼야 할 단위가 승인된다).
+    #[test]
+    fn test_trusted_band_index_maps_by_name() {
+        let two = |name: &str, order: u8, unit: &str| {
+            alloc::format!(
+                "[layout.when.{name}]\norder = {order}\nmin_cols = 100\nmax_cols = 110\n[layout.when.{name}.line1]\nleft = [\"{unit}\", \"char\"]\n"
+            )
+        };
+        let unit = |id: &str| {
+            alloc::format!("[segment.\"{id}\"]\nkind = \"command\"\ncommand = [\"u\"]\n")
+        };
+        // Trusted: `gone` (index 0) is shadowed by `live` (index 1) on the same widths.
+        let root = alloc::format!(
+            "{}{}[layout.line1]\nleft = [\"char\"]\n{}{}",
+            unit("custom/neg"),
+            unit("custom/pos"),
+            two("gone", 2, "custom/neg"),
+            two("live", 1, "custom/pos"),
+        );
+        // The shape-only file adds a band that sorts first, so every index shifts by one.
+        let shape = "[layout.when.early]\nmin_cols = 300\n";
+        // Units sorted by id: custom/neg, custom/pos.
+        assert_eq!(
+            exec_not_run(&root, shape),
+            [Some(NotRun::NotInTrustedLayout), None]
+        );
+    }
+
+    // 이것을 실패시키는 것: 신뢰 merge의 구간이 정렬에 실패할 때 전체 merge의 도달 가능성으로 대신하는 것(모양 파일의
+    // `order`가 신뢰 설정이 풀지 못한 구간 겹침을 풀어 명령을 되살린다). 양성 대조는 위 시험과 앞의 시험이 맡는다.
+    #[test]
+    fn test_unorderable_trusted_bands_approve_nothing() {
+        let root = alloc::format!(
+            "{UNIT}[layout.line1]\nleft = [\"char\"]\n[layout.when.a]\nmin_cols = 100\nmax_cols = 110\n[layout.when.a.line1]\nleft = [\"custom/u\", \"char\"]\n[layout.when.b]\nmin_cols = 105\nmax_cols = 115\n"
+        );
+        // Crossing ranges need `order`; only the shape-only file gives it.
+        let shape = "[layout.when.a]\norder = 1\n[layout.when.b]\norder = 2\n";
+        assert_eq!(
+            exec_not_run(&root, shape),
+            [Some(NotRun::NotInTrustedLayout)]
+        );
+    }
+
+    // 이것을 실패시키는 것: 표시 참조의 도달 가능성 검사를 `shown_at.is_empty()`로 약화하는 것(모양 전용 파일이
+    // 모든 폭을 덮는 구간에서 줄을 바꿔 명령을 화면에서 지웠는데도 신뢰 설정의 승인만으로 실행된다).
+    // 양성 대조: 같은 신뢰 설정에 모양 파일이 없으면 실행한다.
+    #[test]
+    fn test_shape_only_cover_band_hides_the_unit() {
+        let root = alloc::format!("{UNIT}[layout.line1]\nleft = [\"custom/u\", \"char\"]\n");
+        let cover =
+            "[layout.when.cover]\norder = 0\n[layout.when.cover.line1]\nleft = [\"char\"]\n";
+        assert_eq!(exec_not_run(&root, "").as_slice(), [None]);
+        assert_eq!(
+            exec_not_run(&root, cover),
+            [Some(NotRun::NotInTrustedLayout)]
         );
     }
 }

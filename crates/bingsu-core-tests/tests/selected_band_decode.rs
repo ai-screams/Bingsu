@@ -302,7 +302,7 @@ fn one_band() -> (Vec<u8>, Vec<u8>) {
     c.widths.clear();
     c.variants = vec![compile("x", BUILTIN).unwrap(); 2];
     let b = encode_compiled(&c).unwrap();
-    assert_eq!(&b[..8], b"BNGCFG04");
+    assert_eq!(&b[..8], b"BNGCFG05");
     let s = Sections::of(&b);
     let x = variant(&[&X_LINE]);
     assert_eq!(
@@ -486,7 +486,7 @@ fn wide_config() -> CompiledConfig {
     for u in &mut wide.exec_units {
         for r in u.approved_by.iter_mut().chain(&mut u.shown_at) {
             if r.band.is_some() {
-                r.band = Some("b3".into());
+                r.band = Some(3);
             }
         }
     }

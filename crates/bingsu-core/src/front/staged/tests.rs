@@ -71,9 +71,11 @@ mod cases {
             assert_eq!(timed.deadline, Some(deadline));
             assert_eq!(timed.record, ordinary.record);
             assert_eq!(timed.status, ordinary.status);
-            assert_eq!(timed.execution.permit(), ordinary.execution.permit());
+            assert_eq!(timed.execution.units(), ordinary.execution.units());
         }
     }
+    /// One command the snapshot draws, so "units" tells whether execution was granted.
+    const UNIT: &str = "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\n[layout.line2]\nleft=['custom/yes','char']";
     fn snapshot(text: &str) -> Snapshot {
         Snapshot {
             id: Identity {
@@ -142,7 +144,7 @@ mod cases {
     }
     impl Harness {
         fn new() -> Self {
-            let s = snapshot("");
+            let s = snapshot(UNIT);
             Self {
                 current: Some(s.encode(1, 0).unwrap()),
                 last: None,
@@ -317,7 +319,7 @@ mod cases {
             h.short = short;
             let r = h.run(&args(), Mode::Dark);
             assert_eq!(r.status, Status::OK_NONE);
-            assert!(r.execution.permit().is_some());
+            assert!(!r.execution.units().is_empty());
             assert!(!record(&r).contains('!'));
             let (c, _) = snapshot::lengths(h.current.as_ref().unwrap()).unwrap();
             assert!(h.reads.iter().all(|(name, off, len)| match *name {
@@ -376,22 +378,22 @@ mod cases {
     #[test]
     fn last_good_uses_its_own_pair_and_keeps_notice() {
         let mut h = Harness::new();
-        let mut old = snapshot("icons='ascii'");
+        let mut old = snapshot(&format!("icons='ascii'\n{UNIT}"));
         old.id.generation = 6;
         h.last = Some(old.encode(1, 0).unwrap());
         h.current.as_mut().unwrap()[192] ^= 1;
         h.marker = Some(marker(&old).encode().to_vec());
         let r = h.run(&args(), Mode::Dark);
         assert_eq!(r.status, Status::ERROR_CONFIG_LAST_GOOD);
-        assert!(r.execution.permit().is_some());
+        assert!(!r.execution.units().is_empty());
         assert!(record(&r).contains('!'));
         h.marker = Some(marker(&snapshot("")).encode().to_vec());
-        assert!(h.run(&args(), Mode::Dark).execution.permit().is_none());
+        assert!(h.run(&args(), Mode::Dark).execution.units().is_empty());
         let mut m = marker(&old);
         m.invalid = true;
         m.id.generation = 123;
         h.marker = Some(m.encode().to_vec());
-        assert!(h.run(&args(), Mode::Dark).execution.permit().is_none());
+        assert!(h.run(&args(), Mode::Dark).execution.units().is_empty());
         old.id.boot = [9; 16];
         h.last = Some(old.encode(1, 0).unwrap());
         assert_eq!(
@@ -593,7 +595,7 @@ mod cases {
             let (mut h, want) = trust_case(case);
             let r = h.run(&args(), Mode::Dark);
             assert_eq!(r.status, want, "case {case}");
-            assert!(r.execution.permit().is_none(), "case {case}");
+            assert!(r.execution.units().is_empty(), "case {case}");
             assert!(record(&r).contains('!'));
             // A safe compiled screen collects independently of command eligibility.
             assert_eq!(r.worker_mask, 10);
@@ -608,7 +610,7 @@ mod cases {
             let (mut h, want) = trust_case(case);
             let r = h.run(&redraw, Mode::Dark);
             assert_eq!(r.status, want, "case {case}");
-            assert!(r.execution.permit().is_none(), "case {case}");
+            assert!(r.execution.units().is_empty(), "case {case}");
             assert_eq!(r.worker_mask, 0, "case {case}");
             let (mut plain, _) = trust_case(case);
             assert_eq!(
@@ -620,6 +622,16 @@ mod cases {
         let fresh = Harness::new().run(&redraw, Mode::Dark);
         assert_eq!(fresh.status, Status::OK_NONE);
         assert_eq!(fresh.record, Harness::new().run(&args(), Mode::Dark).record);
+    }
+    // 이것을 실패시키는 것: redraw 분기에서만 표시 자격(단위 목록)을 비우거나 바꾸는 것.
+    #[test]
+    fn test_redraw_display_matches_normal() {
+        let mut redraw = args();
+        redraw.push(b"--redraw");
+        let normal = Harness::new().run(&args(), Mode::Dark);
+        let redrawn = Harness::new().run(&redraw, Mode::Dark);
+        assert!(!normal.execution.units().is_empty());
+        assert_eq!(redrawn.execution.units(), normal.execution.units());
     }
     // 이것을 실패시키는 것: 부팅/현재 셸 문맥을 선택에서 빼거나 외부 문맥의 일치하는 짝을 허용하는 것.
     #[test]
@@ -639,7 +651,7 @@ mod cases {
             h.marker = Some(marker(&s).encode().to_vec());
             let r = h.run(&args(), Mode::Dark);
             assert_eq!(r.status, Status::ERROR_CONFIG_DEFAULT);
-            assert!(r.execution.permit().is_none());
+            assert!(r.execution.units().is_empty());
             assert!(record(&r).contains('!'));
         }
     }
@@ -670,7 +682,7 @@ mod cases {
                     _ => f.entry.ownership = Some(false),
                 }
                 h.file_change = Some((name, f));
-                assert!(h.run(&args(), Mode::Dark).execution.permit().is_none());
+                assert!(h.run(&args(), Mode::Dark).execution.units().is_empty());
                 assert!(
                     h.reads.iter().all(|(n, _, _)| *n != name),
                     "{name:?} case {case}"
@@ -753,7 +765,7 @@ mod cases {
             let mut h = Harness::new();
             let r = h.run(&a, Mode::Dark);
             assert!(h.calls.is_empty());
-            assert!(r.execution.permit().is_none());
+            assert!(r.execution.units().is_empty());
         }
         let r = finish(prepare(&args()), Observed::default());
         assert_eq!(r.status, Status::DEGRADED_RUNTIME_ROOT);
@@ -826,7 +838,7 @@ mod cases {
         h.marker = Some(m.encode().to_vec());
         let invalid = h.run(&args(), Mode::Dark);
         assert_eq!(invalid.worker_mask, ordinary.worker_mask);
-        assert!(invalid.execution.permit().is_none());
+        assert!(invalid.execution.units().is_empty());
         // 이것을 실패시키는 것: 무효 표식에서 실행 단위를 허용하는 것.
         assert!(invalid.execution.units().is_empty());
         let s = snapshot(
@@ -868,7 +880,7 @@ mod cases {
             h.marker = Some(m.encode().to_vec());
             let r = h.run_catalog(&args(), Mode::Dark, Some(&catalog));
             assert_eq!(r.worker_mask, 1 << 31);
-            assert!(r.execution.permit().is_none());
+            assert!(r.execution.units().is_empty());
         }
     }
 
@@ -890,7 +902,7 @@ mod cases {
         let mut h = Harness::new();
         h.fail_at = Some(missing);
         let response = h.run(&args(), Mode::Dark);
-        assert!(response.execution.permit().is_none());
+        assert!(response.execution.units().is_empty());
         assert!(
             !h.calls
                 .iter()
@@ -907,7 +919,7 @@ mod cases {
             let mut h = Harness::new();
             h.fail_at = Some(i);
             let r = h.run(&args(), Mode::Dark);
-            assert!(r.execution.permit().is_none(), "effect {i}");
+            assert!(r.execution.units().is_empty(), "effect {i}");
             assert_ne!(r.status, Status::OK_NONE, "effect {i}");
         }
     }
@@ -1033,20 +1045,18 @@ mod cases {
 
     // C3 (GATE-EXEC-DEADLINE.1, GATE-CLOCK-READS.1): the approval clock samples and the deadline.
     fn command_harness() -> Harness {
-        let s = snapshot(
-            "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\n[layout.line2]\nleft=['custom/yes','char']",
-        );
+        let s = snapshot(UNIT);
         let mut h = Harness::new();
         h.current = Some(s.encode(1, 0).unwrap());
         h.marker = Some(marker(&s).encode().to_vec());
         h
     }
     // 판정 직후 시계가 마감을 넘긴 fixture: 마감 1ns 전 관찰은 그 단위를 승인하고(양성 대조),
-    // 마감 이상이면 permit도 단위도 없다.
+    // 마감 이상이면 단위가 없다.
     // 이것을 실패시키는 것: snapshot::eligible의 T 비교를 `>=`에서 `>`로 바꾸는 것, 끝 시계 대신 시작 시계로
     // 판정하는 것, FinalClock 단계를 생략하는 것.
     #[test]
-    fn finish_refuses_permit_when_final_clock_reaches_deadline() {
+    fn finish_refuses_units_when_final_clock_reaches_deadline() {
         let end = 100 + T_NS;
         for (now, approved) in [(end - 1, true), (end, false), (end + 1, false)] {
             let mut h = command_harness();
@@ -1054,7 +1064,6 @@ mod cases {
             let r = h.run(&args(), Mode::Dark);
             if approved {
                 assert_eq!(r.status, Status::OK_NONE, "{now}");
-                assert_eq!(r.execution.permit().map(|p| p.deadline), Some(end));
                 assert_eq!(
                     r.execution
                         .units()
@@ -1065,7 +1074,6 @@ mod cases {
                 );
             } else {
                 assert_eq!(r.status, Status::DEGRADED_TRUST_EXPIRED, "{now}");
-                assert_eq!(r.execution.permit(), None, "{now}");
                 assert!(r.execution.units().is_empty(), "{now}");
             }
             assert_eq!(h.clocks, 2);
@@ -1149,7 +1157,7 @@ mod cases {
             };
             assert_eq!(r.status, expected, "{case}");
             assert_eq!(
-                r.execution.permit().is_some(),
+                !r.execution.units().is_empty(),
                 case == "normal" || case == "last-good",
                 "{case}"
             );

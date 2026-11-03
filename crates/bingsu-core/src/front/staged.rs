@@ -12,7 +12,6 @@ use crate::color::palette::Mode;
 use crate::config::compile::ExecUnit;
 use crate::envelope::{self, Envelope, EnvelopeError};
 use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
-use crate::handoff::Permit;
 use crate::layout_view::FrontConfig;
 use crate::snapshot::{self, Clock, FrontDecoder, FrontSnapshot, Marker, Refusal};
 use crate::status::Status;
@@ -809,17 +808,14 @@ pub fn next(plan: &mut ReadPlan, previous: Option<Observation>) -> Step {
     }
 }
 
-/// Execution is permission for these decoded units only, never for arbitrary
-/// caller-supplied policies. A relay permit alone does not grant a unit.
+/// Which decoded units may show a value on this prompt, redraw included. The
+/// front never starts anything, so it carries no execution permit; the helper
+/// makes that from the same verdict.
 #[derive(Default)]
 pub struct Eligibility {
-    permit: Option<Permit>,
     units: Vec<ExecUnit>,
 }
 impl Eligibility {
-    pub fn permit(&self) -> Option<Permit> {
-        self.permit
-    }
     pub fn units(&self) -> &[ExecUnit] {
         &self.units
     }
@@ -831,7 +827,7 @@ pub struct Response {
     /// timer, the per-step clock check and the write loop); nothing reads this
     /// field to stop work, so later code must not assume it does.
     pub deadline: Option<Deadline>,
-    /// Snapshot trust expiry; it must never extend the prompt's output deadline.
+    /// Display eligibility under the snapshot's trust, same for redraw.
     pub execution: Eligibility,
     pub worker_mask: u32,
     pub status: Status,
@@ -920,14 +916,7 @@ pub fn finish_with_catalog(
                 }
             };
             response.worker_mask = catalog.worker_mask(&s.config, e.width, e.redraw);
-            if let (Ok(deadline), Some(clock)) = (eligibility, observed.clock) {
-                response.execution.permit = Some(Permit {
-                    deadline,
-                    kind: clock.kind,
-                    boot: clock.boot,
-                    domain: clock.domain,
-                    resume: clock.resume,
-                });
+            if eligibility.is_ok() {
                 response.execution.units = s
                     .config
                     .exec_units()
