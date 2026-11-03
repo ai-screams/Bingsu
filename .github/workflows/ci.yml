@@ -256,6 +256,8 @@ jobs:
           grep -Fx 'test relay::tests::test_target_env_equals_frame ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_refuses_unsafe_targets ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_runs_execute_only_target ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_refuses_relative_executable ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_close_range_fallback ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_pre_exec_clock_reads ... ok' "$RUNNER_TEMP/relay-native.txt"
       - run: |
           set -o pipefail

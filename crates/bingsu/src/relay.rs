@@ -57,6 +57,9 @@ pub(crate) struct Target {
 
 /// Spec order: signals, fd 3 read and closed, the executable opened and
 /// checked, descriptors past 2 marked close-on-exec, then the fresh clock.
+/// The relay never changes folder: the supervisor spawns it in the unit's
+/// working folder (the neutral folder, or the shell's folder for
+/// `untrusted-current`), and the target inherits that folder.
 pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     reset_signals();
     let input = read_fd3();
@@ -76,16 +79,7 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let argv_ptrs = pointers(&argv);
     let envp_ptrs = pointers(&envp);
     // The target gets 0, 1 and 2 only; the executable's fd is close-on-exec.
-    // SAFETY: plain syscall; CLOSE_RANGE_CLOEXEC changes flags, closes nothing.
-    let r = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            3u32,
-            u32::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        )
-    };
-    if r != 0 {
+    if !cloexec_from_3(close_range_cloexec()) {
         return Err(RELAY_EXEC);
     }
     // Last before exec: a fresh clock. Config units need the trust deadline
@@ -154,6 +148,59 @@ fn reset_signals() {
     };
 }
 
+/// `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`, or its errno.
+fn close_range_cloexec() -> Result<(), i32> {
+    // SAFETY: plain syscall; CLOSE_RANGE_CLOEXEC changes flags, closes nothing.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+    }
+}
+
+/// Most descriptors the fallback walks; a larger soft limit fails closed.
+const FALLBACK_FD_CAP: u64 = 65_536;
+
+/// Every descriptor from 3 up is close-on-exec. Kernels before 5.11 have no
+/// close_range (ENOSYS; the spec supports 5.7 and later): then each number
+/// below the RLIMIT_NOFILE soft limit gets FD_CLOEXEC. Any other error, or a
+/// limit we cannot read or above `FALLBACK_FD_CAP`, fails closed.
+fn cloexec_from_3(close_range: Result<(), i32>) -> bool {
+    match close_range {
+        Ok(()) => true,
+        Err(libc::ENOSYS) => {
+            // SAFETY: an all-zero rlimit is a valid out-parameter value.
+            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+            // SAFETY: `lim` is writable.
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+                return false;
+            }
+            cloexec_below(lim.rlim_cur)
+        }
+        Err(_) => false,
+    }
+}
+
+/// FD_CLOEXEC on 3..limit (closed numbers answer EBADF, which is fine).
+fn cloexec_below(limit: u64) -> bool {
+    if limit > FALLBACK_FD_CAP {
+        return false;
+    }
+    for fd in 3..limit as i32 {
+        // SAFETY: F_SETFD only changes this number's descriptor flags.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    true
+}
+
 /// All of fd 3 up to end of file; `None` past `INPUT_CAP` or on an error.
 fn read_fd3() -> Option<Vec<u8>> {
     let mut buf = vec![0u8; INPUT_CAP + 1];
@@ -179,6 +226,10 @@ fn read_fd3() -> Option<Vec<u8>> {
 /// execute-only file opens with `O_PATH`, which cannot be read, so it is run
 /// as a native executable only (spec section 4 "native executable").
 fn open_target(path: &[u8]) -> Result<OwnedFd, u8> {
+    // A relative path would name a file in the inherited working folder.
+    if !path.starts_with(b"/") {
+        return Err(RELAY_TARGET);
+    }
     let path = CString::new(path).map_err(|_| RELAY_INPUT)?;
     let flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
     // SAFETY: `path` is NUL-terminated; no O_CREAT.
@@ -723,6 +774,76 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 이것을 실패시키는 것: open_target의 절대 경로 검사를 지우는 것(작업 폴더 기준 상대 경로로
+    // 실제 cat에 닿는 경로가 실행된다).
+    #[test]
+    fn test_relay_refuses_relative_executable() {
+        let depth = std::env::current_dir().unwrap().components().count() - 1;
+        let relative = PathBuf::from("../".repeat(depth)).join(cat().strip_prefix("/").unwrap());
+        assert!(std::fs::metadata(&relative).is_ok(), "{relative:?}");
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let got = outcome(spawn_relay(&bytes, &args(&relative, &[b"cat"]), &[]));
+        assert!(
+            matches!(got, Outcome::Refused(c) if c == i32::from(RELAY_TARGET)),
+            "{got:?}"
+        );
+    }
+
+    /// The close_range fallback, in a child because it changes every
+    /// descriptor's flags: ENOSYS walks the soft limit, other errors and a
+    /// limit above the cap fail closed.
+    #[test]
+    #[ignore = "child: changes this process's descriptor flags"]
+    fn cloexec_child() {
+        // SAFETY: fd 0 is open; the duplicate is not close-on-exec.
+        let fd = unsafe { libc::dup(0) };
+        let cloexec = |fd| {
+            // SAFETY: F_GETFD only reads flags.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            flags & libc::FD_CLOEXEC != 0
+        };
+        let before = cloexec(fd);
+        let enosys = cloexec_from_3(Err(libc::ENOSYS));
+        let after = cloexec(fd);
+        let einval = cloexec_from_3(Err(libc::EINVAL));
+        let over = cloexec_below(FALLBACK_FD_CAP + 1);
+        let line = format!("{CLOCK_TAG} {before} {enosys} {after} {einval} {over}\n");
+        put(
+            // SAFETY: fd 1 is the parent's capture pipe; ManuallyDrop keeps it open.
+            &std::mem::ManuallyDrop::new(unsafe { OwnedFd::from_raw_fd(1) }),
+            line.as_bytes(),
+        );
+        // SAFETY: child exit without the harness's atexit work.
+        unsafe { libc::_exit(0) }
+    }
+
+    // 이것을 실패시키는 것: cloexec_from_3의 ENOSYS 분기를 지우는 것(5.11 미만 커널에서 실행 불가),
+    // 대체 루프를 지우는 것(fd가 close-on-exec가 아님), 다른 오류를 통과시키는 것, 상한 검사를
+    // 지우는 것.
+    #[test]
+    fn test_relay_close_range_fallback() {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "relay::tests::cloexec_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env_clear()
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| l.starts_with(CLOCK_TAG)).collect();
+        assert_eq!(
+            lines,
+            [format!("{CLOCK_TAG} false true true false false")],
+            "{text}"
+        );
     }
 
     // 이것을 실패시키는 것: open_target의 O_PATH 재시도를 지우는 것(실행 권한만 있는 파일을
