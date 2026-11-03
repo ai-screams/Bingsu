@@ -13,3 +13,38 @@ fn no_args_prints_usage_to_stderr_and_exits_2() {
         "{err}"
     );
 }
+
+// 이것을 실패시키는 것: commands::run의 `__exec-v2` 분기를 지우는 것(사용법 오류 2로 끝남).
+// fd 3은 /dev/null이라 중계는 빈 입력을 받고 대상을 실행하지 않은 채 RELAY_INPUT(120)으로 끝난다.
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_entry_reaches_the_relay() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let null = std::fs::File::open("/dev/null").unwrap();
+    let fd = null.as_raw_fd();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bingsu"));
+    cmd.args([
+        "__exec-v2",
+        "--permit-fd=3",
+        "1",
+        "/bin/true",
+        "neutral",
+        "--",
+        "true",
+    ])
+    .env_clear();
+    let setup = move || {
+        // SAFETY: dup2 is async-signal-safe and `fd` is open in the child.
+        if unsafe { libc::dup2(fd, 3) } == 3 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+    // SAFETY: `setup` only calls dup2.
+    unsafe { cmd.pre_exec(setup) };
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(120), "{out:?}");
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+}

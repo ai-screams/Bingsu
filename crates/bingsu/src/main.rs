@@ -26,6 +26,11 @@ mod prompt_read;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod prompt_spawn;
+// Linux: the trusted relay `__exec-v2` between the command supervisor and a
+// user command (hash-pinned like the prompt files).
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod relay;
 // Linux: the prompt's seccomp filter. Elsewhere there is no filter.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]

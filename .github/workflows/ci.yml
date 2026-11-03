@@ -236,6 +236,27 @@ jobs:
           grep -F 'test commands::refresh::tests::chmod_g_w_after_verified_at_plus_t_approves_no_unit ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test commands::refresh::tests::scan_time_chmod_or_replace_keeps_marker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test prompt_read::tests::clock_reads::test_front_clock_reads_per_use_are_fixed ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+      # The trusted relay is Linux-only; tests/gate-acceptance.tsv rows (bin:bingsu) and the B1 table.
+      # 이것을 실패시키는 것: 중계 시험을 ignored로 바꾸거나 Linux 칸에서 빼는 것.
+      - name: Assert native Linux trusted relay passes
+        if: runner.os == 'Linux'
+        run: |
+          set -o pipefail
+          cargo test -j 2 -p bingsu --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_refuses_after_deadline ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_runs_before_deadline ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_config_refuses_after_e ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_builtin_refuses_after_e ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_builtin_ignores_trust ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_target_fds ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_no_deadline_env ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_refuses_after_resume ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_resets_sigpipe ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_loader_never_sees_target_env ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_target_env_equals_frame ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_refuses_unsafe_targets ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_runs_execute_only_target ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_pre_exec_clock_reads ... ok' "$RUNNER_TEMP/relay-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"

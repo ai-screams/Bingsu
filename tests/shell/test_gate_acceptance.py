@@ -137,7 +137,7 @@ M3D_SUPPLEMENTARY.update({f"GATE-SHELL-REDRAW.1-{case}": "M4" for case in ("same
 # 이것을 실패시키는 것: 빈 PATH 행을 지워 Linux trace만으로 macOS까지 외부 명령 0을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-SHELL-EXTERNAL.1-empty_path"] = "M4"
 # Stages an active row may name: the milestone whose work added the test.
-ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4")
+ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
 # Clauses deferred to a later milestone, with that milestone. Each has a row
 # whose stage is `deferred:<milestone>`; removing one fails the table check.
@@ -145,11 +145,8 @@ M3D_DEFERRED = {
     "GATE-RUNTIME-ROOT.6": "M5",
     "GATE-FDS.3": "M6",
     "GATE-TRUST-REVOKE.3": "M6",
-    "GATE-EXEC-DEADLINE.3": "M6",
-    "GATE-EXEC-DEADLINE.4": "M6",
     "GATE-CLOCK-READS.2": "M6",
     "GATE-CLOCK-READS.3": "M6",
-    "GATE-CLOCK-READS.4": "M6",
 }
 DEFERRED_MILESTONES = ("M5", "M6")
 
@@ -519,8 +516,8 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
         table += line
     elif damage == "active-stage":
         # The pinned stage moves too, so only the active-stage rule can refuse it.
-        monkeypatch.setitem(M3D_SUPPLEMENTARY, "GATE-EXEC-DEADLINE.2-m3a", "M6")
-        table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM6\n"))
+        monkeypatch.setitem(M3D_SUPPLEMENTARY, "GATE-EXEC-DEADLINE.2-m3a", "M7")
+        table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM7\n"))
     elif damage == "supplementary-stage":
         # M3b is an active stage, so only the pinned supplementary stage refuses it.
         table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM3b\n"))
