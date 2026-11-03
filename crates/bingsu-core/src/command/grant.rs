@@ -55,10 +55,9 @@ pub fn approve(
 /// list), plus every `LC_*`.
 const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
 const KEEP_PREFIX: &[u8] = b"LC_";
-/// Never passed, not even through `env_allow` (U-13 V2): loader injection
-/// and language startup settings. The spec ends the second list with "etc.";
-/// only the names it spells out are here.
-const FORBIDDEN: [&[u8]; 7] = [
+/// Never passed, not even through `env_allow` (U-13 V2, closed list S-24):
+/// loader injection, then language and shell startup settings.
+const FORBIDDEN: [&[u8]; 16] = [
     b"GLIBC_TUNABLES",
     b"GCONV_PATH",
     b"NODE_OPTIONS",
@@ -66,6 +65,15 @@ const FORBIDDEN: [&[u8]; 7] = [
     b"PYTHONPATH",
     b"RUBYOPT",
     b"PERL5OPT",
+    b"NODE_PATH",
+    b"PYTHONHOME",
+    b"PERL5LIB",
+    b"PERLLIB",
+    b"RUBYLIB",
+    b"JAVA_TOOL_OPTIONS",
+    b"_JAVA_OPTIONS",
+    b"BASH_ENV",
+    b"ENV",
 ];
 const FORBIDDEN_PREFIX: [&[u8]; 2] = [b"LD_", b"DYLD_"];
 
@@ -362,7 +370,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: env_allow 금지 검사(`env_allow.iter().any(forbidden)`)를 지우는 것,
-    // FORBIDDEN 비교나 FORBIDDEN_PREFIX 비교 하나를 지우는 것.
+    // FORBIDDEN 비교나 FORBIDDEN_PREFIX 비교를 지우는 것, FORBIDDEN에서 항목 하나를 빼는 것.
+    // 기대 목록은 판정(U-13 V2, S-24)에서 따로 옮겨 적었다.
     #[test]
     fn target_environment_forbidden_names_never_pass() {
         for name in [
@@ -376,6 +385,15 @@ mod tests {
             b"PYTHONPATH",
             b"RUBYOPT",
             b"PERL5OPT",
+            b"NODE_PATH",
+            b"PYTHONHOME",
+            b"PERL5LIB",
+            b"PERLLIB",
+            b"RUBYLIB",
+            b"JAVA_TOOL_OPTIONS",
+            b"_JAVA_OPTIONS",
+            b"BASH_ENV",
+            b"ENV",
         ] {
             let mut entry = name.to_vec();
             entry.extend_from_slice(b"=x\0");
