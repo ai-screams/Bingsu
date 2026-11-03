@@ -55,9 +55,9 @@ pub fn approve(
 /// list), plus every `LC_*`.
 const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
 const KEEP_PREFIX: &[u8] = b"LC_";
-/// Never passed, not even through `env_allow` (U-13 V2, closed list S-24):
-/// loader injection, then language and shell startup settings.
-const FORBIDDEN: [&[u8]; 16] = [
+/// Never passed, not even through `env_allow` (U-13 V2, closed list S-24,
+/// S-25): loader injection, then language and shell startup settings.
+const FORBIDDEN: [&[u8]; 20] = [
     b"GLIBC_TUNABLES",
     b"GCONV_PATH",
     b"NODE_OPTIONS",
@@ -74,8 +74,12 @@ const FORBIDDEN: [&[u8]; 16] = [
     b"_JAVA_OPTIONS",
     b"BASH_ENV",
     b"ENV",
+    b"SHELLOPTS",
+    b"BASHOPTS",
+    b"PS4",
+    b"ZDOTDIR",
 ];
-const FORBIDDEN_PREFIX: [&[u8]; 2] = [b"LD_", b"DYLD_"];
+const FORBIDDEN_PREFIX: [&[u8]; 3] = [b"LD_", b"DYLD_", b"BASH_FUNC_"];
 
 fn forbidden(name: &[u8]) -> bool {
     FORBIDDEN.contains(&name) || FORBIDDEN_PREFIX.iter().any(|p| name.starts_with(p))
@@ -83,7 +87,9 @@ fn forbidden(name: &[u8]) -> bool {
 
 /// The target environment of a config unit: `NAME=VALUE\0` entries whose
 /// names are in the keep list or the unit's `env_allow`, and an `env_allow`
-/// with no forbidden name (such a unit is refused as a whole).
+/// with no forbidden name (such a unit is refused as a whole). A name may
+/// appear once: with two `PATH` entries, which one a program reads depends
+/// on how it searches its environment.
 pub fn target_environment_allowed(environment: &[u8], env_allow: &[Vec<u8>]) -> bool {
     if env_allow.iter().any(|n| forbidden(n)) {
         return false;
@@ -94,15 +100,22 @@ pub fn target_environment_allowed(environment: &[u8], env_allow: &[Vec<u8>]) -> 
     let Some(body) = environment.strip_suffix(b"\0") else {
         return false;
     };
-    body.split(|&b| b == 0).all(|entry| {
+    let mut names = Vec::new();
+    for entry in body.split(|&b| b == 0) {
         let Some(eq) = entry.iter().position(|&b| b == b'=') else {
             return false;
         };
         let name = &entry[..eq];
-        KEEP.contains(&name)
+        if !(KEEP.contains(&name)
             || name.starts_with(KEEP_PREFIX)
-            || env_allow.iter().any(|n| n.as_slice() == name)
-    })
+            || env_allow.iter().any(|n| n.as_slice() == name))
+        {
+            return false;
+        }
+        names.push(name);
+    }
+    names.sort_unstable();
+    !names.windows(2).any(|w| w[0] == w[1])
 }
 
 /// Approve config unit `index` of `grant`: a unit can only be named by its
@@ -371,7 +384,7 @@ mod tests {
 
     // 이것을 실패시키는 것: env_allow 금지 검사(`env_allow.iter().any(forbidden)`)를 지우는 것,
     // FORBIDDEN 비교나 FORBIDDEN_PREFIX 비교를 지우는 것, FORBIDDEN에서 항목 하나를 빼는 것.
-    // 기대 목록은 판정(U-13 V2, S-24)에서 따로 옮겨 적었다.
+    // 기대 목록은 판정(U-13 V2, S-24, S-25)에서 따로 옮겨 적었다.
     #[test]
     fn target_environment_forbidden_names_never_pass() {
         for name in [
@@ -394,6 +407,11 @@ mod tests {
             b"_JAVA_OPTIONS",
             b"BASH_ENV",
             b"ENV",
+            b"SHELLOPTS",
+            b"BASHOPTS",
+            b"PS4",
+            b"ZDOTDIR",
+            b"BASH_FUNC_ls%%",
         ] {
             let mut entry = name.to_vec();
             entry.extend_from_slice(b"=x\0");
@@ -405,6 +423,18 @@ mod tests {
             b"GIT_DIR=/r\0",
             &[b"GIT_DIR".to_vec()]
         ));
+    }
+
+    // 이것을 실패시키는 것: 이름 중복 검사(`windows(2)` 비교)를 지우거나 정렬을 지우는 것
+    // (떨어져 있는 같은 이름은 정렬 없이는 이웃이 아니다).
+    #[test]
+    fn target_environment_refuses_duplicate_names() {
+        assert!(!target_environment_allowed(b"PATH=/a\0PATH=/b\0", &[]));
+        assert!(!target_environment_allowed(
+            b"PATH=/a\0HOME=/h\0PATH=/a\0",
+            &[]
+        ));
+        assert!(target_environment_allowed(b"PATH=/a\0HOME=/h\0", &[]));
     }
 
     // 이것을 실패시키는 것: 빈 환경의 조기 승인을 지우는 것, 끝 NUL 요구(strip_suffix)를 지우는 것,
