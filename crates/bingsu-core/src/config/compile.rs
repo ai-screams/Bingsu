@@ -1126,19 +1126,12 @@ fn text_segments(
         {
             continue;
         }
-        if let Some(n) = t.get("enabled") {
-            if n.origin.trust == Trust::Unsafe {
-                notes.push(
-                    Diagnostic::new(codes::NOT_RUN_UNSAFE_FILE, at(n))
-                        .arg("id", e.key.clone())
-                        .arg("key", "enabled")
-                        .arg("reason", "the file failed the owner and permission check"),
-                );
-                continue;
-            }
-            if n.value == MValue::Scalar(Value::Bool(false)) {
-                continue;
-            }
+        // `kind` and `enabled` are execution keys: one written by a file
+        // that failed the safety check keeps the segment from being drawn.
+        if unsafe_exec_key(&e.key, &exec_origins(&e.key, t), notes).is_some()
+            || boolean(t, &["enabled"]) == Some(false)
+        {
+            continue;
         }
         out.push(CustomText {
             id: e.key.clone(),
@@ -1165,6 +1158,39 @@ fn text_segments(
         )]);
     }
     Ok(out)
+}
+
+/// Each execution key written for a segment and its origin.
+fn exec_origins(id: &str, t: &MTable) -> Vec<(String, Origin)> {
+    t.entries
+        .iter()
+        .filter(|k| keys::classify(&["segment", id, &k.key]) == KeyClass::Exec)
+        .map(|k| (k.key.clone(), k.node.origin))
+        .collect()
+}
+
+/// The first execution key written by a file that failed the safety check,
+/// with the W405 note that says the segment is not used for it. Every kind
+/// of segment, drawn text included, goes through this one judgement.
+fn unsafe_exec_key(
+    id: &str,
+    origins: &[(String, Origin)],
+    notes: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let (k, origin) = origins.iter().find(|(_, o)| o.trust == Trust::Unsafe)?;
+    notes.push(
+        Diagnostic::new(
+            codes::NOT_RUN_UNSAFE_FILE,
+            Place::Source {
+                id: origin.source,
+                span: origin.span,
+            },
+        )
+        .arg("id", id)
+        .arg("key", k.clone())
+        .arg("reason", "the file failed the owner and permission check"),
+    );
+    Some(k.clone())
 }
 
 fn exec_units(
@@ -1205,30 +1231,11 @@ fn exec_units(
             _ => continue,
         };
         let place = at(&e.node);
-        let origins: Vec<(String, Origin)> = t
-            .entries
-            .iter()
-            .filter(|k| keys::classify(&["segment", &e.key, &k.key]) == KeyClass::Exec)
-            .map(|k| (k.key.clone(), k.node.origin))
-            .collect();
+        let origins = exec_origins(&e.key, t);
         let approved_by = approved.get(&e.key).cloned().unwrap_or_default();
         let shown_at = shown.get(&e.key).cloned().unwrap_or_default();
-        let not_run = if let Some((k, origin)) =
-            origins.iter().find(|(_, o)| o.trust == Trust::Unsafe)
-        {
-            notes.push(
-                Diagnostic::new(
-                    codes::NOT_RUN_UNSAFE_FILE,
-                    Place::Source {
-                        id: origin.source,
-                        span: origin.span,
-                    },
-                )
-                .arg("id", e.key.clone())
-                .arg("key", k.clone())
-                .arg("reason", "the file failed the owner and permission check"),
-            );
-            Some(NotRun::UnsafeFile { key: k.clone() })
+        let not_run = if let Some(k) = unsafe_exec_key(&e.key, &origins, notes) {
+            Some(NotRun::UnsafeFile { key: k })
         } else if boolean(t, &["enabled"]) == Some(false) {
             Some(NotRun::Disabled)
         } else if let why @ Some(_) = layout_verdict(&approved_by, &shown_at, names.len(), reach) {
