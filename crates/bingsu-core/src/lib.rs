@@ -14,6 +14,8 @@ pub mod bands;
 /// Bounded collector exchange and completed response codecs.
 pub mod collection;
 pub mod color;
+/// Command execution contract (types and pure decisions, no executor).
+pub mod command;
 pub mod config;
 pub mod default_theme;
 pub mod diag;

@@ -1,0 +1,27 @@
+//! Command execution contract: helper to supervisor frames, the approval
+//! decision the supervisor makes before each relay spawn, and the run
+//! deadline formulas. Types and pure decisions only; nothing here runs.
+pub mod deadline;
+pub mod grant;
+pub mod wire;
+
+/// Why a command frame was refused. Errors never produce reply bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// Fewer bytes than the header or the declared length.
+    Short,
+    Magic,
+    Version,
+    /// A kind byte outside the defined set.
+    Kind,
+    /// Reserved bytes are not zero.
+    Flags,
+    /// Declared length disagrees with the bytes, or exceeds a cap.
+    Length,
+    Checksum,
+    /// A count or size above what the caller allows.
+    Limit,
+    Utf8,
+    /// Bytes after the last field.
+    Trailing,
+}
