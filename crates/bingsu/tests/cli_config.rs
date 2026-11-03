@@ -170,6 +170,30 @@ fn check_reports_and_judges() {
     assert!(stdout.contains("result: invalid"), "{stdout}");
 }
 
+// A command whose script starts with `#!/usr/bin/env` is warned about by check (W411), which stays
+// valid; the warning names the segment.
+// 이것을 실패시키는 것: check 경로에서 W411 진단을 보고서에 더하지 않는 것, 경고를 오류로 세는 것.
+#[test]
+fn check_warns_about_env_shebang_scripts() {
+    let e = Env::new("cli_config", "shebang");
+    let script = e.put("bin/tool", "#!/usr/bin/env sh\necho 1\n");
+    e.put_config(
+        "config.toml",
+        &format!(
+            "[segment.\"custom/tool\"]\nkind = \"command\"\ncommand = [\"{}\"]\n[layout.line1]\nleft = [\"dir\", \"custom/tool\"]\n",
+            script.display()
+        ),
+    );
+    let (code, stdout, _) = out(&e.run(&["config", "check"]));
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("W411: segment `custom/tool`"), "{stdout}");
+    assert!(
+        stdout.contains("diagnostics: 0 error(s), 1 warning(s)"),
+        "{stdout}"
+    );
+    assert!(stdout.trim_end().ends_with("result: valid"), "{stdout}");
+}
+
 // A file others can change keeps its colors but runs nothing; check names the file and why, and the
 // result says files were left out (still exit 0: the rest is valid).
 // 이것을 실패시키는 것: 안전 검사에 걸린 이유를 지우거나, 남이 쓸 수 있는 파일을 "trusted"로 표시하는 것.

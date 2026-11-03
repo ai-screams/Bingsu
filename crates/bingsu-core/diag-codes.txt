@@ -15,6 +15,9 @@ E207 stable
 E208 stable
 E209 stable
 E210 stable
+E211 stable
+E212 stable
+E213 stable
 E301 stable
 E302 stable
 E303 stable
@@ -30,6 +33,9 @@ W405 stable
 W406 stable
 W407 stable
 W408 stable
+W409 stable
+W410 stable
+W411 stable
 N501 stable
 N502 stable
 N503 stable

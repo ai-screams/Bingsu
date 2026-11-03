@@ -55,6 +55,8 @@ pub enum Ty {
 
 /// Segment kinds (spec section 2 "`kind`"): a closed list.
 pub const KINDS: [&str; 4] = ["command", "text", "env", "language"];
+/// Values of `segment.*.cwd`.
+pub const CWDS: [&str; 2] = ["neutral", "untrusted-current"];
 
 #[derive(Clone, Copy, Debug)]
 pub struct KeyDef {
@@ -488,14 +490,14 @@ pub const KEYS: &[KeyDef] = &[
     .example("[\"kubectl\", \"config\", \"current-context\"]"),
     key(
         "segment.*.cwd",
-        Ty::Str,
+        Ty::Enum(&CWDS),
         Expert,
-        "Folder to run in.",
-        "실행할 폴더.",
+        "Folder to run in: an empty private folder, or the current folder (warned).",
+        "실행할 폴더: 비어 있는 개인 폴더, 또는 현재 폴더(경고).",
     )
     .exec()
     .kinds(CMD)
-    .example("\"~/work\""),
+    .example("\"neutral\""),
     key(
         "segment.*.enabled",
         Ty::Bool,
@@ -528,12 +530,12 @@ pub const KEYS: &[KeyDef] = &[
         "segment.*.shell",
         Ty::Str,
         Expert,
-        "Run through this shell (needs unsafe_shell).",
-        "이 셸로 실행(unsafe_shell 필요).",
+        "A shell command line, instead of `command` (needs unsafe_shell).",
+        "`command` 대신 셸 명령 줄(unsafe_shell 필요).",
     )
     .exec()
     .kinds(CMD)
-    .example("\"sh\""),
+    .example("\"kubectl config current-context | cut -d/ -f2\""),
     key(
         "segment.*.text",
         Ty::Text,

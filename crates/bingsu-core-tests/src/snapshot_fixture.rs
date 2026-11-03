@@ -47,7 +47,7 @@ pub fn report(text: &str) -> bingsu_core::config::report::ConfigReport {
 }
 pub fn config() -> CompiledConfig {
     let mut c = compile(
-        "icons='nerd'\n[width]\nambiguous=2\nemoji=1\n[layout]\nuse_last_column=true\n[segment.\"custom/hello\"]\nkind='command'\ncommand=['echo','빙수']\ncwd='/tmp/a b'\nenv_allow=['LANG']\ntimeout='123ms'\ncache='45s'\n[layout.line2]\nleft=['custom/hello','char']\n[layout.when.wide]\nmin_cols=100\norder=4\n[layout.when.wide.line1]\nleft=['dir','git']\n[colors]\nmode='auto'\n",
+        "icons='nerd'\n[width]\nambiguous=2\nemoji=1\n[layout]\nuse_last_column=true\n[segment.\"custom/hello\"]\nkind='command'\ncommand=['echo','빙수']\ncwd='neutral'\nenv_allow=['LANG']\ntimeout='123ms'\ncache='45s'\n[layout.line2]\nleft=['custom/hello','char']\n[layout.when.wide]\nmin_cols=100\norder=4\n[layout.when.wide.line1]\nleft=['dir','git']\n[colors]\nmode='auto'\n",
     );
     let origin = |trust| Origin {
         source: SourceId(31),

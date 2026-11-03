@@ -57,7 +57,7 @@ const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
 const KEEP_PREFIX: &[u8] = b"LC_";
 /// Never passed, not even through `env_allow` (U-13 V2, closed list S-24,
 /// S-25): loader injection, then language and shell startup settings.
-const FORBIDDEN: [&[u8]; 20] = [
+pub const FORBIDDEN: [&[u8]; 20] = [
     b"GLIBC_TUNABLES",
     b"GCONV_PATH",
     b"NODE_OPTIONS",
@@ -79,9 +79,11 @@ const FORBIDDEN: [&[u8]; 20] = [
     b"PS4",
     b"ZDOTDIR",
 ];
-const FORBIDDEN_PREFIX: [&[u8]; 3] = [b"LD_", b"DYLD_", b"BASH_FUNC_"];
+pub const FORBIDDEN_PREFIX: [&[u8]; 3] = [b"LD_", b"DYLD_", b"BASH_FUNC_"];
 
-fn forbidden(name: &[u8]) -> bool {
+/// Whether `name` is never passed to a target. `config check` uses the
+/// same judgement, so a config that names one fails before it is published.
+pub fn forbidden(name: &[u8]) -> bool {
     FORBIDDEN.contains(&name) || FORBIDDEN_PREFIX.iter().any(|p| name.starts_with(p))
 }
 

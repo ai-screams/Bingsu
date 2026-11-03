@@ -7,6 +7,7 @@
 use super::{Error, grant::Refusal};
 use crate::{
     collection::cwd_hash::sha256,
+    config::compile::ExecPolicy,
     handoff::{Cwd, Origin, Permit},
     snapshot::crc32c,
 };
@@ -31,6 +32,27 @@ pub enum Policy {
     UnsafeShell { script: Vec<u8> },
 }
 impl Policy {
+    /// The grant form of a compiled unit's policy. A `shell` without
+    /// `unsafe_shell = true`, a unit that sets both `command` and `shell`, an
+    /// empty argv and a language unit have none, so the helper cannot put them in a grant.
+    pub fn from_config(p: &ExecPolicy) -> Option<Self> {
+        match p {
+            ExecPolicy::Command {
+                argv, shell: None, ..
+            } if !argv.is_empty() => Some(Self::Argv {
+                argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
+            }),
+            ExecPolicy::Command {
+                argv,
+                shell: Some(script),
+                unsafe_shell: true,
+                ..
+            } if argv.is_empty() => Some(Self::UnsafeShell {
+                script: script.as_bytes().to_vec(),
+            }),
+            _ => None,
+        }
+    }
     fn tag(&self) -> u8 {
         match self {
             Self::Argv { .. } => 0,

@@ -50,6 +50,9 @@ pub const THEME_FORBIDDEN_KEY: DiagCode = e(207);
 pub const BAD_LAYOUT_LINE: DiagCode = e(208);
 pub const SEGMENT_NEEDS_KIND: DiagCode = e(209);
 pub const CONTROL_IN_TEXT: DiagCode = e(210);
+pub const SHELL_NOT_ALLOWED: DiagCode = e(211);
+pub const COMMAND_FORM_CONFLICT: DiagCode = e(212);
+pub const PLACEHOLDER_NOT_WHOLE: DiagCode = e(213);
 pub const EXTENDS_CYCLE: DiagCode = e(301);
 pub const EXTENDS_TOO_DEEP: DiagCode = e(302);
 pub const EXTENDS_TOO_MANY: DiagCode = e(303);
@@ -65,6 +68,9 @@ pub const NOT_RUN_UNSAFE_FILE: DiagCode = w(405);
 pub const SHAPE_FILE_DROPPED: DiagCode = w(406);
 pub const BAND_NEVER_CHOSEN: DiagCode = w(407);
 pub const CUSTOM_UNDECLARED: DiagCode = w(408);
+pub const UNSAFE_SHELL_USED: DiagCode = w(409);
+pub const CWD_UNTRUSTED_CURRENT: DiagCode = w(410);
+pub const ENV_SHEBANG: DiagCode = w(411);
 pub const TEMPLATE_REPLACES_STYLE: DiagCode = n(501);
 pub const CUSTOM_DRAWN_LATER: DiagCode = n(502);
 pub const KEY_PLANNED: DiagCode = n(503);
@@ -177,6 +183,24 @@ pub const CODES: &[CodeInfo] = &[
         "remove the character",
     ),
     stable(
+        SHELL_NOT_ALLOWED,
+        "segment `{id}` sets `shell` without `unsafe_shell = true`, so it does not run",
+        "shell text runs whatever it says; it runs only when you allow that explicitly",
+        "write the command as an array, `command = [\"tool\", \"arg\"]`, or add `unsafe_shell = true`",
+    ),
+    stable(
+        COMMAND_FORM_CONFLICT,
+        "segment `{id}`: {problem}",
+        "a command segment runs either `command` (an array, no shell) or `shell` with `unsafe_shell = true`",
+        "keep one of the two forms",
+    ),
+    stable(
+        PLACEHOLDER_NOT_WHOLE,
+        "segment `{id}` uses the placeholder {placeholder} {place}",
+        "a placeholder is replaced only as one whole element of `command`, so its value never joins other text or becomes shell code",
+        "make the placeholder its own element of the `command` array",
+    ),
+    stable(
         EXTENDS_CYCLE,
         "`extends` comes back to a file it started from",
         "extends must not form a cycle",
@@ -265,6 +289,24 @@ pub const CODES: &[CodeInfo] = &[
         "segment `{id}` is not declared, so it is not drawn",
         "a layout names a user segment that no file declares (a theme may have removed it, or it is a typo)",
         "declare `[segment.\"{id}\"]`, or take it out of the layout",
+    ),
+    stable(
+        UNSAFE_SHELL_USED,
+        "segment `{id}` runs its `shell` text through a shell",
+        "shell text can run anything it says, and nothing in it is quoted for you",
+        "prefer `command = [...]`; keep `unsafe_shell = true` only where you need shell syntax",
+    ),
+    stable(
+        CWD_UNTRUSTED_CURRENT,
+        "segment `{id}` runs inside the current folder",
+        "files in a folder you did not write, such as a cloned repository, can change what the command does",
+        "use `cwd = \"neutral\"` and pass the folder as a `command` element instead",
+    ),
+    stable(
+        ENV_SHEBANG,
+        "segment `{id}`: {path} starts with `#!/usr/bin/env`, so it will not run",
+        "a script's interpreter must be an absolute path that passes the same checks; `/usr/bin/env` would take it from PATH",
+        "write the interpreter's absolute path on the first line, for example `#!/usr/bin/python3`",
     ),
     stable(
         TEMPLATE_REPLACES_STYLE,

@@ -100,6 +100,8 @@ mod cases {
             NotRun::UnsafeFile {
                 key: "command".into(),
             },
+            NotRun::UnknownBand,
+            NotRun::ShellNotAllowed,
         ] {
             round(x);
         }

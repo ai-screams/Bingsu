@@ -724,6 +724,7 @@ impl Wire for NotRun {
                 key.put(o)
             }
             Self::UnknownBand => 3u8.put(o),
+            Self::ShellNotAllowed => 4u8.put(o),
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -732,6 +733,7 @@ impl Wire for NotRun {
             1 => Self::NotInTrustedLayout,
             2 => Self::UnsafeFile { key: Wire::get(r)? },
             3 => Self::UnknownBand,
+            4 => Self::ShellNotAllowed,
             _ => return Err(Error::Tag),
         })
     }
