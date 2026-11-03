@@ -8,6 +8,7 @@ use super::{Error, grant::Refusal};
 use crate::{
     collection::cwd_hash::sha256,
     config::compile::ExecPolicy,
+    fs_trust::GroupPin,
     handoff::{Cwd, Origin, Permit},
     snapshot::crc32c,
 };
@@ -77,6 +78,11 @@ pub struct Unit {
     /// The unit's `env_allow` names, so a config that changes only them
     /// gets another digest.
     pub env_allow: Vec<Vec<u8>>,
+    /// The canonical executable the helper resolved from the sanitized
+    /// `PATH` this round. An observation, so it is not in `digest`.
+    pub executable: Vec<u8>,
+    /// Its group pin when it is group-writable (`handoff::ExecFrame::pin`).
+    pub pin: Option<GroupPin>,
 }
 
 /// One builtin version probe. Fixed arguments and environment come from the
@@ -85,6 +91,8 @@ pub struct Unit {
 pub struct Probe {
     pub profile: u8,
     pub executable: Vec<u8>,
+    /// As `Unit::pin`.
+    pub pin: Option<GroupPin>,
 }
 
 /// The single grant. The supervisor can run nothing outside these lists.
@@ -219,10 +227,13 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
                 for w in &u.env_allow {
                     bytes16(&mut b, w);
                 }
+                bytes16(&mut b, &u.executable);
+                b.extend_from_slice(&GroupPin::to_bytes(u.pin));
             }
             for p in &g.probes {
                 b.push(p.profile);
                 bytes16(&mut b, &p.executable);
+                b.extend_from_slice(&GroupPin::to_bytes(p.pin));
             }
         }
         Message::Done => {}
@@ -304,6 +315,8 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                 for _ in 0..n {
                     env_allow.push(no_nul(r.bytes16()?)?.to_vec());
                 }
+                let executable = no_nul(r.bytes16()?)?.to_vec();
+                let pin = r.pin()?;
                 units.push(Unit {
                     id,
                     digest,
@@ -312,14 +325,18 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                     environment,
                     timeout,
                     env_allow,
+                    executable,
+                    pin,
                 });
             }
             let mut probes = Vec::new();
             for _ in 0..np {
                 let profile = r.u8()?;
+                let executable = no_nul(r.bytes16()?)?.to_vec();
                 probes.push(Probe {
                     profile,
-                    executable: no_nul(r.bytes16()?)?.to_vec(),
+                    executable,
+                    pin: r.pin()?,
                 });
             }
             Message::Grant(Grant {
@@ -424,6 +441,10 @@ impl<'a> Reader<'a> {
         let h = self.take(2)?;
         self.take(usize::from(u16::from_le_bytes([h[0], h[1]])))
     }
+    fn pin(&mut self) -> Result<Option<GroupPin>, Error> {
+        let b: &[u8; 24] = self.take(24)?.try_into().map_err(|_| Error::Short)?;
+        Ok(GroupPin::from_bytes(b))
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +471,13 @@ mod tests {
             environment: b"HOME=/h\0PATH=/usr/bin\0".to_vec(),
             timeout: 7,
             env_allow: vec![b"KUBECONFIG".to_vec()],
+            executable: b"/usr/local/bin/kubectl".to_vec(),
+            pin: Some(GroupPin {
+                dev: 7,
+                ino: 8,
+                gid: 1000,
+                mode: 0o100_775,
+            }),
         }
     }
     fn grant() -> Message {
@@ -467,6 +495,12 @@ mod tests {
             probes: vec![Probe {
                 profile: 3,
                 executable: b"/usr/bin/go".to_vec(),
+                pin: Some(GroupPin {
+                    dev: 1,
+                    ino: 2,
+                    gid: 80,
+                    mode: 0o100_775,
+                }),
             }],
         })
     }
@@ -488,6 +522,7 @@ mod tests {
     }
 
     // 양성 대조: 세 종류와 모든 종료 이유가 그대로 돌아온다(거부 시험들이 정상 프레임까지 막지 않음).
+    // 이것을 실패시키는 것: encode나 decode 한쪽에서 단위·probe의 실행 파일 경로나 pin을 빼는 것.
     #[test]
     fn frames_roundtrip() {
         for m in [grant(), Message::Done, result()] {
@@ -615,6 +650,9 @@ mod tests {
         cases.push(g);
         let mut g = base.clone();
         g.probes[0].executable = b"/usr/bin/go\0neutral".to_vec();
+        cases.push(g);
+        let mut g = base.clone();
+        g.units[0].executable = b"/usr/bin/kubectl\0neutral".to_vec();
         cases.push(g);
         for g in cases {
             let b = encode(&Message::Grant(g)).unwrap();

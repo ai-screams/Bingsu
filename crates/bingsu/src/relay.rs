@@ -14,7 +14,7 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
-use bingsu_core::fs_trust::{AclFacts, Facts, RefuseGroupWrite, Verdict, entry_verdict};
+use bingsu_core::fs_trust::{AclFacts, Facts, GroupPin, PinnedGroupWrite, Verdict, entry_verdict};
 use bingsu_core::handoff::{ExecFrame, PERMIT_FD, Permit, parse_relay_args, read_relay_input};
 use std::ffi::{CString, OsString};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -74,7 +74,7 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
-    let fd = open_target(parsed.executable)?;
+    let fd = open_target(parsed.executable, frame.pin)?;
     let argv = parsed
         .argv
         .iter()
@@ -241,31 +241,63 @@ fn read_fd3() -> Option<Vec<u8>> {
     None
 }
 
-/// Opens the executable without following a final symlink and without
-/// waiting on a FIFO, then checks the descriptor: a regular file that only
-/// root or the user can change (group write refused: the relay has no group
-/// answer), and not a script (the sealed memfd path comes later). An
-/// execute-only file opens with `O_PATH`, which cannot be read, so it is run
-/// as a native executable only (spec section 4 "native executable").
-fn open_target(path: &[u8]) -> Result<OwnedFd, u8> {
-    // A relative path would name a file in the inherited working folder.
-    if !path.starts_with(b"/") {
-        return Err(RELAY_TARGET);
-    }
-    let path = CString::new(path).map_err(|_| RELAY_INPUT)?;
-    let flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
-    // SAFETY: `path` is NUL-terminated; no O_CREAT.
-    let mut raw = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | flags) };
-    let readable = raw >= 0;
-    if !readable && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES) {
-        // SAFETY: as above.
-        raw = unsafe { libc::open(path.as_ptr(), libc::O_PATH | flags) };
-    }
+/// `openat(dir, name, flags | O_NOFOLLOW | O_CLOEXEC)` as an owned fd.
+fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
+    let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is open (or AT_FDCWD with an absolute name); `name` is
+    // NUL-terminated; no O_CREAT.
+    let raw = unsafe { libc::openat(dir, name.as_ptr(), flags) };
     if raw < 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    // SAFETY: a successful openat returns a descriptor nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Opens the executable one name at a time from "/" without following any
+/// symlink and without waiting on a FIFO, then checks the descriptor. The
+/// supervisor passes the canonical path the helper resolved (symlinks
+/// owned by root or the user already followed there), so a symlink on the
+/// way now means the path changed: refused. Every folder is opened
+/// `O_PATH | O_DIRECTORY | O_NOFOLLOW`, so a symlink in a folder's place
+/// fails with ENOTDIR or ELOOP; ".", ".." and empty names are refused.
+///
+/// The file must be regular, only root or the user may change it and it is
+/// not a script (the sealed memfd path comes later). Group write passes
+/// only for the exact file, group and mode of `pin`, which the helper set
+/// after the system cleared the group (spec section 2 safety row). An
+/// execute-only file opens with `O_PATH`, which cannot be read, so it is
+/// run as a native executable only (spec section 4 "native executable").
+fn open_target(path: &[u8], pin: Option<GroupPin>) -> Result<OwnedFd, u8> {
+    // A relative path would name a file in the inherited working folder.
+    let Some(rest) = path.strip_prefix(b"/") else {
+        return Err(RELAY_TARGET);
+    };
+    let names: Vec<&[u8]> = rest.split(|&b| b == b'/').collect();
+    let (last, folders) = names.split_last().ok_or(RELAY_TARGET)?;
+    if names
+        .iter()
+        .any(|n| n.is_empty() || *n == b"." || *n == b"..")
+    {
         return Err(RELAY_TARGET);
     }
-    // SAFETY: a successful open returns a descriptor nothing else owns.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let search = libc::O_PATH | libc::O_DIRECTORY;
+    let mut dir = open_at(libc::AT_FDCWD, b"/", search).map_err(|_| RELAY_TARGET)?;
+    for name in folders {
+        dir = open_at(dir.as_raw_fd(), name, search).map_err(|_| RELAY_TARGET)?;
+    }
+    let read = libc::O_RDONLY | libc::O_NONBLOCK;
+    let (fd, readable) = match open_at(dir.as_raw_fd(), last, read) {
+        Ok(fd) => (fd, true),
+        Err(libc::EACCES) => (
+            open_at(dir.as_raw_fd(), last, libc::O_PATH | libc::O_NONBLOCK)
+                .map_err(|_| RELAY_TARGET)?,
+            false,
+        ),
+        Err(_) => return Err(RELAY_TARGET),
+    };
+    drop(dir);
     // SAFETY: an all-zero stat is a valid out-parameter value.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: `fd` is open and `st` is writable.
@@ -281,14 +313,21 @@ fn open_target(path: &[u8]) -> Result<OwnedFd, u8> {
         uid: st.st_uid,
         gid: st.st_gid,
         mode: st.st_mode,
-        // Linux file systems enforce ownership. An ACL matters only under
-        // group write (its mask), which RefuseGroupWrite refuses already.
+        // Linux file systems enforce ownership. The ACL is not read here: the
+        // helper read it before it made the pin (an extended ACL under group
+        // write is undecided there and gets no pin), and after that only the
+        // file's owner (root or the user, checked below) or a holder of
+        // CAP_FOWNER can change it, both trusted (B2 ruling A-1).
         acl: AclFacts::None,
         ownership: Some(true),
     };
     // SAFETY: getuid cannot fail.
     let me = unsafe { libc::getuid() };
-    if entry_verdict(&facts, me, false, &mut RefuseGroupWrite) != Verdict::Safe {
+    let pins: &[GroupPin] = match &pin {
+        Some(p) => std::slice::from_ref(p),
+        None => &[],
+    };
+    if entry_verdict(&facts, me, false, &mut PinnedGroupWrite(pins)) != Verdict::Safe {
         return Err(RELAY_TARGET);
     }
     if readable {
@@ -351,6 +390,16 @@ mod tests {
     };
 
     fn input_at(clock: Clock, origin: Origin, t: Times, environment: &[u8]) -> (Permit, Vec<u8>) {
+        pinned_at(clock, origin, t, environment, None)
+    }
+
+    fn pinned_at(
+        clock: Clock,
+        origin: Origin,
+        t: Times,
+        environment: &[u8],
+        pin: Option<GroupPin>,
+    ) -> (Permit, Vec<u8>) {
         let permit = Permit {
             kind: clock.kind,
             deadline: clock.now.checked_add_signed(t.trust).unwrap(),
@@ -362,6 +411,7 @@ mod tests {
             origin,
             run_deadline: clock.now.checked_add_signed(t.run).unwrap(),
             environment: environment.to_vec(),
+            pin,
         };
         (permit, relay_input(permit, &frame, INPUT_CAP).unwrap())
     }
@@ -381,6 +431,11 @@ mod tests {
             .into_iter()
             .map(<[u8]>::to_vec)
             .collect()
+    }
+
+    fn pinned(pin: Option<GroupPin>) -> Vec<u8> {
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        pinned_at(clock, Origin::Config, LIVE, b"", pin).1
     }
 
     fn cat() -> PathBuf {
@@ -1024,5 +1079,202 @@ mod tests {
             "{text}\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// A copy of `cat` at `path` with `mode`, and the pin of what landed there.
+    fn cat_copy(path: &Path, mode: u32) -> GroupPin {
+        std::fs::copy(cat(), path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let file = std::fs::File::open(path).unwrap();
+        // SAFETY: an all-zero stat is a valid out-parameter value.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the file is open and `st` is writable.
+        assert_eq!(unsafe { libc::fstat(file.as_raw_fd(), &mut st) }, 0);
+        GroupPin {
+            dev: st.st_dev,
+            ino: st.st_ino,
+            gid: st.st_gid,
+            mode: st.st_mode,
+        }
+    }
+
+    fn refused(exe: &Path, pin: Option<GroupPin>) -> bool {
+        let got = outcome(spawn_relay(&pinned(pin), &args(exe, &[b"cat"]), &[]));
+        matches!(got, Outcome::Refused(c) if c == i32::from(RELAY_TARGET))
+    }
+
+    // 이것을 실패시키는 것: open_target이 폴더를 한 이름씩 O_NOFOLLOW로 열지 않고 전체 경로를 한 번에 여는
+    // 것(중간 symlink를 따라감), 또는 "."·".."·빈 이름 거부를 지우는 것.
+    #[test]
+    fn test_relay_refuses_middle_symlink() {
+        let dir = fresh_dir("middle");
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::create_dir(dir.join("real")).unwrap();
+        cat_copy(&dir.join("real/cat"), 0o755);
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        // Positive control: the canonical path runs.
+        ran(outcome(spawn_relay(
+            &pinned(None),
+            &args(&dir.join("real/cat"), &[b"cat"]),
+            &[],
+        )));
+        assert!(refused(&dir.join("link/cat"), None));
+        let mut dotted = dir.join("real").into_os_string();
+        dotted.push("/../real/cat");
+        assert!(refused(Path::new(&dotted), None));
+        let mut doubled = dir.join("real").into_os_string();
+        doubled.push("//cat");
+        assert!(refused(Path::new(&doubled), None));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 그룹 쓰기 대상은 그 파일·그룹·mode의 pin이 있을 때만 실행된다. 이것을 실패시키는 것: open_target이
+    // pin을 무시하고 RefuseGroupWrite로 되돌리는 것(양성 대조가 깨짐), pin이 있기만 하면 통과시키는 것
+    // (다른 ino·mode·gid pin이 실행됨), 그룹 쓰기 판정을 지우는 것(pin 없이 실행됨).
+    #[test]
+    fn test_relay_group_write_needs_matching_pin() {
+        let dir = fresh_dir("pin");
+        let exe = dir.join("cat");
+        let pin = cat_copy(&exe, 0o775);
+        ran(outcome(spawn_relay(
+            &pinned(Some(pin)),
+            &args(&exe, &[b"cat"]),
+            &[],
+        )));
+        assert!(refused(&exe, None));
+        let wrong = [
+            GroupPin {
+                ino: pin.ino + 1,
+                ..pin
+            },
+            GroupPin {
+                dev: pin.dev + 1,
+                ..pin
+            },
+            GroupPin {
+                gid: pin.gid + 1,
+                ..pin
+            },
+            GroupPin {
+                mode: pin.mode & !0o020,
+                ..pin
+            },
+        ];
+        for w in wrong {
+            assert!(refused(&exe, Some(w)), "{w:?}");
+        }
+        // A pin does not open other write.
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(refused(
+            &exe,
+            Some(GroupPin {
+                mode: pin.mode | 0o002,
+                ..pin
+            })
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Prepares a relay run of `exe` (a copy of `true`), then renames a copy
+    /// of `false` over that name, then executes: the exit code says which
+    /// file ran.
+    #[test]
+    #[ignore = "child: replaces itself with the target"]
+    fn swap_child() {
+        let dir = PathBuf::from(OsString::from_vec(read_all(4)));
+        // SAFETY: fd 4 is this child's argument pipe, read to the end above.
+        unsafe { libc::close(4) };
+        let exe = dir.join("x");
+        let words: Vec<OsString> = args(&exe, &[b"x"])
+            .into_iter()
+            .map(OsString::from_vec)
+            .collect();
+        let (r, w) = pipe();
+        put(&w, &pinned(None));
+        drop(w);
+        // SAFETY: both descriptors are valid; fd 3 is free in this child.
+        assert_eq!(unsafe { libc::dup2(r.as_raw_fd(), 3) }, 3);
+        drop(r);
+        let target = prepare(&words).unwrap();
+        std::fs::rename(dir.join("false"), &exe).unwrap();
+        let code = target.exec();
+        // SAFETY: child exit without the harness's atexit work.
+        unsafe { libc::_exit(100 + i32::from(code)) }
+    }
+
+    // 이것을 실패시키는 것: 중계가 검사한 fd 대신 경로로 실행하는 것(execveat(fd) 대신 execve(path)):
+    // 검사 뒤 바꿔치기한 false가 실행되어 종료 코드 1이 된다.
+    #[test]
+    fn test_swap_after_check_runs_checked_file() {
+        let dir = std::fs::canonicalize(fresh_dir("swap")).unwrap();
+        let copy = |from: &str, to: &str| {
+            std::fs::copy(std::fs::canonicalize(from).unwrap(), dir.join(to)).unwrap();
+        };
+        copy("/bin/true", "x");
+        copy("/bin/false", "false");
+        let (r4, w4) = pipe();
+        put(&w4, dir.as_os_str().as_bytes());
+        drop(w4);
+        let r4 = r4.as_raw_fd();
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "relay::tests::swap_child",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+        let setup = move || {
+            // SAFETY: `r4` is valid in the child; dup2 clears close-on-exec on 4.
+            if unsafe { libc::dup2(r4, 4) } != 4 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        };
+        // SAFETY: dup2 is async-signal-safe.
+        unsafe { cmd.pre_exec(setup) };
+        let status = cmd.status().unwrap();
+        assert_eq!(status.code(), Some(0), "{status:?}");
+        // Positive control: what now sits at the name is `false`.
+        assert_eq!(
+            Command::new(dir.join("x")).status().unwrap().code(),
+            Some(1)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Ubuntu 사용자 전용 그룹(umask 0002) 실행 파일: 도우미 쪽 해석(SystemGroups)이 pin을 만들고 중계가
+    // 그 pin으로 실행한다. 사용자 전용 기본 그룹이 있는 비root 사용자로 Linux 컨테이너에서 --ignored로
+    // 돌린다. 이것을 실패시키는 것: resolve가 pin을 비우는 것(양성이 거부됨), 중계가 pin을 무시하는 것.
+    #[test]
+    #[ignore = "needs a user-private primary group; run in the Linux container as that user"]
+    fn test_private_group_target_runs_with_pin() {
+        // SAFETY: umask only changes this process's file creation mask.
+        unsafe { libc::umask(0o002) };
+        let dir = fresh_dir("private-group");
+        let exe = std::fs::canonicalize(&dir).unwrap().join("cat");
+        std::fs::copy(cat(), &exe).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let found = crate::commands::exec_path::resolve_for_user(&exe).unwrap();
+        assert_eq!(found.executable, exe);
+        let pin = found.pin.expect("the private group is cleared");
+        ran(outcome(spawn_relay(
+            &pinned(Some(pin)),
+            &args(&exe, &[b"cat"]),
+            &[],
+        )));
+        assert!(refused(&exe, None));
+        assert!(refused(
+            &exe,
+            Some(GroupPin {
+                ino: pin.ino + 1,
+                ..pin
+            })
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
