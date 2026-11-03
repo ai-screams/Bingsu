@@ -1295,7 +1295,36 @@ fn section<T: Wire>(
     }
     Ok((value, r.budget))
 }
+/// Every segment and field a node names exists: segment numbers are the
+/// built-ins and then the config's text segments (the decode checks the
+/// same per line, `LineCheck`).
+fn nodes_in_range(lines: &[CompiledLine], custom: usize) -> bool {
+    let segs = crate::field::BUILTIN.len() + custom;
+    lines.iter().flat_map(|l| l.nodes()).all(|n| match n {
+        Node::Segment { seg, .. } => usize::from(*seg) < segs,
+        Node::Field { seg, field } => {
+            let seg = usize::from(*seg);
+            let decl = crate::field::BUILTIN
+                .get(seg)
+                .unwrap_or(&crate::field::CUSTOM_TEXT);
+            seg < segs && usize::from(*field) < decl.fields.len()
+        }
+        _ => true,
+    })
+}
 pub(crate) fn validate(c: &CompiledConfig) -> Result<(), Error> {
+    if !c
+        .variants
+        .iter()
+        .map(|v| v.as_slice())
+        .chain([
+            core::slice::from_ref(&c.transient),
+            core::slice::from_ref(&c.vi),
+        ])
+        .all(|l| nodes_in_range(l, c.custom.len()))
+    {
+        return Err(Error::Shape);
+    }
     check(&Parts {
         variants: c.variants.len(),
         variant_lines: c

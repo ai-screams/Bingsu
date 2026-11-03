@@ -343,3 +343,62 @@ fn too_many_text_segments_is_an_error() {
     assert!(r.diagnostics.iter().any(|d| d.code == codes::BAD_VALUE));
     assert_eq!(MAX_CUSTOM_TEXT, 256);
 }
+
+// 이것을 실패시키는 것: 컴파일이 원문을 그대로 저장하는 것(257자 이상이 `config check`를 통과하고 발행에서
+// 코덱 바이트 상한에 걸린다), 칸 대신 바이트로 자르는 것, 설정의 폭 프로필을 쓰지 않는 것.
+// 64칸은 그대로, 65칸은 말줄임으로 잘리고, 어느 경우든 encode와 decode가 성공한다.
+#[test]
+fn long_text_is_cut_to_the_cells_and_always_encodes() {
+    let ambiguous = "\u{b7}".repeat(40);
+    let cases: [(&str, String, u32); 6] = [
+        ("", "a".repeat(64), 1),
+        ("", "a".repeat(65), 1),
+        ("", "a".repeat(300), 1),
+        ("", "\u{d55c}".repeat(100), 1),
+        ("", format!("{}\u{d55c}", "a".repeat(63)), 1),
+        ("[width]\nambiguous = 2\n", ambiguous, 2),
+    ];
+    for (head, text, amb) in cases {
+        let r = fixture::report(&format!("{head}{}", config(&text)));
+        assert!(
+            r.diagnostics.iter().all(|d| d.code != codes::BAD_VALUE),
+            "{text:.8}"
+        );
+        let c = r
+            .snapshot
+            .unwrap_or_else(|| panic!("{text:.8}: {:?}", r.diagnostics));
+        let kept = &c.custom[0].text;
+        let p = bingsu_core::width::WidthProfile::new(amb as u8, 2).unwrap();
+        let cells = bingsu_core::width::str_width(kept, p);
+        assert!(
+            cells <= 64 && kept.len() <= 256,
+            "{text:.8}: {cells} cells {} bytes",
+            kept.len()
+        );
+        if text.chars().count() <= 64 && cells_of(&text, p) <= 64 {
+            assert_eq!(kept, &text);
+        } else {
+            assert!(kept.ends_with('\u{2026}'), "{text:.8}: {kept}");
+        }
+        let b = encode_compiled(&c).unwrap_or_else(|e| panic!("{text:.8}: {e:?}"));
+        assert_eq!(decode_compiled(&b).unwrap(), c);
+    }
+}
+
+fn cells_of(t: &str, p: bingsu_core::width::WidthProfile) -> u32 {
+    bingsu_core::width::str_width(t, p)
+}
+
+// 이것을 실패시키는 것: custom 번호에서 `+ i`를 빼는 것(둘째 선언이 첫째 값으로 나온다), 선언 순서로
+// 번호를 매기는 것(id 순서와 어긋난다). b를 먼저 선언하고 세그먼트와 `.value`를 번갈아 부른다.
+#[test]
+fn each_text_segment_shows_its_own_value() {
+    let cfg = "[segment.\"custom/b\"]\nkind = \"text\"\ntext = \"BBB\"\n\
+               [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"AAA\"\n\
+               [style]\ntemplate = \"{custom/b}-{custom/a.value}-{custom/a}-{custom/b.value}{char}\"\n";
+    let c = fixture::compile(cfg);
+    for sh in SHELLS {
+        let text = left(&c, sh, 80);
+        assert!(text.contains("BBB-AAA-AAA-BBB"), "{sh:?}: {text:?}");
+    }
+}

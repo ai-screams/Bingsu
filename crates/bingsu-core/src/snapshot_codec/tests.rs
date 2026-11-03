@@ -833,6 +833,26 @@ mod cases {
         assert!(!line(n + 1, Some(0), n + 1));
     }
 
+    // 이것을 실패시키는 것: encode의 `validate`가 노드 번호를 보지 않는 것(목록에 없는 custom 번호를 쓰는
+    // 설정이 인코드되고 디코드에서야 거부된다).
+    #[test]
+    fn encode_rejects_node_numbers_past_the_list() {
+        let mut c = config();
+        c.custom = vec![CustomText {
+            id: "custom/a".into(),
+            text: "x".into(),
+        }];
+        c.variants[0] = crate::template::compile::compile_with(
+            "{custom/a}{custom/a.value}",
+            crate::field::BUILTIN,
+            &["custom/a"],
+        )
+        .unwrap();
+        assert!(encode_compiled(&c).is_ok());
+        c.custom.clear();
+        rejected(&c);
+    }
+
     fn line_bytes(nodes: Vec<Node>, origin: Vec<Span>, fill: Option<usize>) -> Vec<u8> {
         let mut b = bytes(&nodes);
         b.extend(bytes(&origin));

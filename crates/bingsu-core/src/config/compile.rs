@@ -832,7 +832,12 @@ pub fn compile(
     let banded = bands_of(m)?;
     notes.extend(banded.notes.iter().cloned());
     let drawn_all = drawn(r, &banded.names);
-    let custom = text_segments(r, &drawn_all, &mut notes)?;
+    let profile = WidthProfile::new(
+        int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
+        int(r, &["width", "emoji"]).unwrap_or(2) as u8,
+    )
+    .unwrap_or(WidthProfile::DEFAULT);
+    let custom = text_segments(r, &drawn_all, profile, &mut notes)?;
     let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
     let mut variants = Vec::new();
     let mut mask = 0u32;
@@ -1038,11 +1043,6 @@ pub fn compile(
         },
         &mut notes,
     );
-    let profile = WidthProfile::new(
-        int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
-        int(r, &["width", "emoji"]).unwrap_or(2) as u8,
-    )
-    .unwrap_or(WidthProfile::DEFAULT);
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1112,6 +1112,7 @@ pub(crate) fn layout_verdict(
 fn text_segments(
     r: &MTable,
     drawn: &BTreeMap<String, Vec<LayoutRef>>,
+    profile: WidthProfile,
     notes: &mut Vec<Diagnostic>,
 ) -> Result<Vec<CustomText>, Vec<Diagnostic>> {
     let mut out: Vec<CustomText> = Vec::new();
@@ -1141,7 +1142,16 @@ fn text_segments(
         }
         out.push(CustomText {
             id: e.key.clone(),
-            text: s(t, &["text"]).unwrap_or_default().into(),
+            // Cut here, to the cells the field shows, so the stored text is
+            // what the front draws and always fits the codec's byte cap
+            // (`Clean` keeps at most `CUSTOM_TEXT_CELLS * 4` bytes).
+            text: crate::field::Clean::new(
+                s(t, &["text"]).unwrap_or_default().as_bytes(),
+                crate::field::CUSTOM_TEXT_CELLS,
+                profile,
+            )
+            .as_str()
+            .into(),
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
