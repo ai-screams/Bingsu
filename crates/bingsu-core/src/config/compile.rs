@@ -35,7 +35,7 @@ use crate::layout::{SegmentSetup, When};
 use crate::render::Theme;
 use crate::shorten::Method;
 use crate::style::{Joining, LineLayout, StyleOptions, generate, preset};
-use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile as compile_template};
+use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile_with};
 use crate::template::syntax::{Span as TSpan, Syntax, parse as parse_template};
 use crate::width::WidthProfile;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -115,6 +115,18 @@ pub struct ExecUnit {
     pub not_run: Option<NotRun>,
 }
 
+/// Most user text segments a config draws (the snapshot carries each one).
+pub const MAX_CUSTOM_TEXT: usize = 256;
+
+/// A user `kind = "text"` segment a layout draws. Its segment number is
+/// `field::BUILTIN.len()` plus its place in `CompiledConfig::custom`, which
+/// is sorted by id; the one field is `value` (`field::CUSTOM_TEXT`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomText {
+    pub id: String,
+    pub text: String,
+}
+
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Setup {
@@ -146,6 +158,8 @@ pub struct CompiledConfig {
     pub use_last_column: bool,
     pub duration_min_ms: u64,
     pub exec_units: Vec<ExecUnit>,
+    /// Drawn text segments, sorted by id.
+    pub custom: Vec<CustomText>,
     pub widths: Vec<WidthRun>,
 }
 
@@ -392,17 +406,25 @@ pub(crate) fn template_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` without custom references (drawn from M6) or disabled built-ins:
+/// `text` without custom references other than the drawn text segments
+/// `texts` (command and language segments are drawn from M6) or disabled built-ins:
 /// each is cut out, and so is a group left without a reference (a
 /// group needs one to compile). A template that does not parse is kept as
 /// it is, so the compile reports it.
-fn without_hidden(text: &str, off: &BTreeSet<&str>) -> String {
-    fn cuts(items: &[(Syntax, TSpan)], off: &BTreeSet<&str>, out: &mut Vec<TSpan>) -> bool {
+fn without_hidden(text: &str, off: &BTreeSet<&str>, texts: &[&str]) -> String {
+    fn cuts(
+        items: &[(Syntax, TSpan)],
+        off: &BTreeSet<&str>,
+        texts: &[&str],
+        out: &mut Vec<TSpan>,
+    ) -> bool {
         let mut kept = false;
         for (syn, sp) in items {
             match syn {
                 Syntax::Segment { id, .. } | Syntax::Field { segment: id, .. } => {
-                    if id.starts_with("custom/") || off.contains(id.as_str()) {
+                    if (id.starts_with("custom/") && !texts.contains(&id.as_str()))
+                        || off.contains(id.as_str())
+                    {
                         out.push(*sp);
                     } else {
                         kept = true;
@@ -410,14 +432,14 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>) -> String {
                 }
                 Syntax::Group(body) => {
                     let mut inner = Vec::new();
-                    if cuts(body, off, &mut inner) || inner.is_empty() {
+                    if cuts(body, off, texts, &mut inner) || inner.is_empty() {
                         out.extend(inner);
                         kept = true;
                     } else {
                         out.push(*sp);
                     }
                 }
-                Syntax::Style { body, .. } => kept |= cuts(body, off, out),
+                Syntax::Style { body, .. } => kept |= cuts(body, off, texts, out),
                 _ => {}
             }
         }
@@ -427,7 +449,7 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>) -> String {
         return String::from(text);
     };
     let mut gone = Vec::new();
-    cuts(&tree, off, &mut gone);
+    cuts(&tree, off, texts, &mut gone);
     gone.sort_by_key(|sp| sp.start);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
@@ -809,6 +831,9 @@ pub fn compile(
     let base_preset = s(r, &["style", "preset"]).unwrap_or(default_str("style.preset"));
     let banded = bands_of(m)?;
     notes.extend(banded.notes.iter().cloned());
+    let drawn_all = drawn(r, &banded.names);
+    let custom = text_segments(r, &drawn_all, &mut notes)?;
+    let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
     let mut variants = Vec::new();
     let mut mask = 0u32;
     for lay in layouts(r) {
@@ -822,10 +847,14 @@ pub fn compile(
         // A template replaces preset and options (spec section 2 "스타일 세
         // 단계"); a band's own template wins over the default's.
         let template = lay.template.as_ref();
-        // User segments are drawn from M6; built-ins turned off are not drawn.
+        // Command and language segments are drawn from M6, text segments now;
+        // built-ins turned off are not drawn.
         let keep = |ids: &[String]| -> Vec<String> {
             ids.iter()
-                .filter(|id| !id.contains('/') && !off.contains(id.as_str()))
+                .filter(|id| {
+                    (!id.contains('/') || texts.contains(&id.as_str()))
+                        && !off.contains(id.as_str())
+                })
                 .cloned()
                 .collect()
         };
@@ -882,7 +911,7 @@ pub fn compile(
                 }
                 // `custom/…` is drawn from M6 (N502 when declared, W408 when
                 // not): only that reference goes, the rest compiles.
-                without_hidden(t, &off)
+                without_hidden(t, &off, &texts)
             }
             _ => {
                 let pr =
@@ -891,7 +920,7 @@ pub fn compile(
                     .map_err(|_| vec![bad(where_, "layout", "", "a layout that fits a template")])?
             }
         };
-        let compiled = compile_template(&text, BUILTIN)
+        let compiled = compile_with(&text, BUILTIN, &texts)
             .map_err(|_| vec![bad(where_, "layout", "", "a layout that compiles")])?;
         // A theme may change how the prompt looks, never erase it: a
         // shape-only template that draws none of the required segments
@@ -929,8 +958,8 @@ pub fn compile(
         }
         variants.push(compiled);
     }
-    for (id, refs) in drawn(r, &banded.names) {
-        if id.starts_with("custom/") && declared(r, &id) {
+    for (id, refs) in &drawn_all {
+        if id.starts_with("custom/") && declared(r, id) && !texts.contains(&id.as_str()) {
             let place = refs
                 .first()
                 .and_then(|r| r.origin)
@@ -938,7 +967,7 @@ pub fn compile(
                     id: o.source,
                     span: o.span,
                 });
-            notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
+            notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id.clone()));
         }
     }
     let shown_bands = selectable(&banded.order, &banded.bands);
@@ -969,7 +998,7 @@ pub fn compile(
         widths,
         ..
     } = banded;
-    let one = |src: &str| compile_template(src, BUILTIN).map(|mut v| v.remove(0));
+    let one = |src: &str| compile_with(src, BUILTIN, &[]).map(|mut v| v.remove(0));
     let transient = one("{char}").map_err(|_| Vec::new())?;
     let vi = one("{char}").map_err(|_| Vec::new())?;
     let dir_methods: Vec<Method> = match get(r, &["segment", "dir", "shorten"]) {
@@ -1036,6 +1065,7 @@ pub fn compile(
             use_last_column: boolean(r, &["layout", "use_last_column"]).unwrap_or(false),
             duration_min_ms,
             exec_units,
+            custom,
             widths,
         },
         notes,
@@ -1074,6 +1104,57 @@ pub(crate) fn layout_verdict(
         |v: &[LayoutRef], set: &BTreeSet<Option<u16>>| v.iter().any(|r| set.contains(&r.band));
     (!live(approved_by, &reach.approved) || !live(shown_at, &reach.shown))
         .then_some(NotRun::NotInTrustedLayout)
+}
+
+/// The `kind = "text"` segments some layout draws, sorted by id. A text
+/// segment turned off (`enabled = false`, or from a file that failed the
+/// safety check) is not drawn; a missing `text` shows nothing.
+fn text_segments(
+    r: &MTable,
+    drawn: &BTreeMap<String, Vec<LayoutRef>>,
+    notes: &mut Vec<Diagnostic>,
+) -> Result<Vec<CustomText>, Vec<Diagnostic>> {
+    let mut out: Vec<CustomText> = Vec::new();
+    for e in entries(r, &["segment"]) {
+        let MValue::Table(t) = &e.node.value else {
+            continue;
+        };
+        if !e.key.starts_with("custom/")
+            || !drawn.contains_key(&e.key)
+            || s(t, &["kind"]) != Some("text")
+        {
+            continue;
+        }
+        if let Some(n) = t.get("enabled") {
+            if n.origin.trust == Trust::Unsafe {
+                notes.push(
+                    Diagnostic::new(codes::NOT_RUN_UNSAFE_FILE, at(n))
+                        .arg("id", e.key.clone())
+                        .arg("key", "enabled")
+                        .arg("reason", "the file failed the owner and permission check"),
+                );
+                continue;
+            }
+            if n.value == MValue::Scalar(Value::Bool(false)) {
+                continue;
+            }
+        }
+        out.push(CustomText {
+            id: e.key.clone(),
+            text: s(t, &["text"]).unwrap_or_default().into(),
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
+    if out.len() > MAX_CUSTOM_TEXT {
+        return Err(vec![bad(
+            place_of(r, &["segment"]),
+            "segment",
+            &alloc::format!("{}", out.len()),
+            "at most 256 drawn text segments",
+        )]);
+    }
+    Ok(out)
 }
 
 fn exec_units(

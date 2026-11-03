@@ -112,10 +112,12 @@ fn render_selected_with_catalog<L: LayoutView>(
 ) {
     let default;
     let setup;
+    let mut custom: &[_] = &[];
     let (theme, setup, options, duration_min) = if let Some(c) = compiled {
         // The variant is selected here at the envelope's width; the theme
         // carries only it, so both views lay out the same lines.
         let shared = c.shared();
+        custom = shared.custom;
         setup = shared.segment_setup();
         (
             shared.theme(c.lines_at(parsed.width), mode),
@@ -166,8 +168,39 @@ fn render_selected_with_catalog<L: LayoutView>(
             *git = shell_values::format_git(git, options.icons, options.profile);
         }
     }
+    // User text segments follow the built-ins: their declaration and value
+    // are made here, from the snapshot alone. With none (the usual case)
+    // the catalog and values are used as they are.
+    let extended: Vec<crate::field::SegmentDecl>;
+    let mut segments = catalog.segments;
+    if !custom.is_empty() && segments.len() == BUILTIN.len() {
+        extended = segments
+            .iter()
+            .copied()
+            .chain(custom.iter().map(|_| crate::field::CUSTOM_TEXT))
+            .collect();
+        segments = &extended;
+        // Nothing past the built-ins is a value yet (a mask bit never reaches there).
+        collected.values.truncate(BUILTIN.len());
+        collected.facts.truncate(BUILTIN.len());
+        for t in custom {
+            let f = crate::field::Field::text(
+                t.text.as_bytes(),
+                crate::field::CUSTOM_TEXT_CELLS,
+                options.profile,
+            );
+            let shown = match &f.value {
+                crate::field::FieldValue::Text(c) => c.as_str().as_bytes().to_vec(),
+                _ => Vec::new(),
+            };
+            collected
+                .values
+                .push(Some(crate::field::Value::new(&shown, alloc::vec![f])));
+            collected.facts.push(None);
+        }
+    }
     let inputs = Inputs {
-        catalog: catalog.segments,
+        catalog: segments,
         values: &collected.values,
         facts: &collected.facts,
         setup,
@@ -192,7 +225,7 @@ fn render_selected_with_catalog<L: LayoutView>(
     let vi = crate::render::render_vi_variants(
         &theme,
         crate::render::ViInputs {
-            catalog: catalog.segments,
+            catalog: segments,
             values: &mut collected.values,
             facts: &collected.facts,
             setup,

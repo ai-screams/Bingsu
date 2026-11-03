@@ -115,8 +115,9 @@ impl CompiledLine {
         nodes: Vec<Node>,
         origin: Vec<Span>,
         fill: Option<usize>,
+        segs: usize,
     ) -> Option<Self> {
-        let mut check = LineCheck::new(nodes.len());
+        let mut check = LineCheck::new(nodes.len(), segs);
         for n in &nodes {
             check.node(n);
         }
@@ -149,6 +150,9 @@ impl CompiledLine {
 /// the line (the decoder's error order) and asks `finish` once.
 pub(crate) struct LineCheck {
     len: usize,
+    /// Segment numbers below this exist: the built-ins and the config's
+    /// user text segments.
+    segs: usize,
     at: usize,
     /// Open styles and groups: (group, end index, references seen at open).
     stack: [(bool, usize, usize); super::syntax::MAX_DEPTH],
@@ -161,9 +165,10 @@ pub(crate) struct LineCheck {
 
 impl LineCheck {
     #[inline(always)]
-    pub(crate) fn new(len: usize) -> Self {
+    pub(crate) fn new(len: usize, segs: usize) -> Self {
         Self {
             len,
+            segs,
             at: 0,
             stack: [(false, 0, 0); super::syntax::MAX_DEPTH],
             depth: 0,
@@ -211,13 +216,18 @@ impl LineCheck {
         match n {
             Node::Text(_) => return None,
             Node::Segment { seg, .. } => {
-                if usize::from(*seg) >= crate::field::BUILTIN.len() {
+                if usize::from(*seg) >= self.segs {
                     return None;
                 }
                 self.references += 1;
             }
             Node::Field { seg, field } => {
-                let decl = crate::field::BUILTIN.get(usize::from(*seg))?;
+                if usize::from(*seg) >= self.segs {
+                    return None;
+                }
+                let decl = crate::field::BUILTIN
+                    .get(usize::from(*seg))
+                    .unwrap_or(&crate::field::CUSTOM_TEXT);
                 if usize::from(*field) >= decl.fields.len() {
                     return None;
                 }
@@ -314,6 +324,9 @@ pub const MAX_LINES: usize = 2;
 
 struct Ctx<'a> {
     catalog: &'a [SegmentDecl],
+    /// User text segments, sorted by id; segment `catalog.len() + i` is
+    /// `customs[i]` and is declared by `field::CUSTOM_TEXT`.
+    customs: &'a [&'a str],
     lines: Vec<CompiledLine>,
 }
 
@@ -321,8 +334,18 @@ fn err(kind: CompileErrorKind, span: Span) -> CompileError {
     CompileError { kind, span }
 }
 
-fn seg_index(catalog: &[SegmentDecl], id: &str) -> Option<usize> {
-    catalog.binary_search_by(|d| d.id.cmp(id)).ok()
+fn seg_index(cx: &Ctx<'_>, id: &str) -> Option<usize> {
+    cx.catalog
+        .binary_search_by(|d| d.id.cmp(id))
+        .ok()
+        .or_else(|| {
+            let i = cx.customs.binary_search_by(|c| (*c).cmp(id)).ok()?;
+            Some(cx.catalog.len() + i)
+        })
+}
+
+fn decl_of<'c>(cx: &'c Ctx<'_>, seg: usize) -> &'c SegmentDecl {
+    cx.catalog.get(seg).unwrap_or(&crate::field::CUSTOM_TEXT)
 }
 
 /// Narrows a catalog position to the `u16` a node stores; no silent wrap.
@@ -387,8 +410,7 @@ fn emit(cx: &mut Ctx<'_>, items: Vec<(Syntax, Span)>, depth: usize) -> Result<bo
         let n = match node {
             Syntax::Text(t) => Node::Text(t),
             Syntax::Segment { id, mode } => {
-                let seg =
-                    seg_index(cx.catalog, &id).ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
+                let seg = seg_index(cx, &id).ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
                 referenced = true;
                 Node::Segment {
                     seg: index16(seg, sp)?,
@@ -396,9 +418,9 @@ fn emit(cx: &mut Ctx<'_>, items: Vec<(Syntax, Span)>, depth: usize) -> Result<bo
                 }
             }
             Syntax::Field { segment, field } => {
-                let seg = seg_index(cx.catalog, &segment)
-                    .ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
-                let f = cx.catalog[seg]
+                let seg =
+                    seg_index(cx, &segment).ok_or(err(CompileErrorKind::UnknownSegment, sp))?;
+                let f = decl_of(cx, seg)
                     .field_index(&field)
                     .ok_or(err(CompileErrorKind::UnknownField, sp))?;
                 referenced = true;
@@ -499,12 +521,24 @@ fn push(cx: &mut Ctx<'_>, n: Node, sp: Span) {
 /// Compiles `src` against the segment catalog (sorted by id), one
 /// CompiledLine per template line.
 pub fn compile(src: &str, catalog: &[SegmentDecl]) -> Result<Vec<CompiledLine>, CompileError> {
-    if !catalog_sorted(catalog) {
+    compile_with(src, catalog, &[])
+}
+
+/// `compile` with user text segments after the catalog: `customs` must be
+/// strictly ascending, and each id's segment number is `catalog.len()` plus
+/// its position. The catalog's own order is untouched.
+pub fn compile_with(
+    src: &str,
+    catalog: &[SegmentDecl],
+    customs: &[&str],
+) -> Result<Vec<CompiledLine>, CompileError> {
+    if !catalog_sorted(catalog) || !customs.windows(2).all(|w| w[0] < w[1]) {
         return Err(err(CompileErrorKind::BadCatalog, Span { start: 0, end: 0 }));
     }
     let tree = parse(src).map_err(|e| err(CompileErrorKind::Syntax(e.kind), e.span))?;
     let mut cx = Ctx {
         catalog,
+        customs,
         lines: alloc::vec![CompiledLine::default()],
     };
     emit(&mut cx, tree, 0)?;

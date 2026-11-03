@@ -18,6 +18,7 @@ mod cases {
         T::get(&mut Reader {
             rest: b,
             budget: MAX_ALLOC,
+            segs: crate::field::BUILTIN.len(),
         })
     }
     fn round<T: Wire + PartialEq + core::fmt::Debug>(v: T) {
@@ -176,7 +177,8 @@ mod cases {
         assert_eq!(
             Vec::<u64>::get(&mut Reader {
                 rest: &b,
-                budget: 7
+                budget: 7,
+                segs: 0,
             }),
             Err(Error::Limit)
         );
@@ -184,7 +186,8 @@ mod cases {
         assert_eq!(
             String::get(&mut Reader {
                 rest: &b,
-                budget: 2
+                budget: 2,
+                segs: 0,
             }),
             Err(Error::Limit)
         );
@@ -232,7 +235,7 @@ mod cases {
         assert_eq!(decode_compiled(&b), Err(Error::Shape));
         let spare = [0; 5];
         assert_eq!(
-            section::<u32>(&spare, section_sum(&spare), MAX_ALLOC).map(drop),
+            section::<u32>(&spare, section_sum(&spare), MAX_ALLOC, 0).map(drop),
             Err(Error::Trailing)
         );
     }
@@ -267,11 +270,16 @@ mod cases {
         let mut left = s.budget;
         for i in 0..s.variants() {
             let e = s.entry(i);
-            left = section::<Vec<CompiledLine>>(&b[e.offset..e.offset + e.len], e.crc, left)
-                .unwrap()
-                .1;
+            left = section::<Vec<CompiledLine>>(
+                &b[e.offset..e.offset + e.len],
+                e.crc,
+                left,
+                crate::field::BUILTIN.len() + s.common.custom.len(),
+            )
+            .unwrap()
+            .1;
         }
-        left = section::<Vec<String>>(&b[s.names..], s.common.names_crc, left)
+        left = section::<Vec<String>>(&b[s.names..], s.common.names_crc, left, 0)
             .unwrap()
             .1;
         let run = size_of::<WidthRun>();
@@ -760,6 +768,69 @@ mod cases {
             b[at] ^= 1;
             assert!(decode_compiled(&b).is_err());
         }
+    }
+
+    fn with_custom(list: &[(&str, &str)]) -> CompiledConfig {
+        let mut c = config();
+        c.custom = list
+            .iter()
+            .map(|(id, text)| CustomText {
+                id: (*id).into(),
+                text: (*text).into(),
+            })
+            .collect();
+        c
+    }
+
+    // 이것을 실패시키는 것: custom 목록 검사 삭제. 정렬 아닌 목록, 중복, custom이 아닌 id, 제어 문자가
+    // 든 글, 칸 상한의 4배 바이트를 넘는 글, 개수 상한 초과를 인코드와 디코드 둘 다 거부해야 한다.
+    #[test]
+    fn custom_list_is_checked_on_both_sides() {
+        let ok = with_custom(&[("custom/a", "x"), ("custom/b", "")]);
+        assert_eq!(decode_compiled(&encode_compiled(&ok).unwrap()).unwrap(), ok);
+        let long = "a".repeat(usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4 + 1);
+        for bad in [
+            with_custom(&[("custom/b", "x"), ("custom/a", "x")]),
+            with_custom(&[("custom/a", "x"), ("custom/a", "y")]),
+            with_custom(&[("git", "x")]),
+            with_custom(&[("acme/a", "x")]),
+            with_custom(&[("custom/a", "e\u{1b}")]),
+            with_custom(&[("custom/a", &long)]),
+        ] {
+            rejected(&bad);
+        }
+        let many: Vec<(String, &str)> = (0..=crate::config::compile::MAX_CUSTOM_TEXT)
+            .map(|i| (alloc::format!("custom/t{i:04}"), "x"))
+            .collect();
+        let refs: Vec<(&str, &str)> = many.iter().map(|(a, b)| (a.as_str(), *b)).collect();
+        rejected(&with_custom(&refs));
+    }
+
+    // 이것을 실패시키는 것: 노드 번호 상한을 `BUILTIN.len()`에 고정하는 것(선언된 custom 번호 거부) 또는
+    // 상한 검사를 빼는 것(선언 밖 번호와 custom의 둘째 필드 통과).
+    #[test]
+    fn node_numbers_follow_the_declared_custom_count() {
+        let n = crate::field::BUILTIN.len();
+        let line = |seg: usize, field: Option<u16>, segs: usize| {
+            let node = match field {
+                None => Node::Segment {
+                    seg: seg as u16,
+                    mode: Mode::Plain,
+                },
+                Some(field) => Node::Field {
+                    seg: seg as u16,
+                    field,
+                },
+            };
+            CompiledLine::from_snapshot(vec![node], vec![Span { start: 0, end: 0 }], None, segs)
+                .is_some()
+        };
+        assert!(!line(n, None, n));
+        assert!(line(n, None, n + 1));
+        assert!(!line(n + 1, None, n + 1));
+        assert!(line(n, Some(0), n + 1));
+        assert!(!line(n, Some(1), n + 1));
+        assert!(!line(n + 1, Some(0), n + 1));
     }
 
     fn line_bytes(nodes: Vec<Node>, origin: Vec<Span>, fill: Option<usize>) -> Vec<u8> {
