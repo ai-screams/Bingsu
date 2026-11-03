@@ -18,8 +18,12 @@ pub enum Refusal {
     Trust,
     /// `now + min_run > H - reserve`.
     Budget,
-    /// The carried policy does not hash to the approved digest.
+    /// The carried policy does not hash to the approved digest, or the
+    /// index is outside the grant's lists.
     Policy,
+    /// Permit and exec frame together exceed the relay input cap. Never
+    /// returned by `approve`; the supervisor reports it in the result.
+    Limit,
 }
 
 /// Approve one spawn at `now` (`t_a`). Returns the run deadline `E`.
@@ -34,6 +38,8 @@ pub fn approve(
     if !permit.same_clock(now) {
         return Err(Refusal::Clock);
     }
+    // A round without a valid marker sends deadline 0, so this refuses every
+    // config unit while builtin probes keep the clock identity check.
     if origin == Origin::Config && now.now >= permit.deadline {
         return Err(Refusal::Trust);
     }
@@ -54,7 +60,7 @@ pub fn approve_unit(
     budget: Budget,
 ) -> Result<u64, Refusal> {
     let unit = grant.units.get(index).ok_or(Refusal::Policy)?;
-    if policy_digest(&unit.policy, unit.cwd, unit.timeout) != unit.digest {
+    if policy_digest(&unit.policy, unit.cwd, unit.timeout, &unit.env_allow) != unit.digest {
         return Err(Refusal::Policy);
     }
     approve(
@@ -130,11 +136,12 @@ mod tests {
         };
         Unit {
             id: "custom/kube".into(),
-            digest: policy_digest(&policy, Cwd::Neutral, timeout),
+            digest: policy_digest(&policy, Cwd::Neutral, timeout, &[]),
             policy,
             cwd: Cwd::Neutral,
             environment: b"HOME=/h\0".to_vec(),
             timeout,
+            env_allow: Vec::new(),
         }
     }
     fn grant(deadline: u64) -> Grant {
@@ -191,6 +198,25 @@ mod tests {
         let g = grant(0);
         assert!(approve_probe(clock(MS), &g, 0, 200 * MS, B).is_ok());
         assert_eq!(approve_unit(clock(MS), &g, 0, B), Err(Refusal::Trust));
+    }
+
+    // 이것을 실패시키는 것: approve의 신뢰 검사(`now.now >= permit.deadline`)를 지우는 것
+    // (표식이 무효인 회차의 deadline 0 permit으로 설정 단위가 승인됨).
+    #[test]
+    fn grant_zero_deadline_permit_refuses_config() {
+        let g = grant(0);
+        for now in [0, MS, H - B.reserve - B.min_run] {
+            assert_eq!(approve_unit(clock(now), &g, 0, B), Err(Refusal::Trust));
+        }
+    }
+
+    // 이것을 실패시키는 것: approve_unit의 요약값에서 env_allow를 빼는 것(이름 목록만 바꾼 단위가
+    // 승인됨).
+    #[test]
+    fn grant_env_allow_change_is_policy_mismatch() {
+        let mut g = grant(TRUST);
+        g.units[0].env_allow = vec![b"SSH_AUTH_SOCK".to_vec()];
+        assert_eq!(approve_unit(clock(MS), &g, 0, B), Err(Refusal::Policy));
     }
 
     // 이것을 실패시키는 것: approve의 same_clock 검사를 지우는 것(내장 조사가 다른 깨어남 세대·

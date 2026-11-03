@@ -30,11 +30,12 @@ fn grant(units: usize, environment: usize) -> Message {
         units: (0..units)
             .map(|i| Unit {
                 id: format!("custom/u{i}"),
-                digest: wire::policy_digest(&policy, Cwd::Neutral, 7),
+                digest: wire::policy_digest(&policy, Cwd::Neutral, 7, &[b"LANG".to_vec()]),
                 policy: policy.clone(),
                 cwd: Cwd::Neutral,
                 environment: vec![b'x'; environment],
                 timeout: 7,
+                env_allow: vec![b"LANG".to_vec()],
             })
             .collect(),
         probes: vec![Probe {

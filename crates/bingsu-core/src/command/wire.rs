@@ -50,6 +50,9 @@ pub struct Unit {
     /// Sanitized target environment, `NAME=VALUE\0` entries.
     pub environment: Vec<u8>,
     pub timeout: u64,
+    /// The unit's `env_allow` names, so a config that changes only them
+    /// gets another digest.
+    pub env_allow: Vec<Vec<u8>>,
 }
 
 /// One builtin version probe. Fixed arguments and environment come from the
@@ -64,7 +67,9 @@ pub struct Probe {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
     /// Clock identity and trust deadline `verified_at + T`. A round without a
-    /// valid marker carries deadline 0, so every config unit is refused.
+    /// valid marker still needs the helper's clock identity for builtin
+    /// probes, so it carries a permit with deadline 0: `now < 0` never holds,
+    /// and every config unit is refused with `Refusal::Trust`.
     pub permit: Permit,
     /// `H`.
     pub helper_deadline: u64,
@@ -78,10 +83,9 @@ pub enum Reason {
     Exited(i32),
     /// Stopped at its run deadline.
     Timeout,
-    /// The supervisor's approval said no.
+    /// The supervisor did not spawn it; `Limit` covers a relay input above
+    /// its cap.
     Refused(Refusal),
-    /// Permit and exec frame together exceed the relay input cap.
-    EnvTooLarge,
     SpawnFailed,
 }
 
@@ -115,20 +119,27 @@ impl Message {
 
 /// Digest of what a config unit runs: the policy kind byte, every argv word
 /// or the script with its length, the cwd kind and the timeout.
-pub fn policy_digest(policy: &Policy, cwd: Cwd, timeout: u64) -> [u8; 32] {
+pub fn policy_digest(policy: &Policy, cwd: Cwd, timeout: u64, env_allow: &[Vec<u8>]) -> [u8; 32] {
     let mut b = Vec::new();
     b.extend_from_slice(b"bingsu-command-policy-v1\0");
     b.push(policy.tag());
-    let mut word = |w: &[u8]| {
+    fn word(b: &mut Vec<u8>, w: &[u8]) {
         b.extend_from_slice(&(w.len() as u64).to_le_bytes());
         b.extend_from_slice(w);
-    };
+    }
     match policy {
-        Policy::Argv { argv } => argv.iter().for_each(|w| word(w)),
-        Policy::UnsafeShell { script } => word(script),
+        Policy::Argv { argv } => {
+            // The word count ends the argv section; without it a longer argv
+            // can collide with a shorter one and other cwd, timeout or names.
+            b.extend_from_slice(&(argv.len() as u64).to_le_bytes());
+            argv.iter().for_each(|w| word(&mut b, w));
+        }
+        Policy::UnsafeShell { script } => word(&mut b, script),
     }
     b.push(cwd.tag());
     b.extend_from_slice(&timeout.to_le_bytes());
+    // Names come last, so their own length prefixes delimit them.
+    env_allow.iter().for_each(|w| word(&mut b, w));
     sha256(&b)
 }
 
@@ -180,6 +191,10 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
                 b.push(u.cwd.tag());
                 b.extend_from_slice(&u.timeout.to_le_bytes());
                 bytes16(&mut b, &u.environment);
+                b.push(u8::try_from(u.env_allow.len()).map_err(|_| Error::Limit)?);
+                for w in &u.env_allow {
+                    bytes16(&mut b, w);
+                }
             }
             for p in &g.probes {
                 b.push(p.profile);
@@ -195,8 +210,7 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
                 Reason::Exited(s) => (1, 0, s),
                 Reason::Timeout => (2, 0, 0),
                 Reason::Refused(r) => (3, refusal_tag(r), 0),
-                Reason::EnvTooLarge => (4, 0, 0),
-                Reason::SpawnFailed => (5, 0, 0),
+                Reason::SpawnFailed => (4, 0, 0),
             };
             b.extend([o.origin.tag(), o.index, tag, detail]);
             b.extend_from_slice(&status.to_le_bytes());
@@ -261,6 +275,11 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                 let cwd = Cwd::from_tag(r.u8()?)?;
                 let timeout = r.u64()?;
                 let environment = r.bytes16()?.to_vec();
+                let n = r.u8()?;
+                let mut env_allow = Vec::new();
+                for _ in 0..n {
+                    env_allow.push(r.bytes16()?.to_vec());
+                }
                 units.push(Unit {
                     id,
                     digest,
@@ -268,6 +287,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                     cwd,
                     environment,
                     timeout,
+                    env_allow,
                 });
             }
             let mut probes = Vec::new();
@@ -298,8 +318,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                 1 => Reason::Exited(status),
                 2 => Reason::Timeout,
                 3 => Reason::Refused(refusal_from(detail)?),
-                4 => Reason::EnvTooLarge,
-                5 => Reason::SpawnFailed,
+                4 => Reason::SpawnFailed,
                 _ => return Err(Error::Kind),
             };
             let approved_at = r.u64()?;
@@ -330,6 +349,7 @@ fn refusal_tag(r: Refusal) -> u8 {
         Refusal::Trust => 2,
         Refusal::Budget => 3,
         Refusal::Policy => 4,
+        Refusal::Limit => 5,
     }
 }
 fn refusal_from(b: u8) -> Result<Refusal, Error> {
@@ -338,6 +358,7 @@ fn refusal_from(b: u8) -> Result<Refusal, Error> {
         2 => Refusal::Trust,
         3 => Refusal::Budget,
         4 => Refusal::Policy,
+        5 => Refusal::Limit,
         _ => return Err(Error::Kind),
     })
 }
@@ -391,11 +412,12 @@ mod tests {
     fn unit(policy: Policy) -> Unit {
         Unit {
             id: "custom/kube".into(),
-            digest: policy_digest(&policy, Cwd::Neutral, 7),
+            digest: policy_digest(&policy, Cwd::Neutral, 7, &[b"KUBECONFIG".to_vec()]),
             policy,
             cwd: Cwd::Neutral,
             environment: b"HOME=/h\0PATH=/usr/bin\0".to_vec(),
             timeout: 7,
+            env_allow: vec![b"KUBECONFIG".to_vec()],
         }
     }
     fn grant() -> Message {
@@ -442,7 +464,7 @@ mod tests {
         for reason in [
             Reason::Exited(-9),
             Reason::Timeout,
-            Reason::EnvTooLarge,
+            Reason::Refused(Refusal::Limit),
             Reason::SpawnFailed,
         ] {
             let Message::Result(mut o) = result() else {
@@ -467,7 +489,8 @@ mod tests {
         assert_eq!(decode(&b), Err(Error::Kind));
     }
 
-    // 이것을 실패시키는 것: policy_digest에서 `b.push(policy.tag())`를 지우는 것.
+    // 이것을 실패시키는 것: policy_digest에서 `b.push(policy.tag())`를 지우는 것. 빈 argv와 빈
+    // script는 종류 바이트가 없으면 같은 바이트(길이 0의 8바이트)가 된다.
     #[test]
     fn policy_kind_in_digest() {
         let s = b"kubectl ctx".to_vec();
@@ -476,8 +499,14 @@ mod tests {
         };
         let shell = Policy::UnsafeShell { script: s };
         assert_ne!(
-            policy_digest(&argv, Cwd::Neutral, 1),
-            policy_digest(&shell, Cwd::Neutral, 1)
+            policy_digest(&argv, Cwd::Neutral, 1, &[]),
+            policy_digest(&shell, Cwd::Neutral, 1, &[])
+        );
+        let argv = Policy::Argv { argv: Vec::new() };
+        let shell = Policy::UnsafeShell { script: Vec::new() };
+        assert_ne!(
+            policy_digest(&argv, Cwd::Neutral, 1, &[]),
+            policy_digest(&shell, Cwd::Neutral, 1, &[])
         );
     }
 
@@ -491,8 +520,43 @@ mod tests {
             argv: vec![b"a".to_vec(), b"bc".to_vec()],
         };
         assert_ne!(
-            policy_digest(&a, Cwd::Neutral, 1),
-            policy_digest(&b, Cwd::Neutral, 1)
+            policy_digest(&a, Cwd::Neutral, 1, &[]),
+            policy_digest(&b, Cwd::Neutral, 1, &[])
+        );
+    }
+
+    // 이것을 실패시키는 것: policy_digest에서 env_allow 이름을 빼는 것(이름만 바꾼 설정이 같은
+    // 요약값이 됨).
+    #[test]
+    fn policy_digest_covers_env_allow_names() {
+        let p = Policy::Argv {
+            argv: vec![b"kubectl".to_vec()],
+        };
+        let a = policy_digest(&p, Cwd::Neutral, 1, &[b"KUBECONFIG".to_vec()]);
+        let b = policy_digest(&p, Cwd::Neutral, 1, &[b"SSH_AUTH_SOCK".to_vec()]);
+        let none = policy_digest(&p, Cwd::Neutral, 1, &[]);
+        assert_ne!(a, b);
+        assert_ne!(a, none);
+        // Name boundaries count too.
+        let ab = policy_digest(&p, Cwd::Neutral, 1, &[b"AB".to_vec(), b"C".to_vec()]);
+        let a_bc = policy_digest(&p, Cwd::Neutral, 1, &[b"A".to_vec(), b"BC".to_vec()]);
+        assert_ne!(ab, a_bc);
+    }
+
+    // 이것을 실패시키는 것: policy_digest의 argv 단어 개수 접두를 지우는 것. 그러면 아래 둘이
+    // 같은 바이트가 된다: argv ["x"], 이름 [""] 과 argv ["x", ""], 이름 없음(cwd neutral, timeout 0.
+    // 짧은 쪽의 cwd·timeout·빈 이름 길이가 긴 쪽의 빈 단어 길이·cwd·timeout과 겹침).
+    #[test]
+    fn policy_digest_counts_argv_words() {
+        let one = Policy::Argv {
+            argv: vec![b"x".to_vec()],
+        };
+        let two = Policy::Argv {
+            argv: vec![b"x".to_vec(), Vec::new()],
+        };
+        assert_ne!(
+            policy_digest(&one, Cwd::Neutral, 0, &[Vec::new()]),
+            policy_digest(&two, Cwd::Neutral, 0, &[])
         );
     }
 
@@ -616,7 +680,7 @@ mod tests {
         b[at] = 2;
         reseal(&mut b);
         assert_eq!(decode(&b), Err(Error::Kind));
-        for (at, v) in [(0, 0), (0, 3), (2, 6), (2, 0), (3, 5), (3, 0)] {
+        for (at, v) in [(0, 0), (0, 3), (2, 5), (2, 0), (3, 6), (3, 0)] {
             let mut b = encode(&result()).unwrap();
             b[HEADER + at] = v;
             if at == 2 {
@@ -628,8 +692,8 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: encode의 argv 개수 변환을 `as u8` 자르기로 바꾸는 것(256개째 단어가
-    // 조용히 잘린 프레임이 됨), 또는 encode 끝의 BODY_MAX 검사를 지우는 것(65,536바이트 필드).
+    // 이것을 실패시키는 것: encode의 argv·env_allow 개수 변환을 `as u8` 자르기로 바꾸는 것(256개째
+    // 단어나 이름이 조용히 잘린 프레임이 됨), 또는 encode 끝의 BODY_MAX 검사를 지우는 것(65,536바이트 필드).
     #[test]
     fn encode_refuses_counts_that_do_not_fit() {
         let Message::Grant(mut g) = grant() else {
@@ -639,6 +703,12 @@ mod tests {
             argv: vec![b"w".to_vec(); 256],
         };
         assert_eq!(encode(&Message::Grant(g.clone())), Err(Error::Limit));
+        g.units[0].policy = Policy::Argv {
+            argv: vec![b"w".to_vec()],
+        };
+        g.units[0].env_allow = vec![b"N".to_vec(); 256];
+        assert_eq!(encode(&Message::Grant(g.clone())), Err(Error::Limit));
+        g.units[0].env_allow.clear();
         g.units.truncate(1);
         g.units[0].policy = Policy::UnsafeShell {
             script: vec![b's'; 65_536],
