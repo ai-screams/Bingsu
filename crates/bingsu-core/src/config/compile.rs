@@ -1673,4 +1673,62 @@ mod tests {
             Some(NotRun::NotInTrustedLayout)
         );
     }
+
+    fn exec_not_run(root: &str, shape: &str) -> Vec<Option<NotRun>> {
+        let src = alloc::format!("extends = [\"shape-x\"]\n{root}");
+        let r = read(&src, &[("shape-x", shape)]);
+        let codes = codes_of(&r);
+        let c = r.snapshot.unwrap_or_else(|| panic!("{codes:?}"));
+        let mut units: Vec<_> = c
+            .exec_units
+            .iter()
+            .map(|u| (u.id.clone(), u.not_run.clone()))
+            .collect();
+        units.sort_by(|a, b| a.0.cmp(&b.0));
+        units.into_iter().map(|u| u.1).collect()
+    }
+
+    // 이것을 실패시키는 것: 신뢰 merge의 구간 번호를 전체 merge의 번호로 이름 없이 복사하는 것(모양 파일이 앞에
+    // 구간을 더해 번호가 밀리면 승인돼야 할 단위가 거부되고 거부돼야 할 단위가 승인된다).
+    #[test]
+    fn test_trusted_band_index_maps_by_name() {
+        let two = |name: &str, order: u8, unit: &str| {
+            alloc::format!(
+                "[layout.when.{name}]\norder = {order}\nmin_cols = 100\nmax_cols = 110\n[layout.when.{name}.line1]\nleft = [\"{unit}\", \"char\"]\n"
+            )
+        };
+        let unit = |id: &str| {
+            alloc::format!("[segment.\"{id}\"]\nkind = \"command\"\ncommand = [\"u\"]\n")
+        };
+        // Trusted: `gone` (index 0) is shadowed by `live` (index 1) on the same widths.
+        let root = alloc::format!(
+            "{}{}[layout.line1]\nleft = [\"char\"]\n{}{}",
+            unit("custom/neg"),
+            unit("custom/pos"),
+            two("gone", 2, "custom/neg"),
+            two("live", 1, "custom/pos"),
+        );
+        // The shape-only file adds a band that sorts first, so every index shifts by one.
+        let shape = "[layout.when.early]\nmin_cols = 300\n";
+        // Units sorted by id: custom/neg, custom/pos.
+        assert_eq!(
+            exec_not_run(&root, shape),
+            [Some(NotRun::NotInTrustedLayout), None]
+        );
+    }
+
+    // 이것을 실패시키는 것: 신뢰 merge의 구간이 정렬에 실패할 때 전체 merge의 도달 가능성으로 대신하는 것(모양 파일의
+    // `order`가 신뢰 설정이 풀지 못한 구간 겹침을 풀어 명령을 되살린다). 양성 대조는 위 시험과 앞의 시험이 맡는다.
+    #[test]
+    fn test_unorderable_trusted_bands_approve_nothing() {
+        let root = alloc::format!(
+            "{UNIT}[layout.line1]\nleft = [\"char\"]\n[layout.when.a]\nmin_cols = 100\nmax_cols = 110\n[layout.when.a.line1]\nleft = [\"custom/u\", \"char\"]\n[layout.when.b]\nmin_cols = 105\nmax_cols = 115\n"
+        );
+        // Crossing ranges need `order`; only the shape-only file gives it.
+        let shape = "[layout.when.a]\norder = 1\n[layout.when.b]\norder = 2\n";
+        assert_eq!(
+            exec_not_run(&root, shape),
+            [Some(NotRun::NotInTrustedLayout)]
+        );
+    }
 }
