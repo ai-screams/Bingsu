@@ -18,10 +18,12 @@ ALLOWLIST = ROOT / "crates/bingsu-collect/dependencies.allowlist.tsv"
 TARGETS = ("aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu",
            "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
            "aarch64-unknown-linux-musl", "x86_64-pc-windows-gnu")
-GIT_PINS = {"gix-index": "0.56.0", "gix-pack": "0.75.0", "gix-object": "0.65.0",
-            "gix-config": "0.61.0", "gix-ref": "0.68.0", "gix-ignore": "0.23.0",
-            "gix-attributes": "0.36.0", "gix-revwalk": "0.36.0",
-            "gix-utils": "0.4.0", "gix-error": "0.4.0", "gix-zlib": "0.2.0"}
+GIT_PINS = {"gix-index": "0.58.0", "gix-pack": "0.77.0", "gix-object": "0.66.1",
+            "gix-config": "0.62.2", "gix-ref": "0.69.1", "gix-ignore": "0.24.1",
+            "gix-attributes": "0.37.1", "gix-revwalk": "0.38.0",
+            "gix-utils": "0.5.2", "gix-error": "0.5.2", "gix-zlib": "0.4.0"}
+# Required by the lower crates themselves; nothing here enables them.
+GIT_FEATURES = {"gix-object": "sha1", "gix-utils": "bstr,interrupt,progress", "gix-error": "bstr"}
 FORBIDDEN_PACKAGES = {"gix", "gix-diff", "gix-status", "gix-filter", "gix-worktree",
                       "gix-odb", "gix-discover", "gix-command"}
 FORBIDDEN_FEATURES = {"blob", "signature", "parallel", "generate", "streaming-input"}
@@ -76,7 +78,7 @@ def git_policy(rows, *, front=False):
                 if feature in FORBIDDEN_FEATURES or feature.startswith("parallel-"):
                     bad.append(f"forbidden feature: {label}/{feature}")
         if name in GIT_PINS:
-            want = {"gix-object": "sha1", "gix-utils": "bstr"}.get(name, "-")
+            want = GIT_FEATURES.get(name, "-")
             if label != name + "@" + GIT_PINS[name] or features != want:
                 bad.append("lower-crate version/features changed: " + row)
     return bad

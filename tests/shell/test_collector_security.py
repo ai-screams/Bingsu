@@ -1983,10 +1983,10 @@ def test_fuzz_isolation_rejects_mutations(damage):
     elif damage == "no-workspace":
         texts["fuzz/collector/Cargo.toml"] = texts["fuzz/collector/Cargo.toml"].replace("\n[workspace]\n", "\n")
     elif damage == "pin":
-        texts["fuzz/collector/Cargo.toml"] = texts["fuzz/collector/Cargo.toml"].replace('"=0.56.0"', '"=0.56.1"')
+        texts["fuzz/collector/Cargo.toml"] = texts["fuzz/collector/Cargo.toml"].replace('"=0.58.0"', '"=0.58.1"')
     elif damage == "lock":
         texts["fuzz/collector/Cargo.lock"] = texts["fuzz/collector/Cargo.lock"].replace(
-            'name = "gix-index"\nversion = "0.56.0"', 'name = "gix-index"\nversion = "0.56.9"')
+            'name = "gix-index"\nversion = "0.58.0"', 'name = "gix-index"\nversion = "0.58.9"')
     elif damage == "build-script":
         texts["crates/bingsu-collect/build.rs"] += '\nfn x() { println!("cargo:rustc-cfg=collector_fuzz"); }\n'
     elif damage == "feature":

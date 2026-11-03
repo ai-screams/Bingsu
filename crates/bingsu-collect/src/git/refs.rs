@@ -13,8 +13,8 @@ const INVALID: ReadError = ReadError::Io(libc::EINVAL);
 // At most 40 reads (39 symbolic hops followed by an object).
 pub const SYMREF_LIMIT: usize = 40;
 /// The release PARSER_ALLOCATION is derived from.
-pub const GIX_REF_VERSION: &str = "0.68.0";
-// gix-ref 0.68.0 Buffer::from_bytes on N <= REF_BYTES input bytes copies them
+pub const GIX_REF_VERSION: &str = "0.69.1";
+// gix-ref 0.69.1 Buffer::from_bytes on N <= REF_BYTES input bytes copies them
 // (N). Without a sorted header it collects at most REF_ENTRIES references (the
 // axis is charged before; a power of two, so the doubling Vec stops there and
 // its growth stays under the later peak), sorts them with scratch of the same size (freed

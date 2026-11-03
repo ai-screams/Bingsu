@@ -10,19 +10,19 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ai-screams/Bingsu"
 
 [workspace.dependencies]
-# Gitoxide 0.88 lower crates only. Staged counts use a bounded sorted merge;
+# Gitoxide 0.90 lower crates only. Staged counts use a bounded sorted merge;
 # gix-diff's blob feature would pull filter/worktree/command into this graph.
-gix-index = { version = "=0.56.0", default-features = false }
-gix-pack = { version = "=0.75.0", default-features = false }
-gix-error = { version = "=0.4.0", default-features = false }
-gix-utils = { version = "=0.4.0", default-features = false }
-gix-zlib = { version = "=0.2.0", default-features = false }
-gix-object = { version = "=0.65.0", default-features = false, features = ["sha1"] }
-gix-config = { version = "=0.61.0", default-features = false }
-gix-ref = { version = "=0.68.0", default-features = false }
-gix-ignore = { version = "=0.23.0", default-features = false }
-gix-attributes = { version = "=0.36.0", default-features = false }
-gix-revwalk = { version = "=0.36.0", default-features = false }
+gix-index = { version = "=0.58.0", default-features = false }
+gix-pack = { version = "=0.77.0", default-features = false }
+gix-error = { version = "=0.5.2", default-features = false }
+gix-utils = { version = "=0.5.2", default-features = false }
+gix-zlib = { version = "=0.4.0", default-features = false }
+gix-object = { version = "=0.66.1", default-features = false, features = ["sha1"] }
+gix-config = { version = "=0.62.2", default-features = false }
+gix-ref = { version = "=0.69.1", default-features = false }
+gix-ignore = { version = "=0.24.1", default-features = false }
+gix-attributes = { version = "=0.37.1", default-features = false }
+gix-revwalk = { version = "=0.38.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

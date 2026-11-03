@@ -225,12 +225,12 @@ pub(crate) const CLASS_BYTES: usize = 24;
 /// 0.07 ms apart plus one pattern (or attribute part); a short path checks
 /// every few hundred patterns.
 const MATCH_CHECK_UNITS: usize = 65_536;
-/// The match loops below follow these releases' search order, and the cap
-/// costs above were measured on them.
+/// The match loops below follow these releases' search order. The cap costs
+/// above were measured one release earlier, with the same matching code.
 pub(crate) const GIX_MATCH_VERSIONS: [(&str, &str); 3] = [
-    ("gix-glob", "0.28.0"),
-    ("gix-ignore", "0.23.0"),
-    ("gix-attributes", "0.36.0"),
+    ("gix-glob", "0.29.1"),
+    ("gix-ignore", "0.24.1"),
+    ("gix-attributes", "0.37.1"),
 ];
 
 /// Whether gix skips `line` as a comment: `#` as the first byte of an ignore
@@ -828,13 +828,17 @@ impl Patterns {
                 // (part 첫 줄의 `+/v8`을 BOM으로 떼어 차등 시험이 갈린다).
                 let from = start.saturating_sub(1);
                 let mut search = gix_attributes::Search::default();
-                search.add_patterns_buffer(
-                    &bytes[from..end],
-                    source.clone(),
-                    if info { None } else { Some(Path::new("")) },
-                    &mut self.metadata,
-                    false,
-                );
+                // 이것을 실패시키는 것: 이 오류를 버리는 것(부모 없는 source 시험이
+                // 빈 Search를 Ok로 받아들인다).
+                search
+                    .add_patterns_buffer(
+                        &bytes[from..end],
+                        source.clone(),
+                        if info { None } else { Some(Path::new("")) },
+                        &mut self.metadata,
+                        false,
+                    )
+                    .map_err(|_| INVALID)?;
                 list.push(AttributePart {
                     search,
                     weight,
@@ -850,14 +854,20 @@ impl Patterns {
         } else {
             let info =
                 source == Path::new("info/exclude") || source == Path::new("<global-excludes>");
-            self.ignore.add_patterns_buffer(
-                bytes,
-                source,
-                if info { None } else { Some(Path::new("")) },
-                gix_ignore::search::Ignore {
-                    support_precious: false,
-                },
-            );
+            // On failure nothing is pushed, so `last()` below would weigh the
+            // previous file's list.
+            // 이것을 실패시키는 것: 이 오류를 버리는 것(부모 없는 source 시험이 Ok를
+            // 받는다).
+            self.ignore
+                .add_patterns_buffer(
+                    bytes,
+                    source,
+                    if info { None } else { Some(Path::new("")) },
+                    gix_ignore::search::Ignore {
+                        support_precious: false,
+                    },
+                )
+                .map_err(|_| INVALID)?;
             let list = self.ignore.patterns.last().map_or(&[][..], |l| &l.patterns);
             // gix-ignore only drops bytes (a leading `!`, a `\` before `!`, `#`
             // or `$`, a leading `/`, a trailing `/`, unescaped trailing spaces)
@@ -1075,6 +1085,25 @@ mod tests {
         .unwrap();
     }
 
+    // gix turned this panic into an error; a refused source must leave no list.
+    // 이것을 실패시키는 것: add_buffer의 add_patterns_buffer 오류 두 곳 중 하나를
+    // 버리는 것.
+    #[test]
+    fn source_without_a_parent_is_refused() {
+        for (kind, axis) in [
+            (PatternKind::Ignore, Axis::IgnorePatterns),
+            (PatternKind::Attributes, Axis::AttributePatterns),
+        ] {
+            let mut meter = Meter::new(Instant::now() + Duration::from_secs(30));
+            let mut patterns = Patterns::default();
+            let added = patterns.add_buffer(b"*.log text\n", "".into(), kind, axis, &mut meter);
+            assert_eq!(added, Err(INVALID));
+            assert!(patterns.ignore.patterns.is_empty());
+            assert!(patterns.attributes.is_empty());
+            assert!(patterns.ignore_weights.is_empty());
+        }
+    }
+
     // 이것을 실패시키는 것: class_bytes에서 escape 건너뛰기, 앞 `!`·`^`·`]` 처리,
     // `[:name:]` 처리, 닫히지 않은 클래스를 줄 끝까지 세기 중 하나를 빼는 것.
     #[test]
@@ -1217,7 +1246,7 @@ mod tests {
             let parse = gix_ignore::search::Ignore {
                 support_precious: false,
             };
-            gix.add_patterns_buffer(bytes, source, root, parse);
+            gix.add_patterns_buffer(bytes, source, root, parse).unwrap();
         }
         for path in [
             "a.log",
@@ -1477,13 +1506,9 @@ mod tests {
                 }
                 let root = (*source != "info/attributes").then_some(Path::new(""));
                 let search = if root.is_none() { &mut info } else { &mut rest };
-                search.add_patterns_buffer(
-                    text.as_bytes(),
-                    source.into(),
-                    root,
-                    &mut metadata,
-                    false,
-                );
+                search
+                    .add_patterns_buffer(text.as_bytes(), source.into(), root, &mut metadata, false)
+                    .unwrap();
             }
             for path in PATHS {
                 for case in [
@@ -1601,8 +1626,9 @@ mod tests {
         assert_eq!(checks(&filled, &long), 0);
     }
 
-    // The match loops copy gix-ignore 0.23 and gix-attributes 0.36 search order
-    // over gix-glob 0.28 wildmatch; the cap costs were measured on these.
+    // The match loops copy gix-ignore 0.24 and gix-attributes 0.37 search order
+    // over gix-glob 0.29 wildmatch; the cap costs were measured on the previous
+    // releases, whose match and wildmatch code is unchanged in these.
     // 이것을 실패시키는 것: Cargo.lock의 셋 중 하나를 GIX_MATCH_VERSIONS와 다른
     // 버전으로 올리는 것.
     #[test]

@@ -119,7 +119,7 @@ impl ExpandedIndex {
         mode: gix_index::entry::Mode,
         path: &[u8],
     ) -> Result<(), ReadError> {
-        // gix-index 0.56 appends entries with Vec::push (capacity doubles).
+        // gix-index 0.58 appends entries with Vec::push (capacity doubles).
         // The pinned decoder's initial capacity is recorded below. Reserve
         // the NEW capacity while the old allocation is still live, and release
         // the old reservation as soon as the push has finished reallocating.
