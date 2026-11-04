@@ -1045,7 +1045,9 @@ COMMAND_ROUND_FILE = "tests/shell/test_command_round.py"
 COMMAND_ROUND_STEP = "      - name: Command rounds run through the supervisor (release)\n        if: matrix.profile == 'release'\n"
 MACOS_ONLY_ROUNDS = {"test_macos_unit_is_one_process_the_relay_execs_into",
                      "test_macos_script_runs_from_a_copy_that_is_then_removed",
-                     "test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep"}
+                     "test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep",
+                     "test_macos_group_grandchild_ends_with_the_round",
+                     "test_macos_group_grandchild_ends_when_the_helper_dies"}
 LINUX_ONLY_ROUNDS = {"test_blocked_path_entry_never_holds_the_marker",
                      "test_each_unit_is_one_process_the_relay_execs_into"}
 # Each home: its job, the step it lives in, and the tests of the file it does not select.

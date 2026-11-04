@@ -410,6 +410,46 @@ def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_r
     assert b"no trusted relay" not in session.log(), session.log()
 
 
+def alive_pid(pidfile):
+    """The pid a unit wrote, once it has written it."""
+    text = pidfile.read_text().strip() if pidfile.exists() else ""
+    return int(text) if text.isdigit() else None
+
+
+# C3 판정 R6(macOS 최선 노력 종료): relay는 자기 프로세스 그룹을 이끌고, 대상이 끝나면 reap 전에 그 그룹을 끝낸다.
+# 그래서 대상이 남긴 같은 그룹의 손자는 회차가 끝나면 없다. 이것을 실패시키는 것: OwnedChild::reap_group의 killpg를
+# 지우는 것(손자 sleep 30이 남음), relay 생성의 POSIX_SPAWN_SETPGROUP을 지우는 것.
+@macos_only
+def test_macos_group_grandchild_ends_with_the_round(tmp_path, _native_boot_required):
+    pidfile = tmp_path / "grandchild"
+    session = CommandSession(tmp_path / "s")
+    session.put(config(["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}"]))
+    ready(session)
+    session.prompt()
+    pid = until(lambda: alive_pid(pidfile))
+    assert pid, "the unit never ran"
+    session.wait_quiet()
+    assert until(lambda: gone(pid), timeout=1.0), "a grandchild in the relay's group outlived the round"
+
+
+# C3 판정 R6: helper가 죽어 감독이 회차를 멈춰도 대상의 종료를 reap하기 전에 그룹을 끝낸다. 이것을 실패시키는 것:
+# OwnedChild::reap_group의 killpg를 지우는 것, relay 생성의 POSIX_SPAWN_SETPGROUP을 지우는 것(손자가 감독의 그룹 밖).
+@macos_only
+def test_macos_group_grandchild_ends_when_the_helper_dies(tmp_path, _native_boot_required):
+    pidfile = tmp_path / "grandchild"
+    session = CommandSession(tmp_path / "s")
+    session.put(config(["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}; /bin/sleep 30"], "timeout='1s'\n"))
+    ready(session)
+    session.prompt()
+    pid = until(lambda: alive_pid(pidfile))
+    assert pid, "the unit never ran"
+    found = until(lambda: supervisors())
+    assert found, "no supervisor"
+    os.kill(found[0][1], signal.SIGKILL)
+    assert until(lambda: gone(pid), timeout=0.5), "a grandchild outlived the helper's death"
+    session.wait_quiet()
+
+
 def scripts_folder(session):
     return Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu" / "scripts"
 

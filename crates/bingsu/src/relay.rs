@@ -373,6 +373,9 @@ fn open_fds() -> Option<Vec<i32>> {
             bytes,
         )
     };
+    // No test: both refusals need the kernel's answer to change under a
+    // single-threaded relay (a failed call, or 16 more descriptors between
+    // the two calls); either refuses (fail closed).
     let got = usize::try_from(got)
         .ok()
         .filter(|&g| g > 0 && g < room * one)?
@@ -871,6 +874,8 @@ fn c_strings<W: AsRef<[u8]>>(words: &[W]) -> Result<Vec<CString>, u8> {
 fn local_ownership(fd: &OwnedFd) -> Option<bool> {
     // SAFETY: an all-zero statfs is a valid out-parameter value.
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    // No test: fstatfs on a descriptor the relay just opened cannot be made
+    // to fail from a test; `None` refuses (fail closed).
     // SAFETY: `fd` is open and `fs` is writable.
     if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut fs) } != 0 {
         return None;

@@ -524,11 +524,9 @@ impl ScriptCopies {
         Ok(self.path.join(name))
     }
 
-    /// Removes a copy `copy` made in this folder.
+    /// Removes a copy `copy` made (by its name in this folder).
     pub fn remove(&self, copy: &Path) {
-        if let Some(name) = copy.file_name()
-            && copy.parent() == Some(self.path.as_path())
-        {
+        if let Some(name) = copy.file_name() {
             let _ = sys::unlink_at(self.dir.as_fd(), name);
         }
     }

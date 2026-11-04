@@ -234,6 +234,38 @@ impl OwnedChild {
         Ok(state.reaped)
     }
 
+    /// macOS: `reap` for a child that leads its own process group. Once it
+    /// has exited, and before the wait frees its pid, what is left of its
+    /// group (a descendant that did not leave it) is killed.
+    #[cfg(target_os = "macos")]
+    pub fn reap_group(&mut self) -> io::Result<bool> {
+        {
+            let state = self.signal.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.reaped {
+                return Ok(true);
+            }
+            // SAFETY: zeroed writable siginfo_t; WNOWAIT leaves the zombie in place.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: our own child; nothing is reaped.
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.signal.pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            // Fails without it: test_macos_group_grandchild_ends_with_the_round
+            // and ..._when_the_helper_dies. Only before the wait below: until
+            // then the pid, and so the group id, cannot be reused.
+            if rc == 0 && info.si_pid != 0 {
+                // SAFETY: the zombie still holds the group id.
+                unsafe { libc::killpg(self.signal.pid, libc::SIGKILL) };
+            }
+        }
+        self.reap()
+    }
+
     /// The reaped child's wait status (`waitpid` form).
     pub fn wait_status(&self) -> Option<i32> {
         self.signal
