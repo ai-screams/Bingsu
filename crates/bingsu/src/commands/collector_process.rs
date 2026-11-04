@@ -15,6 +15,8 @@ struct State {
     killed: bool,
     reaped: bool,
     exit_code: Option<i32>,
+    /// The wait status in `waitpid` form: exit code << 8, or the signal.
+    wait_status: Option<i32>,
 }
 
 pub(crate) struct SignalChild {
@@ -27,6 +29,8 @@ pub(crate) struct SignalChild {
 }
 
 pub(crate) struct OwnedChild {
+    #[cfg_attr(not(test), allow(dead_code, reason = "tests check the pid is gone"))]
+    pub pid: libc::pid_t,
     pub spawn_enter: Option<u64>,
     pub spawn_return: Option<u64>,
     signal: SignalChild,
@@ -107,16 +111,15 @@ impl SignalChild {
 }
 
 impl OwnedChild {
-    #[cfg(test)]
-    #[allow(
-        dead_code,
-        reason = "Linux native integration fixes the pidfd before TSYNC"
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "only Linux has a pidfd to poll")
     )]
     pub fn pidfd(&self) -> Option<std::os::fd::RawFd> {
         self.signal.pidfd()
     }
 
-    fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {
+    pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
             // SAFETY: SIGCHLD is DFL and nobody has waited for this direct child.
@@ -133,6 +136,7 @@ impl OwnedChild {
                     pidfd: Arc::new(pidfd),
                     state: Arc::default(),
                 },
+                pid,
                 expires_ns,
                 spawn_enter: None,
                 spawn_return: None,
@@ -145,6 +149,7 @@ impl OwnedChild {
                     pid,
                     state: Arc::default(),
                 },
+                pid,
                 expires_ns,
                 spawn_enter: None,
                 spawn_return: None,
@@ -193,9 +198,15 @@ impl OwnedChild {
             }
             // SAFETY: waitid initialized the child event fields.
             state.reaped = unsafe { info.si_pid() } != 0;
-            if state.reaped && info.si_code == libc::CLD_EXITED {
-                // SAFETY: waitid returned an initialized CLD_EXITED event.
-                state.exit_code = Some(unsafe { info.si_status() });
+            if state.reaped {
+                // SAFETY: waitid initialized the child event fields.
+                let status = unsafe { info.si_status() };
+                if info.si_code == libc::CLD_EXITED {
+                    state.exit_code = Some(status);
+                    state.wait_status = Some((status & 0xff) << 8);
+                } else {
+                    state.wait_status = Some(status & 0x7f);
+                }
             }
         }
         #[cfg(target_os = "macos")]
@@ -212,12 +223,24 @@ impl OwnedChild {
                 }
             } else {
                 state.reaped = rc == self.signal.pid;
+                if state.reaped {
+                    state.wait_status = Some(status);
+                }
                 if state.reaped && libc::WIFEXITED(status) {
                     state.exit_code = Some(libc::WEXITSTATUS(status));
                 }
             }
         }
         Ok(state.reaped)
+    }
+
+    /// The reaped child's wait status (`waitpid` form).
+    pub fn wait_status(&self) -> Option<i32> {
+        self.signal
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .wait_status
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -595,6 +618,7 @@ mod tests {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
         assert!(fd >= 0);
         let child = OwnedChild {
+            pid,
             spawn_enter: None,
             spawn_return: None,
             signal: SignalChild {
@@ -605,6 +629,7 @@ mod tests {
                     killed: false,
                     reaped: true,
                     exit_code: None,
+                    wait_status: None,
                 })),
             },
             expires_ns: 0,
@@ -626,6 +651,8 @@ mod tests {
         // Our own PID cannot be our child, so waitpid must return ECHILD.
         // Mark killed for panic-safe teardown even under the deliberate mutation.
         let mut child = OwnedChild {
+            // SAFETY: read-only own identity.
+            pid: unsafe { libc::getpid() },
             spawn_enter: None,
             spawn_return: None,
             signal: SignalChild {
@@ -635,6 +662,7 @@ mod tests {
                     killed: true,
                     reaped: false,
                     exit_code: None,
+                    wait_status: None,
                 })),
             },
             expires_ns: 0,

@@ -48,13 +48,15 @@ pub fn approve(
     if !deadline::has_budget(now.now, budget.min_run, limit) {
         return Err(Refusal::Budget);
     }
+    // A config can ask for more; no unit runs longer than the U-9d cap.
+    let timeout = timeout.min(super::plan::TIMEOUT_MAX);
     Ok(deadline::run_deadline(now.now, timeout, limit))
 }
 
 /// Names every config unit may pass (spec, sanitized environment: keep
 /// list), plus every `LC_*`.
-const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
-const KEEP_PREFIX: &[u8] = b"LC_";
+pub const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
+pub const KEEP_PREFIX: &[u8] = b"LC_";
 /// Never passed, not even through `env_allow` (U-13 V2, closed list S-24,
 /// S-25): loader injection, then language and shell startup settings.
 pub const FORBIDDEN: [&[u8]; 20] = [
@@ -221,12 +223,15 @@ mod tests {
             env_allow: Vec::new(),
             executable: b"/usr/bin/kubectl".to_vec(),
             pin: None,
+            interpreter: None,
         }
     }
     fn grant(deadline: u64) -> Grant {
         Grant {
             permit: permit(deadline),
             helper_deadline: H,
+            cwd: b"/home/u/repo".to_vec(),
+            neutral: b"/run/user/1/bingsu/neutral".to_vec(),
             units: vec![unit(&[b"kubectl", b"config", b"current-context"], 200 * MS)],
             probes: vec![Probe {
                 profile: 1,
@@ -461,6 +466,25 @@ mod tests {
         assert!(!target_environment_allowed(b"KUBECONFIG=/k\0", &[]));
         // A name is compared whole: no prefix of a kept name passes.
         assert!(!target_environment_allowed(b"HOMEX=/h\0", &allow));
+    }
+
+    // 이것을 실패시키는 것: approve의 `timeout.min(TIMEOUT_MAX)`를 지우는 것(5 s timeout이 그대로 E가 됨).
+    #[test]
+    fn grant_cuts_timeout_to_cap() {
+        let mut g = grant(H);
+        g.units = vec![unit(&[b"slow"], 5_000 * MS)];
+        let wide = Budget {
+            reserve: 0,
+            min_run: B.min_run,
+        };
+        let far = H + 10_000 * MS;
+        g.helper_deadline = far;
+        g.permit.deadline = far;
+        assert_eq!(approve_unit(clock(MS), &g, 0, wide), Ok(MS + 1_000 * MS));
+        assert_eq!(
+            approve_probe(clock(MS), &g, 0, 5_000 * MS, wide),
+            Ok(MS + 1_000 * MS)
+        );
     }
 
     // 이것을 실패시키는 것: run_deadline의 `.min(limit)`을 지우는 것

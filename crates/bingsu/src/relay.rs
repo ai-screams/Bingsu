@@ -1,10 +1,11 @@
 //! Trusted relay, Linux native executables and scripts (`bingsu __exec-v2`,
 //! spec section 4 "the place of the pre-exec check", rows native executable
 //! and script). The command supervisor spawns it with an empty environment
-//! and the permit and exec frame on fd 3; the relay checks the target through
-//! one open descriptor, takes a fresh clock as its last step and runs the
-//! target with `execveat` on that descriptor. A script runs as its checked
-//! interpreter's descriptor with a sealed memfd copy of the script. Every decision
+//! and the permit and exec frame on fd 3 (fd 2 is its status pipe); the relay checks the target through
+//! one open descriptor, takes a fresh clock, checks that the name in the
+//! folder it walked is still that file and runs it by that name with
+//! `execveat(folder, name, AT_SYMLINK_NOFOLLOW)` (U-18). A script runs as its checked
+//! interpreter, the same way, with a sealed memfd copy of the script. Every decision
 //! is `bingsu_core::handoff` or `bingsu_core::fs_trust`; this file reads fd 3,
 //! makes the system calls and refuses with a fixed exit code. It is pinned in
 //! scripts/check_cli_prompt_forbid.py (TCB_SHA256).
@@ -24,9 +25,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
-/// Largest permit plus exec frame the relay reads from fd 3 (U-9d, 16 KB):
-/// the supervisor writes both into an empty pipe in one write.
-pub(crate) const INPUT_CAP: usize = 16 * 1024;
+/// Largest permit plus exec frame the relay reads from fd 3.
+pub(crate) const INPUT_CAP: usize = bingsu_core::handoff::RELAY_INPUT_MAX;
 /// Fixed exit codes; the target was not executed. Argv or fd 3 input.
 pub(crate) const RELAY_INPUT: u8 = 120;
 /// The fresh clock is past a deadline or is not the permit's clock.
@@ -45,12 +45,56 @@ pub(crate) fn run(args: &[OsString]) -> ExitCode {
     ExitCode::from(relay(args))
 }
 
-/// Returns only when the target was not executed.
+/// Returns only when the target was not executed. The supervisor learns
+/// which happened from the status pipe it passes as fd 2: the refusal code
+/// as one byte, or end of file without one when `execveat` closed it.
 fn relay(args: &[OsString]) -> u8 {
-    match prepare(args) {
-        Ok(target) => target.exec(),
-        Err(code) => code,
+    let (status, code) = match take_status() {
+        Ok(status) => {
+            let code = match prepare(args) {
+                Ok(target) => target.exec(),
+                Err(code) => code,
+            };
+            (status, code)
+        }
+        Err(status) => (status, RELAY_EXEC),
+    };
+    if let Some(fd) = status {
+        // SAFETY: one readable byte to the relay's own descriptor.
+        unsafe { libc::write(fd.as_raw_fd(), [code].as_ptr().cast(), 1) };
     }
+    code
+}
+
+/// Moves fd 2 (the status pipe) to 4 or above, where the close-on-exec pass
+/// of `prepare` marks it like every descriptor from 3 up, and puts
+/// `/dev/null` at 2 for the target (spec: stderr `/dev/null`). Without a
+/// fd 2 there is no status pipe, and 2 still gets `/dev/null`. `Err` (fd 2
+/// could not be replaced, so the target would inherit the pipe) refuses.
+fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
+    // Above 3 even when fd 3 is missing: the input must never be read from
+    // (or closed under) the status pipe. Fails without it: cli_smoke's
+    // exec_entry_reaches_the_relay, whose fd 3 is closed (the relay aborted).
+    // SAFETY: duplicates fd 2 when it is open; -1 (EBADF) when it is not.
+    let moved = unsafe { libc::fcntl(2, libc::F_DUPFD, 4) };
+    // SAFETY: a successful F_DUPFD returns a descriptor nothing else owns.
+    let status = (moved >= 0).then(|| unsafe { OwnedFd::from_raw_fd(moved) });
+    // SAFETY: fixed NUL-terminated path, no O_CREAT.
+    let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    // No test: opening /dev/null or the dup2 below cannot be made to fail
+    // from a test without also failing the relay's other opens; either way
+    // the relay refuses (fail closed). Same class as the C1 macOS fcntl
+    // branch (user decision).
+    if null < 0 {
+        return Err(status);
+    }
+    // Rust's runtime opens `/dev/null` on any of 0 to 2 that is closed
+    // before `main`, so fd 2 is open here and `null` is above it.
+    // SAFETY: both descriptors are open; dup2 clears close-on-exec on 2.
+    let ok = unsafe { libc::dup2(null, 2) } == 2;
+    // SAFETY: `null` was opened above and is closed once.
+    unsafe { libc::close(null) };
+    if ok { Ok(status) } else { Err(status) }
 }
 
 /// A checked target, ready for the clock check and `execveat`. The pointer
@@ -60,7 +104,7 @@ fn relay(args: &[OsString]) -> u8 {
 pub(crate) struct Target {
     permit: Permit,
     frame: ExecFrame,
-    fd: OwnedFd,
+    exe: Exe,
     /// A script's sealed copy: the one descriptor past 2 the target keeps.
     _script: Option<OwnedFd>,
     _argv: Vec<CString>,
@@ -72,9 +116,11 @@ pub(crate) struct Target {
 /// Spec order: signals, fd 3 read and closed, the executable opened and
 /// checked, descriptors past 2 marked close-on-exec. Every buffer of this
 /// stage is freed when it returns; the fresh clock comes after, in `exec`.
-/// The relay never changes folder: the supervisor spawns it in the unit's
-/// working folder (the neutral folder, or the shell's folder for
-/// `untrusted-current`), and the target inherits that folder.
+/// The relay enters the unit's working folder (the frame's `cwd`: the
+/// neutral folder, or the shell's folder for `untrusted-current`) after its
+/// checks, and the target inherits it. The supervisor spawns every relay in
+/// "/", so a folder on a stopped mount holds only this relay, which the
+/// supervisor ends at its deadline.
 pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     reset_signals();
     let input = read_fd3();
@@ -84,12 +130,12 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
-    let (fd, script, argv) = match open_target(parsed.executable, frame.pin)? {
+    let (exe, script, argv) = match open_target(parsed.executable, frame.pin)? {
         // A frame that names an interpreter was made for a script.
         Opened::Native(_) if frame.interpreter.is_some() => return Err(RELAY_TARGET),
-        Opened::Native(fd) => (fd, None, c_strings(parsed.argv)?),
-        Opened::Script(fd, checked, body) => {
-            let (interpreter, copy, argv) = script(&fd, &checked, &body, &frame, parsed.argv)?;
+        Opened::Native(exe) => (exe, None, c_strings(parsed.argv)?),
+        Opened::Script(exe, body) => {
+            let (interpreter, copy, argv) = script(&exe, &body, &frame, parsed.argv)?;
             (interpreter, Some(copy), argv)
         }
     };
@@ -108,10 +154,22 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     {
         return Err(RELAY_EXEC);
     }
+    let folder = CString::new(std::mem::take(&mut frame.cwd)).map_err(|_| RELAY_INPUT)?;
+    // SAFETY: NUL-terminated absolute path (the frame refuses any other).
+    if unsafe { libc::chdir(folder.as_ptr()) } != 0 {
+        return Err(RELAY_EXEC);
+    }
+    // U-17: a setuid, setgid or file-capability target runs, but without
+    // gaining anything; the flag stays for every descendant. Last of the
+    // checks, so `exec` keeps the clock read right before execveat.
+    // SAFETY: plain prctl with integer arguments.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(RELAY_EXEC);
+    }
     Ok(Target {
         permit,
         frame,
-        fd,
+        exe,
         _script: script,
         _argv: argv,
         _envp: envp,
@@ -127,22 +185,35 @@ impl Target {
         crate::prompt_io::observe_clock().is_ok_and(|now| self.frame.allows(self.permit, now))
     }
 
-    /// The clock check and `execveat` back to back: nothing is built or
-    /// freed between them (`self` drops only after a failed exec).
+    /// The name check, the clock check and `execveat` back to back: nothing
+    /// is built or freed between them (`self` drops only after a failed
+    /// exec). The target runs by its name in the folder the walk held
+    /// (U-18): a program that tells its role from the executed name
+    /// (uutils' multicall coreutils reads AT_EXECFN) refuses a `/dev/fd/N`.
+    /// Right before, the name must still be the checked file: same device,
+    /// inode and ctime, and not a symlink (AT_SYMLINK_NOFOLLOW on both).
     fn exec(self) -> u8 {
+        // The name check first: on NFS or FUSE it can take long, and the
+        // clock read must be the last step before execveat.
+        if !self.exe.still_named() {
+            return RELAY_TARGET;
+        }
         if !self.clock_allows() {
             return RELAY_EXPIRED;
         }
-        // SAFETY: the fd is open; both arrays are NULL-terminated and point
-        // at NUL-terminated strings owned by `self`, alive for the call.
+        #[cfg(test)]
+        tests::at(tests::Stage::BeforeExec);
+        // SAFETY: the folder fd is open, the name is NUL-terminated; both
+        // arrays are NULL-terminated and point at NUL-terminated strings
+        // owned by `self`, alive for the call.
         unsafe {
             libc::syscall(
                 libc::SYS_execveat,
-                self.fd.as_raw_fd(),
-                c"".as_ptr(),
+                self.exe.dir.as_raw_fd(),
+                self.exe.name.as_ptr(),
                 self.argv_ptrs.as_ptr(),
                 self.envp_ptrs.as_ptr(),
-                libc::AT_EMPTY_PATH,
+                libc::AT_SYMLINK_NOFOLLOW,
             )
         };
         RELAY_EXEC
@@ -326,26 +397,63 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     if st.st_mode & libc::S_IFMT != libc::S_IFREG || !allowed(&st, pin)? {
         return Err(RELAY_TARGET);
     }
-    drop(dir);
+    let name = CString::new(*last).map_err(|_| RELAY_TARGET)?;
     let (fd, readable) = match reopen(&path_fd).map_err(native_only) {
         Ok(fd) => (fd, true),
         Err(Some(())) => (path_fd, false),
         Err(None) => return Err(RELAY_TARGET),
     };
+    let exe = Exe { fd, dir, name, st };
     if !readable {
-        return Ok(Opened::Native(fd));
+        return Ok(Opened::Native(exe));
     }
-    Ok(match read_script(&fd)? {
-        Some(body) => Opened::Script(fd, st, body),
-        None => Opened::Native(fd),
+    Ok(match read_script(&exe.fd)? {
+        Some(body) => Opened::Script(exe, body),
+        None => Opened::Native(exe),
     })
 }
 
-/// A checked executable: a native one, or a script with the stat its checks
-/// ran on and its body, read once.
+/// A checked executable: its descriptor, the folder it was found in, its
+/// last name there and the stat the checks ran on.
+pub(crate) struct Exe {
+    fd: OwnedFd,
+    dir: OwnedFd,
+    name: CString,
+    st: libc::stat,
+}
+
+impl Exe {
+    /// Whether the name in the held folder is still the checked file (not
+    /// a symlink, same device, inode and ctime).
+    fn still_named(&self) -> bool {
+        #[cfg(test)]
+        tests::at(tests::Stage::Recheck);
+        // SAFETY: an all-zero stat is a valid out-parameter value.
+        let mut now: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: open folder fd, NUL-terminated name, writable `now`.
+        let rc = unsafe {
+            libc::fstatat(
+                self.dir.as_raw_fd(),
+                self.name.as_ptr(),
+                &mut now,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        rc == 0
+            && (now.st_dev, now.st_ino, now.st_ctime, now.st_ctime_nsec)
+                == (
+                    self.st.st_dev,
+                    self.st.st_ino,
+                    self.st.st_ctime,
+                    self.st.st_ctime_nsec,
+                )
+    }
+}
+
+/// A checked executable: a native one, or a script with its body, read once.
 enum Opened {
-    Native(OwnedFd),
-    Script(OwnedFd, libc::stat, Vec<u8>),
+    Native(Exe),
+    Script(Exe, Vec<u8>),
 }
 
 /// The bytes every script decision uses, read in one pass from offset 0:
@@ -409,12 +517,12 @@ fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
 /// with argv `[line interpreter, line argument, /proc/self/fd/N, argv[1..]]`,
 /// the order the kernel's script loader uses.
 fn script(
-    fd: &OwnedFd,
-    checked: &libc::stat,
+    script: &Exe,
     body: &[u8],
     frame: &ExecFrame,
     argv: &[&[u8]],
-) -> Result<(OwnedFd, OwnedFd, Vec<CString>), u8> {
+) -> Result<(Exe, OwnedFd, Vec<CString>), u8> {
+    let (fd, checked) = (&script.fd, &script.st);
     let Head::Script(line) = head(&body[..body.len().min(SHEBANG_MAX)]) else {
         return Err(RELAY_TARGET);
     };
@@ -426,7 +534,7 @@ fn script(
     if !may_execute(fd) {
         return Err(RELAY_TARGET);
     }
-    let Opened::Native(interpreter_fd) = open_target(&interpreter.path, interpreter.pin)? else {
+    let Opened::Native(interpreter_exe) = open_target(&interpreter.path, interpreter.pin)? else {
         return Err(RELAY_TARGET);
     };
     let copy = sealed_copy(body, memfd_create, write_fd)?;
@@ -434,7 +542,7 @@ fn script(
         return Err(RELAY_TARGET);
     }
     let argv = c_strings(&script_argv(line, copy.as_raw_fd(), argv))?;
-    Ok((interpreter_fd, copy, argv))
+    Ok((interpreter_exe, copy, argv))
 }
 
 /// The kernel's own answer whether this user may execute the script's
@@ -676,6 +784,25 @@ mod tests {
     use std::process::{Child, Command, Stdio};
 
     const SECOND: i64 = 1_000_000_000;
+
+    /// Where a test may act inside `exec`: before the name check's fstatat,
+    /// or after the name and clock checks, right before execveat.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Stage {
+        Recheck,
+        BeforeExec,
+    }
+    type Hook = Option<Box<dyn FnMut(Stage)>>;
+    thread_local! {
+        static HOOK: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn at(stage: Stage) {
+        HOOK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(stage);
+            }
+        });
+    }
     const ECHO: &[u8] = b"bingsu-relay-echo\n";
     const CLOCK_TAG: &str = "RELAY-CLOCK-READS";
 
@@ -716,6 +843,7 @@ mod tests {
             environment: environment.to_vec(),
             pin,
             interpreter: None,
+            cwd: b"/".to_vec(),
         };
         (permit, relay_input(permit, &frame, INPUT_CAP).unwrap())
     }
@@ -791,7 +919,20 @@ mod tests {
     /// SIGUSR1 is ignored and SIGUSR2 blocked, which the relay must undo.
     /// `relay_env` is the relay's own envp; the supervisor passes none.
     fn spawn_relay(input: &[u8], args: &[Vec<u8>], relay_env: &[(&str, &Path)]) -> Child {
-        spawn_relay_with(input, args, relay_env, None)
+        spawn_relay_with(input, args, relay_env, Spawn::default())
+    }
+
+    /// How `spawn_relay_with` starts the relay beyond its input and argv.
+    #[derive(Default)]
+    struct Spawn {
+        /// Run as this user (root only).
+        uid: Option<u32>,
+        /// Start under a filter that answers PR_SET_NO_NEW_PRIVS with EPERM.
+        deny_nnp: bool,
+        /// fd 2 of the relay (its status pipe); the test's stderr otherwise.
+        status: Option<OwnedFd>,
+        /// Start the relay with fd 2 closed.
+        close_stderr: bool,
     }
 
     /// `spawn_relay`, as the user `uid` when given (root only).
@@ -799,8 +940,42 @@ mod tests {
         input: &[u8],
         args: &[Vec<u8>],
         relay_env: &[(&str, &Path)],
-        uid: Option<u32>,
+        how: Spawn,
     ) -> Child {
+        let Spawn {
+            uid,
+            deny_nnp,
+            status,
+            close_stderr,
+        } = how;
+        // With `deny_nnp` the relay starts under a filter that answers
+        // prctl(PR_SET_NO_NEW_PRIVS) with EPERM (installing it needs the
+        // flag first). Built before the fork: the child may not allocate.
+        let stmt = |code, k| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump = |k, jt, jf| libc::sock_filter {
+            code: 0x15,
+            jt,
+            jf,
+            k,
+        };
+        let deny = [
+            stmt(0x20, 0),
+            jump(libc::SYS_prctl as u32, 0, 3),
+            stmt(0x20, 16),
+            jump(libc::PR_SET_NO_NEW_PRIVS as u32, 0, 1),
+            stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            stmt(0x06, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: deny.len() as u16,
+            filter: deny.as_ptr().cast_mut(),
+        };
+        let program = std::ptr::addr_of!(program) as usize;
         let (r3, w3) = pipe();
         put(&w3, input);
         drop(w3);
@@ -824,7 +999,7 @@ mod tests {
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stderr(status.map_or_else(Stdio::inherit, Stdio::from));
         for (k, v) in relay_env {
             cmd.env(k, v);
         }
@@ -850,6 +1025,23 @@ mod tests {
             unsafe { libc::sigaddset(&mut set, libc::SIGUSR2) };
             // SAFETY: `set` is initialized; the old mask is not requested.
             unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
+            if close_stderr {
+                // SAFETY: closes the child's own fd 2.
+                unsafe { libc::close(2) };
+            }
+            if deny_nnp {
+                // SAFETY: plain prctl with integer arguments.
+                if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // SAFETY: `program` points at the filter above, alive until spawn returns.
+                let rc = unsafe {
+                    libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, program)
+                };
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             Ok(())
         };
         // SAFETY: `setup` is async-signal-safe (above).
@@ -863,6 +1055,8 @@ mod tests {
         fds: Vec<i32>,
         sig_ign: String,
         sig_blk: String,
+        no_new_privs: String,
+        cwd: PathBuf,
         environ: Vec<u8>,
         cmdline: Vec<u8>,
     }
@@ -934,6 +1128,8 @@ mod tests {
             fds,
             sig_ign: field("SigIgn:"),
             sig_blk: field("SigBlk:"),
+            no_new_privs: field("NoNewPrivs:"),
+            cwd: std::fs::read_link(proc.join("cwd")).unwrap(),
             environ: std::fs::read(proc.join("environ")).unwrap(),
             cmdline: std::fs::read(proc.join("cmdline")).unwrap(),
         };
@@ -1042,6 +1238,177 @@ mod tests {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let seen = ran(relay_cat(Origin::Config, LIVE, b""));
         assert_eq!(seen.fds, [0, 1, 2]);
+    }
+
+    /// A pipe for the relay's fd 2: (supervisor's read end, relay's write end).
+    fn status_pipe() -> (OwnedFd, OwnedFd) {
+        pipe()
+    }
+
+    /// Everything in the status pipe once every writer is gone.
+    fn status_bytes(read: OwnedFd) -> Vec<u8> {
+        read_all(read.as_raw_fd())
+    }
+
+    // 감독이 exec 성공과 중계 거부를 대상 종료 코드와 따로 안다(B1 판정). 이것을 실패시키는 것: relay()의
+    // 상태 바이트 쓰기를 지우는 것(거부가 빈 EOF, 곧 "실행됨"으로 보임).
+    #[test]
+    fn test_relay_writes_refusal_to_status() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (read, write) = status_pipe();
+        let (_, bytes) = input(Origin::Config, Times { trust: -1, ..LIVE }, b"");
+        let got = outcome(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                status: Some(write),
+                ..Spawn::default()
+            },
+        ));
+        assert!(refused_with(&got, RELAY_EXPIRED), "{got:?}");
+        assert_eq!(status_bytes(read), [RELAY_EXPIRED]);
+    }
+
+    // 이것을 실패시키는 것: take_status가 fd 2에 /dev/null을 놓지 않는 것(대상 fd 2가 상태 파이프라 EOF가
+    // 대상 종료까지 늦어짐).
+    #[test]
+    fn test_relay_status_ends_at_exec() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (read, write) = status_pipe();
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let child = echo(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                status: Some(write),
+                ..Spawn::default()
+            },
+        ))
+        .unwrap();
+        // The target runs: the pipe already ended, with no byte.
+        // SAFETY: flag change on the test's own read end.
+        unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        let mut b = [0u8; 1];
+        // SAFETY: `b` is writable; the read end is non-blocking.
+        let n = unsafe { libc::read(read.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
+        let fd2 = std::fs::read_link(format!("/proc/{}/fd/2", child.id())).unwrap();
+        finish(child);
+        assert_eq!(n, 0, "end of file while the target still runs");
+        assert_eq!(fd2, Path::new("/dev/null"));
+    }
+
+    // C2 수용 조건(B3 리뷰): fd 2 없이 떠도 대상은 fd 2에 /dev/null을 받는다(memfd나 열린 파일이 2를 받지
+    // 않음). 이 성질은 Rust 런타임이 main 전에 닫힌 0–2에 /dev/null을 여는 데서 온다(take_status의 dup2를
+    // 지워도 통과함을 확인했다). 이것을 실패시키는 것: 그 정리를 하지 않는 런타임·대상으로 중계를 빌드하는 것.
+    #[test]
+    fn test_relay_without_fd2_gives_target_dev_null() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let child = echo(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                close_stderr: true,
+                ..Spawn::default()
+            },
+        ))
+        .unwrap();
+        let fd2 = std::fs::read_link(format!("/proc/{}/fd/2", child.id()));
+        finish(child);
+        assert_eq!(fd2.unwrap(), Path::new("/dev/null"));
+    }
+
+    // 작업 폴더는 중계가 exec 직전에 들어간다(감독은 "/"에서 생성). 이것을 실패시키는 것: prepare의 chdir를
+    // 지우는 것(대상이 중계의 "/"에 남음), 없는 폴더의 chdir 실패를 무시하는 것.
+    #[test]
+    fn test_relay_enters_the_frame_folder() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("cwd")).unwrap();
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        let (permit, _) = input_at(clock, Origin::Config, LIVE, b"");
+        let mut frame = read_relay_input(&input_at(clock, Origin::Config, LIVE, b"").1, INPUT_CAP)
+            .unwrap()
+            .1;
+        frame.cwd = dir.as_os_str().as_bytes().to_vec();
+        let bytes = relay_input(permit, &frame, INPUT_CAP).unwrap();
+        let seen = ran(outcome(spawn_relay(&bytes, &args(&cat(), &[b"cat"]), &[])));
+        assert_eq!(seen.cwd, dir);
+        frame.cwd = dir.join("missing").into_os_string().into_vec();
+        let bytes = relay_input(permit, &frame, INPUT_CAP).unwrap();
+        let got = outcome(spawn_relay(&bytes, &args(&cat(), &[b"cat"]), &[]));
+        assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-17. 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를 지우는 것(대상의 NoNewPrivs가 0).
+    #[test]
+    fn test_relay_target_has_no_new_privs() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let own = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert!(
+            own.lines().any(|l| l == "NoNewPrivs:\t0"),
+            "the test process must not have the flag already"
+        );
+        let seen = ran(relay_cat(Origin::Config, LIVE, b""));
+        assert_eq!(seen.no_new_privs, "1");
+    }
+
+    // U-17: 플래그를 걸 수 없으면 대상을 실행하지 않는다. 이것을 실패시키는 것: prepare에서 prctl의
+    // 실패 분기(`!= 0` → RELAY_EXEC)를 지우는 것(EPERM을 무시하고 대상이 실행됨).
+    #[test]
+    fn test_relay_refuses_without_no_new_privs() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let got = outcome(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                deny_nnp: true,
+                ..Spawn::default()
+            },
+        ));
+        assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
+    }
+
+    // U-17: setuid 대상은 실행되지만 권한을 얻지 못한다. Linux 컨테이너에서 root로 --ignored로 돌린다
+    // (root 소유 04755 사본을 nobody가 실행). 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를
+    // 지우는 것(대상의 유효 uid가 0이 됨).
+    #[test]
+    #[ignore = "root in the Linux container; the relay runs as nobody"]
+    fn test_setuid_target_gains_nothing() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        // SAFETY: getuid cannot fail.
+        assert_eq!(unsafe { libc::getuid() }, 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("setuid")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o4755);
+        assert_eq!(pin_of(&exe).group.mode & 0o7777, 0o4755);
+        let (_, input) = input(Origin::Config, LIVE, b"");
+        let child = echo(spawn_relay_with(
+            &input,
+            &args(&exe, &[b"cat"]),
+            &[],
+            Spawn {
+                uid: Some(65_534),
+                ..Spawn::default()
+            },
+        ))
+        .unwrap();
+        // Only the status file: another user's /proc/<pid>/exe needs ptrace access.
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+        finish(child);
+        assert!(
+            status
+                .lines()
+                .any(|l| l == "Uid:\t65534\t65534\t65534\t65534"),
+            "{status}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.
@@ -1563,46 +1930,85 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Prepares a relay run of `exe` (a copy of `true`), then renames a copy
-    /// of `false` over that name, then executes: the exit code says which
-    /// file ran.
+    /// Prepares a relay run of `exe` (a copy of `true`), then puts something
+    /// else at that name (fd 4: the folder, NUL, `rename` for a copy of
+    /// `false` renamed over it or `symlink` for a symlink to it), then
+    /// executes: the exit code says what happened.
     #[test]
     #[ignore = "child: replaces itself with the target"]
     fn swap_child() {
-        let dir = PathBuf::from(OsString::from_vec(read_all(4)));
+        let words = read_all(4);
         // SAFETY: fd 4 is this child's argument pipe, read to the end above.
         unsafe { libc::close(4) };
+        let mut parts = words.split(|&b| b == 0);
+        let dir = PathBuf::from(OsString::from_vec(parts.next().unwrap().to_vec()));
+        let mode = parts.next().unwrap().to_vec();
         let exe = dir.join("x");
         let words: Vec<OsString> = args(&exe, &[b"x"])
             .into_iter()
             .map(OsString::from_vec)
             .collect();
         let (r, w) = pipe();
-        put(&w, &pinned(None));
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        let short = Times {
+            trust: SECOND,
+            run: 100_000_000,
+            resume_shift: 0,
+        };
+        let times = if mode == b"late" { short } else { LIVE };
+        put(&w, &pinned_at(clock, Origin::Config, times, b"", None).1);
         drop(w);
         // SAFETY: both descriptors are valid; fd 3 is free in this child.
         assert_eq!(unsafe { libc::dup2(r.as_raw_fd(), 3) }, 3);
         drop(r);
         let target = prepare(&words).unwrap();
-        std::fs::rename(dir.join("false"), &exe).unwrap();
+        let link = {
+            let (exe, dir) = (exe.clone(), dir.clone());
+            move || {
+                std::fs::remove_file(&exe).unwrap();
+                std::os::unix::fs::symlink(dir.join("false"), &exe).unwrap();
+            }
+        };
+        match mode.as_slice() {
+            b"rename" => std::fs::rename(dir.join("false"), &exe).unwrap(),
+            b"symlink" => link(),
+            // A symlink put at the name after the name and clock checks passed.
+            b"symlink-late" => HOOK.with(|h| {
+                let mut link = Some(link);
+                *h.borrow_mut() = Some(Box::new(move |stage| {
+                    if stage == Stage::BeforeExec
+                        && let Some(link) = link.take()
+                    {
+                        link();
+                    }
+                }));
+            }),
+            // The deadline passes while the name check runs.
+            _ => HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(|stage| {
+                    if stage == Stage::Recheck {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }));
+            }),
+        }
         let code = target.exec();
         // SAFETY: child exit without the harness's atexit work.
         unsafe { libc::_exit(100 + i32::from(code)) }
     }
 
-    // 이것을 실패시키는 것: 중계가 검사한 fd 대신 경로로 실행하는 것(execveat(fd) 대신 execve(path)):
-    // 검사 뒤 바꿔치기한 false가 실행되어 종료 코드 1이 된다.
-    #[test]
-    fn test_swap_after_check_runs_checked_file() {
-        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        let dir = std::fs::canonicalize(fresh_dir("swap")).unwrap();
+    fn swapped(mode: &str) -> Option<i32> {
+        let dir = std::fs::canonicalize(fresh_dir(&format!("swap-{mode}"))).unwrap();
         let copy = |from: &str, to: &str| {
             std::fs::copy(std::fs::canonicalize(from).unwrap(), dir.join(to)).unwrap();
         };
         copy("/bin/true", "x");
         copy("/bin/false", "false");
         let (r4, w4) = pipe();
-        put(&w4, dir.as_os_str().as_bytes());
+        put(
+            &w4,
+            &[dir.as_os_str().as_bytes(), b"\0", mode.as_bytes()].concat(),
+        );
         drop(w4);
         let r4 = r4.as_raw_fd();
         let mut cmd = Command::new(std::env::current_exe().unwrap());
@@ -1627,13 +2033,57 @@ mod tests {
         // SAFETY: dup2 is async-signal-safe.
         unsafe { cmd.pre_exec(setup) };
         let status = cmd.status().unwrap();
-        assert_eq!(status.code(), Some(0), "{status:?}");
-        // Positive control: what now sits at the name is `false`.
+        // Positive control: what now sits at the name is `false` (`late`
+        // leaves `true` there).
+        let want = if mode == "late" { 0 } else { 1 };
         assert_eq!(
             Command::new(dir.join("x")).status().unwrap().code(),
-            Some(1)
+            Some(want)
         );
         std::fs::remove_dir_all(&dir).unwrap();
+        status.code()
+    }
+
+    // U-18: 중계는 이름으로 실행하되, 바로 앞에서 그 이름이 검사한 파일(장치·inode·ctime)인지 다시 본다.
+    // 검사 뒤 같은 이름에 다른 파일을 넣으면 실행하지 않는다(RELAY_TARGET). 이것을 실패시키는 것: exec의
+    // still_named 재확인을 지우는 것(바꿔치기한 false가 실행되어 종료 코드 1).
+    #[test]
+    fn test_swap_after_check_is_refused() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(swapped("rename"), Some(100 + i32::from(RELAY_TARGET)));
+    }
+
+    // U-18: 시계는 이름 재확인 다음, execveat 바로 앞에서 읽는다. 재확인(fstatat)이 오래 걸려 그 사이 마감이
+    // 지나면 실행하지 않는다(RELAY_EXPIRED). 이것을 실패시키는 것: exec에서 시계 확인을 재확인 앞으로 되돌리는 것
+    // (확인 뒤 지난 마감에도 true가 실행되어 종료 코드 0).
+    #[test]
+    fn test_deadline_passing_during_the_name_check_is_refused() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(swapped("late"), Some(100 + i32::from(RELAY_EXPIRED)));
+    }
+
+    // U-18: 재확인과 시계가 통과한 뒤 이름이 symlink로 바뀌어도 execveat의 AT_SYMLINK_NOFOLLOW가 따라가지
+    // 않는다(ELOOP, RELAY_EXEC). 이것을 실패시키는 것: execveat의 AT_SYMLINK_NOFOLLOW만 지우는 것(링크를 따라
+    // false가 실행됨).
+    #[test]
+    fn test_symlink_after_the_checks_is_not_followed() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(swapped("symlink-late"), Some(100 + i32::from(RELAY_EXEC)));
+    }
+
+    // U-18: 검사 뒤 이름을 symlink로 바꾸면 따라가지 않는다. 재확인은 링크 자체를 보아 거부하고(RELAY_TARGET),
+    // 재확인이 없어도 execveat의 AT_SYMLINK_NOFOLLOW가 ELOOP로 막는다(RELAY_EXEC). 이것을 실패시키는 것:
+    // 재확인과 NOFOLLOW를 함께 지우는 것(링크를 따라 false가 실행됨). NOFOLLOW만 지운 변이는 위
+    // test_symlink_after_the_checks_is_not_followed가 잡는다.
+    #[test]
+    fn test_symlink_after_check_is_not_followed() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let code = swapped("symlink");
+        assert!(
+            code == Some(100 + i32::from(RELAY_TARGET))
+                || code == Some(100 + i32::from(RELAY_EXEC)),
+            "{code:?}"
+        );
     }
 
     // Ubuntu 사용자 전용 그룹(umask 0002) 실행 파일: 도우미 쪽 해석(SystemGroups)이 pin을 만들고 중계가
@@ -1760,6 +2210,7 @@ mod tests {
                 path: path.as_os_str().as_bytes().to_vec(),
                 pin,
             }),
+            cwd: b"/".to_vec(),
         };
         relay_input(permit, &frame, INPUT_CAP).unwrap()
     }
@@ -2026,10 +2477,12 @@ mod tests {
         assert_eq!(&back[..n], body);
     }
 
-    fn open_read(path: &Path) -> (OwnedFd, libc::stat) {
+    fn open_read(path: &Path) -> Exe {
         let fd: OwnedFd = std::fs::File::open(path).unwrap().into();
         let st = stat(&fd).unwrap();
-        (fd, st)
+        let dir: OwnedFd = std::fs::File::open(path.parent().unwrap()).unwrap().into();
+        let name = CString::new(path.file_name().unwrap().as_bytes()).unwrap();
+        Exe { fd, dir, name, st }
     }
 
     fn script_frame(line: &[u8], path: &Path) -> ExecFrame {
@@ -2057,8 +2510,8 @@ mod tests {
         );
         let body = format!("#!{} -\n# checked\n", cat().display()).into_bytes();
         let frame = script_frame(&cat_line(), &cat());
-        let (fd, st) = open_read(&file);
-        let (_, copy, argv) = script(&fd, &st, &body, &frame, &[b"s"]).unwrap();
+        let exe = open_read(&file);
+        let (_, copy, argv) = script(&exe, &body, &frame, &[b"s"]).unwrap();
         let mut back = vec![0u8; SCRIPT_MAX];
         let n = read_at(&copy, &mut back, 0).unwrap();
         assert_eq!(&back[..n], body.as_slice());
@@ -2066,15 +2519,15 @@ mod tests {
         // The file's own line would match another frame; the buffer's decides.
         let other = format!("#!{}\n", cat().display()).into_bytes();
         assert_eq!(
-            script(&fd, &st, &other, &frame, &[b"s"]).err(),
+            script(&exe, &other, &frame, &[b"s"]).err(),
             Some(RELAY_TARGET)
         );
         // Rewritten after the checks (same bytes, new ctime): refused.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&file, std::fs::read(&file).unwrap()).unwrap();
-        assert_ne!(stat(&fd).unwrap().st_ctime_nsec, st.st_ctime_nsec);
+        assert_ne!(stat(&exe.fd).unwrap().st_ctime_nsec, exe.st.st_ctime_nsec);
         assert_eq!(
-            script(&fd, &st, &body, &frame, &[b"s"]).err(),
+            script(&exe, &body, &frame, &[b"s"]).err(),
             Some(RELAY_TARGET)
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -2145,7 +2598,10 @@ mod tests {
             &input,
             &args(&script, &[b"s"]),
             &[],
-            Some(65_534),
+            Spawn {
+                uid: Some(65_534),
+                ..Spawn::default()
+            },
         ));
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         // Positive control: with execute for others it runs as nobody.
@@ -2155,7 +2611,10 @@ mod tests {
                 &input,
                 &args(&script, &[b"s"]),
                 &[],
-                Some(65_534),
+                Spawn {
+                    uid: Some(65_534),
+                    ..Spawn::default()
+                },
             ))
             .unwrap(),
         );
@@ -2286,13 +2745,13 @@ mod tests {
         let exe = dir.join("cat");
         std::fs::copy(cat(), &exe).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o111)).unwrap();
-        let Opened::Native(fd) = open_target(exe.as_os_str().as_bytes(), None).unwrap() else {
+        let Opened::Native(opened) = open_target(exe.as_os_str().as_bytes(), None).unwrap() else {
             panic!("an execute-only file is not a script here");
         };
         // SAFETY: F_GETFL only reads the descriptor's status flags.
-        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        let flags = unsafe { libc::fcntl(opened.fd.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(flags & libc::O_PATH, 0, "{flags:#x}");
-        drop(fd);
+        drop(opened);
         let got = script_outcome(&exe, &script_input(&cat_line(), &cat(), None), &[b"cat"]);
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         std::fs::remove_dir_all(&dir).unwrap();

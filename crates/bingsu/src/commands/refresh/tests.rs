@@ -1929,7 +1929,7 @@ fn broker_runs_after_validation_before_final_revalidation() {
     let result = refresh_broker(
         fx.request.clone(),
         &mut Fixed(clock()),
-        &mut |_, display, now| {
+        &mut |_, display, now, _| {
             calls += 1;
             assert!(
                 display.is_none(),
@@ -1942,10 +1942,14 @@ fn broker_runs_after_validation_before_final_revalidation() {
     assert_eq!(calls, 1);
     assert_eq!(result, RefreshResult::Incomplete);
     assert!(!fx.dir().join("marker").exists());
-    let result = refresh_broker(fx.request.clone(), &mut Fixed(clock()), &mut |_, _, _| {
-        fx.put("broken = [");
-        Ok(())
-    });
+    let result = refresh_broker(
+        fx.request.clone(),
+        &mut Fixed(clock()),
+        &mut |_, _, _, _| {
+            fx.put("broken = [");
+            Ok(())
+        },
+    );
     assert_eq!(result, RefreshResult::Incomplete);
     assert!(!fx.dir().join("marker").exists());
     fx.put(COMMAND);
@@ -1955,7 +1959,7 @@ fn broker_runs_after_validation_before_final_revalidation() {
     let result = refresh_broker(
         fx.request.clone(),
         &mut Fixed(clock()),
-        &mut |_, display, _| {
+        &mut |_, display, _, _| {
             assert_eq!(display.unwrap().1, id);
             Ok(())
         },

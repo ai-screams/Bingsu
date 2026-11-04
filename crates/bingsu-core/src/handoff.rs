@@ -16,6 +16,9 @@ pub const PERMIT_FD: u8 = 3;
 /// Version word of the relay argv layout (the exec frame carries its own,
 /// `EXEC_VERSION`).
 pub const RELAY_VERSION: &str = "1";
+/// Largest permit plus exec frame on fd 3 (U-9d, 16 KB): the supervisor
+/// writes both into an empty pipe in one write before the spawn.
+pub const RELAY_INPUT_MAX: usize = 16 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permit {
     pub kind: u8,
@@ -196,11 +199,13 @@ pub fn parse_relay_args<'a>(args: &'a [&'a [u8]]) -> Result<RelayArgs<'a>, Frame
 
 const EXEC_MAGIC: &[u8; 8] = b"BNGEXF01";
 const EXEC_DOMAIN: &[u8] = b"bingsu-exec-frame-v1\0";
-/// Layout version 2 added the target pin, version 3 the script interpreter.
-const EXEC_VERSION: u16 = 3;
+/// Layout version 2 added the target pin, version 3 the script interpreter,
+/// version 4 the working folder.
+const EXEC_VERSION: u16 = 4;
 /// Magic, version, origin, flags, environment length, run deadline, CRC,
 /// reserved, target pin, interpreter pin (`EXEC_PIN_LEN` bytes each, all
-/// zero for none), interpreter line and path lengths, reserved.
+/// zero for none), interpreter line, path and working folder lengths,
+/// reserved.
 pub const EXEC_HEADER: usize = 40 + 2 * EXEC_PIN_LEN;
 const TARGET_PIN: usize = 32;
 const INTERPRETER_PIN: usize = TARGET_PIN + EXEC_PIN_LEN;
@@ -220,6 +225,11 @@ pub struct ExecFrame {
     /// The interpreter the helper resolved for a `#!` target; `None` for a
     /// native one.
     pub interpreter: Option<Interpreter>,
+    /// The absolute folder the relay enters right before the exec (the
+    /// neutral folder, or the shell's folder for `untrusted-current`). The
+    /// relay, not the supervisor, changes folder: a folder on a stopped
+    /// mount then holds only that one relay, which its deadline ends.
+    pub cwd: Vec<u8>,
 }
 /// A script's interpreter as the helper resolved it (spec section 4 script
 /// row). The relay reads the `#!` line itself and runs the script only when
@@ -235,9 +245,9 @@ pub struct Interpreter {
     pub pin: Option<ExecPin>,
 }
 /// CRC over everything but the CRC itself (reserved bytes and pins included).
-fn exec_crc(h: &[u8], body: [&[u8]; 3]) -> [u8; 4] {
-    let [a, b, c] = body;
-    crc32c(&[EXEC_DOMAIN, &h[..24], &h[28..EXEC_HEADER], a, b, c])
+fn exec_crc(h: &[u8], body: [&[u8]; 4]) -> [u8; 4] {
+    let [a, b, c, d] = body;
+    crc32c(&[EXEC_DOMAIN, &h[..24], &h[28..EXEC_HEADER], a, b, c, d])
 }
 fn le16(b: &[u8], at: usize) -> u32 {
     u32::from(u16::from_le_bytes([b[at], b[at + 1]]))
@@ -265,6 +275,7 @@ impl ExecFrame {
         };
         let line_len = u16::try_from(line.len()).map_err(|_| FrameError::Limit)?;
         let path_len = u16::try_from(path.len()).map_err(|_| FrameError::Limit)?;
+        let cwd_len = u16::try_from(self.cwd.len()).map_err(|_| FrameError::Limit)?;
         let mut h = [0u8; EXEC_HEADER];
         h[..8].copy_from_slice(EXEC_MAGIC);
         h[8..10].copy_from_slice(&EXEC_VERSION.to_le_bytes());
@@ -275,11 +286,13 @@ impl ExecFrame {
         h[INTERPRETER_PIN..LENGTHS].copy_from_slice(&ExecPin::to_bytes(pin));
         h[LENGTHS..LENGTHS + 2].copy_from_slice(&line_len.to_le_bytes());
         h[LENGTHS + 2..LENGTHS + 4].copy_from_slice(&path_len.to_le_bytes());
-        let crc = exec_crc(&h, [line, path, &self.environment]);
+        h[LENGTHS + 4..LENGTHS + 6].copy_from_slice(&cwd_len.to_le_bytes());
+        let crc = exec_crc(&h, [line, path, &self.cwd, &self.environment]);
         h[24..28].copy_from_slice(&crc);
         out.extend_from_slice(&h);
         out.extend_from_slice(line);
         out.extend_from_slice(path);
+        out.extend_from_slice(&self.cwd);
         out.extend_from_slice(&self.environment);
         Ok(())
     }
@@ -289,15 +302,18 @@ impl ExecFrame {
         }
         let len = u32::from_le_bytes([b[12], b[13], b[14], b[15]]);
         let (line_len, path_len) = (le16(b, LENGTHS), le16(b, LENGTHS + 2));
+        let cwd_len = le16(b, LENGTHS + 4);
         let body = &b[EXEC_HEADER..];
         // In u32, so a declared environment near u32::MAX cannot wrap the
         // sum on any target.
         let want = len
             .checked_add(line_len)
             .and_then(|n| n.checked_add(path_len))
+            .and_then(|n| n.checked_add(cwd_len))
             .and_then(|n| usize::try_from(n).ok())
             .ok_or(FrameError::Length)?;
-        let (line_len, path_len) = (line_len as usize, path_len as usize);
+        let (line_len, path_len, cwd_len) =
+            (line_len as usize, path_len as usize, cwd_len as usize);
         if body.len() < want {
             return Err(FrameError::Short);
         }
@@ -311,10 +327,10 @@ impl ExecFrame {
             return Err(FrameError::Version);
         }
         let origin = Origin::from_tag(b[10])?;
-        if b[11] != 0 || b[28..32] != [0; 4] || b[LENGTHS + 4..EXEC_HEADER] != [0; 4] {
+        if b[11] != 0 || b[28..32] != [0; 4] || b[LENGTHS + 6..EXEC_HEADER] != [0; 2] {
             return Err(FrameError::Flags);
         }
-        if exec_crc(b, [body, &[], &[]]) != b[24..28] {
+        if exec_crc(b, [body, &[], &[], &[]]) != b[24..28] {
             return Err(FrameError::Checksum);
         }
         let mut deadline = [0u8; 8];
@@ -322,7 +338,8 @@ impl ExecFrame {
         let pin = pin_at(b, TARGET_PIN)?;
         let interpreter_pin = pin_at(b, INTERPRETER_PIN)?;
         let (line, rest) = body.split_at(line_len);
-        let (path, environment) = rest.split_at(path_len);
+        let (path, rest) = rest.split_at(path_len);
+        let (cwd, environment) = rest.split_at(cwd_len);
         // A line names its interpreter's path and only an interpreter has a
         // pin: either all three or none.
         let interpreter = match (line.is_empty(), path.is_empty()) {
@@ -334,12 +351,17 @@ impl ExecFrame {
             (true, true) if interpreter_pin.is_none() => None,
             _ => return Err(FrameError::Length),
         };
+        // An absolute folder without NUL, or the relay could not enter it.
+        if cwd.first() != Some(&b'/') || cwd.contains(&0) {
+            return Err(FrameError::Kind);
+        }
         Ok(Self {
             origin,
             run_deadline: u64::from_le_bytes(deadline),
             environment: environment.to_vec(),
             pin,
             interpreter,
+            cwd: cwd.to_vec(),
         })
     }
 }
@@ -354,6 +376,7 @@ pub fn relay_input(permit: Permit, frame: &ExecFrame, cap: usize) -> Result<Vec<
         .checked_add(EXEC_HEADER)
         .and_then(|n| n.checked_add(frame.environment.len()))
         .and_then(|n| n.checked_add(interpreter))
+        .and_then(|n| n.checked_add(frame.cwd.len()))
         .ok_or(FrameError::Limit)?;
     if total > cap {
         return Err(FrameError::Limit);
@@ -447,6 +470,7 @@ mod tests {
             environment: b"HOME=/h\0LANG=C\0".to_vec(),
             pin: None,
             interpreter: None,
+            cwd: b"/run/n".to_vec(),
         }
     }
 
@@ -518,7 +542,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: relay_input의 `total > cap` 검사를 지우거나 read_relay_input의 cap 검사를
-    // 지우는 것, total에서 인터프리터 줄·경로 길이를 빼는 것(cap을 넘는 프레임을 만든다).
+    // 지우는 것, total에서 인터프리터 줄·경로 길이나 작업 폴더 길이를 빼는 것(cap을 넘는 프레임을 만든다).
     #[test]
     fn relay_input_cap() {
         for f in [frame(Origin::Config), scripted(Some(pin()))] {
@@ -526,7 +550,7 @@ mod tests {
                 .interpreter
                 .as_ref()
                 .map_or(0, |i| i.line.len() + i.path.len());
-            let exact = 96 + EXEC_HEADER + f.environment.len() + line_path;
+            let exact = 96 + EXEC_HEADER + f.environment.len() + line_path + f.cwd.len();
             let b = relay_input(permit(30), &f, exact).unwrap();
             assert_eq!(b.len(), exact);
             assert_eq!(read_relay_input(&b, exact), Ok((permit(30), f.clone())));
@@ -535,6 +559,25 @@ mod tests {
                 Err(FrameError::Limit)
             );
             assert_eq!(read_relay_input(&b, exact - 1), Err(FrameError::Limit));
+        }
+    }
+
+    // 작업 폴더는 절대 경로이고 NUL이 없다(중계가 chdir한다). 이것을 실패시키는 것: decode의 `/` 시작
+    // 검사나 NUL 검사를 지우는 것, encode·decode에서 작업 폴더를 빼는 것(왕복이 달라짐).
+    #[test]
+    fn exec_frame_cwd_is_absolute() {
+        let mut f = frame(Origin::Config);
+        f.cwd = b"/home/u/a b".to_vec();
+        let b = relay_input(permit(30), &f, 16_384).unwrap();
+        assert_eq!(read_relay_input(&b, 16_384), Ok((permit(30), f.clone())));
+        for bad in [&b""[..], b"rel/x", b"/a\0b"] {
+            f.cwd = bad.to_vec();
+            let b = relay_input(permit(30), &f, 16_384).unwrap();
+            assert_eq!(
+                read_relay_input(&b, 16_384),
+                Err(FrameError::Kind),
+                "{bad:?}"
+            );
         }
     }
 
@@ -558,8 +601,8 @@ mod tests {
     fn exec_header_fields_checked_under_valid_crc() {
         let cases: [(usize, u8, FrameError); 6] = [
             (0, b'X', FrameError::Magic),
-            (8, 2, FrameError::Version),
-            (8, 4, FrameError::Version),
+            (8, 3, FrameError::Version),
+            (8, 5, FrameError::Version),
             (10, 0, FrameError::Kind),
             (10, 3, FrameError::Kind),
             (11, 1, FrameError::Flags),
@@ -568,7 +611,7 @@ mod tests {
             let mut b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
             let f = &mut b[96..];
             f[at] = v;
-            let crc = exec_crc(f, [&f[EXEC_HEADER..], &[], &[]]);
+            let crc = exec_crc(f, [&f[EXEC_HEADER..], &[], &[], &[]]);
             f[24..28].copy_from_slice(&crc);
             assert_eq!(read_relay_input(&b, 16_384), Err(e), "{at}");
         }
@@ -601,7 +644,7 @@ mod tests {
         let mut x = relay_input(permit(30), &f, 16_384).unwrap();
         let h = &mut x[96..];
         h[INTERPRETER_PIN - 1] = 1;
-        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Flags));
     }
@@ -642,7 +685,7 @@ mod tests {
         h[LENGTHS..LENGTHS + 2].copy_from_slice(&line.to_le_bytes());
         h[LENGTHS + 2..LENGTHS + 4].copy_from_slice(&path.to_le_bytes());
         h[INTERPRETER_PIN..LENGTHS].copy_from_slice(&ExecPin::to_bytes(pin));
-        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         b
     }
@@ -658,7 +701,7 @@ mod tests {
         let mut b = relay_input(permit(30), &scripted(None), 16_384).unwrap();
         let h = &mut b[96..];
         h[EXEC_HEADER - 1] = 1;
-        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&b, 16_384), Err(FrameError::Flags));
     }
@@ -669,13 +712,13 @@ mod tests {
     #[test]
     fn exec_frame_interpreter_parts_go_together() {
         let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
-        let environment = b.len() - 96 - EXEC_HEADER;
+        let environment = b.len() - 96 - EXEC_HEADER - frame(Origin::Config).cwd.len();
         // Shift two environment bytes into the line or the path.
         for (line, path) in [(2, 0), (0, 2)] {
             let mut x = reshaped(b.clone(), line, path, None);
             let h = &mut x[96..];
             h[12..16].copy_from_slice(&u32::try_from(environment - 2).unwrap().to_le_bytes());
-            let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+            let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[], &[]]);
             h[24..28].copy_from_slice(&crc);
             assert_eq!(
                 read_relay_input(&x, 16_384),
@@ -695,7 +738,7 @@ mod tests {
         let mut x = reshaped(b, u16::MAX, u16::MAX, None);
         let h = &mut x[96..];
         h[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
-        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Length));
         // The first sum fits exactly; only adding the path length overflows.
@@ -703,7 +746,7 @@ mod tests {
         let mut x = reshaped(b, u16::MAX, 1, None);
         let h = &mut x[96..];
         h[12..16].copy_from_slice(&(u32::MAX - u32::from(u16::MAX)).to_le_bytes());
-        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Length));
     }

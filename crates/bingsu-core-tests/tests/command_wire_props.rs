@@ -27,6 +27,8 @@ fn grant(units: usize, environment: usize) -> Message {
     Message::Grant(Grant {
         permit: permit(),
         helper_deadline: 9,
+        cwd: b"/home/u".to_vec(),
+        neutral: b"/run/bingsu/neutral".to_vec(),
         units: (0..units)
             .map(|i| Unit {
                 id: format!("custom/u{i}"),
@@ -38,6 +40,7 @@ fn grant(units: usize, environment: usize) -> Message {
                 env_allow: vec![b"LANG".to_vec()],
                 executable: b"/usr/bin/kubectl".to_vec(),
                 pin: None,
+                interpreter: None,
             })
             .collect(),
         probes: vec![Probe {
@@ -97,7 +100,7 @@ proptest! {
         let b = wire::encode(&grant(units, environment)).unwrap();
         let n = cut.index(b.len());
         prop_assert_eq!(wire::decode(&b[..n]), Err(Error::Short));
-        let f = ExecFrame { origin: Origin::Config, run_deadline: 5, environment: vec![b'e'; environment], pin: None, interpreter: None };
+        let f = ExecFrame { origin: Origin::Config, run_deadline: 5, environment: vec![b'e'; environment], pin: None, interpreter: None, cwd: b"/".to_vec() };
         let r = handoff::relay_input(permit(), &f, 16_384).unwrap();
         let n = cut.index(r.len());
         prop_assert_eq!(handoff::read_relay_input(&r[..n], 16_384), Err(Error::Short));

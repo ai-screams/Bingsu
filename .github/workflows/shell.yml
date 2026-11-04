@@ -140,6 +140,7 @@ jobs:
       - name: PTY tests
         if: success() || failure()
         run: |
+          # test_command_round.py needs git and runs in the filter-calls release step.
           # While recording (record_observations), -s shows the OBSERVE-PTY lines in the job log.
           docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
@@ -151,6 +152,7 @@ jobs:
                 --ignore tests/shell/test_collector_security.py \
                 --ignore tests/shell/test_gate_acceptance.py \
                 --ignore tests/shell/test_prompt_trace_budget.py \
+                --ignore tests/shell/test_command_round.py \
                 --durations=0 --durations-min=0.1 \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
                 --deselect tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples \
@@ -284,6 +286,34 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[collect]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-last-good]' "$RUNNER_TEMP/helper-stage.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[failure-recover]' "$RUNNER_TEMP/helper-stage.txt"
+      # GATE-CMD-SPAWN and GATE-CLOCK-READS.3: command rounds through the real helper,
+      # supervisor and relay (release: the collected-root round exceeds the helper's
+      # CPU limit in debug builds on slow hosts, as on the base).
+      # Every command test this non-root host runs is asserted, so a skip shows
+      # (the root-only owner cell and the macOS cell are not selected).
+      # 이것을 실패시키는 것: 이 단계를 빼거나 PASSED 단언 하나를 빼는 것.
+      - name: Command rounds run through the supervisor (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_command_round.py::test_configured_command_runs' 'tests/shell/test_command_round.py::test_not_run_unit_never_runs' 'tests/shell/test_command_round.py::test_one_supervisor_per_session' 'tests/shell/test_command_round.py::test_target_ends_soon_after_helper_death' 'tests/shell/test_command_round.py::test_lock_held_while_supervisor_alive' 'tests/shell/test_command_round.py::test_blocked_path_entry_never_holds_the_marker' 'tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin' 'tests/shell/test_command_round.py::test_shell_folder_stands_for_the_repository' 'tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[ok]' 'tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[file]' 'tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[0700]' 'tests/shell/test_command_round.py::test_unit_cannot_write_in_the_neutral_folder' 'tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt' 'tests/shell/test_command_round.py::test_no_session_runs_nothing_and_says_so' 'tests/shell/test_command_round.py::test_each_unit_is_one_process_the_relay_execs_into' 'tests/shell/test_command_round.py::test_round_without_units_starts_no_supervisor' 'tests/shell/test_command_round.py::test_command_table_names_real_tests' --basetemp="$RUNNER_TEMP/command-round-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_configured_command_runs' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_not_run_unit_never_runs' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_one_supervisor_per_session' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_target_ends_soon_after_helper_death' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_lock_held_while_supervisor_alive' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_blocked_path_entry_never_holds_the_marker' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_shell_folder_stands_for_the_repository' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[ok]' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[file]' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[0700]' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_unit_cannot_write_in_the_neutral_folder' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_no_session_runs_nothing_and_says_so' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_each_unit_is_one_process_the_relay_execs_into' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_round_without_units_starts_no_supervisor' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_command_table_names_real_tests' "$RUNNER_TEMP/command-round.txt"
       # GATE-FS-HELPER.2 on a release build: past an axis cap the helper's round ends
       # closed and no config source call follows the crossing.
       # 이것을 실패시키는 것: 이 단계를 빼거나 debug 칸에서만 돌리거나 PASSED 단언을 빼는 것.

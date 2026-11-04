@@ -12,14 +12,15 @@ use super::{
 use crate::{
     collection::cwd_hash::sha256,
     config::compile::ExecPolicy,
-    handoff::{Cwd, Origin, Permit},
+    handoff::{Cwd, Interpreter, Origin, Permit},
     snapshot::crc32c,
 };
 use alloc::{string::String, vec::Vec};
 
 const MAGIC: &[u8; 8] = b"BNGCMD01";
-/// Version 2 added the resolved executable and its pin to units and probes.
-const VERSION: u16 = 2;
+/// Version 2 added the resolved executable and its pin to units and probes,
+/// version 3 the round's folders and a unit's script interpreter.
+const VERSION: u16 = 3;
 const DOMAIN: &[u8] = b"bingsu-command-v1\0";
 /// Magic, version, kind, flags, body length, CRC32C.
 pub const HEADER: usize = 20;
@@ -87,6 +88,9 @@ pub struct Unit {
     pub executable: Vec<u8>,
     /// Its group pin when it is group-writable (`handoff::ExecFrame::pin`).
     pub pin: Option<ExecPin>,
+    /// The interpreter the helper resolved when `executable` is a `#!`
+    /// script (`handoff::ExecFrame::interpreter`). An observation too.
+    pub interpreter: Option<Interpreter>,
 }
 
 /// One builtin version probe. Fixed arguments and environment come from the
@@ -109,6 +113,12 @@ pub struct Grant {
     pub permit: Permit,
     /// `H`.
     pub helper_deadline: u64,
+    /// The shell's folder: the value of `{dir}` and the working folder of
+    /// an `untrusted-current` unit. Not in any digest: the policy holds
+    /// `{dir}` itself, so one config keeps one digest in every folder.
+    pub cwd: Vec<u8>,
+    /// The empty private folder a `neutral` unit and every probe run in.
+    pub neutral: Vec<u8>,
     pub units: Vec<Unit>,
     pub probes: Vec<Probe>,
 }
@@ -209,6 +219,8 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
         Message::Grant(g) => {
             b.extend_from_slice(&g.permit.encode());
             b.extend_from_slice(&g.helper_deadline.to_le_bytes());
+            bytes16(&mut b, &g.cwd);
+            bytes16(&mut b, &g.neutral);
             b.push(u8::try_from(g.units.len()).map_err(|_| Error::Limit)?);
             b.push(u8::try_from(g.probes.len()).map_err(|_| Error::Limit)?);
             for u in &g.units {
@@ -233,6 +245,15 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
                 }
                 bytes16(&mut b, &u.executable);
                 b.extend_from_slice(&ExecPin::to_bytes(u.pin));
+                match &u.interpreter {
+                    None => b.push(0),
+                    Some(i) => {
+                        b.push(1);
+                        bytes16(&mut b, &i.line);
+                        bytes16(&mut b, &i.path);
+                        b.extend_from_slice(&ExecPin::to_bytes(i.pin));
+                    }
+                }
             }
             for p in &g.probes {
                 b.push(p.profile);
@@ -292,6 +313,8 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
         1 => {
             let permit = Permit::decode(r.take(96)?).map_err(|_| Error::Checksum)?;
             let helper_deadline = r.u64()?;
+            let cwd = no_nul(r.bytes16()?)?.to_vec();
+            let neutral = no_nul(r.bytes16()?)?.to_vec();
             let (nu, np) = (r.u8()?, r.u8()?);
             let mut units = Vec::new();
             for _ in 0..nu {
@@ -321,6 +344,15 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                 }
                 let executable = no_nul(r.bytes16()?)?.to_vec();
                 let pin = r.pin()?;
+                let interpreter = match r.u8()? {
+                    0 => None,
+                    1 => Some(Interpreter {
+                        line: no_nul(r.bytes16()?)?.to_vec(),
+                        path: no_nul(r.bytes16()?)?.to_vec(),
+                        pin: r.pin()?,
+                    }),
+                    _ => return Err(Error::Kind),
+                };
                 units.push(Unit {
                     id,
                     digest,
@@ -331,6 +363,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
                     env_allow,
                     executable,
                     pin,
+                    interpreter,
                 });
             }
             let mut probes = Vec::new();
@@ -346,6 +379,8 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
             Message::Grant(Grant {
                 permit,
                 helper_deadline,
+                cwd,
+                neutral,
                 units,
                 probes,
             })
@@ -490,19 +525,29 @@ mod tests {
                 ctime_sec: 11,
                 ctime_nsec: 12,
             }),
+            interpreter: None,
         }
     }
     fn grant() -> Message {
         Message::Grant(Grant {
             permit: permit(),
             helper_deadline: 9,
+            cwd: b"/home/u/a b".to_vec(),
+            neutral: b"/run/bingsu/neutral".to_vec(),
             units: vec![
                 unit(Policy::Argv {
                     argv: vec![b"kubectl".to_vec(), b"--".to_vec()],
                 }),
-                unit(Policy::UnsafeShell {
-                    script: b"kubectl ctx | head -1".to_vec(),
-                }),
+                Unit {
+                    interpreter: Some(Interpreter {
+                        line: b"/bin/sh -e".to_vec(),
+                        path: b"/usr/bin/dash".to_vec(),
+                        pin: None,
+                    }),
+                    ..unit(Policy::UnsafeShell {
+                        script: b"kubectl ctx | head -1".to_vec(),
+                    })
+                },
             ],
             probes: vec![Probe {
                 profile: 3,
@@ -564,8 +609,9 @@ mod tests {
     #[test]
     fn policy_codec_has_no_plain_shell() {
         let mut b = encode(&grant()).unwrap();
-        // Body: permit 96, H 8, counts 2, then id (2 + 11) and digest 32.
-        let at = HEADER + 96 + 8 + 2 + 2 + 11 + 32;
+        // Body: permit 96, H 8, cwd 2 + 11, neutral 2 + 19, counts 2, then
+        // id (2 + 11) and digest 32.
+        let at = HEADER + 96 + 8 + 13 + 21 + 2 + 2 + 11 + 32;
         assert_eq!(b[at], 0);
         b[at] = 2;
         reseal(&mut b);
@@ -643,8 +689,8 @@ mod tests {
         );
     }
 
-    // 이것을 실패시키는 것: decode의 argv 단어·script·env_allow 이름·실행 파일 경로 no_nul 검사
-    // 하나를 지우는 것(NUL 뒤 바이트가 C 문자열에서 다른 단어가 됨).
+    // 이것을 실패시키는 것: decode의 argv 단어·script·env_allow 이름·실행 파일 경로·회차 폴더 둘·
+    // 인터프리터 줄과 경로의 no_nul 검사 하나를 지우는 것(NUL 뒤 바이트가 C 문자열에서 다른 단어가 됨).
     #[test]
     fn decode_refuses_nul_in_words() {
         let Message::Grant(base) = grant() else {
@@ -670,6 +716,22 @@ mod tests {
         let mut g = base.clone();
         g.units[0].executable = b"/usr/bin/kubectl\0neutral".to_vec();
         cases.push(g);
+        let mut g = base.clone();
+        g.cwd = b"/home/u\0/x".to_vec();
+        cases.push(g);
+        let mut g = base.clone();
+        g.neutral = b"/run\0/x".to_vec();
+        cases.push(g);
+        for line in [true, false] {
+            let mut g = base.clone();
+            let i = g.units[1].interpreter.as_mut().unwrap();
+            if line {
+                i.line = b"/bin/sh\0-x".to_vec();
+            } else {
+                i.path = b"/bin/sh\0".to_vec();
+            }
+            cases.push(g);
+        }
         for g in cases {
             let b = encode(&Message::Grant(g)).unwrap();
             assert_eq!(decode(&b), Err(Error::Utf8));
@@ -772,8 +834,8 @@ mod tests {
     fn header_fields_checked_under_valid_crc() {
         let cases: [(usize, u8, Error); 6] = [
             (0, b'X', Error::Magic),
-            (8, 1, Error::Version),
-            (8, 3, Error::Version),
+            (8, 2, Error::Version),
+            (8, 4, Error::Version),
             (10, 0, Error::Kind),
             (10, 4, Error::Kind),
             (11, 1, Error::Flags),
@@ -803,8 +865,9 @@ mod tests {
     #[test]
     fn body_tags_checked_under_valid_crc() {
         let mut b = encode(&grant()).unwrap();
-        // First unit: id 13, digest 32, kind 1, argc 1, "kubectl" 9, "--" 4, then cwd.
-        let at = HEADER + 96 + 8 + 2 + 13 + 32 + 1 + 1 + 9 + 4;
+        // First unit (after cwd 13 and neutral 21): id 13, digest 32, kind 1,
+        // argc 1, "kubectl" 9, "--" 4, then cwd.
+        let at = HEADER + 96 + 8 + 13 + 21 + 2 + 13 + 32 + 1 + 1 + 9 + 4;
         assert_eq!(b[at], 0);
         b[at] = 2;
         reseal(&mut b);
@@ -819,6 +882,24 @@ mod tests {
             reseal(&mut b);
             assert_eq!(decode(&b), Err(Error::Kind), "{at}:{v}");
         }
+    }
+
+    // 이것을 실패시키는 것: 단위의 인터프리터 표시 바이트에서 `_ => Err(Kind)`를 None이나 Some으로
+    // 바꾸는 것.
+    #[test]
+    fn interpreter_flag_checked_under_valid_crc() {
+        let Message::Grant(mut g) = grant() else {
+            unreachable!()
+        };
+        g.units.truncate(1);
+        g.probes.clear();
+        let mut b = encode(&Message::Grant(g)).unwrap();
+        // The unit's last byte is its interpreter flag: no interpreter.
+        let at = b.len() - 1;
+        assert_eq!(b[at], 0);
+        b[at] = 2;
+        reseal(&mut b);
+        assert_eq!(decode(&b), Err(Error::Kind));
     }
 
     // 이것을 실패시키는 것: encode의 argv·env_allow 개수 변환을 `as u8` 자르기로 바꾸는 것(256개째

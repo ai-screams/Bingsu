@@ -469,7 +469,7 @@ fn helper(base:&Path,mode:&str) {
     let watchdog=commands::helper_limits::start(Instant::now()).unwrap();
     let mut verification=commands::helper::Verification::start();
     let start=verification.start.unwrap(); let mut verified=None; let mut handle=None;
-    let result=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock| {
+    let result=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock@MARKER@| {
        verification.verified();let end=verification.end.unwrap();verified=Some(end);
        if mode=="--product-zero" {
           assert!(commands::helper::selected_request(&collection::selection::PRODUCT,&envelope,display,clock)?.is_none());
@@ -795,6 +795,14 @@ def build_context(binary):
     return source
 
 
+def broker_marker(source):
+    """The extra broker argument of the tree being measured: refresh_broker's
+    closure takes the staged marker since the command supervisor (C2). The
+    gate prepares the base and the candidate with one script."""
+    refresh = (Path(source) / "crates/bingsu/src/commands/refresh.rs").read_text()
+    return ",_marker" if "        &Marker,\n    ) -> Result<(), StoreError>" in refresh else ""
+
+
 def replace_required(text, old, new):
     assert text.count(old) == 1, f"worker.rs substitution expected exactly once: {old!r}"
     changed = text.replace(old, new)
@@ -907,7 +915,8 @@ def prepare(binary):
     stream_path.write_text(stream_source)
     modules.append(f'#[path={json.dumps(str(stream_path))}] mod global_stream;')
     rust = directory / "main.rs"
-    rust.write_text(HARNESS.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect")))))
+    rust.write_text(HARNESS.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect"))))
+                    .replace("@MARKER@", broker_marker(source)))
     fixture = directory / "collector-product"
     command = ["rustc", "--edition=2024", "--cfg", "test", "-O", str(rust), "-o", str(fixture),
                "-L", f"dependency={binary.parent / 'deps'}"]

@@ -1,7 +1,123 @@
 //! Helper filter: installed after the fixed collection spawn and synchronized
 //! with the already-running watchdog. This is not the prompt syscall policy.
+/// Which pidfd may receive a signal through `pidfd_send_signal`.
+#[derive(Clone)]
 #[cfg(target_os = "linux")]
+enum Pidfds {
+    /// None (the helper without a collector).
+    Denied,
+    /// This one (the helper's collector).
+    Only(std::os::fd::RawFd),
+    /// The command supervisor: exactly the pidfds of the children it holds
+    /// when it confines itself. It also may open, duplicate or receive no
+    /// descriptor afterwards, so no other process can be reached.
+    Supervisor(Vec<std::os::fd::RawFd>),
+}
+#[cfg(all(test, target_os = "linux"))]
 fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_filter> {
+    program_with(pid, child_pidfd.map_or(Pidfds::Denied, Pidfds::Only))
+}
+/// The command supervisor's filter after its last spawn: deny by default.
+/// Allowed are only the calls its loop makes (poll, read, write, waitid,
+/// close, clocks and sleeps, memory, futex, exit, signal return and the
+/// abort path on itself), and `pidfd_send_signal` on the pidfds it holds
+/// now. No call that makes a descriptor (open, dup, socket, recvmsg, pipe,
+/// pidfd_open, pidfd_getfd, ...) is allowed, so a held number, once closed,
+/// can never come to name another process.
+#[cfg(target_os = "linux")]
+fn supervisor_program(pid: u32, held: &[std::os::fd::RawFd]) -> Vec<libc::sock_filter> {
+    let stmt = |code, k| libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let jump = |k, jt, jf| libc::sock_filter {
+        code: 0x15,
+        jt,
+        jf,
+        k,
+    };
+    #[cfg(target_arch = "x86_64")]
+    let arch = 0xc000003e;
+    #[cfg(target_arch = "aarch64")]
+    let arch = 0xc00000b7;
+    let allow = stmt(0x06, libc::SECCOMP_RET_ALLOW);
+    let deny = stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32);
+    let mut code = vec![
+        stmt(0x20, 4),
+        jump(arch, 1, 0),
+        stmt(0x06, libc::SECCOMP_RET_KILL_PROCESS),
+        stmt(0x20, 0),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    {
+        code.push(libc::sock_filter {
+            code: 0x35,
+            jt: 0,
+            jf: 1,
+            k: 0x40000000,
+        });
+        code.push(stmt(0x06, libc::SECCOMP_RET_KILL_PROCESS));
+    }
+    let calls = [
+        libc::SYS_ppoll,
+        libc::SYS_read,
+        libc::SYS_write,
+        libc::SYS_waitid,
+        libc::SYS_close,
+        libc::SYS_clock_gettime,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_nanosleep,
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+        libc::SYS_rt_sigreturn,
+        // A poll stopped by SIGSTOP resumes through restart_syscall.
+        libc::SYS_restart_syscall,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_sigaltstack,
+        libc::SYS_munmap,
+        libc::SYS_mmap,
+        libc::SYS_mremap,
+        libc::SYS_madvise,
+        libc::SYS_mprotect,
+        libc::SYS_brk,
+        libc::SYS_futex,
+        libc::SYS_sched_yield,
+        libc::SYS_getpid,
+        libc::SYS_gettid,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_poll,
+    ];
+    for nr in calls {
+        code.push(jump(nr as u32, 0, 1));
+        code.push(allow);
+    }
+    // The abort path signals this process only.
+    code.push(jump(libc::SYS_tgkill as u32, 0, 4));
+    code.push(stmt(0x20, 16));
+    code.push(jump(pid, 0, 1));
+    code.push(allow);
+    code.push(deny);
+    // Signals through the held pidfds only.
+    let n = u8::try_from(held.len()).unwrap_or(u8::MAX);
+    // Not this call: on to the final deny, past ld, n compares, deny, allow.
+    code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, n + 3));
+    code.push(stmt(0x20, 16));
+    for (k, fd) in held.iter().take(usize::from(n)).enumerate() {
+        code.push(jump(*fd as u32, n - k as u8, 0));
+    }
+    code.push(deny);
+    code.push(allow);
+    code.push(deny);
+    code
+}
+
+#[cfg(target_os = "linux")]
+fn program_with(pid: u32, pidfds: Pidfds) -> Vec<libc::sock_filter> {
+    if let Pidfds::Supervisor(held) = &pidfds {
+        return supervisor_program(pid, held);
+    }
     let stmt = |code, k| libc::sock_filter {
         code,
         jt: 0,
@@ -53,9 +169,10 @@ fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_
         code.push(jump(nr as u32, 0, 1));
         code.push(stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32));
     }
-    if child_pidfd.is_none() {
+    let deny = stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32);
+    if matches!(pidfds, Pidfds::Denied) {
         code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, 1));
-        code.push(stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32));
+        code.push(deny);
     }
     // Numeric process/group targets are fixed to this helper. Thread-directed
     // forms retain the tgid check so libc raise/abort can target any own thread.
@@ -69,7 +186,7 @@ fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_
         (libc::SYS_rt_sigqueueinfo, vec![(0, u64::from(pid))]),
         (libc::SYS_rt_tgsigqueueinfo, vec![(0, u64::from(pid))]),
     ];
-    if let Some(fd) = child_pidfd {
+    if let Pidfds::Only(fd) = pidfds {
         bound.push((libc::SYS_pidfd_send_signal, vec![(0, fd as u64)]));
     }
     for (nr, args) in bound {
@@ -92,9 +209,20 @@ fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_
 }
 #[cfg(target_os = "linux")]
 pub fn install(child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
+    install_with(child_pidfd.map_or(Pidfds::Denied, Pidfds::Only))
+}
+/// The command supervisor's filter, after its last spawn: the helper's rules
+/// (no exec, no process creation, no `pidfd_open`, numeric signals only to
+/// itself) with signals through any pidfd it holds.
+#[cfg(target_os = "linux")]
+pub fn install_supervisor(pidfds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
+    install_with(Pidfds::Supervisor(pidfds.to_vec()))
+}
+#[cfg(target_os = "linux")]
+fn install_with(pidfds: Pidfds) -> std::io::Result<()> {
     // SAFETY: own PID is captured once before TSYNC.
     let pid = unsafe { libc::getpid() } as u32;
-    let mut code = program(pid, child_pidfd);
+    let mut code = program_with(pid, pidfds);
     let prog = libc::sock_fprog {
         len: code.len() as u16,
         filter: code.as_mut_ptr(),
@@ -125,6 +253,10 @@ fn tsync_result(rc: libc::c_long) -> std::io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn install(_child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
+    Ok(())
+}
+#[cfg(not(target_os = "linux"))]
+pub fn install_supervisor(_pidfds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -170,6 +302,122 @@ mod tests {
             }
         }
     }
+    // 감독 필터는 기본 거부다. 루프가 쓰는 호출만 허용하고, 신호는 필터를 걸 때 쥔 자식 pidfd에만 간다.
+    // descriptor를 만드는 호출(open·dup·socket·recvmsg·pipe·pidfd_open·pidfd_getfd·fcntl)과 exec·생성은
+    // 모두 거부된다. 이것을 실패시키는 것: 마지막 기본 거부를 허용으로 바꾸는 것, pidfd 블록의 건너뛰기
+    // 거리를 하나 줄이는 것(목록 밖 호출이 허용으로 떨어짐), 집합 비교를 지우는 것, 허용 목록에서 루프의
+    // 호출(read·ppoll·waitid) 하나를 빼는 것, tgkill의 자기 pid 비교를 지우는 것.
+    #[test]
+    fn supervisor_filter_denies_by_default() {
+        let denied = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        let run = |nr: i64, args: [u64; 2]| {
+            let mut input = [0u8; 64];
+            input[..4].copy_from_slice(&(nr as u32).to_ne_bytes());
+            #[cfg(target_arch = "x86_64")]
+            let arch = 0xc000003eu32;
+            #[cfg(target_arch = "aarch64")]
+            let arch = 0xc00000b7u32;
+            input[4..8].copy_from_slice(&arch.to_ne_bytes());
+            for (i, value) in args.into_iter().enumerate() {
+                input[16 + i * 8..24 + i * 8].copy_from_slice(&value.to_ne_bytes());
+            }
+            evaluate_program(
+                program_with(1234, Pidfds::Supervisor(vec![7, 9, 12])),
+                input,
+            )
+        };
+        for fd in [7, 9, 12] {
+            assert_eq!(
+                run(libc::SYS_pidfd_send_signal, [fd, 9]),
+                libc::SECCOMP_RET_ALLOW,
+                "{fd}"
+            );
+        }
+        for fd in [3, 8, 13, 40] {
+            assert_eq!(run(libc::SYS_pidfd_send_signal, [fd, 9]), denied, "{fd}");
+        }
+        let never = [
+            libc::SYS_execve,
+            libc::SYS_execveat,
+            libc::SYS_clone,
+            libc::SYS_clone3,
+            libc::SYS_pidfd_open,
+            libc::SYS_pidfd_getfd,
+            libc::SYS_openat,
+            libc::SYS_openat2,
+            libc::SYS_dup,
+            libc::SYS_dup3,
+            libc::SYS_fcntl,
+            libc::SYS_socket,
+            libc::SYS_socketpair,
+            libc::SYS_recvmsg,
+            libc::SYS_recvmmsg,
+            libc::SYS_accept4,
+            libc::SYS_pipe2,
+            libc::SYS_memfd_create,
+            libc::SYS_kill,
+            libc::SYS_ioctl,
+            libc::SYS_prctl,
+            libc::SYS_seccomp,
+        ];
+        for nr in never {
+            assert_eq!(run(nr, [0, 0]), denied, "{nr}");
+        }
+        for nr in [
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_ppoll,
+            libc::SYS_waitid,
+            libc::SYS_close,
+        ] {
+            assert_eq!(run(nr, [3, 0]), libc::SECCOMP_RET_ALLOW, "{nr}");
+        }
+        assert_eq!(run(libc::SYS_tgkill, [1234, 6]), libc::SECCOMP_RET_ALLOW);
+        assert_eq!(run(libc::SYS_tgkill, [1, 6]), denied);
+        assert_eq!(
+            run(libc::SYS_restart_syscall, [0, 0]),
+            libc::SECCOMP_RET_ALLOW
+        );
+    }
+
+    // 감독 필터의 첫 검사: 다른 AUDIT_ARCH, x32 비트, 음수 번호는 프로세스를 죽인다. 이것을 실패시키는 것:
+    // arch 비교를 지우거나 KILL 대신 다음 검사로 넘기는 것, x86_64의 0x40000000 하한 검사를 지우는 것.
+    #[test]
+    fn supervisor_filter_kills_foreign_arch_and_x32() {
+        let program = program_with(1234, Pidfds::Supervisor(vec![7]));
+        let input = |nr: u32, arch: u32| {
+            let mut b = [0u8; 64];
+            b[..4].copy_from_slice(&nr.to_ne_bytes());
+            b[4..8].copy_from_slice(&arch.to_ne_bytes());
+            b
+        };
+        #[cfg(target_arch = "x86_64")]
+        let (native, foreign) = (0xc000003eu32, 0xc00000b7u32);
+        #[cfg(target_arch = "aarch64")]
+        let (native, foreign) = (0xc00000b7u32, 0xc000003eu32);
+        let read = libc::SYS_read as u32;
+        assert_eq!(
+            evaluate_program(program.clone(), input(read, native)),
+            libc::SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            evaluate_program(program.clone(), input(read, foreign)),
+            libc::SECCOMP_RET_KILL_PROCESS
+        );
+        assert_eq!(
+            evaluate_program(program.clone(), input(read, 0x4000_0003)),
+            libc::SECCOMP_RET_KILL_PROCESS
+        );
+        #[cfg(target_arch = "x86_64")]
+        for nr in [read | 0x4000_0000, u32::MAX] {
+            assert_eq!(
+                evaluate_program(program.clone(), input(nr, native)),
+                libc::SECCOMP_RET_KILL_PROCESS,
+                "{nr:#x}"
+            );
+        }
+    }
+
     // 이것을 실패시키는 것: 자기 pid/SIGKILL의 64비트 조건 또는 늦은 pidfd_open 거부 제거.
     #[test]
     fn kill_requires_exact_self_pid_and_sigkill_and_pidfd_open_is_denied() {

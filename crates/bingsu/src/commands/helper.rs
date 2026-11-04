@@ -3,7 +3,7 @@ use super::{
     clock::SystemClock,
     collection_breaker, collection_gc,
     collection_store::{Admission, CollectionStore},
-    collector,
+    collector, command_grant,
     group_policy::SystemGroups,
     helper_filter, helper_limits, log,
     refresh::{self, RefreshRequest, RefreshResult},
@@ -36,9 +36,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // could take one of the helper's own. The command supervisor (C2) is the
     // consumer; locations never come from it.
     #[cfg(test)]
-    let _command_env = fixture.is_none().then(|| read_env(ENV_FD)).flatten();
+    let command_env = if fixture.is_none() {
+        read_env_why(ENV_FD)
+    } else {
+        Err(NoEnv::Missing)
+    };
     #[cfg(not(test))]
-    let _command_env = read_env(ENV_FD);
+    let command_env = read_env_why(ENV_FD);
     let raw: Vec<_> = args.iter().map(|a| a.as_bytes()).collect();
     let Ok(e) = bingsu_core::helper::validate(&raw) else {
         return ExitCode::from(1);
@@ -94,6 +98,11 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     ) else {
         return ExitCode::from(1);
     };
+    let runtime_path = request.runtime.path.clone();
+    let collected_repo: std::sync::Arc<std::sync::Mutex<Option<u16>>> = Default::default();
+    let mut command_round = None;
+    let mut command_skip = None;
+    let mut round_marker = None;
     let mut filter_failed = false;
     let mut supervisor = None;
     let mut collection_runtime = None;
@@ -105,7 +114,8 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         &bingsu_core::config::compile::CompiledConfig,
         bingsu_core::snapshot::Identity,
     )>,
-                      now| {
+                      now,
+                      marker: &bingsu_core::snapshot::Marker| {
         verification.verified();
         let request = selected_request(&collection::selection::PRODUCT, &e, display, now)?;
         let selected = request.is_some();
@@ -161,9 +171,21 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     collector::spawn(&pin, request, lock, &_watchdog, context)?,
                     &store,
                 );
-                Ok::<_, super::snapshot_store::StoreError>(Ok(Some(
-                    job.start(Box::new(move |result| store.publish(&result)))?,
-                )))
+                // The repository root this collection reports for the shell's
+                // folder, for the command round's PATH rules (C2 ruling J9).
+                let slot = collected_repo.clone();
+                Ok::<_, super::snapshot_store::StoreError>(Ok(Some(job.start(Box::new(
+                    move |result| {
+                        let repo = result
+                            .updates
+                            .iter()
+                            .find_map(|u| u.facts.as_ref())
+                            .and_then(|f| f.repo_component);
+                        store.publish(&result)?;
+                        *slot.lock().unwrap_or_else(|e| e.into_inner()) = repo;
+                        Ok(())
+                    },
+                ))?)))
             })();
             let (started, outcome) = collection_result(admission);
             supervisor = started.flatten();
@@ -173,12 +195,35 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         if fixture.is_some() {
             return Ok(());
         }
+        // The command supervisor, like the collector, is spawned before the
+        // helper's filter; its grant waits for the marker's installation.
+        if let Some((config, _)) = display {
+            let inputs = command_grant::Inputs {
+                config,
+                session: e.session.as_deref(),
+                pwd: e.pwd.as_deref(),
+                environment: &command_env,
+                runtime: &context.runtime,
+                runtime_path: &runtime_path,
+                exe,
+                me: sys::current_uid(),
+                helper_deadline: _watchdog.expires_ns(),
+            };
+            match command_grant::prepare(&inputs) {
+                Ok(round) => command_round = Some(round),
+                Err(skip) => command_skip = Some(skip),
+            }
+            round_marker = Some(*marker);
+        }
         let child_pidfd = supervisor.as_ref().and_then(|handle| handle.child_pidfd());
         let confinement =
             helper_limits::install(&_watchdog).and_then(|()| helper_filter::install(child_pidfd));
         if let Err(error) = confinement {
             filter_failed = true;
             drop(supervisor.take());
+            if let Some(round) = command_round.take() {
+                round.abandon();
+            }
             return Err(error.into());
         }
         if let Some(handle) = &supervisor {
@@ -192,7 +237,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let result = if let Some(fixture) = &fixture {
         // Only the external refresh/admission inputs are injected. The run
         // path above and reporting/exit below are shared with production.
-        let published = broker(&fixture.context, None, fixture.now).and_then(|()| {
+        let published = broker(
+            &fixture.context,
+            None,
+            fixture.now,
+            &fixture_marker(fixture.now),
+        )
+        .and_then(|()| {
             let lock = fixture.context.try_lock()?;
             lock.stage(super::snapshot_store::Slot::Snapshot, &fixture.snapshot)?;
             lock.install(super::snapshot_store::Slot::Snapshot)
@@ -209,6 +260,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         refresh::refresh_broker(request, &mut clock, &mut broker)
     };
     // refresh_broker has released the snapshot lock and source descriptors.
+    // The collection ends first: its repository root feeds the grant.
     if let Some(handle) = supervisor {
         let supervision = handle.finish();
         if let Some(ticket) = breaker_ticket.take()
@@ -218,6 +270,80 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             // Persistence failure affects only the next optional breaker lookup.
             let _ = ticket.finish(progress, reason, now);
         }
+    }
+    // The grant goes out only once this round's marker is installed.
+    if let Some(round) = command_round.take() {
+        match grant_permit(round_marker, &result) {
+            Some(permit) => {
+                if round.neutral_refused > 0 {
+                    report(&mut groups, LogLevel::Info, command_grant::NEUTRAL_REFUSED);
+                }
+                let repo = *collected_repo.lock().unwrap_or_else(|e| e.into_inner());
+                let done = round.grant(permit, repo, sys::current_uid(), &mut groups);
+                if done.unresolved > 0 {
+                    report(
+                        &mut groups,
+                        LogLevel::Info,
+                        "command round: a unit's executable was not found or failed the checks",
+                    );
+                }
+                if done.failed {
+                    report(
+                        &mut groups,
+                        LogLevel::Error,
+                        "command round failed: the shell's folder could not be read",
+                    );
+                }
+                if done.send_failed {
+                    report(
+                        &mut groups,
+                        LogLevel::Error,
+                        "command round failed: the grant could not be sent in time",
+                    );
+                }
+                if done.oversize > 0 {
+                    report(
+                        &mut groups,
+                        LogLevel::Info,
+                        "command round: a unit's environment is over the relay input cap",
+                    );
+                }
+                if done.repo_fallback {
+                    report(
+                        &mut groups,
+                        LogLevel::Info,
+                        "command round: no collected repository root; the shell's folder stands for it",
+                    );
+                }
+                let dropped = done.dropped;
+                if dropped.malformed + dropped.duplicate > 0 {
+                    let text = format!(
+                        "command environment: {} malformed entries and {} duplicated names left out",
+                        dropped.malformed, dropped.duplicate
+                    );
+                    log::event(
+                        e.log_level,
+                        log_root,
+                        sys::current_uid(),
+                        &mut groups,
+                        LogLevel::Info,
+                        &text,
+                    );
+                }
+                if done.rejected > 0 {
+                    report(
+                        &mut groups,
+                        LogLevel::Error,
+                        "command round: results rejected",
+                    );
+                }
+                report(&mut groups, LogLevel::DebugLog, "command round finished");
+            }
+            None => round.abandon(),
+        }
+    }
+    if let Some(text) = command_skip.and_then(command_grant::Skip::message) {
+        report(&mut groups, LogLevel::Info, text);
     }
     if let Some(runtime) = collection_runtime
         && let Ok(now) = clock.observe()
@@ -279,6 +405,24 @@ pub(crate) fn fixture_run(fixture: FixtureRun) {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(fixture);
     });
+}
+#[cfg(test)]
+fn fixture_marker(now: bingsu_core::snapshot::Clock) -> bingsu_core::snapshot::Marker {
+    bingsu_core::snapshot::Marker {
+        id: bingsu_core::snapshot::Identity {
+            boot: now.boot,
+            epoch: [0; 16],
+            context: [0; 4],
+            generation: 0,
+            source: [0; 4],
+        },
+        seq: 0,
+        verified_at: now.now,
+        kind: now.kind,
+        domain: now.domain,
+        resume: now.resume,
+        invalid: false,
+    }
 }
 #[cfg(test)]
 struct FixtureClock(Option<bingsu_core::snapshot::Clock>);
@@ -343,19 +487,58 @@ impl Verification {
 const ENV_FD: i32 = bingsu_core::command::env_frame::FD;
 
 /// The environment frame's body from `fd`, which is then closed, or `None`
-/// (no environment this round): no fd, a frame cut short or damaged, or
-/// one over the cap. Reads stop once the declared frame is in, so a whole
-/// frame costs one read. The prompt wrote the frame and closed its end
-/// before the spawn, so a read returns data or end of file and never waits.
+/// (no environment this round). See `read_env_why`.
+#[cfg(test)]
 pub(crate) fn read_env(fd: i32) -> Option<Vec<u8>> {
+    read_env_why(fd).ok()
+}
+
+/// Why a round has no command environment; the helper logs it, since every
+/// config unit is then left out of the grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoEnv {
+    /// No descriptor at fd 4 (the helper was not started by a prompt).
+    Missing,
+    /// End of file before any byte: the prompt wrote nothing, because the
+    /// environment is over the frame cap.
+    Unwritten,
+    /// Fewer bytes than the frame declares: the prompt's single write was
+    /// cut, as with a pipe smaller than the frame (pipe-user-pages-soft
+    /// leaves 4 KB pipes, m6-C1a).
+    Cut,
+    /// Another magic, a wrong checksum, or more than the cap.
+    Damaged,
+}
+impl NoEnv {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Missing => "command environment: none handed over",
+            Self::Unwritten => "command environment: not written (over 64 KB)",
+            Self::Cut => "command environment: frame cut short (pipe smaller than the frame)",
+            Self::Damaged => "command environment: frame damaged",
+        }
+    }
+}
+
+/// The environment frame's body from `fd`, which is then closed, or why
+/// there is none: no fd, a frame never written, cut short or damaged.
+/// Reads stop once the declared frame is in, so a whole frame costs one
+/// read. The prompt wrote the frame and closed its end before the spawn,
+/// so a read returns data or end of file and never waits.
+pub(crate) fn read_env_why(fd: i32) -> Result<Vec<u8>, NoEnv> {
     use bingsu_core::command::env_frame;
     let mut buf = vec![0u8; env_frame::FRAME_MAX];
     let mut got = 0;
+    let mut missing = false;
     while got < buf.len() {
         // SAFETY: writable bytes from got to the end of buf. fd 4 is not a Rust-owned
         // descriptor (it may not exist at all), so it is read and closed as a raw int.
         let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr().cast(), buf.len() - got) };
-        let Ok(n) = usize::try_from(n) else { break };
+        let Ok(n) = usize::try_from(n) else {
+            missing =
+                got == 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
+            break;
+        };
         if n == 0 {
             break;
         }
@@ -367,7 +550,38 @@ pub(crate) fn read_env(fd: i32) -> Option<Vec<u8>> {
     // SAFETY: closes the inherited descriptor once; EBADF when it was never there.
     unsafe { libc::close(fd) };
     buf.truncate(got);
-    env_frame::body(&buf).map(<[u8]>::to_vec)
+    if let Some(body) = env_frame::body(&buf) {
+        return Ok(body.to_vec());
+    }
+    Err(if missing {
+        NoEnv::Missing
+    } else if got == 0 {
+        NoEnv::Unwritten
+    } else if env_frame::declared(&buf).is_none_or(|total| got < total) {
+        NoEnv::Cut
+    } else {
+        NoEnv::Damaged
+    })
+}
+
+/// The permit of this round's grant, or `None` when no grant goes out
+/// (U-1 C+): only a round that installed its marker (Published,
+/// Revalidated, Invalid) sends one, under that marker's clock and trust
+/// deadline. Busy and Incomplete (a failed filter, a source that changed
+/// before the final revalidation, a lost lock) send none.
+fn grant_permit(
+    marker: Option<bingsu_core::snapshot::Marker>,
+    result: &RefreshResult,
+) -> Option<bingsu_core::handoff::Permit> {
+    let installed = matches!(
+        result,
+        RefreshResult::Published { .. }
+            | RefreshResult::Revalidated { .. }
+            | RefreshResult::Invalid
+    );
+    marker
+        .filter(|_| installed)
+        .map(|m| command_grant::permit(&m))
 }
 
 pub(super) fn detach() -> Result<(), ()> {
@@ -422,4 +636,81 @@ pub(crate) fn selected_request(
         50,
     )
     .map_err(|_| super::snapshot_store::StoreError::Unsafe)
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::{RefreshResult, grant_permit};
+
+    // GATE-CMD-GRANT.2(허가 없음): 발행 실패·필터 실패·마지막 재검증 실패(chmod, 원본 교체)는 Incomplete이고,
+    // 잠금 경합은 Busy다. 둘 다 permit이 없어 허가를 보내지 않는다. 표식을 설치한 회차는 그 표식의 permit을
+    // 보낸다. 이것을 실패시키는 것: grant_permit의 결과 판정에 Incomplete나 Busy를 더하는 것, 표식 대신 다른
+    // 시계로 permit을 만드는 것. 계획 표의 변이("허가 전송을 broker 안으로 옮김")는 제품 바이너리에 회차 사이
+    // hook이 없어 죽일 수 없다(K4 판정). 그 자리는 이 함수와 helper::run의 호출 위치(refresh_broker 반환 뒤)로
+    // 고정한다.
+    #[test]
+    fn grant_only_after_the_marker_is_installed() {
+        let marker = super::fixture_marker(bingsu_core::snapshot::Clock {
+            boot: [3; 16],
+            domain: [4; 16],
+            kind: 1,
+            resume: 0,
+            now: 77,
+        });
+        let want = Some(super::command_grant::permit(&marker));
+        for r in [
+            RefreshResult::Published {
+                generation: 1,
+                left_out: vec![],
+            },
+            RefreshResult::Revalidated { generation: 1 },
+            RefreshResult::Invalid,
+        ] {
+            assert_eq!(grant_permit(Some(marker), &r), want, "{r:?}");
+            assert_eq!(grant_permit(None, &r), None, "{r:?}");
+        }
+        for r in [RefreshResult::Incomplete, RefreshResult::Busy] {
+            assert_eq!(grant_permit(Some(marker), &r), None, "{r:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::{NoEnv, read_env_why};
+    use bingsu_core::command::env_frame;
+
+    /// A pipe holding `bytes`, its write end closed; returns the read end.
+    fn pipe_with(bytes: &[u8]) -> i32 {
+        let (read, write) = crate::commands::collector_process::pipe().unwrap();
+        assert!(matches!(
+            crate::commands::sys::write_fd(std::os::fd::AsRawFd::as_raw_fd(&write), bytes),
+            crate::commands::sys::WriteOutcome::Done
+        ));
+        drop(write);
+        std::os::fd::IntoRawFd::into_raw_fd(read)
+    }
+
+    // m6-C1a·C1 수용 조건: 환경 없음의 이유를 나눠 알린다. 이것을 실패시키는 것: Missing 판정(EBADF)을
+    // 지우는 것, `got == 0`을 Unwritten으로 보지 않는 것, 선언 길이 비교(Cut)를 지우는 것(잘린 프레임이
+    // Damaged로 보고됨).
+    #[test]
+    fn no_environment_reasons() {
+        let frame = env_frame::encode([b"HOME=/h\0".as_slice()]).unwrap();
+        assert_eq!(
+            read_env_why(pipe_with(&frame)).as_deref(),
+            Ok(&b"HOME=/h\0"[..])
+        );
+        // A descriptor number nothing holds.
+        assert_eq!(read_env_why(1_000_000), Err(NoEnv::Missing));
+        assert_eq!(read_env_why(pipe_with(b"")), Err(NoEnv::Unwritten));
+        assert_eq!(read_env_why(pipe_with(&frame[..5])), Err(NoEnv::Cut));
+        assert_eq!(
+            read_env_why(pipe_with(&frame[..frame.len() - 1])),
+            Err(NoEnv::Cut)
+        );
+        let mut bad = frame.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert_eq!(read_env_why(pipe_with(&bad)), Err(NoEnv::Damaged));
+    }
 }
