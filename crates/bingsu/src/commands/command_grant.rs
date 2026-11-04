@@ -108,11 +108,18 @@ pub(crate) struct Round {
     environment: Vec<u8>,
     grant_pipe: File,
     results: File,
-    /// The session lock; the supervisor holds its own copy.
-    _lock: File,
+    /// The session's cgroup parent on the atomic path (Linux); the
+    /// supervisor gets a copy at descriptor 6.
+    #[cfg(target_os = "linux")]
+    cgroup: Option<super::command_cgroup::fs::Dir>,
     /// Units left out because the neutral folder failed its check.
     pub neutral_refused: usize,
     scripts: Scripts,
+    /// Diagnostic lines of this round's reclaims, for the helper's log.
+    pub notes: Vec<&'static str>,
+    /// The session lock; the supervisor holds its own copy. Dropped last:
+    /// the reclaim after the supervisor runs while it is still held.
+    _lock: File,
 }
 
 /// Script copies of one round. Linux runs a script through a sealed memfd
@@ -303,6 +310,17 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             return Err(Skip::Neutral);
         }
     }
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "Linux reclaims"))]
+    let mut notes = Vec::new();
+    // Under the lock no supervisor of this session is alive: whatever its
+    // cgroup parent holds is left over (C3 ruling R1, U-15 Q1).
+    #[cfg(target_os = "linux")]
+    let mut cgroup = super::command_cgroup::fs::open_session(session, i.me);
+    #[cfg(target_os = "linux")]
+    if let Some(parent) = &mut cgroup {
+        let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
+        notes.extend(r.messages());
+    }
     let grant = Grant {
         permit: Permit {
             kind: 0,
@@ -336,6 +354,10 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         &grant_read,
         &results_write,
         &lock,
+        #[cfg(target_os = "linux")]
+        cgroup.as_ref().map(|d| &d.folder),
+        #[cfg(not(target_os = "linux"))]
+        None,
         i.helper_deadline,
     )
     .map_err(|_| Skip::Failed)?;
@@ -349,9 +371,12 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         environment: body.clone(),
         grant_pipe,
         results,
-        _lock: lock,
+        #[cfg(target_os = "linux")]
+        cgroup,
         neutral_refused,
         scripts,
+        notes,
+        _lock: lock,
     })
 }
 
@@ -577,26 +602,35 @@ pub(crate) struct Report {
     pub dropped: plan::Dropped,
     /// The grant could not be written in time: nothing ran.
     pub send_failed: bool,
+    /// Diagnostic lines of the round's reclaims.
+    pub notes: Vec<&'static str>,
 }
 
 impl Round {
     /// Without publication: no grant. Closing the pipe tells the supervisor
     /// to run nothing; it is then waited for until the helper's deadline.
-    pub(crate) fn abandon(self) {
-        self.end();
+    /// Returns the round's diagnostic lines.
+    pub(crate) fn abandon(self) -> Vec<&'static str> {
+        self.end()
     }
 
     /// `abandon`, then the round's script copies are removed once the
     /// supervisor has ended (reaped: its end of the result pipe is closed,
     /// so it runs nothing more). A supervisor still alive at the helper's
     /// deadline may still be starting an interpreter on one: its copies
-    /// stay for the next round of the session to sweep.
-    fn end(self) {
+    /// stay for the next round of the session to sweep. Then, still under
+    /// the lock, its unit cgroups are reclaimed (Linux, C3 ruling R1).
+    fn end(self) -> Vec<&'static str> {
         let deadline = self.grant.helper_deadline;
         let Self {
             mut child,
             grant_pipe,
             scripts,
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "Linux reclaims"))]
+            mut notes,
+            #[cfg(target_os = "linux")]
+            mut cgroup,
+            _lock,
             ..
         } = self;
         drop(grant_pipe);
@@ -605,6 +639,16 @@ impl Round {
         if wait(&mut child, deadline) {
             scripts.remove_all();
         }
+        // Killed and reaped if it is still there; then its unit cgroups are
+        // leftovers, removed while the lock is still held.
+        drop(child);
+        #[cfg(target_os = "linux")]
+        if let Some(parent) = &mut cgroup {
+            let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
+            notes.extend(r.messages());
+        }
+        drop(_lock);
+        notes
     }
 
     /// Sends the grant under `permit`, reads every result until the helper's
@@ -636,13 +680,13 @@ impl Round {
                 report.dropped = resolved.dropped;
                 self.grant.units = resolved.units;
                 if self.grant.units.is_empty() {
-                    self.abandon();
+                    report.notes = self.abandon();
                     return report;
                 }
             }
             Err(_) => {
                 report.failed = true;
-                self.abandon();
+                report.notes = self.abandon();
                 return report;
             }
         }
@@ -653,13 +697,13 @@ impl Round {
         // units() kept the grant within one frame, so this encodes.
         let Ok(frame) = wire::encode(&Message::Grant(self.grant.clone())) else {
             report.send_failed = true;
-            self.abandon();
+            report.notes = self.abandon();
             return report;
         };
         // A short grant is a cut one, which the supervisor refuses whole.
         if !send(self.grant_pipe.as_raw_fd(), &frame, end) {
             report.send_failed = true;
-            self.abandon();
+            report.notes = self.abandon();
             return report;
         }
         let want = self.grant.units.len() + self.grant.probes.len();
@@ -713,7 +757,7 @@ impl Round {
         if let Ok(done) = wire::encode(&Message::Done) {
             let _ = sys::write_fd(self.grant_pipe.as_raw_fd(), &done);
         }
-        self.abandon();
+        report.notes = self.abandon();
         report
     }
 }

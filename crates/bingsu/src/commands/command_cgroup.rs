@@ -179,6 +179,7 @@ fn clear<T: Tree>(
 #[cfg(target_os = "linux")]
 pub(crate) mod fs {
     use super::super::sys;
+    use bingsu_core::command::cgroup;
     use std::{
         ffi::OsStr,
         fs::File,
@@ -235,6 +236,109 @@ pub(crate) mod fs {
             sys::WriteOutcome::Done => Ok(()),
             _ => Err(io::Error::last_os_error()),
         }
+    }
+
+    fn read_small(path: &std::ffi::CStr, max: usize) -> io::Result<Vec<u8>> {
+        // SAFETY: fixed NUL-terminated path; the descriptor is owned below.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        use std::os::fd::FromRawFd;
+        // SAFETY: a fresh descriptor nothing else owns.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let mut out = vec![0u8; max + 1];
+        let mut len = 0;
+        while len < out.len() {
+            // SAFETY: writable tail of `out`.
+            let n = unsafe {
+                libc::read(
+                    file.as_raw_fd(),
+                    out[len..].as_mut_ptr().cast(),
+                    out.len() - len,
+                )
+            };
+            match usize::try_from(n) {
+                Ok(0) => break,
+                Ok(n) => len += n,
+                Err(_) => return Err(io::Error::last_os_error()),
+            }
+        }
+        out.truncate(len);
+        Ok(out)
+    }
+
+    /// The atomic path's capability (spec section 4 stop order step 4, the
+    /// X-04 method; U-14 F0, C3 rulings): Linux 5.14 or later, the process's
+    /// `0::` cgroup on the cgroup v2 mount at `/sys/fs/cgroup`, and the
+    /// session parent `bingsu-cmd-<digest>` under it, made here when
+    /// missing and owned by `me`. On cgroup v2 from 5.14 every non-root
+    /// cgroup has `cgroup.kill`, and the parent is never the root. `None` on
+    /// any miss: the round takes the best-effort path. Called only by a
+    /// helper holding the session lock, in a round with command units.
+    pub(crate) fn open_session(session: &[u8], me: u32) -> Option<Dir> {
+        // SAFETY: zeroed writable utsname.
+        let mut u: libc::utsname = unsafe { std::mem::zeroed() };
+        // SAFETY: writable utsname.
+        if unsafe { libc::uname(&mut u) } != 0 {
+            return None;
+        }
+        // SAFETY: uname wrote a NUL-terminated release.
+        let release = unsafe { std::ffi::CStr::from_ptr(u.release.as_ptr()) };
+        let text = read_small(c"/proc/self/cgroup", cgroup::PROC_CGROUP_MAX).ok()?;
+        open_session_at(b"/sys/fs/cgroup", release.to_bytes(), &text, session, me)
+    }
+
+    /// [`open_session`] from its inputs: the cgroup v2 mount, `uname -r`
+    /// and `/proc/self/cgroup`.
+    pub(crate) fn open_session_at(
+        mount: &[u8],
+        release: &[u8],
+        proc_self_cgroup: &[u8],
+        session: &[u8],
+        me: u32,
+    ) -> Option<Dir> {
+        if !cgroup::kernel_has_kill(release) {
+            return None;
+        }
+        let own = cgroup::own_path(proc_self_cgroup)?;
+        let own = std::ffi::CString::new([mount, own].concat()).ok()?;
+        // SAFETY: NUL-terminated path; the descriptor is owned below.
+        let fd = unsafe {
+            libc::open(
+                own.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        use std::os::fd::FromRawFd;
+        // SAFETY: a fresh descriptor nothing else owns.
+        let own = unsafe { File::from_raw_fd(fd) };
+        // SAFETY: zeroed writable statfs.
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: open descriptor and writable statfs.
+        if unsafe { libc::fstatfs(own.as_raw_fd(), &mut st) } != 0 {
+            return None;
+        }
+        #[allow(
+            clippy::unnecessary_cast,
+            reason = "f_type's type differs between libcs"
+        )]
+        let cgroup2 = st.f_type as i64 == libc::CGROUP2_SUPER_MAGIC as i64;
+        if !cgroup2 {
+            return None;
+        }
+        let name = cgroup::parent_name(session);
+        let name = OsStr::new(&name);
+        // A failed mkdir (read-only, not delegated) leaves nothing to open.
+        let _ = sys::mkdir_at(own.as_fd(), name, 0o700);
+        let parent = sys::open_dir_at_nofollow(own.as_fd(), name).ok()?;
+        if sys::fd_facts(parent.as_fd()).ok()?.uid != me {
+            return None;
+        }
+        Some(Dir::new(parent))
     }
 
     impl super::Tree for Fs {
@@ -302,7 +406,7 @@ pub(crate) mod fs {
             // SAFETY: writable buffer of its length; kernfs files reread from 0.
             let n = unsafe { libc::pread(events, buf.as_mut_ptr().cast(), buf.len(), 0) };
             let n = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
-            Ok(bingsu_core::command::cgroup::populated(&buf[..n]))
+            Ok(cgroup::populated(&buf[..n]))
         }
 
         fn rmdir(&mut self, dir: &Dir, name: &[u8]) -> io::Result<()> {
@@ -600,7 +704,7 @@ pub(crate) mod tests {
 /// `--ignored`. Each test makes its own parent under the test's cgroup.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod cell {
-    use super::fs::{Dir, Fs};
+    use super::fs::{self, Dir, Fs};
     use super::*;
     use std::{fs::File, os::unix::fs::DirBuilderExt, path::PathBuf, process::Command};
 
@@ -629,11 +733,93 @@ pub(crate) mod cell {
         })
     }
 
+    /// Whether this run is the privileged cell; atomic-path tests return
+    /// at once elsewhere (CI checks each one PASSED in that cell).
+    pub(crate) fn privileged() -> bool {
+        cell() == "priv"
+    }
+
+    /// The cell this run is in: `BINGSU_CGROUP_CELL=priv|plain`.
+    pub(crate) fn cell() -> String {
+        #[expect(clippy::disallowed_methods, reason = "test-only cell name")]
+        std::env::var("BINGSU_CGROUP_CELL").expect("BINGSU_CGROUP_CELL=priv|plain")
+    }
+
+    fn release() -> Vec<u8> {
+        std::fs::read("/proc/sys/kernel/osrelease").unwrap()
+    }
+
+    // 특권 셀은 원자 경로, 기본 셀은 최선 노력(X-04 음성 대조: 하위 폴더 생성 EROFS). 두 번째 판정은 같은
+    // 부모 폴더를 다시 연다. 이것을 실패시키는 것: 부모를 열지 못하면 자기 cgroup 폴더를 대신 쓰는 것(기본
+    // 셀에서 Some), open_session_at의 커널 조건을 지우는 것(5.13 입력이 Some).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_capability_matches_the_cell() {
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        let session = format!("cell-{}", std::process::id());
+        let me = super::super::sys::current_uid();
+        let first = fs::open_session(session.as_bytes(), me);
+        match cell().as_str() {
+            "plain" => assert!(first.is_none()),
+            "priv" => {
+                use std::os::unix::fs::MetadataExt;
+                let a = first.expect("atomic path in the privileged cell");
+                let b = fs::open_session(session.as_bytes(), me).unwrap();
+                assert_eq!(
+                    a.folder.metadata().unwrap().ino(),
+                    b.folder.metadata().unwrap().ino()
+                );
+                let old = b"5.13.19\n";
+                assert!(
+                    fs::open_session_at(b"/sys/fs/cgroup", old, &text, session.as_bytes(), me)
+                        .is_none()
+                );
+                let path = own_cgroup().join(cgroup::parent_name(session.as_bytes()));
+                std::fs::remove_dir(path).unwrap();
+            }
+            other => panic!("unknown cell {other}"),
+        }
+    }
+
+    // cgroup v2가 아닌 곳(일반 파일 시스템)은 원자 경로가 아니다. 이것을 실패시키는 것: fstatfs의
+    // CGROUP2_SUPER_MAGIC 비교를 지우는 것(임시 폴더 아래에 부모를 만들고 Some).
+    #[test]
+    fn test_capability_needs_cgroup2() {
+        let root = std::env::temp_dir().join(format!("bingsu-cg-v1-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("user.slice")).unwrap();
+        let me = super::super::sys::current_uid();
+        let mount = root.as_os_str().as_encoded_bytes();
+        let got = fs::open_session_at(mount, b"6.8.0", b"0::/user.slice\n", b"s", me);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(got.is_none());
+    }
+
+    // 남이 만든 부모 폴더는 쓰지 않는다. 이것을 실패시키는 것: 소유자 비교를 지우는 것.
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_capability_refuses_a_foreign_parent() {
+        if !privileged() {
+            return;
+        }
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        let session = format!("foreign-{}", std::process::id());
+        let path = own_cgroup().join(cgroup::parent_name(session.as_bytes()));
+        std::fs::create_dir(&path).unwrap();
+        std::os::unix::fs::chown(&path, Some(4242), None).unwrap();
+        let me = super::super::sys::current_uid();
+        let got = fs::open_session_at(b"/sys/fs/cgroup", &release(), &text, session.as_bytes(), me);
+        std::fs::remove_dir(&path).unwrap();
+        assert!(got.is_none());
+    }
+
     // 실제 cgroupfs에서 kill → populated 0 → 후위 rmdir. 대상 프로세스는 단위 아래 깊이 2 폴더에 있다.
     // 이것을 실패시키는 것: Fs::kill이 cgroup.kill을 쓰지 않는 것(populated가 1로 남아 단위가 남음).
     #[test]
-    #[ignore = "needs a delegated cgroup v2 tree (privileged cell)"]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
     fn fs_reclaim_kills_and_removes_a_nested_tree() {
+        if !privileged() {
+            return;
+        }
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
         let (p, mut dir) = parent("nested");
         let unit = p.join(cgroup::unit_name(1));

@@ -110,7 +110,8 @@ pub(crate) fn spawn(
 
 /// The supervisor itself, from the helper (`args`: the binary and
 /// `__command-v1`): 0 to 2 `/dev/null`, then the grant pipe's read end, the
-/// result pipe's write end and the lock copy at 3, 4 and 5, in folder "/".
+/// result pipe's write end and the lock copy at 3, 4 and 5, and on the
+/// atomic path the session's cgroup parent at 6, in folder "/".
 /// Every other helper descriptor is closed.
 pub(crate) fn spawn_supervisor(
     exe: &CStr,
@@ -118,8 +119,11 @@ pub(crate) fn spawn_supervisor(
     grant: &File,
     results: &File,
     lock: &File,
+    cgroup: Option<&File>,
     expires_ns: u64,
 ) -> io::Result<OwnedChild> {
+    let mut dups = vec![(grant, 3), (results, 4), (lock, 5)];
+    dups.extend(cgroup.map(|c| (c, 6)));
     spawn_with(
         exe,
         args,
@@ -128,7 +132,7 @@ pub(crate) fn spawn_supervisor(
             (1, libc::O_WRONLY),
             (2, libc::O_WRONLY),
         ],
-        &[(grant, 3), (results, 4), (lock, 5)],
+        &dups,
         c"/",
         true,
         false,
@@ -476,7 +480,7 @@ mod tests {
         let (c, _d) = pipe().unwrap();
         let sleep = c"/bin/sleep";
         let args = [b"sleep".to_vec(), b"5".to_vec()];
-        let mut child = spawn_supervisor(sleep, &args, &a, &b, &c, u64::MAX).unwrap();
+        let mut child = spawn_supervisor(sleep, &args, &a, &b, &c, None, u64::MAX).unwrap();
         // The spawn is synchronous; give exec a moment to settle the table.
         std::thread::sleep(std::time::Duration::from_millis(50));
         let seen = fds(child.pid);
@@ -489,6 +493,24 @@ mod tests {
         }
         assert_eq!(seen, [0, 1, 2, 3, 4, 5]);
         assert!(environ.is_empty());
+    }
+
+    // GATE-CMD-FDS(원자 경로, C3 판정 R2): 세션 cgroup 부모가 있으면 정확히 {0..6}. 이것을 실패시키는 것:
+    // spawn_supervisor의 `dups.extend(cgroup…)`를 지우는 것({0..5}가 됨).
+    #[test]
+    fn test_supervisor_gets_seven_fds_on_the_atomic_path() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (a, b) = pipe().unwrap();
+        let (c, _d) = pipe().unwrap();
+        let (parent, _e) = pipe().unwrap();
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        let mut child =
+            spawn_supervisor(c"/bin/sleep", &args, &a, &b, &c, Some(&parent), u64::MAX).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let seen = fds(child.pid);
+        let _ = child.signal(libc::SIGKILL);
+        while !child.reap().unwrap() {}
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6]);
     }
 
     fn sleeper(
@@ -610,8 +632,11 @@ mod tests {
     // 원자 경로: 중계는 처음부터 그 cgroup 안에서 시작한다. 이것을 실패시키는 것: clone_into에서
     // CLONE_INTO_CGROUP을 빼는 것(시험 프로세스의 cgroup에서 시작).
     #[test]
-    #[ignore = "needs a delegated cgroup v2 tree (privileged cell)"]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
     fn test_clone3_starts_inside_the_cgroup() {
+        if !super::super::command_cgroup::cell::privileged() {
+            return;
+        }
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
         let (p, _dir) = super::super::command_cgroup::cell::parent("clone3");
         let unit = p.join("u0000000000000001");
@@ -702,8 +727,16 @@ mod timing {
         }
         let args = [exe.to_bytes().to_vec(), b"__command-v1".to_vec()];
         let spawned = now();
-        let mut child =
-            spawn_supervisor(exe, &args, &grant_read, &results_write, &lock, u64::MAX).unwrap();
+        let mut child = spawn_supervisor(
+            exe,
+            &args,
+            &grant_read,
+            &results_write,
+            &lock,
+            None,
+            u64::MAX,
+        )
+        .unwrap();
         drop((grant_read, results_write));
         if !early {
             std::thread::sleep(std::time::Duration::from_millis(50));
