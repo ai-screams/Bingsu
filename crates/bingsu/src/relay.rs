@@ -944,16 +944,18 @@ mod tests {
                 // SAFETY: closes the child's own fd 2.
                 unsafe { libc::close(2) };
             }
-            // SAFETY: plain prctl calls; `program` points at the filter above,
-            // alive until spawn returns.
-            if deny_nnp
-                && unsafe {
-                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                        || libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, program)
-                            != 0
+            if deny_nnp {
+                // SAFETY: plain prctl with integer arguments.
+                if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
-            {
-                return Err(std::io::Error::last_os_error());
+                // SAFETY: `program` points at the filter above, alive until spawn returns.
+                let rc = unsafe {
+                    libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, program)
+                };
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         };

@@ -64,7 +64,7 @@ TCB_SHA256 = {
     "crates/bingsu/src/prompt_io.rs": "31dc5ba3b067a86a6f3ca2b3e4c849013259ae5e3882b592115bac846cff4d2e",
     "crates/bingsu/src/prompt.rs": "c4a9890e04fdb2d463ade9d1f1f2423116dc244ed12df2e7456ea6ec02b05919",
     "crates/bingsu/src/main.rs": "5ddd2c064bf75087d426c4bca8e70b14917c6e4b4feeb5457272c04095e0380c",
-    "crates/bingsu/src/relay.rs": "1068ffc32c7db76a7de41a9de30f8d967d04f1c8d30fb22b62f9c4ff946c5743",
+    "crates/bingsu/src/relay.rs": "01ac436e7a840286783b48b7f84b86e36199e90237fe4fc4bf3be868bb93a677",
     "crates/bingsu-core/src/fs_trust.rs": "cc71c39796a8fbb553ab678ada14860caa14a5f57b09591b0669e9f654575df9",
     "crates/bingsu-core/src/handoff.rs": "88ccf0b2376b89f1878f954c515b231a0c2ee86188f9d99bc2fb1ad80614805e",
     "crates/bingsu-core/src/command/path.rs": "35bd7c130b33491297b0842f9dce7f7f4560fccb3ebab19b1596ea3c51091dc4",
