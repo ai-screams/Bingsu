@@ -2158,10 +2158,10 @@ pub(crate) mod tests {
         assert!(matches!(other[0].reason, Reason::SpawnFailed), "{other:?}");
     }
 
-    // 최선 노력 경로(cgroup 없음): 중계는 자기 프로세스 그룹을 이끌고, 단위가 끝날 때(마감, 또는 대상이 끝나
-    // reap하기 직전) 그 그룹 전체에 SIGKILL이 간다. setsid하지 않은 손자는 남지 않는다. 이것을 실패시키는 것:
-    // spawn의 SETPGROUP을 끄는 것(그룹이 없어 손자가 남음), end_group의 kill을 지우는 것, reap 앞의
-    // exited() 그룹 종료를 지우는 것(끝난 대상의 손자가 남음).
+    // 최선 노력 경로(cgroup 없음): 중계는 자기 프로세스 그룹을 이끌고, 그 종료를 회수하기 직전(마감 뒤, 또는
+    // 대상이 스스로 끝난 뒤) OwnedChild::reap이 그룹 전체에 SIGKILL을 보낸다. setsid하지 않은 손자는 남지
+    // 않는다. 이것을 실패시키는 것: spawn의 own_group을 끄는 것(그룹이 없어 손자가 남음), reap의 killpg를
+    // 지우는 것.
     #[cfg(target_os = "linux")]
     #[test]
     fn test_group_kill_ends_a_same_group_descendant() {
