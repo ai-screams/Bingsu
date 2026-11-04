@@ -256,7 +256,14 @@ fn spawn_with(
                 [std::ptr::null_mut()].as_ptr(),
             )
         })?;
-        Ok((OwnedChild::attach(pid, expires_ns)?, spawn_enter))
+        let child = OwnedChild::attach(pid, expires_ns)?;
+        #[cfg(target_os = "macos")]
+        let child = if own_group {
+            child.leads_group()
+        } else {
+            child
+        };
+        Ok((child, spawn_enter))
     })();
     // SAFETY: initialized actions, no longer used.
     unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };

@@ -1427,6 +1427,21 @@ mod tests {
         std::fs::remove_dir_all(&t).unwrap();
     }
 
+    // C2 재리뷰 Low: 검사가 끝난 뒤 copy() 전에 바뀐 원본도 복사하지 않는다. 비교 기준은 걷기 때의 Stamp다. 이것을
+    // 실패시키는 것: copy가 Checked의 Stamp 대신 copy 시작 때 새로 읽은 stat과 비교하는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_copy_refuses_a_script_changed_before_the_copy() {
+        let (t, root) = runtime_root("changed-early");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        let script = t.join("tool.sh");
+        let checked = script_at(&script, b"#!/bin/sh\necho a\n");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&script, b"#!/bin/sh\necho b\n").unwrap();
+        assert_eq!(copies.copy(&checked, "t"), Err(Miss::Refused));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
     // C2 리뷰 Medium: 원본 스크립트의 실행 권한은 커널에 묻는다. 소유자 실행 비트가 없는 0611(남에게만 실행)과
     // 0011은 복사하지 않는다. 양성 대조: 0711. 이것을 실패시키는 것: may_execute의 faccessat 검사를 지우는 것.
     #[cfg(target_os = "macos")]

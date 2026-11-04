@@ -502,9 +502,9 @@ impl Supervisor {
         self.stopped = true;
         for run in &self.runs {
             // macOS has no cgroup: the relay's process group goes when this
-            // exit is reaped (`reap_group`, the same step right after). A
-            // supervisor that ends before it sees the exit leaves the group
-            // (best effort, as a descendant that called setsid stays).
+            // exit is reaped (OwnedChild::reap of a group leader), in a later
+            // step or in the drop when the supervisor ends first (best
+            // effort: a descendant that called setsid stays).
             let _ = run.child.signal(libc::SIGKILL);
         }
     }
@@ -565,11 +565,7 @@ impl Supervisor {
             read_stdout(run);
             read_status(run);
             if !run.reaped {
-                #[cfg(target_os = "macos")]
-                let reaped = run.child.reap_group();
-                #[cfg(not(target_os = "macos"))]
-                let reaped = run.child.reap();
-                run.reaped = reaped.unwrap_or(true);
+                run.reaped = run.child.reap().unwrap_or(true);
                 if run.reaped {
                     // The relay is gone: what its pipes hold now is all it wrote.
                     read_status(run);

@@ -35,6 +35,10 @@ pub(crate) struct OwnedChild {
     pub spawn_return: Option<u64>,
     signal: SignalChild,
     expires_ns: u64,
+    /// macOS: it leads its own process group (a relay), so `reap` ends what
+    /// is left of the group first.
+    #[cfg(target_os = "macos")]
+    group: bool,
 }
 
 impl SignalChild {
@@ -153,8 +157,17 @@ impl OwnedChild {
                 expires_ns,
                 spawn_enter: None,
                 spawn_return: None,
+                group: false,
             })
         }
+    }
+
+    /// macOS: this child leads its own process group (spawned with
+    /// `POSIX_SPAWN_SETPGROUP`, so its pid is the group id).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn leads_group(mut self) -> Self {
+        self.group = true;
+        self
     }
 
     pub fn signal(&self, signal: i32) -> io::Result<()> {
@@ -211,6 +224,34 @@ impl OwnedChild {
         }
         #[cfg(target_os = "macos")]
         {
+            // A group leader: once its exit is seen, and before the wait frees
+            // its pid (and so the group id), what is left of the group is
+            // killed; an exit not seen yet is not reaped. Every reap takes
+            // this path, the drop's too. Fails without the early return:
+            // group_exit_seen_late_is_not_reaped_before_its_group; without
+            // the killpg: a_dropped_group_leader_takes_its_group.
+            if self.group {
+                // SAFETY: zeroed writable siginfo_t; WNOWAIT leaves the zombie in place.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: our own child; nothing is reaped.
+                let rc = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        self.signal.pid as libc::id_t,
+                        &mut info,
+                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                    )
+                };
+                #[cfg(test)]
+                tests::after_waitid();
+                if rc == 0 {
+                    if info.si_pid == 0 {
+                        return Ok(false);
+                    }
+                    // SAFETY: the zombie still holds the group id.
+                    unsafe { libc::killpg(self.signal.pid, libc::SIGKILL) };
+                }
+            }
             let mut status = 0;
             // SAFETY: sole reaper, writable status; state excludes signals and sampling.
             let rc = unsafe { libc::waitpid(self.signal.pid, &mut status, libc::WNOHANG) };
@@ -232,38 +273,6 @@ impl OwnedChild {
             }
         }
         Ok(state.reaped)
-    }
-
-    /// macOS: `reap` for a child that leads its own process group. Once it
-    /// has exited, and before the wait frees its pid, what is left of its
-    /// group (a descendant that did not leave it) is killed.
-    #[cfg(target_os = "macos")]
-    pub fn reap_group(&mut self) -> io::Result<bool> {
-        {
-            let state = self.signal.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.reaped {
-                return Ok(true);
-            }
-            // SAFETY: zeroed writable siginfo_t; WNOWAIT leaves the zombie in place.
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // SAFETY: our own child; nothing is reaped.
-            let rc = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    self.signal.pid as libc::id_t,
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            };
-            // Fails without it: test_macos_group_grandchild_ends_with_the_round
-            // and ..._when_the_helper_dies. Only before the wait below: until
-            // then the pid, and so the group id, cannot be reused.
-            if rc == 0 && info.si_pid != 0 {
-                // SAFETY: the zombie still holds the group id.
-                unsafe { libc::killpg(self.signal.pid, libc::SIGKILL) };
-            }
-        }
-        self.reap()
     }
 
     /// The reaped child's wait status (`waitpid` form).
@@ -544,6 +553,95 @@ fn spawn_args_with_probe(
 mod tests {
     use super::*;
 
+    /// Runs in a group leader's `reap` right after its waitid (tests only).
+    #[cfg(target_os = "macos")]
+    type Hook = Option<Box<dyn FnOnce()>>;
+    #[cfg(target_os = "macos")]
+    thread_local! {
+        static AFTER_WAITID: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn after_waitid() {
+        if let Some(f) = AFTER_WAITID.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
+
+    /// A group leader `sh` whose background `sleep` stays in its group, and
+    /// that grandchild's pid. This handle is the child's only reaper.
+    #[cfg(target_os = "macos")]
+    fn leader_with_grandchild() -> (OwnedChild, libc::pid_t) {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "/bin/sleep 30 & echo $!; exec /bin/sleep 30"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        // The OwnedChild below reaps it; std must not.
+        std::mem::forget(child);
+        let expires = now_ns().unwrap() + 5_000_000_000;
+        let owned = OwnedChild::attach(pid, expires).unwrap().leads_group();
+        (owned, line.trim().parse().unwrap())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ends(pid: libc::pid_t) -> bool {
+        (0..200).any(|_| {
+            // SAFETY: signal 0 only asks whether the pid exists.
+            let gone = unsafe { libc::kill(pid, 0) } != 0;
+            if !gone {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            gone
+        })
+    }
+
+    // C2 재리뷰 Medium: 그룹 리더의 종료를 waitid(WNOWAIT)가 보지 못했으면 reap하지 않는다. 두 호출 사이에 리더가
+    // 죽으면(hook) 그 회차는 Ok(false)이고, 다음 reap이 그룹을 끝낸 뒤 회수한다. 이것을 실패시키는 것: reap의
+    // `si_pid == 0`이면 돌아가는 줄을 지우는 것(waitpid가 바로 회수하고 손자가 남음).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn group_exit_seen_late_is_not_reaped_before_its_group() {
+        let _spawn = super::super::sys::test_inherited_fd_lock();
+        let (mut leader, grandchild) = leader_with_grandchild();
+        let pid = leader.pid;
+        AFTER_WAITID.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                // SAFETY: our own child.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }));
+        });
+        assert!(
+            !leader.reap().unwrap(),
+            "an exit waitid did not see was reaped"
+        );
+        assert!(leader.reap().unwrap());
+        assert!(ends(grandchild), "the grandchild outlived its group leader");
+    }
+
+    // C2 재리뷰 Medium: 감독이 대상의 종료를 보기 전에 끝나도(stop 뒤 drop) drop의 회수가 그룹을 끝낸다. 이것을
+    // 실패시키는 것: reap의 killpg를 지우는 것, 그룹 리더 표시(leads_group)를 reap이 보지 않는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_dropped_group_leader_takes_its_group() {
+        let _spawn = super::super::sys::test_inherited_fd_lock();
+        let (leader, grandchild) = leader_with_grandchild();
+        leader.signal(libc::SIGKILL).unwrap();
+        drop(leader);
+        assert!(
+            ends(grandchild),
+            "the grandchild outlived its dropped group leader"
+        );
+    }
+
     // 이것을 실패시키는 것: pipe2의 O_CLOEXEC(또는 macOS fcntl 설정) 제거.
     #[test]
     fn pipe_endpoints_are_cloexec() {
@@ -698,6 +796,7 @@ mod tests {
                 })),
             },
             expires_ns: 0,
+            group: false,
         };
         let copy = child.signal_copy().unwrap();
         assert!(child.reap().unwrap());
