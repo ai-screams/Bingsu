@@ -26,7 +26,7 @@ class BypassGates(unittest.TestCase):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, dest)
         core = self.root / "crates/bingsu-core/src/f.rs"
-        core.parent.mkdir(parents=True)
+        core.parent.mkdir(parents=True, exist_ok=True)
         core.write_text("pub fn f() {}\n")
 
     def replace_tcb(self, name, fixture):

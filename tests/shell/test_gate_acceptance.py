@@ -1036,9 +1036,12 @@ LINUX_DESELECTED = (
     "tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount",
     "tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock",
     "tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children",
-    "tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio",
+    "tests/shell/test_prompt_env_paths.py::test_helper_fds_after_env",
     "tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds",
     "tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive",
+    "tests/shell/test_prompt_env_paths.py::test_ld_preload_not_loaded_into_helper",
+    "tests/shell/test_prompt_env_paths.py::test_helper_ignores_xdg_runtime_dir_from_env",
+    "tests/shell/test_prompt_env_paths.py::test_oversize_env_block_means_no_env",
     "tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t",
 )
 MACOS_DESELECTED = ("tests/shell/test_zsh_screen.py::test_prompt_inside_tmux",)

@@ -20,7 +20,8 @@ int main(int argc, char **argv) {
     for (unsigned long fd = 0; fd < scan; fd++) {
         if (fcntl((int)fd, F_GETFD) >= 0) {
             count++;
-            if (fd >= (collect ? 6 : 3)) unexpected++;
+            /* The refresh helper also holds the environment frame pipe at fd 4. */
+            if (fd >= (collect ? 6 : 3) && (collect || fd != 4)) unexpected++;
         }
     }
     char path[8192] = {0}; int slow = 0;
@@ -39,9 +40,22 @@ int main(int argc, char **argv) {
     if (stat("/dev/null", &null_stat)) return 12;
     for (int fd = 0; fd < 3; fd++)
         if (!fstat(fd, &fd_stat) && S_ISCHR(fd_stat.st_mode) && fd_stat.st_rdev == null_stat.st_rdev) null_stdio++;
+    /* The frame on fd 4: bytes up to end of file, and whether the parent's
+     * BINGSU_ATTACK entry is in it (only as bytes, never in envp). */
+    static char frame[70000]; long frame_bytes = -1; int frame_attack = 0;
+    if (!collect && fcntl(4, F_GETFD) >= 0) {
+        frame_bytes = 0;
+        for (;;) {
+            ssize_t n = read(4, frame + frame_bytes, sizeof(frame) - (size_t)frame_bytes);
+            if (n <= 0) break;
+            frame_bytes += n;
+        }
+        for (long i = 0; i + 18 <= frame_bytes; i++)
+            if (!memcmp(frame + i, "BINGSU_ATTACK=yes", 18)) frame_attack = 1;
+    }
     int out = collect ? openat(4,"probe",O_WRONLY|O_CREAT|O_TRUNC,0600) : open(path,O_WRONLY|O_CREAT|O_TRUNC,0600);
     if (out < 0) return 11;
-    dprintf(out,"%d %d %d %d %d %d %d %d\n",count,unexpected,mode,signal_ok,environment_ok,(int)getpid(),(int)request_stat.st_nlink,null_stdio); close(out);
+    dprintf(out,"%d %d %d %d %d %d %d %d %ld %d\n",count,unexpected,mode,signal_ok,environment_ok,(int)getpid(),(int)request_stat.st_nlink,null_stdio,frame_bytes,frame_attack); close(out);
     if (slow || collect) sleep(2);
     return 0;
 }

@@ -218,6 +218,15 @@ POSIX_SPAWN_PRIMITIVES: dict[str, dict[str, int]] = {
     "musl": {"pipe2": 1, "read": 1, "close": 2},
 }
 
+# The front's command environment frame before its helper spawn, every libc:
+# pipe2(O_CLOEXEC|O_NONBLOCK), one write of the whole frame, close of the
+# write end after it and of the read end after the spawn (U-9h). These are the
+# counts of a normal prompt, which every gate fixture is; an oversize
+# environment skips the write (test_oversize_env_block_means_no_env checks that
+# path on its own). The helper's fd 4 read and close are pipe calls, outside
+# the helper stage kinds; GATE-FDS.1 pins them.
+ENV_PIPE_PRIMITIVES: dict[str, int] = {"pipe2": 1, "write": 1, "close": 2}
+
 # Rust std main-thread stack guard via glibc pthread_getattr_np. In the
 # x86_64 CI capture, /proc/self/maps stdio teardown calls lseek(SEEK_CUR)
 # then lseek(SEEK_SET). Neither call is a loader exemption. The preceding
