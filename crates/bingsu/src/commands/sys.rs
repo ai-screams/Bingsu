@@ -61,10 +61,8 @@ pub fn test_limit_file_size(bytes: libc::rlim_t) {
         rlim_max: 0,
     };
     // SAFETY: valid writable rlimit pointer for the current process.
-    assert_eq!(
-        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) },
-        0
-    );
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) };
+    assert_eq!(rc, 0);
     // Only the soft limit moves: raising an inherited hard limit is EPERM.
     limit.rlim_cur = bytes.min(limit.rlim_max);
     // SAFETY: SIG_IGN is a valid disposition; nothing else handles SIGXFSZ.
