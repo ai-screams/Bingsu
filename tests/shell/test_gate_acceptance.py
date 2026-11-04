@@ -1037,15 +1037,20 @@ PTY_VERSIONS = {"min-u22": {"bash=5.1", "zsh=5.8"}, "min-d12": {"fish=3.6"}, "cu
 # Files a PTY run leaves out. The first two have their own gates in ci.yml; assert_pty_split
 # finds the place that runs the other two.
 PTY_IGNORED = {"tests/shell/test_collector_no_spawn_macos.py", "tests/shell/test_collector_security.py",
-               "tests/shell/test_gate_acceptance.py", "tests/shell/test_prompt_trace_budget.py"}
-# Files only the Linux PTY runs leave out: the command rounds need git, which the minimum images
-# lack, and run in the filter-calls release step that assert_command_round_home pins. macOS keeps
-# running the file for its no-relay test.
-LINUX_PTY_IGNORED = {"tests/shell/test_command_round.py"}
+               "tests/shell/test_gate_acceptance.py", "tests/shell/test_prompt_trace_budget.py",
+               "tests/shell/test_command_round.py"}
+# The command rounds are shell-independent and need git, which the minimum images lack: they run
+# in the filter-calls release step and the macOS gate step, which assert_command_round_home pins.
 COMMAND_ROUND_FILE = "tests/shell/test_command_round.py"
 COMMAND_ROUND_STEP = "      - name: Command rounds run through the supervisor (release)\n        if: matrix.profile == 'release'\n"
-# Tests of the file that the non-root release cell does not select: the macOS no-relay test.
-COMMAND_ROUND_ELSEWHERE = {"test_macos_runs_no_command_without_a_relay"}
+MACOS_ONLY_ROUNDS = {"test_macos_unit_is_one_process_the_relay_execs_into",
+                     "test_macos_script_runs_from_a_copy_that_is_then_removed",
+                     "test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep"}
+LINUX_ONLY_ROUNDS = {"test_blocked_path_entry_never_holds_the_marker",
+                     "test_each_unit_is_one_process_the_relay_execs_into"}
+# Each home: its job, the step it lives in, and the tests of the file it does not select.
+COMMAND_ROUND_HOMES = (("filter-calls", COMMAND_ROUND_STEP, MACOS_ONLY_ROUNDS),
+                       ("shell-macos", SELF_STEP, LINUX_ONLY_ROUNDS))
 # Exact pytest arguments of a PTY run, apart from PTY_IGNORED. A test leaves these runs
 # only by changing this list.
 PTY_PYTEST = ("tests/shell", "tests/golden/record/test_overrides.py", "tests/golden/record/test_mixed_versions.py",
@@ -1146,18 +1151,19 @@ def assert_macos_jobs_match(text):
 
 def assert_command_round_home(text):
     # 이것을 실패시키는 것: 단계를 빼거나 debug 칸으로 옮기는 것, 파일의 시험 하나를 선택이나 PASSED 단언에서 빼는 것,
-    # pipefail을 빼는 것.
-    block = job_block(text, "filter-calls")
-    assert block.count(COMMAND_ROUND_STEP) == 1, "command round step"
-    step = block.split(COMMAND_ROUND_STEP)[1].split("\n      - ")[0]
-    assert "set -o pipefail" in step
-    run, = (line for line in step.splitlines() if " -m pytest " in line)
-    selected = {arg for arg in shlex.split(run) if arg.startswith(COMMAND_ROUND_FILE + "::")}
-    passed = set(re.findall(r"grep -Fx 'PASSED (\S+)' ", step))
-    assert selected and selected == passed, sorted(selected ^ passed)
+    # pipefail을 빼는 것, 두 집(Linux release 칸, macOS gate 단계) 가운데 하나를 빼는 것.
     names = set(re.findall(r"(?m)^def (test_\w+)\(", (ROOT / COMMAND_ROUND_FILE).read_text()))
-    chosen = {node.split("::")[1].split("[")[0] for node in selected}
-    assert chosen == names - COMMAND_ROUND_ELSEWHERE, sorted(chosen ^ (names - COMMAND_ROUND_ELSEWHERE))
+    for job, header, elsewhere in COMMAND_ROUND_HOMES:
+        block = job_block(text, job)
+        assert block.count(header) == 1, (job, "command round step")
+        step = block.split(header)[1].split("\n      - ")[0]
+        assert "set -o pipefail" in step, job
+        run, = (line for line in step.splitlines() if " -m pytest " in line and COMMAND_ROUND_FILE in line)
+        selected = {arg for arg in shlex.split(run) if arg.startswith(COMMAND_ROUND_FILE + "::")}
+        passed = set(re.findall(r"grep -Fx 'PASSED (" + re.escape(COMMAND_ROUND_FILE) + r"::\S+)' ", step))
+        assert selected and selected == passed, (job, sorted(selected ^ passed))
+        chosen = {node.split("::")[1].split("[")[0] for node in selected}
+        assert chosen == names - elsewhere, (job, sorted(chosen ^ (names - elsewhere)))
 
 
 def assert_pty_split(text, ignored=PTY_IGNORED):
@@ -1181,10 +1187,10 @@ def assert_pty_split(text, ignored=PTY_IGNORED):
     # pytest reads this variable; a value in the workflow would narrow every run without changing the commands.
     assert "PYTEST_ADDOPTS" not in text
     assert_pty_selection(assert_pty_steps(text, "shell-linux", LINUX_CONDITIONS), LINUX_PTY_RUN, LINUX_DESELECTED,
-                         ignored | LINUX_PTY_IGNORED)
+                         ignored)
     for job in ("shell-macos", "shell-macos-shells"):
         assert_pty_selection(assert_pty_steps(text, job, MACOS_CONDITIONS), MACOS_PTY_RUN, MACOS_DESELECTED, ignored)
-    assert all((ROOT / path).is_file() for path in ignored | LINUX_PTY_IGNORED), "no such file"
+    assert all((ROOT / path).is_file() for path in ignored), "no such file"
     assert_command_round_home(text)
     # The two left-out files that have no gate of their own run in required cells.
     assert [cell[0] for cell in cells if cell[1] == "min-d12"] == ["Shell PTY (min-d12)"]
@@ -1277,9 +1283,11 @@ def test_pty_cells_cover_every_shell_and_shell_free_file():
         "macos-steps-differ": ("      - run: brew install bash fish\n", "", "shell-macos-shells"),
         "macos-keeps-trace-budget": (" --ignore tests/shell/test_prompt_trace_budget.py", "", "shell-macos"),
         "linux-keeps-command-round": ("                --ignore tests/shell/test_command_round.py \\\n", "", "shell-linux"),
-        "macos-drops-command-round": (" --ignore tests/shell/test_prompt_trace_budget.py",
-                                      " --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py",
-                                      "both-macos-jobs"),
+        "macos-keeps-command-round": (" --ignore tests/shell/test_command_round.py", "", "both-macos-jobs"),
+        "macos-command-round-drops-a-test": (" 'tests/shell/test_command_round.py::test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep'",
+                                             "", "shell-macos"),
+        "macos-command-round-drops-a-grep": ("          grep -Fx 'PASSED tests/shell/test_command_round.py::test_configured_command_runs' \"$RUNNER_TEMP/command-round.txt\"\n",
+                                             "", "shell-macos"),
         "command-round-step-gone": ("      - name: Command rounds run through the supervisor (release)\n",
                                     "      - name: Command rounds\n", "filter-calls"),
         "command-round-debug-cell": ("        if: matrix.profile == 'release'\n        run: |\n          set -o pipefail\n          \"$RUNNER_TEMP/venv/bin/python\" -m pytest 'tests/shell/test_command_round.py",

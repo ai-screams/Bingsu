@@ -98,7 +98,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
     #[cfg(not(unix))]
     let _ = &a.argv0;
     match a.args.first().and_then(|w| w.to_str()) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some(bingsu_core::handoff::ENTRY) => crate::relay::run(&a.args),
         #[cfg(unix)]
         Some("__refresh-v1") => helper::run(&a.argv0, &a.args[1..]),

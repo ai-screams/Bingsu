@@ -264,6 +264,10 @@ pub fn path_value(folders: &[PathBuf]) -> Vec<u8> {
 /// executable regular file of that name decides; if that file fails the
 /// rules nothing runs. `repo` as in `sanitize`; the file's own folders
 /// must not pass through it either.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the command round uses lookup_open")
+)]
 pub fn lookup(
     word: &[u8],
     folders: &[PathBuf],
@@ -271,12 +275,24 @@ pub fn lookup(
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Found, Miss> {
+    lookup_open(word, folders, repo, me, groups).map(|(found, _)| found)
+}
+
+/// `lookup`, also handing back the descriptor the checks ran on (macOS
+/// copies a script from it).
+pub fn lookup_open(
+    word: &[u8],
+    folders: &[PathBuf],
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<(Found, Checked), Miss> {
     match rule::name(word) {
         Name::Refused => Err(Miss::Refused),
-        Name::Absolute(p) => resolve(Path::new(OsStr::from_bytes(p)), repo, me, groups),
+        Name::Absolute(p) => resolve_open(Path::new(OsStr::from_bytes(p)), repo, me, groups),
         Name::Search(n) => {
             for folder in folders {
-                match resolve(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
+                match resolve_open(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
                     Err(Miss::Absent) => continue,
                     other => return other,
                 }
@@ -439,19 +455,22 @@ pub const SCRIPT_MAX: u64 = 65_536;
 #[cfg(target_os = "macos")]
 pub struct ScriptCopies {
     dir: File,
+    /// The folder's canonical path (`F_GETPATH`): the relay refuses any
+    /// symlink on the path it is given, and `$TMPDIR`-style roots sit under
+    /// the `/var -> private/var` link.
     path: PathBuf,
 }
 
+/// Copies removed by one sweep, at most (C2 ruling Q1).
+#[cfg(target_os = "macos")]
+pub const SWEEP_MAX: usize = 64;
+
 #[cfg(target_os = "macos")]
 impl ScriptCopies {
-    /// Opens (creating if needed) `scripts` in the runtime root, `root` at
-    /// `root_path` (as `open_runtime_root` checked it). The folder must be
-    /// the user's, exactly 0700, with no ACL that allows writing, local.
-    pub fn open(
-        root: std::os::fd::BorrowedFd<'_>,
-        root_path: &Path,
-        me: u32,
-    ) -> Result<Self, Miss> {
+    /// Opens (creating if needed) `scripts` in the runtime root `root` (as
+    /// `open_runtime_root` checked it). The folder must be the user's,
+    /// exactly 0700, with no ACL that allows writing, local.
+    pub fn open(root: std::os::fd::BorrowedFd<'_>, me: u32) -> Result<Self, Miss> {
         use bingsu_core::fs_trust::{Last, RefuseGroupWrite, final_verdict};
         let name = OsStr::new("scripts");
         let made = sys::mkdir_at(root, name, 0o700).map_err(|_| Miss::Refused)?;
@@ -476,24 +495,24 @@ impl ScriptCopies {
             &mut RefuseGroupWrite,
         )
         .map_err(|_| Miss::Refused)?;
-        Ok(Self {
-            dir,
-            path: root_path.join(name),
-        })
+        let path = sys::fd_path(std::os::fd::AsRawFd::as_raw_fd(&dir)).ok_or(Miss::Refused)?;
+        Ok(Self { dir, path })
     }
 
     /// Copies `script` (read from its start, through the checked
-    /// descriptor) into a new file with a random name, mode 0600, and
-    /// returns its path. A body over `SCRIPT_MAX` is refused. The caller
-    /// removes the copy after the run.
-    pub fn copy(&self, script: &Checked) -> Result<PathBuf, Miss> {
+    /// descriptor) into a new file named `<tag>-<random>`, mode 0600, and
+    /// returns its canonical path. A body over `SCRIPT_MAX` is refused. The
+    /// caller removes the copy after the run (`remove`), or a later `sweep`
+    /// of the same tag does.
+    pub fn copy(&self, script: &Checked, tag: &str) -> Result<PathBuf, Miss> {
         use std::io::Seek;
         let mut from = script.file();
         from.seek(std::io::SeekFrom::Start(0))
             .map_err(|_| Miss::Refused)?;
         let body = read_capped(from)?;
         let random = sys::random_bytes16().ok_or(Miss::Refused)?;
-        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let random: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let name = format!("{tag}-{random}");
         let out = sys::create_file_at(self.dir.as_fd(), OsStr::new(&name), 0o600)
             .map_err(|_| Miss::Refused)?;
         let raw = std::os::fd::AsRawFd::as_raw_fd(&out);
@@ -503,6 +522,40 @@ impl ScriptCopies {
             return Err(Miss::Refused);
         }
         Ok(self.path.join(name))
+    }
+
+    /// Removes a copy `copy` made in this folder.
+    pub fn remove(&self, copy: &Path) {
+        if let Some(name) = copy.file_name()
+            && copy.parent() == Some(self.path.as_path())
+        {
+            let _ = sys::unlink_at(self.dir.as_fd(), name);
+        }
+    }
+
+    /// Removes up to `SWEEP_MAX` copies named `<tag>-...`: what a round of
+    /// the same session left when its helper did not see its supervisor
+    /// end. Only the helper that holds the session lock calls it, so no
+    /// live supervisor of that session uses them; other tags stay.
+    pub fn sweep(&self, tag: &str) -> usize {
+        let Ok(names) = sys::directory_names(self.dir.as_fd()) else {
+            return 0;
+        };
+        let prefix = format!("{tag}-");
+        let mut removed = 0;
+        // Fails without the prefix test: sweep_removes_only_its_tag.
+        for name in names
+            .iter()
+            .filter(|n| n.as_bytes().starts_with(prefix.as_bytes()))
+        {
+            if removed == SWEEP_MAX {
+                break;
+            }
+            if sys::unlink_at(self.dir.as_fd(), name).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
     }
 }
 
@@ -1179,18 +1232,44 @@ mod tests {
         let (t, root) = runtime_root("script-copy");
         let script = t.join("tool.sh");
         let checked = script_at(&script, b"#!/bin/sh\necho hi\n");
-        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
         assert_eq!(mode_of(&t.join("scripts")), 0o700);
         checked.file().read_exact(&mut [0; 2]).unwrap();
-        let copy = copies.copy(&checked).unwrap();
-        assert_eq!(copy.parent(), Some(t.join("scripts").as_path()));
+        let copy = copies.copy(&checked, "t").unwrap();
+        let folder = std::fs::canonicalize(t.join("scripts")).unwrap();
+        assert_eq!(copy.parent(), Some(folder.as_path()));
+        assert!(copy.file_name().unwrap().as_bytes().starts_with(b"t-"));
         assert_eq!(mode_of(&copy), 0o600);
         assert_eq!(
             std::fs::read(&copy).unwrap(),
             std::fs::read(&script).unwrap()
         );
         // A second open finds the folder it made and accepts it.
-        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        assert!(ScriptCopies::open(root.as_fd(), me()).is_ok());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // C2 판정 Q1: sweep은 자기 태그의 사본만, 한 번에 SWEEP_MAX개까지 지운다. 이것을 실패시키는 것: 접두사
+    // 비교를 지우는 것(다른 세션의 사본이 지워짐), 상한 검사를 지우는 것(70개가 한 번에 지워짐).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sweep_removes_only_its_tag() {
+        let (t, root) = runtime_root("sweep");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        let folder = t.join("scripts");
+        for i in 0..70 {
+            std::fs::write(folder.join(format!("mine-{i:032x}")), b"x").unwrap();
+        }
+        std::fs::write(folder.join("other-0"), b"x").unwrap();
+        std::fs::write(folder.join("minex-0"), b"x").unwrap();
+        assert_eq!(copies.sweep("mine"), SWEEP_MAX);
+        assert_eq!(copies.sweep("mine"), 70 - SWEEP_MAX);
+        let mut left: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["minex-0", "other-0"]);
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -1212,7 +1291,7 @@ mod tests {
         let t = parent_scratch("umask");
         let root = root_at(&t);
         sys::test_umask(0o177);
-        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        assert!(ScriptCopies::open(root.as_fd(), me()).is_ok());
         sys::exit_now(0);
     }
 
@@ -1225,12 +1304,7 @@ mod tests {
     fn script_folder_others_can_change_is_refused() {
         let (t, root) = runtime_root("script-loose");
         let scripts = t.join("scripts");
-        let refused = || {
-            matches!(
-                ScriptCopies::open(root.as_fd(), &t, me()),
-                Err(Miss::Refused)
-            )
-        };
+        let refused = || matches!(ScriptCopies::open(root.as_fd(), me()), Err(Miss::Refused));
         let fresh = || {
             let _ = std::fs::remove_dir_all(&scripts);
             std::fs::create_dir(&scripts).unwrap();
@@ -1241,7 +1315,7 @@ mod tests {
         assert!(refused());
         assert_eq!(mode_of(&scripts), 0o755);
         fresh();
-        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        assert!(ScriptCopies::open(root.as_fd(), me()).is_ok());
         add_acl("nobody allow add_file", &scripts);
         assert!(refused());
         fresh();
@@ -1262,13 +1336,15 @@ mod tests {
     #[test]
     fn script_copy_over_64k_refused() {
         let (t, root) = runtime_root("script-big");
-        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
         let script = t.join("big.sh");
         let max = usize::try_from(SCRIPT_MAX).unwrap();
-        let copy = copies.copy(&script_at(&script, &vec![b'#'; max])).unwrap();
+        let copy = copies
+            .copy(&script_at(&script, &vec![b'#'; max]), "t")
+            .unwrap();
         assert_eq!(std::fs::metadata(&copy).unwrap().len(), SCRIPT_MAX);
         assert_eq!(
-            copies.copy(&script_at(&script, &vec![b'#'; max + 1])),
+            copies.copy(&script_at(&script, &vec![b'#'; max + 1]), "t"),
             Err(Miss::Refused)
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1316,9 +1392,9 @@ mod tests {
         let t = parent_scratch("short-copy");
         let root = root_at(&t);
         let checked = script_at(&t.join("tool.sh"), &[b'#'; 1000]);
-        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
         sys::test_limit_file_size(16);
-        assert_eq!(copies.copy(&checked), Err(Miss::Refused));
+        assert_eq!(copies.copy(&checked, "t"), Err(Miss::Refused));
         sys::exit_now(0);
     }
 

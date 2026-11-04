@@ -120,8 +120,8 @@ OVERLAPS = (
 )
 
 
-# commands::run names crate::relay on Linux; the relay itself is not part of this build.
-RELAY_STUB = '#[cfg(target_os = "linux")] mod relay {pub(crate) fn run(_: &[std::ffi::OsString]) -> std::process::ExitCode {unreachable!("the relay runs only in the bingsu binary")}}'
+# commands::run names crate::relay on Linux and macOS; the relay itself is not part of this build.
+RELAY_STUB = '#[cfg(any(target_os = "linux", target_os = "macos"))] mod relay {pub(crate) fn run(_: &[std::ffi::OsString]) -> std::process::ExitCode {unreachable!("the relay runs only in the bingsu binary")}}'
 
 def segment_disposition(row, metrics, system):
     """One row's disposition from {field: summary}. Exceeding is never auto-handled."""

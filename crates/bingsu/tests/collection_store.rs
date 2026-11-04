@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 // The relay is not part of these tests; `commands::run` names it.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod relay {
     pub(crate) fn run(_: &[std::ffi::OsString]) -> std::process::ExitCode {
         unreachable!("the relay runs only in the bingsu binary")

@@ -1358,6 +1358,26 @@ impl Drop for PausedFork {
     }
 }
 
+/// macOS `fstatat` flag (sys/fcntl.h, not in the libc crate): no symlink
+/// anywhere on the path. The relay keeps its own copy (it is hash-pinned).
+#[cfg(target_os = "macos")]
+pub const AT_SYMLINK_NOFOLLOW_ANY: i32 = 0x0800;
+
+/// macOS: the canonical path of the file or folder `fd` holds (`F_GETPATH`).
+#[cfg(target_os = "macos")]
+pub fn fd_path(fd: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes into `buf`.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buf[..len],
+    )))
+}
+
 pub fn unlink_at(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::OsStr) -> std::io::Result<()> {
     collection_ops(1)?;
     use std::os::fd::AsRawFd;
