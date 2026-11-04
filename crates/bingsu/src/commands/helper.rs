@@ -196,7 +196,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 me: sys::current_uid(),
                 helper_deadline: _watchdog.expires_ns(),
             };
-            match command_grant::prepare(&inputs, &mut groups) {
+            match command_grant::prepare(&inputs) {
                 Ok(round) => command_round = Some(round),
                 Err(skip) => command_skip = Some(skip),
             }
@@ -251,14 +251,25 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let Some(round) = command_round.take() {
         match round_marker.filter(|_| installs_marker(&result)) {
             Some(marker) => {
-                if round.unresolved > 0 {
+                let done = round.grant(
+                    command_grant::permit(&marker),
+                    sys::current_uid(),
+                    &mut groups,
+                );
+                if done.unresolved > 0 {
                     report(
                         &mut groups,
                         LogLevel::Info,
                         "command round: a unit's executable was not found or failed the checks",
                     );
                 }
-                let done = round.grant(command_grant::permit(&marker));
+                if done.failed {
+                    report(
+                        &mut groups,
+                        LogLevel::Error,
+                        "command round failed: the shell's folder could not be read",
+                    );
+                }
                 if done.rejected > 0 {
                     report(
                         &mut groups,

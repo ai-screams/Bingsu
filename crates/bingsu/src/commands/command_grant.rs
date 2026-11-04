@@ -65,8 +65,6 @@ pub(crate) enum Skip {
     NoSession,
     /// Another supervisor of this session holds the lock.
     Busy,
-    /// No unit's executable could be resolved.
-    Unresolved,
     /// No trusted relay on this platform yet (macOS, C2 ruling J3).
     NoRelay,
     Failed,
@@ -77,22 +75,25 @@ impl Skip {
             Self::NoUnits | Self::NoSession | Self::NoRelay => return None,
             Self::NoEnvironment(why) => why.message(),
             Self::Busy => "command round busy: the session's supervisor is still running",
-            Self::Unresolved => "command round skipped: no unit's executable passed the checks",
             Self::Failed => "command round failed: supervisor not started",
         })
     }
 }
 
-/// A started supervisor waiting for its grant.
+/// A started supervisor waiting for its grant. The grant's units are
+/// resolved only after publication: walking the sanitized `PATH` and the
+/// shell's folder can block on a stopped mount, which must never hold the
+/// marker back.
 pub(crate) struct Round {
     child: OwnedChild,
+    /// Everything but the units and the permit.
     grant: Grant,
+    runnable: Vec<(String, plan::Runnable)>,
+    environment: Vec<u8>,
     grant_pipe: File,
     results: File,
     /// The session lock; the supervisor holds its own copy.
     _lock: File,
-    /// Units left out because their executable failed the checks.
-    pub unresolved: usize,
 }
 
 /// `command-<first 16 bytes of sha256(session), hex>.lock`: a fixed-length
@@ -128,9 +129,10 @@ fn neutral(runtime: &File, me: u32) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Decides the round and, when it has units, takes the session lock,
-/// builds the grant (its permit comes later) and spawns the supervisor.
-pub(crate) fn prepare(i: &Inputs<'_>, groups: &mut SystemGroups) -> Result<Round, Skip> {
+/// Decides the round and, when it has units, takes the session lock and
+/// spawns the supervisor. Only the runtime root is touched here, before the
+/// marker; the units are resolved in `Round::grant`, after it.
+pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     let runnable: Vec<_> = i
         .config
         .exec_units
@@ -156,43 +158,6 @@ pub(crate) fn prepare(i: &Inputs<'_>, groups: &mut SystemGroups) -> Result<Round
             _ => Skip::Failed,
         })?;
     neutral(i.runtime, i.me).map_err(|_| Skip::Failed)?;
-    // The repository the shell is in, by identity, for the PATH and
-    // executable rules. Until it has a source (C2 ruling J9) the shell's own
-    // folder stands for it; a folder that cannot be read refuses the round.
-    let repo =
-        exec_path::repo_id(Some(Path::new(OsStr::from_bytes(pwd)))).map_err(|_| Skip::Failed)?;
-    let vars = Environ::parse(body);
-    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, i.me, groups);
-    let path = exec_path::path_value(&folders);
-    let attempts: Vec<(&str, Option<u64>)> = runnable.iter().map(|(id, _)| (*id, None)).collect();
-    let mut units = Vec::new();
-    let mut unresolved = 0;
-    for at in plan::pick(&attempts, plan::CONFIG_MAX) {
-        let (id, r) = &runnable[at];
-        let word = match &r.policy {
-            Policy::Argv { argv } => argv[0].as_slice(),
-            Policy::UnsafeShell { .. } => SHELL,
-        };
-        let Ok(found) = exec_path::lookup(word, &folders, repo, i.me, groups) else {
-            unresolved += 1;
-            continue;
-        };
-        units.push(Unit {
-            id: (*id).to_owned(),
-            digest: policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow),
-            policy: r.policy.clone(),
-            cwd: r.cwd,
-            environment: plan::target_environment(&vars, &r.env_allow, &path),
-            timeout: r.timeout,
-            env_allow: r.env_allow.clone(),
-            executable: found.executable.into_os_string().into_encoded_bytes(),
-            pin: found.pin,
-            interpreter: found.interpreter,
-        });
-    }
-    if units.is_empty() {
-        return Err(Skip::Unresolved);
-    }
     let grant = Grant {
         permit: Permit {
             kind: 0,
@@ -208,7 +173,7 @@ pub(crate) fn prepare(i: &Inputs<'_>, groups: &mut SystemGroups) -> Result<Round
             .join(NEUTRAL)
             .into_os_string()
             .into_encoded_bytes(),
-        units,
+        units: Vec::new(),
         probes: Vec::new(),
     };
     let (grant_read, grant_pipe) = pipe().map_err(|_| Skip::Failed)?;
@@ -232,11 +197,64 @@ pub(crate) fn prepare(i: &Inputs<'_>, groups: &mut SystemGroups) -> Result<Round
     Ok(Round {
         child,
         grant,
+        runnable: runnable
+            .into_iter()
+            .map(|(id, r)| (id.to_owned(), r))
+            .collect(),
+        environment: body.clone(),
         grant_pipe,
         results,
         _lock: lock,
-        unresolved,
     })
+}
+
+/// The grant's units: at most `CONFIG_MAX` runnable units whose executable
+/// resolves from the sanitized `PATH` (or `/bin/sh` for a script), each with
+/// its target environment and the digest of its policy before `{dir}`.
+/// Returns them and how many were left out.
+fn units(
+    runnable: &[(String, plan::Runnable)],
+    environment: &[u8],
+    pwd: &[u8],
+    me: u32,
+    groups: &mut SystemGroups,
+) -> Result<(Vec<Unit>, usize), Skip> {
+    // The repository the shell is in, by identity, for the PATH and
+    // executable rules. Until it has a source (C2 ruling J9) the shell's own
+    // folder stands for it; a folder that cannot be read refuses the round.
+    let repo =
+        exec_path::repo_id(Some(Path::new(OsStr::from_bytes(pwd)))).map_err(|_| Skip::Failed)?;
+    let vars = Environ::parse(environment);
+    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
+    let path = exec_path::path_value(&folders);
+    let attempts: Vec<(&str, Option<u64>)> =
+        runnable.iter().map(|(id, _)| (id.as_str(), None)).collect();
+    let mut units = Vec::new();
+    let mut unresolved = 0;
+    for at in plan::pick(&attempts, plan::CONFIG_MAX) {
+        let (id, r) = &runnable[at];
+        let word = match &r.policy {
+            Policy::Argv { argv } => argv[0].as_slice(),
+            Policy::UnsafeShell { .. } => SHELL,
+        };
+        let Ok(found) = exec_path::lookup(word, &folders, repo, me, groups) else {
+            unresolved += 1;
+            continue;
+        };
+        units.push(Unit {
+            id: id.clone(),
+            digest: policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow),
+            policy: r.policy.clone(),
+            cwd: r.cwd,
+            environment: plan::target_environment(&vars, &r.env_allow, &path),
+            timeout: r.timeout,
+            env_allow: r.env_allow.clone(),
+            executable: found.executable.into_os_string().into_encoded_bytes(),
+            pin: found.pin,
+            interpreter: found.interpreter,
+        });
+    }
+    Ok((units, unresolved))
 }
 
 /// The permit of the marker this round installed: its clock and trust
@@ -262,6 +280,10 @@ pub(crate) struct Report {
     pub results: Vec<Outcome>,
     /// Frames that did not decode or did not name a place in the grant.
     pub rejected: usize,
+    /// Units left out because their executable was not found or failed the checks.
+    pub unresolved: usize,
+    /// The shell's folder could not be read: no grant.
+    pub failed: bool,
 }
 
 impl Round {
@@ -280,9 +302,31 @@ impl Round {
 
     /// Sends the grant under `permit`, reads every result until the helper's
     /// deadline less the reserve, then writes done and closes the pipe.
-    pub(crate) fn grant(mut self, permit: Permit) -> Report {
+    pub(crate) fn grant(mut self, permit: Permit, me: u32, groups: &mut SystemGroups) -> Report {
         self.grant.permit = permit;
         let mut report = Report::default();
+        match units(
+            &self.runnable,
+            &self.environment,
+            &self.grant.cwd,
+            me,
+            groups,
+        ) {
+            Ok((units, unresolved)) if !units.is_empty() => {
+                self.grant.units = units;
+                report.unresolved = unresolved;
+            }
+            Ok((_, unresolved)) => {
+                report.unresolved = unresolved;
+                self.abandon();
+                return report;
+            }
+            Err(_) => {
+                report.failed = true;
+                self.abandon();
+                return report;
+            }
+        }
         let Ok(frame) = wire::encode(&Message::Grant(self.grant.clone())) else {
             self.abandon();
             return report;

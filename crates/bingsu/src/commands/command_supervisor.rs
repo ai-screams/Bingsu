@@ -520,8 +520,9 @@ impl Supervisor {
             if !run.reaped {
                 run.reaped = run.child.reap().unwrap_or(true);
                 if run.reaped {
-                    // The relay is gone: what its status pipe holds is all.
+                    // The relay is gone: what its pipes hold now is all it wrote.
                     read_status(run);
+                    read_stdout(run);
                 }
             }
             if run.finished() && !run.reported {
@@ -593,19 +594,22 @@ fn pollfd(fd: i32, events: i16) -> libc::pollfd {
     }
 }
 
-/// Up to `STDOUT_MAX` bytes; then the pipe is closed, so a target that keeps
-/// writing gets EPIPE instead of filling memory.
+/// What the pipe holds now, up to `STDOUT_MAX` bytes in all; then the pipe
+/// is closed, so a target that keeps writing gets EPIPE instead of filling
+/// memory. Reads until it would block, so after the reap nothing written
+/// before the exit is left behind.
 fn read_stdout(run: &mut Run) {
-    let Some(f) = &run.stdout else { return };
-    let mut buf = [0u8; STDOUT_MAX];
-    let room = STDOUT_MAX - run.out.len();
-    match read_some(f.as_raw_fd(), &mut buf[..room]) {
-        Ok(None) => {}
-        Ok(Some(0)) | Err(()) => run.stdout = None,
-        Ok(Some(n)) => {
-            run.out.extend_from_slice(&buf[..n]);
-            if run.out.len() >= STDOUT_MAX {
-                run.stdout = None;
+    while let Some(f) = &run.stdout {
+        let mut buf = [0u8; STDOUT_MAX];
+        let room = STDOUT_MAX - run.out.len();
+        match read_some(f.as_raw_fd(), &mut buf[..room]) {
+            Ok(None) => return,
+            Ok(Some(0)) | Err(()) => run.stdout = None,
+            Ok(Some(n)) => {
+                run.out.extend_from_slice(&buf[..n]);
+                if run.out.len() >= STDOUT_MAX {
+                    run.stdout = None;
+                }
             }
         }
     }
@@ -683,6 +687,13 @@ pub(crate) mod tests {
             b"sleep" | b"noread" => {
                 executed();
                 std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            b"split" => {
+                // Two writes, then exit at once: the second can land after the
+                // supervisor's read and before its reap.
+                say(b"a");
+                executed();
+                say(b"b\n");
             }
             b"yes" => {
                 executed();
@@ -935,6 +946,23 @@ pub(crate) mod tests {
         // SAFETY: signal 0 only asks whether the pid still exists.
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "the target must be gone");
     }
+
+    // 대상이 나눠 쓰고 곧바로 끝나도 마지막 조각까지 결과에 담긴다. 수정 전(reap 뒤 비우기 없음)에도 Linux
+    // 2,000회·macOS 200회에서 잃은 회차가 0이라 그 경합은 이 시험으로 잡히지 않는다. 이것을 실패시키는 것:
+    // stdout을 결과에 담지 않거나 앞 조각만 담는 것.
+    #[test]
+    fn test_split_output_is_kept_whole() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let mut lost = 0;
+        for _ in 0..SPLIT_ROUNDS {
+            let (got, _) = round(grant(vec![unit("split", 200 * MS)], 1_000 * MS));
+            if !got[0].stdout.ends_with(b"ab\n") {
+                lost += 1;
+            }
+        }
+        assert_eq!(lost, 0, "{lost} of {SPLIT_ROUNDS} rounds lost output");
+    }
+    const SPLIT_ROUNDS: usize = 50;
 
     // 이것을 실패시키는 것: read_stdout의 4 KB 상한(room·STDOUT_MAX 비교)을 지우는 것.
     #[test]
