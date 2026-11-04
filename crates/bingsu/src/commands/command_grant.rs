@@ -319,6 +319,10 @@ fn units(
 /// leaves 4 KB pipes, m6-C1a).
 fn send(fd: i32, mut bytes: &[u8], until_ns: u64) -> bool {
     while !bytes.is_empty() {
+        // Before the first write and every retry: a late grant is no grant.
+        if now_ns().map_or(true, |now| now >= until_ns) {
+            return false;
+        }
         // SAFETY: `bytes` is readable for its length.
         let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
         if let Ok(n) = usize::try_from(n) {
@@ -332,15 +336,13 @@ fn send(fd: i32, mut bytes: &[u8], until_ns: u64) -> bool {
             return false;
         }
         let Ok(now) = now_ns() else { return false };
-        if now >= until_ns {
-            return false;
-        }
         let mut fds = [libc::pollfd {
             fd,
             events: libc::POLLOUT,
             revents: 0,
         }];
-        let wait = i32::try_from((until_ns - now).div_ceil(1_000_000)).unwrap_or(i32::MAX);
+        let wait =
+            i32::try_from(until_ns.saturating_sub(now).div_ceil(1_000_000)).unwrap_or(i32::MAX);
         // SAFETY: one valid pollfd.
         unsafe { libc::poll(fds.as_mut_ptr(), 1, wait) };
     }
@@ -675,6 +677,20 @@ mod tests {
         unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
         let until = now_ns().unwrap() + 50_000_000;
         assert!(!send(write.as_raw_fd(), &frame, until));
+    }
+
+    // 마감이 지난 뒤에는 빈 파이프라도 쓰지 않는다. 이것을 실패시키는 것: send의 쓰기 전 마감 검사를 지우는 것.
+    #[test]
+    fn grant_send_writes_nothing_past_its_deadline() {
+        let (read, write) = pipe().unwrap();
+        super::super::collector_process::nonblocking(&write).unwrap();
+        super::super::collector_process::nonblocking(&read).unwrap();
+        let past = now_ns().unwrap() - 1;
+        assert!(!send(write.as_raw_fd(), b"grant", past));
+        let mut b = [0u8; 8];
+        // SAFETY: writable buffer; non-blocking read end.
+        let n = unsafe { libc::read(read.as_raw_fd(), b.as_mut_ptr().cast(), b.len()) };
+        assert!(n < 0, "nothing was written");
     }
 
     // 무효 표식 회차의 permit은 deadline 0이라 설정 단위가 모두 거부된다(내장 조사만). 이것을 실패시키는

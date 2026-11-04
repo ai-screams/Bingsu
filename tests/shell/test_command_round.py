@@ -419,6 +419,10 @@ def test_no_session_runs_nothing_and_says_so(tmp_path, _native_boot_required):
 # 중계가 대상을 자식으로 띄우는 것(relay의 execveat 대신 생성), 감독이 중계를 건너뛰고 대상을 바로 띄우는 것.
 @linux_only
 def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_required):
+    # The proof below is the target's no_new_privs: it holds only when nothing
+    # above the relay already had the flag.
+    own = Path("/proc/self/status").read_text()
+    assert "NoNewPrivs:\t0" in own, "the test process must not have no_new_privs"
     session = CommandSession(tmp_path / "s")
     units = "".join(f"[segment.\"custom/u{i}\"]\nkind='command'\ncommand=['/bin/sleep', '1']\ntimeout='1s'\n"
                     for i in range(3))

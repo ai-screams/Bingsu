@@ -17,8 +17,105 @@ enum Pidfds {
 fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_filter> {
     program_with(pid, child_pidfd.map_or(Pidfds::Denied, Pidfds::Only))
 }
+/// The command supervisor's filter after its last spawn: deny by default.
+/// Allowed are only the calls its loop makes (poll, read, write, waitid,
+/// close, clocks and sleeps, memory, futex, exit, signal return and the
+/// abort path on itself), and `pidfd_send_signal` on the pidfds it holds
+/// now. No call that makes a descriptor (open, dup, socket, recvmsg, pipe,
+/// pidfd_open, pidfd_getfd, ...) is allowed, so a held number, once closed,
+/// can never come to name another process.
+#[cfg(target_os = "linux")]
+fn supervisor_program(pid: u32, held: &[std::os::fd::RawFd]) -> Vec<libc::sock_filter> {
+    let stmt = |code, k| libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let jump = |k, jt, jf| libc::sock_filter {
+        code: 0x15,
+        jt,
+        jf,
+        k,
+    };
+    #[cfg(target_arch = "x86_64")]
+    let arch = 0xc000003e;
+    #[cfg(target_arch = "aarch64")]
+    let arch = 0xc00000b7;
+    let allow = stmt(0x06, libc::SECCOMP_RET_ALLOW);
+    let deny = stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32);
+    let mut code = vec![
+        stmt(0x20, 4),
+        jump(arch, 1, 0),
+        stmt(0x06, libc::SECCOMP_RET_KILL_PROCESS),
+        stmt(0x20, 0),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    {
+        code.push(libc::sock_filter {
+            code: 0x35,
+            jt: 0,
+            jf: 1,
+            k: 0x40000000,
+        });
+        code.push(stmt(0x06, libc::SECCOMP_RET_KILL_PROCESS));
+    }
+    let calls = [
+        libc::SYS_ppoll,
+        libc::SYS_read,
+        libc::SYS_write,
+        libc::SYS_waitid,
+        libc::SYS_close,
+        libc::SYS_clock_gettime,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_nanosleep,
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_sigaltstack,
+        libc::SYS_munmap,
+        libc::SYS_mmap,
+        libc::SYS_mremap,
+        libc::SYS_madvise,
+        libc::SYS_mprotect,
+        libc::SYS_brk,
+        libc::SYS_futex,
+        libc::SYS_sched_yield,
+        libc::SYS_getpid,
+        libc::SYS_gettid,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_poll,
+    ];
+    for nr in calls {
+        code.push(jump(nr as u32, 0, 1));
+        code.push(allow);
+    }
+    // The abort path signals this process only.
+    code.push(jump(libc::SYS_tgkill as u32, 0, 4));
+    code.push(stmt(0x20, 16));
+    code.push(jump(pid, 0, 1));
+    code.push(allow);
+    code.push(deny);
+    // Signals through the held pidfds only.
+    let n = u8::try_from(held.len()).unwrap_or(u8::MAX);
+    // Not this call: on to the final deny, past ld, n compares, deny, allow.
+    code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, n + 3));
+    code.push(stmt(0x20, 16));
+    for (k, fd) in held.iter().take(usize::from(n)).enumerate() {
+        code.push(jump(*fd as u32, n - k as u8, 0));
+    }
+    code.push(deny);
+    code.push(allow);
+    code.push(deny);
+    code
+}
+
 #[cfg(target_os = "linux")]
 fn program_with(pid: u32, pidfds: Pidfds) -> Vec<libc::sock_filter> {
+    if let Pidfds::Supervisor(held) = &pidfds {
+        return supervisor_program(pid, held);
+    }
     let stmt = |code, k| libc::sock_filter {
         code,
         jt: 0,
@@ -74,41 +171,6 @@ fn program_with(pid: u32, pidfds: Pidfds) -> Vec<libc::sock_filter> {
     if matches!(pidfds, Pidfds::Denied) {
         code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, 1));
         code.push(deny);
-    }
-    if let Pidfds::Supervisor(held) = &pidfds {
-        // No new descriptor: no file (a /proc entry would name another
-        // process), no copy of one it holds.
-        let opens = [
-            libc::SYS_openat,
-            libc::SYS_openat2,
-            libc::SYS_dup,
-            libc::SYS_dup3,
-            #[cfg(target_arch = "x86_64")]
-            libc::SYS_open,
-            #[cfg(target_arch = "x86_64")]
-            libc::SYS_dup2,
-        ];
-        for nr in opens {
-            code.push(jump(nr as u32, 0, 1));
-            code.push(deny);
-        }
-        // fcntl duplicates only through F_DUPFD and F_DUPFD_CLOEXEC.
-        code.push(jump(libc::SYS_fcntl as u32, 0, 4));
-        code.push(stmt(0x20, 24));
-        code.push(jump(libc::F_DUPFD as u32, 1, 0));
-        code.push(jump(libc::F_DUPFD_CLOEXEC as u32, 0, 1));
-        code.push(deny);
-        code.push(stmt(0x20, 0));
-        // Signals through the held pidfds only.
-        let n = u8::try_from(held.len()).unwrap_or(u8::MAX);
-        code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, n + 3));
-        code.push(stmt(0x20, 16));
-        for (k, fd) in held.iter().take(usize::from(n)).enumerate() {
-            code.push(jump(*fd as u32, n - k as u8, 0));
-        }
-        code.push(deny);
-        code.push(stmt(0x06, libc::SECCOMP_RET_ALLOW));
-        code.push(stmt(0x20, 0));
     }
     // Numeric process/group targets are fixed to this helper. Thread-directed
     // forms retain the tgid check so libc raise/abort can target any own thread.
@@ -238,12 +300,13 @@ mod tests {
             }
         }
     }
-    // 감독 필터: 신호는 필터를 걸 때 쥔 자식 pidfd에만 가고, exec·생성·pidfd_open·새 descriptor(open·openat·
-    // openat2·dup·dup2·dup3·fcntl F_DUPFD·F_DUPFD_CLOEXEC)는 거부된다. 다른 fcntl은 그대로다. 이것을 실패시키는
-    // 것: pidfd 집합 비교를 지우는 것(아무 fd나 허용), open 계열 거부 하나를 지우는 것, fcntl의 cmd 비교를
-    // 지우는 것(F_SETFL까지 거부되거나 F_DUPFD가 허용됨), 집합 점프 거리를 하나 틀리는 것.
+    // 감독 필터는 기본 거부다. 루프가 쓰는 호출만 허용하고, 신호는 필터를 걸 때 쥔 자식 pidfd에만 간다.
+    // descriptor를 만드는 호출(open·dup·socket·recvmsg·pipe·pidfd_open·pidfd_getfd·fcntl)과 exec·생성은
+    // 모두 거부된다. 이것을 실패시키는 것: 마지막 기본 거부를 허용으로 바꾸는 것, pidfd 블록의 건너뛰기
+    // 거리를 하나 줄이는 것(목록 밖 호출이 허용으로 떨어짐), 집합 비교를 지우는 것, 허용 목록에서 루프의
+    // 호출(read·ppoll·waitid) 하나를 빼는 것, tgkill의 자기 pid 비교를 지우는 것.
     #[test]
-    fn supervisor_signals_only_held_pidfds_and_opens_nothing() {
+    fn supervisor_filter_denies_by_default() {
         let denied = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
         let run = |nr: i64, args: [u64; 2]| {
             let mut input = [0u8; 64];
@@ -263,7 +326,7 @@ mod tests {
         };
         for fd in [7, 9, 12] {
             assert_eq!(
-                run(libc::SYS_pidfd_send_signal, [fd, libc::SIGKILL as u64]),
+                run(libc::SYS_pidfd_send_signal, [fd, 9]),
                 libc::SECCOMP_RET_ALLOW,
                 "{fd}"
             );
@@ -277,36 +340,38 @@ mod tests {
             libc::SYS_clone,
             libc::SYS_clone3,
             libc::SYS_pidfd_open,
+            libc::SYS_pidfd_getfd,
             libc::SYS_openat,
             libc::SYS_openat2,
             libc::SYS_dup,
             libc::SYS_dup3,
-            #[cfg(target_arch = "x86_64")]
-            libc::SYS_open,
-            #[cfg(target_arch = "x86_64")]
-            libc::SYS_dup2,
+            libc::SYS_fcntl,
+            libc::SYS_socket,
+            libc::SYS_socketpair,
+            libc::SYS_recvmsg,
+            libc::SYS_recvmmsg,
+            libc::SYS_accept4,
+            libc::SYS_pipe2,
+            libc::SYS_memfd_create,
+            libc::SYS_kill,
+            libc::SYS_ioctl,
+            libc::SYS_prctl,
+            libc::SYS_seccomp,
         ];
         for nr in never {
             assert_eq!(run(nr, [0, 0]), denied, "{nr}");
         }
-        for cmd in [libc::F_DUPFD, libc::F_DUPFD_CLOEXEC] {
-            assert_eq!(run(libc::SYS_fcntl, [0, cmd as u64]), denied, "{cmd}");
-        }
-        for cmd in [libc::F_GETFL, libc::F_SETFL, libc::F_GETFD, libc::F_SETFD] {
-            assert_eq!(
-                run(libc::SYS_fcntl, [0, cmd as u64]),
-                libc::SECCOMP_RET_ALLOW,
-                "{cmd}"
-            );
-        }
         for nr in [
             libc::SYS_read,
             libc::SYS_write,
-            libc::SYS_close,
+            libc::SYS_ppoll,
             libc::SYS_waitid,
+            libc::SYS_close,
         ] {
             assert_eq!(run(nr, [3, 0]), libc::SECCOMP_RET_ALLOW, "{nr}");
         }
+        assert_eq!(run(libc::SYS_tgkill, [1234, 6]), libc::SECCOMP_RET_ALLOW);
+        assert_eq!(run(libc::SYS_tgkill, [1, 6]), denied);
     }
 
     // 이것을 실패시키는 것: 자기 pid/SIGKILL의 64비트 조건 또는 늦은 pidfd_open 거부 제거.

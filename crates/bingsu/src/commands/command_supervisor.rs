@@ -318,9 +318,6 @@ impl Supervisor {
     }
 
     fn spawn_unit(&mut self, index: usize) {
-        if self.helper_gone() {
-            return;
-        }
         let now = clock();
         let at = now.map_or(0, |c| c.now);
         if index >= plan::CONFIG_MAX {
@@ -366,9 +363,6 @@ impl Supervisor {
     }
 
     fn spawn_probe(&mut self, index: usize) {
-        if self.helper_gone() {
-            return;
-        }
         let now = clock();
         let at = now.map_or(0, |c| c.now);
         if index >= plan::PROBE_MAX {
@@ -448,6 +442,13 @@ impl Supervisor {
             .chain(self.relay.prefix.iter().cloned())
             .chain(relay_args.into_iter().map(<[u8]>::to_vec))
             .collect();
+        // Last check before the spawn, after every preparation step. A poll
+        // and a spawn cannot be one step, so the guarantee is: once the
+        // helper's death is observed no new spawn follows, and a unit spawned
+        // before that is ended at the loop's next poll of the grant pipe.
+        if self.helper_gone() {
+            return;
+        }
         let spawned =
             command_process::spawn(&self.relay.exe, &args, &input, self.grant.helper_deadline);
         let Ok(s) = spawned else {
@@ -935,7 +936,7 @@ pub(crate) mod tests {
     }
 
     // 도우미가 허가를 쓰고 곧 죽었으면(쓰기 쪽 닫힘) 감독은 하나도 생성하지 않는다. 이것을 실패시키는 것:
-    // spawn_unit의 helper_gone 검사를 지우는 것.
+    // start의 생성 직전 helper_gone 검사를 지우는 것.
     #[test]
     fn test_dead_helper_gets_no_spawn() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
@@ -1220,7 +1221,7 @@ pub(crate) mod tests {
     #[ignore = "child: one confined supervisor round"]
     fn filter_child() {
         let (grant_read, _grant_write) = pipe();
-        let (_result_read, result_write) = pipe();
+        let (result_read, result_write) = pipe();
         // A process the supervisor does not supervise, and a pidfd of it taken
         // before the filter.
         // Never waited for: the child exits with _exit below and init reaps it.
@@ -1244,7 +1245,15 @@ pub(crate) mod tests {
             result_write.as_raw_fd(),
         )
         .run(true);
+        let held: Vec<i32> = s.runs.iter().filter_map(|r| r.child.pidfd()).collect();
         drop(s);
+        // Positive: the confined loop finished the round and wrote its result.
+        let mut buf = vec![0u8; 65_536];
+        // SAFETY: writable buffer; non-blocking read end.
+        let n = unsafe { libc::read(result_read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        let finished = usize::try_from(n).ok().is_some_and(|n| {
+            matches!(wire::decode(&buf[..n]), Ok(Message::Result(o)) if o.reason == Reason::Exited(0))
+        });
         let eperm = |rc: libc::c_long| {
             rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
         };
@@ -1272,14 +1281,35 @@ pub(crate) mod tests {
             eperm(unsafe { libc::dup(0) } as libc::c_long),
             // SAFETY: as above.
             eperm(unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 10) } as libc::c_long),
+            // SAFETY: as above.
+            eperm(unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) } as libc::c_long),
+            // SAFETY: a null header is never read: the filter answers first.
+            eperm(unsafe { libc::recvmsg(0, std::ptr::null_mut(), 0) } as libc::c_long),
         ];
-        let code = if checks.iter().all(|&c| c) { 42 } else { 1 };
+        // A held number, now closed, names nobody: the signal finds no descriptor.
+        let ebadf = held.iter().all(|&fd| {
+            // SAFETY: plain syscall with integer arguments.
+            let rc = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, libc::SIGKILL, 0, 0) };
+            rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+        });
+        // SAFETY: zeroed siginfo is a valid output buffer; WNOHANG|WNOWAIT only looks.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: as above.
+        let alive = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        } == 0
+            // SAFETY: waitid filled the event fields.
+            && unsafe { info.si_pid() } == 0;
+        let all = checks.iter().all(|&c| c) && finished && !held.is_empty() && ebadf && alive;
+        let code = if all { 42 } else { 1 };
         // SAFETY: plain exit of the child (the stray sleep ends on its own).
         unsafe { libc::_exit(code) }
     }
 
-    // 이것을 실패시키는 것: run에서 confine 호출을 지우는 것(마지막 생성 뒤에도 execve가 됨), 필터의 pidfd
-    // 집합에 아무 fd나 허용하는 것(무관한 자식에 신호), open·dup·fcntl(F_DUPFD*) 거부 하나를 지우는 것.
+    // 필터 뒤에도 감독은 회차를 끝까지 마치고(양성), exec·무관한 자식 신호·open·dup·fcntl·socket·recvmsg는
+    // EPERM이며, 닫힌 pidfd 번호로 보낸 신호는 아무에게도 닿지 않는다. 이것을 실패시키는 것: run에서 confine
+    // 호출을 지우는 것(execve가 됨), 기본 거부를 허용으로 바꾸는 것(socket·recvmsg가 됨), 허용 목록에서 루프의
+    // 호출을 빼는 것(회차가 끝나지 않음), pidfd 집합 비교를 지우는 것.
     #[cfg(target_os = "linux")]
     #[test]
     fn test_supervisor_filter_denies_exec_after_spawn() {
