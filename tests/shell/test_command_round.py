@@ -475,11 +475,12 @@ def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_require
     session = CommandSession(tmp_path / "s")
     session.put("[layout.line2]\nleft=['char']\n")
     ready(session)
+    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
     seen = []
     for _ in range(3):
         session.prompt()
-        seen += supervisors()
+        # This session's only: a supervisor holds its session lock in this runtime root.
+        seen += [p for p, _ in supervisors() if (lock_of(p) or "").startswith(str(root))]
     session.wait_quiet()
-    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
     assert seen == []
     assert list(root.glob("command-*.lock")) == [] and not session.neutral().exists()
