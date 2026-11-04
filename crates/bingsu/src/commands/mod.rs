@@ -41,6 +41,9 @@ mod ctx;
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
 #[cfg(unix)]
+#[allow(dead_code, reason = "C2 connects the resolver")]
+pub(crate) mod exec_path;
+#[cfg(unix)]
 mod git_global;
 #[cfg(unix)]
 mod group_policy;

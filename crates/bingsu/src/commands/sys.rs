@@ -789,6 +789,18 @@ pub fn open_file_at_nofollow(
     )
 }
 
+/// Linux: opens `name` inside `dir` as a path-only descriptor (`O_PATH`)
+/// without following a symlink at that name. An execute-only file, which
+/// `O_RDONLY` cannot open, is still checked through it (`fstat`; the ACL
+/// through `/proc/self/fd`, see `acl_facts_fd`).
+#[cfg(target_os = "linux")]
+pub fn open_path_at_nofollow(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    open_at(Some(dir), name, SEARCH_ONLY)
+}
+
 /// Creates `name` inside `dir` (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode
 /// `mode`) for writing. Applies the exact mode through the new fd, regardless
 /// of umask; an existing entry is never changed.

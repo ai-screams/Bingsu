@@ -219,6 +219,8 @@ mod tests {
             environment: b"HOME=/h\0".to_vec(),
             timeout,
             env_allow: Vec::new(),
+            executable: b"/usr/bin/kubectl".to_vec(),
+            pin: None,
         }
     }
     fn grant(deadline: u64) -> Grant {
@@ -229,6 +231,7 @@ mod tests {
             probes: vec![Probe {
                 profile: 1,
                 executable: b"/usr/bin/python3".to_vec(),
+                pin: None,
             }],
         }
     }

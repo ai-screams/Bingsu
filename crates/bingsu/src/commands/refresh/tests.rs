@@ -1305,6 +1305,10 @@ fn assert_drops_only_that_files_units(damage: &str) {
     match damage {
         "mode-0646" => mode(&dropped, 0o646),
         "acl-allows-write" => {
+            // A spawn holds the serial lock (sys::test_inherited_fd_lock): the
+            // child shares every descriptor until exec, close-only store locks
+            // of another test's fixture included.
+            let _serial = sys::test_inherited_fd_lock();
             let out = std::process::Command::new("/bin/chmod")
                 .args(["+a", "everyone allow write"])
                 .arg(&dropped)

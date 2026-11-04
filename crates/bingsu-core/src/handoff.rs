@@ -1,7 +1,10 @@
 //! Fixed relay contract: argv, the permit and the exec frame on fd 3.
 //! The relay rechecks both with a fresh clock immediately before execution.
 use crate::{
-    command::Error as FrameError,
+    command::{
+        Error as FrameError,
+        path::{EXEC_PIN_LEN, ExecPin},
+    },
     snapshot::{Clock, crc32c},
     snapshot_codec::Error,
 };
@@ -10,7 +13,8 @@ use alloc::vec::Vec;
 pub const ENTRY: &str = "__exec-v2";
 pub const PERMIT_ARG: &str = "--permit-fd=3";
 pub const PERMIT_FD: u8 = 3;
-/// Version word of the relay argv and exec frame layout.
+/// Version word of the relay argv layout (the exec frame carries its own,
+/// `EXEC_VERSION`).
 pub const RELAY_VERSION: &str = "1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permit {
@@ -192,8 +196,11 @@ pub fn parse_relay_args<'a>(args: &'a [&'a [u8]]) -> Result<RelayArgs<'a>, Frame
 
 const EXEC_MAGIC: &[u8; 8] = b"BNGEXF01";
 const EXEC_DOMAIN: &[u8] = b"bingsu-exec-frame-v1\0";
-/// Magic, version, origin, flags, environment length, run deadline, CRC, reserved.
-pub const EXEC_HEADER: usize = 32;
+/// Layout version 2 added the target pin.
+const EXEC_VERSION: u16 = 2;
+/// Magic, version, origin, flags, environment length, run deadline, CRC,
+/// reserved, target pin (`EXEC_PIN_LEN` bytes, all zero for none).
+pub const EXEC_HEADER: usize = 32 + EXEC_PIN_LEN;
 /// Second frame on fd 3, after the 96-byte permit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecFrame {
@@ -202,6 +209,14 @@ pub struct ExecFrame {
     pub run_deadline: u64,
     /// Target envp as `NAME=VALUE\0` entries. Only `execveat` sees it.
     pub environment: Vec<u8>,
+    /// The target the helper resolved, when it is group-writable and its
+    /// group was cleared (spec section 2 safety row): the relay accepts the
+    /// group write only for this exact file, group and mode.
+    pub pin: Option<ExecPin>,
+}
+/// CRC over everything but the CRC itself (reserved bytes and pin included).
+fn exec_crc(h: &[u8], body: &[u8]) -> [u8; 4] {
+    crc32c(&[EXEC_DOMAIN, &h[..24], &h[28..EXEC_HEADER], body])
 }
 impl ExecFrame {
     /// Config: trust deadline and run deadline; builtin: run deadline only.
@@ -215,11 +230,12 @@ impl ExecFrame {
         let len = u32::try_from(self.environment.len()).map_err(|_| FrameError::Limit)?;
         let mut h = [0u8; EXEC_HEADER];
         h[..8].copy_from_slice(EXEC_MAGIC);
-        h[8..10].copy_from_slice(&1u16.to_le_bytes());
+        h[8..10].copy_from_slice(&EXEC_VERSION.to_le_bytes());
         h[10] = self.origin.tag();
         h[12..16].copy_from_slice(&len.to_le_bytes());
         h[16..24].copy_from_slice(&self.run_deadline.to_le_bytes());
-        let crc = crc32c(&[EXEC_DOMAIN, &h[..24], &self.environment]);
+        h[32..EXEC_HEADER].copy_from_slice(&ExecPin::to_bytes(self.pin));
+        let crc = exec_crc(&h, &self.environment);
         h[24..28].copy_from_slice(&crc);
         out.extend_from_slice(&h);
         out.extend_from_slice(&self.environment);
@@ -240,22 +256,26 @@ impl ExecFrame {
         if &b[..8] != EXEC_MAGIC {
             return Err(FrameError::Magic);
         }
-        if b[8..10] != 1u16.to_le_bytes() {
+        if b[8..10] != EXEC_VERSION.to_le_bytes() {
             return Err(FrameError::Version);
         }
         let origin = Origin::from_tag(b[10])?;
         if b[11] != 0 || b[28..32] != [0; 4] {
             return Err(FrameError::Flags);
         }
-        if crc32c(&[EXEC_DOMAIN, &b[..24], body]) != b[24..28] {
+        if exec_crc(b, body) != b[24..28] {
             return Err(FrameError::Checksum);
         }
         let mut deadline = [0u8; 8];
         deadline.copy_from_slice(&b[16..24]);
+        let mut pin = [0u8; EXEC_PIN_LEN];
+        pin.copy_from_slice(&b[32..EXEC_HEADER]);
+        let pin = ExecPin::from_bytes(&pin)?;
         Ok(Self {
             origin,
             run_deadline: u64::from_le_bytes(deadline),
             environment: body.to_vec(),
+            pin,
         })
     }
 }
@@ -356,6 +376,7 @@ mod tests {
             origin,
             run_deadline: 50,
             environment: b"HOME=/h\0LANG=C\0".to_vec(),
+            pin: None,
         }
     }
 
@@ -460,9 +481,10 @@ mod tests {
     // CRC를 다시 계산해 둔 머리라 CRC 비교는 이것을 거부하지 못한다.
     #[test]
     fn exec_header_fields_checked_under_valid_crc() {
-        let cases: [(usize, u8, FrameError); 5] = [
+        let cases: [(usize, u8, FrameError); 6] = [
             (0, b'X', FrameError::Magic),
-            (8, 2, FrameError::Version),
+            (8, 1, FrameError::Version),
+            (8, 3, FrameError::Version),
             (10, 0, FrameError::Kind),
             (10, 3, FrameError::Kind),
             (11, 1, FrameError::Flags),
@@ -471,16 +493,51 @@ mod tests {
             let mut b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
             let f = &mut b[96..];
             f[at] = v;
-            let crc = crc32c(&[EXEC_DOMAIN, &f[..24], &f[EXEC_HEADER..]]);
+            let crc = exec_crc(f, &f[EXEC_HEADER..]);
             f[24..28].copy_from_slice(&crc);
             assert_eq!(read_relay_input(&b, 16_384), Err(e), "{at}");
         }
     }
 
-    // 이것을 실패시키는 것: ExecFrame::decode의 CRC 비교나 예약 바이트(28..32) 검사를 지우는 것.
+    fn pin() -> ExecPin {
+        ExecPin {
+            group: crate::fs_trust::GroupPin {
+                dev: 0x0102_0304_0506_0708,
+                ino: 0x1112_1314_1516_1718,
+                gid: 1000,
+                mode: 0o100_775,
+            },
+            ctime_sec: 1_700_000_000,
+            ctime_nsec: 123,
+        }
+    }
+
+    // 이것을 실패시키는 것: encode_into가 pin을 쓰지 않거나 decode가 pin을 버리는 것, 또는 pin의
+    // 예약 바이트 거부(ExecPin::from_bytes의 Err를 Flags로)를 지우는 것.
+    #[test]
+    fn exec_frame_carries_pin() {
+        let mut f = frame(Origin::Config);
+        f.pin = Some(pin());
+        let b = relay_input(permit(30), &f, 16_384).unwrap();
+        assert_eq!(read_relay_input(&b, 16_384).unwrap().1.pin, Some(pin()));
+        let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
+        assert_eq!(b[96 + 32..96 + EXEC_HEADER], [0; EXEC_PIN_LEN]);
+        assert_eq!(read_relay_input(&b, 16_384).unwrap().1.pin, None);
+        let mut x = relay_input(permit(30), &f, 16_384).unwrap();
+        let h = &mut x[96..];
+        h[EXEC_HEADER - 1] = 1;
+        let crc = exec_crc(h, &h[EXEC_HEADER..]);
+        h[24..28].copy_from_slice(&crc);
+        assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Flags));
+    }
+
+    // 이것을 실패시키는 것: ExecFrame::decode의 CRC 비교나 예약 바이트(28..32) 검사를 지우는 것,
+    // 또는 CRC 범위에서 pin(32..EXEC_HEADER)을 빼는 것.
     #[test]
     fn exec_frame_rejects_every_flipped_bit() {
-        let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
+        let mut f = frame(Origin::Config);
+        f.pin = Some(pin());
+        let b = relay_input(permit(30), &f, 16_384).unwrap();
         for i in 96..b.len() {
             for bit in 0..8 {
                 let mut x = b.clone();
