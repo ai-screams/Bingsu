@@ -113,37 +113,6 @@ impl GroupPin {
             mode: f.mode,
         }
     }
-
-    /// Wire form for the command frames: gid, mode, dev, ino little-endian;
-    /// all zero is no pin (no pinned entry has mode 0, its type bits are set).
-    pub fn to_bytes(pin: Option<Self>) -> [u8; 24] {
-        let mut b = [0; 24];
-        if let Some(p) = pin {
-            b[..4].copy_from_slice(&p.gid.to_le_bytes());
-            b[4..8].copy_from_slice(&p.mode.to_le_bytes());
-            b[8..16].copy_from_slice(&p.dev.to_le_bytes());
-            b[16..24].copy_from_slice(&p.ino.to_le_bytes());
-        }
-        b
-    }
-
-    pub fn from_bytes(b: &[u8; 24]) -> Option<Self> {
-        if *b == [0; 24] {
-            return None;
-        }
-        let word = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
-        let wide = |at: usize| {
-            let mut a = [0; 8];
-            a.copy_from_slice(&b[at..at + 8]);
-            u64::from_le_bytes(a)
-        };
-        Some(Self {
-            gid: word(0),
-            mode: word(4),
-            dev: wide(8),
-            ino: wide(16),
-        })
-    }
 }
 
 /// The prompt front end's oracle: it cannot ask the group database, so a

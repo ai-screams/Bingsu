@@ -4,18 +4,22 @@
 //! per unit (supervisor to helper). A frame is at most 65,536 bytes with its
 //! header, so it fits an empty default pipe in one write. Counts and
 //! durations travel as data; their limits are arguments of the callers.
-use super::{Error, grant::Refusal};
+use super::{
+    Error,
+    grant::Refusal,
+    path::{EXEC_PIN_LEN, ExecPin},
+};
 use crate::{
     collection::cwd_hash::sha256,
     config::compile::ExecPolicy,
-    fs_trust::GroupPin,
     handoff::{Cwd, Origin, Permit},
     snapshot::crc32c,
 };
 use alloc::{string::String, vec::Vec};
 
 const MAGIC: &[u8; 8] = b"BNGCMD01";
-const VERSION: u16 = 1;
+/// Version 2 added the resolved executable and its pin to units and probes.
+const VERSION: u16 = 2;
 const DOMAIN: &[u8] = b"bingsu-command-v1\0";
 /// Magic, version, kind, flags, body length, CRC32C.
 pub const HEADER: usize = 20;
@@ -82,7 +86,7 @@ pub struct Unit {
     /// `PATH` this round. An observation, so it is not in `digest`.
     pub executable: Vec<u8>,
     /// Its group pin when it is group-writable (`handoff::ExecFrame::pin`).
-    pub pin: Option<GroupPin>,
+    pub pin: Option<ExecPin>,
 }
 
 /// One builtin version probe. Fixed arguments and environment come from the
@@ -92,7 +96,7 @@ pub struct Probe {
     pub profile: u8,
     pub executable: Vec<u8>,
     /// As `Unit::pin`.
-    pub pin: Option<GroupPin>,
+    pub pin: Option<ExecPin>,
 }
 
 /// The single grant. The supervisor can run nothing outside these lists.
@@ -228,12 +232,12 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
                     bytes16(&mut b, w);
                 }
                 bytes16(&mut b, &u.executable);
-                b.extend_from_slice(&GroupPin::to_bytes(u.pin));
+                b.extend_from_slice(&ExecPin::to_bytes(u.pin));
             }
             for p in &g.probes {
                 b.push(p.profile);
                 bytes16(&mut b, &p.executable);
-                b.extend_from_slice(&GroupPin::to_bytes(p.pin));
+                b.extend_from_slice(&ExecPin::to_bytes(p.pin));
             }
         }
         Message::Done => {}
@@ -441,9 +445,12 @@ impl<'a> Reader<'a> {
         let h = self.take(2)?;
         self.take(usize::from(u16::from_le_bytes([h[0], h[1]])))
     }
-    fn pin(&mut self) -> Result<Option<GroupPin>, Error> {
-        let b: &[u8; 24] = self.take(24)?.try_into().map_err(|_| Error::Short)?;
-        Ok(GroupPin::from_bytes(b))
+    fn pin(&mut self) -> Result<Option<ExecPin>, Error> {
+        let b: &[u8; EXEC_PIN_LEN] = self
+            .take(EXEC_PIN_LEN)?
+            .try_into()
+            .map_err(|_| Error::Short)?;
+        ExecPin::from_bytes(b)
     }
 }
 
@@ -451,6 +458,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::command::grant::Refusal;
+    use crate::fs_trust::GroupPin;
     use alloc::vec;
 
     fn permit() -> Permit {
@@ -472,11 +480,15 @@ mod tests {
             timeout: 7,
             env_allow: vec![b"KUBECONFIG".to_vec()],
             executable: b"/usr/local/bin/kubectl".to_vec(),
-            pin: Some(GroupPin {
-                dev: 7,
-                ino: 8,
-                gid: 1000,
-                mode: 0o100_775,
+            pin: Some(ExecPin {
+                group: GroupPin {
+                    dev: 7,
+                    ino: 8,
+                    gid: 1000,
+                    mode: 0o100_775,
+                },
+                ctime_sec: 11,
+                ctime_nsec: 12,
             }),
         }
     }
@@ -495,11 +507,15 @@ mod tests {
             probes: vec![Probe {
                 profile: 3,
                 executable: b"/usr/bin/go".to_vec(),
-                pin: Some(GroupPin {
-                    dev: 1,
-                    ino: 2,
-                    gid: 80,
-                    mode: 0o100_775,
+                pin: Some(ExecPin {
+                    group: GroupPin {
+                        dev: 1,
+                        ino: 2,
+                        gid: 80,
+                        mode: 0o100_775,
+                    },
+                    ctime_sec: 3,
+                    ctime_nsec: 4,
                 }),
             }],
         })
@@ -754,9 +770,10 @@ mod tests {
     // 계산해 둔 머리라 CRC 비교는 이것을 거부하지 못한다.
     #[test]
     fn header_fields_checked_under_valid_crc() {
-        let cases: [(usize, u8, Error); 5] = [
+        let cases: [(usize, u8, Error); 6] = [
             (0, b'X', Error::Magic),
-            (8, 2, Error::Version),
+            (8, 1, Error::Version),
+            (8, 3, Error::Version),
             (10, 0, Error::Kind),
             (10, 4, Error::Kind),
             (11, 1, Error::Flags),
@@ -767,6 +784,18 @@ mod tests {
             reseal(&mut b);
             assert_eq!(decode(&b), Err(e), "{at}");
         }
+    }
+
+    // 이것을 실패시키는 것: Reader::pin이 ExecPin::from_bytes의 Err를 Flags로 돌리지 않고 pin 없음으로
+    // 읽는 것(예약 바이트가 0이 아닌 pin을 받음).
+    #[test]
+    fn pin_reserved_bytes_checked_under_valid_crc() {
+        let mut b = encode(&grant()).unwrap();
+        // The last probe's pin ends the body; its last 4 bytes are reserved.
+        let last = b.len() - 1;
+        b[last] = 1;
+        reseal(&mut b);
+        assert_eq!(decode(&b), Err(Error::Flags));
     }
 
     // 이것을 실패시키는 것: 본문의 cwd 종류, 결과의 origin·이유·거부 사유 종류에서 `_ => Err(Kind)`

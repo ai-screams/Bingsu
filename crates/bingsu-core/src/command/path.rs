@@ -3,6 +3,7 @@
 //! safety row for group write). Pure rules over the strings and the facts
 //! the helper observed through open descriptors; the walk itself is the
 //! CLI's `exec_path`.
+use super::Error;
 use crate::fs_trust::{Facts, GroupOracle, GroupPin, NextOwner, Verdict, entry_verdict};
 use alloc::vec::Vec;
 
@@ -118,15 +119,96 @@ pub fn candidate(f: &Facts, me: u32, next: NextOwner, groups: &mut dyn GroupOrac
     }
 }
 
+/// The pin of one group-writable target the system cleared: the folder pin
+/// (device, inode, group, mode) plus the status change time. Rewriting the
+/// file in place, chmod, chown and ACL changes all move `st_ctime`, so a
+/// group member who changes the file after the helper's check (a path the
+/// group database does not show, such as a setgid binary or newgrp) makes
+/// the relay refuse it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecPin {
+    pub group: GroupPin,
+    pub ctime_sec: i64,
+    pub ctime_nsec: u32,
+}
+
+/// Bytes of an `ExecPin` in the command frames.
+pub const EXEC_PIN_LEN: usize = 40;
+
+impl ExecPin {
+    /// Whether `f`, with status change time `ctime`, is the pinned file
+    /// unchanged.
+    pub fn matches(&self, f: &Facts, ctime: (i64, u32)) -> bool {
+        self.group == GroupPin::of(f) && (self.ctime_sec, self.ctime_nsec) == ctime
+    }
+
+    /// gid, mode, dev, ino, ctime seconds, ctime nanoseconds, 4 reserved
+    /// bytes, little-endian; all zero is no pin (a pinned file's mode has
+    /// its type bits set).
+    pub fn to_bytes(pin: Option<Self>) -> [u8; EXEC_PIN_LEN] {
+        let mut b = [0; EXEC_PIN_LEN];
+        if let Some(p) = pin {
+            b[..4].copy_from_slice(&p.group.gid.to_le_bytes());
+            b[4..8].copy_from_slice(&p.group.mode.to_le_bytes());
+            b[8..16].copy_from_slice(&p.group.dev.to_le_bytes());
+            b[16..24].copy_from_slice(&p.group.ino.to_le_bytes());
+            b[24..32].copy_from_slice(&p.ctime_sec.to_le_bytes());
+            b[32..36].copy_from_slice(&p.ctime_nsec.to_le_bytes());
+        }
+        b
+    }
+
+    /// `Flags` for reserved bytes that are not zero or nanoseconds of a
+    /// whole second or more.
+    pub fn from_bytes(b: &[u8; EXEC_PIN_LEN]) -> Result<Option<Self>, Error> {
+        if *b == [0; EXEC_PIN_LEN] {
+            return Ok(None);
+        }
+        let word = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let wide = |at: usize| {
+            let mut a = [0; 8];
+            a.copy_from_slice(&b[at..at + 8]);
+            a
+        };
+        let ctime_nsec = word(32);
+        if b[36..] != [0; 4] || ctime_nsec >= 1_000_000_000 {
+            return Err(Error::Flags);
+        }
+        Ok(Some(Self {
+            group: GroupPin {
+                gid: word(0),
+                mode: word(4),
+                dev: u64::from_le_bytes(wide(8)),
+                ino: u64::from_le_bytes(wide(16)),
+            },
+            ctime_sec: i64::from_le_bytes(wide(24)),
+            ctime_nsec,
+        }))
+    }
+}
+
 /// The pin the relay needs for a target `candidate` accepted: present only
 /// when the file is group-writable, and then only if the group oracle
 /// cleared this very file (`cleared` is what `Recording` kept). An ACL is
 /// not in the pin: only the file's owner (root or the user, which
 /// `entry_verdict` checked) or a holder of CAP_FOWNER can change it, and
-/// both are trusted.
-pub fn target_pin(f: &Facts, cleared: &[GroupPin]) -> Option<GroupPin> {
-    let pin = GroupPin::of(f);
-    (f.mode & 0o020 != 0 && cleared.contains(&pin)).then_some(pin)
+/// both are trusted; a change also moves the ctime in the pin.
+pub fn target_pin(f: &Facts, cleared: &[GroupPin], ctime: (i64, u32)) -> Option<ExecPin> {
+    let group = GroupPin::of(f);
+    (f.mode & 0o020 != 0 && cleared.contains(&group)).then_some(ExecPin {
+        group,
+        ctime_sec: ctime.0,
+        ctime_nsec: ctime.1,
+    })
+}
+
+/// A resolved executable inside the current repository is refused even when
+/// the `PATH` folder it was found through is outside (a symlink
+/// `~/bin/tool -> <repo>/bin/tool`), and so is an absolute command path
+/// there (spec section 7 user commands row: executables inside the
+/// repository).
+pub fn outside_repo(canonical: &[u8], repo: Option<&[u8]>) -> bool {
+    !repo.is_some_and(|r| within(canonical, r))
 }
 
 #[cfg(test)]
@@ -253,16 +335,57 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: target_pin의 그룹 쓰기 조건을 지우는 것(그룹 쓰기 없는 파일에 pin),
-    // 또는 cleared 확인을 지우는 것(오라클이 통과시키지 않은 파일에 pin).
+    // cleared 확인을 지우는 것(오라클이 통과시키지 않은 파일에 pin), ctime을 pin에 넣지 않는 것.
     #[test]
     fn pins_only_for_cleared_group_writable_targets() {
         let f = file(ME, 0o775);
-        assert_eq!(target_pin(&f, &[GroupPin::of(&f)]), Some(GroupPin::of(&f)));
-        assert_eq!(target_pin(&f, &[]), None);
+        let pin = target_pin(&f, &[GroupPin::of(&f)], (7, 9)).unwrap();
+        assert_eq!(pin.group, GroupPin::of(&f));
+        assert_eq!((pin.ctime_sec, pin.ctime_nsec), (7, 9));
+        assert_eq!(target_pin(&f, &[], (7, 9)), None);
         let mut other = f;
         other.ino = 3;
-        assert_eq!(target_pin(&f, &[GroupPin::of(&other)]), None);
+        assert_eq!(target_pin(&f, &[GroupPin::of(&other)], (7, 9)), None);
         let plain = file(ME, 0o755);
-        assert_eq!(target_pin(&plain, &[GroupPin::of(&plain)]), None);
+        assert_eq!(target_pin(&plain, &[GroupPin::of(&plain)], (7, 9)), None);
+    }
+
+    // 이것을 실패시키는 것: matches에서 ctime 비교를 지우는 것(그 자리에서 고쳐 쓴 파일이 통과),
+    // 또는 GroupPin 비교를 지우는 것.
+    #[test]
+    fn exec_pin_matches_file_and_ctime() {
+        let f = file(ME, 0o775);
+        let pin = target_pin(&f, &[GroupPin::of(&f)], (7, 9)).unwrap();
+        assert!(pin.matches(&f, (7, 9)));
+        assert!(!pin.matches(&f, (7, 10)));
+        assert!(!pin.matches(&f, (8, 9)));
+        let mut moved = f;
+        moved.ino = 3;
+        assert!(!pin.matches(&moved, (7, 9)));
+    }
+
+    // 이것을 실패시키는 것: to_bytes가 ctime을 쓰지 않거나 from_bytes가 버리는 것, 전부 0을 Some으로
+    // 읽는 것, 예약 바이트·나노초 범위 검사를 지우는 것.
+    #[test]
+    fn exec_pin_bytes() {
+        let f = file(ME, 0o775);
+        let pin = target_pin(&f, &[GroupPin::of(&f)], (-5, 999_999_999)).unwrap();
+        let b = ExecPin::to_bytes(Some(pin));
+        assert_eq!(ExecPin::from_bytes(&b), Ok(Some(pin)));
+        assert_eq!(ExecPin::from_bytes(&ExecPin::to_bytes(None)), Ok(None));
+        let mut bad = b;
+        bad[39] = 1;
+        assert_eq!(ExecPin::from_bytes(&bad), Err(Error::Flags));
+        let mut bad = b;
+        bad[32..36].copy_from_slice(&1_000_000_000u32.to_le_bytes());
+        assert_eq!(ExecPin::from_bytes(&bad), Err(Error::Flags));
+    }
+
+    // 이것을 실패시키는 것: outside_repo의 저장소 비교를 지우거나 반전하는 것.
+    #[test]
+    fn executables_inside_the_repo_are_refused() {
+        assert!(!outside_repo(b"/w/repo/bin/tool", Some(b"/w/repo")));
+        assert!(outside_repo(b"/w/repo2/bin/tool", Some(b"/w/repo")));
+        assert!(outside_repo(b"/usr/bin/tool", None));
     }
 }

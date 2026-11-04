@@ -1,8 +1,10 @@
 //! Fixed relay contract: argv, the permit and the exec frame on fd 3.
 //! The relay rechecks both with a fresh clock immediately before execution.
 use crate::{
-    command::Error as FrameError,
-    fs_trust::GroupPin,
+    command::{
+        Error as FrameError,
+        path::{EXEC_PIN_LEN, ExecPin},
+    },
     snapshot::{Clock, crc32c},
     snapshot_codec::Error,
 };
@@ -197,8 +199,8 @@ const EXEC_DOMAIN: &[u8] = b"bingsu-exec-frame-v1\0";
 /// Layout version 2 added the target pin.
 const EXEC_VERSION: u16 = 2;
 /// Magic, version, origin, flags, environment length, run deadline, CRC,
-/// reserved, target pin (24 bytes, all zero for none).
-pub const EXEC_HEADER: usize = 56;
+/// reserved, target pin (`EXEC_PIN_LEN` bytes, all zero for none).
+pub const EXEC_HEADER: usize = 32 + EXEC_PIN_LEN;
 /// Second frame on fd 3, after the 96-byte permit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecFrame {
@@ -210,7 +212,7 @@ pub struct ExecFrame {
     /// The target the helper resolved, when it is group-writable and its
     /// group was cleared (spec section 2 safety row): the relay accepts the
     /// group write only for this exact file, group and mode.
-    pub pin: Option<GroupPin>,
+    pub pin: Option<ExecPin>,
 }
 /// CRC over everything but the CRC itself (reserved bytes and pin included).
 fn exec_crc(h: &[u8], body: &[u8]) -> [u8; 4] {
@@ -232,7 +234,7 @@ impl ExecFrame {
         h[10] = self.origin.tag();
         h[12..16].copy_from_slice(&len.to_le_bytes());
         h[16..24].copy_from_slice(&self.run_deadline.to_le_bytes());
-        h[32..56].copy_from_slice(&GroupPin::to_bytes(self.pin));
+        h[32..EXEC_HEADER].copy_from_slice(&ExecPin::to_bytes(self.pin));
         let crc = exec_crc(&h, &self.environment);
         h[24..28].copy_from_slice(&crc);
         out.extend_from_slice(&h);
@@ -266,13 +268,14 @@ impl ExecFrame {
         }
         let mut deadline = [0u8; 8];
         deadline.copy_from_slice(&b[16..24]);
-        let mut pin = [0u8; 24];
+        let mut pin = [0u8; EXEC_PIN_LEN];
         pin.copy_from_slice(&b[32..EXEC_HEADER]);
+        let pin = ExecPin::from_bytes(&pin)?;
         Ok(Self {
             origin,
             run_deadline: u64::from_le_bytes(deadline),
             environment: body.to_vec(),
-            pin: GroupPin::from_bytes(&pin),
+            pin,
         })
     }
 }
@@ -496,37 +499,44 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: encode_into가 pin을 쓰지 않거나 decode가 pin을 버리는 것, 또는
-    // from_bytes가 전부 0인 pin을 Some으로 읽는 것.
+    fn pin() -> ExecPin {
+        ExecPin {
+            group: crate::fs_trust::GroupPin {
+                dev: 0x0102_0304_0506_0708,
+                ino: 0x1112_1314_1516_1718,
+                gid: 1000,
+                mode: 0o100_775,
+            },
+            ctime_sec: 1_700_000_000,
+            ctime_nsec: 123,
+        }
+    }
+
+    // 이것을 실패시키는 것: encode_into가 pin을 쓰지 않거나 decode가 pin을 버리는 것, 또는 pin의
+    // 예약 바이트 거부(ExecPin::from_bytes의 Err를 Flags로)를 지우는 것.
     #[test]
     fn exec_frame_carries_pin() {
-        let pin = GroupPin {
-            dev: 0x0102_0304_0506_0708,
-            ino: 0x1112_1314_1516_1718,
-            gid: 1000,
-            mode: 0o100_775,
-        };
         let mut f = frame(Origin::Config);
-        f.pin = Some(pin);
+        f.pin = Some(pin());
         let b = relay_input(permit(30), &f, 16_384).unwrap();
-        assert_eq!(read_relay_input(&b, 16_384).unwrap().1.pin, Some(pin));
-        assert_eq!(GroupPin::from_bytes(&GroupPin::to_bytes(None)), None);
+        assert_eq!(read_relay_input(&b, 16_384).unwrap().1.pin, Some(pin()));
         let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
-        assert_eq!(b[96 + 32..96 + EXEC_HEADER], [0; 24]);
+        assert_eq!(b[96 + 32..96 + EXEC_HEADER], [0; EXEC_PIN_LEN]);
         assert_eq!(read_relay_input(&b, 16_384).unwrap().1.pin, None);
+        let mut x = relay_input(permit(30), &f, 16_384).unwrap();
+        let h = &mut x[96..];
+        h[EXEC_HEADER - 1] = 1;
+        let crc = exec_crc(h, &h[EXEC_HEADER..]);
+        h[24..28].copy_from_slice(&crc);
+        assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Flags));
     }
 
     // 이것을 실패시키는 것: ExecFrame::decode의 CRC 비교나 예약 바이트(28..32) 검사를 지우는 것,
-    // 또는 CRC 범위에서 pin(32..56)을 빼는 것.
+    // 또는 CRC 범위에서 pin(32..EXEC_HEADER)을 빼는 것.
     #[test]
     fn exec_frame_rejects_every_flipped_bit() {
         let mut f = frame(Origin::Config);
-        f.pin = Some(GroupPin {
-            dev: 1,
-            ino: 2,
-            gid: 3,
-            mode: 0o100_775,
-        });
+        f.pin = Some(pin());
         let b = relay_input(permit(30), &f, 16_384).unwrap();
         for i in 96..b.len() {
             for bit in 0..8 {

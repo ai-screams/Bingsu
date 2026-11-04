@@ -12,8 +12,8 @@
 //! relay's exec nobody else can swap a name on the way.
 use crate::commands::group_policy::Recording;
 use crate::commands::sys;
-use bingsu_core::command::path::{self as rule, Candidate, Name};
-use bingsu_core::fs_trust::{GroupOracle, GroupPin, NextOwner, ancestor_verdict};
+use bingsu_core::command::path::{self as rule, Candidate, ExecPin, Name};
+use bingsu_core::fs_trust::{GroupOracle, NextOwner, ancestor_verdict};
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -31,7 +31,7 @@ const DEPTH_MAX: usize = 256;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Found {
     pub executable: PathBuf,
-    pub pin: Option<GroupPin>,
+    pub pin: Option<ExecPin>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,7 +51,11 @@ struct Folder {
 
 enum End {
     Folder,
-    File { file: File, next: NextOwner },
+    File {
+        file: File,
+        next: NextOwner,
+        ctime: (i64, i64),
+    },
 }
 
 /// `p`'s names in order: "/" restarts at the root, ".." steps back.
@@ -66,8 +70,14 @@ fn names(p: &Path) -> VecDeque<OsString> {
         .collect()
 }
 
+/// A name that is not there, or a folder the user may not search (EACCES),
+/// holds nothing to run: the lookup moves on to the next folder, as
+/// `execvp` does.
 fn miss(e: &std::io::Error) -> Miss {
-    if e.kind() == std::io::ErrorKind::NotFound {
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    ) {
         Miss::Absent
     } else {
         Miss::Refused
@@ -140,7 +150,8 @@ fn walk(
                 return Err(Miss::Refused);
             }
             canonical.push(&name);
-            return Ok((canonical, End::File { file, next }));
+            let ctime = now.ctime;
+            return Ok((canonical, End::File { file, next, ctime }));
         }
         if kind != 0o040_000 || stack.len() >= DEPTH_MAX {
             return Err(if kind == 0o040_000 {
@@ -212,19 +223,20 @@ pub fn path_value(folders: &[PathBuf]) -> Vec<u8> {
 /// Looks the command's first word up: an absolute path as given, a bare
 /// name in `folders` (from `sanitize`). The first folder with an
 /// executable regular file of that name decides; if that file fails the
-/// rules nothing runs.
+/// rules nothing runs. `repo` as in `sanitize`.
 pub fn lookup(
     word: &[u8],
     folders: &[PathBuf],
+    repo: Option<&Path>,
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Found, Miss> {
     match rule::name(word) {
         Name::Refused => Err(Miss::Refused),
-        Name::Absolute(p) => resolve(Path::new(OsStr::from_bytes(p)), me, groups),
+        Name::Absolute(p) => resolve(Path::new(OsStr::from_bytes(p)), repo, me, groups),
         Name::Search(n) => {
             for folder in folders {
-                match resolve(&folder.join(OsStr::from_bytes(n)), me, groups) {
+                match resolve(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
                     Err(Miss::Absent) => continue,
                     other => return other,
                 }
@@ -236,17 +248,30 @@ pub fn lookup(
 
 /// One executable path: walked, then judged with the group answers kept,
 /// so a group-writable target carries the pin its group was cleared for.
-pub fn resolve(path: &Path, me: u32, groups: &mut dyn GroupOracle) -> Result<Found, Miss> {
+/// The canonical file must be outside `repo`, wherever the walk started.
+pub fn resolve(
+    path: &Path,
+    repo: Option<&Path>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<Found, Miss> {
     let (executable, end) = walk(path, me, groups, false)?;
-    let End::File { file, next } = end else {
+    let End::File { file, next, ctime } = end else {
         return Err(Miss::Absent);
     };
+    if !rule::outside_repo(
+        executable.as_os_str().as_bytes(),
+        repo.map(|r| r.as_os_str().as_bytes()),
+    ) {
+        return Err(Miss::Refused);
+    }
+    let ctime = (ctime.0, u32::try_from(ctime.1).map_err(|_| Miss::Refused)?);
     let facts = sys::fd_facts(file.as_fd()).map_err(|_| Miss::Refused)?;
     let mut recording = Recording::new(groups);
     match rule::candidate(&facts, me, next, &mut recording) {
         Candidate::Run => Ok(Found {
             executable,
-            pin: rule::target_pin(&facts, &recording.cleared),
+            pin: rule::target_pin(&facts, &recording.cleared, ctime),
         }),
         Candidate::Skip => Err(Miss::Absent),
         Candidate::Refuse => Err(Miss::Refused),
@@ -255,11 +280,11 @@ pub fn resolve(path: &Path, me: u32, groups: &mut dyn GroupOracle) -> Result<Fou
 
 /// `resolve` for the current user with the system's group answers, asked
 /// afresh (one `SystemGroups` per call, like every other walk).
-pub fn resolve_for_user(path: &Path) -> Result<Found, Miss> {
+pub fn resolve_for_user(path: &Path, repo: Option<&Path>) -> Result<Found, Miss> {
     let me = sys::current_uid();
     let user = sys::passwd_entry(me).ok_or(Miss::Refused)?;
     let mut groups = crate::commands::group_policy::SystemGroups::new(&user.name);
-    resolve(path, me, &mut groups)
+    resolve(path, repo, me, &mut groups)
 }
 
 #[cfg(test)]
@@ -321,7 +346,7 @@ mod tests {
         let mut path = bytes(&repo.join("bin")).to_vec();
         path.extend_from_slice(b":.::bin:/usr/bin");
         let folders = sanitize(&path, Some(&repo), me(), &mut RefuseGroupWrite);
-        let found = lookup(b"env", &folders, me(), &mut RefuseGroupWrite).unwrap();
+        let found = lookup(b"env", &folders, Some(&repo), me(), &mut RefuseGroupWrite).unwrap();
         assert_eq!(
             found.executable,
             std::fs::canonicalize("/usr/bin/env").unwrap()
@@ -336,7 +361,7 @@ mod tests {
         assert_eq!(path_value(&folders), bytes(&usr_bin));
         // Positive control: outside a repository the same folder stays and wins.
         let folders = sanitize(&path, None, me(), &mut RefuseGroupWrite);
-        let found = lookup(b"env", &folders, me(), &mut RefuseGroupWrite).unwrap();
+        let found = lookup(b"env", &folders, None, me(), &mut RefuseGroupWrite).unwrap();
         assert_eq!(found.executable, repo.join("bin/env"));
         std::fs::remove_dir_all(&t).unwrap();
     }
@@ -351,7 +376,7 @@ mod tests {
         folders(&t.join("bin"));
         symlink("../Cellar/x/1/bin/x", t.join("bin/x")).unwrap();
         let folders = sanitize(bytes(&t.join("bin")), None, me(), &mut RefuseGroupWrite);
-        let found = lookup(b"x", &folders, me(), &mut RefuseGroupWrite).unwrap();
+        let found = lookup(b"x", &folders, None, me(), &mut RefuseGroupWrite).unwrap();
         assert_eq!(
             found,
             Found {
@@ -375,11 +400,16 @@ mod tests {
         symlink(&real, &link).unwrap();
         // Positive control: a root-owned link resolves.
         assert_eq!(
-            resolve(&link, 0, &mut RefuseGroupWrite).unwrap().executable,
+            resolve(&link, None, 0, &mut RefuseGroupWrite)
+                .unwrap()
+                .executable,
             real
         );
         std::os::unix::fs::lchown(&link, Some(12345), Some(12345)).unwrap();
-        assert_eq!(resolve(&link, 0, &mut RefuseGroupWrite), Err(Miss::Refused));
+        assert_eq!(
+            resolve(&link, None, 0, &mut RefuseGroupWrite),
+            Err(Miss::Refused)
+        );
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -392,7 +422,7 @@ mod tests {
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(sanitize(bytes(&loose), None, me(), &mut RefuseGroupWrite).is_empty());
         assert_eq!(
-            resolve(&loose.join("x"), me(), &mut RefuseGroupWrite),
+            resolve(&loose.join("x"), None, me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -415,23 +445,125 @@ mod tests {
         exe(&b.join("y"), 0o755);
         let folders = [a.clone(), b.clone()];
         assert_eq!(
-            lookup(b"x", &folders, me(), &mut RefuseGroupWrite),
+            lookup(b"x", &folders, None, me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         assert_eq!(
-            lookup(b"y", &folders, me(), &mut RefuseGroupWrite)
+            lookup(b"y", &folders, None, me(), &mut RefuseGroupWrite)
                 .unwrap()
                 .executable,
             b.join("y")
         );
         assert_eq!(
-            lookup(b"z", &folders, me(), &mut RefuseGroupWrite),
+            lookup(b"z", &folders, None, me(), &mut RefuseGroupWrite),
             Err(Miss::Absent)
         );
         assert_eq!(
-            lookup(b"a/x", &folders, me(), &mut RefuseGroupWrite),
+            lookup(b"a/x", &folders, None, me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 이것을 실패시키는 것: resolve의 outside_repo 검사를 지우는 것(저장소 밖 폴더의 본인 소유 symlink가
+    // 저장소 안 실행 파일로 이어지거나, 저장소 안 절대 경로 명령이 실행됨).
+    #[test]
+    fn executables_inside_the_repo_are_refused_through_links() {
+        let t = scratch("repo-link");
+        let repo = t.join("repo");
+        exe(&repo.join("bin/tool"), 0o755);
+        folders(&t.join("bin"));
+        symlink(repo.join("bin/tool"), t.join("bin/tool")).unwrap();
+        let folders = sanitize(
+            bytes(&t.join("bin")),
+            Some(&repo),
+            me(),
+            &mut RefuseGroupWrite,
+        );
+        assert_eq!(folders, [t.join("bin")]);
+        let g = &mut RefuseGroupWrite;
+        assert_eq!(
+            lookup(b"tool", &folders, Some(&repo), me(), g),
+            Err(Miss::Refused)
+        );
+        let absolute = repo.join("bin/tool");
+        assert_eq!(
+            lookup(bytes(&absolute), &[], Some(&repo), me(), g),
+            Err(Miss::Refused)
+        );
+        // Positive control: outside any repository the link resolves.
+        assert_eq!(
+            lookup(b"tool", &folders, None, me(), g).unwrap().executable,
+            absolute
+        );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 이것을 실패시키는 것: miss가 EACCES(PermissionDenied)를 Refused로 두는 것(들어갈 수 없는 앞 폴더에서
+    // 찾기가 멈춤). root는 검색 권한을 무시하므로 root가 아닌 사용자로 돌려야 뜻이 있다.
+    #[test]
+    fn unsearchable_folders_are_skipped() {
+        let t = scratch("nosearch");
+        let (a, b) = (t.join("a"), t.join("b"));
+        exe(&a.join("x"), 0o755);
+        exe(&b.join("x"), 0o755);
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let found = lookup(
+            b"x",
+            &[a.clone(), b.clone()],
+            None,
+            me(),
+            &mut RefuseGroupWrite,
+        );
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if me() != 0 {
+            assert_eq!(found.unwrap().executable, b.join("x"));
+        }
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 이것을 실패시키는 것: walk의 LINKS_MAX 상한을 지우는 것(고리를 끝없이 돎).
+    #[test]
+    fn symlink_loops_are_refused() {
+        let t = scratch("loop");
+        symlink(t.join("b"), t.join("a")).unwrap();
+        symlink(t.join("a"), t.join("b")).unwrap();
+        assert_eq!(
+            resolve(&t.join("a/x"), None, me(), &mut RefuseGroupWrite),
+            Err(Miss::Refused)
+        );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // root 소유 1777 폴더 아래 실행 파일은 본인 소유만 실행된다. chown과 root 소유 파일이 필요해 Linux
+    // 컨테이너에서 root로 --ignored로 돌린다. 폴더는 sticky가 아닌 "/" 바로 아래에 둔다(/tmp 아래면 사용자
+    // 12345 쪽에서 /tmp의 의무가 먼저 걸린다). 이것을 실패시키는 것: candidate의 sticky 상위 의무를 지우는
+    // 것(사용자 12345에게 root 소유 파일이 실행됨).
+    #[test]
+    #[ignore = "needs root (chown to another uid); run in the Linux container"]
+    fn sticky_folder_files_must_be_mine() {
+        assert_eq!(me(), 0, "run as root");
+        let t = PathBuf::from(format!("/bingsu-exec-path-sticky-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        folders(&t);
+        let sticky = t.join("sticky");
+        folders(&sticky);
+        std::fs::set_permissions(&sticky, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let (root_file, theirs) = (sticky.join("root"), sticky.join("theirs"));
+        exe(&root_file, 0o755);
+        exe(&theirs, 0o755);
+        std::os::unix::fs::chown(&theirs, Some(12345), Some(12345)).unwrap();
+        let g = &mut RefuseGroupWrite;
+        // For root: its own file runs, the other uid's file is refused.
+        assert_eq!(
+            resolve(&root_file, None, 0, g).unwrap().executable,
+            root_file
+        );
+        assert_eq!(resolve(&theirs, None, 0, g), Err(Miss::Refused));
+        // For uid 12345: its own file runs; root's file, fine by owner alone, is
+        // refused by the sticky folder's duty.
+        assert_eq!(resolve(&theirs, None, 12345, g).unwrap().executable, theirs);
+        assert_eq!(resolve(&root_file, None, 12345, g), Err(Miss::Refused));
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -442,11 +574,17 @@ mod tests {
         let t = scratch("pin");
         let x = t.join("x");
         exe(&x, 0o775);
-        assert_eq!(resolve(&x, me(), &mut RefuseGroupWrite), Err(Miss::Refused));
-        let found = resolve(&x, me(), &mut Clear).unwrap();
+        assert_eq!(
+            resolve(&x, None, me(), &mut RefuseGroupWrite),
+            Err(Miss::Refused)
+        );
+        let found = resolve(&x, None, me(), &mut Clear).unwrap();
         let file = File::open(&x).unwrap();
         let facts = sys::fd_facts(file.as_fd()).unwrap();
-        assert_eq!(found.pin, Some(GroupPin::of(&facts)));
+        let stamp = sys::file_stamp(&file).unwrap();
+        let pin = found.pin.unwrap();
+        assert_eq!(pin.group, bingsu_core::fs_trust::GroupPin::of(&facts));
+        assert_eq!((pin.ctime_sec, i64::from(pin.ctime_nsec)), stamp.ctime);
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -459,7 +597,9 @@ mod tests {
         let x = t.join("x");
         exe(&x, 0o111);
         assert_eq!(
-            resolve(&x, me(), &mut RefuseGroupWrite).unwrap().executable,
+            resolve(&x, None, me(), &mut RefuseGroupWrite)
+                .unwrap()
+                .executable,
             x
         );
         std::fs::remove_dir_all(&t).unwrap();
