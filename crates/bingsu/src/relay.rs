@@ -1,7 +1,7 @@
 //! Trusted relay, Linux native executables and scripts (`bingsu __exec-v2`,
 //! spec section 4 "the place of the pre-exec check", rows native executable
 //! and script). The command supervisor spawns it with an empty environment
-//! and the permit and exec frame on fd 3; the relay checks the target through
+//! and the permit and exec frame on fd 3 (fd 2 is its status pipe); the relay checks the target through
 //! one open descriptor, takes a fresh clock as its last step and runs the
 //! target with `execveat` on that descriptor. A script runs as its checked
 //! interpreter's descriptor with a sealed memfd copy of the script. Every decision
@@ -24,9 +24,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
-/// Largest permit plus exec frame the relay reads from fd 3 (U-9d, 16 KB):
-/// the supervisor writes both into an empty pipe in one write.
-pub(crate) const INPUT_CAP: usize = 16 * 1024;
+/// Largest permit plus exec frame the relay reads from fd 3.
+pub(crate) const INPUT_CAP: usize = bingsu_core::handoff::RELAY_INPUT_MAX;
 /// Fixed exit codes; the target was not executed. Argv or fd 3 input.
 pub(crate) const RELAY_INPUT: u8 = 120;
 /// The fresh clock is past a deadline or is not the permit's clock.
@@ -45,12 +44,49 @@ pub(crate) fn run(args: &[OsString]) -> ExitCode {
     ExitCode::from(relay(args))
 }
 
-/// Returns only when the target was not executed.
+/// Returns only when the target was not executed. The supervisor learns
+/// which happened from the status pipe it passes as fd 2: the refusal code
+/// as one byte, or end of file without one when `execveat` closed it.
 fn relay(args: &[OsString]) -> u8 {
-    match prepare(args) {
-        Ok(target) => target.exec(),
-        Err(code) => code,
+    let (status, code) = match take_status() {
+        Ok(status) => {
+            let code = match prepare(args) {
+                Ok(target) => target.exec(),
+                Err(code) => code,
+            };
+            (status, code)
+        }
+        Err(status) => (status, RELAY_EXEC),
+    };
+    if let Some(fd) = status {
+        // SAFETY: one readable byte to the relay's own descriptor.
+        unsafe { libc::write(fd.as_raw_fd(), [code].as_ptr().cast(), 1) };
     }
+    code
+}
+
+/// Moves fd 2 (the status pipe) above fd 3, where the close-on-exec pass
+/// of `prepare` marks it like every descriptor from 3 up, and puts
+/// `/dev/null` at 2 for the target (spec: stderr `/dev/null`). Without a
+/// fd 2 there is no status pipe, and 2 still gets `/dev/null`. `Err` (fd 2
+/// could not be replaced, so the target would inherit the pipe) refuses.
+fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
+    // SAFETY: duplicates fd 2 when it is open; -1 (EBADF) when it is not.
+    let moved = unsafe { libc::fcntl(2, libc::F_DUPFD, 3) };
+    // SAFETY: a successful F_DUPFD returns a descriptor nothing else owns.
+    let status = (moved >= 0).then(|| unsafe { OwnedFd::from_raw_fd(moved) });
+    // SAFETY: fixed NUL-terminated path, no O_CREAT.
+    let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if null < 0 {
+        return Err(status);
+    }
+    // Rust's runtime opens `/dev/null` on any of 0 to 2 that is closed
+    // before `main`, so fd 2 is open here and `null` is above it.
+    // SAFETY: both descriptors are open; dup2 clears close-on-exec on 2.
+    let ok = unsafe { libc::dup2(null, 2) } == 2;
+    // SAFETY: `null` was opened above and is closed once.
+    unsafe { libc::close(null) };
+    if ok { Ok(status) } else { Err(status) }
 }
 
 /// A checked target, ready for the clock check and `execveat`. The pointer
@@ -798,7 +834,20 @@ mod tests {
     /// SIGUSR1 is ignored and SIGUSR2 blocked, which the relay must undo.
     /// `relay_env` is the relay's own envp; the supervisor passes none.
     fn spawn_relay(input: &[u8], args: &[Vec<u8>], relay_env: &[(&str, &Path)]) -> Child {
-        spawn_relay_with(input, args, relay_env, None, false)
+        spawn_relay_with(input, args, relay_env, Spawn::default())
+    }
+
+    /// How `spawn_relay_with` starts the relay beyond its input and argv.
+    #[derive(Default)]
+    struct Spawn {
+        /// Run as this user (root only).
+        uid: Option<u32>,
+        /// Start under a filter that answers PR_SET_NO_NEW_PRIVS with EPERM.
+        deny_nnp: bool,
+        /// fd 2 of the relay (its status pipe); the test's stderr otherwise.
+        status: Option<OwnedFd>,
+        /// Start the relay with fd 2 closed.
+        close_stderr: bool,
     }
 
     /// `spawn_relay`, as the user `uid` when given (root only).
@@ -806,9 +855,14 @@ mod tests {
         input: &[u8],
         args: &[Vec<u8>],
         relay_env: &[(&str, &Path)],
-        uid: Option<u32>,
-        deny_nnp: bool,
+        how: Spawn,
     ) -> Child {
+        let Spawn {
+            uid,
+            deny_nnp,
+            status,
+            close_stderr,
+        } = how;
         // With `deny_nnp` the relay starts under a filter that answers
         // prctl(PR_SET_NO_NEW_PRIVS) with EPERM (installing it needs the
         // flag first). Built before the fork: the child may not allocate.
@@ -860,7 +914,7 @@ mod tests {
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stderr(status.map_or_else(Stdio::inherit, Stdio::from));
         for (k, v) in relay_env {
             cmd.env(k, v);
         }
@@ -886,6 +940,10 @@ mod tests {
             unsafe { libc::sigaddset(&mut set, libc::SIGUSR2) };
             // SAFETY: `set` is initialized; the old mask is not requested.
             unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
+            if close_stderr {
+                // SAFETY: closes the child's own fd 2.
+                unsafe { libc::close(2) };
+            }
             // SAFETY: plain prctl calls; `program` points at the filter above,
             // alive until spawn returns.
             if deny_nnp
@@ -1093,6 +1151,87 @@ mod tests {
         assert_eq!(seen.fds, [0, 1, 2]);
     }
 
+    /// A pipe for the relay's fd 2: (supervisor's read end, relay's write end).
+    fn status_pipe() -> (OwnedFd, OwnedFd) {
+        pipe()
+    }
+
+    /// Everything in the status pipe once every writer is gone.
+    fn status_bytes(read: OwnedFd) -> Vec<u8> {
+        read_all(read.as_raw_fd())
+    }
+
+    // 감독이 exec 성공과 중계 거부를 대상 종료 코드와 따로 안다(B1 판정). 이것을 실패시키는 것: relay()의
+    // 상태 바이트 쓰기를 지우는 것(거부가 빈 EOF, 곧 "실행됨"으로 보임).
+    #[test]
+    fn test_relay_writes_refusal_to_status() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (read, write) = status_pipe();
+        let (_, bytes) = input(Origin::Config, Times { trust: -1, ..LIVE }, b"");
+        let got = outcome(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                status: Some(write),
+                ..Spawn::default()
+            },
+        ));
+        assert!(refused_with(&got, RELAY_EXPIRED), "{got:?}");
+        assert_eq!(status_bytes(read), [RELAY_EXPIRED]);
+    }
+
+    // 이것을 실패시키는 것: take_status가 fd 2에 /dev/null을 놓지 않는 것(대상 fd 2가 상태 파이프라 EOF가
+    // 대상 종료까지 늦어짐).
+    #[test]
+    fn test_relay_status_ends_at_exec() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (read, write) = status_pipe();
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let child = echo(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                status: Some(write),
+                ..Spawn::default()
+            },
+        ))
+        .unwrap();
+        // The target runs: the pipe already ended, with no byte.
+        // SAFETY: flag change on the test's own read end.
+        unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        let mut b = [0u8; 1];
+        // SAFETY: `b` is writable; the read end is non-blocking.
+        let n = unsafe { libc::read(read.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
+        let fd2 = std::fs::read_link(format!("/proc/{}/fd/2", child.id())).unwrap();
+        finish(child);
+        assert_eq!(n, 0, "end of file while the target still runs");
+        assert_eq!(fd2, Path::new("/dev/null"));
+    }
+
+    // C2 수용 조건(B3 리뷰): fd 2 없이 떠도 대상은 fd 2에 /dev/null을 받는다(memfd나 열린 파일이 2를 받지
+    // 않음). 이 성질은 Rust 런타임이 main 전에 닫힌 0–2에 /dev/null을 여는 데서 온다(take_status의 dup2를
+    // 지워도 통과함을 확인했다). 이것을 실패시키는 것: 그 정리를 하지 않는 런타임·대상으로 중계를 빌드하는 것.
+    #[test]
+    fn test_relay_without_fd2_gives_target_dev_null() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let child = echo(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            Spawn {
+                close_stderr: true,
+                ..Spawn::default()
+            },
+        ))
+        .unwrap();
+        let fd2 = std::fs::read_link(format!("/proc/{}/fd/2", child.id()));
+        finish(child);
+        assert_eq!(fd2.unwrap(), Path::new("/dev/null"));
+    }
+
     // U-17. 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를 지우는 것(대상의 NoNewPrivs가 0).
     #[test]
     fn test_relay_target_has_no_new_privs() {
@@ -1116,8 +1255,10 @@ mod tests {
             &bytes,
             &args(&cat(), &[b"cat"]),
             &[],
-            None,
-            true,
+            Spawn {
+                deny_nnp: true,
+                ..Spawn::default()
+            },
         ));
         assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
     }
@@ -1141,8 +1282,10 @@ mod tests {
             &input,
             &args(&exe, &[b"cat"]),
             &[],
-            Some(65_534),
-            false,
+            Spawn {
+                uid: Some(65_534),
+                ..Spawn::default()
+            },
         ))
         .unwrap();
         // Only the status file: another user's /proc/<pid>/exe needs ptrace access.
@@ -2258,8 +2401,10 @@ mod tests {
             &input,
             &args(&script, &[b"s"]),
             &[],
-            Some(65_534),
-            false,
+            Spawn {
+                uid: Some(65_534),
+                ..Spawn::default()
+            },
         ));
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         // Positive control: with execute for others it runs as nobody.
@@ -2269,8 +2414,10 @@ mod tests {
                 &input,
                 &args(&script, &[b"s"]),
                 &[],
-                Some(65_534),
-                false,
+                Spawn {
+                    uid: Some(65_534),
+                    ..Spawn::default()
+                },
             ))
             .unwrap(),
         );
