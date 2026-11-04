@@ -100,7 +100,7 @@ fn main() {
  let mut verification=commands::helper::Verification::start();
  let mut handle=None;let mut admission_ns=0;let mut product_mask=None;let mut deferred=None;
  let value=std::sync::Arc::new(std::sync::Mutex::new(None));let output=value.clone();
- let broker=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock| {
+ let broker=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock,_marker| {
  verification.verified();
  let mut selected=commands::helper::selected_request(&collection::selection::PRODUCT,&envelope,display,clock)?.unwrap();
  assert_eq!(selected.binding.mask,10);
@@ -185,8 +185,8 @@ def prepare(binary):
             text = M3B.replace_required(text, old, new)
     supervisor.write_text(text)
     process = copied / "collector_process.rs"
-    process.write_text(M3B.replace_required(process.read_text(), "    fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {",
-        '    fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {\n        println!("F3_PID {pid}");'))
+    process.write_text(M3B.replace_required(process.read_text(), "    pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {",
+        '    pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {\n        println!("F3_PID {pid}");'))
     modules = [f'#[path={json.dumps(str(mod))}] mod commands;', RELAY_STUB]
     for name in ("prompt", "prompt_io", "prompt_read", "prompt_spawn"):
         path = source / "crates/bingsu/src" / (name + ".rs")

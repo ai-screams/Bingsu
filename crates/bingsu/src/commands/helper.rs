@@ -603,9 +603,10 @@ pub(crate) fn selected_request(
 mod grant_tests {
     use super::{RefreshResult, installs_marker};
 
-    // GATE-CMD-GRANT(허가 없음): 발행 실패·필터 실패·마지막 재검증 실패(chmod, 원본 교체)는 Incomplete이고,
+    // GATE-CMD-GRANT.2(허가 없음): 발행 실패·필터 실패·마지막 재검증 실패(chmod, 원본 교체)는 Incomplete이고,
     // 잠금 경합은 Busy다. 둘 다 허가를 보내지 않는다. 이것을 실패시키는 것: installs_marker에 Incomplete나
-    // Busy를 더하는 것.
+    // Busy를 더하는 것. 계획 표의 변이("허가 전송을 broker 안으로 옮김")는 제품 바이너리에 회차 사이 hook이 없어
+    // 죽일 수 없다(K4 판정). 그 자리는 이 결정 함수와 helper::run의 호출 위치(refresh_broker 반환 뒤)로 고정한다.
     #[test]
     fn grant_only_after_the_marker_is_installed() {
         assert!(installs_marker(&RefreshResult::Published {

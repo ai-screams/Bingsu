@@ -412,3 +412,52 @@ def test_no_session_runs_nothing_and_says_so(tmp_path, _native_boot_required):
     session.wait_quiet()
     assert not canary.exists()
     assert b"no session value from the shell" in session.log(), session.log()
+
+
+# GATE-CLOCK-READS.3: 단위마다 exec가 하나 늘 뿐(중계가 대상으로 exec), 프로세스는 늘지 않는다. 감독의 자식은
+# 단위 수와 같고 각각 이미 대상이다. 이것을 실패시키는 것: 중계가 대상을 자식으로 띄우는 것(relay의
+# execveat 대신 생성), 감독이 단위마다 둘을 띄우는 것.
+@linux_only
+def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path / "s")
+    units = "".join(f"[segment.\"custom/u{i}\"]\nkind='command'\ncommand=['/bin/sleep', '1']\ntimeout='1s'\n"
+                    for i in range(3))
+    session.put(units + "[layout.line2]\nleft=['custom/u0','custom/u1','custom/u2','char']\n")
+    ready(session)
+    session.prompt()
+    sleep = os.path.realpath("/bin/sleep")
+
+    def running():
+        for pid, _ in supervisors():
+            kids = children(pid)
+            try:
+                exes = sorted(os.readlink(f"/proc/{k}/exe") for k in kids)
+            except OSError:
+                continue
+            if len(kids) == 3 and exes == [sleep] * 3:
+                return kids
+        return None
+
+    kids = until(running, timeout=2.0)
+    assert kids, [(s, children(s)) for s, _ in supervisors()]
+    for k in kids:
+        assert children(k) == [], "a target has a child of its own"
+    session.wait_quiet()
+
+
+# tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
+# 것: 표의 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것.
+def test_command_table_names_real_tests():
+    import csv, re
+    from conftest import ROOT
+    rows = list(csv.DictReader((ROOT / "tests/command-acceptance.tsv").read_text().splitlines(), delimiter="\t"))
+    assert rows and len({r["id"] for r in rows}) == len(rows)
+    for row in rows:
+        if row["stage"] != "C2":
+            assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
+            continue
+        path, name = row["test"].split("::")
+        source = (ROOT / path).read_text()
+        pattern = (rf"^def {re.escape(name)}\(" if path.endswith(".py")
+                   else rf"^\s*fn {re.escape(name)}\(\)")
+        assert len(re.findall(pattern, source, re.M)) == 1, (row["id"], path, name)

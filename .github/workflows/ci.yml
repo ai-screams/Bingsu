@@ -259,6 +259,9 @@ jobs:
           grep -Fx 'test relay::tests::test_relay_refuses_relative_executable ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_close_range_fallback ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_pre_exec_clock_reads ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_supervisor_approval_deadline_table ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_no_grant_means_no_exec ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test commands::helper::grant_tests::grant_only_after_the_marker_is_installed ... ok' "$RUNNER_TEMP/relay-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"

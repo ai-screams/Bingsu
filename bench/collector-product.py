@@ -469,7 +469,7 @@ fn helper(base:&Path,mode:&str) {
     let watchdog=commands::helper_limits::start(Instant::now()).unwrap();
     let mut verification=commands::helper::Verification::start();
     let start=verification.start.unwrap(); let mut verified=None; let mut handle=None;
-    let result=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock| {
+    let result=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock,_marker| {
        verification.verified();let end=verification.end.unwrap();verified=Some(end);
        if mode=="--product-zero" {
           assert!(commands::helper::selected_request(&collection::selection::PRODUCT,&envelope,display,clock)?.is_none());

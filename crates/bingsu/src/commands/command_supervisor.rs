@@ -872,8 +872,9 @@ pub(crate) mod tests {
         assert_eq!(rest, done);
     }
 
-    // GATE-CMD-GRANT(감독 승인 표). 이것을 실패시키는 것: spawn_unit에서 approve_unit 호출을 지우는 것
-    // (중계는 그대로 생성): 신뢰 마감이 지났거나 시계가 다르거나 요약값이 다른 단위도 생성된다.
+    // GATE-CMD-GRANT.1(감독 승인 표), GATE-TRUST-REVOKE.3(철회된 단위의 결정 시각 기록). 이것을 실패시키는
+    // 것: spawn_unit에서 approve_unit 호출을 지우는 것(중계는 그대로 생성): 신뢰 마감이 지났거나 시계가 다르거나
+    // 요약값이 다른 단위도 생성된다. 거부 결과에 승인 시각 대신 0을 적는 것.
     #[test]
     fn test_supervisor_approval_deadline_table() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
@@ -904,6 +905,12 @@ pub(crate) mod tests {
             let (got, _) = round(g);
             assert_eq!(got.len(), 1, "{name}");
             assert_eq!(spawned(&got[0]), want, "{name}: {got:?}");
+            // GATE-TRUST-REVOKE.3: a revoked unit's result records the refusal
+            // and when it was decided.
+            if matches!(name, "expired" | "waited") {
+                assert_eq!(got[0].reason, Reason::Refused(Refusal::Trust), "{name}");
+                assert!(got[0].approved_at > 0 && got[0].approved_at <= got[0].ended_at);
+            }
         }
     }
 

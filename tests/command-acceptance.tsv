@@ -1,0 +1,22 @@
+id	property	platform	test	stage
+CMD-NO-GO-CHMOD	No grant when the final revalidation fails (chmod g+w, replaced source): the round is Incomplete and sends nothing. The plan's mutation (grant sent inside the broker) cannot be caused without a hook between rounds; the decision function and its call site after refresh_broker stand for it (K4)	Unix	crates/bingsu/src/commands/helper.rs::grant_only_after_the_marker_is_installed	C2
+CMD-NO-GO-PIPE	A grant pipe that ends (helper SIGKILL, filter failure abandons the round), a done frame or a cut grant runs nothing	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_no_grant_means_no_exec	C2
+CMD-APPROVAL-TABLE	Supervisor approval right before each spawn: live spawns; expired, waited out, other boot/domain/resume, digest mismatch spawn nothing	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_supervisor_approval_deadline_table	C2
+CMD-BUILTIN-INVALID-MARKER	Builtin probes run under an invalid marker's deadline-0 permit, config units do not (test profile; the python-project fixture is D1/D3)	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_builtin_runs_under_invalid_marker	C2
+CMD-NO-UNITS	A unit with a not_run reason never runs and spawns nothing	Linux	tests/shell/test_command_round.py::test_not_run_unit_never_runs	C2
+CMD-ONE-PER-SESSION	At most one supervisor per session at once	Linux	tests/shell/test_command_round.py::test_one_supervisor_per_session	C2
+CMD-LOCK-HELD	A stopped supervisor keeps the session lock after its helper dies	Linux	tests/shell/test_command_round.py::test_lock_held_while_supervisor_alive	C2
+CMD-HELPER-DEATH	A target with no output ends soon after the helper is killed (non-delegated cell; the delegated cgroup cell is C3)	Linux	tests/shell/test_command_round.py::test_target_ends_soon_after_helper_death	C2
+CMD-BACKPRESSURE	A full result pipe does not hide the helper's death: every target ends	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_result_backpressure_then_helper_death	C2
+CMD-RELAY-NEVER-READS	A relay that never reads its input does not block other units and is ended at its deadline	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_relay_never_reads_does_not_block	C2
+CMD-OVERSIZE-FRAME	A unit whose relay input passes 16 KB is refused with Limit; others run	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_oversize_exec_frame_refused	C2
+CMD-ROUND-ROBIN	Units are tried oldest attempt first; the attempt times live in the command response	-	-	C4
+CMD-OUTPUT-4K	Endless output: the result keeps 4 KB, the rest is read and dropped, the unit ends at its deadline, supervisor RSS grows under 1 MB (Linux)	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_gigabyte_output_is_cut_at_4k	C2
+CMD-OUTPUT-EXIT	Output past 4 KB keeps the target's own exit status (no SIGPIPE)	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_long_output_keeps_exit_status	C2
+CMD-STDOUT-HOLDER	A descendant holding stdout delays neither the prompt nor the round	Linux	tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt	C2
+CMD-FILTER	After the last spawn the supervisor's own filter refuses execve	Linux	crates/bingsu/src/commands/command_supervisor.rs::test_supervisor_filter_denies_exec_after_spawn	C2
+CMD-NNP	The relay sets no_new_privs; a setuid target gains nothing (U-17)	Linux	crates/bingsu/src/relay.rs::test_relay_target_has_no_new_privs	C2
+CMD-STATUS	The relay reports a refusal on its status pipe and the pipe ends at exec; the target's fd 2 is /dev/null	Linux	crates/bingsu/src/relay.rs::test_relay_writes_refusal_to_status	C2
+CMD-NEUTRAL	Neutral units run only in an empty, own, 0500 neutral folder	Linux	tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500	C2
+CMD-REPO-ROOT	The collected repository root, else the shell's folder, bounds the sanitized PATH (J9)	Linux	tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin	C2
+CMD-MACOS-NO-RELAY	macOS runs no config unit and starts no supervisor until its relay (PR 10b)	macOS	tests/shell/test_command_round.py::test_macos_runs_no_command_without_a_relay	C2
