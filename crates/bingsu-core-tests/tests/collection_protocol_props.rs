@@ -16,6 +16,7 @@ mod allocation;
 static ALLOC: allocation::Counting = allocation::Counting;
 fn request() -> Request {
     Request {
+        languages: Vec::new(),
         request_id: M3B_REQUEST_ID,
         binding: Binding {
             path_query: Default::default(),
@@ -131,7 +132,7 @@ proptest! {
         d=saved_d;t=saved_t;
         for (offset,byte,kind) in changes {
             let kind=match kind {0=>Kind::Ready,1=>Kind::RequestBegin,2=>Kind::RequestChunk,3=>Kind::RequestEnd,4=>Kind::Update,5=>Kind::Complete,_=>Kind::Progress};
-            let mut payload=match kind {Kind::Ready=>ready(),Kind::RequestBegin=>begin.clone(),Kind::RequestChunk=>chunk.clone(),Kind::RequestEnd=>snapshot::crc32c(&[&body]).to_vec(),Kind::Update=>vec![3,0,1,0,0,0,0,1,0,0,0,0,1,4,0,0,0,1,0],Kind::Complete=>vec![],Kind::Progress=>vec![0;10]};
+            let mut payload=match kind {Kind::Ready=>ready(),Kind::RequestBegin=>begin.clone(),Kind::RequestChunk=>chunk.clone(),Kind::RequestEnd=>snapshot::crc32c(&[&body]).to_vec(),Kind::Update=>vec![3,0,1,0,0,0,0,1,0,0,0,0,1,4,0,0,0,1,0],Kind::Complete=>vec![],Kind::Progress=>vec![0;10],Kind::Language=>vec![0,0,0,0,0]};
             if !payload.is_empty() {let i=offset%payload.len();payload[i]^=byte;} else if byte!=0 {payload.push(byte);}
             let f=frame(&r,kind,&payload);let before_d=d.clone();let before_t=t.clone();
             let mut dr=Ok(None);let mut tr=Ok(());
@@ -355,7 +356,7 @@ proptest! {
         path_extra in 0usize..128, delta in 1u8..=255,
     ) {
         let mut r = request(); r.binding.cwd.extend(vec![b'w'; path_extra]);
-        let c = Completed {progress: Default::default(), request_id:r.request_id, binding:r.binding.clone(),
+        let c = Completed { language_queries: Vec::new(), languages: Vec::new(),progress: Default::default(), request_id:r.request_id, binding:r.binding.clone(),
             completed_at_ns:98, reason:EndReason::Deadline,
             updates:vec![wire::Update {facts: None,segment:3,value:None}] };
         let good = c.encode().unwrap();
@@ -412,9 +413,10 @@ proptest! {
         prop_assert_eq!(result,Err(ProtocolError::Duplicate));
         prop_assert_eq!(t,saved);
         prop_assert_eq!(counts,(2,0,fields_bytes+n));
-        let c=Completed {progress: Default::default(),request_id:r.request_id,binding:r.binding.clone(), completed_at_ns:98,
+        let c=Completed { language_queries: Vec::new(), languages: Vec::new(),progress: Default::default(),request_id:r.request_id,binding:r.binding.clone(), completed_at_ns:98,
             reason:EndReason::Deadline, updates:vec![wire::Update {facts: None,segment:3,value:None}]};
-        let mut bad=c.encode().unwrap(); bad.truncate(bad.len()-4); bad.extend(payload); fix_response(&mut bad);
+        // The stored update, then the two-byte (empty) language section.
+        let mut bad=c.encode().unwrap(); bad.truncate(bad.len()-6); bad.extend(payload); bad.extend([0,0]); fix_response(&mut bad);
         let mut result=Ok(None);
         let counts=allocation::counted(|| result=Completed::decode(&bad).map(Some));
         prop_assert_eq!(result,Err(ProtocolError::Duplicate));
@@ -772,7 +774,8 @@ proptest! {
         let mut r=request();r.global_excludes=bytes;r.global_excludes_known=known;
         let good=r.encode_body().unwrap();
         prop_assert_eq!(Request::decode_body(r.binding.build_id,r.request_id,&good),Ok(r.clone()));
-        let field_at=good.len()-r.global_excludes.len()-4;
+        // The excludes' length field, before the excludes and the language count.
+        let field_at=good.len()-r.global_excludes.len()-4-1;
         let mut bad=good.clone();bad[field_at-1]=invalid_tag;
         prop_assert_eq!(Request::decode_body(r.binding.build_id,r.request_id,&bad),Err(ProtocolError::Schema));
         let mut bad=good[..field_at+4].to_vec();
@@ -802,7 +805,8 @@ fn request_decode_copies_each_field_once_after_its_budget_check() {
     r.binding.cwd = path;
     r.binding.snapshot.context =
         snapshot::context_crc(&r.binding.config, &r.binding.state).unwrap();
-    for size in [0, 64_920] {
+    // 64,919: the largest excludes beside the language count byte.
+    for size in [0, 64_919] {
         r.global_excludes = vec![0xff; size];
         let bytes = r.encode_body().unwrap();
         let mut decoded = None;

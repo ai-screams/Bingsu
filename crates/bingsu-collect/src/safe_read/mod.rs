@@ -315,6 +315,10 @@ impl ResolverChoice {
     }
 }
 
+/// Folders the discovery holds above the shell's and looks through for a
+/// repository; language detection looks no further (it is the same bound).
+pub const DISCOVERY_LEVELS: usize = 32;
+
 #[derive(Clone, Copy, Debug)]
 pub struct ReadCap {
     pub bytes: u64,
@@ -412,7 +416,7 @@ impl Discovery {
         max_levels: usize,
         meter: &mut Meter,
     ) -> Result<(Rc<Root>, Option<usize>), ReadError> {
-        for level in 0..=max_levels.min(32).min(self.ancestors.len()) {
+        for level in 0..=max_levels.min(DISCOVERY_LEVELS).min(self.ancestors.len()) {
             let root = if level == 0 {
                 &self.cwd
             } else {
@@ -441,7 +445,8 @@ impl Discovery {
         let needed = self.query.home_component.map_or(self.components, |home| {
             self.components.saturating_sub(usize::from(home) + 1)
         });
-        self.in_repo = (self.logical && needed <= max_levels.min(32)).then_some(false);
+        self.in_repo =
+            (self.logical && needed <= max_levels.min(DISCOVERY_LEVELS)).then_some(false);
         Ok((Rc::clone(&self.cwd), None))
     }
 

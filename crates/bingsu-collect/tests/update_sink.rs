@@ -19,6 +19,7 @@ use update_sink::{UpdateSink, WireSink};
 
 fn request(mask: u32) -> Request {
     Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),
@@ -370,8 +371,10 @@ fn sink_enforces_exact_frame_stream_and_storage_bytes() {
                 sink.fixture_update(&payload(65_457))
             }
             "storage" => {
-                sink.fixture_update(&payload(65_294)).unwrap();
-                sink.fixture_update(&payload(65_295))
+                // The stored record's two-byte language section comes out
+                // of the same 65,296 bytes.
+                sink.fixture_update(&payload(65_292)).unwrap();
+                sink.fixture_update(&payload(65_293))
             }
             _ => {
                 for _ in 0..3 {

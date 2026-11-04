@@ -1478,6 +1478,7 @@ fn measure_untracked_pipeline() {
     let path = std::env::var_os("BINGSU_UNTRACKED_MEASURE_ROOT").unwrap();
     let cwd = PathBuf::from(path).as_os_str().as_bytes().to_vec();
     let request = Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),
@@ -1582,6 +1583,7 @@ fn measure_untracked_pipeline() {
         c_ms: 30_000,
         d_ms: 30_000,
         path_ms: 30_000,
+        lang_ms: bingsu_core::collection::budget::LANG_MS,
     };
     let result = git::collect_with_deadlines(&request, &mut sink, m, access, deadlines);
     eprintln!(
@@ -1899,6 +1901,7 @@ fn global_excludes_knowledge_survives_wire_into_stage_b() {
     let mut scans = Vec::new();
     for known in [true, false] {
         let request = Request {
+            languages: Vec::new(),
             request_id: RequestId([1; 32]),
             binding: Binding {
                 build_id: BuildId([2; 32]),

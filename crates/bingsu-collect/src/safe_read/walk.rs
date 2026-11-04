@@ -271,7 +271,7 @@ fn acquire_inner(
         // No cross-mount comparison in acquisition. Every fd must nevertheless
         // have an identity and must not be procfs.
         stack.push_back(node);
-        if stack.len() > 33 {
+        if stack.len() > super::DISCOVERY_LEVELS + 1 {
             stack.pop_front();
             dropped += 1;
         }

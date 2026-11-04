@@ -86,6 +86,7 @@ impl Drop for Fixture {
 fn request(cwd: &Path, home: &Path, unique: bool) -> Request {
     let cwd = cwd.as_os_str().as_bytes().to_vec();
     Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),
@@ -514,6 +515,7 @@ fn deadlines() -> git::StageDeadlines {
     git::StageDeadlines {
         a_ms: 60_000,
         path_ms: 60_000,
+        lang_ms: bingsu_core::collection::budget::LANG_MS,
         b_ms: 60_000,
         c_ms: 60_000,
         d_ms: 60_000,

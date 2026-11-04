@@ -179,6 +179,8 @@ pub fn facts() -> PathFactInput {
 }
 pub fn response(v: Value) -> Completed {
     Completed {
+        language_queries: Vec::new(),
+        languages: Vec::new(),
         binding: binding(),
         request_id: M3B_REQUEST_ID,
         completed_at_ns: 99,

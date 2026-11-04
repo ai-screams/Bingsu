@@ -91,6 +91,8 @@ fn binding() -> Binding {
 }
 fn completed(at: u64, text: &[u8]) -> Completed {
     Completed {
+        language_queries: Vec::new(),
+        languages: Vec::new(),
         progress: Default::default(),
         request_id: M3B_REQUEST_ID,
         binding: binding(),

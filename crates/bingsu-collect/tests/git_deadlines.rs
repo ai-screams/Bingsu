@@ -41,6 +41,7 @@ const GENEROUS: StageDeadlines = StageDeadlines {
     c_ms: 30_000,
     d_ms: 30_000,
     path_ms: 30_000,
+    lang_ms: bingsu_core::collection::budget::LANG_MS,
 };
 fn meter() -> Meter {
     Meter::new(Instant::now() + Duration::from_secs(120))
@@ -96,6 +97,7 @@ impl Fixture {
     fn request(&self) -> Request {
         let cwd = self.0.as_os_str().as_bytes().to_vec();
         Request {
+            languages: Vec::new(),
             request_id: wire::M3B_REQUEST_ID,
             binding: Binding {
                 build_id: BuildId([7; 32]),

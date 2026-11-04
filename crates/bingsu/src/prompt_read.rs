@@ -818,6 +818,8 @@ pub(crate) mod tests {
         let mut store =
             CollectionStore::fixture(&context, b, now, &COLLECTION_CATALOG, None).unwrap();
         let r = Completed {
+            language_queries: Vec::new(),
+            languages: Vec::new(),
             progress: Default::default(),
             request_id: M3B_REQUEST_ID,
             binding: b.clone(),
@@ -1068,6 +1070,8 @@ pub(crate) mod tests {
             if released.is_ok() {
                 store
                     .publish(&Completed {
+                        language_queries: Vec::new(),
+                        languages: Vec::new(),
                         progress: Default::default(),
                         request_id: M3B_REQUEST_ID,
                         binding: b,

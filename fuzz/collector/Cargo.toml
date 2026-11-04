@@ -126,6 +126,14 @@ doc = false
 bench = false
 required-features = ["libfuzzer"]
 
+[[bin]]
+name = "language"
+path = "fuzz_targets/language.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
 # Instruction-count bench only (CI job icount): never built by cargo fuzz or
 # the seed writer, and the version equals the root lock's (job icount checks
 # both locks against its gungraun-runner).
@@ -136,6 +144,12 @@ gungraun = "=0.20.0"
 # cfg(collector_fuzz); see the file's header.
 [[bench]]
 name = "attributes"
+harness = false
+test = false
+
+# The language version file parser (core's, as the worker calls it).
+[[bench]]
+name = "language"
 harness = false
 test = false
 

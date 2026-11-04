@@ -1,4 +1,5 @@
 //! Complete immutable records, including logically partial collection results.
+use super::language::{self, LanguageQuery, LanguageResult};
 use super::wire::{
     self, Binding, BuildId, EndReason, Progress, ProtocolError, Reader, RequestId, STREAM_MAX,
     Schema, Update,
@@ -20,6 +21,27 @@ pub struct Completed {
     /// no-repository marker; an absent/Hidden git value does not suffice.
     pub progress: Progress,
     pub updates: Vec<Update>,
+    /// The languages the request asked about (D1), so a reader can tell
+    /// which query these results answer.
+    pub language_queries: Vec<LanguageQuery>,
+    /// One result per answered language, by ascending index.
+    pub languages: Vec<LanguageResult>,
+}
+
+/// The language section: queries, result count, results.
+fn languages_len(c: &Completed) -> Result<usize, ProtocolError> {
+    let mut n = wire::add_budget(language::queries_len(&c.language_queries)?, 1, STREAM_MAX)?;
+    let mut last = None;
+    for l in &c.languages {
+        l.check(&c.language_queries)?;
+        // Ascending and unique, so the encoding of one answer set is one.
+        if last.is_some_and(|i| i >= l.index) {
+            return Err(ProtocolError::Schema);
+        }
+        last = Some(l.index);
+        n = wire::add_budget(n, l.encoded_len(), STREAM_MAX)?;
+    }
+    Ok(n)
 }
 /// File header plus request id, binding, completion clock, reason and count.
 pub(crate) fn base_len(binding: &Binding) -> Result<usize, ProtocolError> {
@@ -56,6 +78,7 @@ impl Completed {
         {
             return Err(ProtocolError::Schema);
         }
+        len = wire::add_budget(len, languages_len(self)?, STREAM_MAX)?;
         let mut out = Vec::with_capacity(len);
         out.resize(HEADER, 0);
         out.extend_from_slice(&self.request_id.0);
@@ -69,9 +92,14 @@ impl Completed {
         for update in &self.updates {
             wire::put_update(&mut out, update);
         }
+        language::put_queries(&mut out, &self.language_queries);
+        out.push(self.languages.len() as u8);
+        for l in &self.languages {
+            l.put(&mut out);
+        }
         let mut out = wire::checked_encoding(out, len)?;
-        out[..8].copy_from_slice(b"BNGRES03");
-        out[8..10].copy_from_slice(&3u16.to_le_bytes());
+        out[..8].copy_from_slice(b"BNGRES04");
+        out[8..10].copy_from_slice(&4u16.to_le_bytes());
         out[10..12].copy_from_slice(&(HEADER as u16).to_le_bytes());
         out[12..16].copy_from_slice(&((len - HEADER) as u32).to_le_bytes());
         let crc = snapshot::crc32c(&[&out[HEADER..]]);
@@ -132,18 +160,33 @@ impl Completed {
             )?;
             updates.push(update);
         }
+        let language_queries = language::read_queries(&mut r)?;
+        let n = usize::from(r.u8()?);
+        if n > language_queries.len() {
+            return Err(ProtocolError::Schema);
+        }
+        let mut languages = Vec::with_capacity(n);
+        for _ in 0..n {
+            languages.push(LanguageResult::read(&mut r)?);
+        }
         r.end()?;
         if progress.stage_a_complete && !wire::stage_a_evidence(&binding, &updates, true) {
             return Err(ProtocolError::Schema);
         }
-        Ok(Self {
+        let completed = Self {
             request_id,
             binding,
             completed_at_ns,
             reason,
             progress,
             updates,
-        })
+            language_queries,
+            languages,
+        };
+        // The same checks as encoding (fit, ascending, unique) and the same
+        // stream bound over updates and languages together.
+        wire::add_budget(len, languages_len(&completed)?, STREAM_MAX)?;
+        Ok(completed)
     }
     pub fn eligible(&self, expected: &Binding, entry: Clock) -> bool {
         self.binding.validate().is_ok()
@@ -168,10 +211,10 @@ pub fn declared_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if bytes.len() > STREAM_MAX {
         return Err(ProtocolError::Budget);
     }
-    if &bytes[..8] != b"BNGRES03" {
+    if &bytes[..8] != b"BNGRES04" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 3u16.to_le_bytes() {
+    if bytes[8..10] != 4u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
     if bytes[10..12] != (HEADER as u16).to_le_bytes() || bytes[20..HEADER].iter().any(|b| *b != 0) {

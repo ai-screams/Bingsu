@@ -4,7 +4,10 @@ use std::io;
 use std::{cell::Cell, time::Instant};
 
 use bingsu_core::{
-    collection::wire::{self, Frame, Kind, Progress, Request, Transcript, Update},
+    collection::{
+        language::LanguageResult,
+        wire::{self, Frame, Kind, Progress, Request, Transcript, Update},
+    },
     field::SegmentDecl,
 };
 
@@ -16,6 +19,11 @@ pub(crate) trait UpdateSink {
     fn stage_deadline(&mut self, _deadline: Instant) {}
     fn update(&mut self, value: Update) -> io::Result<()>;
     fn progress(&mut self, value: Progress) -> io::Result<()>;
+    /// One language's detection result (D1). A sink for a request without
+    /// languages never receives one.
+    fn language(&mut self, _value: LanguageResult) -> io::Result<()> {
+        Err(io::Error::other("this sink takes no language result"))
+    }
 }
 
 pub(crate) struct WireSink<'a> {
@@ -132,6 +140,10 @@ impl UpdateSink for WireSink<'_> {
 
     fn progress(&mut self, value: Progress) -> io::Result<()> {
         self.send(Kind::Progress, &value.encode())
+    }
+
+    fn language(&mut self, value: LanguageResult) -> io::Result<()> {
+        self.send(Kind::Language, &value.encode())
     }
 }
 

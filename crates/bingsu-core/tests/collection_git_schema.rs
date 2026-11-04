@@ -15,6 +15,7 @@ use bingsu_core::{
 };
 fn request(mask: u32) -> Request {
     Request {
+        languages: Vec::new(),
         request_id: M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),
@@ -413,9 +414,10 @@ fn facts_only_attach_to_requested_dir() {
     );
 }
 
-// 이것을 실패시키는 것: query의 4바이트 또는 Progress의 10바이트를 저장 예산에서 빼거나 재정제 확대분을 무시하는 것.
+// 이것을 실패시키는 것: query의 4바이트, Progress의 10바이트 또는 언어 절(빈 질의·결과 수 2바이트)을 저장 예산에서
+// 빼거나 재정제 확대분을 무시하는 것.
 #[test]
-fn v3_max_binding_leaves_65294_update_bytes() {
+fn v4_max_binding_leaves_65292_update_bytes() {
     use field::{FieldDecl, SegmentDecl};
     const F: [FieldDecl; 32] = [const {
         FieldDecl {
@@ -438,8 +440,9 @@ fn v3_max_binding_leaves_65294_update_bytes() {
     r.binding.cwd = path;
     r.binding.snapshot.context =
         snapshot::context_crc(&r.binding.config, &r.binding.state).unwrap();
-    assert_eq!(r.encode_body().unwrap().len() + 32 - 11, 196_733);
-    let mut rest = 65_294 - 266;
+    // The request body's language section is one count byte.
+    assert_eq!(r.encode_body().unwrap().len() + 32 - 11, 196_734);
+    let mut rest = 65_292 - 266;
     let fields = (0..32)
         .map(|_| {
             let n = rest.min(4096);
@@ -448,6 +451,8 @@ fn v3_max_binding_leaves_65294_update_bytes() {
         })
         .collect();
     let mut c = Completed {
+        language_queries: Vec::new(),
+        languages: Vec::new(),
         request_id: r.request_id,
         binding: r.binding,
         completed_at_ns: 98,
@@ -461,8 +466,8 @@ fn v3_max_binding_leaves_65294_update_bytes() {
     };
     let bytes = c.encode_with_catalog(&C).unwrap();
     assert_eq!(bytes.len(), 262_144);
-    assert_eq!(&bytes[..10], b"BNGRES03\x03\0");
-    assert_eq!(bytes.len() - 65_294 - 64, 196_786);
+    assert_eq!(&bytes[..10], b"BNGRES04\x04\0");
+    assert_eq!(bytes.len() - 65_292 - 64 - 2, 196_786);
     assert_eq!(Completed::decode_with_catalog(&bytes, &C), Ok(c.clone()));
     let mut expanded = bytes;
     expanded[64 + 196_786 + 17] = 0xff;
@@ -501,10 +506,12 @@ fn v3_max_binding_leaves_65294_update_bytes() {
     ready.extend([0; 12]);
     t.accept(frame(&r, Kind::Ready, &ready)).unwrap();
     t.request_sent().unwrap();
-    t.accept(frame(&r, Kind::Update, &bytes[64 + 196_786..]))
-        .unwrap();
+    // The update is what lies between the base and the trailing two-byte
+    // (empty) language section.
+    let update = &bytes[64 + 196_786..bytes.len() - 2];
+    t.accept(frame(&r, Kind::Update, update)).unwrap();
     let before = t.clone();
-    let mut payload = bytes[64 + 196_786..].to_vec();
+    let mut payload = update.to_vec();
     payload[17] = 0xff;
     assert_eq!(t.accept(frame(&r, Kind::Update, &payload)), Err(E::Budget));
     assert_eq!(t, before);

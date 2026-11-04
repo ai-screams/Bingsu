@@ -2,6 +2,8 @@
 pub mod config;
 pub mod discover;
 pub mod io;
+#[path = "../language.rs"]
+pub mod language;
 #[path = "../path_facts.rs"]
 pub mod path_facts;
 pub mod preflight;
@@ -57,6 +59,7 @@ pub(crate) struct StageDeadlines {
     pub c_ms: u64,
     pub d_ms: u64,
     pub path_ms: u64,
+    pub lang_ms: u64,
 }
 
 impl StageDeadlines {
@@ -66,6 +69,7 @@ impl StageDeadlines {
         c_ms: bingsu_core::collection::budget::C_MS,
         d_ms: bingsu_core::collection::budget::D_MS,
         path_ms: bingsu_core::collection::budget::PATH_MS,
+        lang_ms: bingsu_core::collection::budget::LANG_MS,
     };
 }
 
@@ -163,27 +167,60 @@ pub(crate) fn collect_with_deadlines(
     match selected {
         discover::Selection::Outside(cwd, access, discovery) => {
             drop(discovery);
-            let mut meter = meter.borrow_mut();
-            meter.event("discovery_consumed");
-            // No Discovery survives into restriction. The only root is cwd.
-            meter.event("before_read_layer");
-            #[cfg(target_os = "linux")]
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+            let mut access = access;
             {
-                let mut access = access;
+                let mut meter = meter.borrow_mut();
+                meter.event("discovery_consumed");
+                // No Discovery survives into restriction. The only root is cwd.
+                meter.event("before_read_layer");
+                #[cfg(target_os = "linux")]
                 access
                     .restrict_to(&[&cwd], &mut meter)
                     .map_err(CollectError::Read)?;
             }
-            #[cfg(not(target_os = "linux"))]
-            let _ = (cwd, access);
+            // Outside a repository only the shell's own folder is looked at.
+            languages(
+                request,
+                &cwd,
+                &[],
+                &access,
+                &meter,
+                sink,
+                deadlines,
+                &mut completion,
+            )?;
             completion
         }
         discover::Selection::Repository(mut roots, discovery) => {
+            // The shell's folder sits `level` folders below the root (0 when
+            // the folder path is not the logical one: discovery then looks
+            // at the folder itself only).
+            let level = discovery.path_binding().1.unwrap_or(0);
             drop(discovery);
             meter.borrow_mut().event("discovery_consumed");
             roots
                 .restrict(&mut meter.borrow_mut())
                 .map_err(CollectError::Read)?;
+            let parts: Vec<&[u8]> = request
+                .binding
+                .cwd
+                .split(|b| *b == b'/')
+                .filter(|p| !p.is_empty())
+                .collect();
+            let below = &parts[parts.len().saturating_sub(level)..];
+            let worktree = std::rc::Rc::clone(&roots.worktree);
+            languages(
+                request,
+                &worktree,
+                below,
+                &roots.access,
+                &meter,
+                sink,
+                deadlines,
+                &mut completion,
+            )?;
+            drop(worktree);
             if !wants_git {
                 return completion;
             }
@@ -283,6 +320,49 @@ pub(crate) fn collect_with_deadlines(
 /// guard, so an unwind there drops it. This boundary then restores the deadline
 /// on the placeholder, but cannot restore the lost counters.
 /// Abort/OOM and blocked calls are exclusively the supervisor's responsibility.
+/// The language stage (D1), in a round that asks for languages: results go
+/// out as each is known. Like the path stage, a failure here is kept until
+/// the end (no Complete) unless the sink itself failed.
+#[allow(clippy::too_many_arguments, reason = "the stage's fixed inputs")]
+fn languages(
+    request: &bingsu_core::collection::wire::Request,
+    root: &crate::safe_read::Root,
+    parts: &[&[u8]],
+    access: &crate::safe_read::Access,
+    meter: &RefCell<crate::meter::Meter>,
+    sink: &mut dyn UpdateSink,
+    deadlines: StageDeadlines,
+    completion: &mut Result<(), CollectError>,
+) -> Result<(), CollectError> {
+    // Fails without it: a round without languages would take the stage's
+    // time and send nothing (git_rounds_without_languages_are_unchanged).
+    if request.languages.is_empty() {
+        return Ok(());
+    }
+    let result = within_stage(meter, sink, deadlines.lang_ms, |sink| {
+        let mut meter = meter.borrow_mut();
+        meter.event("languages");
+        language::detect_all(
+            &request.languages,
+            root,
+            parts,
+            access,
+            &mut meter,
+            |result| sink.language(result).map_err(CollectError::Sink),
+        )
+    });
+    match result {
+        Err(error @ CollectError::Sink(_)) => Err(error),
+        Err(error) => {
+            if completion.is_ok() {
+                *completion = Err(error);
+            }
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
 fn within_stage<T>(
     meter: &RefCell<crate::meter::Meter>,
     sink: &mut dyn UpdateSink,

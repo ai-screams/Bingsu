@@ -30,7 +30,7 @@ def crc(data):
 
 
 def frame(kind, identity, payload):
-    return b"BNGIPC05" + struct.pack("<HBBI", 5, kind, 0, len(payload)) + identity + bytes(32) + payload
+    return b"BNGIPC06" + struct.pack("<HBBI", 6, kind, 0, len(payload)) + identity + bytes(32) + payload
 
 
 def request(identity, mask, cwd=b"/r"):
@@ -94,7 +94,7 @@ def run_worker(command, dylib, tmp_path, mutation=False, cwd=None):
                 if not data:
                     break
                 output.extend(data)
-            at = output.find(b"BNGIPC05")
+            at = output.find(b"BNGIPC06")
             if not sent and at >= 0 and len(output) >= at + 104:
                 mask, = struct.unpack_from("<I", output, at + 88)
                 if "__collect-v1" in command and cwd is None:
@@ -108,7 +108,7 @@ def run_worker(command, dylib, tmp_path, mutation=False, cwd=None):
         else:
             assert_no_process_effects(code, seen)
             assert code == 0 and sent, (code, output)
-            wire = output[output.index(b"BNGIPC05"):]
+            wire = output[output.index(b"BNGIPC06"):]
             kinds = []
             while wire:
                 assert len(wire) >= 80
@@ -172,7 +172,7 @@ def test_macos_no_spawn_harness_detects_creation(tmp_path):
     product_output = run_worker(product, canary, tmp_path)
     fixture_output = run_worker(fixture, canary, tmp_path)
     assert b"fixture" in fixture_output
-    at = fixture_output.index(b"BNGIPC05")
+    at = fixture_output.index(b"BNGIPC06")
     assert product_output[16:48] != fixture_output[at + 16:at + 48]
     mutant = prepared()["mutant"]
     # A call from a separate executable is interposed. dyld deliberately does

@@ -114,7 +114,9 @@ fn select_inner(
     let max_levels = if logical {
         query
             .home_component
-            .map_or(32, |home| parts.len().saturating_sub(usize::from(home) + 1))
+            .map_or(safe_read::DISCOVERY_LEVELS, |home| {
+                parts.len().saturating_sub(usize::from(home) + 1)
+            })
     } else {
         0
     }; // a logical HOME boundary cannot be proved through a symlink
@@ -126,7 +128,9 @@ fn select_inner(
         return Ok(Selection::Outside(worktree, access, discovery));
     };
     let worktree_path = absolute(&parts[..parts.len() - level]);
-    let ancestors = max_levels.min(32).saturating_sub(level);
+    let ancestors = max_levels
+        .min(safe_read::DISCOVERY_LEVELS)
+        .saturating_sub(level);
     let location = Location {
         path: &worktree_path,
         logical,

@@ -1439,7 +1439,10 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None):
                 header = ast.literal_eval("b" + args[1])
                 assert len(header) == 64, ("collection header bytes", c)
                 total = int.from_bytes(header[12:16], "little") + 64
-                valid_headers[path] = (header[:8] == b"BNGRES03" and header[8:12] == bytes([3,0,64,0])
+                # The current stored-response envelope, or the one before D1 that the
+                # recorded fixture traces (tests/shell/fixtures/*.strace*) carry.
+                valid_headers[path] = (header[:10] in (b"BNGRES04\x04\x00", b"BNGRES03\x03\x00")
+                                       and header[10:12] == bytes([64,0])
                                        and header[20:] == bytes(44) and total == sizes[path] and total <= 262144)
             else:
                 assert valid_headers[path], ("collection body after invalid header", c)

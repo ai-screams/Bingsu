@@ -16,7 +16,8 @@
 //!   to its own id; the walk's cycle colour is pinned by git_history);
 //! - multi_pack_index: two objects aliasing one pack offset;
 //! - gitdir: a pointer to the worktree itself;
-//! - commondir: a commondir naming the linked gitdir itself.
+//! - commondir: a commondir naming the linked gitdir itself;
+//! - language: a `.tool-versions` naming its tool twice (the first wins).
 use crate::{
     entries::{self, Target, Verdict},
     formats::{self, IndexEntry, PackEntry},
@@ -79,7 +80,83 @@ pub fn all() -> Vec<Seed> {
     multi_pack_index(&mut seeds);
     gitdir(&mut seeds);
     commondir(&mut seeds);
+    language(&mut seeds);
     seeds
+}
+
+/// Version selection files, by format flag (see entries). Caps come from
+/// the worker's own constant, so a changed cap changes a verdict.
+fn language(seeds: &mut Vec<Seed>) {
+    use Class::*;
+    use Verdict::*;
+    let t = Target::Language;
+    let cap = bingsu_core::collection::language::FILE_MAX as usize;
+    let sized = |n: usize| {
+        let mut body = b"3.12.1\n".to_vec();
+        body.resize(n, b'#');
+        with_flag(0, &body)
+    };
+    push(
+        seeds,
+        t,
+        "python-version",
+        Valid,
+        with_flag(0, b"3.12.1\n"),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "rust-toolchain-toml",
+        Valid,
+        with_flag(2, b"[toolchain]\nchannel = \"1.80.0\"\n"),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "go-mod-toolchain",
+        Valid,
+        with_flag(3, b"module m\ngo 1.21\ntoolchain go1.22.1\n"),
+        Ok,
+    );
+    push(
+        seeds,
+        t,
+        "path-in-version",
+        Damaged,
+        with_flag(0, b"../x\n"),
+        Invalid,
+    );
+    push(
+        seeds,
+        t,
+        "escape-in-channel",
+        Damaged,
+        with_flag(2, b"[toolchain]\nchannel = \"a\\\"b\"\n"),
+        Invalid,
+    );
+    push(
+        seeds,
+        t,
+        "tool-without-version",
+        Truncated,
+        with_flag(1, b"python\n"),
+        Invalid,
+    );
+    push(seeds, t, "empty-file", Truncated, with_flag(0, b""), Other);
+    push(
+        seeds,
+        t,
+        "tool-twice",
+        Cyclic,
+        with_flag(1, b"python 3.11\npython 3.10\n"),
+        Ok,
+    );
+    push(seeds, t, "megabyte", Oversize, sized(1 << 20), Limit);
+    push(seeds, t, "cap-minus-one", CapMinusOne, sized(cap - 1), Ok);
+    push(seeds, t, "at-cap", AtCap, sized(cap), Ok);
+    push(seeds, t, "cap-plus-one", CapPlusOne, sized(cap + 1), Limit);
 }
 
 fn push(

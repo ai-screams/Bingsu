@@ -1,6 +1,7 @@
 //! Bounded, single-exchange wire protocol. Errors never produce reply bytes.
 use super::{
     cwd_hash, git,
+    language::{self, LanguageQuery, LanguageResult},
     path_facts::{PathFactInput, PathQuery},
     response::Completed,
 };
@@ -35,6 +36,8 @@ pub enum Kind {
     Update,
     Complete,
     Progress,
+    /// One language's detection result (D1).
+    Language,
 }
 impl Kind {
     fn tag(self) -> u8 {
@@ -46,6 +49,7 @@ impl Kind {
             Self::Update => 5,
             Self::Complete => 6,
             Self::Progress => 7,
+            Self::Language => 8,
         }
     }
 }
@@ -83,13 +87,13 @@ pub fn frame_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if total > FRAME_MAX {
         return Err(ProtocolError::Length);
     }
-    if &bytes[..8] != b"BNGIPC05" {
+    if &bytes[..8] != b"BNGIPC06" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 5u16.to_le_bytes() {
+    if bytes[8..10] != 6u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
-    if !(1..=7).contains(&bytes[10]) {
+    if !(1..=8).contains(&bytes[10]) {
         return Err(ProtocolError::Kind);
     }
     if bytes[11] != 0 {
@@ -115,6 +119,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
         5 => Kind::Update,
         6 => Kind::Complete,
         7 => Kind::Progress,
+        8 => Kind::Language,
         _ => return Err(ProtocolError::Kind),
     };
     Ok(Frame {
@@ -142,8 +147,8 @@ pub fn decode_eof(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
 }
 pub fn encode_frame(frame: Frame<'_>, out: &mut [u8; FRAME_MAX]) -> Result<usize, ProtocolError> {
     let len = frame_size(frame)?;
-    out[..8].copy_from_slice(b"BNGIPC05");
-    out[8..10].copy_from_slice(&5u16.to_le_bytes());
+    out[..8].copy_from_slice(b"BNGIPC06");
+    out[8..10].copy_from_slice(&6u16.to_le_bytes());
     out[10] = frame.kind.tag();
     out[11] = 0;
     out[12..16].copy_from_slice(&(frame.payload.len() as u32).to_le_bytes());
@@ -310,10 +315,16 @@ pub struct Request {
     /// False means the helper could not determine the complete global input.
     pub global_excludes_known: bool,
     pub global_excludes: Vec<u8>,
+    /// Languages to detect (D1); empty when none is asked for.
+    pub languages: Vec<LanguageQuery>,
 }
 impl Request {
-    fn body_len(&self) -> Result<usize, ProtocolError> {
-        let n = Self::checked_body_len(self.binding.encoded_len()?, self.global_excludes.len())?;
+    pub(crate) fn body_len(&self) -> Result<usize, ProtocolError> {
+        let n = Self::checked_body_len(
+            self.binding.encoded_len()?,
+            self.global_excludes.len(),
+            language::queries_len(&self.languages)?,
+        )?;
         if !(1..=50).contains(&self.budget_ms) {
             return Err(ProtocolError::Budget);
         }
@@ -322,12 +333,17 @@ impl Request {
         }
         Ok(n)
     }
-    fn checked_body_len(binding_len: usize, excludes_len: usize) -> Result<usize, ProtocolError> {
+    fn checked_body_len(
+        binding_len: usize,
+        excludes_len: usize,
+        languages_len: usize,
+    ) -> Result<usize, ProtocolError> {
         let n = add_budget(binding_len - 32, 11, STREAM_MAX)?;
         if excludes_len > GLOBAL_EXCLUDES_MAX {
             return Err(ProtocolError::Budget);
         }
         let n = add_budget(n, excludes_len, STREAM_MAX)?;
+        let n = add_budget(n, languages_len, STREAM_MAX)?;
         // Begin (12), chunk offsets (4 each), End (4), and every header
         // count against the unchanged directional stream cap.
         let chunks = n.div_ceil(FRAME_MAX - HEADER - 4);
@@ -343,6 +359,7 @@ impl Request {
         out.extend_from_slice(&0u16.to_le_bytes());
         out.push(u8::from(self.global_excludes_known));
         put_bytes(&mut out, &self.global_excludes);
+        language::put_queries(&mut out, &self.languages);
         checked_encoding(out, n)
     }
     pub fn decode_body(
@@ -369,11 +386,16 @@ impl Request {
             _ => return Err(ProtocolError::Schema),
         };
         let global_excludes = r.bytes(GLOBAL_EXCLUDES_MAX, ProtocolError::Budget)?;
+        let languages = language::read_queries(&mut r)?;
         r.end()?;
         // read_paths checked path syntax, context CRC, clock and query; the
         // reader checked every remaining field. Only stream framing is left.
         // Do not call body_len here: it repeats the full binding validation.
-        Self::checked_body_len(binding.len_from_paths()?, global_excludes.len())?;
+        Self::checked_body_len(
+            binding.len_from_paths()?,
+            global_excludes.len(),
+            language::queries_len(&languages)?,
+        )?;
         Ok(Self {
             request_id,
             binding,
@@ -381,6 +403,7 @@ impl Request {
             environment: Vec::new(),
             global_excludes_known,
             global_excludes: global_excludes.to_vec(),
+            languages,
         })
     }
 }
@@ -653,6 +676,8 @@ pub struct Transcript {
     progress: Progress,
     progress_seen: bool,
     updates: Vec<Update>,
+    /// One result per asked language at most, in arrival order.
+    languages: Vec<LanguageResult>,
 }
 impl Transcript {
     pub fn new(request: &Request) -> Self {
@@ -684,8 +709,24 @@ impl Transcript {
             progress: Progress::default(),
             progress_seen: false,
             updates: Vec::new(),
+            languages: Vec::new(),
         })
     }
+    /// The bytes the stored record leaves for updates and language results:
+    /// the stream bound less the record's base and its language section's
+    /// queries and result count.
+    fn room(&self) -> Result<usize, ProtocolError> {
+        let base = super::response::base_len(&self.request.binding)?;
+        let section = add_budget(
+            language::queries_len(&self.request.languages)?,
+            1,
+            STREAM_MAX,
+        )?;
+        STREAM_MAX
+            .checked_sub(add_budget(base, section, STREAM_MAX)?)
+            .ok_or(ProtocolError::Budget)
+    }
+
     pub fn accept(&mut self, frame: Frame<'_>) -> Result<(), ProtocolError> {
         let size = frame_size(frame)?;
         if self.complete {
@@ -697,7 +738,10 @@ impl Transcript {
         if (!self.ready && frame.kind != Kind::Ready)
             || (self.ready
                 && (!self.sent
-                    || !matches!(frame.kind, Kind::Update | Kind::Complete | Kind::Progress)))
+                    || !matches!(
+                        frame.kind,
+                        Kind::Update | Kind::Complete | Kind::Progress | Kind::Language
+                    )))
         {
             return Err(ProtocolError::Order);
         }
@@ -757,8 +801,7 @@ impl Transcript {
                     return Err(ProtocolError::Budget);
                 }
                 let len = update_len(&update, &self.schema, &self.request.binding)?;
-                let base = super::response::base_len(&self.request.binding)?;
-                let limit = STREAM_MAX.checked_sub(base).ok_or(ProtocolError::Budget)?;
+                let limit = self.room()?;
                 let stored = replace_budget(self.stored, self.lengths[index], len, limit)?;
                 if let Some(old) = self
                     .updates
@@ -789,6 +832,21 @@ impl Transcript {
                 }
                 self.progress = next;
                 self.progress_seen = true;
+            }
+            Kind::Language => {
+                let mut r = Reader::new(frame.payload);
+                let result = LanguageResult::read(&mut r)?;
+                r.end()?;
+                // Fails without it: a result naming a file or language the
+                // request did not ask about (language_results_must_fit_the_query).
+                result.check(&self.request.languages)?;
+                if self.languages.iter().any(|l| l.index == result.index) {
+                    return Err(ProtocolError::Duplicate);
+                }
+                let limit = self.room()?;
+                let stored = add_budget(self.stored, result.encoded_len(), limit)?;
+                self.languages.push(result);
+                self.stored = stored;
             }
             Kind::Complete => {
                 if !frame.payload.is_empty() {
@@ -842,10 +900,14 @@ impl Transcript {
         {
             return Err(ProtocolError::Schema);
         }
-        add_budget(super::response::base_len(b)?, self.stored, STREAM_MAX)?;
-        if self.updates.is_empty() {
+        // The stored record: base, updates and languages, and the language
+        // section's queries and count (`room` kept `stored` within it).
+        add_budget(self.stored, STREAM_MAX - self.room()?, STREAM_MAX)?;
+        if self.updates.is_empty() && self.languages.is_empty() {
             return Ok(None);
         }
+        let mut languages = self.languages;
+        languages.sort_by_key(|l| l.index);
         Ok(Some(Completed {
             request_id: self.request.request_id,
             binding: self.request.binding,
@@ -853,6 +915,8 @@ impl Transcript {
             reason,
             progress: self.progress,
             updates: self.updates,
+            language_queries: self.request.languages,
+            languages,
         }))
     }
 }

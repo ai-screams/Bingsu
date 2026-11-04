@@ -135,6 +135,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                         .map(|result| result.map(|()| unreachable!("fixture has no worker")));
                 }
                 let mut request = request.unwrap();
+                // D1 (ruling Q1): the user-defined languages' detect_files;
+                // the built-in four are asked for by their segments (D3).
+                if let Some((config, _)) = display {
+                    request.languages = collection::language::user_queries(&config.exec_units);
+                    if request.encode_body().is_err() {
+                        request.languages.clear();
+                    }
+                }
                 if request.binding.mask & (1 << collection::git::SEGMENT) != 0 {
                     let reason = super::git_global::attach(&mut request, &e);
                     report(&mut groups, reason.log_level(), reason.message());

@@ -29,6 +29,7 @@ fn request() -> Request {
     let mut path = vec![b'a'; 65_536];
     path[0] = b'/';
     Request {
+        languages: Vec::new(),
         request_id: M3B_REQUEST_ID,
         binding: Binding {
             path_query: Default::default(),
@@ -67,6 +68,8 @@ fn completed() -> Completed {
         fields.push(Field::text(&vec![b'a'; n], 4096, WidthProfile::DEFAULT));
     }
     Completed {
+        language_queries: Vec::new(),
+        languages: Vec::new(),
         progress: Default::default(),
         request_id: r.request_id,
         binding: r.binding,
@@ -95,7 +98,7 @@ fn cwd(n: usize) -> Vec<u8> {
 }
 fn prefix() -> [u8; 80] {
     let mut p = [0; 80];
-    p[..8].copy_from_slice(b"BNGIPC05");
+    p[..8].copy_from_slice(b"BNGIPC06");
     p[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     p
 }

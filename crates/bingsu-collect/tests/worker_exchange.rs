@@ -58,6 +58,7 @@ const GENEROUS: git::StageDeadlines = git::StageDeadlines {
     c_ms: 30_000,
     d_ms: 30_000,
     path_ms: 30_000,
+    lang_ms: bingsu_core::collection::budget::LANG_MS,
 };
 /// Git only, as the product catalog grants it once enabled.
 const GIT_ONLY: Catalog<'static> = Catalog {
@@ -158,6 +159,7 @@ fn clock() -> Clock {
 }
 fn request(cwd: &[u8], build_id: BuildId) -> Request {
     Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id,
