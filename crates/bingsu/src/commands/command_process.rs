@@ -142,6 +142,13 @@ pub(crate) fn spawn_supervisor(
     .map(|(child, _)| child)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// Per clone3 call, in order: an errno to fail with instead (tests only).
+    pub(crate) static CLONE3_ERRORS: std::cell::RefCell<std::collections::VecDeque<Option<i32>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
 #[cfg(test)]
 thread_local! {
     /// Runs at the start of a relay spawn's preparation (tests only).
@@ -385,6 +392,10 @@ fn clone_into(
     }
     if !go() {
         return Err(io::Error::from(io::ErrorKind::Interrupted));
+    }
+    #[cfg(test)]
+    if let Some(errno) = CLONE3_ERRORS.with(|q| q.borrow_mut().pop_front()).flatten() {
+        return Err(io::Error::from_raw_os_error(errno));
     }
     // SAFETY: a valid clone_args of its size; without CLONE_VM the child is
     // a copy and runs only async-signal-safe calls on prepared data.

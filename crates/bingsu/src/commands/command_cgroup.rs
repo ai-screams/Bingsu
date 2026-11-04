@@ -723,7 +723,26 @@ pub(crate) mod cell {
         (p, dir)
     }
 
-    fn alive(pid: u32) -> bool {
+    /// Whether this run is the privileged cell; atomic-path tests return
+    /// at once elsewhere (CI checks each one PASSED in that cell).
+    pub(crate) fn privileged() -> bool {
+        #[expect(clippy::disallowed_methods, reason = "test-only cell name")]
+        let cell = std::env::var("BINGSU_CGROUP_CELL");
+        cell.is_ok_and(|c| c == "priv")
+    }
+
+    /// Unit folders under a session parent.
+    pub(crate) fn units(parent: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| cgroup::is_unit_name(n.as_bytes()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    pub(crate) fn alive(pid: i32) -> bool {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
             !s.rsplit(')')
                 .next()
@@ -731,12 +750,6 @@ pub(crate) mod cell {
                 .trim_start()
                 .starts_with('Z')
         })
-    }
-
-    /// Whether this run is the privileged cell; atomic-path tests return
-    /// at once elsewhere (CI checks each one PASSED in that cell).
-    pub(crate) fn privileged() -> bool {
-        cell() == "priv"
     }
 
     /// The cell this run is in: `BINGSU_CGROUP_CELL=priv|plain`.
@@ -829,7 +842,7 @@ pub(crate) mod cell {
         std::fs::write(unit.join("a/b/cgroup.procs"), sleep.id().to_string()).unwrap();
         let r = reclaim(&mut Fs, &mut dir);
         let _ = sleep.wait();
-        assert!(!alive(sleep.id()));
+        assert!(!alive(sleep.id() as i32));
         assert_eq!((r.removed, r.stuck, r.failed), (1, 0, 0), "{r:?}");
         assert!(!unit.exists());
         std::fs::remove_dir(&p).unwrap();

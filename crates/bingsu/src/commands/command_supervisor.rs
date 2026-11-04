@@ -38,6 +38,9 @@ pub(crate) const ENTRY: &str = "__command-v1";
 pub(crate) const GRANT_FD: i32 = 3;
 pub(crate) const RESULT_FD: i32 = 4;
 pub(crate) const LOCK_FD: i32 = 5;
+/// The session's cgroup parent, open only on the atomic path (C3 ruling R2).
+#[cfg(target_os = "linux")]
+pub(crate) const CGROUP_FD: i32 = 6;
 /// U-9d: the round ends 100 ms before the helper's deadline, and a unit
 /// with less than 10 ms left is not spawned.
 pub(crate) const BUDGET: Budget = Budget {
@@ -76,7 +79,16 @@ pub(crate) fn run(argv0: &OsStr) -> ExitCode {
         exe: relay,
         prefix: Vec::new(),
     };
-    Supervisor::new(grant, rest, relay, GRANT_FD, RESULT_FD).run(true);
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "Linux cgroups"))]
+    let mut s = Supervisor::new(grant, rest, relay, GRANT_FD, RESULT_FD);
+    #[cfg(target_os = "linux")]
+    // Descriptor 6 is there only on the atomic path; nothing else crosses a spawn.
+    if set_fd(CGROUP_FD, libc::FD_CLOEXEC).is_ok() {
+        use std::os::fd::FromRawFd;
+        // SAFETY: an open descriptor the helper placed for this process alone.
+        s = s.with_cgroup(unsafe { File::from_raw_fd(CGROUP_FD) });
+    }
+    s.run(true);
     ExitCode::SUCCESS
 }
 
@@ -192,6 +204,8 @@ struct Run {
     approved_at: u64,
     deadline: u64,
     child: OwnedChild,
+    /// `cgroup.kill` of the unit's cgroup (atomic path), until written.
+    kill: Option<File>,
     stdout: Option<File>,
     status: Option<File>,
     out: Vec<u8>,
@@ -205,6 +219,18 @@ struct Run {
 }
 
 impl Run {
+    /// Ends the target and everything it forked: SIGKILL to the relay's
+    /// pidfd, and on the atomic path `1` into the unit's `cgroup.kill`
+    /// (once; the descriptor is closed after it).
+    fn end(&mut self) {
+        let _ = self.child.signal(libc::SIGKILL);
+        #[cfg(target_os = "linux")]
+        if let Some(kill) = self.kill.take() {
+            let _ = super::command_cgroup::fs::write_kill(&kill);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = &self.kill;
+    }
     fn finished(&self) -> bool {
         self.reaped && self.status.is_none()
     }
@@ -241,6 +267,9 @@ pub(crate) struct Supervisor {
     pending: Vec<u8>,
     /// The helper is gone or done: every child is ended and nothing more is written.
     stopped: bool,
+    /// The atomic path: the session's cgroup parent and the last unit name.
+    #[cfg(target_os = "linux")]
+    cgroup: Option<Cgroups>,
     #[cfg(test)]
     pub eagain: u32,
     /// Runs once the filter is installed (tests only).
@@ -271,11 +300,20 @@ impl Supervisor {
             result_fd,
             runs: Vec::new(),
             pending: Vec::new(),
+            #[cfg(target_os = "linux")]
+            cgroup: None,
             #[cfg(test)]
             eagain: 0,
             #[cfg(test)]
             confined: None,
         }
+    }
+
+    /// The atomic path, with the session's cgroup parent (descriptor 6).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_cgroup(mut self, parent: File) -> Self {
+        self.cgroup = Some(Cgroups { parent, seq: None });
+        self
     }
 
     fn report(&mut self, origin: Origin, index: usize, reason: Reason, approved_at: u64) {
@@ -439,6 +477,28 @@ impl Supervisor {
         // loop's next poll of the grant pipe.
         let (fd, stopped) = (self.grant_fd, self.stopped);
         let go = move || !stopped && fd.is_some_and(|fd| !readable(fd));
+        #[cfg(target_os = "linux")]
+        let unit = match self.cgroup.as_mut().map(Cgroups::unit) {
+            Some(Ok(u)) => Some(u),
+            // A unit cgroup that cannot be made (or a name already taken)
+            // runs nothing: never an old folder, never outside one.
+            Some(Err(())) => {
+                return self.report(origin, index, Reason::SpawnFailed, approved_at);
+            }
+            None => None,
+        };
+        #[cfg(target_os = "linux")]
+        use std::os::fd::AsFd;
+        #[cfg(target_os = "linux")]
+        let mut spawned = command_process::spawn(
+            &self.relay.exe,
+            &args,
+            &input,
+            self.grant.helper_deadline,
+            &go,
+            unit.as_ref().map(|u| u.folder.as_fd()),
+        );
+        #[cfg(not(target_os = "linux"))]
         let spawned = command_process::spawn(
             &self.relay.exe,
             &args,
@@ -447,6 +507,33 @@ impl Supervisor {
             &go,
             None,
         );
+        #[cfg(target_os = "linux")]
+        let kill = match (unit, &spawned) {
+            (Some(u), Ok(_)) => Some(u.kill),
+            (Some(u), Err(e)) => {
+                let clone3_missing = matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM));
+                if let Some(c) = &self.cgroup {
+                    c.remove(&u.name);
+                }
+                // clone3 refused before any unit ran in a cgroup: the whole
+                // round takes the best-effort path (C3 ruling).
+                if clone3_missing && !self.runs.iter().any(|r| r.kill.is_some()) {
+                    self.cgroup = None;
+                    spawned = command_process::spawn(
+                        &self.relay.exe,
+                        &args,
+                        &input,
+                        self.grant.helper_deadline,
+                        &go,
+                        None,
+                    );
+                }
+                None
+            }
+            (None, _) => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let kill = None;
         if matches!(&spawned, Err(e) if e.kind() == std::io::ErrorKind::Interrupted) {
             return self.stop();
         }
@@ -459,6 +546,7 @@ impl Supervisor {
             approved_at,
             deadline,
             child: s.child,
+            kill,
             stdout: Some(s.stdout),
             status: Some(s.status),
             out: Vec::new(),
@@ -501,12 +589,12 @@ impl Supervisor {
 
     fn stop(&mut self) {
         self.stopped = true;
-        for run in &self.runs {
-            // macOS has no cgroup: the relay's process group goes when this
-            // exit is reaped (OwnedChild::reap of a group leader), in a later
-            // step or in the drop when the supervisor ends first (best
-            // effort: a descendant that called setsid stays).
-            let _ = run.child.signal(libc::SIGKILL);
+        for run in &mut self.runs {
+            // Without a cgroup the relay's process group goes when this exit
+            // is reaped (OwnedChild::reap of a group leader), in a later step
+            // or in the drop when the supervisor ends first (best effort: a
+            // descendant that called setsid stays).
+            run.end();
         }
     }
 
@@ -524,7 +612,7 @@ impl Supervisor {
         for run in self.runs.iter_mut().filter(|r| !r.reaped) {
             if now >= run.deadline && !run.timed_out {
                 run.timed_out = true;
-                let _ = run.child.signal(libc::SIGKILL);
+                run.end();
             }
             if !run.timed_out {
                 next = next.min(run.deadline);
@@ -568,6 +656,8 @@ impl Supervisor {
             if !run.reaped {
                 run.reaped = run.child.reap().unwrap_or(true);
                 if run.reaped {
+                    // What the target left running (setsid or not) ends with it.
+                    run.end();
                     // The relay is gone: what its pipes hold now is all it wrote.
                     read_status(run);
                     read_stdout(run);
@@ -634,6 +724,59 @@ impl Supervisor {
             // round (fail closed), the same class as the C1 macOS fcntl branch.
             Err(_) => self.stop(),
         }
+    }
+}
+
+/// The session's cgroup parent and the names this supervisor made in it.
+#[cfg(target_os = "linux")]
+struct Cgroups {
+    parent: File,
+    seq: Option<u64>,
+}
+
+/// One unit's cgroup, made right before its spawn.
+#[cfg(target_os = "linux")]
+struct UnitCgroup {
+    name: String,
+    folder: File,
+    kill: File,
+}
+
+#[cfg(target_os = "linux")]
+impl Cgroups {
+    /// A new unit cgroup with a name never used in this boot: `mkdirat`
+    /// fails on a name that exists, and nothing reuses it then.
+    fn unit(&mut self) -> Result<UnitCgroup, ()> {
+        use std::os::fd::AsFd;
+        let now = super::collector_process::now_ns().map_err(|_| ())?;
+        let seq = bingsu_core::command::cgroup::next_seq(self.seq, now);
+        self.seq = Some(seq);
+        let name = bingsu_core::command::cgroup::unit_name(seq);
+        let os = OsStr::new(&name);
+        if !super::sys::mkdir_at(self.parent.as_fd(), os, 0o755).map_err(|_| ())? {
+            return Err(());
+        }
+        let made = (|| {
+            let folder = super::sys::open_dir_at_nofollow(self.parent.as_fd(), os).ok()?;
+            let kill = super::command_cgroup::fs::kill_file(&folder).ok()?;
+            Some((folder, kill))
+        })();
+        // No test for the None arm: a folder this call just made opens, and
+        // every cgroup v2 folder from 5.14 has cgroup.kill; it runs nothing
+        // (fail closed), the same class as the C1 fcntl branch.
+        match made {
+            Some((folder, kill)) => Ok(UnitCgroup { name, folder, kill }),
+            None => {
+                self.remove(&name);
+                Err(())
+            }
+        }
+    }
+
+    /// Removes an empty unit folder (before the filter: no process ran in it).
+    fn remove(&self, name: &str) {
+        use std::os::fd::AsFd;
+        let _ = super::sys::remove_dir_at(self.parent.as_fd(), OsStr::new(name));
     }
 }
 
@@ -778,6 +921,47 @@ pub(crate) mod tests {
                 for _ in 0..64 {
                     say(&[b'x'; 4096]);
                 }
+            }
+            b"setsid" | b"setsid-exit" => {
+                // A grandchild in its own session that outlives the target
+                // (which waits, or with `-exit` ends at once):
+                // only the unit's cgroup reaches it. Its pid goes to argv[1].
+                // SAFETY: the child runs only async-signal-safe calls.
+                let pid = unsafe { libc::fork() };
+                if pid == 0 {
+                    // SAFETY: in the forked child.
+                    unsafe { libc::setsid() };
+                    // SAFETY: as above.
+                    unsafe { libc::sleep(60) };
+                    // SAFETY: as above.
+                    unsafe { libc::_exit(0) }
+                }
+                std::fs::write(std::ffi::OsStr::from_bytes(&target[1]), pid.to_string()).unwrap();
+                executed();
+                if behaviour == b"setsid" {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            }
+            b"nest" => {
+                // Two nested cgroups below the unit's (depth 2) and one beside,
+                // with a process moved into the deepest; argv[1] is told when.
+                let text = std::fs::read("/proc/self/cgroup").unwrap();
+                let own = bingsu_core::command::cgroup::own_path(&text).unwrap();
+                let own = format!("/sys/fs/cgroup{}", String::from_utf8_lossy(own));
+                std::fs::create_dir_all(format!("{own}/a/b")).unwrap();
+                std::fs::create_dir_all(format!("{own}/c")).unwrap();
+                // SAFETY: the child runs only async-signal-safe calls.
+                let pid = unsafe { libc::fork() };
+                if pid == 0 {
+                    // SAFETY: in the forked child.
+                    unsafe { libc::sleep(60) };
+                    // SAFETY: as above.
+                    unsafe { libc::_exit(0) }
+                }
+                std::fs::write(format!("{own}/a/b/cgroup.procs"), pid.to_string()).unwrap();
+                std::fs::write(std::ffi::OsStr::from_bytes(&target[1]), b"ok").unwrap();
+                executed();
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
             b"yes" => {
                 executed();
@@ -1645,5 +1829,308 @@ pub(crate) mod tests {
         let (got, _) = round(g);
         assert_eq!(got[0].reason, Reason::Refused(Refusal::Trust), "{got:?}");
         assert!(matches!(got[1].reason, Reason::Exited(0)), "{got:?}");
+    }
+
+    /// A round in this process with the session's cgroup parent `parent`
+    /// (the atomic path), the helper alive throughout.
+    #[cfg(target_os = "linux")]
+    fn cgroup_round(g: Grant, parent: &std::path::Path) -> Vec<Outcome> {
+        let (grant_read, grant_write) = pipe();
+        let (result_read, result_write) = pipe();
+        let s = Supervisor::new(
+            g,
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .with_cgroup(File::open(parent).unwrap())
+        .run(false);
+        drop(s);
+        drop((grant_write, result_write));
+        results(result_read)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_pid(path: &std::path::Path) -> i32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn gone_within(pid: i32, ms: u64) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            if !super::super::command_cgroup::cell::alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        !super::super::command_cgroup::cell::alive(pid)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish(path: &std::path::Path) {
+        use super::super::command_cgroup::{fs, reclaim};
+        let mut dir = fs::Dir::new(File::open(path).unwrap());
+        reclaim(&mut fs::Fs, &mut dir);
+        let _ = std::fs::remove_dir(path);
+    }
+
+    // 원자 경로: 마감에 cgroup.kill이 setsid한 손자까지 끝낸다. 이것을 실패시키는 것: Run::end의
+    // write_kill을 지우는 것(주 pid만 SIGKILL, 손자가 남음 — 결정적 대조).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_setsid_descendant_killed_with_cgroup() {
+        use super::super::command_cgroup::cell;
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("setsid");
+        let pidfile = std::env::temp_dir().join(format!("bingsu-gc-{}", std::process::id()));
+        let mut g = grant(vec![unit("setsid", 300 * MS)], 1_000 * MS);
+        g.cwd = pidfile.as_os_str().as_bytes().to_vec();
+        let out = cgroup_round(g, &path);
+        assert!(matches!(out[0].reason, Reason::Timeout), "{out:?}");
+        let grandchild = read_pid(&pidfile);
+        let gone = gone_within(grandchild, 1_000);
+        if !gone {
+            // SAFETY: plain signal to the test's own leftover.
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(&pidfile);
+        finish(&path);
+        assert!(gone, "the setsid grandchild outlived the unit");
+    }
+
+    // 대상이 단위 cgroup 아래 깊이 2의 하위 cgroup을 만들어도 그 회차의 정리(감독 뒤 도우미의 회수) 뒤
+    // 단위 폴더 0. 이것을 실패시키는 것: 회수의 후위 순회를 단위 폴더 rmdir 하나로 바꾸는 것(clear 결과를
+    // true로: EBUSY로 남음).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_nested_cgroup_removed_postorder() {
+        use super::super::command_cgroup::{cell, fs, reclaim};
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("nested-round");
+        let flag = std::env::temp_dir().join(format!("bingsu-nest-{}", std::process::id()));
+        let mut g = grant(vec![unit("nest", 300 * MS)], 1_000 * MS);
+        g.cwd = flag.as_os_str().as_bytes().to_vec();
+        let out = cgroup_round(g, &path);
+        assert!(flag.exists(), "the target made no nested cgroup: {out:?}");
+        let _ = std::fs::remove_file(&flag);
+        let mut dir = fs::Dir::new(File::open(&path).unwrap());
+        let r = reclaim(&mut fs::Fs, &mut dir);
+        let left = cell::units(&path);
+        finish(&path);
+        assert_eq!(left, Vec::<String>::new(), "{r:?}");
+        assert_eq!(r.removed, 1, "{r:?}");
+    }
+
+    // 같은 세션의 100 단위(8개씩 13회차, 회차마다 새 감독)는 이름이 모두 다르다. 이것을 실패시키는 것:
+    // 단위 이름을 회차 안 순번으로 만드는 것(next_seq 대신 0부터 세기: 회차마다 같은 이름이 다시 쓰임).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_cgroup_names_never_reused() {
+        use super::super::command_cgroup::cell;
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("names");
+        let mut seen = Vec::new();
+        while seen.len() < 100 {
+            let units = (0..plan::CONFIG_MAX)
+                .map(|_| unit("echo", 500 * MS))
+                .collect();
+            let out = cgroup_round(grant(units, 2_000 * MS), &path);
+            assert!(out.iter().all(spawned), "{out:?}");
+            let names = cell::units(&path);
+            assert_eq!(names.len(), plan::CONFIG_MAX);
+            seen.extend(names);
+            let mut dir = super::super::command_cgroup::fs::Dir::new(File::open(&path).unwrap());
+            super::super::command_cgroup::reclaim(
+                &mut super::super::command_cgroup::fs::Fs,
+                &mut dir,
+            );
+        }
+        finish(&path);
+        let mut unique = seen.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), seen.len(), "a unit cgroup name came back");
+    }
+
+    // 위임 셀: 출력 없는 대상의 도우미가 죽으면 1 s 안에 그 단위 cgroup이 빈다(setsid 손자까지). 이것을
+    // 실패시키는 것: stop()이 Run::end 대신 pidfd SIGKILL만 보내는 것(손자가 남아 populated 1).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_supervisor_detects_helper_death_without_output_in_cgroup() {
+        use super::super::command_cgroup::cell;
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("death");
+        let pidfile = std::env::temp_dir().join(format!("bingsu-death-{}", std::process::id()));
+        let (grant_read, grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        let mut g = grant(vec![unit("setsid", 1_000 * MS)], 1_000 * MS);
+        g.cwd = pidfile.as_os_str().as_bytes().to_vec();
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(grant_write);
+            std::time::Instant::now()
+        });
+        let s = Supervisor::new(
+            g,
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .with_cgroup(File::open(&path).unwrap())
+        .run(false);
+        drop(s);
+        let died = killer.join().unwrap();
+        let unit = path.join(&cell::units(&path)[0]);
+        let empty = loop {
+            let events = std::fs::read(unit.join("cgroup.events")).unwrap();
+            let empty = bingsu_core::command::cgroup::populated(&events) == Some(false);
+            if empty || died.elapsed() > std::time::Duration::from_secs(1) {
+                break empty;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        if !empty {
+            // SAFETY: plain signal to the test's own leftover.
+            unsafe { libc::kill(read_pid(&pidfile), libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(&pidfile);
+        finish(&path);
+        assert!(
+            empty,
+            "the unit cgroup was not empty 1 s after the helper died"
+        );
+    }
+
+    // 바로 끝난 대상이 남긴 setsid 손자도 그 단위가 끝날 때(relay reap) cgroup.kill로 끝난다. 이것을 실패시키는
+    // 것: reap 분기의 run.end()를 지우는 것(회차가 정상으로 끝나 손자가 남음).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_setsid_descendant_of_an_exited_target_killed() {
+        use super::super::command_cgroup::cell;
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("setsid-exit");
+        let pidfile = std::env::temp_dir().join(format!("bingsu-gcx-{}", std::process::id()));
+        let mut g = grant(vec![unit("setsid-exit", 1_000 * MS)], 1_000 * MS);
+        g.cwd = pidfile.as_os_str().as_bytes().to_vec();
+        let out = cgroup_round(g, &path);
+        assert!(matches!(out[0].reason, Reason::Exited(0)), "{out:?}");
+        let grandchild = read_pid(&pidfile);
+        let gone = gone_within(grandchild, 1_000);
+        if !gone {
+            // SAFETY: plain signal to the test's own leftover.
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(&pidfile);
+        finish(&path);
+        assert!(gone, "the exited target's setsid grandchild survived");
+    }
+
+    // 이미 있는 이름의 단위 폴더는 다시 쓰지 않는다: 그 단위는 생성 0, SpawnFailed. 이것을 실패시키는 것:
+    // Cgroups::unit의 `mkdir_at`이 false(EEXIST)일 때의 거부를 지우는 것(남의 폴더 안에서 실행됨).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_existing_unit_name_is_never_reused() {
+        use super::super::command_cgroup::cell;
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("taken");
+        let taken = u64::MAX - 10;
+        std::fs::create_dir(path.join(bingsu_core::command::cgroup::unit_name(taken + 1))).unwrap();
+        let (grant_read, grant_write) = pipe();
+        let (result_read, result_write) = pipe();
+        let mut s = Supervisor::new(
+            grant(vec![unit("echo", 500 * MS)], 1_000 * MS),
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .with_cgroup(File::open(&path).unwrap());
+        if let Some(c) = s.cgroup.as_mut() {
+            c.seq = Some(taken);
+        }
+        drop(s.run(false));
+        drop((grant_write, result_write));
+        let out = results(result_read);
+        finish(&path);
+        assert!(matches!(out[0].reason, Reason::SpawnFailed), "{out:?}");
+    }
+
+    // clone3이 ENOSYS면 그 회차는 처음부터 최선 노력(posix_spawn)으로 돌고 빈 단위 폴더는 남지 않는다. 첫
+    // 단위가 cgroup 안에서 돈 뒤의 실패는 섞지 않고 그 단위만 SpawnFailed. 이것을 실패시키는 것: 대체 경로를
+    // 지우는 것(첫 회차 단위가 SpawnFailed), 빈 폴더 제거를 지우는 것(단위 폴더가 남음), "아직 cgroup 단위
+    // 없음" 조건을 지우는 것(둘째 회차의 둘째 단위가 최선 노력으로 섞여 실행됨), ENOSYS·EPERM 판별을 모든
+    // 오류로 넓히는 것(EINVAL 단위가 최선 노력으로 실행됨).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_clone3_refusal_takes_the_best_effort_path() {
+        use super::super::command_cgroup::cell;
+        use super::super::command_process::CLONE3_ERRORS;
+        if !cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (path, _dir) = cell::parent("enosys");
+        CLONE3_ERRORS.with(|q| *q.borrow_mut() = [Some(libc::ENOSYS)].into());
+        let out = cgroup_round(
+            grant(
+                vec![unit("echo", 500 * MS), unit("echo", 500 * MS)],
+                1_000 * MS,
+            ),
+            &path,
+        );
+        let left = cell::units(&path);
+        CLONE3_ERRORS.with(|q| *q.borrow_mut() = [None, Some(libc::ENOSYS)].into());
+        let mixed = cgroup_round(
+            grant(
+                vec![unit("echo", 500 * MS), unit("echo", 500 * MS)],
+                1_000 * MS,
+            ),
+            &path,
+        );
+        CLONE3_ERRORS.with(|q| *q.borrow_mut() = [Some(libc::EINVAL)].into());
+        let other = cgroup_round(grant(vec![unit("echo", 500 * MS)], 1_000 * MS), &path);
+        CLONE3_ERRORS.with(|q| q.borrow_mut().clear());
+        finish(&path);
+        assert!(
+            out.iter().all(|o| matches!(o.reason, Reason::Exited(0))),
+            "{out:?}"
+        );
+        assert_eq!(left, Vec::<String>::new());
+        assert!(matches!(mixed[0].reason, Reason::Exited(0)), "{mixed:?}");
+        assert!(matches!(mixed[1].reason, Reason::SpawnFailed), "{mixed:?}");
+        // Any other clone3 error is that unit's spawn failure, not a path switch.
+        assert!(matches!(other[0].reason, Reason::SpawnFailed), "{other:?}");
     }
 }
