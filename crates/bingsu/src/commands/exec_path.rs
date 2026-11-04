@@ -565,7 +565,8 @@ mod tests {
         let repo = t.join("repo");
         exe(&repo.join("bin/tool"), 0o755);
         let alias = t.join("REPO");
-        if repo_id(Some(&alias)).unwrap() != repo_id(Some(&repo)).unwrap() {
+        // A case-sensitive volume has no `REPO`: nothing to assert there.
+        if repo_id(Some(&alias)).ok() != Some(repo_id(Some(&repo)).unwrap()) {
             std::fs::remove_dir_all(&t).unwrap();
             return;
         }
