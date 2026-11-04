@@ -16,8 +16,8 @@ use super::{
     sys,
 };
 use bingsu_core::{
-    collection::cwd_hash::sha256,
     command::{
+        cgroup,
         plan::{self, Environ},
         wire::{self, Grant, Message, Outcome, Policy, Unit, policy_digest},
     },
@@ -222,8 +222,7 @@ impl Scripts {
 /// The first 16 bytes of sha256(session), hex: names the session's lock and
 /// its script copies, never the raw session value.
 fn session_tag(session: &[u8]) -> String {
-    let d = sha256(session);
-    d[..16].iter().map(|b| format!("{b:02x}")).collect()
+    cgroup::session_digest(session)
 }
 
 /// `command-<first 16 bytes of sha256(session), hex>.lock`: a fixed-length
