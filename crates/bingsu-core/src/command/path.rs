@@ -206,6 +206,68 @@ pub fn target_pin(f: &Facts, cleared: &[GroupPin], ctime: (i64, u32)) -> Option<
     })
 }
 
+/// Bytes the kernel reads for a `#!` line (`BINPRM_BUF_SIZE`).
+pub const SHEBANG_MAX: usize = 256;
+
+/// The interpreter line of a script, split as the kernel splits it: the
+/// interpreter up to the first space or tab, then at most one argument (the
+/// rest of the line, spaces and tabs trimmed at both ends). `line` is the
+/// whole line after `#!`, untrimmed: what the helper and the relay compare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shebang<'a> {
+    pub line: &'a [u8],
+    pub interpreter: &'a [u8],
+    pub arg: Option<&'a [u8]>,
+}
+
+/// What the first bytes of an executable say about how it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Head<'a> {
+    /// No `#!`: the kernel loads it itself.
+    Native,
+    Script(Shebang<'a>),
+    /// A `#!` line the executor does not run (spec section 4 script row):
+    /// longer than `SHEBANG_MAX`, with a NUL (the kernel would end the line
+    /// there), a relative interpreter, or `/usr/bin/env`, which would pick the
+    /// real interpreter from `PATH`.
+    Refused,
+}
+
+/// `first` is the file's first bytes, at most `SHEBANG_MAX`; fewer means the
+/// file ended there, so a line without a newline is whole.
+pub fn head(first: &[u8]) -> Head<'_> {
+    let Some(rest) = first.strip_prefix(b"#!") else {
+        return Head::Native;
+    };
+    let line = match rest.iter().position(|&b| b == b'\n') {
+        Some(end) => &rest[..end],
+        None if first.len() < SHEBANG_MAX => rest,
+        None => return Head::Refused,
+    };
+    if line.contains(&0) {
+        return Head::Refused;
+    }
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let words = trim(line, blank);
+    let end = words.iter().position(blank).unwrap_or(words.len());
+    let (interpreter, arg) = words.split_at(end);
+    let arg = trim(arg, blank);
+    if interpreter.first() != Some(&b'/') || interpreter == b"/usr/bin/env" {
+        return Head::Refused;
+    }
+    Head::Script(Shebang {
+        line,
+        interpreter,
+        arg: (!arg.is_empty()).then_some(arg),
+    })
+}
+
+fn trim(s: &[u8], blank: impl Fn(&u8) -> bool) -> &[u8] {
+    let start = s.iter().position(|b| !blank(b)).unwrap_or(s.len());
+    let end = s.iter().rposition(|b| !blank(b)).map_or(start, |i| i + 1);
+    &s[start..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +437,76 @@ mod tests {
         let mut bad = b;
         bad[32..36].copy_from_slice(&1_000_000_000u32.to_le_bytes());
         assert_eq!(ExecPin::from_bytes(&bad), Err(Error::Flags));
+    }
+
+    /// The parsed head of `#!<line>\n`.
+    fn script<'a>(line: &'a [u8], interpreter: &'a [u8], arg: Option<&'a [u8]>) -> Head<'a> {
+        Head::Script(Shebang {
+            line,
+            interpreter,
+            arg,
+        })
+    }
+
+    // 이것을 실패시키는 것: head의 `#!` 판별을 지우는 것(네이티브가 스크립트로), 공백·탭 자르기를 한쪽이라도
+    // 지우는 것(인터프리터나 인자에 공백이 남음), 인자 하나 대신 공백마다 나누는 것, line에 자른 줄을 넣는 것.
+    #[test]
+    fn shebang_splits_like_the_kernel() {
+        assert_eq!(head(b"\x7fELF\x02\x01"), Head::Native);
+        assert_eq!(head(b""), Head::Native);
+        assert_eq!(head(b"#"), Head::Native);
+        assert_eq!(
+            head(b"#!/bin/sh\necho 1\n"),
+            script(b"/bin/sh", b"/bin/sh", None)
+        );
+        assert_eq!(
+            head(b"#! \t/bin/bash \t-e -u \t\nx"),
+            script(b" \t/bin/bash \t-e -u \t", b"/bin/bash", Some(b"-e -u"))
+        );
+        assert_eq!(
+            head(b"#!/bin/sh   \n"),
+            script(b"/bin/sh   ", b"/bin/sh", None)
+        );
+    }
+
+    // 이것을 실패시키는 것: 줄바꿈 없이 SHEBANG_MAX를 채운 머리를 거부하는 분기를 지우는 것(잘린
+    // 인터프리터로 실행), 또는 그보다 짧은 머리(파일 끝)까지 거부하는 것.
+    #[test]
+    fn shebang_needs_its_line_within_the_kernel_buffer() {
+        let mut long = b"#!/bin/sh ".to_vec();
+        long.resize(SHEBANG_MAX, b'a');
+        assert_eq!(head(&long), Head::Refused);
+        long.pop();
+        assert!(matches!(head(&long), Head::Script(_)));
+        assert_eq!(head(b"#!/bin/sh"), script(b"/bin/sh", b"/bin/sh", None));
+    }
+
+    // test_env_shebang_refused의 core 짝. 이것을 실패시키는 것: 절대 경로 검사를 지우는 것(상대·빈
+    // 인터프리터가 통과), `/usr/bin/env` 거부를 지우는 것.
+    #[test]
+    fn shebang_refuses_relative_and_env() {
+        for line in [
+            &b"#!sh\n"[..],
+            b"#!\n",
+            b"#!  \n",
+            b"#!./x\n",
+            b"#!/usr/bin/env sh\n",
+            b"#! /usr/bin/env\n",
+        ] {
+            assert_eq!(head(line), Head::Refused, "{line:?}");
+        }
+        assert_eq!(
+            head(b"#!/usr/bin/envx\n"),
+            script(b"/usr/bin/envx", b"/usr/bin/envx", None)
+        );
+    }
+
+    // 이것을 실패시키는 것: head의 NUL 거부를 지우는 것(커널은 NUL에서 줄을 끝내므로 인자가 다르게 읽힘).
+    #[test]
+    fn shebang_refuses_nul() {
+        assert_eq!(head(b"#!/bin/sh\0-x\n"), Head::Refused);
+        assert_eq!(head(b"#!/bin/sh -e\0\n"), Head::Refused);
+        // A NUL after the line is the script's business.
+        assert!(matches!(head(b"#!/bin/sh\n\0"), Head::Script(_)));
     }
 }

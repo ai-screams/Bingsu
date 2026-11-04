@@ -97,7 +97,7 @@ proptest! {
         let b = wire::encode(&grant(units, environment)).unwrap();
         let n = cut.index(b.len());
         prop_assert_eq!(wire::decode(&b[..n]), Err(Error::Short));
-        let f = ExecFrame { origin: Origin::Config, run_deadline: 5, environment: vec![b'e'; environment], pin: None };
+        let f = ExecFrame { origin: Origin::Config, run_deadline: 5, environment: vec![b'e'; environment], pin: None, interpreter: None };
         let r = handoff::relay_input(permit(), &f, 16_384).unwrap();
         let n = cut.index(r.len());
         prop_assert_eq!(handoff::read_relay_input(&r[..n], 16_384), Err(Error::Short));
