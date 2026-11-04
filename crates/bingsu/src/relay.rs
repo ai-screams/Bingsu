@@ -856,6 +856,7 @@ mod tests {
     // N-076. 이것을 실패시키는 것: prepare의 새 시계 확인(`frame.allows`)을 지우는 것.
     #[test]
     fn test_relay_refuses_after_deadline() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let t = Times { trust: -1, ..LIVE };
         assert!(matches!(
             relay_cat(Origin::Config, t, b""),
@@ -866,6 +867,7 @@ mod tests {
     // 양성 대조: 두 마감이 1초 남은 같은 입력은 대상을 실행한다.
     #[test]
     fn test_relay_runs_before_deadline() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let seen = ran(relay_cat(Origin::Config, LIVE, b""));
         assert_eq!(seen.exe, cat());
     }
@@ -873,6 +875,7 @@ mod tests {
     // 이것을 실패시키는 것: ExecFrame::allows에서 `now < run_deadline`을 지우는 것.
     #[test]
     fn test_relay_config_refuses_after_e() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let t = Times { run: -1, ..LIVE };
         assert!(matches!(
             relay_cat(Origin::Config, t, b""),
@@ -884,6 +887,7 @@ mod tests {
     // (`now < run_deadline`을 `origin == Config`일 때만 보게 하는 것).
     #[test]
     fn test_relay_builtin_refuses_after_e() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let t = Times { run: -1, ..LIVE };
         assert!(matches!(
             relay_cat(Origin::Builtin, t, b""),
@@ -895,6 +899,7 @@ mod tests {
     // `origin == Builtin ||`를 지우는 것).
     #[test]
     fn test_relay_builtin_ignores_trust() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let t = Times { trust: -1, ..LIVE };
         ran(relay_cat(Origin::Builtin, t, b""));
     }
@@ -903,6 +908,7 @@ mod tests {
     // (중계가 물려받은 fd 5가 대상에 남는다).
     #[test]
     fn test_relay_target_fds() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let seen = ran(relay_cat(Origin::Config, LIVE, b""));
         assert_eq!(seen.fds, [0, 1, 2]);
     }
@@ -910,6 +916,7 @@ mod tests {
     // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.
     #[test]
     fn test_relay_no_deadline_env() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let (permit, bytes) = input(Origin::Config, LIVE, b"A=1\0");
         let seen = ran(outcome(spawn_relay(&bytes, &args(&cat(), &[b"cat"]), &[])));
         let (_, frame) = read_relay_input(&bytes, INPUT_CAP).unwrap();
@@ -937,6 +944,7 @@ mod tests {
     // 이것을 실패시키는 것: Permit::same_clock의 resume 비교를 지우는 것(깨어난 뒤의 시계로 실행).
     #[test]
     fn test_relay_refuses_after_resume() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         for origin in [Origin::Config, Origin::Builtin] {
             let t = Times {
                 resume_shift: 1,
@@ -953,6 +961,7 @@ mod tests {
     // 무시된 채 남음), 또는 마스크 비우기를 지우는 것(SIGUSR2가 막힌 채 남음).
     #[test]
     fn test_relay_resets_sigpipe() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let seen = ran(relay_cat(Origin::Config, LIVE, b""));
         assert_eq!(seen.sig_ign, "0000000000000000");
         assert_eq!(seen.sig_blk, "0000000000000000");
@@ -999,6 +1008,7 @@ mod tests {
     #[cfg(target_env = "gnu")]
     #[test]
     fn test_relay_loader_never_sees_target_env() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("loader");
         let so = canary(&dir);
         let hits = dir.join("hits");
@@ -1026,6 +1036,7 @@ mod tests {
     // 빈 항목을 더하는 것.
     #[test]
     fn test_target_env_equals_frame() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let seen = ran(relay_cat(Origin::Config, LIVE, b"A=1\0B=2\0"));
         assert_eq!(seen.environ, b"A=1\0B=2\0");
         let seen = ran(relay_cat(Origin::Config, LIVE, b""));
@@ -1038,6 +1049,7 @@ mod tests {
     // 잡는다(지우면 FIFO를 읽기로 연다).
     #[test]
     fn test_relay_refuses_unsafe_targets() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("unsafe");
         let writable = dir.join("writable");
         std::fs::copy(cat(), &writable).unwrap();
@@ -1070,6 +1082,7 @@ mod tests {
     // 실제 cat에 닿는 경로가 실행된다).
     #[test]
     fn test_relay_refuses_relative_executable() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let depth = std::env::current_dir().unwrap().components().count() - 1;
         let relative = PathBuf::from("../".repeat(depth)).join(cat().strip_prefix("/").unwrap());
         assert!(std::fs::metadata(&relative).is_ok(), "{relative:?}");
@@ -1145,6 +1158,7 @@ mod tests {
     // close_range 오류를 통과시키는 것.
     #[test]
     fn test_relay_close_range_fallback() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = Command::new(std::env::current_exe().unwrap())
             .args([
                 "relay::tests::cloexec_child",
@@ -1173,6 +1187,7 @@ mod tests {
     // 거부). root는 읽기 권한을 무시하므로 이 시험은 root가 아닌 사용자로 돌려야 뜻이 있다.
     #[test]
     fn test_relay_runs_execute_only_target() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("xonly");
         let exe = dir.join("cat");
         std::fs::copy(cat(), &exe).unwrap();
@@ -1263,6 +1278,7 @@ mod tests {
     // 것(close_range는 close-on-exec만 켠다), close-on-exec 처리를 지우는 것.
     #[test]
     fn test_relay_pre_exec_clock_reads() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let out = Command::new(std::env::current_exe().unwrap())
             .args([
                 "relay::tests::clock_child",
@@ -1325,6 +1341,7 @@ mod tests {
     // 것(중간 symlink를 따라감), 또는 "."·".."·빈 이름 거부를 지우는 것.
     #[test]
     fn test_relay_refuses_middle_symlink() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("middle");
         let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::create_dir(dir.join("real")).unwrap();
@@ -1355,6 +1372,7 @@ mod tests {
     // 실행됨), 그룹 쓰기 판정을 지우는 것(pin 없이 실행됨).
     #[test]
     fn test_relay_group_write_needs_matching_pin() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("pin");
         let exe = dir.join("cat");
         let pin = cat_copy(&exe, 0o775);
@@ -1445,6 +1463,7 @@ mod tests {
     // 검사 뒤 바꿔치기한 false가 실행되어 종료 코드 1이 된다.
     #[test]
     fn test_swap_after_check_runs_checked_file() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("swap")).unwrap();
         let copy = |from: &str, to: &str| {
             std::fs::copy(std::fs::canonicalize(from).unwrap(), dir.join(to)).unwrap();
@@ -1492,6 +1511,7 @@ mod tests {
     #[test]
     #[ignore = "needs a user-private primary group; run in the Linux container as that user"]
     fn test_private_group_target_runs_with_pin() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         // SAFETY: umask only changes this process's file creation mask.
         unsafe { libc::umask(0o002) };
         let dir = fresh_dir("private-group");
@@ -1532,6 +1552,7 @@ mod tests {
     // 이것을 실패시키는 것: open_target이 마지막 이름을 O_PATH가 아니라 O_RDONLY로 먼저 여는 것.
     #[test]
     fn test_relay_never_opens_a_fifo_for_reading() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("fifo-open");
         let fifo = dir.join("fifo");
         let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
@@ -1649,7 +1670,7 @@ mod tests {
     // 빠뜨리거나 자르는 것(cat이 내보내는 내용이 다름).
     #[test]
     fn test_script_runs_through_sealed_memfd() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("sealed")).unwrap();
         let script = dir.join("s");
         let body = cat_script(300);
@@ -1690,7 +1711,7 @@ mod tests {
     // cat이 스크립트를 열지 못함), 끄기를 지우는 것, argv[0]을 버리지 않거나 줄 인자를 버리는 것.
     #[test]
     fn test_script_fd_set() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("script-fds")).unwrap();
         let script = dir.join("s");
         let body = cat_script(200);
@@ -1726,7 +1747,7 @@ mod tests {
     // 그대로 실행). 감독이 env를 인터프리터로 실어 보내도 중계가 RELAY_TARGET으로 거부한다.
     #[test]
     fn test_env_shebang_refused() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = fresh_dir("env-shebang");
         let script = dir.join("s");
         executable(&script, b"#!/usr/bin/env sh\nexec cat\n", 0o755);
@@ -1741,7 +1762,7 @@ mod tests {
     // close-on-exec 인터프리터 fd 위의 스크립트를 ENOENT로 막아 RELAY_EXEC로 끝남).
     #[test]
     fn test_nested_shebang_refused() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("nested")).unwrap();
         let interpreter = dir.join("i");
         executable(&interpreter, cat_script(64).as_slice(), 0o755);
@@ -1758,7 +1779,7 @@ mod tests {
     // 것(65,537바이트가 잘리거나 통째로 실행됨), 상한을 하나 줄이는 것.
     #[test]
     fn test_script_over_64k_refused() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("64k")).unwrap();
         let script = dir.join("s");
         let input = script_input(cat().as_os_str().as_bytes(), &cat(), None);
@@ -1785,7 +1806,7 @@ mod tests {
     // 넘기는 것(양성 대조가 깨짐)이나 pin 없이 그룹 쓰기를 통과시키는 것.
     #[test]
     fn test_script_interpreter_matches_line_and_pin() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("interp")).unwrap();
         let interpreter = dir.join("cat");
         let pin = cat_copy(&interpreter, 0o775);
@@ -1837,7 +1858,7 @@ mod tests {
     // interpreter.line을 여는 것(merged-/usr에서 중간 symlink로 거부), argv[0]에 정규 경로를 쓰는 것.
     #[test]
     fn test_resolved_script_runs() {
-        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("resolved")).unwrap();
         let script = dir.join("s");
         executable(&script, b"#!/bin/cat -\n", 0o755);
