@@ -577,6 +577,8 @@ mod tests {
     #[test]
     #[ignore = "needs root and CAP_SYS_ADMIN (bind mount); run in the Linux container"]
     fn repo_bind_mount_is_inside() {
+        // It spawns mount and umount (see sys::test_inherited_fd_lock).
+        let _serial = sys::test_inherited_fd_lock();
         let t = scratch("bind");
         let repo = t.join("repo");
         exe(&repo.join("bin/tool"), 0o755);

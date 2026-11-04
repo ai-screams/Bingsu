@@ -546,6 +546,11 @@ mod tests {
     // 실행하지 않는 단위까지 보는 것, 상대 argv[0]을 PATH에서 찾는 것.
     #[test]
     fn test_env_shebang_warned() {
+        // It spawns mkfifo: between fork and exec the child holds every
+        // descriptor of this process, a fixture's close-only flock included,
+        // so a store test in another thread would see Busy. Spawning tests
+        // hold the serial lock (sys::test_inherited_fd_lock).
+        let _serial = crate::commands::sys::test_inherited_fd_lock();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("bingsu-env-shebang-{}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
