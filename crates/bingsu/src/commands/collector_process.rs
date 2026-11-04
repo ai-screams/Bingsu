@@ -123,6 +123,21 @@ impl OwnedChild {
         self.signal.pidfd()
     }
 
+    /// A child whose pidfd came from its own `clone3(CLONE_PIDFD)`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt(pid: libc::pid_t, pidfd: OwnedFd, expires_ns: u64) -> Self {
+        Self {
+            signal: SignalChild {
+                pidfd: Arc::new(pidfd),
+                state: Arc::default(),
+            },
+            pid,
+            expires_ns,
+            spawn_enter: None,
+            spawn_return: None,
+        }
+    }
+
     pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {

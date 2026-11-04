@@ -445,6 +445,7 @@ impl Supervisor {
             &input,
             self.grant.helper_deadline,
             &go,
+            None,
         );
         if matches!(&spawned, Err(e) if e.kind() == std::io::ErrorKind::Interrupted) {
             return self.stop();
