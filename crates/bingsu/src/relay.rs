@@ -85,9 +85,11 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
     let (fd, script, argv) = match open_target(parsed.executable, frame.pin)? {
+        // A frame that names an interpreter was made for a script.
+        Opened::Native(_) if frame.interpreter.is_some() => return Err(RELAY_TARGET),
         Opened::Native(fd) => (fd, None, c_strings(parsed.argv)?),
-        Opened::Script(fd, first) => {
-            let (interpreter, copy, argv) = script(&fd, &first, &frame, parsed.argv)?;
+        Opened::Script(fd, checked, body) => {
+            let (interpreter, copy, argv) = script(&fd, &checked, &body, &frame, parsed.argv)?;
             (interpreter, Some(copy), argv)
         }
     };
@@ -294,7 +296,7 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// The file must be regular and pass `allowed`. It is opened `O_PATH` first
 /// and checked; then that descriptor is opened for reading through
 /// `/proc/self/fd`, the same inode, and its first bytes say whether it is a
-/// script. An execute-only file cannot be opened for reading (EACCES), and
+/// script (`read_script`). An execute-only file cannot be opened for reading (EACCES), and
 /// without `/proc` there is no such path; then the `O_PATH` descriptor runs,
 /// as a native executable only (spec section 4 "native executable"): its
 /// `#!` line, if any, is never read, and the kernel's own script loader
@@ -333,21 +335,45 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     if !readable {
         return Ok(Opened::Native(fd));
     }
-    let mut first = vec![0u8; SHEBANG_MAX];
-    let n = read_at(&fd, &mut first, 0).map_err(|_| RELAY_TARGET)?;
-    first.truncate(n);
-    Ok(if first.starts_with(b"#!") {
-        Opened::Script(fd, first)
-    } else {
-        Opened::Native(fd)
+    Ok(match read_script(&fd)? {
+        Some(body) => Opened::Script(fd, st, body),
+        None => Opened::Native(fd),
     })
 }
 
-/// A checked executable: a native one, or a script with its first bytes (at
-/// most `SHEBANG_MAX`).
+/// A checked executable: a native one, or a script with the stat its checks
+/// ran on and its body, read once.
 enum Opened {
     Native(OwnedFd),
-    Script(OwnedFd, Vec<u8>),
+    Script(OwnedFd, libc::stat, Vec<u8>),
+}
+
+/// The bytes every script decision uses, read in one pass from offset 0:
+/// the first `SHEBANG_MAX` bytes, and when they start with `#!` the rest of
+/// the body, refused past `SCRIPT_MAX`. `None` for a native file. Nothing
+/// reads the file again: the line compared with the frame, the argv and the
+/// memfd copy all come from this buffer.
+fn read_script(fd: &OwnedFd) -> Result<Option<Vec<u8>>, u8> {
+    let mut first = [0u8; SHEBANG_MAX];
+    let n = read_at(fd, &mut first, 0).map_err(|_| RELAY_TARGET)?;
+    if !first[..n].starts_with(b"#!") {
+        return Ok(None);
+    }
+    let mut body = vec![0u8; SCRIPT_MAX + 1];
+    body[..n].copy_from_slice(&first[..n]);
+    let mut len = n;
+    while len < body.len() {
+        let n = read_at(fd, &mut body[len..], len).map_err(|_| RELAY_TARGET)?;
+        if n == 0 {
+            break;
+        }
+        len += n;
+    }
+    if len > SCRIPT_MAX {
+        return Err(RELAY_TARGET);
+    }
+    body.truncate(len);
+    Ok(Some(body))
 }
 
 /// One `pread`; a signal never interrupts it (no handler is installed).
@@ -358,32 +384,71 @@ fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
     usize::try_from(n).map_err(|_| errno())
 }
 
-/// The script row of spec section 4: the `#!` line read from the checked
-/// descriptor must name the interpreter the helper resolved, which must pass
-/// the same checks and be a native executable (no nested `#!`). The script
-/// is copied into a sealed memfd and the interpreter's descriptor runs with
-/// argv `[line interpreter, line argument, /proc/self/fd/N, argv[1..]]`, the
-/// order the kernel's script loader uses.
+/// The script row of spec section 4, on the body `read_script` read once:
+/// its whole `#!` line must be the line the helper resolved, the kernel must
+/// let the user execute the file (`may_execute`), and the interpreter must
+/// pass the same checks, be a native executable (no nested `#!`) and not be
+/// `/usr/bin/env`. The body goes into a sealed memfd; then the script's
+/// descriptor must still be the file `checked` describes (same identity,
+/// owner, mode and status change time). The interpreter's descriptor runs
+/// with argv `[line interpreter, line argument, /proc/self/fd/N, argv[1..]]`,
+/// the order the kernel's script loader uses.
 fn script(
     fd: &OwnedFd,
-    first: &[u8],
+    checked: &libc::stat,
+    body: &[u8],
     frame: &ExecFrame,
     argv: &[&[u8]],
 ) -> Result<(OwnedFd, OwnedFd, Vec<CString>), u8> {
-    let Head::Script(line) = head(first) else {
+    let Head::Script(line) = head(&body[..body.len().min(SHEBANG_MAX)]) else {
         return Err(RELAY_TARGET);
     };
     let interpreter = frame
         .interpreter
         .as_ref()
-        .filter(|i| i.line == line.interpreter)
+        .filter(|i| i.line == line.line && i.path != b"/usr/bin/env")
         .ok_or(RELAY_TARGET)?;
+    if !may_execute(fd) {
+        return Err(RELAY_TARGET);
+    }
     let Opened::Native(interpreter_fd) = open_target(&interpreter.path, interpreter.pin)? else {
         return Err(RELAY_TARGET);
     };
-    let copy = sealed_copy(fd)?;
+    let copy = sealed_copy(body, memfd_create, write_fd)?;
+    if !unchanged(checked, &stat(fd)?) {
+        return Err(RELAY_TARGET);
+    }
     let argv = c_strings(&script_argv(line, copy.as_raw_fd(), argv))?;
     Ok((interpreter_fd, copy, argv))
+}
+
+/// The kernel's own answer whether this user may execute the script's
+/// file: permission bits, ACL and a `noexec` mount, as `execve` would judge
+/// a native file. Asked through `/proc/self/fd/N`, so it is the checked
+/// inode on its own mount.
+fn may_execute(fd: &OwnedFd) -> bool {
+    let Ok(name) = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
+        return false;
+    };
+    // SAFETY: `name` is NUL-terminated.
+    unsafe { libc::faccessat(libc::AT_FDCWD, name.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// Whether `now` is still the file `before` describes: a write, chmod,
+/// chown or ACL change moves the status change time.
+fn unchanged(before: &libc::stat, now: &libc::stat) -> bool {
+    let key = |s: &libc::stat| {
+        (
+            s.st_dev,
+            s.st_ino,
+            s.st_mode,
+            s.st_uid,
+            s.st_gid,
+            s.st_ctime,
+            s.st_ctime_nsec,
+        )
+    };
+    key(before) == key(now)
 }
 
 fn script_argv<'a>(line: Shebang<'a>, copy: i32, argv: &[&'a [u8]]) -> Vec<Vec<u8>> {
@@ -395,26 +460,21 @@ fn script_argv<'a>(line: Shebang<'a>, copy: i32, argv: &[&'a [u8]]) -> Vec<Vec<u
     out
 }
 
-/// The script, at most `SCRIPT_MAX` bytes, in a memfd sealed with `SEALS`.
-fn sealed_copy(script: &OwnedFd) -> Result<OwnedFd, u8> {
-    let mut body = vec![0u8; SCRIPT_MAX + 1];
-    let mut len = 0;
-    loop {
-        let n = read_at(script, &mut body[len..], len).map_err(|_| RELAY_TARGET)?;
-        if n == 0 {
-            break;
-        }
-        len += n;
-        if len > SCRIPT_MAX {
-            return Err(RELAY_TARGET);
-        }
-    }
-    let copy = memfd().map_err(|_| RELAY_EXEC)?;
-    let mut rest = &body[..len];
+/// `body` in a memfd from `create` (through `memfd`), written with `write`
+/// and sealed with `SEALS`.
+fn sealed_copy(
+    body: &[u8],
+    create: impl FnMut(libc::c_uint) -> Result<OwnedFd, i32>,
+    mut write: impl FnMut(&OwnedFd, &[u8]) -> isize,
+) -> Result<OwnedFd, u8> {
+    let copy = memfd(create).map_err(|_| RELAY_EXEC)?;
+    let mut rest = body;
     while !rest.is_empty() {
-        // SAFETY: `rest` is readable for its length; `copy` is open for writing.
-        let n = unsafe { libc::write(copy.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
-        let n = usize::try_from(n).map_err(|_| RELAY_EXEC)?;
+        // A write that takes nothing would loop forever.
+        let n = usize::try_from(write(&copy, rest))
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or(RELAY_EXEC)?;
         rest = &rest[n..];
     }
     // SAFETY: F_ADD_SEALS only changes the memfd's seals.
@@ -424,20 +484,21 @@ fn sealed_copy(script: &OwnedFd) -> Result<OwnedFd, u8> {
     Ok(copy)
 }
 
-/// A close-on-exec, sealable memfd that can never be executed
-/// (`MFD_NOEXEC_SEAL`, Linux 6.3), or without that flag on an older kernel.
-fn memfd() -> Result<OwnedFd, i32> {
-    let base = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
-    match memfd_create(base | libc::MFD_NOEXEC_SEAL) {
-        Err(e) if retry_without_noexec(e) => memfd_create(base),
-        other => other,
-    }
+fn write_fd(fd: &OwnedFd, bytes: &[u8]) -> isize {
+    // SAFETY: `bytes` is readable for its length; `fd` is open for writing.
+    unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) }
 }
 
-/// Before 6.3 the kernel does not know `MFD_NOEXEC_SEAL` and answers
-/// EINVAL; any other error (EMFILE, ENOMEM, EACCES) stays an error.
-fn retry_without_noexec(errno: i32) -> bool {
-    errno == libc::EINVAL
+/// A close-on-exec, sealable memfd that can never be executed
+/// (`MFD_NOEXEC_SEAL`, Linux 6.3). Before 6.3 the kernel does not know that
+/// flag and answers EINVAL: then once more without it. Any other error
+/// (EMFILE, ENOMEM, EACCES) stays an error.
+fn memfd(mut create: impl FnMut(libc::c_uint) -> Result<OwnedFd, i32>) -> Result<OwnedFd, i32> {
+    let base = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    match create(base | libc::MFD_NOEXEC_SEAL) {
+        Err(libc::EINVAL) => create(base),
+        other => other,
+    }
 }
 
 fn memfd_create(flags: libc::c_uint) -> Result<OwnedFd, i32> {
@@ -673,6 +734,16 @@ mod tests {
     /// SIGUSR1 is ignored and SIGUSR2 blocked, which the relay must undo.
     /// `relay_env` is the relay's own envp; the supervisor passes none.
     fn spawn_relay(input: &[u8], args: &[Vec<u8>], relay_env: &[(&str, &Path)]) -> Child {
+        spawn_relay_with(input, args, relay_env, None)
+    }
+
+    /// `spawn_relay`, as the user `uid` when given (root only).
+    fn spawn_relay_with(
+        input: &[u8],
+        args: &[Vec<u8>],
+        relay_env: &[(&str, &Path)],
+        uid: Option<u32>,
+    ) -> Child {
         let (r3, w3) = pipe();
         put(&w3, input);
         drop(w3);
@@ -699,6 +770,9 @@ mod tests {
         .stderr(Stdio::inherit());
         for (k, v) in relay_env {
             cmd.env(k, v);
+        }
+        if let Some(uid) = uid {
+            cmd.uid(uid).gid(uid);
         }
         // Runs in the forked child: only async-signal-safe calls (dup2, signal,
         // sigemptyset, sigaddset, pthread_sigmask) on descriptors open there.
@@ -1609,7 +1683,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The relay input for a script whose `#!` line names `line`, resolved
+    /// The `#!` line (after `#!`) of `cat_script`.
+    fn cat_line() -> Vec<u8> {
+        format!("{} -", cat().display()).into_bytes()
+    }
+
+    /// The relay input for a script whose whole `#!` line is `line`, resolved
     /// by the helper to `path` (with `pin` for a group-writable interpreter).
     fn script_input(line: &[u8], path: &Path, pin: Option<ExecPin>) -> Vec<u8> {
         let clock = crate::prompt_io::observe_clock().unwrap();
@@ -1675,7 +1754,7 @@ mod tests {
         let script = dir.join("s");
         let body = cat_script(300);
         executable(&script, &body, 0o755);
-        let input = script_input(cat().as_os_str().as_bytes(), &cat(), None);
+        let input = script_input(&cat_line(), &cat(), None);
         let child = echo(spawn_relay(&input, &args(&script, &[b"s"]), &[])).unwrap();
         let proc = PathBuf::from(format!("/proc/{}", child.id()));
         let n = copy_fd(&std::fs::read(proc.join("cmdline")).unwrap());
@@ -1717,7 +1796,7 @@ mod tests {
         let body = cat_script(200);
         executable(&script, &body, 0o755);
         let line = cat();
-        let input = script_input(line.as_os_str().as_bytes(), &cat(), None);
+        let input = script_input(&cat_line(), &cat(), None);
         let child = echo(spawn_relay(&input, &args(&script, &[b"s", b"-"]), &[])).unwrap();
         let proc = PathBuf::from(format!("/proc/{}", child.id()));
         let cmdline = std::fs::read(proc.join("cmdline")).unwrap();
@@ -1752,7 +1831,7 @@ mod tests {
         let script = dir.join("s");
         executable(&script, b"#!/usr/bin/env sh\nexec cat\n", 0o755);
         let env = std::fs::canonicalize("/usr/bin/env").unwrap();
-        let input = script_input(b"/usr/bin/env", &env, None);
+        let input = script_input(b"/usr/bin/env sh", &env, None);
         let got = script_outcome(&script, &input, &[b"s"]);
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1782,7 +1861,7 @@ mod tests {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let dir = std::fs::canonicalize(fresh_dir("64k")).unwrap();
         let script = dir.join("s");
-        let input = script_input(cat().as_os_str().as_bytes(), &cat(), None);
+        let input = script_input(&cat_line(), &cat(), None);
         let body = cat_script(SCRIPT_MAX);
         assert_eq!(body.len(), 65_536);
         executable(&script, &body, 0o755);
@@ -1816,7 +1895,8 @@ mod tests {
             format!("#!{} -\n", interpreter.display()).as_bytes(),
             0o755,
         );
-        let line = interpreter.as_os_str().as_bytes();
+        let line = format!("{} -", interpreter.display()).into_bytes();
+        let line = line.as_slice();
         finish(
             echo(spawn_relay(
                 &script_input(line, &interpreter, Some(pin)),
@@ -1836,21 +1916,253 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // 이것을 실패시키는 것: retry_without_noexec가 EINVAL 밖의 오류(EMFILE·ENOMEM·EACCES)에도
-    // MFD_NOEXEC_SEAL 없이 다시 만드는 것, 또는 EINVAL에서 다시 만들지 않는 것(6.3 미만 커널에서 스크립트
-    // 실행 불가).
+    // 이것을 실패시키는 것: memfd가 EINVAL 밖의 오류(EMFILE·ENOMEM·EACCES·EPERM)에도 다시 부르는 것,
+    // EINVAL에서 다시 부르지 않는 것(6.3 미만 커널에서 스크립트 실행 불가), 다시 부를 때 MFD_NOEXEC_SEAL 밖의
+    // 플래그(CLOEXEC·ALLOW_SEALING)까지 빼는 것.
     #[test]
-    fn memfd_retries_only_on_einval() {
-        assert!(retry_without_noexec(libc::EINVAL));
-        for e in [
-            libc::EMFILE,
-            libc::ENFILE,
-            libc::ENOMEM,
-            libc::EACCES,
-            libc::EPERM,
-        ] {
-            assert!(!retry_without_noexec(e), "{e}");
+    fn memfd_retries_once_without_noexec_on_einval() {
+        let base = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+        let calls = |first: Result<(), i32>| {
+            let mut seen = Vec::new();
+            let got = memfd(|flags| {
+                seen.push(flags);
+                match (seen.len(), first) {
+                    (1, Ok(())) => Ok(std::fs::File::open("/dev/null").unwrap().into()),
+                    (1, Err(e)) => Err(e),
+                    _ => Err(libc::EMFILE),
+                }
+            });
+            (got.is_ok(), seen)
+        };
+        assert_eq!(
+            calls(Err(libc::EINVAL)),
+            (false, vec![base | libc::MFD_NOEXEC_SEAL, base])
+        );
+        assert_eq!(calls(Ok(())), (true, vec![base | libc::MFD_NOEXEC_SEAL]));
+        for e in [libc::EMFILE, libc::ENOMEM, libc::EACCES, libc::EPERM] {
+            assert_eq!(
+                calls(Err(e)),
+                (false, vec![base | libc::MFD_NOEXEC_SEAL]),
+                "{e}"
+            );
         }
+    }
+
+    // 이것을 실패시키는 것: sealed_copy가 0바이트 write를 진행으로 보는 것(끝나지 않는 고리, 시험은
+    // 시간 초과로 죽음)이나 음수를 받아들이는 것, 짧은 write 뒤 나머지를 쓰지 않는 것.
+    #[test]
+    fn sealed_copy_needs_writes_that_progress() {
+        for stuck in [0, -1] {
+            let got = sealed_copy(b"#!/bin/sh\n", memfd_create, |_, _| stuck);
+            assert_eq!(got.err(), Some(RELAY_EXEC), "{stuck}");
+        }
+        let body = b"#!/bin/sh\necho one byte at a time\n";
+        let copy = sealed_copy(body, memfd_create, |fd, b| write_fd(fd, &b[..1])).unwrap();
+        let mut back = vec![0u8; body.len() + 1];
+        let n = read_at(&copy, &mut back, 0).unwrap();
+        assert_eq!(&back[..n], body);
+    }
+
+    fn open_read(path: &Path) -> (OwnedFd, libc::stat) {
+        let fd: OwnedFd = std::fs::File::open(path).unwrap().into();
+        let st = stat(&fd).unwrap();
+        (fd, st)
+    }
+
+    fn script_frame(line: &[u8], path: &Path) -> ExecFrame {
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let mut frame = read_relay_input(&bytes, INPUT_CAP).unwrap().1;
+        frame.interpreter = Some(bingsu_core::handoff::Interpreter {
+            line: line.to_vec(),
+            path: path.as_os_str().as_bytes().to_vec(),
+            pin: None,
+        });
+        frame
+    }
+
+    // 중계가 판정한 바이트가 곧 복사한 바이트다. 파일에는 다른 본문을 두고 script()에 버퍼를 넘긴다.
+    // 이것을 실패시키는 것: script()나 sealed_copy가 파일을 다시 읽는 것(memfd에 파일 쪽 본문이 들어감),
+    // 줄 비교를 버퍼 대신 파일에서 하는 것, 복사 뒤 fstat 재확인을 지우는 것(검사 뒤 고쳐 쓴 파일이 통과).
+    #[test]
+    fn script_uses_the_checked_buffer() {
+        let dir = std::fs::canonicalize(fresh_dir("buffer")).unwrap();
+        let file = dir.join("s");
+        executable(
+            &file,
+            format!("#!{} -\n# on disk\n", cat().display()).as_bytes(),
+            0o755,
+        );
+        let body = format!("#!{} -\n# checked\n", cat().display()).into_bytes();
+        let frame = script_frame(&cat_line(), &cat());
+        let (fd, st) = open_read(&file);
+        let (_, copy, argv) = script(&fd, &st, &body, &frame, &[b"s"]).unwrap();
+        let mut back = vec![0u8; SCRIPT_MAX];
+        let n = read_at(&copy, &mut back, 0).unwrap();
+        assert_eq!(&back[..n], body.as_slice());
+        assert_eq!(argv[0].as_bytes(), cat().as_os_str().as_bytes());
+        // The file's own line would match another frame; the buffer's decides.
+        let other = format!("#!{}\n", cat().display()).into_bytes();
+        assert_eq!(
+            script(&fd, &st, &other, &frame, &[b"s"]).err(),
+            Some(RELAY_TARGET)
+        );
+        // Rewritten after the checks (same bytes, new ctime): refused.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&file, std::fs::read(&file).unwrap()).unwrap();
+        assert_ne!(stat(&fd).unwrap().st_ctime_nsec, st.st_ctime_nsec);
+        assert_eq!(
+            script(&fd, &st, &body, &frame, &[b"s"]).err(),
+            Some(RELAY_TARGET)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 선택 인자까지 줄 전체를 비교한다. 이것을 실패시키는 것: script()가 줄 전체(line.line) 대신 인터프리터
+    // 단어만 비교하는 것.
+    #[test]
+    fn test_script_line_compares_the_argument() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("line-arg")).unwrap();
+        let script = dir.join("s");
+        let sh = std::fs::canonicalize("/bin/sh").unwrap();
+        for (on_disk, framed) in [
+            (&b"/bin/sh -n"[..], &b"/bin/sh"[..]),
+            (b"/bin/sh", b"/bin/sh -n"),
+        ] {
+            let mut body = b"#!".to_vec();
+            body.extend_from_slice(on_disk);
+            body.extend_from_slice(b"\nexec cat\n");
+            executable(&script, &body, 0o755);
+            let got = script_outcome(&script, &script_input(framed, &sh, None), &[b"s"]);
+            assert!(refused_with(&got, RELAY_TARGET), "{on_disk:?} {got:?}");
+        }
+        // Positive control: the same line runs.
+        executable(&script, b"#!/bin/sh\nexec cat\n", 0o755);
+        finish(
+            echo(spawn_relay(
+                &script_input(b"/bin/sh", &sh, None),
+                &args(&script, &[b"s"]),
+                &[],
+            ))
+            .unwrap(),
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 원본 스크립트의 실행 권한은 커널이 판정한다(네이티브는 execveat가 했다). 이것을 실패시키는 것: script()의
+    // may_execute 확인을 지우는 것(읽기만 되는 0644 스크립트가 실행됨).
+    #[test]
+    fn test_script_needs_execute_permission() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("noexec-bits")).unwrap();
+        let script = dir.join("s");
+        executable(&script, &cat_script(64), 0o644);
+        let input = script_input(&cat_line(), &cat(), None);
+        let got = script_outcome(&script, &input, &[b"s"]);
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 다른 사용자에게 읽기만 허락한 root 소유 0744 스크립트는 그 사용자에게 실행되지 않는다(소유자 비트만 보는
+    // 검사로는 통과). root로 Linux 컨테이너에서 --ignored로 돌린다(중계는 nobody로 뜬다). 시험 바이너리는
+    // nobody가 실행할 수 있는 곳에 있어야 한다. 이것을 실패시키는 것: may_execute를 mode 비트의 아무 x
+    // 비트 검사로 바꾸는 것, may_execute를 지우는 것.
+    #[test]
+    #[ignore = "root in the Linux container; the relay runs as nobody"]
+    fn test_root_script_others_may_only_read() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        // SAFETY: getuid cannot fail.
+        assert_eq!(unsafe { libc::getuid() }, 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("root-0744")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = dir.join("s");
+        let input = script_input(&cat_line(), &cat(), None);
+        executable(&script, &cat_script(64), 0o744);
+        let got = outcome(spawn_relay_with(
+            &input,
+            &args(&script, &[b"s"]),
+            &[],
+            Some(65_534),
+        ));
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        // Positive control: with execute for others it runs as nobody.
+        executable(&script, &cat_script(64), 0o755);
+        finish(
+            echo(spawn_relay_with(
+                &input,
+                &args(&script, &[b"s"]),
+                &[],
+                Some(65_534),
+            ))
+            .unwrap(),
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // noexec 마운트 위의 스크립트는 실행되지 않는다. 특권 Linux 컨테이너에서 root로 --ignored로 돌린다(tmpfs를
+    // 직접 마운트한다). 이것을 실패시키는 것: may_execute를 지우거나 mode 비트만 보는 검사로 바꾸는 것.
+    #[test]
+    #[ignore = "privileged Linux container, root: mounts a noexec tmpfs"]
+    fn test_script_on_noexec_mount_refused() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("noexec-mount")).unwrap();
+        let target = CString::new(dir.as_os_str().as_bytes()).unwrap();
+        // SAFETY: all strings are NUL-terminated; no data argument.
+        let mounted = unsafe {
+            libc::mount(
+                c"tmpfs".as_ptr(),
+                target.as_ptr(),
+                c"tmpfs".as_ptr(),
+                libc::MS_NOEXEC,
+                std::ptr::null(),
+            )
+        } == 0;
+        assert!(mounted, "BLOCKED: mount needs a privileged container");
+        let script = dir.join("s");
+        executable(&script, &cat_script(64), 0o755);
+        let input = script_input(&cat_line(), &cat(), None);
+        let got = script_outcome(&script, &input, &[b"s"]);
+        // SAFETY: `target` is NUL-terminated.
+        unsafe { libc::umount(target.as_ptr()) };
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 인터프리터를 실은 프레임은 스크립트용이다. 이것을 실패시키는 것: prepare의 "Native인데 인터프리터가 있으면
+    // 거부" 분기를 지우는 것(네이티브 cat이 실행됨, O_PATH 갈래 포함).
+    #[test]
+    fn test_interpreter_frame_on_native_target_refused() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = fresh_dir("native-with-interp");
+        let xonly = dir.join("cat");
+        std::fs::copy(cat(), &xonly).unwrap();
+        std::fs::set_permissions(&xonly, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let input = script_input(&cat_line(), &cat(), None);
+        for exe in [cat(), xonly] {
+            let got = script_outcome(&exe, &input, &[b"cat"]);
+            assert!(refused_with(&got, RELAY_TARGET), "{exe:?} {got:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 정규 경로가 /usr/bin/env인 인터프리터는 중계도 거부한다(줄의 원문은 다른 이름). 이것을 실패시키는 것:
+    // script()의 `i.path != b"/usr/bin/env"`를 지우는 것(env가 sh를 찾아 스크립트를 실행).
+    #[test]
+    fn test_relay_refuses_env_by_canonical_path() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("env-alias")).unwrap();
+        let env = std::fs::canonicalize("/usr/bin/env").unwrap();
+        assert_eq!(env, Path::new("/usr/bin/env"));
+        std::os::unix::fs::symlink(&env, dir.join("env")).unwrap();
+        let script = dir.join("s");
+        let line = format!("{} sh", dir.join("env").display()).into_bytes();
+        let mut body = b"#!".to_vec();
+        body.extend_from_slice(&line);
+        body.extend_from_slice(b"\nexec cat\n");
+        executable(&script, &body, 0o755);
+        let got = script_outcome(&script, &script_input(&line, &env, None), &[b"s"]);
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // 도우미 해석에서 중계 실행까지: `#!/bin/cat -`는 merged-/usr에서 `/bin -> usr/bin`을 지나므로, 중계는 줄의
@@ -1864,7 +2176,7 @@ mod tests {
         executable(&script, b"#!/bin/cat -\n", 0o755);
         let found = crate::commands::exec_path::resolve_for_user(&script, None).unwrap();
         let interpreter = found.interpreter.unwrap();
-        assert_eq!(interpreter.line, b"/bin/cat");
+        assert_eq!(interpreter.line, b"/bin/cat -");
         let path = PathBuf::from(OsString::from_vec(interpreter.path.clone()));
         assert_eq!(path, cat());
         let input = script_input(&interpreter.line, &path, interpreter.pin);

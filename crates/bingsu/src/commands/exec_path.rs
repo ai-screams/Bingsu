@@ -12,7 +12,9 @@
 //! relay's exec nobody else can swap a name on the way.
 use crate::commands::group_policy::Recording;
 use crate::commands::sys;
-use bingsu_core::command::path::{self as rule, Candidate, ExecPin, Head, Name, SHEBANG_MAX};
+use bingsu_core::command::path::{
+    self as rule, Candidate, ExecPin, Head, Name, SHEBANG_MAX, Shebang,
+};
 use bingsu_core::fs_trust::{GroupOracle, NextOwner, ancestor_verdict};
 use bingsu_core::handoff::Interpreter;
 use std::collections::VecDeque;
@@ -322,7 +324,7 @@ pub fn resolve_open(
         Some(first) => match rule::head(&first) {
             Head::Native => None,
             Head::Refused => return Err(Miss::Refused),
-            Head::Script(line) => Some(interpreter(line.interpreter, repo, me, groups)?),
+            Head::Script(line) => Some(interpreter(line, repo, me, groups)?),
         },
         None => None,
     };
@@ -341,20 +343,20 @@ pub fn resolve_open(
 /// (merged-/usr `/bin/env`). A missing interpreter refuses the script; the
 /// lookup does not move on.
 fn interpreter(
-    line: &[u8],
+    line: Shebang<'_>,
     repo: Option<rule::Id>,
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Interpreter, Miss> {
-    let (found, checked) = resolve_checked(Path::new(OsStr::from_bytes(line)), repo, me, groups)
-        .map_err(|_| Miss::Refused)?;
+    let word = Path::new(OsStr::from_bytes(line.interpreter));
+    let (found, checked) = resolve_checked(word, repo, me, groups).map_err(|_| Miss::Refused)?;
     let native = first_bytes(&checked)?.is_none_or(|first| rule::head(&first) == Head::Native);
     let path = found.executable.into_os_string().into_vec();
     if !native || path == b"/usr/bin/env" {
         return Err(Miss::Refused);
     }
     Ok(Interpreter {
-        line: line.to_vec(),
+        line: line.line.to_vec(),
         path,
         pin: found.pin,
     })
@@ -1358,8 +1360,10 @@ mod tests {
         symlink(&cat, t.join("link")).unwrap();
         let s = t.join("s");
         script(&s, &format!("#!{} -\n", t.join("link").display()));
+        let mut line = bytes(&t.join("link")).to_vec();
+        line.extend_from_slice(b" -");
         let want = Interpreter {
-            line: bytes(&t.join("link")).to_vec(),
+            line,
             path: bytes(&cat).to_vec(),
             pin: None,
         };

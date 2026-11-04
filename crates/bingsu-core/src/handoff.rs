@@ -223,7 +223,8 @@ pub struct ExecFrame {
 }
 /// A script's interpreter as the helper resolved it (spec section 4 script
 /// row). The relay reads the `#!` line itself and runs the script only when
-/// its interpreter is `line` byte for byte; it then opens `path`, which the
+/// the whole line after `#!` (interpreter and argument, untrimmed) is `line`
+/// byte for byte; it then opens `path`, which the
 /// helper reached by following root's and the user's symlinks (merged-/usr
 /// `/bin/sh`), refusing any symlink on the way, and accepts group write only
 /// for `pin`.
@@ -238,8 +239,8 @@ fn exec_crc(h: &[u8], body: [&[u8]; 3]) -> [u8; 4] {
     let [a, b, c] = body;
     crc32c(&[EXEC_DOMAIN, &h[..24], &h[28..EXEC_HEADER], a, b, c])
 }
-fn le16(b: &[u8], at: usize) -> usize {
-    usize::from(u16::from_le_bytes([b[at], b[at + 1]]))
+fn le16(b: &[u8], at: usize) -> u32 {
+    u32::from(u16::from_le_bytes([b[at], b[at + 1]]))
 }
 fn pin_at(b: &[u8], at: usize) -> Result<Option<ExecPin>, FrameError> {
     let mut pin = [0u8; EXEC_PIN_LEN];
@@ -286,10 +287,17 @@ impl ExecFrame {
         if b.len() < EXEC_HEADER {
             return Err(FrameError::Short);
         }
-        let len = u32::from_le_bytes([b[12], b[13], b[14], b[15]]) as usize;
+        let len = u32::from_le_bytes([b[12], b[13], b[14], b[15]]);
         let (line_len, path_len) = (le16(b, LENGTHS), le16(b, LENGTHS + 2));
         let body = &b[EXEC_HEADER..];
-        let want = len + line_len + path_len;
+        // In u32, so a declared environment near u32::MAX cannot wrap the
+        // sum on any target.
+        let want = len
+            .checked_add(line_len)
+            .and_then(|n| n.checked_add(path_len))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(FrameError::Length)?;
+        let (line_len, path_len) = (line_len as usize, path_len as usize);
         if body.len() < want {
             return Err(FrameError::Short);
         }
@@ -676,6 +684,19 @@ mod tests {
             );
         }
         let x = reshaped(b, 0, 0, Some(pin()));
+        assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Length));
+    }
+
+    // 이것을 실패시키는 것: decode의 길이 합을 checked_add 대신 그냥 더하는 것(디버그는 넘침 panic, 릴리스는
+    // 감싼 작은 합으로 짧은 본문을 받아들임).
+    #[test]
+    fn exec_frame_length_sum_never_wraps() {
+        let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
+        let mut x = reshaped(b, u16::MAX, u16::MAX, None);
+        let h = &mut x[96..];
+        h[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Length));
     }
 }
