@@ -44,7 +44,14 @@ pub(crate) fn spawn(
     args: &[Vec<u8>],
     input: &[u8],
     expires_ns: u64,
+    go: &dyn Fn() -> bool,
 ) -> io::Result<Spawned> {
+    #[cfg(test)]
+    PREPARE.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
     let (input_read, input_write) = pipe()?;
     super::collector_process::nonblocking(&input_write)?;
     // SAFETY: `input` is readable for its length; the pipe is empty.
@@ -67,6 +74,7 @@ pub(crate) fn spawn(
         c"/",
         false,
         expires_ns,
+        go,
     )?;
     Ok(Spawned {
         child,
@@ -99,8 +107,16 @@ pub(crate) fn spawn_supervisor(
         c"/",
         true,
         expires_ns,
+        &|| true,
     )
     .map(|(child, _)| child)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs at the start of a relay spawn's preparation (tests only).
+    pub(crate) static PREPARE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// One `posix_spawn` with an empty environment and default signals: `nulls`
@@ -108,6 +124,7 @@ pub(crate) fn spawn_supervisor(
 /// are first moved above every target), the child starts in `cwd`. With
 /// `close_rest` (Linux) every other open descriptor is closed in the child;
 /// macOS always spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`.
+#[allow(clippy::too_many_arguments, reason = "one spawn's fixed inputs")]
 fn spawn_with(
     exe: &CStr,
     args: &[Vec<u8>],
@@ -116,6 +133,7 @@ fn spawn_with(
     cwd: &CStr,
     close_rest: bool,
     expires_ns: u64,
+    go: &dyn Fn() -> bool,
 ) -> io::Result<(OwnedChild, Option<u64>)> {
     let words = args
         .iter()
@@ -205,6 +223,11 @@ fn spawn_with(
         let _ = close_rest;
         // SAFETY: NUL-terminated folder, applied in the child before exec.
         check(unsafe { libc::posix_spawn_file_actions_addchdir_np(&mut actions, cwd.as_ptr()) })?;
+        // The caller's last word, after every preparation step: false (the
+        // helper is gone) spawns nothing.
+        if !go() {
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
         let mut pid = 0;
         let spawn_enter = now_ns().ok();
         // SAFETY: initialized objects and live NUL-terminated arrays; empty environment.

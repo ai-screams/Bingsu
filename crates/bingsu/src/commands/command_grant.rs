@@ -317,34 +317,51 @@ fn units(
 /// `poll` when the pipe is full: the supervisor reads the grant while it
 /// arrives, and a pipe can be smaller than the frame (pipe-user-pages-soft
 /// leaves 4 KB pipes, m6-C1a).
-fn send(fd: i32, mut bytes: &[u8], until_ns: u64) -> bool {
+fn send(fd: i32, bytes: &[u8], until_ns: u64) -> bool {
+    send_with(
+        bytes,
+        until_ns,
+        &mut || now_ns().ok(),
+        &mut |b: &[u8]| {
+            // SAFETY: `b` is readable for its length.
+            let n = unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) };
+            usize::try_from(n)
+                .map_err(|_| std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+        },
+        &mut |wait_ms| {
+            let mut fds = [libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            }];
+            // SAFETY: one valid pollfd.
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, wait_ms) };
+        },
+    )
+}
+
+/// `send` with its clock, write and wait passed in (tests replace them).
+fn send_with(
+    mut bytes: &[u8],
+    until_ns: u64,
+    now: &mut dyn FnMut() -> Option<u64>,
+    write: &mut dyn FnMut(&[u8]) -> Result<usize, i32>,
+    wait: &mut dyn FnMut(i32),
+) -> bool {
     while !bytes.is_empty() {
         // Before the first write and every retry: a late grant is no grant.
-        if now_ns().map_or(true, |now| now >= until_ns) {
+        let Some(at) = now().filter(|&at| at < until_ns) else {
             return false;
+        };
+        match write(bytes) {
+            Ok(n) => {
+                bytes = &bytes[n..];
+                continue;
+            }
+            Err(libc::EAGAIN | libc::EINTR) => {}
+            Err(_) => return false,
         }
-        // SAFETY: `bytes` is readable for its length.
-        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-        if let Ok(n) = usize::try_from(n) {
-            bytes = &bytes[n..];
-            continue;
-        }
-        if !matches!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EAGAIN | libc::EINTR)
-        ) {
-            return false;
-        }
-        let Ok(now) = now_ns() else { return false };
-        let mut fds = [libc::pollfd {
-            fd,
-            events: libc::POLLOUT,
-            revents: 0,
-        }];
-        let wait =
-            i32::try_from(until_ns.saturating_sub(now).div_ceil(1_000_000)).unwrap_or(i32::MAX);
-        // SAFETY: one valid pollfd.
-        unsafe { libc::poll(fds.as_mut_ptr(), 1, wait) };
+        wait(i32::try_from((until_ns - at).div_ceil(1_000_000)).unwrap_or(i32::MAX));
     }
     true
 }
@@ -677,6 +694,31 @@ mod tests {
         unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
         let until = now_ns().unwrap() + 50_000_000;
         assert!(!send(write.as_raw_fd(), &frame, until));
+    }
+
+    // 첫 부분 쓰기 뒤에 마감이 지나면 다음 write를 하지 않는다(시계·write 주입). 이것을 실패시키는 것:
+    // send_with의 쓰기 전 마감 검사를 지우는 것(둘째 write가 일어남).
+    #[test]
+    fn grant_send_stops_writing_once_its_deadline_passes() {
+        let mut calls = 0;
+        let mut clock = [10, 200, 300].into_iter();
+        let mut writes = 0;
+        let sent = send_with(
+            b"0123456789",
+            100,
+            &mut || {
+                calls += 1;
+                clock.next()
+            },
+            &mut |b: &[u8]| {
+                writes += 1;
+                Ok(3.min(b.len()))
+            },
+            &mut |_| {},
+        );
+        assert!(!sent);
+        assert_eq!(writes, 1, "the partial write, then the deadline");
+        assert_eq!(calls, 2);
     }
 
     // 마감이 지난 뒤에는 빈 파이프라도 쓰지 않는다. 이것을 실패시키는 것: send의 쓰기 전 마감 검사를 지우는 것.

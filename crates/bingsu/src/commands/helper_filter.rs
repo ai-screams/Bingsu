@@ -72,6 +72,8 @@ fn supervisor_program(pid: u32, held: &[std::os::fd::RawFd]) -> Vec<libc::sock_f
         libc::SYS_exit,
         libc::SYS_exit_group,
         libc::SYS_rt_sigreturn,
+        // A poll stopped by SIGSTOP resumes through restart_syscall.
+        libc::SYS_restart_syscall,
         libc::SYS_rt_sigprocmask,
         libc::SYS_sigaltstack,
         libc::SYS_munmap,
@@ -372,6 +374,48 @@ mod tests {
         }
         assert_eq!(run(libc::SYS_tgkill, [1234, 6]), libc::SECCOMP_RET_ALLOW);
         assert_eq!(run(libc::SYS_tgkill, [1, 6]), denied);
+        assert_eq!(
+            run(libc::SYS_restart_syscall, [0, 0]),
+            libc::SECCOMP_RET_ALLOW
+        );
+    }
+
+    // 감독 필터의 첫 검사: 다른 AUDIT_ARCH, x32 비트, 음수 번호는 프로세스를 죽인다. 이것을 실패시키는 것:
+    // arch 비교를 지우거나 KILL 대신 다음 검사로 넘기는 것, x86_64의 0x40000000 하한 검사를 지우는 것.
+    #[test]
+    fn supervisor_filter_kills_foreign_arch_and_x32() {
+        let program = program_with(1234, Pidfds::Supervisor(vec![7]));
+        let input = |nr: u32, arch: u32| {
+            let mut b = [0u8; 64];
+            b[..4].copy_from_slice(&nr.to_ne_bytes());
+            b[4..8].copy_from_slice(&arch.to_ne_bytes());
+            b
+        };
+        #[cfg(target_arch = "x86_64")]
+        let (native, foreign) = (0xc000003eu32, 0xc00000b7u32);
+        #[cfg(target_arch = "aarch64")]
+        let (native, foreign) = (0xc00000b7u32, 0xc000003eu32);
+        let read = libc::SYS_read as u32;
+        assert_eq!(
+            evaluate_program(program.clone(), input(read, native)),
+            libc::SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            evaluate_program(program.clone(), input(read, foreign)),
+            libc::SECCOMP_RET_KILL_PROCESS
+        );
+        assert_eq!(
+            evaluate_program(program.clone(), input(read, 0x4000_0003)),
+            libc::SECCOMP_RET_KILL_PROCESS
+        );
+        #[cfg(target_arch = "x86_64")]
+        for nr in [read | 0x4000_0000, u32::MAX] {
+            assert_eq!(
+                evaluate_program(program.clone(), input(nr, native)),
+                libc::SECCOMP_RET_KILL_PROCESS,
+                "{nr:#x}"
+            );
+        }
     }
 
     // 이것을 실패시키는 것: 자기 pid/SIGKILL의 64비트 조건 또는 늦은 pidfd_open 거부 제거.

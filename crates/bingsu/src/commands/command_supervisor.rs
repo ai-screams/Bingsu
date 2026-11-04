@@ -302,21 +302,6 @@ impl Supervisor {
         }
     }
 
-    /// Whether the helper is gone or done: anything readable on the grant
-    /// pipe now (a done frame, end of file) or a stop already decided. Asked
-    /// right before every spawn, so a dead helper gets no new process.
-    fn helper_gone(&mut self) -> bool {
-        let Some(fd) = self.grant_fd.filter(|_| !self.stopped) else {
-            return true;
-        };
-        let mut fds = [pollfd(fd, libc::POLLIN)];
-        let ready = !poll(&mut fds, 0) || fds[0].revents != 0;
-        if ready {
-            self.stop();
-        }
-        ready
-    }
-
     fn spawn_unit(&mut self, index: usize) {
         let now = clock();
         let at = now.map_or(0, |c| c.now);
@@ -442,15 +427,23 @@ impl Supervisor {
             .chain(self.relay.prefix.iter().cloned())
             .chain(relay_args.into_iter().map(<[u8]>::to_vec))
             .collect();
-        // Last check before the spawn, after every preparation step. A poll
-        // and a spawn cannot be one step, so the guarantee is: once the
-        // helper's death is observed no new spawn follows, and a unit spawned
-        // before that is ended at the loop's next poll of the grant pipe.
-        if self.helper_gone() {
-            return;
+        // Checked right before posix_spawn, after every preparation step
+        // (pipes, input, descriptors, actions). A poll and a spawn cannot be
+        // one step, so the guarantee is: once the helper's death is observed
+        // no new spawn follows, and a unit spawned before that is ended at the
+        // loop's next poll of the grant pipe.
+        let (fd, stopped) = (self.grant_fd, self.stopped);
+        let go = move || !stopped && fd.is_some_and(|fd| !readable(fd));
+        let spawned = command_process::spawn(
+            &self.relay.exe,
+            &args,
+            &input,
+            self.grant.helper_deadline,
+            &go,
+        );
+        if matches!(&spawned, Err(e) if e.kind() == std::io::ErrorKind::Interrupted) {
+            return self.stop();
         }
-        let spawned =
-            command_process::spawn(&self.relay.exe, &args, &input, self.grant.helper_deadline);
         let Ok(s) = spawned else {
             return self.report(origin, index, Reason::SpawnFailed, approved_at);
         };
@@ -628,6 +621,13 @@ impl Supervisor {
             Err(_) => self.stop(),
         }
     }
+}
+
+/// Whether anything is readable on the grant pipe now: a done frame or end
+/// of file, either way the helper is gone or done.
+fn readable(fd: i32) -> bool {
+    let mut fds = [pollfd(fd, libc::POLLIN)];
+    !poll(&mut fds, 0) || fds[0].revents != 0
 }
 
 fn pollfd(fd: i32, events: i16) -> libc::pollfd {
@@ -936,7 +936,7 @@ pub(crate) mod tests {
     }
 
     // 도우미가 허가를 쓰고 곧 죽었으면(쓰기 쪽 닫힘) 감독은 하나도 생성하지 않는다. 이것을 실패시키는 것:
-    // start의 생성 직전 helper_gone 검사를 지우는 것.
+    // spawn_with의 posix_spawn 직전 `go()` 검사를 지우는 것.
     #[test]
     fn test_dead_helper_gets_no_spawn() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
@@ -951,6 +951,30 @@ pub(crate) mod tests {
             result_write.as_raw_fd(),
         )
         .run(false);
+        assert!(s.runs.is_empty(), "{} spawned", s.runs.len());
+    }
+
+    // 생성 준비(파이프·입력·descriptor·actions) 도중에 도우미가 죽어도 그 생성은 일어나지 않는다. 이것을
+    // 실패시키는 것: 도우미 확인을 posix_spawn 직전이 아니라 준비 앞(start의 command_process::spawn 호출 앞)에
+    // 두는 것.
+    #[test]
+    fn test_helper_death_during_preparation_spawns_nothing() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (grant_read, grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        let mut writer = Some(grant_write);
+        command_process::PREPARE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || drop(writer.take())));
+        });
+        let s = Supervisor::new(
+            grant(vec![unit("ok", 200 * MS)], 1_000 * MS),
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(false);
+        command_process::PREPARE.with(|hook| hook.borrow_mut().take());
         assert!(s.runs.is_empty(), "{} spawned", s.runs.len());
     }
 
@@ -1327,6 +1351,63 @@ pub(crate) mod tests {
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(42));
+    }
+
+    /// A confined round with one unit that runs past a SIGSTOP and SIGCONT
+    /// of this process: exit 42 when the round still ends with its result.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "child: a confined supervisor stopped and continued"]
+    fn stopcont_child() {
+        let (grant_read, _grant_write) = pipe();
+        let (result_read, result_write) = pipe();
+        let s = Supervisor::new(
+            grant(vec![unit("sleep", 500 * MS)], 1_000 * MS),
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(true);
+        drop(s);
+        let mut buf = vec![0u8; 65_536];
+        // SAFETY: writable buffer; non-blocking read end.
+        let n = unsafe { libc::read(result_read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        let ok = usize::try_from(n).ok().is_some_and(|n| {
+            matches!(wire::decode(&buf[..n]), Ok(Message::Result(o)) if o.reason == Reason::Timeout)
+        });
+        // SAFETY: plain exit of the child.
+        unsafe { libc::_exit(if ok { 42 } else { 1 }) }
+    }
+
+    // 필터 뒤 poll이 SIGSTOP·SIGCONT로 멈췄다 재개되어도 회차가 끝까지 간다. x86_64의 poll은 restart_syscall로
+    // 이어진다. 이것을 실패시키는 것(x86_64): 허용 목록에서 restart_syscall을 빼는 것(재개된 poll이 EPERM으로
+    // 회차를 끝내 결과가 없음). aarch64의 ppoll은 같은 호출로 다시 시작해 이 변이를 잡지 못하고, 그 칸은 BPF
+    // 시험(supervisor_filter_denies_by_default)이 잡는다.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_confined_supervisor_survives_stop_and_continue() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::command_supervisor::tests::stopcont_child",
+                "--ignored",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env_clear()
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        // SAFETY: signals to the test's own child.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // SAFETY: as above.
+        unsafe { libc::kill(pid, libc::SIGCONT) };
+        assert_eq!(child.wait().unwrap().code(), Some(42));
     }
 
     /// A confined round where the supervisor's own filter cannot be installed

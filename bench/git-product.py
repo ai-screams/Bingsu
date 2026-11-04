@@ -100,7 +100,7 @@ fn main() {
  let mut verification=commands::helper::Verification::start();
  let mut handle=None;let mut admission_ns=0;let mut product_mask=None;let mut deferred=None;
  let value=std::sync::Arc::new(std::sync::Mutex::new(None));let output=value.clone();
- let broker=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock,_marker| {
+ let broker=commands::refresh::refresh_broker(request,&mut Fixed(now),&mut |context,display,clock@MARKER@| {
  verification.verified();
  let mut selected=commands::helper::selected_request(&collection::selection::PRODUCT,&envelope,display,clock)?.unwrap();
  assert_eq!(selected.binding.mask,10);
@@ -185,8 +185,14 @@ def prepare(binary):
             text = M3B.replace_required(text, old, new)
     supervisor.write_text(text)
     process = copied / "collector_process.rs"
-    process.write_text(M3B.replace_required(process.read_text(), "    pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {",
-        '    pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {\n        println!("F3_PID {pid}");'))
+    # The gate prepares the base and the candidate with this one script, so the
+    # child attach is matched in either visibility (it became pub(crate) for
+    # the command supervisor); the printed pid is the same either way.
+    text = process.read_text()
+    attach = next(line for line in ("    pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {",
+                                    "    fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {")
+                  if line in text)
+    process.write_text(M3B.replace_required(text, attach, attach + '\n        println!("F3_PID {pid}");'))
     modules = [f'#[path={json.dumps(str(mod))}] mod commands;', RELAY_STUB]
     for name in ("prompt", "prompt_io", "prompt_read", "prompt_spawn"):
         path = source / "crates/bingsu/src" / (name + ".rs")
@@ -206,7 +212,8 @@ def prepare(binary):
     modules.append(f'#[path={json.dumps(str(source / "crates/bingsu/src/sandbox.rs"))}] mod sandbox;' if platform.system() == "Linux" else
                    'mod sandbox {pub fn enter()->bingsu_core::front::Sandbox{bingsu_core::front::Sandbox::Absent}}')
     rust = directory / "main.rs"
-    rust.write_text(HELPER.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect")))))
+    rust.write_text(HELPER.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect"))))
+                    .replace("@MARKER@", M3B.broker_marker(source)))
     fixture = directory / "git-product"
     command = ["rustc", "--edition=2024", "--cfg", "test", "-O", "-C", "lto=fat", "-C", "embed-bitcode=yes", str(rust), "-o", str(fixture), "-L", f"dependency={binary.parent / 'deps'}"]
     for name in ("bingsu_core", "bingsu_identity", "libc"):
