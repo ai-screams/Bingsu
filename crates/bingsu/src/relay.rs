@@ -1374,10 +1374,18 @@ mod tests {
         let writer = std::thread::spawn(move || {
             // SAFETY: gettid has no preconditions.
             tid_tx.send(unsafe { libc::gettid() }).unwrap();
-            // Blocks until a reader opens the FIFO.
-            let w = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            // Blocks in openat until a reader opens the FIFO. Called directly,
+            // so the waiting system call is openat on every architecture and
+            // C library (std's open may use SYS_open on x86_64 musl).
+            let c = CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: `c` is NUL-terminated; no O_CREAT.
+            let w = unsafe {
+                libc::openat(libc::AT_FDCWD, c.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC)
+            };
+            assert!(w >= 0);
             tx.send(()).unwrap();
-            drop(w);
+            // SAFETY: `w` was opened above and is closed once.
+            unsafe { libc::close(w) };
         });
         // The writer must be waiting inside openat before the relay runs, or a
         // late writer would hide a relay that opened the FIFO.

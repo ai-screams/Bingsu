@@ -213,11 +213,16 @@ fn open_target(dir: std::os::fd::BorrowedFd<'_>, name: &OsStr) -> std::io::Resul
 }
 
 /// The identity of the repository root the shell is in, for `sanitize`
-/// and `lookup`.
-pub fn repo_id(root: &Path) -> Option<rule::Id> {
+/// and `lookup`. `root` is `None` only when the shell is known to be in no
+/// repository; a root that cannot be read is `Refused`, never "no
+/// repository", which would switch the repository rule off.
+pub fn repo_id(root: Option<&Path>) -> Result<Option<rule::Id>, Miss> {
     use std::os::unix::fs::MetadataExt;
-    let m = std::fs::metadata(root).ok()?;
-    Some((m.dev(), m.ino()))
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let m = std::fs::metadata(root).map_err(|_| Miss::Refused)?;
+    Ok(Some((m.dev(), m.ino())))
 }
 
 /// The canonical folders of `path_env` that commands may search, in order,
@@ -379,11 +384,16 @@ mod tests {
         exe(&repo.join("bin/env"), 0o755);
         let mut path = bytes(&repo.join("bin")).to_vec();
         path.extend_from_slice(b":.::bin:/usr/bin");
-        let folders = sanitize(&path, repo_id(&repo), me(), &mut RefuseGroupWrite);
+        let folders = sanitize(
+            &path,
+            repo_id(Some(&repo)).unwrap(),
+            me(),
+            &mut RefuseGroupWrite,
+        );
         let found = lookup(
             b"env",
             &folders,
-            repo_id(&repo),
+            repo_id(Some(&repo)).unwrap(),
             me(),
             &mut RefuseGroupWrite,
         )
@@ -517,19 +527,25 @@ mod tests {
         symlink(repo.join("bin/tool"), t.join("bin/tool")).unwrap();
         let folders = sanitize(
             bytes(&t.join("bin")),
-            repo_id(&repo),
+            repo_id(Some(&repo)).unwrap(),
             me(),
             &mut RefuseGroupWrite,
         );
         assert_eq!(folders, [t.join("bin")]);
         let g = &mut RefuseGroupWrite;
         assert_eq!(
-            lookup(b"tool", &folders, repo_id(&repo), me(), g),
+            lookup(b"tool", &folders, repo_id(Some(&repo)).unwrap(), me(), g),
             Err(Miss::Refused)
         );
         let absolute = repo.join("bin/tool");
         assert_eq!(
-            lookup(bytes(&absolute), &[], repo_id(&repo), me(), g),
+            lookup(
+                bytes(&absolute),
+                &[],
+                repo_id(Some(&repo)).unwrap(),
+                me(),
+                g
+            ),
             Err(Miss::Refused)
         );
         // Positive control: outside any repository the link resolves.
@@ -549,12 +565,12 @@ mod tests {
         let repo = t.join("repo");
         exe(&repo.join("bin/tool"), 0o755);
         let alias = t.join("REPO");
-        if repo_id(&alias) != repo_id(&repo) {
+        if repo_id(Some(&alias)).unwrap() != repo_id(Some(&repo)).unwrap() {
             std::fs::remove_dir_all(&t).unwrap();
             return;
         }
         let g = &mut RefuseGroupWrite;
-        let id = repo_id(&repo);
+        let id = repo_id(Some(&repo)).unwrap();
         assert!(sanitize(bytes(&alias.join("bin")), id, me(), g).is_empty());
         let absolute = alias.join("bin/tool");
         assert_eq!(
@@ -593,7 +609,7 @@ mod tests {
         };
         mount(&[OsStr::new("--bind"), repo.as_os_str(), alias.as_os_str()]);
         let g = &mut RefuseGroupWrite;
-        let id = repo_id(&repo);
+        let id = repo_id(Some(&repo)).unwrap();
         let folders_got = sanitize(bytes(&alias.join("bin")), id, me(), g);
         let refused = lookup(bytes(&alias.join("bin/tool")), &[], id, me(), g);
         let outside = lookup(bytes(&alias.join("bin/tool")), &[], None, me(), g);
@@ -605,6 +621,17 @@ mod tests {
         assert!(folders_got.is_empty(), "{folders_got:?}");
         assert_eq!(refused, Err(Miss::Refused));
         assert_eq!(outside.unwrap().executable, alias.join("bin/tool"));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 이것을 실패시키는 것: repo_id가 읽지 못한 저장소 루트를 저장소 없음(Ok(None))으로 바꾸는 것(저장소
+    // 규칙이 꺼진 채 실행됨).
+    #[test]
+    fn unreadable_repo_root_refuses() {
+        let t = scratch("repo-gone");
+        assert_eq!(repo_id(Some(&t.join("gone"))), Err(Miss::Refused));
+        assert_eq!(repo_id(None), Ok(None));
+        assert!(repo_id(Some(&t)).unwrap().is_some());
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -644,10 +671,42 @@ mod tests {
                 "{p:?}"
             );
         }
-        let mut target = x.clone().into_os_string();
-        target.push("/");
-        symlink(&target, t.join("l")).unwrap();
-        assert_eq!(resolve(&t.join("l"), None, me(), g), Err(Miss::Refused));
+        for (name, tail) in [("l", "/"), ("ld", "/.")] {
+            let mut target = x.clone().into_os_string();
+            target.push(tail);
+            symlink(&target, t.join(name)).unwrap();
+            assert_eq!(
+                resolve(&t.join(name), None, me(), g),
+                Err(Miss::Refused),
+                "{tail}"
+            );
+        }
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 양성 대조: 폴더를 가리키는 끝 '/'는 폴더 자리에서는 정상이다. 이것을 실패시키는 것: walk의 명령
+    // 검사나 링크 검사에서 `!want_folder`를 지우는 것(PATH 항목 `…/safe/bin/`이나 `link -> …/safe/bin/`이
+    // 빠짐), 링크 검사에서 `todo.is_empty()`를 지우는 것(중간 링크 `link -> …/safe/bin/`을 지난
+    // `link/tool`이 거부됨).
+    #[test]
+    fn folder_slashes_pass_where_a_folder_is_meant() {
+        let t = scratch("folder-slash");
+        let bin = t.join("safe/bin");
+        exe(&bin.join("tool"), 0o755);
+        let mut with_slash = bin.clone().into_os_string();
+        with_slash.push("/");
+        symlink(&with_slash, t.join("link")).unwrap();
+        let g = &mut RefuseGroupWrite;
+        assert_eq!(
+            sanitize(with_slash.as_bytes(), None, me(), g),
+            [bin.clone()]
+        );
+        assert_eq!(
+            sanitize(bytes(&t.join("link")), None, me(), g),
+            [bin.clone()]
+        );
+        let found = resolve(&t.join("link/tool"), None, me(), g).unwrap();
+        assert_eq!(found.executable, bin.join("tool"));
         std::fs::remove_dir_all(&t).unwrap();
     }
 
