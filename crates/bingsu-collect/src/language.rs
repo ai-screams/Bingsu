@@ -23,7 +23,7 @@ const _: () = assert!(DETECT_LEVELS == safe_read::DISCOVERY_LEVELS);
 /// `root` itself, at most `DETECT_LEVELS` above the shell's.
 pub fn levels(parts: &[&[u8]]) -> impl Iterator<Item = (u8, Vec<u8>)> {
     let top = parts.len().min(DETECT_LEVELS);
-    // Fails without the inclusive bound: detect_reaches_a_root_32_levels_up.
+    // Fails without the inclusive bound: test_detect_depth_32 (a root 32 up).
     (0..=top).map(move |level| (level as u8, parts[..parts.len() - level].join(&b'/')))
 }
 
