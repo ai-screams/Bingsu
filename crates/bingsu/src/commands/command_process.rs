@@ -274,3 +274,152 @@ mod tests {
         assert!(environ.is_empty());
     }
 }
+
+/// C2 timings with the real binaries (Linux): `BINGSU_BIN` names a built
+/// `bingsu`. Run with `--ignored --nocapture`; it prints, never asserts.
+#[cfg(all(test, target_os = "linux"))]
+mod timing {
+    use super::*;
+    use bingsu_core::command::wire::{self, Grant, Message, Policy, Unit, policy_digest};
+    use bingsu_core::handoff::{Cwd, Permit};
+
+    fn now() -> u64 {
+        crate::prompt_io::observe_clock().unwrap().now
+    }
+
+    fn grant(units: usize) -> Grant {
+        let c = crate::prompt_io::observe_clock().unwrap();
+        let policy = Policy::Argv {
+            argv: vec![b"true".to_vec()],
+        };
+        let tmp = std::env::temp_dir().into_os_string().into_encoded_bytes();
+        Grant {
+            permit: Permit {
+                kind: c.kind,
+                deadline: c.now + 10_000_000_000,
+                boot: c.boot,
+                resume: c.resume,
+                domain: c.domain,
+            },
+            helper_deadline: c.now + 2_000_000_000,
+            cwd: tmp.clone(),
+            neutral: tmp,
+            units: (0..units)
+                .map(|i| Unit {
+                    id: format!("custom/t{i}"),
+                    digest: policy_digest(&policy, Cwd::Neutral, 200_000_000, &[]),
+                    policy: policy.clone(),
+                    cwd: Cwd::Neutral,
+                    environment: b"PATH=/usr/bin\0".to_vec(),
+                    timeout: 200_000_000,
+                    env_allow: Vec::new(),
+                    executable: std::fs::canonicalize("/bin/true")
+                        .unwrap()
+                        .into_os_string()
+                        .into_encoded_bytes(),
+                    pin: None,
+                    interpreter: None,
+                })
+                .collect(),
+            probes: Vec::new(),
+        }
+    }
+
+    /// Spawns the real supervisor; with `early` the grant is in the pipe
+    /// before the spawn. Returns (spawned at, grant written at, results).
+    fn round(exe: &CStr, units: usize, early: bool) -> (u64, u64, Vec<wire::Outcome>) {
+        let (grant_read, grant_write) = pipe().unwrap();
+        let (results_read, results_write) = pipe().unwrap();
+        let (lock, _keep) = pipe().unwrap();
+        let frame = wire::encode(&Message::Grant(grant(units))).unwrap();
+        let write = |at: &mut u64| {
+            *at = now();
+            assert!(matches!(
+                crate::commands::sys::write_fd(grant_write.as_raw_fd(), &frame),
+                crate::commands::sys::WriteOutcome::Done
+            ));
+        };
+        let mut granted = 0;
+        if early {
+            write(&mut granted);
+        }
+        let args = [exe.to_bytes().to_vec(), b"__command-v1".to_vec()];
+        let spawned = now();
+        let mut child =
+            spawn_supervisor(exe, &args, &grant_read, &results_write, &lock, u64::MAX).unwrap();
+        drop((grant_read, results_write));
+        if !early {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            write(&mut granted);
+        }
+        let mut bytes = Vec::new();
+        let mut buf = vec![0u8; 65_536];
+        let mut out = Vec::new();
+        while out.len() < units {
+            // SAFETY: writable buffer; blocking read end.
+            let n =
+                unsafe { libc::read(results_read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            let n = usize::try_from(n).unwrap();
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            while bytes.len() >= wire::HEADER {
+                let total = wire::frame_len(&bytes).unwrap();
+                if bytes.len() < total {
+                    break;
+                }
+                if let Message::Result(o) = wire::decode(&bytes[..total]).unwrap() {
+                    out.push(o);
+                }
+                bytes.drain(..total);
+            }
+        }
+        drop(grant_write);
+        while !child.reap().unwrap() {}
+        (spawned, granted, out)
+    }
+
+    fn show(name: &str, mut v: Vec<u64>) {
+        v.sort_unstable();
+        let p = |q: f64| v[((v.len() as f64 * q) as usize).min(v.len() - 1)] as f64 / 1e6;
+        println!(
+            "{name}: n={} p50={:.3} ms p95={:.3} ms max={:.3} ms",
+            v.len(),
+            p(0.5),
+            p(0.95),
+            p(1.0)
+        );
+    }
+
+    #[test]
+    #[ignore = "timing: needs BINGSU_BIN"]
+    fn c2_timings() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        #[expect(clippy::disallowed_methods, reason = "test-only timing input")]
+        let exe = CString::new(std::env::var("BINGSU_BIN").unwrap()).unwrap();
+        let rounds: usize = 30;
+        let (mut ready, mut first, mut approve) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..rounds {
+            // Grant already waiting: spawn -> first approval is start-up and grant read.
+            let (spawned, _, out) = round(&exe, 1, true);
+            ready.push(out[0].approved_at - spawned);
+            // Supervisor idle on its pipe: grant -> first approval, and approval -> end.
+            let (_, granted, out) = round(&exe, 8, false);
+            first.push(out.iter().map(|o| o.approved_at).min().unwrap() - granted);
+            for o in &out {
+                assert!(matches!(o.reason, wire::Reason::Exited(0)), "{o:?}");
+                approve.push(o.ended_at - o.approved_at);
+            }
+        }
+        show(
+            "supervisor_ready_ns (spawn -> first approval, grant waiting)",
+            ready,
+        );
+        show("go_to_first_approval_ns (grant -> first approval)", first);
+        show(
+            "approve_to_end_ns (approval -> /bin/true reaped, 8 units)",
+            approve,
+        );
+    }
+}
