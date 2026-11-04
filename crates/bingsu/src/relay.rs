@@ -447,6 +447,19 @@ fn may_execute(fd: &OwnedFd) -> bool {
     let Ok(name) = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
         return false;
     };
+    execute_verdict(|| faccessat2(&name), || may_execute_old(&name))
+}
+
+/// `new` answers; only its ENOSYS asks `old`, once. Any other error refuses.
+fn execute_verdict(new: impl FnOnce() -> Result<(), i32>, old: impl FnOnce() -> bool) -> bool {
+    match new() {
+        Ok(()) => true,
+        Err(libc::ENOSYS) => old(),
+        Err(_) => false,
+    }
+}
+
+fn faccessat2(name: &CString) -> Result<(), i32> {
     // SAFETY: `name` is NUL-terminated; no pointer is written.
     let r = unsafe {
         libc::syscall(
@@ -457,11 +470,7 @@ fn may_execute(fd: &OwnedFd) -> bool {
             libc::AT_EACCESS,
         )
     };
-    match r {
-        0 => true,
-        _ if errno() == libc::ENOSYS => may_execute_old(&name),
-        _ => false,
-    }
+    if r == 0 { Ok(()) } else { Err(errno()) }
 }
 
 /// Without faccessat2 (before Linux 5.8): the three-argument faccessat
@@ -2287,5 +2296,28 @@ mod tests {
         let got = script_outcome(&exe, &script_input(&cat_line(), &cat(), None), &[b"cat"]);
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 이것을 실패시키는 것: execute_verdict의 ENOSYS 조건을 지우는 것(모든 오류에서 대체 호출), ENOSYS에서
+    // 대체 호출을 하지 않거나 그 답을 버리는 것, 성공을 거부하는 것.
+    #[test]
+    fn execute_check_falls_back_only_on_enosys() {
+        let run = |new: Result<(), i32>, old: bool| {
+            let mut calls = 0;
+            let verdict = execute_verdict(
+                || new,
+                || {
+                    calls += 1;
+                    old
+                },
+            );
+            (verdict, calls)
+        };
+        assert_eq!(run(Ok(()), false), (true, 0));
+        assert_eq!(run(Err(libc::ENOSYS), true), (true, 1));
+        assert_eq!(run(Err(libc::ENOSYS), false), (false, 1));
+        for e in [libc::EPERM, libc::EACCES, libc::EINVAL, libc::EIO] {
+            assert_eq!(run(Err(e), true), (false, 0), "{e}");
+        }
     }
 }
