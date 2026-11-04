@@ -688,13 +688,21 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: decode의 길이 합을 checked_add 대신 그냥 더하는 것(디버그는 넘침 panic, 릴리스는
-    // 감싼 작은 합으로 짧은 본문을 받아들임).
+    // 감싼 작은 합으로 짧은 본문을 받아들임), 두 번째(경로 길이) checked_add만 감싸 더하는 것.
     #[test]
     fn exec_frame_length_sum_never_wraps() {
         let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
         let mut x = reshaped(b, u16::MAX, u16::MAX, None);
         let h = &mut x[96..];
         h[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
+        h[24..28].copy_from_slice(&crc);
+        assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Length));
+        // The first sum fits exactly; only adding the path length overflows.
+        let b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
+        let mut x = reshaped(b, u16::MAX, 1, None);
+        let h = &mut x[96..];
+        h[12..16].copy_from_slice(&(u32::MAX - u32::from(u16::MAX)).to_le_bytes());
         let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Length));

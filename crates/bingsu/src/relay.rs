@@ -354,8 +354,23 @@ enum Opened {
 /// reads the file again: the line compared with the frame, the argv and the
 /// memfd copy all come from this buffer.
 fn read_script(fd: &OwnedFd) -> Result<Option<Vec<u8>>, u8> {
+    read_script_with(|buf, at| read_at(fd, buf, at))
+}
+
+/// `read_script` over `read(buf, offset)`. Only a read of 0 bytes is the
+/// end: a short read of the first bytes is followed by more reads.
+fn read_script_with(
+    mut read: impl FnMut(&mut [u8], usize) -> Result<usize, i32>,
+) -> Result<Option<Vec<u8>>, u8> {
     let mut first = [0u8; SHEBANG_MAX];
-    let n = read_at(fd, &mut first, 0).map_err(|_| RELAY_TARGET)?;
+    let mut n = 0;
+    while n < SHEBANG_MAX {
+        let got = read(&mut first[n..], n).map_err(|_| RELAY_TARGET)?;
+        if got == 0 {
+            break;
+        }
+        n += got;
+    }
     if !first[..n].starts_with(b"#!") {
         return Ok(None);
     }
@@ -363,7 +378,7 @@ fn read_script(fd: &OwnedFd) -> Result<Option<Vec<u8>>, u8> {
     body[..n].copy_from_slice(&first[..n]);
     let mut len = n;
     while len < body.len() {
-        let n = read_at(fd, &mut body[len..], len).map_err(|_| RELAY_TARGET)?;
+        let n = read(&mut body[len..], len).map_err(|_| RELAY_TARGET)?;
         if n == 0 {
             break;
         }
@@ -425,17 +440,50 @@ fn script(
 /// The kernel's own answer whether this user may execute the script's
 /// file: permission bits, ACL and a `noexec` mount, as `execve` would judge
 /// a native file. Asked through `/proc/self/fd/N`, so it is the checked
-/// inode on its own mount.
+/// inode on its own mount, with the faccessat2 system call itself (a C
+/// library may answer AT_EACCESS from the mode bits). Before Linux 5.8
+/// (ENOSYS) the answer is `may_execute_old`; any other error refuses.
 fn may_execute(fd: &OwnedFd) -> bool {
     let Ok(name) = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
         return false;
     };
-    // SAFETY: `name` is NUL-terminated.
-    unsafe { libc::faccessat(libc::AT_FDCWD, name.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+    // SAFETY: `name` is NUL-terminated; no pointer is written.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_faccessat2,
+            libc::AT_FDCWD,
+            name.as_ptr(),
+            libc::X_OK,
+            libc::AT_EACCESS,
+        )
+    };
+    match r {
+        0 => true,
+        _ if errno() == libc::ENOSYS => may_execute_old(&name),
+        _ => false,
+    }
+}
+
+/// Without faccessat2 (before Linux 5.8): the three-argument faccessat
+/// system call, which the kernel judges (bits, ACL, `noexec` mount) for the
+/// real ids. The relay is never set-uid, so they are its effective ids; were
+/// it set-uid, the real ids would be the stricter answer.
+fn may_execute_old(name: &CString) -> bool {
+    // SAFETY: `name` is NUL-terminated; no pointer is written.
+    unsafe {
+        libc::syscall(
+            libc::SYS_faccessat,
+            libc::AT_FDCWD,
+            name.as_ptr(),
+            libc::X_OK,
+        ) == 0
+    }
 }
 
 /// Whether `now` is still the file `before` describes: a write, chmod,
-/// chown or ACL change moves the status change time.
+/// chown or ACL change moves the status change time. A rewrite within one
+/// timestamp tick keeps the ctime and is not caught; only trusted parties
+/// (the owner, root, a pinned group) can write the file (m6-B2a).
 fn unchanged(before: &libc::stat, now: &libc::stat) -> bool {
     let key = |s: &libc::stat| {
         (
@@ -1922,26 +1970,32 @@ mod tests {
     #[test]
     fn memfd_retries_once_without_noexec_on_einval() {
         let base = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
-        let calls = |first: Result<(), i32>| {
+        // Each call answers from `answers` in turn; a call past them fails the test.
+        let calls = |answers: &[Result<(), i32>]| {
             let mut seen = Vec::new();
             let got = memfd(|flags| {
                 seen.push(flags);
-                match (seen.len(), first) {
-                    (1, Ok(())) => Ok(std::fs::File::open("/dev/null").unwrap().into()),
-                    (1, Err(e)) => Err(e),
-                    _ => Err(libc::EMFILE),
+                match answers[seen.len() - 1] {
+                    Ok(()) => Ok(std::fs::File::open("/dev/null").unwrap().into()),
+                    Err(e) => Err(e),
                 }
             });
             (got.is_ok(), seen)
         };
+        let both = vec![base | libc::MFD_NOEXEC_SEAL, base];
         assert_eq!(
-            calls(Err(libc::EINVAL)),
-            (false, vec![base | libc::MFD_NOEXEC_SEAL, base])
+            calls(&[Err(libc::EINVAL), Err(libc::EMFILE)]),
+            (false, both.clone())
         );
-        assert_eq!(calls(Ok(())), (true, vec![base | libc::MFD_NOEXEC_SEAL]));
+        assert_eq!(
+            calls(&[Err(libc::EINVAL), Err(libc::EINVAL)]),
+            (false, both.clone())
+        );
+        assert_eq!(calls(&[Err(libc::EINVAL), Ok(())]), (true, both));
+        assert_eq!(calls(&[Ok(())]), (true, vec![base | libc::MFD_NOEXEC_SEAL]));
         for e in [libc::EMFILE, libc::ENOMEM, libc::EACCES, libc::EPERM] {
             assert_eq!(
-                calls(Err(e)),
+                calls(&[Err(e)]),
                 (false, vec![base | libc::MFD_NOEXEC_SEAL]),
                 "{e}"
             );
@@ -2187,6 +2241,51 @@ mod tests {
             "{cmdline:?}"
         );
         finish(child);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 처음 256바이트는 0바이트 읽기만 끝으로 본다. 이것을 실패시키는 것: read_script_with가 첫 읽기 한 번의
+    // 결과로 판정하는 것(1바이트 "#"만 보고 네이티브로 봄), 본문 읽기에서 짧은 읽기 뒤 멈추는 것.
+    #[test]
+    fn read_script_keeps_reading_short_reads() {
+        let one_at_a_time = |source: &[u8]| {
+            let source = source.to_vec();
+            read_script_with(move |buf, at| {
+                let n = source.len().saturating_sub(at).min(1).min(buf.len());
+                buf[..n].copy_from_slice(&source[at..at + n]);
+                Ok(n)
+            })
+        };
+        let script = cat_script(300);
+        assert_eq!(one_at_a_time(&script), Ok(Some(script)));
+        assert_eq!(one_at_a_time(b"\x7fELF\x02\x01\x01"), Ok(None));
+        assert_eq!(one_at_a_time(b""), Ok(None));
+    }
+
+    // 실행 권한만 있는 대상은 O_PATH fd로 열리고, 그 갈래에서도 인터프리터를 실은 프레임은 거부된다. root가 아닌
+    // 사용자로 Linux 컨테이너에서 --ignored로 돌린다(root는 읽기 권한을 무시해 O_PATH 갈래를 지나지 않는다).
+    // 이것을 실패시키는 것: prepare의 "Native인데 인터프리터가 있으면 거부" 분기를 지우는 것, open_target의
+    // O_PATH 재시도를 지우는 것(열기 자체가 실패).
+    #[test]
+    #[ignore = "non-root user in the Linux container"]
+    fn test_execute_only_target_runs_path_only() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        // SAFETY: getuid cannot fail.
+        let me = unsafe { libc::getuid() };
+        assert_ne!(me, 0, "run as a user other than root");
+        let dir = fresh_dir("xonly-path");
+        let exe = dir.join("cat");
+        std::fs::copy(cat(), &exe).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let Opened::Native(fd) = open_target(exe.as_os_str().as_bytes(), None).unwrap() else {
+            panic!("an execute-only file is not a script here");
+        };
+        // SAFETY: F_GETFL only reads the descriptor's status flags.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags & libc::O_PATH, 0, "{flags:#x}");
+        drop(fd);
+        let got = script_outcome(&exe, &script_input(&cat_line(), &cat(), None), &[b"cat"]);
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
