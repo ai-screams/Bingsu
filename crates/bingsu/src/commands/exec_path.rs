@@ -1396,6 +1396,8 @@ mod tests {
             format!("#!{}\n", t.join("missing").display()),
             format!("#!{}\n", t.join("open").display()),
             "#!/usr/bin/env sh\n".to_owned(),
+            // merged-/usr: `/bin/env` is `/usr/bin/env` (elsewhere it is missing).
+            "#!/bin/env sh\n".to_owned(),
         ] {
             script(&s, &line);
             assert_eq!(interpreter_of(&s), Err(Miss::Refused), "{line}");
