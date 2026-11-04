@@ -2,9 +2,10 @@
 //! spec section 4 "the place of the pre-exec check", rows native executable
 //! and script). The command supervisor spawns it with an empty environment
 //! and the permit and exec frame on fd 3 (fd 2 is its status pipe); the relay checks the target through
-//! one open descriptor, takes a fresh clock as its last step and runs the
-//! target with `execveat` on that descriptor. A script runs as its checked
-//! interpreter's descriptor with a sealed memfd copy of the script. Every decision
+//! one open descriptor, takes a fresh clock, checks that the name in the
+//! folder it walked is still that file and runs it by that name with
+//! `execveat(folder, name, AT_SYMLINK_NOFOLLOW)` (U-18). A script runs as its checked
+//! interpreter, the same way, with a sealed memfd copy of the script. Every decision
 //! is `bingsu_core::handoff` or `bingsu_core::fs_trust`; this file reads fd 3,
 //! makes the system calls and refuses with a fixed exit code. It is pinned in
 //! scripts/check_cli_prompt_forbid.py (TCB_SHA256).
@@ -103,7 +104,7 @@ fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
 pub(crate) struct Target {
     permit: Permit,
     frame: ExecFrame,
-    fd: OwnedFd,
+    exe: Exe,
     /// A script's sealed copy: the one descriptor past 2 the target keeps.
     _script: Option<OwnedFd>,
     _argv: Vec<CString>,
@@ -129,12 +130,12 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
-    let (fd, script, argv) = match open_target(parsed.executable, frame.pin)? {
+    let (exe, script, argv) = match open_target(parsed.executable, frame.pin)? {
         // A frame that names an interpreter was made for a script.
         Opened::Native(_) if frame.interpreter.is_some() => return Err(RELAY_TARGET),
-        Opened::Native(fd) => (fd, None, c_strings(parsed.argv)?),
-        Opened::Script(fd, checked, body) => {
-            let (interpreter, copy, argv) = script(&fd, &checked, &body, &frame, parsed.argv)?;
+        Opened::Native(exe) => (exe, None, c_strings(parsed.argv)?),
+        Opened::Script(exe, body) => {
+            let (interpreter, copy, argv) = script(&exe, &body, &frame, parsed.argv)?;
             (interpreter, Some(copy), argv)
         }
     };
@@ -168,7 +169,7 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     Ok(Target {
         permit,
         frame,
-        fd,
+        exe,
         _script: script,
         _argv: argv,
         _envp: envp,
@@ -184,22 +185,31 @@ impl Target {
         crate::prompt_io::observe_clock().is_ok_and(|now| self.frame.allows(self.permit, now))
     }
 
-    /// The clock check and `execveat` back to back: nothing is built or
-    /// freed between them (`self` drops only after a failed exec).
+    /// The clock check, the name check and `execveat` back to back: nothing
+    /// is built or freed between them (`self` drops only after a failed
+    /// exec). The target runs by its name in the folder the walk held
+    /// (U-18): a program that tells its role from the executed name
+    /// (uutils' multicall coreutils reads AT_EXECFN) refuses a `/dev/fd/N`.
+    /// Right before, the name must still be the checked file: same device,
+    /// inode and ctime, and not a symlink (AT_SYMLINK_NOFOLLOW on both).
     fn exec(self) -> u8 {
         if !self.clock_allows() {
             return RELAY_EXPIRED;
         }
-        // SAFETY: the fd is open; both arrays are NULL-terminated and point
-        // at NUL-terminated strings owned by `self`, alive for the call.
+        if !self.exe.still_named() {
+            return RELAY_TARGET;
+        }
+        // SAFETY: the folder fd is open, the name is NUL-terminated; both
+        // arrays are NULL-terminated and point at NUL-terminated strings
+        // owned by `self`, alive for the call.
         unsafe {
             libc::syscall(
                 libc::SYS_execveat,
-                self.fd.as_raw_fd(),
-                c"".as_ptr(),
+                self.exe.dir.as_raw_fd(),
+                self.exe.name.as_ptr(),
                 self.argv_ptrs.as_ptr(),
                 self.envp_ptrs.as_ptr(),
-                libc::AT_EMPTY_PATH,
+                libc::AT_SYMLINK_NOFOLLOW,
             )
         };
         RELAY_EXEC
@@ -383,26 +393,61 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     if st.st_mode & libc::S_IFMT != libc::S_IFREG || !allowed(&st, pin)? {
         return Err(RELAY_TARGET);
     }
-    drop(dir);
+    let name = CString::new(*last).map_err(|_| RELAY_TARGET)?;
     let (fd, readable) = match reopen(&path_fd).map_err(native_only) {
         Ok(fd) => (fd, true),
         Err(Some(())) => (path_fd, false),
         Err(None) => return Err(RELAY_TARGET),
     };
+    let exe = Exe { fd, dir, name, st };
     if !readable {
-        return Ok(Opened::Native(fd));
+        return Ok(Opened::Native(exe));
     }
-    Ok(match read_script(&fd)? {
-        Some(body) => Opened::Script(fd, st, body),
-        None => Opened::Native(fd),
+    Ok(match read_script(&exe.fd)? {
+        Some(body) => Opened::Script(exe, body),
+        None => Opened::Native(exe),
     })
 }
 
-/// A checked executable: a native one, or a script with the stat its checks
-/// ran on and its body, read once.
+/// A checked executable: its descriptor, the folder it was found in, its
+/// last name there and the stat the checks ran on.
+pub(crate) struct Exe {
+    fd: OwnedFd,
+    dir: OwnedFd,
+    name: CString,
+    st: libc::stat,
+}
+
+impl Exe {
+    /// Whether the name in the held folder is still the checked file (not
+    /// a symlink, same device, inode and ctime).
+    fn still_named(&self) -> bool {
+        // SAFETY: an all-zero stat is a valid out-parameter value.
+        let mut now: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: open folder fd, NUL-terminated name, writable `now`.
+        let rc = unsafe {
+            libc::fstatat(
+                self.dir.as_raw_fd(),
+                self.name.as_ptr(),
+                &mut now,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        rc == 0
+            && (now.st_dev, now.st_ino, now.st_ctime, now.st_ctime_nsec)
+                == (
+                    self.st.st_dev,
+                    self.st.st_ino,
+                    self.st.st_ctime,
+                    self.st.st_ctime_nsec,
+                )
+    }
+}
+
+/// A checked executable: a native one, or a script with its body, read once.
 enum Opened {
-    Native(OwnedFd),
-    Script(OwnedFd, libc::stat, Vec<u8>),
+    Native(Exe),
+    Script(Exe, Vec<u8>),
 }
 
 /// The bytes every script decision uses, read in one pass from offset 0:
@@ -466,12 +511,12 @@ fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
 /// with argv `[line interpreter, line argument, /proc/self/fd/N, argv[1..]]`,
 /// the order the kernel's script loader uses.
 fn script(
-    fd: &OwnedFd,
-    checked: &libc::stat,
+    script: &Exe,
     body: &[u8],
     frame: &ExecFrame,
     argv: &[&[u8]],
-) -> Result<(OwnedFd, OwnedFd, Vec<CString>), u8> {
+) -> Result<(Exe, OwnedFd, Vec<CString>), u8> {
+    let (fd, checked) = (&script.fd, &script.st);
     let Head::Script(line) = head(&body[..body.len().min(SHEBANG_MAX)]) else {
         return Err(RELAY_TARGET);
     };
@@ -483,7 +528,7 @@ fn script(
     if !may_execute(fd) {
         return Err(RELAY_TARGET);
     }
-    let Opened::Native(interpreter_fd) = open_target(&interpreter.path, interpreter.pin)? else {
+    let Opened::Native(interpreter_exe) = open_target(&interpreter.path, interpreter.pin)? else {
         return Err(RELAY_TARGET);
     };
     let copy = sealed_copy(body, memfd_create, write_fd)?;
@@ -491,7 +536,7 @@ fn script(
         return Err(RELAY_TARGET);
     }
     let argv = c_strings(&script_argv(line, copy.as_raw_fd(), argv))?;
-    Ok((interpreter_fd, copy, argv))
+    Ok((interpreter_exe, copy, argv))
 }
 
 /// The kernel's own answer whether this user may execute the script's
@@ -1860,15 +1905,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Prepares a relay run of `exe` (a copy of `true`), then renames a copy
-    /// of `false` over that name, then executes: the exit code says which
-    /// file ran.
+    /// Prepares a relay run of `exe` (a copy of `true`), then puts something
+    /// else at that name (fd 4: the folder, NUL, `rename` for a copy of
+    /// `false` renamed over it or `symlink` for a symlink to it), then
+    /// executes: the exit code says what happened.
     #[test]
     #[ignore = "child: replaces itself with the target"]
     fn swap_child() {
-        let dir = PathBuf::from(OsString::from_vec(read_all(4)));
+        let words = read_all(4);
         // SAFETY: fd 4 is this child's argument pipe, read to the end above.
         unsafe { libc::close(4) };
+        let mut parts = words.split(|&b| b == 0);
+        let dir = PathBuf::from(OsString::from_vec(parts.next().unwrap().to_vec()));
+        let mode = parts.next().unwrap().to_vec();
         let exe = dir.join("x");
         let words: Vec<OsString> = args(&exe, &[b"x"])
             .into_iter()
@@ -1881,25 +1930,29 @@ mod tests {
         assert_eq!(unsafe { libc::dup2(r.as_raw_fd(), 3) }, 3);
         drop(r);
         let target = prepare(&words).unwrap();
-        std::fs::rename(dir.join("false"), &exe).unwrap();
+        if mode == b"rename" {
+            std::fs::rename(dir.join("false"), &exe).unwrap();
+        } else {
+            std::fs::remove_file(&exe).unwrap();
+            std::os::unix::fs::symlink(dir.join("false"), &exe).unwrap();
+        }
         let code = target.exec();
         // SAFETY: child exit without the harness's atexit work.
         unsafe { libc::_exit(100 + i32::from(code)) }
     }
 
-    // 이것을 실패시키는 것: 중계가 검사한 fd 대신 경로로 실행하는 것(execveat(fd) 대신 execve(path)):
-    // 검사 뒤 바꿔치기한 false가 실행되어 종료 코드 1이 된다.
-    #[test]
-    fn test_swap_after_check_runs_checked_file() {
-        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        let dir = std::fs::canonicalize(fresh_dir("swap")).unwrap();
+    fn swapped(mode: &str) -> Option<i32> {
+        let dir = std::fs::canonicalize(fresh_dir(&format!("swap-{mode}"))).unwrap();
         let copy = |from: &str, to: &str| {
             std::fs::copy(std::fs::canonicalize(from).unwrap(), dir.join(to)).unwrap();
         };
         copy("/bin/true", "x");
         copy("/bin/false", "false");
         let (r4, w4) = pipe();
-        put(&w4, dir.as_os_str().as_bytes());
+        put(
+            &w4,
+            &[dir.as_os_str().as_bytes(), b"\0", mode.as_bytes()].concat(),
+        );
         drop(w4);
         let r4 = r4.as_raw_fd();
         let mut cmd = Command::new(std::env::current_exe().unwrap());
@@ -1924,13 +1977,36 @@ mod tests {
         // SAFETY: dup2 is async-signal-safe.
         unsafe { cmd.pre_exec(setup) };
         let status = cmd.status().unwrap();
-        assert_eq!(status.code(), Some(0), "{status:?}");
         // Positive control: what now sits at the name is `false`.
         assert_eq!(
             Command::new(dir.join("x")).status().unwrap().code(),
             Some(1)
         );
         std::fs::remove_dir_all(&dir).unwrap();
+        status.code()
+    }
+
+    // U-18: 중계는 이름으로 실행하되, 바로 앞에서 그 이름이 검사한 파일(장치·inode·ctime)인지 다시 본다.
+    // 검사 뒤 같은 이름에 다른 파일을 넣으면 실행하지 않는다(RELAY_TARGET). 이것을 실패시키는 것: exec의
+    // still_named 재확인을 지우는 것(바꿔치기한 false가 실행되어 종료 코드 1).
+    #[test]
+    fn test_swap_after_check_is_refused() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(swapped("rename"), Some(100 + i32::from(RELAY_TARGET)));
+    }
+
+    // U-18: 검사 뒤 이름을 symlink로 바꾸면 따라가지 않는다. 재확인은 링크 자체를 보아 거부하고(RELAY_TARGET),
+    // 재확인이 없어도 execveat의 AT_SYMLINK_NOFOLLOW가 ELOOP로 막는다(RELAY_EXEC). 이것을 실패시키는 것:
+    // 재확인과 NOFOLLOW를 함께 지우는 것(링크를 따라 false가 실행됨). 둘 중 하나만 지우면 다른 하나가 막는다.
+    #[test]
+    fn test_symlink_after_check_is_not_followed() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let code = swapped("symlink");
+        assert!(
+            code == Some(100 + i32::from(RELAY_TARGET))
+                || code == Some(100 + i32::from(RELAY_EXEC)),
+            "{code:?}"
+        );
     }
 
     // Ubuntu 사용자 전용 그룹(umask 0002) 실행 파일: 도우미 쪽 해석(SystemGroups)이 pin을 만들고 중계가
@@ -2324,10 +2400,12 @@ mod tests {
         assert_eq!(&back[..n], body);
     }
 
-    fn open_read(path: &Path) -> (OwnedFd, libc::stat) {
+    fn open_read(path: &Path) -> Exe {
         let fd: OwnedFd = std::fs::File::open(path).unwrap().into();
         let st = stat(&fd).unwrap();
-        (fd, st)
+        let dir: OwnedFd = std::fs::File::open(path.parent().unwrap()).unwrap().into();
+        let name = CString::new(path.file_name().unwrap().as_bytes()).unwrap();
+        Exe { fd, dir, name, st }
     }
 
     fn script_frame(line: &[u8], path: &Path) -> ExecFrame {
@@ -2355,8 +2433,8 @@ mod tests {
         );
         let body = format!("#!{} -\n# checked\n", cat().display()).into_bytes();
         let frame = script_frame(&cat_line(), &cat());
-        let (fd, st) = open_read(&file);
-        let (_, copy, argv) = script(&fd, &st, &body, &frame, &[b"s"]).unwrap();
+        let exe = open_read(&file);
+        let (_, copy, argv) = script(&exe, &body, &frame, &[b"s"]).unwrap();
         let mut back = vec![0u8; SCRIPT_MAX];
         let n = read_at(&copy, &mut back, 0).unwrap();
         assert_eq!(&back[..n], body.as_slice());
@@ -2364,15 +2442,15 @@ mod tests {
         // The file's own line would match another frame; the buffer's decides.
         let other = format!("#!{}\n", cat().display()).into_bytes();
         assert_eq!(
-            script(&fd, &st, &other, &frame, &[b"s"]).err(),
+            script(&exe, &other, &frame, &[b"s"]).err(),
             Some(RELAY_TARGET)
         );
         // Rewritten after the checks (same bytes, new ctime): refused.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&file, std::fs::read(&file).unwrap()).unwrap();
-        assert_ne!(stat(&fd).unwrap().st_ctime_nsec, st.st_ctime_nsec);
+        assert_ne!(stat(&exe.fd).unwrap().st_ctime_nsec, exe.st.st_ctime_nsec);
         assert_eq!(
-            script(&fd, &st, &body, &frame, &[b"s"]).err(),
+            script(&exe, &body, &frame, &[b"s"]).err(),
             Some(RELAY_TARGET)
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -2590,13 +2668,13 @@ mod tests {
         let exe = dir.join("cat");
         std::fs::copy(cat(), &exe).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o111)).unwrap();
-        let Opened::Native(fd) = open_target(exe.as_os_str().as_bytes(), None).unwrap() else {
+        let Opened::Native(opened) = open_target(exe.as_os_str().as_bytes(), None).unwrap() else {
             panic!("an execute-only file is not a script here");
         };
         // SAFETY: F_GETFL only reads the descriptor's status flags.
-        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        let flags = unsafe { libc::fcntl(opened.fd.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(flags & libc::O_PATH, 0, "{flags:#x}");
-        drop(fd);
+        drop(opened);
         let got = script_outcome(&exe, &script_input(&cat_line(), &cat(), None), &[b"cat"]);
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         std::fs::remove_dir_all(&dir).unwrap();
