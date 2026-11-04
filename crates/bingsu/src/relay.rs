@@ -404,7 +404,7 @@ mod tests {
     use bingsu_core::snapshot::Clock;
     use std::io::{Read, Write};
     use std::os::unix::ffi::OsStringExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -1366,8 +1366,14 @@ mod tests {
         let opened = rx
             .recv_timeout(std::time::Duration::from_millis(300))
             .is_ok();
-        // Release the writer either way.
-        let reader = std::fs::File::open(&fifo).unwrap();
+        // Release a writer still waiting; non-blocking, because a writer the
+        // relay already released is gone and a blocking open would wait for
+        // another one.
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
         writer.join().unwrap();
         drop(reader);
         assert!(!opened, "the relay opened the FIFO for reading");
