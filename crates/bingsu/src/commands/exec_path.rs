@@ -699,11 +699,11 @@ mod tests {
         let g = &mut RefuseGroupWrite;
         assert_eq!(
             sanitize(with_slash.as_bytes(), None, me(), g),
-            [bin.clone()]
+            std::slice::from_ref(&bin)
         );
         assert_eq!(
             sanitize(bytes(&t.join("link")), None, me(), g),
-            [bin.clone()]
+            std::slice::from_ref(&bin)
         );
         let found = resolve(&t.join("link/tool"), None, me(), g).unwrap();
         assert_eq!(found.executable, bin.join("tool"));
