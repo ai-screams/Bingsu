@@ -189,8 +189,10 @@ fn env_pipe_ends() -> Option<[i32; 2]> {
     #[cfg(target_os = "macos")]
     {
         // A blocking write could wait on the helper: without the flag, no pipe.
+        // No test: F_SETFL fails only on an invalid fd, which a test cannot
+        // produce here. Kept by user decision (2026-11-04).
         // SAFETY: the write end made above; changes only its status flags.
-        if unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
+        if unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
             // SAFETY: both ends made above, closed exactly once.
             unsafe { libc::close(fds[0]) };
             // SAFETY: as above.

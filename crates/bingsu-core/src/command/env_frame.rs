@@ -76,6 +76,20 @@ mod tests {
         e
     }
 
+    // Fixed wire bytes, so a change to magic, length, domain or CRC input shows here.
+    // 이것을 실패시키는 것: DOMAIN을 빈 값으로 바꾸는 것(CRC가 달라지고, 도메인 없는 CRC를 받아들인다).
+    #[test]
+    fn wire_vector_and_domain() {
+        let frame = encode([b"A=1\0".as_slice()]).unwrap();
+        let hex: alloc::string::String = frame.iter().map(|b| alloc::format!("{b:02x}")).collect();
+        assert_eq!(hex, "424e47454e56303104000000054f00ab413d3100");
+        let mut plain = frame.clone();
+        let crc = crate::snapshot::crc32c(&[&plain[..12], &plain[HEADER..]]);
+        plain[12..16].copy_from_slice(&crc);
+        assert_ne!(plain, frame);
+        assert_eq!(body(&plain), None, "a CRC without the domain is refused");
+    }
+
     // 이것을 실패시키는 것: 상한을 본문 기준 65,536으로 두는 것(HEADER를 빼지 않음). 본문이
     // 65,536 − 16 + 1바이트인 환경이 프레임 65,537바이트가 되어 한 번의 쓰기에 들어가지 않는다.
     #[test]

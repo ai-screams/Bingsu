@@ -220,9 +220,11 @@ POSIX_SPAWN_PRIMITIVES: dict[str, dict[str, int]] = {
 
 # The front's command environment frame before its helper spawn, every libc:
 # pipe2(O_CLOEXEC|O_NONBLOCK), one write of the whole frame, close of the
-# write end after it and of the read end after the spawn (U-9h). An oversize
-# environment has no write. The helper's fd 4 read and close are pipe calls,
-# outside the helper stage kinds; GATE-FDS.1 pins them.
+# write end after it and of the read end after the spawn (U-9h). These are the
+# counts of a normal prompt, which every gate fixture is; an oversize
+# environment skips the write (test_oversize_env_block_means_no_env checks that
+# path on its own). The helper's fd 4 read and close are pipe calls, outside
+# the helper stage kinds; GATE-FDS.1 pins them.
 ENV_PIPE_PRIMITIVES: dict[str, int] = {"pipe2": 1, "write": 1, "close": 2}
 
 # Rust std main-thread stack guard via glibc pthread_getattr_np. In the

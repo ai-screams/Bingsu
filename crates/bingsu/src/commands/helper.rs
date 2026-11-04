@@ -26,16 +26,19 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if detach().is_err() {
         return ExitCode::from(1);
     }
-    // Before anything here opens a descriptor: on the cold init path there is
-    // no fd 4, and a later read could take one of the helper's own. The
-    // command supervisor (C2) is the consumer; locations never come from it.
+    let Ok(_watchdog) = helper_limits::start(started) else {
+        return ExitCode::from(1);
+    };
+    // After the watchdog, so a read that blocks (fd 4 handed over by
+    // something other than the prompt) ends with the helper's lifetime;
+    // starting it opens no file and uses no NSS. Before anything here opens
+    // a descriptor: on the cold init path there is no fd 4, and a later read
+    // could take one of the helper's own. The command supervisor (C2) is the
+    // consumer; locations never come from it.
     #[cfg(test)]
     let _command_env = fixture.is_none().then(|| read_env(ENV_FD)).flatten();
     #[cfg(not(test))]
     let _command_env = read_env(ENV_FD);
-    let Ok(_watchdog) = helper_limits::start(started) else {
-        return ExitCode::from(1);
-    };
     let raw: Vec<_> = args.iter().map(|a| a.as_bytes()).collect();
     let Ok(e) = bingsu_core::helper::validate(&raw) else {
         return ExitCode::from(1);
