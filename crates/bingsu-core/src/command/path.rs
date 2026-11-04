@@ -15,27 +15,31 @@ pub fn entries(path: &[u8]) -> impl Iterator<Item = &[u8]> {
         .filter(|e| e.first() == Some(&b'/'))
 }
 
-/// Whether canonical `p` is `root` or a path below it, on a component
-/// boundary (`/repo2` is not below `/repo`).
-pub fn within(p: &[u8], root: &[u8]) -> bool {
-    let root = match root {
-        [rest @ .., b'/'] if !rest.is_empty() => rest,
-        r => r,
-    };
-    if root == b"/" {
-        return p.first() == Some(&b'/');
-    }
-    match p.strip_prefix(root) {
-        Some(rest) => rest.is_empty() || rest.first() == Some(&b'/'),
-        None => false,
-    }
+/// A folder or file, as `(st_dev, st_ino)`.
+pub type Id = (u64, u64);
+
+/// Whether the walk's folder chain (from "/" to the folder holding the last
+/// entry, or to the folder itself) avoids the repository root. Identity,
+/// not spelling: a case-only alias on a case-insensitive volume, a firmlink
+/// such as `/System/Volumes/Data` or a bind mount of the root reach the
+/// same `(dev, ino)`. A bind mount of a folder below the root is not seen;
+/// only root can make one (known-issues m6-B2a).
+pub fn outside_repo(chain: &[Id], repo: Option<Id>) -> bool {
+    !repo.is_some_and(|r| chain.contains(&r))
 }
 
-/// A resolved `PATH` folder stays when nobody else can change the way to it
-/// (the walk's verdict) and it is not inside the current repository, whose
-/// files whoever controls the repository chose.
-pub fn keep_folder(canonical: &[u8], repo: Option<&[u8]>, walk_ok: bool) -> bool {
-    walk_ok && !repo.is_some_and(|r| within(canonical, r))
+/// A canonical `PATH` folder whose name has ':' cannot be written into the
+/// `PATH` value: it would split into two entries, one of them possibly empty
+/// (the current folder).
+pub fn path_safe(canonical: &[u8]) -> bool {
+    !canonical.contains(&b':')
+}
+
+/// Whether a command or a final symlink target names a folder: it ends in
+/// '/' or "/." (`/usr/bin/true/`), which the walk's name splitting would
+/// otherwise drop.
+pub fn names_folder(p: &[u8]) -> bool {
+    p.ends_with(b"/") || p.ends_with(b"/.")
 }
 
 /// The sanitized `PATH` value: kept canonical folders, first occurrence
@@ -202,15 +206,6 @@ pub fn target_pin(f: &Facts, cleared: &[GroupPin], ctime: (i64, u32)) -> Option<
     })
 }
 
-/// A resolved executable inside the current repository is refused even when
-/// the `PATH` folder it was found through is outside (a symlink
-/// `~/bin/tool -> <repo>/bin/tool`), and so is an absolute command path
-/// there (spec section 7 user commands row: executables inside the
-/// repository).
-pub fn outside_repo(canonical: &[u8], repo: Option<&[u8]>) -> bool {
-    !repo.is_some_and(|r| within(canonical, r))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,19 +239,20 @@ mod tests {
         assert_eq!(got, [&b"/usr/bin"[..], b"/opt/x/bin"]);
     }
 
-    // 이것을 실패시키는 것: within의 구성 요소 경계 검사를 지우는 것(`/repo2`가 `/repo` 안으로
-    // 보임), 또는 keep_folder의 저장소 검사를 지우는 것.
+    // 이것을 실패시키는 것: outside_repo의 저장소 비교를 지우거나 반전하는 것, path_safe의 ':' 검사를
+    // 지우는 것, names_folder의 '/'·"/." 검사 하나를 지우는 것.
     #[test]
-    fn repo_folders_are_dropped_on_component_boundaries() {
-        assert!(within(b"/w/repo", b"/w/repo"));
-        assert!(within(b"/w/repo/bin", b"/w/repo"));
-        assert!(within(b"/w/repo/bin", b"/w/repo/"));
-        assert!(!within(b"/w/repo2/bin", b"/w/repo"));
-        assert!(within(b"/usr/bin", b"/"));
-        assert!(!keep_folder(b"/w/repo/bin", Some(b"/w/repo"), true));
-        assert!(keep_folder(b"/w/repo2/bin", Some(b"/w/repo"), true));
-        assert!(keep_folder(b"/usr/bin", None, true));
-        assert!(!keep_folder(b"/usr/bin", None, false));
+    fn repo_identity_colons_and_folder_names() {
+        let chain = [(1, 2), (1, 3), (4, 5)];
+        assert!(!outside_repo(&chain, Some((1, 3))));
+        assert!(outside_repo(&chain, Some((1, 6))));
+        assert!(outside_repo(&chain, None));
+        assert!(path_safe(b"/usr/bin"));
+        assert!(!path_safe(b"/opt/a:b/bin"));
+        assert!(names_folder(b"/usr/bin/true/"));
+        assert!(names_folder(b"/usr/bin/true/."));
+        assert!(!names_folder(b"/usr/bin/true"));
+        assert!(!names_folder(b"/usr/bin/x."));
     }
 
     // 이것을 실패시키는 것: sanitized의 중복 검사를 지우는 것, 또는 구분자를 앞에 붙이는 것.
@@ -379,13 +375,5 @@ mod tests {
         let mut bad = b;
         bad[32..36].copy_from_slice(&1_000_000_000u32.to_le_bytes());
         assert_eq!(ExecPin::from_bytes(&bad), Err(Error::Flags));
-    }
-
-    // 이것을 실패시키는 것: outside_repo의 저장소 비교를 지우거나 반전하는 것.
-    #[test]
-    fn executables_inside_the_repo_are_refused() {
-        assert!(!outside_repo(b"/w/repo/bin/tool", Some(b"/w/repo")));
-        assert!(outside_repo(b"/w/repo2/bin/tool", Some(b"/w/repo")));
-        assert!(outside_repo(b"/usr/bin/tool", None));
     }
 }

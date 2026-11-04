@@ -266,10 +266,10 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 ///
 /// The file must be regular, pass `allowed` and not be a script (the sealed
 /// memfd path comes later). It is opened `O_PATH` first and checked; then
-/// the same name in the same folder is opened for reading and must be the
-/// same unchanged file. An execute-only file cannot be opened for reading
-/// (EACCES), so its `O_PATH` descriptor runs, as a native executable only
-/// (spec section 4 "native executable").
+/// that descriptor is opened for reading through `/proc/self/fd`, the same
+/// inode. An execute-only file cannot be opened for reading (EACCES), and
+/// without `/proc` there is no such path; then the `O_PATH` descriptor runs,
+/// as a native executable only (spec section 4 "native executable").
 fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<OwnedFd, u8> {
     // A relative path would name a file in the inherited working folder.
     let Some(rest) = path.strip_prefix(b"/") else {
@@ -295,19 +295,12 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<OwnedFd, u8> {
     if st.st_mode & libc::S_IFMT != libc::S_IFREG || !allowed(&st, pin)? {
         return Err(RELAY_TARGET);
     }
-    let read = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY;
-    let (fd, readable) = match open_at(dir.as_raw_fd(), last, read) {
-        Ok(fd) => {
-            // The same file, unchanged since the check above.
-            if identity(&stat(&fd)?) != identity(&st) {
-                return Err(RELAY_TARGET);
-            }
-            (fd, true)
-        }
-        Err(libc::EACCES) => (path_fd, false),
-        Err(_) => return Err(RELAY_TARGET),
-    };
     drop(dir);
+    let (fd, readable) = match reopen(&path_fd).map_err(native_only) {
+        Ok(fd) => (fd, true),
+        Err(Some(())) => (path_fd, false),
+        Err(None) => return Err(RELAY_TARGET),
+    };
     if readable {
         let mut head = [0u8; 2];
         // SAFETY: `head` is writable for 2 bytes; `fd` is open for reading.
@@ -329,18 +322,28 @@ fn stat(fd: &OwnedFd) -> Result<libc::stat, u8> {
     Ok(st)
 }
 
-/// What the check rests on: file, owner, group, mode, status change time.
-fn identity(st: &libc::stat) -> (u64, u64, u32, u32, u32, i64, i64) {
-    let s = st;
-    (
-        s.st_dev,
-        s.st_ino,
-        s.st_uid,
-        s.st_gid,
-        s.st_mode,
-        s.st_ctime,
-        s.st_ctime_nsec,
-    )
+/// The checked file for reading, through its own descriptor: opening
+/// `/proc/self/fd/N` reaches the inode `N` holds, never a name someone may
+/// have swapped since.
+fn reopen(path_fd: &OwnedFd) -> Result<OwnedFd, i32> {
+    let name = format!("/proc/self/fd/{}", path_fd.as_raw_fd());
+    let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // SAFETY: `name` is NUL-terminated; no O_CREAT.
+    let raw = unsafe { libc::open(name.as_ptr(), flags) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    // SAFETY: a successful open returns a descriptor nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// A failed reopen that still lets the `O_PATH` descriptor run as a native
+/// executable (`Some`): EACCES (execute-only file) and no `/proc` (ENOENT),
+/// as the close-on-exec fallback treats a missing listing. Anything else
+/// refuses (`None`).
+fn native_only(errno: i32) -> Option<()> {
+    matches!(errno, libc::EACCES | libc::ENOENT).then_some(())
 }
 
 /// Only root or the user may change the file. Group write passes only with
@@ -1345,6 +1348,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // 이것을 실패시키는 것: native_only에서 EACCES나 ENOENT를 지우는 것(실행 전용 파일, /proc 없는 환경이
+    // 거부됨), 또는 그 밖의 오류도 O_PATH 실행으로 넘기는 것.
+    #[test]
+    fn reopen_failures_that_still_run_native() {
+        assert_eq!(native_only(libc::EACCES), Some(()));
+        assert_eq!(native_only(libc::ENOENT), Some(()));
+        for e in [libc::EPERM, libc::EMFILE, libc::ELOOP, libc::ENXIO] {
+            assert_eq!(native_only(e), None, "{e}");
+        }
+    }
+
     // 종류를 확인하기 전에는 읽기로 열지 않는다. 막혀 있는 FIFO 쓰기 쪽은 누군가 읽기로 열면 풀린다.
     // 이것을 실패시키는 것: open_target이 마지막 이름을 O_PATH가 아니라 O_RDONLY로 먼저 여는 것.
     #[test]
@@ -1355,13 +1369,30 @@ mod tests {
         // SAFETY: `c` is NUL-terminated.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o755) }, 0);
         let (tx, rx) = std::sync::mpsc::channel();
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
         let path = fifo.clone();
         let writer = std::thread::spawn(move || {
+            // SAFETY: gettid has no preconditions.
+            tid_tx.send(unsafe { libc::gettid() }).unwrap();
             // Blocks until a reader opens the FIFO.
             let w = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             tx.send(()).unwrap();
             drop(w);
         });
+        // The writer must be waiting inside openat before the relay runs, or a
+        // late writer would hide a relay that opened the FIFO.
+        let syscall = format!("/proc/self/task/{}/syscall", tid_rx.recv().unwrap());
+        let blocked = (0..400).any(|_| {
+            let now = std::fs::read_to_string(&syscall).unwrap_or_default();
+            let first = now.split_whitespace().next().unwrap_or("");
+            if first == libc::SYS_openat.to_string() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            false
+        });
+        assert!(blocked, "the writer never blocked in openat");
+        std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(refused(&fifo, None));
         let opened = rx
             .recv_timeout(std::time::Duration::from_millis(300))
