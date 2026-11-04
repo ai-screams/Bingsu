@@ -2524,6 +2524,9 @@ fn release_git_lifecycle_observations() {
 // 이것을 실패시키는 것: 마감 종료를 Protocol로 합치거나 마감 코드로 잘린/잘못된 프레임을 통과시키는 것.
 #[test]
 fn stage_deadline_exit_preserves_protocol_validation() {
+    // run_peer spawns the peer, like the other callers that run in the
+    // shared test process (see sys::test_inherited_fd_lock).
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
     for (mode, expected, count) in [
         ("stage-deadline", EndReason::Deadline, 1),
         ("stage-failure", EndReason::Protocol, 1),
