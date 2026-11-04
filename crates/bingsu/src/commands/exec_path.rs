@@ -12,13 +12,14 @@
 //! relay's exec nobody else can swap a name on the way.
 use crate::commands::group_policy::Recording;
 use crate::commands::sys;
-use bingsu_core::command::path::{self as rule, Candidate, ExecPin, Name};
+use bingsu_core::command::path::{self as rule, Candidate, ExecPin, Head, Name, SHEBANG_MAX};
 use bingsu_core::fs_trust::{GroupOracle, NextOwner, ancestor_verdict};
+use bingsu_core::handoff::Interpreter;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::fd::AsFd;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 
 /// The same bound Linux uses for one path lookup (MAXSYMLINKS).
@@ -27,11 +28,12 @@ const LINKS_MAX: usize = 40;
 const DEPTH_MAX: usize = 256;
 
 /// The executable to run: its canonical path and, when it is group-writable,
-/// the pin the relay compares against.
+/// the pin the relay compares against; for a `#!` script, its interpreter.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Found {
     pub executable: PathBuf,
     pub pin: Option<ExecPin>,
+    pub interpreter: Option<Interpreter>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -307,7 +309,75 @@ impl Checked {
 
 /// `resolve`, also handing back the descriptor the checks ran on, so the
 /// bytes read next (a script's shebang and body) are the checked file's.
+/// A `#!` script's interpreter is read from that descriptor and resolved by
+/// the same rules.
 pub fn resolve_open(
+    path: &Path,
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<(Found, Checked), Miss> {
+    let (found, checked) = resolve_checked(path, repo, me, groups)?;
+    let interpreter = match first_bytes(&checked)? {
+        Some(first) => match rule::head(&first) {
+            Head::Native => None,
+            Head::Refused => return Err(Miss::Refused),
+            Head::Script(line) => Some(interpreter(line.interpreter, repo, me, groups)?),
+        },
+        None => None,
+    };
+    Ok((
+        Found {
+            interpreter,
+            ..found
+        },
+        checked,
+    ))
+}
+
+/// A script's interpreter (spec section 4 script row): an absolute path
+/// resolved by the same rules, a native executable (no nested `#!`, read
+/// from its checked descriptor), and not `/usr/bin/env` under another name
+/// (merged-/usr `/bin/env`). A missing interpreter refuses the script; the
+/// lookup does not move on.
+fn interpreter(
+    line: &[u8],
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<Interpreter, Miss> {
+    let (found, checked) = resolve_checked(Path::new(OsStr::from_bytes(line)), repo, me, groups)
+        .map_err(|_| Miss::Refused)?;
+    let native = first_bytes(&checked)?.is_none_or(|first| rule::head(&first) == Head::Native);
+    let path = found.executable.into_os_string().into_vec();
+    if !native || path == b"/usr/bin/env" {
+        return Err(Miss::Refused);
+    }
+    Ok(Interpreter {
+        line: line.to_vec(),
+        path,
+        pin: found.pin,
+    })
+}
+
+/// The checked file's first `SHEBANG_MAX` bytes, read at offset 0 without
+/// moving its offset; `None` for a Linux path-only descriptor (an
+/// execute-only file), which the relay runs as native only.
+fn first_bytes(checked: &Checked) -> Result<Option<Vec<u8>>, Miss> {
+    use std::os::unix::fs::FileExt;
+    let mut first = vec![0u8; SHEBANG_MAX];
+    match checked.file().read_at(&mut first, 0) {
+        Ok(n) => {
+            first.truncate(n);
+            Ok(Some(first))
+        }
+        Err(e) if cfg!(target_os = "linux") && e.raw_os_error() == Some(libc::EBADF) => Ok(None),
+        Err(_) => Err(Miss::Refused),
+    }
+}
+
+/// `resolve_open` without the script step.
+fn resolve_checked(
     path: &Path,
     repo: Option<rule::Id>,
     me: u32,
@@ -345,6 +415,7 @@ pub fn resolve_open(
                 Found {
                     executable,
                     pin: rule::target_pin(&facts, &recording.cleared, ctime),
+                    interpreter: None,
                 },
                 Checked(file),
             ))
@@ -563,7 +634,8 @@ mod tests {
             found,
             Found {
                 executable: real,
-                pin: None
+                pin: None,
+                interpreter: None,
             }
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1248,7 +1320,8 @@ mod tests {
         sys::exit_now(0);
     }
 
-    // 이것을 실패시키는 것: open_target의 O_PATH 재시도를 지우는 것. root는 읽기 권한을 무시하므로
+    // 이것을 실패시키는 것: open_target의 O_PATH 재시도를 지우는 것, first_bytes가 O_PATH fd의 EBADF를
+    // 거부로 보는 것(실행 전용 파일은 #! 줄을 읽지 않고 네이티브로만). root는 읽기 권한을 무시하므로
     // root가 아닌 사용자로 돌려야 뜻이 있다.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1262,6 +1335,71 @@ mod tests {
                 .executable,
             x
         );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    fn script(path: &Path, body: &str) {
+        folders(path.parent().unwrap());
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn interpreter_of(path: &Path) -> Result<Option<Interpreter>, Miss> {
+        resolve(path, None, me(), &mut RefuseGroupWrite).map(|f| f.interpreter)
+    }
+
+    // 도우미가 #! 줄의 인터프리터를 같은 규칙으로 해석해 줄 원문과 정규 경로를 함께 싣는다. 이것을 실패시키는
+    // 것: resolve가 interpreter를 비우는 것, line에 정규 경로를 넣는 것(본인 소유 링크의 이름이 사라짐),
+    // path에 원문을 넣는 것(중계가 링크를 거부).
+    #[test]
+    fn test_script_interpreter_resolved() {
+        let t = scratch("script");
+        let cat = std::fs::canonicalize("/bin/cat").unwrap();
+        symlink(&cat, t.join("link")).unwrap();
+        let s = t.join("s");
+        script(&s, &format!("#!{} -\n", t.join("link").display()));
+        let want = Interpreter {
+            line: bytes(&t.join("link")).to_vec(),
+            path: bytes(&cat).to_vec(),
+            pin: None,
+        };
+        assert_eq!(interpreter_of(&s), Ok(Some(want)));
+        script(&s, "#!/bin/sh\necho 1\n");
+        let sh = std::fs::canonicalize("/bin/sh").unwrap();
+        let got = interpreter_of(&s).unwrap().unwrap();
+        assert_eq!(
+            (got.line.as_slice(), got.path.as_slice()),
+            (&b"/bin/sh"[..], bytes(&sh))
+        );
+        assert_eq!(interpreter_of(&cat), Ok(None));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 이것을 실패시키는 것: interpreter의 네이티브 검사(중첩 #!)를 지우는 것, 정규 경로 `/usr/bin/env` 거부를
+    // 지우는 것(본인 소유 링크 이름의 env가 통과), 해석 실패를 Refused 대신 그대로 넘기는 것(없는 인터프리터가
+    // Absent가 되어 다음 PATH 폴더로 넘어감), head의 Refused를 네이티브로 보는 것. 남이 쓸 수 있는
+    // 인터프리터(`open`)는 resolve_file의 같은 규칙이 거부한다.
+    #[test]
+    fn test_script_interpreter_refused() {
+        let t = scratch("script-refused");
+        let s = t.join("s");
+        script(&t.join("nested"), "#!/bin/sh\n");
+        symlink(
+            std::fs::canonicalize("/usr/bin/env").unwrap(),
+            t.join("env"),
+        )
+        .unwrap();
+        exe(&t.join("open"), 0o777);
+        for line in [
+            format!("#!{}\n", t.join("nested").display()),
+            format!("#!{} sh\n", t.join("env").display()),
+            format!("#!{}\n", t.join("missing").display()),
+            format!("#!{}\n", t.join("open").display()),
+            "#!/usr/bin/env sh\n".to_owned(),
+        ] {
+            script(&s, &line);
+            assert_eq!(interpreter_of(&s), Err(Miss::Refused), "{line}");
+        }
         std::fs::remove_dir_all(&t).unwrap();
     }
 }

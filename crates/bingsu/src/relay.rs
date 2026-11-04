@@ -1,8 +1,10 @@
-//! Trusted relay, Linux native executables (`bingsu __exec-v2`, spec section 4
-//! "the place of the pre-exec check"). The command supervisor spawns it with
-//! an empty environment and the permit and exec frame on fd 3; the relay checks
-//! the target through one open descriptor, takes a fresh clock as its last
-//! step and runs the target with `execveat` on that descriptor. Every decision
+//! Trusted relay, Linux native executables and scripts (`bingsu __exec-v2`,
+//! spec section 4 "the place of the pre-exec check", rows native executable
+//! and script). The command supervisor spawns it with an empty environment
+//! and the permit and exec frame on fd 3; the relay checks the target through
+//! one open descriptor, takes a fresh clock as its last step and runs the
+//! target with `execveat` on that descriptor. A script runs as its checked
+//! interpreter's descriptor with a sealed memfd copy of the script. Every decision
 //! is `bingsu_core::handoff` or `bingsu_core::fs_trust`; this file reads fd 3,
 //! makes the system calls and refuses with a fixed exit code. It is pinned in
 //! scripts/check_cli_prompt_forbid.py (TCB_SHA256).
@@ -14,7 +16,7 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
-use bingsu_core::command::path::ExecPin;
+use bingsu_core::command::path::{ExecPin, Head, SHEBANG_MAX, Shebang, head};
 use bingsu_core::fs_trust::{AclFacts, Facts, PinnedGroupWrite, Verdict, entry_verdict};
 use bingsu_core::handoff::{ExecFrame, PERMIT_FD, Permit, parse_relay_args, read_relay_input};
 use std::ffi::{CString, OsString};
@@ -33,6 +35,11 @@ pub(crate) const RELAY_EXPIRED: u8 = 121;
 pub(crate) const RELAY_TARGET: u8 = 122;
 /// Descriptor setup or `execveat` failed.
 pub(crate) const RELAY_EXEC: u8 = 123;
+/// Largest script the relay copies into its memfd (spec: 64 KB).
+pub(crate) const SCRIPT_MAX: usize = 64 * 1024;
+/// The seals of the script copy: its bytes and size are fixed, and nobody
+/// can lift a seal.
+const SEALS: i32 = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
 
 pub(crate) fn run(args: &[OsString]) -> ExitCode {
     ExitCode::from(relay(args))
@@ -54,6 +61,8 @@ pub(crate) struct Target {
     permit: Permit,
     frame: ExecFrame,
     fd: OwnedFd,
+    /// A script's sealed copy: the one descriptor past 2 the target keeps.
+    _script: Option<OwnedFd>,
     _argv: Vec<CString>,
     _envp: Vec<CString>,
     argv_ptrs: Vec<*const libc::c_char>,
@@ -75,12 +84,13 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
-    let fd = open_target(parsed.executable, frame.pin)?;
-    let argv = parsed
-        .argv
-        .iter()
-        .map(|w| CString::new(*w).map_err(|_| RELAY_INPUT))
-        .collect::<Result<Vec<_>, _>>()?;
+    let (fd, script, argv) = match open_target(parsed.executable, frame.pin)? {
+        Opened::Native(fd) => (fd, None, c_strings(parsed.argv)?),
+        Opened::Script(fd, first) => {
+            let (interpreter, copy, argv) = script(&fd, &first, &frame, parsed.argv)?;
+            (interpreter, Some(copy), argv)
+        }
+    };
     let envp = environment(&std::mem::take(&mut frame.environment))?;
     let argv_ptrs = pointers(&argv);
     let envp_ptrs = pointers(&envp);
@@ -88,10 +98,19 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     if !cloexec_from_3(close_range_cloexec()) {
         return Err(RELAY_EXEC);
     }
+    // A script's copy alone stays open across exec, so the interpreter can
+    // open `/proc/self/fd/N`; this comes after the close-on-exec pass, which
+    // would mark it again.
+    if let Some(copy) = &script
+        && set_fd_flags(copy.as_raw_fd(), 0).is_err()
+    {
+        return Err(RELAY_EXEC);
+    }
     Ok(Target {
         permit,
         frame,
         fd,
+        _script: script,
         _argv: argv,
         _envp: envp,
         argv_ptrs,
@@ -201,12 +220,20 @@ fn open_fds() -> Option<Vec<i32>> {
 }
 
 fn set_cloexec(fd: i32) -> Result<(), i32> {
+    set_fd_flags(fd, libc::FD_CLOEXEC)
+}
+
+fn set_fd_flags(fd: i32, flags: i32) -> Result<(), i32> {
     // SAFETY: F_SETFD only changes this number's descriptor flags.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0 {
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } == 0 {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+        Err(errno())
     }
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 /// `set` on every listed number above 2. EBADF is the listing's own
@@ -264,13 +291,15 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// `O_PATH | O_DIRECTORY | O_NOFOLLOW`, so a symlink in a folder's place
 /// fails with ENOTDIR or ELOOP; ".", ".." and empty names are refused.
 ///
-/// The file must be regular, pass `allowed` and not be a script (the sealed
-/// memfd path comes later). It is opened `O_PATH` first and checked; then
-/// that descriptor is opened for reading through `/proc/self/fd`, the same
-/// inode. An execute-only file cannot be opened for reading (EACCES), and
+/// The file must be regular and pass `allowed`. It is opened `O_PATH` first
+/// and checked; then that descriptor is opened for reading through
+/// `/proc/self/fd`, the same inode, and its first bytes say whether it is a
+/// script. An execute-only file cannot be opened for reading (EACCES), and
 /// without `/proc` there is no such path; then the `O_PATH` descriptor runs,
-/// as a native executable only (spec section 4 "native executable").
-fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<OwnedFd, u8> {
+/// as a native executable only (spec section 4 "native executable"): its
+/// `#!` line, if any, is never read, and the kernel's own script loader
+/// cannot open the close-on-exec descriptor it would hand the interpreter.
+fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     // A relative path would name a file in the inherited working folder.
     let Some(rest) = path.strip_prefix(b"/") else {
         return Err(RELAY_TARGET);
@@ -301,15 +330,131 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<OwnedFd, u8> {
         Err(Some(())) => (path_fd, false),
         Err(None) => return Err(RELAY_TARGET),
     };
-    if readable {
-        let mut head = [0u8; 2];
-        // SAFETY: `head` is writable for 2 bytes; `fd` is open for reading.
-        let n = unsafe { libc::pread(fd.as_raw_fd(), head.as_mut_ptr().cast(), 2, 0) };
-        if n < 0 || (n == 2 && head == *b"#!") {
+    if !readable {
+        return Ok(Opened::Native(fd));
+    }
+    let mut first = vec![0u8; SHEBANG_MAX];
+    let n = read_at(&fd, &mut first, 0).map_err(|_| RELAY_TARGET)?;
+    first.truncate(n);
+    Ok(if first.starts_with(b"#!") {
+        Opened::Script(fd, first)
+    } else {
+        Opened::Native(fd)
+    })
+}
+
+/// A checked executable: a native one, or a script with its first bytes (at
+/// most `SHEBANG_MAX`).
+enum Opened {
+    Native(OwnedFd),
+    Script(OwnedFd, Vec<u8>),
+}
+
+/// One `pread`; a signal never interrupts it (no handler is installed).
+fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
+    let at = libc::off_t::try_from(at).map_err(|_| libc::EINVAL)?;
+    // SAFETY: `buf` is writable for its length; `fd` is open for reading.
+    let n = unsafe { libc::pread(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), at) };
+    usize::try_from(n).map_err(|_| errno())
+}
+
+/// The script row of spec section 4: the `#!` line read from the checked
+/// descriptor must name the interpreter the helper resolved, which must pass
+/// the same checks and be a native executable (no nested `#!`). The script
+/// is copied into a sealed memfd and the interpreter's descriptor runs with
+/// argv `[line interpreter, line argument, /proc/self/fd/N, argv[1..]]`, the
+/// order the kernel's script loader uses.
+fn script(
+    fd: &OwnedFd,
+    first: &[u8],
+    frame: &ExecFrame,
+    argv: &[&[u8]],
+) -> Result<(OwnedFd, OwnedFd, Vec<CString>), u8> {
+    let Head::Script(line) = head(first) else {
+        return Err(RELAY_TARGET);
+    };
+    let interpreter = frame
+        .interpreter
+        .as_ref()
+        .filter(|i| i.line == line.interpreter)
+        .ok_or(RELAY_TARGET)?;
+    let Opened::Native(interpreter_fd) = open_target(&interpreter.path, interpreter.pin)? else {
+        return Err(RELAY_TARGET);
+    };
+    let copy = sealed_copy(fd)?;
+    let argv = c_strings(&script_argv(line, copy.as_raw_fd(), argv))?;
+    Ok((interpreter_fd, copy, argv))
+}
+
+fn script_argv<'a>(line: Shebang<'a>, copy: i32, argv: &[&'a [u8]]) -> Vec<Vec<u8>> {
+    let mut out = vec![line.interpreter.to_vec()];
+    out.extend(line.arg.map(<[u8]>::to_vec));
+    out.push(format!("/proc/self/fd/{copy}").into_bytes());
+    // parse_relay_args refuses an empty argv; argv[0] is the script's name.
+    out.extend(argv.iter().skip(1).map(|w| w.to_vec()));
+    out
+}
+
+/// The script, at most `SCRIPT_MAX` bytes, in a memfd sealed with `SEALS`.
+fn sealed_copy(script: &OwnedFd) -> Result<OwnedFd, u8> {
+    let mut body = vec![0u8; SCRIPT_MAX + 1];
+    let mut len = 0;
+    loop {
+        let n = read_at(script, &mut body[len..], len).map_err(|_| RELAY_TARGET)?;
+        if n == 0 {
+            break;
+        }
+        len += n;
+        if len > SCRIPT_MAX {
             return Err(RELAY_TARGET);
         }
     }
-    Ok(fd)
+    let copy = memfd().map_err(|_| RELAY_EXEC)?;
+    let mut rest = &body[..len];
+    while !rest.is_empty() {
+        // SAFETY: `rest` is readable for its length; `copy` is open for writing.
+        let n = unsafe { libc::write(copy.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
+        let n = usize::try_from(n).map_err(|_| RELAY_EXEC)?;
+        rest = &rest[n..];
+    }
+    // SAFETY: F_ADD_SEALS only changes the memfd's seals.
+    if unsafe { libc::fcntl(copy.as_raw_fd(), libc::F_ADD_SEALS, SEALS) } != 0 {
+        return Err(RELAY_EXEC);
+    }
+    Ok(copy)
+}
+
+/// A close-on-exec, sealable memfd that can never be executed
+/// (`MFD_NOEXEC_SEAL`, Linux 6.3), or without that flag on an older kernel.
+fn memfd() -> Result<OwnedFd, i32> {
+    let base = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    match memfd_create(base | libc::MFD_NOEXEC_SEAL) {
+        Err(e) if retry_without_noexec(e) => memfd_create(base),
+        other => other,
+    }
+}
+
+/// Before 6.3 the kernel does not know `MFD_NOEXEC_SEAL` and answers
+/// EINVAL; any other error (EMFILE, ENOMEM, EACCES) stays an error.
+fn retry_without_noexec(errno: i32) -> bool {
+    errno == libc::EINVAL
+}
+
+fn memfd_create(flags: libc::c_uint) -> Result<OwnedFd, i32> {
+    // SAFETY: the name is NUL-terminated.
+    let raw = unsafe { libc::memfd_create(c"bingsu-script".as_ptr(), flags) };
+    if raw < 0 {
+        return Err(errno());
+    }
+    // SAFETY: a successful memfd_create returns a descriptor nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+fn c_strings<W: AsRef<[u8]>>(words: &[W]) -> Result<Vec<CString>, u8> {
+    words
+        .iter()
+        .map(|w| CString::new(w.as_ref()).map_err(|_| RELAY_INPUT))
+        .collect()
 }
 
 fn stat(fd: &OwnedFd) -> Result<libc::stat, u8> {
@@ -452,6 +597,7 @@ mod tests {
             run_deadline: clock.now.checked_add_signed(t.run).unwrap(),
             environment: environment.to_vec(),
             pin,
+            interpreter: None,
         };
         (permit, relay_input(permit, &frame, INPUT_CAP).unwrap())
     }
@@ -612,15 +758,22 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         if got.ends_with(ECHO) {
+            // A script target prints its script after the echo.
+            child.stdout = Some(stdout);
             Ok(child)
         } else {
             Err(child.wait().unwrap().code().unwrap_or(-1))
         }
     }
 
-    /// Ends a running target by closing its stdin.
+    /// Ends a running target by closing its stdin; what it prints after
+    /// that (a script target prints its script) is drained so it never
+    /// blocks on a full pipe.
     fn finish(mut child: Child) {
         drop(child.stdin.take());
+        if let Some(mut out) = child.stdout.take() {
+            out.read_to_end(&mut Vec::new()).unwrap();
+        }
         assert!(child.wait().unwrap().success());
     }
 
@@ -669,6 +822,10 @@ mod tests {
         }
     }
 
+    /// Stands for the relay's own pid in a word of its argv: `/proc/self` is
+    /// a symlink, which the relay refuses.
+    const OWN_PID: &[u8] = b"@relay-pid@";
+
     /// The relay process: reads its argv from fd 4 and runs the relay.
     #[test]
     #[ignore = "child: one relay run"]
@@ -676,11 +833,20 @@ mod tests {
         let words = read_all(4);
         // SAFETY: fd 4 is this child's argv pipe, read to the end above.
         unsafe { libc::close(4) };
+        let pid = std::process::id().to_string();
         let args: Vec<OsString> = words
             .strip_suffix(b"\0")
             .unwrap()
             .split(|&b| b == 0)
-            .map(|w| OsString::from_vec(w.to_vec()))
+            .map(|w| {
+                match w
+                    .strip_prefix(b"/proc/")
+                    .and_then(|r| r.strip_prefix(OWN_PID))
+                {
+                    Some(rest) => OsString::from_vec([b"/proc/", pid.as_bytes(), rest].concat()),
+                    None => OsString::from_vec(w.to_vec()),
+                }
+            })
             .collect();
         let code = relay(&args);
         // SAFETY: child exit without the harness's atexit work.
@@ -867,8 +1033,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: allowed의 entry_verdict 확인을 지우는 것(남이 쓸 수 있는 파일 실행),
-    // shebang 거부를 지우는 것(종료 코드가 RELAY_EXEC로 바뀜), pread 실패를 통과로 보는 것
-    // (/proc/self/mem이 RELAY_EXEC로 끝남). S_IFREG 비교는 test_relay_never_opens_a_fifo_for_reading이
+    // 프레임에 인터프리터가 없는 스크립트를 거부하지 않는 것, 첫 바이트 pread 실패를 네이티브로 보는 것
+    // (/proc/<중계 pid>/mem이 RELAY_EXEC로 끝남). S_IFREG 비교는 test_relay_never_opens_a_fifo_for_reading이
     // 잡는다(지우면 FIFO를 읽기로 연다).
     #[test]
     fn test_relay_refuses_unsafe_targets() {
@@ -883,9 +1049,12 @@ mod tests {
         let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
         // SAFETY: `c` is NUL-terminated.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o755) }, 0);
-        // /proc/self/mem is a regular 0600 file of the relay's own user whose
-        // read at offset 0 fails (EIO): the shebang check cannot answer.
-        let unreadable = PathBuf::from("/proc/self/mem");
+        // The relay's /proc/<pid>/mem is a regular 0600 file of its own user
+        // whose read at offset 0 fails (EIO): the shebang check cannot answer.
+        let mut unreadable = b"/proc/".to_vec();
+        unreadable.extend_from_slice(OWN_PID);
+        unreadable.extend_from_slice(b"/mem");
+        let unreadable = PathBuf::from(OsString::from_vec(unreadable));
         for exe in [&writable, &script, &fifo, &dir.join("missing"), &unreadable] {
             let (_, bytes) = input(Origin::Config, LIVE, b"");
             let got = outcome(spawn_relay(&bytes, &args(exe, &[b"cat"]), &[]));
@@ -1416,6 +1585,275 @@ mod tests {
         writer.join().unwrap();
         drop(reader);
         assert!(!opened, "the relay opened the FIFO for reading");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The relay input for a script whose `#!` line names `line`, resolved
+    /// by the helper to `path` (with `pin` for a group-writable interpreter).
+    fn script_input(line: &[u8], path: &Path, pin: Option<ExecPin>) -> Vec<u8> {
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        let (permit, _) = input_at(clock, Origin::Config, LIVE, b"");
+        let frame = ExecFrame {
+            origin: Origin::Config,
+            run_deadline: clock.now.checked_add_signed(LIVE.run).unwrap(),
+            environment: Vec::new(),
+            pin: None,
+            interpreter: Some(bingsu_core::handoff::Interpreter {
+                line: line.to_vec(),
+                path: path.as_os_str().as_bytes().to_vec(),
+                pin,
+            }),
+        };
+        relay_input(permit, &frame, INPUT_CAP).unwrap()
+    }
+
+    /// An executable file at `path` with `bytes`.
+    fn executable(path: &Path, bytes: &[u8], mode: u32) {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// `#!<cat> -` and a body: `cat` reads stdin (the echo) before it prints
+    /// the script it was handed, so it waits with exactly the descriptors the
+    /// relay left it.
+    fn cat_script(len: usize) -> Vec<u8> {
+        let mut s = format!("#!{} -\n", cat().display()).into_bytes();
+        while s.len() < len {
+            s.extend_from_slice(b"# bingsu script body line\n");
+        }
+        s.truncate(len);
+        s
+    }
+
+    fn script_outcome(script: &Path, input: &[u8], argv: &[&[u8]]) -> Outcome {
+        outcome(spawn_relay(input, &args(script, argv), &[]))
+    }
+
+    fn refused_with(o: &Outcome, code: u8) -> bool {
+        matches!(o, Outcome::Refused(c) if *c == i32::from(code))
+    }
+
+    /// The memfd number from `/proc/self/fd/N` in a script target's argv.
+    fn copy_fd(cmdline: &[u8]) -> i32 {
+        let words: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
+        let word = std::str::from_utf8(words[2]).unwrap();
+        word.strip_prefix("/proc/self/fd/")
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    // 실행 중인 대상의 memfd에 쓰기·늘이기·줄이기가 막히고 봉인 집합이 정확히 SEALS(6.3 이상이면 +
+    // F_SEAL_EXEC)이며, 대상이 읽는 내용이 스크립트 그대로다. 이것을 실패시키는 것: SEALS에서
+    // F_SEAL_WRITE(쓰기 성공)·GROW·SHRINK·SEAL 하나를 빼는 것, F_ADD_SEALS 호출을 지우는 것, 복사를
+    // 빠뜨리거나 자르는 것(cat이 내보내는 내용이 다름).
+    #[test]
+    fn test_script_runs_through_sealed_memfd() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("sealed")).unwrap();
+        let script = dir.join("s");
+        let body = cat_script(300);
+        executable(&script, &body, 0o755);
+        let input = script_input(cat().as_os_str().as_bytes(), &cat(), None);
+        let child = echo(spawn_relay(&input, &args(&script, &[b"s"]), &[])).unwrap();
+        let proc = PathBuf::from(format!("/proc/{}", child.id()));
+        let n = copy_fd(&std::fs::read(proc.join("cmdline")).unwrap());
+        let copy = std::fs::OpenOptions::new()
+            .write(true)
+            .open(proc.join(format!("fd/{n}")))
+            .unwrap();
+        // SAFETY: F_GET_SEALS only reads the memfd's seals.
+        let seals = unsafe { libc::fcntl(copy.as_raw_fd(), libc::F_GET_SEALS) };
+        let want = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        assert_eq!(seals & !libc::F_SEAL_EXEC, want, "{seals:#x}");
+        // F_SEAL_EXEC (0x20) is there when MFD_NOEXEC_SEAL was accepted.
+        eprintln!("relay script seals {seals:#x}");
+        let write = (&copy).write(b"x").unwrap_err();
+        assert_eq!(write.raw_os_error(), Some(libc::EPERM));
+        for len in [0, 1 << 20] {
+            let e = copy.set_len(len).unwrap_err();
+            assert_eq!(e.raw_os_error(), Some(libc::EPERM), "{len}");
+        }
+        drop(copy);
+        let mut child = child;
+        drop(child.stdin.take());
+        let mut rest = Vec::new();
+        child.stdout.take().unwrap().read_to_end(&mut rest).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(rest, body);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 대상의 fd는 정확히 {0,1,2,N}이고 N이 argv의 /proc/self/fd/N이며, argv는 커널 순서(#! 줄의
+    // 인터프리터, 줄 인자, 스크립트, 원래 argv[1..])다. 이것을 실패시키는 것: close-on-exec 끄기를 모든
+    // fd에 하는 것(인터프리터 fd와 물려받은 fd 5가 남음), 끄기를 close_range 앞으로 옮기는 것(N이 닫혀
+    // cat이 스크립트를 열지 못함), 끄기를 지우는 것, argv[0]을 버리지 않거나 줄 인자를 버리는 것.
+    #[test]
+    fn test_script_fd_set() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("script-fds")).unwrap();
+        let script = dir.join("s");
+        let body = cat_script(200);
+        executable(&script, &body, 0o755);
+        let line = cat();
+        let input = script_input(line.as_os_str().as_bytes(), &cat(), None);
+        let child = echo(spawn_relay(&input, &args(&script, &[b"s", b"-"]), &[])).unwrap();
+        let proc = PathBuf::from(format!("/proc/{}", child.id()));
+        let cmdline = std::fs::read(proc.join("cmdline")).unwrap();
+        let n = copy_fd(&cmdline);
+        let mut fds: Vec<i32> = std::fs::read_dir(proc.join("fd"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_str().unwrap().parse().unwrap())
+            .collect();
+        fds.sort_unstable();
+        assert_eq!(fds, [0, 1, 2, n]);
+        assert!(n > 2);
+        assert_eq!(std::fs::read_link(proc.join("exe")).unwrap(), cat());
+        assert_eq!(
+            cmdline,
+            format!("{}\0-\0/proc/self/fd/{n}\0-\0", line.display()).into_bytes()
+        );
+        let mut child = child;
+        drop(child.stdin.take());
+        let mut rest = Vec::new();
+        child.stdout.take().unwrap().read_to_end(&mut rest).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(rest, body);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 이것을 실패시키는 것: head의 `/usr/bin/env` 거부를 지우는 것(도우미가 거르지 못한 env 줄을 중계가
+    // 그대로 실행). 감독이 env를 인터프리터로 실어 보내도 중계가 RELAY_TARGET으로 거부한다.
+    #[test]
+    fn test_env_shebang_refused() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = fresh_dir("env-shebang");
+        let script = dir.join("s");
+        executable(&script, b"#!/usr/bin/env sh\nexec cat\n", 0o755);
+        let env = std::fs::canonicalize("/usr/bin/env").unwrap();
+        let input = script_input(b"/usr/bin/env", &env, None);
+        let got = script_outcome(&script, &input, &[b"s"]);
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 이것을 실패시키는 것: script()에서 인터프리터가 Opened::Native인지 보는 검사를 지우는 것(커널이
+    // close-on-exec 인터프리터 fd 위의 스크립트를 ENOENT로 막아 RELAY_EXEC로 끝남).
+    #[test]
+    fn test_nested_shebang_refused() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("nested")).unwrap();
+        let interpreter = dir.join("i");
+        executable(&interpreter, cat_script(64).as_slice(), 0o755);
+        let script = dir.join("s");
+        let line = format!("#!{}\n", interpreter.display());
+        executable(&script, line.as_bytes(), 0o755);
+        let input = script_input(interpreter.as_os_str().as_bytes(), &interpreter, None);
+        let got = script_outcome(&script, &input, &[b"s"]);
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 양성 대조: 정확히 65,536바이트는 실행된다. 이것을 실패시키는 것: sealed_copy의 크기 검사를 지우는
+    // 것(65,537바이트가 잘리거나 통째로 실행됨), 상한을 하나 줄이는 것.
+    #[test]
+    fn test_script_over_64k_refused() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("64k")).unwrap();
+        let script = dir.join("s");
+        let input = script_input(cat().as_os_str().as_bytes(), &cat(), None);
+        let body = cat_script(SCRIPT_MAX);
+        assert_eq!(body.len(), 65_536);
+        executable(&script, &body, 0o755);
+        let mut child = echo(spawn_relay(&input, &args(&script, &[b"s"]), &[])).unwrap();
+        drop(child.stdin.take());
+        let mut rest = Vec::new();
+        child.stdout.take().unwrap().read_to_end(&mut rest).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(rest, body);
+        let body = cat_script(SCRIPT_MAX + 1);
+        assert_eq!(body.len(), 65_537);
+        executable(&script, &body, 0o755);
+        let got = script_outcome(&script, &input, &[b"s"]);
+        assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 중계는 자기가 읽은 #! 줄이 도우미가 해석한 인터프리터와 같을 때만, 그 인터프리터를 같은 검사와 pin으로
+    // 열어 실행한다. 이것을 실패시키는 것: script()의 줄 비교를 지우는 것(프레임의 다른 인터프리터가
+    // 실행됨), 프레임에 인터프리터가 없을 때 거부하지 않는 것, 인터프리터를 열 때 그 pin 대신 None을
+    // 넘기는 것(양성 대조가 깨짐)이나 pin 없이 그룹 쓰기를 통과시키는 것.
+    #[test]
+    fn test_script_interpreter_matches_line_and_pin() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("interp")).unwrap();
+        let interpreter = dir.join("cat");
+        let pin = cat_copy(&interpreter, 0o775);
+        let script = dir.join("s");
+        executable(
+            &script,
+            format!("#!{} -\n", interpreter.display()).as_bytes(),
+            0o755,
+        );
+        let line = interpreter.as_os_str().as_bytes();
+        finish(
+            echo(spawn_relay(
+                &script_input(line, &interpreter, Some(pin)),
+                &args(&script, &[b"s"]),
+                &[],
+            ))
+            .unwrap(),
+        );
+        for input in [
+            script_input(line, &interpreter, None),
+            script_input(b"/bin/true", &interpreter, Some(pin)),
+            pinned(None),
+        ] {
+            let got = script_outcome(&script, &input, &[b"s"]);
+            assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 이것을 실패시키는 것: retry_without_noexec가 EINVAL 밖의 오류(EMFILE·ENOMEM·EACCES)에도
+    // MFD_NOEXEC_SEAL 없이 다시 만드는 것, 또는 EINVAL에서 다시 만들지 않는 것(6.3 미만 커널에서 스크립트
+    // 실행 불가).
+    #[test]
+    fn memfd_retries_only_on_einval() {
+        assert!(retry_without_noexec(libc::EINVAL));
+        for e in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::EACCES,
+            libc::EPERM,
+        ] {
+            assert!(!retry_without_noexec(e), "{e}");
+        }
+    }
+
+    // 도우미 해석에서 중계 실행까지: `#!/bin/cat -`는 merged-/usr에서 `/bin -> usr/bin`을 지나므로, 중계는 줄의
+    // 원문이 아니라 도우미가 푼 정규 경로를 연다. 이것을 실패시키는 것: script()가 interpreter.path 대신
+    // interpreter.line을 여는 것(merged-/usr에서 중간 symlink로 거부), argv[0]에 정규 경로를 쓰는 것.
+    #[test]
+    fn test_resolved_script_runs() {
+        let _lock = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("resolved")).unwrap();
+        let script = dir.join("s");
+        executable(&script, b"#!/bin/cat -\n", 0o755);
+        let found = crate::commands::exec_path::resolve_for_user(&script, None).unwrap();
+        let interpreter = found.interpreter.unwrap();
+        assert_eq!(interpreter.line, b"/bin/cat");
+        let path = PathBuf::from(OsString::from_vec(interpreter.path.clone()));
+        assert_eq!(path, cat());
+        let input = script_input(&interpreter.line, &path, interpreter.pin);
+        let child = echo(spawn_relay(&input, &args(&script, &[b"s"]), &[])).unwrap();
+        let cmdline = std::fs::read(format!("/proc/{}/cmdline", child.id())).unwrap();
+        assert!(
+            cmdline.starts_with(b"/bin/cat\0-\0/proc/self/fd/"),
+            "{cmdline:?}"
+        );
+        finish(child);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
