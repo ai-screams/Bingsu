@@ -197,3 +197,17 @@ def test_orphan_live_descendant_reclaimed(tmp_path):
             d.terminate()
         for m in ("m", "i"):
             subprocess.run(["fusermount3", "-uz", str(tmp_path / m)], capture_output=True)
+
+
+# 최선 노력 경로(위임 cgroup 없음, 기본 셀): 마감에 감독이 필터 아래에서 중계의 그룹에 SIGKILL을 보내, 대상이
+# setsid 없이 남긴 자손도 끝난다. 원자 경로의 셀에서도 같은 결과다(cgroup.kill). 이것을 실패시키는 것: 감독
+# 필터의 kill 그룹 블록에서 쥔 그룹 비교를 지우는 것(모든 kill이 EPERM이 되어 자손이 남음).
+@pytest.mark.skipif(sys.platform != "linux", reason="the trusted relay runs on Linux only")
+def test_best_effort_group_kill_under_the_filter(tmp_path):
+    session = CommandSession(tmp_path)
+    pidfile = session.base / "pid"
+    session.put(config(["/bin/sh", "-c", f"sleep 60 & echo $! > {pidfile}; exec sleep 5"], "timeout='1s'\n"))
+    ready(session)
+    session.wait_quiet(timeout=8)
+    descendant = started(pidfile)
+    assert until(lambda: not alive(descendant), timeout=2.0), "the target's descendant outlived its unit"

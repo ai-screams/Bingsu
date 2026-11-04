@@ -221,7 +221,8 @@ struct Run {
 impl Run {
     /// Ends the target and everything it forked: SIGKILL to the relay's
     /// pidfd, and on the atomic path `1` into the unit's `cgroup.kill`
-    /// (once; the descriptor is closed after it).
+    /// (once; the descriptor is closed after it). On the best-effort path
+    /// the relay's process group goes at its reap (OwnedChild::reap).
     fn end(&mut self) {
         let _ = self.child.signal(libc::SIGKILL);
         #[cfg(target_os = "linux")]
@@ -843,7 +844,13 @@ impl Supervisor {
     fn confine(&self) -> std::io::Result<()> {
         let pidfds: Vec<std::os::fd::RawFd> =
             self.runs.iter().filter_map(|r| r.child.pidfd()).collect();
-        super::helper_filter::install_supervisor(&pidfds)
+        let groups: Vec<libc::pid_t> = self
+            .runs
+            .iter()
+            .filter(|r| r.child.group())
+            .map(|r| r.child.pid)
+            .collect();
+        super::helper_filter::install_supervisor(&pidfds, &groups)
     }
 }
 
@@ -939,6 +946,23 @@ pub(crate) mod tests {
                 std::fs::write(std::ffi::OsStr::from_bytes(&target[1]), pid.to_string()).unwrap();
                 executed();
                 if behaviour == b"setsid" {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            }
+            b"fork" | b"fork-exit" => {
+                // A grandchild in the target's own process group (no new
+                // session); with `-exit` the target ends at once.
+                // SAFETY: the child runs only async-signal-safe calls.
+                let pid = unsafe { libc::fork() };
+                if pid == 0 {
+                    // SAFETY: in the forked child.
+                    unsafe { libc::sleep(60) };
+                    // SAFETY: as above.
+                    unsafe { libc::_exit(0) }
+                }
+                std::fs::write(std::ffi::OsStr::from_bytes(&target[1]), pid.to_string()).unwrap();
+                executed();
+                if behaviour == b"fork" {
                     std::thread::sleep(std::time::Duration::from_secs(5));
                 }
             }
@@ -2132,5 +2156,31 @@ pub(crate) mod tests {
         assert!(matches!(mixed[1].reason, Reason::SpawnFailed), "{mixed:?}");
         // Any other clone3 error is that unit's spawn failure, not a path switch.
         assert!(matches!(other[0].reason, Reason::SpawnFailed), "{other:?}");
+    }
+
+    // 최선 노력 경로(cgroup 없음): 중계는 자기 프로세스 그룹을 이끌고, 단위가 끝날 때(마감, 또는 대상이 끝나
+    // reap하기 직전) 그 그룹 전체에 SIGKILL이 간다. setsid하지 않은 손자는 남지 않는다. 이것을 실패시키는 것:
+    // spawn의 SETPGROUP을 끄는 것(그룹이 없어 손자가 남음), end_group의 kill을 지우는 것, reap 앞의
+    // exited() 그룹 종료를 지우는 것(끝난 대상의 손자가 남음).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_group_kill_ends_a_same_group_descendant() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        for (word, timeout) in [("fork", 300 * MS), ("fork-exit", 1_000 * MS)] {
+            let pidfile =
+                std::env::temp_dir().join(format!("bingsu-grp-{word}-{}", std::process::id()));
+            let mut g = grant(vec![unit(word, timeout)], 1_000 * MS);
+            g.cwd = pidfile.as_os_str().as_bytes().to_vec();
+            let (out, _) = round(g);
+            assert!(spawned(&out[0]), "{out:?}");
+            let grandchild = read_pid(&pidfile);
+            let gone = gone_within(grandchild, 1_000);
+            if !gone {
+                // SAFETY: plain signal to the test's own leftover.
+                unsafe { libc::kill(grandchild, libc::SIGKILL) };
+            }
+            let _ = std::fs::remove_file(&pidfile);
+            assert!(gone, "{word}: a same-group grandchild outlived its unit");
+        }
     }
 }
