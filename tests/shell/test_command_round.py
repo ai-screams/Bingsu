@@ -36,7 +36,7 @@ class CommandSession(SnapshotSession):
     pwd = None
 
     def prompt_args(self):
-        args = super().prompt_args() + ["--session", self.session]
+        args = super().prompt_args() + (["--session", self.session] if self.session else [])
         if self.pwd is not None:
             args[args.index("--pwd") + 1] = str(self.pwd)
         return [f"--log-level={self.level}" if a == "--log-level=off" else a for a in args]
@@ -317,6 +317,10 @@ def neutral_round(tmp_path, damage):
     elif damage == "0700":
         folder.mkdir(mode=0o700)
         folder.chmod(0o700)
+    elif damage == "owner":
+        folder.mkdir(mode=0o700)
+        folder.chmod(0o500)
+        os.chown(folder, 65534, 65534)
     for _ in range(3):
         session.prompt()
     session.wait_quiet()
@@ -324,10 +328,13 @@ def neutral_round(tmp_path, damage):
 
 
 # K2: 중립 폴더는 비어 있고 내 것이고 정확히 0500일 때만 neutral 단위가 돈다. 이것을 실패시키는 것:
-# neutral()의 빈 폴더 검사를 지우는 것(file), 모드 비교를 지우는 것(0700). 양성 대조: 손대지 않은 폴더(ok).
+# neutral()의 빈 폴더 검사를 지우는 것(file), 모드 비교를 지우는 것(0700), 소유자 비교를 지우는 것
+# (owner, root만 다른 소유자로 바꿀 수 있다). 양성 대조: 손대지 않은 폴더(ok).
 @linux_only
-@pytest.mark.parametrize("damage", ["ok", "file", "0700"])
+@pytest.mark.parametrize("damage", ["ok", "file", "0700", "owner"])
 def test_neutral_folder_must_be_empty_and_0500(tmp_path, damage, _native_boot_required):
+    if damage == "owner" and os.geteuid() != 0:
+        pytest.skip("only root can hand the folder to another user")
     session, canary = neutral_round(tmp_path, damage)
     if damage == "ok":
         assert canary.exists()
@@ -389,3 +396,19 @@ def test_macos_runs_no_command_without_a_relay(tmp_path):
     assert not canary.exists()
     assert seen == []
     assert b"no trusted relay on this platform" in session.log(), session.log()
+
+
+# J7: 세션 값이 없으면 감독을 띄우지 않고 그 사실을 로그한다. 이것을 실패시키는 것: Skip::NoSession의
+# 로그 문구를 None으로 하는 것.
+@linux_only
+def test_no_session_runs_nothing_and_says_so(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path / "s")
+    session.session = None
+    session.level = "info"
+    canary = tmp_path / "ran"
+    session.put(config(["/usr/bin/touch", str(canary)]))
+    ready(session)
+    session.prompt()
+    session.wait_quiet()
+    assert not canary.exists()
+    assert b"no session value from the shell" in session.log(), session.log()
