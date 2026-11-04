@@ -108,6 +108,13 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     {
         return Err(RELAY_EXEC);
     }
+    // U-17: a setuid, setgid or file-capability target runs, but without
+    // gaining anything; the flag stays for every descendant. Last of the
+    // checks, so `exec` keeps the clock read right before execveat.
+    // SAFETY: plain prctl with integer arguments.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(RELAY_EXEC);
+    }
     Ok(Target {
         permit,
         frame,
@@ -791,7 +798,7 @@ mod tests {
     /// SIGUSR1 is ignored and SIGUSR2 blocked, which the relay must undo.
     /// `relay_env` is the relay's own envp; the supervisor passes none.
     fn spawn_relay(input: &[u8], args: &[Vec<u8>], relay_env: &[(&str, &Path)]) -> Child {
-        spawn_relay_with(input, args, relay_env, None)
+        spawn_relay_with(input, args, relay_env, None, false)
     }
 
     /// `spawn_relay`, as the user `uid` when given (root only).
@@ -800,7 +807,36 @@ mod tests {
         args: &[Vec<u8>],
         relay_env: &[(&str, &Path)],
         uid: Option<u32>,
+        deny_nnp: bool,
     ) -> Child {
+        // With `deny_nnp` the relay starts under a filter that answers
+        // prctl(PR_SET_NO_NEW_PRIVS) with EPERM (installing it needs the
+        // flag first). Built before the fork: the child may not allocate.
+        let stmt = |code, k| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump = |k, jt, jf| libc::sock_filter {
+            code: 0x15,
+            jt,
+            jf,
+            k,
+        };
+        let deny = [
+            stmt(0x20, 0),
+            jump(libc::SYS_prctl as u32, 0, 3),
+            stmt(0x20, 16),
+            jump(libc::PR_SET_NO_NEW_PRIVS as u32, 0, 1),
+            stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            stmt(0x06, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: deny.len() as u16,
+            filter: deny.as_ptr().cast_mut(),
+        };
+        let program = std::ptr::addr_of!(program) as usize;
         let (r3, w3) = pipe();
         put(&w3, input);
         drop(w3);
@@ -850,6 +886,17 @@ mod tests {
             unsafe { libc::sigaddset(&mut set, libc::SIGUSR2) };
             // SAFETY: `set` is initialized; the old mask is not requested.
             unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
+            // SAFETY: plain prctl calls; `program` points at the filter above,
+            // alive until spawn returns.
+            if deny_nnp
+                && unsafe {
+                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                        || libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, program)
+                            != 0
+                }
+            {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         };
         // SAFETY: `setup` is async-signal-safe (above).
@@ -863,6 +910,7 @@ mod tests {
         fds: Vec<i32>,
         sig_ign: String,
         sig_blk: String,
+        no_new_privs: String,
         environ: Vec<u8>,
         cmdline: Vec<u8>,
     }
@@ -934,6 +982,7 @@ mod tests {
             fds,
             sig_ign: field("SigIgn:"),
             sig_blk: field("SigBlk:"),
+            no_new_privs: field("NoNewPrivs:"),
             environ: std::fs::read(proc.join("environ")).unwrap(),
             cmdline: std::fs::read(proc.join("cmdline")).unwrap(),
         };
@@ -1042,6 +1091,70 @@ mod tests {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         let seen = ran(relay_cat(Origin::Config, LIVE, b""));
         assert_eq!(seen.fds, [0, 1, 2]);
+    }
+
+    // U-17. 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를 지우는 것(대상의 NoNewPrivs가 0).
+    #[test]
+    fn test_relay_target_has_no_new_privs() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let own = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert!(
+            own.lines().any(|l| l == "NoNewPrivs:\t0"),
+            "the test process must not have the flag already"
+        );
+        let seen = ran(relay_cat(Origin::Config, LIVE, b""));
+        assert_eq!(seen.no_new_privs, "1");
+    }
+
+    // U-17: 플래그를 걸 수 없으면 대상을 실행하지 않는다. 이것을 실패시키는 것: prepare에서 prctl의
+    // 실패 분기(`!= 0` → RELAY_EXEC)를 지우는 것(EPERM을 무시하고 대상이 실행됨).
+    #[test]
+    fn test_relay_refuses_without_no_new_privs() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let got = outcome(spawn_relay_with(
+            &bytes,
+            &args(&cat(), &[b"cat"]),
+            &[],
+            None,
+            true,
+        ));
+        assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
+    }
+
+    // U-17: setuid 대상은 실행되지만 권한을 얻지 못한다. Linux 컨테이너에서 root로 --ignored로 돌린다
+    // (root 소유 04755 사본을 nobody가 실행). 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를
+    // 지우는 것(대상의 유효 uid가 0이 됨).
+    #[test]
+    #[ignore = "root in the Linux container; the relay runs as nobody"]
+    fn test_setuid_target_gains_nothing() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        // SAFETY: getuid cannot fail.
+        assert_eq!(unsafe { libc::getuid() }, 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("setuid")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o4755);
+        assert_eq!(pin_of(&exe).group.mode & 0o7777, 0o4755);
+        let (_, input) = input(Origin::Config, LIVE, b"");
+        let child = echo(spawn_relay_with(
+            &input,
+            &args(&exe, &[b"cat"]),
+            &[],
+            Some(65_534),
+            false,
+        ))
+        .unwrap();
+        // Only the status file: another user's /proc/<pid>/exe needs ptrace access.
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+        finish(child);
+        assert!(
+            status
+                .lines()
+                .any(|l| l == "Uid:\t65534\t65534\t65534\t65534"),
+            "{status}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.
@@ -2146,6 +2259,7 @@ mod tests {
             &args(&script, &[b"s"]),
             &[],
             Some(65_534),
+            false,
         ));
         assert!(refused_with(&got, RELAY_TARGET), "{got:?}");
         // Positive control: with execute for others it runs as nobody.
@@ -2156,6 +2270,7 @@ mod tests {
                 &args(&script, &[b"s"]),
                 &[],
                 Some(65_534),
+                false,
             ))
             .unwrap(),
         );
