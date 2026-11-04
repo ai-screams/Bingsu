@@ -128,6 +128,14 @@ mod tests {
         let crc = crate::snapshot::crc32c(&[DOMAIN, &other[..12], &other[HEADER..]]);
         other[12..16].copy_from_slice(&crc);
         assert_eq!(body(&other), None);
+        // 이것을 실패시키는 것: body의 `total > FRAME_MAX`를 지우는 것(읽는 쪽 버퍼가 아니라 디코더가 상한을 지킨다).
+        let mut over = vec![0u8; HEADER];
+        over[..8].copy_from_slice(MAGIC);
+        over[8..12].copy_from_slice(&((BODY_MAX + 1) as u32).to_le_bytes());
+        over.resize(FRAME_MAX + 1, b'x');
+        let crc = crate::snapshot::crc32c(&[DOMAIN, &over[..12], &over[HEADER..]]);
+        over[12..16].copy_from_slice(&crc);
+        assert_eq!(body(&over), None);
         // A declared length over the cap is refused before any slice.
         let mut huge = vec![0u8; HEADER];
         huge[..8].copy_from_slice(MAGIC);
