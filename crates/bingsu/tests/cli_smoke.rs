@@ -15,7 +15,8 @@ fn no_args_prints_usage_to_stderr_and_exits_2() {
 }
 
 // 이것을 실패시키는 것: commands::run의 `__exec-v2` 분기를 지우는 것(사용법 오류 2로 끝남).
-// fd 3은 /dev/null이라 중계는 빈 입력을 받고 대상을 실행하지 않은 채 RELAY_INPUT(120)으로 끝난다.
+// fd 3은 /dev/null이라 중계는 빈 입력을 받고 대상을 실행하지 않은 채 RELAY_INPUT(120)으로 끝나며,
+// 상태 파이프(fd 2)에 그 코드 1바이트를 쓴다.
 #[cfg(target_os = "linux")]
 #[test]
 fn exec_entry_reaches_the_relay() {
@@ -46,5 +47,7 @@ fn exec_entry_reaches_the_relay() {
     unsafe { cmd.pre_exec(setup) };
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(120), "{out:?}");
-    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    // fd 2 is the relay's status pipe: the refusal code, one byte.
+    assert!(out.stdout.is_empty());
+    assert_eq!(out.stderr, [120]);
 }

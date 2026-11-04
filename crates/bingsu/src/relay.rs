@@ -65,14 +65,17 @@ fn relay(args: &[OsString]) -> u8 {
     code
 }
 
-/// Moves fd 2 (the status pipe) above fd 3, where the close-on-exec pass
+/// Moves fd 2 (the status pipe) to 4 or above, where the close-on-exec pass
 /// of `prepare` marks it like every descriptor from 3 up, and puts
 /// `/dev/null` at 2 for the target (spec: stderr `/dev/null`). Without a
 /// fd 2 there is no status pipe, and 2 still gets `/dev/null`. `Err` (fd 2
 /// could not be replaced, so the target would inherit the pipe) refuses.
 fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
+    // Above 3 even when fd 3 is missing: the input must never be read from
+    // (or closed under) the status pipe. Fails without it: cli_smoke's
+    // exec_entry_reaches_the_relay, whose fd 3 is closed (the relay aborted).
     // SAFETY: duplicates fd 2 when it is open; -1 (EBADF) when it is not.
-    let moved = unsafe { libc::fcntl(2, libc::F_DUPFD, 3) };
+    let moved = unsafe { libc::fcntl(2, libc::F_DUPFD, 4) };
     // SAFETY: a successful F_DUPFD returns a descriptor nothing else owns.
     let status = (moved >= 0).then(|| unsafe { OwnedFd::from_raw_fd(moved) });
     // SAFETY: fixed NUL-terminated path, no O_CREAT.
