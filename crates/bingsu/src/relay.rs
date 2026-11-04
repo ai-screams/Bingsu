@@ -117,6 +117,10 @@ pub(crate) struct Target {
     exe: Exe,
     /// A script's sealed copy: the one descriptor past 2 the target keeps.
     _script: Option<OwnedFd>,
+    /// macOS: the helper's script copy the interpreter will open by path,
+    /// rechecked by name with the interpreter right before the exec.
+    #[cfg(target_os = "macos")]
+    copy: Option<Exe>,
     _argv: Vec<CString>,
     _envp: Vec<CString>,
     argv_ptrs: Vec<*const libc::c_char>,
@@ -140,11 +144,20 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
+    #[cfg(target_os = "macos")]
+    let mut copy = None;
     let (exe, script, argv) = match open_target(parsed.executable, frame.pin)? {
         // A frame that names an interpreter was made for a script.
         Opened::Native(_) if frame.interpreter.is_some() => return Err(RELAY_TARGET),
         Opened::Native(exe) => (exe, None, c_strings(parsed.argv)?),
-        Opened::Script(exe, body) => script(&exe, &body, &frame, parsed.executable, parsed.argv)?,
+        Opened::Script(exe, body) => {
+            let run = script(&exe, &body, &frame, parsed.executable, parsed.argv)?;
+            #[cfg(target_os = "macos")]
+            {
+                copy = Some(exe);
+            }
+            run
+        }
     };
     let envp = environment(&std::mem::take(&mut frame.environment))?;
     let argv_ptrs = pointers(&argv);
@@ -180,6 +193,8 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
         frame,
         exe,
         _script: script,
+        #[cfg(target_os = "macos")]
+        copy,
         _argv: argv,
         _envp: envp,
         argv_ptrs,
@@ -207,6 +222,14 @@ impl Target {
         // The name check first: on NFS or FUSE it can take long, and the
         // clock read must be the last step before execveat.
         if !self.exe.still_named() {
+            return RELAY_TARGET;
+        }
+        // macOS: the script copy too, by its path. After the exec the
+        // interpreter opens that path itself; in between only the user can
+        // change the copy, the user's 0600 file in a 0700 folder (fails
+        // without it: test_macos_copy_swapped_before_the_exec_is_refused).
+        #[cfg(target_os = "macos")]
+        if !self.copy.as_ref().is_none_or(Exe::still_named) {
             return RELAY_TARGET;
         }
         if !self.clock_allows() {
@@ -515,10 +538,12 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     #[cfg(target_os = "macos")]
     let (exe, readable) = {
         // A device or FIFO put there is never opened (fails without it:
-        // test_macos_relay_never_opens_a_fifo). One swapped in after this
-        // check needs root, the user or a cleared group, and still cannot
-        // run: a FIFO has no offset to read, and execve refuses any file
-        // that is not regular.
+        // test_macos_relay_never_opens_a_fifo). The descriptor is not
+        // compared with this stat again: no test can tell a swap between the
+        // two from a swap before them. Whatever is opened is what the checks
+        // below run on (owner, mode, pin); swapping the name needs root, the
+        // user or a cleared group; a FIFO then fails its first pread, and
+        // execve refuses any file that is not regular.
         if stat_at(&dir, &name)?.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Err(RELAY_TARGET);
         }
@@ -665,10 +690,11 @@ fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
 /// the order the kernel's script loader uses.
 ///
 /// macOS: the target is the helper's private copy of the script
-/// (`exec_path::ScriptCopies`, made from the descriptor the helper checked,
-/// whose execute permission it judged): it must be the user's and exactly
-/// 0600, and the interpreter gets its path in place of `/proc/self/fd/N`.
-/// Nothing stays open across exec.
+/// (`exec_path::ScriptCopies`, made from the descriptor the helper checked:
+/// the helper refused a `noexec` mount, asked faccessat(X_OK, AT_EACCESS) on
+/// the original's path and compared its stat after copying): it must be the
+/// user's and exactly 0600, and the interpreter gets its path in place of
+/// `/proc/self/fd/N`. Nothing stays open across exec.
 fn script(
     script: &Exe,
     body: &[u8],
@@ -883,12 +909,13 @@ fn local_ownership(fd: &OwnedFd) -> Option<bool> {
     mount_ownership(fs.f_flags)
 }
 
-/// macOS mount flags to ownership: `None` unless local (fails without it:
-/// mount_flags_decide_ownership).
+/// macOS mount flags to ownership, by the helper's own rules: `None` unless
+/// local (fails without it: mount_flags_decide_ownership and
+/// test_macos_target_on_a_volume_ignoring_owners_refused).
 #[cfg(target_os = "macos")]
 fn mount_ownership(flags: u32) -> Option<bool> {
-    let has = |bit: i32| flags & bit as u32 != 0;
-    has(libc::MNT_LOCAL).then_some(!has(libc::MNT_IGNORE_OWNERSHIP))
+    use bingsu_core::fs_trust::{macos_fs_is_local, macos_ownership_enforced};
+    macos_fs_is_local(flags).then_some(macos_ownership_enforced(flags))
 }
 
 /// macOS: `fstatat(dir, name)` without following a symlink.
@@ -2981,12 +3008,13 @@ mod tests {
     // 이것을 실패시키는 것: prepare의 "Native인데 인터프리터가 있으면 거부" 분기를 지우는 것, open_target의
     // O_PATH 재시도를 지우는 것(열기 자체가 실패).
     #[test]
-    #[ignore = "non-root user in the Linux container"]
     fn test_execute_only_target_runs_path_only() {
+        // Root reads any file, so the case needs another user (CI's Linux
+        // cells; BINGSU_REQUIRE_NONROOT_TESTS=1 turns a root run into a failure).
+        if crate::commands::exec_path::test_skip_as_root() {
+            return;
+        }
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        // SAFETY: getuid cannot fail.
-        let me = unsafe { libc::getuid() };
-        assert_ne!(me, 0, "run as a user other than root");
         let dir = fresh_dir("xonly-path");
         let exe = dir.join("cat");
         std::fs::copy(cat(), &exe).unwrap();
@@ -3011,12 +3039,13 @@ mod tests {
     // 폴더 fd의 FD_CLOEXEC를 끄는 것(touch가 돌아 카나리가 생기고 종료 코드가 touch의 것). 폴더를 O_CLOEXEC 없이
     // 여는 것만으로는 실패하지 않는다: prepare의 close-on-exec 단계가 3 이상 모든 fd에 다시 건다.
     #[test]
-    #[ignore = "non-root user in the Linux container"]
     fn test_execute_only_script_is_not_loaded() {
+        // Root reads any file, so the case needs another user (CI's Linux
+        // cells; BINGSU_REQUIRE_NONROOT_TESTS=1 turns a root run into a failure).
+        if crate::commands::exec_path::test_skip_as_root() {
+            return;
+        }
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        // SAFETY: getuid cannot fail.
-        let me = unsafe { libc::getuid() };
-        assert_ne!(me, 0, "run as a user other than root");
         let dir = fresh_dir("xonly-script");
         let canary = dir.join("ran");
         let exe = dir.join("tool");
@@ -3266,11 +3295,14 @@ mod macos_tests {
         let (target, with) = (PathBuf::from(target), PathBuf::from(with));
         let mode = mode.into_string().unwrap();
         if !mode.is_empty() {
+            // Once: a script run checks two names.
+            let mut once = Some(mode);
             HOOK.with(|h| {
                 *h.borrow_mut() = Some(Box::new(move |stage| {
                     if stage != Stage::Recheck {
                         return;
                     }
+                    let Some(mode) = once.take() else { return };
                     match mode.as_str() {
                         // Another file under the checked name.
                         "rename" => std::fs::rename(&with, &target).unwrap(),
@@ -3578,6 +3610,44 @@ mod macos_tests {
         let run = run_relay(&frame_input(60 * SECOND, frame), &copy2, &[b"tool"], None);
         assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // C2 리뷰 Medium: 최종 재확인은 스크립트 사본도 본다. 인터프리터 재확인 때 사본 자리에 다른 0600 스크립트가
+    // 오면 거부한다. 양성 대조: test_macos_script_copy_runs_through_its_interpreter. 이것을 실패시키는 것: exec의
+    // 사본 still_named 검사를 지우는 것(바뀐 사본이 돈다).
+    #[test]
+    fn test_macos_copy_swapped_before_the_exec_is_refused() {
+        let dir = scratch("copy-swap");
+        let copy = script_copy(&dir, 0o600);
+        let other = dir.join("other");
+        std::fs::write(&other, b"#!/bin/sh\necho \"SEEN swapped\"\n").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let run = run_relay(
+            &frame_input(60 * SECOND, interpreter("/bin/sh")),
+            &copy,
+            &[b"tool"],
+            Some(("rename", &copy, &other)),
+        );
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // C2 리뷰 Low: 소유권을 무시하는 볼륨(`hdiutil attach -owners off`) 위의 대상은 거부한다(그 볼륨에서는 모든
+    // 파일이 지금 사용자 소유로 보인다). 양성 대조: 같은 dmg를 소유권을 지키게 붙이면 돈다. 이것을 실패시키는 것:
+    // mount_ownership이 MNT_IGNORE_OWNERSHIP을 보지 않는 것.
+    #[test]
+    fn test_macos_target_on_a_volume_ignoring_owners_refused() {
+        for (owners, code) in [(true, 0), (false, RELAY_TARGET)] {
+            let dir = scratch(if owners { "owners-on" } else { "owners-off" });
+            let volume = crate::commands::sys::TestVolume::new(&dir, owners, false);
+            // A small target: the image holds 4 MB.
+            let exe = volume.mount.join("true");
+            copy_mode(Path::new("/usr/bin/true"), &exe, 0o755);
+            let run = run_relay(&live(), &exe, &[b"true"], None);
+            assert_eq!(run.code, i32::from(code), "owners {owners}: {run:?}");
+            drop(volume);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     // 로컬이 아닌 마운트는 판정 불가(None), 소유권을 무시하는 로컬 마운트는 false다. 이것을 실패시키는 것:

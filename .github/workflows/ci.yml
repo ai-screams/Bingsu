@@ -236,13 +236,19 @@ jobs:
           grep -F 'test commands::refresh::tests::chmod_g_w_after_verified_at_plus_t_approves_no_unit ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test commands::refresh::tests::scan_time_chmod_or_replace_keeps_marker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test prompt_read::tests::clock_reads::test_front_clock_reads_per_use_are_fixed ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
-      # The trusted relay is Linux-only; tests/gate-acceptance.tsv rows (bin:bingsu) and the B1 table.
+      # The trusted relay on Linux; tests/gate-acceptance.tsv rows (bin:bingsu) and the B1 table.
       # 이것을 실패시키는 것: 중계 시험을 ignored로 바꾸거나 Linux 칸에서 빼는 것.
       - name: Assert native Linux trusted relay passes
         if: runner.os == 'Linux'
+        # The runner user is not root: the execute-only cases must run, not skip.
+        env:
+          BINGSU_REQUIRE_NONROOT_TESTS: "1"
         run: |
           set -o pipefail
           cargo test -j 2 -p bingsu --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_execute_only_target_runs_path_only ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_execute_only_script_is_not_loaded ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test commands::exec_path::tests::nonroot_cases_run_for_a_user ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_refuses_after_deadline ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_runs_before_deadline ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_config_refuses_after_e ... ok' "$RUNNER_TEMP/relay-native.txt"
@@ -262,6 +268,27 @@ jobs:
           grep -Fx 'test commands::command_supervisor::tests::test_supervisor_approval_deadline_table ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test commands::command_supervisor::tests::test_no_grant_means_no_exec ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test commands::helper::grant_tests::grant_only_after_the_marker_is_installed ... ok' "$RUNNER_TEMP/relay-native.txt"
+      # The macOS relay (PR 10b): every relay::macos_tests case passes, none is skipped.
+      # 이것을 실패시키는 것: macOS 중계 시험을 ignored로 바꾸거나 이 단언을 빼는 것.
+      - name: Assert native macOS trusted relay passes
+        if: runner.os == 'macOS'
+        run: |
+          set -o pipefail
+          cargo test -j 2 -p bingsu --bin bingsu relay:: -- --test-threads=2 | tee "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_relay_runs_the_target_clean ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_relay_refuses_an_expired_frame ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_set_id_targets_are_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_execute_only_target_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_swap_before_the_name_check_is_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_link_on_the_way_is_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_deadline_passing_during_the_name_check_is_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_relay_never_opens_a_fifo ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_script_copy_runs_through_its_interpreter ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_script_copy_must_be_private ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_script_line_and_nesting_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_copy_swapped_before_the_exec_is_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::test_macos_target_on_a_volume_ignoring_owners_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test relay::macos_tests::mount_flags_decide_ownership ... ok' "$RUNNER_TEMP/relay-macos.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu-core --test collection_selection | tee "$RUNNER_TEMP/selection-native.txt"

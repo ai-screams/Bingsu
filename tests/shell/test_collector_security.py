@@ -276,7 +276,8 @@ LINUX_SECURITY_STEPS = {
     "Assert native Linux trusted relay passes",
 }
 MACOS_SECURITY_STEPS = {"Assert native macOS M3b security passes",
-                        "Assert native macOS F1 collection passes"}
+                        "Assert native macOS F1 collection passes",
+                        "Assert native macOS trusted relay passes"}
 
 
 def security_steps(text):

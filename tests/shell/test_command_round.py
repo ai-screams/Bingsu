@@ -383,7 +383,7 @@ def test_stdout_holder_does_not_block_prompt(tmp_path, _native_boot_required):
 
 # macOS에서도 단위마다 프로세스는 하나다: 감독의 자식은 단위 수와 같고 각각 이미 대상이며 자식이 없다. 그리고 회차
 # 로그에 relay가 없다는 거부가 없다. 이것을 실패시키는 것: macOS에서 prepare가 Skip::NoRelay를 내는 것(감독이 뜨지
-# 않음), relay가 대상을 자식으로 띄우는 것(감독의 자식이 bingsu).
+# 않음), relay가 대상을 자식으로 띄우는 것(감독의 자식이 bingsu), Scripts가 스크립트 없는 회차에도 폴더를 여는 것.
 @macos_only
 def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
@@ -408,6 +408,8 @@ def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_r
         assert children(k) == [], "a target has a child of its own"
     session.wait_quiet()
     assert b"no trusted relay" not in session.log(), session.log()
+    # The scripts folder is made at a round's first script only.
+    assert not scripts_folder(session).exists()
 
 
 def alive_pid(pidfile):
@@ -504,9 +506,7 @@ def test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep(tmp_path, _nat
             pass
     assert until(lambda: gone(supervisor), timeout=3.0)
     session.wait_quiet()
-    session.put(config(["/usr/bin/true"]))
-    session.prompt()
-    session.wait_quiet()
+    # The next script round of the session sweeps; its own copy goes at its end.
     session.prompt()
     session.wait_quiet()
     assert [f.name for f in folder.iterdir()] == [other.name]

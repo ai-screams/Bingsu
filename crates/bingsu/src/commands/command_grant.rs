@@ -119,33 +119,55 @@ pub(crate) struct Round {
 /// the relay makes, so this holds nothing there. macOS runs the helper's
 /// private copy (C2 ruling Q1): made after the marker from the descriptor
 /// the checks ran on, named after the session, removed once the
-/// supervisor has ended, or by a later round of the same session.
+/// supervisor has ended, or by a later round of the same session. The
+/// `scripts` folder is opened (and swept) at the round's first script.
 #[derive(Default)]
 struct Scripts {
     #[cfg(target_os = "macos")]
-    copies: Option<exec_path::ScriptCopies>,
+    runtime: Option<File>,
+    #[cfg(target_os = "macos")]
+    me: u32,
     #[cfg(target_os = "macos")]
     tag: String,
+    /// `None` until the first script; then the folder, if it passed.
+    #[cfg(target_os = "macos")]
+    copies: Option<Option<exec_path::ScriptCopies>>,
     #[cfg(target_os = "macos")]
     made: Vec<std::path::PathBuf>,
 }
 
 impl Scripts {
-    /// macOS: the `scripts` folder of the runtime root, after the copies an
-    /// earlier round of this session left were swept. Only the holder of
-    /// the session lock calls it. A folder that fails its checks leaves
-    /// scripts unresolved; other units still run.
+    /// macOS: the round's script copies in the runtime root. Only the
+    /// holder of the session lock makes one.
     #[cfg(target_os = "macos")]
-    fn open(runtime: &File, me: u32, tag: String) -> Self {
-        let copies = exec_path::ScriptCopies::open(runtime.as_fd(), me).ok();
-        if let Some(c) = &copies {
-            c.sweep(&tag);
-        }
+    fn new(runtime: &File, me: u32, tag: String) -> Self {
         Self {
-            copies,
+            runtime: runtime.try_clone().ok(),
+            me,
             tag,
+            copies: None,
             made: Vec::new(),
         }
+    }
+
+    /// macOS: the `scripts` folder, opened at the first call after the
+    /// copies an earlier round of this session left were swept. A folder
+    /// that fails its checks leaves scripts unresolved; other units run.
+    /// Fails without the laziness: test_macos_unit_is_one_process_the_relay_execs_into
+    /// (a round without scripts makes no folder).
+    #[cfg(target_os = "macos")]
+    fn copies(&mut self) -> Option<&exec_path::ScriptCopies> {
+        if self.copies.is_none() {
+            let opened = self
+                .runtime
+                .as_ref()
+                .and_then(|r| exec_path::ScriptCopies::open(r.as_fd(), self.me).ok());
+            if let Some(c) = &opened {
+                c.sweep(&self.tag);
+            }
+            self.copies = Some(opened);
+        }
+        self.copies.as_ref()?.as_ref()
     }
 
     /// The executable the relay runs for `found` and its pin: the file
@@ -158,7 +180,8 @@ impl Scripts {
     ) -> Option<(Vec<u8>, Option<bingsu_core::command::path::ExecPin>)> {
         #[cfg(target_os = "macos")]
         if found.interpreter.is_some() {
-            let copy = self.copies.as_ref()?.copy(checked, &self.tag).ok()?;
+            let tag = self.tag.clone();
+            let copy = self.copies()?.copy(checked, &tag).ok()?;
             self.made.push(copy.clone());
             return Some((copy.into_os_string().into_encoded_bytes(), None));
         }
@@ -176,7 +199,7 @@ impl Scripts {
     /// The copy `executable` just made, for a unit left out after all.
     fn forget_last(&mut self, executable: &[u8]) {
         #[cfg(target_os = "macos")]
-        if let (Some(c), Some(last)) = (&self.copies, self.made.last())
+        if let (Some(Some(c)), Some(last)) = (&self.copies, self.made.last())
             && last.as_os_str().as_encoded_bytes() == executable
         {
             c.remove(last);
@@ -188,7 +211,7 @@ impl Scripts {
     /// Removes every copy this round made.
     fn remove_all(self) {
         #[cfg(target_os = "macos")]
-        if let Some(c) = &self.copies {
+        if let Some(Some(c)) = &self.copies {
             for copy in &self.made {
                 c.remove(copy);
             }
@@ -252,7 +275,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     // flag, so no test removes this call and fails; `nofollow_any` itself
     // is tested (nofollow_any_probe_decides).
     #[cfg(target_os = "macos")]
-    if !nofollow_any(probe_nofollow_any()) {
+    if !nofollow_any(probe_nofollow_any(c"/"), probe_nofollow_any(c"/var/empty")) {
         return Err(Skip::NoNofollowAny);
     }
     let body = i
@@ -268,7 +291,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             _ => Skip::Failed,
         })?;
     #[cfg(target_os = "macos")]
-    let scripts = Scripts::open(i.runtime, i.me, session_tag(session));
+    let scripts = Scripts::new(i.runtime, i.me, session_tag(session));
     #[cfg(not(target_os = "macos"))]
     let scripts = Scripts::default();
     let mut runnable = runnable;
@@ -333,17 +356,17 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     })
 }
 
-/// The behavior probe for `AT_SYMLINK_NOFOLLOW_ANY` on "/": the result of
-/// `fstatat` (0 or its errno).
+/// The behavior probe for `AT_SYMLINK_NOFOLLOW_ANY` on `path`: the result
+/// of `fstatat` (0 or its errno).
 #[cfg(target_os = "macos")]
-fn probe_nofollow_any() -> i32 {
+fn probe_nofollow_any(path: &std::ffi::CStr) -> i32 {
     // SAFETY: an all-zero stat is a valid out-parameter value.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fixed NUL-terminated path, writable `st`.
     let rc = unsafe {
         libc::fstatat(
             libc::AT_FDCWD,
-            c"/".as_ptr(),
+            path.as_ptr(),
             &mut st,
             sys::AT_SYMLINK_NOFOLLOW_ANY,
         )
@@ -355,11 +378,13 @@ fn probe_nofollow_any() -> i32 {
     }
 }
 
-/// Whether the probe says the flag works. Only an answer of 0 does: EINVAL
-/// is a macOS without it, and any other error is no answer either.
+/// Whether the probes say the flag works both ways: "/" (no symlink) is
+/// found, and `/var/empty` (through the `/var -> private/var` link) is
+/// refused with ELOOP. EINVAL is a macOS without the flag; a flag that is
+/// accepted but not enforced passes "/" and fails the link.
 #[cfg(target_os = "macos")]
-fn nofollow_any(probe: i32) -> bool {
-    probe == 0
+fn nofollow_any(root: i32, link: i32) -> bool {
+    root == 0 && link == libc::ELOOP
 }
 
 /// The grant's units and what was left out.
@@ -576,7 +601,8 @@ impl Round {
             ..
         } = self;
         drop(grant_pipe);
-        // Fails without the check: a script copy removed under a live supervisor (copies_wait_for_the_supervisor).
+        // Fails without the check: test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep
+        // (a copy removed under a live supervisor).
         if wait(&mut child, deadline) {
             scripts.remove_all();
         }
@@ -747,19 +773,19 @@ mod tests {
         SystemGroups::new(&sys::passwd_entry(sys::current_uid()).unwrap().name)
     }
 
-    // C2 판정 Q3: 탐침이 0일 때만 relay를 쓴다(EINVAL은 그 플래그가 없는 macOS, 다른 오류도 답이 아님). 이 Mac의
-    // 탐침 결과도 기록한다. 이것을 실패시키는 것: nofollow_any를 늘 참으로 하거나 EINVAL만 거부로 보는 것.
+    // C2 판정 Q3: "/"는 0, 링크를 지나는 "/var/empty"는 ELOOP일 때만 relay를 쓴다(EINVAL은 그 플래그가 없는
+    // macOS, 받기만 하고 지키지 않는 플래그는 링크 쪽에서 걸림). 이 Mac의 탐침 결과도 기록한다. 이것을 실패시키는
+    // 것: nofollow_any의 두 조건 가운데 하나를 지우는 것.
     #[cfg(target_os = "macos")]
     #[test]
     fn nofollow_any_probe_decides() {
-        assert!(nofollow_any(0));
-        assert!(!nofollow_any(libc::EINVAL));
-        assert!(!nofollow_any(libc::EPERM));
-        eprintln!(
-            "AT_SYMLINK_NOFOLLOW_ANY probe on this host: {}",
-            probe_nofollow_any()
-        );
-        assert_eq!(probe_nofollow_any(), 0, "this macOS runs no command round");
+        assert!(nofollow_any(0, libc::ELOOP));
+        assert!(!nofollow_any(libc::EINVAL, libc::EINVAL));
+        assert!(!nofollow_any(0, 0));
+        assert!(!nofollow_any(libc::EPERM, libc::ELOOP));
+        let (root, link) = (probe_nofollow_any(c"/"), probe_nofollow_any(c"/var/empty"));
+        eprintln!("AT_SYMLINK_NOFOLLOW_ANY probe on this host: / {root}, /var/empty {link}");
+        assert!(nofollow_any(root, link), "this macOS runs no command round");
     }
 
     #[cfg(target_os = "macos")]
@@ -786,7 +812,7 @@ mod tests {
             .unwrap();
         let me = sys::current_uid();
         let mut g = groups();
-        let mut scripts = Scripts::open(&root, me, "abcd".to_owned());
+        let mut scripts = Scripts::new(&root, me, "abcd".to_owned());
         let (found, checked) = exec_path::resolve_open(&tool, None, me, &mut g).unwrap();
         let (exe, pin) = scripts.executable(&found, &checked).unwrap();
         let exe = std::path::PathBuf::from(OsStr::from_bytes(&exe));
