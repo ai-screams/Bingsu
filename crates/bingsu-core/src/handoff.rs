@@ -234,8 +234,9 @@ pub struct Interpreter {
     pub pin: Option<ExecPin>,
 }
 /// CRC over everything but the CRC itself (reserved bytes and pins included).
-fn exec_crc(h: &[u8], body: &[u8]) -> [u8; 4] {
-    crc32c(&[EXEC_DOMAIN, &h[..24], &h[28..EXEC_HEADER], body])
+fn exec_crc(h: &[u8], body: [&[u8]; 3]) -> [u8; 4] {
+    let [a, b, c] = body;
+    crc32c(&[EXEC_DOMAIN, &h[..24], &h[28..EXEC_HEADER], a, b, c])
 }
 fn le16(b: &[u8], at: usize) -> usize {
     usize::from(u16::from_le_bytes([b[at], b[at + 1]]))
@@ -273,11 +274,12 @@ impl ExecFrame {
         h[INTERPRETER_PIN..LENGTHS].copy_from_slice(&ExecPin::to_bytes(pin));
         h[LENGTHS..LENGTHS + 2].copy_from_slice(&line_len.to_le_bytes());
         h[LENGTHS + 2..LENGTHS + 4].copy_from_slice(&path_len.to_le_bytes());
-        let body = [line, path, &self.environment].concat();
-        let crc = exec_crc(&h, &body);
+        let crc = exec_crc(&h, [line, path, &self.environment]);
         h[24..28].copy_from_slice(&crc);
         out.extend_from_slice(&h);
-        out.extend_from_slice(&body);
+        out.extend_from_slice(line);
+        out.extend_from_slice(path);
+        out.extend_from_slice(&self.environment);
         Ok(())
     }
     fn decode(b: &[u8]) -> Result<Self, FrameError> {
@@ -304,7 +306,7 @@ impl ExecFrame {
         if b[11] != 0 || b[28..32] != [0; 4] || b[LENGTHS + 4..EXEC_HEADER] != [0; 4] {
             return Err(FrameError::Flags);
         }
-        if exec_crc(b, body) != b[24..28] {
+        if exec_crc(b, [body, &[], &[]]) != b[24..28] {
             return Err(FrameError::Checksum);
         }
         let mut deadline = [0u8; 8];
@@ -336,9 +338,14 @@ impl ExecFrame {
 /// Everything the relay reads from fd 3: permit, then exec frame. Refused
 /// above `cap` bytes so the whole input fits one write into an empty pipe.
 pub fn relay_input(permit: Permit, frame: &ExecFrame, cap: usize) -> Result<Vec<u8>, FrameError> {
+    let interpreter = frame
+        .interpreter
+        .as_ref()
+        .map_or(0, |i| i.line.len().saturating_add(i.path.len()));
     let total = 96usize
         .checked_add(EXEC_HEADER)
         .and_then(|n| n.checked_add(frame.environment.len()))
+        .and_then(|n| n.checked_add(interpreter))
         .ok_or(FrameError::Limit)?;
     if total > cap {
         return Err(FrameError::Limit);
@@ -503,19 +510,24 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: relay_input의 `total > cap` 검사를 지우거나 read_relay_input의 cap 검사를
-    // 지우는 것.
+    // 지우는 것, total에서 인터프리터 줄·경로 길이를 빼는 것(cap을 넘는 프레임을 만든다).
     #[test]
     fn relay_input_cap() {
-        let f = frame(Origin::Config);
-        let exact = 96 + EXEC_HEADER + f.environment.len();
-        let b = relay_input(permit(30), &f, exact).unwrap();
-        assert_eq!(b.len(), exact);
-        assert_eq!(read_relay_input(&b, exact), Ok((permit(30), f.clone())));
-        assert_eq!(
-            relay_input(permit(30), &f, exact - 1),
-            Err(FrameError::Limit)
-        );
-        assert_eq!(read_relay_input(&b, exact - 1), Err(FrameError::Limit));
+        for f in [frame(Origin::Config), scripted(Some(pin()))] {
+            let line_path = f
+                .interpreter
+                .as_ref()
+                .map_or(0, |i| i.line.len() + i.path.len());
+            let exact = 96 + EXEC_HEADER + f.environment.len() + line_path;
+            let b = relay_input(permit(30), &f, exact).unwrap();
+            assert_eq!(b.len(), exact);
+            assert_eq!(read_relay_input(&b, exact), Ok((permit(30), f.clone())));
+            assert_eq!(
+                relay_input(permit(30), &f, exact - 1),
+                Err(FrameError::Limit)
+            );
+            assert_eq!(read_relay_input(&b, exact - 1), Err(FrameError::Limit));
+        }
     }
 
     // 이것을 실패시키는 것: ExecFrame::decode의 `body.len() < len` 검사를 지우는 것
@@ -548,7 +560,7 @@ mod tests {
             let mut b = relay_input(permit(30), &frame(Origin::Config), 16_384).unwrap();
             let f = &mut b[96..];
             f[at] = v;
-            let crc = exec_crc(f, &f[EXEC_HEADER..]);
+            let crc = exec_crc(f, [&f[EXEC_HEADER..], &[], &[]]);
             f[24..28].copy_from_slice(&crc);
             assert_eq!(read_relay_input(&b, 16_384), Err(e), "{at}");
         }
@@ -581,7 +593,7 @@ mod tests {
         let mut x = relay_input(permit(30), &f, 16_384).unwrap();
         let h = &mut x[96..];
         h[INTERPRETER_PIN - 1] = 1;
-        let crc = exec_crc(h, &h[EXEC_HEADER..]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&x, 16_384), Err(FrameError::Flags));
     }
@@ -622,7 +634,7 @@ mod tests {
         h[LENGTHS..LENGTHS + 2].copy_from_slice(&line.to_le_bytes());
         h[LENGTHS + 2..LENGTHS + 4].copy_from_slice(&path.to_le_bytes());
         h[INTERPRETER_PIN..LENGTHS].copy_from_slice(&ExecPin::to_bytes(pin));
-        let crc = exec_crc(h, &h[EXEC_HEADER..]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         b
     }
@@ -638,7 +650,7 @@ mod tests {
         let mut b = relay_input(permit(30), &scripted(None), 16_384).unwrap();
         let h = &mut b[96..];
         h[EXEC_HEADER - 1] = 1;
-        let crc = exec_crc(h, &h[EXEC_HEADER..]);
+        let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
         h[24..28].copy_from_slice(&crc);
         assert_eq!(read_relay_input(&b, 16_384), Err(FrameError::Flags));
     }
@@ -655,7 +667,7 @@ mod tests {
             let mut x = reshaped(b.clone(), line, path, None);
             let h = &mut x[96..];
             h[12..16].copy_from_slice(&u32::try_from(environment - 2).unwrap().to_le_bytes());
-            let crc = exec_crc(h, &h[EXEC_HEADER..]);
+            let crc = exec_crc(h, [&h[EXEC_HEADER..], &[], &[]]);
             h[24..28].copy_from_slice(&crc);
             assert_eq!(
                 read_relay_input(&x, 16_384),
