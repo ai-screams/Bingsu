@@ -28,6 +28,15 @@ pub(crate) mod collector_process;
 #[allow(unsafe_code)]
 pub(crate) mod collector_supervisor;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod command_grant;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod command_process;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod command_supervisor;
+#[cfg(unix)]
 mod config;
 #[cfg(unix)]
 mod config_inspect;
@@ -93,6 +102,8 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         Some(bingsu_core::handoff::ENTRY) => crate::relay::run(&a.args),
         #[cfg(unix)]
         Some("__refresh-v1") => helper::run(&a.argv0, &a.args[1..]),
+        #[cfg(unix)]
+        Some(command_supervisor::ENTRY) => command_supervisor::run(&a.argv0),
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]

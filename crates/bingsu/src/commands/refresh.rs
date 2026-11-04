@@ -143,11 +143,14 @@ pub fn refresh_broker(
     refresh_with_broker(request, clock, &mut |_| {}, broker)
 }
 // The broker may start supervision here but must return without joining it.
-// All snapshot/source owners are released before refresh_broker returns.
+// All snapshot/source owners are released before refresh_broker returns. It
+// gets the marker this round stages, which is installed only if
+// refresh_broker returns Published, Revalidated or Invalid.
 type Broker<'a> = dyn FnMut(
         &CheckedContextFd,
         Option<(&bingsu_core::config::compile::CompiledConfig, Identity)>,
         Clock,
+        &Marker,
     ) -> Result<(), StoreError>
     + 'a;
 fn refresh_with(
@@ -155,7 +158,7 @@ fn refresh_with(
     clock: &mut dyn ClockSource,
     hook: &mut dyn FnMut(Checkpoint),
 ) -> RefreshResult {
-    refresh_with_broker(request, clock, hook, &mut |_, _, _| Ok(()))
+    refresh_with_broker(request, clock, hook, &mut |_, _, _, _| Ok(()))
 }
 fn refresh_with_broker(
     request: RefreshRequest,
@@ -415,7 +418,7 @@ fn run(
             .or(fallback.as_ref())
             .map(|s| (&s.config, s.id))
     };
-    broker(&root, display, b.check(clock)?)?;
+    broker(&root, display, b.check(clock)?, &marker)?;
     b.check(clock)?;
     // Contention now is Incomplete: a sequence reservation may already exist.
     // Reacquire in the same context -> selection order through marker+renew.

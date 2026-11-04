@@ -1286,7 +1286,7 @@ fn verified_screen_child() {
     let result = refresh::refresh_broker(
         refresh_request.clone(),
         &mut FixedClock(observed),
-        &mut |_, display, clock| {
+        &mut |_, display, clock, _| {
             let verified_ns = collector_process::now_ns().unwrap();
             let selected = helper::selected_request(
                 &collection::selection::PRODUCT,
