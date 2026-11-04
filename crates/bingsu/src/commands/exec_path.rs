@@ -1060,9 +1060,21 @@ mod tests {
     /// Runs one `#[ignore]` child test of this module in a fresh process
     /// (it changes process-wide state: umask, file size limit).
     #[cfg(target_os = "macos")]
-    fn run_child(name: &str) {
+    /// `hard_fsize`: a finite soft and hard file size limit (512-byte blocks) the
+    /// child inherits, set by `/bin/sh` before it execs the child.
+    fn run_child(name: &str, hard_fsize: Option<u32>) {
         let _serial = sys::test_inherited_fd_lock();
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let exe = std::env::current_exe().unwrap();
+        let mut cmd = match hard_fsize {
+            None => std::process::Command::new(&exe),
+            Some(blocks) => {
+                let mut sh = std::process::Command::new("/bin/sh");
+                sh.args(["-c", &format!("ulimit -f {blocks} && exec \"$0\" \"$@\"")])
+                    .arg(&exe);
+                sh
+            }
+        };
+        let out = cmd
             .args([
                 "--ignored",
                 "--exact",
@@ -1114,7 +1126,7 @@ mod tests {
     #[test]
     fn script_folder_made_under_a_tight_umask_is_0700() {
         let t = scratch("umask");
-        run_child("umask_child");
+        run_child("umask_child", None);
         assert_eq!(mode_of(&t.join("scripts")), 0o700);
         std::fs::remove_dir_all(&t).unwrap();
     }
@@ -1211,12 +1223,14 @@ mod tests {
     }
 
     // 쓰기가 중간에 실패하면 짧은 복사본을 남기지 않는다. 자식에서 파일 크기 상한(RLIMIT_FSIZE)을 16바이트로
-    // 두어 쓰기를 EFBIG로 실패시킨다. 이것을 실패시키는 것: copy의 쓰기 실패 분기에서 unlink_at을 지우는 것.
+    // 두어 쓰기를 EFBIG로 실패시킨다. 이것을 실패시키는 것: copy의 쓰기 실패 분기에서 unlink_at을 지우는 것,
+    // sys::test_limit_file_size가 물려받은 유한한 hard limit을 RLIM_INFINITY로 올리는 것(EPERM).
     #[cfg(target_os = "macos")]
     #[test]
     fn failed_copy_leaves_nothing() {
         let t = scratch("short-copy");
-        run_child("short_copy_child");
+        // A finite inherited hard limit: the helper must lower only the soft one.
+        run_child("short_copy_child", Some(4096));
         assert_eq!(std::fs::read_dir(t.join("scripts")).unwrap().count(), 0);
         std::fs::remove_dir_all(&t).unwrap();
     }

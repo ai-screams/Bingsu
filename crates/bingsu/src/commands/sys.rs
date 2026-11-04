@@ -56,10 +56,17 @@ pub fn test_umask(mask: libc::mode_t) {
 /// only).
 #[cfg(all(test, target_os = "macos"))]
 pub fn test_limit_file_size(bytes: libc::rlim_t) {
-    let limit = libc::rlimit {
-        rlim_cur: bytes,
-        rlim_max: libc::RLIM_INFINITY,
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
     };
+    // SAFETY: valid writable rlimit pointer for the current process.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) },
+        0
+    );
+    // Only the soft limit moves: raising an inherited hard limit is EPERM.
+    limit.rlim_cur = bytes.min(limit.rlim_max);
     // SAFETY: SIG_IGN is a valid disposition; nothing else handles SIGXFSZ.
     unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
     // SAFETY: valid rlimit pointer for the current process.
