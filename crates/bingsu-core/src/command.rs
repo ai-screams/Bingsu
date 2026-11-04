@@ -5,6 +5,7 @@ pub mod deadline;
 pub mod env_frame;
 pub mod grant;
 pub mod path;
+pub mod plan;
 pub mod wire;
 
 /// Why a command frame was refused. Errors never produce reply bytes.

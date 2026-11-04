@@ -1,0 +1,431 @@
+//! The helper's side of one round: which config units may go into the grant
+//! and in what form, the shell environment the prompt handed over, the target
+//! environment built from it, `{dir}` in argv, the units chosen this round
+//! and whether a result frame names a place in the grant. Pure; the helper
+//! and the supervisor do the I/O.
+use super::{
+    grant::{KEEP, KEEP_PREFIX},
+    wire::{Grant, Outcome, Policy},
+};
+use crate::{
+    config::compile::{ExecPolicy, ExecUnit},
+    handoff::{Cwd, Origin},
+};
+use alloc::vec::Vec;
+
+/// Config units spawned in one round (U-9d).
+pub const CONFIG_MAX: usize = 8;
+/// Builtin probes spawned in one round (U-9d): the four languages.
+pub const PROBE_MAX: usize = 4;
+/// Longest run of one unit (U-9d, 1,000 ms); a longer `timeout` is cut to it.
+pub const TIMEOUT_MAX: u64 = 1_000_000_000;
+/// `timeout` when the config sets none (spec: 200 ms).
+pub const TIMEOUT_DEFAULT: u64 = 200_000_000;
+/// The one placeholder M6 replaces, as one whole argv word.
+pub const DIR: &[u8] = b"{dir}";
+
+/// A config unit in its grant form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Runnable {
+    pub policy: Policy,
+    pub cwd: Cwd,
+    /// Nanoseconds, as configured (the supervisor cuts it to `TIMEOUT_MAX`).
+    pub timeout: u64,
+    pub env_allow: Vec<Vec<u8>>,
+}
+
+/// The grant form of a compiled unit, or `None` when it must not run: a
+/// `not_run` reason (unreachable band, untrusted file, disabled), no grant
+/// policy (plain `shell`, language unit), or a `cwd` value outside the two.
+pub fn runnable(u: &ExecUnit) -> Option<Runnable> {
+    if u.not_run.is_some() {
+        return None;
+    }
+    let policy = Policy::from_config(&u.policy)?;
+    let ExecPolicy::Command { cwd, env_allow, .. } = &u.policy else {
+        return None;
+    };
+    let cwd = match cwd.as_deref() {
+        None | Some("neutral") => Cwd::Neutral,
+        Some("untrusted-current") => Cwd::UntrustedCurrent,
+        Some(_) => return None,
+    };
+    let timeout = match u.timeout_ms {
+        None => TIMEOUT_DEFAULT,
+        Some(ms) => ms.checked_mul(1_000_000)?,
+    };
+    Some(Runnable {
+        policy,
+        cwd,
+        timeout,
+        env_allow: env_allow.iter().map(|n| n.as_bytes().to_vec()).collect(),
+    })
+}
+
+/// What `Environ::parse` left out, for the helper's log line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dropped {
+    /// Entries without `=`, with an empty name, empty, or not ended by NUL.
+    pub malformed: usize,
+    /// Names that appeared more than once; every copy is left out.
+    pub duplicate: usize,
+}
+
+/// The shell environment as the prompt passed it (`NAME=VALUE\0` entries,
+/// `env_frame` body), sorted by name. A name given twice is dropped as a
+/// whole: which copy a program reads depends on how it searches its
+/// environment, so neither is passed on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Environ<'a> {
+    entries: Vec<(&'a [u8], &'a [u8])>,
+    pub dropped: Dropped,
+}
+
+impl<'a> Environ<'a> {
+    pub fn parse(body: &'a [u8]) -> Self {
+        let mut dropped = Dropped::default();
+        let mut found = Vec::new();
+        let mut rest = body;
+        while let Some(end) = rest.iter().position(|&b| b == 0) {
+            let entry = &rest[..end];
+            rest = &rest[end + 1..];
+            match entry.iter().position(|&b| b == b'=') {
+                Some(eq) if eq > 0 => found.push((&entry[..eq], &entry[eq + 1..])),
+                _ => dropped.malformed += 1,
+            }
+        }
+        // The prompt ends every entry with NUL; a tail without one is not an entry.
+        if !rest.is_empty() {
+            dropped.malformed += 1;
+        }
+        found.sort_by(|a, b| a.0.cmp(b.0));
+        let mut entries = Vec::with_capacity(found.len());
+        let mut i = 0;
+        while i < found.len() {
+            let same = found[i..].iter().take_while(|e| e.0 == found[i].0).count();
+            if same == 1 {
+                entries.push(found[i]);
+            } else {
+                dropped.duplicate += 1;
+            }
+            i += same;
+        }
+        Self { entries, dropped }
+    }
+
+    pub fn get(&self, name: &[u8]) -> Option<&'a [u8]> {
+        self.entries
+            .binary_search_by(|e| e.0.cmp(name))
+            .ok()
+            .map(|i| self.entries[i].1)
+    }
+}
+
+/// The target environment of a config unit: the keep list (`PATH` is the
+/// sanitized value, never the shell's), every `LC_*`, then the unit's
+/// `env_allow` names, each at most once and only when the shell had it. An
+/// empty sanitized `PATH` leaves `PATH` out: `PATH=` would be one empty
+/// entry, which a search reads as the working folder.
+pub fn target_environment(vars: &Environ<'_>, env_allow: &[Vec<u8>], path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut push = |name: &[u8], value: &[u8]| {
+        out.extend_from_slice(name);
+        out.push(b'=');
+        out.extend_from_slice(value);
+        out.push(0);
+    };
+    for name in KEEP.iter().filter(|n| **n != b"PATH") {
+        if let Some(v) = vars.get(name) {
+            push(name, v);
+        }
+    }
+    for (name, value) in vars.entries.iter().filter(|e| e.0.starts_with(KEEP_PREFIX)) {
+        push(name, value);
+    }
+    for (i, name) in env_allow.iter().enumerate() {
+        let kept = KEEP.contains(&name.as_slice()) || name.starts_with(KEEP_PREFIX);
+        if kept || env_allow[..i].contains(name) {
+            continue;
+        }
+        if let Some(v) = vars.get(name) {
+            push(name, v);
+        }
+    }
+    if !path.is_empty() {
+        push(b"PATH", path);
+    }
+    out
+}
+
+/// `argv` with every word that is exactly `{dir}` replaced by `dir`. Only a
+/// whole word is replaced, so a value with spaces, quotes or a newline stays
+/// one argv element (config check refuses `{dir}` inside a word).
+pub fn with_dir(argv: &[Vec<u8>], dir: &[u8]) -> Vec<Vec<u8>> {
+    argv.iter()
+        .map(|w| if w == DIR { dir.to_vec() } else { w.clone() })
+        .collect()
+}
+
+/// Indices of the units to run this round, at most `cap`: never tried
+/// first, then the oldest last attempt, then by id. N units are each tried
+/// within ⌈N / cap⌉ rounds.
+pub fn pick(units: &[(&str, Option<u64>)], cap: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..units.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ia, ta) = units[a];
+        let (ib, tb) = units[b];
+        ta.cmp(&tb).then(ia.cmp(ib))
+    });
+    order.truncate(cap);
+    order
+}
+
+/// Whether a result names a place in the grant's list for its origin and
+/// does not end before it was approved.
+pub fn result_fits(grant: &Grant, o: &Outcome) -> bool {
+    let len = match o.origin {
+        Origin::Config => grant.units.len(),
+        Origin::Builtin => grant.probes.len(),
+    };
+    usize::from(o.index) < len && o.approved_at <= o.ended_at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        command::{
+            grant::{Refusal, target_environment_allowed},
+            wire::{Probe, Reason, Unit, policy_digest},
+        },
+        config::compile::NotRun,
+        handoff::Permit,
+    };
+    use alloc::{string::String, vec};
+
+    fn unit(policy: ExecPolicy) -> ExecUnit {
+        ExecUnit {
+            id: "custom/k".into(),
+            policy,
+            timeout_ms: None,
+            cache_ms: None,
+            origins: Vec::new(),
+            approved_by: Vec::new(),
+            shown_at: Vec::new(),
+            not_run: None,
+        }
+    }
+    fn command(argv: &[&str], cwd: Option<&str>) -> ExecPolicy {
+        ExecPolicy::Command {
+            argv: argv.iter().map(|w| String::from(*w)).collect(),
+            cwd: cwd.map(String::from),
+            env_allow: vec!["KUBECONFIG".into()],
+            shell: None,
+            unsafe_shell: false,
+        }
+    }
+
+    // 이것을 실패시키는 것: runnable의 `not_run.is_some()` 거름을 지우는 것(도달할 수 없는 구간·믿을 수
+    // 없는 파일의 단위가 허가에 들어감).
+    #[test]
+    fn runnable_skips_not_run_units() {
+        let ok = unit(command(&["kubectl"], None));
+        assert!(runnable(&ok).is_some());
+        for reason in [
+            NotRun::Disabled,
+            NotRun::NotInTrustedLayout,
+            NotRun::UnknownBand,
+            NotRun::UnsafeFile {
+                key: "command".into(),
+            },
+        ] {
+            let mut u = ok.clone();
+            u.not_run = Some(reason);
+            assert_eq!(runnable(&u), None);
+        }
+    }
+
+    // 이것을 실패시키는 것: cwd 대응에서 `Some(_) => return None`을 Neutral로 바꾸는 것, 또는
+    // "untrusted-current"를 Neutral로 읽는 것. 기본 timeout 200 ms, 설정값은 ms → ns.
+    #[test]
+    fn runnable_maps_cwd_and_timeout() {
+        let r = runnable(&unit(command(&["k"], None))).unwrap();
+        assert_eq!((r.cwd, r.timeout), (Cwd::Neutral, TIMEOUT_DEFAULT));
+        assert_eq!(r.env_allow, vec![b"KUBECONFIG".to_vec()]);
+        let r = runnable(&unit(command(&["k"], Some("neutral")))).unwrap();
+        assert_eq!(r.cwd, Cwd::Neutral);
+        let r = runnable(&unit(command(&["k"], Some("untrusted-current")))).unwrap();
+        assert_eq!(r.cwd, Cwd::UntrustedCurrent);
+        assert_eq!(runnable(&unit(command(&["k"], Some("repo")))), None);
+        let mut u = unit(command(&["k"], None));
+        u.timeout_ms = Some(300);
+        assert_eq!(runnable(&u).unwrap().timeout, 300_000_000);
+        u.timeout_ms = Some(u64::MAX);
+        assert_eq!(runnable(&u), None);
+    }
+
+    // 이것을 실패시키는 것: Environ::parse에서 `=` 없는 항목이나 빈 이름(`=x`)을 받아들이는 것,
+    // NUL로 끝나지 않는 꼬리를 항목으로 읽는 것.
+    #[test]
+    fn environ_skips_malformed_entries() {
+        let e = Environ::parse(b"HOME=/h\0NOEQ\0\0=x\0TERM=xterm\0TAIL=1");
+        assert_eq!(e.get(b"HOME"), Some(&b"/h"[..]));
+        assert_eq!(e.get(b"TERM"), Some(&b"xterm"[..]));
+        assert_eq!(e.get(b"NOEQ"), None);
+        assert_eq!(e.get(b""), None);
+        assert_eq!(e.get(b"TAIL"), None);
+        assert_eq!(
+            e.dropped,
+            Dropped {
+                malformed: 4,
+                duplicate: 0
+            }
+        );
+        // A value may hold '=' and be empty.
+        let e = Environ::parse(b"A=b=c\0B=\0");
+        assert_eq!(e.get(b"A"), Some(&b"b=c"[..]));
+        assert_eq!(e.get(b"B"), Some(&b""[..]));
+    }
+
+    // 이것을 실패시키는 것: 중복 이름의 첫 사본이나 마지막 사본을 남기는 것(`same == 1` 조건을 지움),
+    // 떨어져 있는 같은 이름을 모으는 정렬을 지우는 것.
+    #[test]
+    fn environ_drops_every_copy_of_a_duplicate_name() {
+        let e = Environ::parse(b"PATH=/a\0HOME=/h\0PATH=/b\0");
+        assert_eq!(e.get(b"PATH"), None);
+        assert_eq!(e.get(b"HOME"), Some(&b"/h"[..]));
+        assert_eq!(
+            e.dropped,
+            Dropped {
+                malformed: 0,
+                duplicate: 1
+            }
+        );
+        let e = Environ::parse(b"X=1\0X=1\0X=2\0Y=3\0");
+        assert_eq!((e.get(b"X"), e.get(b"Y")), (None, Some(&b"3"[..])));
+    }
+
+    // 이것을 실패시키는 것: target_environment가 셸의 PATH를 넘기는 것(KEEP 훑기에서 PATH 제외를 지움),
+    // LC_* 접두 훑기를 지우는 것, env_allow 이름을 빼는 것, env_allow의 남기기 이름·중복을 다시 넣는 것
+    // (같은 이름 두 번이면 감독이 그 단위를 거부한다).
+    #[test]
+    fn target_environment_keeps_names_once() {
+        let vars = Environ::parse(
+            b"HOME=/h\0PATH=/repo/bin:/usr/bin\0LC_TIME=ko_KR.UTF-8\0KUBECONFIG=/k\0EDITOR=vi\0TERM=xterm\0",
+        );
+        let allow = vec![
+            b"KUBECONFIG".to_vec(),
+            b"HOME".to_vec(),
+            b"KUBECONFIG".to_vec(),
+            b"LC_TIME".to_vec(),
+            b"MISSING".to_vec(),
+        ];
+        let out = target_environment(&vars, &allow, b"/usr/bin");
+        assert_eq!(
+            out,
+            b"HOME=/h\0TERM=xterm\0LC_TIME=ko_KR.UTF-8\0KUBECONFIG=/k\0PATH=/usr/bin\0".to_vec()
+        );
+        assert!(target_environment_allowed(&out, &allow));
+    }
+
+    // 이것을 실패시키는 것: 정제한 PATH가 비었을 때도 `PATH=`를 넣는 것(빈 항목은 현재 폴더로 읽힘).
+    #[test]
+    fn empty_sanitized_path_is_left_out() {
+        let vars = Environ::parse(b"PATH=/repo/bin\0HOME=/h\0");
+        assert_eq!(target_environment(&vars, &[], b""), b"HOME=/h\0".to_vec());
+    }
+
+    // 수용 조건(A4): `{dir}` 값에 셸 문자·줄바꿈이 있어도 argv 원소 하나로 남는다. 이것을 실패시키는 것:
+    // with_dir가 값을 공백·줄바꿈으로 나누거나 단어 안의 `{dir}`도 바꾸는 것.
+    #[test]
+    fn dir_value_stays_one_word() {
+        let argv = vec![b"ls".to_vec(), DIR.to_vec(), b"x{dir}".to_vec()];
+        let dir = b"/tmp/a b;$(rm -rf ~)\n`id`|c";
+        let got = with_dir(&argv, dir);
+        assert_eq!(got, vec![b"ls".to_vec(), dir.to_vec(), b"x{dir}".to_vec()]);
+    }
+
+    // 이것을 실패시키는 것: pick의 시도 시각 정렬을 지우는 것(id 순만), id 동점 처리를 지우는 것,
+    // truncate(cap)를 지우는 것.
+    #[test]
+    fn pick_oldest_attempt_first() {
+        let units = [
+            ("a", Some(30)),
+            ("b", None),
+            ("c", Some(10)),
+            ("d", Some(10)),
+            ("e", None),
+        ];
+        assert_eq!(pick(&units, 3), vec![1, 4, 2]);
+        assert_eq!(pick(&units, 8), vec![1, 4, 2, 3, 0]);
+        // 12 units never tried, 8 a round: the 4 left over come first next round.
+        let ids: Vec<String> = (0..12).map(|i| alloc::format!("u{i:02}")).collect();
+        let first: Vec<(&str, Option<u64>)> = ids.iter().map(|i| (i.as_str(), None)).collect();
+        let round1 = pick(&first, CONFIG_MAX);
+        let second: Vec<(&str, Option<u64>)> = first
+            .iter()
+            .enumerate()
+            .map(|(i, u)| (u.0, round1.contains(&i).then_some(1)))
+            .collect();
+        let mut all = round1.clone();
+        all.extend(pick(&second, CONFIG_MAX).into_iter().take(4));
+        all.sort_unstable();
+        assert_eq!(all, (0..12).collect::<Vec<_>>());
+    }
+
+    fn grant() -> Grant {
+        let policy = Policy::Argv {
+            argv: vec![b"k".to_vec()],
+        };
+        Grant {
+            permit: Permit {
+                kind: 1,
+                deadline: 9,
+                boot: [1; 16],
+                resume: 0,
+                domain: [2; 16],
+            },
+            helper_deadline: 9,
+            units: vec![Unit {
+                id: "custom/k".into(),
+                digest: policy_digest(&policy, Cwd::Neutral, 1, &[]),
+                policy,
+                cwd: Cwd::Neutral,
+                environment: Vec::new(),
+                timeout: 1,
+                env_allow: Vec::new(),
+                executable: b"/usr/bin/k".to_vec(),
+                pin: None,
+            }],
+            probes: Vec::new(),
+        }
+    }
+    fn outcome(origin: Origin, index: u8, approved_at: u64, ended_at: u64) -> Outcome {
+        Outcome {
+            origin,
+            index,
+            reason: Reason::Refused(Refusal::Budget),
+            approved_at,
+            ended_at,
+            stdout: Vec::new(),
+        }
+    }
+
+    // 수용 조건(A3 L-5). 이것을 실패시키는 것: result_fits의 순번 검사를 지우는 것, origin별 목록 대신
+    // 두 목록 합을 보는 것, `approved_at <= ended_at`을 지우는 것.
+    #[test]
+    fn result_must_name_a_grant_place() {
+        let mut g = grant();
+        assert!(result_fits(&g, &outcome(Origin::Config, 0, 5, 5)));
+        assert!(!result_fits(&g, &outcome(Origin::Config, 1, 5, 6)));
+        assert!(!result_fits(&g, &outcome(Origin::Builtin, 0, 5, 6)));
+        assert!(!result_fits(&g, &outcome(Origin::Config, 0, 6, 5)));
+        g.probes.push(Probe {
+            profile: 1,
+            executable: b"/usr/bin/go".to_vec(),
+            pin: None,
+        });
+        assert!(result_fits(&g, &outcome(Origin::Builtin, 0, 5, 6)));
+        assert!(!result_fits(&g, &outcome(Origin::Config, 1, 5, 6)));
+    }
+}
