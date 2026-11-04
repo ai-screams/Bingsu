@@ -185,7 +185,6 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         // The command supervisor, like the collector, is spawned before the
         // helper's filter; its grant waits for the marker's installation.
         if let Some((config, _)) = display {
-            let cwd = e.pwd.as_deref().map(|p| Path::new(OsStr::from_bytes(p)));
             let inputs = command_grant::Inputs {
                 config,
                 session: e.session.as_deref(),
@@ -193,9 +192,6 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 environment: &command_env,
                 runtime: &context.runtime,
                 runtime_path: &runtime_path,
-                // Until the repository root has a source (C2 ruling J9), the
-                // shell's own folder is excluded from PATH and executables.
-                repo: super::exec_path::repo_id(cwd).ok().flatten(),
                 exe,
                 me: sys::current_uid(),
                 helper_deadline: _watchdog.expires_ns(),

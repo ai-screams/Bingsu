@@ -50,9 +50,6 @@ pub(crate) struct Inputs<'a> {
     pub environment: &'a Result<Vec<u8>, NoEnv>,
     pub runtime: &'a File,
     pub runtime_path: &'a Path,
-    /// The repository root the shell is in, by identity, for the `PATH` and
-    /// executable rules; `None` only when the shell is known to be in none.
-    pub repo: Option<bingsu_core::command::path::Id>,
     pub exe: &'a OsStr,
     pub me: u32,
     pub helper_deadline: u64,
@@ -159,8 +156,13 @@ pub(crate) fn prepare(i: &Inputs<'_>, groups: &mut SystemGroups) -> Result<Round
             _ => Skip::Failed,
         })?;
     neutral(i.runtime, i.me).map_err(|_| Skip::Failed)?;
+    // The repository the shell is in, by identity, for the PATH and
+    // executable rules. Until it has a source (C2 ruling J9) the shell's own
+    // folder stands for it; a folder that cannot be read refuses the round.
+    let repo =
+        exec_path::repo_id(Some(Path::new(OsStr::from_bytes(pwd)))).map_err(|_| Skip::Failed)?;
     let vars = Environ::parse(body);
-    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), i.repo, i.me, groups);
+    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, i.me, groups);
     let path = exec_path::path_value(&folders);
     let attempts: Vec<(&str, Option<u64>)> = runnable.iter().map(|(id, _)| (*id, None)).collect();
     let mut units = Vec::new();
@@ -171,7 +173,7 @@ pub(crate) fn prepare(i: &Inputs<'_>, groups: &mut SystemGroups) -> Result<Round
             Policy::Argv { argv } => argv[0].as_slice(),
             Policy::UnsafeShell { .. } => SHELL,
         };
-        let Ok(found) = exec_path::lookup(word, &folders, i.repo, i.me, groups) else {
+        let Ok(found) = exec_path::lookup(word, &folders, repo, i.me, groups) else {
             unresolved += 1;
             continue;
         };
@@ -359,5 +361,57 @@ impl Round {
 fn wait(child: &mut OwnedChild, deadline: u64) {
     while matches!(child.reap(), Ok(false)) && now_ns().is_ok_and(|now| now < deadline) {
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bingsu_core::snapshot::Identity;
+
+    // 무효 표식 회차의 permit은 deadline 0이라 설정 단위가 모두 거부된다(내장 조사만). 이것을 실패시키는
+    // 것: permit()의 `marker.invalid` 분기를 지우는 것, T를 더하지 않는 것.
+    #[test]
+    fn permit_follows_the_installed_marker() {
+        let marker = Marker {
+            id: Identity {
+                boot: [7; 16],
+                epoch: [0; 16],
+                context: [0; 4],
+                generation: 3,
+                source: [0; 4],
+            },
+            seq: 1,
+            verified_at: 1_000,
+            kind: 1,
+            domain: [9; 16],
+            resume: 2,
+            invalid: false,
+        };
+        assert_eq!(
+            permit(&marker),
+            Permit {
+                kind: 1,
+                deadline: 1_000 + T_NS,
+                boot: [7; 16],
+                resume: 2,
+                domain: [9; 16],
+            }
+        );
+        let invalid = Marker {
+            invalid: true,
+            ..marker
+        };
+        assert_eq!(permit(&invalid).deadline, 0);
+    }
+
+    // 파일 이름에는 세션 값이 아니라 고정 길이 요약값만. 이것을 실패시키는 것: lock_name이 세션 값을
+    // 그대로 쓰는 것.
+    #[test]
+    fn lock_name_is_a_digest() {
+        let name = lock_name(b"0123456789abcdef0123456789abcdef");
+        assert_eq!(name.len(), "command-".len() + 32 + ".lock".len());
+        assert!(!name.contains("0123456789abcdef"));
+        assert_ne!(name, lock_name(b"fedcba9876543210fedcba9876543210"));
     }
 }
