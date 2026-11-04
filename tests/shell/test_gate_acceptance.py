@@ -1038,6 +1038,14 @@ PTY_VERSIONS = {"min-u22": {"bash=5.1", "zsh=5.8"}, "min-d12": {"fish=3.6"}, "cu
 # finds the place that runs the other two.
 PTY_IGNORED = {"tests/shell/test_collector_no_spawn_macos.py", "tests/shell/test_collector_security.py",
                "tests/shell/test_gate_acceptance.py", "tests/shell/test_prompt_trace_budget.py"}
+# Files only the Linux PTY runs leave out: the command rounds need git, which the minimum images
+# lack, and run in the filter-calls release step that assert_command_round_home pins. macOS keeps
+# running the file for its no-relay test.
+LINUX_PTY_IGNORED = {"tests/shell/test_command_round.py"}
+COMMAND_ROUND_FILE = "tests/shell/test_command_round.py"
+COMMAND_ROUND_STEP = "      - name: Command rounds run through the supervisor (release)\n        if: matrix.profile == 'release'\n"
+# Tests of the file that the non-root release cell does not select: the macOS no-relay test.
+COMMAND_ROUND_ELSEWHERE = {"test_macos_runs_no_command_without_a_relay"}
 # Exact pytest arguments of a PTY run, apart from PTY_IGNORED. A test leaves these runs
 # only by changing this list.
 PTY_PYTEST = ("tests/shell", "tests/golden/record/test_overrides.py", "tests/golden/record/test_mixed_versions.py",
@@ -1136,6 +1144,22 @@ def assert_macos_jobs_match(text):
     assert want.rstrip() == job_block(text, "shell-macos-shells").rstrip(), "macOS jobs differ"
 
 
+def assert_command_round_home(text):
+    # 이것을 실패시키는 것: 단계를 빼거나 debug 칸으로 옮기는 것, 파일의 시험 하나를 선택이나 PASSED 단언에서 빼는 것,
+    # pipefail을 빼는 것.
+    block = job_block(text, "filter-calls")
+    assert block.count(COMMAND_ROUND_STEP) == 1, "command round step"
+    step = block.split(COMMAND_ROUND_STEP)[1].split("\n      - ")[0]
+    assert "set -o pipefail" in step
+    run, = (line for line in step.splitlines() if " -m pytest " in line)
+    selected = {arg for arg in shlex.split(run) if arg.startswith(COMMAND_ROUND_FILE + "::")}
+    passed = set(re.findall(r"grep -Fx 'PASSED (\S+)' ", step))
+    assert selected and selected == passed, sorted(selected ^ passed)
+    names = set(re.findall(r"(?m)^def (test_\w+)\(", (ROOT / COMMAND_ROUND_FILE).read_text()))
+    chosen = {node.split("::")[1].split("[")[0] for node in selected}
+    assert chosen == names - COMMAND_ROUND_ELSEWHERE, sorted(chosen ^ (names - COMMAND_ROUND_ELSEWHERE))
+
+
 def assert_pty_split(text, ignored=PTY_IGNORED):
     cells = pty_cells(text)
     names = [cell[0] for cell in cells]
@@ -1156,10 +1180,12 @@ def assert_pty_split(text, ignored=PTY_IGNORED):
     assert 'LOCALES="en_US.UTF-8 C ko_KR.UTF-8"' in job_block(text, "shell-macos")
     # pytest reads this variable; a value in the workflow would narrow every run without changing the commands.
     assert "PYTEST_ADDOPTS" not in text
-    assert_pty_selection(assert_pty_steps(text, "shell-linux", LINUX_CONDITIONS), LINUX_PTY_RUN, LINUX_DESELECTED, ignored)
+    assert_pty_selection(assert_pty_steps(text, "shell-linux", LINUX_CONDITIONS), LINUX_PTY_RUN, LINUX_DESELECTED,
+                         ignored | LINUX_PTY_IGNORED)
     for job in ("shell-macos", "shell-macos-shells"):
         assert_pty_selection(assert_pty_steps(text, job, MACOS_CONDITIONS), MACOS_PTY_RUN, MACOS_DESELECTED, ignored)
-    assert all((ROOT / path).is_file() for path in ignored), "no such file"
+    assert all((ROOT / path).is_file() for path in ignored | LINUX_PTY_IGNORED), "no such file"
+    assert_command_round_home(text)
     # The two left-out files that have no gate of their own run in required cells.
     assert [cell[0] for cell in cells if cell[1] == "min-d12"] == ["Shell PTY (min-d12)"]
     assert text.count(SHELL_FREE_STEP) == 1 and SHELL_FREE_STEP in linux
@@ -1250,6 +1276,22 @@ def test_pty_cells_cover_every_shell_and_shell_free_file():
         "macos-zsh-job-all-shells": ("BINGSU_TEST_SHELLS: zsh\n", "BINGSU_TEST_SHELLS: zsh bash fish\n", "shell-macos"),
         "macos-steps-differ": ("      - run: brew install bash fish\n", "", "shell-macos-shells"),
         "macos-keeps-trace-budget": (" --ignore tests/shell/test_prompt_trace_budget.py", "", "shell-macos"),
+        "linux-keeps-command-round": ("                --ignore tests/shell/test_command_round.py \\\n", "", "shell-linux"),
+        "macos-drops-command-round": (" --ignore tests/shell/test_prompt_trace_budget.py",
+                                      " --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py",
+                                      "both-macos-jobs"),
+        "command-round-step-gone": ("      - name: Command rounds run through the supervisor (release)\n",
+                                    "      - name: Command rounds\n", "filter-calls"),
+        "command-round-debug-cell": ("        if: matrix.profile == 'release'\n        run: |\n          set -o pipefail\n          \"$RUNNER_TEMP/venv/bin/python\" -m pytest 'tests/shell/test_command_round.py",
+                                     "        if: matrix.profile == 'debug'\n        run: |\n          set -o pipefail\n          \"$RUNNER_TEMP/venv/bin/python\" -m pytest 'tests/shell/test_command_round.py",
+                                     "filter-calls"),
+        "command-round-drops-a-test": (" 'tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin'", "",
+                                       "filter-calls"),
+        "command-round-drops-a-grep": ("          grep -Fx 'PASSED tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin' \"$RUNNER_TEMP/command-round.txt\"\n",
+                                       "", "filter-calls"),
+        "command-round-without-pipefail": ("          set -o pipefail\n          \"$RUNNER_TEMP/venv/bin/python\" -m pytest 'tests/shell/test_command_round.py",
+                                           "          \"$RUNNER_TEMP/venv/bin/python\" -m pytest 'tests/shell/test_command_round.py",
+                                           "filter-calls"),
         "macos-narrow-gate-run": ("tests/shell/test_gate_acceptance.py -q", "tests/shell/test_gate_acceptance.py -k first -q",
                                   "shell-macos"),
     }.items()])

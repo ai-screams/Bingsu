@@ -140,6 +140,7 @@ jobs:
       - name: PTY tests
         if: success() || failure()
         run: |
+          # test_command_round.py needs git and runs in the filter-calls release step.
           # While recording (record_observations), -s shows the OBSERVE-PTY lines in the job log.
           docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
@@ -151,6 +152,7 @@ jobs:
                 --ignore tests/shell/test_collector_security.py \
                 --ignore tests/shell/test_gate_acceptance.py \
                 --ignore tests/shell/test_prompt_trace_budget.py \
+                --ignore tests/shell/test_command_round.py \
                 --durations=0 --durations-min=0.1 \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
                 --deselect tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples \
