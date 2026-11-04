@@ -371,6 +371,69 @@ mod tests {
         child("lowered_nofile_child");
     }
 
+    // 이것을 실패시키는 것: env_pipe_ends의 `if !made` 조기 반환을 지우는 것(Linux: [-1, -1]을 돌려줘
+    // 첫 단언이 실패한다. macOS에서는 뒤따르는 F_SETFL 실패 분기가 같은 경우를 닫아 이 변이가 산다).
+    // musl의 posix_spawn은 자기 오류 파이프에 fd 둘이 필요해 같은 한도에서 생성이
+    // 실패하므로 musl에서는 돌리지 않는다.
+    #[cfg(not(target_env = "musl"))]
+    #[test]
+    fn env_pipe_failure_still_spawns_without_fd_4() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        child("env_pipe_failure_child");
+    }
+
+    #[cfg(not(target_env = "musl"))]
+    #[test]
+    #[ignore = "child: fills its fd table so only one descriptor is free"]
+    fn env_pipe_failure_child() {
+        use std::os::fd::IntoRawFd;
+        const LIMIT: i32 = 32;
+        let (base, exe) = crate::commands::n3_test::probe("env-emfile");
+        let null = fs::File::open("/dev/null").unwrap().into_raw_fd();
+        assert!(null < LIMIT - 1);
+        for fd in 3..LIMIT - 1 {
+            // SAFETY: isolated child; only probes whether the slot is open.
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                // SAFETY: live source fd; fills a free slot in this child only.
+                assert_eq!(unsafe { libc::dup2(null, fd) }, fd);
+            }
+        }
+        // SAFETY: isolated child; leaves exactly the last slot under the limit free.
+        unsafe { libc::close(LIMIT - 1) };
+        // SAFETY: initialized below, writable limit storage.
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: valid resource and writable limit storage.
+        let got = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+        assert_eq!(got, 0);
+        let saved = limit;
+        limit.rlim_cur = LIMIT as libc::rlim_t;
+        // SAFETY: lowers only the soft limit of this child.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        // One free slot: the fd walk (Linux) still opens its folder, a pipe cannot.
+        assert!(
+            super::env_pipe_ends().is_none(),
+            "the fixture must make pipe fail"
+        );
+        let home = format!("--home={}", base.display());
+        let raw: Vec<&[u8]> = vec![
+            b"--runtime-root=1:2:/r",
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            home.as_bytes(),
+            b"--log-level=debug",
+        ];
+        let spawned = spawn(exe.as_os_str(), &raw);
+        // SAFETY: restores the soft limit saved above (within the unchanged hard limit).
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &saved) }, 0);
+        spawned.expect("the helper spawns without an environment pipe");
+        let report = crate::commands::n3_test::wait_report(&base.join("probe"));
+        // fds 0-2 only, envp empty, and no fd 4: the helper reads that as no environment.
+        assert_eq!(&report[..5], &[3, 0, 0, 1, 1], "{report:?}");
+        assert_eq!(report[8], -1, "no fd 4: {report:?}");
+        fs::remove_dir_all(base).unwrap();
+    }
+
     // 이것을 실패시키는 것: 읽는 쪽이 이미 fd 4일 때 adddup2를 건너뛰는 것(Linux는 pipe2의 CLOEXEC로,
     // macOS는 POSIX_SPAWN_CLOEXEC_DEFAULT로 exec 때 닫혀 도우미에 fd 4가 없다).
     #[test]
