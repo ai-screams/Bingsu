@@ -1,8 +1,9 @@
-"""Command rounds through the real helper, supervisor and relay (M6 C2, Linux).
+"""Command rounds through the real helper, supervisor and relay (M6 C2, Linux and macOS).
 
 The helper spawns the command supervisor before its own filter and grants it
 the configured units only after the marker is installed; the supervisor
 approves each unit again right before its relay spawn."""
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -15,8 +16,11 @@ from blocked_mount import blocked_mount
 from shell_support import Blocked
 from snapshot_support import SnapshotSession, require_native_boot
 
-linux_only = pytest.mark.skipif(
-    sys.platform != "linux", reason="the trusted relay runs on Linux only (C2 ruling J3, PR 10b)")
+# Process and file-descriptor views below come from /proc on Linux and from
+# ps and lsof on macOS. A test that needs a Linux-only fact (a FUSE mount,
+# no_new_privs) is marked so.
+linux_only = pytest.mark.skipif(sys.platform != "linux", reason="needs a Linux-only fact")
+macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="the macOS relay and script copies")
 
 SESSION = "0123456789abcdef0123456789abcdef"
 OTHER = "fedcba9876543210fedcba9876543210"
@@ -56,9 +60,16 @@ def config(argv, extra=""):
             "[layout.line2]\nleft=['custom/probe','char']\n")
 
 
-def supervisors():
-    """Live command supervisors (Linux /proc): pid and parent pid."""
+def processes():
+    """Live processes: (pid, parent pid, state letter, argv words)."""
     found = []
+    if sys.platform != "linux":
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,state=,args="], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            words = line.split()
+            if len(words) >= 4:
+                found.append((int(words[0]), int(words[1]), words[2][0], words[3:]))
+        return found
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
@@ -67,22 +78,24 @@ def supervisors():
             stat = (entry / "stat").read_text()
         except OSError:
             continue
-        if argv[1:2] == [b"__command-v1"]:
-            found.append((int(entry.name), int(stat.rsplit(")", 1)[1].split()[1])))
+        fields = stat.rsplit(")", 1)[1].split()
+        found.append((int(entry.name), int(fields[1]), fields[0],
+                      [w.decode(errors="replace") for w in argv if w]))
     return found
 
 
+def supervisors():
+    """Live command supervisors: pid and parent pid."""
+    return [(pid, ppid) for pid, ppid, _, argv in processes() if argv[1:2] == ["__command-v1"]]
+
+
 def children(pid):
-    out = []
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
-            try:
-                stat = (entry / "stat").read_text()
-            except OSError:
-                continue
-            if int(stat.rsplit(")", 1)[1].split()[1]) == pid:
-                out.append(int(entry.name))
-    return out
+    return [p for p, ppid, _, _ in processes() if ppid == pid]
+
+
+def gone(pid):
+    """Whether `pid` has exited (a zombie counts)."""
+    return not any(p == pid and state != "Z" for p, _, state, _ in processes())
 
 
 def until(check, timeout=4.0, step=0.01):
@@ -104,7 +117,6 @@ def ready(session, canary=None):
 
 # 양성 대조: 설정 단위가 실제로 실행된다(도우미 → 감독 → 중계 → 대상). 이것을 실패시키는 것: 도우미가
 # 표식 설치 뒤 허가를 보내지 않는 것(helper.rs의 round.grant 호출 삭제).
-@linux_only
 def test_configured_command_runs(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     canary = session.base / "ran"
@@ -116,7 +128,6 @@ def test_configured_command_runs(tmp_path, _native_boot_required):
 
 # 이것을 실패시키는 것: 허가 단위를 고를 때 not_run을 거르지 않는 것(plan::runnable의 거름 삭제):
 # 믿을 수 있는 레이아웃이 그리지 않는 단위(NotInTrustedLayout)도 실행된다.
-@linux_only
 def test_not_run_unit_never_runs(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     canary = session.base / "never"
@@ -131,6 +142,10 @@ def test_not_run_unit_never_runs(tmp_path, _native_boot_required):
 
 def lock_of(pid):
     """The session lock a supervisor holds at fd 5 (its name carries the session digest)."""
+    if sys.platform != "linux":
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "5", "-Fn"],
+                             capture_output=True, text=True).stdout
+        return next((line[1:] for line in out.splitlines() if line.startswith("n")), None)
     try:
         return os.readlink(f"/proc/{pid}/fd/5")
     except OSError:
@@ -139,7 +154,6 @@ def lock_of(pid):
 
 # U-15: 셸 세션마다 동시 감독은 하나다. 이것을 실패시키는 것: command_grant::prepare의 세션 잠금
 # (close_only_lock)을 지우는 것(1초 걸리는 명령 동안 연속 프롬프트가 같은 세션의 감독을 여럿 띄운다).
-@linux_only
 def test_one_supervisor_per_session(tmp_path, _native_boot_required):
     sessions = []
     for name, value in (("a", SESSION), ("b", OTHER)):
@@ -167,7 +181,6 @@ def test_one_supervisor_per_session(tmp_path, _native_boot_required):
 
 # 생존 신호(U-1): 출력 없는 대상도 도우미가 죽으면 끝난다. 이것을 실패시키는 것: 감독이 허가 파이프 EOF에서
 # 자식을 끝내지 않는 것(read_grant_pipe의 stop 삭제): 대상이 자기 마감(1 s)까지 남는다.
-@linux_only
 def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     session.put(config(["/bin/sleep", "5"], "timeout='1s'\n"))
@@ -178,10 +191,9 @@ def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     supervisor, helper, target = found[0]
     os.kill(helper, signal.SIGKILL)
     killed = time.monotonic()
-    gone = until(lambda: not Path(f"/proc/{target}").exists()
-                 or Path(f"/proc/{target}/stat").read_text().split()[2] == "Z", timeout=2.0)
+    ended = until(lambda: gone(target), timeout=2.0)
     took = time.monotonic() - killed
-    assert gone and took < 0.5, took
+    assert ended and took < 0.5, took
     until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=2.0)
     session.wait_quiet()
 
@@ -189,7 +201,6 @@ def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
 # 세션 잠금은 감독이 사는 동안 풀리지 않는다(감독이 close-only 사본을 쥔다). 이것을 실패시키는 것: 감독에
 # 잠금 사본을 넘기지 않는 것(spawn_supervisor의 fd 5 dup 삭제): 도우미가 죽으면 잠금이 풀려 같은 세션에
 # 둘째 감독이 뜬다.
-@linux_only
 def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     session.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
@@ -201,8 +212,7 @@ def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
     os.kill(supervisor, signal.SIGSTOP)
     try:
         os.kill(helper, signal.SIGKILL)
-        until(lambda: not Path(f"/proc/{helper}/cmdline").exists()
-              or Path(f"/proc/{helper}/cmdline").read_bytes() == b"", timeout=2.0)
+        until(lambda: gone(helper), timeout=2.0)
         session.wait_quiet()
         session.prompt()
         session.wait_quiet()
@@ -246,7 +256,6 @@ def script(path, body):
 # J9: 같은 회차 수집이 알린 저장소 루트가 PATH 정제의 저장소다. 셸이 저장소 하위 폴더에 있어도 루트 아래
 # bin은 빠진다. 이것을 실패시키는 것: Round::grant에 수집 루트 대신 None을 넘기는 것(셸 폴더로 대체되어
 # 루트 바로 아래 bin이 남음).
-@linux_only
 def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
     from test_helper_lifecycle import LifetimeSession
 
@@ -264,7 +273,7 @@ def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
     script(other / "bin" / "probe-out", f"touch '{outside}'")
     session = Session(tmp_path / "s")
     session.level = "debug"
-    session.env["PATH"] = f"{repo}/bin:{other}/bin:/usr/bin:/bin"
+    session.env["PATH"] = f"{repo}/bin:{other}/bin:" + session.env["PATH"]
     session.put(f"[segment.\"custom/a\"]\nkind='command'\ncommand=['probe-cmd']\n"
                 f"[segment.\"custom/b\"]\nkind='command'\ncommand=['probe-out']\n"
                 "[layout.line2]\nleft=['custom/a','custom/b','char']\n")
@@ -279,7 +288,6 @@ def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
 
 # J9 대체: 수집 루트가 없으면 셸 폴더가 저장소를 대신한다. 이것을 실패시키는 것: units()의 repo_id를
 # 늘 None으로 하는 것(셸 폴더 아래 bin의 실행 파일이 돈다). 양성 대조: 저장소 밖 폴더의 같은 명령은 돈다.
-@linux_only
 def test_shell_folder_stands_for_the_repository(tmp_path, _native_boot_required):
     proj = tmp_path / "proj"
     other = tmp_path / "other"
@@ -288,7 +296,7 @@ def test_shell_folder_stands_for_the_repository(tmp_path, _native_boot_required)
     script(proj / "bin" / "probe-cmd", f"touch '{inside}'")
     script(other / "bin" / "probe-out", f"touch '{outside}'")
     session = CommandSession(tmp_path / "s")
-    session.env["PATH"] = f"{proj}/bin:{other}/bin:/usr/bin:/bin"
+    session.env["PATH"] = f"{proj}/bin:{other}/bin:" + session.env["PATH"]
     session.put(f"[segment.\"custom/a\"]\nkind='command'\ncommand=['probe-cmd']\n"
                 f"[segment.\"custom/b\"]\nkind='command'\ncommand=['probe-out']\n"
                 "[layout.line2]\nleft=['custom/a','custom/b','char']\n")
@@ -330,7 +338,6 @@ def neutral_round(tmp_path, damage):
 # K2: 중립 폴더는 비어 있고 내 것이고 정확히 0500일 때만 neutral 단위가 돈다. 이것을 실패시키는 것:
 # neutral()의 빈 폴더 검사를 지우는 것(file), 모드 비교를 지우는 것(0700), 소유자 비교를 지우는 것
 # (owner, root만 다른 소유자로 바꿀 수 있다). 양성 대조: 손대지 않은 폴더(ok).
-@linux_only
 @pytest.mark.parametrize("damage", ["ok", "file", "0700", "owner"])
 def test_neutral_folder_must_be_empty_and_0500(tmp_path, damage, _native_boot_required):
     if damage == "owner" and os.geteuid() != 0:
@@ -346,7 +353,6 @@ def test_neutral_folder_must_be_empty_and_0500(tmp_path, damage, _native_boot_re
 
 # K2: 단위는 중립 폴더에 아무것도 남기지 못한다(쓰기 권한 없음, EACCES). root는 모드를 무시하므로 건너뛴다.
 # 이것을 실패시키는 것: 중립 폴더를 0700으로 만드는 것(set_permissions의 0o500).
-@linux_only
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes through 0500")
 def test_unit_cannot_write_in_the_neutral_folder(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
@@ -361,7 +367,6 @@ def test_unit_cannot_write_in_the_neutral_folder(tmp_path, _native_boot_required
 
 # 자손이 stdout을 쥐고 있어도 도우미 회차는 대상이 끝나면 끝난다(감독은 stdout EOF를 기다리지 않음).
 # 이것을 실패시키는 것: Run::finished가 stdout EOF까지 기다리게 하는 것(회차가 자손의 3초를 기다림).
-@linux_only
 def test_stdout_holder_does_not_block_prompt(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
     session.put(config(["/bin/sh", "-c", "/bin/sleep 3 & echo held"]))
@@ -376,31 +381,139 @@ def test_stdout_holder_does_not_block_prompt(tmp_path, _native_boot_required):
     assert round_s < 1.0, round_s
 
 
-# J3(PR 10a): macOS에는 신뢰된 중계가 아직 없어 설정 단위가 있어도 감독을 띄우지 않는다(실행 0, 감독 0,
-# 로그 한 줄). 이것을 실패시키는 것: command_grant::prepare의 NoRelay 판정을 지우는 것(감독이 뜨고
-# 로그가 없다).
-@pytest.mark.skipif(sys.platform != "darwin", reason="the macOS side of C2 ruling J3")
-def test_macos_runs_no_command_without_a_relay(tmp_path):
+# macOS에서도 단위마다 프로세스는 하나다: 감독의 자식은 단위 수와 같고 각각 이미 대상이며 자식이 없다. 그리고 회차
+# 로그에 relay가 없다는 거부가 없다. 이것을 실패시키는 것: macOS에서 prepare가 Skip::NoRelay를 내는 것(감독이 뜨지
+# 않음), relay가 대상을 자식으로 띄우는 것(감독의 자식이 bingsu), Scripts가 스크립트 없는 회차에도 폴더를 여는 것.
+@macos_only
+def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
     session.level = "info"
-    canary = tmp_path / "ran"
-    session.put(config(["/usr/bin/touch", str(canary)]))
-    session.init()
+    units = "".join(f"[segment.\"custom/u{i}\"]\nkind='command'\ncommand=['/bin/sleep', '1']\ntimeout='1s'\n"
+                    for i in range(3))
+    session.put(units + "[layout.line2]\nleft=['custom/u0','custom/u1','custom/u2','char']\n")
+    ready(session)
+    session.prompt()
+
+    def running():
+        table = processes()
+        for pid, _ in supervisors():
+            kids = [(p, argv) for p, ppid, state, argv in table if ppid == pid and state != "Z"]
+            if len(kids) == 3 and all(argv == ["/bin/sleep", "1"] for _, argv in kids):
+                return [p for p, _ in kids]
+        return None
+
+    kids = until(running, timeout=2.0)
+    assert kids, [(s, children(s)) for s, _ in supervisors()]
+    for k in kids:
+        assert children(k) == [], "a target has a child of its own"
     session.wait_quiet()
-    seen = []
-    for _ in range(3):
-        session.prompt()
-        out = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
-        seen += [line for line in out.splitlines() if "__command-v1" in line]
-        session.wait_quiet()
-    assert not canary.exists()
-    assert seen == []
-    assert b"no trusted relay on this platform" in session.log(), session.log()
+    assert b"no trusted relay" not in session.log(), session.log()
+    # The scripts folder is made at a round's first script only.
+    assert not scripts_folder(session).exists()
+
+
+def alive_pid(pidfile):
+    """The pid a unit wrote, once it has written it."""
+    text = pidfile.read_text().strip() if pidfile.exists() else ""
+    return int(text) if text.isdigit() else None
+
+
+# C3 판정 R6(macOS 최선 노력 종료): relay는 자기 프로세스 그룹을 이끌고, 대상이 끝나면 reap 전에 그 그룹을 끝낸다.
+# 그래서 대상이 남긴 같은 그룹의 손자는 회차가 끝나면 없다. 이것을 실패시키는 것: OwnedChild::reap_group의 killpg를
+# 지우는 것(손자 sleep 30이 남음), relay 생성의 POSIX_SPAWN_SETPGROUP을 지우는 것.
+@macos_only
+def test_macos_group_grandchild_ends_with_the_round(tmp_path, _native_boot_required):
+    pidfile = tmp_path / "grandchild"
+    session = CommandSession(tmp_path / "s")
+    session.put(config(["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}"]))
+    ready(session)
+    session.prompt()
+    pid = until(lambda: alive_pid(pidfile))
+    assert pid, "the unit never ran"
+    session.wait_quiet()
+    assert until(lambda: gone(pid), timeout=1.0), "a grandchild in the relay's group outlived the round"
+
+
+# C3 판정 R6: helper가 죽어 감독이 회차를 멈춰도 대상의 종료를 reap하기 전에 그룹을 끝낸다. 이것을 실패시키는 것:
+# OwnedChild::reap_group의 killpg를 지우는 것, relay 생성의 POSIX_SPAWN_SETPGROUP을 지우는 것(손자가 감독의 그룹 밖).
+@macos_only
+def test_macos_group_grandchild_ends_when_the_helper_dies(tmp_path, _native_boot_required):
+    pidfile = tmp_path / "grandchild"
+    session = CommandSession(tmp_path / "s")
+    session.put(config(["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}; /bin/sleep 30"], "timeout='1s'\n"))
+    ready(session)
+    session.prompt()
+    pid = until(lambda: alive_pid(pidfile))
+    assert pid, "the unit never ran"
+    found = until(lambda: supervisors())
+    assert found, "no supervisor"
+    os.kill(found[0][1], signal.SIGKILL)
+    assert until(lambda: gone(pid), timeout=0.5), "a grandchild outlived the helper's death"
+    session.wait_quiet()
+
+
+def scripts_folder(session):
+    return Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu" / "scripts"
+
+
+def session_tag(value):
+    return hashlib.sha256(value.encode()).hexdigest()[:32]
+
+
+# C2 판정 Q1: macOS 스크립트 단위는 helper가 만든 사본으로 돌고, 감독이 끝나면 사본은 지워진다. 이것을
+# 실패시키는 것: Round::end의 remove_all 호출을 지우는 것(사본이 남음), 사본 대신 원본 경로를 허가에 넣는 것
+# (relay가 0600이 아닌 원본을 거부해 카나리가 없음).
+@macos_only
+def test_macos_script_runs_from_a_copy_that_is_then_removed(tmp_path, _native_boot_required):
+    canary = tmp_path / "ran"
+    tool = tmp_path / "bin" / "tool"
+    script(tool, f"touch '{canary}'")
+    session = CommandSession(tmp_path / "s")
+    session.put(config([str(tool)]))
+    ready(session)
+    assert until(lambda: (session.prompt(), canary.exists())[1]), "the script never ran"
+    session.wait_quiet()
+    assert list(scripts_folder(session).iterdir()) == []
+
+
+# C2 판정 Q1: 감독이 살아 있는 동안 helper가 끝나면 사본은 남고, 같은 세션의 다음 회차(세션 잠금을 얻은
+# helper)가 지운다. 다른 세션 태그의 파일은 남는다. 이것을 실패시키는 것: Round::end의 wait 결과 검사를 지우는
+# 것(멈춘 감독 아래 사본이 지워짐), prepare의 sweep을 지우는 것(남은 사본이 그대로), sweep의 접두사 비교를 지우는 것.
+@macos_only
+def test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep(tmp_path, _native_boot_required):
+    tool = tmp_path / "bin" / "tool"
+    script(tool, "/bin/sleep 1")
+    session = CommandSession(tmp_path / "s")
+    session.put(config([str(tool)], "timeout='1s'\n"))
+    ready(session)
+    folder = scripts_folder(session)
+    other = folder / f"{session_tag(OTHER)}-{'0' * 32}"
+    session.prompt()
+    found = until(lambda: [(s, p) for s, p in supervisors()
+                           if any(f.name.startswith(session_tag(SESSION)) for f in folder.iterdir())])
+    assert found, "no supervisor with a copy"
+    supervisor, helper = found[0]
+    other.write_bytes(b"x")
+    os.kill(supervisor, signal.SIGSTOP)
+    try:
+        assert until(lambda: gone(helper), timeout=4.0), "the helper did not end"
+        mine = [f for f in folder.iterdir() if f.name.startswith(session_tag(SESSION))]
+        assert len(mine) == 1, mine
+    finally:
+        try:
+            os.kill(supervisor, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+    assert until(lambda: gone(supervisor), timeout=3.0)
+    session.wait_quiet()
+    # The next script round of the session sweeps; its own copy goes at its end.
+    session.prompt()
+    session.wait_quiet()
+    assert [f.name for f in folder.iterdir()] == [other.name]
 
 
 # J7: 세션 값이 없으면 감독을 띄우지 않고 그 사실을 로그한다. 이것을 실패시키는 것: Skip::NoSession의
 # 로그 문구를 None으로 하는 것.
-@linux_only
 def test_no_session_runs_nothing_and_says_so(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
     session.session = None
@@ -474,7 +587,6 @@ def test_command_table_names_real_tests():
 
 # 단위가 없는 회차는 감독을 띄우지 않는다. 감독은 세션 잠금을 얻은 뒤에만 생성되므로 잠금 파일과 중립 폴더가
 # 없으면 감독도 없었다. 이것을 실패시키는 것: prepare의 NoUnits 조기 반환을 지우는 것.
-@linux_only
 def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
     session.put("[layout.line2]\nleft=['char']\n")

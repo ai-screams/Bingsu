@@ -1,11 +1,15 @@
-//! Trusted relay, Linux native executables and scripts (`bingsu __exec-v2`,
-//! spec section 4 "the place of the pre-exec check", rows native executable
-//! and script). The command supervisor spawns it with an empty environment
-//! and the permit and exec frame on fd 3 (fd 2 is its status pipe); the relay checks the target through
-//! one open descriptor, takes a fresh clock, checks that the name in the
-//! folder it walked is still that file and runs it by that name with
-//! `execveat(folder, name, AT_SYMLINK_NOFOLLOW)` (U-18). A script runs as its checked
-//! interpreter, the same way, with a sealed memfd copy of the script. Every decision
+//! Trusted relay, native executables and scripts on Linux and macOS
+//! (`bingsu __exec-v2`, spec section 4 "the place of the pre-exec check",
+//! rows native executable, script and macOS executable). The command
+//! supervisor spawns it with an empty environment and the permit and exec
+//! frame on fd 3 (fd 2 is its status pipe); the relay checks the target
+//! through one open descriptor, checks that its name is still that file,
+//! takes a fresh clock and runs it by name (U-18). Linux runs it with
+//! `execveat(folder, name, AT_SYMLINK_NOFOLLOW)` and a script as its checked
+//! interpreter with a sealed memfd copy of the script. macOS has neither
+//! `execveat` nor `fexecve`: it rechecks the whole canonical path with
+//! `AT_SYMLINK_NOFOLLOW_ANY` and runs `execve` on it, and a script arrives
+//! as the helper's private copy (`exec_path::ScriptCopies`). Every decision
 //! is `bingsu_core::handoff` or `bingsu_core::fs_trust`; this file reads fd 3,
 //! makes the system calls and refuses with a fixed exit code. It is pinned in
 //! scripts/check_cli_prompt_forbid.py (TCB_SHA256).
@@ -37,8 +41,14 @@ pub(crate) const RELAY_TARGET: u8 = 122;
 pub(crate) const RELAY_EXEC: u8 = 123;
 /// Largest script the relay copies into its memfd (spec: 64 KB).
 pub(crate) const SCRIPT_MAX: usize = 64 * 1024;
+/// macOS `fstatat` flag (sys/fcntl.h, not in the libc crate): no symlink
+/// anywhere on the path. A macOS without it answers EINVAL, and the name
+/// check then refuses (C2 ruling Q3).
+#[cfg(target_os = "macos")]
+const AT_SYMLINK_NOFOLLOW_ANY: i32 = 0x0800;
 /// The seals of the script copy: its bytes and size are fixed, and nobody
 /// can lift a seal.
+#[cfg(target_os = "linux")]
 const SEALS: i32 = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
 
 pub(crate) fn run(args: &[OsString]) -> ExitCode {
@@ -107,6 +117,10 @@ pub(crate) struct Target {
     exe: Exe,
     /// A script's sealed copy: the one descriptor past 2 the target keeps.
     _script: Option<OwnedFd>,
+    /// macOS: the helper's script copy the interpreter will open by path,
+    /// rechecked by name with the interpreter right before the exec.
+    #[cfg(target_os = "macos")]
+    copy: Option<Exe>,
     _argv: Vec<CString>,
     _envp: Vec<CString>,
     argv_ptrs: Vec<*const libc::c_char>,
@@ -130,25 +144,31 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let parsed = parse_relay_args(&words).map_err(|_| RELAY_INPUT)?;
     let (permit, mut frame) = read_relay_input(&input, INPUT_CAP).map_err(|_| RELAY_INPUT)?;
+    #[cfg(target_os = "macos")]
+    let mut copy = None;
     let (exe, script, argv) = match open_target(parsed.executable, frame.pin)? {
         // A frame that names an interpreter was made for a script.
         Opened::Native(_) if frame.interpreter.is_some() => return Err(RELAY_TARGET),
         Opened::Native(exe) => (exe, None, c_strings(parsed.argv)?),
         Opened::Script(exe, body) => {
-            let (interpreter, copy, argv) = script(&exe, &body, &frame, parsed.argv)?;
-            (interpreter, Some(copy), argv)
+            let run = script(&exe, &body, &frame, parsed.executable, parsed.argv)?;
+            #[cfg(target_os = "macos")]
+            {
+                copy = Some(exe);
+            }
+            run
         }
     };
     let envp = environment(&std::mem::take(&mut frame.environment))?;
     let argv_ptrs = pointers(&argv);
     let envp_ptrs = pointers(&envp);
     // The target gets 0, 1 and 2 only; the executable's fd is close-on-exec.
-    if !cloexec_from_3(close_range_cloexec()) {
+    if !cloexec_all() {
         return Err(RELAY_EXEC);
     }
-    // A script's copy alone stays open across exec, so the interpreter can
-    // open `/proc/self/fd/N`; this comes after the close-on-exec pass, which
-    // would mark it again.
+    // A Linux script's copy alone stays open across exec, so the interpreter
+    // can open `/proc/self/fd/N`; this comes after the close-on-exec pass,
+    // which would mark it again.
     if let Some(copy) = &script
         && set_fd_flags(copy.as_raw_fd(), 0).is_err()
     {
@@ -161,7 +181,9 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     }
     // U-17: a setuid, setgid or file-capability target runs, but without
     // gaining anything; the flag stays for every descendant. Last of the
-    // checks, so `exec` keeps the clock read right before execveat.
+    // checks, so `exec` keeps the clock read right before execveat. macOS
+    // has no such flag and refuses set-id files in `open_target` instead.
+    #[cfg(target_os = "linux")]
     // SAFETY: plain prctl with integer arguments.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(RELAY_EXEC);
@@ -171,6 +193,8 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
         frame,
         exe,
         _script: script,
+        #[cfg(target_os = "macos")]
+        copy,
         _argv: argv,
         _envp: envp,
         argv_ptrs,
@@ -185,24 +209,45 @@ impl Target {
         crate::prompt_io::observe_clock().is_ok_and(|now| self.frame.allows(self.permit, now))
     }
 
-    /// The name check, the clock check and `execveat` back to back: nothing
+    /// The name check, the clock check and the exec back to back: nothing
     /// is built or freed between them (`self` drops only after a failed
-    /// exec). The target runs by its name in the folder the walk held
-    /// (U-18): a program that tells its role from the executed name
-    /// (uutils' multicall coreutils reads AT_EXECFN) refuses a `/dev/fd/N`.
-    /// Right before, the name must still be the checked file: same device,
-    /// inode and ctime, and not a symlink (AT_SYMLINK_NOFOLLOW on both).
+    /// exec). The target runs by its name (U-18): a program that tells its
+    /// role from the executed name (uutils' multicall coreutils reads
+    /// AT_EXECFN) refuses a `/dev/fd/N`. Right before, the name must still
+    /// be the checked file: same device, inode and ctime, and not a symlink.
+    /// Linux runs the name in the folder the walk held; macOS runs the
+    /// canonical path, which only root, the user or a cleared group can
+    /// change (spec section 4 macOS executable row: an OS limit).
     fn exec(self) -> u8 {
         // The name check first: on NFS or FUSE it can take long, and the
         // clock read must be the last step before execveat.
         if !self.exe.still_named() {
             return RELAY_TARGET;
         }
+        // macOS: the script copy too, by its path. After the exec the
+        // interpreter opens that path itself; in between only the user can
+        // change the copy, the user's 0600 file in a 0700 folder (fails
+        // without it: test_macos_copy_swapped_before_the_exec_is_refused).
+        #[cfg(target_os = "macos")]
+        if !self.copy.as_ref().is_none_or(Exe::still_named) {
+            return RELAY_TARGET;
+        }
         if !self.clock_allows() {
             return RELAY_EXPIRED;
         }
         #[cfg(test)]
-        tests::at(tests::Stage::BeforeExec);
+        hook::at(hook::Stage::BeforeExec);
+        #[cfg(target_os = "macos")]
+        // SAFETY: NUL-terminated path; both arrays are NULL-terminated and
+        // point at NUL-terminated strings owned by `self`, alive for the call.
+        unsafe {
+            libc::execve(
+                self.exe.path.as_ptr(),
+                self.argv_ptrs.as_ptr(),
+                self.envp_ptrs.as_ptr(),
+            )
+        };
+        #[cfg(target_os = "linux")]
         // SAFETY: the folder fd is open, the name is NUL-terminated; both
         // arrays are NULL-terminated and point at NUL-terminated strings
         // owned by `self`, alive for the call.
@@ -225,6 +270,7 @@ impl Target {
 /// `main`. The kernel calls are made directly because the C library refuses
 /// its reserved signals (32 and up), which an ignoring parent can still leave
 /// ignored; the kernel refuses only SIGKILL and SIGSTOP, already default.
+#[cfg(target_os = "linux")]
 fn reset_signals() {
     // The kernel's sigaction (handler, flags, restorer, 64-bit mask) and the
     // 64-bit sigset: all zero is SIG_DFL, no flags, nothing blocked.
@@ -253,7 +299,39 @@ fn reset_signals() {
     };
 }
 
+/// macOS: every signal below NSIG (32) to its default and an empty mask; the
+/// C library's sigaction is the kernel's, and it refuses only SIGKILL and
+/// SIGSTOP, already default.
+#[cfg(target_os = "macos")]
+fn reset_signals() {
+    for signal in 1..32 {
+        // SAFETY: an all-zero sigaction is SIG_DFL, no flags, empty mask.
+        let action: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: `action` is readable; no old action is requested.
+        unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+    }
+    // SAFETY: an all-zero sigset_t is the empty set.
+    let empty: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `empty` is readable; no old mask is requested.
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) };
+}
+
+/// Every descriptor from 3 up is close-on-exec, or false.
+#[cfg(target_os = "linux")]
+fn cloexec_all() -> bool {
+    cloexec_from_3(close_range_cloexec())
+}
+
+/// macOS has no close_range: every open descriptor above 2 that the kernel
+/// lists for this process gets FD_CLOEXEC. A listing that fails or may be
+/// cut short refuses.
+#[cfg(target_os = "macos")]
+fn cloexec_all() -> bool {
+    cloexec_listed(open_fds(), set_cloexec)
+}
+
 /// `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`, or its errno.
+#[cfg(target_os = "linux")]
 fn close_range_cloexec() -> Result<(), i32> {
     // SAFETY: plain syscall; CLOSE_RANGE_CLOEXEC changes flags, closes nothing.
     let r = unsafe {
@@ -276,6 +354,7 @@ fn close_range_cloexec() -> Result<(), i32> {
 /// supports 5.7 and later) every open descriptor listed in /proc/self/fd gets
 /// FD_CLOEXEC. Any other error, an unreadable listing or a failed fcntl
 /// fails closed.
+#[cfg(target_os = "linux")]
 fn cloexec_from_3(close_range: Result<(), i32>) -> bool {
     match close_range {
         Ok(()) => true,
@@ -285,11 +364,46 @@ fn cloexec_from_3(close_range: Result<(), i32>) -> bool {
 }
 
 /// The numbers in /proc/self/fd, or `None` when the listing fails.
+#[cfg(target_os = "linux")]
 fn open_fds() -> Option<Vec<i32>> {
     std::fs::read_dir("/proc/self/fd")
         .ok()?
         .map(|e| e.ok()?.file_name().to_str()?.parse().ok())
         .collect()
+}
+
+/// The descriptors `proc_pidinfo(PROC_PIDLISTFDS)` lists, or `None` when
+/// the call fails or fills the whole buffer (the list may be cut).
+#[cfg(target_os = "macos")]
+fn open_fds() -> Option<Vec<i32>> {
+    let one = std::mem::size_of::<libc::proc_fdinfo>();
+    // SAFETY: getpid cannot fail.
+    let pid = unsafe { libc::getpid() };
+    // SAFETY: a null buffer asks only for the size.
+    let need =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let room = usize::try_from(need).ok()? / one + 16;
+    // SAFETY: an all-zero proc_fdinfo is a valid value.
+    let mut list = vec![unsafe { std::mem::zeroed::<libc::proc_fdinfo>() }; room];
+    let bytes = i32::try_from(room * one).ok()?;
+    // SAFETY: `list` is writable for `bytes` bytes.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            list.as_mut_ptr().cast(),
+            bytes,
+        )
+    };
+    // No test: both refusals need the kernel's answer to change under a
+    // single-threaded relay (a failed call, or 16 more descriptors between
+    // the two calls); either refuses (fail closed).
+    let got = usize::try_from(got)
+        .ok()
+        .filter(|&g| g > 0 && g < room * one)?
+        / one;
+    Some(list[..got].iter().map(|f| f.proc_fd).collect())
 }
 
 fn set_cloexec(fd: i32) -> Result<(), i32> {
@@ -361,8 +475,9 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// supervisor passes the canonical path the helper resolved (symlinks
 /// owned by root or the user already followed there), so a symlink on the
 /// way now means the path changed: refused. Every folder is opened
-/// `O_PATH | O_DIRECTORY | O_NOFOLLOW`, so a symlink in a folder's place
-/// fails with ENOTDIR or ELOOP; ".", ".." and empty names are refused.
+/// `O_PATH | O_DIRECTORY | O_NOFOLLOW` (macOS: `O_SEARCH | O_NOFOLLOW`), so
+/// a symlink in a folder's place fails with ENOTDIR or ELOOP; ".", ".." and
+/// empty names are refused.
 ///
 /// The file must be regular and pass `allowed`. It is opened `O_PATH` first
 /// and checked; then that descriptor is opened for reading through
@@ -371,7 +486,17 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// without `/proc` there is no such path; then the `O_PATH` descriptor runs,
 /// as a native executable only (spec section 4 "native executable"): its
 /// `#!` line, if any, is never read, and the kernel's own script loader
-/// cannot open the close-on-exec descriptor it would hand the interpreter.
+/// cannot open the folder descriptor it would hand the interpreter: the
+/// name runs as `/dev/fd/<folder>/<name>`, and the folder is close-on-exec
+/// (BINPRM_FLAGS_PATH_INACCESSIBLE, `test_execute_only_script_is_not_loaded`).
+///
+/// macOS has no `O_PATH`: the last name's type is read first (`fstatat`,
+/// no follow), then the regular file is opened for reading, and its
+/// descriptor must be the same inode. An execute-only file cannot be read
+/// and is refused: run by path, the kernel's own script loader would start
+/// whatever interpreter its `#!` line names, unchecked (C2 ruling Q4). A
+/// set-id file is refused (U-17), and so is one on a mount that is not
+/// local or ignores ownership.
 fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     // A relative path would name a file in the inherited working folder.
     let Some(rest) = path.strip_prefix(b"/") else {
@@ -385,25 +510,54 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     {
         return Err(RELAY_TARGET);
     }
+    #[cfg(target_os = "linux")]
     let search = libc::O_PATH | libc::O_DIRECTORY;
+    #[cfg(target_os = "macos")]
+    let search = libc::O_SEARCH;
     let mut dir = open_at(libc::AT_FDCWD, b"/", search).map_err(|_| RELAY_TARGET)?;
     for name in folders {
         dir = open_at(dir.as_raw_fd(), name, search).map_err(|_| RELAY_TARGET)?;
     }
-    // The last name opens path-only first, so a device or FIFO put there is
-    // never opened for reading before its type is known.
-    let path_fd = open_at(dir.as_raw_fd(), last, libc::O_PATH).map_err(|_| RELAY_TARGET)?;
-    let st = stat(&path_fd)?;
-    if st.st_mode & libc::S_IFMT != libc::S_IFREG || !allowed(&st, pin)? {
-        return Err(RELAY_TARGET);
-    }
     let name = CString::new(*last).map_err(|_| RELAY_TARGET)?;
-    let (fd, readable) = match reopen(&path_fd).map_err(native_only) {
-        Ok(fd) => (fd, true),
-        Err(Some(())) => (path_fd, false),
-        Err(None) => return Err(RELAY_TARGET),
+    #[cfg(target_os = "linux")]
+    let (exe, readable) = {
+        // The last name opens path-only first, so a device or FIFO put there is
+        // never opened for reading before its type is known.
+        let path_fd = open_at(dir.as_raw_fd(), last, libc::O_PATH).map_err(|_| RELAY_TARGET)?;
+        let st = stat(&path_fd)?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG || !allowed(&st, pin, Some(true))? {
+            return Err(RELAY_TARGET);
+        }
+        let (fd, readable) = match reopen(&path_fd).map_err(native_only) {
+            Ok(fd) => (fd, true),
+            Err(Some(())) => (path_fd, false),
+            Err(None) => return Err(RELAY_TARGET),
+        };
+        (Exe { fd, dir, name, st }, readable)
     };
-    let exe = Exe { fd, dir, name, st };
+    #[cfg(target_os = "macos")]
+    let (exe, readable) = {
+        // A device or FIFO put there is never opened (fails without it:
+        // test_macos_relay_never_opens_a_fifo). The descriptor is not
+        // compared with this stat again: no test can tell a swap between the
+        // two from a swap before them. Whatever is opened is what the checks
+        // below run on (owner, mode, pin); swapping the name needs root, the
+        // user or a cleared group; a FIFO then fails its first pread, and
+        // execve refuses any file that is not regular.
+        if stat_at(&dir, &name)?.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(RELAY_TARGET);
+        }
+        let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY;
+        let fd = open_at(dir.as_raw_fd(), last, flags).map_err(|_| RELAY_TARGET)?;
+        let st = stat(&fd)?;
+        // Fails without it: test_set_id_targets_are_refused (both bits).
+        let set_id = st.st_mode & (libc::S_ISUID | libc::S_ISGID) != 0;
+        if set_id || !allowed(&st, pin, local_ownership(&fd))? {
+            return Err(RELAY_TARGET);
+        }
+        let path = CString::new(path).map_err(|_| RELAY_TARGET)?;
+        (Exe { fd, path, st }, true)
+    };
     if !readable {
         return Ok(Opened::Native(exe));
     }
@@ -413,23 +567,31 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     })
 }
 
-/// A checked executable: its descriptor, the folder it was found in, its
-/// last name there and the stat the checks ran on.
+/// A checked executable: its descriptor and the stat the checks ran on,
+/// with the folder it was found in and its last name there (Linux) or its
+/// canonical path (macOS).
 pub(crate) struct Exe {
     fd: OwnedFd,
+    #[cfg(target_os = "linux")]
     dir: OwnedFd,
+    #[cfg(target_os = "linux")]
     name: CString,
+    #[cfg(target_os = "macos")]
+    path: CString,
     st: libc::stat,
 }
 
 impl Exe {
-    /// Whether the name in the held folder is still the checked file (not
-    /// a symlink, same device, inode and ctime).
+    /// Whether the name is still the checked file (not a symlink, same
+    /// device, inode and ctime). Linux asks the held folder; macOS asks the
+    /// whole path, as `execve` will resolve it, with no symlink anywhere on
+    /// it (EINVAL on a macOS without that flag refuses).
     fn still_named(&self) -> bool {
         #[cfg(test)]
-        tests::at(tests::Stage::Recheck);
+        hook::at(hook::Stage::Recheck);
         // SAFETY: an all-zero stat is a valid out-parameter value.
         let mut now: libc::stat = unsafe { std::mem::zeroed() };
+        #[cfg(target_os = "linux")]
         // SAFETY: open folder fd, NUL-terminated name, writable `now`.
         let rc = unsafe {
             libc::fstatat(
@@ -437,6 +599,16 @@ impl Exe {
                 self.name.as_ptr(),
                 &mut now,
                 libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        // SAFETY: NUL-terminated absolute path, writable `now`.
+        let rc = unsafe {
+            libc::fstatat(
+                libc::AT_FDCWD,
+                self.path.as_ptr(),
+                &mut now,
+                AT_SYMLINK_NOFOLLOW_ANY,
             )
         };
         rc == 0
@@ -516,13 +688,20 @@ fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
 /// owner, mode and status change time). The interpreter's descriptor runs
 /// with argv `[line interpreter, line argument, /proc/self/fd/N, argv[1..]]`,
 /// the order the kernel's script loader uses.
+///
+/// macOS: the target is the helper's private copy of the script
+/// (`exec_path::ScriptCopies`, made from the descriptor the helper checked:
+/// the helper refused a `noexec` mount, asked faccessat(X_OK, AT_EACCESS) on
+/// the original's path and compared its stat after copying): it must be the
+/// user's and exactly 0600, and the interpreter gets its path in place of
+/// `/proc/self/fd/N`. Nothing stays open across exec.
 fn script(
     script: &Exe,
     body: &[u8],
     frame: &ExecFrame,
+    executable: &[u8],
     argv: &[&[u8]],
-) -> Result<(Exe, OwnedFd, Vec<CString>), u8> {
-    let (fd, checked) = (&script.fd, &script.st);
+) -> Result<(Exe, Option<OwnedFd>, Vec<CString>), u8> {
     let Head::Script(line) = head(&body[..body.len().min(SHEBANG_MAX)]) else {
         return Err(RELAY_TARGET);
     };
@@ -531,20 +710,43 @@ fn script(
         .as_ref()
         .filter(|i| i.line == line.line && i.path != b"/usr/bin/env")
         .ok_or(RELAY_TARGET)?;
-    if !may_execute(fd) {
-        return Err(RELAY_TARGET);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = executable;
+        let (fd, checked) = (&script.fd, &script.st);
+        if !may_execute(fd) {
+            return Err(RELAY_TARGET);
+        }
+        let Opened::Native(interpreter_exe) = open_target(&interpreter.path, interpreter.pin)?
+        else {
+            return Err(RELAY_TARGET);
+        };
+        let copy = sealed_copy(body, memfd_create, write_fd)?;
+        if !unchanged(checked, &stat(fd)?) {
+            return Err(RELAY_TARGET);
+        }
+        let name = format!("/proc/self/fd/{}", copy.as_raw_fd()).into_bytes();
+        let argv = c_strings(&script_argv(line, name, argv))?;
+        Ok((interpreter_exe, Some(copy), argv))
     }
-    let Opened::Native(interpreter_exe) = open_target(&interpreter.path, interpreter.pin)? else {
-        return Err(RELAY_TARGET);
-    };
-    let copy = sealed_copy(body, memfd_create, write_fd)?;
-    if !unchanged(checked, &stat(fd)?) {
-        return Err(RELAY_TARGET);
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: getuid cannot fail.
+        let me = unsafe { libc::getuid() };
+        // Fails without it: test_script_copy_must_be_private (0644 copy).
+        if script.st.st_uid != me || script.st.st_mode & 0o7777 != 0o600 {
+            return Err(RELAY_TARGET);
+        }
+        let Opened::Native(interpreter_exe) = open_target(&interpreter.path, interpreter.pin)?
+        else {
+            return Err(RELAY_TARGET);
+        };
+        let argv = c_strings(&script_argv(line, executable.to_vec(), argv))?;
+        Ok((interpreter_exe, None, argv))
     }
-    let argv = c_strings(&script_argv(line, copy.as_raw_fd(), argv))?;
-    Ok((interpreter_exe, copy, argv))
 }
 
+#[cfg(target_os = "linux")]
 /// The kernel's own answer whether this user may execute the script's
 /// file: permission bits, ACL and a `noexec` mount, as `execve` would judge
 /// a native file. Asked through `/proc/self/fd/N`, so it is the checked
@@ -558,6 +760,7 @@ fn may_execute(fd: &OwnedFd) -> bool {
     execute_verdict(|| faccessat2(&name), || may_execute_old(&name))
 }
 
+#[cfg(target_os = "linux")]
 /// `new` answers; only its ENOSYS asks `old`, once. Any other error refuses.
 fn execute_verdict(new: impl FnOnce() -> Result<(), i32>, old: impl FnOnce() -> bool) -> bool {
     match new() {
@@ -567,6 +770,7 @@ fn execute_verdict(new: impl FnOnce() -> Result<(), i32>, old: impl FnOnce() -> 
     }
 }
 
+#[cfg(target_os = "linux")]
 fn faccessat2(name: &CString) -> Result<(), i32> {
     // SAFETY: `name` is NUL-terminated; no pointer is written.
     let r = unsafe {
@@ -581,6 +785,7 @@ fn faccessat2(name: &CString) -> Result<(), i32> {
     if r == 0 { Ok(()) } else { Err(errno()) }
 }
 
+#[cfg(target_os = "linux")]
 /// Without faccessat2 (before Linux 5.8): the three-argument faccessat
 /// system call, which the kernel judges (bits, ACL, `noexec` mount) for the
 /// real ids. The relay is never set-uid, so they are its effective ids; were
@@ -597,6 +802,7 @@ fn may_execute_old(name: &CString) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Whether `now` is still the file `before` describes: a write, chmod,
 /// chown or ACL change moves the status change time. A rewrite within one
 /// timestamp tick keeps the ctime and is not caught; only trusted parties
@@ -616,15 +822,16 @@ fn unchanged(before: &libc::stat, now: &libc::stat) -> bool {
     key(before) == key(now)
 }
 
-fn script_argv<'a>(line: Shebang<'a>, copy: i32, argv: &[&'a [u8]]) -> Vec<Vec<u8>> {
+fn script_argv<'a>(line: Shebang<'a>, script: Vec<u8>, argv: &[&'a [u8]]) -> Vec<Vec<u8>> {
     let mut out = vec![line.interpreter.to_vec()];
     out.extend(line.arg.map(<[u8]>::to_vec));
-    out.push(format!("/proc/self/fd/{copy}").into_bytes());
+    out.push(script);
     // parse_relay_args refuses an empty argv; argv[0] is the script's name.
     out.extend(argv.iter().skip(1).map(|w| w.to_vec()));
     out
 }
 
+#[cfg(target_os = "linux")]
 /// `body` in a memfd from `create` (through `memfd`), written with `write`
 /// and sealed with `SEALS`.
 fn sealed_copy(
@@ -649,11 +856,13 @@ fn sealed_copy(
     Ok(copy)
 }
 
+#[cfg(target_os = "linux")]
 fn write_fd(fd: &OwnedFd, bytes: &[u8]) -> isize {
     // SAFETY: `bytes` is readable for its length; `fd` is open for writing.
     unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) }
 }
 
+#[cfg(target_os = "linux")]
 /// A close-on-exec, sealable memfd that can never be executed
 /// (`MFD_NOEXEC_SEAL`, Linux 6.3). Before 6.3 the kernel does not know that
 /// flag and answers EINVAL: then once more without it. Any other error
@@ -666,6 +875,7 @@ fn memfd(mut create: impl FnMut(libc::c_uint) -> Result<OwnedFd, i32>) -> Result
     }
 }
 
+#[cfg(target_os = "linux")]
 fn memfd_create(flags: libc::c_uint) -> Result<OwnedFd, i32> {
     // SAFETY: the name is NUL-terminated.
     let raw = unsafe { libc::memfd_create(c"bingsu-script".as_ptr(), flags) };
@@ -683,6 +893,51 @@ fn c_strings<W: AsRef<[u8]>>(words: &[W]) -> Result<Vec<CString>, u8> {
         .collect()
 }
 
+/// macOS: whether `fd`'s mount enforces ownership, `None` (undecidable) when
+/// fstatfs fails or the mount is not local (spec section 4: a network file
+/// system's executable is refused).
+#[cfg(target_os = "macos")]
+fn local_ownership(fd: &OwnedFd) -> Option<bool> {
+    // SAFETY: an all-zero statfs is a valid out-parameter value.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    // No test: fstatfs on a descriptor the relay just opened cannot be made
+    // to fail from a test; `None` refuses (fail closed).
+    // SAFETY: `fd` is open and `fs` is writable.
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut fs) } != 0 {
+        return None;
+    }
+    mount_ownership(fs.f_flags)
+}
+
+/// macOS mount flags to ownership, by the helper's own rules: `None` unless
+/// local (fails without it: mount_flags_decide_ownership and
+/// test_macos_target_on_a_volume_ignoring_owners_refused).
+#[cfg(target_os = "macos")]
+fn mount_ownership(flags: u32) -> Option<bool> {
+    use bingsu_core::fs_trust::{macos_fs_is_local, macos_ownership_enforced};
+    macos_fs_is_local(flags).then_some(macos_ownership_enforced(flags))
+}
+
+/// macOS: `fstatat(dir, name)` without following a symlink.
+#[cfg(target_os = "macos")]
+fn stat_at(dir: &OwnedFd, name: &CString) -> Result<libc::stat, u8> {
+    // SAFETY: an all-zero stat is a valid out-parameter value.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: open folder fd, NUL-terminated name, writable `st`.
+    if unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(RELAY_TARGET);
+    }
+    Ok(st)
+}
+
 fn stat(fd: &OwnedFd) -> Result<libc::stat, u8> {
     // SAFETY: an all-zero stat is a valid out-parameter value.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -693,6 +948,7 @@ fn stat(fd: &OwnedFd) -> Result<libc::stat, u8> {
     Ok(st)
 }
 
+#[cfg(target_os = "linux")]
 /// The checked file for reading, through its own descriptor: opening
 /// `/proc/self/fd/N` reaches the inode `N` holds, never a name someone may
 /// have swapped since.
@@ -709,6 +965,7 @@ fn reopen(path_fd: &OwnedFd) -> Result<OwnedFd, i32> {
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
+#[cfg(target_os = "linux")]
 /// A failed reopen that still lets the `O_PATH` descriptor run as a native
 /// executable (`Some`): EACCES (execute-only file) and no `/proc` (ENOENT),
 /// as the close-on-exec fallback treats a missing listing. Anything else
@@ -722,20 +979,29 @@ fn native_only(errno: i32) -> Option<()> {
 /// group, mode and status change time as when the helper's group check
 /// cleared it (spec section 2 safety row; rewriting, chmod, chown and ACL
 /// changes move the ctime).
-fn allowed(st: &libc::stat, pin: Option<ExecPin>) -> Result<bool, u8> {
+/// `ownership`: whether the file's mount enforces ownership (Linux file
+/// systems do; macOS asks `local_ownership`).
+fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Result<bool, u8> {
     let facts = Facts {
+        #[cfg(target_os = "linux")]
         dev: st.st_dev,
+        // The helper's facts take the same sign-extending cast (sys::fd_facts).
+        #[cfg(target_os = "macos")]
+        dev: st.st_dev as u64,
         ino: st.st_ino,
         uid: st.st_uid,
         gid: st.st_gid,
+        #[cfg(target_os = "linux")]
         mode: st.st_mode,
-        // Linux file systems enforce ownership. The ACL is not read here: the
-        // helper read it before it made the pin (an extended ACL under group
-        // write is undecided there and gets no pin), and after that only the
-        // file's owner (root or the user, checked below) or a holder of
-        // CAP_FOWNER can change it, both trusted (B2 ruling A-1).
+        #[cfg(target_os = "macos")]
+        mode: u32::from(st.st_mode),
+        // The ACL is not read here: the helper read it before it made the
+        // pin (an extended ACL under group write is undecided there and gets
+        // no pin), and after that only the file's owner (root or the user,
+        // checked below) or a holder of CAP_FOWNER can change it, both
+        // trusted (B2 ruling A-1; on macOS only the owner or root).
         acl: AclFacts::None,
-        ownership: Some(true),
+        ownership,
     };
     let ctime = (
         st.st_ctime,
@@ -770,7 +1036,30 @@ fn pointers(strings: &[CString]) -> Vec<*const libc::c_char> {
         .collect()
 }
 
+/// Where a test may act inside `exec`, on either platform.
 #[cfg(test)]
+mod hook {
+    /// Before the name check's fstatat, or after the name and clock checks,
+    /// right before the exec.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Stage {
+        Recheck,
+        BeforeExec,
+    }
+    type Hook = Option<Box<dyn FnMut(Stage)>>;
+    thread_local! {
+        pub(super) static HOOK: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn at(stage: Stage) {
+        HOOK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(stage);
+            }
+        });
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use bingsu_core::fs_trust::GroupPin;
@@ -785,24 +1074,7 @@ mod tests {
 
     const SECOND: i64 = 1_000_000_000;
 
-    /// Where a test may act inside `exec`: before the name check's fstatat,
-    /// or after the name and clock checks, right before execveat.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(super) enum Stage {
-        Recheck,
-        BeforeExec,
-    }
-    type Hook = Option<Box<dyn FnMut(Stage)>>;
-    thread_local! {
-        static HOOK: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
-    }
-    pub(super) fn at(stage: Stage) {
-        HOOK.with(|h| {
-            if let Some(f) = h.borrow_mut().as_mut() {
-                f(stage);
-            }
-        });
-    }
+    use super::hook::{HOOK, Stage};
     const ECHO: &[u8] = b"bingsu-relay-echo\n";
     const CLOCK_TAG: &str = "RELAY-CLOCK-READS";
 
@@ -2511,7 +2783,8 @@ mod tests {
         let body = format!("#!{} -\n# checked\n", cat().display()).into_bytes();
         let frame = script_frame(&cat_line(), &cat());
         let exe = open_read(&file);
-        let (_, copy, argv) = script(&exe, &body, &frame, &[b"s"]).unwrap();
+        let (_, copy, argv) = script(&exe, &body, &frame, b"/s", &[b"s"]).unwrap();
+        let copy = copy.unwrap();
         let mut back = vec![0u8; SCRIPT_MAX];
         let n = read_at(&copy, &mut back, 0).unwrap();
         assert_eq!(&back[..n], body.as_slice());
@@ -2519,7 +2792,7 @@ mod tests {
         // The file's own line would match another frame; the buffer's decides.
         let other = format!("#!{}\n", cat().display()).into_bytes();
         assert_eq!(
-            script(&exe, &other, &frame, &[b"s"]).err(),
+            script(&exe, &other, &frame, b"/s", &[b"s"]).err(),
             Some(RELAY_TARGET)
         );
         // Rewritten after the checks (same bytes, new ctime): refused.
@@ -2527,7 +2800,7 @@ mod tests {
         std::fs::write(&file, std::fs::read(&file).unwrap()).unwrap();
         assert_ne!(stat(&exe.fd).unwrap().st_ctime_nsec, exe.st.st_ctime_nsec);
         assert_eq!(
-            script(&exe, &body, &frame, &[b"s"]).err(),
+            script(&exe, &body, &frame, b"/s", &[b"s"]).err(),
             Some(RELAY_TARGET)
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -2735,12 +3008,13 @@ mod tests {
     // 이것을 실패시키는 것: prepare의 "Native인데 인터프리터가 있으면 거부" 분기를 지우는 것, open_target의
     // O_PATH 재시도를 지우는 것(열기 자체가 실패).
     #[test]
-    #[ignore = "non-root user in the Linux container"]
     fn test_execute_only_target_runs_path_only() {
+        // Root reads any file, so the case needs another user (CI's Linux
+        // cells; BINGSU_REQUIRE_NONROOT_TESTS=1 turns a root run into a failure).
+        if crate::commands::exec_path::test_skip_as_root() {
+            return;
+        }
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        // SAFETY: getuid cannot fail.
-        let me = unsafe { libc::getuid() };
-        assert_ne!(me, 0, "run as a user other than root");
         let dir = fresh_dir("xonly-path");
         let exe = dir.join("cat");
         std::fs::copy(cat(), &exe).unwrap();
@@ -2759,6 +3033,34 @@ mod tests {
 
     // 이것을 실패시키는 것: execute_verdict의 ENOSYS 조건을 지우는 것(모든 오류에서 대체 호출), ENOSYS에서
     // 대체 호출을 하지 않거나 그 답을 버리는 것, 성공을 거부하는 것.
+    // U-18 뒤에도 실행 전용 `#!` 스크립트는 커널이 싣지 않는다. 이름 실행의 경로가 `/dev/fd/<폴더>/<이름>`이고
+    // 그 폴더 fd가 close-on-exec라 binfmt_script가 ENOENT를 낸다(BINPRM_FLAGS_PATH_INACCESSIBLE). 그래서 줄이
+    // 이름 붙인 인터프리터(검사하지 않은 `touch`)는 돌지 않고 결과는 RELAY_EXEC다. 이것을 실패시키는 것: exec 직전에
+    // 폴더 fd의 FD_CLOEXEC를 끄는 것(touch가 돌아 카나리가 생기고 종료 코드가 touch의 것). 폴더를 O_CLOEXEC 없이
+    // 여는 것만으로는 실패하지 않는다: prepare의 close-on-exec 단계가 3 이상 모든 fd에 다시 건다.
+    #[test]
+    fn test_execute_only_script_is_not_loaded() {
+        // Root reads any file, so the case needs another user (CI's Linux
+        // cells; BINGSU_REQUIRE_NONROOT_TESTS=1 turns a root run into a failure).
+        if crate::commands::exec_path::test_skip_as_root() {
+            return;
+        }
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = fresh_dir("xonly-script");
+        let canary = dir.join("ran");
+        let exe = dir.join("tool");
+        let line = format!("#!/usr/bin/touch {}\n", canary.display());
+        executable(&exe, line.as_bytes(), 0o111);
+        let (_, bytes) = input(Origin::Config, LIVE, b"");
+        let got = script_outcome(&exe, &bytes, &[b"tool"]);
+        assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
+        assert!(
+            !canary.exists(),
+            "the kernel ran the script's own interpreter"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn execute_check_falls_back_only_on_enosys() {
         let run = |new: Result<(), i32>, old: bool| {
@@ -2778,5 +3080,585 @@ mod tests {
         for e in [libc::EPERM, libc::EACCES, libc::EINVAL, libc::EIO] {
             assert_eq!(run(Err(e), true), (false, 0), "{e}");
         }
+    }
+}
+
+/// macOS relay runs: the test binary is the relay (`relay_child`) and, for
+/// the checks that need to see the target, the target too (`probe_child`).
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::hook::{HOOK, Stage};
+    use super::*;
+    use bingsu_core::handoff::{Cwd, Interpreter, Origin, relay_args, relay_input};
+    use std::io::Read;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const SECOND: i64 = 1_000_000_000;
+
+    /// A pipe whose ends sit at 100 or above and are close-on-exec, so the
+    /// child's dup2 onto 3 and 5 never overwrites another of them.
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` is writable for two descriptors.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let high = |fd: i32| {
+            // SAFETY: `fd` is open; the duplicate is close-on-exec.
+            let h = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 100) };
+            assert!(h >= 100);
+            // SAFETY: `fd` was returned by pipe above and is closed once.
+            unsafe { libc::close(fd) };
+            // SAFETY: `h` is a fresh descriptor nothing else owns.
+            unsafe { OwnedFd::from_raw_fd(h) }
+        };
+        (high(fds[0]), high(fds[1]))
+    }
+
+    fn put(fd: &OwnedFd, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            // SAFETY: `bytes` is readable for its length; `fd` is open.
+            let n = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            bytes = &bytes[usize::try_from(n).unwrap()..];
+        }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = base.join(format!("bingsu-relay-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn copy_mode(from: &Path, to: &Path, mode: u32) {
+        std::fs::copy(from, to).unwrap();
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn frame_input(run_ns: i64, interpreter: Option<Interpreter>) -> Vec<u8> {
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        let permit = Permit {
+            kind: clock.kind,
+            // Far: the first run of a fresh copy of this binary can take
+            // seconds on macOS (its code is checked on first exec).
+            deadline: clock.now.checked_add_signed(60 * SECOND).unwrap(),
+            boot: clock.boot,
+            resume: clock.resume,
+            domain: clock.domain,
+        };
+        let frame = ExecFrame {
+            origin: Origin::Config,
+            run_deadline: clock.now.checked_add_signed(run_ns).unwrap(),
+            environment: Vec::new(),
+            pin: None,
+            interpreter,
+            cwd: b"/".to_vec(),
+        };
+        relay_input(permit, &frame, INPUT_CAP).unwrap()
+    }
+
+    fn live() -> Vec<u8> {
+        frame_input(60 * SECOND, None)
+    }
+
+    /// What one relay run left: its exit code, the bytes on its status pipe
+    /// and the target's stdout.
+    #[derive(Debug)]
+    struct Run {
+        code: i32,
+        status: Vec<u8>,
+        stdout: Vec<u8>,
+    }
+
+    fn read_all(fd: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            // SAFETY: `buf` is writable for its length.
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+            match usize::try_from(n).unwrap() {
+                0 => return out,
+                n => out.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// A `relay_child` hook: its mode, the path it acts on and the other one.
+    type Swap<'a> = Option<(&'a str, &'a Path, &'a Path)>;
+
+    /// The supervisor's side for one relay: fd 3 holds `input`, fd 2 the
+    /// status pipe, fd 4 the `relay_child` hook and the relay argv as
+    /// NUL-terminated words, fd 5 a pipe end left open without close-on-exec
+    /// (an fd the relay must not pass on). SIGUSR1 is ignored and SIGUSR2
+    /// blocked, which the relay must undo.
+    fn run_relay(input: &[u8], exe: &Path, argv: &[&[u8]], swap: Swap<'_>) -> Run {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let words: Vec<Vec<u8>> = relay_args(exe.as_os_str().as_bytes(), Cwd::Neutral, argv)
+            .unwrap()
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect();
+        let (r3, w3) = pipe();
+        put(&w3, input);
+        drop(w3);
+        let (r4, w4) = pipe();
+        let (mode, target, with) = swap.unwrap_or(("", Path::new(""), Path::new("")));
+        let hook = [
+            mode.as_bytes(),
+            target.as_os_str().as_bytes(),
+            with.as_os_str().as_bytes(),
+        ];
+        for word in hook.into_iter().chain(words.iter().map(Vec::as_slice)) {
+            put(&w4, word);
+            put(&w4, b"\0");
+        }
+        drop(w4);
+        let (status_r, status_w) = pipe();
+        let (r5, _w5) = pipe();
+        let (r3n, r4n, r5n) = (r3.as_raw_fd(), r4.as_raw_fd(), r5.as_raw_fd());
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "relay::macos_tests::relay_child",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(status_w));
+        // Runs in the forked child: only async-signal-safe calls.
+        let setup = move || {
+            for (from, to) in [(r3n, 3), (r4n, 4), (r5n, 5)] {
+                // SAFETY: both descriptors are valid; dup2 clears close-on-exec on `to`.
+                if unsafe { libc::dup2(from, to) } != to {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            // SAFETY: plain disposition change.
+            unsafe { libc::signal(libc::SIGUSR1, libc::SIG_IGN) };
+            // SAFETY: an all-zero sigset_t is a valid buffer for sigemptyset.
+            let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `set` is writable.
+            unsafe { libc::sigemptyset(&mut set) };
+            // SAFETY: `set` is initialized.
+            unsafe { libc::sigaddset(&mut set, libc::SIGUSR2) };
+            // SAFETY: `set` is initialized; the old mask is not requested.
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
+            Ok(())
+        };
+        // SAFETY: `setup` is async-signal-safe (above).
+        unsafe { cmd.pre_exec(setup) };
+        let mut child = cmd.spawn().unwrap();
+        drop((r3, r4, r5));
+        let mut stdout = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut stdout)
+            .unwrap();
+        let code = child.wait().unwrap().code().unwrap_or(-1);
+        drop(cmd);
+        let mut status = Vec::new();
+        std::fs::File::from(status_r)
+            .read_to_end(&mut status)
+            .unwrap();
+        Run {
+            code,
+            status,
+            stdout,
+        }
+    }
+
+    /// The relay process: reads its hook and argv from fd 4 (the relay
+    /// reads no environment, so neither does this), then runs the relay.
+    #[test]
+    #[ignore = "child: one relay run"]
+    fn relay_child() {
+        let words = read_all(4);
+        // SAFETY: fd 4 is this child's argument pipe, read to the end above.
+        unsafe { libc::close(4) };
+        let mut words: Vec<OsString> = words
+            .strip_suffix(b"\0")
+            .unwrap()
+            .split(|&b| b == 0)
+            .map(|w| OsString::from_vec(w.to_vec()))
+            .collect();
+        let args = words.split_off(3);
+        let [mode, target, with] = <[OsString; 3]>::try_from(words).unwrap();
+        let (target, with) = (PathBuf::from(target), PathBuf::from(with));
+        let mode = mode.into_string().unwrap();
+        if !mode.is_empty() {
+            // Once: a script run checks two names.
+            let mut once = Some(mode);
+            HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |stage| {
+                    if stage != Stage::Recheck {
+                        return;
+                    }
+                    let Some(mode) = once.take() else { return };
+                    match mode.as_str() {
+                        // Another file under the checked name.
+                        "rename" => std::fs::rename(&with, &target).unwrap(),
+                        // The checked folder moved to `with`, a symlink in
+                        // its place: the same inode through a link.
+                        "folder-link" => {
+                            std::fs::rename(&target, &with).unwrap();
+                            std::os::unix::fs::symlink(&with, &target).unwrap();
+                        }
+                        // The name check takes long: the deadline passes.
+                        "late" => std::thread::sleep(std::time::Duration::from_millis(400)),
+                        other => panic!("{other}"),
+                    }
+                }));
+            });
+        }
+        let code = relay(&args);
+        // SAFETY: child exit without the harness's atexit work.
+        unsafe { libc::_exit(i32::from(code)) }
+    }
+
+    /// The target side: prints what it was started with on one line.
+    #[test]
+    #[ignore = "child: the relay's target"]
+    fn probe_child() {
+        let fds: Vec<i32> = open_fds().unwrap().into_iter().collect();
+        // SAFETY: an all-zero sigset_t is a valid out-parameter value.
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: only reads this thread's mask into `mask`.
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) };
+        // SAFETY: an all-zero sigaction is a valid out-parameter value.
+        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: only reads SIGUSR1's action into `old`.
+        unsafe { libc::sigaction(libc::SIGUSR1, std::ptr::null(), &mut old) };
+        let cwd = std::env::current_dir().unwrap();
+        let argv0 = std::env::args_os().next().unwrap();
+        println!(
+            "SEEN fds={fds:?} mask={mask} usr1={} cwd={} argv0={}",
+            old.sa_sigaction,
+            cwd.display(),
+            argv0.to_string_lossy()
+        );
+    }
+
+    fn me_exe() -> PathBuf {
+        std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+    }
+
+    /// The probe target as `exe` (a path to this test binary or a copy).
+    fn probe(exe: &Path, input: &[u8]) -> Run {
+        let argv: [&[u8]; 6] = [
+            b"probe-word",
+            b"relay::macos_tests::probe_child",
+            b"--exact",
+            b"--ignored",
+            b"--nocapture",
+            b"-q",
+        ];
+        run_relay(input, exe, &argv, None)
+    }
+
+    fn seen(run: &Run) -> String {
+        let out = String::from_utf8_lossy(&run.stdout);
+        out.lines()
+            .find_map(|l| l.strip_prefix("SEEN "))
+            .unwrap_or_else(|| panic!("the target did not run: {run:?}"))
+            .to_owned()
+    }
+
+    // 양성 대조와 계약: 대상은 fd {0,1,2}만, 빈 신호 마스크와 기본 처리, frame의 작업 폴더, 사용자가 쓴 argv[0]으로
+    // 돈다. 상태 파이프는 exec에서 닫혀 0바이트다. 이것을 실패시키는 것: cloexec_all을 늘 참으로(fd 5와 상태
+    // 파이프가 남음), reset_signals를 지우는 것.
+    #[test]
+    fn test_macos_relay_runs_the_target_clean() {
+        let run = probe(&me_exe(), &live());
+        let line = seen(&run);
+        assert_eq!(run.code, 0, "{run:?}");
+        assert!(run.status.is_empty(), "{run:?}");
+        assert!(line.contains("fds=[0, 1, 2] "), "{line}");
+        assert!(line.contains(" mask=0 usr1=0 "), "{line}");
+        assert!(line.contains(" cwd=/ "), "{line}");
+        assert!(line.ends_with(" argv0=probe-word"), "{line}");
+    }
+
+    // 거부하면 상태 파이프에 코드 1바이트를 쓰고 대상은 돌지 않는다. 이것을 실패시키는 것: relay의 상태 쓰기를
+    // 지우는 것, prepare의 시계 확인을 지우는 것(만료 frame이 돈다).
+    #[test]
+    fn test_macos_relay_refuses_an_expired_frame() {
+        let run = probe(&me_exe(), &frame_input(-1, None));
+        assert_eq!(run.code, i32::from(RELAY_EXPIRED), "{run:?}");
+        assert_eq!(run.status, [RELAY_EXPIRED]);
+        assert!(!String::from_utf8_lossy(&run.stdout).contains("SEEN "));
+    }
+
+    // U-17(macOS): setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
+    // 것: open_target의 set_id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
+    #[test]
+    fn test_set_id_targets_are_refused() {
+        let dir = scratch("set-id");
+        for (mode, code) in [(0o755, 0), (0o4755, RELAY_TARGET), (0o2755, RELAY_TARGET)] {
+            let exe = dir.join(format!("probe-{mode:o}"));
+            copy_mode(&me_exe(), &exe, mode);
+            let run = probe(&exe, &live());
+            assert_eq!(run.code, i32::from(code), "{mode:o}: {run:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // C2 판정 Q4: 읽을 수 없는 실행 전용 대상은 거부한다(경로 execve면 커널이 그 `#!` 줄의 인터프리터를 검사 없이
+    // 띄운다). 양성 대조: 같은 사본 0711(소유자가 읽음)은 돈다. 이것을 실패시키는 것: 읽기 열기의 EACCES에서
+    // O_EXEC로 다시 열어 네이티브로 실행하는 대체 경로.
+    #[test]
+    fn test_macos_execute_only_target_refused() {
+        let dir = scratch("xonly");
+        for (mode, code) in [(0o711, 0), (0o111, RELAY_TARGET)] {
+            let exe = dir.join(format!("probe-{mode:o}"));
+            copy_mode(&me_exe(), &exe, mode);
+            let run = probe(&exe, &live());
+            assert_eq!(run.code, i32::from(code), "{mode:o}: {run:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn swapped(mode: &str, input: &[u8]) -> Run {
+        let dir = scratch(&format!("swap-{mode}"));
+        let folder = dir.join("bin");
+        std::fs::create_dir(&folder).unwrap();
+        let exe = folder.join("probe");
+        copy_mode(&me_exe(), &exe, 0o755);
+        // The first exec of a fresh copy is slow (its code is checked): done
+        // here, so the short deadline of "late" measures the name check alone.
+        assert!(
+            Command::new(&exe)
+                .arg("--list")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let (target, with) = match mode {
+            "rename" => {
+                let other = folder.join("other");
+                copy_mode(&me_exe(), &other, 0o755);
+                (exe.clone(), other)
+            }
+            "folder-link" => (folder.clone(), dir.join("moved")),
+            _ => (exe.clone(), exe.clone()),
+        };
+        let argv: [&[u8]; 6] = [
+            b"probe-word",
+            b"relay::macos_tests::probe_child",
+            b"--exact",
+            b"--ignored",
+            b"--nocapture",
+            b"-q",
+        ];
+        let run = run_relay(input, &exe, &argv, Some((mode, &target, &with)));
+        std::fs::remove_dir_all(&dir).unwrap();
+        run
+    }
+
+    // U-18: 재확인 바로 앞에 이름 자리에 다른 파일이 오면 거부한다. 이것을 실패시키는 것: still_named를 늘 참으로.
+    #[test]
+    fn test_macos_swap_before_the_name_check_is_refused() {
+        let run = swapped("rename", &live());
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+    }
+
+    // C2 판정 Q3: 검사한 폴더를 옮기고 그 자리에 링크를 두면 같은 inode·ctime이라도 거부한다(execve는 경로 전체를
+    // 다시 해석한다). 이것을 실패시키는 것: 재확인의 AT_SYMLINK_NOFOLLOW_ANY를 AT_SYMLINK_NOFOLLOW로 바꾸는 것.
+    #[test]
+    fn test_macos_link_on_the_way_is_refused() {
+        let run = swapped("folder-link", &live());
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+    }
+
+    // U-18 순서: 재확인이 늦어 마감이 지나면 실행하지 않는다(시계는 재확인 뒤). 이것을 실패시키는 것: exec의
+    // 시계 확인을 still_named 앞으로 옮기는 것.
+    #[test]
+    fn test_macos_deadline_passing_during_the_name_check_is_refused() {
+        let run = swapped("late", &frame_input(300_000_000, None));
+        assert_eq!(run.code, i32::from(RELAY_EXPIRED), "{run:?}");
+    }
+
+    // 이름 자리의 FIFO는 열지 않는다(열면 기다리던 쓰는 쪽이 풀린다). macOS에는 쓰는 쪽이 open 안에서 기다리는지
+    // 볼 /proc이 없어 200 ms를 먼저 기다린다(늦은 쓰는 쪽은 통과로 보일 수 있을 뿐 거짓 실패는 없다). 이것을
+    // 실패시키는 것: open_target의 열기 전 형식 검사(stat_at)를 지우는 것.
+    #[test]
+    fn test_macos_relay_never_opens_a_fifo() {
+        let dir = scratch("fifo");
+        let fifo = dir.join("fifo");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is NUL-terminated.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o755) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            // SAFETY: `c` is NUL-terminated; no O_CREAT. Blocks until a reader opens it.
+            let w = unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+            assert!(w >= 0);
+            tx.send(()).unwrap();
+            // SAFETY: `w` was opened above and is closed once.
+            unsafe { libc::close(w) };
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let run = probe(&fifo, &live());
+        let opened = rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_ok();
+        // Release a writer still waiting, without waiting for one.
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is NUL-terminated; no O_CREAT.
+        let r = unsafe {
+            libc::open(
+                c.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        writer.join().unwrap();
+        // SAFETY: `r` was opened above and is closed once.
+        unsafe { libc::close(r) };
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+        assert!(!opened, "the relay opened the FIFO for reading");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn sh() -> PathBuf {
+        std::fs::canonicalize("/bin/sh").unwrap()
+    }
+
+    fn interpreter(line: &str) -> Option<Interpreter> {
+        Some(Interpreter {
+            line: line.as_bytes().to_vec(),
+            path: sh().as_os_str().as_bytes().to_vec(),
+            pin: None,
+        })
+    }
+
+    /// A script copy as the helper makes one (the user's, 0600 unless
+    /// `mode` says otherwise) that prints its argv.
+    fn script_copy(dir: &Path, mode: u32) -> PathBuf {
+        let copy = dir.join("copy");
+        std::fs::write(&copy, b"#!/bin/sh\necho \"SEEN $0 $*\"\n").unwrap();
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(mode)).unwrap();
+        copy
+    }
+
+    // 스크립트 복사본은 검사한 인터프리터로 돌고, 인터프리터는 복사본 경로를 인자로 받는다. 이것을 실패시키는 것:
+    // script_argv에 복사본 경로 대신 다른 값을 넣는 것.
+    #[test]
+    fn test_macos_script_copy_runs_through_its_interpreter() {
+        let dir = scratch("script");
+        let copy = script_copy(&dir, 0o600);
+        let run = run_relay(
+            &frame_input(60 * SECOND, interpreter("/bin/sh")),
+            &copy,
+            &[b"tool", b"x"],
+            None,
+        );
+        assert_eq!(run.code, 0, "{run:?}");
+        assert_eq!(seen(&run), format!("{} x", copy.display()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 복사본은 사용자의 0600 파일이어야 한다. 이것을 실패시키는 것: script()의 private 조건을 지우는 것.
+    #[test]
+    fn test_script_copy_must_be_private() {
+        let dir = scratch("script-0644");
+        let copy = script_copy(&dir, 0o644);
+        let run = run_relay(
+            &frame_input(60 * SECOND, interpreter("/bin/sh")),
+            &copy,
+            &[b"tool"],
+            None,
+        );
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // frame의 줄과 다른 `#!` 줄, 그리고 인터프리터가 다시 스크립트인 경우는 거부한다. 이것을 실패시키는 것:
+    // script()의 줄 비교를 지우는 것, 인터프리터의 Opened::Native 요구를 지우는 것.
+    #[test]
+    fn test_macos_script_line_and_nesting_refused() {
+        let dir = scratch("script-refused");
+        let copy = script_copy(&dir, 0o600);
+        let other = run_relay(
+            &frame_input(60 * SECOND, interpreter("/bin/zsh")),
+            &copy,
+            &[b"tool"],
+            None,
+        );
+        assert_eq!(other.code, i32::from(RELAY_TARGET), "{other:?}");
+        let nested = dir.join("nested");
+        std::fs::write(&nested, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut frame = interpreter("/bin/sh");
+        if let Some(i) = frame.as_mut() {
+            i.path = nested.as_os_str().as_bytes().to_vec();
+        }
+        let copy2 = dir.join("copy2");
+        std::fs::write(&copy2, format!("#!{}\n", nested.display())).unwrap();
+        std::fs::set_permissions(&copy2, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if let Some(i) = frame.as_mut() {
+            i.line = nested.as_os_str().as_bytes().to_vec();
+        }
+        let run = run_relay(&frame_input(60 * SECOND, frame), &copy2, &[b"tool"], None);
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // C2 리뷰 Medium: 최종 재확인은 스크립트 사본도 본다. 인터프리터 재확인 때 사본 자리에 다른 0600 스크립트가
+    // 오면 거부한다. 양성 대조: test_macos_script_copy_runs_through_its_interpreter. 이것을 실패시키는 것: exec의
+    // 사본 still_named 검사를 지우는 것(바뀐 사본이 돈다).
+    #[test]
+    fn test_macos_copy_swapped_before_the_exec_is_refused() {
+        let dir = scratch("copy-swap");
+        let copy = script_copy(&dir, 0o600);
+        let other = dir.join("other");
+        std::fs::write(&other, b"#!/bin/sh\necho \"SEEN swapped\"\n").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let run = run_relay(
+            &frame_input(60 * SECOND, interpreter("/bin/sh")),
+            &copy,
+            &[b"tool"],
+            Some(("rename", &copy, &other)),
+        );
+        assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // C2 리뷰 Low: 소유권을 무시하는 볼륨(`hdiutil attach -owners off`) 위의 대상은 거부한다(그 볼륨에서는 모든
+    // 파일이 지금 사용자 소유로 보인다). 양성 대조: 같은 dmg를 소유권을 지키게 붙이면 돈다. 이것을 실패시키는 것:
+    // mount_ownership이 MNT_IGNORE_OWNERSHIP을 보지 않는 것.
+    #[test]
+    fn test_macos_target_on_a_volume_ignoring_owners_refused() {
+        for (owners, code) in [(true, 0), (false, RELAY_TARGET)] {
+            let dir = scratch(if owners { "owners-on" } else { "owners-off" });
+            let volume = crate::commands::sys::TestVolume::new(&dir, owners, false);
+            // A small target: the image holds 4 MB.
+            let exe = volume.mount.join("true");
+            copy_mode(Path::new("/usr/bin/true"), &exe, 0o755);
+            let run = run_relay(&live(), &exe, &[b"true"], None);
+            assert_eq!(run.code, i32::from(code), "owners {owners}: {run:?}");
+            drop(volume);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    // 로컬이 아닌 마운트는 판정 불가(None), 소유권을 무시하는 로컬 마운트는 false다. 이것을 실패시키는 것:
+    // mount_ownership의 MNT_LOCAL 조건이나 MNT_IGNORE_OWNERSHIP 조건을 지우는 것.
+    #[test]
+    fn mount_flags_decide_ownership() {
+        let local = libc::MNT_LOCAL as u32;
+        let ignore = libc::MNT_IGNORE_OWNERSHIP as u32;
+        assert_eq!(mount_ownership(local), Some(true));
+        assert_eq!(mount_ownership(local | ignore), Some(false));
+        assert_eq!(mount_ownership(0), None);
+        assert_eq!(mount_ownership(ignore), None);
     }
 }

@@ -73,6 +73,7 @@ pub(crate) fn spawn(
         &[(&stdout_write, 1), (&status_write, 2), (&input_read, 3)],
         c"/",
         false,
+        true,
         expires_ns,
         go,
     )?;
@@ -106,6 +107,7 @@ pub(crate) fn spawn_supervisor(
         &[(grant, 3), (results, 4), (lock, 5)],
         c"/",
         true,
+        false,
         expires_ns,
         &|| true,
     )
@@ -123,7 +125,9 @@ thread_local! {
 /// open `/dev/null` at a number, `dups` move a source to a number (sources
 /// are first moved above every target), the child starts in `cwd`. With
 /// `close_rest` (Linux) every other open descriptor is closed in the child;
-/// macOS always spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`.
+/// macOS always spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. With `own_group`
+/// (macOS, a relay) the child leads a new process group, which the
+/// supervisor ends with `killpg` (best effort: there is no cgroup).
 #[allow(clippy::too_many_arguments, reason = "one spawn's fixed inputs")]
 fn spawn_with(
     exe: &CStr,
@@ -132,6 +136,7 @@ fn spawn_with(
     dups: &[(&File, i32)],
     cwd: &CStr,
     close_rest: bool,
+    own_group: bool,
     expires_ns: u64,
     go: &dyn Fn() -> bool,
 ) -> io::Result<(OwnedChild, Option<u64>)> {
@@ -181,6 +186,16 @@ fn spawn_with(
         let flags = libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF;
         #[cfg(target_os = "macos")]
         let flags = flags | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+        #[cfg(target_os = "macos")]
+        let flags = if own_group {
+            // SAFETY: initialized attributes; group 0 is the child's own pid.
+            check(unsafe { libc::posix_spawnattr_setpgroup(&mut attr, 0) })?;
+            flags | libc::POSIX_SPAWN_SETPGROUP
+        } else {
+            flags
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = own_group;
         // SAFETY: supported child-only flags.
         check(unsafe { libc::posix_spawnattr_setflags(&mut attr, flags as libc::c_short) })?;
         for &(fd, mode) in nulls {
@@ -241,7 +256,14 @@ fn spawn_with(
                 [std::ptr::null_mut()].as_ptr(),
             )
         })?;
-        Ok((OwnedChild::attach(pid, expires_ns)?, spawn_enter))
+        let child = OwnedChild::attach(pid, expires_ns)?;
+        #[cfg(target_os = "macos")]
+        let child = if own_group {
+            child.leads_group()
+        } else {
+            child
+        };
+        Ok((child, spawn_enter))
     })();
     // SAFETY: initialized actions, no longer used.
     unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };

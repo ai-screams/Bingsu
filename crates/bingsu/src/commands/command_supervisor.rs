@@ -501,6 +501,10 @@ impl Supervisor {
     fn stop(&mut self) {
         self.stopped = true;
         for run in &self.runs {
+            // macOS has no cgroup: the relay's process group goes when this
+            // exit is reaped (OwnedChild::reap of a group leader), in a later
+            // step or in the drop when the supervisor ends first (best
+            // effort: a descendant that called setsid stays).
             let _ = run.child.signal(libc::SIGKILL);
         }
     }

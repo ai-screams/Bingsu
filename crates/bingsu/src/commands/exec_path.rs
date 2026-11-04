@@ -62,7 +62,7 @@ enum End {
         chain: Vec<rule::Id>,
         file: File,
         next: NextOwner,
-        ctime: (i64, i64),
+        stamp: sys::Stamp,
     },
 }
 
@@ -168,7 +168,6 @@ fn walk(
                 return Err(Miss::Refused);
             }
             canonical.push(&name);
-            let ctime = now.ctime;
             let chain = stack.iter().map(|f| f.id).collect();
             return Ok((
                 canonical,
@@ -176,7 +175,7 @@ fn walk(
                     chain,
                     file,
                     next,
-                    ctime,
+                    stamp: now,
                 },
             ));
         }
@@ -264,6 +263,10 @@ pub fn path_value(folders: &[PathBuf]) -> Vec<u8> {
 /// executable regular file of that name decides; if that file fails the
 /// rules nothing runs. `repo` as in `sanitize`; the file's own folders
 /// must not pass through it either.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the command round uses lookup_open")
+)]
 pub fn lookup(
     word: &[u8],
     folders: &[PathBuf],
@@ -271,12 +274,24 @@ pub fn lookup(
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Found, Miss> {
+    lookup_open(word, folders, repo, me, groups).map(|(found, _)| found)
+}
+
+/// `lookup`, also handing back the descriptor the checks ran on (macOS
+/// copies a script from it).
+pub fn lookup_open(
+    word: &[u8],
+    folders: &[PathBuf],
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<(Found, Checked), Miss> {
     match rule::name(word) {
         Name::Refused => Err(Miss::Refused),
-        Name::Absolute(p) => resolve(Path::new(OsStr::from_bytes(p)), repo, me, groups),
+        Name::Absolute(p) => resolve_open(Path::new(OsStr::from_bytes(p)), repo, me, groups),
         Name::Search(n) => {
             for folder in folders {
-                match resolve(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
+                match resolve_open(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
                     Err(Miss::Absent) => continue,
                     other => return other,
                 }
@@ -298,14 +313,28 @@ pub fn resolve(
     resolve_open(path, repo, me, groups).map(|(found, _)| found)
 }
 
-/// The descriptor `resolve_open` ran its checks on. Only this module makes
-/// one, so what reads it (a script's shebang, `ScriptCopies::copy`) reads
-/// the checked file, never one opened again by name.
-pub struct Checked(File);
+/// The descriptor `resolve_open` ran its checks on, with its canonical path
+/// and the stat the walk took before the checks (device, inode, owner,
+/// group, mode, status change time: what a pin binds). Only this module
+/// makes one, so what reads it (a script's shebang, `ScriptCopies::copy`)
+/// reads the checked file, never one opened again by name.
+pub struct Checked {
+    file: File,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "macOS script copies")
+    )]
+    path: PathBuf,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "macOS script copies")
+    )]
+    stamp: sys::Stamp,
+}
 
 impl Checked {
     pub fn file(&self) -> &File {
-        &self.0
+        &self.file
     }
 }
 
@@ -390,7 +419,7 @@ fn resolve_checked(
         chain,
         file,
         next,
-        ctime,
+        stamp,
     } = end
     else {
         return Err(Miss::Absent);
@@ -398,7 +427,10 @@ fn resolve_checked(
     if !rule::outside_repo(&chain, repo) {
         return Err(Miss::Refused);
     }
-    let ctime = (ctime.0, u32::try_from(ctime.1).map_err(|_| Miss::Refused)?);
+    let ctime = (
+        stamp.ctime.0,
+        u32::try_from(stamp.ctime.1).map_err(|_| Miss::Refused)?,
+    );
     let facts = sys::fd_facts(file.as_fd()).map_err(|_| Miss::Refused)?;
     let mut recording = Recording::new(groups);
     match rule::candidate(&facts, me, next, &mut recording) {
@@ -415,11 +447,15 @@ fn resolve_checked(
             }
             Ok((
                 Found {
-                    executable,
+                    executable: executable.clone(),
                     pin: rule::target_pin(&facts, &recording.cleared, ctime),
                     interpreter: None,
                 },
-                Checked(file),
+                Checked {
+                    file,
+                    path: executable,
+                    stamp,
+                },
             ))
         }
         Candidate::Skip => Err(Miss::Absent),
@@ -439,19 +475,22 @@ pub const SCRIPT_MAX: u64 = 65_536;
 #[cfg(target_os = "macos")]
 pub struct ScriptCopies {
     dir: File,
+    /// The folder's canonical path (`F_GETPATH`): the relay refuses any
+    /// symlink on the path it is given, and `$TMPDIR`-style roots sit under
+    /// the `/var -> private/var` link.
     path: PathBuf,
 }
 
+/// Copies removed by one sweep, at most (C2 ruling Q1).
+#[cfg(target_os = "macos")]
+pub const SWEEP_MAX: usize = 64;
+
 #[cfg(target_os = "macos")]
 impl ScriptCopies {
-    /// Opens (creating if needed) `scripts` in the runtime root, `root` at
-    /// `root_path` (as `open_runtime_root` checked it). The folder must be
-    /// the user's, exactly 0700, with no ACL that allows writing, local.
-    pub fn open(
-        root: std::os::fd::BorrowedFd<'_>,
-        root_path: &Path,
-        me: u32,
-    ) -> Result<Self, Miss> {
+    /// Opens (creating if needed) `scripts` in the runtime root `root` (as
+    /// `open_runtime_root` checked it). The folder must be the user's,
+    /// exactly 0700, with no ACL that allows writing, local.
+    pub fn open(root: std::os::fd::BorrowedFd<'_>, me: u32) -> Result<Self, Miss> {
         use bingsu_core::fs_trust::{Last, RefuseGroupWrite, final_verdict};
         let name = OsStr::new("scripts");
         let made = sys::mkdir_at(root, name, 0o700).map_err(|_| Miss::Refused)?;
@@ -476,24 +515,39 @@ impl ScriptCopies {
             &mut RefuseGroupWrite,
         )
         .map_err(|_| Miss::Refused)?;
-        Ok(Self {
-            dir,
-            path: root_path.join(name),
-        })
+        let path = sys::fd_path(std::os::fd::AsRawFd::as_raw_fd(&dir)).ok_or(Miss::Refused)?;
+        Ok(Self { dir, path })
     }
 
     /// Copies `script` (read from its start, through the checked
-    /// descriptor) into a new file with a random name, mode 0600, and
-    /// returns its path. A body over `SCRIPT_MAX` is refused. The caller
-    /// removes the copy after the run.
-    pub fn copy(&self, script: &Checked) -> Result<PathBuf, Miss> {
+    /// descriptor) into a new file named `<tag>-<random>`, mode 0600, and
+    /// returns its canonical path. A body over `SCRIPT_MAX` is refused. The
+    /// caller removes the copy after the run (`remove`), or a later `sweep`
+    /// of the same tag does.
+    pub fn copy(&self, script: &Checked, tag: &str) -> Result<PathBuf, Miss> {
         use std::io::Seek;
+        if !may_execute(script) {
+            return Err(Miss::Refused);
+        }
         let mut from = script.file();
         from.seek(std::io::SeekFrom::Start(0))
             .map_err(|_| Miss::Refused)?;
         let body = read_capped(from)?;
+        #[cfg(test)]
+        tests::after_read();
+        // The bytes copied are those of the file the checks and the pin
+        // describe: a write, chmod, chown or ACL change since moves the
+        // status change time (C2 review High; fails without it:
+        // test_macos_copy_refuses_a_script_changed_after_its_check).
+        if !same_file(
+            &sys::file_stamp(script.file()).map_err(|_| Miss::Refused)?,
+            &script.stamp,
+        ) {
+            return Err(Miss::Refused);
+        }
         let random = sys::random_bytes16().ok_or(Miss::Refused)?;
-        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let random: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let name = format!("{tag}-{random}");
         let out = sys::create_file_at(self.dir.as_fd(), OsStr::new(&name), 0o600)
             .map_err(|_| Miss::Refused)?;
         let raw = std::os::fd::AsRawFd::as_raw_fd(&out);
@@ -504,6 +558,72 @@ impl ScriptCopies {
         }
         Ok(self.path.join(name))
     }
+
+    /// Removes a copy `copy` made (by its name in this folder).
+    pub fn remove(&self, copy: &Path) {
+        if let Some(name) = copy.file_name() {
+            let _ = sys::unlink_at(self.dir.as_fd(), name);
+        }
+    }
+
+    /// Removes up to `SWEEP_MAX` copies named `<tag>-...`: what a round of
+    /// the same session left when its helper did not see its supervisor
+    /// end. Only the helper that holds the session lock calls it, so no
+    /// live supervisor of that session uses them; other tags stay.
+    pub fn sweep(&self, tag: &str) -> usize {
+        let Ok(names) = sys::directory_names(self.dir.as_fd()) else {
+            return 0;
+        };
+        let prefix = format!("{tag}-");
+        let mut removed = 0;
+        // Fails without the prefix test: sweep_removes_only_its_tag.
+        for name in names
+            .iter()
+            .filter(|n| n.as_bytes().starts_with(prefix.as_bytes()))
+        {
+            if removed == SWEEP_MAX {
+                break;
+            }
+            if sys::unlink_at(self.dir.as_fd(), name).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
+/// Whether `now` is the checked file unchanged: device, inode, owner,
+/// group, mode and status change time.
+#[cfg(target_os = "macos")]
+fn same_file(now: &sys::Stamp, then: &sys::Stamp) -> bool {
+    let key = |s: &sys::Stamp| (s.dev, s.ino, s.uid, s.gid, s.mode, s.ctime);
+    key(now) == key(then)
+}
+
+/// Whether the kernel would let this user execute the checked script, as
+/// `execve` would judge it (bits, ACL, a `noexec` mount):
+/// `faccessat(X_OK, AT_EACCESS)` on its canonical path, which must still
+/// name the checked file afterwards (macOS has no descriptor form; C2
+/// review Medium). The copy is 0600 and runs as an
+/// interpreter's argument, so this is the only place the script's own
+/// execute permission is decided.
+#[cfg(target_os = "macos")]
+fn may_execute(script: &Checked) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // The kernel's answer covers a `noexec` mount too: a separate fstatfs
+    // check of MNT_NOEXEC was tried and no test failed without it, since
+    // faccessat refuses there already. Fails without it:
+    // test_macos_script_needs_its_own_execute_bit (0611) and
+    // test_macos_noexec_script_refused.
+    if !sys::may_execute_path(&script.path) {
+        return false;
+    }
+    #[cfg(test)]
+    tests::after_access();
+    // The path faccessat judged is still the checked file (fails without
+    // it: test_macos_access_check_names_the_checked_file).
+    std::fs::symlink_metadata(&script.path)
+        .is_ok_and(|m| (m.dev(), m.ino()) == (script.stamp.dev, script.stamp.ino))
 }
 
 /// A script body of at most `SCRIPT_MAX` bytes, reading no more than one
@@ -530,9 +650,65 @@ pub fn resolve_for_user(path: &Path, repo: Option<rule::Id>) -> Result<Found, Mi
     resolve(path, repo, me, &mut groups)
 }
 
+/// A test that needs a user other than root: true (skip) when running as
+/// root, unless `BINGSU_REQUIRE_NONROOT_TESTS=1` (a CI cell that runs as
+/// another user), which makes a root run fail instead of passing silently.
+#[cfg(test)]
+pub(crate) fn test_skip_as_root() -> bool {
+    if sys::current_uid() != 0 {
+        return false;
+    }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-only switch from CI; sys and the relay forbid environment reads"
+    )]
+    let required = std::env::var_os("BINGSU_REQUIRE_NONROOT_TESTS");
+    assert!(
+        required.as_deref() != Some(std::ffi::OsStr::new("1")),
+        "this cell must not run as root"
+    );
+    eprintln!("skipped as root: the case needs another user");
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs inside `ScriptCopies::copy` after the body is read (tests only).
+    #[cfg(target_os = "macos")]
+    type Hook = Option<Box<dyn FnMut()>>;
+    #[cfg(target_os = "macos")]
+    thread_local! {
+        static AFTER_READ: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+        /// Runs in `may_execute` right after faccessat.
+        static AFTER_ACCESS: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn after_read() {
+        AFTER_READ.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f();
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn after_access() {
+        AFTER_ACCESS.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f();
+            }
+        });
+    }
+
+    // 사용자 칸에서는 비 root 전용 시험이 실제로 돈다. 이것을 실패시키는 것: test_skip_as_root가 늘 참을 돌려주는 것
+    // (실행 전용 relay 시험이 아무것도 단언하지 않고 통과).
+    #[test]
+    fn nonroot_cases_run_for_a_user() {
+        if sys::current_uid() != 0 {
+            assert!(!test_skip_as_root());
+        }
+    }
     use bingsu_core::fs_trust::{Facts, Group, RefuseGroupWrite};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -1179,18 +1355,158 @@ mod tests {
         let (t, root) = runtime_root("script-copy");
         let script = t.join("tool.sh");
         let checked = script_at(&script, b"#!/bin/sh\necho hi\n");
-        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
         assert_eq!(mode_of(&t.join("scripts")), 0o700);
         checked.file().read_exact(&mut [0; 2]).unwrap();
-        let copy = copies.copy(&checked).unwrap();
-        assert_eq!(copy.parent(), Some(t.join("scripts").as_path()));
+        let copy = copies.copy(&checked, "t").unwrap();
+        let folder = std::fs::canonicalize(t.join("scripts")).unwrap();
+        assert_eq!(copy.parent(), Some(folder.as_path()));
+        assert!(copy.file_name().unwrap().as_bytes().starts_with(b"t-"));
         assert_eq!(mode_of(&copy), 0o600);
         assert_eq!(
             std::fs::read(&copy).unwrap(),
             std::fs::read(&script).unwrap()
         );
         // A second open finds the folder it made and accepts it.
-        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        assert!(ScriptCopies::open(root.as_fd(), me()).is_ok());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // C2 리뷰 High: 검사한 뒤 바뀐 원본(본문을 읽은 직후의 다시 쓰기)은 복사하지 않는다. 양성 대조: 그대로 두면
+    // 복사된다. 이것을 실패시키는 것: copy의 복사 뒤 stat 비교를 지우는 것, 그 비교를 본문 읽기 앞으로 옮기는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_copy_refuses_a_script_changed_after_its_check() {
+        let (t, root) = runtime_root("changed");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        let script = t.join("tool.sh");
+        assert!(
+            copies
+                .copy(&script_at(&script, b"#!/bin/sh\necho a\n"), "t")
+                .is_ok()
+        );
+        let checked = script_at(&script, b"#!/bin/sh\necho a\n");
+        let path = script.clone();
+        AFTER_READ.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::fs::write(&path, b"#!/bin/sh\necho b\n").unwrap();
+            }));
+        });
+        let got = copies.copy(&checked, "t");
+        AFTER_READ.with(|h| *h.borrow_mut() = None);
+        assert_eq!(got, Err(Miss::Refused));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // C2 리뷰 Medium: faccessat이 판정한 경로가 아직 검사한 파일이어야 한다. 판정 직후 상위 폴더를 옮기고 같은
+    // 경로에 다른 스크립트를 두면(검사한 inode의 ctime은 그대로라 복사 뒤 비교로는 못 잡는다) 복사하지 않는다.
+    // 이것을 실패시키는 것: may_execute의 판정 뒤 (dev, ino) 비교를 지우는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_access_check_names_the_checked_file() {
+        let (t, root) = runtime_root("access-swap");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        let folder = t.join("a");
+        std::fs::create_dir(&folder).unwrap();
+        let script = folder.join("tool.sh");
+        let checked = script_at(&script, b"#!/bin/sh\necho a\n");
+        let (folder2, moved) = (folder.clone(), t.join("b"));
+        AFTER_ACCESS.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&folder2, &moved).unwrap();
+                std::fs::create_dir(&folder2).unwrap();
+                let other = folder2.join("tool.sh");
+                std::fs::write(&other, b"#!/bin/sh\necho b\n").unwrap();
+                std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }));
+        });
+        let got = copies.copy(&checked, "t");
+        AFTER_ACCESS.with(|h| *h.borrow_mut() = None);
+        assert_eq!(got, Err(Miss::Refused));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // C2 재리뷰 Low: 검사가 끝난 뒤 copy() 전에 바뀐 원본도 복사하지 않는다. 비교 기준은 걷기 때의 Stamp다. 이것을
+    // 실패시키는 것: copy가 Checked의 Stamp 대신 copy 시작 때 새로 읽은 stat과 비교하는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_copy_refuses_a_script_changed_before_the_copy() {
+        let (t, root) = runtime_root("changed-early");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        let script = t.join("tool.sh");
+        let checked = script_at(&script, b"#!/bin/sh\necho a\n");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&script, b"#!/bin/sh\necho b\n").unwrap();
+        assert_eq!(copies.copy(&checked, "t"), Err(Miss::Refused));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // C2 리뷰 Medium: 원본 스크립트의 실행 권한은 커널에 묻는다. 소유자 실행 비트가 없는 0611(남에게만 실행)과
+    // 0011은 복사하지 않는다. 양성 대조: 0711. 이것을 실패시키는 것: may_execute의 faccessat 검사를 지우는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_script_needs_its_own_execute_bit() {
+        let (t, root) = runtime_root("xbit");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        for (mode, ok) in [(0o711, true), (0o611, false), (0o011, false)] {
+            let script = t.join(format!("tool-{mode:o}"));
+            std::fs::write(&script, b"#!/bin/sh\necho a\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+            let copied = resolve_open(&script, None, me(), &mut Clear)
+                .ok()
+                .and_then(|(_, checked)| copies.copy(&checked, "t").ok());
+            assert_eq!(copied.is_some(), ok, "{mode:o}");
+        }
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // C2 리뷰 Medium: noexec 마운트 위의 원본 스크립트는 복사하지 않는다(사용자가 붙인 dmg를 noexec로 다시
+    // 마운트). 양성 대조: noexec가 아닌 같은 dmg. 이것을 실패시키는 것: may_execute의 faccessat 검사를 지우는 것
+    // (따로 둔 MNT_NOEXEC 검사를 지운 변이는 살아남아 그 검사는 넣지 않았다).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_noexec_script_refused() {
+        for noexec in [false, true] {
+            let (t, root) = runtime_root(if noexec { "noexec" } else { "exec" });
+            let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+            let volume = sys::TestVolume::new(&t, true, noexec);
+            let script = volume.mount.join("tool");
+            std::fs::write(&script, b"#!/bin/sh\necho a\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (_, checked) = resolve_open(&script, None, me(), &mut Clear).unwrap();
+            assert_eq!(
+                copies.copy(&checked, "t").is_ok(),
+                !noexec,
+                "noexec {noexec}"
+            );
+            drop(checked);
+            drop(volume);
+            std::fs::remove_dir_all(&t).unwrap();
+        }
+    }
+
+    // C2 판정 Q1: sweep은 자기 태그의 사본만, 한 번에 SWEEP_MAX개까지 지운다. 이것을 실패시키는 것: 접두사
+    // 비교를 지우는 것(다른 세션의 사본이 지워짐), 상한 검사를 지우는 것(70개가 한 번에 지워짐).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sweep_removes_only_its_tag() {
+        let (t, root) = runtime_root("sweep");
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
+        let folder = t.join("scripts");
+        for i in 0..70 {
+            std::fs::write(folder.join(format!("mine-{i:032x}")), b"x").unwrap();
+        }
+        std::fs::write(folder.join("other-0"), b"x").unwrap();
+        std::fs::write(folder.join("minex-0"), b"x").unwrap();
+        assert_eq!(copies.sweep("mine"), SWEEP_MAX);
+        assert_eq!(copies.sweep("mine"), 70 - SWEEP_MAX);
+        let mut left: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["minex-0", "other-0"]);
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -1212,7 +1528,7 @@ mod tests {
         let t = parent_scratch("umask");
         let root = root_at(&t);
         sys::test_umask(0o177);
-        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        assert!(ScriptCopies::open(root.as_fd(), me()).is_ok());
         sys::exit_now(0);
     }
 
@@ -1225,12 +1541,7 @@ mod tests {
     fn script_folder_others_can_change_is_refused() {
         let (t, root) = runtime_root("script-loose");
         let scripts = t.join("scripts");
-        let refused = || {
-            matches!(
-                ScriptCopies::open(root.as_fd(), &t, me()),
-                Err(Miss::Refused)
-            )
-        };
+        let refused = || matches!(ScriptCopies::open(root.as_fd(), me()), Err(Miss::Refused));
         let fresh = || {
             let _ = std::fs::remove_dir_all(&scripts);
             std::fs::create_dir(&scripts).unwrap();
@@ -1241,7 +1552,7 @@ mod tests {
         assert!(refused());
         assert_eq!(mode_of(&scripts), 0o755);
         fresh();
-        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        assert!(ScriptCopies::open(root.as_fd(), me()).is_ok());
         add_acl("nobody allow add_file", &scripts);
         assert!(refused());
         fresh();
@@ -1262,13 +1573,15 @@ mod tests {
     #[test]
     fn script_copy_over_64k_refused() {
         let (t, root) = runtime_root("script-big");
-        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
         let script = t.join("big.sh");
         let max = usize::try_from(SCRIPT_MAX).unwrap();
-        let copy = copies.copy(&script_at(&script, &vec![b'#'; max])).unwrap();
+        let copy = copies
+            .copy(&script_at(&script, &vec![b'#'; max]), "t")
+            .unwrap();
         assert_eq!(std::fs::metadata(&copy).unwrap().len(), SCRIPT_MAX);
         assert_eq!(
-            copies.copy(&script_at(&script, &vec![b'#'; max + 1])),
+            copies.copy(&script_at(&script, &vec![b'#'; max + 1]), "t"),
             Err(Miss::Refused)
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1316,9 +1629,9 @@ mod tests {
         let t = parent_scratch("short-copy");
         let root = root_at(&t);
         let checked = script_at(&t.join("tool.sh"), &[b'#'; 1000]);
-        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let copies = ScriptCopies::open(root.as_fd(), me()).unwrap();
         sys::test_limit_file_size(16);
-        assert_eq!(copies.copy(&checked), Err(Miss::Refused));
+        assert_eq!(copies.copy(&checked, "t"), Err(Miss::Refused));
         sys::exit_now(0);
     }
 

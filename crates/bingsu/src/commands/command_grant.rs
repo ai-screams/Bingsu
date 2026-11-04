@@ -66,8 +66,13 @@ pub(crate) enum Skip {
     NoSession,
     /// Another supervisor of this session holds the lock.
     Busy,
-    /// No trusted relay on this platform yet (macOS, C2 ruling J3).
+    /// No trusted relay on this platform: a unix other than Linux and
+    /// macOS (C2 ruling Q2).
     NoRelay,
+    /// This macOS refuses `AT_SYMLINK_NOFOLLOW_ANY`, without which the
+    /// relay's name check refuses every target (C2 ruling Q3).
+    #[cfg(target_os = "macos")]
+    NoNofollowAny,
     /// Every unit runs in the neutral folder, which is not empty, the
     /// user's and 0500.
     Neutral,
@@ -79,6 +84,10 @@ impl Skip {
             Self::NoUnits => return None,
             Self::NoSession => "command round skipped: no session value from the shell",
             Self::NoRelay => "command round skipped: no trusted relay on this platform",
+            #[cfg(target_os = "macos")]
+            Self::NoNofollowAny => {
+                "command round skipped: this macOS has no AT_SYMLINK_NOFOLLOW_ANY, which the relay's name check needs"
+            }
             Self::Neutral => NEUTRAL_REFUSED,
             Self::NoEnvironment(why) => why.message(),
             Self::Busy => "command round busy: the session's supervisor is still running",
@@ -103,14 +112,124 @@ pub(crate) struct Round {
     _lock: File,
     /// Units left out because the neutral folder failed its check.
     pub neutral_refused: usize,
+    scripts: Scripts,
+}
+
+/// Script copies of one round. Linux runs a script through a sealed memfd
+/// the relay makes, so this holds nothing there. macOS runs the helper's
+/// private copy (C2 ruling Q1): made after the marker from the descriptor
+/// the checks ran on, named after the session, removed once the
+/// supervisor has ended, or by a later round of the same session. The
+/// `scripts` folder is opened (and swept) at the round's first script.
+#[derive(Default)]
+struct Scripts {
+    #[cfg(target_os = "macos")]
+    runtime: Option<File>,
+    #[cfg(target_os = "macos")]
+    me: u32,
+    #[cfg(target_os = "macos")]
+    tag: String,
+    /// `None` until the first script; then the folder, if it passed.
+    #[cfg(target_os = "macos")]
+    copies: Option<Option<exec_path::ScriptCopies>>,
+    #[cfg(target_os = "macos")]
+    made: Vec<std::path::PathBuf>,
+}
+
+impl Scripts {
+    /// macOS: the round's script copies in the runtime root. Only the
+    /// holder of the session lock makes one.
+    #[cfg(target_os = "macos")]
+    fn new(runtime: &File, me: u32, tag: String) -> Self {
+        Self {
+            runtime: runtime.try_clone().ok(),
+            me,
+            tag,
+            copies: None,
+            made: Vec::new(),
+        }
+    }
+
+    /// macOS: the `scripts` folder, opened at the first call after the
+    /// copies an earlier round of this session left were swept. A folder
+    /// that fails its checks leaves scripts unresolved; other units run.
+    /// Fails without the laziness: test_macos_unit_is_one_process_the_relay_execs_into
+    /// (a round without scripts makes no folder).
+    #[cfg(target_os = "macos")]
+    fn copies(&mut self) -> Option<&exec_path::ScriptCopies> {
+        if self.copies.is_none() {
+            let opened = self
+                .runtime
+                .as_ref()
+                .and_then(|r| exec_path::ScriptCopies::open(r.as_fd(), self.me).ok());
+            if let Some(c) = &opened {
+                c.sweep(&self.tag);
+            }
+            self.copies = Some(opened);
+        }
+        self.copies.as_ref()?.as_ref()
+    }
+
+    /// The executable the relay runs for `found` and its pin: the file
+    /// itself, or on macOS a script's private copy (no pin: the copy is the
+    /// user's 0600 file). `None` when the copy cannot be made.
+    fn executable(
+        &mut self,
+        found: &exec_path::Found,
+        checked: &exec_path::Checked,
+    ) -> Option<(Vec<u8>, Option<bingsu_core::command::path::ExecPin>)> {
+        #[cfg(target_os = "macos")]
+        if found.interpreter.is_some() {
+            let tag = self.tag.clone();
+            let copy = self.copies()?.copy(checked, &tag).ok()?;
+            self.made.push(copy.clone());
+            return Some((copy.into_os_string().into_encoded_bytes(), None));
+        }
+        let _ = checked;
+        Some((
+            found
+                .executable
+                .clone()
+                .into_os_string()
+                .into_encoded_bytes(),
+            found.pin,
+        ))
+    }
+
+    /// The copy `executable` just made, for a unit left out after all.
+    fn forget_last(&mut self, executable: &[u8]) {
+        #[cfg(target_os = "macos")]
+        if let (Some(Some(c)), Some(last)) = (&self.copies, self.made.last())
+            && last.as_os_str().as_encoded_bytes() == executable
+        {
+            c.remove(last);
+            self.made.pop();
+        }
+        let _ = executable;
+    }
+
+    /// Removes every copy this round made.
+    fn remove_all(self) {
+        #[cfg(target_os = "macos")]
+        if let Some(Some(c)) = &self.copies {
+            for copy in &self.made {
+                c.remove(copy);
+            }
+        }
+    }
+}
+
+/// The first 16 bytes of sha256(session), hex: names the session's lock and
+/// its script copies, never the raw session value.
+fn session_tag(session: &[u8]) -> String {
+    let d = sha256(session);
+    d[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `command-<first 16 bytes of sha256(session), hex>.lock`: a fixed-length
 /// name, never the raw session value.
 fn lock_name(session: &[u8]) -> String {
-    let d = sha256(session);
-    let hex: String = d[..16].iter().map(|b| format!("{b:02x}")).collect();
-    format!("command-{hex}.lock")
+    format!("command-{}.lock", session_tag(session))
 }
 
 /// The neutral folder (spec: an empty private folder): made 0500 when
@@ -146,8 +265,18 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     if runnable.is_empty() {
         return Err(Skip::NoUnits);
     }
-    if cfg!(not(target_os = "linux")) {
+    // Another unix has no trusted relay and runs nothing. No CI target is
+    // such a unix, so no test runs this branch; `cfg!` keeps it compiled on
+    // Linux and macOS too (C2 ruling Q2).
+    if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
         return Err(Skip::NoRelay);
+    }
+    // The behavior probe of C2 ruling Q3. Every macOS CI runner has the
+    // flag, so no test removes this call and fails; `nofollow_any` itself
+    // is tested (nofollow_any_probe_decides).
+    #[cfg(target_os = "macos")]
+    if !nofollow_any(probe_nofollow_any(c"/"), probe_nofollow_any(c"/var/empty")) {
+        return Err(Skip::NoNofollowAny);
     }
     let body = i
         .environment
@@ -161,6 +290,10 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             StoreError::Busy => Skip::Busy,
             _ => Skip::Failed,
         })?;
+    #[cfg(target_os = "macos")]
+    let scripts = Scripts::new(i.runtime, i.me, session_tag(session));
+    #[cfg(not(target_os = "macos"))]
+    let scripts = Scripts::default();
     let mut runnable = runnable;
     let mut neutral_refused = 0;
     if !neutral(i.runtime, i.me).map_err(|_| Skip::Failed)? {
@@ -219,7 +352,39 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         results,
         _lock: lock,
         neutral_refused,
+        scripts,
     })
+}
+
+/// The behavior probe for `AT_SYMLINK_NOFOLLOW_ANY` on `path`: the result
+/// of `fstatat` (0 or its errno).
+#[cfg(target_os = "macos")]
+fn probe_nofollow_any(path: &std::ffi::CStr) -> i32 {
+    // SAFETY: an all-zero stat is a valid out-parameter value.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fixed NUL-terminated path, writable `st`.
+    let rc = unsafe {
+        libc::fstatat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            &mut st,
+            sys::AT_SYMLINK_NOFOLLOW_ANY,
+        )
+    };
+    if rc == 0 {
+        0
+    } else {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+    }
+}
+
+/// Whether the probes say the flag works both ways: "/" (no symlink) is
+/// found, and `/var/empty` (through the `/var -> private/var` link) is
+/// refused with ELOOP. EINVAL is a macOS without the flag; a flag that is
+/// accepted but not enforced passes "/" and fails the link.
+#[cfg(target_os = "macos")]
+fn nofollow_any(root: i32, link: i32) -> bool {
+    root == 0 && link == libc::ELOOP
 }
 
 /// The grant's units and what was left out.
@@ -247,6 +412,7 @@ fn units(
     collected: Option<u16>,
     me: u32,
     groups: &mut SystemGroups,
+    scripts: &mut Scripts,
 ) -> Result<Resolved, Skip> {
     let mut out = Resolved {
         repo_fallback: collected.is_none(),
@@ -272,7 +438,11 @@ fn units(
             Policy::Argv { argv } => argv[0].as_slice(),
             Policy::UnsafeShell { .. } => SHELL,
         };
-        let Ok(found) = exec_path::lookup(word, &folders, repo, me, groups) else {
+        let Ok((found, checked)) = exec_path::lookup_open(word, &folders, repo, me, groups) else {
+            out.unresolved += 1;
+            continue;
+        };
+        let Some((executable, pin)) = scripts.executable(&found, &checked) else {
             out.unresolved += 1;
             continue;
         };
@@ -284,8 +454,8 @@ fn units(
             environment: plan::target_environment(&vars, &r.env_allow, &path),
             timeout: r.timeout,
             env_allow: r.env_allow.clone(),
-            executable: found.executable.into_os_string().into_encoded_bytes(),
-            pin: found.pin,
+            executable,
+            pin,
             interpreter: found.interpreter,
         };
         let frame = ExecFrame {
@@ -300,12 +470,15 @@ fn units(
             },
         };
         if handoff::relay_input(base.permit, &frame, handoff::RELAY_INPUT_MAX).is_err() {
+            scripts.forget_last(&unit.executable);
             out.oversize += 1;
             continue;
         }
         trial.units.push(unit);
         if wire::encode(&Message::Grant(trial.clone())).is_err() {
-            trial.units.pop();
+            if let Some(unit) = trial.units.pop() {
+                scripts.forget_last(&unit.executable);
+            }
             out.oversize += 1;
         }
     }
@@ -411,14 +584,28 @@ impl Round {
     /// Without publication: no grant. Closing the pipe tells the supervisor
     /// to run nothing; it is then waited for until the helper's deadline.
     pub(crate) fn abandon(self) {
+        self.end();
+    }
+
+    /// `abandon`, then the round's script copies are removed once the
+    /// supervisor has ended (reaped: its end of the result pipe is closed,
+    /// so it runs nothing more). A supervisor still alive at the helper's
+    /// deadline may still be starting an interpreter on one: its copies
+    /// stay for the next round of the session to sweep.
+    fn end(self) {
         let deadline = self.grant.helper_deadline;
         let Self {
             mut child,
             grant_pipe,
+            scripts,
             ..
         } = self;
         drop(grant_pipe);
-        wait(&mut child, deadline);
+        // Fails without the check: test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep
+        // (a copy removed under a live supervisor).
+        if wait(&mut child, deadline) {
+            scripts.remove_all();
+        }
     }
 
     /// Sends the grant under `permit`, reads every result until the helper's
@@ -441,6 +628,7 @@ impl Round {
             repo,
             me,
             groups,
+            &mut self.scripts,
         ) {
             Ok(resolved) => {
                 report.unresolved = resolved.unresolved;
@@ -533,9 +721,16 @@ impl Round {
 
 /// Waits for the supervisor to exit (it ends its children first) until the
 /// helper's deadline; the drop then kills and reaps whatever is left.
-fn wait(child: &mut OwnedChild, deadline: u64) {
-    while matches!(child.reap(), Ok(false)) && now_ns().is_ok_and(|now| now < deadline) {
-        std::thread::sleep(std::time::Duration::from_millis(1));
+/// Whether it exited.
+fn wait(child: &mut OwnedChild, deadline: u64) -> bool {
+    loop {
+        match child.reap() {
+            Ok(true) => return true,
+            Ok(false) if now_ns().is_ok_and(|now| now < deadline) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            _ => return false,
+        }
     }
 }
 
@@ -578,6 +773,70 @@ mod tests {
         SystemGroups::new(&sys::passwd_entry(sys::current_uid()).unwrap().name)
     }
 
+    // C2 판정 Q3: "/"는 0, 링크를 지나는 "/var/empty"는 ELOOP일 때만 relay를 쓴다(EINVAL은 그 플래그가 없는
+    // macOS, 받기만 하고 지키지 않는 플래그는 링크 쪽에서 걸림). 이 Mac의 탐침 결과도 기록한다. 이것을 실패시키는
+    // 것: nofollow_any의 두 조건 가운데 하나를 지우는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nofollow_any_probe_decides() {
+        assert!(nofollow_any(0, libc::ELOOP));
+        assert!(!nofollow_any(libc::EINVAL, libc::EINVAL));
+        assert!(!nofollow_any(0, 0));
+        assert!(!nofollow_any(libc::EPERM, libc::ELOOP));
+        let (root, link) = (probe_nofollow_any(c"/"), probe_nofollow_any(c"/var/empty"));
+        eprintln!("AT_SYMLINK_NOFOLLOW_ANY probe on this host: / {root}, /var/empty {link}");
+        assert!(nofollow_any(root, link), "this macOS runs no command round");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scratch_runtime(tag: &str) -> (std::path::PathBuf, File) {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let t = base.join(format!("bingsu-grant-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir(&t).unwrap();
+        std::fs::set_permissions(&t, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let root = File::open(&t).unwrap();
+        (t, root)
+    }
+
+    // C2 판정 Q1: macOS 스크립트는 세션 이름이 붙은 사본으로, 핀 없이 넘긴다. 네이티브 파일은 그대로다. 빠진 단위의
+    // 사본과 회차의 사본은 지운다. 이것을 실패시키는 것: executable()의 사본 분기를 지우는 것(원본 경로가 넘어감),
+    // forget_last나 remove_all의 unlink를 지우는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_scripts_run_as_tagged_private_copies() {
+        let (t, root) = scratch_runtime("scripts");
+        let tool = t.join("tool");
+        std::fs::write(&tool, b"#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let me = sys::current_uid();
+        let mut g = groups();
+        let mut scripts = Scripts::new(&root, me, "abcd".to_owned());
+        let (found, checked) = exec_path::resolve_open(&tool, None, me, &mut g).unwrap();
+        let (exe, pin) = scripts.executable(&found, &checked).unwrap();
+        let exe = std::path::PathBuf::from(OsStr::from_bytes(&exe));
+        assert_ne!(exe, tool);
+        assert!(
+            exe.file_name().unwrap().as_bytes().starts_with(b"abcd-"),
+            "{exe:?}"
+        );
+        assert_eq!(pin, None);
+        assert_eq!(std::fs::read(&exe).unwrap(), std::fs::read(&tool).unwrap());
+        let (native, checked) =
+            exec_path::resolve_open(Path::new("/bin/ls"), None, me, &mut g).unwrap();
+        let (path, _) = scripts.executable(&native, &checked).unwrap();
+        assert_eq!(path, native.executable.as_os_str().as_bytes());
+        let (found2, checked2) = exec_path::resolve_open(&tool, None, me, &mut g).unwrap();
+        let (left_out, _) = scripts.executable(&found2, &checked2).unwrap();
+        scripts.forget_last(&left_out);
+        assert!(!Path::new(OsStr::from_bytes(&left_out)).exists());
+        assert!(exe.exists());
+        scripts.remove_all();
+        assert!(!exe.exists());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
     // M4·M-2: 상한을 넘는 단위만 빠지고 나머지는 돈다. 이것을 실패시키는 것: units()의 relay 입력 상한 검사를
     // 지우는 것(20 KB 환경 단위가 허가에 남음), 허가 전체 encode 검사를 지우는 것(여덟 단위 × 15 KB가 한 프레임을
     // 넘어 회차 전체가 실패함).
@@ -602,6 +861,7 @@ mod tests {
             None,
             sys::current_uid(),
             &mut groups(),
+            &mut Scripts::default(),
         )
         .unwrap();
         assert_eq!((got.units.len(), got.oversize), (1, 1));
@@ -616,6 +876,7 @@ mod tests {
             None,
             sys::current_uid(),
             &mut groups(),
+            &mut Scripts::default(),
         )
         .unwrap();
         assert!(
@@ -641,6 +902,7 @@ mod tests {
             None,
             sys::current_uid(),
             &mut groups(),
+            &mut Scripts::default(),
         )
         .unwrap();
         assert!(got.repo_fallback);
@@ -658,6 +920,7 @@ mod tests {
             Some(0),
             sys::current_uid(),
             &mut groups(),
+            &mut Scripts::default(),
         )
         .unwrap();
         assert!(!got.repo_fallback);

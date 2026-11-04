@@ -140,7 +140,8 @@ jobs:
       - name: PTY tests
         if: success() || failure()
         run: |
-          # test_command_round.py needs git and runs in the filter-calls release step.
+          # test_command_round.py runs in the filter-calls release step and the
+          # macOS gate step, where every test it selects is asserted as passed.
           # While recording (record_observations), -s shows the OBSERVE-PTY lines in the job log.
           docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
@@ -599,6 +600,29 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_redraw_yields_to_a_key_and_skips_the_same_width' "$RUNNER_TEMP/shell-gates.txt"
           grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_width_that_keeps_changing_does_not_hold_input' "$RUNNER_TEMP/shell-gates.txt"
           grep -Fx 'PASSED tests/shell/test_zsh_hooks.py::test_width_changed_during_a_call_is_drawn' "$RUNNER_TEMP/shell-gates.txt"
+          # Command rounds through the macOS relay (PR 10b); the root-only owner cell
+          # and the Linux-only cells are not selected.
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_command_round.py::test_configured_command_runs' 'tests/shell/test_command_round.py::test_not_run_unit_never_runs' 'tests/shell/test_command_round.py::test_one_supervisor_per_session' 'tests/shell/test_command_round.py::test_target_ends_soon_after_helper_death' 'tests/shell/test_command_round.py::test_lock_held_while_supervisor_alive' 'tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin' 'tests/shell/test_command_round.py::test_shell_folder_stands_for_the_repository' 'tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[ok]' 'tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[file]' 'tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[0700]' 'tests/shell/test_command_round.py::test_unit_cannot_write_in_the_neutral_folder' 'tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt' 'tests/shell/test_command_round.py::test_macos_unit_is_one_process_the_relay_execs_into' 'tests/shell/test_command_round.py::test_macos_script_runs_from_a_copy_that_is_then_removed' 'tests/shell/test_command_round.py::test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep' 'tests/shell/test_command_round.py::test_macos_group_grandchild_ends_when_the_helper_dies' 'tests/shell/test_command_round.py::test_macos_group_grandchild_ends_with_the_round' 'tests/shell/test_command_round.py::test_no_session_runs_nothing_and_says_so' 'tests/shell/test_command_round.py::test_command_table_names_real_tests' 'tests/shell/test_command_round.py::test_round_without_units_starts_no_supervisor' --basetemp="$RUNNER_TEMP/command-round-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_configured_command_runs' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_not_run_unit_never_runs' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_one_supervisor_per_session' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_target_ends_soon_after_helper_death' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_lock_held_while_supervisor_alive' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_shell_folder_stands_for_the_repository' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[ok]' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[file]' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500[0700]' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_unit_cannot_write_in_the_neutral_folder' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_macos_unit_is_one_process_the_relay_execs_into' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_macos_script_runs_from_a_copy_that_is_then_removed' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_macos_group_grandchild_ends_when_the_helper_dies' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_macos_group_grandchild_ends_with_the_round' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_no_session_runs_nothing_and_says_so' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_command_table_names_real_tests' "$RUNNER_TEMP/command-round.txt"
+          grep -Fx 'PASSED tests/shell/test_command_round.py::test_round_without_units_starts_no_supervisor' "$RUNNER_TEMP/command-round.txt"
       - name: Fetch the pinned oh-my-zsh
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
@@ -621,7 +645,7 @@ jobs:
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
 
   shell-macos-shells:
     name: Shell PTY (macOS Homebrew ${{ matrix.shell }})
@@ -686,4 +710,4 @@ jobs:
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'

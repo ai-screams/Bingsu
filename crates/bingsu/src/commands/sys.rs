@@ -1308,6 +1308,81 @@ pub fn try_lock(file: std::fs::File) -> std::io::Result<FileLock> {
     }
 }
 
+/// macOS tests: a small HFS+ disk image attached at `<dir>/mount`, with
+/// ownership off (`hdiutil attach -owners off`) or remounted `noexec`
+/// (`mount -u`, the user's own mount), detached on drop.
+#[cfg(all(test, target_os = "macos"))]
+pub struct TestVolume {
+    pub mount: std::path::PathBuf,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+impl TestVolume {
+    pub fn new(dir: &std::path::Path, owners: bool, noexec: bool) -> Self {
+        let _spawn = test_inherited_fd_lock();
+        let image = dir.join("volume.dmg");
+        let mount = dir.join("mount");
+        std::fs::create_dir_all(&mount).unwrap();
+        let run = |args: &[&std::ffi::OsStr]| {
+            let out = std::process::Command::new(args[0])
+                .args(&args[1..])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let o = std::ffi::OsStr::new;
+        run(&[
+            o("/usr/bin/hdiutil"),
+            o("create"),
+            o("-quiet"),
+            o("-size"),
+            o("4m"),
+            o("-fs"),
+            o("HFS+"),
+            o("-volname"),
+            o("bingsu-test"),
+            image.as_os_str(),
+        ]);
+        run(&[
+            o("/usr/bin/hdiutil"),
+            o("attach"),
+            o("-quiet"),
+            o("-nobrowse"),
+            o("-noautoopen"),
+            o("-owners"),
+            o(if owners { "on" } else { "off" }),
+            o("-mountpoint"),
+            mount.as_os_str(),
+            image.as_os_str(),
+        ]);
+        if noexec {
+            run(&[
+                o("/sbin/mount"),
+                o("-u"),
+                o("-o"),
+                o("noexec,nobrowse"),
+                mount.as_os_str(),
+            ]);
+        }
+        Self { mount }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+impl Drop for TestVolume {
+    fn drop(&mut self) {
+        let _spawn = test_inherited_fd_lock();
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-quiet", "-force"])
+            .arg(&self.mount)
+            .output();
+    }
+}
+
 /// Serialize all child-spawning tests with fixtures owning close-only locks.
 #[cfg(test)]
 pub fn test_inherited_fd_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1356,6 +1431,38 @@ impl Drop for PausedFork {
             );
         }
     }
+}
+
+/// macOS `fstatat` flag (sys/fcntl.h, not in the libc crate): no symlink
+/// anywhere on the path. The relay keeps its own copy (it is hash-pinned).
+#[cfg(target_os = "macos")]
+pub const AT_SYMLINK_NOFOLLOW_ANY: i32 = 0x0800;
+
+/// macOS: `faccessat(AT_FDCWD, path, X_OK, AT_EACCESS)`, the kernel's answer
+/// whether this user may execute `path` (bits and ACL).
+#[cfg(target_os = "macos")]
+pub fn may_execute_path(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: NUL-terminated path; nothing is written.
+    unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// macOS: the canonical path of the file or folder `fd` holds (`F_GETPATH`).
+#[cfg(target_os = "macos")]
+pub fn fd_path(fd: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes into `buf`.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buf[..len],
+    )))
 }
 
 pub fn unlink_at(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::OsStr) -> std::io::Result<()> {
