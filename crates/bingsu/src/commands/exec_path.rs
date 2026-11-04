@@ -291,6 +291,28 @@ pub fn resolve(
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Found, Miss> {
+    resolve_open(path, repo, me, groups).map(|(found, _)| found)
+}
+
+/// The descriptor `resolve_open` ran its checks on. Only this module makes
+/// one, so what reads it (a script's shebang, `ScriptCopies::copy`) reads
+/// the checked file, never one opened again by name.
+pub struct Checked(File);
+
+impl Checked {
+    pub fn file(&self) -> &File {
+        &self.0
+    }
+}
+
+/// `resolve`, also handing back the descriptor the checks ran on, so the
+/// bytes read next (a script's shebang and body) are the checked file's.
+pub fn resolve_open(
+    path: &Path,
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<(Found, Checked), Miss> {
     let (executable, end) = walk(path, me, groups, false)?;
     let End::File {
         chain,
@@ -308,13 +330,122 @@ pub fn resolve(
     let facts = sys::fd_facts(file.as_fd()).map_err(|_| Miss::Refused)?;
     let mut recording = Recording::new(groups);
     match rule::candidate(&facts, me, next, &mut recording) {
-        Candidate::Run => Ok(Found {
-            executable,
-            pin: rule::target_pin(&facts, &recording.cleared, ctime),
-        }),
+        Candidate::Run => {
+            // macOS runs the target by path, not by descriptor: an executable
+            // on a network file system (no MNT_LOCAL) is refused (spec section
+            // 4, macOS executable row). Only the file itself, as that row
+            // says, and only one that would run: a file the lookup skips
+            // stays a skip. The test that fails this needs a network mount
+            // (`test_macos_network_fs_refused`).
+            #[cfg(target_os = "macos")]
+            if sys::fd_is_local(std::os::fd::AsRawFd::as_raw_fd(&file)) != Some(true) {
+                return Err(Miss::Refused);
+            }
+            Ok((
+                Found {
+                    executable,
+                    pin: rule::target_pin(&facts, &recording.cleared, ctime),
+                },
+                Checked(file),
+            ))
+        }
         Candidate::Skip => Err(Miss::Absent),
         Candidate::Refuse => Err(Miss::Refused),
     }
+}
+
+/// The largest script body copied for an interpreter, as on Linux (spec
+/// section 4 script row: 64 KB).
+#[cfg(target_os = "macos")]
+pub const SCRIPT_MAX: u64 = 65_536;
+
+/// macOS script copies (spec section 4 script row): macOS cannot run a
+/// checked descriptor, so a script's body is copied into the private folder
+/// `scripts` of the runtime root and the interpreter is given the copy's
+/// path. Only the user can change anything in that folder.
+#[cfg(target_os = "macos")]
+pub struct ScriptCopies {
+    dir: File,
+    path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl ScriptCopies {
+    /// Opens (creating if needed) `scripts` in the runtime root, `root` at
+    /// `root_path` (as `open_runtime_root` checked it). The folder must be
+    /// the user's, exactly 0700, with no ACL that allows writing, local.
+    pub fn open(
+        root: std::os::fd::BorrowedFd<'_>,
+        root_path: &Path,
+        me: u32,
+    ) -> Result<Self, Miss> {
+        use bingsu_core::fs_trust::{Last, RefuseGroupWrite, final_verdict};
+        let name = OsStr::new("scripts");
+        let made = sys::mkdir_at(root, name, 0o700).map_err(|_| Miss::Refused)?;
+        let dir = sys::open_dir_at_nofollow(root, name).map_err(|_| Miss::Refused)?;
+        // A umask can take bits from the folder this call made; only that
+        // one is set to 0700. A folder that was already there is judged as
+        // found and never repaired.
+        if made {
+            use std::os::unix::fs::PermissionsExt;
+            dir.set_permissions(std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| Miss::Refused)?;
+        }
+        let facts = sys::fd_facts(dir.as_fd()).map_err(|_| Miss::Refused)?;
+        let local = sys::fd_is_local(std::os::fd::AsRawFd::as_raw_fd(&dir));
+        final_verdict(
+            &facts,
+            me,
+            0,
+            NextOwner::Any,
+            Last::PrivateFolder,
+            local,
+            &mut RefuseGroupWrite,
+        )
+        .map_err(|_| Miss::Refused)?;
+        Ok(Self {
+            dir,
+            path: root_path.join(name),
+        })
+    }
+
+    /// Copies `script` (read from its start, through the checked
+    /// descriptor) into a new file with a random name, mode 0600, and
+    /// returns its path. A body over `SCRIPT_MAX` is refused. The caller
+    /// removes the copy after the run.
+    pub fn copy(&self, script: &Checked) -> Result<PathBuf, Miss> {
+        use std::io::Seek;
+        let mut from = script.file();
+        from.seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| Miss::Refused)?;
+        let body = read_capped(from)?;
+        let random = sys::random_bytes16().ok_or(Miss::Refused)?;
+        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let out = sys::create_file_at(self.dir.as_fd(), OsStr::new(&name), 0o600)
+            .map_err(|_| Miss::Refused)?;
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&out);
+        if !matches!(sys::write_fd(raw, &body), sys::WriteOutcome::Done) {
+            // A short copy must not stay behind for an interpreter to read.
+            let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new(&name));
+            return Err(Miss::Refused);
+        }
+        Ok(self.path.join(name))
+    }
+}
+
+/// A script body of at most `SCRIPT_MAX` bytes, reading no more than one
+/// byte past it.
+#[cfg(target_os = "macos")]
+fn read_capped(from: impl std::io::Read) -> Result<Vec<u8>, Miss> {
+    use std::io::Read;
+    let mut body = Vec::new();
+    from.take(SCRIPT_MAX + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| Miss::Refused)?;
+    if body.len() as u64 > SCRIPT_MAX {
+        return Err(Miss::Refused);
+    }
+    Ok(body)
 }
 
 /// `resolve` for the current user with the system's group answers, asked
@@ -798,6 +929,323 @@ mod tests {
         assert_eq!(pin.group, bingsu_core::fs_trust::GroupPin::of(&facts));
         assert_eq!((pin.ctime_sec, i64::from(pin.ctime_nsec)), stamp.ctime);
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// `chmod +a <entry> <path>` (macOS extended ACL).
+    #[cfg(target_os = "macos")]
+    fn add_acl(entry: &str, path: &Path) {
+        // It spawns /bin/chmod (see sys::test_inherited_fd_lock).
+        let _serial = sys::test_inherited_fd_lock();
+        let st = std::process::Command::new("/bin/chmod")
+            .args(["+a", entry])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(st.success(), "chmod +a {entry} {path:?}");
+    }
+
+    // 다른 사용자(nobody)에게 확장 속성 쓰기만 허용한 ACL은 실행 파일에 있어도, 상위 폴더에 있어도 거부.
+    // 이것을 실패시키는 것: sys::macos_acl::WRITE_CLASS에서 ACL_WRITE_EXTATTRIBUTES(1 << 10)를 빼는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_acl_write_extattr_refused() {
+        let t = scratch("acl-xattr");
+        let (x, y) = (t.join("x"), t.join("d/y"));
+        exe(&x, 0o755);
+        exe(&y, 0o755);
+        let g = &mut RefuseGroupWrite;
+        // Positive control: without the ACL both run.
+        assert_eq!(resolve(&x, None, me(), g).unwrap().executable, x);
+        assert_eq!(resolve(&y, None, me(), g).unwrap().executable, y);
+        add_acl("nobody allow writeextattr", &x);
+        add_acl("nobody allow writeextattr", &t.join("d"));
+        assert_eq!(resolve(&x, None, me(), g), Err(Miss::Refused));
+        assert_eq!(resolve(&y, None, me(), g), Err(Miss::Refused));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 실행 파일 두 단계 위 폴더만 그룹 쓰기이고 그 그룹에 다른 구성원이 있으면(RefuseGroupWrite가 그렇게
+    // 답한다) 거부. 양성 대조: 같은 폴더를 오라클이 통과시키면 실행. 이것을 실패시키는 것: walk가 마지막
+    // 이름을 담은 폴더에서만 ancestor_verdict를 부르는 것(걷기를 한 단계에서 멈춤).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_parent_walk() {
+        let t = scratch("parent-walk");
+        let top = t.join("top");
+        let x = top.join("mid/x");
+        exe(&x, 0o755);
+        std::fs::set_permissions(&top, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            resolve(&x, None, me(), &mut RefuseGroupWrite),
+            Err(Miss::Refused)
+        );
+        assert_eq!(resolve(&x, None, me(), &mut Clear).unwrap().executable, x);
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 네트워크 파일 시스템(MNT_LOCAL 없음)의 실행 파일은 거부하고, 같은 폴더의 실행할 수 없는 파일은 거부
+    // 없이 건너뛴다. 이 Mac에는 그런 마운트가 없어(`mount`에 local이 아닌 것은 autofs
+    // /System/Volumes/Data/home뿐, 실행 파일을 둘 수 없음) 무시한다. SMB·NFS 마운트가 있는 칸에서
+    // BINGSU_NETWORK_FS_EXE=<그 안의 실행 파일, 본인 소유 0755, 그 폴더에 쓸 수 있음>로 --ignored로 돌린다.
+    // 소유권을 무시하는 마운트(SMB 등에서 흔함)면 소유권 판정이 먼저 거부해 locality 검사가 시험되지 않으므로,
+    // 같은 fixture에서 walk 성공과 candidate == Run을 먼저 단언해 거부 원인이 locality 하나뿐임을 보인다.
+    // 이것을 실패시키는 것: resolve의 fd_is_local 검사 제거(실행 파일이 통과), 그 검사를 Candidate::Run
+    // 분기 앞으로 되돌리는 것(0644 파일에서 찾기가 Refused로 멈춤). 네트워크 FS 칸에서만 확인할 수 있고,
+    // 이 Mac은 BLOCKED다(검사를 지워도 이 Mac의 시험은 모두 통과, 2026-11-04 확인).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs an executable on a network file system (BINGSU_NETWORK_FS_EXE)"]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a manual test reads where the mount is from its runner"
+    )]
+    fn test_macos_network_fs_refused() {
+        let x = PathBuf::from(std::env::var_os("BINGSU_NETWORK_FS_EXE").expect("set it"));
+        assert_eq!(sys::fs_is_local(&x), Some(false), "not a network mount");
+        let g = &mut RefuseGroupWrite;
+        let Ok((_, End::File { file, next, .. })) = walk(&x, me(), g, false) else {
+            panic!("the walk to {x:?} fails before the file");
+        };
+        let f = sys::fd_facts(file.as_fd()).unwrap();
+        assert_eq!(f.ownership, Some(true), "the mount ignores ownership");
+        assert_eq!(rule::candidate(&f, me(), next, g), Candidate::Run);
+        assert_eq!(resolve(&x, None, me(), g), Err(Miss::Refused));
+        // A file there that would not run is skipped, not refused.
+        let net = x.parent().unwrap().to_path_buf();
+        let name = format!("bingsu-skip-{}", std::process::id());
+        exe(&net.join(&name), 0o644);
+        let local = scratch("net-skip");
+        exe(&local.join(&name), 0o755);
+        let found = lookup(
+            name.as_bytes(),
+            &[net.clone(), local.clone()],
+            None,
+            me(),
+            g,
+        );
+        std::fs::remove_file(net.join(&name)).unwrap();
+        assert_eq!(found.unwrap().executable, local.join(&name));
+        std::fs::remove_dir_all(&local).unwrap();
+    }
+
+    /// A runtime root stand-in: a fresh 0700 folder and its search descriptor.
+    #[cfg(target_os = "macos")]
+    fn root_at(t: &Path) -> File {
+        std::fs::set_permissions(t, std::fs::Permissions::from_mode(0o700)).unwrap();
+        sys::open_dir_at_search_nofollow(None, t.as_os_str()).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn runtime_root(tag: &str) -> (PathBuf, File) {
+        let t = scratch(tag);
+        let fd = root_at(&t);
+        (t, fd)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mode_of(p: &Path) -> u32 {
+        std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// `body` as an executable script at `p`, checked by `resolve_open`.
+    #[cfg(target_os = "macos")]
+    fn script_at(p: &Path, body: &[u8]) -> Checked {
+        std::fs::write(p, body).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        resolve_open(p, None, me(), &mut RefuseGroupWrite)
+            .unwrap()
+            .1
+    }
+
+    /// Runs one `#[ignore]` child test of this module in a fresh process
+    /// (it changes process-wide state: umask, file size limit).
+    #[cfg(target_os = "macos")]
+    /// `hard_fsize`: a finite soft and hard file size limit (512-byte blocks) the
+    /// child inherits, set by `/bin/sh` before it execs the child.
+    fn run_child(name: &str, hard_fsize: Option<u32>) {
+        let _serial = sys::test_inherited_fd_lock();
+        let exe = std::env::current_exe().unwrap();
+        let mut cmd = match hard_fsize {
+            None => std::process::Command::new(&exe),
+            Some(blocks) => {
+                let mut sh = std::process::Command::new("/bin/sh");
+                sh.args(["-c", &format!("ulimit -f {blocks} && exec \"$0\" \"$@\"")])
+                    .arg(&exe);
+                sh
+            }
+        };
+        let out = cmd
+            .args([
+                "--ignored",
+                "--exact",
+                &format!("commands::exec_path::tests::{name}"),
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    /// The parent's scratch folder `tag`, seen from a child.
+    #[cfg(target_os = "macos")]
+    fn parent_scratch(tag: &str) -> PathBuf {
+        let ppid = std::os::unix::process::parent_id();
+        let dir = std::env::temp_dir().join(format!("bingsu-exec-path-{ppid}-{tag}"));
+        std::fs::canonicalize(dir).unwrap()
+    }
+
+    // 이것을 실패시키는 것: ScriptCopies::open의 fchmod 모드를 0o755로 바꾸는 것(final_verdict가 거부해
+    // open이 실패), copy의 파일 모드를 0o644로 바꾸는 것, copy의 처음으로 되감기를 지우는 것(shebang을 먼저
+    // 읽은 fd에서 앞 두 바이트가 빠짐).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_script_copy_is_private() {
+        use std::io::Read;
+        let (t, root) = runtime_root("script-copy");
+        let script = t.join("tool.sh");
+        let checked = script_at(&script, b"#!/bin/sh\necho hi\n");
+        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        assert_eq!(mode_of(&t.join("scripts")), 0o700);
+        checked.file().read_exact(&mut [0; 2]).unwrap();
+        let copy = copies.copy(&checked).unwrap();
+        assert_eq!(copy.parent(), Some(t.join("scripts").as_path()));
+        assert_eq!(mode_of(&copy), 0o600);
+        assert_eq!(
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(&script).unwrap()
+        );
+        // A second open finds the folder it made and accepts it.
+        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // umask 0o177이면 mkdir 0o700이 0600 폴더를 만든다. 이번 호출이 만든 폴더만 0700으로 맞춘다. 이것을
+    // 실패시키는 것: ScriptCopies::open의 fchmod를 지우는 것(0600 폴더를 final_verdict가 거부).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn script_folder_made_under_a_tight_umask_is_0700() {
+        let t = scratch("umask");
+        run_child("umask_child", None);
+        assert_eq!(mode_of(&t.join("scripts")), 0o700);
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "child: opens the script folder under umask 0o177"]
+    fn umask_child() {
+        let t = parent_scratch("umask");
+        let root = root_at(&t);
+        sys::test_umask(0o177);
+        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        sys::exit_now(0);
+    }
+
+    // 이미 있는 scripts 폴더가 0755이거나, 남에게 파일 추가를 허용하는 ACL(상속 전용 줄 포함)이 있거나,
+    // 다른 0700 폴더를 가리키는 symlink면 고치지 않고 거부. 이것을 실패시키는 것: ScriptCopies::open의
+    // final_verdict 확인을 지우는 것, fchmod를 이번 호출이 만든 폴더 조건 없이 하는 것(0755가 고쳐짐),
+    // 폴더를 이름으로 따라가며 여는 것(symlink가 통과).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn script_folder_others_can_change_is_refused() {
+        let (t, root) = runtime_root("script-loose");
+        let scripts = t.join("scripts");
+        let refused = || {
+            matches!(
+                ScriptCopies::open(root.as_fd(), &t, me()),
+                Err(Miss::Refused)
+            )
+        };
+        let fresh = || {
+            let _ = std::fs::remove_dir_all(&scripts);
+            std::fs::create_dir(&scripts).unwrap();
+            std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        fresh();
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused());
+        assert_eq!(mode_of(&scripts), 0o755);
+        fresh();
+        assert!(ScriptCopies::open(root.as_fd(), &t, me()).is_ok());
+        add_acl("nobody allow add_file", &scripts);
+        assert!(refused());
+        fresh();
+        add_acl("nobody allow write,file_inherit,only_inherit", &scripts);
+        assert!(refused());
+        std::fs::remove_dir_all(&scripts).unwrap();
+        let other = t.join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&other, &scripts).unwrap();
+        assert!(refused());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // 이것을 실패시키는 것: read_capped의 SCRIPT_MAX 검사를 지우는 것(65,537바이트가 복사됨), 또는 `>`를
+    // `>=`로 바꾸는 것(정확히 65,536바이트가 거부됨).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn script_copy_over_64k_refused() {
+        let (t, root) = runtime_root("script-big");
+        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        let script = t.join("big.sh");
+        let max = usize::try_from(SCRIPT_MAX).unwrap();
+        let copy = copies.copy(&script_at(&script, &vec![b'#'; max])).unwrap();
+        assert_eq!(std::fs::metadata(&copy).unwrap().len(), SCRIPT_MAX);
+        assert_eq!(
+            copies.copy(&script_at(&script, &vec![b'#'; max + 1])),
+            Err(Miss::Refused)
+        );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// Serves `#` without end, but panics when asked for more than
+    /// `SCRIPT_MAX + 1` bytes in all.
+    #[cfg(target_os = "macos")]
+    struct Endless(u64);
+
+    #[cfg(target_os = "macos")]
+    impl std::io::Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            assert!(self.0 <= SCRIPT_MAX, "read past SCRIPT_MAX + 1");
+            buf.fill(b'#');
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+    }
+
+    // 이것을 실패시키는 것: read_capped의 `.take(SCRIPT_MAX + 1)`을 지우는 것(끝없는 입력을 끝까지 읽음).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn script_reads_stop_one_byte_past_the_limit() {
+        assert_eq!(read_capped(Endless(0)), Err(Miss::Refused));
+    }
+
+    // 쓰기가 중간에 실패하면 짧은 복사본을 남기지 않는다. 자식에서 파일 크기 상한(RLIMIT_FSIZE)을 16바이트로
+    // 두어 쓰기를 EFBIG로 실패시킨다. 이것을 실패시키는 것: copy의 쓰기 실패 분기에서 unlink_at을 지우는 것,
+    // sys::test_limit_file_size가 물려받은 유한한 hard limit을 RLIM_INFINITY로 올리는 것(EPERM).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_copy_leaves_nothing() {
+        let t = scratch("short-copy");
+        // A finite inherited hard limit: the helper must lower only the soft one.
+        run_child("short_copy_child", Some(4096));
+        assert_eq!(std::fs::read_dir(t.join("scripts")).unwrap().count(), 0);
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "child: copies a script under a 16-byte file size limit"]
+    fn short_copy_child() {
+        let t = parent_scratch("short-copy");
+        let root = root_at(&t);
+        let checked = script_at(&t.join("tool.sh"), &[b'#'; 1000]);
+        let copies = ScriptCopies::open(root.as_fd(), &t, me()).unwrap();
+        sys::test_limit_file_size(16);
+        assert_eq!(copies.copy(&checked), Err(Miss::Refused));
+        sys::exit_now(0);
     }
 
     // 이것을 실패시키는 것: open_target의 O_PATH 재시도를 지우는 것. root는 읽기 권한을 무시하므로

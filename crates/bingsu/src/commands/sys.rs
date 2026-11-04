@@ -44,6 +44,33 @@ pub fn write_deadline_notice(buf: &[u8]) {
     let _ = unsafe { libc::write(2, buf.as_ptr().cast(), buf.len()) };
 }
 
+/// Sets this process's umask (a disposable test child only).
+#[cfg(all(test, target_os = "macos"))]
+pub fn test_umask(mask: libc::mode_t) {
+    // SAFETY: umask only swaps the process file mode mask.
+    unsafe { libc::umask(mask) };
+}
+
+/// Caps the size of files this process writes at `bytes`, with SIGXFSZ
+/// ignored so a write past it fails with EFBIG (a disposable test child
+/// only).
+#[cfg(all(test, target_os = "macos"))]
+pub fn test_limit_file_size(bytes: libc::rlim_t) {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: valid writable rlimit pointer for the current process.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) };
+    assert_eq!(rc, 0);
+    // Only the soft limit moves: raising an inherited hard limit is EPERM.
+    limit.rlim_cur = bytes.min(limit.rlim_max);
+    // SAFETY: SIG_IGN is a valid disposition; nothing else handles SIGXFSZ.
+    unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    // SAFETY: valid rlimit pointer for the current process.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+}
+
 #[cfg(test)]
 pub fn test_limit_fds(limit: libc::rlim_t) {
     let mut limits = libc::rlimit {
