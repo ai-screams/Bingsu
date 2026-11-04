@@ -154,6 +154,7 @@ jobs:
                 --ignore tests/shell/test_gate_acceptance.py \
                 --ignore tests/shell/test_prompt_trace_budget.py \
                 --ignore tests/shell/test_command_round.py \
+                --ignore tests/shell/test_command_cgroup.py \
                 --durations=0 --durations-min=0.1 \
                 --deselect tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty \
                 --deselect tests/shell/test_runtime_root_gate.py::test_runtime_root_path_examples \
@@ -195,6 +196,89 @@ jobs:
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e LC_ALL=C.UTF-8 \
             "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
               exec python3 -m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q -rs -p no:cacheprovider --basetemp=/root/pytest'
+
+  # M6 C3: the command cgroup layer in two cells. The default container
+  # refuses child cgroups (X-04's negative cell: the capability check picks
+  # the best-effort path); the privileged one has the atomic path, where
+  # every test below must really run (the tests fail rather than skip there).
+  # tests/shell/test_gate_acceptance.py pins the cells and the asserted tests.
+  command-cgroup:
+    name: Command cgroup cell (${{ matrix.cell }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell: plain
+            opts: ""
+          - cell: priv
+            opts: --privileged --cgroupns=private
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Static musl binaries run in any image.
+      - name: Build the cell binaries
+        run: |
+          set -o pipefail
+          cargo build --release -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl
+          cargo test -p bingsu --bin bingsu --target x86_64-unknown-linux-musl --no-run --message-format=json | jq -r 'select(.profile.test == true and .executable != null) | .executable' > "$RUNNER_TEMP/cell-bin"
+      - run: tests/shell/containers/check-digests.sh
+      - run: docker build -f tests/shell/containers/cgroup-d13.Dockerfile -t bingsu-cgroup-d13 tests/shell/containers
+      # X-04: whether this runner gives the cell a delegated cgroup (recorded, not asserted).
+      - name: Record the X-04 line
+        run: |
+          { echo "### X-04 (${{ matrix.cell }})"; echo '```'; uname -r; cat /proc/self/cgroup
+            docker run --rm ${{ matrix.opts }} bingsu-cgroup-d13 sh -c 'cat /proc/self/cgroup; d=/sys/fs/cgroup$(cut -c4- /proc/self/cgroup); if mkdir "$d/x04"; then echo "child cgroup: made"; rmdir "$d/x04"; else echo "child cgroup: refused"; fi'
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Rust tests in the cell
+        run: |
+          set -o pipefail
+          docker run --rm ${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }} -v "$(cat "$RUNNER_TEMP/cell-bin"):/cell:ro" bingsu-cgroup-d13 /cell --include-ignored --exact --test-threads=1 commands::command_cgroup::cell::test_capability_matches_the_cell commands::command_cgroup::cell::test_capability_refuses_a_foreign_parent commands::command_cgroup::cell::fs_reclaim_kills_and_removes_a_nested_tree commands::command_process::tests::test_clone3_relay_gets_exactly_four_fds commands::command_process::tests::test_clone3_exec_failure_is_reported commands::command_process::tests::test_clone3_waits_for_go commands::command_process::tests::test_clone3_starts_inside_the_cgroup commands::command_supervisor::tests::test_setsid_descendant_killed_with_cgroup commands::command_supervisor::tests::test_setsid_descendant_of_an_exited_target_killed commands::command_supervisor::tests::test_nested_cgroup_removed_postorder commands::command_supervisor::tests::test_cgroup_names_never_reused commands::command_supervisor::tests::test_supervisor_detects_helper_death_without_output_in_cgroup commands::command_supervisor::tests::test_existing_unit_name_is_never_reused commands::command_supervisor::tests::test_clone3_refusal_takes_the_best_effort_path | tee "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_cgroup::cell::test_capability_matches_the_cell ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_cgroup::cell::test_capability_refuses_a_foreign_parent ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_cgroup::cell::fs_reclaim_kills_and_removes_a_nested_tree ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_process::tests::test_clone3_relay_gets_exactly_four_fds ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_process::tests::test_clone3_exec_failure_is_reported ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_process::tests::test_clone3_waits_for_go ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_process::tests::test_clone3_starts_inside_the_cgroup ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_setsid_descendant_killed_with_cgroup ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_setsid_descendant_of_an_exited_target_killed ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_nested_cgroup_removed_postorder ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_cgroup_names_never_reused ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_supervisor_detects_helper_death_without_output_in_cgroup ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_existing_unit_name_is_never_reused ... ok' "$RUNNER_TEMP/cell-rust.txt"
+          grep -Fx 'test commands::command_supervisor::tests::test_clone3_refusal_takes_the_best_effort_path ... ok' "$RUNNER_TEMP/cell-rust.txt"
+      # The prompt tests run as root with a root-owned copy (init warns about
+      # a folder above the binary that another user can change).
+      - name: Command cgroup tests in the cell
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          docker run --rm ${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }} -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/w" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py -q -rA -p no:cacheprovider --basetemp=/root/pytest' | tee "$RUNNER_TEMP/cell-py.txt"
+          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_best_effort_group_kill_under_the_filter' "$RUNNER_TEMP/cell-py.txt"
+      # The survivor fixture depends on the kernel and FUSE: a skip there is
+      # BLOCKED and recorded, not failed (plan C3, X-04).
+      - name: Record the survivor fixture result
+        if: success() || failure()
+        run: |
+          { echo "### Command cgroup tests (${{ matrix.cell }})"; echo '```'; grep -E '^(PASSED|SKIPPED|FAILED|ERROR)' "$RUNNER_TEMP/cell-py.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # 이것을 실패시키는 것: 특권 칸의 PASSED 단언 하나를 빼는 것, 원자 경로 시험이 skip인 채 통과하는 것.
+      - name: Every atomic-path test passed (privileged cell)
+        if: matrix.cell == 'priv'
+        run: |
+          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_reclaim_after_supervisor_sigkill' "$RUNNER_TEMP/cell-py.txt"
+          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_round_removes_its_own_cgroups' "$RUNNER_TEMP/cell-py.txt"
+          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_reclaim_never_touches_live_supervisor' "$RUNNER_TEMP/cell-py.txt"
+          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_best_effort_group_kill_under_the_filter' "$RUNNER_TEMP/cell-py.txt"
 
   # Every system call the prompt makes after its seccomp filter is installed
   # is a row of crates/bingsu/prompt-syscalls.tsv and none is refused
@@ -645,7 +729,7 @@ jobs:
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --ignore tests/shell/test_command_cgroup.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
 
   shell-macos-shells:
     name: Shell PTY (macOS Homebrew ${{ matrix.shell }})
@@ -710,4 +794,4 @@ jobs:
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --ignore tests/shell/test_command_cgroup.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'

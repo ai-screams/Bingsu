@@ -575,7 +575,7 @@ def test_command_table_names_real_tests():
     rows = list(csv.DictReader((ROOT / "tests/command-acceptance.tsv").read_text().splitlines(), delimiter="\t"))
     assert rows and len({r["id"] for r in rows}) == len(rows)
     for row in rows:
-        if row["stage"] != "C2":
+        if row["stage"] not in ("C2", "C3"):
             assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
             continue
         path, name = row["test"].split("::")

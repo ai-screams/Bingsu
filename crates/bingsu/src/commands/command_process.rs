@@ -531,7 +531,8 @@ mod tests {
     }
 
     /// The clone3 path without a cgroup; `None` where clone3 is refused
-    /// (a default container's seccomp profile answers ENOSYS).
+    /// (a default container's seccomp profile answers ENOSYS), except in the
+    /// privileged cell, where CI asserts these tests pass.
     fn clone3_sleeper() -> Option<Spawned> {
         let args = [b"sleep".to_vec(), b"5".to_vec()];
         let (input_read, input_write) = pipe().unwrap();
@@ -551,7 +552,11 @@ mod tests {
                 stdout,
                 status,
             }),
-            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) => {
+            // In the privileged cell clone3 must work: a refusal there fails.
+            Err(e)
+                if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM))
+                    && !super::super::command_cgroup::cell::privileged() =>
+            {
                 eprintln!("clone3 unavailable here: {e}");
                 None
             }
@@ -598,7 +603,12 @@ mod tests {
             &|| true,
         ) {
             Ok(c) => c,
-            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) => return,
+            Err(e)
+                if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM))
+                    && !super::super::command_cgroup::cell::privileged() =>
+            {
+                return;
+            }
             Err(e) => panic!("{e}"),
         };
         drop(status_write);
