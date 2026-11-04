@@ -16,6 +16,9 @@ pub const PERMIT_FD: u8 = 3;
 /// Version word of the relay argv layout (the exec frame carries its own,
 /// `EXEC_VERSION`).
 pub const RELAY_VERSION: &str = "1";
+/// Largest permit plus exec frame on fd 3 (U-9d, 16 KB): the supervisor
+/// writes both into an empty pipe in one write before the spawn.
+pub const RELAY_INPUT_MAX: usize = 16 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permit {
     pub kind: u8,

@@ -223,12 +223,15 @@ mod tests {
             env_allow: Vec::new(),
             executable: b"/usr/bin/kubectl".to_vec(),
             pin: None,
+            interpreter: None,
         }
     }
     fn grant(deadline: u64) -> Grant {
         Grant {
             permit: permit(deadline),
             helper_deadline: H,
+            cwd: b"/home/u/repo".to_vec(),
+            neutral: b"/run/user/1/bingsu/neutral".to_vec(),
             units: vec![unit(&[b"kubectl", b"config", b"current-context"], 200 * MS)],
             probes: vec![Probe {
                 profile: 1,

@@ -386,6 +386,8 @@ mod tests {
                 domain: [2; 16],
             },
             helper_deadline: 9,
+            cwd: Vec::new(),
+            neutral: Vec::new(),
             units: vec![Unit {
                 id: "custom/k".into(),
                 digest: policy_digest(&policy, Cwd::Neutral, 1, &[]),
@@ -396,6 +398,7 @@ mod tests {
                 env_allow: Vec::new(),
                 executable: b"/usr/bin/k".to_vec(),
                 pin: None,
+                interpreter: None,
             }],
             probes: Vec::new(),
         }

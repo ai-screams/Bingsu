@@ -27,6 +27,8 @@ fn grant(units: usize, environment: usize) -> Message {
     Message::Grant(Grant {
         permit: permit(),
         helper_deadline: 9,
+        cwd: b"/home/u".to_vec(),
+        neutral: b"/run/bingsu/neutral".to_vec(),
         units: (0..units)
             .map(|i| Unit {
                 id: format!("custom/u{i}"),
@@ -38,6 +40,7 @@ fn grant(units: usize, environment: usize) -> Message {
                 env_allow: vec![b"LANG".to_vec()],
                 executable: b"/usr/bin/kubectl".to_vec(),
                 pin: None,
+                interpreter: None,
             })
             .collect(),
         probes: vec![Probe {
