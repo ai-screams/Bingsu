@@ -22,7 +22,7 @@ use bingsu_core::{
         wire::{self, Grant, Message, Outcome, Policy, Unit, policy_digest},
     },
     config::compile::CompiledConfig,
-    handoff::{Cwd, Permit},
+    handoff::{self, Cwd, ExecFrame, Origin, Permit},
     snapshot::{Marker, T_NS},
 };
 use std::{
@@ -120,8 +120,9 @@ fn lock_name(session: &[u8]) -> String {
 /// repaired or emptied.
 fn neutral(runtime: &File, me: u32) -> Result<bool, StoreError> {
     let name = OsStr::new(NEUTRAL);
-    let made = sys::mkdir_at(runtime.as_fd(), name, 0o700)?;
+    let made = sys::mkdir_at(runtime.as_fd(), name, 0o500)?;
     let dir = sys::open_dir_at_nofollow(runtime.as_fd(), name)?;
+    // Only a folder this call made is set (a umask can take bits from it).
     if made {
         use std::os::unix::fs::PermissionsExt;
         dir.set_permissions(std::fs::Permissions::from_mode(0o500))?;
@@ -221,32 +222,50 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     })
 }
 
+/// The grant's units and what was left out.
+#[derive(Debug, Default)]
+struct Resolved {
+    units: Vec<Unit>,
+    /// Executable not found or failed the checks.
+    unresolved: usize,
+    /// Over the relay's input cap, or past the grant frame's room.
+    oversize: usize,
+    /// No collected repository root: the shell's folder stood for it.
+    repo_fallback: bool,
+    dropped: plan::Dropped,
+}
+
 /// The grant's units: at most `CONFIG_MAX` runnable units whose executable
 /// resolves from the sanitized `PATH` (or `/bin/sh` for a script), each with
-/// its target environment and the digest of its policy before `{dir}`.
-/// Returns them and how many were left out.
+/// its target environment and the digest of its policy before `{dir}`. A
+/// unit whose relay input would pass `RELAY_INPUT_MAX`, or that would push
+/// the grant past one frame, is left out alone; the others still run.
 fn units(
     runnable: &[(String, plan::Runnable)],
     environment: &[u8],
-    pwd: &[u8],
+    base: &Grant,
     collected: Option<u16>,
     me: u32,
     groups: &mut SystemGroups,
-) -> Result<(Vec<Unit>, usize), Skip> {
+) -> Result<Resolved, Skip> {
+    let mut out = Resolved {
+        repo_fallback: collected.is_none(),
+        ..Resolved::default()
+    };
     // The repository the shell is in, by identity, for the PATH and
     // executable rules (C2 ruling J9): the root this round's collection
     // reported, else the shell's own folder (one statx, command rounds
     // only). A folder that cannot be read refuses the round.
-    let folder = plan::repo_folder(pwd, collected);
+    let folder = plan::repo_folder(&base.cwd, collected);
     let repo = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
         .map_err(|_| Skip::Failed)?;
     let vars = Environ::parse(environment);
+    out.dropped = vars.dropped;
     let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
     let path = exec_path::path_value(&folders);
     let attempts: Vec<(&str, Option<u64>)> =
         runnable.iter().map(|(id, _)| (id.as_str(), None)).collect();
-    let mut units = Vec::new();
-    let mut unresolved = 0;
+    let mut trial = base.clone();
     for at in plan::pick(&attempts, plan::CONFIG_MAX) {
         let (id, r) = &runnable[at];
         let word = match &r.policy {
@@ -254,10 +273,10 @@ fn units(
             Policy::UnsafeShell { .. } => SHELL,
         };
         let Ok(found) = exec_path::lookup(word, &folders, repo, me, groups) else {
-            unresolved += 1;
+            out.unresolved += 1;
             continue;
         };
-        units.push(Unit {
+        let unit = Unit {
             id: id.clone(),
             digest: policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow),
             policy: r.policy.clone(),
@@ -268,9 +287,64 @@ fn units(
             executable: found.executable.into_os_string().into_encoded_bytes(),
             pin: found.pin,
             interpreter: found.interpreter,
-        });
+        };
+        let frame = ExecFrame {
+            origin: Origin::Config,
+            run_deadline: 0,
+            environment: unit.environment.clone(),
+            pin: unit.pin,
+            interpreter: unit.interpreter.clone(),
+            cwd: match unit.cwd {
+                Cwd::Neutral => base.neutral.clone(),
+                Cwd::UntrustedCurrent => base.cwd.clone(),
+            },
+        };
+        if handoff::relay_input(base.permit, &frame, handoff::RELAY_INPUT_MAX).is_err() {
+            out.oversize += 1;
+            continue;
+        }
+        trial.units.push(unit);
+        if wire::encode(&Message::Grant(trial.clone())).is_err() {
+            trial.units.pop();
+            out.oversize += 1;
+        }
     }
-    Ok((units, unresolved))
+    out.units = trial.units;
+    Ok(out)
+}
+
+/// Writes all of `bytes` to the non-blocking `fd` by `until_ns`, waiting in
+/// `poll` when the pipe is full: the supervisor reads the grant while it
+/// arrives, and a pipe can be smaller than the frame (pipe-user-pages-soft
+/// leaves 4 KB pipes, m6-C1a).
+fn send(fd: i32, mut bytes: &[u8], until_ns: u64) -> bool {
+    while !bytes.is_empty() {
+        // SAFETY: `bytes` is readable for its length.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        if let Ok(n) = usize::try_from(n) {
+            bytes = &bytes[n..];
+            continue;
+        }
+        if !matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EAGAIN | libc::EINTR)
+        ) {
+            return false;
+        }
+        let Ok(now) = now_ns() else { return false };
+        if now >= until_ns {
+            return false;
+        }
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        }];
+        let wait = i32::try_from((until_ns - now).div_ceil(1_000_000)).unwrap_or(i32::MAX);
+        // SAFETY: one valid pollfd.
+        unsafe { libc::poll(fds.as_mut_ptr(), 1, wait) };
+    }
+    true
 }
 
 /// The permit of the marker this round installed: its clock and trust
@@ -300,6 +374,14 @@ pub(crate) struct Report {
     pub unresolved: usize,
     /// The shell's folder could not be read: no grant.
     pub failed: bool,
+    /// Units over the relay input cap or past the grant frame's room.
+    pub oversize: usize,
+    /// No collected repository root; the shell's folder stood for it.
+    pub repo_fallback: bool,
+    /// Environment entries left out (`=` missing, empty, duplicate names).
+    pub dropped: plan::Dropped,
+    /// The grant could not be written in time: nothing ran.
+    pub send_failed: bool,
 }
 
 impl Round {
@@ -332,19 +414,21 @@ impl Round {
         match units(
             &self.runnable,
             &self.environment,
-            &self.grant.cwd,
+            &self.grant,
             repo,
             me,
             groups,
         ) {
-            Ok((units, unresolved)) if !units.is_empty() => {
-                self.grant.units = units;
-                report.unresolved = unresolved;
-            }
-            Ok((_, unresolved)) => {
-                report.unresolved = unresolved;
-                self.abandon();
-                return report;
+            Ok(resolved) => {
+                report.unresolved = resolved.unresolved;
+                report.oversize = resolved.oversize;
+                report.repo_fallback = resolved.repo_fallback;
+                report.dropped = resolved.dropped;
+                self.grant.units = resolved.units;
+                if self.grant.units.is_empty() {
+                    self.abandon();
+                    return report;
+                }
             }
             Err(_) => {
                 report.failed = true;
@@ -352,27 +436,23 @@ impl Round {
                 return report;
             }
         }
-        let Ok(frame) = wire::encode(&Message::Grant(self.grant.clone())) else {
-            self.abandon();
-            return report;
-        };
-        // One write into the empty pipe; a short one is a cut grant, which
-        // the supervisor refuses as a whole. No test for the failure: a grant
-        // is at most 64 KB and the pipe is empty, so the write cannot be made
-        // to fail from a test; it abandons the round (fail closed), the same
-        // class as the C1 macOS fcntl branch (user decision).
-        if !matches!(
-            sys::write_fd(self.grant_pipe.as_raw_fd(), &frame),
-            sys::WriteOutcome::Done
-        ) {
-            self.abandon();
-            return report;
-        }
-        let want = self.grant.units.len() + self.grant.probes.len();
         let end = self
             .grant
             .helper_deadline
             .saturating_sub(super::command_supervisor::BUDGET.reserve / 2);
+        // units() kept the grant within one frame, so this encodes.
+        let Ok(frame) = wire::encode(&Message::Grant(self.grant.clone())) else {
+            report.send_failed = true;
+            self.abandon();
+            return report;
+        };
+        // A short grant is a cut one, which the supervisor refuses whole.
+        if !send(self.grant_pipe.as_raw_fd(), &frame, end) {
+            report.send_failed = true;
+            self.abandon();
+            return report;
+        }
+        let want = self.grant.units.len() + self.grant.probes.len();
         let mut bytes = Vec::new();
         let mut chunk = vec![0u8; wire::FRAME_MAX];
         while report.results.len() + report.rejected < want {
@@ -440,6 +520,162 @@ fn wait(child: &mut OwnedChild, deadline: u64) {
 mod tests {
     use super::*;
     use bingsu_core::snapshot::Identity;
+
+    fn runnable(id: &str, env_allow: &[&str]) -> (String, plan::Runnable) {
+        (
+            id.to_owned(),
+            plan::Runnable {
+                policy: Policy::Argv {
+                    argv: vec![b"/usr/bin/true".to_vec()],
+                },
+                cwd: Cwd::Neutral,
+                timeout: plan::TIMEOUT_DEFAULT,
+                env_allow: env_allow.iter().map(|n| n.as_bytes().to_vec()).collect(),
+            },
+        )
+    }
+    fn base() -> Grant {
+        Grant {
+            permit: Permit {
+                kind: 1,
+                deadline: 9,
+                boot: [1; 16],
+                resume: 0,
+                domain: [2; 16],
+            },
+            helper_deadline: 9,
+            // A folder of its own stands for the repository (no collected root).
+            cwd: std::env::temp_dir().into_os_string().into_encoded_bytes(),
+            neutral: b"/tmp".to_vec(),
+            units: Vec::new(),
+            probes: Vec::new(),
+        }
+    }
+    fn groups() -> SystemGroups {
+        SystemGroups::new(&sys::passwd_entry(sys::current_uid()).unwrap().name)
+    }
+
+    // M4·M-2: 상한을 넘는 단위만 빠지고 나머지는 돈다. 이것을 실패시키는 것: units()의 relay 입력 상한 검사를
+    // 지우는 것(20 KB 환경 단위가 허가에 남음), 허가 전체 encode 검사를 지우는 것(여덟 단위 × 15 KB가 한 프레임을
+    // 넘어 회차 전체가 실패함).
+    #[test]
+    fn oversize_units_are_left_out_alone() {
+        let big = |n: usize| {
+            [
+                b"PATH=/usr/bin:/bin\0BIG=".as_slice(),
+                &vec![b'x'; n],
+                b"\0",
+            ]
+            .concat()
+        };
+        let units20 = vec![
+            runnable("custom/big", &["BIG"]),
+            runnable("custom/small", &[]),
+        ];
+        let got = units(
+            &units20,
+            &big(20 * 1024),
+            &base(),
+            None,
+            sys::current_uid(),
+            &mut groups(),
+        )
+        .unwrap();
+        assert_eq!((got.units.len(), got.oversize), (1, 1));
+        assert_eq!(got.units[0].id, "custom/small");
+        let eight: Vec<_> = (0..8)
+            .map(|i| runnable(&format!("custom/u{i}"), &["BIG"]))
+            .collect();
+        let got = units(
+            &eight,
+            &big(15 * 1024),
+            &base(),
+            None,
+            sys::current_uid(),
+            &mut groups(),
+        )
+        .unwrap();
+        assert!(
+            got.oversize > 0 && !got.units.is_empty(),
+            "{} {}",
+            got.units.len(),
+            got.oversize
+        );
+        let mut g = base();
+        g.units = got.units;
+        assert!(wire::encode(&Message::Grant(g)).is_ok());
+    }
+
+    // J9·L5: 수집 루트가 없으면 대체를 알리고, 버린 환경 항목 수를 센다. 이것을 실패시키는 것: repo_fallback을
+    // 늘 false로 두는 것, dropped를 옮기지 않는 것.
+    #[test]
+    fn units_report_the_fallback_and_dropped_entries() {
+        let env = b"PATH=/usr/bin:/bin\0NOEQ\0X=1\0X=2\0";
+        let got = units(
+            &[runnable("custom/a", &[])],
+            env,
+            &base(),
+            None,
+            sys::current_uid(),
+            &mut groups(),
+        )
+        .unwrap();
+        assert!(got.repo_fallback);
+        assert_eq!(
+            got.dropped,
+            plan::Dropped {
+                malformed: 1,
+                duplicate: 1
+            }
+        );
+        let got = units(
+            &[runnable("custom/a", &[])],
+            env,
+            &base(),
+            Some(0),
+            sys::current_uid(),
+            &mut groups(),
+        )
+        .unwrap();
+        assert!(!got.repo_fallback);
+    }
+
+    // M4: 허가는 4 KB 파이프에서도 감독이 읽는 동안 이어 써서 끝까지 간다. 읽는 쪽이 없으면 마감에 실패한다.
+    // 이것을 실패시키는 것: send가 EAGAIN이나 부분 쓰기에서 멈추는 것(write 한 번만).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn grant_send_waits_for_a_small_pipe() {
+        let (read, write) = pipe().unwrap();
+        super::super::collector_process::nonblocking(&write).unwrap();
+        // SAFETY: F_SETPIPE_SZ on the test's own pipe.
+        assert!(unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) } >= 4096);
+        let frame = vec![7u8; 40 * 1024];
+        let reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut got = Vec::new();
+            let mut read = read;
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = read.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            got.len()
+        });
+        let until = now_ns().unwrap() + 2_000_000_000;
+        assert!(send(write.as_raw_fd(), &frame, until));
+        drop(write);
+        assert_eq!(reader.join().unwrap(), frame.len());
+        // Nobody reads: the deadline ends it.
+        let (_read, write) = pipe().unwrap();
+        super::super::collector_process::nonblocking(&write).unwrap();
+        // SAFETY: as above.
+        unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
+        let until = now_ns().unwrap() + 50_000_000;
+        assert!(!send(write.as_raw_fd(), &frame, until));
+    }
 
     // 무효 표식 회차의 permit은 deadline 0이라 설정 단위가 모두 거부된다(내장 조사만). 이것을 실패시키는
     // 것: permit()의 `marker.invalid` 분기를 지우는 것, T를 더하지 않는 것.

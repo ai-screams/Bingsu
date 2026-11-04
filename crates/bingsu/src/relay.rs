@@ -115,9 +115,11 @@ pub(crate) struct Target {
 /// Spec order: signals, fd 3 read and closed, the executable opened and
 /// checked, descriptors past 2 marked close-on-exec. Every buffer of this
 /// stage is freed when it returns; the fresh clock comes after, in `exec`.
-/// The relay never changes folder: the supervisor spawns it in the unit's
-/// working folder (the neutral folder, or the shell's folder for
-/// `untrusted-current`), and the target inherits that folder.
+/// The relay enters the unit's working folder (the frame's `cwd`: the
+/// neutral folder, or the shell's folder for `untrusted-current`) after its
+/// checks, and the target inherits it. The supervisor spawns every relay in
+/// "/", so a folder on a stopped mount holds only this relay, which the
+/// supervisor ends at its deadline.
 pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     reset_signals();
     let input = read_fd3();
@@ -149,6 +151,11 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     if let Some(copy) = &script
         && set_fd_flags(copy.as_raw_fd(), 0).is_err()
     {
+        return Err(RELAY_EXEC);
+    }
+    let folder = CString::new(std::mem::take(&mut frame.cwd)).map_err(|_| RELAY_INPUT)?;
+    // SAFETY: NUL-terminated absolute path (the frame refuses any other).
+    if unsafe { libc::chdir(folder.as_ptr()) } != 0 {
         return Err(RELAY_EXEC);
     }
     // U-17: a setuid, setgid or file-capability target runs, but without
@@ -766,6 +773,7 @@ mod tests {
             environment: environment.to_vec(),
             pin,
             interpreter: None,
+            cwd: b"/".to_vec(),
         };
         (permit, relay_input(permit, &frame, INPUT_CAP).unwrap())
     }
@@ -978,6 +986,7 @@ mod tests {
         sig_ign: String,
         sig_blk: String,
         no_new_privs: String,
+        cwd: PathBuf,
         environ: Vec<u8>,
         cmdline: Vec<u8>,
     }
@@ -1050,6 +1059,7 @@ mod tests {
             sig_ign: field("SigIgn:"),
             sig_blk: field("SigBlk:"),
             no_new_privs: field("NoNewPrivs:"),
+            cwd: std::fs::read_link(proc.join("cwd")).unwrap(),
             environ: std::fs::read(proc.join("environ")).unwrap(),
             cmdline: std::fs::read(proc.join("cmdline")).unwrap(),
         };
@@ -1239,6 +1249,28 @@ mod tests {
         let fd2 = std::fs::read_link(format!("/proc/{}/fd/2", child.id()));
         finish(child);
         assert_eq!(fd2.unwrap(), Path::new("/dev/null"));
+    }
+
+    // 작업 폴더는 중계가 exec 직전에 들어간다(감독은 "/"에서 생성). 이것을 실패시키는 것: prepare의 chdir를
+    // 지우는 것(대상이 중계의 "/"에 남음), 없는 폴더의 chdir 실패를 무시하는 것.
+    #[test]
+    fn test_relay_enters_the_frame_folder() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("cwd")).unwrap();
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        let (permit, _) = input_at(clock, Origin::Config, LIVE, b"");
+        let mut frame = read_relay_input(&input_at(clock, Origin::Config, LIVE, b"").1, INPUT_CAP)
+            .unwrap()
+            .1;
+        frame.cwd = dir.as_os_str().as_bytes().to_vec();
+        let bytes = relay_input(permit, &frame, INPUT_CAP).unwrap();
+        let seen = ran(outcome(spawn_relay(&bytes, &args(&cat(), &[b"cat"]), &[])));
+        assert_eq!(seen.cwd, dir);
+        frame.cwd = dir.join("missing").into_os_string().into_vec();
+        let bytes = relay_input(permit, &frame, INPUT_CAP).unwrap();
+        let got = outcome(spawn_relay(&bytes, &args(&cat(), &[b"cat"]), &[]));
+        assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // U-17. 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를 지우는 것(대상의 NoNewPrivs가 0).
@@ -2025,6 +2057,7 @@ mod tests {
                 path: path.as_os_str().as_bytes().to_vec(),
                 pin,
             }),
+            cwd: b"/".to_vec(),
         };
         relay_input(permit, &frame, INPUT_CAP).unwrap()
     }

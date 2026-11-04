@@ -273,18 +273,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     }
     // The grant goes out only once this round's marker is installed.
     if let Some(round) = command_round.take() {
-        match round_marker.filter(|_| installs_marker(&result)) {
-            Some(marker) => {
+        match grant_permit(round_marker, &result) {
+            Some(permit) => {
                 if round.neutral_refused > 0 {
                     report(&mut groups, LogLevel::Info, command_grant::NEUTRAL_REFUSED);
                 }
                 let repo = *collected_repo.lock().unwrap_or_else(|e| e.into_inner());
-                let done = round.grant(
-                    command_grant::permit(&marker),
-                    repo,
-                    sys::current_uid(),
-                    &mut groups,
-                );
+                let done = round.grant(permit, repo, sys::current_uid(), &mut groups);
                 if done.unresolved > 0 {
                     report(
                         &mut groups,
@@ -297,6 +292,42 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                         &mut groups,
                         LogLevel::Error,
                         "command round failed: the shell's folder could not be read",
+                    );
+                }
+                if done.send_failed {
+                    report(
+                        &mut groups,
+                        LogLevel::Error,
+                        "command round failed: the grant could not be sent in time",
+                    );
+                }
+                if done.oversize > 0 {
+                    report(
+                        &mut groups,
+                        LogLevel::Info,
+                        "command round: a unit's environment is over the relay input cap",
+                    );
+                }
+                if done.repo_fallback {
+                    report(
+                        &mut groups,
+                        LogLevel::Info,
+                        "command round: no collected repository root; the shell's folder stands for it",
+                    );
+                }
+                let dropped = done.dropped;
+                if dropped.malformed + dropped.duplicate > 0 {
+                    let text = format!(
+                        "command environment: {} malformed entries and {} duplicated names left out",
+                        dropped.malformed, dropped.duplicate
+                    );
+                    log::event(
+                        e.log_level,
+                        log_root,
+                        sys::current_uid(),
+                        &mut groups,
+                        LogLevel::Info,
+                        &text,
                     );
                 }
                 if done.rejected > 0 {
@@ -533,16 +564,24 @@ pub(crate) fn read_env_why(fd: i32) -> Result<Vec<u8>, NoEnv> {
     })
 }
 
-/// Whether this round installed its marker: only then is the command grant
-/// sent (U-1 C+). Busy and Incomplete (a failed filter, a source that
-/// changed before the final revalidation, a lost lock) send none.
-fn installs_marker(result: &RefreshResult) -> bool {
-    matches!(
+/// The permit of this round's grant, or `None` when no grant goes out
+/// (U-1 C+): only a round that installed its marker (Published,
+/// Revalidated, Invalid) sends one, under that marker's clock and trust
+/// deadline. Busy and Incomplete (a failed filter, a source that changed
+/// before the final revalidation, a lost lock) send none.
+fn grant_permit(
+    marker: Option<bingsu_core::snapshot::Marker>,
+    result: &RefreshResult,
+) -> Option<bingsu_core::handoff::Permit> {
+    let installed = matches!(
         result,
         RefreshResult::Published { .. }
             | RefreshResult::Revalidated { .. }
             | RefreshResult::Invalid
-    )
+    );
+    marker
+        .filter(|_| installed)
+        .map(|m| command_grant::permit(&m))
 }
 
 pub(super) fn detach() -> Result<(), ()> {
@@ -601,24 +640,38 @@ pub(crate) fn selected_request(
 
 #[cfg(test)]
 mod grant_tests {
-    use super::{RefreshResult, installs_marker};
+    use super::{RefreshResult, grant_permit};
 
     // GATE-CMD-GRANT.2(허가 없음): 발행 실패·필터 실패·마지막 재검증 실패(chmod, 원본 교체)는 Incomplete이고,
-    // 잠금 경합은 Busy다. 둘 다 허가를 보내지 않는다. 이것을 실패시키는 것: installs_marker에 Incomplete나
-    // Busy를 더하는 것. 계획 표의 변이("허가 전송을 broker 안으로 옮김")는 제품 바이너리에 회차 사이 hook이 없어
-    // 죽일 수 없다(K4 판정). 그 자리는 이 결정 함수와 helper::run의 호출 위치(refresh_broker 반환 뒤)로 고정한다.
+    // 잠금 경합은 Busy다. 둘 다 permit이 없어 허가를 보내지 않는다. 표식을 설치한 회차는 그 표식의 permit을
+    // 보낸다. 이것을 실패시키는 것: grant_permit의 결과 판정에 Incomplete나 Busy를 더하는 것, 표식 대신 다른
+    // 시계로 permit을 만드는 것. 계획 표의 변이("허가 전송을 broker 안으로 옮김")는 제품 바이너리에 회차 사이
+    // hook이 없어 죽일 수 없다(K4 판정). 그 자리는 이 함수와 helper::run의 호출 위치(refresh_broker 반환 뒤)로
+    // 고정한다.
     #[test]
     fn grant_only_after_the_marker_is_installed() {
-        assert!(installs_marker(&RefreshResult::Published {
-            generation: 1,
-            left_out: vec![],
-        }));
-        assert!(installs_marker(&RefreshResult::Revalidated {
-            generation: 1
-        }));
-        assert!(installs_marker(&RefreshResult::Invalid));
-        assert!(!installs_marker(&RefreshResult::Incomplete));
-        assert!(!installs_marker(&RefreshResult::Busy));
+        let marker = super::fixture_marker(bingsu_core::snapshot::Clock {
+            boot: [3; 16],
+            domain: [4; 16],
+            kind: 1,
+            resume: 0,
+            now: 77,
+        });
+        let want = Some(super::command_grant::permit(&marker));
+        for r in [
+            RefreshResult::Published {
+                generation: 1,
+                left_out: vec![],
+            },
+            RefreshResult::Revalidated { generation: 1 },
+            RefreshResult::Invalid,
+        ] {
+            assert_eq!(grant_permit(Some(marker), &r), want, "{r:?}");
+            assert_eq!(grant_permit(None, &r), None, "{r:?}");
+        }
+        for r in [RefreshResult::Incomplete, RefreshResult::Busy] {
+            assert_eq!(grant_permit(Some(marker), &r), None, "{r:?}");
+        }
     }
 }
 

@@ -6,7 +6,7 @@
 //! `/dev/null`, 1 the stdout pipe, 2 the status pipe, 3 its input; nothing
 //! else crosses (the supervisor's own descriptors are close-on-exec, and
 //! macOS spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`). The environment is empty
-//! and the working folder is set by the spawn.
+//! and the spawn happens in "/"; the relay enters the unit's folder.
 use super::collector_process::{OwnedChild, now_ns, pipe};
 use std::{
     ffi::{CStr, CString},
@@ -34,14 +34,15 @@ fn check(rc: i32) -> io::Result<()> {
     }
 }
 
-/// Spawns `exe` with `args` (argv[0] included) in folder `cwd`, `input` on
+/// Spawns `exe` with `args` (argv[0] included) in "/", `input` on
 /// descriptor 3. `input` must fit one write into an empty pipe; a shorter
-/// write is an error and nothing is spawned.
+/// write is an error and nothing is spawned. The relay enters the unit's
+/// folder itself: a chdir here would run in the spawn and hold the
+/// supervisor on a stopped mount.
 pub(crate) fn spawn(
     exe: &CStr,
     args: &[Vec<u8>],
     input: &[u8],
-    cwd: &CStr,
     expires_ns: u64,
 ) -> io::Result<Spawned> {
     let (input_read, input_write) = pipe()?;
@@ -63,7 +64,7 @@ pub(crate) fn spawn(
         args,
         &[(0, libc::O_RDONLY)],
         &[(&stdout_write, 1), (&status_write, 2), (&input_read, 3)],
-        cwd,
+        c"/",
         false,
         expires_ns,
     )?;

@@ -63,7 +63,13 @@ pub(crate) fn run(argv0: &OsStr) -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    let Some((grant, rest)) = wait_grant(GRANT_FD) else {
+    // The helper lives at most LIFETIME; a grant later than that (plus a
+    // second) comes from no live helper.
+    let until = super::collector_process::now_ns().ok().and_then(|now| {
+        let life = super::helper_limits::LIFETIME + std::time::Duration::from_secs(1);
+        now.checked_add(u64::try_from(life.as_nanos()).ok()?)
+    });
+    let Some((grant, rest)) = until.and_then(|until| wait_grant(GRANT_FD, until)) else {
         return ExitCode::SUCCESS;
     };
     let relay = Relay {
@@ -122,7 +128,7 @@ fn read_some(fd: i32, buf: &mut [u8]) -> Result<Option<usize>, ()> {
 
 /// The grant, and any bytes read after it (a done frame), or `None` when the
 /// pipe ends or carries anything but one valid grant first.
-pub(crate) fn wait_grant(fd: i32) -> Option<(Grant, Vec<u8>)> {
+pub(crate) fn wait_grant(fd: i32, until_ns: u64) -> Option<(Grant, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; wire::FRAME_MAX];
     loop {
@@ -140,8 +146,17 @@ pub(crate) fn wait_grant(fd: i32) -> Option<(Grant, Vec<u8>)> {
             events: libc::POLLIN,
             revents: 0,
         }];
-        if !poll(&mut fds, -1) {
+        // Its own deadline too: a helper stopped (not killed) never ends the pipe.
+        let now = super::collector_process::now_ns().ok()?;
+        if now >= until_ns {
             return None;
+        }
+        let wait = i32::try_from((until_ns - now).div_ceil(1_000_000)).unwrap_or(i32::MAX);
+        if !poll(&mut fds, wait) {
+            return None;
+        }
+        if fds[0].revents == 0 {
+            continue;
         }
         match read_some(fd, &mut chunk).ok()? {
             Some(0) => return None,
@@ -287,7 +302,25 @@ impl Supervisor {
         }
     }
 
+    /// Whether the helper is gone or done: anything readable on the grant
+    /// pipe now (a done frame, end of file) or a stop already decided. Asked
+    /// right before every spawn, so a dead helper gets no new process.
+    fn helper_gone(&mut self) -> bool {
+        let Some(fd) = self.grant_fd.filter(|_| !self.stopped) else {
+            return true;
+        };
+        let mut fds = [pollfd(fd, libc::POLLIN)];
+        let ready = !poll(&mut fds, 0) || fds[0].revents != 0;
+        if ready {
+            self.stop();
+        }
+        ready
+    }
+
     fn spawn_unit(&mut self, index: usize) {
+        if self.helper_gone() {
+            return;
+        }
         let now = clock();
         let at = now.map_or(0, |c| c.now);
         if index >= plan::CONFIG_MAX {
@@ -311,6 +344,7 @@ impl Supervisor {
             environment: unit.environment.clone(),
             pin: unit.pin,
             interpreter: unit.interpreter.clone(),
+            cwd: Vec::new(),
         };
         let folder = match unit.cwd {
             Cwd::Neutral => self.grant.neutral.clone(),
@@ -332,6 +366,9 @@ impl Supervisor {
     }
 
     fn spawn_probe(&mut self, index: usize) {
+        if self.helper_gone() {
+            return;
+        }
         let now = clock();
         let at = now.map_or(0, |c| c.now);
         if index >= plan::PROBE_MAX {
@@ -363,6 +400,7 @@ impl Supervisor {
             environment: Vec::new(),
             pin: probe.pin,
             interpreter: None,
+            cwd: Vec::new(),
         };
         let executable = probe.executable.clone();
         let folder = self.grant.neutral.clone();
@@ -392,8 +430,14 @@ impl Supervisor {
         folder: &[u8],
         argv: &[Vec<u8>],
     ) {
+        // The relay enters the folder; the spawn itself happens in "/", so
+        // a folder on a stopped mount never holds the supervisor.
+        let frame = ExecFrame {
+            cwd: folder.to_vec(),
+            ..frame.clone()
+        };
         // Over the relay's input cap: the unit's environment is too large.
-        let Ok(input) = handoff::relay_input(self.grant.permit, frame, RELAY_INPUT_MAX) else {
+        let Ok(input) = handoff::relay_input(self.grant.permit, &frame, RELAY_INPUT_MAX) else {
             return self.report(origin, index, Reason::Refused(Refusal::Limit), approved_at);
         };
         let words: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
@@ -404,16 +448,8 @@ impl Supervisor {
             .chain(self.relay.prefix.iter().cloned())
             .chain(relay_args.into_iter().map(<[u8]>::to_vec))
             .collect();
-        let (Ok(folder), true) = (CString::new(folder), folder.first() == Some(&b'/')) else {
-            return self.report(origin, index, Reason::Refused(Refusal::Policy), approved_at);
-        };
-        let spawned = command_process::spawn(
-            &self.relay.exe,
-            &args,
-            &input,
-            &folder,
-            self.grant.helper_deadline,
-        );
+        let spawned =
+            command_process::spawn(&self.relay.exe, &args, &input, self.grant.helper_deadline);
         let Ok(s) = spawned else {
             return self.report(origin, index, Reason::SpawnFailed, approved_at);
         };
@@ -437,13 +473,14 @@ impl Supervisor {
     /// Spawns, confines itself, then supervises until every result is
     /// written, the helper is gone or the helper's deadline passes.
     pub(crate) fn run(mut self, confine: bool) -> Self {
+        // A done frame read with the grant stops the round before any spawn.
+        let tail = std::mem::take(&mut self.tail);
+        self.grant_bytes(&tail);
         self.spawn_all();
-        if confine && confine_self().is_err() {
+        if confine && self.confine().is_err() {
             // Without the filter nothing more may run: end the children.
             self.stop();
         }
-        let tail = std::mem::take(&mut self.tail);
-        self.grant_bytes(&tail);
         while !self.over() {
             self.step();
         }
@@ -641,10 +678,15 @@ fn clock() -> Result<Clock, ()> {
     crate::prompt_io::observe_clock().map_err(|_| ())
 }
 
-/// After the last spawn (spec: the supervisor's own filter): no exec, no
-/// new process, signals only through the pidfds it holds (Linux).
-fn confine_self() -> std::io::Result<()> {
-    super::helper_filter::install_supervisor()
+impl Supervisor {
+    /// After the last spawn (spec: the supervisor's own filter): no exec,
+    /// no new process, no new descriptor, and signals only through the
+    /// pidfds of the children it holds now (Linux).
+    fn confine(&self) -> std::io::Result<()> {
+        let pidfds: Vec<std::os::fd::RawFd> =
+            self.runs.iter().filter_map(|r| r.child.pidfd()).collect();
+        super::helper_filter::install_supervisor(&pidfds)
+    }
 }
 
 #[cfg(test)]
@@ -680,6 +722,9 @@ pub(crate) mod tests {
             // SAFETY: fd 3 is this child's input pipe, owned here.
             let mut f = unsafe { File::from_raw_fd(3) };
             f.read_to_end(&mut input).unwrap();
+            // As the relay: enter the frame's folder.
+            let (_, frame) = handoff::read_relay_input(&input, RELAY_INPUT_MAX).unwrap();
+            std::env::set_current_dir(std::ffi::OsStr::from_bytes(&frame.cwd)).unwrap();
         }
         let executed = || {
             // SAFETY: fd 2 is the status pipe; closing it is "executed".
@@ -702,6 +747,12 @@ pub(crate) mod tests {
                 say(b"a");
                 executed();
                 say(b"b\n");
+            }
+            b"late" => {
+                // Writes its canary after 300 ms, unless it is ended first.
+                executed();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::fs::write(std::ffi::OsStr::from_bytes(&target[1]), b"x").unwrap();
             }
             b"big" => {
                 // 256 KB, more than a pipe holds, then a normal exit. SIGPIPE
@@ -856,7 +907,7 @@ pub(crate) mod tests {
             ));
             drop(write);
             assert!(
-                wait_grant(read.as_raw_fd()).is_none(),
+                wait_grant(read.as_raw_fd(), u64::MAX).is_none(),
                 "{} bytes",
                 bytes.len()
             );
@@ -867,9 +918,58 @@ pub(crate) mod tests {
             super::super::sys::write_fd(write.as_raw_fd(), &both),
             super::super::sys::WriteOutcome::Done
         ));
-        let (g, rest) = wait_grant(read.as_raw_fd()).unwrap();
+        let (g, rest) = wait_grant(read.as_raw_fd(), u64::MAX).unwrap();
         assert_eq!(g.units.len(), 1);
         assert_eq!(rest, done);
+    }
+
+    // 도우미가 멈춰(죽지 않고) 허가도 EOF도 오지 않으면 감독은 자기 마감에 끝난다. 이것을 실패시키는 것:
+    // wait_grant의 마감 검사를 지우는 것(poll이 영원히 기다림).
+    #[test]
+    fn test_wait_grant_ends_at_its_deadline() {
+        let (read, _write) = pipe();
+        let started = std::time::Instant::now();
+        let until = super::super::collector_process::now_ns().unwrap() + 50 * MS;
+        assert!(wait_grant(read.as_raw_fd(), until).is_none());
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    // 도우미가 허가를 쓰고 곧 죽었으면(쓰기 쪽 닫힘) 감독은 하나도 생성하지 않는다. 이것을 실패시키는 것:
+    // spawn_unit의 helper_gone 검사를 지우는 것.
+    #[test]
+    fn test_dead_helper_gets_no_spawn() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (grant_read, grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        drop(grant_write);
+        let s = Supervisor::new(
+            grant(vec![unit("ok", 200 * MS), unit("ok", 200 * MS)], 1_000 * MS),
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(false);
+        assert!(s.runs.is_empty(), "{} spawned", s.runs.len());
+    }
+
+    // 허가와 함께 읽힌 done은 생성 전에 회차를 멈춘다. 이것을 실패시키는 것: run에서 tail 처리를 spawn_all
+    // 뒤로 옮기는 것.
+    #[test]
+    fn test_done_with_the_grant_spawns_nothing() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (grant_read, _grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        let done = wire::encode(&Message::Done).unwrap();
+        let s = Supervisor::new(
+            grant(vec![unit("ok", 200 * MS)], 1_000 * MS),
+            done,
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(false);
+        assert!(s.runs.is_empty());
     }
 
     // GATE-CMD-GRANT.1(감독 승인 표), GATE-TRUST-REVOKE.3(철회된 단위의 결정 시각 기록). 이것을 실패시키는
@@ -1121,6 +1221,16 @@ pub(crate) mod tests {
     fn filter_child() {
         let (grant_read, _grant_write) = pipe();
         let (_result_read, result_write) = pipe();
+        // A process the supervisor does not supervise, and a pidfd of it taken
+        // before the filter.
+        let other = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let pid = other.id() as libc::pid_t;
+        // SAFETY: pidfd_open of our own child.
+        let other_pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+        assert!(other_pidfd >= 0);
         let s = Supervisor::new(
             grant(vec![unit("ok", 200 * MS)], 1_000 * MS),
             Vec::new(),
@@ -1130,20 +1240,41 @@ pub(crate) mod tests {
         )
         .run(true);
         drop(s);
+        let eperm = |rc: libc::c_long| {
+            rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        };
         let argv = [c"/bin/false".as_ptr(), std::ptr::null()];
         let envp = [std::ptr::null()];
-        // SAFETY: NUL-terminated arrays of NUL-terminated strings.
-        unsafe { libc::execve(argv[0], argv.as_ptr(), envp.as_ptr()) };
-        let code = if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
-            42
-        } else {
-            1
-        };
-        // SAFETY: plain exit of the child.
+        let proc = std::ffi::CString::new(format!("/proc/{pid}/stat")).unwrap();
+        let checks = [
+            // SAFETY: NUL-terminated arrays of NUL-terminated strings.
+            eperm(unsafe { libc::execve(argv[0], argv.as_ptr(), envp.as_ptr()) } as libc::c_long),
+            // SAFETY: plain syscalls with integer or NUL-terminated arguments.
+            eperm(unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    other_pidfd,
+                    libc::SIGKILL,
+                    0,
+                    0,
+                )
+            }),
+            // SAFETY: as above.
+            eperm(unsafe { libc::kill(pid, libc::SIGKILL) } as libc::c_long),
+            // SAFETY: as above.
+            eperm(unsafe { libc::open(proc.as_ptr(), libc::O_RDONLY) } as libc::c_long),
+            // SAFETY: as above.
+            eperm(unsafe { libc::dup(0) } as libc::c_long),
+            // SAFETY: as above.
+            eperm(unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 10) } as libc::c_long),
+        ];
+        let code = if checks.iter().all(|&c| c) { 42 } else { 1 };
+        // SAFETY: plain exit of the child (the stray sleep ends on its own).
         unsafe { libc::_exit(code) }
     }
 
-    // 이것을 실패시키는 것: run에서 confine_self 호출을 지우는 것(마지막 생성 뒤에도 execve가 됨).
+    // 이것을 실패시키는 것: run에서 confine 호출을 지우는 것(마지막 생성 뒤에도 execve가 됨), 필터의 pidfd
+    // 집합에 아무 fd나 허용하는 것(무관한 자식에 신호), open·dup·fcntl(F_DUPFD*) 거부 하나를 지우는 것.
     #[cfg(target_os = "linux")]
     #[test]
     fn test_supervisor_filter_denies_exec_after_spawn() {
@@ -1161,6 +1292,140 @@ pub(crate) mod tests {
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(42));
+    }
+
+    /// A confined round where the supervisor's own filter cannot be installed
+    /// (a filter in front answers seccomp with EPERM): exit 42 when the late
+    /// unit's canary never appears.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "child: a supervisor whose filter fails"]
+    fn filter_failure_child() {
+        let deny = [
+            libc::sock_filter {
+                code: 0x20,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: 0x15,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_seccomp as u32,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let prog = libc::sock_fprog {
+            len: deny.len() as u16,
+            filter: deny.as_ptr().cast_mut(),
+        };
+        // SAFETY: plain prctl calls; `prog` outlives them.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog),
+                0
+            );
+        }
+        let canary = std::env::temp_dir().join(format!("bingsu-c2-late-{}", std::process::id()));
+        let _ = std::fs::remove_file(&canary);
+        let (grant_read, _grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        let mut late = unit("late", 1_000 * MS);
+        late.policy = Policy::Argv {
+            argv: vec![b"late".to_vec(), canary.as_os_str().as_bytes().to_vec()],
+        };
+        late.digest = policy_digest(&late.policy, late.cwd, late.timeout, &late.env_allow);
+        let s = Supervisor::new(
+            grant(vec![late], 1_000 * MS),
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(true);
+        drop(s);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let code = if canary.exists() { 1 } else { 42 };
+        let _ = std::fs::remove_file(&canary);
+        // SAFETY: plain exit of the child.
+        unsafe { libc::_exit(code) }
+    }
+
+    // 자기 필터를 걸지 못하면 이미 띄운 자식을 끝내고 아무것도 더 실행하지 않는다. 이것을 실패시키는 것:
+    // run에서 confine 실패 분기(stop)를 지우는 것(늦게 쓰는 대상이 카나리를 남김).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_filter_failure_ends_the_round() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::command_supervisor::tests::filter_failure_child",
+                "--ignored",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env_clear()
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(42));
+    }
+
+    /// A round whose second unit works in a folder on a stopped mount (the
+    /// last argument names it; run by hand in a FUSE container): the first
+    /// unit is still ended at its deadline and the helper's death is still
+    /// seen, because the supervisor spawns in "/" and only that one relay
+    /// waits on the mount. Exit 42 on success.
+    #[test]
+    #[ignore = "child: needs a stopped FUSE mount, path as the last argument"]
+    fn blocked_cwd_round() {
+        let folder = std::env::args_os().last().unwrap();
+        let (grant_read, grant_write) = pipe();
+        let (result_read, result_write) = pipe();
+        let mut stuck = unit("ok", 1_000 * MS);
+        stuck.cwd = Cwd::UntrustedCurrent;
+        stuck.digest = policy_digest(&stuck.policy, stuck.cwd, stuck.timeout, &stuck.env_allow);
+        let mut g = grant(vec![unit("sleep", 300 * MS), stuck], 1_000 * MS);
+        g.cwd = folder.as_bytes().to_vec();
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            drop(grant_write);
+        });
+        let started = std::time::Instant::now();
+        let s = Supervisor::new(
+            g,
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(false);
+        let took = started.elapsed();
+        drop(s);
+        drop(result_write);
+        killer.join().unwrap();
+        let got = results(result_read);
+        let ok = took < std::time::Duration::from_millis(900)
+            && got
+                .first()
+                .is_some_and(|o| o.index == 0 && o.reason == Reason::Timeout);
+        eprintln!("took {took:?}: {got:?}");
+        // SAFETY: plain exit of the child.
+        unsafe { libc::_exit(if ok { 42 } else { 1 }) }
     }
 
     // 무효 표식 회차(permit deadline 0)에서도 내장 조사는 돈다. 이것을 실패시키는 것: 내장 조사를 permit

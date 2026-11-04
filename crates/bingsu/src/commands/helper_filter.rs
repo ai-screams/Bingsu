@@ -1,16 +1,17 @@
 //! Helper filter: installed after the fixed collection spawn and synchronized
 //! with the already-running watchdog. This is not the prompt syscall policy.
 /// Which pidfd may receive a signal through `pidfd_send_signal`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 #[cfg(target_os = "linux")]
 enum Pidfds {
     /// None (the helper without a collector).
     Denied,
     /// This one (the helper's collector).
     Only(std::os::fd::RawFd),
-    /// Any it holds: the command supervisor holds only its own children's,
-    /// since `pidfd_open` and every process creation are denied here.
-    Held,
+    /// The command supervisor: exactly the pidfds of the children it holds
+    /// when it confines itself. It also may open, duplicate or receive no
+    /// descriptor afterwards, so no other process can be reached.
+    Supervisor(Vec<std::os::fd::RawFd>),
 }
 #[cfg(all(test, target_os = "linux"))]
 fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_filter> {
@@ -69,9 +70,45 @@ fn program_with(pid: u32, pidfds: Pidfds) -> Vec<libc::sock_filter> {
         code.push(jump(nr as u32, 0, 1));
         code.push(stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32));
     }
+    let deny = stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32);
     if matches!(pidfds, Pidfds::Denied) {
         code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, 1));
-        code.push(stmt(0x06, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32));
+        code.push(deny);
+    }
+    if let Pidfds::Supervisor(held) = &pidfds {
+        // No new descriptor: no file (a /proc entry would name another
+        // process), no copy of one it holds.
+        let opens = [
+            libc::SYS_openat,
+            libc::SYS_openat2,
+            libc::SYS_dup,
+            libc::SYS_dup3,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_open,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_dup2,
+        ];
+        for nr in opens {
+            code.push(jump(nr as u32, 0, 1));
+            code.push(deny);
+        }
+        // fcntl duplicates only through F_DUPFD and F_DUPFD_CLOEXEC.
+        code.push(jump(libc::SYS_fcntl as u32, 0, 4));
+        code.push(stmt(0x20, 24));
+        code.push(jump(libc::F_DUPFD as u32, 1, 0));
+        code.push(jump(libc::F_DUPFD_CLOEXEC as u32, 0, 1));
+        code.push(deny);
+        code.push(stmt(0x20, 0));
+        // Signals through the held pidfds only.
+        let n = u8::try_from(held.len()).unwrap_or(u8::MAX);
+        code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, n + 3));
+        code.push(stmt(0x20, 16));
+        for (k, fd) in held.iter().take(usize::from(n)).enumerate() {
+            code.push(jump(*fd as u32, n - k as u8, 0));
+        }
+        code.push(deny);
+        code.push(stmt(0x06, libc::SECCOMP_RET_ALLOW));
+        code.push(stmt(0x20, 0));
     }
     // Numeric process/group targets are fixed to this helper. Thread-directed
     // forms retain the tgid check so libc raise/abort can target any own thread.
@@ -114,8 +151,8 @@ pub fn install(child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
 /// (no exec, no process creation, no `pidfd_open`, numeric signals only to
 /// itself) with signals through any pidfd it holds.
 #[cfg(target_os = "linux")]
-pub fn install_supervisor() -> std::io::Result<()> {
-    install_with(Pidfds::Held)
+pub fn install_supervisor(pidfds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
+    install_with(Pidfds::Supervisor(pidfds.to_vec()))
 }
 #[cfg(target_os = "linux")]
 fn install_with(pidfds: Pidfds) -> std::io::Result<()> {
@@ -155,7 +192,7 @@ pub fn install(_child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> 
     Ok(())
 }
 #[cfg(not(target_os = "linux"))]
-pub fn install_supervisor() -> std::io::Result<()> {
+pub fn install_supervisor(_pidfds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -201,11 +238,12 @@ mod tests {
             }
         }
     }
-    // 감독 필터: 쥔 pidfd 아무것에나 신호를 보낼 수 있고(pidfd_open이 거부되어 자기 자식 것뿐), exec·생성·
-    // pidfd_open은 거부된다. 이것을 실패시키는 것: Held를 Denied처럼 다루는 것(pidfd_send_signal 거부), Held에
-    // Only처럼 fd 비교를 붙이는 것.
+    // 감독 필터: 신호는 필터를 걸 때 쥔 자식 pidfd에만 가고, exec·생성·pidfd_open·새 descriptor(open·openat·
+    // openat2·dup·dup2·dup3·fcntl F_DUPFD·F_DUPFD_CLOEXEC)는 거부된다. 다른 fcntl은 그대로다. 이것을 실패시키는
+    // 것: pidfd 집합 비교를 지우는 것(아무 fd나 허용), open 계열 거부 하나를 지우는 것, fcntl의 cmd 비교를
+    // 지우는 것(F_SETFL까지 거부되거나 F_DUPFD가 허용됨), 집합 점프 거리를 하나 틀리는 것.
     #[test]
-    fn supervisor_signals_any_held_pidfd_and_never_execs() {
+    fn supervisor_signals_only_held_pidfds_and_opens_nothing() {
         let denied = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
         let run = |nr: i64, args: [u64; 2]| {
             let mut input = [0u8; 64];
@@ -218,22 +256,54 @@ mod tests {
             for (i, value) in args.into_iter().enumerate() {
                 input[16 + i * 8..24 + i * 8].copy_from_slice(&value.to_ne_bytes());
             }
-            evaluate_program(program_with(1234, Pidfds::Held), input)
+            evaluate_program(
+                program_with(1234, Pidfds::Supervisor(vec![7, 9, 12])),
+                input,
+            )
         };
-        for fd in [3, 7, 40] {
+        for fd in [7, 9, 12] {
             assert_eq!(
                 run(libc::SYS_pidfd_send_signal, [fd, libc::SIGKILL as u64]),
-                libc::SECCOMP_RET_ALLOW
+                libc::SECCOMP_RET_ALLOW,
+                "{fd}"
             );
         }
-        for nr in [
+        for fd in [3, 8, 13, 40] {
+            assert_eq!(run(libc::SYS_pidfd_send_signal, [fd, 9]), denied, "{fd}");
+        }
+        let mut never = vec![
             libc::SYS_execve,
             libc::SYS_execveat,
             libc::SYS_clone,
             libc::SYS_clone3,
             libc::SYS_pidfd_open,
-        ] {
+            libc::SYS_openat,
+            libc::SYS_openat2,
+            libc::SYS_dup,
+            libc::SYS_dup3,
+        ];
+        #[cfg(target_arch = "x86_64")]
+        never.extend([libc::SYS_open, libc::SYS_dup2]);
+        for nr in never {
             assert_eq!(run(nr, [0, 0]), denied, "{nr}");
+        }
+        for cmd in [libc::F_DUPFD, libc::F_DUPFD_CLOEXEC] {
+            assert_eq!(run(libc::SYS_fcntl, [0, cmd as u64]), denied, "{cmd}");
+        }
+        for cmd in [libc::F_GETFL, libc::F_SETFL, libc::F_GETFD, libc::F_SETFD] {
+            assert_eq!(
+                run(libc::SYS_fcntl, [0, cmd as u64]),
+                libc::SECCOMP_RET_ALLOW,
+                "{cmd}"
+            );
+        }
+        for nr in [
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_close,
+            libc::SYS_waitid,
+        ] {
+            assert_eq!(run(nr, [3, 0]), libc::SECCOMP_RET_ALLOW, "{nr}");
         }
     }
 

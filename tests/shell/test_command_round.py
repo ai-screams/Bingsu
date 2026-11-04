@@ -415,8 +415,8 @@ def test_no_session_runs_nothing_and_says_so(tmp_path, _native_boot_required):
 
 
 # GATE-CLOCK-READS.3: 단위마다 exec가 하나 늘 뿐(중계가 대상으로 exec), 프로세스는 늘지 않는다. 감독의 자식은
-# 단위 수와 같고 각각 이미 대상이다. 이것을 실패시키는 것: 중계가 대상을 자식으로 띄우는 것(relay의
-# execveat 대신 생성), 감독이 단위마다 둘을 띄우는 것.
+# 단위 수와 같고 각각 이미 대상이며, 같은 pid에서 중계가 돌았다(중계가 건 NoNewPrivs). 이것을 실패시키는 것:
+# 중계가 대상을 자식으로 띄우는 것(relay의 execveat 대신 생성), 감독이 중계를 건너뛰고 대상을 바로 띄우는 것.
 @linux_only
 def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
@@ -442,6 +442,11 @@ def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_re
     assert kids, [(s, children(s)) for s, _ in supervisors()]
     for k in kids:
         assert children(k) == [], "a target has a child of its own"
+        # The supervisor spawned `bingsu __exec-v2` as this pid, and the relay
+        # set no_new_privs there before execveat: neither the helper nor the
+        # supervisor has the flag at spawn time, so it proves the relay ran.
+        status = Path(f"/proc/{k}/status").read_text()
+        assert "NoNewPrivs:\t1" in status, status
     session.wait_quiet()
 
 
@@ -461,3 +466,20 @@ def test_command_table_names_real_tests():
         pattern = (rf"^def {re.escape(name)}\(" if path.endswith(".py")
                    else rf"^\s*fn {re.escape(name)}\(\)")
         assert len(re.findall(pattern, source, re.M)) == 1, (row["id"], path, name)
+
+
+# 단위가 없는 회차는 감독을 띄우지 않는다. 감독은 세션 잠금을 얻은 뒤에만 생성되므로 잠금 파일과 중립 폴더가
+# 없으면 감독도 없었다. 이것을 실패시키는 것: prepare의 NoUnits 조기 반환을 지우는 것.
+@linux_only
+def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path / "s")
+    session.put("[layout.line2]\nleft=['char']\n")
+    ready(session)
+    seen = []
+    for _ in range(3):
+        session.prompt()
+        seen += supervisors()
+    session.wait_quiet()
+    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
+    assert seen == []
+    assert list(root.glob("command-*.lock")) == [] and not session.neutral().exists()
