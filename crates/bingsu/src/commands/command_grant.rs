@@ -350,9 +350,9 @@ fn send_with(
 ) -> bool {
     while !bytes.is_empty() {
         // Before the first write and every retry: a late grant is no grant.
-        let Some(at) = now().filter(|&at| at < until_ns) else {
+        if now().is_none_or(|at| at >= until_ns) {
             return false;
-        };
+        }
         match write(bytes) {
             Ok(n) => {
                 bytes = &bytes[n..];
@@ -361,6 +361,10 @@ fn send_with(
             Err(libc::EAGAIN | libc::EINTR) => {}
             Err(_) => return false,
         }
+        // The clock again right before the wait: the write itself took time.
+        let Some(at) = now().filter(|&at| at < until_ns) else {
+            return false;
+        };
         wait(i32::try_from((until_ns - at).div_ceil(1_000_000)).unwrap_or(i32::MAX));
     }
     true
@@ -719,6 +723,23 @@ mod tests {
         assert!(!sent);
         assert_eq!(writes, 1, "the partial write, then the deadline");
         assert_eq!(calls, 2);
+    }
+
+    // EAGAIN 뒤에는 기다리기 직전에 시계를 다시 읽고, 그사이 마감이 지났으면 기다리지 않고 false다. 이것을
+    // 실패시키는 것: 기다릴 시간을 write 전 시각으로 계산하는 것(기다리기 전 재확인 삭제).
+    #[test]
+    fn grant_send_rereads_the_clock_before_waiting() {
+        let mut clock = [10, 200, 300].into_iter();
+        let mut waits = 0;
+        let sent = send_with(
+            b"grant",
+            100,
+            &mut || clock.next(),
+            &mut |_: &[u8]| Err(libc::EAGAIN),
+            &mut |_| waits += 1,
+        );
+        assert!(!sent);
+        assert_eq!(waits, 0, "the deadline passed during the write");
     }
 
     // 마감이 지난 뒤에는 빈 파이프라도 쓰지 않는다. 이것을 실패시키는 것: send의 쓰기 전 마감 검사를 지우는 것.

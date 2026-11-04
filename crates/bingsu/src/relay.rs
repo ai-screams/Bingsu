@@ -185,7 +185,7 @@ impl Target {
         crate::prompt_io::observe_clock().is_ok_and(|now| self.frame.allows(self.permit, now))
     }
 
-    /// The clock check, the name check and `execveat` back to back: nothing
+    /// The name check, the clock check and `execveat` back to back: nothing
     /// is built or freed between them (`self` drops only after a failed
     /// exec). The target runs by its name in the folder the walk held
     /// (U-18): a program that tells its role from the executed name
@@ -193,12 +193,16 @@ impl Target {
     /// Right before, the name must still be the checked file: same device,
     /// inode and ctime, and not a symlink (AT_SYMLINK_NOFOLLOW on both).
     fn exec(self) -> u8 {
-        if !self.clock_allows() {
-            return RELAY_EXPIRED;
-        }
+        // The name check first: on NFS or FUSE it can take long, and the
+        // clock read must be the last step before execveat.
         if !self.exe.still_named() {
             return RELAY_TARGET;
         }
+        if !self.clock_allows() {
+            return RELAY_EXPIRED;
+        }
+        #[cfg(test)]
+        tests::at(tests::Stage::BeforeExec);
         // SAFETY: the folder fd is open, the name is NUL-terminated; both
         // arrays are NULL-terminated and point at NUL-terminated strings
         // owned by `self`, alive for the call.
@@ -422,6 +426,8 @@ impl Exe {
     /// Whether the name in the held folder is still the checked file (not
     /// a symlink, same device, inode and ctime).
     fn still_named(&self) -> bool {
+        #[cfg(test)]
+        tests::at(tests::Stage::Recheck);
         // SAFETY: an all-zero stat is a valid out-parameter value.
         let mut now: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: open folder fd, NUL-terminated name, writable `now`.
@@ -778,6 +784,25 @@ mod tests {
     use std::process::{Child, Command, Stdio};
 
     const SECOND: i64 = 1_000_000_000;
+
+    /// Where a test may act inside `exec`: before the name check's fstatat,
+    /// or after the name and clock checks, right before execveat.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Stage {
+        Recheck,
+        BeforeExec,
+    }
+    type Hook = Option<Box<dyn FnMut(Stage)>>;
+    thread_local! {
+        static HOOK: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn at(stage: Stage) {
+        HOOK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(stage);
+            }
+        });
+    }
     const ECHO: &[u8] = b"bingsu-relay-echo\n";
     const CLOCK_TAG: &str = "RELAY-CLOCK-READS";
 
@@ -1924,17 +1949,48 @@ mod tests {
             .map(OsString::from_vec)
             .collect();
         let (r, w) = pipe();
-        put(&w, &pinned(None));
+        let clock = crate::prompt_io::observe_clock().unwrap();
+        let short = Times {
+            trust: SECOND,
+            run: 100_000_000,
+            resume_shift: 0,
+        };
+        let times = if mode == b"late" { short } else { LIVE };
+        put(&w, &pinned_at(clock, Origin::Config, times, b"", None).1);
         drop(w);
         // SAFETY: both descriptors are valid; fd 3 is free in this child.
         assert_eq!(unsafe { libc::dup2(r.as_raw_fd(), 3) }, 3);
         drop(r);
         let target = prepare(&words).unwrap();
-        if mode == b"rename" {
-            std::fs::rename(dir.join("false"), &exe).unwrap();
-        } else {
-            std::fs::remove_file(&exe).unwrap();
-            std::os::unix::fs::symlink(dir.join("false"), &exe).unwrap();
+        let link = {
+            let (exe, dir) = (exe.clone(), dir.clone());
+            move || {
+                std::fs::remove_file(&exe).unwrap();
+                std::os::unix::fs::symlink(dir.join("false"), &exe).unwrap();
+            }
+        };
+        match mode.as_slice() {
+            b"rename" => std::fs::rename(dir.join("false"), &exe).unwrap(),
+            b"symlink" => link(),
+            // A symlink put at the name after the name and clock checks passed.
+            b"symlink-late" => HOOK.with(|h| {
+                let mut link = Some(link);
+                *h.borrow_mut() = Some(Box::new(move |stage| {
+                    if stage == Stage::BeforeExec
+                        && let Some(link) = link.take()
+                    {
+                        link();
+                    }
+                }));
+            }),
+            // The deadline passes while the name check runs.
+            _ => HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(|stage| {
+                    if stage == Stage::Recheck {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }));
+            }),
         }
         let code = target.exec();
         // SAFETY: child exit without the harness's atexit work.
@@ -1977,10 +2033,12 @@ mod tests {
         // SAFETY: dup2 is async-signal-safe.
         unsafe { cmd.pre_exec(setup) };
         let status = cmd.status().unwrap();
-        // Positive control: what now sits at the name is `false`.
+        // Positive control: what now sits at the name is `false` (`late`
+        // leaves `true` there).
+        let want = if mode == "late" { 0 } else { 1 };
         assert_eq!(
             Command::new(dir.join("x")).status().unwrap().code(),
-            Some(1)
+            Some(want)
         );
         std::fs::remove_dir_all(&dir).unwrap();
         status.code()
@@ -1995,9 +2053,28 @@ mod tests {
         assert_eq!(swapped("rename"), Some(100 + i32::from(RELAY_TARGET)));
     }
 
+    // U-18: 시계는 이름 재확인 다음, execveat 바로 앞에서 읽는다. 재확인(fstatat)이 오래 걸려 그 사이 마감이
+    // 지나면 실행하지 않는다(RELAY_EXPIRED). 이것을 실패시키는 것: exec에서 시계 확인을 재확인 앞으로 되돌리는 것
+    // (확인 뒤 지난 마감에도 true가 실행되어 종료 코드 0).
+    #[test]
+    fn test_deadline_passing_during_the_name_check_is_refused() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(swapped("late"), Some(100 + i32::from(RELAY_EXPIRED)));
+    }
+
+    // U-18: 재확인과 시계가 통과한 뒤 이름이 symlink로 바뀌어도 execveat의 AT_SYMLINK_NOFOLLOW가 따라가지
+    // 않는다(ELOOP, RELAY_EXEC). 이것을 실패시키는 것: execveat의 AT_SYMLINK_NOFOLLOW만 지우는 것(링크를 따라
+    // false가 실행됨).
+    #[test]
+    fn test_symlink_after_the_checks_is_not_followed() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(swapped("symlink-late"), Some(100 + i32::from(RELAY_EXEC)));
+    }
+
     // U-18: 검사 뒤 이름을 symlink로 바꾸면 따라가지 않는다. 재확인은 링크 자체를 보아 거부하고(RELAY_TARGET),
     // 재확인이 없어도 execveat의 AT_SYMLINK_NOFOLLOW가 ELOOP로 막는다(RELAY_EXEC). 이것을 실패시키는 것:
-    // 재확인과 NOFOLLOW를 함께 지우는 것(링크를 따라 false가 실행됨). 둘 중 하나만 지우면 다른 하나가 막는다.
+    // 재확인과 NOFOLLOW를 함께 지우는 것(링크를 따라 false가 실행됨). NOFOLLOW만 지운 변이는 위
+    // test_symlink_after_the_checks_is_not_followed가 잡는다.
     #[test]
     fn test_symlink_after_check_is_not_followed() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();

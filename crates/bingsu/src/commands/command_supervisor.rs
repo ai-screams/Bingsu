@@ -243,6 +243,9 @@ pub(crate) struct Supervisor {
     stopped: bool,
     #[cfg(test)]
     pub eagain: u32,
+    /// Runs once the filter is installed (tests only).
+    #[cfg(test)]
+    pub confined: Option<Box<dyn FnOnce()>>,
 }
 
 impl Supervisor {
@@ -270,6 +273,8 @@ impl Supervisor {
             pending: Vec::new(),
             #[cfg(test)]
             eagain: 0,
+            #[cfg(test)]
+            confined: None,
         }
     }
 
@@ -474,6 +479,10 @@ impl Supervisor {
         if confine && self.confine().is_err() {
             // Without the filter nothing more may run: end the children.
             self.stop();
+        }
+        #[cfg(test)]
+        if let Some(confined) = self.confined.take() {
+            confined();
         }
         while !self.over() {
             self.step();
@@ -1361,14 +1370,19 @@ pub(crate) mod tests {
     fn stopcont_child() {
         let (grant_read, _grant_write) = pipe();
         let (result_read, result_write) = pipe();
-        let s = Supervisor::new(
+        let mut s = Supervisor::new(
             grant(vec![unit("sleep", 500 * MS)], 1_000 * MS),
             Vec::new(),
             stub(),
             grant_read.as_raw_fd(),
             result_write.as_raw_fd(),
-        )
-        .run(true);
+        );
+        // Tells the parent the filter is in: one byte on stdout (write is allowed).
+        s.confined = Some(Box::new(|| {
+            // SAFETY: one readable byte to this child's stdout.
+            unsafe { libc::write(1, b"R".as_ptr().cast(), 1) };
+        }));
+        let s = s.run(true);
         drop(s);
         let mut buf = vec![0u8; 65_536];
         // SAFETY: writable buffer; non-blocking read end.
@@ -1397,16 +1411,85 @@ pub(crate) mod tests {
                 "-q",
             ])
             .env_clear()
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let pid = child.id() as libc::pid_t;
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        // libtest prints its own lines first; the byte after them is ours.
+        let mut out = child.stdout.take().unwrap();
+        let mut got = Vec::new();
+        let mut b = [0u8; 1];
+        while !got.ends_with(b"R") {
+            assert_eq!(std::io::Read::read(&mut out, &mut b).unwrap(), 1, "{got:?}");
+            got.push(b[0]);
+        }
+        // Stopped only once a confined thread waits in poll, continued only
+        // once it is stopped.
+        let tasks = || -> Vec<String> {
+            std::fs::read_dir(format!("/proc/{pid}/task"))
+                .map(|d| {
+                    d.filter_map(|e| e.ok())
+                        .map(|e| e.path().display().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        #[cfg(target_arch = "x86_64")]
+        let polls = [libc::SYS_poll, libc::SYS_ppoll];
+        #[cfg(target_arch = "aarch64")]
+        let polls = [libc::SYS_ppoll];
+        let in_poll = || {
+            tasks().iter().any(|t| {
+                let status = std::fs::read_to_string(format!("{t}/status")).unwrap_or_default();
+                let call = std::fs::read_to_string(format!("{t}/syscall")).unwrap_or_default();
+                let nr = call
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<i64>().ok());
+                status.contains("Seccomp:\t2") && nr.is_some_and(|n| polls.contains(&n))
+            })
+        };
+        let until = |what: &dyn Fn() -> bool| {
+            // An upper bound only: a loaded host starts the child slowly.
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !what() && std::time::Instant::now() < end {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            what()
+        };
+        let seen = || {
+            tasks()
+                .iter()
+                .map(|t| {
+                    let status = std::fs::read_to_string(format!("{t}/status")).unwrap_or_default();
+                    let seccomp = status
+                        .lines()
+                        .find(|l| l.starts_with("Seccomp:"))
+                        .unwrap_or("")
+                        .to_owned();
+                    (
+                        t.clone(),
+                        seccomp,
+                        std::fs::read_to_string(format!("{t}/syscall")).map_err(|e| e.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            until(&in_poll),
+            "the confined supervisor never waited in poll: {:?}",
+            seen()
+        );
         // SAFETY: signals to the test's own child.
         unsafe { libc::kill(pid, libc::SIGSTOP) };
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let stopped = || {
+            std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .is_ok_and(|s| s.lines().any(|l| l.starts_with("State:\tT")))
+        };
+        assert!(until(&stopped), "the child never stopped");
         // SAFETY: as above.
         unsafe { libc::kill(pid, libc::SIGCONT) };
+        let _ = std::io::Read::read_to_end(&mut out, &mut Vec::new());
         assert_eq!(child.wait().unwrap().code(), Some(42));
     }
 
