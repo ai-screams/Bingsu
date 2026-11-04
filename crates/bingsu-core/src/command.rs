@@ -2,6 +2,7 @@
 //! decision the supervisor makes before each relay spawn, and the run
 //! deadline formulas. Types and pure decisions only; nothing here runs.
 pub mod deadline;
+pub mod env_frame;
 pub mod grant;
 pub mod wire;
 

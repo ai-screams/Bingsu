@@ -163,9 +163,12 @@ jobs:
                 --deselect tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount \
                 --deselect tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock \
                 --deselect tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children \
-                --deselect tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio \
+                --deselect tests/shell/test_prompt_env_paths.py::test_helper_fds_after_env \
                 --deselect tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds \
                 --deselect tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive \
+                --deselect tests/shell/test_prompt_env_paths.py::test_ld_preload_not_loaded_into_helper \
+                --deselect tests/shell/test_prompt_env_paths.py::test_helper_ignores_xdg_runtime_dir_from_env \
+                --deselect tests/shell/test_prompt_env_paths.py::test_oversize_env_block_means_no_env \
                 --deselect tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
       # Python only: recorded traces and the workflow files, no shell and no binary.
       # 이것을 실패시키는 것: 이 파일을 다른 칸으로 옮기거나 빼는 것, skip을 통과로 세는 것.
@@ -350,10 +353,21 @@ jobs:
         if: matrix.profile == 'release'
         run: |
           set -o pipefail
-          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio' 'tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds' 'tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive' --basetemp="$RUNNER_TEMP/fd-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/fds.txt"
-          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_execs_with_only_dev_null_stdio' "$RUNNER_TEMP/fds.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_helper_fds_after_env' 'tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds' 'tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive' --basetemp="$RUNNER_TEMP/fd-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/fds.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_helper_fds_after_env' "$RUNNER_TEMP/fds.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_collector_holds_only_fixed_fds' "$RUNNER_TEMP/fds.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_shell_pipe_reaches_eof_while_helper_is_alive' "$RUNNER_TEMP/fds.txt"
+      # The command environment reaches the helper as frame bytes on fd 4, never
+      # through envp or as a location. The LD_PRELOAD canary needs the glibc loader.
+      # 이것을 실패시키는 것: debug 칸에서 돌리거나 시험 하나의 PASSED 단언을 빼는 것, glibc 칸의 skip을 통과로 세는 것.
+      - name: Command environment frame (release)
+        if: matrix.profile == 'release'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/venv/bin/python" -m pytest 'tests/shell/test_prompt_env_paths.py::test_ld_preload_not_loaded_into_helper' 'tests/shell/test_prompt_env_paths.py::test_helper_ignores_xdg_runtime_dir_from_env' 'tests/shell/test_prompt_env_paths.py::test_oversize_env_block_means_no_env' --basetemp="$RUNNER_TEMP/env-pytest" -q -rA -p no:cacheprovider | tee "$RUNNER_TEMP/env.txt"
+          if [ "$LIBC" = gnu ]; then grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_ld_preload_not_loaded_into_helper' "$RUNNER_TEMP/env.txt"; fi
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_helper_ignores_xdg_runtime_dir_from_env' "$RUNNER_TEMP/env.txt"
+          grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_oversize_env_block_means_no_env' "$RUNNER_TEMP/env.txt"
       # The path allowlist with exactly one collecting collector needs a release
       # helper (a debug one under strace often defers admission); the PTY
       # containers run the no-collection cell on their debug build.

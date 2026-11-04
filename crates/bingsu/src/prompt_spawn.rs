@@ -1,5 +1,8 @@
 //! Pre-filter TCB: one fixed helper, no PATH lookup, no inherited environment,
 //! no wait. The caller's argv0 is the absolute binary path pinned by init.
+//! The shell's environment reaches the helper only as bytes: one framed
+//! write into a pipe whose read end becomes the helper's fd 4
+//! (`bingsu_core::command::env_frame`); the helper's envp stays empty.
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -51,6 +54,8 @@ fn spawn_until(
         unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };
         return Err(());
     }
+    let mut env_read = None;
+    let env_read = &mut env_read;
     let result = (|| {
         // SAFETY: zero is valid storage for sigaction; mask initialized below.
         let mut reap: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -75,18 +80,6 @@ fn spawn_until(
         let flags = flags | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
         // SAFETY: attr is initialized; flags are supported spawn flags.
         check(unsafe { libc::posix_spawnattr_setflags(&mut attr, flags as libc::c_short) })?;
-        for fd in 0..3 {
-            // SAFETY: initialized actions, fixed NUL-terminated path; only child's fds change.
-            check(unsafe {
-                libc::posix_spawn_file_actions_addopen(
-                    &mut actions,
-                    fd,
-                    c"/dev/null".as_ptr(),
-                    libc::O_RDWR,
-                    0,
-                )
-            })?;
-        }
         #[cfg(target_os = "linux")]
         {
             // Single-threaded front end. Enumerate the complete fd table, not
@@ -116,6 +109,27 @@ fn spawn_until(
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         return Err(());
         crate::prompt_io::check_deadline(deadline);
+        // Made after the fd walk above, so the walk neither lists nor marks it.
+        *env_read = env_pipe(environ_entries());
+        if let Some(read) = *env_read {
+            // First, so a read end at 0-2 is copied before those are replaced.
+            // A read end that already is fd 4 has its close-on-exec flag
+            // cleared by this action (POSIX adddup2 with equal descriptors).
+            // SAFETY: initialized actions; the read end is open until after spawn.
+            check(unsafe { libc::posix_spawn_file_actions_adddup2(&mut actions, read, ENV_FD) })?;
+        }
+        for fd in 0..3 {
+            // SAFETY: initialized actions, fixed NUL-terminated path; only child's fds change.
+            check(unsafe {
+                libc::posix_spawn_file_actions_addopen(
+                    &mut actions,
+                    fd,
+                    c"/dev/null".as_ptr(),
+                    libc::O_RDWR,
+                    0,
+                )
+            })?;
+        }
         let mut pid = 0;
         // SAFETY: all strings, pointer arrays, initialized objects outlive spawn;
         // env and argv are NUL terminated. No function pointer or PATH lookup.
@@ -130,6 +144,10 @@ fn spawn_until(
             )
         })
     })();
+    if let Some(read) = *env_read {
+        // SAFETY: the read end made by env_pipe; the helper holds its own copy.
+        unsafe { libc::close(read) };
+    }
     // SAFETY: initialized actions, now no longer used.
     unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };
     // SAFETY: initialized attributes, now no longer used.
@@ -138,6 +156,97 @@ fn spawn_until(
 }
 fn check(rc: i32) -> Result<(), ()> {
     if rc == 0 { Ok(()) } else { Err(()) }
+}
+
+const ENV_FD: i32 = bingsu_core::command::env_frame::FD;
+
+/// The read end of a new pipe holding the frame of `entries`, its write end
+/// already closed. `None` when no pipe could be made; the helper then starts
+/// without fd 4, which it reads as no environment.
+fn env_pipe<'a>(entries: impl IntoIterator<Item = &'a [u8]>) -> Option<i32> {
+    let [read, write] = env_pipe_ends()?;
+    let _ = write_frame(write, entries);
+    // SAFETY: the write end made above, closed exactly once.
+    unsafe { libc::close(write) };
+    Some(read)
+}
+
+/// `[read, write]`, the write end non-blocking (on Linux both ends, from pipe2).
+fn env_pipe_ends() -> Option<[i32; 2]> {
+    let mut fds = [-1; 2];
+    // SAFETY: two writable ints for the new descriptors.
+    #[cfg(target_os = "linux")]
+    let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } == 0;
+    // macOS has no pipe2. Spawn closes every other fd (POSIX_SPAWN_CLOEXEC_DEFAULT).
+    // SAFETY: two writable ints for the new descriptors.
+    #[cfg(target_os = "macos")]
+    let made = unsafe { libc::pipe(fds.as_mut_ptr()) } == 0;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let made = false;
+    if !made {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // A blocking write could wait on the helper: without the flag, no pipe.
+        // SAFETY: the write end made above; changes only its status flags.
+        if unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
+            // SAFETY: both ends made above, closed exactly once.
+            unsafe { libc::close(fds[0]) };
+            // SAFETY: as above.
+            unsafe { libc::close(fds[1]) };
+            return None;
+        }
+    }
+    Some(fds)
+}
+
+/// One non-blocking write of the frame; the bytes accepted. `EAGAIN`, a short
+/// write or an oversize environment (no frame, no write) leaves less than a
+/// whole frame, which the helper reads as no environment. Never retried:
+/// nobody reads the pipe until the helper runs.
+fn write_frame<'a>(write: i32, entries: impl IntoIterator<Item = &'a [u8]>) -> isize {
+    let Some(frame) = bingsu_core::command::env_frame::encode(entries) else {
+        return 0;
+    };
+    // SAFETY: initialized frame bytes, valid for frame.len() bytes.
+    unsafe { libc::write(write, frame.as_ptr().cast(), frame.len()) }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    static environ: *const *const libc::c_char;
+}
+
+/// The entries of this process's environment as the shell passed them,
+/// each with its NUL. Nothing is split or decoded. The front is single
+/// threaded and never changes its environment, so the array stays put.
+fn environ_entries() -> impl Iterator<Item = &'static [u8]> {
+    // SAFETY: the C runtime's environment pointer, read once.
+    #[cfg(target_os = "linux")]
+    let mut at = unsafe { environ };
+    // SAFETY: libSystem's accessor for the same pointer; never null.
+    #[cfg(target_os = "macos")]
+    let slot = unsafe { libc::_NSGetEnviron() };
+    // SAFETY: the accessor's slot holds the environment pointer.
+    #[cfg(target_os = "macos")]
+    let mut at = unsafe { *slot }.cast_const().cast::<*const libc::c_char>();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let mut at: *const *const libc::c_char = std::ptr::null();
+    std::iter::from_fn(move || {
+        if at.is_null() {
+            return None;
+        }
+        // SAFETY: a NULL-terminated array of entries; `at` is inside it.
+        let entry = unsafe { *at };
+        if entry.is_null() {
+            return None;
+        }
+        // SAFETY: the next slot exists, since this one was not the terminator.
+        at = unsafe { at.add(1) };
+        // SAFETY: each entry is a NUL-terminated string that lives as long as the process.
+        Some(unsafe { std::ffi::CStr::from_ptr(entry) }.to_bytes_with_nul())
+    })
 }
 
 #[cfg(test)]
@@ -202,7 +311,14 @@ mod tests {
         spawn(exe.as_os_str(), &raw).unwrap();
         assert!(start.elapsed() < Duration::from_secs(1));
         let report = crate::commands::n3_test::wait_report(&base.join("probe"));
-        assert_eq!(&report[..5], &[3, 0, 0, 1, 1]);
+        // fds 0-2 and the environment pipe at 4, nothing else.
+        assert_eq!(&report[..5], &[4, 0, 0, 1, 1]);
+        // The parent's BINGSU_ATTACK reaches the helper only as frame bytes (report[4]: not in envp).
+        // 이것을 실패시키는 것: adddup2를 빼는 것(fd 4가 없어 -1), 쓰기를 빼는 것(0바이트).
+        assert!(
+            report[8] > 16 && report[9] == 1,
+            "frame on fd 4: {report:?}"
+        );
         // 이것을 실패시키는 것: fd 0–2 중 하나의 addopen을 지우는 것(시험 부모의 stdout·stderr가 남는다).
         assert_eq!(report[7], 3, "fds 0-2 must be the spawn's own /dev/null");
         // The slow helper is alive, but the test parent has never waited for it.
@@ -216,7 +332,7 @@ mod tests {
             fs::remove_file(base.join("probe")).unwrap();
             spawn(exe.as_os_str(), &fast).unwrap();
             let report = crate::commands::n3_test::wait_report(&base.join("probe"));
-            assert_eq!(&report[..5], &[3, 0, 0, 1, 1]);
+            assert_eq!(&report[..5], &[4, 0, 0, 1, 1]);
         }
         let end = Instant::now() + Duration::from_secs(2);
         loop {
@@ -253,6 +369,159 @@ mod tests {
     fn lowered_nofile_still_spawns_without_leaking_fds() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         child("lowered_nofile_child");
+    }
+
+    // 이것을 실패시키는 것: 읽는 쪽이 이미 fd 4일 때 adddup2를 건너뛰는 것(Linux는 pipe2의 CLOEXEC로,
+    // macOS는 POSIX_SPAWN_CLOEXEC_DEFAULT로 exec 때 닫혀 도우미에 fd 4가 없다).
+    #[test]
+    fn env_read_end_already_at_fd_4() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        child("env_read_end_at_fd_4_child");
+    }
+
+    #[test]
+    #[ignore = "child: arranges its fd table so the pipe's read end is fd 4"]
+    fn env_read_end_at_fd_4_child() {
+        let (base, exe) = crate::commands::n3_test::probe("env-fd4");
+        // Isolated child process: fd 3 open, 4 and 5 free, so the pipe gets [4, 5].
+        use std::os::fd::IntoRawFd;
+        let null = fs::File::open("/dev/null").unwrap().into_raw_fd();
+        if null != 3 {
+            // SAFETY: live source fd; replaces whatever fd 3 was in this child only.
+            assert_eq!(unsafe { libc::dup2(null, 3) }, 3);
+            // SAFETY: the raw fd taken above, closed once.
+            unsafe { libc::close(null) };
+        }
+        for fd in [4, 5] {
+            // SAFETY: isolated child; frees the slots the fixture needs.
+            unsafe { libc::close(fd) };
+        }
+        let [read, write] = super::env_pipe_ends().unwrap();
+        assert_eq!(
+            (read, write),
+            (4, 5),
+            "fixture must put the read end at fd 4"
+        );
+        for fd in [read, write] {
+            // SAFETY: both ends made just above, closed once.
+            unsafe { libc::close(fd) };
+        }
+        let home = format!("--home={}", base.display());
+        let raw: Vec<&[u8]> = vec![
+            b"--runtime-root=1:2:/r",
+            b"--config-root=/c",
+            b"--config-root-written=/c",
+            b"--state-root=/s",
+            home.as_bytes(),
+            b"--log-level=debug",
+        ];
+        spawn(exe.as_os_str(), &raw).unwrap();
+        let report = crate::commands::n3_test::wait_report(&base.join("probe"));
+        assert_eq!(&report[..5], &[4, 0, 0, 1, 1], "{report:?}");
+        assert!(
+            report[8] > 16 && report[9] == 1,
+            "frame on fd 4: {report:?}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn entry(total: usize) -> Vec<u8> {
+        let mut e = b"BIG=".to_vec();
+        e.resize(total - 1, b'x');
+        e.push(0);
+        e
+    }
+
+    fn read_all(fd: i32) -> Vec<u8> {
+        let mut out = vec![0u8; 80_000];
+        let mut got = 0;
+        loop {
+            // SAFETY: writable bytes from got to the end of out.
+            let n = unsafe { libc::read(fd, out[got..].as_mut_ptr().cast(), out.len() - got) };
+            if n <= 0 {
+                break;
+            }
+            got += n as usize;
+        }
+        // SAFETY: test-owned read end, closed once.
+        unsafe { libc::close(fd) };
+        out.truncate(got);
+        out
+    }
+
+    // 이것을 실패시키는 것: 상한을 본문 기준 65,536으로 두는 것(머리를 빼지 않음). 1바이트 큰 환경이
+    // 65,537바이트 프레임이 되어 쓰기가 일부만 받아들이고, 도우미 쪽 파이프에 바이트가 남는다.
+    #[test]
+    fn max_env_frame_fits_one_write() {
+        use bingsu_core::command::env_frame::{BODY_MAX, FRAME_MAX};
+        let max = entry(BODY_MAX);
+        let [read, write] = super::env_pipe_ends().unwrap();
+        assert_eq!(
+            super::write_frame(write, [max.as_slice()]),
+            FRAME_MAX as isize
+        );
+        // SAFETY: test-owned write end, closed once.
+        unsafe { libc::close(write) };
+        assert_eq!(
+            crate::commands::helper::read_env(read).as_deref(),
+            Some(max.as_slice())
+        );
+        let over = entry(BODY_MAX + 1);
+        let read = super::env_pipe([over.as_slice()]).unwrap();
+        assert_eq!(
+            read_all(read),
+            b"",
+            "an oversize environment writes nothing"
+        );
+    }
+
+    // 이것을 실패시키는 것: 도우미 쪽 프레임 길이 검사를 지우는 것(중간 EOF 프레임에서 slice panic).
+    // 미리 채운 파이프는 쓰기가 EAGAIN·부분 쓰기로 끝나는 경로를 만든다(재시도하면 이 시험이 멈춘다).
+    #[test]
+    fn partial_env_frame_discarded() {
+        let body = entry(5_000);
+        let frame = bingsu_core::command::env_frame::encode([body.as_slice()]).unwrap();
+        // End of file in the middle of the body.
+        let [read, write] = super::env_pipe_ends().unwrap();
+        // SAFETY: initialized bytes, half the frame.
+        let n = unsafe { libc::write(write, frame.as_ptr().cast(), frame.len() / 2) };
+        assert_eq!(n as usize, frame.len() / 2);
+        // SAFETY: test-owned write end, closed once.
+        unsafe { libc::close(write) };
+        assert_eq!(crate::commands::helper::read_env(read), None);
+        // EAGAIN or a short write into a pipe that is almost full.
+        let [read, write] = super::env_pipe_ends().unwrap();
+        let fill = vec![0u8; bingsu_core::command::env_frame::FRAME_MAX - 1_000];
+        let mut filled = 0;
+        while filled < fill.len() {
+            // SAFETY: initialized bytes from filled on.
+            let n =
+                unsafe { libc::write(write, fill[filled..].as_ptr().cast(), fill.len() - filled) };
+            assert!(n > 0);
+            filled += n as usize;
+        }
+        let accepted = super::write_frame(write, [body.as_slice()]);
+        assert!(
+            accepted < frame.len() as isize,
+            "the fixture must refuse part of the frame"
+        );
+        // SAFETY: test-owned write end, closed once.
+        unsafe { libc::close(write) };
+        let mut drained = vec![0u8; fill.len()];
+        let mut got = 0;
+        while got < drained.len() {
+            // SAFETY: writable bytes from got on.
+            let n = unsafe {
+                libc::read(
+                    read,
+                    drained[got..].as_mut_ptr().cast(),
+                    drained.len() - got,
+                )
+            };
+            assert!(n > 0);
+            got += n as usize;
+        }
+        assert_eq!(crate::commands::helper::read_env(read), None);
     }
 
     fn child(name: &str) {

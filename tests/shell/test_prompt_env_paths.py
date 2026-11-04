@@ -2159,16 +2159,46 @@ def front_fact_kind(call):
     raise AssertionError(('unexpected front facts primitive', call))
 
 
+def front_env_pipe_calls(front, boundary, spawns):
+    """Exact environment pipe of the front: only with a helper spawn, before the filter."""
+    pipes = [c for c in front if c.name == 'pipe2' and c.args.endswith('O_NONBLOCK|O_CLOEXEC')]
+    # 이것을 실패시키는 것: 도우미를 띄우지 않는 회차에도 환경 파이프를 만드는 것(env-no-spawn).
+    assert len(pipes) == len(spawns), ('front environment pipe count', pipes, spawns)
+    accounted = []
+    for pipe in pipes:
+        match = re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_NONBLOCK\|O_CLOEXEC', pipe.args)
+        assert match and pipe.ret == '0', ('front environment pipe creation', pipe)
+        reader, inode, writer = match.groups()
+        read_fd, write_fd = (f'{fd}<pipe:[{inode}]>' for fd in (reader, writer))
+        channel = [c for c in front if c.name in ('read', 'write', 'close', 'fcntl', 'dup2', 'dup3')
+                   and args_of(c) and args_of(c)[0] in (read_fd, write_fd)]
+        shape = [(c.name, args_of(c)[0]) for c in channel]
+        # Write, write-end close, spawn, read-end close, all before the filter. A retried
+        # write is also caught by the primitive count below.
+        # 이것을 실패시키는 것: 쓰기 쪽을 생성 뒤에 닫는 것(test_prompt_trace_budget.py의 env-open-writer).
+        assert (shape == [('write', write_fd), ('close', write_fd), ('close', read_fd)]
+                and pipe.index < channel[0].index < channel[1].index < spawns[0].index < channel[2].index < boundary), (
+            'front environment pipe sequence', pipe, channel, spawns)
+        write = channel[0]
+        # 이것을 실패시키는 것: 일부만 받아들인 쓰기를 통과시키는 것(env-short).
+        assert write.ret == args_of(write)[2], ('one write takes the whole frame', write)
+        accounted.extend([pipe, *channel])
+    return accounted
+
+
 def front_spawn_pipe_calls(front, boundary, libc, evidence):
     """Exact parent error channel, never a general pipe exemption."""
     from collections import Counter
-    from fsbudget.formula import POSIX_SPAWN_PRIMITIVES
+    from fsbudget.formula import ENV_PIPE_PRIMITIVES, POSIX_SPAWN_PRIMITIVES
     spawns = successful_spawns(front)
     assert len(spawns) <= 1, ('front helper spawns', spawns)
     expected = Counter(POSIX_SPAWN_PRIMITIVES[libc]) if spawns else Counter()
-    pipes = [c for c in front if c.name == 'pipe2']
-    assert len(pipes) == expected['pipe2'], ('front spawn pipe count', pipes, expected)
-    accounted = []
+    accounted = front_env_pipe_calls(front, boundary, spawns)
+    if spawns:
+        expected.update(ENV_PIPE_PRIMITIVES)
+    pipes = [c for c in front if c.name == 'pipe2' and c.index not in {a.index for a in accounted}]
+    error_pipes = POSIX_SPAWN_PRIMITIVES[libc].get('pipe2', 0) if spawns else 0
+    assert len(pipes) == error_pipes, ('front spawn pipe count', pipes, expected)
     for pipe in pipes:
         match = re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_CLOEXEC', pipe.args)
         assert match and pipe.ret == '0', ('front spawn pipe creation', pipe)
@@ -2502,6 +2532,8 @@ def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_
     assert role_children(trace) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
     assert len({c.pid for c in trace}) == 1, "a redraw is one process"
     assert not config_calls("redraw", trace)
+    # 이것을 실패시키는 것: 도우미를 띄우지 않는 redraw에서도 환경 파이프를 만드는 것.
+    assert not [c for c in trace if c.name in {"pipe", "pipe2"}], "a redraw makes no environment pipe"
 
 
 BRANCH = "redrawbranch"
@@ -2930,19 +2962,47 @@ def check_front_receives_shell_pipes(after, initial, pipes, exe):
     assert set(SHELL_PIPE_FDS) <= marked, ("the front's F_SETFD loop must mark every shell pipe", sorted(marked))
 
 
-# 이것을 실패시키는 것: 앞단의 fcntl(F_SETFD) 루프를 건너뛰는 것(fd 3–9·1025가 도우미 exec에 남는다),
-# fd 2의 addopen을 지우는 것(bash 훅의 2>/dev/null이 경로를 같게 만들어도 출처가 셸 상속이 된다).
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
-def test_live_helper_execs_with_only_dev_null_stdio(tmp_path):
-    """GATE-FDS.1: at the helper's execve its table is exactly fds 0-2 on the
-    spawn's own /dev/null, while the shell holds pipe write ends at 3-9 and 1025."""
+def helper_fd_table(after, exe, initial):
+    """The helper's table at execve: fds 0-2 on the spawn's own /dev/null and
+    fd 4 the read end of the front's environment pipe (pipe2 with O_NONBLOCK)."""
     from fsbudget.attribute import fd_table_at_exec
+    front = exec_pid(after, exe, "prompt")
+    env_pipes = [re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_NONBLOCK\|O_CLOEXEC', c.args)
+                 for c in after if c.pid == front and c.name == "pipe2" and c.ret == "0"
+                 and c.args.endswith("O_NONBLOCK|O_CLOEXEC")]
+    assert len(env_pipes) == 1 and env_pipes[0], ("one front environment pipe", env_pipes)
+    inode = env_pipes[0][2]
+    helper = fd_summary(fd_table_at_exec(after, exec_pid(after, exe, "__refresh-v1"), initial))
+    assert helper == {**{fd: SPAWNED_DEV_NULL for fd in (0, 1, 2)},
+                      4: (f"pipe:[{inode}]", False, "spawn-action")}, helper
+    return helper
+
+
+# 이것을 실패시키는 것: 앞단의 fcntl(F_SETFD) 루프를 건너뛰는 것(fd 3–9·1025가 도우미 exec에 남는다),
+# fd 2의 addopen을 지우는 것(bash 훅의 2>/dev/null이 경로를 같게 만들어도 출처가 셸 상속이 된다),
+# 환경 파이프의 adddup2를 지우는 것(fd 4가 없다), 도우미가 완전한 프레임 뒤에 EOF 읽기를 더 하는 것,
+# 도우미가 fd 4를 NSS 뒤에 읽는 것(첫 open보다 늦다).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+def test_helper_fds_after_env(tmp_path):
+    """GATE-FDS.1: at the helper's execve its table is exactly fds 0-2 on the
+    spawn's own /dev/null and fd 4 the front's environment pipe, while the
+    shell holds pipe write ends at 3-9 and 1025."""
     after, initial, fixture, pipes = shell_fd_capture("unchanged", tmp_path)
     try:
         exe = str(fixture.inst.exe)
         check_front_receives_shell_pipes(after, initial, pipes, exe)
-        helper = fd_table_at_exec(after, exec_pid(after, exe, "__refresh-v1"), initial)
-        assert fd_summary(helper) == {fd: SPAWNED_DEV_NULL for fd in (0, 1, 2)}, fd_summary(helper)
+        inode = helper_fd_table(after, exe, initial)[4][0]
+        # U-9i: the helper reads the whole frame in one read and closes fd 4,
+        # before its own first open (the loader's and stack guard's come before
+        # main; on the cold init path there is no fd 4).
+        helper = exec_pid(after, exe, "__refresh-v1")
+        calls = [c for c in after if c.pid == helper and c.index > next(
+            e.index for e in after if e.pid == helper and e.name == "execve")]
+        on_env = [c for c in calls if args_of(c) and args_of(c)[0] == f"4<{inode}>"]
+        front_write, = [c for c in after if c.name == "write" and args_of(c)[0].endswith(f"<{inode}>")]
+        assert [(c.name, c.ret) for c in on_env] == [("read", front_write.ret), ("close", "0")], on_env
+        first_open = next(c.index for c in calls if c.name in OPENS and not SYSTEM_PATHS.fullmatch(call_paths(c)[0]))
+        assert on_env[-1].index < first_open, ("fd 4 is read before the helper opens anything", on_env)
     finally:
         wait_helpers(fixture.base)
         shutil.rmtree(fixture.base, ignore_errors=True)
@@ -2963,8 +3023,7 @@ def test_live_collector_holds_only_fixed_fds(tmp_path):
     try:
         exe = str(fixture.inst.exe)
         check_front_receives_shell_pipes(after, initial, pipes, exe)
-        helper = fd_table_at_exec(after, exec_pid(after, exe, "__refresh-v1"), initial)
-        assert fd_summary(helper) == {fd: SPAWNED_DEV_NULL for fd in (0, 1, 2)}, fd_summary(helper)
+        helper_fd_table(after, exe, initial)
         collector = fd_summary(fd_table_at_exec(after, exec_pid(after, fixture.collector, "__collect-v1"), initial))
         assert sorted(collector) == [0, 1, 2, 3, 5], collector
         assert collector[0] == collector[2] == SPAWNED_DEV_NULL, collector
@@ -2975,6 +3034,103 @@ def test_live_collector_holds_only_fixed_fds(tmp_path):
         assert response[1:] == request[1:] == lock[1:] == (False, "spawn-action"), collector
     finally:
         wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+def env_prompt(tmp_path, env):
+    """One traced prompt of a published fixture with `env` added to the
+    shell's environment: (trace, fixture, front pid, helper pid)."""
+    require_release_helper(real_bin())
+    assert shutil.which("strace"), "this Linux gate must execute strace"
+    fixture = HelperStageFixture("unchanged")
+    try:
+        fixture.env.update(env)
+        path = tmp_path / "env.strace"
+        fixture.prompt(path)
+        wait_helpers(fixture.base)
+        trace = parse_trace(path.read_text(errors="replace"))
+        assert not trace.errors, trace.errors[:5]
+        exe = str(fixture.inst.exe)
+        return trace, fixture, exec_pid(trace, exe, "prompt"), exec_pid(trace, exe, "__refresh-v1")
+    except BaseException:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)
+        raise
+
+
+def env_pipe_of(trace, front):
+    """The front's environment pipe: (inode, write calls on it)."""
+    pipe, = [c for c in trace if c.pid == front and c.name == "pipe2" and c.args.endswith("O_NONBLOCK|O_CLOEXEC")]
+    inode = re.fullmatch(r'\[\d+<(pipe:\[\d+\])>, \d+<\1>\], O_NONBLOCK\|O_CLOEXEC', pipe.args)[1]
+    return inode, [c for c in trace if c.pid == front and c.name == "write" and args_of(c)[0].endswith(f"<{inode}>")]
+
+
+def helper_env_reads(trace, helper, inode):
+    return [c for c in trace if c.pid == helper and c.name == "read" and args_of(c)[0] == f"4<{inode}>"]
+
+
+# 이것을 실패시키는 것: 환경을 도우미 envp로도 넘기는 것(도우미의 로더가 카나리를 올린다).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux glibc loader")
+def test_ld_preload_not_loaded_into_helper(tmp_path):
+    """A shell LD_PRELOAD reaches the front's loader but never the helper's:
+    the helper starts with an empty envp and gets the environment as bytes."""
+    if require_release_helper(real_bin()) != "gnu":
+        pytest.skip("static musl has no dynamic loader to preload into")
+    canaries = tmp_path / "canaries"
+    canaries.mkdir()
+    library = tmp_path / "env-canary.so"
+    subprocess.run(["cc", "-O2", "-Wall", "-Werror", "-shared", "-fPIC", f'-DCANARY_DIR="{canaries}"',
+                    str(ROOT / "tests/shell/fixtures/env_canary.c"), "-o", str(library)], check=True)
+    trace, fixture, front, helper = env_prompt(tmp_path, {"LD_PRELOAD": str(library)})
+    try:
+        names = sorted(p.name.rsplit("-", 1)[0] for p in canaries.iterdir())
+        # Non-vacuity: the shell's LD_PRELOAD reached the front's loader, and the helper ran.
+        assert names == ["prompt"], names
+        inode, _ = env_pipe_of(trace, front)
+        reads = helper_env_reads(trace, helper, inode)
+        assert len(reads) == 1 and "LD_PRELOAD=" in reads[0].args, ("the entry still reaches the helper as bytes", reads)
+        # Positive control: the same library given to the helper through envp is loaded there.
+        direct = subprocess.run([str(fixture.inst.exe), "__refresh-v1", "--ctx", "1", "--record", "B1"],
+                                env={"LD_PRELOAD": str(library)}, capture_output=True, timeout=10)
+        assert direct.returncode != 0
+        assert sorted(p.name.rsplit("-", 1)[0] for p in canaries.iterdir()) == ["__refresh-v1", "prompt"]
+    finally:
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+# 이것을 실패시키는 것: 도우미가 환경의 XDG_RUNTIME_DIR로 위치를 정하는 것(그 폴더를 연다).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+def test_helper_ignores_xdg_runtime_dir_from_env(tmp_path):
+    """The environment never decides a location: with XDG_RUNTIME_DIR pointing
+    into a repository, the helper names no path under it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    trace, fixture, front, helper = env_prompt(tmp_path, {"XDG_RUNTIME_DIR": str(repo)})
+    try:
+        inode, writes = env_pipe_of(trace, front)
+        reads = helper_env_reads(trace, helper, inode)
+        # Non-vacuity: the value reached the helper, as frame bytes.
+        assert len(reads) == 1 and f"XDG_RUNTIME_DIR={repo}" in reads[0].args, reads
+        # Neither the front nor the helper names the folder outside the frame itself.
+        named = [c for c in trace if str(repo) in c.args and c not in reads and c not in writes]
+        assert named == [], named
+    finally:
+        shutil.rmtree(fixture.base, ignore_errors=True)
+
+
+# 이것을 실패시키는 것: 앞단 프레임의 상한 검사를 지우는 것(70 KB 프레임을 쓰고 일부만 들어간다).
+# 설정 단위 실행 0은 감독(C2)이 생긴 뒤에 단언한다.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+def test_oversize_env_block_means_no_env(tmp_path):
+    """A 70 KB environment: the front writes nothing and the helper reads end
+    of file, which is no environment for the round."""
+    trace, fixture, front, helper = env_prompt(tmp_path, {"BINGSU_BIG": "x" * (70 * 1024)})
+    try:
+        inode, writes = env_pipe_of(trace, front)
+        assert writes == [], writes
+        reads = helper_env_reads(trace, helper, inode)
+        assert [c.ret for c in reads] == ["0"], reads
+    finally:
         shutil.rmtree(fixture.base, ignore_errors=True)
 
 

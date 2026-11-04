@@ -2601,6 +2601,7 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
 @pytest.mark.parametrize('mutation', [
     'none', 'extra-read', 'missing-read', 'missing-pipe', 'missing-close',
     'extra-pipe', 'wrong-size', 'non-eof', 'late-pipe',
+    'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn',
 ])
 def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     lines, pinned, store, attempts = front_axis_control()
@@ -2623,9 +2624,10 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     pipe = '1 pipe2([90<pipe:[525252]>, 91<pipe:[525252]>], O_CLOEXEC) = 0'
     read = '1 read(90<pipe:[525252]>, "", 4) = 0'
     close = '1 close(90<pipe:[525252]>) = 0'
+    env_before, env_after = env_pipe_replay(1)
     channel = ([pipe] if libc == 'musl' and spawn else [])
     if spawn:
-        channel += ['1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2']
+        channel = env_before + channel + ['1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2'] + env_after
     if libc == 'musl' and spawn:
         channel += ['1 close(91<pipe:[525252]>) = 0', read, close]
     baseline = lines.copy()
@@ -2647,11 +2649,24 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
         channel = [l.replace('"", 4)', '"", 8)') for l in channel]
     elif mutation == 'non-eof':
         channel = [l.replace('"", 4) = 0', '"x", 4) = 1') for l in channel]
+    # 이것을 실패시키는 것: 환경 프레임 쓰기를 재시도하는 것, 일부만 받아들인 쓰기를 통과시키는 것,
+    # 쓰기 쪽을 생성 전에 닫지 않는 것, 도우미를 띄우지 않는 회차에 환경 파이프를 만드는 것.
+    elif mutation == 'env-retry' and spawn:
+        channel.insert(channel.index(env_before[1]), env_before[1])
+    elif mutation == 'env-short' and spawn:
+        channel = [l.replace(', 64) = 64', ', 64) = 32') for l in channel]
+    elif mutation == 'env-open-writer' and spawn:
+        writer_close = channel.pop(channel.index(env_before[2]))
+        channel.append(writer_close)
+    elif mutation == 'env-no-spawn' and not spawn:
+        channel = env_before + env_after
     boundary = next(i for i, l in enumerate(lines) if 'PR_SET_SECCOMP' in l)
     lines[boundary + (mutation == 'late-pipe'):boundary + (mutation == 'late-pipe')] = channel
     evidence = {}
-    changed = (mutation in ('extra-read', 'extra-pipe')
-               or libc == 'musl' and spawn and mutation != 'none')
+    env_mutation = mutation in ('env-retry', 'env-short', 'env-open-writer') and spawn or mutation == 'env-no-spawn' and not spawn
+    changed = (mutation in ('extra-read', 'extra-pipe') or env_mutation
+               or libc == 'musl' and spawn and mutation not in ('none', 'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn')
+               or mutation == 'late-pipe' and spawn)
     if changed:
         with pytest.raises(AssertionError):
             budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
@@ -2659,9 +2674,31 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     else:
         budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
                                    arch=arch, libc=libc, evidence=evidence)
-        expected = {'pipe2': 1, 'read': 1, 'close': 2} if libc == 'musl' and spawn else {}
+        from fsbudget.formula import ENV_PIPE_PRIMITIVES
+        expected = Counter({'pipe2': 1, 'read': 1, 'close': 2} if libc == 'musl' and spawn else {})
+        if spawn:
+            expected.update(ENV_PIPE_PRIMITIVES)
         assert evidence['spawn_pipe_counts'] == expected
         assert evidence['spawn_pipe_expected'] == expected
+
+
+def env_pipe_replay(pid):
+    """The current bootstrap's environment pipe (U-9h), for captures and
+    synthetic traces from before it: pipe2, the frame write and the write
+    end's close before the helper spawn; the read end's close after it."""
+    return ([f'{pid} pipe2([200<pipe:[909090]>, 201<pipe:[909090]>], O_NONBLOCK|O_CLOEXEC) = 0',
+             f'{pid} write(201<pipe:[909090]>, "BNGENV01", 64) = 64',
+             f'{pid} close(201<pipe:[909090]>) = 0'],
+            [f'{pid} close(200<pipe:[909090]>) = 0'])
+
+
+def replay_env_pipe(lines, pid):
+    spawn = next(i for i, l in enumerate(lines) if l.split()[0] == pid and ' clone(' in l and 'CLONE_VFORK' in l)
+    done = spawn if '<unfinished' not in lines[spawn] else next(
+        i for i in range(spawn, len(lines)) if lines[i].split()[0] == pid and 'clone resumed>' in lines[i])
+    before, after = env_pipe_replay(pid)
+    lines[done + 1:done + 1] = after
+    lines[spawn:spawn] = before
 
 
 # 이것을 실패시키는 것: 실제 aarch64 glibc 캡처의 kernel 9개 facts/ACL fallback/EOF 비용을 누락하는 것.
@@ -2683,6 +2720,8 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
     attempts = budget.front_attempt_plan('normal', 3008)
     maps_close = next(i for i, l in enumerate(lines) if ' close(3</proc/' in l and '/maps>' in l)
     pid = lines[maps_close].split()[0]
+    replay_env_pipe(lines, pid)
+    maps_close = next(i for i, l in enumerate(lines) if ' close(3</proc/' in l and '/maps>' in l)
     # Legacy E4 captured two maps reads. Current A2 release front has three
     # (keep/unchanged.strace pid 1130); CI x86_64 has three too (A2 report).
     # Replay current startup on this older product-axis fixture explicitly.

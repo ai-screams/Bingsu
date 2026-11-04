@@ -26,6 +26,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if detach().is_err() {
         return ExitCode::from(1);
     }
+    // Before anything here opens a descriptor: on the cold init path there is
+    // no fd 4, and a later read could take one of the helper's own. The
+    // command supervisor (C2) is the consumer; locations never come from it.
+    #[cfg(test)]
+    let _command_env = fixture.is_none().then(|| read_env(ENV_FD)).flatten();
+    #[cfg(not(test))]
+    let _command_env = read_env(ENV_FD);
     let Ok(_watchdog) = helper_limits::start(started) else {
         return ExitCode::from(1);
     };
@@ -328,6 +335,36 @@ impl Verification {
             store.response_renamed.clone(),
         )
     }
+}
+
+const ENV_FD: i32 = bingsu_core::command::env_frame::FD;
+
+/// The environment frame's body from `fd`, which is then closed, or `None`
+/// (no environment this round): no fd, a frame cut short or damaged, or
+/// one over the cap. Reads stop once the declared frame is in, so a whole
+/// frame costs one read. The prompt wrote the frame and closed its end
+/// before the spawn, so a read returns data or end of file and never waits.
+pub(crate) fn read_env(fd: i32) -> Option<Vec<u8>> {
+    use bingsu_core::command::env_frame;
+    let mut buf = vec![0u8; env_frame::FRAME_MAX];
+    let mut got = 0;
+    while got < buf.len() {
+        // SAFETY: writable bytes from got to the end of buf. fd 4 is not a Rust-owned
+        // descriptor (it may not exist at all), so it is read and closed as a raw int.
+        let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr().cast(), buf.len() - got) };
+        let Ok(n) = usize::try_from(n) else { break };
+        if n == 0 {
+            break;
+        }
+        got += n;
+        if env_frame::declared(&buf[..got]).is_some_and(|total| got >= total) {
+            break;
+        }
+    }
+    // SAFETY: closes the inherited descriptor once; EBADF when it was never there.
+    unsafe { libc::close(fd) };
+    buf.truncate(got);
+    env_frame::body(&buf).map(<[u8]>::to_vec)
 }
 
 pub(super) fn detach() -> Result<(), ()> {
