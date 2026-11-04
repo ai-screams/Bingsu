@@ -29,6 +29,13 @@ pub(crate) mod collector_process;
 pub(crate) mod collector_supervisor;
 #[cfg(unix)]
 #[allow(unsafe_code)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the helper calls it from the next change")
+)]
+pub(crate) mod command_cgroup;
+#[cfg(unix)]
+#[allow(unsafe_code)]
 pub(crate) mod command_grant;
 #[cfg(unix)]
 #[allow(unsafe_code)]
