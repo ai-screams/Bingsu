@@ -2183,4 +2183,23 @@ pub(crate) mod tests {
             assert!(gone, "{word}: a same-group grandchild outlived its unit");
         }
     }
+
+    // clone3 자식의 exec 실패 코드는 relay의 어떤 상태 코드와도 겹치지 않고, 감독은 그것을 SpawnFailed로
+    // 읽는다(relay가 쓴 거부 코드로 읽히지 않음). 이것을 실패시키는 것: SPAWN_FAILED를 122(RELAY_TARGET)로
+    // 바꾸는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_failed_code_is_not_a_relay_code() {
+        let relay = include_str!("../relay.rs").replace("\r\n", "\n");
+        let codes: Vec<u8> = relay
+            .lines()
+            .filter_map(|l| l.strip_prefix("pub(crate) const RELAY_"))
+            .filter_map(|l| l.split(": u8 = ").nth(1)?.strip_suffix(';')?.parse().ok())
+            .collect();
+        assert_eq!(codes, [RELAY_INPUT, RELAY_EXPIRED, RELAY_TARGET, 123]);
+        assert!(!codes.contains(&command_process::SPAWN_FAILED));
+        assert!(
+            ![RELAY_INPUT, RELAY_EXPIRED, RELAY_TARGET].contains(&command_process::SPAWN_FAILED)
+        );
+    }
 }

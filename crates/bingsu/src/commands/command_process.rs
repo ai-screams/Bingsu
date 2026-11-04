@@ -729,6 +729,15 @@ mod timing {
     /// Spawns the real supervisor; with `early` the grant is in the pipe
     /// before the spawn. Returns (spawned at, grant written at, results).
     fn round(exe: &CStr, units: usize, early: bool) -> (u64, u64, Vec<wire::Outcome>) {
+        round_in(exe, units, early, None)
+    }
+
+    fn round_in(
+        exe: &CStr,
+        units: usize,
+        early: bool,
+        cgroup: Option<&File>,
+    ) -> (u64, u64, Vec<wire::Outcome>) {
         let (grant_read, grant_write) = pipe().unwrap();
         let (results_read, results_write) = pipe().unwrap();
         let (lock, _keep) = pipe().unwrap();
@@ -752,7 +761,7 @@ mod timing {
             &grant_read,
             &results_write,
             &lock,
-            None,
+            cgroup,
             u64::MAX,
         )
         .unwrap();
@@ -830,5 +839,44 @@ mod timing {
             "approve_to_end_ns (approval -> /bin/true reaped, 8 units)",
             approve,
         );
+    }
+
+    /// C3 `cgroup_ns`: the same 8-unit round on the atomic path (unit cgroup,
+    /// clone3, cgroup.kill) and on the best-effort path, and one reclaim of
+    /// the 8 unit folders a round leaves. Privileged cell, `BINGSU_BIN`.
+    #[test]
+    #[ignore = "timing: needs BINGSU_BIN and the privileged cell"]
+    fn c3_cgroup_timings() {
+        use super::super::command_cgroup::{cell, fs, reclaim};
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        #[expect(clippy::disallowed_methods, reason = "test-only timing input")]
+        let exe = CString::new(std::env::var("BINGSU_BIN").unwrap()).unwrap();
+        let (path, _dir) = cell::parent("timing");
+        let parent = File::open(&path).unwrap();
+        let (mut atomic, mut plain, mut reclaims) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..30 {
+            let (_, _, out) = round_in(&exe, 8, true, Some(&parent));
+            assert_eq!(cell::units(&path).len(), 8, "{out:?}");
+            for o in &out {
+                assert!(matches!(o.reason, wire::Reason::Exited(0)), "{o:?}");
+                atomic.push(o.ended_at - o.approved_at);
+            }
+            let mut dir = fs::Dir::new(File::open(&path).unwrap());
+            let r = reclaim(&mut fs::Fs, &mut dir);
+            assert_eq!(r.removed, 8, "{r:?}");
+            reclaims.push(r.elapsed_ns);
+            let (_, _, out) = round(&exe, 8, true);
+            plain.extend(out.iter().map(|o| o.ended_at - o.approved_at));
+        }
+        let _ = std::fs::remove_dir(&path);
+        show(
+            "approve_to_end_ns atomic (unit cgroup, clone3, cgroup.kill)",
+            atomic,
+        );
+        show(
+            "approve_to_end_ns best effort (posix_spawn, process group)",
+            plain,
+        );
+        show("reclaim_ns (8 empty unit cgroups)", reclaims);
     }
 }
