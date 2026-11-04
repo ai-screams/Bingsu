@@ -240,6 +240,9 @@ impl Supervisor {
     ) -> Self {
         // Neither pipe may block the loop: a helper that stops reading
         // results must not keep the supervisor from seeing it is gone.
+        // No test for the failure: fcntl(F_SETFL) on an open pipe end cannot
+        // be made to fail from a test; it stops the round (fail closed), the
+        // same class as the C1 macOS fcntl branch (user decision).
         let blocked = nonblocking(grant_fd).and(nonblocking(result_fd)).is_err();
         Self {
             stopped: blocked,
@@ -580,7 +583,10 @@ impl Supervisor {
                     self.eagain += 1;
                 }
             }
-            // The helper closed its end: nobody reads results any more.
+            // The helper closed its end: nobody reads results any more. No
+            // test: the helper closes its read end only after done or at its
+            // own exit, which the grant pipe reports first; EPIPE here ends the
+            // round (fail closed), the same class as the C1 macOS fcntl branch.
             Err(_) => self.stop(),
         }
     }
@@ -594,26 +600,28 @@ fn pollfd(fd: i32, events: i16) -> libc::pollfd {
     }
 }
 
-/// What the pipe holds now, up to `STDOUT_MAX` bytes in all; then the pipe
-/// is closed, so a target that keeps writing gets EPIPE instead of filling
-/// memory. Reads until it would block, so after the reap nothing written
-/// before the exit is left behind.
+/// What the pipe holds now: the first `STDOUT_MAX` bytes are kept, the
+/// rest is read and dropped. The pipe stays open, so a target that writes
+/// more is not ended by EPIPE and keeps its own exit status; one that never
+/// stops is ended by its run deadline. At most `DRAIN_CHUNKS` reads per
+/// call, so an endless writer cannot hold the loop; after the reap the call
+/// takes what was written before the exit.
 fn read_stdout(run: &mut Run) {
-    while let Some(f) = &run.stdout {
-        let mut buf = [0u8; STDOUT_MAX];
-        let room = STDOUT_MAX - run.out.len();
-        match read_some(f.as_raw_fd(), &mut buf[..room]) {
+    let mut buf = [0u8; STDOUT_MAX];
+    for _ in 0..DRAIN_CHUNKS {
+        let Some(f) = &run.stdout else { return };
+        match read_some(f.as_raw_fd(), &mut buf) {
             Ok(None) => return,
             Ok(Some(0)) | Err(()) => run.stdout = None,
             Ok(Some(n)) => {
-                run.out.extend_from_slice(&buf[..n]);
-                if run.out.len() >= STDOUT_MAX {
-                    run.stdout = None;
-                }
+                let room = STDOUT_MAX - run.out.len();
+                run.out.extend_from_slice(&buf[..n.min(room)]);
             }
         }
     }
 }
+/// 16 reads of 4 KB per loop turn.
+const DRAIN_CHUNKS: usize = 16;
 
 fn read_status(run: &mut Run) {
     let Some(f) = &mut run.status else { return };
@@ -694,6 +702,16 @@ pub(crate) mod tests {
                 say(b"a");
                 executed();
                 say(b"b\n");
+            }
+            b"big" => {
+                // 256 KB, more than a pipe holds, then a normal exit. SIGPIPE
+                // to its default, as in a C program (Rust ignores it).
+                // SAFETY: plain disposition change.
+                unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+                executed();
+                for _ in 0..64 {
+                    say(&[b'x'; 4096]);
+                }
             }
             b"yes" => {
                 executed();
@@ -947,9 +965,9 @@ pub(crate) mod tests {
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "the target must be gone");
     }
 
-    // 대상이 나눠 쓰고 곧바로 끝나도 마지막 조각까지 결과에 담긴다. 수정 전(reap 뒤 비우기 없음)에도 Linux
-    // 2,000회·macOS 200회에서 잃은 회차가 0이라 그 경합은 이 시험으로 잡히지 않는다. 이것을 실패시키는 것:
-    // stdout을 결과에 담지 않거나 앞 조각만 담는 것.
+    // 대상이 나눠 쓰고 곧바로 끝나도 마지막 조각까지 결과에 담긴다. reap 뒤 비우기를 지운 변이는 Linux
+    // 2,000회·macOS 200회에서 잃은 회차가 0이라 이 시험으로 잡히지 않는다. 이것을 실패시키는 것: 읽은
+    // stdout을 결과에 옮기지 않는 것(Outcome의 stdout을 비우는 것).
     #[test]
     fn test_split_output_is_kept_whole() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
@@ -964,13 +982,38 @@ pub(crate) mod tests {
     }
     const SPLIT_ROUNDS: usize = 50;
 
-    // 이것을 실패시키는 것: read_stdout의 4 KB 상한(room·STDOUT_MAX 비교)을 지우는 것.
+    /// The test process's resident set, in KB (Linux).
+    #[cfg(target_os = "linux")]
+    fn rss_kb() -> u64 {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+        line.split_whitespace().nth(1).unwrap().parse().unwrap()
+    }
+
+    // 끝없이 쓰는 대상: 결과는 4 KB, 나머지는 읽어서 버리고 마감에 끝낸다. 이것을 실패시키는 것:
+    // read_stdout의 room 자르기를 지우는 것(4 KB 넘는 결과는 encode가 거부해 결과가 사라짐).
+    // Linux는 감독(이 시험 프로세스) RSS 증가가 1 MB 미만인지도 본다.
     #[test]
     fn test_gigabyte_output_is_cut_at_4k() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
-        let (got, took) = round(grant(vec![unit("yes", 1_000 * MS)], 1_000 * MS));
-        assert_eq!(got[0].stdout.len(), STDOUT_MAX, "{:?}", got[0].reason);
-        assert!(took < std::time::Duration::from_millis(1_000), "{took:?}");
+        #[cfg(target_os = "linux")]
+        let before = rss_kb();
+        let (got, _) = round(grant(vec![unit("yes", 300 * MS)], 1_000 * MS));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].reason, Reason::Timeout);
+        assert_eq!(got[0].stdout.len(), STDOUT_MAX);
+        #[cfg(target_os = "linux")]
+        assert!(rss_kb() < before + 1024, "{} KB -> {} KB", before, rss_kb());
+    }
+
+    // K1: 4 KB를 넘게 쓰고 끝나는 정상 명령은 SIGPIPE 없이 자기 종료 상태를 남긴다. 이것을 실패시키는 것:
+    // 4 KB에서 stdout을 닫는 것(대상이 SIGPIPE로 끝남).
+    #[test]
+    fn test_long_output_keeps_exit_status() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (got, _) = round(grant(vec![unit("big", 300 * MS)], 1_000 * MS));
+        assert_eq!(got[0].reason, Reason::Exited(0), "{:?}", got[0].reason);
+        assert_eq!(got[0].stdout.len(), STDOUT_MAX);
     }
 
     // 이것을 실패시키는 것: 중계 입력을 생성 뒤에 쓰는 것(읽지 않는 중계에 막힘), 마감에 끝내지 않는 것.
@@ -989,7 +1032,7 @@ pub(crate) mod tests {
 
     // 결과 파이프가 가득 차도(도우미가 읽지 않음) 감독은 허가 파이프 EOF를 보고 모든 대상을 끝낸다.
     // 이것을 실패시키는 것: 결과 쓰기를 차단 모드로 하는 것(EAGAIN 대신 write에 막혀 EOF를 못 봄),
-    // poll 집합에서 허가 파이프를 빼는 것.
+    // poll 집합에서 허가 파이프를 빼는 것(Linux만. macOS는 REAP_TICK 때문에 이 변이를 잡지 못한다).
     #[test]
     fn test_result_backpressure_then_helper_death() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();

@@ -99,6 +99,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         return ExitCode::from(1);
     };
     let runtime_path = request.runtime.path.clone();
+    let collected_repo: std::sync::Arc<std::sync::Mutex<Option<u16>>> = Default::default();
     let mut command_round = None;
     let mut command_skip = None;
     let mut round_marker = None;
@@ -170,9 +171,21 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     collector::spawn(&pin, request, lock, &_watchdog, context)?,
                     &store,
                 );
-                Ok::<_, super::snapshot_store::StoreError>(Ok(Some(
-                    job.start(Box::new(move |result| store.publish(&result)))?,
-                )))
+                // The repository root this collection reports for the shell's
+                // folder, for the command round's PATH rules (C2 ruling J9).
+                let slot = collected_repo.clone();
+                Ok::<_, super::snapshot_store::StoreError>(Ok(Some(job.start(Box::new(
+                    move |result| {
+                        let repo = result
+                            .updates
+                            .iter()
+                            .find_map(|u| u.facts.as_ref())
+                            .and_then(|f| f.repo_component);
+                        store.publish(&result)?;
+                        *slot.lock().unwrap_or_else(|e| e.into_inner()) = repo;
+                        Ok(())
+                    },
+                ))?)))
             })();
             let (started, outcome) = collection_result(admission);
             supervisor = started.flatten();
@@ -247,12 +260,28 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         refresh::refresh_broker(request, &mut clock, &mut broker)
     };
     // refresh_broker has released the snapshot lock and source descriptors.
+    // The collection ends first: its repository root feeds the grant.
+    if let Some(handle) = supervisor {
+        let supervision = handle.finish();
+        if let Some(ticket) = breaker_ticket.take()
+            && let Ok(now) = clock.observe()
+        {
+            let (progress, reason) = supervision.breaker_observation();
+            // Persistence failure affects only the next optional breaker lookup.
+            let _ = ticket.finish(progress, reason, now);
+        }
+    }
     // The grant goes out only once this round's marker is installed.
     if let Some(round) = command_round.take() {
         match round_marker.filter(|_| installs_marker(&result)) {
             Some(marker) => {
+                if round.neutral_refused > 0 {
+                    report(&mut groups, LogLevel::Info, command_grant::NEUTRAL_REFUSED);
+                }
+                let repo = *collected_repo.lock().unwrap_or_else(|e| e.into_inner());
                 let done = round.grant(
                     command_grant::permit(&marker),
+                    repo,
                     sys::current_uid(),
                     &mut groups,
                 );
@@ -284,16 +313,6 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     }
     if let Some(text) = command_skip.and_then(command_grant::Skip::message) {
         report(&mut groups, LogLevel::Info, text);
-    }
-    if let Some(handle) = supervisor {
-        let supervision = handle.finish();
-        if let Some(ticket) = breaker_ticket.take()
-            && let Ok(now) = clock.observe()
-        {
-            let (progress, reason) = supervision.breaker_observation();
-            // Persistence failure affects only the next optional breaker lookup.
-            let _ = ticket.finish(progress, reason, now);
-        }
     }
     if let Some(runtime) = collection_runtime
         && let Ok(now) = clock.observe()

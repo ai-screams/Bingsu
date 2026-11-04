@@ -22,8 +22,7 @@ use bingsu_core::{
         wire::{self, Grant, Message, Outcome, Policy, Unit, policy_digest},
     },
     config::compile::CompiledConfig,
-    fs_trust::{Last, NextOwner, RefuseGroupWrite, final_verdict},
-    handoff::Permit,
+    handoff::{Cwd, Permit},
     snapshot::{Marker, T_NS},
 };
 use std::{
@@ -39,8 +38,10 @@ use std::{
 /// The shell to run an `unsafe_shell` script with: a fixed path, resolved
 /// by the same rules as any executable, never looked up in `PATH`.
 const SHELL: &[u8] = b"/bin/sh";
-/// The neutral working folder in the runtime root (spec: empty, 0700).
+/// The neutral working folder in the runtime root (spec: empty).
 const NEUTRAL: &str = "neutral";
+pub(crate) const NEUTRAL_REFUSED: &str =
+    "command round: the neutral folder is not empty, the user's and 0500; its units do not run";
 
 /// What the helper knows before it decides on a round.
 pub(crate) struct Inputs<'a> {
@@ -67,12 +68,18 @@ pub(crate) enum Skip {
     Busy,
     /// No trusted relay on this platform yet (macOS, C2 ruling J3).
     NoRelay,
+    /// Every unit runs in the neutral folder, which is not empty, the
+    /// user's and 0500.
+    Neutral,
     Failed,
 }
 impl Skip {
     pub(crate) fn message(self) -> Option<&'static str> {
         Some(match self {
-            Self::NoUnits | Self::NoSession | Self::NoRelay => return None,
+            Self::NoUnits => return None,
+            Self::NoSession => "command round skipped: no session value from the shell",
+            Self::NoRelay => "command round skipped: no trusted relay on this platform",
+            Self::Neutral => NEUTRAL_REFUSED,
             Self::NoEnvironment(why) => why.message(),
             Self::Busy => "command round busy: the session's supervisor is still running",
             Self::Failed => "command round failed: supervisor not started",
@@ -94,6 +101,8 @@ pub(crate) struct Round {
     results: File,
     /// The session lock; the supervisor holds its own copy.
     _lock: File,
+    /// Units left out because the neutral folder failed its check.
+    pub neutral_refused: usize,
 }
 
 /// `command-<first 16 bytes of sha256(session), hex>.lock`: a fixed-length
@@ -104,29 +113,23 @@ fn lock_name(session: &[u8]) -> String {
     format!("command-{hex}.lock")
 }
 
-/// The neutral folder: made 0700 when missing; one that is there must be
-/// the user's, exactly 0700 and allow no other writer.
-fn neutral(runtime: &File, me: u32) -> Result<(), StoreError> {
+/// The neutral folder (spec: an empty private folder): made 0500 when
+/// missing, so read and search work and nothing can be written in it, by
+/// a unit either. One that is there must be empty, the user's and exactly
+/// 0500; otherwise `neutral` units do not run this round. It is never
+/// repaired or emptied.
+fn neutral(runtime: &File, me: u32) -> Result<bool, StoreError> {
     let name = OsStr::new(NEUTRAL);
     let made = sys::mkdir_at(runtime.as_fd(), name, 0o700)?;
     let dir = sys::open_dir_at_nofollow(runtime.as_fd(), name)?;
     if made {
         use std::os::unix::fs::PermissionsExt;
-        dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        dir.set_permissions(std::fs::Permissions::from_mode(0o500))?;
     }
     let facts = sys::fd_facts(dir.as_fd())?;
-    let local = sys::fd_is_local(dir.as_raw_fd());
-    final_verdict(
-        &facts,
-        me,
-        0,
-        NextOwner::Any,
-        Last::PrivateFolder,
-        local,
-        &mut RefuseGroupWrite,
-    )
-    .map_err(|_| StoreError::Unsafe)?;
-    Ok(())
+    Ok(facts.uid == me
+        && facts.mode & 0o7777 == 0o500
+        && sys::directory_names(dir.as_fd())?.is_empty())
 }
 
 /// Decides the round and, when it has units, takes the session lock and
@@ -157,7 +160,16 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             StoreError::Busy => Skip::Busy,
             _ => Skip::Failed,
         })?;
-    neutral(i.runtime, i.me).map_err(|_| Skip::Failed)?;
+    let mut runnable = runnable;
+    let mut neutral_refused = 0;
+    if !neutral(i.runtime, i.me).map_err(|_| Skip::Failed)? {
+        let before = runnable.len();
+        runnable.retain(|(_, r)| r.cwd != Cwd::Neutral);
+        neutral_refused = before - runnable.len();
+        if runnable.is_empty() {
+            return Err(Skip::Neutral);
+        }
+    }
     let grant = Grant {
         permit: Permit {
             kind: 0,
@@ -205,6 +217,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         grant_pipe,
         results,
         _lock: lock,
+        neutral_refused,
     })
 }
 
@@ -216,14 +229,17 @@ fn units(
     runnable: &[(String, plan::Runnable)],
     environment: &[u8],
     pwd: &[u8],
+    collected: Option<u16>,
     me: u32,
     groups: &mut SystemGroups,
 ) -> Result<(Vec<Unit>, usize), Skip> {
     // The repository the shell is in, by identity, for the PATH and
-    // executable rules. Until it has a source (C2 ruling J9) the shell's own
-    // folder stands for it; a folder that cannot be read refuses the round.
-    let repo =
-        exec_path::repo_id(Some(Path::new(OsStr::from_bytes(pwd)))).map_err(|_| Skip::Failed)?;
+    // executable rules (C2 ruling J9): the root this round's collection
+    // reported, else the shell's own folder (one statx, command rounds
+    // only). A folder that cannot be read refuses the round.
+    let folder = plan::repo_folder(pwd, collected);
+    let repo = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
+        .map_err(|_| Skip::Failed)?;
     let vars = Environ::parse(environment);
     let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
     let path = exec_path::path_value(&folders);
@@ -302,13 +318,22 @@ impl Round {
 
     /// Sends the grant under `permit`, reads every result until the helper's
     /// deadline less the reserve, then writes done and closes the pipe.
-    pub(crate) fn grant(mut self, permit: Permit, me: u32, groups: &mut SystemGroups) -> Report {
+    /// `repo`: the repository component this round's collection reported
+    /// for the shell's folder, if it ran (C2 ruling J9).
+    pub(crate) fn grant(
+        mut self,
+        permit: Permit,
+        repo: Option<u16>,
+        me: u32,
+        groups: &mut SystemGroups,
+    ) -> Report {
         self.grant.permit = permit;
         let mut report = Report::default();
         match units(
             &self.runnable,
             &self.environment,
             &self.grant.cwd,
+            repo,
             me,
             groups,
         ) {
@@ -332,7 +357,10 @@ impl Round {
             return report;
         };
         // One write into the empty pipe; a short one is a cut grant, which
-        // the supervisor refuses as a whole.
+        // the supervisor refuses as a whole. No test for the failure: a grant
+        // is at most 64 KB and the pipe is empty, so the write cannot be made
+        // to fail from a test; it abandons the round (fail closed), the same
+        // class as the C1 macOS fcntl branch (user decision).
         if !matches!(
             sys::write_fd(self.grant_pipe.as_raw_fd(), &frame),
             sys::WriteOutcome::Done

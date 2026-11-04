@@ -77,6 +77,10 @@ fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
     let status = (moved >= 0).then(|| unsafe { OwnedFd::from_raw_fd(moved) });
     // SAFETY: fixed NUL-terminated path, no O_CREAT.
     let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    // No test: opening /dev/null or the dup2 below cannot be made to fail
+    // from a test without also failing the relay's other opens; either way
+    // the relay refuses (fail closed). Same class as the C1 macOS fcntl
+    // branch (user decision).
     if null < 0 {
         return Err(status);
     }

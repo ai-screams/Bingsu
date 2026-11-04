@@ -166,6 +166,26 @@ pub fn with_dir(argv: &[Vec<u8>], dir: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The folder whose identity stands for the repository the shell is in, for
+/// the `PATH` and executable rules (C2 ruling J9): the repository root this
+/// round's collection reported for `cwd` (component `component` of it, as
+/// the collector found it), else `cwd` itself. The fallback misses a root
+/// above `cwd` when the shell is in a subfolder of a repository.
+pub fn repo_folder(cwd: &[u8], component: Option<u16>) -> Vec<u8> {
+    let Some(last) = component else {
+        return cwd.to_vec();
+    };
+    let mut out = Vec::new();
+    for name in crate::collection::path_facts::components(cwd).take(usize::from(last) + 1) {
+        out.push(b'/');
+        out.extend_from_slice(name);
+    }
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    out
+}
+
 /// Indices of the units to run this round, at most `cap`: never tried
 /// first, then the oldest last attempt, then by id. N units are each tried
 /// within ⌈N / cap⌉ rounds.
@@ -343,6 +363,21 @@ mod tests {
         let dir = b"/tmp/a b;$(rm -rf ~)\n`id`|c";
         let got = with_dir(&argv, dir);
         assert_eq!(got, vec![b"ls".to_vec(), dir.to_vec(), b"x{dir}".to_vec()]);
+    }
+
+    // J9: 수집이 알린 저장소 루트가 있으면 그 폴더, 없으면 셸 폴더. 이것을 실패시키는 것: component를
+    // 무시하고 늘 cwd를 쓰는 것, take의 `+ 1`을 지우는 것(루트 한 단계 위가 됨).
+    #[test]
+    fn repo_folder_prefers_the_collected_root() {
+        assert_eq!(
+            repo_folder(b"/home/u/repo/src/x", Some(2)),
+            b"/home/u/repo".to_vec()
+        );
+        assert_eq!(
+            repo_folder(b"/home/u/repo/src/x", Some(0)),
+            b"/home".to_vec()
+        );
+        assert_eq!(repo_folder(b"/home/u/proj", None), b"/home/u/proj".to_vec());
     }
 
     // 이것을 실패시키는 것: pick의 시도 시각 정렬을 지우는 것(id 순만), id 동점 처리를 지우는 것,
