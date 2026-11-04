@@ -163,3 +163,33 @@ def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     assert gone and took < 0.5, took
     until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=2.0)
     session.wait_quiet()
+
+
+# 세션 잠금은 감독이 사는 동안 풀리지 않는다(감독이 close-only 사본을 쥔다). 이것을 실패시키는 것: 감독에
+# 잠금 사본을 넘기지 않는 것(spawn_supervisor의 fd 5 dup 삭제): 도우미가 죽으면 잠금이 풀려 같은 세션에
+# 둘째 감독이 뜬다.
+def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    session.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
+    ready(session)
+    session.prompt()
+    found = until(lambda: [(s, p) for s, p in supervisors() if lock_of(s) is not None])
+    assert found, "no supervisor"
+    supervisor, helper = found[0]
+    os.kill(supervisor, signal.SIGSTOP)
+    try:
+        os.kill(helper, signal.SIGKILL)
+        until(lambda: not Path(f"/proc/{helper}/cmdline").exists()
+              or Path(f"/proc/{helper}/cmdline").read_bytes() == b"", timeout=2.0)
+        session.wait_quiet()
+        session.prompt()
+        session.wait_quiet()
+        others = [s for s, _ in supervisors() if s != supervisor]
+        assert others == [], "a second supervisor while the first holds the lock"
+    finally:
+        os.kill(supervisor, signal.SIGCONT)
+    # It sees the helper gone (end of file), ends its child and exits.
+    assert until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=3.0)
+    session.prompt()
+    assert until(lambda: supervisors()), "the next prompt starts a supervisor again"
+    session.wait_quiet()
