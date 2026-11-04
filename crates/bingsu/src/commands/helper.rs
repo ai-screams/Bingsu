@@ -249,13 +249,8 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // refresh_broker has released the snapshot lock and source descriptors.
     // The grant goes out only once this round's marker is installed.
     if let Some(round) = command_round.take() {
-        match (&result, round_marker) {
-            (
-                RefreshResult::Published { .. }
-                | RefreshResult::Revalidated { .. }
-                | RefreshResult::Invalid,
-                Some(marker),
-            ) => {
+        match round_marker.filter(|_| installs_marker(&result)) {
+            Some(marker) => {
                 if round.unresolved > 0 {
                     report(
                         &mut groups,
@@ -273,7 +268,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 }
                 report(&mut groups, LogLevel::DebugLog, "command round finished");
             }
-            _ => round.abandon(),
+            None => round.abandon(),
         }
     }
     if let Some(text) = command_skip.and_then(command_grant::Skip::message) {
@@ -508,6 +503,18 @@ pub(crate) fn read_env_why(fd: i32) -> Result<Vec<u8>, NoEnv> {
     })
 }
 
+/// Whether this round installed its marker: only then is the command grant
+/// sent (U-1 C+). Busy and Incomplete (a failed filter, a source that
+/// changed before the final revalidation, a lost lock) send none.
+fn installs_marker(result: &RefreshResult) -> bool {
+    matches!(
+        result,
+        RefreshResult::Published { .. }
+            | RefreshResult::Revalidated { .. }
+            | RefreshResult::Invalid
+    )
+}
+
 pub(super) fn detach() -> Result<(), ()> {
     let core = libc::rlimit {
         rlim_cur: 0,
@@ -560,6 +567,28 @@ pub(crate) fn selected_request(
         50,
     )
     .map_err(|_| super::snapshot_store::StoreError::Unsafe)
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::{RefreshResult, installs_marker};
+
+    // GATE-CMD-GRANT(허가 없음): 발행 실패·필터 실패·마지막 재검증 실패(chmod, 원본 교체)는 Incomplete이고,
+    // 잠금 경합은 Busy다. 둘 다 허가를 보내지 않는다. 이것을 실패시키는 것: installs_marker에 Incomplete나
+    // Busy를 더하는 것.
+    #[test]
+    fn grant_only_after_the_marker_is_installed() {
+        assert!(installs_marker(&RefreshResult::Published {
+            generation: 1,
+            left_out: vec![],
+        }));
+        assert!(installs_marker(&RefreshResult::Revalidated {
+            generation: 1
+        }));
+        assert!(installs_marker(&RefreshResult::Invalid));
+        assert!(!installs_marker(&RefreshResult::Incomplete));
+        assert!(!installs_marker(&RefreshResult::Busy));
+    }
 }
 
 #[cfg(test)]

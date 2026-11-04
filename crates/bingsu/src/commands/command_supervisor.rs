@@ -63,11 +63,6 @@ pub(crate) fn run(argv0: &OsStr) -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    for fd in [GRANT_FD, RESULT_FD] {
-        if nonblocking(fd).is_err() {
-            return ExitCode::from(1);
-        }
-    }
     let Some((grant, rest)) = wait_grant(GRANT_FD) else {
         return ExitCode::SUCCESS;
     };
@@ -243,7 +238,11 @@ impl Supervisor {
         grant_fd: i32,
         result_fd: i32,
     ) -> Self {
+        // Neither pipe may block the loop: a helper that stops reading
+        // results must not keep the supervisor from seeing it is gone.
+        let blocked = nonblocking(grant_fd).and(nonblocking(result_fd)).is_err();
         Self {
+            stopped: blocked,
             grant,
             tail,
             relay,
@@ -251,7 +250,6 @@ impl Supervisor {
             result_fd,
             runs: Vec::new(),
             pending: Vec::new(),
-            stopped: false,
             #[cfg(test)]
             eagain: 0,
         }
@@ -778,7 +776,6 @@ pub(crate) mod tests {
     fn round(g: Grant) -> (Vec<Outcome>, std::time::Duration) {
         let (grant_read, grant_write) = pipe();
         let (result_read, result_write) = pipe();
-        nonblocking(result_write.as_raw_fd()).unwrap();
         let started = std::time::Instant::now();
         let s = Supervisor::new(
             g,
@@ -813,6 +810,37 @@ pub(crate) mod tests {
 
     fn spawned(o: &Outcome) -> bool {
         !matches!(o.reason, Reason::Refused(_) | Reason::SpawnFailed)
+    }
+
+    // 허가 없이 파이프가 닫히면(도우미 SIGKILL, 발행 실패로 버림) 아무것도 실행하지 않는다. 이것을
+    // 실패시키는 것: wait_grant가 EOF에서 None 대신 빈 허가를 돌려주는 것, 허가 아닌 프레임(done)을 허가로
+    // 받는 것, 잘린 허가를 받아들이는 것.
+    #[test]
+    fn test_no_grant_means_no_exec() {
+        let frame = wire::encode(&Message::Grant(grant(vec![unit("ok", MS)], MS))).unwrap();
+        let done = wire::encode(&Message::Done).unwrap();
+        for bytes in [&b""[..], &done, &frame[..frame.len() - 1]] {
+            let (read, write) = pipe();
+            assert!(matches!(
+                super::super::sys::write_fd(write.as_raw_fd(), bytes),
+                super::super::sys::WriteOutcome::Done
+            ));
+            drop(write);
+            assert!(
+                wait_grant(read.as_raw_fd()).is_none(),
+                "{} bytes",
+                bytes.len()
+            );
+        }
+        let (read, write) = pipe();
+        let both = [frame.as_slice(), &done].concat();
+        assert!(matches!(
+            super::super::sys::write_fd(write.as_raw_fd(), &both),
+            super::super::sys::WriteOutcome::Done
+        ));
+        let (g, rest) = wait_grant(read.as_raw_fd()).unwrap();
+        assert_eq!(g.units.len(), 1);
+        assert_eq!(rest, done);
     }
 
     // GATE-CMD-GRANT(감독 승인 표). 이것을 실패시키는 것: spawn_unit에서 approve_unit 호출을 지우는 것
@@ -929,6 +957,59 @@ pub(crate) mod tests {
         assert_eq!(got[0].reason, Reason::Timeout, "{got:?}");
         assert!(matches!(got[1].reason, Reason::Exited(0)), "{got:?}");
         assert!(took < std::time::Duration::from_millis(1_000), "{took:?}");
+    }
+
+    // 결과 파이프가 가득 차도(도우미가 읽지 않음) 감독은 허가 파이프 EOF를 보고 모든 대상을 끝낸다.
+    // 이것을 실패시키는 것: 결과 쓰기를 차단 모드로 하는 것(EAGAIN 대신 write에 막혀 EOF를 못 봄),
+    // poll 집합에서 허가 파이프를 빼는 것.
+    #[test]
+    fn test_result_backpressure_then_helper_death() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (grant_read, grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        // The helper reads nothing: its pipe is already full.
+        let w = result_write.as_raw_fd();
+        nonblocking(w).unwrap();
+        let fill = [0u8; 4096];
+        // SAFETY: `fill` is readable; the end is non-blocking, so this stops at EAGAIN.
+        while unsafe { libc::write(w, fill.as_ptr().cast(), fill.len()) } > 0 {}
+        // Blocking again, as the helper hands it over: the supervisor sets its own mode.
+        // SAFETY: plain flag change on the test's own descriptor.
+        unsafe { libc::fcntl(w, libc::F_SETFL, 0) };
+        let mut units: Vec<Unit> = (0..7).map(|_| unit("yes", 1_000 * MS)).collect();
+        units.push(unit("sleep", 1_000 * MS));
+        let mut g = grant(units, 1_000 * MS);
+        for _ in 0..4 {
+            g.probes.push(Probe {
+                profile: TEST_PROFILE,
+                executable: b"/usr/bin/probe".to_vec(),
+                pin: None,
+            });
+        }
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(grant_write);
+        });
+        let started = std::time::Instant::now();
+        let s = Supervisor::new(
+            g,
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(false);
+        let took = started.elapsed();
+        let pids: Vec<libc::pid_t> = s.runs.iter().map(|r| r.child.pid).collect();
+        let eagain = s.eagain;
+        drop(s);
+        killer.join().unwrap();
+        assert!(eagain >= 1, "the full pipe must have refused a write");
+        assert!(took < std::time::Duration::from_millis(800), "{took:?}");
+        for pid in pids {
+            // SAFETY: signal 0 only asks whether the pid still exists.
+            assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "{pid} still runs");
+        }
     }
 
     // 이것을 실패시키는 것: relay_input의 16 KB 상한을 지우거나 그 거부를 생성으로 바꾸는 것.
