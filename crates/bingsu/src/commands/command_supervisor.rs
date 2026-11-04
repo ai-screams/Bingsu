@@ -1223,6 +1223,11 @@ pub(crate) mod tests {
         let (_result_read, result_write) = pipe();
         // A process the supervisor does not supervise, and a pidfd of it taken
         // before the filter.
+        // Never waited for: the child exits with _exit below and init reaps it.
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the test child exits without waiting"
+        )]
         let other = std::process::Command::new("/bin/sleep")
             .arg("5")
             .spawn()
@@ -1331,14 +1336,12 @@ pub(crate) mod tests {
             len: deny.len() as u16,
             filter: deny.as_ptr().cast_mut(),
         };
-        // SAFETY: plain prctl calls; `prog` outlives them.
-        unsafe {
-            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
-            assert_eq!(
-                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog),
-                0
-            );
-        }
+        // SAFETY: plain prctl with integer arguments.
+        let nnp = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        assert_eq!(nnp, 0);
+        // SAFETY: `prog` outlives the call.
+        let rc = unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog) };
+        assert_eq!(rc, 0);
         let canary = std::env::temp_dir().join(format!("bingsu-c2-late-{}", std::process::id()));
         let _ = std::fs::remove_file(&canary);
         let (grant_read, _grant_write) = pipe();

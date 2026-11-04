@@ -271,7 +271,7 @@ mod tests {
         for fd in [3, 8, 13, 40] {
             assert_eq!(run(libc::SYS_pidfd_send_signal, [fd, 9]), denied, "{fd}");
         }
-        let mut never = vec![
+        let never = [
             libc::SYS_execve,
             libc::SYS_execveat,
             libc::SYS_clone,
@@ -281,9 +281,11 @@ mod tests {
             libc::SYS_openat2,
             libc::SYS_dup,
             libc::SYS_dup3,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_open,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_dup2,
         ];
-        #[cfg(target_arch = "x86_64")]
-        never.extend([libc::SYS_open, libc::SYS_dup2]);
         for nr in never {
             assert_eq!(run(nr, [0, 0]), denied, "{nr}");
         }
