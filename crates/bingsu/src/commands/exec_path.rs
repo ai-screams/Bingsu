@@ -317,8 +317,8 @@ pub fn resolve_open(
     }
     // macOS runs the target by path, not by descriptor: a file on a network
     // file system (no MNT_LOCAL) is refused (spec section 4, macOS
-    // executable row). No cell here has a network mount, so the test that
-    // fails this is ignored (`test_macos_network_fs_refused`, BLOCKED).
+    // executable row). Only the file itself, as that row says. The test
+    // that fails this needs a network mount (`test_macos_network_fs_refused`).
     #[cfg(target_os = "macos")]
     if sys::fd_is_local(std::os::fd::AsRawFd::as_raw_fd(&file)) != Some(true) {
         return Err(Miss::Refused);
@@ -954,8 +954,8 @@ mod tests {
     // local이 아닌 것은 autofs /System/Volumes/Data/home뿐, 실행 파일을 둘 수 없음) 무시한다. SMB·NFS
     // 마운트가 있는 칸에서 BINGSU_NETWORK_FS_EXE=<그 안의 실행 파일, 본인 소유 0755>로 --ignored로 돌린다.
     // 소유권을 무시하는 마운트(SMB 등에서 흔함)면 소유권 판정이 먼저 거부해 locality 검사가 시험되지 않으므로
-    // 전제를 먼저 단언한다. 이 칸에서는 죽는 시험이 없다(BLOCKED): resolve의 fd_is_local 검사를 지워도
-    // 이 Mac의 시험은 모두 통과한다(2026-11-04 확인). 그 칸에서 이것을 실패시키는 것: 그 검사를 지우는 것.
+    // 전제를 먼저 단언한다. 이것을 실패시키는 것: resolve의 fd_is_local 검사 제거. 네트워크 FS 칸에서만
+    // 확인할 수 있고, 이 Mac은 BLOCKED다(검사를 지워도 이 Mac의 시험은 모두 통과, 2026-11-04 확인).
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "needs an executable on a network file system (BINGSU_NETWORK_FS_EXE)"]
