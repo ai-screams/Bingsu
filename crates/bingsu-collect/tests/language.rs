@@ -636,11 +636,12 @@ fn directories_stay_for_git_after_a_deep_request() {
     );
 }
 
-// 보안 리뷰 H2·S-L2·S-L3와 재리뷰 M1: 512 상한은 meter가 호출을 세는 자리(Meter::charge)에서, 세는 모든 종류
-// (stat·open·read·identity·mount·component·retry 등)에 건다. 20단 아래에서 표시 파일 하나짜리 언어 16개는 탐침이
-// 336개(512 미만)지만, 폴더를 열고 확인하는 호출까지 세면 상한을 넘는다. 언어 단계의 실제 호출 수(모든 종류의
-// 합)는 512를 넘지 않는다. 이것을 실패시키는 것: Meter::charge의 상한 검사를 지우는 것(16개가 모두 오고 호출이
-// 512를 넘음), Meter::calls가 stat·open만 세는 것(다른 종류까지 합한 실제 호출이 넘음).
+// 보안 리뷰 H2·S-L2·S-L3와 재리뷰 M1: 호출 상한(1,024, 사용자 결정 U-20)은 meter가 호출을 세는 자리
+// (Meter::charge)에서, 세는 모든 종류(stat·open·read·identity·mount·component·retry 등)에 건다. 20단 아래에서 표시
+// 파일 둘짜리 언어 16개는 탐침이 672개(1,024 미만)지만, 폴더를 열고 확인하는 호출까지 세면 상한을 넘는다. 언어
+// 단계의 실제 호출 수(모든 종류의 합)는 1,024를 넘지 않는다. 이것을 실패시키는 것: Meter::charge의 상한 검사를
+// 지우는 것(16개가 모두 오고 호출이 1,024를 넘음), Meter::calls가 stat·open만 세는 것(다른 종류까지 합한 실제
+// 호출이 넘음).
 #[test]
 fn probe_bound_counts_folder_calls() {
     if case("probe_bound_counts_folder_calls", 1).is_none() {
@@ -652,13 +653,13 @@ fn probe_bound_counts_folder_calls() {
     fs::create_dir_all(&cwd).unwrap();
     let query = LanguageQuery {
         id: b"custom/none".to_vec(),
-        markers: vec![b"absent".to_vec()],
+        markers: vec![b"absent-0".to_vec(), b"absent-1".to_vec()],
         version_files: vec![],
     };
     let (results, events) = round(&request(&cwd, &f.0, vec![query; 16]));
     assert!(results.len() < 16, "{}", results.len());
     assert!(events.iter().any(|e| e == "languages_over_bound"));
-    assert!(calls(&events) <= 512, "{}", calls(&events));
+    assert!(calls(&events) <= 1_024, "{}", calls(&events));
 }
 
 // 재리뷰 M1: 언어 단계의 호출 상한은 그 단계에서 끝난다. 상한을 다 쓴 뒤에도 git 단계는 HEAD와 config를 읽고

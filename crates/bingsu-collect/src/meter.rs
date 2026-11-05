@@ -224,7 +224,7 @@ impl Meter {
         if self.operations >= 100_000 {
             return Err(ReadError::Limit);
         }
-        // Fails without it: probe_bound_counts_folder_calls (more than 512
+        // Fails without it: probe_bound_counts_folder_calls (more than 1,024
         // calls in the language stage).
         if self.calls() >= self.calls_limit {
             return Err(ReadError::Limit);

@@ -18,7 +18,9 @@ use bingsu_core::collection::language::{
 /// and checked on the way, a version file's own walk and the stack's closing
 /// checks count; and bytes it may read (every byte the kernel returned,
 /// failed reads included).
-pub const PROBES_MAX: u64 = 512;
+/// 1,024 by user decision U-20 (was 512): with every call counted, 512 left
+/// built-in languages without an answer from 15 folders down.
+pub const PROBES_MAX: u64 = 1_024;
 pub const BYTES_MAX: u64 = 65_536;
 
 const _: () = assert!(DETECT_LEVELS == safe_read::DISCOVERY_LEVELS);
