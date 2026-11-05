@@ -121,6 +121,40 @@ impl<'a> Environ<'a> {
     }
 }
 
+/// The original environment digest of a config unit (spec section 4
+/// "cache", U-16): the keep list (`LC_*` by prefix) and the unit's
+/// `env_allow`, as the shell gave them, before any sanitizing. The prompt
+/// computes the same from its own environment, so a response is shown only
+/// to a shell whose values it ran with. Names in byte order, each once; a
+/// name without a value is marked absent, so an empty value differs.
+pub fn env_digest(vars: &Environ<'_>, env_allow: &[Vec<u8>]) -> [u8; 32] {
+    let mut names: Vec<&[u8]> = KEEP.to_vec();
+    names.extend(
+        vars.entries
+            .iter()
+            .map(|e| e.0)
+            .filter(|n| n.starts_with(KEEP_PREFIX)),
+    );
+    names.extend(env_allow.iter().map(|n| n.as_slice()));
+    names.sort_unstable();
+    names.dedup();
+    let mut b = Vec::new();
+    b.extend_from_slice(b"bingsu-command-env-v1\0");
+    for name in names {
+        b.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        b.extend_from_slice(name);
+        match vars.get(name) {
+            Some(v) => {
+                b.push(1);
+                b.extend_from_slice(&(v.len() as u64).to_le_bytes());
+                b.extend_from_slice(v);
+            }
+            None => b.push(0),
+        }
+    }
+    crate::collection::cwd_hash::sha256(&b)
+}
+
 /// The target environment of a config unit: the keep list (`PATH` is the
 /// sanitized value, never the shell's), every `LC_*`, then the unit's
 /// `env_allow` names, each at most once and only when the shell had it. An
@@ -378,6 +412,27 @@ mod tests {
             b"/home".to_vec()
         );
         assert_eq!(repo_folder(b"/home/u/proj", None), b"/home/u/proj".to_vec());
+    }
+
+    // 원본 환경 요약값: 남기기 목록·LC_* 접두·env_allow의 값만 보고, 다른 이름은 보지 않으며, 없음과 빈 값을
+    // 가린다. 이것을 실패시키는 것: env_allow를 이름 목록에 넣지 않는 것(KUBECONFIG만 다른 두 셸이 같은 값),
+    // LC_* 접두 훑기를 지우는 것(LC_TIME만 다른 두 셸이 같은 값), 없음 표시를 빈 값과 같게 쓰는 것.
+    #[test]
+    fn env_digest_covers_kept_names_lc_and_env_allow_only() {
+        let allow = [b"KUBECONFIG".to_vec()];
+        let d = |frame: &[u8]| env_digest(&Environ::parse(frame), &allow);
+        let base = d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0");
+        assert_eq!(base, d(b"PATH=/bin\0HOME=/h\0KUBECONFIG=a\0SECRET=x\0"));
+        assert_ne!(base, d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=b\0"));
+        assert_ne!(
+            base,
+            d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0LC_TIME=ko_KR.UTF-8\0")
+        );
+        assert_ne!(base, d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0TZ=\0"));
+        assert_ne!(
+            env_digest(&Environ::parse(b"HOME=/h\0KUBECONFIG=a\0"), &[]),
+            env_digest(&Environ::parse(b"HOME=/h\0KUBECONFIG=b\0"), &allow)
+        );
     }
 
     // 이것을 실패시키는 것: pick의 시도 시각 정렬을 지우는 것(id 순만), id 동점 처리를 지우는 것,

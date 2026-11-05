@@ -1,0 +1,298 @@
+#[cfg(test)]
+mod cases {
+    use super::super::*;
+    use alloc::{format, string::ToString, vec};
+
+    fn binding() -> Binding {
+        let config = b"/home/u/.config/bingsu".to_vec();
+        let state = b"/home/u/.local/state/bingsu".to_vec();
+        Binding {
+            build_id: BuildId([7; 32]),
+            boot: [1; 16],
+            epoch: [2; 16],
+            context: snapshot::context_crc(&config, &state).unwrap(),
+            clock_kind: 1,
+            domain: [3; 16],
+            resume: 4,
+            config,
+            state,
+            cwd: b"/home/u/repo".to_vec(),
+        }
+    }
+
+    fn entry(id: &str, attempted_at: u64, completed_at: u64) -> Entry {
+        Entry {
+            origin: Origin::Config,
+            id: id.to_string(),
+            policy: [5; 32],
+            environment: [6; 32],
+            pattern: [0; 32],
+            attempted_at,
+            completed_at,
+            status: Status::Ok,
+            value: format!("v-{id}"),
+            raw: format!("v-{id}"),
+        }
+    }
+
+    // 왕복과 머리 검사. 이것을 실패시키는 것: decode의 CRC 비교를 지우는 것(본문 1바이트를 바꾼 파일을 받음),
+    // 마지막 항목 뒤 남는 바이트 검사를 지우는 것(길이·CRC가 맞는 꼬리를 받음).
+    #[test]
+    fn response_round_trips_and_refuses_damage() {
+        let r = Response {
+            binding: binding(),
+            entries: vec![entry("custom/a", 10, 20), entry("custom/b", 11, 21)],
+        };
+        let bytes = r.encode().unwrap();
+        assert_eq!(Response::decode(&bytes).unwrap(), r);
+        let mut flipped = bytes.clone();
+        *flipped.last_mut().unwrap() ^= 1;
+        assert_eq!(Response::decode(&flipped), Err(Error::Checksum));
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(Response::decode(&long).is_err());
+        // A byte after the last entry, inside a body whose length and checksum agree.
+        let mut padded = bytes.clone();
+        padded.push(0);
+        let body = (padded.len() - HEADER) as u32;
+        padded[12..16].copy_from_slice(&body.to_le_bytes());
+        let crc = snapshot::crc32c(&[&padded[HEADER..]]);
+        padded[16..20].copy_from_slice(&crc);
+        assert_eq!(Response::decode(&padded), Err(Error::Trailing));
+        let mut magic = bytes;
+        magic[0] = b'X';
+        assert_eq!(Response::decode(&magic), Err(Error::Magic));
+    }
+
+    // 항목 상한과 같은 단위 중복. 이것을 실패시키는 것: check_entries의 개수 상한을 지우는 것, 같은 origin·id 중복
+    // 거부를 지우는 것, 값 4 KB 상한을 지우는 것.
+    #[test]
+    fn response_refuses_too_many_duplicate_or_long_entries() {
+        let mut r = Response {
+            binding: binding(),
+            entries: (0..ENTRIES_MAX + 1)
+                .map(|i| entry(&format!("custom/u{i}"), 1, 2))
+                .collect(),
+        };
+        assert_eq!(r.encode(), Err(Error::Limit));
+        r.entries = vec![entry("custom/a", 1, 2), entry("custom/a", 3, 4)];
+        assert_eq!(r.encode(), Err(Error::Flags));
+        let mut long = entry("custom/a", 1, 2);
+        long.value = "x".repeat(VALUE_MAX + 1);
+        r.entries = vec![long];
+        assert_eq!(r.encode(), Err(Error::Limit));
+        // The same id under the other origin is another unit.
+        let mut builtin = entry("custom/a", 1, 2);
+        builtin.origin = Origin::Builtin;
+        r.entries = vec![entry("custom/a", 1, 2), builtin];
+        assert!(r.encode().is_ok());
+    }
+
+    // 최대 크기 응답도 상한 안에서 왕복한다. 이것을 실패시키는 것: RESPONSE_MAX 계산에서 항목 하나의 최대를 줄이는 것.
+    #[test]
+    fn the_largest_response_fits_its_cap() {
+        let mut b = binding();
+        b.cwd = [b"/".as_slice(), &[b'a'; PATH_MAX - 1]].concat();
+        let r = Response {
+            binding: b,
+            entries: (0..ENTRIES_MAX)
+                .map(|i| Entry {
+                    id: format!("custom/{i:0>width$}", width = ID_MAX - 7),
+                    value: "v".repeat(VALUE_MAX),
+                    raw: "r".repeat(VALUE_MAX),
+                    ..entry("x", 1, 2)
+                })
+                .collect(),
+        };
+        let bytes = r.encode().unwrap();
+        assert_eq!(Response::decode(&bytes).unwrap(), r);
+    }
+
+    // 내 회차가 실행한 단위만, 더 늦게 끝났을 때만 바꾼다. 다른 단위의 항목은 남는다. 이것을 실패시키는 것:
+    // merge가 현재 항목을 버리고 mine만 쓰는 것, 완료 시각 비교를 지우는 것(늦게 온 옛 결과가 새 결과를 덮음),
+    // binding 비교를 지우는 것(다른 문맥의 항목이 섞임).
+    #[test]
+    fn merge_keeps_other_units_and_newer_results() {
+        let current = Response {
+            binding: binding(),
+            entries: vec![entry("custom/a", 10, 50), entry("custom/b", 10, 20)],
+        };
+        let mine = [
+            entry("custom/a", 30, 40),
+            entry("custom/b", 30, 60),
+            entry("custom/c", 30, 35),
+        ];
+        let r = merge(Some(&current), &binding(), &mine);
+        assert_eq!(
+            r.entry(Origin::Config, "custom/a").unwrap().completed_at,
+            50
+        );
+        assert_eq!(
+            r.entry(Origin::Config, "custom/b").unwrap().completed_at,
+            60
+        );
+        assert!(r.entry(Origin::Config, "custom/c").is_some());
+        let mut other = binding();
+        other.cwd = b"/elsewhere".to_vec();
+        let r = merge(Some(&current), &other, &mine[2..]);
+        assert_eq!(r.entries.len(), 1);
+    }
+
+    // 32개를 넘으면 이 회차가 쓰지 않은 항목 가운데 가장 오래 전에 시도한 것부터 뺀다. 이것을 실패시키는 것:
+    // 넘친 항목을 자르지 않는 것(인코딩이 Limit으로 실패), 내 항목을 빼는 것.
+    #[test]
+    fn merge_drops_the_oldest_other_entries_past_the_cap() {
+        let current = Response {
+            binding: binding(),
+            entries: (0..ENTRIES_MAX)
+                .map(|i| entry(&format!("custom/u{i}"), 100 + i as u64, 200 + i as u64))
+                .collect(),
+        };
+        // Tried before every entry there: still never the one dropped.
+        let mine = [entry("custom/new", 1, 600)];
+        let r = merge(Some(&current), &binding(), &mine);
+        assert_eq!(r.entries.len(), ENTRIES_MAX);
+        assert!(r.entry(Origin::Config, "custom/new").is_some());
+        assert!(r.entry(Origin::Config, "custom/u0").is_none());
+        assert!(r.encode().is_ok());
+    }
+
+    // 적중: 정책·환경이 같고 기간 안. 실패는 10초. 이것을 실패시키는 것: hit의 환경 요약값 비교를 지우는 것,
+    // 정책 비교를 지우는 것, 기간 비교를 `>=`로 바꾸는 것(경계에서 적중), 실패를 cache_ns로 세는 것, 완료 시각이
+    // now 뒤인 항목을 받는 것.
+    #[test]
+    fn hit_needs_the_same_policy_env_and_time() {
+        let e = entry("custom/a", 0, 1_000);
+        assert!(e.hit(&[5; 32], &[6; 32], 1_500, 1_000));
+        assert!(!e.hit(&[5; 32], &[9; 32], 1_500, 1_000));
+        assert!(!e.hit(&[9; 32], &[6; 32], 1_500, 1_000));
+        assert!(!e.hit(&[5; 32], &[6; 32], 2_000, 1_000));
+        assert!(!e.hit(&[5; 32], &[6; 32], 1_500, 0));
+        // A completion after `now` (another clock) is no hit.
+        assert!(!e.hit(&[5; 32], &[6; 32], 999, 1_000));
+        let failed = Entry {
+            status: Status::Failed,
+            ..e
+        };
+        assert!(failed.hit(&[5; 32], &[6; 32], 1_000 + FAILURE_NS - 1, 0));
+        assert!(!failed.hit(&[5; 32], &[6; 32], 1_000 + FAILURE_NS, 0));
+    }
+
+    // 표시 자격: binding과 시계가 같을 때만. 이것을 실패시키는 것: eligible의 boot·domain·resume 비교 중 하나를
+    // 지우는 것.
+    #[test]
+    fn eligible_needs_the_same_binding_and_clock() {
+        let r = Response {
+            binding: binding(),
+            entries: vec![],
+        };
+        let now = Clock {
+            kind: 1,
+            now: 5,
+            boot: [1; 16],
+            resume: 4,
+            domain: [3; 16],
+        };
+        assert!(r.eligible(&binding(), now));
+        for c in [
+            Clock {
+                boot: [9; 16],
+                ..now
+            },
+            Clock {
+                domain: [9; 16],
+                ..now
+            },
+            Clock { resume: 5, ..now },
+            Clock { kind: 2, ..now },
+        ] {
+            assert!(!r.eligible(&binding(), c), "{c:?}");
+        }
+        let mut other = binding();
+        other.cwd = b"/x".to_vec();
+        assert!(!r.eligible(&other, now));
+    }
+
+    /// `bytes` with its body checksum made right again after an edit.
+    fn resealed(mut bytes: Vec<u8>) -> Vec<u8> {
+        let crc = snapshot::crc32c(&[&bytes[HEADER..]]);
+        bytes[16..20].copy_from_slice(&crc);
+        bytes
+    }
+
+    // 머리·binding·항목의 각 거부. 이것을 실패시키는 것(줄마다 하나): 버전 비교, 머리의 예약 바이트 0 검사,
+    // 선언 길이 상한, binding의 context crc 비교, 절대 경로 검사, origin 태그 거부, 상태 태그 거부, 시도 시각 >
+    // 완료 시각 거부, 빈 id 거부, id 길이 상한, 원본 줄 4 KB 상한, 경로 길이 상한, 경로의 NUL 거부, 시계 종류
+    // 검사, 잘린 파일 거부를 지우는 것.
+    #[test]
+    fn decode_refuses_each_malformed_part() {
+        let good = Response {
+            binding: binding(),
+            entries: vec![entry("custom/a", 10, 20)],
+        };
+        let bytes = good.encode().unwrap();
+        let mut version = bytes.clone();
+        version[8] = 2;
+        assert_eq!(Response::decode(&version), Err(Error::Version));
+        let mut reserved = bytes.clone();
+        reserved[30] = 1;
+        assert_eq!(Response::decode(&reserved), Err(Error::Flags));
+        let mut long = bytes.clone();
+        long[12..16].copy_from_slice(&(RESPONSE_MAX as u32).to_le_bytes());
+        assert_eq!(declared_len(&long), Err(Error::Length));
+        // The binding's context digest is at a fixed place after build, boot, epoch.
+        let mut context = bytes.clone();
+        context[HEADER + 32 + 16 + 16] ^= 1;
+        assert_eq!(Response::decode(&resealed(context)), Err(Error::Flags));
+        for cwd in [
+            b"repo".to_vec(),
+            b"/a\0b".to_vec(),
+            [b"/".as_slice(), &[b'a'; PATH_MAX]].concat(),
+        ] {
+            let mut bad = good.clone();
+            bad.binding.cwd = cwd;
+            assert_eq!(bad.encode(), Err(Error::Utf8));
+        }
+        let mut kind = good.clone();
+        kind.binding.clock_kind = 3;
+        assert_eq!(kind.encode(), Err(Error::Flags));
+        assert_eq!(
+            Response::decode(&bytes[..bytes.len() - 1]),
+            Err(Error::Short)
+        );
+        // Entry tags: origin and status follow the id and the digests.
+        // From the end: raw and value (4 + 10 bytes each), then the status byte.
+        let status_at = bytes.len() - 2 * (4 + 10) - 1;
+        let origin_at = status_at - 16 - 96 - 1;
+        let mut origin = bytes.clone();
+        origin[origin_at] = 9;
+        assert_eq!(Response::decode(&resealed(origin)), Err(Error::Kind));
+        let mut status = bytes.clone();
+        status[status_at] = 7;
+        assert_eq!(Response::decode(&resealed(status)), Err(Error::Kind));
+        for broken in [
+            Entry {
+                attempted_at: 30,
+                ..entry("custom/a", 10, 20)
+            },
+            Entry {
+                id: String::new(),
+                ..entry("custom/a", 10, 20)
+            },
+            Entry {
+                id: "x".repeat(ID_MAX + 1),
+                ..entry("custom/a", 10, 20)
+            },
+            Entry {
+                raw: "r".repeat(VALUE_MAX + 1),
+                ..entry("custom/a", 10, 20)
+            },
+        ] {
+            let r = Response {
+                binding: binding(),
+                entries: vec![broken.clone()],
+            };
+            assert_eq!(r.encode(), Err(Error::Limit), "{broken:?}");
+        }
+    }
+}
