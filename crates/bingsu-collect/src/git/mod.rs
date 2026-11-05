@@ -206,16 +206,7 @@ pub(crate) fn collect_with_deadlines(
                     .map_err(CollectError::Read)?;
             }
             // Outside a repository only the shell's own folder is looked at.
-            languages(
-                request,
-                &cwd,
-                &[],
-                &access,
-                &meter,
-                sink,
-                deadlines,
-                &mut completion,
-            )?;
+            languages(request, &cwd, &[], &access, &meter, sink, deadlines)?;
             completion
         }
         discover::Selection::Repository(mut roots, discovery) => {
@@ -244,7 +235,6 @@ pub(crate) fn collect_with_deadlines(
                 &meter,
                 sink,
                 deadlines,
-                &mut completion,
             )?;
             drop(worktree);
             if !wants_git {
@@ -347,8 +337,9 @@ pub(crate) fn collect_with_deadlines(
 /// on the placeholder, but cannot restore the lost counters.
 /// Abort/OOM and blocked calls are exclusively the supervisor's responsibility.
 /// The language stage (D1), in a round that asks for languages: results go
-/// out as each is known. Like the path stage, a failure here is kept until
-/// the end (no Complete) unless the sink itself failed.
+/// out as each is known. Only the sink's own error fails the round; a file
+/// that cannot be read, a bound or the stage's time leaves languages
+/// without an answer and never takes the round's Complete away.
 #[allow(clippy::too_many_arguments, reason = "the stage's fixed inputs")]
 fn languages(
     request: &bingsu_core::collection::wire::Request,
@@ -358,7 +349,6 @@ fn languages(
     meter: &RefCell<crate::meter::Meter>,
     sink: &mut dyn UpdateSink,
     deadlines: StageDeadlines,
-    completion: &mut Result<(), CollectError>,
 ) -> Result<(), CollectError> {
     // Fails without it: a round without languages would take the stage's
     // time and send nothing (git_rounds_without_languages_are_unchanged).
@@ -377,14 +367,19 @@ fn languages(
             |result| sink.language(result).map_err(CollectError::Sink),
         )
     });
+    #[cfg(test)]
+    {
+        let mut meter = meter.borrow_mut();
+        let used = meter
+            .budget
+            .used(bingsu_core::collection::budget::Axis::Directories);
+        meter.event(&format!("languages directories={used}"));
+    }
     match result {
+        // Fails without it: a sink error would not end the round.
         Err(error @ CollectError::Sink(_)) => Err(error),
-        Err(error) => {
-            if completion.is_ok() {
-                *completion = Err(error);
-            }
-            Ok(())
-        }
+        // A panic inside detection: no more languages, the round goes on.
+        Err(_) => Ok(()),
         Ok(()) => Ok(()),
     }
 }

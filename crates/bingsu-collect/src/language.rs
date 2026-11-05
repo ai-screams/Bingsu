@@ -6,14 +6,16 @@
 //! `bingsu_core::collection::language`; only grammar-checked strings leave.
 use crate::{
     meter::Meter,
-    safe_read::{self, Access, ReadCap, ReadError, Root},
+    safe_read::{self, Access, ReadCap, ReadError, Root, WorktreeStats},
 };
 use bingsu_core::collection::language::{
     self as rule, DETECT_LEVELS, LanguageQuery, LanguageResult, Version,
 };
 
-/// Stats and reads one request's detection may make, and bytes it may read.
-pub const PROBES_MAX: usize = 512;
+/// Stat and open calls one request's detection may make (counted on the
+/// meter, so every folder opened and checked on the way counts), and bytes
+/// it may read (every byte the kernel returned, failed reads included).
+pub const PROBES_MAX: u64 = 512;
 pub const BYTES_MAX: u64 = 65_536;
 
 const _: () = assert!(DETECT_LEVELS == safe_read::DISCOVERY_LEVELS);
@@ -35,33 +37,57 @@ fn join(folder: &[u8], name: &[u8]) -> Vec<u8> {
     }
 }
 
-/// What one request's detection may still spend.
+/// What one request's detection has spent, read from the meter's own
+/// counters (all phases) against their values when detection started.
 struct Spend {
-    probes: usize,
+    operations: u64,
     bytes: u64,
 }
 
+fn operations(meter: &Meter) -> u64 {
+    meter.counts.iter().map(|c| c.stat + c.open).sum()
+}
+
+fn bytes(meter: &Meter) -> u64 {
+    meter.counts.iter().map(|c| c.read_bytes).sum()
+}
+
 impl Spend {
-    fn probe(&mut self) -> Result<(), ReadError> {
-        self.probes = self.probes.checked_add(1).ok_or(ReadError::Limit)?;
-        // Fails without it: probe_bound_stops_further_languages.
-        if self.probes > PROBES_MAX {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            operations: operations(meter),
+            bytes: bytes(meter),
+        }
+    }
+
+    /// Before each stat or open: the calls made so far stay under the bound.
+    /// One probe may still make up to a folder walk's calls past it.
+    fn probe(&self, meter: &Meter) -> Result<(), ReadError> {
+        // Fails without it: probe_bound_stops_further_languages,
+        // probe_bound_counts_folder_calls (with a count of probes instead).
+        if operations(meter) - self.operations >= PROBES_MAX {
             return Err(ReadError::Limit);
         }
         Ok(())
     }
+
+    fn bytes_left(&self, meter: &Meter) -> u64 {
+        BYTES_MAX.saturating_sub(bytes(meter) - self.bytes)
+    }
 }
 
-/// A regular file named `name` in `folder` (no symlink at the leaf).
+/// A regular file at `path` (no symlink at the leaf), through the detection's
+/// one folder stack: a parent already held is not opened again.
 fn is_file(
+    stats: &mut WorktreeStats,
     root: &Root,
     path: &[u8],
     access: &Access,
-    spend: &mut Spend,
+    spend: &Spend,
     meter: &mut Meter,
 ) -> Result<bool, ReadError> {
-    spend.probe()?;
-    match safe_read::worktree_metadata(root, path, access, meter) {
+    spend.probe(meter)?;
+    match stats.metadata(root, path, access, meter) {
         Ok(st) => Ok(st.st_mode & libc::S_IFMT == libc::S_IFREG),
         Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => Ok(false),
         Err(error) => Err(error),
@@ -69,66 +95,24 @@ fn is_file(
 }
 
 /// One language: the nearest marker and the nearest version selection file
-/// (within a folder, in the query's order). A file over its cap has no
-/// value (C2 ruling Q4 for D1): `Refused` with an all-zero digest.
+/// (within a folder, in the query's order), in one pass from the shell's
+/// folder up, on one folder stack (each folder is opened once per language,
+/// not once per probe). A file over its cap has no value (C2 ruling Q4 for
+/// D1): `Refused` with an all-zero digest.
 fn detect(
     index: u8,
     query: &LanguageQuery,
     root: &Root,
     parts: &[&[u8]],
     access: &Access,
-    spend: &mut Spend,
+    spend: &Spend,
     meter: &mut Meter,
 ) -> Result<LanguageResult, ReadError> {
-    let mut marker = None;
-    'markers: for (level, folder) in levels(parts) {
-        for (i, name) in query.markers.iter().enumerate() {
-            if is_file(root, &join(&folder, name), access, spend, meter)? {
-                marker = Some((i as u8, level));
-                break 'markers;
-            }
-        }
-    }
-    let mut version = Version::None;
-    'files: for (level, folder) in levels(parts) {
-        for (i, file) in query.version_files.iter().enumerate() {
-            let path = join(&folder, &file.name);
-            spend.probe()?;
-            // Opened without following the leaf (a symlink is absent), a
-            // regular file only; the bytes come from that descriptor.
-            let opened = match safe_read::resolve_nofollow(root, &path, access, meter) {
-                Ok(opened) => opened,
-                Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => continue,
-                Err(error) => return Err(error),
-            };
-            let cap = file
-                .format
-                .cap()
-                .min(BYTES_MAX - spend.bytes.min(BYTES_MAX));
-            version = match opened.read(
-                ReadCap {
-                    bytes: cap,
-                    single_link: true,
-                },
-                meter,
-            ) {
-                Ok(bytes) => {
-                    // Fails without it: byte_bound_stops_further_languages.
-                    spend.bytes += bytes.len() as u64;
-                    rule::version(&file.format, &bytes, i as u8, level)
-                }
-                // Over the format's own cap: no value (C2 ruling Q4 for D1).
-                // Over what the request may still read: stop (`Limit`).
-                Err(ReadError::Limit) if cap == file.format.cap() => Version::Refused {
-                    file: i as u8,
-                    level,
-                    digest: [0; 16],
-                },
-                Err(error) => return Err(error),
-            };
-            break 'files;
-        }
-    }
+    let mut stats = WorktreeStats::default();
+    let found = find(&mut stats, query, root, parts, access, spend, meter);
+    let finished = stats.finish(root, access, meter);
+    let (marker, version) = found?;
+    finished?;
     Ok(LanguageResult {
         index,
         marker,
@@ -136,9 +120,94 @@ fn detect(
     })
 }
 
+type Found = (Option<(u8, u8)>, Version);
+
+fn find(
+    stats: &mut WorktreeStats,
+    query: &LanguageQuery,
+    root: &Root,
+    parts: &[&[u8]],
+    access: &Access,
+    spend: &Spend,
+    meter: &mut Meter,
+) -> Result<Found, ReadError> {
+    let mut marker = None;
+    let mut version = None;
+    for (level, folder) in levels(parts) {
+        if marker.is_none() {
+            for (i, name) in query.markers.iter().enumerate() {
+                if is_file(stats, root, &join(&folder, name), access, spend, meter)? {
+                    marker = Some((i as u8, level));
+                    break;
+                }
+            }
+        }
+        if version.is_none() {
+            for (i, file) in query.version_files.iter().enumerate() {
+                let path = join(&folder, &file.name);
+                if !is_file(stats, root, &path, access, spend, meter)? {
+                    continue;
+                }
+                version = read_version(file, i as u8, level, root, &path, access, spend, meter)?;
+                if version.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok((marker, version.unwrap_or(Version::None)))
+}
+
+#[allow(clippy::too_many_arguments, reason = "one version file's fixed inputs")]
+fn read_version(
+    file: &rule::VersionFile,
+    i: u8,
+    level: u8,
+    root: &Root,
+    path: &[u8],
+    access: &Access,
+    spend: &Spend,
+    meter: &mut Meter,
+) -> Result<Option<Version>, ReadError> {
+    spend.probe(meter)?;
+    let left = spend.bytes_left(meter);
+    if left == 0 {
+        return Err(ReadError::Limit);
+    }
+    // Opened without following the leaf, a regular file only; the bytes come
+    // from that descriptor. One that cannot be opened is absent, as before
+    // the stat (the next file is looked at).
+    let opened = match safe_read::resolve_nofollow(root, path, access, meter) {
+        Ok(opened) => opened,
+        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let cap = file.format.cap().min(left);
+    match opened.read(
+        ReadCap {
+            bytes: cap,
+            single_link: true,
+        },
+        meter,
+    ) {
+        Ok(bytes) => Ok(Some(rule::version(&file.format, &bytes, i, level))),
+        // Over the format's own cap: no value (C2 ruling Q4 for D1).
+        // Over what the request may still read: stop (`Limit`).
+        Err(ReadError::Limit) if cap == file.format.cap() => Ok(Some(Version::Refused {
+            file: i,
+            level,
+            digest: [0; 16],
+        })),
+        Err(error) => Err(error),
+    }
+}
+
 /// Every asked language, in order, each sent as soon as it is known. Over
-/// the probe or byte bound the rest is not sent (the reader sees no answer,
-/// not a wrong one).
+/// the call or byte bound, or past the stage's time, the rest is not sent
+/// (the reader sees no answer, not a wrong one). A file that cannot be read
+/// safely (a hard link, a file replaced or changed while read, an I/O
+/// error) leaves only that language without an answer. Nothing here fails
+/// the round: only the sink's own error does.
 pub fn detect_all(
     queries: &[LanguageQuery],
     root: &Root,
@@ -147,22 +216,20 @@ pub fn detect_all(
     meter: &mut Meter,
     mut send: impl FnMut(LanguageResult) -> Result<(), crate::git::CollectError>,
 ) -> Result<(), crate::git::CollectError> {
-    use crate::git::CollectError;
-    let mut spend = Spend {
-        probes: 0,
-        bytes: 0,
-    };
+    let spend = Spend::new(meter);
     for (index, query) in queries.iter().enumerate() {
-        match detect(index as u8, query, root, parts, access, &mut spend, meter) {
-            Ok(result) => {
-                meter.check().map_err(CollectError::Read)?;
-                send(result)?;
-            }
-            Err(ReadError::Limit) => {
+        let result = detect(index as u8, query, root, parts, access, &spend, meter)
+            .and_then(|result| meter.check().map(|()| result));
+        match result {
+            Ok(result) => send(result)?,
+            // Fails without the stop: lang_ms_zero_keeps_the_round_complete
+            // (a Deadline would be skipped language by language, each
+            // reaching the next stat first).
+            Err(ReadError::Limit | ReadError::Deadline) => {
                 meter.event("languages_over_bound");
                 return Ok(());
             }
-            Err(error) => return Err(CollectError::Read(error)),
+            Err(_) => meter.event("language_unreadable"),
         }
     }
     Ok(())

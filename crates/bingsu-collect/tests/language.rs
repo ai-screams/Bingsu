@@ -206,16 +206,36 @@ fn full_access() -> Access {
 
 /// One collection round in this process; its language results and events.
 fn round(r: &Request) -> (Vec<LanguageResult>, Vec<String>) {
+    round_with(r, deadlines(), |_| {})
+}
+
+/// A round with these stage deadlines; `also` sees every meter event first.
+/// The round must end complete (the collector would send Complete).
+fn round_with(
+    r: &Request,
+    stages: git::StageDeadlines,
+    mut also: impl FnMut(&str) + 'static,
+) -> (Vec<LanguageResult>, Vec<String>) {
     let events = Rc::new(RefCell::new(Vec::new()));
     let output = Rc::clone(&events);
     let mut m = meter();
     m.hook = Some(Box::new(move |event| {
+        also(event);
         output.borrow_mut().push(event.to_owned())
     }));
     let mut sink = Sink::default();
-    git::collect_with_deadlines(r, &mut sink, m, full_access(), deadlines()).unwrap();
+    git::collect_with_deadlines(r, &mut sink, m, full_access(), stages).unwrap();
     let events = events.borrow().clone();
     (sink.languages, events)
+}
+
+fn directories(events: &[String]) -> u64 {
+    events
+        .iter()
+        .find_map(|e| e.strip_prefix("languages directories="))
+        .expect("language stage ran")
+        .parse()
+        .unwrap()
 }
 
 fn python() -> LanguageQuery {
@@ -504,5 +524,198 @@ fn product_entry_gives_c_time_to_languages() {
         events.borrow().iter().any(|e| e == want),
         "{:?}",
         events.borrow()
+    );
+}
+
+// 보안 리뷰 H1: 파일 하나를 안전하게 읽을 수 없으면 그 언어만 답이 없다. hard link인 `.python-version`(링크 수 2)은
+// 읽지 않고, 뒤의 go는 답이 오며, 회차는 완료된다(round_with가 Complete를 단언한다). 이것을 실패시키는 것:
+// detect_all이 읽기 오류에서 멈추는 것(go가 오지 않음), 읽기 오류를 회차 오류로 올리는 것(round가 실패).
+#[test]
+fn hard_linked_version_file_leaves_only_that_language() {
+    if case("hard_linked_version_file_leaves_only_that_language", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    fs::write(f.0.join("pv"), b"3.12\n").unwrap();
+    fs::hard_link(f.0.join("pv"), repo.join(".python-version")).unwrap();
+    fs::write(repo.join("go.mod"), b"module m\ngo 1.21\n").unwrap();
+    let (results, events) = round(&request(&repo, &f.0, vec![python(), BUILTIN[3].query()]));
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].index, 1);
+    assert!(matches!(results[0].version, Version::Found { .. }));
+    assert!(
+        events.iter().any(|e| e == "language_unreadable"),
+        "{events:?}"
+    );
+}
+
+// 보안 리뷰 H1: 언어 단계 시간이 0이어도 회차는 완료되고, 남은 언어는 보내지 않는다(하나씩 건너뛰지 않고 멈춘다).
+// 이것을 실패시키는 것: detect_all에서 Deadline을 멈춤 대신 그 언어만 건너뛰는 쪽으로 보내는 것
+// (language_unreadable이 생김), Deadline을 회차 오류로 올리는 것(round가 실패).
+#[test]
+fn lang_ms_zero_keeps_the_round_complete() {
+    if case("lang_ms_zero_keeps_the_round_complete", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    fs::write(repo.join("pyproject.toml"), b"").unwrap();
+    let mut stages = deadlines();
+    stages.lang_ms = 0;
+    let (results, events) = round_with(
+        &request(&repo, &f.0, vec![python(), python()]),
+        stages,
+        |_| {},
+    );
+    assert!(results.is_empty(), "{results:?}");
+    assert!(
+        events.iter().any(|e| e == "languages_over_bound"),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e == "language_unreadable"),
+        "{events:?}"
+    );
+}
+
+// 보안 리뷰 H1: 언어 단계 안의 panic도 회차를 실패시키지 않는다(Sink 오류만 실패시킨다). 이것을 실패시키는 것:
+// languages()가 Sink가 아닌 오류를 그대로 돌려주는 것(round가 실패).
+#[test]
+fn a_panic_in_the_language_stage_keeps_the_round_complete() {
+    if case("a_panic_in_the_language_stage_keeps_the_round_complete", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    fs::write(repo.join("pyproject.toml"), b"").unwrap();
+    let (results, _) = round_with(&request(&repo, &f.0, vec![python()]), deadlines(), |e| {
+        assert_ne!(e, "languages", "injected panic");
+    });
+    assert!(results.is_empty(), "{results:?}");
+}
+
+// 보안 리뷰 H2: 한 언어는 폴더 stack 하나로 찾으므로, 20단 아래에서 16×16 요청을 해도 언어 단계가 쓰는
+// Directories는 언어마다 폴더 깊이(20)를 넘지 않고, git B가 쓸 몫(4,096)이 남는다. 이것을 실패시키는 것:
+// is_file이 탐침마다 새 stack(worktree_metadata)을 쓰는 것(탐침마다 20씩 씀).
+#[test]
+fn directories_stay_for_git_after_a_deep_request() {
+    if case("directories_stay_for_git_after_a_deep_request", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let cwd = repo.join(vec!["d"; 20].join("/"));
+    fs::create_dir_all(&cwd).unwrap();
+    let query = LanguageQuery {
+        id: b"custom/none".to_vec(),
+        markers: (0..16)
+            .map(|i| format!("absent-{i}").into_bytes())
+            .collect(),
+        version_files: vec![],
+    };
+    let (results, events) = round(&request(&cwd, &f.0, vec![query; 16]));
+    let used = directories(&events);
+    assert!(
+        used <= 20 * (results.len() as u64 + 1),
+        "{used} for {} languages",
+        results.len()
+    );
+    assert!(
+        used < bingsu_core::collection::budget::DIRECTORIES / 8,
+        "{used}"
+    );
+}
+
+// 보안 리뷰 H2: 512 상한은 탐침 수가 아니라 meter가 센 stat·open 수에 건다. 20단 아래에서 표시 파일 하나짜리
+// 언어 16개는 탐침이 336개(512 미만)지만, 폴더를 열고 확인하는 호출까지 세면 상한을 넘는다. 이것을 실패시키는
+// 것: Spend가 탐침 수를 세는 것(16개가 모두 온다).
+#[test]
+fn probe_bound_counts_folder_calls() {
+    if case("probe_bound_counts_folder_calls", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let cwd = repo.join(vec!["d"; 20].join("/"));
+    fs::create_dir_all(&cwd).unwrap();
+    let query = LanguageQuery {
+        id: b"custom/none".to_vec(),
+        markers: vec![b"absent".to_vec()],
+        version_files: vec![],
+    };
+    let (results, events) = round(&request(&cwd, &f.0, vec![query; 16]));
+    assert!(results.len() < 16, "{}", results.len());
+    assert!(events.iter().any(|e| e == "languages_over_bound"));
+}
+
+// Codex M1: 실패한 읽기의 바이트도 65,536 예산에 센다. stat 뒤 `.python-version`이 커지면 읽기는 4,097바이트를
+// 읽고 상한 초과로 끝나며(값 없음), 그 4,097바이트가 남은 예산에서 빠져 16 KiB go.mod는 셋만 읽힌다(빼지 않으면
+// 넷). 이것을 실패시키는 것: 성공한 읽기의 바이트만 세는 것.
+#[test]
+fn bytes_of_failed_reads_count() {
+    if case("bytes_of_failed_reads_count", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let pv = repo.join(".python-version");
+    fs::write(&pv, b"3.12\n").unwrap();
+    let mut go = b"module m\ngo 1.21\n".to_vec();
+    go.resize(16_384, b'\n');
+    fs::write(repo.join("go.mod"), &go).unwrap();
+    let mut armed = false;
+    let mut grown = false;
+    let grow = move |event: &str| {
+        armed |= event == "languages";
+        if armed && !grown && event == "before_read" {
+            grown = true;
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().append(true).open(&pv).unwrap();
+            file.write_all(&[b'#'; 8_000]).unwrap();
+        }
+    };
+    let mut languages = vec![python()];
+    languages.extend(std::iter::repeat_n(BUILTIN[3].query(), 4));
+    let (results, _) = round_with(&request(&repo, &f.0, languages), deadlines(), grow);
+    assert!(
+        matches!(results[0].version, Version::Refused { file: 0, .. }),
+        "{results:?}"
+    );
+    assert_eq!(results.len(), 4, "{results:?}");
+}
+
+// 보안 리뷰 H1의 반대편: 회차를 실패시키는 것은 Sink 오류뿐이고, 언어 결과를 보내지 못하면 회차가 실패한다.
+// 이것을 실패시키는 것: languages()가 Sink 오류도 삼키는 것(회차가 완료됨).
+#[test]
+fn a_sink_error_in_the_language_stage_fails_the_round() {
+    if case("a_sink_error_in_the_language_stage_fails_the_round", 1).is_none() {
+        return;
+    }
+    struct Refusing(Sink);
+    impl update_sink::UpdateSink for Refusing {
+        fn update(&mut self, value: Update) -> std::io::Result<()> {
+            self.0.update(value)
+        }
+        fn progress(&mut self, value: Progress) -> std::io::Result<()> {
+            self.0.progress(value)
+        }
+        fn language(&mut self, _value: LanguageResult) -> std::io::Result<()> {
+            Err(std::io::Error::other("closed"))
+        }
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let mut sink = Refusing(Sink::default());
+    let result = git::collect_with_deadlines(
+        &request(&repo, &f.0, vec![python()]),
+        &mut sink,
+        meter(),
+        full_access(),
+        deadlines(),
+    );
+    assert!(
+        matches!(result, Err(git::CollectError::Sink(_))),
+        "{result:?}"
     );
 }
