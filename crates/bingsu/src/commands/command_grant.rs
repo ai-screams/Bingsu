@@ -524,9 +524,12 @@ struct Resolved {
     units: Vec<Unit>,
     /// Executable not found or failed the checks.
     unresolved: usize,
-    /// Their ids: each is published as a failed attempt, so the round robin
-    /// moves past it (a unit that never resolves would otherwise hold its
-    /// slot among the first `CONFIG_MAX` forever).
+    /// The ids of units that cannot run however often they are picked (not
+    /// resolved, or over the relay input cap): each is published as a
+    /// failed attempt, so the round robin moves past it; otherwise it would
+    /// hold its slot among the first `CONFIG_MAX` forever. A unit left out
+    /// only because the grant frame is full is not one: never tried, it
+    /// comes first next round.
     unresolved_ids: Vec<String>,
     /// Over the relay's input cap, or past the grant frame's room.
     oversize: usize,
@@ -617,6 +620,7 @@ fn units(
         if handoff::relay_input(base.permit, &frame, handoff::RELAY_INPUT_MAX).is_err() {
             scripts.forget_last(&unit.executable);
             out.oversize += 1;
+            out.unresolved_ids.push(id.clone());
             continue;
         }
         trial.units.push(unit);
@@ -895,7 +899,8 @@ impl Round {
     }
 
     /// Publishes the round's results and, as failed attempts at this time,
-    /// the units whose executable did not resolve (C4a review M2).
+    /// the units that could not run (C4a review M2: not resolved, or over
+    /// the relay input cap).
     fn publish_results(&self, report: &mut Report, unresolved: &[String]) {
         let mut entries = self.entries(&report.results);
         if let Ok(now) = now_ns() {

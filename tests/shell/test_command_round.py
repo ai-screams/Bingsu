@@ -700,6 +700,24 @@ def test_unresolved_units_do_not_hold_the_round(tmp_path, _native_boot_required)
     assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
 
 
+# relay 입력 상한(16 KiB)을 넘는 환경의 단위도 실패 항목으로 남겨 순서를 넘긴다. 이것을 실패시키는 것: units()의
+# relay 입력 상한 분기에서 실패 항목 기록을 지우는 것(뒤의 두 단위가 영원히 돌지 않음).
+def test_oversize_units_do_not_hold_the_round(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    marks = session.base / "marks"
+    marks.mkdir()
+    big = "".join(f"[segment.\"custom/b{i}\"]\nkind='command'\ncommand=['/usr/bin/true']\nenv_allow=['BINGSU_BIG']\n"
+                  for i in range(8))
+    real = "".join(f"[segment.\"custom/r{i}\"]\nkind='command'\ncommand=['/usr/bin/touch', '{marks}/r{i}']\n"
+                   for i in range(2))
+    left = ", ".join([f"'custom/b{i}'" for i in range(8)] + [f"'custom/r{i}'" for i in range(2)])
+    session.put(big + real + f"[layout.line2]\nleft=[{left}, 'char']\n")
+    session.env["BINGSU_BIG"] = "x" * (20 * 1024)
+    ready(session)
+    rounds(session, 3)
+    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
+
+
 # 명령만 있는 레이아웃(수집 없음)도 발행 뒤 GC 회수를 돌린다. 그래서 cwd를 여럿 다녀 예약이 예산을 채워도 다음
 # cwd의 발행이 된다. 이것을 실패시키는 것: helper가 명령 발행 뒤 collection_runtime을 세우지 않는 것(8번째
 # cwd부터 예약이 막혀 발행이 계속 실패).
