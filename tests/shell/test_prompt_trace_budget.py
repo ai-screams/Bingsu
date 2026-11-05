@@ -44,12 +44,13 @@ def collecting_prompt():
 
 # 이것을 실패시키는 것: live 기본 판정(RESPONSE_HEADERS)이 기록 fixture의 옛 봉투(BNGRES03)를 받는 것. 기록
 # fixture만 provenance 표의 봉투를 명시해 넘긴다(D1 판정). check_collecting_prompt의 headers에 기본값을 다시 두는
-# 것(호출마다 봉투를 밝히지 않아도 됨).
+# 것(호출마다 봉투를 밝히지 않아도 됨), headers를 위치 인자로 받는 것.
 def test_live_gate_refuses_a_recorded_envelope():
     import inspect
     assert budget.RESPONSE_HEADERS == (b"BNGRES04\x04\x00",)
     headers = inspect.signature(check_collecting_prompt).parameters["headers"]
     assert headers.default is inspect.Parameter.empty
+    assert headers.kind is inspect.Parameter.KEYWORD_ONLY
     check_collecting_prompt(collecting_prompt(), headers=COLLECT_HEADERS)
     with pytest.raises(AssertionError, match="collection body after invalid header"):
         check_collecting_prompt(collecting_prompt(), headers=budget.RESPONSE_HEADERS)
