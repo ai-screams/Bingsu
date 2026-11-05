@@ -48,8 +48,15 @@ def manifest_path(binary):
     return Path(binary).resolve().with_name("git-product.json")
 
 
+def stage_harness(source):
+    """The stage fixture's Rust text belongs to the tree it is compiled
+    against: the base tip builds with its own copy, the candidate with its
+    own, so a field one side lacks never breaks the other."""
+    return Path(source) / "scripts/prepare_git_corpus.py"
+
+
 def sources(source):
-    return {**M3B.preparation_sources(source), "f3_harness": M3B.digest(__file__), "stage_harness": M3B.digest(ROOT / "scripts/prepare_git_corpus.py")}
+    return {**M3B.preparation_sources(source), "f3_harness": M3B.digest(__file__), "stage_harness": M3B.digest(stage_harness(source))}
 
 
 def prepared(binary):
@@ -239,14 +246,14 @@ def prepare(binary):
              "hashes": {"front": M3B.digest(binary), "collector": M3B.digest(binary.with_name("bingsu-collect")), "fixture": M3B.digest(fixture), "diagnostic": M3B.digest(diagnostic)},
              "source_hashes": sources(source), "sibling_build_id": identity.hex(), "stripped_bytes": sizes,
              "compiler": M3B.run(["rustc", "-vV"]).stdout.decode(),
-             "probe_sources": {"stage_fixture": M3B.digest(ROOT / "scripts/prepare_git_corpus.py"), "reader_fixture": M3B.digest(ROOT / "bench/collector-product.py")}}
+             "probe_sources": {"stage_fixture": M3B.digest(stage_harness(source)), "reader_fixture": M3B.digest(ROOT / "bench/collector-product.py")}}
     manifest_path(binary).write_text(json.dumps(value, indent=2) + "\n")
     return value
 
 
 def prepare_diagnostic(source, directory, binary, deps, cross, triple):
     """Separate stage-local observations; never substituted for shipped samples."""
-    corpus = module("f3_stage_source", ROOT / "scripts/prepare_git_corpus.py")
+    corpus = module("f3_stage_source", stage_harness(source))
     copied = directory / "collector"
     shutil.copytree(source / "crates/bingsu-collect/src", copied, dirs_exist_ok=True)
     shutil.copy2(source / "crates/bingsu-collect/collector-syscalls.tsv", directory)
