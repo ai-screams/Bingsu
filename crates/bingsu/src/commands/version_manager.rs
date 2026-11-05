@@ -78,14 +78,12 @@ pub(crate) struct Homes {
     pub unsupported: Vec<PathBuf>,
 }
 
-/// An environment value that names a folder: absolute, no `..`, no NUL.
+/// An environment value that names a folder: absolute, no `..` (an env
+/// frame entry never holds a NUL: the frame splits on it).
 fn folder(value: &[u8]) -> Option<PathBuf> {
     let path = Path::new(OsStr::from_bytes(value));
-    // Fails without it: homes_follow_the_environment (a relative value).
-    if !path.is_absolute()
-        || value.contains(&0)
-        || path.components().any(|c| c == Component::ParentDir)
-    {
+    // Fails without it: homes_follow_the_environment (a relative value, `..`).
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
         return None;
     }
     Some(path.to_path_buf())
