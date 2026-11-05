@@ -96,6 +96,9 @@ mod source_path;
 pub(crate) mod sys;
 #[cfg(unix)]
 mod trust_record;
+#[cfg(unix)]
+#[allow(dead_code, reason = "D3 connects the resolver to the builtin probes")]
+pub(crate) mod version_manager;
 
 #[used]
 static ROLE_TAG: [u8; 49] = bingsu_identity::role_tag(bingsu_identity::BINGSU_ROLE);
