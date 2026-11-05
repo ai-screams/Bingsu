@@ -296,6 +296,25 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             StoreError::Busy => Skip::Busy,
             _ => Skip::Failed,
         })?;
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "Linux reclaims"))]
+    let mut notes = Vec::new();
+    // Under the lock no supervisor of this session is alive: whatever its
+    // cgroup parent holds is left over (C3 ruling R1, U-15 Q1). Right after
+    // the lock, before any other check can end the round.
+    #[cfg(target_os = "linux")]
+    let mut cgroup = sys::fd_facts(i.runtime.as_fd()).ok().and_then(|root| {
+        super::command_cgroup::fs::open_session(&super::command_cgroup::fs::Who {
+            session,
+            runtime: (root.dev, root.ino),
+            me: i.me,
+            pid: std::process::id(),
+        })
+    });
+    #[cfg(target_os = "linux")]
+    if let Some(parent) = &mut cgroup {
+        let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
+        notes.extend(r.messages());
+    }
     #[cfg(target_os = "macos")]
     let scripts = Scripts::new(i.runtime, i.me, session_tag(session));
     #[cfg(not(target_os = "macos"))]
@@ -309,17 +328,6 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         if runnable.is_empty() {
             return Err(Skip::Neutral);
         }
-    }
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "Linux reclaims"))]
-    let mut notes = Vec::new();
-    // Under the lock no supervisor of this session is alive: whatever its
-    // cgroup parent holds is left over (C3 ruling R1, U-15 Q1).
-    #[cfg(target_os = "linux")]
-    let mut cgroup = super::command_cgroup::fs::open_session(session, i.me);
-    #[cfg(target_os = "linux")]
-    if let Some(parent) = &mut cgroup {
-        let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
-        notes.extend(r.messages());
     }
     let grant = Grant {
         permit: Permit {
@@ -619,7 +627,8 @@ impl Round {
     /// so it runs nothing more). A supervisor still alive at the helper's
     /// deadline may still be starting an interpreter on one: its copies
     /// stay for the next round of the session to sweep. Then, still under
-    /// the lock, its unit cgroups are reclaimed (Linux, C3 ruling R1).
+    /// the lock and only when it was reaped, its unit cgroups are reclaimed
+    /// (Linux, C3 ruling R1).
     fn end(self) -> Vec<&'static str> {
         let deadline = self.grant.helper_deadline;
         let Self {
@@ -636,14 +645,17 @@ impl Round {
         drop(grant_pipe);
         // Fails without the check: test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep
         // (a copy removed under a live supervisor).
-        if wait(&mut child, deadline) {
+        let ended = wait(&mut child, deadline);
+        if ended {
             scripts.remove_all();
         }
-        // Killed and reaped if it is still there; then its unit cgroups are
-        // leftovers, removed while the lock is still held.
         drop(child);
+        // Only a supervisor seen reaped leaves leftovers: one still there at
+        // the deadline may outlive the drop's kill (a wait the kill cannot
+        // end), and its units are live. The session's next helper reclaims
+        // them under the lock once it is gone.
         #[cfg(target_os = "linux")]
-        if let Some(parent) = &mut cgroup {
+        if let Some(parent) = cgroup.as_mut().filter(|_| ended) {
             let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
             notes.extend(r.messages());
         }

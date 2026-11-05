@@ -48,6 +48,8 @@ pub(crate) struct Reclaim {
     pub deep: usize,
     /// The visit window or the time ran out with entries left.
     pub capped: bool,
+    /// The parent held more names than one reclaim reads.
+    pub truncated: bool,
     /// Calls that failed (the entry stays).
     pub failed: usize,
     /// Time from start to end.
@@ -64,8 +66,25 @@ impl Reclaim {
         if self.capped {
             out.push("command reclaim: limit reached, the rest waits for the next reclaim");
         }
+        if self.truncated {
+            out.push("command reclaim: the session's cgroup folder holds more names than one reclaim reads");
+        }
         out
     }
+}
+
+/// Unit folders one reclaim kills: half the visit window, so their
+/// subtrees always have room and every reclaim can remove something.
+const KILL_VISITS: usize = RECLAIM_VISITS / 2;
+/// Names one reclaim reads under the parent. Names outside the unit grammar
+/// cost no visit; past this many the rest of the listing is not seen.
+const LIST_MAX: usize = 4 * RECLAIM_VISITS;
+
+/// Whether the reclaim's time is up; set `capped` when it is.
+fn over<T: Tree>(t: &mut T, end: u64, r: &mut Reclaim) -> bool {
+    let over = t.now() >= end;
+    r.capped |= over;
+    over
 }
 
 /// One reclaim of the session parent `parent`.
@@ -73,7 +92,7 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
     let start = t.now();
     let end = start.saturating_add(RECLAIM_NS);
     let mut r = Reclaim::default();
-    let names = match t.subdirs(parent, RECLAIM_VISITS + 1) {
+    let mut names = match t.subdirs(parent, LIST_MAX + 1) {
         Ok(names) => names,
         Err(_) => {
             r.failed += 1;
@@ -81,11 +100,18 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
             return r;
         }
     };
+    if names.len() > LIST_MAX {
+        names.truncate(LIST_MAX);
+        r.truncated = true;
+    }
     // Every unit is killed before any is checked, so their deaths overlap.
     let mut units = Vec::new();
     for name in names.into_iter().filter(|n| cgroup::is_unit_name(n)) {
-        if r.visits >= RECLAIM_VISITS || t.now() >= end {
+        if units.len() >= KILL_VISITS {
             r.capped = true;
+            break;
+        }
+        if over(t, end, &mut r) {
             break;
         }
         let Ok(dir) = t.open(parent, &name) else {
@@ -99,16 +125,22 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
         units.push((name, dir));
     }
     for (name, mut dir) in units {
-        if t.now() >= end {
-            r.capped = true;
+        if over(t, end, &mut r) {
             break;
         }
         let mut empty = t.populated(&mut dir, 0).ok().flatten() == Some(false);
         for _ in 0..POPULATED_RETRIES {
-            if empty || t.now() >= end {
+            if empty {
                 break;
             }
-            empty = t.populated(&mut dir, POPULATED_WAIT_MS).ok().flatten() == Some(false);
+            // Never wait past the reclaim's own end.
+            let left = end.saturating_sub(t.now()) / 1_000_000;
+            let wait = POPULATED_WAIT_MS.min(i32::try_from(left).unwrap_or(i32::MAX));
+            if wait == 0 {
+                r.capped = true;
+                break;
+            }
+            empty = t.populated(&mut dir, wait).ok().flatten() == Some(false);
         }
         if !empty {
             r.stuck += 1;
@@ -120,6 +152,9 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
             continue;
         }
         drop(dir);
+        if over(t, end, &mut r) {
+            break;
+        }
         match t.rmdir(parent, &name) {
             Ok(()) => r.removed += 1,
             Err(_) => r.failed += 1,
@@ -130,7 +165,8 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
 }
 
 /// Removes every folder under `dir` in post-order; `depth` is the level of
-/// its children. True when `dir` is left without children.
+/// its children. True when `dir` is left without children. The time is
+/// checked before every listing and every removal.
 fn clear<T: Tree>(
     t: &mut T,
     dir: &mut T::Dir,
@@ -139,6 +175,9 @@ fn clear<T: Tree>(
     r: &mut Reclaim,
     deep: &mut bool,
 ) -> bool {
+    if over(t, end, r) {
+        return false;
+    }
     let room = RECLAIM_VISITS.saturating_sub(r.visits) + 1;
     let Ok(kids) = t.subdirs(dir, room) else {
         r.failed += 1;
@@ -153,8 +192,11 @@ fn clear<T: Tree>(
     }
     let mut all = true;
     for name in kids {
-        if r.visits >= RECLAIM_VISITS || t.now() >= end {
+        if r.visits >= RECLAIM_VISITS {
             r.capped = true;
+            return false;
+        }
+        if over(t, end, r) {
             return false;
         }
         let Ok(mut child) = t.open(dir, &name) else {
@@ -167,6 +209,8 @@ fn clear<T: Tree>(
         drop(child);
         if !cleared {
             all = false;
+        } else if over(t, end, r) {
+            return false;
         } else if t.rmdir(dir, &name).is_err() {
             r.failed += 1;
             all = false;
@@ -268,15 +312,42 @@ pub(crate) mod fs {
         Ok(out)
     }
 
+    /// Who asks for the session's cgroup parent.
+    pub(crate) struct Who<'a> {
+        pub session: &'a [u8],
+        /// `(dev, ino)` of the runtime root, where the session lock lives.
+        pub runtime: (u64, u64),
+        pub me: u32,
+        /// This process: it must be in the cgroup the path names.
+        pub pid: u32,
+    }
+
+    fn cgroup2(fd: &File) -> bool {
+        // SAFETY: zeroed writable statfs.
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: open descriptor and writable statfs.
+        if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut st) } != 0 {
+            return false;
+        }
+        #[allow(
+            clippy::unnecessary_cast,
+            reason = "f_type's type differs between libcs"
+        )]
+        let magic = st.f_type as i64 == libc::CGROUP2_SUPER_MAGIC as i64;
+        magic
+    }
+
     /// The atomic path's capability (spec section 4 stop order step 4, the
-    /// X-04 method; U-14 F0, C3 rulings): Linux 5.14 or later, the process's
-    /// `0::` cgroup on the cgroup v2 mount at `/sys/fs/cgroup`, and the
-    /// session parent `bingsu-cmd-<digest>` under it, made here when
-    /// missing and owned by `me`. On cgroup v2 from 5.14 every non-root
-    /// cgroup has `cgroup.kill`, and the parent is never the root. `None` on
-    /// any miss: the round takes the best-effort path. Called only by a
-    /// helper holding the session lock, in a round with command units.
-    pub(crate) fn open_session(session: &[u8], me: u32) -> Option<Dir> {
+    /// X-04 method; U-14 F0, C3 rulings): Linux 5.14 or later; the process's
+    /// `0::` cgroup on the cgroup v2 mount at `/sys/fs/cgroup`, which must
+    /// hold this process (a cgroup namespace whose mount was not redone
+    /// names another folder); and the session parent `bingsu-cmd-<digest>`
+    /// under it, made here when missing, owned by `me` and itself on cgroup
+    /// v2. On cgroup v2 from 5.14 every non-root cgroup has `cgroup.kill`,
+    /// and the parent is never the root. `None` on any miss: the round takes
+    /// the best-effort path. Called only by a helper holding the session
+    /// lock, in a round with command units.
+    pub(crate) fn open_session(who: &Who<'_>) -> Option<Dir> {
         // SAFETY: zeroed writable utsname.
         let mut u: libc::utsname = unsafe { std::mem::zeroed() };
         // SAFETY: writable utsname.
@@ -286,7 +357,7 @@ pub(crate) mod fs {
         // SAFETY: uname wrote a NUL-terminated release.
         let release = unsafe { std::ffi::CStr::from_ptr(u.release.as_ptr()) };
         let text = read_small(c"/proc/self/cgroup", cgroup::PROC_CGROUP_MAX).ok()?;
-        open_session_at(b"/sys/fs/cgroup", release.to_bytes(), &text, session, me)
+        open_session_at(b"/sys/fs/cgroup", release.to_bytes(), &text, who)
     }
 
     /// [`open_session`] from its inputs: the cgroup v2 mount, `uname -r`
@@ -295,8 +366,7 @@ pub(crate) mod fs {
         mount: &[u8],
         release: &[u8],
         proc_self_cgroup: &[u8],
-        session: &[u8],
-        me: u32,
+        who: &Who<'_>,
     ) -> Option<Dir> {
         if !cgroup::kernel_has_kill(release) {
             return None;
@@ -316,26 +386,26 @@ pub(crate) mod fs {
         use std::os::fd::FromRawFd;
         // SAFETY: a fresh descriptor nothing else owns.
         let own = unsafe { File::from_raw_fd(fd) };
-        // SAFETY: zeroed writable statfs.
-        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-        // SAFETY: open descriptor and writable statfs.
-        if unsafe { libc::fstatfs(own.as_raw_fd(), &mut st) } != 0 {
+        if !cgroup2(&own) {
             return None;
         }
-        #[allow(
-            clippy::unnecessary_cast,
-            reason = "f_type's type differs between libcs"
-        )]
-        let cgroup2 = st.f_type as i64 == libc::CGROUP2_SUPER_MAGIC as i64;
-        if !cgroup2 {
+        let procs = open_at(&own, b"cgroup.procs", libc::O_RDONLY).ok()?;
+        let mut text = vec![0u8; cgroup::PROCS_MAX + 1];
+        // SAFETY: writable buffer of its length.
+        let n = unsafe { libc::pread(procs.as_raw_fd(), text.as_mut_ptr().cast(), text.len(), 0) };
+        let n = usize::try_from(n).ok()?;
+        // No test for the size bound: no cell holds a shell cgroup with
+        // 64 KiB of pids. A cut list could end in a partial line that names
+        // another pid, so a full buffer is no atomic path (fail closed).
+        if n > cgroup::PROCS_MAX || !cgroup::procs_contains(&text[..n], who.pid) {
             return None;
         }
-        let name = cgroup::parent_name(session);
+        let name = cgroup::parent_name(who.session, who.runtime);
         let name = OsStr::new(&name);
         // A failed mkdir (read-only, not delegated) leaves nothing to open.
         let _ = sys::mkdir_at(own.as_fd(), name, 0o700);
         let parent = sys::open_dir_at_nofollow(own.as_fd(), name).ok()?;
-        if sys::fd_facts(parent.as_fd()).ok()?.uid != me {
+        if sys::fd_facts(parent.as_fd()).ok()?.uid != who.me || !cgroup2(&parent) {
             return None;
         }
         Some(Dir::new(parent))
@@ -433,6 +503,10 @@ pub(crate) mod tests {
         pub log: Vec<String>,
         pub clock: u64,
         pub tick: u64,
+        /// The clock when each call started.
+        pub starts: Vec<u64>,
+        /// The longest wait a populated read asked for.
+        pub waited: i32,
     }
     #[derive(Default, Clone)]
     pub(crate) struct Folder {
@@ -467,6 +541,7 @@ pub(crate) mod tests {
             self.folders.get_mut(path.as_bytes()).unwrap()
         }
         fn step(&mut self) {
+            self.starts.push(self.clock);
             self.clock += self.tick;
         }
         /// Unit folders still under `parent`.
@@ -512,8 +587,10 @@ pub(crate) mod tests {
             }
             Ok(())
         }
-        fn populated(&mut self, dir: &mut Vec<u8>, _wait_ms: i32) -> io::Result<Option<bool>> {
+        fn populated(&mut self, dir: &mut Vec<u8>, wait_ms: i32) -> io::Result<Option<bool>> {
             self.step();
+            self.waited = self.waited.max(wait_ms);
+            self.clock += u64::try_from(wait_ms).unwrap_or(0) * 1_000_000;
             let prefix = [dir.as_slice(), b"/"].concat();
             let mut any = false;
             for (path, f) in self.folders.iter_mut() {
@@ -628,17 +705,13 @@ pub(crate) mod tests {
         let r = reclaim(&mut wide, &mut parent);
         assert!(r.capped, "{r:?}");
         assert!(r.elapsed_ns <= RECLAIM_NS + 2 * wide.tick, "{r:?}");
-        // More units than the window: the kill pass stops at 64.
+        // More units than the kill pass may take: it stops at half the window.
         let mut many = Fake::default();
         for i in 0..70 {
             many.add(&format!("p/{}", unit(i)));
         }
         let r = reclaim(&mut many, &mut parent);
-        assert_eq!(
-            (r.visits, r.removed),
-            (RECLAIM_VISITS, RECLAIM_VISITS),
-            "{r:?}"
-        );
+        assert_eq!((r.visits, r.removed), (KILL_VISITS, KILL_VISITS), "{r:?}");
         assert!(r.capped);
     }
 
@@ -697,6 +770,87 @@ pub(crate) mod tests {
         assert_eq!(r.removed, 1);
         assert_eq!(f.left("p"), ["other"]);
         assert!(!f.log.iter().any(|l| l.contains("other")), "{:?}", f.log);
+    }
+
+    // kill 단계는 방문 창의 절반까지만 써서 하위 트리 몫을 남긴다: 하위 폴더 하나씩 가진 빈 단위 64개도 한
+    // 회수에 일부가 제거된다. 이것을 실패시키는 것: KILL_VISITS를 RECLAIM_VISITS로 되돌리는 것(64개를 모두
+    // 열고 kill해 하위 폴더를 볼 방문이 없어 제거 0, 매 회수 같은 자리).
+    #[test]
+    fn test_reclaim_leaves_room_for_subtrees() {
+        let mut f = Fake::default();
+        for i in 0..64 {
+            f.add(&format!("p/{}/x", unit(i)));
+        }
+        let mut parent = b"p".to_vec();
+        let r = reclaim(&mut f, &mut parent);
+        assert!(r.removed > 0, "{r:?}");
+        assert!(r.visits <= RECLAIM_VISITS, "{r:?}");
+    }
+
+    // 문법 밖 이름은 방문을 쓰지 않으므로 그 뒤의 단위도 회수된다. 한 회수가 읽는 이름 수를 넘으면 잘림 진단을
+    // 남긴다. 이것을 실패시키는 것: 목록 상한을 RECLAIM_VISITS + 1로 되돌리는 것(문법 밖 65개 뒤 단위가
+    // 보이지 않음), 잘림 표시를 지우는 것(진단 없음).
+    #[test]
+    fn test_reclaim_reads_past_foreign_names() {
+        let mut f = Fake::default();
+        for i in 0..65 {
+            f.add(&format!("p/other{i:03}"));
+        }
+        f.add(&format!("p/{}", unit(1)));
+        let mut parent = b"p".to_vec();
+        let r = reclaim(&mut f, &mut parent);
+        assert_eq!(r.removed, 1, "{r:?}");
+        assert!(!r.truncated);
+        let mut f = Fake::default();
+        for i in 0..LIST_MAX {
+            f.add(&format!("p/other{i:04}"));
+        }
+        f.add(&format!("p/{}", unit(1)));
+        let r = reclaim(&mut f, &mut parent);
+        assert_eq!(r.removed, 0, "{r:?}");
+        assert!(r.truncated, "{r:?}");
+        assert!(r.messages().contains(
+            &"command reclaim: the session's cgroup folder holds more names than one reclaim reads"
+        ));
+    }
+
+    // 마감이 지나면 목록 읽기·rmdir·대기를 새로 시작하지 않는다: 깊이 4 체인의 재귀가 돌아오는 중에 예산이
+    // 끝나는 경우와, 남는 항목의 재시도 대기가 남은 예산보다 길어지는 경우. 이것을 실패시키는 것: clear의 rmdir
+    // 앞 마감 확인을 지우는 것, 목록 읽기 앞 확인을 지우는 것, 부모 rmdir 앞 확인을 지우는 것, 재시도 대기를
+    // 남은 예산으로 자르지 않는 것.
+    #[test]
+    fn test_reclaim_stops_at_its_deadline() {
+        let mut parent = b"p".to_vec();
+        for tick in (1_000_000..4_000_000).step_by(100_000) {
+            let mut f = Fake {
+                tick,
+                ..Fake::default()
+            };
+            f.add(&format!("p/{}/a/b/c/d", unit(1)));
+            let r = reclaim(&mut f, &mut parent);
+            let late: Vec<u64> = f
+                .starts
+                .iter()
+                .copied()
+                .filter(|&at| at >= RECLAIM_NS)
+                .collect();
+            assert!(
+                late.is_empty(),
+                "tick {tick}: calls after the deadline {late:?} {r:?}"
+            );
+        }
+        // A stuck unit whose first read ends past the deadline is not waited on again.
+        let mut f = Fake {
+            tick: 6_500_000,
+            ..Fake::default()
+        };
+        f.add(&format!("p/{}", unit(2)));
+        let u = f.get(&format!("p/{}", unit(2)));
+        u.populated = true;
+        u.stuck = true;
+        let r = reclaim(&mut f, &mut parent);
+        assert_eq!(f.waited, 0, "{r:?}");
+        assert!(f.starts.iter().all(|&at| at < RECLAIM_NS), "{:?}", f.starts);
     }
 }
 
@@ -762,6 +916,36 @@ pub(crate) mod cell {
         std::fs::read("/proc/sys/kernel/osrelease").unwrap()
     }
 
+    fn who(session: &str) -> (Vec<u8>, (u64, u64), u32) {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::fs::metadata(std::env::temp_dir()).unwrap();
+        (
+            session.as_bytes().to_vec(),
+            (root.dev(), root.ino()),
+            super::super::sys::current_uid(),
+        )
+    }
+
+    fn open_at(mount: &[u8], release: &[u8], text: &[u8], session: &str) -> Option<Dir> {
+        let (session, runtime, me) = who(session);
+        fs::open_session_at(
+            mount,
+            release,
+            text,
+            &fs::Who {
+                session: &session,
+                runtime,
+                me,
+                pid: std::process::id(),
+            },
+        )
+    }
+
+    fn parent_path(session: &str) -> PathBuf {
+        let (session, runtime, _) = who(session);
+        own_cgroup().join(cgroup::parent_name(&session, runtime))
+    }
+
     // 특권 셀은 원자 경로, 기본 셀은 최선 노력(X-04 음성 대조: 하위 폴더 생성 EROFS). 두 번째 판정은 같은
     // 부모 폴더를 다시 연다. 이것을 실패시키는 것: 부모를 열지 못하면 자기 cgroup 폴더를 대신 쓰는 것(기본
     // 셀에서 Some), open_session_at의 커널 조건을 지우는 것(5.13 입력이 Some).
@@ -770,39 +954,38 @@ pub(crate) mod cell {
     fn test_capability_matches_the_cell() {
         let text = std::fs::read("/proc/self/cgroup").unwrap();
         let session = format!("cell-{}", std::process::id());
-        let me = super::super::sys::current_uid();
-        let first = fs::open_session(session.as_bytes(), me);
+        let release = release();
+        let first = open_at(b"/sys/fs/cgroup", &release, &text, &session);
         match cell().as_str() {
             "plain" => assert!(first.is_none()),
             "priv" => {
                 use std::os::unix::fs::MetadataExt;
                 let a = first.expect("atomic path in the privileged cell");
-                let b = fs::open_session(session.as_bytes(), me).unwrap();
+                let b = open_at(b"/sys/fs/cgroup", &release, &text, &session).unwrap();
                 assert_eq!(
                     a.folder.metadata().unwrap().ino(),
                     b.folder.metadata().unwrap().ino()
                 );
-                let old = b"5.13.19\n";
-                assert!(
-                    fs::open_session_at(b"/sys/fs/cgroup", old, &text, session.as_bytes(), me)
-                        .is_none()
-                );
-                let path = own_cgroup().join(cgroup::parent_name(session.as_bytes()));
-                std::fs::remove_dir(path).unwrap();
+                assert!(open_at(b"/sys/fs/cgroup", b"5.13.19\n", &text, &session).is_none());
+                std::fs::remove_dir(parent_path(&session)).unwrap();
             }
             other => panic!("unknown cell {other}"),
         }
     }
 
-    // cgroup v2가 아닌 곳(일반 파일 시스템)은 원자 경로가 아니다. 이것을 실패시키는 것: fstatfs의
-    // CGROUP2_SUPER_MAGIC 비교를 지우는 것(임시 폴더 아래에 부모를 만들고 Some).
+    // cgroup v2가 아닌 곳(일반 파일 시스템)은 원자 경로가 아니다. 이것을 실패시키는 것: 자기 cgroup 폴더의
+    // fstatfs CGROUP2_SUPER_MAGIC 비교를 지우는 것(임시 폴더 아래에 부모를 만들고 Some).
     #[test]
     fn test_capability_needs_cgroup2() {
         let root = std::env::temp_dir().join(format!("bingsu-cg-v1-{}", std::process::id()));
         std::fs::create_dir_all(root.join("user.slice")).unwrap();
-        let me = super::super::sys::current_uid();
-        let mount = root.as_os_str().as_encoded_bytes();
-        let got = fs::open_session_at(mount, b"6.8.0", b"0::/user.slice\n", b"s", me);
+        std::fs::write(
+            root.join("user.slice/cgroup.procs"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let mount = root.as_os_str().as_encoded_bytes().to_vec();
+        let got = open_at(&mount, b"6.8.0", b"0::/user.slice\n", "s");
         std::fs::remove_dir_all(&root).unwrap();
         assert!(got.is_none());
     }
@@ -816,13 +999,150 @@ pub(crate) mod cell {
         }
         let text = std::fs::read("/proc/self/cgroup").unwrap();
         let session = format!("foreign-{}", std::process::id());
-        let path = own_cgroup().join(cgroup::parent_name(session.as_bytes()));
+        let path = parent_path(&session);
         std::fs::create_dir(&path).unwrap();
         std::os::unix::fs::chown(&path, Some(4242), None).unwrap();
-        let me = super::super::sys::current_uid();
-        let got = fs::open_session_at(b"/sys/fs/cgroup", &release(), &text, session.as_bytes(), me);
+        let got = open_at(b"/sys/fs/cgroup", &release(), &text, &session);
         std::fs::remove_dir(&path).unwrap();
         assert!(got.is_none());
+    }
+
+    // `0::` 경로가 이 프로세스를 담지 않은 cgroup을 가리키면(namespace를 만들고 다시 마운트하지 않은 경우의
+    // 모양) 원자 경로가 아니다. 이것을 실패시키는 것: 자기 cgroup의 cgroup.procs 확인을 지우는 것(남의 cgroup
+    // 아래에 부모를 만들고 Some).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_capability_needs_its_own_cgroup() {
+        if !privileged() {
+            return;
+        }
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        let own = cgroup::own_path(&text).unwrap();
+        let other = format!("bingsu-other-{}", std::process::id());
+        let fake = format!(
+            "0::{}/{other}\n",
+            String::from_utf8_lossy(own).trim_end_matches('/')
+        );
+        std::fs::create_dir(own_cgroup().join(&other)).unwrap();
+        let session = format!("other-{}", std::process::id());
+        let got = open_at(b"/sys/fs/cgroup", &release(), fake.as_bytes(), &session);
+        let made = own_cgroup()
+            .join(&other)
+            .join(cgroup::parent_name(&who(&session).0, who(&session).1));
+        let _ = std::fs::remove_dir(&made);
+        std::fs::remove_dir(own_cgroup().join(&other)).unwrap();
+        assert!(got.is_none());
+    }
+
+    // 실제 cgroup namespace를 만들고 다시 마운트하지 않은 프로세스(자식 시험)는 원자 경로를 고르지 않는다.
+    // 이것을 실패시키는 것: 위와 같은 cgroup.procs 확인 삭제(namespace 뿌리로 보이는 마운트 뿌리 아래에 부모를
+    // 만들고 Some).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_capability_refuses_an_unremounted_namespace() {
+        if !privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let inner = own_cgroup().join(format!("bingsu-ns-{}", std::process::id()));
+        std::fs::create_dir(&inner).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::command_cgroup::cell::unremounted_namespace_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BINGSU_NS_CGROUP", &inner)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let _ = std::fs::remove_dir(&inner);
+        assert!(
+            text.contains("NS-CHILD atomic=false"),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Child of the test above: moves itself into `BINGSU_NS_CGROUP`, makes a
+    /// cgroup namespace there without remounting `/sys/fs/cgroup`, and
+    /// reports the capability.
+    #[test]
+    #[ignore = "child: an unremounted cgroup namespace"]
+    fn unremounted_namespace_child() {
+        #[expect(clippy::disallowed_methods, reason = "test-only child input")]
+        let Ok(inner) = std::env::var("BINGSU_NS_CGROUP") else {
+            return;
+        };
+        std::fs::write(
+            format!("{inner}/cgroup.procs"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        // SAFETY: plain namespace call on this test thread.
+        assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWCGROUP) }, 0);
+        // Read from this thread: the path is relative to its new namespace.
+        let text = std::fs::read("/proc/thread-self/cgroup").unwrap();
+        let session = format!("ns-{}", std::process::id());
+        let got = open_at(b"/sys/fs/cgroup", &release(), &text, &session);
+        if got.is_some() {
+            let (s, r, _) = who(&session);
+            let line = String::from_utf8_lossy(&text).into_owned();
+            let rel = line
+                .trim()
+                .trim_start_matches("0::")
+                .trim_end_matches('/')
+                .to_owned();
+            let _ = std::fs::remove_dir(format!(
+                "/sys/fs/cgroup{rel}/{}",
+                cgroup::parent_name(&s, r)
+            ));
+        }
+        // Back out of the folder so the parent test can remove it.
+        let _ = std::fs::write(
+            "/sys/fs/cgroup/cgroup.procs",
+            std::process::id().to_string(),
+        );
+        println!("NS-CHILD atomic={}", got.is_some());
+    }
+
+    // 부모 자리에만 일반 폴더를 bind mount하면(부모 fd가 cgroup v2가 아님) 원자 경로가 아니다. 이것을
+    // 실패시키는 것: 부모 fd의 fstatfs 확인을 지우는 것.
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_capability_refuses_a_bind_mounted_parent() {
+        if !privileged() {
+            return;
+        }
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        let session = format!("bind-{}", std::process::id());
+        let path = parent_path(&session);
+        let plain = std::env::temp_dir().join(format!("bingsu-bind-{}", std::process::id()));
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let c =
+            |p: &std::path::Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: NUL-terminated paths; a bind mount in this container only.
+        let rc = unsafe {
+            libc::mount(
+                c(&plain).as_ptr(),
+                c(&path).as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        let got = open_at(b"/sys/fs/cgroup", &release(), &text, &session);
+        let ok = got.is_none();
+        drop(got);
+        // SAFETY: the mount made above.
+        unsafe { libc::umount2(c(&path).as_ptr(), libc::MNT_DETACH) };
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::remove_dir(&plain).unwrap();
+        assert!(ok);
     }
 
     // 실제 cgroupfs에서 kill → populated 0 → 후위 rmdir. 대상 프로세스는 단위 아래 깊이 2 폴더에 있다.

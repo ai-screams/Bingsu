@@ -18,6 +18,9 @@ pub const RECLAIM_NS: u64 = 20_000_000;
 pub const POPULATED_RETRIES: usize = 3;
 /// Longest `/proc/self/cgroup` content the parser accepts.
 pub const PROC_CGROUP_MAX: usize = 4096;
+/// Longest `cgroup.procs` the capability check reads; a larger one is no
+/// atomic path (the shell's own cgroup holds that many processes).
+pub const PROCS_MAX: usize = 65_536;
 
 /// `cgroup.kill` exists from Linux 5.14; below that the atomic path is off
 /// and the best-effort path runs (U-14 F0). `release` is `uname -r`: the
@@ -75,10 +78,18 @@ pub fn session_digest(session: &[u8]) -> String {
     hex(&sha256(session)[..16])
 }
 
-/// `bingsu-cmd-<session digest>`: the one cgroup parent folder of a shell
-/// session, under the cgroup the supervisor inherited from the shell.
-pub fn parent_name(session: &[u8]) -> String {
-    format!("bingsu-cmd-{}", session_digest(session))
+/// `bingsu-cmd-<digest>`: the one cgroup parent folder of a shell session,
+/// under the cgroup the supervisor inherited from the shell. The digest
+/// covers the session and the runtime root's `(dev, ino)`, the root the
+/// session lock lives in: helpers that share a parent always share the
+/// lock, so a reclaim under the lock never meets a live supervisor's unit.
+pub fn parent_name(session: &[u8], runtime: (u64, u64)) -> String {
+    let mut input = alloc::vec::Vec::with_capacity(session.len() + 17);
+    input.extend_from_slice(&runtime.0.to_le_bytes());
+    input.extend_from_slice(&runtime.1.to_le_bytes());
+    input.push(0);
+    input.extend_from_slice(session);
+    format!("bingsu-cmd-{}", hex(&sha256(&input)[..16]))
 }
 
 /// A unit cgroup's name: `u` and 16 lowercase hex digits of `seq`.
@@ -105,6 +116,12 @@ pub fn next_seq(previous: Option<u64>, now: u64) -> u64 {
         Some(p) => now.max(p.saturating_add(1)),
         None => now,
     }
+}
+
+/// Whether `cgroup.procs` (one pid per line) lists `pid`.
+pub fn procs_contains(procs: &[u8], pid: u32) -> bool {
+    let want = format!("{pid}");
+    procs.split(|&b| b == b'\n').any(|l| l == want.as_bytes())
 }
 
 /// `populated 0` or `populated 1` in `cgroup.events`; `None` when the line
@@ -175,13 +192,19 @@ mod tests {
         assert_eq!(own_path(&long), None);
     }
 
-    // 세션 부모 이름은 잠금 이름과 같은 고정 길이 요약값. 이것을 실패시키는 것: 세션 값을 그대로 쓰는 것.
+    // 세션 부모 이름은 고정 길이 요약값이고, 세션과 런타임 뿌리(잠금이 사는 곳)의 정체를 함께 묶는다. 이것을
+    // 실패시키는 것: 세션 값을 그대로 쓰는 것, 런타임 뿌리의 dev나 ino를 요약에서 빼는 것(뿌리가 다른 두
+    // helper가 잠금은 따로, 부모는 같이 씀).
     #[test]
     fn parent_name_is_a_fixed_length_digest() {
-        let a = parent_name(b"0123456789abcdef0123456789abcdef");
+        let s = b"0123456789abcdef0123456789abcdef";
+        let a = parent_name(s, (1, 2));
         assert_eq!(a.len(), "bingsu-cmd-".len() + 32);
         assert!(!a.contains("0123456789abcdef0123"));
-        assert_ne!(a, parent_name(b"fedcba9876543210fedcba9876543210"));
+        assert_ne!(a, parent_name(b"fedcba9876543210fedcba9876543210", (1, 2)));
+        assert_ne!(a, parent_name(s, (3, 2)));
+        assert_ne!(a, parent_name(s, (1, 4)));
+        assert_eq!(a, parent_name(s, (1, 2)));
         assert_eq!(session_digest(b"s").len(), 32);
     }
 
@@ -211,6 +234,16 @@ mod tests {
         assert_eq!(next_seq(Some(5), 5), 6);
         assert_eq!(next_seq(Some(9), 5), 10);
         assert_eq!(next_seq(Some(5), 9), 9);
+    }
+
+    // 같은 줄 전체가 그 pid일 때만. 이것을 실패시키는 것: 줄 비교를 접두사·포함 비교로 바꾸는 것(12가 123을
+    // 담은 목록에서 참).
+    #[test]
+    fn procs_contains_matches_whole_lines() {
+        assert!(procs_contains(b"1\n12\n300\n", 12));
+        assert!(!procs_contains(b"1\n123\n300\n", 12));
+        assert!(!procs_contains(b"312\n", 12));
+        assert!(!procs_contains(b"", 12));
     }
 
     // 이것을 실패시키는 것: "1" 외 값을 비어 있음으로 보는 것(알 수 없는 값은 None, 호출 쪽이 남김).
