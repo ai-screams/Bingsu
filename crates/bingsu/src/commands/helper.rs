@@ -212,6 +212,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         if let Some((config, _)) = display {
             let inputs = command_grant::Inputs {
                 config,
+                context,
+                identity: display.map(|(_, id)| id).unwrap_or(marker.id),
+                now,
                 session: e.session.as_deref(),
                 pwd: e.pwd.as_deref(),
                 environment: &command_env,
@@ -340,6 +343,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                         &mut groups,
                         LogLevel::Info,
                         &text,
+                    );
+                }
+                if done.publish_failed {
+                    report(
+                        &mut groups,
+                        LogLevel::Info,
+                        "command round: results not published; the store was busy or refused",
                     );
                 }
                 if done.rejected > 0 {

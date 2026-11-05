@@ -19,6 +19,7 @@ use bingsu_core::{
     command::{
         cgroup,
         plan::{self, Environ},
+        response,
         wire::{self, Grant, Message, Outcome, Policy, Unit, policy_digest},
     },
     config::compile::CompiledConfig,
@@ -46,6 +47,12 @@ pub(crate) const NEUTRAL_REFUSED: &str =
 /// What the helper knows before it decides on a round.
 pub(crate) struct Inputs<'a> {
     pub config: &'a CompiledConfig,
+    /// The checked config context, where the command response lives.
+    pub context: &'a super::snapshot_store::CheckedContextFd,
+    /// The published snapshot's identity and the round's clock: the
+    /// command response is bound to them (C4).
+    pub identity: bingsu_core::snapshot::Identity,
+    pub now: bingsu_core::snapshot::Clock,
     pub session: Option<&'a [u8]>,
     pub pwd: Option<&'a [u8]>,
     pub environment: &'a Result<Vec<u8>, NoEnv>,
@@ -59,7 +66,8 @@ pub(crate) struct Inputs<'a> {
 /// Why a round runs no supervisor, for the helper's log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Skip {
-    /// No config unit may run (none, or all with a `not_run` reason).
+    /// No config unit may run (none, all with a `not_run` reason, or every
+    /// one a cache hit).
     NoUnits,
     NoEnvironment(NoEnv),
     /// No session value or no shell folder in the envelope.
@@ -117,9 +125,22 @@ pub(crate) struct Round {
     scripts: Scripts,
     /// Diagnostic lines of this round's reclaims, for the helper's log.
     pub notes: Vec<&'static str>,
+    /// Where and how the round's results are published (C4).
+    publish: Publish,
     /// The session lock; the supervisor holds its own copy. Dropped last:
     /// the reclaim after the supervisor runs while it is still held.
     _lock: File,
+}
+
+/// The command response of a round: its context, binding, and for each
+/// unit to run the original environment digest it is bound to; the attempt
+/// times of the units for round robin; when the round started.
+struct Publish {
+    context: super::snapshot_store::CheckedContextFd,
+    binding: response::Binding,
+    clock: bingsu_core::snapshot::Clock,
+    environments: Vec<(String, [u8; 32])>,
+    attempts: Vec<(String, u64)>,
 }
 
 /// Script copies of one round. Linux runs a script through a sealed memfd
@@ -290,8 +311,59 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         .config
         .exec_units
         .iter()
-        .filter_map(|u| plan::runnable(u).map(|r| (u.id.as_str(), r)))
+        .filter_map(|u| plan::runnable(u).map(|r| (u.id.as_str(), r, u.cache_ms)))
         .collect();
+    let binding = i.pwd.map(|cwd| response::Binding {
+        build_id: bingsu_core::collection::wire::BuildId(bingsu_identity::build_id().0),
+        boot: i.identity.boot,
+        epoch: i.identity.epoch,
+        context: i.identity.context,
+        clock_kind: i.now.kind,
+        domain: i.now.domain,
+        resume: i.now.resume,
+        config: i.context.config.clone(),
+        state: i.context.state.clone(),
+        cwd: cwd.to_vec(),
+    });
+    // The cache (U-16 K1): a unit whose entry is bound to this round, to its
+    // policy and to this shell's original environment, and still stands,
+    // runs nothing. Read without the lock; a damaged one is no cache.
+    let current = match (&binding, runnable.is_empty()) {
+        // Only a response bound to exactly this binding (built from this
+        // round's clock) is returned.
+        (Some(b), false) => super::collection_store::read_commands(i.context, b)
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    let vars = i.environment.as_ref().ok().map(|body| Environ::parse(body));
+    let mut environments = Vec::new();
+    let runnable: Vec<_> = runnable
+        .into_iter()
+        .filter(|(id, r, cache_ms)| {
+            let Some(vars) = &vars else { return true };
+            let env = plan::env_digest(vars, &r.env_allow);
+            environments.push((id.to_string(), env));
+            let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
+            let cache_ns = cache_ms.unwrap_or(0).saturating_mul(1_000_000);
+            let hit = current
+                .as_ref()
+                .and_then(|c| c.entry(Origin::Config, id))
+                .is_some_and(|e| e.hit(&policy, &env, i.now.now, cache_ns));
+            !hit
+        })
+        .map(|(id, r, _)| (id, r))
+        .collect();
+    let attempts = current
+        .as_ref()
+        .map(|c| {
+            c.entries
+                .iter()
+                .filter(|e| e.origin == Origin::Config)
+                .map(|e| (e.id.clone(), e.attempted_at))
+                .collect()
+        })
+        .unwrap_or_default();
     if runnable.is_empty() {
         // A config with command units reclaims what an earlier supervisor of
         // the session left even when no unit runs this round (C4 ruling Q4);
@@ -403,6 +475,13 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         neutral_refused,
         scripts,
         notes,
+        publish: Publish {
+            context: i.context.try_clone().map_err(|_| Skip::Failed)?,
+            binding: binding.ok_or(Skip::NoSession)?,
+            clock: i.now,
+            environments,
+            attempts,
+        },
         _lock: lock,
     })
 }
@@ -456,8 +535,10 @@ struct Resolved {
 /// its target environment and the digest of its policy before `{dir}`. A
 /// unit whose relay input would pass `RELAY_INPUT_MAX`, or that would push
 /// the grant past one frame, is left out alone; the others still run.
+#[allow(clippy::too_many_arguments, reason = "one round's fixed inputs")]
 fn units(
     runnable: &[(String, plan::Runnable)],
+    tried: &[(String, u64)],
     environment: &[u8],
     base: &Grant,
     collected: Option<u16>,
@@ -480,8 +561,14 @@ fn units(
     out.dropped = vars.dropped;
     let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
     let path = exec_path::path_value(&folders);
-    let attempts: Vec<(&str, Option<u64>)> =
-        runnable.iter().map(|(id, _)| (id.as_str(), None)).collect();
+    // Round robin: never tried first, then the attempt longest ago.
+    let attempts: Vec<(&str, Option<u64>)> = runnable
+        .iter()
+        .map(|(id, _)| {
+            let at = tried.iter().find(|(t, _)| t == id).map(|(_, at)| *at);
+            (id.as_str(), at)
+        })
+        .collect();
     let mut trial = base.clone();
     for at in plan::pick(&attempts, plan::CONFIG_MAX) {
         let (id, r) = &runnable[at];
@@ -631,6 +718,10 @@ pub(crate) struct Report {
     pub send_failed: bool,
     /// Diagnostic lines of the round's reclaims.
     pub notes: Vec<&'static str>,
+    /// The command response this round published, if any.
+    pub published: Option<response::Response>,
+    /// Results came back but could not be published (store busy or unsafe).
+    pub publish_failed: bool,
 }
 
 impl Round {
@@ -697,6 +788,7 @@ impl Round {
         let mut report = Report::default();
         match units(
             &self.runnable,
+            &self.publish.attempts,
             &self.environment,
             &self.grant,
             repo,
@@ -788,8 +880,57 @@ impl Round {
         if let Ok(done) = wire::encode(&Message::Done) {
             let _ = sys::write_fd(self.grant_pipe.as_raw_fd(), &done);
         }
+        let entries = self.entries(&report.results);
+        if !entries.is_empty() {
+            match self.publish_entries(&entries) {
+                Ok(published) => report.published = Some(published),
+                Err(_) => report.publish_failed = true,
+            }
+        }
         report.notes = self.abandon();
         report
+    }
+
+    /// The response entries of this round's config results (builtin probes
+    /// are D3's): each bound to the unit's policy digest and the original
+    /// environment digest it ran with.
+    fn entries(&self, results: &[Outcome]) -> Vec<response::Entry> {
+        results
+            .iter()
+            .filter(|o| o.origin == Origin::Config)
+            .filter_map(|o| {
+                let unit = self.grant.units.get(usize::from(o.index))?;
+                let env = self
+                    .publish
+                    .environments
+                    .iter()
+                    .find(|(id, _)| *id == unit.id)?
+                    .1;
+                response::entry_for(unit.id.clone(), unit.digest, env, self.publish.clock.now, o)
+            })
+            .collect()
+    }
+
+    /// Publishes `entries` into the command response of this context and
+    /// cwd: the store of the collection response, under its lock (C4 ruling
+    /// P1). A store another round holds is no publication: the next round
+    /// runs those units again.
+    fn publish_entries(
+        &self,
+        entries: &[response::Entry],
+    ) -> Result<response::Response, StoreError> {
+        let p = &self.publish;
+        let now = bingsu_core::snapshot::Clock {
+            now: now_ns().map_err(StoreError::Io)?,
+            ..p.clock
+        };
+        match super::collection_store::CollectionStore::admit_commands(&p.context, &p.binding, now)?
+        {
+            super::collection_store::Admission::Admitted(mut store) => {
+                store.publish_commands(&p.binding, entries)
+            }
+            super::collection_store::Admission::Deferred(_) => Err(StoreError::Busy),
+        }
     }
 }
 
@@ -930,6 +1071,7 @@ mod tests {
         ];
         let got = units(
             &units20,
+            &[],
             &big(20 * 1024),
             &base(),
             None,
@@ -945,6 +1087,7 @@ mod tests {
             .collect();
         let got = units(
             &eight,
+            &[],
             &big(15 * 1024),
             &base(),
             None,
@@ -971,6 +1114,7 @@ mod tests {
         let env = b"PATH=/usr/bin:/bin\0NOEQ\0X=1\0X=2\0";
         let got = units(
             &[runnable("custom/a", &[])],
+            &[],
             env,
             &base(),
             None,
@@ -989,6 +1133,7 @@ mod tests {
         );
         let got = units(
             &[runnable("custom/a", &[])],
+            &[],
             env,
             &base(),
             Some(0),

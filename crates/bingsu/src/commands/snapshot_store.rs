@@ -82,6 +82,17 @@ pub struct CheckedContextFd {
     me: u32,
 }
 impl CheckedContextFd {
+    /// A second handle on the same checked folders, for work after the
+    /// round's broker (the command publication).
+    pub(crate) fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            dir: self.dir.try_clone()?,
+            runtime: self.runtime.try_clone()?,
+            config: self.config.clone(),
+            state: self.state.clone(),
+            me: self.me,
+        })
+    }
     pub fn open(
         pin: &runtime_root::Pinned,
         config: &[u8],

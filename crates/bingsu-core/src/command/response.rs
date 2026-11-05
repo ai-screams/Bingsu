@@ -4,7 +4,10 @@
 //! original environment, within its cache time, does not run again. Several
 //! sessions of one context and cwd share the file, so a publication merges
 //! only the entries its own round ran. Types and pure decisions only.
-use super::Error;
+use super::{
+    Error,
+    wire::{Outcome, Reason},
+};
 use crate::{
     collection::wire::BuildId,
     handoff::Origin,
@@ -370,6 +373,54 @@ pub fn merge(current: Option<&Response>, binding: &Binding, mine: &[Entry]) -> R
         binding: binding.clone(),
         entries,
     }
+}
+
+/// What a unit shows: the first line of its stdout, sanitized by the
+/// section 3 rules (a CR before the line end is a control character it
+/// drops), at most `VALUE_MAX` bytes.
+pub fn first_line(stdout: &[u8]) -> String {
+    let line = stdout.split(|&b| b == b'\n').next().unwrap_or_default();
+    let mut value = crate::sanitize::sanitize(line);
+    let mut end = value.len().min(VALUE_MAX);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
+}
+
+/// The entry a unit's result leaves, or `None` when it did not run (the
+/// supervisor refused it: the next round tries it again). Exit 0 is a
+/// value; any other end is a failure, kept for `FAILURE_NS`.
+pub fn entry_for(
+    id: String,
+    policy: [u8; 32],
+    environment: [u8; 32],
+    attempted_at: u64,
+    o: &Outcome,
+) -> Option<Entry> {
+    let ok = match o.reason {
+        Reason::Exited(status) => status == 0,
+        Reason::Timeout | Reason::SpawnFailed => false,
+        Reason::Refused(_) => return None,
+    };
+    let raw = if ok {
+        first_line(&o.stdout)
+    } else {
+        String::new()
+    };
+    Some(Entry {
+        origin: o.origin,
+        id,
+        policy,
+        environment,
+        pattern: [0; 32],
+        attempted_at: attempted_at.min(o.ended_at),
+        completed_at: o.ended_at,
+        status: if ok { Status::Ok } else { Status::Failed },
+        value: raw.clone(),
+        raw,
+    })
 }
 
 #[cfg(test)]

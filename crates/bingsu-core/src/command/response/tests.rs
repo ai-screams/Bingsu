@@ -295,4 +295,79 @@ mod cases {
             assert_eq!(r.encode(), Err(Error::Limit), "{broken:?}");
         }
     }
+
+    // 값은 첫 줄(줄 끝 제외)을 정제한 것이고 4 KB까지다. 이것을 실패시키는 것: 첫 줄 자르기를 지우는 것(둘째 줄이
+    // 섞임), 정제를 건너뛰는 것(ESC와 CR이 남음), 4 KB 자르기를 지우는 것, 글자 경계 맞추기를 지우는 것.
+    #[test]
+    fn first_line_is_sanitized_and_bounded() {
+        assert_eq!(first_line(b"v1.2\r\nnext\n"), "v1.2");
+        assert!(!first_line(b"a\x1b[31mb").contains('\x1b'));
+        let long = alloc::vec![b'x'; VALUE_MAX + 10];
+        assert_eq!(first_line(&long).len(), VALUE_MAX);
+        // A cut never splits a character.
+        let mut wide = alloc::vec![b'x'; VALUE_MAX - 1];
+        wide.extend_from_slice("\u{AC00}".as_bytes());
+        assert!(first_line(&wide).len() < VALUE_MAX);
+    }
+
+    // 종료 0만 값, 다른 끝은 실패(10초), 감독이 거부한 것은 항목 없음. 이것을 실패시키는 것: Exited의 0 비교를
+    // 지우는 것, Refused를 실패 항목으로 쓰는 것, 시도 시각을 완료 시각 이하로 맞추지 않는 것.
+    #[test]
+    fn entry_for_keeps_runs_only() {
+        use crate::command::{grant::Refusal, wire::Outcome};
+        let o = |reason| Outcome {
+            origin: Origin::Config,
+            index: 0,
+            reason,
+            approved_at: 10,
+            ended_at: 20,
+            stdout: b"1.0\n".to_vec(),
+        };
+        let ok = entry_for(
+            "custom/a".into(),
+            [1; 32],
+            [2; 32],
+            5,
+            &o(Reason::Exited(0)),
+        )
+        .unwrap();
+        assert_eq!(
+            (ok.status, ok.value.as_str(), ok.attempted_at),
+            (Status::Ok, "1.0", 5)
+        );
+        let bad = entry_for(
+            "custom/a".into(),
+            [1; 32],
+            [2; 32],
+            5,
+            &o(Reason::Exited(256)),
+        )
+        .unwrap();
+        assert_eq!((bad.status, bad.value.as_str()), (Status::Failed, ""));
+        assert_eq!(
+            entry_for("custom/a".into(), [1; 32], [2; 32], 5, &o(Reason::Timeout))
+                .unwrap()
+                .status,
+            Status::Failed
+        );
+        assert!(
+            entry_for(
+                "custom/a".into(),
+                [1; 32],
+                [2; 32],
+                5,
+                &o(Reason::Refused(Refusal::Trust))
+            )
+            .is_none()
+        );
+        let late = entry_for(
+            "custom/a".into(),
+            [1; 32],
+            [2; 32],
+            50,
+            &o(Reason::Exited(0)),
+        )
+        .unwrap();
+        assert_eq!(late.attempted_at, 20);
+    }
 }
