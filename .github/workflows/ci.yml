@@ -216,6 +216,7 @@ jobs:
           grep -Fx 'test explain_shows_origin_per_key ... ok' "$RUNNER_TEMP/explain-native.txt"
           grep -Fx 'test explain_shows_not_run_reason ... ok' "$RUNNER_TEMP/explain-native.txt"
           grep -Fx 'test explain_names_why_a_script_is_refused ... ok' "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_shows_shell_relative_and_language_units ... ok' "$RUNNER_TEMP/explain-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu --test collector_lifecycle --test collection_store --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/lifecycle-native.txt"
