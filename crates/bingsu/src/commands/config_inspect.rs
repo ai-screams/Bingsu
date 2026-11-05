@@ -394,21 +394,36 @@ fn lookups(
     let Some(c) = &report.snapshot else {
         return Vec::new();
     };
-    let repo = None;
-    let folders = exec_path::sanitize(path.map_or(&b""[..], |p| p.as_bytes()), repo, me, groups);
-    c.exec_units
+    // The units to look up first: with none, `PATH` is not walked at all
+    // (E2 review M2; a stopped mount on it cannot hold a plain check).
+    let words: Vec<(String, &str)> = c
+        .exec_units
         .iter()
         .filter(|u| u.not_run.is_none())
         .filter_map(|u| {
             let ExecPolicy::Command { argv, shell, .. } = &u.policy else {
                 return None;
             };
-            let word = match shell {
+            let word: &str = match shell {
                 Some(_) => "/bin/sh",
                 None => argv.first()?,
             };
+            Some((u.id.clone(), word))
+        })
+        .collect();
+    // Fails without it: test_check_walks_no_path_without_commands.
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let repo = None;
+    #[cfg(test)]
+    tests::PATH_WALKS.with(|n| n.set(n.get() + 1));
+    let folders = exec_path::sanitize(path.map_or(&b""[..], |p| p.as_bytes()), repo, me, groups);
+    words
+        .into_iter()
+        .map(|(id, word)| {
             let found = exec_path::explain(word.as_bytes(), &folders, repo, me, groups);
-            Some((u.id.clone(), found))
+            (id, found)
         })
         .collect()
 }
@@ -492,10 +507,32 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
         }
     };
     for u in &units {
+        let looked = found.iter().find(|(id, _)| *id == u.id).map(|(_, f)| f);
         match &u.not_run {
-            None => {
-                let _ = writeln!(out, "{}  {}, runs", clean(&u.id), u.kind);
-            }
+            // The lookup decides too: a unit whose file is refused or not
+            // found will not run, as W411 says (E2 review M1).
+            // Fails without it: explain_shows_limits_cwd_shell_and_the_sanitized_lookup.
+            None => match looked {
+                Some(exec_path::Explained::Absent) => {
+                    let _ = writeln!(
+                        out,
+                        "{}  {}, will not run: not found on the sanitized PATH",
+                        clean(&u.id),
+                        u.kind
+                    );
+                }
+                Some(exec_path::Explained::Refused { .. }) => {
+                    let _ = writeln!(
+                        out,
+                        "{}  {}, will not run: its file is refused (see executable)",
+                        clean(&u.id),
+                        u.kind
+                    );
+                }
+                _ => {
+                    let _ = writeln!(out, "{}  {}, runs", clean(&u.id), u.kind);
+                }
+            },
             Some(n) => {
                 let (text, code) = explain::not_run_text(n);
                 let code = code.map(|c| format!(" ({c})")).unwrap_or_default();
@@ -511,7 +548,16 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
                 place(&r.from)
             );
         }
-        if let Some((_, f)) = found.iter().find(|(id, _)| *id == u.id) {
+        for e in &u.environment {
+            let _ = writeln!(
+                out,
+                "  {:<10} {:<36} {}",
+                "env",
+                clean(&e.name),
+                place(&e.from)
+            );
+        }
+        if let Some(f) = looked {
             let line = match f {
                 exec_path::Explained::Runs(found) => ctx::show(&found.executable).to_string(),
                 exec_path::Explained::Absent => "not found on the sanitized PATH".into(),
@@ -604,6 +650,34 @@ fn path_exit(i: &Inspection) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        /// `PATH` walks of `lookups` (E2 review M2).
+        pub(super) static PATH_WALKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    // 실행할 명령 단위가 없으면 config check는 PATH를 걷지 않는다(멈춘 마운트가 기본 설정의 check까지 붙잡지
+    // 않게, E2 리뷰 M2). 이것을 실패시키는 것: 조회할 단위를 고르기 전에 PATH를 정제하는 것.
+    #[test]
+    fn test_check_walks_no_path_without_commands() {
+        let me = crate::commands::sys::current_uid();
+        let mut groups = SystemGroups::new(&crate::commands::sys::passwd_entry(me).unwrap().name);
+        let path = std::ffi::OsString::from("/usr/bin:/bin");
+        let walks = || PATH_WALKS.with(std::cell::Cell::get);
+        let before = walks();
+        let none = report_of("[layout.line1]\nleft = [\"dir\"]\n");
+        assert!(lookups(&none, Some(&path), me, &mut groups).is_empty());
+        let off = report_of(
+            "[segment.\"custom/a\"]\nkind = \"command\"\nenabled = false\ncommand = [\"/bin/echo\"]\n[layout.line1]\nleft = [\"custom/a\"]\n",
+        );
+        assert!(lookups(&off, Some(&path), me, &mut groups).is_empty());
+        assert_eq!(walks(), before);
+        let one = report_of(
+            "[segment.\"custom/a\"]\nkind = \"command\"\ncommand = [\"echo\"]\n[layout.line1]\nleft = [\"custom/a\"]\n",
+        );
+        assert_eq!(lookups(&one, Some(&path), me, &mut groups).len(), 1);
+        assert_eq!(walks(), before + 1);
+    }
+
     use super::*;
     use bingsu_core::config::source::{ExtendsRef, OpenError, Opened, Resolver};
 

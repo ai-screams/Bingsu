@@ -665,3 +665,78 @@ fn explain_shows_shell_relative_and_language_units() {
         "{stdout}"
     );
 }
+
+// 시간 상한·캐시·명시한 cwd는 각자 값과 출처를 보이고, 셸 단위는 셸 본문을 보인다. 정제한 PATH로 찾으므로, 앞쪽
+// 폴더가 남이 쓸 수 있으면 뒤쪽 안전한 폴더의 같은 이름이 실행 파일이다. 찾은 파일이 거부되면 상태도 "will not
+// run"이다(E2 리뷰 M1, L4). 이것을 실패시키는 것: timeout·cache 줄을 빼는 것, 셸 본문 줄을 빼는 것, cwd 출처를
+// 기본값으로 두는 것, 정제하지 않은 PATH로 찾는 것, 조회 결과를 상태에 합치지 않는 것.
+#[test]
+fn explain_shows_limits_cwd_shell_and_the_sanitized_lookup() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let e = Env::new("cli_config", "explain-limits");
+    let open = e.put("open/tool", "#!/bin/sh\necho open\n");
+    let safe = e.put("safe/tool", "#!/bin/sh\necho safe\n");
+    let env = e.put("envbin/envtool", "#!/usr/bin/env sh\necho 1\n");
+    for f in [&open, &safe, &env] {
+        chmod(f, 0o755);
+    }
+    std::fs::set_permissions(
+        open.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    e.put_config(
+        "config.toml",
+        &format!(
+            "[segment.\"custom/a\"]\nkind = \"command\"\ncommand = [\"tool\"]\ntimeout = \"2s\"\ncache = \"30s\"\n\
+             [segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n\
+             [segment.\"custom/env\"]\nkind = \"command\"\ncommand = [\"{}\"]\n\
+             [layout.line1]\nleft = [\"dir\", \"custom/a\", \"custom/sh\", \"custom/env\"]\n",
+            env.display()
+        ),
+    );
+    e.put_config(
+        "conf.d/10-cwd.toml",
+        "[segment.\"custom/a\"]\ncwd = \"neutral\"\n",
+    );
+    let path = format!(
+        "{}:{}:/usr/bin:/bin",
+        open.parent().unwrap().display(),
+        safe.parent().unwrap().display()
+    );
+    let o = e
+        .cmd(&["config", "check", "--explain"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let stdout = text(&o.stdout);
+    let line = |key: &str, value: &str| {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(key) && l.contains(value))
+            .unwrap_or_else(|| panic!("{key} {value}: {stdout}"))
+            .to_owned()
+    };
+    assert!(
+        line("timeout", "2000 ms").contains("config.toml:"),
+        "{stdout}"
+    );
+    assert!(
+        line("cache", "30000 ms").contains("config.toml:"),
+        "{stdout}"
+    );
+    assert!(line("cwd", "neutral").contains("10-cwd.toml:2"), "{stdout}");
+    assert!(
+        line("shell", "echo hi").contains("config.toml:"),
+        "{stdout}"
+    );
+    let safe_dir = std::fs::canonicalize(safe.parent().unwrap()).unwrap();
+    assert!(
+        line("executable", "/tool").contains(safe_dir.to_str().unwrap()),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("custom/env  command, will not run:"),
+        "{stdout}"
+    );
+}
