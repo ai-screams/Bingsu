@@ -1497,11 +1497,27 @@ def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict
 # GATE-FS-HELPER.1: helper calls per publication stage of a release build.
 HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
-                 "failure-recover": ("failure-recover",)}
+                 "failure-recover": ("failure-recover",),
+                 "command_miss": ("unchanged", "command_miss"), "command_hit": ("unchanged", "command_hit"),
+                 "command_not_run": ("unchanged", "command_not_run")}
+# Command stages (M6 C4): one config unit run through the relay, on a screen
+# without dir or git. The miss runs it (no cache: every round); the hit finds
+# the warm-up's result inside its cache time; not_run keeps the unit off the
+# screen. All three take the session lock and reclaim (C4 ruling Q4; the
+# security review's R-1 names both rounds with nothing to run). The helper
+# reads /proc/self/cgroup there, which the helper path rules admit under
+# /proc/self/ (C3 ruling R3: the input of the atomic path's decision, the
+# delegated cgroup subpath; 2026-11-05 lead ruling).
+COMMAND_UNIT = "[segment.\"custom/probe\"]\nkind='command'\ncommand=['/usr/bin/true']\n"
+COMMAND_SCREEN = "[layout.line1]\nleft=['char']\n[layout.line2]\nleft=[{shown}'char']\n"
+COMMAND_PATH = "/usr/bin"
 TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\ntemplate='EDIT {char}'\n",
              "collect": "[style]\ntemplate='BASE {dir} {git} {char}'\n", "broken": "[broken"}
 # 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
 # 80 selects a variant past INDEX's chunk, with more variants after it.
+TEMPLATES["command_miss"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="'custom/probe', ")
+TEMPLATES["command_hit"] = COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="'custom/probe', ")
+TEMPLATES["command_not_run"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="")
 TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
                              f"[layout.when.b{i:02}.style]\ntemplate='{'x' * 600} {{char}}'\n" for i in range(64))
 
@@ -1706,7 +1722,10 @@ class HelperStageFixture:
         os.mkdir(self.env["HOME"], 0o700)
         self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, mode=0o700)
-        self.put("collect" if stage == "collect" else config, template=template)
+        command = stage.startswith("command_")
+        self.put("collect" if stage == "collect" else stage if command else config, template=template)
+        if command:
+            self.env["PATH"] = COMMAND_PATH
         self.script = self.inst.init("bash", self.env)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
@@ -1718,7 +1737,9 @@ class HelperStageFixture:
             (self.pwd / "a").write_text("x")
         # The first prompts publish and, for collect, admit and store a response
         # untraced: under strace a cold admission can exceed its 20 ms budget.
-        for _ in range(3 if stage == "collect" else 1):
+        # Command stages: the first round publishes the snapshot, the second
+        # leaves the unit's response (and the session cgroup parent).
+        for _ in range(3 if stage == "collect" else 2 if command else 1):
             self.prompt()
             wait_helpers(self.base)
         self.store = context_store(self.env["XDG_RUNTIME_DIR"], os.path.realpath(self.config),
@@ -1736,6 +1757,19 @@ class HelperStageFixture:
                                **sizes,
                                "collector_components": path_names(Path(self.collector).parent),
                                "collector_bytes": Path(self.collector).stat().st_size}
+        self.command = {}
+        if command:
+            # A unit off the screen never ran: no response, no lookup.
+            responses = list((self.store / "collections-v1").glob("*/store/command"))
+            assert len(responses) == int(stage != "command_not_run"), ("command responses after warm-up", responses)
+            self.response = responses[0] if responses else None
+            procs = own_cgroup() / "cgroup.procs"
+            self.command = {"command_bytes": self.response.stat().st_size if responses else 0,
+                            "catalog_bytes": (Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu/.collections.catalog").stat().st_size
+                            if responses else 0,
+                            "cgroup_procs_bytes": len(procs.read_bytes()),
+                            "cgroup_parent": session_cgroup_parent(),
+                            "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin")}
         if stage == "publish":
             self.put("edited")
         elif stage == "failure-last-good":
@@ -1784,7 +1818,25 @@ class HelperStageFixture:
             state_components=path_names(state), exe_link_components=path_names(self.inst.dir),
             exe_components=path_names(real_bin().parent),
             nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
-            arch=platform.machine(), **self.collection)
+            arch=platform.machine(), **self.collection, **self.command)
+
+
+def own_cgroup():
+    """The cgroup v2 folder of this process (the helper's, as its descendant)."""
+    line = next(l for l in Path("/proc/self/cgroup").read_text().splitlines() if l.startswith("0::"))
+    return Path("/sys/fs/cgroup" + line[3:].rstrip("/"))
+
+
+def session_cgroup_parent():
+    """Whether the warm-up left a session cgroup parent of this user under
+    the own cgroup: the helper then takes the atomic path. A host that
+    refused the mkdir (read-only or not delegated) is best effort. Decided
+    from the host, never from the traced calls."""
+    try:
+        return any(d.name.startswith("bingsu-cmd-") and d.is_dir() and d.stat().st_uid == os.getuid()
+                   for d in own_cgroup().iterdir())
+    except OSError:
+        return False
 
 
 def collector_exit(lines, collector):
@@ -1807,7 +1859,10 @@ def measured_helper_attribution(lines, exe, collector, helper_vocabulary=True):
     from fsbudget.attribute import collector_attribute
     _, scoped = tree(lines, exe)
     collectors = sum(is_root(line, collector) for line in scoped)
+    # The command supervisor and relay are the pinned binary's other verbs;
+    # they and the target are counted in their own roles, never the helper's.
     roles = collector_attribute(scoped, {"front": exe, "helper": exe, "collector": collector,
+                                         "supervisor": exe, "relay": exe,
                                          "collectors": collectors}, helper_vocabulary=helper_vocabulary)
     errors = [e for e in roles.errors if "(collector):" not in e]
     assert not errors, errors
@@ -1820,8 +1875,8 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
 
 
 def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
-    from fsbudget.formula import helper_stage_expected, helper_collect_expected
-    from fsbudget.gate import check, check_collect
+    from fsbudget.formula import helper_stage_expected, helper_collect_expected, helper_command_expected
+    from fsbudget.gate import check, check_collect, check_command
     if evidence is None:
         evidence = {}
     status = collector_exit(lines, collector) if stage == "collect" else None
@@ -1829,7 +1884,14 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     collectors, roles = measured_helper_attribution(lines, exe, collector)
     evidence["role_counts"] = roles.counts
     assert collectors == int(stage == "collect"), ("collector spawns", collectors)
-    if stage != "collect":
+    command_roles = {"supervisor", "relay", "command"} & set(roles.counts)
+    # 이것을 실패시키는 것: 명령 단계에서 감독·relay·대상 역할이 비는 것(그 호출이 helper에 섞임), 명령 없는
+    # 단계나 실행할 것 없는 명령 단계에 그 역할이 생기는 것.
+    assert command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss" else set()), command_roles
+    if stage == "command_miss":
+        errors = check_command(roles, helper_command_expected(plan), evidence=evidence)
+        published = False
+    elif stage != "collect":
         measured = {"helper": roles.counts.get("helper", {})}
         expected = {"helper": helper_stage_expected(plan)}
         evidence.update(phase_counts=measured, phase_expected=expected)

@@ -155,6 +155,8 @@ M3D_SUPPLEMENTARY["GATE-SHELL-EXTERNAL.1-empty_path"] = "M4"
 # 이것을 실패시키는 것: 파이프 끝·done·잘린 허가 행이나 not_run·잠금 유지 행을 지우고 주 행 하나로 닫는 것.
 M3D_SUPPLEMENTARY.update({"GATE-CMD-GRANT.2-pipe": "M6", "GATE-CMD-SPAWN.1-not_run": "M6",
                           "GATE-CMD-SPAWN.2-lock": "M6"})
+# 이것을 실패시키는 것: 명령 회차 단계 행(실행·캐시 적중·화면 밖 단위)을 지우고 기존 단계만으로 GATE-FS-HELPER.1을 닫는 것.
+M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run")})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
@@ -827,10 +829,12 @@ def test_profile_condition_needs_a_profile_axis():
 
 
 HELPER_STAGE_ROWS = ("GATE-FS-HELPER.1", "GATE-FS-HELPER.1-publish", "GATE-FS-HELPER.1-collect",
-                     "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover")
+                     "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover",
+                     "GATE-FS-HELPER.1-command_miss", "GATE-FS-HELPER.1-command_hit",
+                     "GATE-FS-HELPER.1-command_not_run")
 
 
-# 이것을 실패시키는 것: 다섯 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.
+# 이것을 실패시키는 것: 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.
 @pytest.mark.parametrize("row_id", HELPER_STAGE_ROWS)
 def test_every_helper_stage_row_is_required(row_id):
     table = (ROOT / TABLE).read_text()

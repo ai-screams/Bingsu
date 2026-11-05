@@ -683,3 +683,76 @@ def test_rename_exchange_tracks_both_open_descriptions():
              '10 renameat2(3</>, "a", 3</>, "b", RENAME_EXCHANGE) = 0',
              '10 read(7</b>, "x", 1) = 1', '10 read(8</a>, "x", 1) = 1']
     assert not collector_attribute(lines, {**PINNED_PRODUCT, "collectors": 0}).errors
+
+
+# A command round: the helper spawns the supervisor before its filter, the
+# supervisor clone3s a relay into a cgroup with a pidfd, the relay execveats
+# the target, and the target forks a child of its own.
+COMMAND_ROUND = [
+    '10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], 0x0 /* 0 vars */) = 0',
+    '10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 11',
+    '11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1", "--width", "80"], 0x0 /* 0 vars */) = 0',
+    '11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 12',
+    '12 execve("/bin/bingsu", ["/bin/bingsu", "__command-v1"], 0x0 /* 0 vars */) = 0',
+    '12 openat(AT_FDCWD</>, "/proc/self/fd", O_RDONLY|O_DIRECTORY) = 19</proc/12/fd>',
+    '12 close(19</proc/12/fd>) = 0',
+    '11 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0',
+    '12 clone3({flags=CLONE_PIDFD|CLONE_INTO_CGROUP, pidfd=0x1, exit_signal=SIGCHLD, stack=NULL, stack_size=0, cgroup=7}'
+    ' => {pidfd=[19<anon_inode:[pidfd]>]}, 88) = 13',
+    '13 execve("/bin/bingsu", ["/bin/bingsu", "__exec-v2", "--permit-fd=3", "1", "/bin/true", "neutral", "--", "/bin/true"],'
+    ' 0x0 /* 0 vars */) = 0',
+    '12 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0',
+    '13 openat(AT_FDCWD</>, "/bin", O_RDONLY|O_PATH|O_DIRECTORY) = 3</bin>',
+    '13 execveat(3</bin>, "true", ["/bin/true"], 0x0 /* 3 vars */, AT_SYMLINK_NOFOLLOW) = 0',
+    '13 openat(AT_FDCWD</>, "/etc/hosts", O_RDONLY) = 4</etc/hosts>',
+    '13 clone(child_stack=NULL, flags=SIGCHLD) = 14',
+    '14 execve("/bin/sh", ["/bin/sh"], 0x0 /* 0 vars */) = 0',
+    '14 openat(AT_FDCWD</>, "/etc/passwd", O_RDONLY) = 5</etc/passwd>',
+    '14 +++ exited with 0 +++',
+    '13 +++ exited with 0 +++',
+    '12 waitid(P_PIDFD, 19<anon_inode:[pidfd]>, {si_signo=SIGCHLD}, WEXITED, NULL) = 0',
+    '12 close(19<anon_inode:[pidfd]>) = 0',
+    '12 +++ exited with 0 +++',
+    '11 +++ exited with 0 +++',
+    '10 +++ exited with 0 +++',
+]
+PINNED_COMMAND = {**PINNED_PRODUCT, "collectors": 0, "supervisor": "/bin/bingsu", "relay": "/bin/bingsu"}
+
+
+# 이것을 실패시키는 것: 감독·relay를 pin 실행 역할에서 빼는 것, relay의 execveat을 "command"로 바꾸지 않는 것,
+# clone3 pidfd를 감독의 fd 표에 넣지 않는 것, 대상의 생성·exec을 오류로 보는 것, 대상 호출을 helper로 세는 것.
+def test_command_round_roles_and_counts():
+    from fsbudget.attribute import collector_attribute
+    got = collector_attribute(COMMAND_ROUND, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts == {
+        "front": {"exec": 1, "spawn": 1},
+        "helper": {"exec": 1, "spawn": 1},
+        "supervisor": {"exec": 1, "spawn": 1, "openat": 1},
+        "relay": {"exec": 1, "openat": 1},
+        "command": {"exec": 2, "openat": 2, "spawn": 1},
+    }
+
+
+# 이것을 실패시키는 것: 생성 부모 검사를 감독·relay에 걸지 않는 것, 감독의 필터 뒤 생성을 받는 것,
+# relay의 생성을 받는 것, relay가 execve로(pin 없이) 대상을 띄우거나 대상을 두 번 exec하는 것을 받는 것,
+# pin이 없는 호출자(기존 gate)에서 감독 exec을 받는 것.
+@pytest.mark.parametrize("old,new,pinned", [
+    ('12 execve("/bin/bingsu", ["/bin/bingsu", "__command-v1"]', '12 execve("/bin/bingsu", ["/bin/bingsu", "__command-v1", "x"]', None),
+    ('11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 12', '10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 12', None),
+    ('12 clone3(', '12 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0\n12 clone3(', None),
+    ('13 openat(AT_FDCWD</>, "/bin"', '13 clone(child_stack=NULL, flags=SIGCHLD) = 15\n13 openat(AT_FDCWD</>, "/bin"', None),
+    ('13 execveat(3</bin>, "true", ["/bin/true"], 0x0 /* 3 vars */, AT_SYMLINK_NOFOLLOW) = 0',
+     '13 execve("/bin/true", ["/bin/true"], 0x0 /* 3 vars */) = 0', None),
+    ('13 execveat(3</bin>, "true", ["/bin/true"], 0x0 /* 3 vars */, AT_SYMLINK_NOFOLLOW) = 0',
+     '13 execve("/bin/bingsu", ["/bin/bingsu", "__exec-v2", "x"], 0x0 /* 0 vars */) = 0', None),
+    ('12 close(19<anon_inode:[pidfd]>) = 0', '12 close(19<anon_inode:[pidfd]>) = 0\n12 close(19<anon_inode:[pidfd]>) = 0', None),
+    ('', '', PINNED_PRODUCT),
+])
+def test_command_round_mutations_are_refused(old, new, pinned):
+    from fsbudget.attribute import collector_attribute
+    text = '\n'.join(COMMAND_ROUND)
+    assert old in text
+    got = collector_attribute(text.replace(old, new, 1).splitlines(),
+                              {**(pinned or PINNED_COMMAND), "collectors": 0})
+    assert got.errors

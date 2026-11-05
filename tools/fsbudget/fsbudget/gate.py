@@ -153,3 +153,38 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
             if (mode == "exact" and g != w) or (mode == "le" and g > w):
                 errors.append(f"{phase}.{kind}: measured {g}, formula {w} ({mode})")
     return errors, published
+
+
+def check_command(attribution, expected, *, evidence=None):
+    """command_miss: the helper's calls through the command response's
+    install (and, on the atomic path, the unit cgroup reclaim after it) are
+    exact; from the next clock observation (its boot_id open) on they are the
+    GC's, held to an upper bound. Without an install every call stays in the
+    exact prefix, so a round that published nothing fails there.
+    Calls of the supervisor, relay and target are other roles (Q7)."""
+    from collections import Counter
+    from .classify import split_args
+
+    measured = {phase: Counter() for phase in expected}
+    installed, gc, errors = False, False, []
+    for c, kind in attribution.helper_calls:
+        args = split_args(c.args)
+        # 이것을 실패시키는 것: 경계를 설치 전 시계(boot_id)로 잡는 것(앞부분이 꼬리로 새어 정확 검사를 빠져나감),
+        # 설치 뒤 첫 시계를 앞부분에 넣는 것(GC 호출이 정확 검사에 들어가 회차마다 실패).
+        if (installed and not gc and c.name in OPEN_ALIASES
+                and '"/proc/sys/kernel/random/boot_id"' in args[:2]):
+            gc = True
+        measured["gc" if gc else "prefix"][kind] += 1
+        if (c.name in {"renameat", "renameat2"} and c.ret == "0"
+                and len(args) >= 4 and args[1] == '".command.stage"' and args[3] == '"command"'):
+            installed = True
+    if evidence is not None:
+        evidence.update(phase_counts=measured, phase_expected=expected, installed=installed)
+    for phase, want in expected.items():
+        mode = "exact" if phase == "prefix" else "le"
+        got = measured[phase]
+        for kind in sorted(set(got) | set(want)):
+            g, w = got.get(kind, 0), want.get(kind, 0)
+            if (mode == "exact" and g != w) or (mode == "le" and g > w):
+                errors.append(f"{phase}.{kind}: measured {g}, formula {w} ({mode})")
+    return errors
