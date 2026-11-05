@@ -120,6 +120,9 @@ pub struct ExecUnit {
 /// Most user segments a config draws, text and command together (the
 /// snapshot carries each one).
 pub const MAX_CUSTOM_TEXT: usize = 256;
+/// Command and language segments one config may declare (plan U-9d: 32
+/// units, the command response's `ENTRIES_MAX`).
+pub const MAX_EXEC_UNITS: usize = 32;
 
 /// A user `custom/…` segment a layout draws. Its segment number is
 /// `field::BUILTIN.len()` plus its place in `CompiledConfig::custom`, which
@@ -1068,7 +1071,7 @@ pub fn compile(
             shown: shown_bands,
         },
         &mut notes,
-    );
+    )?;
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1362,7 +1365,7 @@ fn exec_units(
     names: &[String],
     reach: &Reach,
     notes: &mut Vec<Diagnostic>,
-) -> Vec<ExecUnit> {
+) -> Result<Vec<ExecUnit>, Vec<Diagnostic>> {
     // A unit runs when a trusted layout draws it and it is still drawn.
     let (approved, shown) = (drawn(trusted, names), drawn(r, names));
     let mut out = Vec::new();
@@ -1426,7 +1429,16 @@ fn exec_units(
             not_run,
         });
     }
-    out
+    // Fails without it: at_most_32_exec_units.
+    if out.len() > MAX_EXEC_UNITS {
+        return Err(vec![bad(
+            place_of(r, &["segment"]),
+            "segment",
+            &alloc::format!("{}", out.len()),
+            "at most 32 command and language segments",
+        )]);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1968,6 +1980,26 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.
+    // 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 33개는 config check 오류다.
+    // 이것을 실패시키는 것: 개수 검사를 지우는 것, 상한을 33 이상으로 두는 것.
+    #[test]
+    fn at_most_32_exec_units() {
+        let units = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    alloc::format!(
+                        "[segment.\"custom/c{i:02}\"]\nkind = \"command\"\ncommand = [\"true\"]\n"
+                    )
+                })
+                .collect::<String>()
+        };
+        let ok = read(&units(32), &[]);
+        assert_eq!(ok.snapshot.map(|c| c.exec_units.len()), Some(32));
+        let over = read(&units(33), &[]);
+        assert!(over.snapshot.is_none());
+        assert!(codes_of(&over).contains(&codes::BAD_VALUE), "{:?}", codes_of(&over));
+    }
+
     #[test]
     fn exec_units_keep_their_whole_policy() {
         let c = compiled(
