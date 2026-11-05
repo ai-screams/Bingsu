@@ -153,12 +153,11 @@ fn version_grammar_table() {
     }
 }
 
-// 형식별 추출. 이것을 실패시키는 것: Line이 주석·빈 줄을 건너뛰지 않는 것, .tool-versions가 다른 도구의
-// 줄을 읽는 것, rust-toolchain.toml이 [toolchain] 밖의 channel을 읽거나 escape를 받는 것, go.mod가 toolchain보다
-// go 지시어를 먼저 쓰는 것(C2 판정 Q5, D1).
+// 형식별 추출. 이것을 실패시키는 것: Line이 주석·빈 줄을 건너뛰지 않는 것, rust-toolchain.toml이 [toolchain] 밖의
+// channel을 읽거나 escape를 받는 것, `path` 키를 보지 않는 것(channel과 함께여도 Path, D2 판정 Q4), `path.x`를
+// 받는 것, go.mod가 toolchain보다 go 지시어를 먼저 쓰는 것(C2 판정 Q5, D1).
 #[test]
 fn formats_extract_one_candidate() {
-    let tool = |t: &[u8]| Format::ToolVersions(t.to_vec());
     let cases: [(Format, &[u8], Candidate<'_>); 14] = [
         (
             Format::Line,
@@ -167,12 +166,20 @@ fn formats_extract_one_candidate() {
         ),
         (Format::Line, b"\n# only\n", Candidate::Absent),
         (
-            tool(b"python"),
-            b"nodejs 20\npython 3.11 3.10 # x\n",
-            Candidate::Value(b"3.11"),
+            Format::RustToolchainToml,
+            b"[toolchain]\npath = \"/opt/rust\"\n",
+            Candidate::Path,
         ),
-        (tool(b"python"), b"python\n", Candidate::Malformed),
-        (tool(b"python"), b"# python 3\n", Candidate::Absent),
+        (
+            Format::RustToolchainToml,
+            b"[toolchain]\nchannel = \"1.80.0\"\npath = \"/opt/rust\"\n",
+            Candidate::Path,
+        ),
+        (
+            Format::RustToolchainToml,
+            b"[toolchain]\npath.x = \"/opt/rust\"\n",
+            Candidate::Malformed,
+        ),
         (
             Format::RustToolchainToml,
             b"[toolchain]\nchannel = \"1.80.0\"\n",
@@ -283,7 +290,7 @@ fn language_results_must_fit_the_query() {
 }
 
 // 저장 응답 왕복과 봉투 버전. 이것을 실패시키는 것: Completed가 언어 절을 쓰지 않는 것, decode가 검사를 건너뛰는
-// 것(질의 밖 결과를 받는 것), 옛 BNGRES03를 받는 것.
+// 것(질의 밖 결과를 받는 것), 옛 BNGRES04를 받는 것.
 #[test]
 fn stored_responses_keep_the_language_section() {
     let r = request(vec![BUILTIN[1].query(), BUILTIN[3].query()]);
@@ -299,17 +306,17 @@ fn stored_responses_keep_the_language_section() {
         [0, 1]
     );
     let bytes = c.encode_with_catalog(&CATALOG).unwrap();
-    assert_eq!(&bytes[..10], b"BNGRES04\x04\0");
+    assert_eq!(&bytes[..10], b"BNGRES05\x05\0");
     let back = Completed::decode_with_catalog(&bytes, &CATALOG).unwrap();
     assert_eq!(back, c);
     let mut old = bytes.clone();
-    old[..8].copy_from_slice(b"BNGRES03");
+    old[..8].copy_from_slice(b"BNGRES04");
     assert_eq!(
         Completed::decode_with_catalog(&old, &CATALOG),
         Err(E::Magic)
     );
     let mut old = bytes.clone();
-    old[8] = 3;
+    old[8] = 4;
     assert_eq!(
         Completed::decode_with_catalog(&old, &CATALOG),
         Err(E::Version)
@@ -319,18 +326,18 @@ fn stored_responses_keep_the_language_section() {
     assert_eq!(outside.encode_with_catalog(&CATALOG), Err(E::Schema));
 }
 
-// 옛 IPC 봉투(BNGIPC05)는 거부한다. 이것을 실패시키는 것: frame_len이 옛 magic이나 version 5를 받는 것.
+// 옛 IPC 봉투(BNGIPC06)는 거부한다. 이것을 실패시키는 것: frame_len이 옛 magic이나 version 6을 받는 것.
 #[test]
 fn old_ipc_frames_are_refused() {
     let r = request(vec![]);
     let mut out = [0; wire::FRAME_MAX];
     let n = wire::encode_frame(frame(&r, Kind::Complete, &[]), &mut out).unwrap();
-    assert_eq!(&out[..10], b"BNGIPC06\x06\0");
+    assert_eq!(&out[..10], b"BNGIPC07\x07\0");
     let mut old = out[..n].to_vec();
-    old[..8].copy_from_slice(b"BNGIPC05");
+    old[..8].copy_from_slice(b"BNGIPC06");
     assert_eq!(wire::decode_frame(&old), Err(E::Magic));
     let mut old = out[..n].to_vec();
-    old[8] = 5;
+    old[8] = 6;
     assert_eq!(wire::decode_frame(&old), Err(E::Version));
 }
 
@@ -460,7 +467,7 @@ fn stored_languages_are_ascending_and_unique() {
 // 보안 리뷰 M2와 Codex L6: 받는 쪽 검사의 나머지 칸. Found의 레벨 33, 표시 파일 index 9, Refused의 파일 index 9,
 // 표시 파일이 없다는 바이트(0) 뒤의 0이 아닌 index나 level은 거부한다. 이것을 실패시키는 것: check의 file_ok에서
 // 레벨 검사를 지우는 것, 표시 파일 index 검사를 지우는 것, Refused를 검사 없이 받는 것, read의 `m == 0`이나
-// `level == 0` 조건을 지우는 것.
+// `level == 0` 조건을 지우는 것, Path의 파일 index를 보지 않는 것(D2).
 #[test]
 fn receiver_checks_every_index_and_level() {
     let r = request(vec![BUILTIN[1].query()]);
@@ -489,12 +496,19 @@ fn receiver_checks_every_index_and_level() {
     let (mut index, mut level_byte) = (absent.clone(), absent);
     index[2] = 1;
     level_byte[3] = 1;
+    // BUILTIN[1] (python) has one version file: index 1 is out.
+    let path = LanguageResult {
+        index: 0,
+        marker: None,
+        version: Version::Path { file: 1, level: 0 },
+    };
     let cases = [
         level.encode(),
         marker.encode(),
         refused.encode(),
         index,
         level_byte,
+        path.encode(),
     ];
     for payload in cases {
         let mut t = transcript(&r);
@@ -509,13 +523,20 @@ fn receiver_checks_every_index_and_level() {
         index: 0,
         marker: Some((3, 32)),
         version: Version::Refused {
-            file: 1,
+            file: 0,
             level: 32,
             digest: [0; 16],
         },
     };
     transcript(&r)
         .accept(frame(&r, Kind::Language, &ok.encode()))
+        .unwrap();
+    let path_ok = LanguageResult {
+        version: Version::Path { file: 0, level: 32 },
+        ..ok
+    };
+    transcript(&r)
+        .accept(frame(&r, Kind::Language, &path_ok.encode()))
         .unwrap();
 }
 
@@ -763,4 +784,71 @@ fn language_results_alone_make_no_record() {
         .unwrap();
     let c = t.finish(EndReason::Deadline, clock(&r)).unwrap().unwrap();
     assert_eq!((c.updates.len(), c.languages.len()), (1, 1));
+}
+
+// D2 판정 Q9·Q11: 내장 파일 순서는 관리자가 읽는 순서다. rustup은 한 폴더에 둘이 있으면 `rust-toolchain`을 읽는다
+// (rustup 1.29.2 실측). `.tool-versions`는 읽지 않는다. 형식 태그 1(옛 `.tool-versions`)은 거부한다. 이것을 실패시키는
+// 것: rust 파일 순서를 toml 먼저로 되돌리는 것, format_from이 태그 1을 받는 것.
+#[test]
+fn formats_follow_the_managers_order() {
+    let rust = BUILTIN[2].query();
+    assert_eq!(rust.version_files[0].name, b"rust-toolchain");
+    assert_eq!(rust.version_files[1].name, b"rust-toolchain.toml");
+    assert!(
+        BUILTIN
+            .iter()
+            .flat_map(|b| b.query().version_files)
+            .all(|f| f.name != b".tool-versions")
+    );
+    let mut r = request(vec![LanguageQuery {
+        id: b"x".to_vec(),
+        markers: vec![],
+        version_files: vec![language::VersionFile {
+            name: b"f".to_vec(),
+            format: Format::Line,
+        }],
+    }]);
+    let mut body = r.encode_body().unwrap();
+    // The last byte is the only file's format tag.
+    *body.last_mut().unwrap() = 1;
+    assert!(Request::decode_body(r.binding.build_id, r.request_id, &body).is_err());
+    *body.last_mut().unwrap() = 0;
+    r.languages[0].version_files[0].format = Format::Line;
+    assert_eq!(
+        Request::decode_body(r.binding.build_id, r.request_id, &body)
+            .unwrap()
+            .languages,
+        r.languages
+    );
+}
+
+// D2 판정 Q4: path 툴체인은 값도 거부도 아닌 자기 답(Path)이고, 받는 쪽과 저장 응답을 지난다. 이것을 실패시키는
+// 것: version()이 Candidate::Path를 Refused로 보내는 것, Path의 wire 태그를 읽지 않는 것.
+#[test]
+fn path_toolchain_is_its_own_answer() {
+    let path = language::version(
+        &Format::RustToolchainToml,
+        b"[toolchain]\npath = \"/opt/rust\"\n",
+        1,
+        2,
+    );
+    assert_eq!(path, Version::Path { file: 1, level: 2 });
+    let r = request(vec![BUILTIN[2].query()]);
+    let result = LanguageResult {
+        index: 0,
+        marker: Some((0, 2)),
+        version: path,
+    };
+    let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Update, &update())).unwrap();
+    t.accept(frame(&r, Kind::Language, &result.encode()))
+        .unwrap();
+    let c = t.finish(EndReason::Deadline, clock(&r)).unwrap().unwrap();
+    let bytes = c.encode_with_catalog(&CATALOG).unwrap();
+    assert_eq!(
+        Completed::decode_with_catalog(&bytes, &CATALOG)
+            .unwrap()
+            .languages,
+        [result]
+    );
 }

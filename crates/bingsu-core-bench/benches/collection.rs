@@ -104,7 +104,7 @@ fn cwd(n: usize) -> Vec<u8> {
 }
 fn prefix() -> [u8; 80] {
     let mut p = [0; 80];
-    p[..8].copy_from_slice(b"BNGIPC06");
+    p[..8].copy_from_slice(b"BNGIPC07");
     p[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     p
 }

@@ -5,6 +5,7 @@ pub mod budget;
 pub mod cwd_hash;
 pub mod git;
 pub mod language;
+pub mod manager;
 pub mod path_facts;
 pub mod response;
 pub mod selection;

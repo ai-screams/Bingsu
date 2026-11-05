@@ -64,19 +64,52 @@ impl Spend {
     }
 }
 
-/// A regular file at `path` (no symlink at the leaf), through the detection's
-/// one folder stack: a parent already held is not opened again.
-fn is_file(
+/// What is at `path` (the leaf never followed), through the detection's one
+/// folder stack: a parent already held is not opened again. How the managers
+/// treat each (D2 re-review M1):
+/// - pyenv takes `.python-version` only when `[[ -f … ]]` holds, a regular
+///   file through links (libexec/pyenv-version-file), so a folder is passed
+///   over and the walk goes on;
+/// - rustup reads `rust-toolchain` and `rust-toolchain.toml` and takes a read
+///   error as "no such file" (src/config.rs `find_override_from_dir_walk`,
+///   1.29.2), so a folder is passed over too; a link it follows.
+///
+/// A folder is therefore absent. A link, a FIFO, a device or a name it may
+/// not look at is something the manager may read but this reader cannot
+/// read safely: `Other`, which ends the search at that level with no value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Absent,
+    Regular,
+    Other,
+}
+
+fn entry(
     stats: &mut WorktreeStats,
     root: &Root,
     path: &[u8],
     access: &Access,
     meter: &mut Meter,
-) -> Result<bool, ReadError> {
+) -> Result<Entry, ReadError> {
     match stats.metadata(root, path, access, meter) {
-        Ok(st) => Ok(st.st_mode & libc::S_IFMT == libc::S_IFREG),
-        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => Ok(false),
+        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFREG => Ok(Entry::Regular),
+        // Fails without it: a_nearer_unreadable_version_file_stops_the_search
+        // (a folder beside a regular rust-toolchain.toml).
+        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFDIR => Ok(Entry::Absent),
+        Ok(_) | Err(ReadError::Denied | ReadError::Special) => Ok(Entry::Other),
+        Err(ReadError::Missing) => Ok(Entry::Absent),
         Err(error) => Err(error),
+    }
+}
+
+/// The answer for a version file that is there but cannot be read safely:
+/// the managers read the nearest file, so the search stops here with no
+/// value instead of taking one from farther up (D2 review M8).
+fn unreadable(file: u8, level: u8) -> Version {
+    Version::Refused {
+        file,
+        level,
+        digest: [0; 16],
     }
 }
 
@@ -122,7 +155,7 @@ fn find(
     for (level, folder) in levels(parts) {
         if marker.is_none() {
             for (i, name) in query.markers.iter().enumerate() {
-                if is_file(stats, root, &join(&folder, name), access, meter)? {
+                if entry(stats, root, &join(&folder, name), access, meter)? == Entry::Regular {
                     marker = Some((i as u8, level));
                     break;
                 }
@@ -131,13 +164,22 @@ fn find(
         if version.is_none() {
             for (i, file) in query.version_files.iter().enumerate() {
                 let path = join(&folder, &file.name);
-                if !is_file(stats, root, &path, access, meter)? {
-                    continue;
+                match entry(stats, root, &path, access, meter)? {
+                    Entry::Absent => continue,
+                    // Fails without it: a_nearer_unreadable_version_file_stops_the_search.
+                    Entry::Other => version = Some(unreadable(i as u8, level)),
+                    Entry::Regular => {
+                        match read_version(
+                            stats, file, i as u8, level, root, &path, access, spend, meter,
+                        )? {
+                            Some(answer) => version = Some(answer),
+                            // Fails without it: version_file_changed_after_its_stat
+                            // (gone: the next file).
+                            None => continue,
+                        }
+                    }
                 }
-                version = read_version(file, i as u8, level, root, &path, access, spend, meter)?;
-                if version.is_some() {
-                    break;
-                }
+                break;
             }
         }
     }
@@ -146,6 +188,7 @@ fn find(
 
 #[allow(clippy::too_many_arguments, reason = "one version file's fixed inputs")]
 fn read_version(
+    stats: &mut WorktreeStats,
     file: &rule::VersionFile,
     i: u8,
     level: u8,
@@ -160,11 +203,24 @@ fn read_version(
         return Err(ReadError::Limit);
     }
     // Opened without following the leaf, a regular file only; the bytes come
-    // from that descriptor. One that cannot be opened is absent, as before
-    // the stat (the next file is looked at).
+    // from that descriptor. One gone since the stat is absent (the next file
+    // is looked at); one refused or replaced by a FIFO or device is this
+    // level's answer. The open reports a link at the leaf as missing too, so
+    // a missing answer is looked at again, without following, from the same
+    // held folder: only a name that is really gone is absent.
+    meter.event("before_language_open");
     let opened = match safe_read::resolve_nofollow(root, path, access, meter) {
         Ok(opened) => opened,
-        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => return Ok(None),
+        // Fails without the second look: version_file_changed_after_its_stat
+        // (a link put in its place).
+        Err(ReadError::Missing) => {
+            return Ok(match entry(stats, root, path, access, meter)? {
+                Entry::Absent => None,
+                Entry::Regular | Entry::Other => Some(unreadable(i, level)),
+            });
+        }
+        // Fails without it: version_file_changed_after_its_stat (a FIFO).
+        Err(ReadError::Denied | ReadError::Special) => return Ok(Some(unreadable(i, level))),
         Err(error) => return Err(error),
     };
     let cap = file.format.cap().min(left);
@@ -187,11 +243,7 @@ fn read_version(
             if cap == file.format.cap()
                 && (size < 0 || size as u64 > cap || bytes(meter) - before > cap) =>
         {
-            Ok(Some(Version::Refused {
-                file: i,
-                level,
-                digest: [0; 16],
-            }))
+            Ok(Some(unreadable(i, level)))
         }
         Err(error) => Err(error),
     }

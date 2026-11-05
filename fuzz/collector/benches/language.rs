@@ -26,10 +26,6 @@ fn input() -> Input {
             (Format::Line, b"3.12.1\n".to_vec()),
             (Format::Line, b"# comment\n\n  lts/iron \n".to_vec()),
             (
-                Format::ToolVersions(b"python".to_vec()),
-                b"nodejs 20.11.0\nrust 1.80.0\npython 3.12.1 3.11.9\n".to_vec(),
-            ),
-            (
                 Format::RustToolchainToml,
                 b"[toolchain]\nchannel = \"1.80.0\"\ncomponents = [\"rustfmt\"]\n".to_vec(),
             ),

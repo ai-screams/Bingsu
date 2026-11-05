@@ -861,7 +861,7 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
 # The stored-response envelope a live capture may read: the current one only. A
 # recorded fixture (an older build's observation) names its own envelope in
 # tests/shell/fixtures/recorded-envelopes.tsv, and only portable tests pass it.
-RESPONSE_HEADERS = (b"BNGRES04\x04\x00",)
+RESPONSE_HEADERS = (b"BNGRES05\x05\x00",)
 
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,

@@ -47,7 +47,7 @@ def collecting_prompt():
 # 것(호출마다 봉투를 밝히지 않아도 됨), headers를 위치 인자로 받는 것.
 def test_live_gate_refuses_a_recorded_envelope():
     import inspect
-    assert budget.RESPONSE_HEADERS == (b"BNGRES04\x04\x00",)
+    assert budget.RESPONSE_HEADERS == (b"BNGRES05\x05\x00",)
     headers = inspect.signature(check_collecting_prompt).parameters["headers"]
     assert headers.default is inspect.Parameter.empty
     assert headers.kind is inspect.Parameter.KEYWORD_ONLY
@@ -1749,7 +1749,7 @@ def collection_trace(*, absent=False, previous=False):
     if not absent:
         for i in ([3, 4] if previous else [3]):
             path = paths[i]; fd = i + 20
-            header = b"BNGRES04" + struct.pack("<HHII", 4, 64, 36, 0) + bytes(44)
+            header = b"BNGRES05" + struct.pack("<HHII", 5, 64, 36, 0) + bytes(44)
             encoded = ''.join(chr(b) if 32 <= b < 127 and b not in (34,92) else f'\\{b:03o}' for b in header)
             lines.append(f'77 read({fd}<{path}>, "{encoded}", 64) = 64')
             lines.append(f'77 read({fd}<{path}>, "' + 'a'*36 + '", 36) = 36')

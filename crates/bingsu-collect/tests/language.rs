@@ -363,7 +363,186 @@ fn symlinked_files_are_not_used() {
     symlink("real/pv", repo.join(".python-version")).unwrap();
     let (results, _) = round(&request(&repo, &f.0, vec![python()]));
     assert_eq!(results[0].marker, None);
-    assert_eq!(results[0].version, Version::None);
+    // The version file is there but a link: no value from it (D2 review M8).
+    assert!(
+        matches!(
+            results[0].version,
+            Version::Refused {
+                file: 0,
+                level: 0,
+                ..
+            }
+        ),
+        "{results:?}"
+    );
+}
+
+// D2 리뷰 M8·재리뷰 M1: 셸 폴더에 더 가까운 버전 파일을 안전하게 읽을 수 없으면(링크, FIFO, 읽기 거부) 위쪽
+// 파일의 값을 쓰지 않는다. pyenv와 rustup은 가까운 파일을 읽기 때문이다. 폴더는 두 관리자 모두 건너뛰므로 없는
+// 것으로 보고 위로 간다(루트의 3.11.9). 이것을 실패시키는 것: Entry::Other를 건너뛰고 위로 가는 것, 폴더를 Other로
+// 보는 것(폴더 칸이 Refused), read_version이 open 거부를 그 언어의 오류로 올리는 것.
+#[test]
+fn a_nearer_unreadable_version_file_stops_the_search() {
+    let Some(k) = case("a_nearer_unreadable_version_file_stops_the_search", 4) else {
+        return;
+    };
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let sub = repo.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(repo.join(".python-version"), b"3.11.9\n").unwrap();
+    let near = sub.join(".python-version");
+    match k {
+        0 => symlink("../.python-version", &near).unwrap(),
+        1 => fs::create_dir(&near).unwrap(),
+        // A regular file the stat sees but the open may not read.
+        3 => {
+            // SAFETY: plain query.
+            if unsafe { libc::geteuid() } == 0 {
+                return;
+            }
+            fs::write(&near, b"3.12.1\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&near, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        _ => {
+            let c = std::ffi::CString::new(near.as_os_str().as_bytes()).unwrap();
+            // SAFETY: a terminated path, read only during the call.
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        }
+    }
+    match (k, python_version(&sub, &f.0)) {
+        (
+            1,
+            Version::Found {
+                file: 0,
+                level: 1,
+                value,
+                ..
+            },
+        ) => assert_eq!(value, b"3.11.9"),
+        (
+            0 | 2 | 3,
+            Version::Refused {
+                file: 0, level: 0, ..
+            },
+        ) => {}
+        (_, other) => panic!("case {k}: {other:?}"),
+    }
+}
+
+// D2 재리뷰 M1: 같은 레벨에서 rust-toolchain이 폴더이면 rustup은 그것을 건너뛰고 rust-toolchain.toml을 읽는다.
+// path 키가 든 toml이면 Path다. 이것을 실패시키는 것: 폴더를 Other로 보는 것(Refused file 0이 됨).
+#[test]
+fn a_folder_lets_the_next_file_of_its_level_answer() {
+    let Some(k) = case("a_folder_lets_the_next_file_of_its_level_answer", 2) else {
+        return;
+    };
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    fs::create_dir(repo.join("rust-toolchain")).unwrap();
+    let toml: &[u8] = if k == 0 {
+        b"[toolchain]\nchannel = \"1.80.0\"\n"
+    } else {
+        b"[toolchain]\npath = \"/opt/rust\"\n"
+    };
+    fs::write(repo.join("rust-toolchain.toml"), toml).unwrap();
+    let (results, _) = round(&request(&repo, &f.0, vec![BUILTIN[2].query()]));
+    match (k, &results[0].version) {
+        (
+            0,
+            Version::Found {
+                file: 1,
+                level: 0,
+                value,
+                ..
+            },
+        ) => assert_eq!(value, b"1.80.0"),
+        (1, Version::Path { file: 1, level: 0 }) => {}
+        (_, other) => panic!("case {k}: {other:?}"),
+    }
+}
+
+// D2 재리뷰 L6: stat 뒤 open 전에 버전 파일이 바뀌는 경우. 사라졌으면 다음 파일(같은 레벨의 rust-toolchain.toml,
+// 그것이 없으면 위쪽 3.11.9), FIFO나 링크로 바뀌었으면 그 레벨의 Refused. 이것을 실패시키는 것: open의 Missing을
+// 다시 보지 않고 사라짐으로 보는 것(링크 칸이 위쪽 3.11.9가 됨), Missing을 늘 Refused로 보는 것, Special을
+// 건너뛰는 것, 사라진 파일 뒤에 같은 레벨의 나머지 파일을 보지 않는 것.
+#[test]
+fn version_file_changed_after_its_stat() {
+    let Some(k) = case("version_file_changed_after_its_stat", 4) else {
+        return;
+    };
+    if k == 2 {
+        let f = Fixture::new();
+        let repo = f.repo("repo");
+        let legacy = repo.join("rust-toolchain");
+        fs::write(&legacy, b"1.79.0\n").unwrap();
+        fs::write(
+            repo.join("rust-toolchain.toml"),
+            b"[toolchain]\nchannel = \"1.80.0\"\n",
+        )
+        .unwrap();
+        let mut done = false;
+        let gone = move |event: &str| {
+            if event == "before_language_open" && !done {
+                done = true;
+                fs::remove_file(&legacy).unwrap();
+            }
+        };
+        let (results, _) = round_with(
+            &request(&repo, &f.0, vec![BUILTIN[2].query()]),
+            deadlines(),
+            gone,
+        );
+        match &results[0].version {
+            Version::Found {
+                file: 1,
+                level: 0,
+                value,
+                ..
+            } => assert_eq!(value, b"1.80.0"),
+            other => panic!("{other:?}"),
+        }
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let sub = repo.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(repo.join(".python-version"), b"3.11.9\n").unwrap();
+    let near = sub.join(".python-version");
+    fs::write(&near, b"3.12.1\n").unwrap();
+    let mut done = false;
+    let change = move |event: &str| {
+        if event == "before_language_open" && !done {
+            done = true;
+            fs::remove_file(&near).unwrap();
+            if k == 1 {
+                let c = std::ffi::CString::new(near.as_os_str().as_bytes()).unwrap();
+                // SAFETY: a terminated path, read only during the call.
+                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            }
+            if k == 3 {
+                symlink("../.python-version", &near).unwrap();
+            }
+        }
+    };
+    let (results, _) = round_with(&request(&sub, &f.0, vec![python()]), deadlines(), change);
+    match (k, &results[0].version) {
+        (
+            0,
+            Version::Found {
+                level: 1, value, ..
+            },
+        ) => assert_eq!(value, b"3.11.9"),
+        (
+            1 | 3,
+            Version::Refused {
+                file: 0, level: 0, ..
+            },
+        ) => {}
+        (_, other) => panic!("case {k}: {other:?}"),
+    }
 }
 
 // 저장소 밖이면 shell 폴더만 본다(읽기 제한의 root가 cwd 하나다). 부모의 표시 파일은 보이지 않는다. 이것을
@@ -425,7 +604,7 @@ fn git_rounds_without_languages_are_unchanged() {
 }
 
 // 크기 상한(C2 판정 Q4, D1): 4,096바이트를 넘는 버전 파일은 값이 없다(Refused, 요약값 0). 이것을 실패시키는
-// 것: Limit을 그 파일의 부재로 보는 것(다음 파일로 넘어가 Found).
+// 것: Limit을 그 파일의 부재로 보는 것(답이 None이 됨).
 #[test]
 fn version_file_over_its_cap_has_no_value() {
     if case("version_file_over_its_cap_has_no_value", 1).is_none() {
@@ -436,7 +615,6 @@ fn version_file_over_its_cap_has_no_value() {
     let mut body = b"3.12\n".to_vec();
     body.resize(4_097, b'#');
     fs::write(repo.join(".python-version"), &body).unwrap();
-    fs::write(repo.join(".tool-versions"), b"python 3.11\n").unwrap();
     match python_version(&repo, &f.0) {
         Version::Refused {
             file: 0, digest, ..
