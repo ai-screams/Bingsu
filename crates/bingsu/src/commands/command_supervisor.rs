@@ -178,23 +178,29 @@ pub(crate) fn wait_grant(fd: i32, until_ns: u64) -> Option<(Grant, Vec<u8>)> {
     }
 }
 
-/// A builtin probe's fixed arguments and run time (spec: argv and
-/// environment come from the profile table, never from the grant). The
-/// table is D3's; until then no profile exists and a probe is refused.
-struct Profile {
-    args: &'static [&'static [u8]],
-    timeout: u64,
-}
-fn profile(id: u8) -> Option<Profile> {
+/// A builtin probe's fixed arguments, run time and environment (spec: argv
+/// and environment come from the profile table, never from the grant; the
+/// grant's toolchain is a grammar-checked name the table puts in one fixed
+/// variable). `home` is the neutral folder the probe runs in.
+fn profile(
+    id: u8,
+    toolchain: Option<&[u8]>,
+    home: &[u8],
+) -> Option<(bingsu_core::command::profile::Profile, Vec<u8>)> {
     #[cfg(test)]
     if id == tests::TEST_PROFILE {
-        return Some(Profile {
-            args: &[b"--version"],
-            timeout: plan::TIMEOUT_DEFAULT,
-        });
+        return Some((
+            bingsu_core::command::profile::Profile {
+                args: &[b"--version"],
+                timeout: plan::TIMEOUT_DEFAULT,
+            },
+            Vec::new(),
+        ));
     }
-    let _ = id;
-    None
+    Some((
+        bingsu_core::command::profile::profile(id)?,
+        bingsu_core::command::profile::environment(id, toolchain, home)?,
+    ))
 }
 
 /// One spawned relay and what it has said so far.
@@ -398,7 +404,13 @@ impl Supervisor {
             return self.report(Origin::Builtin, index, Reason::Refused(Refusal::Limit), at);
         }
         let probe = &self.grant.probes[index];
-        let Some(profile) = profile(probe.profile) else {
+        // Fails without it: test_builtin_profiles_fix_argv_and_environment
+        // (an unknown profile or a toolchain it does not take runs nothing).
+        let Some((profile, environment)) = profile(
+            probe.profile,
+            probe.toolchain.as_deref(),
+            &self.grant.neutral,
+        ) else {
             return self.report(Origin::Builtin, index, Reason::Refused(Refusal::Policy), at);
         };
         let approved = now
@@ -420,7 +432,7 @@ impl Supervisor {
         let frame = ExecFrame {
             origin: Origin::Builtin,
             run_deadline: deadline,
-            environment: Vec::new(),
+            environment,
             pin: probe.pin,
             interpreter: None,
             cwd: Vec::new(),
@@ -888,6 +900,7 @@ pub(crate) mod tests {
             // SAFETY: readable bytes; fd 1 is the stdout pipe.
             unsafe { libc::write(1, b.as_ptr().cast(), b.len()) };
         };
+        let mut environment = Vec::new();
         if behaviour != b"noread" {
             let mut input = Vec::new();
             // SAFETY: fd 3 is this child's input pipe, owned here.
@@ -896,6 +909,7 @@ pub(crate) mod tests {
             // As the relay: enter the frame's folder.
             let (_, frame) = handoff::read_relay_input(&input, RELAY_INPUT_MAX).unwrap();
             std::env::set_current_dir(std::ffi::OsStr::from_bytes(&frame.cwd)).unwrap();
+            environment = frame.environment;
         }
         let executed = || {
             // SAFETY: fd 2 is the status pipe; closing it is "executed".
@@ -911,6 +925,18 @@ pub(crate) mod tests {
             b"sleep" | b"noread" => {
                 executed();
                 std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            b"record" => {
+                // The target's argv, then its environment: what the relay
+                // would execute, one line ("argv…|NAME=VALUE;…").
+                executed();
+                say(&target.join(&b' '));
+                say(b"|");
+                say(&environment
+                    .iter()
+                    .map(|&b| if b == 0 { b';' } else { b })
+                    .collect::<Vec<u8>>());
+                say(b"\n");
             }
             b"split" => {
                 // Two writes, then exit at once: the second can land after the
@@ -1415,6 +1441,7 @@ pub(crate) mod tests {
                 profile: TEST_PROFILE,
                 executable: b"/usr/bin/probe".to_vec(),
                 pin: None,
+                toolchain: None,
             });
         }
         let killer = std::thread::spawn(move || {
@@ -1844,6 +1871,63 @@ pub(crate) mod tests {
         unsafe { libc::_exit(if ok { 42 } else { 1 }) }
     }
 
+    // D3 계획 PY.1·GO.1·RUST.1·NODE.1(구조 단언): 내장 조사의 argv와 환경은 core 프로필 표에서만 온다. Python은
+    // 정확히 [python, -I, -S, --version]이고 환경이 비어 있다. Rust는 RUSTUP_AUTO_INSTALL=0과 해석기가 고른
+    // RUSTUP_TOOLCHAIN, Go는 GOTOOLCHAIN=local, 둘 다 HOME은 중립 폴더다. Node 환경은 비어 있다(NODE_OPTIONS 없음).
+    // 프로필에 맞지 않는 toolchain(경로 꼴, 다른 언어에 준 것)과 모르는 프로필은 실행하지 않는다. 이것을 실패시키는
+    // 것: `-S`나 `-I`를 빼는 것, GOTOOLCHAIN=local이나 RUSTUP_AUTO_INSTALL=0을 빼는 것, toolchain 문법 검사를 지우는
+    // 것, 프로필이 받지 않는 toolchain을 받는 것, 감독이 프로필 환경 대신 빈 환경을 넘기는 것.
+    #[test]
+    fn test_builtin_profiles_fix_argv_and_environment() {
+        use bingsu_core::command::profile::{GO, NODE, PYTHON, RUST};
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let mut g = grant(Vec::new(), 1_000 * MS);
+        let neutral = String::from_utf8(g.neutral.clone()).unwrap();
+        let probe = |profile, toolchain: Option<&[u8]>| Probe {
+            profile,
+            executable: b"/opt/bingsu-test/record".to_vec(),
+            pin: None,
+            toolchain: toolchain.map(<[u8]>::to_vec),
+        };
+        g.probes = vec![
+            probe(PYTHON, None),
+            probe(RUST, Some(b"1.80.0")),
+            probe(GO, None),
+            probe(NODE, None),
+        ];
+        let (got, _) = round(g.clone());
+        // The stub's own line is the last (libtest prints before it).
+        let line = |o: &Outcome| {
+            let text = String::from_utf8(o.stdout.clone()).unwrap();
+            format!("{}\n", text.lines().last().unwrap_or_default())
+        };
+        let by = |i: u8| got.iter().find(|o| o.index == i).unwrap();
+        assert_eq!(line(by(0)), "record -I -S --version|\n", "{got:?}");
+        assert_eq!(
+            line(by(1)),
+            format!(
+                "record --version|HOME={neutral};RUSTUP_AUTO_INSTALL=0;RUSTUP_TOOLCHAIN=1.80.0;\n"
+            )
+        );
+        assert_eq!(
+            line(by(2)),
+            format!("record version|HOME={neutral};GOTOOLCHAIN=local;\n")
+        );
+        assert_eq!(line(by(3)), "record --version|\n");
+        g.probes = vec![
+            probe(RUST, Some(b"../x")),
+            probe(PYTHON, Some(b"3.12.1")),
+            probe(99, None),
+        ];
+        let (got, _) = round(g);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(
+            got.iter()
+                .all(|o| o.reason == Reason::Refused(Refusal::Policy)),
+            "{got:?}"
+        );
+    }
+
     // 무효 표식 회차(permit deadline 0)에서도 내장 조사는 돈다. 이것을 실패시키는 것: 내장 조사를 permit
     // 신뢰 검사 안으로 넣는 것(approve_probe 대신 approve_unit 규칙).
     #[test]
@@ -1855,6 +1939,7 @@ pub(crate) mod tests {
             profile: TEST_PROFILE,
             executable: b"/usr/bin/probe".to_vec(),
             pin: None,
+            toolchain: None,
         });
         let (got, _) = round(g);
         assert_eq!(got[0].reason, Reason::Refused(Refusal::Trust), "{got:?}");

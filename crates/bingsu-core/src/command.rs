@@ -8,6 +8,7 @@ pub mod env_frame;
 pub mod grant;
 pub mod path;
 pub mod plan;
+pub mod profile;
 pub mod response;
 pub mod wire;
 

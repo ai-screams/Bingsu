@@ -47,6 +47,7 @@ fn grant(units: usize, environment: usize) -> Message {
             profile: 1,
             executable: b"/usr/bin/node".to_vec(),
             pin: None,
+            toolchain: None,
         }],
     })
 }

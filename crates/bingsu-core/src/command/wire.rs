@@ -20,7 +20,7 @@ use alloc::{string::String, vec::Vec};
 const MAGIC: &[u8; 8] = b"BNGCMD01";
 /// Version 2 added the resolved executable and its pin to units and probes,
 /// version 3 the round's folders and a unit's script interpreter.
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 const DOMAIN: &[u8] = b"bingsu-command-v1\0";
 /// Magic, version, kind, flags, body length, CRC32C.
 pub const HEADER: usize = 20;
@@ -94,13 +94,17 @@ pub struct Unit {
 }
 
 /// One builtin version probe. Fixed arguments and environment come from the
-/// core profile table, not from the grant.
+/// core profile table (`command::profile`), not from the grant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Probe {
     pub profile: u8,
     pub executable: Vec<u8>,
     /// As `Unit::pin`.
     pub pin: Option<ExecPin>,
+    /// Rust only: the toolchain the helper's resolver chose, a name that
+    /// passes the version grammar (`RUSTUP_TOOLCHAIN` in the profile's
+    /// environment). Never a path.
+    pub toolchain: Option<Vec<u8>>,
 }
 
 /// The single grant. The supervisor can run nothing outside these lists.
@@ -259,6 +263,13 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, Error> {
                 b.push(p.profile);
                 bytes16(&mut b, &p.executable);
                 b.extend_from_slice(&ExecPin::to_bytes(p.pin));
+                match &p.toolchain {
+                    None => b.push(0),
+                    Some(t) => {
+                        b.push(1);
+                        bytes16(&mut b, t);
+                    }
+                }
             }
         }
         Message::Done => {}
@@ -370,10 +381,24 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
             for _ in 0..np {
                 let profile = r.u8()?;
                 let executable = no_nul(r.bytes16()?)?.to_vec();
+                let pin = r.pin()?;
+                let toolchain = match r.u8()? {
+                    0 => None,
+                    1 => {
+                        let t = r.bytes16()?;
+                        // Fails without it: probe_toolchain_is_a_version_name.
+                        if !crate::collection::language::version_ok(t) {
+                            return Err(Error::Utf8);
+                        }
+                        Some(t.to_vec())
+                    }
+                    _ => return Err(Error::Flags),
+                };
                 probes.push(Probe {
                     profile,
                     executable,
-                    pin: r.pin()?,
+                    pin,
+                    toolchain,
                 });
             }
             Message::Grant(Grant {
@@ -562,6 +587,7 @@ mod tests {
                     ctime_sec: 3,
                     ctime_nsec: 4,
                 }),
+                toolchain: Some(b"1.80.0".to_vec()),
             }],
         })
     }
@@ -687,6 +713,19 @@ mod tests {
             policy_digest(&one, Cwd::Neutral, 0, &[Vec::new()]),
             policy_digest(&two, Cwd::Neutral, 0, &[])
         );
+    }
+
+    // D3a: probe의 toolchain 칸은 0(없음)이나 1(이름)만 받는다. 이것을 실패시키는 것: decode가 다른 태그를 없음으로
+    // 읽는 것.
+    #[test]
+    fn decode_refuses_an_unknown_toolchain_tag() {
+        let mut b = encode(&grant()).unwrap();
+        // The grant ends with the probe's toolchain: tag, length, "1.80.0".
+        let at = b.len() - (1 + 2 + 6);
+        assert_eq!(b[at], 1);
+        b[at] = 2;
+        reseal(&mut b);
+        assert_eq!(decode(&b), Err(Error::Flags));
     }
 
     // 이것을 실패시키는 것: decode의 argv 단어·script·env_allow 이름·실행 파일 경로·회차 폴더 둘·
@@ -834,8 +873,8 @@ mod tests {
     fn header_fields_checked_under_valid_crc() {
         let cases: [(usize, u8, Error); 6] = [
             (0, b'X', Error::Magic),
-            (8, 2, Error::Version),
-            (8, 4, Error::Version),
+            (8, 3, Error::Version),
+            (8, 5, Error::Version),
             (10, 0, Error::Kind),
             (10, 4, Error::Kind),
             (11, 1, Error::Flags),
@@ -853,8 +892,9 @@ mod tests {
     #[test]
     fn pin_reserved_bytes_checked_under_valid_crc() {
         let mut b = encode(&grant()).unwrap();
-        // The last probe's pin ends the body; its last 4 bytes are reserved.
-        let last = b.len() - 1;
+        // The last probe's pin comes right before its toolchain (tag, length,
+        // "1.80.0"); the pin's last 4 bytes are reserved.
+        let last = b.len() - (1 + 2 + 6) - 1;
         b[last] = 1;
         reseal(&mut b);
         assert_eq!(decode(&b), Err(Error::Flags));
