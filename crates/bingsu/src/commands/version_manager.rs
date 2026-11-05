@@ -931,6 +931,24 @@ mod tests {
             Some(Decision::Hidden(Hidden::Untrusted))
         );
         mode(&pyenv, 0o755);
+        // A manager folder that is not there: nothing to read, the command
+        // runs (it reports what it finds).
+        let gone = Homes {
+            pyenv: Some(s.0.join("no-such-pyenv")),
+            ..Homes::default()
+        };
+        assert_eq!(
+            decide(
+                py,
+                Some(&vars),
+                &gone,
+                v(b"3.12.1"),
+                b"python3",
+                b"/w",
+                me()
+            ),
+            Some(Decision::Run(None))
+        );
         assert_eq!(d(Shim::Unsupported, Some(&vars), v(b"3.12.1")), None);
         assert_eq!(
             d(Shim::None, Some(&vars), v(b"3.12.1")),
