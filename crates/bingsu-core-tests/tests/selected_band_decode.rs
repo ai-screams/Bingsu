@@ -302,7 +302,7 @@ fn one_band() -> (Vec<u8>, Vec<u8>) {
     c.widths.clear();
     c.variants = vec![compile("x", BUILTIN).unwrap(); 2];
     let b = encode_compiled(&c).unwrap();
-    assert_eq!(&b[..8], b"BNGCFG06");
+    assert_eq!(&b[..8], b"BNGCFG08");
     let s = Sections::of(&b);
     let x = variant(&[&X_LINE]);
     assert_eq!(

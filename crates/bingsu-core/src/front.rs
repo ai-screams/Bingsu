@@ -184,8 +184,17 @@ fn render_selected_with_catalog<L: LayoutView>(
         collected.values.truncate(BUILTIN.len());
         collected.facts.truncate(BUILTIN.len());
         for t in custom {
+            // A command segment's value comes from the command response
+            // (filled by the prompt in C4b); without one it has no value, so
+            // the renderer drops it with its separators like any absent
+            // segment.
+            let Some(text) = crate::layout_view::custom_text(t) else {
+                collected.values.push(None);
+                collected.facts.push(None);
+                continue;
+            };
             let f = crate::field::Field::text(
-                t.text.as_bytes(),
+                text.as_bytes(),
                 crate::field::CUSTOM_TEXT_CELLS,
                 options.profile,
             );

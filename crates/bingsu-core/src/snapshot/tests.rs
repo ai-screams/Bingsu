@@ -424,7 +424,7 @@ mod cases {
         let original = snapshot_codec::encode_compiled(&config).unwrap();
         // 이것을 실패시키는 것: 크기 사전 계산에서 schema bytes를 빼 재할당하게 만드는 것.
         assert_eq!(original.capacity(), original.len());
-        assert_eq!(&original[..12], b"BNGCFG06\x06\0\x02\0");
+        assert_eq!(&original[..12], b"BNGCFG08\x08\0\x02\0");
         assert_eq!(snapshot_codec::decode_compiled(&original), Ok(config));
         for version in [0u16, 1, 3, u16::MAX] {
             let mut bytes = original.clone();

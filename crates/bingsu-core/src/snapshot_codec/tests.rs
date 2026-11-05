@@ -776,13 +776,32 @@ mod cases {
         }
     }
 
+    // 사용자 세그먼트는 종류 태그(0 text, 1 command)로 왕복하고, 그 밖의 태그는 거부한다. 이것을 실패시키는 것: 0과
+    // 1 밖의 태그를 command로 읽는 것, command에 text 바이트를 붙이거나 읽는 것.
+    #[test]
+    fn user_segment_kinds_round_trip_and_unknown_tags_fail() {
+        round(CustomSegment {
+            id: "custom/a".into(),
+            kind: CustomKind::Text("A".into()),
+        });
+        let command = CustomSegment {
+            id: "custom/k".into(),
+            kind: CustomKind::Command,
+        };
+        round(command.clone());
+        let mut b = bytes(&command);
+        assert_eq!(b.pop(), Some(1));
+        b.push(2);
+        assert_eq!(read::<CustomSegment>(&b), Err(Error::Shape));
+    }
+
     fn with_custom(list: &[(&str, &str)]) -> CompiledConfig {
         let mut c = config();
         c.custom = list
             .iter()
-            .map(|(id, text)| CustomText {
+            .map(|(id, text)| CustomSegment {
                 id: (*id).into(),
-                text: (*text).into(),
+                kind: CustomKind::Text((*text).into()),
             })
             .collect();
         c
@@ -845,9 +864,9 @@ mod cases {
     fn encode_rejects_node_numbers_past_the_list() {
         for src in ["{custom/a}", "{custom/a.value}"] {
             let mut c = config();
-            c.custom = vec![CustomText {
+            c.custom = vec![CustomSegment {
                 id: "custom/a".into(),
-                text: "x".into(),
+                kind: CustomKind::Text("x".into()),
             }];
             c.variants[0] =
                 crate::template::compile::compile_with(src, crate::field::BUILTIN, &["custom/a"])
@@ -863,9 +882,9 @@ mod cases {
     #[test]
     fn transient_and_vi_may_not_name_custom_segments() {
         let custom = |c: &mut CompiledConfig| {
-            c.custom = vec![CustomText {
+            c.custom = vec![CustomSegment {
                 id: "custom/a".into(),
-                text: "x".into(),
+                kind: CustomKind::Text("x".into()),
             }];
             crate::template::compile::compile_with(
                 "{custom/a}",

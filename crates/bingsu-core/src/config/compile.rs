@@ -117,16 +117,27 @@ pub struct ExecUnit {
     pub not_run: Option<NotRun>,
 }
 
-/// Most user text segments a config draws (the snapshot carries each one).
+/// Most user segments a config draws, text and command together (the
+/// snapshot carries each one).
 pub const MAX_CUSTOM_TEXT: usize = 256;
 
-/// A user `kind = "text"` segment a layout draws. Its segment number is
+/// A user `custom/…` segment a layout draws. Its segment number is
 /// `field::BUILTIN.len()` plus its place in `CompiledConfig::custom`, which
 /// is sorted by id; the one field is `value` (`field::CUSTOM_TEXT`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CustomText {
+pub struct CustomSegment {
     pub id: String,
-    pub text: String,
+    pub kind: CustomKind,
+}
+
+/// What a user segment shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CustomKind {
+    /// `kind = "text"`: its text, cut to the field's cells.
+    Text(String),
+    /// `kind = "command"`: the unit's value from the command response; a
+    /// segment with no value draws nothing.
+    Command,
 }
 
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
@@ -161,7 +172,7 @@ pub struct CompiledConfig {
     pub duration_min_ms: u64,
     pub exec_units: Vec<ExecUnit>,
     /// Drawn text segments, sorted by id.
-    pub custom: Vec<CustomText>,
+    pub custom: Vec<CustomSegment>,
     pub widths: Vec<WidthRun>,
 }
 
@@ -838,10 +849,10 @@ pub fn compile(
         int(r, &["width", "emoji"]).unwrap_or(2) as u8,
     )
     .unwrap_or(WidthProfile::DEFAULT);
-    // Without a declared text segment nothing is looked up, so the usual
-    // config compiles exactly as it did before text segments.
-    let custom = if declares_text(r) {
-        text_segments(r, &drawn(r, &banded.names), profile, &mut notes)?
+    // Without a declared text or command segment nothing is looked up, so
+    // the usual config compiles exactly as it did before user segments.
+    let custom = if declares_custom(r) {
+        custom_segments(r, &drawn(r, &banded.names), profile, &mut notes)?
     } else {
         Vec::new()
     };
@@ -1113,32 +1124,38 @@ pub(crate) fn layout_verdict(
         .then_some(NotRun::NotInTrustedLayout)
 }
 
-/// Whether any `custom/…` segment is declared with `kind = "text"`.
-fn declares_text(r: &MTable) -> bool {
+/// The user segment kinds a layout draws.
+const DRAWN_KINDS: [&str; 2] = ["text", "command"];
+
+/// Whether any `custom/…` segment is declared with a drawn kind.
+fn declares_custom(r: &MTable) -> bool {
     entries(r, &["segment"]).iter().any(|e| {
         e.key.starts_with("custom/")
-            && matches!(&e.node.value, MValue::Table(t) if s(t, &["kind"]) == Some("text"))
+            && matches!(&e.node.value, MValue::Table(t)
+                if s(t, &["kind"]).is_some_and(|k| DRAWN_KINDS.contains(&k)))
     })
 }
 
-/// The `kind = "text"` segments some layout draws, sorted by id. A text
-/// segment turned off (`enabled = false`, or from a file that failed the
-/// safety check) is not drawn; a missing `text` shows nothing.
-fn text_segments(
+/// The `kind = "text"` and `kind = "command"` segments some layout draws,
+/// sorted by id. A segment turned off (`enabled = false`, or from a file
+/// that failed the safety check) is not drawn; a missing `text` shows
+/// nothing. A command segment carries no value here: the prompt fills it
+/// from the command response, and draws nothing without one.
+fn custom_segments(
     r: &MTable,
     drawn: &BTreeMap<String, Vec<LayoutRef>>,
     profile: WidthProfile,
     notes: &mut Vec<Diagnostic>,
-) -> Result<Vec<CustomText>, Vec<Diagnostic>> {
-    let mut out: Vec<CustomText> = Vec::new();
+) -> Result<Vec<CustomSegment>, Vec<Diagnostic>> {
+    let mut out: Vec<CustomSegment> = Vec::new();
     for e in entries(r, &["segment"]) {
         let MValue::Table(t) = &e.node.value else {
             continue;
         };
-        if !e.key.starts_with("custom/")
-            || !drawn.contains_key(&e.key)
-            || s(t, &["kind"]) != Some("text")
-        {
+        let Some(kind) = s(t, &["kind"]).filter(|k| DRAWN_KINDS.contains(k)) else {
+            continue;
+        };
+        if !e.key.starts_with("custom/") || !drawn.contains_key(&e.key) {
             continue;
         }
         // `kind` and `enabled` are execution keys: one written by a file
@@ -1148,18 +1165,24 @@ fn text_segments(
         {
             continue;
         }
-        out.push(CustomText {
+        out.push(CustomSegment {
             id: e.key.clone(),
-            // Cut here, to the cells the field shows, so the stored text is
-            // what the front draws and always fits the codec's byte cap
-            // (`Clean` keeps at most `CUSTOM_TEXT_CELLS * 4` bytes).
-            text: crate::field::Clean::new(
-                s(t, &["text"]).unwrap_or_default().as_bytes(),
-                crate::field::CUSTOM_TEXT_CELLS,
-                profile,
-            )
-            .as_str()
-            .into(),
+            kind: if kind == "command" {
+                CustomKind::Command
+            } else {
+                // Cut here, to the cells the field shows, so the stored text
+                // is what the front draws and always fits the codec's byte
+                // cap (`Clean` keeps at most `CUSTOM_TEXT_CELLS * 4` bytes).
+                CustomKind::Text(
+                    crate::field::Clean::new(
+                        s(t, &["text"]).unwrap_or_default().as_bytes(),
+                        crate::field::CUSTOM_TEXT_CELLS,
+                        profile,
+                    )
+                    .as_str()
+                    .into(),
+                )
+            },
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1169,7 +1192,7 @@ fn text_segments(
             place_of(r, &["segment"]),
             "segment",
             &alloc::format!("{}", out.len()),
-            "at most 256 drawn text segments",
+            "at most 256 drawn text and command segments",
         )]);
     }
     Ok(out)
@@ -1677,15 +1700,6 @@ mod tests {
         assert_eq!(codes_of(&r), [codes::KEY_PLANNED]);
     }
 
-    /// The codes of a report, without the N502 every drawn command segment
-    /// gets until commands are drawn.
-    fn form_codes(r: &crate::config::report::ConfigReport) -> Vec<crate::diag::DiagCode> {
-        codes_of(r)
-            .into_iter()
-            .filter(|c| *c != codes::CUSTOM_DRAWN_LATER)
-            .collect()
-    }
-
     /// One drawn command segment with `body` as its keys.
     fn command_seg(body: &str) -> String {
         alloc::format!(
@@ -1709,7 +1723,7 @@ mod tests {
         .unwrap();
         let m = crate::config::merge::merge(&g, &[], &keys::slot);
         let (c, _) = compile(&m, &m, Mode::Dark).unwrap();
-        (c.exec_units[0].not_run.clone(), form_codes(&r))
+        (c.exec_units[0].not_run.clone(), codes_of(&r))
     }
 
     // 명시 허용(`unsafe_shell = true`) 없는 `shell`은 컴파일 오류 E211이고 그 단위는 실행 대상이 아니다.
@@ -1739,7 +1753,7 @@ mod tests {
             &command_seg("shell = \"kubectl ctx | head -1\"\nunsafe_shell = true\n"),
             &[],
         );
-        assert_eq!(form_codes(&r), [codes::UNSAFE_SHELL_USED]);
+        assert_eq!(codes_of(&r), [codes::UNSAFE_SHELL_USED]);
         let c = r.snapshot.unwrap();
         assert_eq!(c.exec_units[0].not_run, None);
     }
@@ -1749,15 +1763,12 @@ mod tests {
     #[test]
     fn test_command_and_shell_together_rejected() {
         let both = command_seg("command = [\"k\"]\nshell = \"k\"\nunsafe_shell = true\n");
-        assert!(form_codes(&read(&both, &[])).contains(&codes::COMMAND_FORM_CONFLICT));
+        assert!(codes_of(&read(&both, &[])).contains(&codes::COMMAND_FORM_CONFLICT));
         let alone = command_seg("command = [\"k\"]\nunsafe_shell = true\n");
-        assert_eq!(
-            form_codes(&read(&alone, &[])),
-            [codes::COMMAND_FORM_CONFLICT]
-        );
+        assert_eq!(codes_of(&read(&alone, &[])), [codes::COMMAND_FORM_CONFLICT]);
         // `unsafe_shell = false` alone says nothing to conflict with.
         let off = command_seg("command = [\"k\"]\nunsafe_shell = false\n");
-        assert_eq!(form_codes(&read(&off, &[])), []);
+        assert_eq!(codes_of(&read(&off, &[])), []);
     }
 
     // 실행할 것이 없는 command 세그먼트(command·shell 둘 다 없음, `command = []`)는 E212다.
@@ -1766,11 +1777,11 @@ mod tests {
     fn test_command_segment_needs_something_to_run() {
         for body in ["", "command = []\n", "timeout = \"200ms\"\n"] {
             let r = read(&command_seg(body), &[]);
-            assert_eq!(form_codes(&r), [codes::COMMAND_FORM_CONFLICT], "{body:?}");
+            assert_eq!(codes_of(&r), [codes::COMMAND_FORM_CONFLICT], "{body:?}");
             assert!(r.snapshot.is_none(), "{body:?}");
         }
         let r = read(&command_seg("command = [\"k\"]\n"), &[]);
-        assert_eq!(form_codes(&r), []);
+        assert_eq!(codes_of(&r), []);
     }
 
     // `shell` 텍스트 안의 자리표시자는 E213이다(허용이 있어도).
@@ -1782,9 +1793,9 @@ mod tests {
             &[],
         );
         assert!(
-            form_codes(&r).contains(&codes::PLACEHOLDER_NOT_WHOLE),
+            codes_of(&r).contains(&codes::PLACEHOLDER_NOT_WHOLE),
             "{:?}",
-            form_codes(&r)
+            codes_of(&r)
         );
         assert!(r.snapshot.is_none());
         // Other braces are shell syntax, not placeholders.
@@ -1792,7 +1803,7 @@ mod tests {
             &command_seg("shell = \"echo {a,b} ${HOME}\"\nunsafe_shell = true\n"),
             &[],
         );
-        assert_eq!(form_codes(&r), [codes::UNSAFE_SHELL_USED]);
+        assert_eq!(codes_of(&r), [codes::UNSAFE_SHELL_USED]);
     }
 
     // 자리표시자는 argv 원소 하나 전체로만 쓴다. 원소 전체 `{dir}`과 다른 중괄호(awk)는 받는다.
@@ -1801,13 +1812,13 @@ mod tests {
     #[test]
     fn test_placeholder_mid_string_rejected() {
         let r = read(&command_seg("command = [\"ls\", \"a{dir}\"]\n"), &[]);
-        assert_eq!(form_codes(&r), [codes::PLACEHOLDER_NOT_WHOLE]);
+        assert_eq!(codes_of(&r), [codes::PLACEHOLDER_NOT_WHOLE]);
         assert!(r.snapshot.is_none());
         let ok = read(
             &command_seg("command = [\"awk\", \"{print $1}\", \"{dir}\"]\n"),
             &[],
         );
-        assert_eq!(form_codes(&ok), []);
+        assert_eq!(codes_of(&ok), []);
     }
 
     // `cwd = "untrusted-current"`는 경고 W410, 목록 밖 값은 E203이다.
@@ -1818,12 +1829,12 @@ mod tests {
             &command_seg("command = [\"k\"]\ncwd = \"untrusted-current\"\n"),
             &[],
         );
-        assert_eq!(form_codes(&r), [codes::CWD_UNTRUSTED_CURRENT]);
+        assert_eq!(codes_of(&r), [codes::CWD_UNTRUSTED_CURRENT]);
         assert!(r.snapshot.is_some());
         let r = read(&command_seg("command = [\"k\"]\ncwd = \"neutral\"\n"), &[]);
-        assert_eq!(form_codes(&r), []);
+        assert_eq!(codes_of(&r), []);
         let r = read(&command_seg("command = [\"k\"]\ncwd = \"/w\"\n"), &[]);
-        assert_eq!(form_codes(&r), [codes::BAD_VALUE]);
+        assert_eq!(codes_of(&r), [codes::BAD_VALUE]);
     }
 
     // 형식이 방어다: 컴파일 검사를 우회해 `unsafe_shell = false`인 shell 정책을 실행 대상으로 넣은 스냅샷도
@@ -1909,7 +1920,7 @@ mod tests {
                 )),
                 &[],
             );
-            assert_eq!(form_codes(&r), [codes::BAD_VALUE], "{name}");
+            assert_eq!(codes_of(&r), [codes::BAD_VALUE], "{name}");
             assert!(r.snapshot.is_none(), "{name}");
         }
         // Credentials may come back (they are warned about later, U-13 V2).
@@ -1917,7 +1928,7 @@ mod tests {
             &command_seg("command = [\"k\"]\nenv_allow = [\"SSH_AUTH_SOCK\", \"LDX\"]\n"),
             &[],
         );
-        assert_eq!(form_codes(&r), []);
+        assert_eq!(codes_of(&r), []);
     }
 
     // env_allow 이름은 비지 않고 `=`·NUL이 없다(정제 환경의 `NAME=VALUE\0` 틀을 깨지 않게).
@@ -1931,13 +1942,13 @@ mod tests {
                 )),
                 &[],
             );
-            assert_eq!(form_codes(&r), [codes::BAD_VALUE], "{bad:?}");
+            assert_eq!(codes_of(&r), [codes::BAD_VALUE], "{bad:?}");
         }
         let r = read(
             &command_seg("command = [\"k\"]\nenv_allow = [\"KUBECONFIG\"]\n"),
             &[],
         );
-        assert_eq!(form_codes(&r), []);
+        assert_eq!(codes_of(&r), []);
     }
 
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.

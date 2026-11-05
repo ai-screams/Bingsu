@@ -5,7 +5,7 @@
 //! Data types only: no config parsing, merging, checking or compiling.
 use crate::bands::{self, Band};
 use crate::color::palette::{Mode, ResolvedPalette};
-use crate::config::compile::{CompiledConfig, CustomText, ExecUnit, Setup};
+use crate::config::compile::{CompiledConfig, CustomKind, CustomSegment, ExecUnit, Setup};
 use crate::diag_widths::WidthRun;
 use crate::icons::IconSet;
 use crate::layout::SegmentSetup;
@@ -13,6 +13,15 @@ use crate::render::Theme;
 use crate::template::compile::CompiledLine;
 use crate::width::WidthProfile;
 use alloc::vec::Vec;
+
+/// A user segment's stored text, or `None` for a command segment (its value
+/// comes from the command response).
+pub fn custom_text(segment: &CustomSegment) -> Option<&str> {
+    match &segment.kind {
+        CustomKind::Text(text) => Some(text),
+        CustomKind::Command => None,
+    }
+}
 
 /// Everything the front reads besides the variant.
 #[derive(Clone, Copy, Debug)]
@@ -29,7 +38,7 @@ pub struct Shared<'a> {
     pub duration_min_ms: u64,
     pub exec_units: &'a [ExecUnit],
     /// Drawn text segments; segment `BUILTIN.len() + i` is `custom[i]`.
-    pub custom: &'a [CustomText],
+    pub custom: &'a [CustomSegment],
 }
 
 impl<'a> Shared<'a> {
@@ -116,7 +125,7 @@ pub struct FrontConfig {
     pub(crate) use_last_column: bool,
     pub(crate) duration_min_ms: u64,
     pub(crate) exec_units: Vec<ExecUnit>,
-    pub(crate) custom: Vec<CustomText>,
+    pub(crate) custom: Vec<CustomSegment>,
     pub(crate) widths: Vec<WidthRun>,
 }
 
