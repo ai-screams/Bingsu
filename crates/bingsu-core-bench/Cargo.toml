@@ -106,3 +106,9 @@ test = false
 name = "git"
 harness = false
 test = false
+
+[[bench]]
+# M6 C4b: the prompt's command response decode, display decision and cut.
+name = "command"
+harness = false
+test = false
