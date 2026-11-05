@@ -10,7 +10,7 @@ CMD-HELPER-DEATH	A target with no output ends soon after the helper is killed (n
 CMD-BACKPRESSURE	A full result pipe does not hide the helper's death: every target ends	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_result_backpressure_then_helper_death	C2
 CMD-RELAY-NEVER-READS	A relay that never reads its input does not block other units and is ended at its deadline	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_relay_never_reads_does_not_block	C2
 CMD-OVERSIZE-FRAME	A unit whose relay input passes 16 KB is refused with Limit; others run	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_oversize_exec_frame_refused	C2
-CMD-ROUND-ROBIN	Units are tried oldest attempt first; the attempt times live in the command response	-	-	C4
+CMD-ROUND-ROBIN	Units are tried oldest attempt first; the attempt times live in the command response	Unix	tests/shell/test_command_round.py::test_round_robin_reaches_every_unit	C4
 CMD-OUTPUT-4K	Endless output: the result keeps 4 KB, the rest is read and dropped, the unit ends at its deadline, supervisor RSS grows under 1 MB (Linux)	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_gigabyte_output_is_cut_at_4k	C2
 CMD-OUTPUT-EXIT	Output past 4 KB keeps the target's own exit status (no SIGPIPE)	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_long_output_keeps_exit_status	C2
 CMD-STDOUT-HOLDER	A descendant holding stdout delays neither the prompt nor the round	Unix	tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt	C2
@@ -57,3 +57,10 @@ CMD-CGROUP-DEADLINE	After its 20 ms a reclaim starts no listing, rmdir or wait	U
 CMD-CGROUP-MOUNT	The parent must be on the mount of the process's own cgroup, and a reclaim never enters a folder on another mount: a cgroup mounted over a name is never killed or removed	Linux	crates/bingsu/src/commands/command_cgroup.rs::test_reclaim_never_enters_a_cgroup_mounted_below	C3
 CMD-CGROUP-KILL-ALL	The kill pass has its own budget: units that stay never keep later units from their kill	Unix	crates/bingsu/src/commands/command_cgroup.rs::test_reclaim_kills_past_units_that_stay	C3
 CMD-CGROUP-PROCS	cgroup.procs is read chunk by chunk to its end, and not used past 64 KiB	Unix	crates/bingsu/src/commands/command_cgroup.rs::read_bounded_reads_every_chunk_up_to_its_cap	C3
+CMD-CACHE-HIT	A unit inside its cache time runs nothing and starts no supervisor; its result is published to the command response	Unix	tests/shell/test_command_round.py::test_cache_hit_runs_nothing	C4
+CMD-CACHE-DEFAULT	Without cache the unit runs every round (default 0)	Unix	tests/shell/test_command_round.py::test_no_cache_runs_every_round	C4
+CMD-CACHE-FAILURE	A failed unit does not run again for 10 s	Unix	tests/shell/test_command_round.py::test_failure_cached_10s	C4
+CMD-CACHE-ENV	A hit needs this shell's original environment digest: another environment's entry runs the unit again	Unix	tests/shell/test_command_round.py::test_cache_hit_is_display_match	C4
+CMD-PUBLISH-MERGE	Rounds of one context and cwd merge their own units into one command response under the store lock	Unix	crates/bingsu/tests/collection_store.rs::test_concurrent_publish_keeps_other_units	C4
+CMD-RESULT-DUP	A second result for one place in the grant is rejected; the first stands	Unix	crates/bingsu-core/src/command/plan.rs::a_second_result_for_one_place_is_rejected	C4
+CMD-RECLAIM-NO-CANDIDATES	A config with command units reclaims the session's cgroups in a round with nothing to run	Linux	tests/shell/test_command_cgroup.py::test_reclaim_without_candidates	C4

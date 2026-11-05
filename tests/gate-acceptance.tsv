@@ -81,3 +81,4 @@ GATE-CMD-SPAWN.1	GATE-CMD-SPAWN	1	A configured unit runs through the helper, sup
 GATE-CMD-SPAWN.1-not_run	GATE-CMD-SPAWN	1	A unit no trusted layout draws (not_run) never runs	Unix	tests/shell/test_command_round.py::test_not_run_unit_never_runs	pytest	M6
 GATE-CMD-SPAWN.2	GATE-CMD-SPAWN	2	Ten prompts of two sessions while a one-second unit runs: never two supervisors of one session at once	Unix	tests/shell/test_command_round.py::test_one_supervisor_per_session	pytest	M6
 GATE-CMD-SPAWN.2-lock	GATE-CMD-SPAWN	2	A stopped supervisor whose helper was killed keeps the session lock: no second supervisor until it exits	Unix	tests/shell/test_command_round.py::test_lock_held_while_supervisor_alive	pytest	M6
+GATE-CMD-SPAWN.3	GATE-CMD-SPAWN	3	A unit inside its cache time runs nothing and its round starts no supervisor	Linux	tests/shell/test_command_round.py::test_cache_hit_runs_nothing	pytest	M6
