@@ -215,8 +215,11 @@ fn the_largest_inputs_stay_small() {
         200,
     );
     // Measured (bytes at peak, allocations), the same in release and debug:
-    // ordinary (834,093, 8,219), long (96,864, 17), fill (1,846, 18), none
-    // (99,792, 25). The bounds sit about 10% above: the counts are exact, so
+    // ordinary (834,093, 8,219), long (96,864, 17), fill (2,422, 18), none
+    // (99,792, 25). fill grows with the catalog: `layout` keeps one `Slot`
+    // (144 bytes) per catalog segment (layout.rs, `Vec::with_capacity(cat.len())`),
+    // so the four language segments of D3a added 4 x 144 = 576 bytes to the
+    // 1,846 before them. The bounds sit about 10% above: the counts are exact, so
     // running one skipped method (thousands of pieces, or the whole path
     // text and its checked copy) goes past them.
     assert!(
@@ -224,7 +227,7 @@ fn the_largest_inputs_stay_small() {
         "ordinary {ordinary:?}"
     );
     assert!(long.0 <= 110_000 && long.1 <= 25, "long {long:?}");
-    assert!(fill.0 <= 2_100 && fill.1 <= 25, "fill {fill:?}");
+    assert!(fill.0 <= 2_700 && fill.1 <= 25, "fill {fill:?}");
     assert!(none.0 <= 110_000 && none.1 <= 30, "none {none:?}");
 }
 
@@ -310,11 +313,11 @@ fn a_reused_log_keeps_one_call_and_its_memory() {
             "line {n}: {steps} {short} {hidden}"
         );
     }
-    // Measured: line 0 reaches step 7 (all 7 steps); 16 shortened, 2 for
-    // each of the 8 segments with a value (`always`, then step 1); 17 hidden.
+    // Measured: line 0 reaches step 7 (all 7 steps); 24 shortened, 2 for
+    // each of the 12 segments with a value (`always`, then step 1); 25 hidden.
     assert_eq!(
         (log.steps.len(), log.shortened.len(), log.hidden.len()),
-        (7, 16, 17)
+        (7, 24, 25)
     );
 }
 
