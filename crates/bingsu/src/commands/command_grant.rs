@@ -7,6 +7,7 @@
 //! has every result, so its end of file tells the supervisor the helper is
 //! gone. Results are checked and dropped here; publishing them is C4.
 use super::{
+    builtin_probe::{self, Action, Language, Planned},
     collection_store::close_only_lock,
     collector_process::{OwnedChild, now_ns, pipe},
     command_process, exec_path,
@@ -61,13 +62,16 @@ pub(crate) struct Inputs<'a> {
     pub exe: &'a OsStr,
     pub me: u32,
     pub helper_deadline: u64,
+    /// The builtin languages whose segments this round draws (D3 ruling
+    /// Q6); empty on a redraw.
+    pub builtins: &'a [&'static Language],
 }
 
 /// Why a round runs no supervisor, for the helper's log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Skip {
     /// No config unit may run (none, all with a `not_run` reason, or every
-    /// one a cache hit).
+    /// one a cache hit) and no builtin language is drawn.
     NoUnits,
     NoEnvironment(NoEnv),
     /// No session value or no shell folder in the envelope.
@@ -127,6 +131,16 @@ pub(crate) struct Round {
     pub notes: Vec<&'static str>,
     /// Where and how the round's results are published (C4).
     publish: Publish,
+    /// The builtin languages drawn this round (D3a).
+    builtins: Vec<&'static Language>,
+    /// The command response read before the round, for the probes' cache.
+    current: Option<response::Response>,
+    /// The plan of each probe in `grant.probes`, by index.
+    probes: Vec<Planned>,
+    /// Builtin entries decided without running anything (shown or hidden).
+    decided: Vec<response::Entry>,
+    /// Why builtin languages were hidden, for the helper's log.
+    pub hidden: Vec<&'static str>,
     /// The session lock; the supervisor holds its own copy. Dropped last:
     /// the reclaim after the supervisor runs while it is still held.
     _lock: File,
@@ -247,6 +261,36 @@ impl Scripts {
     }
 }
 
+/// This round's language answers, by the asked language's id (U-3 L2): what
+/// the collector found for each version selection file. Empty when the
+/// collection did not run or did not finish.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Languages {
+    answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
+}
+
+impl Languages {
+    /// The answers of a finished collection. The builtin queries come
+    /// first in a request, so the first answer for an id is the builtin's.
+    pub(crate) fn from_result(c: &bingsu_core::collection::response::Completed) -> Self {
+        let mut answers: Vec<(Vec<u8>, _)> = Vec::new();
+        for l in &c.languages {
+            let Some(q) = c.language_queries.get(usize::from(l.index)) else {
+                continue;
+            };
+            if !answers.iter().any(|(id, _)| *id == q.id) {
+                answers.push((q.id.clone(), l.version.clone()));
+            }
+        }
+        Self { answers }
+    }
+
+    /// The answer for language `id`, if the collection gave one.
+    pub(crate) fn get(&self, id: &[u8]) -> Option<&bingsu_core::collection::language::Version> {
+        self.answers.iter().find(|(a, _)| a == id).map(|(_, v)| v)
+    }
+}
+
 /// The first 16 bytes of sha256(session), hex: names the session's lock and
 /// its script copies, never the raw session value.
 fn session_tag(session: &[u8]) -> String {
@@ -328,7 +372,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     // The cache (U-16 K1): a unit whose entry is bound to this round, to its
     // policy and to this shell's original environment, and still stands,
     // runs nothing. Read without the lock; a damaged one is no cache.
-    let current = match (&binding, runnable.is_empty()) {
+    let current = match (&binding, runnable.is_empty() && i.builtins.is_empty()) {
         // Only a response bound to exactly this binding (built from this
         // round's clock) is returned.
         (Some(b), false) => super::collection_store::read_commands(i.context, b)
@@ -364,7 +408,12 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
                 .collect()
         })
         .unwrap_or_default();
-    if runnable.is_empty() {
+    let mut builtins = i.builtins.to_vec();
+    // A drawn builtin language spawns the supervisor even with no config
+    // unit (D3a ruling Q-C (a)): whether it runs is known only once the
+    // collection answered, after the marker.
+    // Fails without it: test_builtin_probe_runs_once_and_is_cached.
+    if runnable.is_empty() && builtins.is_empty() {
         // A config with command units reclaims what an earlier supervisor of
         // the session left even when no unit runs this round (C4 ruling Q4);
         // one without any touches nothing. A busy lock is a live supervisor.
@@ -414,8 +463,10 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     let mut runnable = runnable;
     let mut neutral_refused = 0;
     if !neutral(i.runtime, i.me).map_err(|_| Skip::Failed)? {
-        let before = runnable.len();
+        let before = runnable.len() + builtins.len();
         runnable.retain(|(_, r)| r.cwd != Cwd::Neutral);
+        // Probes run in the neutral folder too.
+        builtins.clear();
         neutral_refused = before - runnable.len();
         if runnable.is_empty() {
             return Err(Skip::Neutral);
@@ -483,6 +534,11 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             environments,
             attempts,
         },
+        builtins,
+        current,
+        probes: Vec::new(),
+        decided: Vec::new(),
+        hidden: Vec::new(),
         _lock: lock,
     })
 }
@@ -733,6 +789,9 @@ pub(crate) struct Report {
     pub published: Option<response::Response>,
     /// Results came back but could not be published (store busy or unsafe).
     pub publish_failed: bool,
+    /// Why builtin languages were hidden this round (D3 ruling Q4: the
+    /// reason goes to the log, never to the prompt).
+    pub hidden: Vec<&'static str>,
 }
 
 impl Round {
@@ -792,6 +851,7 @@ impl Round {
         mut self,
         permit: Permit,
         repo: Option<u16>,
+        languages: &Languages,
         me: u32,
         groups: &mut SystemGroups,
     ) -> Report {
@@ -813,7 +873,10 @@ impl Round {
                 report.repo_fallback = resolved.repo_fallback;
                 report.dropped = resolved.dropped;
                 self.grant.units = resolved.units;
-                if self.grant.units.is_empty() {
+                self.plan_builtins(languages, repo, me, groups);
+                report.hidden = std::mem::take(&mut self.hidden);
+                // Fails without the probes: test_builtin_probe_runs_once_and_is_cached.
+                if self.grant.units.is_empty() && self.grant.probes.is_empty() {
                     self.publish_results(&mut report, &resolved.unresolved_ids);
                     report.notes = self.abandon();
                     return report;
@@ -898,11 +961,107 @@ impl Round {
         report
     }
 
+    /// The builtin languages of this round (D3a): each decided without
+    /// running (shown or hidden), or a probe added to the grant unless its
+    /// cached result stands. A language the collection did not answer
+    /// (it did not run or did not finish) is left as it was.
+    fn plan_builtins(
+        &mut self,
+        languages: &Languages,
+        collected: Option<u16>,
+        me: u32,
+        groups: &mut SystemGroups,
+    ) {
+        if self.builtins.is_empty() {
+            return;
+        }
+        let environment = self.environment.clone();
+        let vars = Environ::parse(&environment);
+        let folder = plan::repo_folder(&self.grant.cwd, collected);
+        let Ok(repo) = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder)))) else {
+            return;
+        };
+        let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
+        let cwd = builtin_probe::canonical_cwd(&self.grant.cwd);
+        let c = builtin_probe::Context {
+            vars: builtin_probe::whole(&vars),
+            folders: &folders,
+            repo,
+            cwd: cwd.as_deref(),
+            me,
+        };
+        let now = now_ns().unwrap_or(self.publish.clock.now);
+        for language in self.builtins.clone() {
+            let Some(version) = languages.get(language.id.as_bytes()) else {
+                continue;
+            };
+            let p = builtin_probe::plan(language, version, &c, groups);
+            let current = self
+                .current
+                .as_ref()
+                .and_then(|r| r.entry(Origin::Builtin, language.id))
+                .cloned();
+            let current = current.as_ref();
+            let (status, value) = match &p.action {
+                Action::Show(value) => (response::Status::Ok, value.clone()),
+                Action::Hide(why) => {
+                    self.hidden.push(why);
+                    (response::Status::Failed, String::new())
+                }
+                Action::Run(probe) => {
+                    self.run_probe(&p, probe.clone(), current);
+                    continue;
+                }
+            };
+            // The same decision already published is not written again: a
+            // fast or hidden value costs a store write only when it changes.
+            // Fails without it: test_builtin_fast_value_is_written_once.
+            let same = current.is_some_and(|e| {
+                e.policy == p.policy
+                    && e.environment == p.environment
+                    && e.status == status
+                    && e.value == value
+            });
+            if !same {
+                self.decided.push(decided(&p, now, status, value));
+            }
+        }
+    }
+
+    /// Adds `probe` to the grant unless its cached result stands or it does
+    /// not fit the grant frame.
+    fn run_probe(&mut self, p: &Planned, probe: wire::Probe, current: Option<&response::Entry>) {
+        {
+            // Fails without it: test_builtin_probe_runs_once_and_is_cached.
+            let hit = current.is_some_and(|e| {
+                e.hit(
+                    &p.policy,
+                    &p.environment,
+                    self.publish.clock.now,
+                    builtin_probe::PROBE_CACHE_NS,
+                )
+            });
+            if hit {
+                return;
+            }
+            let mut trial = self.grant.clone();
+            trial.probes.push(probe.clone());
+            if wire::encode(&Message::Grant(trial)).is_err() {
+                self.hidden
+                    .push("a builtin probe does not fit the grant frame");
+                return;
+            }
+            self.grant.probes.push(probe);
+            self.probes.push(p.clone());
+        }
+    }
+
     /// Publishes the round's results and, as failed attempts at this time,
     /// the units that could not run (C4a review M2: not resolved, or over
     /// the relay input cap).
     fn publish_results(&self, report: &mut Report, unresolved: &[String]) {
         let mut entries = self.entries(&report.results);
+        entries.extend(self.decided.iter().cloned());
         if let Ok(now) = now_ns() {
             entries.extend(
                 unresolved
@@ -939,6 +1098,10 @@ impl Round {
     /// are D3's): each bound to the unit's policy digest and the original
     /// environment digest it ran with.
     fn entries(&self, results: &[Outcome]) -> Vec<response::Entry> {
+        let probes = results
+            .iter()
+            .filter(|o| o.origin == Origin::Builtin)
+            .filter_map(|o| self.probe_entry(o));
         results
             .iter()
             .filter(|o| o.origin == Origin::Config)
@@ -952,7 +1115,34 @@ impl Round {
                     .1;
                 response::entry_for(unit.id.clone(), unit.digest, env, self.publish.clock.now, o)
             })
+            .chain(probes)
             .collect()
+    }
+
+    /// A probe's entry: its version cut from the first line it printed
+    /// (`Python 3.12.1` shows `3.12.1`); a line with no version is a failed
+    /// probe with no value.
+    fn probe_entry(&self, o: &Outcome) -> Option<response::Entry> {
+        let p = self.probes.get(usize::from(o.index))?;
+        let mut e = response::entry_for(
+            p.language.id.to_owned(),
+            p.policy,
+            p.environment,
+            self.publish.clock.now,
+            o,
+        )?;
+        if e.status == response::Status::Ok {
+            // Fails without it: test_builtin_probe_publishes_only_a_version.
+            match bingsu_core::command::profile::version(p.language.profile, &e.raw) {
+                Some(v) => e.value = v.to_owned(),
+                None => {
+                    e.status = response::Status::Failed;
+                    e.value.clear();
+                    e.raw.clear();
+                }
+            }
+        }
+        Some(e)
     }
 
     /// Publishes `entries` into the command response of this context and
@@ -975,6 +1165,22 @@ impl Round {
             }
             super::collection_store::Admission::Deferred(_) => Err(StoreError::Busy),
         }
+    }
+}
+
+/// A builtin entry decided without running anything, at `now`.
+fn decided(p: &Planned, now: u64, status: response::Status, value: String) -> response::Entry {
+    response::Entry {
+        origin: Origin::Builtin,
+        id: p.language.id.to_owned(),
+        policy: p.policy,
+        environment: p.environment,
+        pattern: [0; 32],
+        attempted_at: now,
+        completed_at: now,
+        status,
+        raw: value.clone(),
+        value,
     }
 }
 

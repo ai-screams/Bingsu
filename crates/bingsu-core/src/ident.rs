@@ -257,7 +257,7 @@ mod tests {
             .iter()
             .map(|d| (d.id, d.fields.iter().map(|f| f.name).collect()))
             .collect();
-        let want: [(&str, &[&str]); 9] = [
+        let want: [(&str, &[&str]); 13] = [
             ("char", &["failed", "vicmd"]),
             ("dir", &["in_repo", "path", "readonly"]),
             ("duration", &["ms"]),
@@ -281,8 +281,12 @@ mod tests {
                     "untracked",
                 ],
             ),
+            ("go", &["version"]),
             ("host", &["name", "root", "ssh", "user"]),
             ("jobs", &["count"]),
+            ("node", &["version"]),
+            ("python", &["version"]),
+            ("rust", &["version"]),
             ("status", &["code", "pipestatus", "signal"]),
             ("time", &["text"]),
             ("venv", &["name"]),

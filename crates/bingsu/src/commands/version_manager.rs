@@ -2,10 +2,10 @@
 //! It gathers the facts the pure rules (`bingsu_core::collection::manager`)
 //! decide on: which manager's shim the language's command is, the manager's
 //! folders from the shell environment, rustup's settings file and one
-//! install check. It runs in the helper before its filter, beside the
-//! executable lookup, once the marker is staged (D2 ruling Q1; the marker is
-//! installed only after the filter); the collector's read confinement is not
-//! widened.
+//! install check. It runs in the helper's command round after the
+//! marker is installed (D3a), beside the executable lookup of config units:
+//! the helper's filter refuses only process and signal calls, so the reads
+//! here pass it; the collector's read confinement is not widened.
 //!
 //! Nothing here runs a program. A wrong answer can only show a wrong
 //! version without running it or run the version command (D3) when it was
@@ -156,11 +156,12 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
 }
 
 /// Which shim `folder` (the first sanitized `PATH` folder holding the
-/// command's name) is. `canonical`, when the lookup resolved the command,
+/// command's name) is; `command` is the manager the language has a
+/// resolver for (none for Node and Go, whose managers have none). `canonical`, when the lookup resolved the command,
 /// is its canonical file: rustup installed by a package manager links
 /// `rustc` to `rustup` elsewhere.
 pub(crate) fn classify(
-    command: Manager,
+    command: Option<Manager>,
     folder: &Path,
     canonical: Option<&Path>,
     homes: &Homes,
@@ -169,7 +170,7 @@ pub(crate) fn classify(
     let same = |candidate: &Path| here.is_some() && identity(candidate) == here;
     // Fails without it: classify_table (pyenv shims folder, also through a
     // link).
-    if command == Manager::Pyenv
+    if command == Some(Manager::Pyenv)
         && homes
             .pyenv
             .as_ref()
@@ -178,7 +179,7 @@ pub(crate) fn classify(
         return Shim::Manager(Manager::Pyenv);
     }
     // Fails without it: classify_table (cargo bin folder).
-    if command == Manager::Rustup
+    if command == Some(Manager::Rustup)
         && homes
             .cargo
             .as_ref()
@@ -191,7 +192,7 @@ pub(crate) fn classify(
         return Shim::Unsupported;
     }
     // Fails without it: classify_table (a linked rustup).
-    if command == Manager::Rustup
+    if command == Some(Manager::Rustup)
         && canonical
             .and_then(Path::file_name)
             .is_some_and(|name| name == "rustup" || name == "rustup-init")
@@ -335,9 +336,25 @@ pub(crate) fn installed(
     }
 }
 
+/// What the install check saw, for a choice that runs the manager's own file.
+struct Checked {
+    install: Install,
+    home: PathBuf,
+    folder: Vec<u8>,
+    value: Vec<u8>,
+    host: Option<Vec<u8>>,
+}
+
+/// The decision and, when the plan reached the install check, what it saw.
+struct Resolved {
+    decision: Decision,
+    checked: Option<Checked>,
+}
+
 /// One language's decision, given what its command is. `command` is the
-/// command name pyenv's version must hold in its `bin` (D3 runs it); `me`
-/// is the helper's user.
+/// command name pyenv's version must hold in its `bin`; `me` is the helper's
+/// user. The round uses [`choose`]; the D2 tests pin the rules through this.
+#[cfg(test)]
 pub(crate) fn decide(
     shim: Shim,
     vars: Option<&Environ<'_>>,
@@ -347,11 +364,36 @@ pub(crate) fn decide(
     cwd: &[u8],
     me: u32,
 ) -> Option<Decision> {
+    resolve(shim, vars, homes, selection, command, cwd, me).map(|r| r.decision)
+}
+
+fn home_path(manager: Manager, homes: &Homes) -> Option<&Path> {
+    match manager {
+        Manager::Rustup => homes.rustup.as_deref(),
+        Manager::Pyenv => homes.pyenv.as_deref(),
+    }
+}
+
+fn resolve(
+    shim: Shim,
+    vars: Option<&Environ<'_>>,
+    homes: &Homes,
+    selection: Selection<'_>,
+    command: &[u8],
+    cwd: &[u8],
+    me: u32,
+) -> Option<Resolved> {
+    let done = |decision| {
+        Some(Resolved {
+            decision,
+            checked: None,
+        })
+    };
     let manager = match shim {
         Shim::Manager(manager) => manager,
         // The caller hides the value and reports the shim (U-12 R2).
         Shim::Unsupported => return None,
-        Shim::None => return Some(Decision::Run(None)),
+        Shim::None => return done(Decision::Run(None)),
     };
     // Fails without it: decide_reads_the_facts (an override variable in the
     // env frame).
@@ -365,23 +407,20 @@ pub(crate) fn decide(
     // Fails without it: decide_reads_the_facts (no settings read for an
     // override).
     if let Some(decision) = manager::early(override_set, selection) {
-        return Some(decision);
+        return done(decision);
     }
-    let path = match manager {
-        Manager::Rustup => homes.rustup.as_deref(),
-        Manager::Pyenv => homes.pyenv.as_deref(),
-    };
+    let path = home_path(manager, homes);
     let home = match path.map(|p| open_home(p, me)) {
         Some(Ok(home)) => Some(home),
         // Fails without it: decide_reads_the_facts (an untrusted home).
-        Some(Err(Install::Untrusted)) => return Some(Decision::Hidden(Hidden::Untrusted)),
+        Some(Err(Install::Untrusted)) => return done(Decision::Hidden(Hidden::Untrusted)),
         // pyenv with no root has nothing installed: the plan goes on and its
         // install check answers absent (H1's absent: the command runs with
         // the selected name).
         _ if manager == Manager::Pyenv => None,
         // rustup with no home has no settings: overrides and the host are
         // unknown, so no name is known to select.
-        _ => return Some(Decision::Run(None)),
+        _ => return done(Decision::Run(None)),
     };
     let settings = match (manager, &home) {
         (Manager::Rustup, Some(home)) => read_settings(home, cwd, me),
@@ -394,8 +433,8 @@ pub(crate) fn decide(
         settings: &settings,
         build_host: BUILD_HOST,
     };
-    Some(match manager::plan(&facts) {
-        Plan::Done(decision) => decision,
+    match manager::plan(&facts) {
+        Plan::Done(decision) => done(decision),
         Plan::Check {
             folder,
             value,
@@ -408,9 +447,169 @@ pub(crate) fn decide(
                 Some(home) => installed(home, &folder, &value, host.as_deref(), command, me),
                 None => Install::Absent,
             };
-            manager::installed(&value, install)
+            Some(Resolved {
+                decision: manager::installed(&value, install),
+                checked: path.map(|home| Checked {
+                    install,
+                    home: home.to_path_buf(),
+                    folder,
+                    value,
+                    host,
+                }),
+            })
         }
-    })
+    }
+}
+
+/// What the helper does about one builtin language (D3a).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Show this version; nothing runs.
+    Fast(Vec<u8>),
+    /// Run the command the sanitized `PATH` resolved (not a shim).
+    RunFound,
+    /// Run this file of the manager's own install directly (never its shim
+    /// or proxy), with the toolchain name for Rust. The caller checks it
+    /// with the executable rules before it reaches a grant.
+    RunManaged {
+        executable: PathBuf,
+        toolchain: Option<Vec<u8>>,
+    },
+    /// Show nothing; the reason goes to the log.
+    Hidden(&'static str),
+    /// A manager without a resolver (U-12 R2): hidden, with a diagnostic.
+    Unsupported,
+}
+
+/// The manager's own file for `value`: `versions/<v>/bin/<command>` (pyenv)
+/// or `toolchains/<v>-<host>/bin/rustc` (rustup).
+fn managed_file(manager: Manager, c: &Checked, command: &[u8]) -> PathBuf {
+    let name = match &c.host {
+        Some(host) => [c.value.as_slice(), b"-", host].concat(),
+        None => c.value.clone(),
+    };
+    let leaf = match manager {
+        Manager::Pyenv => command,
+        Manager::Rustup => b"rustc",
+    };
+    c.home
+        .join(OsStr::from_bytes(&c.folder))
+        .join(OsStr::from_bytes(&name))
+        .join("bin")
+        .join(OsStr::from_bytes(leaf))
+}
+
+/// The manager's override variable when it alone names a usable version
+/// (D3 rulings Q1 and Q2): a grammar-checked name that is not pyenv's
+/// `system` (a `:` list never passes the grammar), with none of the
+/// manager's other precedence variables set.
+fn override_value<'a>(manager: Manager, vars: &Environ<'a>) -> Option<&'a [u8]> {
+    let (first, rest) = manager.precedence_variables().split_first()?;
+    let value = vars.get(first)?;
+    // Fails without each: plan_follows_the_rulings (`system`, a path-shaped
+    // name, PYENV_HOOK_PATH beside PYENV_VERSION).
+    (version_ok(value) && value != b"system" && !rest.iter().any(|name| vars.get(name).is_some()))
+        .then_some(value)
+}
+
+/// One builtin language's choice (D3 rulings Q1, Q2 and the D3a acceptance
+/// rules): what the resolver decided, turned into what runs. A manager's
+/// shim or proxy never runs: a decision to run with no usable name, a
+/// version that is not installed or an untrusted tree is hidden.
+pub(crate) fn choose(
+    shim: Shim,
+    vars: Option<&Environ<'_>>,
+    homes: &Homes,
+    selection: Selection<'_>,
+    command: &[u8],
+    cwd: &[u8],
+    me: u32,
+) -> Choice {
+    let manager = match shim {
+        Shim::Unsupported => return Choice::Unsupported,
+        Shim::None => return Choice::RunFound,
+        Shim::Manager(manager) => manager,
+    };
+    if let Some(value) = vars.and_then(|v| override_value(manager, v)) {
+        return run_override(manager, homes, value, command, cwd, me);
+    }
+    let Some(r) = resolve(shim, vars, homes, selection, command, cwd, me) else {
+        return Choice::Unsupported;
+    };
+    match (r.decision, r.checked) {
+        (Decision::Fast(value), _) => Choice::Fast(value),
+        (Decision::Hidden(Hidden::ToolchainPath), _) => Choice::Hidden("a path toolchain"),
+        (Decision::Hidden(Hidden::Untrusted), _) => Choice::Hidden("an untrusted manager tree"),
+        // Installed under a name that is not itself the version (`stable`,
+        // `3.12`): run that install's own file.
+        // Fails without it: plan_follows_the_rulings (a channel runs).
+        (
+            Decision::Run(Some(_)),
+            Some(
+                c @ Checked {
+                    install: Install::Present,
+                    ..
+                },
+            ),
+        ) => Choice::RunManaged {
+            executable: managed_file(manager, &c, command),
+            toolchain: (manager == Manager::Rustup).then(|| c.value.clone()),
+        },
+        (Decision::Run(Some(_)), _) => Choice::Hidden("the selected version is not installed"),
+        // Fails without it: plan_follows_the_rulings (no name: hidden,
+        // never the shim).
+        (Decision::Run(None), _) => Choice::Hidden("the manager's choice is not known"),
+    }
+}
+
+/// An override variable's version: installed and trusted, it runs; otherwise
+/// hidden.
+fn run_override(
+    manager: Manager,
+    homes: &Homes,
+    value: &[u8],
+    command: &[u8],
+    cwd: &[u8],
+    me: u32,
+) -> Choice {
+    let Some(path) = home_path(manager, homes) else {
+        return Choice::Hidden("the manager's folder is not known");
+    };
+    let home = match open_home(path, me) {
+        Ok(home) => home,
+        Err(_) => return Choice::Hidden("the manager's folder is missing or untrusted"),
+    };
+    let (folder, host): (&[u8], Option<Vec<u8>>) = match manager {
+        Manager::Pyenv => (b"versions", None),
+        Manager::Rustup => {
+            let host = match read_settings(&home, cwd, me) {
+                Settings::Known {
+                    host: Some(host), ..
+                } => host,
+                _ => BUILD_HOST.to_vec(),
+            };
+            (b"toolchains", Some(host))
+        }
+    };
+    let leaf = (manager == Manager::Pyenv).then_some(command);
+    // Fails without it: plan_follows_the_rulings (an override that is not
+    // installed is hidden).
+    match installed(&home, folder, value, host.as_deref(), leaf, me) {
+        Install::Present => {
+            let c = Checked {
+                install: Install::Present,
+                home: path.to_path_buf(),
+                folder: folder.to_vec(),
+                value: value.to_vec(),
+                host,
+            };
+            Choice::RunManaged {
+                executable: managed_file(manager, &c, command),
+                toolchain: (manager == Manager::Rustup).then(|| value.to_vec()),
+            }
+        }
+        _ => Choice::Hidden("the override's version is not installed or untrusted"),
+    }
 }
 
 #[cfg(test)]
@@ -550,46 +749,53 @@ mod tests {
             pyenv: Some(missing.clone()),
             ..Homes::default()
         };
-        let cases: [(Manager, PathBuf, Option<PathBuf>, &Homes, Shim); 10] = [
+        type Case<'a> = (Option<Manager>, PathBuf, Option<PathBuf>, &'a Homes, Shim);
+        let cases: [Case<'_>; 13] = [
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 at(".pyenv/shims"),
                 None,
                 &h,
                 Shim::Manager(Manager::Pyenv),
             ),
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 at("alias"),
                 None,
                 &h,
                 Shim::Manager(Manager::Pyenv),
             ),
-            (Manager::Rustup, at(".pyenv/shims"), None, &h, Shim::None),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
+                at(".pyenv/shims"),
+                None,
+                &h,
+                Shim::None,
+            ),
+            (
+                Some(Manager::Rustup),
                 at(".cargo/bin"),
                 None,
                 &h,
                 Shim::Manager(Manager::Rustup),
             ),
-            (Manager::Pyenv, at(".cargo/bin"), None, &h, Shim::None),
+            (Some(Manager::Pyenv), at(".cargo/bin"), None, &h, Shim::None),
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 at(".asdf/shims"),
                 None,
                 &h,
                 Shim::Unsupported,
             ),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
                 at(".volta/bin"),
                 None,
                 &h,
                 Shim::Unsupported,
             ),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
                 at("usr/bin"),
                 Some(PathBuf::from(
                     "/opt/homebrew/Cellar/rustup/1.29.2/bin/rustup-init",
@@ -598,17 +804,27 @@ mod tests {
                 Shim::Manager(Manager::Rustup),
             ),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
                 at("usr/bin"),
                 Some(PathBuf::from("/usr/lib/rust/bin/rustc")),
                 &h,
                 Shim::None,
             ),
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 missing.join("shims"),
                 None,
                 &lone,
+                Shim::None,
+            ),
+            // Node and Go: only the managers without a resolver are known.
+            (None, at(".volta/bin"), None, &h, Shim::Unsupported),
+            (None, at(".pyenv/shims"), None, &h, Shim::None),
+            (
+                None,
+                at("usr/bin"),
+                Some(PathBuf::from("/usr/lib/rustup/bin/rustup")),
+                &h,
                 Shim::None,
             ),
         ];

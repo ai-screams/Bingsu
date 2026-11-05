@@ -502,7 +502,15 @@ impl CollectionStore {
         staged.install(self.dir(), self.me, COMMAND_STAGE, COMMAND, COMMAND_MAX)?;
         Ok(merged)
     }
+    /// A result without an update makes no record (D1 security review L4,
+    /// D3a ruling Q-B): the newest record is the one the prompt reads, and
+    /// one without updates would leave every segment of the previous record
+    /// pending. Its language results reach the round through the helper.
     pub(crate) fn publish(&mut self, result: &Completed) -> Result<(), StoreError> {
+        // Fails without it: a_result_without_updates_makes_no_record.
+        if result.updates.is_empty() {
+            return Ok(());
+        }
         self.publish_inner(result, &mut |_| {})
     }
     #[cfg(test)]

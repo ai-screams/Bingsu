@@ -75,3 +75,37 @@ fn probe_toolchain_is_a_version_name() {
     let bad = wire::encode(&grant(b"../x")).unwrap();
     assert_eq!(wire::decode(&bad), Err(Error::Utf8));
 }
+
+// 프로브 출력에서 버전만 꺼낸다. 이것을 실패시키는 것: 언어별 접두(`v`, `Python `, `rustc `, `go version go`) 검사를
+// 지우는 것, 숫자로 시작하는지와 버전 문법 검사를 지우는 것(`vtrue`, 경로 꼴), 다른 프로필의 출력을 받는 것.
+#[test]
+fn probe_output_yields_the_version() {
+    let v = profile::version;
+    assert_eq!(v(PYTHON, "Python 3.11.2"), Some("3.11.2"));
+    assert_eq!(v(NODE, "v18.20.4"), Some("18.20.4"));
+    assert_eq!(
+        v(RUST, "rustc 1.98.1 (abcdef012 2026-09-01)"),
+        Some("1.98.1")
+    );
+    assert_eq!(v(GO, "go version go1.19.8 linux/arm64"), Some("1.19.8"));
+    assert_eq!(v(NODE, "18.20.4"), None);
+    assert_eq!(v(NODE, "vtrue"), None);
+    assert_eq!(v(NODE, "v1/2"), None);
+    assert_eq!(v(PYTHON, "Pythonx 3.11.2"), None);
+    assert_eq!(v(PYTHON, "3.11.2"), None);
+    assert_eq!(v(RUST, "cargo 1.98.1"), None);
+    assert_eq!(v(GO, "go version devel"), None);
+    assert_eq!(v(GO, "gx version go1.19.8"), None);
+    assert_eq!(v(0, "1.0.0"), None);
+}
+
+// 내장 항목의 요약값은 부분 목록의 경계까지 묶는다. 이것을 실패시키는 것: 길이 접두를 빼는 것(["ab","c"]와
+// ["a","bc"]가 같아짐), kind나 프로필을 빼는 것.
+#[test]
+fn builtin_digest_binds_every_part() {
+    let d = profile::digest;
+    assert_ne!(d(RUST, 1, &[b"ab", b"c"]), d(RUST, 1, &[b"a", b"bc"]));
+    assert_ne!(d(RUST, 1, &[b"a"]), d(RUST, 2, &[b"a"]));
+    assert_ne!(d(RUST, 1, &[b"a"]), d(GO, 1, &[b"a"]));
+    assert_eq!(d(RUST, 1, &[b"a"]), d(RUST, 1, &[b"a"]));
+}

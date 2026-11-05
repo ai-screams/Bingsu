@@ -135,6 +135,36 @@ M6_GATES = {
         "A unit that does not run shows why, with the diagnostic code",
         "W411 warns about exactly the first lines the executor refuses, with the reason",
     ),
+    # M6 D3a: the builtin language versions (D3 ruling Q7: the structural
+    # clauses; the multi-version and network observations are F1's).
+    "GATE-LANG-PY": (
+        "A Python probe runs exactly the resolved python with -I -S --version and an empty environment",
+    ),
+    "GATE-LANG-GO": (
+        "A Go probe runs version with HOME at the neutral folder and GOTOOLCHAIN=local",
+    ),
+    "GATE-LANG-RUST": (
+        "A Rust probe runs the selected toolchain's own rustc, never the rustup proxy, with RUSTUP_AUTO_INSTALL=0 "
+        "and the resolved toolchain name",
+    ),
+    "GATE-LANG-NODE": (
+        "A drawn Node segment runs the real node once, publishes its version and does not run it again within the "
+        "probe cache",
+    ),
+    "GATE-LANG-TOML": (
+        "A path toolchain in rust-toolchain.toml is hidden and never run",
+    ),
+    "GATE-LANG-FAST": (
+        "An installed version under a resolved manager's shim is shown without running anything and an unchanged "
+        "value is not written again",
+    ),
+    "GATE-LANG-SHIM": (
+        "A shim of a manager without a resolver is hidden, never run",
+    ),
+    "GATE-LANG-INSTALL": (
+        "A selected version that is not installed, or a manager choice that is not known, is hidden, never run "
+        "through a shim or proxy",
+    ),
 }
 GATE_IDS = M3D_GATE_IDS + tuple(M4_GATES) + tuple(M6_GATES)
 
@@ -166,6 +196,8 @@ M3D_SUPPLEMENTARY.update({"GATE-CMD-GRANT.2-pipe": "M6", "GATE-CMD-SPAWN.1-not_r
 M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run")})
 # 이것을 실패시키는 것: merged-/usr `/bin/env` 별칭 행을 지우고 CLI 주 행 하나로 W411을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-EXPLAIN.4-alias"] = "M6"
+# 이것을 실패시키는 것: Rust 프로필 환경 행이나 버전 없는 첫 줄 행을 지우고 주 행 하나로 닫는 것.
+M3D_SUPPLEMENTARY.update({"GATE-LANG-RUST.1-profile": "M6", "GATE-LANG-NODE.1-version": "M6"})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
@@ -297,8 +329,8 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
-    # 14 M3d, 5 M4, the 2 M6 C2 gates and the E2 explain gate.
-    assert len(GATE_IDS) == 22
+    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate and the 8 D3a language gates.
+    assert len(GATE_IDS) == 30
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)
@@ -1052,8 +1084,9 @@ PTY_VERSIONS = {"min-u22": {"bash=5.1", "zsh=5.8"}, "min-d12": {"fish=3.6"}, "cu
 # finds the place that runs the other two.
 PTY_IGNORED = {"tests/shell/test_collector_no_spawn_macos.py", "tests/shell/test_collector_security.py",
                "tests/shell/test_gate_acceptance.py", "tests/shell/test_prompt_trace_budget.py",
-               "tests/shell/test_command_round.py", "tests/shell/test_command_cgroup.py"}
-# The command rounds are shell-independent and need git, which the minimum images lack: they run
+               "tests/shell/test_command_round.py", "tests/shell/test_command_cgroup.py",
+               "tests/shell/test_builtin_round.py"}
+# The command rounds (and the builtin rounds beside them, which need the version stub) are shell-independent and need git, which the minimum images lack: they run
 # in the filter-calls release step and the macOS gate step, which assert_command_round_home pins.
 # The command cgroup file runs in its own two cells (command-cgroup), which
 # assert_command_cgroup_cells pins.

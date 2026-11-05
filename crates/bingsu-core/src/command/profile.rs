@@ -78,3 +78,42 @@ pub fn environment(id: u8, toolchain: Option<&[u8]>, home: &[u8]) -> Option<Vec<
     }
     Some(out)
 }
+
+/// The version a probe printed, from the sanitized first line of its stdout:
+/// `Python 3.11.2`, `v18.20.4`, `rustc 1.98.1 (… …)`, `go version go1.19.8
+/// linux/arm64`. Only a token that passes the version grammar and begins
+/// with a digit is a version; anything else is no value.
+pub fn version(id: u8, line: &str) -> Option<&str> {
+    let mut words = line.split(' ');
+    let token = match id {
+        // Fails without each prefix: probe_output_yields_the_version.
+        NODE => words.next()?.strip_prefix('v')?,
+        PYTHON => words.nth(1).filter(|_| line.starts_with("Python "))?,
+        RUST => words.nth(1).filter(|_| line.starts_with("rustc "))?,
+        GO => words
+            .nth(2)
+            .filter(|_| line.starts_with("go version "))?
+            .strip_prefix("go")?,
+        _ => return None,
+    };
+    // Fails without it: probe_output_yields_the_version (`vtrue`, a
+    // `/`-name).
+    (token.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) && version_ok(token.as_bytes()))
+        .then_some(token)
+}
+
+/// The digest a builtin entry is bound to (spec "cache"): the profile, how
+/// the value was decided (`kind`, the helper's) and each part that decided
+/// it, each with its length, so no two lists collide.
+pub fn digest(id: u8, kind: u8, parts: &[&[u8]]) -> [u8; 32] {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"bingsu-builtin-policy-v1\0");
+    b.push(id);
+    b.push(kind);
+    b.extend_from_slice(&(parts.len() as u64).to_le_bytes());
+    for p in parts {
+        b.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        b.extend_from_slice(p);
+    }
+    crate::collection::cwd_hash::sha256(&b)
+}

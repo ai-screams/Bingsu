@@ -248,6 +248,9 @@ const fn t(max_cells: u16) -> FieldType {
 use FieldType::{Bool, Count, Duration, Int};
 
 /// Public builtin field names, including the git stage schema.
+/// The four language segments (go, node, python, rust; plan D3a) carry one
+/// `version` text, at most the version grammar's 32 bytes; drawing them is
+/// D3b's.
 /// Names follow one rule: one concept of another tool, one field (starship
 /// `git_status` variables ahead, behind, staged, modified, untracked,
 /// conflicted, stashed). Sorted by id; fields sorted by name.
@@ -293,6 +296,11 @@ pub const BUILTIN: &[SegmentDecl] = &[
         ],
     },
     SegmentDecl {
+        id: "go",
+        role: "fg",
+        fields: &[f("version", t(32))],
+    },
+    SegmentDecl {
         id: "host",
         role: "host",
         fields: &[
@@ -306,6 +314,21 @@ pub const BUILTIN: &[SegmentDecl] = &[
         id: "jobs",
         role: "jobs",
         fields: &[f("count", Count)],
+    },
+    SegmentDecl {
+        id: "node",
+        role: "fg",
+        fields: &[f("version", t(32))],
+    },
+    SegmentDecl {
+        id: "python",
+        role: "fg",
+        fields: &[f("version", t(32))],
+    },
+    SegmentDecl {
+        id: "rust",
+        role: "fg",
+        fields: &[f("version", t(32))],
     },
     SegmentDecl {
         id: "status",
@@ -695,8 +718,12 @@ duration duration: ms=Duration
 git git.branch: ahead=Count behind=Count branch=Text { max_cells: 256 } commit=Text { max_cells: 16 } \
 conflicted=Count detached=Bool filtered=Bool modified=Count no_repo=Bool operation=Text { max_cells: 16 } partial=Bool stage=Text { max_cells: 1 } staged=Count stash=Count \
 untracked=Count
+go fg: version=Text { max_cells: 32 }
 host host: name=Text { max_cells: 64 } root=Bool ssh=Bool user=Text { max_cells: 64 }
 jobs jobs: count=Count
+node fg: version=Text { max_cells: 32 }
+python fg: version=Text { max_cells: 32 }
+rust fg: version=Text { max_cells: 32 }
 status status: code=Int pipestatus=Text { max_cells: 64 } signal=Text { max_cells: 16 }
 time fg: text=Text { max_cells: 32 }
 venv venv: name=Text { max_cells: 64 }

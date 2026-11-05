@@ -100,6 +100,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     };
     let runtime_path = request.runtime.path.clone();
     let collected_repo: std::sync::Arc<std::sync::Mutex<Option<u16>>> = Default::default();
+    // This round's language answers, by the asked language's id (U-3 L2).
+    let collected_languages: std::sync::Arc<std::sync::Mutex<command_grant::Languages>> =
+        Default::default();
     let mut command_round = None;
     let mut command_skip = None;
     let mut round_marker = None;
@@ -147,9 +150,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 // test fails without this block yet: the detect_files key opens
                 // in D3, which tests it end to end with the key (ruling Q8).
                 if let Some((config, _)) = display {
-                    request.languages = collection::language::user_queries(&config.exec_units);
+                    // After the builtin languages: a user query that does
+                    // not fit drops the user queries, never the builtins.
+                    let builtins = request.languages.len();
+                    request
+                        .languages
+                        .extend(collection::language::user_queries(&config.exec_units));
                     if request.encode_body().is_err() {
-                        request.languages.clear();
+                        request.languages.truncate(builtins);
                     }
                 }
                 collection_runtime = Some(context.runtime.try_clone()?);
@@ -187,6 +195,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 // The repository root this collection reports for the shell's
                 // folder, for the command round's PATH rules (C2 ruling J9).
                 let slot = collected_repo.clone();
+                let languages = collected_languages.clone();
                 Ok::<_, super::snapshot_store::StoreError>(Ok(Some(job.start(Box::new(
                     move |result| {
                         let repo = result
@@ -194,6 +203,11 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                             .iter()
                             .find_map(|u| u.facts.as_ref())
                             .and_then(|f| f.repo_component);
+                        // Before the record: a round with only language
+                        // answers publishes none, and its answers still go
+                        // to the builtin probes (D3a ruling Q-B).
+                        *languages.lock().unwrap_or_else(|e| e.into_inner()) =
+                            command_grant::Languages::from_result(&result);
                         store.publish(&result)?;
                         *slot.lock().unwrap_or_else(|e| e.into_inner()) = repo;
                         Ok(())
@@ -224,6 +238,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 exe,
                 me: sys::current_uid(),
                 helper_deadline: _watchdog.expires_ns(),
+                builtins: &drawn_builtins(config, &e),
             };
             match command_grant::prepare(&inputs) {
                 Ok(round) => {
@@ -298,7 +313,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     report(&mut groups, LogLevel::Info, command_grant::NEUTRAL_REFUSED);
                 }
                 let repo = *collected_repo.lock().unwrap_or_else(|e| e.into_inner());
-                let done = round.grant(permit, repo, sys::current_uid(), &mut groups);
+                let languages = collected_languages
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let done = round.grant(permit, repo, &languages, sys::current_uid(), &mut groups);
+                for why in &done.hidden {
+                    report(&mut groups, LogLevel::Info, why);
+                }
                 if done.unresolved > 0 {
                     report(
                         &mut groups,
@@ -647,6 +669,21 @@ pub(super) fn detach() -> Result<(), ()> {
     }
 }
 
+/// The builtin languages whose segments this width draws (D3 ruling Q6),
+/// the same ones the collection request asks about; none on a redraw.
+fn drawn_builtins(
+    config: &bingsu_core::config::compile::CompiledConfig,
+    e: &bingsu_core::envelope::Envelope,
+) -> Vec<&'static super::builtin_probe::Language> {
+    if e.redraw {
+        return Vec::new();
+    }
+    collection::builtin_languages(collection::selection::builtin_mask(config, e.width))
+        .iter()
+        .filter_map(|q| super::builtin_probe::language(&q.id))
+        .collect()
+}
+
 pub(crate) fn selected_request(
     catalog: &collection::selection::Catalog<'_>,
     e: &bingsu_core::envelope::Envelope,
@@ -659,7 +696,14 @@ pub(crate) fn selected_request(
     let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) else {
         return Ok(None);
     };
-    collection::request(
+    // The builtin language segments this width draws (D3a ruling Q6); a
+    // redraw collects nothing.
+    let languages = if e.redraw {
+        Vec::new()
+    } else {
+        collection::builtin_languages(collection::selection::builtin_mask(config, e.width))
+    };
+    collection::request_with_languages(
         catalog,
         collection::wire::Binding {
             path_query: collection::selection::path_query(config, e.width, cwd, e.home.as_deref()),
@@ -675,6 +719,7 @@ pub(crate) fn selected_request(
         },
         collection::wire::M3B_REQUEST_ID,
         50,
+        languages,
     )
     .map_err(|_| super::snapshot_store::StoreError::Unsafe)
 }

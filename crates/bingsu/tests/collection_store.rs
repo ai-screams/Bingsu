@@ -3253,3 +3253,17 @@ mod command_store {
         }
     }
 }
+
+// D1 보안 리뷰 L4와 D3a 판정 Q-B: 갱신 없는 결과(언어 결과만 있는 회차)는 기록을 만들지 않는다. 앞선 기록이 그대로
+// 가장 새 기록으로 남는다. 이것을 실패시키는 것: publish의 갱신 없음 검사를 지우는 것.
+#[test]
+fn a_result_without_updates_makes_no_record() {
+    let f = Fixture::new("no-updates");
+    f.publish(b"kept");
+    let before = fs::read(f.path().join("response")).unwrap();
+    let mut empty = completed(&f.binding, b"");
+    empty.updates.clear();
+    f.acquire().unwrap().publish(&empty).unwrap();
+    assert_eq!(fs::read(f.path().join("response")).unwrap(), before);
+    assert!(!f.path().join("previous").exists());
+}

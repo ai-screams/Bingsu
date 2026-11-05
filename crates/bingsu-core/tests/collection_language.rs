@@ -768,16 +768,19 @@ x = 1
     }
 }
 
-// 보안 리뷰 L4: 갱신 없이 언어 결과만 있는 회차는 기록을 만들지 않는다. 그런 기록이 가장 새 기록이 되면 prompt는
-// 앞선 기록의 git 칸까지 모두 대기로 읽는다(merge가 갱신 없는 응답을 대기로 채움). 이것을 실패시키는 것: finish가
-// 언어 결과만으로 Completed를 만드는 것.
+// D3a 판정 Q-B: 갱신 없이 언어 결과만 있는 회차도 결과(Completed)를 낸다. helper가 이번 회차의 내장 조사에 넘기기
+// 때문이다. 기록은 저장소가 갱신 있을 때만 만든다(보안 리뷰 L4의 계약, collection_store 시험이 고정). 둘 다 없으면
+// 결과도 없다. 이것을 실패시키는 것: finish가 언어 결과만 있는 회차를 None으로 보내는 것, 빈 회차에 결과를 내는 것.
 #[test]
-fn language_results_alone_make_no_record() {
+fn language_results_alone_reach_the_round() {
     let r = request(vec![BUILTIN[1].query()]);
+    let t = transcript(&r);
+    assert_eq!(t.finish(EndReason::Deadline, clock(&r)), Ok(None));
     let mut t = transcript(&r);
     t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
         .unwrap();
-    assert_eq!(t.finish(EndReason::Deadline, clock(&r)), Ok(None));
+    let c = t.finish(EndReason::Deadline, clock(&r)).unwrap().unwrap();
+    assert_eq!((c.updates.len(), c.languages.len()), (0, 1));
     let mut t = transcript(&r);
     t.accept(frame(&r, Kind::Update, &update())).unwrap();
     t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
@@ -850,5 +853,37 @@ fn path_toolchain_is_its_own_answer() {
             .unwrap()
             .languages,
         [result]
+    );
+}
+
+// 그려진 내장 언어 segment만 각각 묻고(D3 판정 Q6), worker mask가 0이어도 언어가 있으면 요청을 만든다. 이것을
+// 실패시키는 것: builtin_languages에서 그려진 비트 검사를 지우는 것(그리지 않은 언어까지 물음), mask가 0이면
+// 언어가 있어도 요청을 만들지 않는 것.
+#[test]
+fn requests_follow_language_segments() {
+    use bingsu_core::collection::{builtin_languages, request_with_languages, selection::PRODUCT};
+    let bit = |id: &str| {
+        let i = bingsu_core::field::BUILTIN
+            .binary_search_by(|d| d.id.cmp(id))
+            .unwrap();
+        1u32 << i
+    };
+    let ids =
+        |drawn| -> Vec<Vec<u8>> { builtin_languages(drawn).into_iter().map(|q| q.id).collect() };
+    assert_eq!(ids(0), Vec::<Vec<u8>>::new());
+    assert_eq!(ids(bit("node")), vec![b"node".to_vec()]);
+    assert_eq!(
+        ids(bit("rust") | bit("python") | bit("git")),
+        vec![b"python".to_vec(), b"rust".to_vec()]
+    );
+    let mut binding = request(vec![]).binding;
+    binding.mask = 0;
+    let made = |languages| {
+        request_with_languages(&PRODUCT, binding.clone(), M3B_REQUEST_ID, 50, languages).unwrap()
+    };
+    assert!(made(vec![]).is_none());
+    assert_eq!(
+        made(builtin_languages(bit("go"))).unwrap().languages.len(),
+        1
     );
 }

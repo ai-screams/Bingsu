@@ -301,6 +301,30 @@ pub fn lookup_open(
     }
 }
 
+/// `lookup_open` for a bare name, also naming the folder whose file decided
+/// (its index in `folders`): a builtin probe classifies that folder as a
+/// version manager's shim folder or not (D3a), so the folder judged is the
+/// one the file to run came from.
+pub fn lookup_open_in(
+    name: &[u8],
+    folders: &[PathBuf],
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Result<(usize, Found, Checked), Miss> {
+    let Name::Search(n) = rule::name(name) else {
+        return Err(Miss::Refused);
+    };
+    for (at, folder) in folders.iter().enumerate() {
+        match resolve_open(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
+            Err(Miss::Absent) => continue,
+            Ok((found, checked)) => return Ok((at, found, checked)),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(Miss::Absent)
+}
+
 /// One executable path: walked, then judged with the group answers kept,
 /// so a group-writable target carries the pin its group was cleared for.
 /// The canonical file must be outside `repo`, wherever the walk started.
