@@ -49,6 +49,16 @@ fn config(text: &str) -> String {
 }
 
 fn left<L: LayoutView>(c: &L, shell: (Shell, &str), width: u16) -> String {
+    left_with(c, shell, width, &[])
+}
+
+/// `left` with the values of the config's command segments.
+fn left_with<L: LayoutView>(
+    c: &L,
+    shell: (Shell, &str),
+    width: u16,
+    commands: &[Option<&str>],
+) -> String {
     let args: Vec<Vec<u8>> = [
         "--ctx",
         "1",
@@ -71,13 +81,14 @@ fn left<L: LayoutView>(c: &L, shell: (Shell, &str), width: u16) -> String {
     let argv: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
     let e = envelope::parse(&argv).unwrap();
     let mut out = Vec::new();
-    front::render_selected(
+    front::render_selected_with_values(
         &e,
         shell.0,
         Status::OK_NONE,
         Some(c),
         Mode::Dark,
         None,
+        commands,
         &mut out,
     );
     assert_eq!(out.pop(), Some(0x1e));
@@ -257,6 +268,116 @@ fn hostile_classes_through_text() {
         }
     }
     assert!(ran >= 15, "{ran}");
+}
+
+// classes.tsv의 모든 값을 명령 stdout으로 보낸다: helper가 첫 줄을 정제해 응답에 싣고(응답 형식은 정제가 지우는
+// 글자를 거부한다), 앞단이 command 세그먼트로 그린다. 정제가 지우는 행은 그 글자 없이, 나머지는 같은 글자로 모든
+// 셸에서 읽힌다(zsh는 `%` 이스케이프 뒤 원문). 이것을 실패시키는 것: helper가 첫 줄을 정제하지 않고 싣는 것(응답
+// 인코딩이 거부), 첫 줄 뒤를 함께 싣는 것(newline 행), 앞단이 command 값을 세그먼트 칸(64)으로 자르지 않는 것
+// (one_mib 행).
+#[test]
+fn hostile_classes_through_command_output() {
+    use bingsu_core::{
+        collection::wire::BuildId,
+        command::response::{self, Binding, Entry, Response},
+        handoff::Origin,
+        snapshot::context_crc,
+    };
+    let c = fixture::compile(
+        "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
+         [layout.line2]\nleft = [\"custom/k\", \"char\"]\n",
+    );
+    let (config, state) = (b"/c".to_vec(), b"/s".to_vec());
+    let binding = Binding {
+        build_id: BuildId([7; 32]),
+        boot: [1; 16],
+        epoch: [2; 16],
+        context: context_crc(&config, &state).unwrap(),
+        clock_kind: 1,
+        domain: [3; 16],
+        resume: 4,
+        config,
+        state,
+        cwd: b"/w".to_vec(),
+    };
+    // What no shell field may show: C0, DEL, C1, and the bidi and invisible format characters.
+    let hidden = |ch: char| {
+        ch.is_control()
+            || matches!(ch, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+    };
+    let table = include_str!("../../../tests/hostile/classes.tsv");
+    let mut ran = 0;
+    for l in table
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+    {
+        let col: Vec<&str> = l.split('\t').collect();
+        let stdout: Vec<u8> = match col[1].strip_prefix("repeat:") {
+            Some(r) => {
+                let (b, n) = r.split_once(':').unwrap();
+                vec![u8::from_str_radix(b, 16).unwrap(); n.parse().unwrap()]
+            }
+            None => (0..col[1].len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&col[1][i..i + 2], 16).unwrap())
+                .collect(),
+        };
+        // CANARY is ASCII: replace it in the bytes, so `bad_utf8` stays invalid.
+        let stdout = match stdout.windows(6).position(|w| w == b"CANARY") {
+            Some(i) => [&stdout[..i], b"/tmp/x".as_slice(), &stdout[i + 6..]].concat(),
+            None => stdout,
+        };
+        let value = response::first_line(&stdout);
+        let published = Response {
+            binding: binding.clone(),
+            entries: vec![Entry {
+                origin: Origin::Config,
+                id: "custom/k".into(),
+                policy: [0; 32],
+                environment: [0; 32],
+                pattern: [0; 32],
+                attempted_at: 1,
+                completed_at: 2,
+                status: response::Status::Ok,
+                value: value.clone(),
+                raw: value,
+            }],
+        };
+        let read = Response::decode(
+            &published
+                .encode()
+                .unwrap_or_else(|e| panic!("{}: {e:?}", col[0])),
+        )
+        .unwrap();
+        let value = read.entries[0].value.as_str();
+        ran += 1;
+        for sh in SHELLS {
+            let shown = left_with(&c, sh, 200, &[Some(value)]);
+            assert!(!shown.chars().any(hidden), "{} {sh:?}: {shown:?}", col[0]);
+            let raw = String::from_utf8_lossy(&stdout).into_owned();
+            match col[6] {
+                "same" | "zsh-escape" => {
+                    assert!(shown.contains(&raw), "{} {sh:?}: {shown:?}", col[0])
+                }
+                // The first line only: `a`, never the `b` after the newline.
+                "strip" if col[0] == "newline" => {
+                    assert!(
+                        shown.contains('a') && !shown.contains('b'),
+                        "{sh:?}: {shown:?}"
+                    )
+                }
+                // Gone with what sanitizing removes; `hidden` above checks that.
+                "strip" => {}
+                "fffd" => assert!(shown.contains('\u{fffd}'), "{sh:?}: {shown:?}"),
+                "truncate" => {
+                    let a = shown.chars().filter(|&ch| ch == 'a').count();
+                    assert!((1..=64).contains(&a), "{sh:?}: {a}")
+                }
+                other => panic!("{}: {other}", col[0]),
+            }
+        }
+    }
+    assert_eq!(ran, 21);
 }
 
 // 이것을 실패시키는 것: custom 번호가 수집 mask 비트를 쓰는 것(9번 이후 비트가 켜진다), 번호가
