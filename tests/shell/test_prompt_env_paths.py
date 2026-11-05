@@ -1586,6 +1586,28 @@ def nss_reads(libc, user_uid):
     return -(-nsswitch.st_size // nsswitch.st_blksize) + 1, -(-at // passwd.st_blksize)
 
 
+def passwd_seeks(libc, user_uid, data=None):
+    """musl's fclose of /etc/passwd seeks back once over the bytes its 1 KiB
+    reads took past the user's line; computed from this host's file."""
+    if libc != "musl":
+        return 0
+    data = Path("/etc/passwd").read_bytes() if data is None else data
+    at = next(m.end() for m in re.finditer(rb"(?m)^[^:\n]*:[^:\n]*:(\d+):.*$\n?", data)
+              if int(m.group(1)) == user_uid)
+    return int(min(-(-at // 1024) * 1024, len(data)) > at)
+
+
+def target_links(path):
+    """Symlink hops from `path` to its file, each a relative name in the same
+    folder (the only shape the formula counts; another fails here)."""
+    hops, folder, name = 0, os.path.dirname(path), os.path.basename(path)
+    while os.path.islink(os.path.join(folder, name)):
+        name = os.readlink(os.path.join(folder, name))
+        assert "/" not in name, ("unreviewed target link", path, name)
+        hops += 1
+    return hops
+
+
 def context_store(runtime, config, state):
     path = Path(runtime) / "bingsu" / "contexts-v2" / "config"
     for index, value in enumerate((os.fsencode(config), os.fsencode(state))):
@@ -1780,7 +1802,8 @@ class HelperStageFixture:
                             "cgroup_procs_bytes": len(procs.read_bytes()),
                             "cgroup_parent": session_cgroup_parent(
                                 self.script, Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
-                            "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin")}
+                            "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin"),
+                            "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0}
         if stage == "publish":
             self.put("edited")
         elif stage == "failure-last-good":
@@ -1829,6 +1852,7 @@ class HelperStageFixture:
             state_components=path_names(state), exe_link_components=path_names(self.inst.dir),
             exe_components=path_names(real_bin().parent),
             nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
+            passwd_seeks=passwd_seeks(libc, os.getuid()),
             arch=platform.machine(), **self.collection, **self.command)
 
 
@@ -3355,3 +3379,28 @@ def test_session_cgroup_parent_needs_this_sessions_parent(case, tmp_path, monkey
         monkeypatch.setenv("BINGSU_CGROUP_CELL", "priv")
     with pytest.raises(AssertionError):
         session_cgroup_parent(SESSION_SCRIPT, runtime, own)
+
+
+
+# 이것을 실패시키는 것: 사용자 줄 뒤에 남은 바이트가 있을 때 seek를 0으로 보는 것, 줄이 버퍼 끝이나 파일 끝일 때 1로
+# 보는 것, glibc에 musl 항을 주는 것.
+def test_passwd_seeks_follow_musl_stdio():
+    root = b"root:x:0:0:root:/root:/bin/bash\n"
+    rest = b"".join(b"u%d:x:%d:%d::/h:/bin/sh\n" % (i, 1000 + i, 1000 + i) for i in range(60))
+    data = root + rest
+    assert passwd_seeks("musl", 0, data) == 1                    # root first: the rest is buffered
+    last = 1000 + 59
+    assert passwd_seeks("musl", last, data) == 0                 # the last line: nothing left
+    assert passwd_seeks("gnu", 0, data) == 0
+
+
+# 이것을 실패시키는 것: 링크를 따라가지 않는 것(gnutrue 같은 대상의 hop을 0으로 셈), 다른 폴더를 가리키는 링크를 받는 것.
+def test_target_links_count_same_folder_hops(tmp_path):
+    (tmp_path / "real").write_bytes(b"x")
+    (tmp_path / "mid").symlink_to("real")
+    (tmp_path / "name").symlink_to("mid")
+    assert target_links(str(tmp_path / "real")) == 0
+    assert target_links(str(tmp_path / "name")) == 2
+    (tmp_path / "away").symlink_to(tmp_path / "real")
+    with pytest.raises(AssertionError):
+        target_links(str(tmp_path / "away"))

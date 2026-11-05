@@ -327,6 +327,11 @@ class HelperPlan:
     # user's line, from the host files and their st_blksize.
     nsswitch_reads: int = 0
     passwd_reads: int = 0
+    # musl only: its getpwuid reads /etc/passwd through a 1 KiB stdio buffer
+    # and fclose seeks back over the bytes it read past the user's line (one
+    # lseek SEEK_CUR when any are left; root's first line leaves most of the
+    # file). glibc's rewind is in the passwd primitive. From the host file.
+    passwd_seeks: int = 0
     # Collect stage: names of the pinned collector's folder, its size (the
     # build check reads it), and the steady store of one earlier collection:
     # catalog, current response and previous response lengths.
@@ -355,6 +360,10 @@ class HelperPlan:
     cgroup_parent: bool = False
     path_names: int = 0
     target_names: int = 0
+    # Symlink hops from the target's name to its file inside its folder (a
+    # runner's /usr/bin/true can be a link to gnutrue): each is an lstat that
+    # finds the link, its readlinkat and the name's lstat again.
+    target_links: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -534,6 +543,8 @@ def _check_plan(p: HelperPlan) -> None:
         raise ValueError("helper fixture axes")
     if p.libc not in _LIBC or (p.libc == "musl") != (p.nsswitch_reads == 0):
         raise ValueError("libc: gnu reads nsswitch.conf, musl does not")
+    if p.passwd_seeks not in (0, int(p.libc == "musl")):
+        raise ValueError("passwd seeks: musl's fclose only, at most one")
     if p.buf != MAX_RW_COUNT or p.marker_bytes != 208 or p.sequence_bytes != 96:
         raise ValueError("store transfers are whole-file calls of fixed record sizes")
     if "collect" in p.stages and (
@@ -854,6 +865,7 @@ def _command_prefix(e: dict, p: HelperPlan, stage: str) -> None:
     _add(e, "folder_root", 2)
     _add(e, "folder_name", p.path_names + p.target_names)
     _add(e, "target_file")
+    _add(e, "resolved_link", p.target_links)
     # publish_entries -> CollectionStore::admit_commands: as collection
     # admission, with no collection response in the store.
     edges = 3
@@ -991,6 +1003,7 @@ def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     _add(e, "stack_guard")
     _add(e, "passwd")
     e["read"] = e.get("read", 0) + p.nsswitch_reads + p.passwd_reads
+    e["seek"] = e.get("seek", 0) + p.passwd_seeks
     # build_identity::read: Resolved walk of the pinned link and its target,
     # target metadata, then revalidate_bindings over every descriptor and name.
     a, t = p.exe_link_components, p.exe_components

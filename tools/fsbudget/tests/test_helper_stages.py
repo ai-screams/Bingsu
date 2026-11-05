@@ -261,3 +261,18 @@ def test_reviewed_command_plans_are_accepted():
     for stage in ("command_miss", "command_hit"):
         helper_stage_expected(plan(("unchanged", stage), **COMMAND))
     helper_stage_expected(plan(("unchanged", "command_not_run"), **{**COMMAND, "command_bytes": 0}))
+
+
+
+# 이것을 실패시키는 것: 대상 링크 hop을 세지 않는 것, musl passwd seek를 더하지 않는 것, glibc에 그 항을 받는 것.
+def test_target_links_and_musl_passwd_seek_terms():
+    miss = ("unchanged", "command_miss")
+    base = helper_stage_expected(plan(miss, **COMMAND))
+    link = helper_stage_expected(plan(miss, **COMMAND, target_links=1))
+    assert {k: link[k] - base.get(k, 0) for k in link if link[k] != base.get(k, 0)} == {"fstat": 2, "readlink": 1}
+    musl = dict(libc="musl", nsswitch_reads=0)
+    base = helper_stage_expected(plan(**musl))
+    seek = helper_stage_expected(plan(**musl, passwd_seeks=1))
+    assert seek["seek"] - base["seek"] == 1
+    with pytest.raises(ValueError):
+        helper_stage_expected(plan(passwd_seeks=1))
