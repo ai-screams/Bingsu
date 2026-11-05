@@ -215,13 +215,13 @@ pub enum Candidate<'a> {
     Value(&'a [u8]),
 }
 
-fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes
         .split(|b| *b == b'\n')
         .map(|l| trim(l.strip_suffix(b"\r").unwrap_or(l)))
 }
 
-fn trim(mut s: &[u8]) -> &[u8] {
+pub(crate) fn trim(mut s: &[u8]) -> &[u8] {
     while let [b' ' | b'\t', rest @ ..] = s {
         s = rest;
     }
