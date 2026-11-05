@@ -822,12 +822,21 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             # (relay 생성 시험이 오류를 내지 않음), 자기 필터를 건 대상의 fork를 오류로 보는 것.
             if k == "spawn" and role != "command" and (role not in SPAWN_ROLES or process in confined):
                 bad(c, "spawn outside the pre-filter creation site")
+            # A target's fork or thread is a counted call: it ends the target's
+            # loader prologue, and a forked child keeps that ended state
+            # until its own exec.
+            # 이것을 실패시키는 것: 대상의 생성을 경계로 보지 않는 것, fork한 자식이 부모의 닫힌 경계를 물려받지
+            # 않는 것(둘 다 뒤의 ld.so.cache 열기가 제외로 빠짐).
+            if role == "command":
+                started.add(process)
             if success:
                 child = int(result)
                 roles[child] = role
                 owner[child] = process if k == "thread" else child
                 if k != "thread":
                     descriptors.start(child, process)
+                    if role == "command":
+                        started.add(child)
                 # clone3 CLONE_PIDFD installs a close-on-exec pidfd in the parent only.
                 # 이것을 실패시키는 것: 이 등록을 지우는 것(특권 셀 trace의 waitid·close가 수명 오류).
                 if pidfd := re.search(r"=> \{pidfd=\[(\d+)(?:<(.+?)>)?\]", c.args):

@@ -1870,9 +1870,9 @@ def with_command_stage_probe(lines):
     return lines[:at + 2] + probe + lines[at + 2:]
 
 
-# 이것을 실패시키는 것: 재생이 이미 있는 쌍을 두 번 넣는 것(같은 결과가 아님), 쌍의 일부만 있거나 자리가 다른 캡처를
-# 받는 것.
-@pytest.mark.parametrize("shape", ["absent", "present", "half", "moved"])
+# 이것을 실패시키는 것: 재생이 이미 있는 쌍을 두 번 넣는 것(같은 결과가 아님), 쌍의 일부만 있거나 자리가 다른 캡처,
+# 자리는 맞지만 호출·인자·반환이 다른 쌍을 받는 것.
+@pytest.mark.parametrize("shape", ["absent", "present", "half", "moved", "different"])
 def test_command_stage_probe_replay(shape):
     raw = (HELPER_STAGE_TRACES.parent / "helper-stage-collect.strace").read_text().splitlines()
     replayed = with_command_stage_probe(raw)
@@ -1883,8 +1883,14 @@ def test_command_stage_probe_replay(shape):
     if shape == "present":
         assert with_command_stage_probe(replayed) == replayed
         return
-    damaged = (replayed[:at + 1] + replayed[at + 2:] if shape == "half"
-               else replayed[:at] + replayed[at + 2:] + replayed[at:at + 2])
+    if shape == "different":
+        # In place, but not the probe the product makes (another result).
+        damaged = list(replayed)
+        damaged[at + 1] = damaged[at + 1].replace("ENOENT (No such file or directory)", "EACCES (Permission denied)")
+        assert damaged != replayed
+    else:
+        damaged = (replayed[:at + 1] + replayed[at + 2:] if shape == "half"
+                   else replayed[:at] + replayed[at + 2:] + replayed[at:at + 2])
     with pytest.raises(AssertionError, match="command stage probe"):
         with_command_stage_probe(damaged)
 

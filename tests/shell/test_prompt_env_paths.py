@@ -3323,8 +3323,9 @@ def session_parent_name(runtime):
 
 # 위임된 cgroup에서는 이 세션의 정확한 부모만 원자 경로의 근거다. 이것을 실패시키는 것: 같은 uid의 다른
 # bingsu-cmd-* 폴더를 받는 것, 부모가 없는 위임 셀을 best effort로 세는 것, 특권 셀에서 위임 없음을 받는 것,
-# 쓸 수 없는 폴더를 위임으로 보는 것.
-@pytest.mark.parametrize("case", ["exact", "other", "missing", "priv-undelegated", "undelegated"])
+# 쓸 수 없는 폴더나 읽기 전용 마운트를 위임으로 보는 것, 정확한 이름의 symlink를 부모로 받는 것.
+@pytest.mark.parametrize("case", ["exact", "other", "missing", "priv-undelegated", "undelegated",
+                                  "read-only", "symlink"])
 def test_session_cgroup_parent_needs_this_sessions_parent(case, tmp_path, monkeypatch):
     own, runtime = tmp_path / "own", tmp_path / "runtime"
     own.mkdir()
@@ -3336,6 +3337,16 @@ def test_session_cgroup_parent_needs_this_sessions_parent(case, tmp_path, monkey
         return
     if case == "other":
         (own / "bingsu-cmd-00112233445566778899aabbccddeeff").mkdir()
+    if case == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        (own / session_parent_name(runtime)).symlink_to(tmp_path / "elsewhere")
+    if case == "read-only":
+        # Writable by permission bits, but on a read-only mount: not delegated.
+        flags = type("S", (), {"f_flag": os.ST_RDONLY})()
+        monkeypatch.setattr(os, "access", lambda *_: True)
+        monkeypatch.setattr(os, "statvfs", lambda *_: flags)
+        assert session_cgroup_parent(SESSION_SCRIPT, runtime, own) is False
+        return
     if case in ("priv-undelegated", "undelegated"):
         monkeypatch.setattr(os, "access", lambda *_: False)
         if case == "undelegated":

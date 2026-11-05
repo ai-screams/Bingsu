@@ -789,3 +789,21 @@ def test_target_prologue_ends_at_its_first_counted_call():
     assert not got.errors, got.errors
     assert got.counts["command"]["openat"] == 3, got.counts["command"]
     assert got.excluded["loader_prologue"] == 3, got.excluded
+
+
+# 대상의 첫 계수 호출이 fork·thread여도 시작 경계가 닫히고, fork한 자식은 exec 전까지 닫힌 경계를 물려받는다. 이것을
+# 실패시키는 것: 생성 분기에서 started를 갱신하지 않는 것, 자식에게 물려주지 않는 것.
+@pytest.mark.parametrize("first", ["fork", "thread"])
+def test_target_prologue_ends_at_a_spawn_and_passes_to_its_child(first):
+    from fsbudget.attribute import collector_attribute
+    lines = list(COMMAND_ROUND)
+    cache = 'openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = {fd}</etc/ld.so.cache>'
+    at = lines.index('13 openat(AT_FDCWD</>, "/etc/hosts", O_RDONLY) = 4</etc/hosts>')
+    spawn = ('13 clone(child_stack=NULL, flags=SIGCHLD) = 16' if first == "fork" else
+             '13 clone(child_stack=0x1, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD) = 16')
+    lines[at:at] = [spawn, "13 " + cache.format(fd=5)]          # after the spawn: counted
+    if first == "fork":
+        lines[at + 2:at + 2] = ["16 " + cache.format(fd=6), "16 +++ exited with 0 +++"]  # the child: counted
+    got = collector_attribute(lines, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts["command"]["openat"] == (4 if first == "fork" else 3), got.counts["command"]
