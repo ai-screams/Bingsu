@@ -57,9 +57,9 @@ pub struct Meter {
     pub counts: [Counters; 3],
     pub byte_limit: u64,
     pub allocation_limit: u64,
-    /// Stat and open calls (all phases) at which the next one is refused:
-    /// a stage's own bound on real calls (language detection), unbounded
-    /// otherwise.
+    /// Charged operations (every kind, all phases) at which the next one is
+    /// refused: a stage's own bound on real calls (language detection),
+    /// unbounded otherwise.
     pub calls_limit: u64,
     operations: u64,
     bytes: u64,
@@ -226,7 +226,7 @@ impl Meter {
         }
         // Fails without it: probe_bound_counts_folder_calls (more than 512
         // calls in the language stage).
-        if matches!(op, Op::Stat | Op::Open) && self.calls() >= self.calls_limit {
+        if self.calls() >= self.calls_limit {
             return Err(ReadError::Limit);
         }
         if matches!(op, Op::Stat) {
@@ -252,9 +252,9 @@ impl Meter {
         Ok(())
     }
 
-    /// Stat and open calls charged so far, all phases.
+    /// Operations charged so far (every kind, all phases).
     pub fn calls(&self) -> u64 {
-        self.counts.iter().map(|c| c.stat + c.open).sum()
+        self.operations
     }
 
     pub fn allocation(&mut self, bytes: usize) -> Result<(), ReadError> {

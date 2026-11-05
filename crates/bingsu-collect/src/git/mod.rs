@@ -356,12 +356,25 @@ fn languages(
         return Ok(());
     }
     #[cfg(test)]
-    let calls = meter
-        .borrow()
-        .counts
-        .iter()
-        .map(|c| c.stat + c.open)
-        .sum::<u64>();
+    let charged = |m: &crate::meter::Meter| {
+        m.counts
+            .iter()
+            .map(|c| {
+                c.open
+                    + c.stat
+                    + c.mount
+                    + c.filesystem
+                    + c.readlink
+                    + c.read
+                    + c.list
+                    + c.components
+                    + c.retries
+                    + c.readonly
+            })
+            .sum::<u64>()
+    };
+    #[cfg(test)]
+    let calls = charged(&meter.borrow());
     let result = within_stage(meter, sink, deadlines.lang_ms, |sink| {
         let mut meter = meter.borrow_mut();
         meter.event("languages");
@@ -383,7 +396,7 @@ fn languages(
             .budget
             .used(bingsu_core::collection::budget::Axis::Directories);
         meter.event(&format!("languages directories={used}"));
-        let now = meter.counts.iter().map(|c| c.stat + c.open).sum::<u64>();
+        let now = charged(&meter);
         meter.event(&format!("languages calls={}", now - calls));
     }
     match result {

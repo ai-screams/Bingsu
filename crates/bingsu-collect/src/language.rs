@@ -12,10 +12,12 @@ use bingsu_core::collection::language::{
     self as rule, DETECT_LEVELS, LanguageQuery, LanguageResult, Version,
 };
 
-/// Stat and open calls one request's detection may make (the meter refuses
-/// the next one where it counts them, so every folder opened and checked on
-/// the way, and the stack's closing checks, count), and bytes it may read
-/// (every byte the kernel returned, failed reads included).
+/// Calls one request's detection may make: every operation the meter
+/// charges (stats, opens, reads, identity and mount checks, components,
+/// retries), refused where the meter counts them, so every folder opened
+/// and checked on the way, a version file's own walk and the stack's closing
+/// checks count; and bytes it may read (every byte the kernel returned,
+/// failed reads included).
 pub const PROBES_MAX: u64 = 512;
 pub const BYTES_MAX: u64 = 65_536;
 
@@ -164,6 +166,8 @@ fn read_version(
         Err(error) => return Err(error),
     };
     let cap = file.format.cap().min(left);
+    let size = opened.metadata().st_size;
+    let before = bytes(meter);
     match opened.read(
         ReadCap {
             bytes: cap,
@@ -172,13 +176,21 @@ fn read_version(
         meter,
     ) {
         Ok(bytes) => Ok(Some(rule::version(&file.format, &bytes, i, level))),
-        // Over the format's own cap: no value (C2 ruling Q4 for D1).
-        // Over what the request may still read: stop (`Limit`).
-        Err(ReadError::Limit) if cap == file.format.cap() => Ok(Some(Version::Refused {
-            file: i,
-            level,
-            digest: [0; 16],
-        })),
+        // The file over the format's own cap (by its size, or grown past it
+        // while read): no value (C2 ruling Q4 for D1). Any other `Limit` (what
+        // the request may still read, the meter's byte, allocation or call
+        // bounds) stops. Fails without the file test:
+        // meter_limits_stop_instead_of_refusing.
+        Err(ReadError::Limit)
+            if cap == file.format.cap()
+                && (size < 0 || size as u64 > cap || bytes(meter) - before > cap) =>
+        {
+            Ok(Some(Version::Refused {
+                file: i,
+                level,
+                digest: [0; 16],
+            }))
+        }
         Err(error) => Err(error),
     }
 }
