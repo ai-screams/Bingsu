@@ -44,29 +44,40 @@ struct Prepared {
     step: Step,
     slots: [Option<Held>; 3],
     files: [Option<Held>; 3],
-    collections: [Option<Held>; 2],
+    collections: [Option<Held>; 3],
     sources: Option<staged::Prefetch>,
     clock: ClockPins,
 }
 
 /// The closure owns every descriptor, including clock evidence. Dropping it on
 /// a refused filter closes them; unwinding has the same ownership discipline.
-pub fn prepare(raw: &[&[u8]], deadline: Deadline) -> impl FnOnce() -> Vec<u8> + use<> {
-    let p = prepare_state(raw, Some(deadline));
+pub fn prepare(
+    raw: &[&[u8]],
+    deadline: Deadline,
+    environment: Option<Vec<u8>>,
+) -> impl FnOnce() -> Vec<u8> + use<> {
+    let p = prepare_state(raw, Some(deadline), environment);
     move || p.respond()
 }
 
-fn prepare_state(raw: &[&[u8]], deadline: Option<Deadline>) -> Prepared {
-    prepare_with_clock(raw, ClockPins::prepare, deadline)
+fn prepare_state(
+    raw: &[&[u8]],
+    deadline: Option<Deadline>,
+    environment: Option<Vec<u8>>,
+) -> Prepared {
+    prepare_with_clock(raw, ClockPins::prepare, deadline, environment)
 }
 
 fn prepare_with_clock(
     raw: &[&[u8]],
     clock: fn(Option<Deadline>) -> ClockPins,
     deadline: Option<Deadline>,
+    environment: Option<Vec<u8>>,
 ) -> Prepared {
     check_deadline(deadline);
-    let plan = staged::prepare(raw).with_build_id(bingsu_identity::build_id());
+    let plan = staged::prepare(raw)
+        .with_build_id(bingsu_identity::build_id())
+        .with_environment(environment);
     let plan = if let Some(d) = deadline {
         plan.with_deadline(d)
     } else {
@@ -78,7 +89,7 @@ fn prepare_with_clock(
         step: Step::Done(staged::Observed::default()),
         slots: [None, None, None],
         files: [None, None, None],
-        collections: [None, None],
+        collections: [None, None, None],
         sources: None,
         clock: ClockPins::default(),
     };
@@ -122,9 +133,9 @@ fn prefetch_collections(
     base: i32,
     sources: &staged::Prefetch,
     deadline: Option<Deadline>,
-) -> [Option<Held>; 2] {
+) -> [Option<Held>; 3] {
     let Some(components) = sources.collection_components() else {
-        return [None, None];
+        return [None, None, None];
     };
     let mut directory: Option<Held> = None;
     for component in components {
@@ -135,23 +146,23 @@ fn prefetch_collections(
             .and_then(|fd| held(fd, deadline).ok())
             .filter(|h| sources.accepts_collection_directory(h.facts));
         if next.is_none() {
-            return [None, None];
+            return [None, None, None];
         }
         directory = next;
     }
     let Some(directory) = directory else {
-        return [None, None];
+        return [None, None, None];
     };
-    [
-        staged::CollectionCopy::Current,
-        staged::CollectionCopy::Previous,
-    ]
-    .map(|copy| {
+    // The command response opens with the collection responses (C4b ruling
+    // Q1): no pathname call may follow the filter, and the snapshot that
+    // says whether a command segment is drawn is read only after it. One
+    // the snapshot does not need is closed unread.
+    staged::CollectionCopy::ALL.map(|copy| {
         CString::new(copy.name())
             .ok()
             .and_then(|name| open(directory.fd.as_raw_fd(), &name, DATA_FLAGS, deadline).ok())
             .and_then(|fd| held(fd, deadline).ok())
-            .filter(|h| sources.accepts_collection(h.facts))
+            .filter(|h| sources.accepts_collection(copy, h.facts))
     })
 }
 
@@ -881,6 +892,7 @@ pub(crate) mod tests {
                 &f.args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                 delayed_clock,
                 Some(deadline),
+                None,
             );
             assert!(p.collections.iter().all(Option::is_some));
             // Supply only the test worker catalog, never override the entry
@@ -1409,6 +1421,7 @@ pub(crate) mod tests {
             &args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
             publisher_clock,
             None,
+            None,
         );
         loop {
             match std::mem::replace(&mut p.step, Step::Done(staged::Observed::default())) {
@@ -1559,6 +1572,7 @@ pub(crate) mod tests {
                 &self.args.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                 fixed_clock,
                 None,
+                None,
             )
         }
     }
@@ -1675,7 +1689,7 @@ pub(crate) mod tests {
     // 이것을 실패시키는 것: 잘못된 봉투에서 UID·clock·파일 관찰을 시작하는 것.
     #[test]
     fn invalid_envelope_opens_nothing() {
-        let p = prepare_state(&[b"--ctx", b"2", b"--record", b"B1"], None);
+        let p = prepare_state(&[b"--ctx", b"2", b"--record", b"B1"], None, None);
         assert!(p.sources.is_none() && p.clock.identity.is_none());
         assert!(p.slots.iter().all(Option::is_none) && p.files.iter().all(Option::is_none));
         assert!(text(p.respond()).contains("error:bad-args"));
@@ -1885,7 +1899,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "child: expires before prefilter preparation"]
     fn expired_preparation_child() {
-        prepare_state(&[], Deadline::from_entry(0, 1));
+        prepare_state(&[], Deadline::from_entry(0, 1), None);
         // SAFETY: child-only sentinel; production must have exited first.
         unsafe { libc::_exit(88) }
     }
@@ -1991,7 +2005,7 @@ pub(crate) mod tests {
         };
         BOUNDARY_START.set(None);
         let raw = args.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let mut p = prepare_with_clock(&raw, clock, deadline);
+        let mut p = prepare_with_clock(&raw, clock, deadline, None);
         if confine {
             assert!(bingsu_core::front::runs_core(crate::sandbox::enter()));
         }
@@ -2203,7 +2217,7 @@ pub(crate) mod tests {
             // checks does not depend on the budget's length.
             let deadline = Deadline::from_entry(entry.start(), 60_000_000_000).unwrap();
             assert!(crate::prompt_io::arm_deadline(deadline));
-            let staged = prepare(&raw, deadline);
+            let staged = prepare(&raw, deadline, None);
             #[cfg(target_os = "linux")]
             assert_eq!(
                 crate::sandbox::enter(),

@@ -2316,7 +2316,7 @@ impl D3FrontHarness {
                 self.config.clone(),
             );
         let mut slots: [Option<File>; 3] = std::array::from_fn(|_| None);
-        let mut collections: [Option<File>; 2] = std::array::from_fn(|_| None);
+        let mut collections: [Option<File>; 3] = std::array::from_fn(|_| None);
         let mut previous = None;
         let mut reading_collection = false;
         let mut collection_reads = 0;
@@ -2358,7 +2358,11 @@ impl D3FrontHarness {
                         .ok()
                         .flatten()
                         .and_then(|(mut file, _bytes)| {
-                            if !prefetch.accepts_collection(facts(&file).ok()?) {
+                            let copy = [
+                                bingsu_core::front::staged::CollectionCopy::Current,
+                                bingsu_core::front::staged::CollectionCopy::Previous,
+                            ][index];
+                            if !prefetch.accepts_collection(copy, facts(&file).ok()?) {
                                 return None;
                             }
                             file.rewind().ok()?;

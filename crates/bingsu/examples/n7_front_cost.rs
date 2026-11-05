@@ -149,7 +149,7 @@ fn main() {
             assert_eq!(decoded.config.bands().len(), config.bands.len());
             let deadline = prompt_io::entry_deadline().unwrap();
             let start = Instant::now();
-            let respond = prompt_read::prepare(&raw, deadline);
+            let respond = prompt_read::prepare(&raw, deadline, None);
             let prefilter_ns = start.elapsed().as_nanos();
             let respond_ns = if native_available {
                 let start = Instant::now();

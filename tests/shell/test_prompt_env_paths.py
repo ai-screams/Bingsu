@@ -605,7 +605,7 @@ def prompt_collection_sources(pinned, cwd):
     root = context + "/collections-v1"
     address = root + "/" + hashlib.sha256(cwd).hexdigest()
     store = address + "/store"
-    return {root, address, store}, {store + "/response", store + "/previous"}
+    return {root, address, store}, {store + "/response", store + "/previous", store + "/command"}
 
 
 def prompt_cwd(call):
@@ -862,6 +862,9 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
 # recorded fixture (an older build's observation) names its own envelope in
 # tests/shell/fixtures/recorded-envelopes.tsv, and only portable tests pass it.
 RESPONSE_HEADERS = (b"BNGRES05\x05\x00",)
+# The command response the prompt prefetches beside them (C4b), and its cap.
+COMMAND_HEADER = b"BNGCMD01\x01\x00"
+COMMAND_RESPONSE_MAX = 471_082
 
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
@@ -1389,7 +1392,7 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None, head
     dirs, files = prompt_collection_sources(pinned, cwd)
     assert dirs, "fixture needs a canonical cwd"
     root, address, store = sorted(dirs, key=len)
-    expected = [root, address, store, store + "/response", store + "/previous"]
+    expected = [root, address, store, store + "/response", store + "/previous", store + "/command"]
     _, snapshots = prompt_sources(pinned)
     if required is None:
         required = any(c.name == "openat" and call_paths(c) == [os.path.dirname(root) + "/snapshot"] for c in calls)
@@ -1403,7 +1406,7 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None, head
         paths = call_paths(c)
         scoped = [p for p in paths if p == root or p.startswith(root + "/")]
         if c.name == "openat" and scoped:
-            assert not stopped and len(opens) < 5, ("collection extra open", c)
+            assert not stopped and len(opens) < 6, ("collection extra open", c)
             path = scoped[0]
             assert path == expected[len(opens)], ("collection address/order", c, expected)
             assert c.index < boundary, ("collection post-filter open", c)
@@ -1446,8 +1449,11 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None, head
                 header = ast.literal_eval("b" + args[1])
                 assert len(header) == 64, ("collection header bytes", c)
                 total = int.from_bytes(header[12:16], "little") + 64
-                valid_headers[path] = (header[:10] in headers and header[10:12] == bytes([64, 0])
-                                       and header[20:] == bytes(44) and total == sizes[path] and total <= 262144)
+                command = path.endswith("/command")
+                valid_headers[path] = ((header[:10] == COMMAND_HEADER if command else header[:10] in headers)
+                                       and header[10:12] == bytes([64, 0]) and header[20:] == bytes(44)
+                                       and total == sizes[path]
+                                       and total <= (COMMAND_RESPONSE_MAX if command else 262144))
             else:
                 assert valid_headers[path], ("collection body after invalid header", c)
             previous.append(want)
@@ -1471,10 +1477,11 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None, head
     if opens[0].ret.startswith("-1 ENOENT"):
         assert counts == collection_front_expected(0, (), (), absent=True), counts
         return counts
-    assert len(opens) <= 5
-    # Full normal fixture: exact facts counts and exact immutable header/body reads.
-    if len(opens) == 5 and all(not c.ret.startswith("-1") for c in opens):
-        want = collection_front_expected(3, tuple(sizes[p] for p in expected[3:]), tuple(sizes[p]-64 for p in reads))
+    assert len(opens) <= 6
+    # Full normal fixture: exact facts counts and exact immutable header/body
+    # reads. The command response is often absent (ENOENT) or left unread.
+    if len(opens) == 6 and all(not c.ret.startswith("-1") for c in opens[:5]):
+        want = collection_front_expected(3, tuple(sizes.get(p) for p in expected[3:]), tuple(sizes[p]-64 for p in reads))
         # Only an invalid declaration may stop before its exact fstat length.
         want["read"] = sum(1 + ((sizes[p]-64+16383)//16384 if valid_headers[p] else 0) for p in reads)
         assert counts == want, ("collection syscall count", counts, want)
@@ -3442,3 +3449,84 @@ def test_target_links_count_same_folder_hops(tmp_path):
     assert target_links(str(tmp_path / f"h{TARGET_LINKS_MAX - 1}")) == TARGET_LINKS_MAX
     with pytest.raises(AssertionError):
         target_links(str(tmp_path / f"h{TARGET_LINKS_MAX}"))
+
+
+# GATE-FS-FRONT command response shapes (C4b, U-9h as revised by C4b ruling Q1):
+# the prompt prefetches `command` with the collection responses before the
+# filter and reads it after the filter only when the snapshot draws a command
+# segment. A store without the file costs one ENOENT open; a file the snapshot
+# does not draw costs its open and facts and one unread close; a drawn one
+# adds its header and body reads.
+COMMAND_FRONT_SHAPES = ("no_response", "unread", "read")
+
+
+def front_calls(lines, exe):
+    """The prompt process's calls of a traced prompt and its filter boundary."""
+    from fsbudget.strace_parse import Trace
+    _, scoped = tree(lines, exe)
+    root = int(next(line.split()[0] for line in scoped if is_root(line, exe)))
+    parsed = parse_trace("\n".join(scoped))
+    assert not parsed.errors, parsed.errors
+    front = Trace()
+    front.extend(c for c in parsed if c.pid == root and c.name != EXIT_EVENT)
+    filters = [c.index for c in front if c.name == "prctl" and "PR_SET_SECCOMP" in c.args and c.ret == "0"]
+    assert len(filters) == 1, filters
+    return front, filters[0]
+
+
+# 이것을 실패시키는 것: command 사본을 prefetch에서 빼는 것(no_response의 ENOENT 1이 없음), 그리지 않는 응답을
+# 읽는 것(unread에 read가 생김), 열어 둔 사본을 닫지 않는 것(unread의 close 1이 없음), 그리는 응답을 끝까지 읽지
+# 않는 것(read의 머리·본문 읽기 수가 식과 다름).
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
+@pytest.mark.parametrize("shape", COMMAND_FRONT_SHAPES)
+def test_live_front_command_response_shapes(shape, tmp_path):
+    from fsbudget.formula import collection_front_expected
+    assert shutil.which("strace"), "the front gate must execute strace"
+    require_release_helper(real_bin())
+    stage = {"no_response": "collect", "unread": "command_hit", "read": "command_hit"}[shape]
+    fixture = HelperStageFixture(stage)
+    try:
+        if shape == "unread":
+            # The unit stays declared and its response stays; the screen no
+            # longer draws it. Publish that snapshot before the traced prompt.
+            fixture.put("command_not_run")
+            fixture.prompt()
+            wait_helpers(fixture.base)
+        trace = tmp_path / "trace.strace"
+        fixture.prompt(trace)
+        wait_helpers(fixture.base)
+        lines = trace.read_text(errors="replace").splitlines()
+        front, boundary = front_calls(lines, str(fixture.inst.exe))
+        pinned = [os.path.realpath(Path(fixture.env[key]) / "bingsu")
+                  for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME")]
+        cwd = os.fsencode(str(fixture.pwd))
+        counts = assert_collection_trace(front, boundary, pinned, cwd, required=True)
+        command_opens = [c for c in front if c.name == "openat" and call_paths(c)
+                         and call_paths(c)[0].endswith("/store/command")]
+        assert len(command_opens) == 1, command_opens
+        opened = command_opens[0]
+        fd = re.match(r"(\d+)", opened.ret)
+        closes = [c for c in front if c.name == "close" and fd and args_of(c)[0].split("<")[0] == fd.group(1)
+                  and c.index > opened.index]
+        reads = [c for c in front if c.name == "read" and fd and args_of(c)[0].split("<")[0] == fd.group(1)
+                 and c.index > opened.index]
+        if shape == "no_response":
+            assert opened.ret.startswith("-1 ENOENT"), opened
+            return
+        size = (fixture.response.stat().st_size if hasattr(fixture, "response") else
+                next((fixture.store / "collections-v1").glob("*/store/command")).stat().st_size)
+        assert fd and closes and closes[0].index > boundary, ("one close after the filter", closes)
+        if shape == "unread":
+            assert reads == [], reads
+        else:
+            assert len(reads) == 1 + -(-(size - 64) // 16_384), (size, reads)
+        sizes = {}
+        for name in ("response", "previous", "command"):
+            files = list((fixture.store / "collections-v1").glob(f"*/store/{name}"))
+            sizes[name] = files[0].stat().st_size if files else None
+        body = (size - 64,) if shape == "read" else ()
+        assert counts == collection_front_expected(3, (sizes["response"], sizes["previous"], sizes["command"]),
+                                                   body), counts
+    finally:
+        wait_helpers(fixture.base)
+        shutil.rmtree(fixture.base, ignore_errors=True)

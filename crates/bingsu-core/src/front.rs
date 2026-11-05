@@ -82,6 +82,23 @@ pub fn render_selected<L: LayoutView>(
     collection: Option<&crate::collection::response::Completed>,
     out: &mut Vec<u8>,
 ) {
+    render_selected_with_values(parsed, shell, status, compiled, mode, collection, &[], out);
+}
+
+/// `render_selected` with the values of the config's command segments, one
+/// per user segment in `custom` order (`None` for a text segment or a
+/// command segment without a value).
+#[allow(clippy::too_many_arguments, reason = "fixed pure renderer inputs")]
+pub fn render_selected_with_values<L: LayoutView>(
+    parsed: &Envelope,
+    shell: Shell,
+    status: Status,
+    compiled: Option<&L>,
+    mode: Mode,
+    collection: Option<&crate::collection::response::Completed>,
+    commands: &[Option<&str>],
+    out: &mut Vec<u8>,
+) {
     render_selected_with_catalog(
         parsed,
         shell,
@@ -91,6 +108,7 @@ pub fn render_selected<L: LayoutView>(
         collection,
         collection.map(|r| &r.binding),
         &crate::collection::selection::PRODUCT,
+        commands,
         out,
     );
 }
@@ -108,6 +126,7 @@ fn render_selected_with_catalog<L: LayoutView>(
     collection: Option<&crate::collection::response::Completed>,
     expected: Option<&crate::collection::wire::Binding>,
     catalog: &crate::collection::selection::Catalog<'_>,
+    commands: &[Option<&str>],
     out: &mut Vec<u8>,
 ) {
     let default;
@@ -183,12 +202,14 @@ fn render_selected_with_catalog<L: LayoutView>(
         // Nothing past the built-ins is a value yet (a mask bit never reaches there).
         collected.values.truncate(BUILTIN.len());
         collected.facts.truncate(BUILTIN.len());
-        for t in custom {
+        for (i, t) in custom.iter().enumerate() {
             // A command segment's value comes from the command response
-            // (filled by the prompt in C4b); without one it has no value, so
-            // the renderer drops it with its separators like any absent
-            // segment.
-            let Some(text) = crate::layout_view::custom_text(t) else {
+            // (`command::display`, cut to the same cells as text); without
+            // one it has no value, so the renderer drops it with its
+            // separators like any absent segment.
+            let Some(text) =
+                crate::layout_view::custom_text(t).or_else(|| commands.get(i).copied().flatten())
+            else {
                 collected.values.push(None);
                 collected.facts.push(None);
                 continue;

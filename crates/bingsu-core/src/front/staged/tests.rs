@@ -141,6 +141,11 @@ mod cases {
         clocks: usize,
         short: usize,
         fail_at: Option<usize>,
+        /// The command response file, the environment frame and the entry
+        /// clock the prompt would hand the plan (C4b); `None` by default.
+        commands: Option<Vec<u8>>,
+        environment: Option<Vec<u8>>,
+        entry: Option<Clock>,
     }
     impl Harness {
         fn new() -> Self {
@@ -162,6 +167,9 @@ mod cases {
                 clocks: 0,
                 short: usize::MAX,
                 fail_at: None,
+                commands: None,
+                environment: None,
+                entry: None,
             }
         }
         fn bytes(&self) -> Option<&[u8]> {
@@ -169,6 +177,7 @@ mod cases {
                 b"snapshot" => self.current.as_deref(),
                 b"last-good" => self.last.as_deref(),
                 b"marker" => self.marker.as_deref(),
+                b"command" => self.commands.as_deref(),
                 _ => None,
             }
         }
@@ -216,6 +225,13 @@ mod cases {
                             .filter(|(n, _)| n == name)
                             .map_or_else(|| facts(true, name == b"/", 0), |(_, f)| *f),
                     )
+                }
+                Operation::OpenCollection(CollectionCopy::Command) if self.commands.is_some() => {
+                    assert!(!self.live_file);
+                    self.current_name = b"command";
+                    self.offset = 0;
+                    self.live_file = true;
+                    Observation::Opened
                 }
                 Operation::OpenCollection(_) => Observation::Failed,
                 Operation::OpenFile { parent, name, into } => {
@@ -278,7 +294,10 @@ mod cases {
                     b"15;0"
                 },
             ]);
-            let mut plan = prepare(&args);
+            let mut plan = prepare(&args).with_environment(self.environment.clone());
+            if let Some(entry) = self.entry {
+                plan = plan.with_entry(entry).with_build_id(BuildId([8; 32]));
+            }
             let mut previous = None;
             for _ in 0..100_000 {
                 match next(&mut plan, previous.take()) {
@@ -1162,5 +1181,157 @@ mod cases {
                 "{case}"
             );
         }
+    }
+
+    /// A command response for `UNIT` as the helper publishes it for this
+    /// prompt (context /c /s, cwd /x/project, build [8; 32]), run in `frame`.
+    fn command_response(value: &str, frame: &[u8], cwd: &[u8]) -> Vec<u8> {
+        use crate::command::{plan, response as cr, wire::policy_digest};
+        let s = snapshot(UNIT);
+        let unit = &s.config.exec_units[0];
+        let r = plan::runnable(unit).unwrap();
+        let vars = plan::Environ::parse(crate::command::env_frame::body(frame).unwrap());
+        cr::Response {
+            binding: cr::Binding {
+                build_id: BuildId([8; 32]),
+                boot: s.id.boot,
+                epoch: s.id.epoch,
+                context: s.id.context,
+                clock_kind: clock().kind,
+                domain: clock().domain,
+                resume: clock().resume,
+                config: b"/c".to_vec(),
+                state: b"/s".to_vec(),
+                cwd: cwd.to_vec(),
+            },
+            entries: vec![cr::Entry {
+                origin: crate::handoff::Origin::Config,
+                id: unit.id.clone(),
+                policy: policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow),
+                environment: plan::env_digest(&vars, &r.env_allow),
+                pattern: [0; 32],
+                attempted_at: 40,
+                completed_at: 50,
+                status: cr::Status::Ok,
+                value: value.into(),
+                raw: value.into(),
+            }],
+        }
+        .encode()
+        .unwrap()
+    }
+    fn frame() -> Vec<u8> {
+        crate::command::env_frame::encode([b"PATH=/usr/bin\0".as_slice(), b"LANG=C\0"]).unwrap()
+    }
+    fn commanded(value: &str) -> Harness {
+        let mut h = Harness::new();
+        h.environment = Some(frame());
+        h.entry = Some(clock());
+        h.commands = Some(command_response(value, &frame(), b"/x/project"));
+        h
+    }
+    fn reads_commands(h: &Harness) -> bool {
+        h.calls
+            .iter()
+            .any(|op| matches!(op, Operation::OpenCollection(CollectionCopy::Command)))
+    }
+
+    // 양성 대조: 스냅샷이 그리는 command 세그먼트는 이 프롬프트의 응답 값을 그린다. 이것을 실패시키는 것: 명령 응답
+    // 읽기를 빼는 것, finish가 값을 render에 넘기지 않는 것.
+    #[test]
+    fn a_drawn_command_segment_shows_its_value() {
+        let mut h = commanded("prod-cluster");
+        let r = h.run(&args(), Mode::Dark);
+        assert_eq!(r.status, Status::OK_NONE);
+        assert!(reads_commands(&h));
+        assert!(record(&r).contains("prod-cluster"), "{}", record(&r));
+    }
+
+    // 값을 낼 수 없으면 응답을 읽지 않는다: 환경 프레임이 없을 때, 그리는 command 세그먼트가 없을 때. 이것을
+    // 실패시키는 것: draws_commands의 환경 조건이나 세그먼트 조건을 지우는 것(읽기가 생김).
+    #[test]
+    fn the_response_is_read_only_when_a_value_can_show() {
+        let mut h = commanded("prod-cluster");
+        h.environment = None;
+        let r = h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+        assert!(!record(&r).contains("prod-cluster"));
+        let mut h = commanded("prod-cluster");
+        // A drawn text segment only: user segments, none of them a command.
+        let s = snapshot(
+            "[segment.\"custom/t\"]\nkind='text'\ntext='T'\n[layout.line2]\nleft=['custom/t','char']",
+        );
+        h.current = Some(s.encode(1, 0).unwrap());
+        h.marker = Some(marker(&s).encode().to_vec());
+        h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+    }
+
+    // 다른 cwd의 응답, 무효 표식, 프롬프트 중 바뀐 시계에서는 그리지 않는다. 이것을 실패시키는 것: 기대 binding의
+    // cwd를 응답에서 가져오는 것, 표시 자격 대신 true를 넘기는 것, 마지막 시계가 어긋날 때 응답을 남기는 것.
+    #[test]
+    fn another_cwd_an_invalid_marker_or_a_moved_clock_shows_nothing() {
+        let mut h = commanded("prod-cluster");
+        h.commands = Some(command_response("prod-cluster", &frame(), b"/x/other"));
+        assert!(!record(&h.run(&args(), Mode::Dark)).contains("prod-cluster"));
+        let mut h = commanded("prod-cluster");
+        let s = snapshot(UNIT);
+        let mut m = marker(&s);
+        m.invalid = true;
+        h.marker = Some(m.encode().to_vec());
+        assert!(!record(&h.run(&args(), Mode::Dark)).contains("prod-cluster"));
+        let mut h = commanded("prod-cluster");
+        let mut moved = clock();
+        moved.boot = [9; 16];
+        h.final_clock = Some(moved);
+        assert!(!record(&h.run(&args(), Mode::Dark)).contains("prod-cluster"));
+    }
+
+    // 값은 text 세그먼트와 같은 칸 수로 잘린다(C4b 판정 Q3). 이것을 실패시키는 것: command 값을 자르지 않고
+    // 그리는 것.
+    #[test]
+    fn a_long_value_is_cut_to_the_segment_cells() {
+        let long = "Q".repeat(usize::from(crate::field::CUSTOM_TEXT_CELLS) + 40);
+        let mut h = commanded(&long);
+        let r = h.run(&args(), Mode::Dark);
+        // The record carries the line in more than one field (the prompt and
+        // its vi variants); each draws the value cut to the cells.
+        let counts: Vec<usize> = record(&r)
+            .split('\x1f')
+            .map(|f| f.matches('Q').count())
+            .collect();
+        assert!(counts.iter().any(|&n| n > 0), "{counts:?}");
+        assert!(
+            counts
+                .iter()
+                .all(|&n| n <= usize::from(crate::field::CUSTOM_TEXT_CELLS)),
+            "{counts:?}"
+        );
+    }
+
+    // command 사본은 수집 응답보다 큰 명령 응답 상한까지 받고, 수집 사본은 그대로다. 이것을 실패시키는 것: command
+    // 사본에 수집 응답 크기 범위를 쓰는 것(300 KB 응답을 버림), 상한을 넘는 응답을 받는 것.
+    #[test]
+    fn the_command_copy_takes_the_command_response_sizes() {
+        let p = Prefetch {
+            parent: Slot::Directory0,
+            uid: 501,
+            cwd: None,
+        };
+        let at = |n: usize| facts(false, false, n);
+        assert!(p.accepts_collection(
+            CollectionCopy::Command,
+            at(crate::command::response::RESPONSE_MAX)
+        ));
+        assert!(p.accepts_collection(CollectionCopy::Command, at(STREAM_MAX + 1)));
+        assert!(!p.accepts_collection(
+            CollectionCopy::Command,
+            at(crate::command::response::RESPONSE_MAX + 1)
+        ));
+        assert!(!p.accepts_collection(
+            CollectionCopy::Command,
+            at(crate::command::response::HEADER - 1)
+        ));
+        assert!(!p.accepts_collection(CollectionCopy::Current, at(STREAM_MAX + 1)));
     }
 }
