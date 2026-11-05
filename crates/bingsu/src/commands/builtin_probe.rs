@@ -251,7 +251,23 @@ pub(crate) fn plan(
         }
         Choice::Hidden(why) => return hide(why),
         Choice::Unsupported => return hide("a version manager bingsu does not resolve"),
-        Choice::RunFound => (found, checked, None),
+        Choice::RunFound => match developer_tool(
+            &found.executable,
+            Path::new(XCODE_SELECT_LINK),
+            Path::new(COMMAND_LINE_TOOLS),
+            cfg!(target_os = "macos"),
+        ) {
+            Stub::Not => (found, checked, None),
+            // The real file the stub would hand the call to, judged like
+            // any executable; the stub itself never runs (D3a ruling i).
+            Stub::Real(real) => match exec_path::resolve_open(&real, c.repo, c.me, groups) {
+                Ok((found, checked)) => (found, checked, None),
+                Err(_) => return hide("the developer tools' python3 failed the checks"),
+            },
+            Stub::Missing => {
+                return hide("python3 is the developer tools' stub and they are not installed");
+            }
+        },
         // The manager's own file, judged by the same rules as any
         // executable (D3a acceptance: owner, pin).
         Choice::RunManaged {
@@ -303,6 +319,62 @@ pub(crate) fn plan(
             toolchain,
         }),
     }
+}
+
+/// macOS's developer tool stubs bingsu meets among the builtin commands
+/// (D3a ruling i). Every developer tool in `/usr/bin` (python3, pip3, git,
+/// clang, make and 77 more on macOS 27.2) is the same file: equal sha256
+/// (`ed6f5284033aa2aa…`), 196 KB, linking `/usr/lib/libxcselect.dylib`;
+/// without the developer tools installed it asks to install them, a dialog
+/// a background round must never raise. Of the four builtin commands only
+/// `python3` is among them.
+const DEVELOPER_STUBS: [&str; 1] = ["/usr/bin/python3"];
+/// The selected developer folder (`xcode-select`'s root-owned link).
+const XCODE_SELECT_LINK: &str = "/var/db/xcode_select_link";
+/// The Command Line Tools, the developer folder when none is selected.
+const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
+
+/// What a resolved command is with respect to the developer tool stubs.
+#[derive(Debug, PartialEq, Eq)]
+enum Stub {
+    /// Not a stub: it runs as found.
+    Not,
+    /// A stub: run this file of the developer folder instead.
+    Real(PathBuf),
+    /// A stub with no developer folder holding its tool: hidden.
+    Missing,
+}
+
+/// The developer folder's own file for a stub (`<folder>/usr/bin/<name>`),
+/// the folder from `select_link`, else `tools` when that is a folder.
+/// Off macOS (`macos` false) nothing is a stub: Linux's `/usr/bin/python3`
+/// is the interpreter itself.
+fn developer_tool(executable: &Path, select_link: &Path, tools: &Path, macos: bool) -> Stub {
+    // Fails without each: developer_stubs_run_the_real_tool (off macOS, a
+    // non-stub rerouted).
+    if !macos || !DEVELOPER_STUBS.iter().any(|s| executable == Path::new(s)) {
+        return Stub::Not;
+    }
+    let Some(name) = executable.file_name() else {
+        return Stub::Missing;
+    };
+    // Fails without it: developer_stubs_run_the_real_tool (the selected
+    // folder before the Command Line Tools).
+    let folder = match std::fs::read_link(select_link) {
+        Ok(target) => select_link
+            .parent()
+            .map_or(target.clone(), |p| p.join(&target)),
+        Err(_) if tools.is_dir() => tools.to_path_buf(),
+        // Fails without it: developer_stubs_run_the_real_tool (neither).
+        Err(_) => return Stub::Missing,
+    };
+    let real = folder.join("usr/bin").join(name);
+    // Fails without it: developer_stubs_run_the_real_tool (a folder
+    // without the tool).
+    if std::fs::symlink_metadata(&real).is_err() {
+        return Stub::Missing;
+    }
+    Stub::Real(real)
 }
 
 /// The shell's folder, canonical (D3a acceptance: rustup's override
@@ -703,5 +775,59 @@ mod tests {
             Some(at("bin").into_os_string().into_encoded_bytes())
         );
         assert_eq!(canonical_cwd(at("missing").as_os_str().as_bytes()), None);
+    }
+
+    // macOS 개발 도구 stub(/usr/bin/python3)은 실행하지 않는다. 선택된 개발자 폴더(xcode_select_link)를 먼저,
+    // 없으면 Command Line Tools를 쓰고, 그 아래 실제 python3가 없거나 둘 다 없으면 숨긴다(D3a 판정 i). stub 판정은
+    // 경로만 보고, 실험으로 stub을 실행하지 않는다. 이것을 실패시키는 것: stub 이름 검사를 지우는 것(아무 명령이나
+    // 개발자 폴더로 돌림), 선택 링크보다 CLT를 먼저 보는 것, 둘 다 없을 때 stub을 그대로 쓰는 것, 개발자 폴더에
+    // 실제 도구가 없을 때 그 경로를 돌려주는 것, macOS 밖에서도 stub으로 보는 것(Linux의 /usr/bin/python3는
+    // 인터프리터 자체다).
+    #[test]
+    fn developer_stubs_run_the_real_tool() {
+        use std::os::unix::fs::symlink;
+        let s = Scratch::new("xcode");
+        let at = |p: &str| s.0.join(p);
+        let stub = Path::new("/usr/bin/python3");
+        for d in ["xcode/usr/bin", "clt/usr/bin", "empty"] {
+            fs::create_dir_all(at(d)).unwrap();
+        }
+        file(&at("xcode/usr/bin/python3"), b"\x7fELF");
+        file(&at("clt/usr/bin/python3"), b"\x7fELF");
+        symlink(at("xcode"), at("link")).unwrap();
+        symlink(at("empty"), at("link-empty")).unwrap();
+        let d =
+            |exe: &Path, link: &str, tools: &str| developer_tool(exe, &at(link), &at(tools), true);
+        assert_eq!(
+            developer_tool(stub, &at("link"), &at("clt"), false),
+            Stub::Not
+        );
+        assert_eq!(d(Path::new("/usr/bin/node"), "link", "clt"), Stub::Not);
+        assert_eq!(
+            d(stub, "link", "clt"),
+            Stub::Real(at("xcode/usr/bin/python3"))
+        );
+        assert_eq!(
+            d(stub, "no-link", "clt"),
+            Stub::Real(at("clt/usr/bin/python3"))
+        );
+        assert_eq!(d(stub, "no-link", "no-clt"), Stub::Missing);
+        assert_eq!(d(stub, "link-empty", "clt"), Stub::Missing);
+    }
+
+    // 이 Mac의 실제 /usr/bin을 PATH로 두면 python3 결정은 stub이 아닌 개발자 폴더의 파일을 실행하거나 숨긴다
+    // (파일을 해석만 하고 실행하지 않는다). 이것을 실패시키는 것: RunFound에서 developer_tool의 답을 무시하고 찾은
+    // stub을 그대로 쓰는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn plan_never_runs_the_developer_stub() {
+        let s = Scratch::new("stub");
+        let path = "/usr/bin".to_string();
+        let p = plan_with(&s, &path, &[], "python", &Version::None);
+        match &p.action {
+            Action::Run(probe) => assert_ne!(probe.executable, b"/usr/bin/python3".to_vec()),
+            Action::Hide(_) => {}
+            other => panic!("{other:?}"),
+        }
     }
 }
