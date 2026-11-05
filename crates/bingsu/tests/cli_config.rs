@@ -36,12 +36,14 @@ fn prints_the_core_schemas() {
         vec!["config", "--theme"],
         vec!["config", "schema", "--yaml"],
         vec!["config", "schema", "--theme", "extra"],
+        vec!["config", "check", "--explain", "extra"],
+        vec!["config", "check", "--verbose"],
     ] {
         let bad = run(&args);
         assert_eq!((bad.status.code(), bad.stdout.is_empty()), (Some(2), true));
         assert_eq!(
             bad.stderr,
-            b"usage: bingsu config <check|path|schema [--theme]|use PATH>\n"
+            b"usage: bingsu config <check [--explain]|path|schema [--theme]|use PATH>\n"
         );
     }
     use std::os::unix::ffi::OsStringExt;
@@ -177,6 +179,9 @@ fn check_reports_and_judges() {
 fn check_warns_about_env_shebang_scripts() {
     let e = Env::new("cli_config", "shebang");
     let script = e.put("bin/tool", "#!/usr/bin/env sh\necho 1\n");
+    // Executable, as a unit's file must be: one the executor would skip
+    // is not what W411 is about.
+    chmod(&script, 0o755);
     e.put_config(
         "config.toml",
         &format!(
@@ -494,4 +499,130 @@ fn fd_exhaustion_during_inspection_is_incomplete_and_read_only() {
         }
     }
     assert!(incomplete > 0);
+}
+
+// GATE-EXPLAIN.1: 설명은 환경 이름과 출처만 보이고 값은 보이지 않는다. 이것을 실패시키는 것: 설명 절에 환경
+// 값을 싣는 것(이름 대신 NAME=VALUE).
+#[test]
+fn explain_never_prints_env_values() {
+    let e = Env::new("cli_config", "explain-env");
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/kube\"]\nkind = \"command\"\ncommand = [\"/bin/echo\", \"hi\"]\nenv_allow = [\"BINGSU_EXPLAIN_CANARY\"]\n[layout.line1]\nleft = [\"dir\", \"custom/kube\"]\n",
+    );
+    let o = e
+        .cmd(&["config", "check", "--explain"])
+        .env("BINGSU_EXPLAIN_CANARY", "canary-7f3")
+        .output()
+        .unwrap();
+    let stdout = text(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("execution (--explain"), "{stdout}");
+    assert!(stdout.contains("BINGSU_EXPLAIN_CANARY"), "{stdout}");
+    assert!(!stdout.contains("canary-7f3"), "{stdout}");
+    assert!(!text(&o.stderr).contains("canary-7f3"));
+}
+
+// GATE-EXPLAIN.2: 키마다 출처를 보인다. command는 config.toml에서, env_allow는 conf.d 파일에서 왔으면 두 파일이
+// 각 줄에 따로 나온다. 이것을 실패시키는 것: 출처 칸을 빼는 것, 모든 키에 단위 하나의 출처를 쓰는 것.
+#[test]
+fn explain_shows_origin_per_key() {
+    let e = Env::new("cli_config", "explain-origin");
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/kube\"]\nkind = \"command\"\ncommand = [\"/bin/echo\", \"hi\"]\n[layout.line1]\nleft = [\"dir\", \"custom/kube\"]\n",
+    );
+    e.put_config(
+        "conf.d/20-env.toml",
+        "[segment.\"custom/kube\"]\nenv_allow = [\"KUBECONFIG\"]\n",
+    );
+    let (code, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
+    assert_eq!(code, Some(0), "{stdout}");
+    let line = |key: &str, value: &str| {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(key) && l.contains(value))
+            .unwrap_or_else(|| panic!("{key} {value}: {stdout}"))
+            .to_owned()
+    };
+    assert!(
+        line("command", "/bin/echo hi").contains("config.toml:3"),
+        "{stdout}"
+    );
+    assert!(
+        line("env", "KUBECONFIG").contains("20-env.toml:2"),
+        "{stdout}"
+    );
+    assert!(line("cwd", "neutral").ends_with("default"), "{stdout}");
+    assert!(line("env", "HOME USER").ends_with("keep list"), "{stdout}");
+    assert!(line("executable", "echo").contains("/bin/echo"), "{stdout}");
+}
+
+// GATE-EXPLAIN.3: 실행하지 않는 단위는 이유와 그 진단 코드를 보인다(남이 쓸 수 있는 파일의 command → W405).
+// 이것을 실패시키는 것: 이유 칸을 빼는 것, check --explain이 설명 절을 붙이지 않는 것.
+#[test]
+fn explain_shows_not_run_reason() {
+    let e = Env::new("cli_config", "explain-notrun");
+    e.put_config(
+        "config.toml",
+        "[layout.line1]\nleft = [\"dir\", \"custom/kube\"]\n[segment.\"custom/kube\"]\nkind = \"command\"\n",
+    );
+    let f = e.put_config(
+        "conf.d/30-cmd.toml",
+        "[segment.\"custom/kube\"]\ncommand = [\"/bin/echo\", \"hi\"]\n",
+    );
+    chmod(&f, 0o666);
+    let (_, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
+    assert!(
+        stdout.contains("custom/kube  command, not run: one of its execution keys comes from a file that failed the safety check (W405)"),
+        "{stdout}"
+    );
+}
+
+// GATE-EXPLAIN.4: W411은 실행기와 같은 판정(core head)으로 첫 줄을 본다. /usr/bin/env, 상대 인터프리터, 256바이트를
+// 넘는 줄, NUL은 각 이유와 함께 경고하고, `#!/bin/sh`는 경고하지 않는다(known-issues m6-A4a·m6-B3a). 이것을
+// 실패시키는 것: W411을 자체 첫 줄 파서로 되돌리는 것(env만 잡음), 이유를 잘못 붙이는 것.
+#[test]
+fn explain_names_why_a_script_is_refused() {
+    let cases: [(&str, &[u8], Option<&str>); 5] = [
+        (
+            "env",
+            b"#!/usr/bin/env sh\necho 1\n",
+            Some("starts with `#!/usr/bin/env`"),
+        ),
+        (
+            "relative",
+            b"#!sh\necho 1\n",
+            Some("interpreter is not an absolute path"),
+        ),
+        ("nul", b"#!/bin/sh\0x\necho 1\n", Some("holds a NUL byte")),
+        ("long", &[], Some("longer than 256 bytes")),
+        ("plain", b"#!/bin/sh\necho 1\n", None),
+    ];
+    for (tag, body, want) in cases {
+        let e = Env::new("cli_config", &format!("w411-{tag}"));
+        let long = [b"#!/bin/sh ".as_slice(), &vec![b'x'; 300], b"\necho 1\n"].concat();
+        let script = e.put("bin/tool", "");
+        std::fs::write(&script, if tag == "long" { &long[..] } else { body }).unwrap();
+        chmod(&script, 0o755);
+        e.put_config(
+            "config.toml",
+            &format!(
+                "[segment.\"custom/tool\"]\nkind = \"command\"\ncommand = [\"{}\"]\n[layout.line1]\nleft = [\"dir\", \"custom/tool\"]\n",
+                script.display()
+            ),
+        );
+        let (code, stdout, _) = out(&e.run(&["config", "check"]));
+        assert_eq!(code, Some(0), "{tag}: {stdout}");
+        match want {
+            Some(reason) => {
+                assert!(
+                    stdout.contains("W411: segment `custom/tool`"),
+                    "{tag}: {stdout}"
+                );
+                assert!(stdout.contains(reason), "{tag}: {stdout}");
+            }
+            None => assert!(!stdout.contains("W411"), "{tag}: {stdout}"),
+        }
+    }
 }

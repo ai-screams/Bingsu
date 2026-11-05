@@ -304,8 +304,8 @@ pub const CODES: &[CodeInfo] = &[
     ),
     stable(
         ENV_SHEBANG,
-        "segment `{id}`: {path} starts with `#!/usr/bin/env`, so it will not run",
-        "a script's interpreter must be an absolute path that passes the same checks; `/usr/bin/env` would take it from PATH",
+        "segment `{id}`: {path} will not run: {reason}",
+        "a script's first line must be at most 256 bytes without a NUL and name an absolute interpreter that passes the same checks; `/usr/bin/env` would take it from PATH",
         "write the interpreter's absolute path on the first line, for example `#!/usr/bin/python3`",
     ),
     stable(

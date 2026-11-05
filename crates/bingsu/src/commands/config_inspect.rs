@@ -6,6 +6,7 @@
 use super::{
     config_load::{Loader, Places, Untrusted, Verified},
     ctx::{self, EXIT_FAILED, EXIT_UNFINISHED, User},
+    exec_path,
     group_policy::SystemGroups,
     init::{
         roots::{self, ConfigRootPin, Roots},
@@ -375,78 +376,71 @@ pub fn exit_for(i: &Inspection) -> u8 {
     }
 }
 
-/// Where `word` (a unit's `argv[0]`) would be found: an absolute path as
-/// written, a bare name in the first absolute `PATH` folder that has it as a
-/// file. A relative path is never looked up. Only `config check` asks, to
-/// warn early; finding the file a unit runs is the executor's own step.
-fn locate(word: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    if word.starts_with('/') {
-        return Some(PathBuf::from(word));
-    }
-    if word.contains('/') {
-        return None;
-    }
-    std::env::split_paths(path?)
-        .filter(|d| d.is_absolute())
-        .map(|d| d.join(word))
-        .find(|f| f.is_file())
-}
-
-/// Whether the file starts with `#!/usr/bin/env`. Read like other optional
-/// inputs of this crate: nonblocking, no controlling terminal, a regular file
-/// only, and at most the first line's worth of bytes.
-fn starts_with_env_shebang(file: &std::path::Path) -> bool {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
-        .open(file)
-        .is_ok_and(|f| head_is_env_shebang(&f))
-}
-
-/// The first line test on an open file, which must still be a regular file
-/// (it may have been replaced since the check by name).
-fn head_is_env_shebang(mut f: &std::fs::File) -> bool {
-    use std::io::Read as _;
-    if !f.metadata().is_ok_and(|m| m.is_file()) {
-        return false;
-    }
-    // One read: a regular file gives the whole first 256 bytes at once.
-    let mut head = [0u8; 256];
-    let Ok(n) = f.read(&mut head) else {
-        return false;
-    };
-    let Some(rest) = head[..n].strip_prefix(b"#!") else {
-        return false;
-    };
-    let rest = rest.trim_ascii_start();
-    let end = rest
-        .iter()
-        .position(|b| b.is_ascii_whitespace())
-        .unwrap_or(rest.len());
-    &rest[..end] == b"/usr/bin/env"
-}
-
-/// W411 for each unit that would run a script whose first line is
-/// `#!/usr/bin/env`: the executor refuses such a script, so `config check`
-/// says so before it is ever tried. Reads files only here, never in a
-/// refresh or the prompt.
-fn env_shebang_notes(report: &ConfigReport, path: Option<&std::ffi::OsStr>) -> Vec<Diagnostic> {
+/// What the executor's own lookup finds for each unit that may run, by
+/// unit id: the sanitized `PATH`, the same checks, nothing run. No folder
+/// stands for a repository: a round leaves out what lies inside the one the
+/// shell is in, which depends on where the prompt is, not on the settings
+/// (the explain section says so). Only `config check` asks; the files are opened and read,
+/// so a stopped mount on the way can hold the command (it never holds a
+/// prompt or a refresh, which do not come here).
+fn lookups(
+    report: &ConfigReport,
+    path: Option<&std::ffi::OsStr>,
+    me: u32,
+    groups: &mut SystemGroups,
+) -> Vec<(String, exec_path::Explained)> {
     use bingsu_core::config::compile::ExecPolicy;
+    use std::os::unix::ffi::OsStrExt as _;
+    let Some(c) = &report.snapshot else {
+        return Vec::new();
+    };
+    let repo = None;
+    let folders = exec_path::sanitize(path.map_or(&b""[..], |p| p.as_bytes()), repo, me, groups);
+    c.exec_units
+        .iter()
+        .filter(|u| u.not_run.is_none())
+        .filter_map(|u| {
+            let ExecPolicy::Command { argv, shell, .. } = &u.policy else {
+                return None;
+            };
+            let word = match shell {
+                Some(_) => "/bin/sh",
+                None => argv.first()?,
+            };
+            let found = exec_path::explain(word.as_bytes(), &folders, repo, me, groups);
+            Some((u.id.clone(), found))
+        })
+        .collect()
+}
+
+/// W411 for each unit whose script the executor refuses by its first line
+/// (D3a/E2 ruling Q2: one code, the reason as its argument). The decision is
+/// the executor's (`exec_path::explain`, core `head`), so `config check`
+/// warns about exactly what will not run.
+fn env_shebang_notes(
+    report: &ConfigReport,
+    found: &[(String, exec_path::Explained)],
+) -> Vec<Diagnostic> {
     let Some(c) = &report.snapshot else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for u in c.exec_units.iter().filter(|u| u.not_run.is_none()) {
-        let ExecPolicy::Command { argv, .. } = &u.policy else {
-            continue;
-        };
-        let (Some(word), Some((_, o))) =
-            (argv.first(), u.origins.iter().find(|(k, _)| k == "command"))
+    for (id, f) in found {
+        let exec_path::Explained::Refused {
+            file: Some(file),
+            script: Some(why),
+        } = f
         else {
             continue;
         };
-        let Some(file) = locate(word, path).filter(|f| starts_with_env_shebang(f)) else {
+        let Some(u) = c.exec_units.iter().find(|u| &u.id == id) else {
+            continue;
+        };
+        let Some((_, o)) = u
+            .origins
+            .iter()
+            .find(|(k, _)| k == "command" || k == "shell")
+        else {
             continue;
         };
         out.push(
@@ -457,17 +451,98 @@ fn env_shebang_notes(report: &ConfigReport, path: Option<&std::ffi::OsStr>) -> V
                     span: o.span,
                 },
             )
-            .arg("id", u.id.clone())
-            .arg("path", ctx::show(&file)),
+            .arg("id", id.clone())
+            .arg("path", ctx::show(file))
+            .arg("reason", why.text()),
         );
     }
     out
 }
 
+/// `config check --explain`: for each command and language segment, whether
+/// it runs and why not, what it runs, and each value with its origin
+/// (`file:line`). Environment names only: the model holds no value.
+fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> String {
+    use bingsu_core::config::explain::{self, From};
+    let mut out = String::from(
+        "execution (--explain; executables as found outside any repository, which a prompt inside one may leave out):\n",
+    );
+    let Some(c) = &i.report.snapshot else {
+        out.push_str("  (not available while an error remains)\n");
+        return out;
+    };
+    let units = explain::units(c);
+    if units.is_empty() {
+        out.push_str("  no command or language segments\n");
+    }
+    let catalog = Catalog(&i.report.files);
+    let clean = |t: &str| bingsu_core::sanitize::sanitize(t.as_bytes());
+    let place = |f: &From| -> String {
+        use bingsu_core::diag::SourceView as _;
+        match f {
+            From::Default => "default".into(),
+            From::KeepList => "keep list".into(),
+            From::Source(o) => {
+                let (l, _) = bingsu_core::diag::line_col(catalog.bytes(o.source), o.span.start);
+                format!(
+                    "{}:{l}",
+                    bingsu_core::sanitize::sanitize(catalog.display(o.source))
+                )
+            }
+        }
+    };
+    for u in &units {
+        match &u.not_run {
+            None => {
+                let _ = writeln!(out, "{}  {}, runs", clean(&u.id), u.kind);
+            }
+            Some(n) => {
+                let (text, code) = explain::not_run_text(n);
+                let code = code.map(|c| format!(" ({c})")).unwrap_or_default();
+                let _ = writeln!(out, "{}  {}, not run: {text}{code}", clean(&u.id), u.kind);
+            }
+        }
+        for r in &u.rows {
+            let _ = writeln!(
+                out,
+                "  {:<10} {:<36} {}",
+                r.key,
+                clean(&r.value),
+                place(&r.from)
+            );
+        }
+        if let Some((_, f)) = found.iter().find(|(id, _)| *id == u.id) {
+            let line = match f {
+                exec_path::Explained::Runs(found) => ctx::show(&found.executable).to_string(),
+                exec_path::Explained::Absent => "not found on the sanitized PATH".into(),
+                exec_path::Explained::Refused { file, script } => format!(
+                    "{} refused{}",
+                    file.as_deref().map(ctx::show).unwrap_or_default(),
+                    script
+                        .map(|s| format!(": {}", s.text()))
+                        .unwrap_or_default()
+                ),
+            };
+            let _ = writeln!(out, "  {:<10} {line}", "executable");
+        }
+    }
+    out
+}
+
+/// What `run_with` adds to the reading: nothing (`config path`), the
+/// executor's lookups and W411 (`config check`), and the execution section
+/// (`config check --explain`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Extra {
+    None,
+    Scripts,
+    Explain,
+}
+
 fn run_with(
     render: fn(&Inspection) -> String,
     exit: fn(&Inspection) -> u8,
-    scripts: bool,
+    extra: Extra,
 ) -> ExitCode {
     let Some(user) = User::current() else {
         eprintln!("{}", en(MsgId::NoHome));
@@ -476,11 +551,23 @@ fn run_with(
     let env = TrustedEnv::capture();
     match inspect_config(&user, &env) {
         Ok(mut i) => {
-            if scripts {
-                let notes = env_shebang_notes(&i.report, env.path.as_deref());
-                i.report.diagnostics.extend(notes);
+            let found = match extra {
+                Extra::None => Vec::new(),
+                Extra::Scripts | Extra::Explain => lookups(
+                    &i.report,
+                    env.path.as_deref(),
+                    user.me,
+                    &mut SystemGroups::new(&user.pw.name),
+                ),
+            };
+            let notes = env_shebang_notes(&i.report, &found);
+            i.report.diagnostics.extend(notes);
+            let mut text = render(&i);
+            // Fails without it: explain_shows_not_run_reason.
+            if extra == Extra::Explain {
+                text.push_str(&render_explain(&i, &found));
             }
-            if !ctx::print(&render(&i)) {
+            if !ctx::print(&text) {
                 return ctx::code(EXIT_FAILED);
             }
             ctx::code(exit(&i))
@@ -493,13 +580,18 @@ fn run_with(
 }
 
 pub fn check() -> ExitCode {
-    run_with(render_check, exit_for, true)
+    run_with(render_check, exit_for, Extra::Scripts)
+}
+
+/// `config check --explain`: `check`, then the execution section.
+pub fn check_explain() -> ExitCode {
+    run_with(render_check, exit_for, Extra::Explain)
 }
 
 /// `config path` lists; it does not judge, so it succeeds whenever it could
 /// read the folder.
 pub fn path() -> ExitCode {
-    run_with(render_path, path_exit, false)
+    run_with(render_path, path_exit, Extra::None)
 }
 
 fn path_exit(i: &Inspection) -> u8 {
@@ -539,11 +631,10 @@ mod tests {
         report::report(roots, &mut NoFiles, [0, 3, 0], Mode::Dark)
     }
 
-    // 실행 파일의 첫 줄이 `#!/usr/bin/env`이면 config check가 W411로 미리 알린다(실행기는 그 스크립트를 거부).
-    // 이것을 실패시키는 것: W411 push를 지우는 것, 인터프리터 비교를 `starts_with(b"/usr/bin/env")`로 넓히는 것
-    // (`/usr/bin/envx`도 경고), PATH 찾기를 지우는 것(맨 이름이 경고 없이 지나감), 상대 PATH 폴더 제외를 지우는 것,
-    // PATH 폴더에 그 파일이 있는지 보지 않는 것(빈 폴더에서 멈춤), 연 뒤의 일반 파일 검사를 지우는 것(FIFO를 읽음),
-    // 실행하지 않는 단위까지 보는 것, 상대 argv[0]을 PATH에서 찾는 것.
+    // 실행기가 거부하는 첫 줄이면 config check가 W411로 미리 알린다. 판정은 실행기의 찾기·검사(exec_path::explain,
+    // core head)이고 PATH는 정제한 것이다(E2, known-issues m6-A4a). 이것을 실패시키는 것: W411 push를 지우는 것,
+    // `/usr/bin/envx`까지 경고하는 것, 맨 이름을 PATH에서 찾지 않는 것, 상대 PATH 폴더를 쓰는 것, FIFO를 읽는 것,
+    // 실행하지 않는 단위까지 보는 것, 상대 argv[0]을 PATH에서 찾는 것, merged-/usr의 `/bin/env` 별칭을 놓치는 것.
     #[test]
     fn test_env_shebang_warned() {
         // It spawns mkfifo: between fork and exec the child holds every
@@ -570,7 +661,11 @@ mod tests {
             )
         };
         let warned = |user: &str, path: Option<&std::ffi::OsStr>| -> Vec<String> {
-            env_shebang_notes(&report_of(user), path)
+            let report = report_of(user);
+            let me = crate::commands::sys::current_uid();
+            let mut groups =
+                SystemGroups::new(&crate::commands::sys::passwd_entry(me).unwrap().name);
+            env_shebang_notes(&report, &lookups(&report, path, me, &mut groups))
                 .iter()
                 .map(|d| {
                     assert_eq!(d.code, codes::ENV_SHEBANG);
@@ -588,6 +683,16 @@ mod tests {
         assert_eq!(warned(&seg("a", &path(&spaced)), None), ["custom/a"]);
         assert_eq!(warned(&seg("a", &path(&abs)), None), Vec::<String>::new());
         assert_eq!(warned(&seg("a", &path(&other)), None), Vec::<String>::new());
+        // `/usr/bin/env` under another name (merged-/usr `/bin/env`) is the
+        // same refusal; where `/bin/env` is not that file it is not.
+        let alias = script("env-alias", "#!/bin/env sh\n");
+        let merged = std::fs::canonicalize("/bin/env")
+            .is_ok_and(|p| p == std::path::Path::new("/usr/bin/env"));
+        assert_eq!(
+            warned(&seg("a", &path(&alias)), None).len(),
+            usize::from(merged),
+            "/bin/env merged: {merged}"
+        );
         // A bare name is looked up in PATH: the first absolute folder that
         // has it as a file. A relative folder is skipped even when it names
         // the same folder from here.
@@ -633,15 +738,8 @@ mod tests {
             ),
             crate::commands::sys::WriteOutcome::Done
         ));
-        assert!(!starts_with_env_shebang(&fifo));
-        // The open-file check alone: a FIFO that got past the name check.
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let opened = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&fifo)
-            .unwrap();
-        assert!(!head_is_env_shebang(&opened));
+        let named = |f: &std::path::Path| seg("a", f.to_str().unwrap());
+        assert_eq!(warned(&named(&fifo), None), Vec::<String>::new());
         drop(keep);
         // A unit that does not run is not looked at.
         let off = seg("a", &path(&env)).replace("kind = ", "enabled = false\nkind = ");
