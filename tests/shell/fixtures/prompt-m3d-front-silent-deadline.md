@@ -58,3 +58,5 @@ binary formats, which the trace judgment decodes) are kept whole.
 | original | `86148c48b80d0c224a587ab832b8fa7e112b78e70490e62363eef0d777ded40c` | 4,133,475 | `ecd756d57b2cd0fac75ee7646eba8a7443f501d8ade26e329e3c287cc986f8a5` | 4,184,615 |
 | reduced | `2df69e32dc23f026a746b3345676839007b2b324a808cfa8254c9bd3151e023b` | 952,911 | `efd968f1e793e2b4ee73b8bb29e68612503fc771f633c97f3fb3d632646cb473` | 1,002,831 |
 | gzip | `4452caefc279384d9054cb3bff623070e66b012e88cd022e72fe425325c8168e` | 62,865 | `0eb9eb0e81a49922ddf6b2bc6f1b194d015e0b8fed5104b02870c20b8376e0c7` | 65,922 |
+
+Envelope: the stored responses these captures read are `BNGRES03` version 3 (before D1). The live gate takes only the current envelope; the portable tests pass the recorded one from `recorded-envelopes.tsv`.

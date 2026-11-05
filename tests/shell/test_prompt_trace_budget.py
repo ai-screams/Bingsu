@@ -17,22 +17,60 @@ COLLECT_BASE = "/home/tester/pt/test_prompt_binary_names_only_1"
 COLLECT_PIN = "/home/tester/target/release/bingsu-collect"
 
 
+def recorded_headers(fixture):
+    """The stored-response envelope a recorded fixture observed (its older
+    build), from fixtures/recorded-envelopes.tsv; the live gate never takes it."""
+    import csv
+    table = Path(__file__).with_name("fixtures") / "recorded-envelopes.tsv"
+    row, = [r for r in csv.DictReader(table.read_text().splitlines(), delimiter="\t") if r["fixture"] == fixture]
+    magic, version = row["response_header"].split()
+    return (magic.encode() + int(version).to_bytes(2, "little"),)
+
+
+COLLECT_FIXTURE = "prompt-m3d-collect-linux-1.strace.gz"
+COLLECT_HEADERS = recorded_headers(COLLECT_FIXTURE)
+
+
 def collecting_prompt():
     """A release prompt whose helper started and supervised one collecting
     collector (global-missing, warm snapshot). read/write payloads are cut to
     120 characters; provenance: fixtures/prompt-m3d-collect-trace.md."""
     import gzip
     data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
-        "prompt-m3d-collect-linux-1.strace.gz").read_bytes())
+        COLLECT_FIXTURE).read_bytes())
     assert hashlib.sha256(data).hexdigest() == "18c030e2e135874a418bc047bc6f0dbe731f5821b2bcd9663afefbd3632c8fab"
     return data.decode().splitlines()
 
 
-def check_collecting_prompt(lines, *, collectors=1, audit=True, platform=None):
+# 이것을 실패시키는 것: live 기본 판정(RESPONSE_HEADERS)이 기록 fixture의 옛 봉투(BNGRES03)를 받는 것. 기록
+# fixture만 provenance 표의 봉투를 명시해 넘긴다(D1 판정).
+def test_live_gate_refuses_a_recorded_envelope():
+    assert budget.RESPONSE_HEADERS == (b"BNGRES04\x04\x00",)
+    check_collecting_prompt(collecting_prompt())
+    with pytest.raises(AssertionError, match="collection body after invalid header"):
+        check_collecting_prompt(collecting_prompt(), headers=budget.RESPONSE_HEADERS)
+
+
+# 이것을 실패시키는 것: 표에 없는 fixture의 봉투를 시험이 지어내는 것, 표의 봉투가 그 fixture에 실제로 없는 것,
+# 표가 가리키는 provenance 문서가 없는 것.
+def test_recorded_envelope_table_matches_its_fixtures():
+    import csv, gzip
+    fixtures = Path(__file__).with_name("fixtures")
+    rows = list(csv.DictReader((fixtures / "recorded-envelopes.tsv").read_text().splitlines(), delimiter="\t"))
+    assert rows
+    for row in rows:
+        magic, version = row["response_header"].split()
+        text = gzip.decompress((fixtures / row["fixture"]).read_bytes()).decode()
+        assert f'"{magic}\\{version}\\0' in text, row
+        assert (fixtures / row["provenance"]).is_file() and row["fixture"] in (fixtures / row["provenance"]).read_text(), row
+
+
+def check_collecting_prompt(lines, *, collectors=1, audit=True, platform=None, headers=COLLECT_HEADERS):
     roots = [COLLECT_BASE + suffix for suffix in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")]
     inputs = tuple(COLLECT_BASE + suffix for suffix in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore"))
     repo = COLLECT_BASE + "/repo"
     budget.assert_prompt_trace_budget(lines, COLLECT_BASE + "/bin/bingsu", roots, global_inputs=inputs,
+                                      headers=headers,
                                       collector_exe=COLLECT_PIN, collectors=collectors,
                                       repository_roots=[repo, repo + "/.git"] if audit else None,
                                       repository_evidence=[repo + "/.git/HEAD"], platform=platform)
@@ -2805,7 +2843,8 @@ def collecting_capture(lines):
         global_inputs=tuple(COLLECT_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")),
         global_present=False, collectors=1,
         pinned=[COLLECT_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
-        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
+        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"),
+        headers=COLLECT_HEADERS)
 
 
 def collector_deadline_lines(after_head=False, head_open=False, extra=()):
@@ -3108,7 +3147,8 @@ def stored_marker_capture(name, *, record, edit=lambda lines: lines):
     lines = edit(data.decode().splitlines())
     untimed = budget.strip_trace_times("\n".join(lines)).splitlines()
     return SimpleNamespace(trace=budget.parse_trace("\n".join(untimed)), lines=lines, untimed=untimed,
-                           context=marker_context(base), record=record, invalid=False)
+                           context=marker_context(base), record=record, invalid=False,
+                           headers=recorded_headers(fixture))
 
 
 def insert_front_open(lines, path):
@@ -3164,7 +3204,8 @@ def silent_deadline_capture(lines=None):
         assert hashlib.sha256(data).hexdigest() == "fec18b40e9f44e7ea3010ac4d28ef36984f20f439e854556edf644ab89b68a68"
         lines = data.decode().splitlines()
     return SimpleNamespace(trace=budget.parse_trace("\n".join(lines)), lines=lines, untimed=lines,
-                           context=KEEP19_CONTEXT, record=b"", invalid=True)
+                           context=KEEP19_CONTEXT, record=b"", invalid=True,
+                           headers=recorded_headers("prompt-m3d-front-silent-deadline-linux.strace.gz"))
 
 
 def keep19_with_alarm(extra=()):
