@@ -1043,13 +1043,13 @@ fn gc_cannot_split_lock_inode_or_delete_inflight_store() {
 // 이것을 실패시키는 것: mkdir 전에 store/node/논리 bytes 상한을 검사하지 않는 것, cwd를 경로 조각으로 쓰는 것.
 #[test]
 fn store_capacity_is_reserved_before_mkdir() {
-    for (stores, nodes, bytes) in [(128, 8_192, 10_000_000), (0, 0, 0)] {
+    for (stores, nodes, bytes) in [(128, 8_192, 15_000_000), (0, 0, 0)] {
         assert!(collection_gc::capacity(stores, nodes, bytes));
     }
     for (stores, nodes, bytes) in [
-        (129, 8_192, 10_000_000),
-        (128, 8_193, 10_000_000),
-        (128, 8_192, 10_000_001),
+        (129, 8_192, 15_000_000),
+        (128, 8_193, 15_000_000),
+        (128, 8_192, 15_000_001),
     ] {
         assert!(!collection_gc::capacity(stores, nodes, bytes));
     }
@@ -1080,10 +1080,12 @@ fn store_capacity_is_reserved_before_mkdir() {
             Ok(store) => held.push(store),
             Err(StoreError::Busy) => {
                 assert!(!f.path_for(&b).exists());
+                // ⌊(15,000,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144 +
+                // 2 × command response maximum)⌋ = 6 (U-21; 7 at 10 MB before).
                 assert_eq!(
                     held.len(),
-                    7,
-                    "reserve two slots, stage, legacy request and both catalog copies"
+                    6,
+                    "reserve two slots, stage, legacy request, the command response and its stage, and both catalog copies"
                 );
                 return;
             }
@@ -2930,4 +2932,280 @@ fn gc_large_catalog_checkpoint_cost() {
         bytes as u64
     );
     eprintln!("GC_CHECKPOINT bytes={bytes} ops={ops}");
+}
+
+mod command_store {
+    use super::*;
+    use bingsu_core::{
+        command::response::{self, Entry, Response, Status},
+        handoff::Origin,
+    };
+    use commands::collection_store::{COMMAND, COMMAND_STAGE};
+
+    fn command_binding(f: &Fixture, cwd: &[u8]) -> response::Binding {
+        let b = &f.binding;
+        response::Binding {
+            build_id: b.build_id,
+            boot: b.snapshot.boot,
+            epoch: b.snapshot.epoch,
+            context: b.snapshot.context,
+            clock_kind: b.clock_kind,
+            domain: b.domain,
+            resume: b.resume,
+            config: b.config.clone(),
+            state: b.state.clone(),
+            cwd: cwd.to_vec(),
+        }
+    }
+
+    fn entry(id: &str, completed_at: u64) -> Entry {
+        Entry {
+            origin: Origin::Config,
+            id: id.to_string(),
+            policy: [1; 32],
+            environment: [2; 32],
+            pattern: [0; 32],
+            attempted_at: completed_at - 1,
+            completed_at,
+            status: Status::Ok,
+            value: id.to_string(),
+            raw: id.to_string(),
+        }
+    }
+
+    fn admit(f: &Fixture, b: &response::Binding) -> CollectionStore {
+        match CollectionStore::admit_commands(&f.context, b, clock()).unwrap() {
+            commands::collection_store::Admission::Admitted(s) => s,
+            commands::collection_store::Admission::Deferred(stop) => panic!("deferred: {stop:?}"),
+        }
+    }
+
+    fn read(f: &Fixture) -> Response {
+        Response::decode(&fs::read(f.path().join(COMMAND)).unwrap()).unwrap()
+    }
+
+    // 두 회차가 서로 다른 단위를 발행해도 둘 다 남는다(잠금 안 재읽기·병합). 같은 cwd의 수집 응답 폴더를 같이
+    // 쓴다. 이것을 실패시키는 것: publish_commands가 현재 응답을 읽지 않고 내 항목만 쓰는 것(첫 단위가 사라짐).
+    #[test]
+    fn test_concurrent_publish_keeps_other_units() {
+        let f = Fixture::new("command-merge");
+        let b = command_binding(&f, b"/cwd");
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/b", 20)])
+            .unwrap();
+        let r = read(&f);
+        assert!(r.entry(Origin::Config, "custom/a").is_some(), "{r:?}");
+        assert!(r.entry(Origin::Config, "custom/b").is_some(), "{r:?}");
+        // The collection response of the same cwd shares the folder.
+        f.publish(b"shared");
+        assert_eq!(read(&f), r);
+    }
+
+    // 발행 잠금을 쥔 동안 같은 cwd의 다른 회차는 들어오지 못하고(Deferred), 그 회차의 발행은 버려진다. 이것을
+    // 실패시키는 것: admit_work가 collection.lock을 잡지 않는 것(둘째 회차가 들어와 같은 순간 발행).
+    #[test]
+    fn a_publishing_round_keeps_the_others_out() {
+        let f = Fixture::new("command-lock");
+        let b = command_binding(&f, b"/cwd");
+        let mut first = admit(&f, &b);
+        let mut second = None;
+        first
+            .publish_commands_with_hook(&b, &[entry("custom/a", 10)], &mut |at| {
+                if at == "read_again" {
+                    second =
+                        Some(CollectionStore::admit_commands(&f.context, &b, clock()).unwrap());
+                }
+            })
+            .unwrap();
+        assert!(matches!(
+            second,
+            Some(commands::collection_store::Admission::Deferred(_))
+        ));
+    }
+
+    // 발행 때 다시 읽은 손상된 명령 응답은 없는 것으로 치워지고, 다른 cwd의 응답은 그 발행을 거부한다. 이것을
+    // 실패시키는 것: read_command의 손상 시 unlink를 지우는 것(손상 파일 자리에 설치할 수 없어 발행 실패),
+    // cwd 비교를 지우는 것, recover_stage의 명령 stage 제거를 지우는 것.
+    #[test]
+    fn damaged_or_foreign_command_responses() {
+        let f = Fixture::new("command-damage");
+        let b = command_binding(&f, b"/cwd");
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        let path = f.path().join(COMMAND);
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, &bytes).unwrap();
+        // A stage an interrupted publication left.
+        let stage = f.path().join(COMMAND_STAGE);
+        fs::write(&stage, b"half").unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
+        // The publication reads it again under the lock: damage is absence.
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/b", 20)])
+            .unwrap();
+        let r = read(&f);
+        assert_eq!(r.entries.len(), 1, "{r:?}");
+        assert!(!stage.exists());
+        let other = command_binding(&f, b"/other");
+        let foreign = Response {
+            binding: other,
+            entries: vec![entry("custom/x", 5)],
+        };
+        fs::write(&path, foreign.encode().unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let got = admit(&f, &b).publish_commands(&b, &[entry("custom/c", 30)]);
+        assert!(
+            matches!(got, Err(StoreError::Busy)),
+            "{:?}",
+            got.map(|_| ())
+        );
+        assert!(path.exists(), "a foreign response is never removed");
+    }
+
+    // GC는 명령 응답을 저장소의 파일로 세고, 그 저장소를 내보낼 때 함께 지운다. 이것을 실패시키는 것: FILES에서
+    // COMMAND를 빼는 것(인벤토리가 모르는 이름으로 Unsafe), file_cap이 COMMAND에 STREAM_MAX를 주는 것(256 KiB를
+    // 넘는 응답에서 Unsafe).
+    #[test]
+    fn gc_accounts_and_evicts_command_responses() {
+        let f = Fixture::new("command-gc");
+        let b = command_binding(&f, b"/cwd");
+        let big: Vec<Entry> = (0..response::ENTRIES_MAX)
+            .map(|i| Entry {
+                value: "v".repeat(response::VALUE_MAX),
+                raw: "r".repeat(response::VALUE_MAX),
+                ..entry(&format!("custom/u{i:02}"), 10 + i as u64)
+            })
+            .collect();
+        admit(&f, &b).publish_commands(&b, &big).unwrap();
+        let stream_max = bingsu_core::collection::wire::STREAM_MAX as u64;
+        assert!(fs::metadata(f.path().join(COMMAND)).unwrap().len() > stream_max);
+        let report = f.gc(clock());
+        assert!(!report.incomplete, "{report:?}");
+        // A day later and over budget, the store is evicted with its command response.
+        let later = day(40);
+        for i in 0..20 {
+            let mut other = f.binding.clone();
+            other.cwd = format!("/push-{i}").into_bytes();
+            if let Ok(store) = CollectionStore::fixture(&f.context, &other, later, &SCHEMA, None) {
+                drop(store);
+            }
+            f.gc(later);
+        }
+        assert!(!f.path().join(COMMAND).exists());
+    }
+
+    // 발행은 그 저장소의 문맥·cwd 응답만 쓰고, 재읽은 뒤 이름이 바뀌었으면 쓰지 않는다. 이것을 실패시키는 것:
+    // publish_commands의 binding·key 비교를 지우는 것(다른 cwd 응답이 이 폴더에 쓰임), 설치 전 stamp 재확인을
+    // 지우는 것(재읽은 뒤 바뀐 파일을 덮어씀).
+    #[test]
+    fn publication_checks_its_cwd_and_the_file_it_read() {
+        let f = Fixture::new("command-checks");
+        let b = command_binding(&f, b"/cwd");
+        let other = command_binding(&f, b"/other");
+        assert!(matches!(
+            admit(&f, &b).publish_commands(&other, &[entry("custom/a", 10)]),
+            Err(StoreError::Unsafe)
+        ));
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        let path = f.path().join(COMMAND);
+        let replaced = Response {
+            binding: b.clone(),
+            entries: vec![entry("custom/z", 99)],
+        }
+        .encode()
+        .unwrap();
+        let got =
+            admit(&f, &b).publish_commands_with_hook(&b, &[entry("custom/b", 20)], &mut |at| {
+                if at == "read_again" {
+                    let tmp = path.with_extension("swap");
+                    fs::write(&tmp, &replaced).unwrap();
+                    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).unwrap();
+                    fs::rename(&tmp, &path).unwrap();
+                }
+            });
+        assert!(
+            matches!(got, Err(StoreError::Unsafe)),
+            "{:?}",
+            got.map(|_| ())
+        );
+        assert_eq!(read(&f).entries[0].id, "custom/z");
+    }
+
+    // 인벤토리는 명령 응답이 놓인 문맥(config·state)에 맞는지 본다. 다른 문맥의 응답이 든 저장소는 안전하지 않은
+    // 것으로 보고 그 인벤토리를 끝내지 않는다(수집 응답과 같은 규칙, cwd는 주소 검사가 맡음). 이것을 실패시키는
+    // 것: command_place의 config·state 비교를 지우는 것.
+    #[test]
+    fn inventory_refuses_a_command_response_out_of_place() {
+        let f = Fixture::new("command-place");
+        let b = command_binding(&f, b"/cwd");
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        let path = f.path().join(COMMAND);
+        // The same cwd under another config root.
+        let mut b2 = command_binding(&f, b"/cwd");
+        b2.config = b"/config-other".to_vec();
+        b2.context = snapshot::context_crc(&b2.config, &b2.state).unwrap();
+        let foreign = Response {
+            binding: b2,
+            entries: vec![entry("custom/x", 5)],
+        };
+        let tmp = path.with_extension("swap");
+        fs::write(&tmp, foreign.encode().unwrap()).unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&tmp, &path).unwrap();
+        fs::write(f.base.join(".collections.catalog"), b"rebuild").unwrap();
+        let got = collection_gc::fixture_reclaim(
+            &f.context,
+            clock(),
+            GcBudget::default().max_ops,
+            &SCHEMA,
+        );
+        assert!(
+            matches!(&got, Err(StoreError::Unsafe)) || got.as_ref().is_ok_and(|r| r.incomplete),
+            "{:?}",
+            got.map(|r| r.incomplete)
+        );
+        assert!(path.exists());
+    }
+
+    // 캐시 조회는 이 회차의 binding과 정확히 같은 응답만 돌려준다(다른 빌드·epoch·시계의 응답은 없는 것). 아무것도
+    // 만들지 않는다. 이것을 실패시키는 것: read_commands의 binding 비교를 지우는 것.
+    #[test]
+    fn the_cache_lookup_takes_only_this_binding() {
+        let f = Fixture::new("command-lookup");
+        let b = command_binding(&f, b"/cwd");
+        assert!(
+            commands::collection_store::read_commands(&f.context, &b)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!f.path().exists(), "a lookup made the store");
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        let got = commands::collection_store::read_commands(&f.context, &b).unwrap();
+        assert_eq!(got.unwrap().entries.len(), 1);
+        for change in [0, 1, 2] {
+            let mut other = b.clone();
+            match change {
+                0 => other.build_id = BuildId([9; 32]),
+                1 => other.epoch = [9; 16],
+                _ => other.resume = 9,
+            }
+            assert!(
+                commands::collection_store::read_commands(&f.context, &other)
+                    .unwrap()
+                    .is_none(),
+                "{change}"
+            );
+        }
+    }
 }

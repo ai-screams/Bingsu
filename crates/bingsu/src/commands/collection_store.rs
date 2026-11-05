@@ -10,6 +10,7 @@ use bingsu_core::{
         response::Completed,
         wire::{Binding, STREAM_MAX},
     },
+    command::response::{self as command, Entry, Response},
     field::SegmentDecl,
     snapshot::Clock,
 };
@@ -25,7 +26,71 @@ pub(crate) const PREVIOUS: &str = "previous";
 pub(crate) const STAGE: &str = ".response.stage";
 pub(crate) const LOCK: &str = "collection.lock";
 pub(crate) const LEGACY_REQUEST: &str = ".stage-request";
-pub(crate) const FILES: [&str; 5] = [RESPONSE, PREVIOUS, STAGE, LEGACY_REQUEST, LOCK];
+/// The command response of this cwd (C4 ruling P1), and its stage.
+pub(crate) const COMMAND: &str = "command";
+pub(crate) const COMMAND_STAGE: &str = ".command.stage";
+pub(crate) const FILES: [&str; 7] = [
+    RESPONSE,
+    PREVIOUS,
+    STAGE,
+    LEGACY_REQUEST,
+    COMMAND,
+    COMMAND_STAGE,
+    LOCK,
+];
+
+/// The largest command response file (C4).
+pub(crate) const COMMAND_MAX: usize = command::RESPONSE_MAX;
+
+/// The largest content a store file may hold.
+pub(crate) fn file_cap(name: &str) -> usize {
+    match name {
+        LOCK => 0,
+        COMMAND | COMMAND_STAGE => COMMAND_MAX,
+        _ => STREAM_MAX,
+    }
+}
+
+/// What a store belongs to: the exact config and state roots, the raw cwd
+/// and the clock of the admitting round. A collection response and a
+/// command response of one cwd share the store.
+pub(crate) struct Key {
+    pub config: Vec<u8>,
+    pub state: Vec<u8>,
+    pub cwd: Vec<u8>,
+    pub boot: [u8; 16],
+    pub kind: u8,
+    pub domain: [u8; 16],
+    pub resume: u64,
+    /// The address name under `collections-v1`.
+    pub address: String,
+}
+impl Key {
+    pub(crate) fn of_collection(b: &Binding) -> Self {
+        Self {
+            config: b.config.clone(),
+            state: b.state.clone(),
+            cwd: b.cwd.clone(),
+            boot: b.snapshot.boot,
+            kind: b.clock_kind,
+            domain: b.domain,
+            resume: b.resume,
+            address: b.components()[1].clone(),
+        }
+    }
+    pub(crate) fn of_command(b: &command::Binding) -> Self {
+        Self {
+            config: b.config.clone(),
+            state: b.state.clone(),
+            cwd: b.cwd.clone(),
+            boot: b.boot,
+            kind: b.clock_kind,
+            domain: b.domain,
+            resume: b.resume,
+            address: bingsu_core::collection::cwd_hash::address(&b.cwd),
+        }
+    }
+}
 
 #[allow(
     clippy::large_enum_variant,
@@ -49,7 +114,9 @@ pub(crate) struct CollectionStore {
     chain: Vec<File>,
     names: [String; 3],
     lock: File,
-    binding: Binding,
+    key: Key,
+    /// The collection binding, for a store admitted to publish a collection.
+    binding: Option<Binding>,
     catalog: &'static [SegmentDecl],
     me: u32,
     pub(crate) lock_acquired: Option<u64>,
@@ -151,29 +218,6 @@ impl CollectionStore {
         start_inventory_meter: impl FnOnce() -> sys::CollectionMeter,
         hook: &mut dyn FnMut(&str),
     ) -> Result<Admission, StoreError> {
-        let result = Self::admit_work(
-            context,
-            binding,
-            now,
-            catalog,
-            address,
-            start_inventory_meter,
-            hook,
-        );
-        match result {
-            Err(StoreError::Busy) => Ok(Admission::Deferred(collection_gc::GcStop::Busy)),
-            other => other,
-        }
-    }
-    fn admit_work(
-        context: &CheckedContextFd,
-        binding: &Binding,
-        now: Clock,
-        catalog: &'static [SegmentDecl],
-        address: Option<String>,
-        start_inventory_meter: impl FnOnce() -> sys::CollectionMeter,
-        hook: &mut dyn FnMut(&str),
-    ) -> Result<Admission, StoreError> {
         // Encoding validates all raw paths and the context CRC before any mkdir.
         let probe = Completed {
             language_queries: Vec::new(),
@@ -188,20 +232,76 @@ impl CollectionStore {
         probe
             .encode_with_catalog(catalog)
             .map_err(|_| StoreError::Unsafe)?;
-        if context.config != binding.config
-            || context.state != binding.state
-            || now.boot != binding.snapshot.boot
-            || now.kind != binding.clock_kind
-            || now.domain != binding.domain
-            || now.resume != binding.resume
+        let mut key = Key::of_collection(binding);
+        if let Some(address) = address {
+            key.address = address;
+        }
+        let result = Self::admit_work(
+            context,
+            key,
+            Some(binding.clone()),
+            now,
+            catalog,
+            start_inventory_meter,
+            hook,
+        );
+        match result {
+            Err(StoreError::Busy) => Ok(Admission::Deferred(collection_gc::GcStop::Busy)),
+            other => other,
+        }
+    }
+    /// A store for the command response of `binding`'s cwd: the same
+    /// folder, lock and space accounting as a collection response.
+    pub(crate) fn admit_commands(
+        context: &CheckedContextFd,
+        binding: &command::Binding,
+        now: Clock,
+    ) -> Result<Admission, StoreError> {
+        // Encoding validates all raw paths and the context CRC before any mkdir.
+        Response {
+            binding: binding.clone(),
+            entries: Vec::new(),
+        }
+        .encode()
+        .map_err(|_| StoreError::Unsafe)?;
+        let result = Self::admit_work(
+            context,
+            Key::of_command(binding),
+            None,
+            now,
+            bingsu_core::field::BUILTIN,
+            || collection_gc::GcBudget::default().start(),
+            &mut |_| {},
+        );
+        match result {
+            Err(StoreError::Busy) => Ok(Admission::Deferred(collection_gc::GcStop::Busy)),
+            other => other,
+        }
+    }
+    fn admit_work(
+        context: &CheckedContextFd,
+        key: Key,
+        binding: Option<Binding>,
+        now: Clock,
+        catalog: &'static [SegmentDecl],
+        start_inventory_meter: impl FnOnce() -> sys::CollectionMeter,
+        hook: &mut dyn FnMut(&str),
+    ) -> Result<Admission, StoreError> {
+        if context.config != key.config
+            || context.state != key.state
+            || now.boot != key.boot
+            || now.kind != key.kind
+            || now.domain != key.domain
+            || now.resume != key.resume
         {
             return Err(StoreError::Unsafe);
         }
         let me = sys::current_uid();
-        let mut names = binding.components();
-        if let Some(address) = address {
-            names[1] = address;
-        }
+        let names = [
+            String::from("collections-v1"),
+            key.address.clone(),
+            String::from("store"),
+        ];
         // This lock order also covers the gap before the collection flock.
         let mut registration = match collection_gc::Registration::open(
             &context.runtime,
@@ -213,7 +313,7 @@ impl CollectionStore {
             Ok(registration) => registration,
             Err(stop) => return Ok(Admission::Deferred(stop)),
         };
-        registration.reserve(context, binding, &names[1], now)?;
+        registration.reserve(context, &key.cwd, &names[1], now)?;
         hook("reserved_before_mkdir");
         let mut chain = vec![context.dir.try_clone()?];
         let mut created = 0;
@@ -233,7 +333,8 @@ impl CollectionStore {
             chain,
             names,
             lock,
-            binding: binding.clone(),
+            key,
+            binding,
             catalog,
             me,
             lock_acquired,
@@ -276,9 +377,9 @@ impl CollectionStore {
             sys::unlink_at(self.dir().as_fd(), OsStr::new(name))?;
             return Ok(None);
         };
-        if completed.binding.config != self.binding.config
-            || completed.binding.state != self.binding.state
-            || completed.binding.cwd != self.binding.cwd
+        if completed.binding.config != self.key.config
+            || completed.binding.state != self.key.state
+            || completed.binding.cwd != self.key.cwd
         {
             return Err(StoreError::Busy);
         }
@@ -290,6 +391,95 @@ impl CollectionStore {
         remove_checked(self.dir(), STAGE, STREAM_MAX, self.me)?;
         remove_checked(self.dir(), LEGACY_REQUEST, STREAM_MAX, self.me)?;
         Ok(())
+    }
+    /// The command response in this store, if any, with the file it was
+    /// read from. A damaged one is removed (only content damage is
+    /// absence); one of another config, state or cwd refuses the store.
+    fn read_command(&self) -> Result<Option<(File, Response, sys::Stamp)>, StoreError> {
+        let Some((file, bytes)) = read_checked(self.dir(), COMMAND, COMMAND_MAX, self.me)? else {
+            return Ok(None);
+        };
+        let Ok(response) = Response::decode(&bytes) else {
+            snapshot_store::same_name(&file, self.dir().as_fd(), COMMAND)?;
+            sys::unlink_at(self.dir().as_fd(), OsStr::new(COMMAND))?;
+            return Ok(None);
+        };
+        if response.binding.config != self.key.config
+            || response.binding.state != self.key.state
+            || response.binding.cwd != self.key.cwd
+        {
+            return Err(StoreError::Busy);
+        }
+        let stamp = sys::file_stamp(&file)?;
+        Ok(Some((file, response, stamp)))
+    }
+    /// Publishes this round's command results: under the store lock the
+    /// current response is read again, `mine` merged in (only the units this
+    /// round ran, only newer results), and the result installed atomically.
+    /// The response published.
+    pub(crate) fn publish_commands(
+        &mut self,
+        binding: &command::Binding,
+        mine: &[Entry],
+    ) -> Result<Response, StoreError> {
+        self.publish_commands_inner(binding, mine, &mut |_| {})
+    }
+    #[cfg(test)]
+    #[allow(dead_code, reason = "native collection_store integration target")]
+    pub(crate) fn publish_commands_with_hook(
+        &mut self,
+        binding: &command::Binding,
+        mine: &[Entry],
+        hook: &mut dyn FnMut(&str),
+    ) -> Result<Response, StoreError> {
+        self.publish_commands_inner(binding, mine, hook)
+    }
+    fn publish_commands_inner(
+        &mut self,
+        binding: &command::Binding,
+        mine: &[Entry],
+        hook: &mut dyn FnMut(&str),
+    ) -> Result<Response, StoreError> {
+        if Key::of_command(binding).cwd != self.key.cwd
+            || binding.config != self.key.config
+            || binding.state != self.key.state
+        {
+            return Err(StoreError::Unsafe);
+        }
+        self.verify()?;
+        let current = self.read_command()?;
+        // Only a command publication touches the command stage: collection
+        // admissions keep their call count.
+        remove_checked(self.dir(), COMMAND_STAGE, COMMAND_MAX, self.me)?;
+        hook("read_again");
+        let merged = command::merge(current.as_ref().map(|c| &c.1), binding, mine);
+        let bytes = merged.encode().map_err(|_| StoreError::Unsafe)?;
+        let staged = snapshot_store::stage_verified(
+            self.dir(),
+            self.me,
+            COMMAND_STAGE,
+            &bytes,
+            COMMAND_MAX,
+            &mut |actual| match Response::decode(actual) {
+                Ok(decoded) if decoded == merged => Ok(()),
+                _ => Err(StoreError::Unsafe),
+            },
+            hook,
+        )?;
+        self.verify()?;
+        match &current {
+            Some((file, _, stamp)) => {
+                if sys::file_stamp(file)? != *stamp {
+                    return Err(StoreError::Unsafe);
+                }
+                snapshot_store::same_name(file, self.dir().as_fd(), COMMAND)?;
+            }
+            None if sys::at_stamp(self.dir().as_fd(), OsStr::new(COMMAND))
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => {}
+            None => return Err(StoreError::Unsafe),
+        }
+        staged.install(self.dir(), self.me, COMMAND_STAGE, COMMAND, COMMAND_MAX)?;
+        Ok(merged)
     }
     pub(crate) fn publish(&mut self, result: &Completed) -> Result<(), StoreError> {
         self.publish_inner(result, &mut |_| {})
@@ -308,7 +498,11 @@ impl CollectionStore {
         result: &Completed,
         hook: &mut dyn FnMut(&str),
     ) -> Result<(), StoreError> {
-        if !result.binding.matches(&self.binding) {
+        if !self
+            .binding
+            .as_ref()
+            .is_some_and(|b| result.binding.matches(b))
+        {
             return Err(StoreError::Unsafe);
         }
         self.verify()?;
@@ -370,6 +564,33 @@ impl CollectionStore {
         hook("after_install");
         Ok(())
     }
+}
+/// The command response of `binding`'s cwd, read without taking the
+/// store lock (it is replaced only by an atomic rename) and without making
+/// anything: the cache lookup of a round. `None` when there is none yet, or
+/// it is damaged, or bound to anything else.
+pub(crate) fn read_commands(
+    context: &CheckedContextFd,
+    binding: &command::Binding,
+) -> Result<Option<Response>, StoreError> {
+    let me = sys::current_uid();
+    let key = Key::of_command(binding);
+    let mut dir = context.dir.try_clone()?;
+    for name in ["collections-v1", key.address.as_str(), "store"] {
+        let child = match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(name)) {
+            Ok(child) => child,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        snapshot_store::check_directory(&child, me)?;
+        dir = child;
+    }
+    let Some((_, bytes)) = read_checked(&dir, COMMAND, COMMAND_MAX, me)? else {
+        return Ok(None);
+    };
+    Ok(Response::decode(&bytes)
+        .ok()
+        .filter(|r| r.binding == *binding))
 }
 // Deliberately no Drop unlock. The supervisor retains its duplicate until both
 // publication and reap, or its existing absolute helper deadline.

@@ -20,9 +20,15 @@ use std::{ffi::OsStr, fs::File, io, os::fd::AsFd};
 
 pub(crate) const MAX_STORES: u64 = 128;
 pub(crate) const MAX_NODES: u64 = 8_192;
-pub(crate) const MAX_BYTES: u64 = 10_000_000;
+/// The runtime namespace's byte budget (U-21: 10 MB before the command
+/// response; 15 MB with it).
+pub(crate) const MAX_BYTES: u64 = 15_000_000;
 pub(crate) const CATALOG_MAX: usize = 1_048_576;
-pub(crate) const RESERVATION: u64 = 4 * STREAM_MAX as u64;
+/// One store's reservation: two collection responses, their stage and the
+/// legacy request (4 × 256 KiB), and the command response and its stage
+/// (U-21: 2 × its largest size).
+pub(crate) const RESERVATION: u64 =
+    4 * STREAM_MAX as u64 + 2 * collection_store::COMMAND_MAX as u64;
 const CATALOG: &str = ".collections.catalog";
 const CATALOG_STAGE: &str = ".collections.catalog.stage";
 const GC_LOCK: &str = ".collections.gc.lock";
@@ -289,7 +295,7 @@ impl<'a> Registration<'a> {
     pub(super) fn reserve(
         &mut self,
         context: &CheckedContextFd,
-        binding: &Binding,
+        cwd: &[u8],
         address: &str,
         now: Clock,
     ) -> Result<(), StoreError> {
@@ -314,7 +320,7 @@ impl<'a> Registration<'a> {
         if let Some(index) = index {
             let old = &self.catalog.entries[index];
             // The raw bytes, not a digest or build id, select this lock owner.
-            if !old.cwd.is_empty() && old.cwd != binding.cwd {
+            if !old.cwd.is_empty() && old.cwd != cwd {
                 return Err(StoreError::Busy);
             }
             let dir = open_path(self.runtime, &path, self.me)?;
@@ -328,7 +334,7 @@ impl<'a> Registration<'a> {
             }
             self.catalog.bytes = self.catalog.bytes.saturating_add(additional);
             let entry = &mut self.catalog.entries[index];
-            entry.cwd = binding.cwd.clone();
+            entry.cwd = cwd.to_vec();
             entry.bytes = entry.bytes.max(RESERVATION);
             entry.reserved = true;
             entry.used = now;
@@ -355,7 +361,7 @@ impl<'a> Registration<'a> {
             }
             self.catalog.entries.push(Entry {
                 path,
-                cwd: binding.cwd.clone(),
+                cwd: cwd.to_vec(),
                 dev: 0,
                 ino: 0,
                 bytes: RESERVATION,
@@ -844,6 +850,20 @@ fn identity(location: &Location, binding: &Binding) -> bool {
         && (location.address == [cwd_hash::address(&binding.cwd)]
             || unhex(&location.address).is_ok_and(|bytes| bytes == binding.cwd))
 }
+/// A command response that decodes must belong to the context it lies in;
+/// its cwd then goes through the same checks as a collection response's
+/// (against the store's other response here, the address in `entry_valid`).
+/// One that does not decode is left to eviction, as a collection response is.
+fn command_place(location: &Location, content: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+    let Ok(r) = bingsu_core::command::response::Response::decode(content) else {
+        return Ok(None);
+    };
+    let b = &r.binding;
+    if location.config != b.config || location.state != b.state {
+        return Err(StoreError::Unsafe);
+    }
+    Ok(Some(b.cwd.clone()))
+}
 fn entry_valid(entry: &Entry) -> bool {
     if collection_breaker::location(&entry.path) {
         return entry.cwd.is_empty()
@@ -1234,11 +1254,17 @@ fn inspect(
         if !FILES.contains(&name) {
             return Err(StoreError::Unsafe);
         }
-        let cap = if name == LOCK { 0 } else { STREAM_MAX };
+        let cap = collection_store::file_cap(name);
         let Some((_, content)) = collection_store::read_checked(dir, name, cap, me)? else {
             return Err(StoreError::Unsafe);
         };
         bytes = bytes.saturating_add(content.len() as u64);
+        if name == collection_store::COMMAND {
+            if let Some(found) = command_place(&loc, &content)? {
+                cwd = found;
+            }
+            continue;
+        }
         if name == RESPONSE || name == PREVIOUS {
             let Ok(response) = Completed::decode_with_catalog(&content, schema) else {
                 // Metadata and fd/name identity passed under the store lock.
@@ -1359,13 +1385,20 @@ fn evict(
             let Some((_, content)) = collection_store::read_checked(
                 &dir,
                 file_name,
-                if file_name == LOCK { 0 } else { STREAM_MAX },
+                collection_store::file_cap(file_name),
                 me,
             )?
             else {
                 return Err(StoreError::Unsafe);
             };
             actual_bytes += content.len() as u64;
+            if file_name == collection_store::COMMAND {
+                let where_ = location(&entry.path)?;
+                if let Some(found) = command_place(&where_, &content)? {
+                    catalog.entries[i].cwd = found;
+                }
+                continue;
+            }
             if file_name == RESPONSE || file_name == PREVIOUS {
                 let Ok(response) = Completed::decode_with_catalog(&content, schema) else {
                     corrupt = true;
@@ -1438,7 +1471,7 @@ fn evict(
             if collection_store::remove_checked(
                 &dir,
                 file_name,
-                if file_name == LOCK { 0 } else { STREAM_MAX },
+                collection_store::file_cap(file_name),
                 me,
             )? {
                 report.removed_files += 1;
