@@ -65,6 +65,21 @@ def session_with(tmp_path, *segments):
     return session
 
 
+def pyenv_fast(session):
+    """pyenv's shim folder first on PATH and 3.12.1 installed and selected."""
+    root = session.base / "pyenv"
+    shim = install(root / "shims", "python3")
+    # As CPython's own install lays it out: python3 is a link to python3.12.
+    real = install(root / "versions" / "3.12.1" / "bin", "python3.12")
+    (real.parent / "python3").symlink_to("python3.12")
+    for folder in (root, root / "versions", root / "versions" / "3.12.1"):
+        folder.chmod(0o755)
+    (session.pwd / ".python-version").write_text("3.12.1\n")
+    session.env["PYENV_ROOT"] = str(root)
+    session.env["PATH"] = f"{shim.parent}:{session.env['PATH']}"
+    return shim, real
+
+
 # GATE-LANG-NODE.1: 설정 단위 없이 언어 segment만 그려도 감독이 뜨고, 프로브가 PATH의 실제 실행 파일을 한 번
 # 실행해 버전을 명령 응답에 발행한다. 캐시 기간 안의 다음 회차는 다시 실행하지 않는다. 이것을 실패시키는 것:
 # prepare에서 언어 segment가 있어도 NoUnits로 끝내는 것, grant에서 probe만 있는 회차를 버리는 것, probe 결과의
@@ -102,14 +117,7 @@ def test_builtin_probe_publishes_only_a_version(tmp_path, _native_boot_required)
 # 대신 실행하는 것.
 def test_builtin_fast_value_is_written_once(tmp_path, _native_boot_required):
     session = session_with(tmp_path, "python")
-    root = session.base / "pyenv"
-    shim = install(root / "shims", "python3")
-    real = install(root / "versions" / "3.12.1" / "bin", "python3")
-    for folder in (root, root / "versions", root / "versions" / "3.12.1"):
-        folder.chmod(0o755)
-    (session.pwd / ".python-version").write_text("3.12.1\n")
-    session.env["PYENV_ROOT"] = str(root)
-    session.env["PATH"] = f"{shim.parent}:{session.env['PATH']}"
+    shim, real = pyenv_fast(session)
     ready(session)
     published_rounds(session)
     assert b"3.12.1" in command_response(session)
@@ -122,18 +130,6 @@ def test_builtin_fast_value_is_written_once(tmp_path, _native_boot_required):
     assert counted(shim) == 0 and counted(real) == 0, (counted(shim), counted(real))
 
 
-
-def pyenv_fast(session):
-    """pyenv's shim folder first on PATH and 3.12.1 installed and selected."""
-    root = session.base / "pyenv"
-    shim = install(root / "shims", "python3")
-    real = install(root / "versions" / "3.12.1" / "bin", "python3")
-    for folder in (root, root / "versions", root / "versions" / "3.12.1"):
-        folder.chmod(0o755)
-    (session.pwd / ".python-version").write_text("3.12.1\n")
-    session.env["PYENV_ROOT"] = str(root)
-    session.env["PATH"] = f"{shim.parent}:{session.env['PATH']}"
-    return shim, real
 
 
 # 중립 폴더가 검사를 통과하지 못하면 프로브는 돌지 않지만, 실행 없이 정한 값(빠른 경로)은 그대로 발행한다.

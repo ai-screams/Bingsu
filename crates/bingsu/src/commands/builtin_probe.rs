@@ -40,14 +40,17 @@ pub(crate) struct Language {
 }
 
 /// Shell variables that name the folders of managers without a resolver
-/// (asdf, mise, volta): they change whether the command is such a shim.
-const UNSUPPORTED: [&[u8]; 6] = [
+/// (asdf, mise, volta, nodenv, goenv): they change whether the command is
+/// such a shim.
+const UNSUPPORTED: [&[u8]; 8] = [
     b"ASDF_DATA_DIR",
     b"ASDF_DIR",
     b"MISE_DATA_DIR",
     b"MISE_SHIMS_DIR",
     b"XDG_DATA_HOME",
     b"VOLTA_HOME",
+    b"NODENV_ROOT",
+    b"GOENV_ROOT",
 ];
 
 pub(crate) const LANGUAGES: [Language; 4] = [
@@ -368,6 +371,7 @@ mod tests {
         file(&at(".cargo/bin/rustc"), b"\x7fELF proxy");
         file(&at(".pyenv/shims/python3"), b"#!/bin/sh\n");
         file(&at(".asdf/shims/node"), b"#!/bin/sh\n");
+        file(&at(".nodenv/shims/node"), b"\x7fELF shim");
         let host = String::from_utf8_lossy(BUILD_HOST);
         for t in ["1.80.0", "stable"] {
             file(
@@ -394,6 +398,8 @@ mod tests {
             ".pyenv/versions",
             ".asdf",
             ".asdf/shims",
+            ".nodenv",
+            ".nodenv/shims",
             ".rustup",
             ".rustup/toolchains",
         ] {
@@ -457,6 +463,13 @@ mod tests {
         // An asdf shim in front: hidden, never run.
         let asdf = format!("{}:{bin}", at(".asdf/shims").display());
         let p = plan_with(&s, &asdf, &[], "node", &Version::None);
+        assert_eq!(
+            p.action,
+            Action::Hide("a version manager bingsu does not resolve")
+        );
+        // A nodenv shim, even a binary one, is a manager without a resolver.
+        let nodenv = format!("{}:{bin}", at(".nodenv/shims").display());
+        let p = plan_with(&s, &nodenv, &[], "node", &Version::None);
         assert_eq!(
             p.action,
             Action::Hide("a version manager bingsu does not resolve")
@@ -548,6 +561,21 @@ mod tests {
             &found("3.12.1"),
         );
         assert!(matches!(p.action, Action::Hide(_)), "{p:?}");
+        // PYENV_DIR only moves the version file search, which an override
+        // skips: the override still names the version (ruling P2).
+        let p = plan_with(
+            &s,
+            &shims,
+            &["PYENV_VERSION=3.12", "PYENV_DIR=/elsewhere"],
+            "python",
+            &found("3.12.1"),
+        );
+        assert_eq!(
+            run_of(&p).0,
+            at(".pyenv/versions/3.12/bin/python3")
+                .as_os_str()
+                .as_bytes()
+        );
         // A hook can change pyenv's answer: no override value is used.
         let p = plan_with(
             &s,
