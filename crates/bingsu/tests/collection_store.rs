@@ -3137,6 +3137,49 @@ mod command_store {
             got.map(|_| ())
         );
         assert_eq!(read(&f).entries[0].id, "custom/z");
+        // The same file (same inode) rewritten after the read: only the stamp
+        // recheck sees it, same_name does not.
+        let rewritten = Response {
+            binding: b.clone(),
+            entries: vec![entry("custom/y", 98), entry("custom/w", 97)],
+        }
+        .encode()
+        .unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+        let got =
+            admit(&f, &b).publish_commands_with_hook(&b, &[entry("custom/c", 30)], &mut |at| {
+                if at == "read_again" {
+                    fs::write(&path, &rewritten).unwrap();
+                }
+            });
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert!(
+            matches!(got, Err(StoreError::Unsafe)),
+            "{:?}",
+            got.map(|_| ())
+        );
+        assert_eq!(read(&f).entries[0].id, "custom/y");
+    }
+
+    // GC는 살아 있는 저장소에 남은 명령 stage를 치운다. 명령 응답 상한까지 받는다. 이것을 실패시키는 것: GC의 stage
+    // 정리 목록에서 COMMAND_STAGE를 빼는 것, 그 정리에 file_cap 대신 STREAM_MAX를 쓰는 것(256 KiB를 넘는 stage에서
+    // Unsafe).
+    #[test]
+    fn gc_removes_an_abandoned_command_stage() {
+        let f = Fixture::new("command-stage-gc");
+        let b = command_binding(&f, b"/cwd");
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        assert!(!f.gc(clock()).incomplete);
+        let stage = f.path().join(COMMAND_STAGE);
+        let stream_max = bingsu_core::collection::wire::STREAM_MAX;
+        fs::write(&stage, vec![b'x'; stream_max + 1]).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
+        let report = f.gc(clock());
+        assert!(!report.incomplete, "{report:?}");
+        assert!(!stage.exists(), "{report:?}");
+        assert!(f.path().join(COMMAND).exists());
     }
 
     // 인벤토리는 명령 응답이 놓인 문맥(config·state)에 맞는지 본다. 다른 문맥의 응답이 든 저장소는 안전하지 않은

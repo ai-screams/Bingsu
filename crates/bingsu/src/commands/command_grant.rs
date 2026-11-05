@@ -389,10 +389,6 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     if !nofollow_any(probe_nofollow_any(c"/"), probe_nofollow_any(c"/var/empty")) {
         return Err(Skip::NoNofollowAny);
     }
-    let body = i
-        .environment
-        .as_ref()
-        .map_err(|why| Skip::NoEnvironment(*why))?;
     let (Some(session), Some(pwd)) = (i.session, i.pwd) else {
         return Err(Skip::NoSession);
     };
@@ -401,9 +397,14 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             StoreError::Busy => Skip::Busy,
             _ => Skip::Failed,
         })?;
-    // Right after the lock, before any other check can end the round.
+    // Right after the lock, before any other check can end the round: a
+    // round that cannot run (no environment frame) still reclaims.
     #[cfg(target_os = "linux")]
     let (cgroup, notes) = session_reclaim(i, session);
+    let body = i
+        .environment
+        .as_ref()
+        .map_err(|why| Skip::NoEnvironment(*why))?;
     #[cfg(not(target_os = "linux"))]
     let notes = Vec::new();
     #[cfg(target_os = "macos")]
@@ -523,6 +524,10 @@ struct Resolved {
     units: Vec<Unit>,
     /// Executable not found or failed the checks.
     unresolved: usize,
+    /// Their ids: each is published as a failed attempt, so the round robin
+    /// moves past it (a unit that never resolves would otherwise hold its
+    /// slot among the first `CONFIG_MAX` forever).
+    unresolved_ids: Vec<String>,
     /// Over the relay's input cap, or past the grant frame's room.
     oversize: usize,
     /// No collected repository root: the shell's folder stood for it.
@@ -578,10 +583,12 @@ fn units(
         };
         let Ok((found, checked)) = exec_path::lookup_open(word, &folders, repo, me, groups) else {
             out.unresolved += 1;
+            out.unresolved_ids.push(id.clone());
             continue;
         };
         let Some((executable, pin)) = scripts.executable(&found, &checked) else {
             out.unresolved += 1;
+            out.unresolved_ids.push(id.clone());
             continue;
         };
         let unit = Unit {
@@ -786,7 +793,7 @@ impl Round {
     ) -> Report {
         self.grant.permit = permit;
         let mut report = Report::default();
-        match units(
+        let unresolved = match units(
             &self.runnable,
             &self.publish.attempts,
             &self.environment,
@@ -803,16 +810,18 @@ impl Round {
                 report.dropped = resolved.dropped;
                 self.grant.units = resolved.units;
                 if self.grant.units.is_empty() {
+                    self.publish_results(&mut report, &resolved.unresolved_ids);
                     report.notes = self.abandon();
                     return report;
                 }
+                resolved.unresolved_ids
             }
             Err(_) => {
                 report.failed = true;
                 report.notes = self.abandon();
                 return report;
             }
-        }
+        };
         let end = self
             .grant
             .helper_deadline
@@ -880,15 +889,45 @@ impl Round {
         if let Ok(done) = wire::encode(&Message::Done) {
             let _ = sys::write_fd(self.grant_pipe.as_raw_fd(), &done);
         }
-        let entries = self.entries(&report.results);
+        self.publish_results(&mut report, &unresolved);
+        report.notes = self.abandon();
+        report
+    }
+
+    /// Publishes the round's results and, as failed attempts at this time,
+    /// the units whose executable did not resolve (C4a review M2).
+    fn publish_results(&self, report: &mut Report, unresolved: &[String]) {
+        let mut entries = self.entries(&report.results);
+        if let Ok(now) = now_ns() {
+            entries.extend(
+                unresolved
+                    .iter()
+                    .filter_map(|id| self.unresolved_entry(id, now)),
+            );
+        }
         if !entries.is_empty() {
             match self.publish_entries(&entries) {
                 Ok(published) => report.published = Some(published),
                 Err(_) => report.publish_failed = true,
             }
         }
-        report.notes = self.abandon();
-        report
+    }
+
+    /// A failed entry for unit `id`, attempted and ended at `now`: the
+    /// failure cache keeps it 10 s, then it is the unit tried longest ago.
+    fn unresolved_entry(&self, id: &str, now: u64) -> Option<response::Entry> {
+        let (_, r) = self.runnable.iter().find(|(u, _)| u == id)?;
+        let env = self.publish.environments.iter().find(|(u, _)| u == id)?.1;
+        let failed = Outcome {
+            origin: Origin::Config,
+            index: 0,
+            reason: wire::Reason::SpawnFailed,
+            approved_at: now,
+            ended_at: now,
+            stdout: Vec::new(),
+        };
+        let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
+        response::entry_for(id.to_owned(), policy, env, now, &failed)
     }
 
     /// The response entries of this round's config results (builtin probes

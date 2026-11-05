@@ -64,3 +64,7 @@ CMD-CACHE-ENV	A hit needs this shell's original environment digest: another envi
 CMD-PUBLISH-MERGE	Rounds of one context and cwd merge their own units into one command response under the store lock	Unix	crates/bingsu/tests/collection_store.rs::test_concurrent_publish_keeps_other_units	C4
 CMD-RESULT-DUP	A second result for one place in the grant is rejected; the first stands	Unix	crates/bingsu-core/src/command/plan.rs::a_second_result_for_one_place_is_rejected	C4
 CMD-RECLAIM-NO-CANDIDATES	A config with command units reclaims the session's cgroups in a round with nothing to run	Linux	tests/shell/test_command_cgroup.py::test_reclaim_without_candidates	C4
+CMD-RECLAIM-NO-ENV	A round with units to run reclaims the session's cgroups even when the environment frame is missing	Linux	tests/shell/test_command_cgroup.py::test_reclaim_without_an_environment	C4
+CMD-UNRESOLVED-ATTEMPT	A unit whose executable does not resolve is published as a failed attempt, so the round robin moves past it	Unix	tests/shell/test_command_round.py::test_unresolved_units_do_not_hold_the_round	C4
+CMD-PUBLISH-GC	A round that publishes command results runs the store GC, also without a collection	Unix	tests/shell/test_command_round.py::test_command_only_rounds_reclaim_the_store_budget	C4
+CMD-RESPONSE-TEXT	Response values and raw lines hold only sanitized text and a failed entry has none, in encode and decode	Unix	crates/bingsu-core/src/command/response/tests.rs::values_are_sanitized_text_and_failures_have_none	C4

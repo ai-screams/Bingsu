@@ -106,6 +106,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut filter_failed = false;
     let mut supervisor = None;
     let mut collection_runtime = None;
+    let mut command_runtime = None;
     let mut breaker_ticket = None;
     let mut collection_outcome = None;
     let mut verification = Verification::start();
@@ -225,7 +226,10 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 helper_deadline: _watchdog.expires_ns(),
             };
             match command_grant::prepare(&inputs) {
-                Ok(round) => command_round = Some(round),
+                Ok(round) => {
+                    command_round = Some(round);
+                    command_runtime = context.runtime.try_clone().ok();
+                }
                 Err(skip) => command_skip = Some(skip),
             }
             round_marker = Some(*marker);
@@ -344,6 +348,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                         LogLevel::Info,
                         &text,
                     );
+                }
+                // A command response reserves GC capacity like a collection
+                // response: a round that published (or tried to) runs the
+                // reclaim too, or command-only layouts fill the budget and
+                // every later publication fails (C4a review H1).
+                if (done.published.is_some() || done.publish_failed) && collection_runtime.is_none()
+                {
+                    collection_runtime = command_runtime.take();
                 }
                 if done.publish_failed {
                     report(

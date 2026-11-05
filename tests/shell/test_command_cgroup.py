@@ -334,3 +334,20 @@ def test_reclaim_without_candidates(tmp_path):
     session.prompt()
     assert until(lambda: not alive(old), timeout=2.0), "a round without candidates left the leftovers"
     session.wait_quiet(timeout=8)
+
+
+# 환경 frame이 없는 회차(앞단이 70 KB 환경을 넘기지 않음)도 실행할 단위가 있으면 잠금 직후 회수한다. 이것을
+# 실패시키는 것: prepare에서 환경 확인을 잠금·회수 앞으로 되돌리는 것(남은 대상이 계속 산다).
+@atomic_cell
+def test_reclaim_without_an_environment(tmp_path):
+    session = CommandSession(tmp_path)
+    pidfile = session.base / "pid"
+    session.put(config(["/bin/sh", "-c", f"echo $$ > {pidfile}; exec sleep 3"], "timeout='3s'\n"))
+    ready(session)
+    session.wait_quiet(timeout=8)
+    pidfile.unlink(missing_ok=True)
+    old = leave_a_live_unit(session, pidfile)
+    session.env["BINGSU_BIG"] = "x" * (70 * 1024)
+    session.prompt()
+    assert until(lambda: not alive(old), timeout=2.0), "a round without an environment left the leftovers"
+    session.wait_quiet(timeout=8)

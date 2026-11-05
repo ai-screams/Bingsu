@@ -682,6 +682,42 @@ def test_round_robin_reaches_every_unit(tmp_path, _native_boot_required):
     assert sorted(p.name for p in marks.iterdir()) == [f"u{i:02}" for i in range(12)]
 
 
+# 실행 파일을 찾지 못한 단위도 시도로 남긴다(10초 실패 항목). 그래서 찾지 못하는 단위 8개가 회차 상한을 차지해도
+# 다음 회차는 뒤의 단위로 넘어간다. 이것을 실패시키는 것: 해석 실패 단위의 실패 항목을 발행하지 않는 것(units()의
+# unresolved_ids 기록이나 publish_results의 그 항목을 지우는 것: 뒤의 두 단위가 영원히 돌지 않음).
+def test_unresolved_units_do_not_hold_the_round(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    marks = session.base / "marks"
+    marks.mkdir()
+    missing = "".join(f"[segment.\"custom/m{i}\"]\nkind='command'\ncommand=['bingsu-no-such-command-{i}']\n"
+                      for i in range(8))
+    real = "".join(f"[segment.\"custom/r{i}\"]\nkind='command'\ncommand=['/usr/bin/touch', '{marks}/r{i}']\n"
+                   for i in range(2))
+    left = ", ".join([f"'custom/m{i}'" for i in range(8)] + [f"'custom/r{i}'" for i in range(2)])
+    session.put(missing + real + f"[layout.line2]\nleft=[{left}, 'char']\n")
+    ready(session)
+    rounds(session, 3)
+    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
+
+
+# 명령만 있는 레이아웃(수집 없음)도 발행 뒤 GC 회수를 돌린다. 그래서 cwd를 여럿 다녀 예약이 예산을 채워도 다음
+# cwd의 발행이 된다. 이것을 실패시키는 것: helper가 명령 발행 뒤 collection_runtime을 세우지 않는 것(8번째
+# cwd부터 예약이 막혀 발행이 계속 실패).
+def test_command_only_rounds_reclaim_the_store_budget(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    # No dir or git on either line: nothing else selects a collection.
+    session.put(config(["/bin/sh", "-c", "echo v"]) + "[layout.line1]\nleft=['char']\n")
+    ready(session)
+    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
+    for i in range(10):
+        folder = (session.base / f"cwd{i:02}").resolve()
+        folder.mkdir()
+        session.pwd = folder
+        rounds(session, 1)
+        bound = [p for p in root.rglob("collections-v1/*/store/command") if os.fsencode(folder) in p.read_bytes()]
+        assert bound, f"no command response for the folder of round {i}"
+
+
 # tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
 # 것: 표의 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것.
 def test_command_table_names_real_tests():

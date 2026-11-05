@@ -1427,11 +1427,20 @@ fn evict(
             && !catalog.entries[i].cwd.is_empty()
         {
             // Recover abandoned stage/request files only while locked.
-            for file_name in [STAGE, collection_store::LEGACY_REQUEST] {
+            for file_name in [
+                STAGE,
+                collection_store::LEGACY_REQUEST,
+                collection_store::COMMAND_STAGE,
+            ] {
                 let before = sys::at_stamp(dir.as_fd(), OsStr::new(file_name))
                     .ok()
                     .map_or(0, |s| s.size);
-                if collection_store::remove_checked(&dir, file_name, STREAM_MAX, me)? {
+                if collection_store::remove_checked(
+                    &dir,
+                    file_name,
+                    collection_store::file_cap(file_name),
+                    me,
+                )? {
                     report.removed_files += 1;
                     catalog.bytes = catalog.bytes.saturating_sub(before);
                     catalog.entries[i].bytes = catalog.entries[i].bytes.saturating_sub(before);
