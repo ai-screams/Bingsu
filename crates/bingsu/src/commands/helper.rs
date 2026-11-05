@@ -136,7 +136,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 }
                 let mut request = request.unwrap();
                 // D1 (ruling Q1): the user-defined languages' detect_files;
-                // the built-in four are asked for by their segments (D3).
+                // the built-in four are asked for by their segments (D3). No
+                // test fails without this line yet: the detect_files key opens
+                // in D3, which tests it end to end with the key (ruling Q8).
                 if let Some((config, _)) = display {
                     request.languages = collection::language::user_queries(&config.exec_units);
                     if request.encode_body().is_err() {

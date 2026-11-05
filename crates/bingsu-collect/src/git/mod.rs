@@ -101,6 +101,15 @@ pub(crate) fn collect_with_deadlines(
         git::{self, StageResult},
         wire::{Progress, Update},
     };
+    // Test builds name the C and language allowances the round got (fails
+    // without collect_with_access's product(): product_entry_gives_c_time_to_languages).
+    #[cfg(test)]
+    let mut meter = meter;
+    #[cfg(test)]
+    meter.event(&format!(
+        "stages c={} lang={}",
+        deadlines.c_ms, deadlines.lang_ms
+    ));
     let wants_git = request.binding.mask & (1 << git::SEGMENT) != 0;
     let wants_dir = request.binding.mask & (1 << 1) != 0;
     let meter = RefCell::new(meter);

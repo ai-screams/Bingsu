@@ -476,3 +476,33 @@ fn product_stages_give_c_time_to_languages_only() {
     let total = |d: git::StageDeadlines| d.a_ms + d.path_ms + d.b_ms + d.c_ms + d.d_ms;
     assert_eq!(total(with) + with.lang_ms, total(plain));
 }
+
+// U-19 호출 자리: 제품 입구(collect_with_access)가 언어 요청 회차에 C 6 ms와 언어 2 ms를 쓴다. 요청이 없으면 C 8 ms.
+// 이것을 실패시키는 것: collect_with_access가 product(...) 대신 StageDeadlines::PRODUCT를 쓰는 것.
+#[test]
+fn product_entry_gives_c_time_to_languages() {
+    let Some(k) = case("product_entry_gives_c_time_to_languages", 2) else {
+        return;
+    };
+    let f = Fixture::new();
+    let cwd = f.dir("plain");
+    let languages = if k == 0 { vec![] } else { vec![python()] };
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let output = Rc::clone(&events);
+    let mut m = meter();
+    m.hook = Some(Box::new(move |event| {
+        output.borrow_mut().push(event.to_owned())
+    }));
+    let mut sink = Sink::default();
+    let _ = git::collect_with_access(&request(&cwd, &f.0, languages), &mut sink, m, full_access());
+    let want = if k == 0 {
+        "stages c=8 lang=2"
+    } else {
+        "stages c=6 lang=2"
+    };
+    assert!(
+        events.borrow().iter().any(|e| e == want),
+        "{:?}",
+        events.borrow()
+    );
+}
