@@ -842,3 +842,51 @@ fn a_late_language_result_keeps_the_round_complete() {
     assert_eq!(sink.1, 1);
     assert!(events.borrow().iter().any(|e| e == "language_late"));
 }
+
+// 확인 리뷰 L: 늦음만 멈춤이다. Language 프레임 일부를 쓴 뒤 나는 일반 TimedOut(쓰기 마감)은 Sink 오류라서 회차가
+// 실패하고 Complete는 쓰이지 않는다. 이것을 실패시키는 것: is_late_language를 `error.kind() == TimedOut`으로
+// 약하게 하는 것(일반 TimedOut도 멈춤이 되어 회차가 완료됨).
+#[test]
+fn a_partial_language_write_fails_the_round() {
+    // Frame header byte 10 is the kind's wire tag.
+    const LANGUAGE_TAG: u8 = 8;
+    const COMPLETE_TAG: u8 = 6;
+    if case("a_partial_language_write_fails_the_round", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let r = request(&repo, &f.0, vec![python()]);
+    let mut ready = wire::FEATURES.to_le_bytes().to_vec();
+    ready.extend(r.binding.mask.to_le_bytes());
+    ready.extend([0; 12]);
+    let output = RefCell::new(Vec::<Vec<u8>>::new());
+    let mut write = |bytes: &[u8]| {
+        if bytes[10] == LANGUAGE_TAG {
+            output.borrow_mut().push(bytes[..bytes.len() / 2].to_vec());
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        output.borrow_mut().push(bytes.to_vec());
+        Ok(())
+    };
+    let mut buffer = [0; wire::FRAME_MAX];
+    let mut sink = update_sink::WireSink::new(
+        &r,
+        bingsu_core::field::BUILTIN,
+        &ready,
+        &mut buffer,
+        &mut write,
+    )
+    .unwrap();
+    let result = git::collect_with_deadlines(&r, &mut sink, meter(), full_access(), deadlines());
+    // The exchange owner sends Complete only after a complete round.
+    let completed = result.is_ok() && sink.complete().is_ok();
+    assert!(
+        matches!(&result, Err(git::CollectError::Sink(e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{result:?}"
+    );
+    assert!(!completed);
+    let frames = output.borrow();
+    assert!(frames.iter().any(|f| f[10] == LANGUAGE_TAG));
+    assert!(!frames.iter().any(|f| f[10] == COMPLETE_TAG));
+}
