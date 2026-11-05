@@ -65,13 +65,22 @@ impl Spend {
 }
 
 /// What is at `path` (the leaf never followed), through the detection's one
-/// folder stack: a parent already held is not opened again.
+/// folder stack: a parent already held is not opened again. How the managers
+/// treat each (D2 re-review M1):
+/// - pyenv takes `.python-version` only when `[[ -f … ]]` holds, a regular
+///   file through links (libexec/pyenv-version-file), so a folder is passed
+///   over and the walk goes on;
+/// - rustup reads `rust-toolchain` and `rust-toolchain.toml` and takes a read
+///   error as "no such file" (src/config.rs `find_override_from_dir_walk`,
+///   1.29.2), so a folder is passed over too; a link it follows.
+///
+/// A folder is therefore absent. A link, a FIFO, a device or a name it may
+/// not look at is something the manager may read but this reader cannot
+/// read safely: `Other`, which ends the search at that level with no value.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Entry {
     Absent,
     Regular,
-    /// Something by that name that is not a regular file it may read: a
-    /// symlink, a folder, a device or FIFO, one it may not look at.
     Other,
 }
 
@@ -84,6 +93,9 @@ fn entry(
 ) -> Result<Entry, ReadError> {
     match stats.metadata(root, path, access, meter) {
         Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFREG => Ok(Entry::Regular),
+        // Fails without it: a_nearer_unreadable_version_file_stops_the_search
+        // (a folder beside a regular rust-toolchain.toml).
+        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFDIR => Ok(Entry::Absent),
         Ok(_) | Err(ReadError::Denied | ReadError::Special) => Ok(Entry::Other),
         Err(ReadError::Missing) => Ok(Entry::Absent),
         Err(error) => Err(error),
@@ -157,9 +169,13 @@ fn find(
                     // Fails without it: a_nearer_unreadable_version_file_stops_the_search.
                     Entry::Other => version = Some(unreadable(i as u8, level)),
                     Entry::Regular => {
-                        version = Some(read_version(
-                            file, i as u8, level, root, &path, access, spend, meter,
-                        )?);
+                        match read_version(file, i as u8, level, root, &path, access, spend, meter)?
+                        {
+                            Some(answer) => version = Some(answer),
+                            // Fails without it: version_file_changed_after_its_stat
+                            // (gone: the next file).
+                            None => continue,
+                        }
                     }
                 }
                 break;
@@ -179,20 +195,21 @@ fn read_version(
     access: &Access,
     spend: &Spend,
     meter: &mut Meter,
-) -> Result<Version, ReadError> {
+) -> Result<Option<Version>, ReadError> {
     let left = spend.bytes_left(meter);
     if left == 0 {
         return Err(ReadError::Limit);
     }
     // Opened without following the leaf, a regular file only; the bytes come
-    // from that descriptor. The stat saw a regular file here, so one that
-    // cannot be opened now (gone, replaced by a link, refused) is this
-    // level's answer, never a reason to look farther up.
+    // from that descriptor. One gone since the stat is absent (the next file
+    // is looked at; a link put in its place reads as gone too); one refused
+    // or replaced by a FIFO or device is this level's answer.
+    meter.event("before_language_open");
     let opened = match safe_read::resolve_nofollow(root, path, access, meter) {
         Ok(opened) => opened,
-        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => {
-            return Ok(unreadable(i, level));
-        }
+        Err(ReadError::Missing) => return Ok(None),
+        // Fails without it: version_file_changed_after_its_stat (a FIFO).
+        Err(ReadError::Denied | ReadError::Special) => return Ok(Some(unreadable(i, level))),
         Err(error) => return Err(error),
     };
     let cap = file.format.cap().min(left);
@@ -205,7 +222,7 @@ fn read_version(
         },
         meter,
     ) {
-        Ok(bytes) => Ok(rule::version(&file.format, &bytes, i, level)),
+        Ok(bytes) => Ok(Some(rule::version(&file.format, &bytes, i, level))),
         // The file over the format's own cap (by its size, or grown past it
         // while read): no value (C2 ruling Q4 for D1). Any other `Limit` (what
         // the request may still read, the meter's byte, allocation or call
@@ -215,7 +232,7 @@ fn read_version(
             if cap == file.format.cap()
                 && (size < 0 || size as u64 > cap || bytes(meter) - before > cap) =>
         {
-            Ok(unreadable(i, level))
+            Ok(Some(unreadable(i, level)))
         }
         Err(error) => Err(error),
     }
