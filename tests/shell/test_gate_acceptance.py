@@ -1176,6 +1176,7 @@ def assert_command_round_home(text):
 
 
 COMMAND_CGROUP_FILE = "tests/shell/test_command_cgroup.py"
+HELPER_STAGE_NODE = "tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula"
 CGROUP_CELL_REASON = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]'
 # A skip of this one is BLOCKED and recorded (plan C3: the survivor fixture depends on kernel and FUSE).
 CGROUP_RECORDED_ONLY = {"test_orphan_live_descendant_reclaimed"}
@@ -1220,6 +1221,13 @@ def assert_command_cgroup_cells(text):
     assert f"python3 -m pytest {COMMAND_CGROUP_FILE} -q -rA" in step and "set -o pipefail" in step
     both = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
     assert both == CGROUP_BOTH_CELLS, both
+    step = block.split("      - name: Helper calls of command rounds in the cell\n")[1].split("\n      - ")[0]
+    assert step.startswith("        if: success() || failure()\n") and "set -o pipefail" in step
+    assert "${{ matrix.opts }} --cap-add SYS_PTRACE -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in step
+    assert f"python3 -m pytest {HELPER_STAGE_NODE} -k command -q -rA" in step
+    stages = set(re.findall(r"grep -Fx 'PASSED " + re.escape(HELPER_STAGE_NODE)
+                            + r"\[(\w+)\]' \"\$RUNNER_TEMP/cell-helper\.txt\"\n", step))
+    assert stages == {"command_miss", "command_hit", "command_not_run"}, stages
     step = block.split("      - name: Every atomic-path test passed (privileged cell)\n")[1].split("\n      - ")[0]
     assert step.startswith("        if: matrix.cell == 'priv'\n")
     priv = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
@@ -1233,6 +1241,10 @@ def assert_command_cgroup_cells(text):
     (" commands::command_process::tests::test_clone3_starts_inside_the_cgroup commands::", " commands::"),
     ("grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_round_removes_its_own_cgroups'", "true"),
     ("        if: matrix.cell == 'priv'\n", "        if: success() || failure()\n"),
+    ("      - name: Helper calls of command rounds in the cell\n        if: success() || failure()\n",
+     "      - name: Helper calls of command rounds in the cell\n        if: matrix.cell == 'priv'\n"),
+    ("[command_hit]' \"$RUNNER_TEMP/cell-helper.txt\"", "[command_hit]' /dev/null || true"),
+    (" -k command -q -rA", " -k command_miss -q -rA"),
 ])
 def test_command_cgroup_cells_reject_mutations(old, new):
     text = workflows()["shell.yml"]

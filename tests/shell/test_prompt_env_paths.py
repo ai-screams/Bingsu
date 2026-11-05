@@ -1778,7 +1778,8 @@ class HelperStageFixture:
                             "catalog_bytes": (Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu/.collections.catalog").stat().st_size
                             if responses else 0,
                             "cgroup_procs_bytes": len(procs.read_bytes()),
-                            "cgroup_parent": session_cgroup_parent(),
+                            "cgroup_parent": session_cgroup_parent(
+                                self.script, Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
                             "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin")}
         if stage == "publish":
             self.put("edited")
@@ -1837,17 +1838,27 @@ def own_cgroup():
     return Path("/sys/fs/cgroup" + line[3:].rstrip("/"))
 
 
-# 이것을 실패시키는 것: 이 판정을 늘 False로 두는 것(privileged 셀의 명령 단계 셋이 모두 실패).
-def session_cgroup_parent():
-    """Whether the warm-up left a session cgroup parent of this user under
-    the own cgroup: the helper then takes the atomic path. A host that
-    refused the mkdir (read-only or not delegated) is best effort. Decided
-    from the host, never from the traced calls."""
-    try:
-        return any(d.name.startswith("bingsu-cmd-") and d.is_dir() and d.stat().st_uid == os.getuid()
-                   for d in own_cgroup().iterdir())
-    except OSError:
-        return False
+def session_cgroup_parent(script, runtime, own=None):
+    """Whether the helper takes the atomic path, decided from the host and
+    never from the traced calls. A cgroup folder this process may write to
+    (not read-only, not someone else's) delegates: the warm-up must then have
+    made this session's own parent (its exact name, owned by this user), or
+    the fixture fails; the privileged cell must delegate. Otherwise the round
+    is best effort."""
+    own = own_cgroup() if own is None else own
+    # init writes the session as a shell word (quoted or not) in the hooks.
+    session = re.search(rb"_bingsu_session:=['\"]?([0-9a-f]{32})", script)[1]
+    root = os.stat(runtime)
+    key = root.st_dev.to_bytes(8, "little") + root.st_ino.to_bytes(8, "little") + b"\0" + session
+    parent = own / f"bingsu-cmd-{hashlib.sha256(key).digest()[:16].hex()}"
+    delegated = os.access(own, os.W_OK) and not os.statvfs(own).f_flag & os.ST_RDONLY
+    # 이것을 실패시키는 것: 특권 셀에서 위임을 요구하지 않는 것, 같은 uid의 아무 bingsu-cmd-* 폴더를 이 세션의 부모로
+    # 받는 것, 위임된 셀에서 부모가 없을 때 best effort로 셈하는 것(데움 실패가 원자 경로 비용을 지움).
+    assert delegated or os.environ.get("BINGSU_CGROUP_CELL") != "priv", ("the privileged cell delegates", own)
+    if delegated:
+        assert (parent.is_dir() and not parent.is_symlink()
+                and parent.stat().st_uid == os.getuid()), ("the warm-up's session parent", parent)
+    return delegated
 
 
 def collector_exit(lines, collector):
@@ -3298,3 +3309,38 @@ def test_shell_pipe_reaches_eof_while_helper_is_alive(tmp_path):
                 pipes.close()
     except Blocked as error:
         pytest.fail(f"BLOCKED: {error.reason}", pytrace=False)
+
+
+SESSION_SCRIPT = b": \"${_bingsu_session:=0123456789abcdef0123456789abcdef}\"\n"
+
+
+def session_parent_name(runtime):
+    root = os.stat(runtime)
+    key = (root.st_dev.to_bytes(8, "little") + root.st_ino.to_bytes(8, "little") + b"\0"
+           + b"0123456789abcdef0123456789abcdef")
+    return f"bingsu-cmd-{hashlib.sha256(key).digest()[:16].hex()}"
+
+
+# 위임된 cgroup에서는 이 세션의 정확한 부모만 원자 경로의 근거다. 이것을 실패시키는 것: 같은 uid의 다른
+# bingsu-cmd-* 폴더를 받는 것, 부모가 없는 위임 셀을 best effort로 세는 것, 특권 셀에서 위임 없음을 받는 것,
+# 쓸 수 없는 폴더를 위임으로 보는 것.
+@pytest.mark.parametrize("case", ["exact", "other", "missing", "priv-undelegated", "undelegated"])
+def test_session_cgroup_parent_needs_this_sessions_parent(case, tmp_path, monkeypatch):
+    own, runtime = tmp_path / "own", tmp_path / "runtime"
+    own.mkdir()
+    runtime.mkdir()
+    monkeypatch.delenv("BINGSU_CGROUP_CELL", raising=False)
+    if case == "exact":
+        (own / session_parent_name(runtime)).mkdir()
+        assert session_cgroup_parent(SESSION_SCRIPT, runtime, own) is True
+        return
+    if case == "other":
+        (own / "bingsu-cmd-00112233445566778899aabbccddeeff").mkdir()
+    if case in ("priv-undelegated", "undelegated"):
+        monkeypatch.setattr(os, "access", lambda *_: False)
+        if case == "undelegated":
+            assert session_cgroup_parent(SESSION_SCRIPT, runtime, own) is False
+            return
+        monkeypatch.setenv("BINGSU_CGROUP_CELL", "priv")
+    with pytest.raises(AssertionError):
+        session_cgroup_parent(SESSION_SCRIPT, runtime, own)

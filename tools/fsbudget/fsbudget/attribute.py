@@ -666,8 +666,9 @@ class _RepositoryProbe:
 
 
 # Roles that may create processes before their filter. The command supervisor
-# spawns relays before its own filter; a target command is not gated here.
-SPAWN_ROLES = {"front", "helper", "supervisor", "command"}
+# spawns relays before its own filter; a target command is not gated here
+# (collector_attribute exempts it).
+SPAWN_ROLES = {"front", "helper", "supervisor"}
 # The role that must create each pinned exec (a posix_spawn child keeps its
 # parent's role until it execs).
 EXEC_PARENT = {"front": "front", "helper": "front", "collector": "helper",
@@ -763,7 +764,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     repository_probe = {}
     bootstrap_ended = set()
     requested = set()  # collectors past their first request read (repository_window)
-    started = set()  # helper processes whose loader prologue is over
+    started = set()  # helper and target processes whose loader prologue is over
     verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1",
              "supervisor": "__command-v1", "relay": "__exec-v2"}
     verbs.update(pinned.get("verbs", {}))
@@ -815,9 +816,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
              else helper_kind(c) if role == "helper" and helper_vocabulary else collector_kind(c))
         if k in {"spawn", "thread"}:
             # A target command may start anything; its spawns stay "command".
+            # A target command is counted and reported only: its own filter
+            # does not make its later forks a product violation.
             # 이것을 실패시키는 것: 감독을 생성 허용 역할에서 빼는 것(명령 회차 trace가 오류), relay를 넣는 것
-            # (relay 생성 시험이 오류를 내지 않음).
-            if k == "spawn" and (role not in SPAWN_ROLES or process in confined):
+            # (relay 생성 시험이 오류를 내지 않음), 자기 필터를 건 대상의 fork를 오류로 보는 것.
+            if k == "spawn" and role != "command" and (role not in SPAWN_ROLES or process in confined):
                 bad(c, "spawn outside the pre-filter creation site")
             if success:
                 child = int(result)
@@ -852,6 +855,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                     count(role, "exec", c)
                     continue
                 if role == "command":
+                    started.discard(process)  # a new image: its own loader prologue
                     count(role, "exec", c)
                     continue
                 if (new is None or role != EXEC_PARENT.get(new)
@@ -879,7 +883,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
-        helper_startup = not (helper_vocabulary and role == "helper") or process not in started
+        # The helper's and a target command's prologue ends at their first
+        # counted call; later loader-shaped calls are counted.
+        # 이것을 실패시키는 것: 대상의 시작 경계를 두지 않는 것(실행 중 내내 loader 모양 호출이 제외됨).
+        tracked = helper_vocabulary and role == "helper" or role == "command"
+        helper_startup = not tracked or process not in started
         if process not in confined and helper_startup and _prologue_call(c, target(c)):
             excluded["loader_prologue"] += 1
             continue
@@ -897,7 +905,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             guard_seeks[process] += 1
             excluded["stack_guard"] += 1
             continue
-        if helper_vocabulary and role == "helper" and k is not None:
+        if tracked and k is not None:
             started.add(process)
         if role == "collector":
             if c.name == "uname" and process not in confined:

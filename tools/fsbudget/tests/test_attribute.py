@@ -756,3 +756,36 @@ def test_command_round_mutations_are_refused(old, new, pinned):
     got = collector_attribute(text.replace(old, new, 1).splitlines(),
                               {**(pinned or PINNED_COMMAND), "collectors": 0})
     assert got.errors
+
+
+# 대상 명령은 세고 보고만 한다: 자기 seccomp 필터를 건 뒤의 fork도 오류가 아니다. 이것을 실패시키는 것: 생성
+# 규칙의 대상 예외를 지우는 것(필터 뒤 생성 오류가 남).
+def test_a_target_may_fork_after_its_own_filter():
+    from fsbudget.attribute import collector_attribute
+    lines = list(COMMAND_ROUND)
+    at = lines.index('13 clone(child_stack=NULL, flags=SIGCHLD) = 14')
+    lines.insert(at, '13 seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=4}) = 0')
+    got = collector_attribute(lines, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts["command"]["spawn"] == 1
+
+
+# 대상의 loader 모양 호출은 첫 계수 호출 전까지만 제외한다. 실행 중의 같은 모양은 센다. 이것을 실패시키는 것:
+# 대상에 시작 경계를 두지 않는 것(뒤의 ld.so.cache 열기가 제외됨), 대상 exec 뒤 경계를 다시 열지 않는 것(자식
+# 셸의 loader 열기가 세어짐).
+def test_target_prologue_ends_at_its_first_counted_call():
+    from fsbudget.attribute import collector_attribute
+    lines = list(COMMAND_ROUND)
+    cache = 'openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = {fd}</etc/ld.so.cache>'
+    at = lines.index('13 openat(AT_FDCWD</>, "/etc/hosts", O_RDONLY) = 4</etc/hosts>')
+    lines[at:at] = ["13 " + cache.format(fd=5)]               # the target's own loader: excluded
+    at = lines.index('13 clone(child_stack=NULL, flags=SIGCHLD) = 14')
+    lines[at:at] = ["13 " + cache.format(fd=6),               # after its first counted call: counted
+                    '13 execve("/bin/sh", ["/bin/sh"], 0x0 /* 0 vars */) = 0',
+                    "13 " + cache.format(fd=8)]               # a new image's loader: excluded
+    at = lines.index('14 execve("/bin/sh", ["/bin/sh"], 0x0 /* 0 vars */) = 0')
+    lines[at + 1:at + 1] = ["14 " + cache.format(fd=7)]       # the forked shell's loader: excluded
+    got = collector_attribute(lines, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts["command"]["openat"] == 3, got.counts["command"]
+    assert got.excluded["loader_prologue"] == 3, got.excluded

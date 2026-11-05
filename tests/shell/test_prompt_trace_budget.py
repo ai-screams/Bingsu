@@ -2566,6 +2566,7 @@ def last_gc_fstat(lines):
     ("command_miss", "extra-prefix-fstat"), ("command_hit", "extra-prefix-fstat"),
     ("command_miss", "missing-prefix-fstat"),
     ("command_miss", "short-gc"), ("command_miss", "extra-gc-fstat"), ("command_miss", "no-install"),
+    ("command_miss", "no-install-no-gc"), ("command_miss", "uname-as-truncate"), ("command_hit", "uname-as-truncate"),
     ("command_miss", "unpinned-supervisor")])
 def test_command_stage_traces_match_the_formula(stage, damage):
     lines, collector, plan = helper_stage_case(stage)
@@ -2584,6 +2585,20 @@ def test_command_stage_traces_match_the_formula(stage, damage):
     elif damage == "no-install":
         at = first_helper_line(lines, r'renameat\(\d+<[^>]*>, "\.command\.stage", \d+<[^>]*>, "command"\) = 0$')
         lines[at] = lines[at].replace(" = 0", " = -1 EACCES (Permission denied)")
+    elif damage == "no-install-no-gc":
+        # The install refused and no GC after it: the prefix alone is exact.
+        at = first_helper_line(lines, r'renameat\(\d+<[^>]*>, "\.command\.stage", \d+<[^>]*>, "command"\) = 0$')
+        lines[at] = lines[at].replace(" = 0", " = -1 EACCES (Permission denied)")
+        pid = lines[at].split()[0]
+        clock = next(i for i in range(at, len(lines))
+                     if lines[i].split()[0] == pid and '"/proc/sys/kernel/random/boot_id"' in lines[i])
+        # The stage keeps its name: its descriptor's close names the stage.
+        lines[at + 1:clock] = [l.replace("/store/command>", "/store/.command.stage>") for l in lines[at + 1:clock]]
+        lines = lines[:clock] + [l for l in lines[clock:] if l.split()[0] != pid or "+++ " in l]
+    elif damage == "uname-as-truncate":
+        # Another unreviewed call where the kernel release check stands.
+        at = first_helper_line(lines, r"uname\(")
+        lines[at] = lines[at].split()[0] + '  truncate("/fx/anything", 0) = 0'
     elif damage == "unpinned-supervisor":
         lines = [l.replace('"__command-v1"', '"__command-v9"') for l in lines]
     if damage in (None, "short-gc"):

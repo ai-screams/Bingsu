@@ -197,12 +197,12 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # FD_CLOEXEC; its reads are one filled read and the EOF read.
     "directory_cursor": {"openat": 1, "fstat": 1, "fd_query": 1, "fd_flags": 1, "getdents": 2},
     # command_cgroup::fs::open_session up to the session parent's open (Linux,
-    # C3): uname (the 5.14 check, counted as unknown-fs), /proc/self/cgroup
+    # C3): uname (the 5.14 check, kernel_release), /proc/self/cgroup
     # through libc::open and read to its end, the own cgroup folder through
     # libc::open and its fstatfs, the cgroup.procs open (its preads are an
     # axis), the parent's mkdirat and open. A best-effort host stops at that
     # open (mkdir refused, nothing to open).
-    "cgroup_probe": {"unknown-fs": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1},
+    "cgroup_probe": {"kernel_release": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1},
     # The opened parent: fd_facts and the mount ids of the own cgroup and the
     # parent; then the reclaim's listing of the parent (lseek, one filled
     # getdents64 and the EOF one).
@@ -240,7 +240,7 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     # musl's opendir does not stat the folder.
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
     # libc::open(O_CLOEXEC) of /proc/self/cgroup and of the own cgroup folder.
-    "cgroup_probe": {"unknown-fs": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1, "fd_flags": 2},
+    "cgroup_probe": {"kernel_release": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1, "fd_flags": 2},
 }
 
 # Parent-side successful posix_spawn exec-error channel, per libc.

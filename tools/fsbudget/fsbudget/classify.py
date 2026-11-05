@@ -253,6 +253,10 @@ def helper_kind(c: Call) -> str | None:
         return "cwd" if args == ['"/"'] else "unknown-fs"
     if c.name == "umask":
         return "umask"
+    if c.name == "uname":
+        # command_cgroup::open_session's 5.14 check, named as the collector's
+        # kernel release read; never folded into unknown-fs.
+        return "kernel_release"
     return collector_kind(c)
 
 

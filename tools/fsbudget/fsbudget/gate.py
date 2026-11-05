@@ -159,8 +159,7 @@ def check_command(attribution, expected, *, evidence=None):
     """command_miss: the helper's calls through the command response's
     install (and, on the atomic path, the unit cgroup reclaim after it) are
     exact; from the next clock observation (its boot_id open) on they are the
-    GC's, held to an upper bound. Without an install every call stays in the
-    exact prefix, so a round that published nothing fails there.
+    GC's, held to an upper bound. The round must install its response.
     Calls of the supervisor, relay and target are other roles (Q7)."""
     from collections import Counter
     from .classify import split_args
@@ -180,6 +179,9 @@ def check_command(attribution, expected, *, evidence=None):
             installed = True
     if evidence is not None:
         evidence.update(phase_counts=measured, phase_expected=expected, installed=installed)
+    # 이것을 실패시키는 것: 설치 성공을 요구하지 않는 것(rename이 실패하고 GC도 없는 미스가 정확 앞부분만으로 통과).
+    if not installed:
+        errors.append("command: the round installed no command response")
     for phase, want in expected.items():
         mode = "exact" if phase == "prefix" else "le"
         got = measured[phase]
