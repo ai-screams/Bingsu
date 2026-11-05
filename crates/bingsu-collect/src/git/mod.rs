@@ -47,7 +47,8 @@ pub fn collect_with_access(
     meter: crate::meter::Meter,
     access: crate::safe_read::Access,
 ) -> Result<(), CollectError> {
-    collect_with_deadlines(request, sink, meter, access, StageDeadlines::PRODUCT)
+    let deadlines = StageDeadlines::product(!request.languages.is_empty());
+    collect_with_deadlines(request, sink, meter, access, deadlines)
 }
 
 /// Stage allowances remain bounded by the Meter's absolute request deadline.
@@ -71,6 +72,22 @@ impl StageDeadlines {
         path_ms: bingsu_core::collection::budget::PATH_MS,
         lang_ms: bingsu_core::collection::budget::LANG_MS,
     };
+
+    /// The product stages of one request. With languages asked for, the
+    /// language stage's time comes out of C (user decision U-19), so the
+    /// stages still add up to the request budget; without, nothing changes
+    /// (fails without it: product_stages_give_c_time_to_languages_only).
+    pub const fn product(languages: bool) -> Self {
+        use bingsu_core::collection::budget::{C_MS, LANG_MS};
+        if languages {
+            Self {
+                c_ms: C_MS - LANG_MS,
+                ..Self::PRODUCT
+            }
+        } else {
+            Self::PRODUCT
+        }
+    }
 }
 
 pub(crate) fn collect_with_deadlines(

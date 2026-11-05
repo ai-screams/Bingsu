@@ -460,3 +460,19 @@ fn byte_bound_stops_further_languages() {
             .all(|r| matches!(r.version, Version::Found { .. }))
     );
 }
+
+// 사용자 결정 U-19: 언어 요청이 있는 회차에만 C가 2 ms를 언어 단계에 준다(8 → 6). 없는 회차는 그대로다.
+// 이것을 실패시키는 것: product()가 언어 요청에도 PRODUCT를 돌려주는 것, 요청이 없어도 C를 줄이는 것.
+#[test]
+fn product_stages_give_c_time_to_languages_only() {
+    use bingsu_core::collection::budget::{C_MS, LANG_MS};
+    let plain = git::StageDeadlines::product(false);
+    let with = git::StageDeadlines::product(true);
+    assert_eq!(
+        (plain.c_ms, plain.b_ms),
+        (C_MS, bingsu_core::collection::budget::B_MS)
+    );
+    assert_eq!((with.c_ms, with.lang_ms), (C_MS - LANG_MS, LANG_MS));
+    let total = |d: git::StageDeadlines| d.a_ms + d.path_ms + d.b_ms + d.c_ms + d.d_ms;
+    assert_eq!(total(with) + with.lang_ms, total(plain));
+}

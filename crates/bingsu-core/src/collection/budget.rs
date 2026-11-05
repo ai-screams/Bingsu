@@ -6,10 +6,10 @@ pub const B_MS: u64 = 28;
 pub const C_MS: u64 = 8;
 pub const D_MS: u64 = 4;
 pub const RESERVE_MS: u64 = 2;
-/// Language detection (D1), only in a round that asks for languages. Where
-/// these milliseconds come from is still to be decided (the B stage p95 is
-/// near 26 ms, so B cannot simply give them); until then the stage runs
-/// inside the request's absolute deadline with this own allowance.
+/// Language detection (D1), only in a round that asks for languages: these
+/// milliseconds come out of C, which is then `C_MS - LANG_MS` (user decision
+/// U-19; B's p95 on a large repository is near its own 28 ms). A round
+/// without languages keeps every stage as above.
 pub const LANG_MS: u64 = 2;
 pub const INDEX_BYTES: u64 = 4_194_304;
 pub const INDEX_ENTRIES: u64 = 50_000;

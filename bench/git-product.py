@@ -313,7 +313,8 @@ def observe_stages(preparation, directory, repo):
                     sent = True
             output.extend(child.communicate()[0])
         text = output.decode(errors="replace")
-        stages = [{"stage": {5: "A", 3: "PathFacts", 28: "B", 8: "C", 4: "D"}[int(ms)],
+        # A round that asks for languages gives C two of its milliseconds (U-19).
+        stages = [{"stage": {5: "A", 3: "PathFacts", 28: "B", 8: "C", 6: "C", 4: "D", 2: "Languages"}[int(ms)],
                    "budget_ns": int(ms) * 1_000_000, "elapsed_ns": int(ns), "result": result}
                   for ms, ns, result in re.findall(r"(?m)^F3_STAGE (\d+) (\d+) (.*)$", text)]
         status = "OBSERVED" if child.returncode == 0 and "F1_RESULT " in text and "AllStages(" in text else "BLOCKED"
