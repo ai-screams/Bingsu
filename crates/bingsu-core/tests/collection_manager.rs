@@ -24,12 +24,12 @@ fn check(folder: &[u8], name: &[u8]) -> Plan {
 
 // 우선순위 출처마다 빠른 경로를 끄는 칸. 이것을 실패시키는 것: 환경이 오지 않은 경우를 끄지 않는 것, override 변수
 // (RUSTUP_TOOLCHAIN·PYENV_VERSION)를 무시하는 것, rustup 설정을 모르는데 진행하는 것, 폴더 override를 무시하는 것,
-// 선택 파일이 없거나 남의 것(.tool-versions)이거나 값이 없는데 진행하는 것, path 툴체인을 숨기지 않는 것, pyenv의
-// `system`을 버전으로 보는 것, host triple 없이 설치 확인을 하는 것.
+// 선택 파일이 없거나 값이 없는데 진행하는 것, path 툴체인을 숨기지 않는 것, pyenv의
+// `system`을 버전으로 보는 것, settings에 host가 없을 때 빌드 triple로 설치 확인을 하지 않는 것(D2 판정 Q8).
 #[test]
 fn decision_table() {
     let host = known(Some(b"aarch64-apple-darwin"), false);
-    let cases: [(Manager, Option<bool>, Selection<'_>, Settings, Plan); 14] = [
+    let cases: [(Manager, Option<bool>, Selection<'_>, Settings, Plan); 13] = [
         (
             Manager::Rustup,
             Some(false),
@@ -70,7 +70,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"1.80.0"),
             known(None, false),
-            run(Some(b"1.80.0")),
+            check(b"toolchains", b"1.80.0-x86_64-unknown-linux-gnu"),
         ),
         (
             Manager::Rustup,
@@ -117,13 +117,6 @@ fn decision_table() {
         (
             Manager::Pyenv,
             Some(false),
-            Selection::Foreign,
-            Settings::Unknown,
-            run(None),
-        ),
-        (
-            Manager::Pyenv,
-            Some(false),
             Selection::Value(b"system"),
             Settings::Unknown,
             run(None),
@@ -135,6 +128,7 @@ fn decision_table() {
             override_set,
             selection,
             settings: &settings,
+            build_host: b"x86_64-unknown-linux-gnu",
         };
         assert_eq!(plan(&facts), want, "{facts:?}");
     }

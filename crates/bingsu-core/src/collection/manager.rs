@@ -36,9 +36,6 @@ pub enum Selection<'a> {
     /// No selection file in the repository (ruling Q2 for D2: the folders
     /// above the repository root are not read).
     Absent,
-    /// The nearest file is one this manager does not read (a `.tool-versions`;
-    /// ruling Q3 for D2), so the manager's own choice is not known.
-    Foreign,
     /// The nearest file exists but has no usable value (over its cap, not
     /// grammar-checked, malformed).
     Unusable,
@@ -91,6 +88,11 @@ pub struct Facts<'a> {
     pub selection: Selection<'a>,
     /// rustup only; ignored for pyenv.
     pub settings: &'a Settings,
+    /// rustup only: the target triple bingsu was built for, used when the
+    /// settings name no `default_host_triple` (rustup leaves the key out
+    /// when the host is its own; ruling Q8 for D2). A wrong guess only
+    /// misses the install check, which then runs the command.
+    pub build_host: &'a [u8],
 }
 
 /// The decision before the install check, or the folder to check.
@@ -128,7 +130,7 @@ pub fn plan(f: &Facts<'_>) -> Plan {
         }
     }
     let name = match f.selection {
-        Selection::Absent | Selection::Foreign | Selection::Unusable => {
+        Selection::Absent | Selection::Unusable => {
             return Plan::Done(Decision::Run(None));
         }
         // Fails without it: decision_table (path → hidden).
@@ -151,10 +153,10 @@ pub fn plan(f: &Facts<'_>) -> Plan {
             let host = match f.settings {
                 Settings::Known {
                     host: Some(host), ..
-                } => host,
-                // Ruling Q5: no host triple, no fast path.
-                // Fails without it: decision_table (no host → run).
-                _ => return Plan::Done(Decision::Run(Some(name.to_vec()))),
+                } => host.as_slice(),
+                // Fails without it: decision_table (no key → the build's
+                // triple is checked).
+                _ => f.build_host,
             };
             Plan::Check {
                 folder: b"toolchains".to_vec(),
