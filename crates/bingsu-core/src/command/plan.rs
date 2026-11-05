@@ -244,6 +244,16 @@ pub fn result_fits(grant: &Grant, o: &Outcome) -> bool {
     usize::from(o.index) < len && o.approved_at <= o.ended_at
 }
 
+/// Whether a result is taken: it fits the grant and is the first one for
+/// its place. A second result for the same origin and index is counted as
+/// rejected and never published (the first one stands).
+pub fn accept(grant: &Grant, taken: &[Outcome], o: &Outcome) -> bool {
+    result_fits(grant, o)
+        && !taken
+            .iter()
+            .any(|t| t.origin == o.origin && t.index == o.index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +530,30 @@ mod tests {
         });
         assert!(result_fits(&g, &outcome(Origin::Builtin, 0, 5, 6)));
         assert!(!result_fits(&g, &outcome(Origin::Config, 1, 5, 6)));
+    }
+
+    // 같은 자리의 둘째 결과는 받지 않는다(첫 결과가 선다, C4 Q5). 이것을 실패시키는 것: accept의 중복 검사를
+    // 지우는 것, origin을 보지 않는 것(같은 index의 다른 origin 결과까지 거부), accept가 result_fits를 건너뛰는 것.
+    #[test]
+    fn a_second_result_for_one_place_is_rejected() {
+        let mut g = grant();
+        g.probes.push(Probe {
+            profile: 1,
+            executable: b"/usr/bin/go".to_vec(),
+            pin: None,
+        });
+        let first = outcome(Origin::Config, 0, 5, 6);
+        assert!(accept(&g, &[], &first));
+        assert!(!accept(
+            &g,
+            core::slice::from_ref(&first),
+            &outcome(Origin::Config, 0, 7, 8)
+        ));
+        assert!(accept(
+            &g,
+            core::slice::from_ref(&first),
+            &outcome(Origin::Builtin, 0, 7, 8)
+        ));
+        assert!(!accept(&g, &[], &outcome(Origin::Config, 0, 9, 8)));
     }
 }

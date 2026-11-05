@@ -758,7 +758,7 @@ impl Round {
                     break;
                 }
                 match wire::decode(&bytes[..total]) {
-                    Ok(Message::Result(o)) if plan::result_fits(&self.grant, &o) => {
+                    Ok(Message::Result(o)) if plan::accept(&self.grant, &report.results, &o) => {
                         report.results.push(o)
                     }
                     _ => report.rejected += 1,
