@@ -384,7 +384,15 @@ fn languages(
             parts,
             access,
             &mut meter,
-            |result| sink.language(result).map_err(CollectError::Sink),
+            |result| {
+                sink.language(result).map_err(|error| {
+                    if crate::update_sink::is_late_language(&error) {
+                        CollectError::Read(crate::safe_read::ReadError::Deadline)
+                    } else {
+                        CollectError::Sink(error)
+                    }
+                })
+            },
         )
     });
     // Fails without it: language_bound_ends_with_the_stage (B refused).

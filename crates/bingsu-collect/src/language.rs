@@ -216,7 +216,17 @@ pub fn detect_all(
         let result = detect(index as u8, query, root, parts, access, &spend, meter)
             .and_then(|result| meter.check().map(|()| result));
         match result {
-            Ok(result) => send(result)?,
+            Ok(result) => match send(result) {
+                Ok(()) => {}
+                // A result the sink found late (nothing written): stop, as
+                // past the stage's time. Fails without it:
+                // a_late_language_result_keeps_the_round_complete.
+                Err(crate::git::CollectError::Read(ReadError::Deadline)) => {
+                    meter.event("language_late");
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            },
             // Fails without the stop: lang_ms_zero_keeps_the_round_complete
             // (a Deadline would be skipped language by language, each
             // reaching the next stat first).

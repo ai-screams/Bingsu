@@ -799,3 +799,45 @@ fn meter_limits_stop_instead_of_refusing() {
         events.borrow()
     );
 }
+
+// 보안 리뷰 S-M: sink가 늦었다고 답한 언어 결과는 멈춤으로 처리하고, 회차는 완료된다(Sink 오류가 아니다). 남은
+// 언어는 보내지 않는다. 이것을 실패시키는 것: detect_all이 늦은 결과를 오류로 올리는 것(회차 실패), languages()
+// 호출부가 늦은 결과를 Sink 오류로 바꾸는 것.
+#[test]
+fn a_late_language_result_keeps_the_round_complete() {
+    if case("a_late_language_result_keeps_the_round_complete", 1).is_none() {
+        return;
+    }
+    struct Late(Sink, usize);
+    impl update_sink::UpdateSink for Late {
+        fn update(&mut self, value: Update) -> std::io::Result<()> {
+            self.0.update(value)
+        }
+        fn progress(&mut self, value: Progress) -> std::io::Result<()> {
+            self.0.progress(value)
+        }
+        fn language(&mut self, _value: LanguageResult) -> std::io::Result<()> {
+            self.1 += 1;
+            Err(update_sink::late_language())
+        }
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let output = Rc::clone(&events);
+    let mut m = meter();
+    m.hook = Some(Box::new(move |event| {
+        output.borrow_mut().push(event.to_owned())
+    }));
+    let mut sink = Late(Sink::default(), 0);
+    let result = git::collect_with_deadlines(
+        &request(&repo, &f.0, vec![python(), python()]),
+        &mut sink,
+        m,
+        full_access(),
+        deadlines(),
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(sink.1, 1);
+    assert!(events.borrow().iter().any(|e| e == "language_late"));
+}
