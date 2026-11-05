@@ -603,32 +603,60 @@ struct Resolved {
 /// its target environment and the digest of its policy before `{dir}`. A
 /// unit whose relay input would pass `RELAY_INPUT_MAX`, or that would push
 /// the grant past one frame, is left out alone; the others still run.
+/// The repository and the sanitized `PATH` folders of one round, which
+/// the config units and the builtin languages share: walking every `PATH`
+/// entry under the ancestor and group rules is the round's largest cost
+/// (about 30 ms on macOS with a long `PATH`, D3a measurement), so it runs
+/// once.
+struct Search {
+    repo: Option<bingsu_core::command::path::Id>,
+    folders: Vec<std::path::PathBuf>,
+    /// No collected repository root: the shell's folder stood for it.
+    fallback: bool,
+}
+
+/// The repository the shell is in, by identity, for the PATH and
+/// executable rules (C2 ruling J9): the root this round's collection
+/// reported, else the shell's own folder (one statx, command rounds only).
+/// A folder that cannot be read refuses the round.
+fn search(
+    environment: &[u8],
+    cwd: &[u8],
+    collected: Option<u16>,
+    me: u32,
+    groups: &mut SystemGroups,
+) -> Result<Search, Skip> {
+    let folder = plan::repo_folder(cwd, collected);
+    let repo = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
+        .map_err(|_| Skip::Failed)?;
+    let vars = Environ::parse(environment);
+    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
+    Ok(Search {
+        repo,
+        folders,
+        fallback: collected.is_none(),
+    })
+}
+
 #[allow(clippy::too_many_arguments, reason = "one round's fixed inputs")]
 fn units(
     runnable: &[(String, plan::Runnable)],
     tried: &[(String, u64)],
     environment: &[u8],
     base: &Grant,
-    collected: Option<u16>,
+    found: &Search,
     me: u32,
     groups: &mut SystemGroups,
     scripts: &mut Scripts,
-) -> Result<Resolved, Skip> {
+) -> Resolved {
     let mut out = Resolved {
-        repo_fallback: collected.is_none(),
+        repo_fallback: found.fallback,
         ..Resolved::default()
     };
-    // The repository the shell is in, by identity, for the PATH and
-    // executable rules (C2 ruling J9): the root this round's collection
-    // reported, else the shell's own folder (one statx, command rounds
-    // only). A folder that cannot be read refuses the round.
-    let folder = plan::repo_folder(&base.cwd, collected);
-    let repo = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
-        .map_err(|_| Skip::Failed)?;
     let vars = Environ::parse(environment);
     out.dropped = vars.dropped;
-    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
-    let path = exec_path::path_value(&folders);
+    let (repo, folders) = (found.repo, &found.folders);
+    let path = exec_path::path_value(folders);
     // Round robin: never tried first, then the attempt longest ago.
     let attempts: Vec<(&str, Option<u64>)> = runnable
         .iter()
@@ -644,7 +672,7 @@ fn units(
             Policy::Argv { argv } => argv[0].as_slice(),
             Policy::UnsafeShell { .. } => SHELL,
         };
-        let Ok((found, checked)) = exec_path::lookup_open(word, &folders, repo, me, groups) else {
+        let Ok((found, checked)) = exec_path::lookup_open(word, folders, repo, me, groups) else {
             out.unresolved += 1;
             out.unresolved_ids.push(id.clone());
             continue;
@@ -692,7 +720,7 @@ fn units(
         }
     }
     out.units = trial.units;
-    Ok(out)
+    out
 }
 
 /// Writes all of `bytes` to the non-blocking `fd` by `until_ns`, waiting in
@@ -861,38 +889,35 @@ impl Round {
     ) -> Report {
         self.grant.permit = permit;
         let mut report = Report::default();
-        let unresolved = match units(
+        let Ok(found) = search(&self.environment, &self.grant.cwd, repo, me, groups) else {
+            report.failed = true;
+            report.notes = self.abandon();
+            return report;
+        };
+        let resolved = units(
             &self.runnable,
             &self.publish.attempts,
             &self.environment,
             &self.grant,
-            repo,
+            &found,
             me,
             groups,
             &mut self.scripts,
-        ) {
-            Ok(resolved) => {
-                report.unresolved = resolved.unresolved;
-                report.oversize = resolved.oversize;
-                report.repo_fallback = resolved.repo_fallback;
-                report.dropped = resolved.dropped;
-                self.grant.units = resolved.units;
-                self.plan_builtins(languages, repo, me, groups);
-                report.hidden = std::mem::take(&mut self.hidden);
-                // Fails without the probes: test_builtin_probe_runs_once_and_is_cached.
-                if self.grant.units.is_empty() && self.grant.probes.is_empty() {
-                    self.publish_results(&mut report, &resolved.unresolved_ids);
-                    report.notes = self.abandon();
-                    return report;
-                }
-                resolved.unresolved_ids
-            }
-            Err(_) => {
-                report.failed = true;
-                report.notes = self.abandon();
-                return report;
-            }
-        };
+        );
+        report.unresolved = resolved.unresolved;
+        report.oversize = resolved.oversize;
+        report.repo_fallback = resolved.repo_fallback;
+        report.dropped = resolved.dropped;
+        self.grant.units = resolved.units;
+        self.plan_builtins(languages, &found, me, groups);
+        report.hidden = std::mem::take(&mut self.hidden);
+        // Fails without the probes: test_builtin_probe_runs_once_and_is_cached.
+        if self.grant.units.is_empty() && self.grant.probes.is_empty() {
+            self.publish_results(&mut report, &resolved.unresolved_ids);
+            report.notes = self.abandon();
+            return report;
+        }
+        let unresolved = resolved.unresolved_ids;
         let end = self
             .grant
             .helper_deadline
@@ -972,7 +997,7 @@ impl Round {
     fn plan_builtins(
         &mut self,
         languages: &Languages,
-        collected: Option<u16>,
+        found: &Search,
         me: u32,
         groups: &mut SystemGroups,
     ) {
@@ -981,16 +1006,11 @@ impl Round {
         }
         let environment = self.environment.clone();
         let vars = Environ::parse(&environment);
-        let folder = plan::repo_folder(&self.grant.cwd, collected);
-        let Ok(repo) = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder)))) else {
-            return;
-        };
-        let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
         let cwd = builtin_probe::canonical_cwd(&self.grant.cwd);
         let c = builtin_probe::Context {
             vars: builtin_probe::whole(&vars),
-            folders: &folders,
-            repo,
+            folders: &found.folders,
+            repo: found.repo,
             cwd: cwd.as_deref(),
             me,
         };
@@ -1363,12 +1383,18 @@ mod tests {
             &[],
             &big(20 * 1024),
             &base(),
-            None,
+            &search(
+                &big(20 * 1024),
+                &base().cwd,
+                None,
+                sys::current_uid(),
+                &mut groups(),
+            )
+            .unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert_eq!((got.units.len(), got.oversize), (1, 1));
         assert_eq!(got.units[0].id, "custom/small");
         let eight: Vec<_> = (0..8)
@@ -1379,12 +1405,18 @@ mod tests {
             &[],
             &big(15 * 1024),
             &base(),
-            None,
+            &search(
+                &big(15 * 1024),
+                &base().cwd,
+                None,
+                sys::current_uid(),
+                &mut groups(),
+            )
+            .unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert!(
             got.oversize > 0 && !got.units.is_empty(),
             "{} {}",
@@ -1406,12 +1438,11 @@ mod tests {
             &[],
             env,
             &base(),
-            None,
+            &search(env, &base().cwd, None, sys::current_uid(), &mut groups()).unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert!(got.repo_fallback);
         assert_eq!(
             got.dropped,
@@ -1425,12 +1456,11 @@ mod tests {
             &[],
             env,
             &base(),
-            Some(0),
+            &search(env, &base().cwd, Some(0), sys::current_uid(), &mut groups()).unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert!(!got.repo_fallback);
     }
 
