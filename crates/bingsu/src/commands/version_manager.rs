@@ -225,22 +225,19 @@ fn opened(result: std::io::Result<File>, me: u32) -> Result<File, Install> {
     }
 }
 
-/// A manager folder (the environment may name it through a link). Opened
-/// as a folder that cannot block: a FIFO or a device in the folder's place
-/// fails at once (`O_DIRECTORY`), and neither the open nor any later read
-/// waits on it (`O_NONBLOCK`) or takes a terminal (`O_NOCTTY`); std adds
+/// A manager folder (the environment may name it through a link), opened
+/// with `O_DIRECTORY`: it refuses a FIFO or a device in the folder's place
+/// before opening it (ENOTDIR), so nothing waits on one; std adds
 /// `O_CLOEXEC`. Opened once per decision and used for every read below it,
 /// so the settings and the install check see the same folder.
 fn open_home(home: &Path, me: u32) -> Result<File, Install> {
     use std::os::unix::fs::OpenOptionsExt;
-    // Fails without both `O_DIRECTORY` and `O_NONBLOCK` (either alone keeps
-    // a FIFO from blocking; they are kept as two layers): homes_never_block
-    // (the FIFO open waits for a writer). No test reaches `O_NOCTTY`: it
-    // matters only for a terminal device the helper could take as its own.
+    // Fails without `O_DIRECTORY`: homes_never_block (the FIFO open waits
+    // for a writer).
     opened(
         std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_NOCTTY)
+            .custom_flags(libc::O_DIRECTORY)
             .open(home),
         me,
     )
@@ -797,9 +794,9 @@ mod tests {
     }
 
     // 보안 리뷰 M-1: 관리자 폴더 자리에 FIFO나 장치가 있어도 필터 전 helper가 멈추지 않는다(open_home이 바로
-    // 실패). 이것을 실패시키는 것: open_home을 평범한 open으로 되돌리거나 O_DIRECTORY와 O_NONBLOCK을 함께 빼는 것
-    // (FIFO open이 쓰는 쪽을 기다려 시간 안에 끝나지 않음). 둘 중 하나만 빼면 남은 하나가 막는다. 장치 칸
-    // (/dev/null)은 O_DIRECTORY가 없으면 신뢰 규칙(남이 쓸 수 있음)이 따로 막으므로 이 변이를 죽이지 않는다.
+    // 실패). O_DIRECTORY가 FIFO·장치를 열기 전에 거부한다(ENOTDIR). 이것을 실패시키는 것: O_DIRECTORY를 빼는 것
+    // (FIFO open이 쓰는 쪽을 기다려 시간 안에 끝나지 않음). 장치 칸(/dev/null)은 O_DIRECTORY가 없어도 신뢰 규칙
+    // (남이 쓸 수 있음)이 따로 막으므로 이 변이를 죽이지 않는다.
     #[test]
     fn homes_never_block() {
         let s = Scratch::new("block");
