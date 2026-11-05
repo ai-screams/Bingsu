@@ -3,8 +3,9 @@
 //! decide on: which manager's shim the language's command is, the manager's
 //! folders from the shell environment, rustup's settings file and one
 //! install check. It runs in the helper before its filter, beside the
-//! executable lookup, after the marker is installed (D2 ruling Q1); the
-//! collector's read confinement is not widened.
+//! executable lookup, once the marker is staged (D2 ruling Q1; the marker is
+//! installed only after the filter); the collector's read confinement is not
+//! widened.
 //!
 //! Nothing here runs a program. A wrong answer can only show a wrong
 //! version without running it or run the version command (D3) when it was
@@ -181,9 +182,21 @@ fn trusted(file: &File, me: u32) -> bool {
 }
 
 /// A manager folder (the environment may name it through a link), only
-/// when trusted.
+/// when trusted. Opened as a folder that cannot block: a FIFO or a device
+/// in the folder's place fails at once (`O_DIRECTORY`), and neither the
+/// open nor any later read waits on it (`O_NONBLOCK`) or takes a terminal
+/// (`O_NOCTTY`); std adds `O_CLOEXEC`.
 fn open_home(home: &Path, me: u32) -> Option<File> {
-    let root = File::open(home).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Fails without both `O_DIRECTORY` and `O_NONBLOCK` (either alone keeps
+    // a FIFO from blocking; they are kept as two layers): homes_never_block
+    // (the FIFO open waits for a writer). No test reaches `O_NOCTTY`: it
+    // matters only for a terminal device the helper could take as its own.
+    let root = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(home)
+        .ok()?;
     // Fails without it: owner_rules_refuse_writable_folders (home).
     trusted(&root, me).then_some(root)
 }
@@ -580,6 +593,29 @@ mod tests {
         mode(&home.join("toolchains"), 0o777);
         assert!(!check());
         assert_eq!(read_settings(&home, b"/w", me()), known);
+    }
+
+    // 보안 리뷰 M-1: 관리자 폴더 자리에 FIFO나 장치가 있어도 필터 전 helper가 멈추지 않는다(settings·설치 확인
+    // 모두 모름·false). 이것을 실패시키는 것: open_home을 평범한 open으로 되돌리거나 O_DIRECTORY와 O_NONBLOCK을
+    // 함께 빼는 것(FIFO open이 쓰는 쪽을 기다려 시간 안에 끝나지 않음). 둘 중 하나만 빼면 남은 하나가 막는다. 장치 칸(/dev/null)은 신뢰 규칙(남이 쓸 수 있음)이 따로 막으므로 이 변이를 죽이지
+    // 않는다.
+    #[test]
+    fn homes_never_block() {
+        let s = Scratch::new("block");
+        let fifo = s.0.join("fifo-home");
+        sys::make_test_fifo(&fifo).unwrap();
+        for home in [fifo, PathBuf::from("/dev/null")] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let me = me();
+            let probe = home.clone();
+            std::thread::spawn(move || {
+                let settings = read_settings(&probe, b"/w", me);
+                let present = installed(&probe, b"toolchains", b"1.80.0", None, me);
+                let _ = tx.send((settings, present));
+            });
+            let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+            assert_eq!(got, Ok((Settings::Unknown, false)), "{}", home.display());
+        }
     }
 
     // 빌드 triple은 이 build의 arch와 OS다(rustup 철자). 이것을 실패시키는 것: build_host의 arch나 OS 가지를
