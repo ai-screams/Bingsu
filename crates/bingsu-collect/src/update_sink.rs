@@ -167,7 +167,6 @@ impl UpdateSink for WireSink<'_> {
     fn language(&mut self, value: LanguageResult) -> io::Result<()> {
         // Before the transcript and the latch: a late result is not sent and
         // stops nothing. Fails without it: late_language_leaves_the_stream_open.
-        self.active()?;
         if self
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
