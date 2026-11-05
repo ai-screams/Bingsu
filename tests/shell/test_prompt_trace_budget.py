@@ -43,10 +43,14 @@ def collecting_prompt():
 
 
 # 이것을 실패시키는 것: live 기본 판정(RESPONSE_HEADERS)이 기록 fixture의 옛 봉투(BNGRES03)를 받는 것. 기록
-# fixture만 provenance 표의 봉투를 명시해 넘긴다(D1 판정).
+# fixture만 provenance 표의 봉투를 명시해 넘긴다(D1 판정). check_collecting_prompt의 headers에 기본값을 다시 두는
+# 것(호출마다 봉투를 밝히지 않아도 됨).
 def test_live_gate_refuses_a_recorded_envelope():
+    import inspect
     assert budget.RESPONSE_HEADERS == (b"BNGRES04\x04\x00",)
-    check_collecting_prompt(collecting_prompt())
+    headers = inspect.signature(check_collecting_prompt).parameters["headers"]
+    assert headers.default is inspect.Parameter.empty
+    check_collecting_prompt(collecting_prompt(), headers=COLLECT_HEADERS)
     with pytest.raises(AssertionError, match="collection body after invalid header"):
         check_collecting_prompt(collecting_prompt(), headers=budget.RESPONSE_HEADERS)
 
@@ -65,7 +69,7 @@ def test_recorded_envelope_table_matches_its_fixtures():
         assert (fixtures / row["provenance"]).is_file() and row["fixture"] in (fixtures / row["provenance"]).read_text(), row
 
 
-def check_collecting_prompt(lines, *, collectors=1, audit=True, platform=None, headers=COLLECT_HEADERS):
+def check_collecting_prompt(lines, *, headers, collectors=1, audit=True, platform=None):
     roots = [COLLECT_BASE + suffix for suffix in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")]
     inputs = tuple(COLLECT_BASE + suffix for suffix in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore"))
     repo = COLLECT_BASE + "/repo"
@@ -96,7 +100,7 @@ def insert_before(lines, pattern, extra):
 
 
 def test_collector_stack_guard_seeks_pass_on_x86_64_gnu():
-    check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"))
+    check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: x86_64 glibc 밖에서, 다른 fd(공유 라이브러리 fd 포함)·다른 모양으로, 표의 횟수를 넘겨,
@@ -120,7 +124,7 @@ def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
         lines = insert_before(collecting_prompt(), f"1098  close({libc}",
                               [f"1098  lseek({libc}, 0, SEEK_CUR) = 832", f"1098  lseek({libc}, 832, SEEK_SET) = 832"])
         with pytest.raises(AssertionError):
-            check_collecting_prompt(lines, platform=platform)
+            check_collecting_prompt(lines, platform=platform, headers=COLLECT_HEADERS)
         return
     if seeks == "lock":  # the inherited collection.lock fd, open at that point
         import re
@@ -128,7 +132,7 @@ def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
                     if (m := re.match(r"1098  newfstatat\((5<[^>]*collection\.lock>)", line)))
         seeks = [f"1098  lseek({lock}, 0, SEEK_CUR) = 0"]
     with pytest.raises(AssertionError):
-        check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform)
+        check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform, headers=COLLECT_HEADERS)
 
 
 FRONT_GUARD = ["1095  lseek(3</proc/1095/maps>, 0, SEEK_CUR) = 2906",
@@ -142,7 +146,7 @@ def with_front_guard_seeks(seeks=FRONT_GUARD):
 
 
 def test_front_stack_guard_seeks_pass_on_x86_64_gnu():
-    check_collecting_prompt(with_front_guard_seeks(), platform=("x86_64", "gnu"))
+    check_collecting_prompt(with_front_guard_seeks(), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: 다른 플랫폼에서, 앞단 자기 maps 아닌 fd에서, 짝 없이 앞단 lseek을 받는 것.
@@ -154,7 +158,7 @@ def test_front_stack_guard_seeks_pass_on_x86_64_gnu():
 ], ids=["aarch64-gnu", "no-platform", "stdout-fd", "unpaired"])
 def test_front_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
     with pytest.raises(AssertionError):
-        check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform)
+        check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform, headers=COLLECT_HEADERS)
 
 
 def front_seeks_after_filter(lines, result="-1 EPERM (Operation not permitted)"):
@@ -173,7 +177,7 @@ def front_seeks_after_filter(lines, result="-1 EPERM (Operation not permitted)")
 @pytest.mark.parametrize("result", ["-1 EPERM (Operation not permitted)", "0"], ids=["eperm", "success"])
 def test_front_stack_guard_seeks_after_the_filter_fail(result):
     with pytest.raises(AssertionError):
-        check_collecting_prompt(front_seeks_after_filter(collecting_prompt(), result), platform=("x86_64", "gnu"))
+        check_collecting_prompt(front_seeks_after_filter(collecting_prompt(), result), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
     cap = collecting_capture(front_seeks_after_filter(collector_deadline_lines(head_open=True), result))
     cap.platform = ("x86_64", "gnu")
     assert budget.deadline_shape(cap) == "collector-deadline"
@@ -199,7 +203,7 @@ def collector_seeks_after_filter():
 # 이것을 실패시키는 것: collector가 prologue에서 연 maps fd로 필터 뒤에 seek하는 것을 받는 것.
 def test_collector_stack_guard_seeks_after_the_filter_fail():
     with pytest.raises(AssertionError, match="collector forbidden effect: lseek"):
-        check_collecting_prompt(collector_seeks_after_filter(), platform=("x86_64", "gnu"))
+        check_collecting_prompt(collector_seeks_after_filter(), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: 작업 종료로 인자가 잘린 helper 경로 호출을 IndexError로 끝내거나 일부 인자로 판정하는 것.
@@ -213,18 +217,18 @@ def test_helper_path_call_cut_short_fails_closed(cut):
     cut = (f'1097  newfstatat(AT_FDCWD</>, "{COLLECT_BASE}/run-t/bingsu/.collections.catalog", '
            " <unfinished ...>") if cut == "after-path" else "1097  newfstatat(AT_FDCWD</>,  <unfinished ...>"
     with pytest.raises(AssertionError, match="cut short by its task's exit.*exited with 0"):
-        check_collecting_prompt(lines[:at] + [cut] + lines[at:])
+        check_collecting_prompt(lines[:at] + [cut] + lines[at:], headers=COLLECT_HEADERS)
 
 
 def test_collecting_prompt_passes_the_path_allowlist():
-    check_collecting_prompt(collecting_prompt())
+    check_collecting_prompt(collecting_prompt(), headers=COLLECT_HEADERS)
     # A thread's interrupted futex wait can resume under strace (seen live once).
     # 이것을 실패시키는 것: helper 경로 표가 restart_syscall의 빈 인자를 해석하려는 것.
     check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
-                                         ["1099  restart_syscall(<... resuming interrupted futex ...>) = 0"]))
+                                         ["1099  restart_syscall(<... resuming interrupted futex ...>) = 0"]), headers=COLLECT_HEADERS)
     # The supervisor's SIGKILL of its own child on a deadline is the one allowed signal.
     check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
-                                         ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0"]))
+                                         ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0"]), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: collector 수를 정확히 보지 않는 것, 수집하는 collector를 감사 없이 통과시키는 것,
@@ -267,7 +271,7 @@ def test_collecting_prompt_rejects_mutations(damage):
         lines = insert_after(lines, "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
                              ["1099  restart_syscall(<... resuming interrupted read ...>) = 0"])
     with pytest.raises(AssertionError):
-        check_collecting_prompt(lines, collectors=collectors, audit=audit)
+        check_collecting_prompt(lines, collectors=collectors, audit=audit, headers=COLLECT_HEADERS)
 
 
 # prompt 트리의 read 계열 payload만 줄였다. provenance: fixtures/prompt-e4-trace.md.

@@ -39,6 +39,8 @@ def request(identity, mask, cwd=b"/r"):
     context = crc(b"bingsu-context-v3\0" + context_paths)
     body = bytes([1]) * 16 + bytes([2]) * 16 + struct.pack("<Q", 1) + bytes([3]) * 4 + context
     body += bytes([1]) + bytes(16) + struct.pack("<QI", 0, mask) + bytes(4) + struct.pack("<I", 50) + paths + bytes(2) + b"\x01" + bytes(4)
+    # The language section ends the v6 body: no languages asked.
+    body += bytes([0])
     return (frame(2, identity, struct.pack("<IQ", len(body), 3))
             + frame(3, identity, bytes(4) + body) + frame(4, identity, crc(body)))
 
