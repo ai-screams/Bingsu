@@ -169,8 +169,9 @@ fn find(
                     // Fails without it: a_nearer_unreadable_version_file_stops_the_search.
                     Entry::Other => version = Some(unreadable(i as u8, level)),
                     Entry::Regular => {
-                        match read_version(file, i as u8, level, root, &path, access, spend, meter)?
-                        {
+                        match read_version(
+                            stats, file, i as u8, level, root, &path, access, spend, meter,
+                        )? {
                             Some(answer) => version = Some(answer),
                             // Fails without it: version_file_changed_after_its_stat
                             // (gone: the next file).
@@ -187,6 +188,7 @@ fn find(
 
 #[allow(clippy::too_many_arguments, reason = "one version file's fixed inputs")]
 fn read_version(
+    stats: &mut WorktreeStats,
     file: &rule::VersionFile,
     i: u8,
     level: u8,
@@ -202,12 +204,21 @@ fn read_version(
     }
     // Opened without following the leaf, a regular file only; the bytes come
     // from that descriptor. One gone since the stat is absent (the next file
-    // is looked at; a link put in its place reads as gone too); one refused
-    // or replaced by a FIFO or device is this level's answer.
+    // is looked at); one refused or replaced by a FIFO or device is this
+    // level's answer. The open reports a link at the leaf as missing too, so
+    // a missing answer is looked at again, without following, from the same
+    // held folder: only a name that is really gone is absent.
     meter.event("before_language_open");
     let opened = match safe_read::resolve_nofollow(root, path, access, meter) {
         Ok(opened) => opened,
-        Err(ReadError::Missing) => return Ok(None),
+        // Fails without the second look: version_file_changed_after_its_stat
+        // (a link put in its place).
+        Err(ReadError::Missing) => {
+            return Ok(match entry(stats, root, path, access, meter)? {
+                Entry::Absent => None,
+                Entry::Regular | Entry::Other => Some(unreadable(i, level)),
+            });
+        }
         // Fails without it: version_file_changed_after_its_stat (a FIFO).
         Err(ReadError::Denied | ReadError::Special) => return Ok(Some(unreadable(i, level))),
         Err(error) => return Err(error),

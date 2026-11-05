@@ -464,11 +464,12 @@ fn a_folder_lets_the_next_file_of_its_level_answer() {
 }
 
 // D2 재리뷰 L6: stat 뒤 open 전에 버전 파일이 바뀌는 경우. 사라졌으면 다음 파일(같은 레벨의 rust-toolchain.toml,
-// 그것이 없으면 위쪽 3.11.9), FIFO로 바뀌었으면 그 레벨의 Refused. 이것을 실패시키는 것: open의 Missing을
-// Refused로 보는 것, Special을 건너뛰는 것, 사라진 파일 뒤에 같은 레벨의 나머지 파일을 보지 않는 것.
+// 그것이 없으면 위쪽 3.11.9), FIFO나 링크로 바뀌었으면 그 레벨의 Refused. 이것을 실패시키는 것: open의 Missing을
+// 다시 보지 않고 사라짐으로 보는 것(링크 칸이 위쪽 3.11.9가 됨), Missing을 늘 Refused로 보는 것, Special을
+// 건너뛰는 것, 사라진 파일 뒤에 같은 레벨의 나머지 파일을 보지 않는 것.
 #[test]
 fn version_file_changed_after_its_stat() {
-    let Some(k) = case("version_file_changed_after_its_stat", 3) else {
+    let Some(k) = case("version_file_changed_after_its_stat", 4) else {
         return;
     };
     if k == 2 {
@@ -521,6 +522,9 @@ fn version_file_changed_after_its_stat() {
                 // SAFETY: a terminated path, read only during the call.
                 assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
             }
+            if k == 3 {
+                symlink("../.python-version", &near).unwrap();
+            }
         }
     };
     let (results, _) = round_with(&request(&sub, &f.0, vec![python()]), deadlines(), change);
@@ -532,7 +536,7 @@ fn version_file_changed_after_its_stat() {
             },
         ) => assert_eq!(value, b"3.11.9"),
         (
-            1,
+            1 | 3,
             Version::Refused {
                 file: 0, level: 0, ..
             },
