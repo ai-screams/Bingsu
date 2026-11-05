@@ -174,8 +174,17 @@ pub(crate) fn classify(
     canonical: Option<&Path>,
     homes: &Homes,
 ) -> Shim {
+    // The folder `PATH` names, and the folder the file really lives in: a
+    // link or a renamed copy elsewhere on `PATH` still counts as the
+    // manager's (D3a security review S-M1).
     let here = identity(folder);
-    let same = |candidate: &Path| here.is_some() && identity(candidate) == here;
+    let home = canonical.and_then(Path::parent).and_then(identity);
+    let same = |candidate: &Path| {
+        let there = identity(candidate);
+        // Fails without the second: classify_table (a link to the cargo
+        // bin folder's proxy from another folder).
+        there.is_some() && (there == here || there == home)
+    };
     // Fails without it: classify_table (pyenv shims folder, also through a
     // link).
     if command == Some(Manager::Pyenv)
@@ -204,6 +213,21 @@ pub(crate) fn classify(
         && canonical
             .and_then(Path::file_name)
             .is_some_and(|name| name == "rustup" || name == "rustup-init")
+    {
+        return Shim::Manager(Manager::Rustup);
+    }
+    // A proxy hard-linked elsewhere is the same file as `<cargo>/bin/rustup`
+    // (security review S-M1).
+    // Fails without it: classify_table (a hard-linked proxy).
+    if command == Some(Manager::Rustup)
+        && canonical.is_some_and(|file| {
+            let file = identity(file);
+            file.is_some()
+                && homes
+                    .cargo
+                    .as_ref()
+                    .is_some_and(|cargo| identity(&cargo.join("bin/rustup")) == file)
+        })
     {
         return Shim::Manager(Manager::Rustup);
     }
@@ -810,7 +834,8 @@ mod tests {
     // shim 판별 표. 폴더는 (dev, ino)로 비교하므로 링크로 이름 붙인 관리자 폴더도 알아본다. 이것을 실패시키는
     // 것: pyenv shims·cargo bin·asdf shims 폴더 비교를 지우는 것, 다른 언어의 관리자 폴더를 받는 것(rustc가 pyenv
     // shims에 있어도 pyenv가 아님), 연결된 rustup 바이너리를 놓치는 것, 이름 문자열로 비교하는 것(링크 별칭을
-    // 놓침), 둘 다 없는 폴더를 같다고 보는 것.
+    // 놓침), 둘 다 없는 폴더를 같다고 보는 것, 파일이 실제로 있는 폴더를 보지 않는 것(다른 PATH 폴더의 링크),
+    // rustup proxy의 하드 링크를 놓치는 것(D3a 보안 리뷰 S-M1).
     #[test]
     fn classify_table() {
         let s = Scratch::new("classify");
@@ -919,6 +944,20 @@ mod tests {
                 folder.display()
             );
         }
+        // A link or a hard-linked copy on another PATH folder is still the
+        // manager's (security review S-M1).
+        fs::create_dir_all(at("bin2")).unwrap();
+        fs::write(at(".cargo/bin/rustup"), b"proxy").unwrap();
+        fs::hard_link(at(".cargo/bin/rustup"), at("bin2/rustc")).unwrap();
+        fs::write(at("bin2/node"), b"node").unwrap();
+        fs::write(at(".asdf/shims/node"), b"shim").unwrap();
+        let rs = Some(Manager::Rustup);
+        let c = |command, file: &str| classify(command, &at("bin2"), Some(&at(file)), &h);
+        assert_eq!(c(rs, ".cargo/bin/rustc"), Shim::Manager(Manager::Rustup));
+        assert_eq!(c(rs, "bin2/rustc"), Shim::Manager(Manager::Rustup));
+        assert_eq!(c(None, ".asdf/shims/node"), Shim::Unsupported);
+        assert_eq!(c(None, "bin2/node"), Shim::None);
+        assert_eq!(c(rs, "bin2/node"), Shim::None);
     }
 
     // settings.toml은 링크가 아닌 일반 파일을 64 KiB까지만 읽는다. FIFO는 open에서 막히지 않고 모름이 되고,

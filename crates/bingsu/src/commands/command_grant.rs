@@ -269,6 +269,9 @@ impl Scripts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Languages {
     answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
+    /// The folder facts' repository answer (D3a review H1): `None` when the
+    /// round got no folder facts, `Some(None)` outside a repository.
+    root: Option<Option<u16>>,
 }
 
 impl Languages {
@@ -282,7 +285,23 @@ impl Languages {
                 Some((q.id.clone(), l.version.clone()))
             })
             .collect();
-        Self { answers }
+        let root = c
+            .updates
+            .iter()
+            .find_map(|u| u.facts.as_ref())
+            .map(|f| f.repo_component);
+        Self { answers, root }
+    }
+
+    /// Whether the builtin languages may be decided this round: the
+    /// collection answered them, and its folder facts name the same
+    /// repository the round searches with (`repo`). Without the facts the
+    /// shell's folder would stand for the repository, and an executable
+    /// inside the real one could run (D3a review H1).
+    pub(crate) fn ready(&self, repo: Option<u16>) -> bool {
+        // Fails without each: a_round_with_nothing_to_decide_searches_nothing,
+        // and test_builtin_probe_never_runs_from_the_repository (no facts).
+        !self.answers.is_empty() && self.root == Some(repo)
     }
 
     /// The answer for language `id`, if the collection gave one.
@@ -889,6 +908,13 @@ impl Round {
     ) -> Report {
         self.grant.permit = permit;
         let mut report = Report::default();
+        let builtins = !self.builtins.is_empty() && languages.ready(repo);
+        // Nothing to search for: no PATH walk, no folder read (D3a security
+        // review S-M3).
+        if !searches(!self.runnable.is_empty(), builtins) {
+            report.notes = self.abandon();
+            return report;
+        }
         let Ok(found) = search(&self.environment, &self.grant.cwd, repo, me, groups) else {
             report.failed = true;
             report.notes = self.abandon();
@@ -909,7 +935,9 @@ impl Round {
         report.repo_fallback = resolved.repo_fallback;
         report.dropped = resolved.dropped;
         self.grant.units = resolved.units;
-        self.plan_builtins(languages, &found, me, groups);
+        if builtins {
+            self.plan_builtins(languages, &found, me, groups);
+        }
         report.hidden = std::mem::take(&mut self.hidden);
         // Fails without the probes: test_builtin_probe_runs_once_and_is_cached.
         if self.grant.units.is_empty() && self.grant.probes.is_empty() {
@@ -1006,12 +1034,12 @@ impl Round {
         }
         let environment = self.environment.clone();
         let vars = Environ::parse(&environment);
-        let cwd = builtin_probe::canonical_cwd(&self.grant.cwd);
+        let shell_folder = self.grant.cwd.clone();
         let c = builtin_probe::Context {
             vars: builtin_probe::whole(&vars),
             folders: &found.folders,
             repo: found.repo,
-            cwd: cwd.as_deref(),
+            cwd: &shell_folder,
             me,
         };
         let now = now_ns().unwrap_or(self.publish.clock.now);
@@ -1203,6 +1231,13 @@ fn fits(grant: &Grant, probe: &wire::Probe) -> bool {
     wire::encode(&Message::Grant(trial)).is_ok()
 }
 
+/// Whether a round walks `PATH` at all: only for config units to run or
+/// builtin languages the collection answered (D3a security review S-M3).
+fn searches(config_units: bool, builtins: bool) -> bool {
+    // Fails without it: a_round_with_nothing_to_decide_searches_nothing.
+    config_units || builtins
+}
+
 /// A builtin entry decided without running anything, at `now`.
 fn decided(p: &Planned, now: u64, status: response::Status, value: String) -> response::Entry {
     response::Entry {
@@ -1252,6 +1287,32 @@ mod tests {
             },
         )
     }
+    // 수집 답과 같은 저장소의 폴더 사실이 있을 때만 내장 언어를 정하고(D3a 리뷰 H1), 할 일이 없는 회차는 PATH를
+    // 걷지 않는다(보안 리뷰 S-M3). 이것을 실패시키는 것: 폴더 사실 없이 내장 언어를 정하는 것(셸 폴더가 저장소를
+    // 대신함), 다른 저장소의 사실을 받는 것, 답 없는 회차를 정하는 것, 할 일이 없어도 탐색하는 것.
+    #[test]
+    fn a_round_with_nothing_to_decide_searches_nothing() {
+        use bingsu_core::collection::language::Version;
+        let answered = |root| Languages {
+            answers: vec![(b"node".to_vec(), Version::None)],
+            root,
+        };
+        assert!(answered(Some(None)).ready(None));
+        assert!(answered(Some(Some(2))).ready(Some(2)));
+        assert!(!answered(None).ready(None));
+        assert!(!answered(Some(Some(2))).ready(Some(3)));
+        assert!(
+            !Languages {
+                answers: Vec::new(),
+                root: Some(None)
+            }
+            .ready(None)
+        );
+        assert!(!searches(false, false));
+        assert!(searches(true, false));
+        assert!(searches(false, true));
+    }
+
     // 허가 프레임을 거의 채운 grant에는 probe를 더하지 않는다(그 probe만 빠지고 회차는 그대로). 이것을 실패시키는
     // 것: fits가 인코딩 실패를 보지 않는 것.
     #[test]

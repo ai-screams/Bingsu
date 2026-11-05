@@ -5,6 +5,7 @@ command response; a version manager's fast path publishes without running.
 The language command is `version-stub` (crates/bingsu-bench) copied under
 the command's name: a probe never runs a `#!` script."""
 import os
+import subprocess
 from pathlib import Path
 import shutil
 
@@ -68,7 +69,12 @@ def session_with(tmp_path, *segments):
 def pyenv_fast(session):
     """pyenv's shim folder first on PATH and 3.12.1 installed and selected."""
     root = session.base / "pyenv"
-    shim = install(root / "shims", "python3")
+    # As pyenv writes its shims: a script through env, which the executable
+    # checks refuse; it must still be known as pyenv's (D3a review M3).
+    shim = root / "shims" / "python3"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/usr/bin/env bash\nexec pyenv exec python3 \"$@\"\n")
+    shim.chmod(0o755)
     # As CPython's own install lays it out: python3 is a link to python3.12.
     real = install(root / "versions" / "3.12.1" / "bin", "python3.12")
     (real.parent / "python3").symlink_to("python3.12")
@@ -168,4 +174,40 @@ def test_builtin_versions_survive_invalid_marker(tmp_path, _native_boot_required
     session.wait_quiet(timeout=8)
     published_rounds(session)
     assert counted(node) >= 1, counted(node)
+    assert b"18.20.4" in command_response(session)
+
+
+# 레이아웃이 dir을 그리지 않아도 언어 회차는 수집된 저장소 뿌리를 경계로 쓴다. /repo/sub에서 PATH 앞의 /repo/bin/node는
+# 저장소 안이라 실행하지 않고, 저장소 밖 node를 실행한다(D3a 리뷰 H1). 이것을 실패시키는 것: 언어 회차에 dir의
+# 폴더 사실을 묻지 않는 것(셸 폴더가 저장소를 대신함), 폴더 사실 없이 내장 언어를 정하는 것.
+def test_builtin_probe_never_runs_from_the_repository(tmp_path, _native_boot_required):
+    session = BuiltinSession(tmp_path)
+    session.env["HOME"] = str(session.base)
+    session.level = "info"
+    repo = session.base / "repo"
+    (repo / "sub").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    session.pwd = repo / "sub"
+    inside = install(repo / "bin", "node")
+    outside = install(session.base / "tools", "node")
+    session.env["PATH"] = f"{inside.parent}:{outside.parent}:{session.env['PATH']}"
+    session.put("[layout.line1]\nleft=['git', 'node']\n[layout.line2]\nleft=['char']\n")
+    ready(session)
+    for f in (inside, outside):
+        Path(f"{f}.runs").unlink(missing_ok=True)
+    published_rounds(session)
+    assert counted(inside) == 0, "an executable inside the repository ran"
+    assert counted(outside) >= 1
+    assert b"18.20.4" in command_response(session)
+
+
+# 레이아웃에 언어 segment만 있어도(worker mask 0) 수집이 일어나 버전을 발행한다(D3a 리뷰 M2). 이것을 실패시키는 것:
+# 언어 회차에 폴더 사실을 묻지 않는 것(답이 있어도 저장소 경계가 없어 정하지 않음).
+def test_language_only_layout_is_collected(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "node")
+    session.put("[layout.line1]\nleft=['node']\n[layout.line2]\nleft=['char']\n")
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    ready(session)
+    published_rounds(session)
     assert b"18.20.4" in command_response(session)

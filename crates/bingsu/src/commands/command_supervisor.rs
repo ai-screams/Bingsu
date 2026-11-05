@@ -1902,7 +1902,11 @@ pub(crate) mod tests {
             format!("{}\n", text.lines().last().unwrap_or_default())
         };
         let by = |i: u8| got.iter().find(|o| o.index == i).unwrap();
-        assert_eq!(line(by(0)), "record -I -S --version|\n", "{got:?}");
+        assert_eq!(
+            line(by(0)),
+            format!("record -I -S --version|HOME={neutral};\n"),
+            "{got:?}"
+        );
         assert_eq!(
             line(by(1)),
             format!(
@@ -1913,7 +1917,7 @@ pub(crate) mod tests {
             line(by(2)),
             format!("record version|HOME={neutral};GOTOOLCHAIN=local;\n")
         );
-        assert_eq!(line(by(3)), "record --version|\n");
+        assert_eq!(line(by(3)), format!("record --version|HOME={neutral};\n"));
         g.probes = vec![
             probe(RUST, Some(b"../x")),
             probe(PYTHON, Some(b"3.12.1")),

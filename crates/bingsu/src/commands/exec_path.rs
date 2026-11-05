@@ -301,28 +301,32 @@ pub fn lookup_open(
     }
 }
 
+/// One folder's answer for a name: the checked file, or why it is refused.
+pub type Lookup = Result<(Found, Checked), Miss>;
+
 /// `lookup_open` for a bare name, also naming the folder whose file decided
-/// (its index in `folders`): a builtin probe classifies that folder as a
-/// version manager's shim folder or not (D3a), so the folder judged is the
-/// one the file to run came from.
+/// (its index in `folders`), even when that file is refused: a builtin
+/// probe classifies that folder (and the file's own folder) as a version
+/// manager's shim folder or not before it judges the file (D3a review M3:
+/// a real shim is a `#!/usr/bin/env bash` script the checks refuse). `None`
+/// when no folder holds the name.
 pub fn lookup_open_in(
     name: &[u8],
     folders: &[PathBuf],
     repo: Option<rule::Id>,
     me: u32,
     groups: &mut dyn GroupOracle,
-) -> Result<(usize, Found, Checked), Miss> {
+) -> Option<(usize, Lookup)> {
     let Name::Search(n) = rule::name(name) else {
-        return Err(Miss::Refused);
+        return None;
     };
     for (at, folder) in folders.iter().enumerate() {
         match resolve_open(&folder.join(OsStr::from_bytes(n)), repo, me, groups) {
             Err(Miss::Absent) => continue,
-            Ok((found, checked)) => return Ok((at, found, checked)),
-            Err(e) => return Err(e),
+            other => return Some((at, other)),
         }
     }
-    Err(Miss::Absent)
+    None
 }
 
 /// One executable path: walked, then judged with the group answers kept,

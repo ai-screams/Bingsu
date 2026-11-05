@@ -204,11 +204,15 @@ fn exchange_with_sink(
             // catalog is explicit; no argv, feature or environment selects it.
             // The rebuilt request only admits: it carries no global excludes, so
             // collection keeps the decoded request and its helper-supplied input.
-            let selected = collection::request(
+            // The helper's own rule (request_with_languages): a request that
+            // asks only about languages is collected too (D3a review M2).
+            // Fails without it: a_language_only_request_is_collected.
+            let selected = collection::request_with_languages(
                 catalog,
                 request.binding.clone(),
                 request.request_id,
                 request.budget_ms,
+                request.languages.clone(),
             )
             .map_err(bad)?
             .is_some();

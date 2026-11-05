@@ -194,6 +194,10 @@ pub fn request(
     request_with_languages(catalog, binding, request_id, budget_ms, Vec::new())
 }
 
+/// The `dir` segment's index: its worker reports the folder facts, the
+/// repository root among them.
+pub const DIR_SEGMENT: u16 = 1;
+
 /// The builtin languages whose segments `drawn` (the layout's built-in
 /// segment bits at this width) shows, each asked about on its own (D3a
 /// rulings Q-A and Q6), in the language table's order.
@@ -213,7 +217,7 @@ pub fn builtin_languages(drawn: u32) -> Vec<language::LanguageQuery> {
 /// language segment still collects (its worker mask may be empty).
 pub fn request_with_languages(
     catalog: &selection::Catalog<'_>,
-    binding: wire::Binding,
+    mut binding: wire::Binding,
     request_id: wire::RequestId,
     budget_ms: u32,
     languages: Vec<language::LanguageQuery>,
@@ -221,6 +225,14 @@ pub fn request_with_languages(
     // Fails without the language test: requests_follow_language_segments.
     if binding.mask == 0 && languages.is_empty() {
         return Ok(None);
+    }
+    // A round that asks about languages also asks for the folder facts: the
+    // repository root they report bounds the builtin probes' PATH and
+    // executable rules, whatever the layout draws (D3a review H1).
+    // Fails without it: requests_follow_language_segments, and
+    // test_builtin_probe_never_runs_from_the_repository.
+    if !languages.is_empty() {
+        binding.mask |= catalog.workers & (1 << DIR_SEGMENT);
     }
     if binding.mask & !(catalog.workers & catalog.declared_mask()) != 0 {
         return Err(wire::ProtocolError::Schema);

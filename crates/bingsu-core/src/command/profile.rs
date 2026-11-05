@@ -53,7 +53,9 @@ pub fn environment(id: u8, toolchain: Option<&[u8]>, home: &[u8]) -> Option<Vec<
         out.push(0);
     };
     match (id, toolchain) {
-        (NODE | PYTHON, None) => {}
+        // `HOME` too, so a startup file under the user's home is never read
+        // (D3a security review S-M1).
+        (NODE | PYTHON, None) => put(b"HOME", home),
         (RUST, toolchain) => {
             put(b"HOME", home);
             // rustup never downloads a toolchain for a probe (X-18).

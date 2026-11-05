@@ -1997,7 +1997,11 @@ mod tests {
         assert_eq!(ok.snapshot.map(|c| c.exec_units.len()), Some(32));
         let over = read(&units(33), &[]);
         assert!(over.snapshot.is_none());
-        assert!(codes_of(&over).contains(&codes::BAD_VALUE), "{:?}", codes_of(&over));
+        assert!(
+            codes_of(&over).contains(&codes::BAD_VALUE),
+            "{:?}",
+            codes_of(&over)
+        );
     }
 
     #[test]

@@ -856,9 +856,10 @@ fn path_toolchain_is_its_own_answer() {
     );
 }
 
-// 그려진 내장 언어 segment만 각각 묻고(D3 판정 Q6), worker mask가 0이어도 언어가 있으면 요청을 만든다. 이것을
-// 실패시키는 것: builtin_languages에서 그려진 비트 검사를 지우는 것(그리지 않은 언어까지 물음), mask가 0이면
-// 언어가 있어도 요청을 만들지 않는 것.
+// 그려진 내장 언어 segment만 각각 묻고(D3 판정 Q6), worker mask가 0이어도 언어가 있으면 요청을 만든다. 언어를
+// 묻는 회차는 dir의 폴더 사실도 묻는다(저장소 뿌리, D3a 리뷰 H1). 이것을 실패시키는 것: builtin_languages에서 그려진
+// 비트 검사를 지우는 것(그리지 않은 언어까지 물음), mask가 0이면 언어가 있어도 요청을 만들지 않는 것, 언어 회차에
+// dir 비트를 더하지 않는 것.
 #[test]
 fn requests_follow_language_segments() {
     use bingsu_core::collection::{builtin_languages, request_with_languages, selection::PRODUCT};
@@ -882,8 +883,12 @@ fn requests_follow_language_segments() {
         request_with_languages(&PRODUCT, binding.clone(), M3B_REQUEST_ID, 50, languages).unwrap()
     };
     assert!(made(vec![]).is_none());
+    let go = made(builtin_languages(bit("go"))).unwrap();
+    assert_eq!(go.languages.len(), 1);
+    // A language round asks for the folder facts too (the repository root).
+    assert_eq!(go.binding.mask, bit("dir"));
     assert_eq!(
-        made(builtin_languages(bit("go"))).unwrap().languages.len(),
-        1
+        bingsu_core::field::BUILTIN[usize::from(bingsu_core::collection::DIR_SEGMENT)].id,
+        "dir"
     );
 }

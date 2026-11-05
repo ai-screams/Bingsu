@@ -71,6 +71,8 @@ pub(crate) const LANGUAGES: [Language; 4] = [
             b"PYENV_VERSION",
             b"PYENV_DIR",
             b"PYENV_HOOK_PATH",
+            // macOS: it picks the developer tools' python3 (D3a review M4).
+            b"DEVELOPER_DIR",
         ],
     },
     Language {
@@ -88,6 +90,23 @@ pub(crate) const LANGUAGES: [Language; 4] = [
         variables: &[],
     },
 ];
+
+impl Language {
+    /// Whether `executable` (canonical) is this language's command by its
+    /// file name: `node`, `python3` or `python3.<n>`, `rustc`, `go`.
+    pub(crate) fn runs(&self, executable: &Path) -> bool {
+        let Some(name) = executable.file_name().map(OsStr::as_bytes) else {
+            return false;
+        };
+        if self.profile == profile::PYTHON {
+            return name == b"python3"
+                || name
+                    .strip_prefix(b"python3.")
+                    .is_some_and(|v| !v.is_empty() && v.iter().all(u8::is_ascii_digit));
+        }
+        name == self.word
+    }
+}
 
 /// The language of a collector query id.
 pub(crate) fn language(id: &[u8]) -> Option<&'static Language> {
@@ -164,9 +183,10 @@ pub(crate) struct Context<'a> {
     /// The sanitized `PATH` folders.
     pub folders: &'a [PathBuf],
     pub repo: Option<Id>,
-    /// The shell's folder, canonical, for rustup's directory overrides;
-    /// `None` when it could not be resolved.
-    pub cwd: Option<&'a [u8]>,
+    /// The shell's folder as the shell gave it; made canonical only for
+    /// rustup's directory overrides, and only then (D3a security review
+    /// S-M3).
+    pub cwd: &'a [u8],
     pub me: u32,
 }
 
@@ -208,26 +228,34 @@ pub(crate) fn plan(
     let Some(vars) = c.vars else {
         return hide("the shell environment was not read whole");
     };
-    let (at, found, checked) =
-        match exec_path::lookup_open_in(language.word, c.folders, c.repo, c.me, groups) {
-            Ok(hit) => hit,
-            Err(_) => return hide("the command was not found or failed the checks"),
-        };
+    let Some((at, looked)) =
+        exec_path::lookup_open_in(language.word, c.folders, c.repo, c.me, groups)
+    else {
+        return hide("the command was not found");
+    };
+    // Classified before the file is judged (D3a review M3): a manager's
+    // shim is a script the checks refuse, and must still be known as one.
+    // The folder the lookup stopped in and the file's own folder both count
+    // (security review S-M1: a link or a renamed copy elsewhere on PATH).
     let homes = version_manager::homes(vars);
+    let canonical_file =
+        std::fs::canonicalize(c.folders[at].join(OsStr::from_bytes(language.word))).ok();
     let shim = version_manager::classify(
         language.manager,
         &c.folders[at],
-        Some(&found.executable),
+        canonical_file.as_deref(),
         &homes,
     );
     // rustup reads directory overrides for the canonical folder; one that
     // could not be resolved leaves the overrides unknown.
-    let cwd = match (shim, c.cwd) {
-        (Shim::Manager(Manager::Rustup), None) => {
-            return hide("the shell's folder could not be resolved");
-        }
-        (_, cwd) => cwd.unwrap_or_default(),
+    let canonical = match shim {
+        Shim::Manager(Manager::Rustup) => match canonical_cwd(c.cwd) {
+            Some(cwd) => Some(cwd),
+            None => return hide("the shell's folder could not be resolved"),
+        },
+        _ => None,
     };
+    let cwd = canonical.as_deref().unwrap_or_default();
     let choice = version_manager::choose(
         shim,
         Some(vars),
@@ -251,23 +279,43 @@ pub(crate) fn plan(
         }
         Choice::Hidden(why) => return hide(why),
         Choice::Unsupported => return hide("a version manager bingsu does not resolve"),
-        Choice::RunFound => match developer_tool(
-            &found.executable,
-            Path::new(XCODE_SELECT_LINK),
-            Path::new(COMMAND_LINE_TOOLS),
-            cfg!(target_os = "macos"),
-        ) {
-            Stub::Not => (found, checked, None),
-            // The real file the stub would hand the call to, judged like
-            // any executable; the stub itself never runs (D3a ruling i).
-            Stub::Real(real) => match exec_path::resolve_open(&real, c.repo, c.me, groups) {
-                Ok((found, checked)) => (found, checked, None),
-                Err(_) => return hide("the developer tools' python3 failed the checks"),
-            },
-            Stub::Missing => {
-                return hide("python3 is the developer tools' stub and they are not installed");
+        Choice::RunFound => {
+            let Ok((found, checked)) = looked else {
+                return hide("the command failed the checks");
+            };
+            // A link or a renamed copy of another program (a manager's own
+            // binary, mise or proto) is not the language's command
+            // (security review S-M1).
+            // Fails without it: plan_follows_the_rulings (a node link to
+            // another program).
+            if !language.runs(&found.executable) {
+                return hide("the command resolves to another program");
             }
-        },
+            match developer_tool(
+                &found.executable,
+                Path::new(XCODE_SELECT_LINK),
+                Path::new(COMMAND_LINE_TOOLS),
+                cfg!(target_os = "macos"),
+            ) {
+                Stub::Not => (found, checked, None),
+                // DEVELOPER_DIR picks the developer folder ahead of
+                // xcode-select's link (D3a review M4): not modelled, hidden.
+                // Fails without it: developer_dir_hides_the_stub.
+                Stub::Real(_) if vars.get(b"DEVELOPER_DIR").is_some() => {
+                    return hide("DEVELOPER_DIR picks the developer tools");
+                }
+                // The real file the stub would hand the call to, judged
+                // like any executable; the stub itself never runs (D3a
+                // ruling i).
+                Stub::Real(real) => match exec_path::resolve_open(&real, c.repo, c.me, groups) {
+                    Ok((found, checked)) => (found, checked, None),
+                    Err(_) => return hide("the developer tools' python3 failed the checks"),
+                },
+                Stub::Missing => {
+                    return hide("python3 is the developer tools' stub and they are not installed");
+                }
+            }
+        }
         // The manager's own file, judged by the same rules as any
         // executable (D3a acceptance: owner, pin).
         Choice::RunManaged {
@@ -442,7 +490,16 @@ mod tests {
         file(&at("bin/node"), b"\x7fELF node");
         file(&at("bin/go"), b"#!/bin/sh\necho go\n");
         file(&at(".cargo/bin/rustc"), b"\x7fELF proxy");
-        file(&at(".pyenv/shims/python3"), b"#!/bin/sh\n");
+        // As pyenv writes them: a script through env, which the
+        // executable checks refuse (D3a review M3).
+        file(
+            &at(".pyenv/shims/python3"),
+            b"#!/usr/bin/env bash\nexec pyenv exec python3\n",
+        );
+        // A program that is not the language's command, under its name.
+        file(&at("mise/mise"), b"\x7fELF mise");
+        fs::create_dir_all(at("other")).unwrap();
+        std::os::unix::fs::symlink(at("mise/mise"), at("other/node")).unwrap();
         file(&at(".asdf/shims/node"), b"#!/bin/sh\n");
         file(&at(".nodenv/shims/node"), b"\x7fELF shim");
         let host = String::from_utf8_lossy(BUILD_HOST);
@@ -473,6 +530,8 @@ mod tests {
             ".asdf/shims",
             ".nodenv",
             ".nodenv/shims",
+            "mise",
+            "other",
             ".rustup",
             ".rustup/toolchains",
         ] {
@@ -498,7 +557,7 @@ mod tests {
             vars: Some(&vars),
             folders: &folders,
             repo: None,
-            cwd: Some(s.0.as_os_str().as_bytes()),
+            cwd: s.0.as_os_str().as_bytes(),
             me,
         };
         plan(lang(id), v, &c, &mut groups)
@@ -546,6 +605,27 @@ mod tests {
         assert_eq!(
             p.action,
             Action::Hide("a version manager bingsu does not resolve")
+        );
+        // The language's command by file name (security review S-M1).
+        let py = lang("python");
+        for (name, ok) in [
+            ("python3", true),
+            ("python3.12", true),
+            ("python3-config", false),
+            ("python3.x", false),
+            ("python3.", false),
+            ("python", false),
+        ] {
+            assert_eq!(py.runs(Path::new(name)), ok, "{name}");
+        }
+        assert!(lang("node").runs(Path::new("/a/node")));
+        assert!(!lang("node").runs(Path::new("/a/nodejs")));
+        // A link named node to another program (security review S-M1).
+        let other = at("other").display().to_string();
+        let p = plan_with(&s, &other, &[], "node", &Version::None);
+        assert_eq!(
+            p.action,
+            Action::Hide("the command resolves to another program")
         );
         // A `#!` script in the command's place.
         let p = plan_with(&s, &bin, &[], "go", &Version::None);
@@ -677,7 +757,7 @@ mod tests {
             vars: None,
             folders: &folders,
             repo: None,
-            cwd: Some(b"/"),
+            cwd: b"/",
             me,
         };
         let p = plan(lang("rust"), &found("1.80.0"), &c, &mut groups);
@@ -693,7 +773,7 @@ mod tests {
         let vars = Environ::parse(&body);
         let c = Context {
             vars: Some(&vars),
-            cwd: None,
+            cwd: b"/nonexistent-bingsu-cwd",
             ..c
         };
         let p = plan(lang("rust"), &found("1.80.0"), &c, &mut groups);
@@ -715,15 +795,49 @@ mod tests {
         tree(&s);
         let bin = s.0.join("bin").display().to_string();
         let cargo = s.0.join(".cargo/bin").display().to_string();
-        let first = plan_with(&s, &bin, &[], "node", &Version::None);
-        file(&s.0.join("bin/node"), b"\x7fELF node, rebuilt");
-        let again = plan_with(&s, &bin, &[], "node", &Version::None);
-        assert_ne!(first.policy, again.policy);
+        let node = s.0.join("bin/node");
+        let policy = || plan_with(&s, &bin, &[], "node", &Version::None).policy;
+        let set_mtime = |secs: u64| {
+            fs::File::options()
+                .write(true)
+                .open(&node)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        set_mtime(1_000_000);
+        let first = policy();
+        assert_eq!(policy(), first);
+        // Each part of the executable's identity alone (D3a review L5).
+        file(&node, b"\x7fELF node, rebuilt");
+        set_mtime(1_000_000);
+        assert_ne!(policy(), first, "size");
+        file(&node, b"\x7fELF node");
+        set_mtime(1_000_000);
+        assert_eq!(policy(), first);
+        set_mtime(2_000_000);
+        assert_ne!(policy(), first, "mtime");
+        set_mtime(1_000_000);
+        // A new inode with the same bytes, size and mtime.
+        let copy = s.0.join("bin/node.new");
+        fs::copy(&node, &copy).unwrap();
+        fs::rename(&copy, &node).unwrap();
+        set_mtime(1_000_000);
+        assert_ne!(policy(), first, "inode");
         let fast = plan_with(&s, &cargo, &[], "rust", &found("1.80.0"));
         let run = plan_with(&s, &cargo, &[], "rust", &found("stable"));
         let hidden = plan_with(&s, &cargo, &[], "rust", &found("1.81.0"));
         assert_ne!(fast.policy, run.policy);
         assert_ne!(fast.policy, hidden.policy);
+        // The selection file's digest alone (same value, other bytes).
+        let other_file = Version::Found {
+            file: 0,
+            level: 0,
+            digest: [8; 16],
+            value: b"stable".to_vec(),
+        };
+        let run2 = plan_with(&s, &cargo, &[], "rust", &other_file);
+        assert_ne!(run.policy, run2.policy, "selection digest");
         let other = plan_with(
             &s,
             &cargo,
@@ -829,5 +943,24 @@ mod tests {
             Action::Hide(_) => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    // 셸에 DEVELOPER_DIR이 있으면 xcode-select 선택보다 그것이 우선하므로, stub 대신 고를 파일을 모른다: 숨긴다
+    // (D3a 리뷰 M4). 환경 요약에도 그 이름이 들어간다. 이것을 실패시키는 것: DEVELOPER_DIR 검사를 지우는 것,
+    // python 언어 변수에서 DEVELOPER_DIR을 빼는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn developer_dir_hides_the_stub() {
+        let s = Scratch::new("devdir");
+        let path = "/usr/bin".to_string();
+        let plain = plan_with(&s, &path, &[], "python", &Version::None);
+        let set = plan_with(&s, &path, &["DEVELOPER_DIR=/x"], "python", &Version::None);
+        if matches!(plain.action, Action::Run(_)) {
+            assert_eq!(
+                set.action,
+                Action::Hide("DEVELOPER_DIR picks the developer tools")
+            );
+        }
+        assert_ne!(plain.environment, set.environment);
     }
 }

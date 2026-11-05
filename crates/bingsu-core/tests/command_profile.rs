@@ -21,8 +21,8 @@ fn profiles_build_fixed_environments() {
     assert_eq!(args(0), None);
     assert_eq!(args(5), None);
     let env = |id, t: Option<&[u8]>| profile::environment(id, t, b"/n");
-    assert_eq!(env(PYTHON, None), Some(Vec::new()));
-    assert_eq!(env(NODE, None), Some(Vec::new()));
+    assert_eq!(env(PYTHON, None), Some(b"HOME=/n\0".to_vec()));
+    assert_eq!(env(NODE, None), Some(b"HOME=/n\0".to_vec()));
     assert_eq!(
         env(GO, None),
         Some(b"HOME=/n\0GOTOOLCHAIN=local\0".to_vec())
