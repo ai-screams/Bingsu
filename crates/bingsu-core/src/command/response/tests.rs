@@ -370,4 +370,69 @@ mod cases {
         .unwrap();
         assert_eq!(late.attempted_at, 20);
     }
+    // 앞단이 이 파일의 값을 터미널에 그대로 쓰므로(C4b) 값과 원본 줄에는 sanitize가 지우는 문자가 없어야 하고,
+    // 실패 항목은 값이 비어야 한다. encode와 decode가 같은 검사를 한다. 이것을 실패시키는 것: check_entries의
+    // is_removed 검사를 지우는 것, 그 검사에서 raw를 빼는 것, 실패 항목의 빈 값 검사를 지우는 것.
+    #[test]
+    fn values_are_sanitized_text_and_failures_have_none() {
+        for bad in [
+            "\u{1b}]0;pwn\u{7}",
+            "a\u{0}b",
+            "a\rb",
+            "a\u{9b}b",
+            "a\u{202e}b",
+        ] {
+            for raw in [false, true] {
+                let mut e = entry("custom/a", 10, 20);
+                if raw {
+                    e.raw = bad.to_string();
+                } else {
+                    e.value = bad.to_string();
+                }
+                let r = Response {
+                    binding: binding(),
+                    entries: vec![e],
+                };
+                assert_eq!(r.encode(), Err(Error::Utf8), "{bad:?} raw={raw}");
+            }
+        }
+        let mut failed = entry("custom/a", 10, 20);
+        failed.status = Status::Failed;
+        let mut r = Response {
+            binding: binding(),
+            entries: vec![failed.clone()],
+        };
+        assert_eq!(r.encode(), Err(Error::Flags));
+        failed.value.clear();
+        r.entries = vec![failed.clone()];
+        assert_eq!(r.encode(), Err(Error::Flags), "raw is still set");
+        failed.raw.clear();
+        r.entries = vec![failed];
+        assert!(r.encode().is_ok());
+        // decode: the same file with an ESC put into the value and the raw
+        // line, and a failure that keeps its value, each resealed.
+        let good = Response {
+            binding: binding(),
+            entries: vec![entry("custom/a", 10, 20)],
+        }
+        .encode()
+        .unwrap();
+        let at = good.windows(2).rposition(|w| w == b"v-").unwrap();
+        for place in [
+            at,
+            good.windows(2)
+                .position(|w| w == b"v-")
+                .filter(|&p| p != at)
+                .unwrap_or(at),
+        ] {
+            let mut bytes = good.clone();
+            bytes[place] = 0x1b;
+            assert_eq!(Response::decode(&resealed(bytes)), Err(Error::Utf8));
+        }
+        let status = good.len() - 2 * (4 + "v-custom/a".len()) - 1;
+        assert_eq!(good[status], 0);
+        let mut bytes = good.clone();
+        bytes[status] = 1;
+        assert_eq!(Response::decode(&resealed(bytes)), Err(Error::Flags));
+    }
 }

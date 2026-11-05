@@ -287,6 +287,17 @@ fn check_entries(entries: &[Entry]) -> Result<(), Error> {
         {
             return Err(Error::Limit);
         }
+        // The front reads these values straight to the terminal (C4b): only
+        // sanitized text, as `first_line` makes it. A failure has no value.
+        if [&e.value, &e.raw]
+            .iter()
+            .any(|t| !t.chars().all(|c| !crate::sanitize::is_removed(c)))
+        {
+            return Err(Error::Utf8);
+        }
+        if e.status == Status::Failed && !(e.value.is_empty() && e.raw.is_empty()) {
+            return Err(Error::Flags);
+        }
         if entries[..i]
             .iter()
             .any(|o| o.origin == e.origin && o.id == e.id)
