@@ -596,6 +596,23 @@ def rounds(session, n):
         session.wait_quiet(timeout=8)
 
 
+NOT_PUBLISHED = b"command round: results not published"
+
+
+def published_rounds(session):
+    """Rounds until one publishes its results; how many ran. A round whose
+    publication was deferred (the store busy or its admission past its
+    budget; the helper logs it) leaves no response, so the next prompt runs
+    the unit again, as designed (C4 ruling P1). Needs the info log."""
+    assert session.level in ("info", "debug")
+    for n in range(1, 6):
+        seen = session.log().count(NOT_PUBLISHED)
+        rounds(session, 1)
+        if session.log().count(NOT_PUBLISHED) == seen:
+            return n
+    raise AssertionError("five publications in a row were deferred")
+
+
 def counting(counter, value="v"):
     return ["/bin/sh", "-c", f"echo x >> {counter}; echo {value}"]
 
@@ -610,12 +627,13 @@ def test_cache_hit_runs_nothing(tmp_path, _native_boot_required):
     session.level = "debug"
     ready(session)
     before = runs(counter)
-    rounds(session, 1)
-    assert runs(counter) == before + 1, (before, runs(counter))
+    ran = published_rounds(session)
+    assert runs(counter) == before + ran, (before, ran, runs(counter))
+    before += ran
     # Each round that starts a supervisor ends with this line.
     supervised = session.log().count(b"command round finished")
     rounds(session, 4)
-    assert runs(counter) == before + 1, "a unit inside its cache time ran again"
+    assert runs(counter) == before, "a unit inside its cache time ran again"
     assert session.log().count(b"command round finished") == supervised, "a cached round started a supervisor"
     assert b"cached-value" in command_response(session)
 
@@ -638,32 +656,35 @@ def test_failure_cached_10s(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     counter = session.base / "runs"
     session.put(config(["/bin/sh", "-c", f"echo x >> {counter}; exit 3"]))
+    session.level = "info"
     ready(session)
     before = runs(counter)
-    rounds(session, 1)
+    ran = published_rounds(session)
     first = runs(counter)
-    assert first == before + 1, (before, first)
+    assert first == before + ran, (before, ran, first)
     rounds(session, 3)
     assert runs(counter) == first, "a failed unit ran again inside 10 s"
 
 
 # 적중은 이 셸의 원본 환경 요약값과 맞을 때만이다. 다른 KUBECONFIG로 낸 프롬프트는 다른 셸의 값을 쓰지 않고 다시
 # 실행하고, 같은 값으로 다시 내면 적중한다. 이것을 실패시키는 것: 적중 판정에서 환경 요약값 비교를 지우는 것(값이
-# 바뀌어도 실행하지 않음), env_digest에 env_allow를 넣지 않는 것.
+# 바뀌어도 실행하지 않음), env_digest에 env_allow를 넣지 않는 것. 발행이 미뤄진 회차(저장소 busy, 예산 초과)는
+# 다음 회차가 다시 실행하는 설계라, 발행된 회차까지 기다린 뒤 센다(published_rounds).
 def test_cache_hit_is_display_match(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     counter = session.base / "runs"
     session.put(config(counting(counter), "cache='30s'\nenv_allow=['KUBECONFIG']\n"))
     session.env["KUBECONFIG"] = "/a"
+    session.level = "info"
     ready(session)
     before = runs(counter)
-    rounds(session, 1)
-    assert runs(counter) == before + 1, (before, runs(counter))
+    ran = published_rounds(session)
+    assert runs(counter) == before + ran, (before, ran, runs(counter))
     session.env["KUBECONFIG"] = "/b"
-    rounds(session, 1)
-    assert runs(counter) == before + 2, "another environment's entry was taken as a hit"
+    ran += published_rounds(session)
+    assert runs(counter) == before + ran, "another environment's entry was taken as a hit"
     rounds(session, 2)
-    assert runs(counter) == before + 2, runs(counter)
+    assert runs(counter) == before + ran, runs(counter)
 
 
 # 단위가 회차 상한(8)보다 많으면, 시도한 지 가장 오래된 것부터 고른다: 12개가 두 회차 안에 모두 실행된다. 이것을
