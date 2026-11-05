@@ -597,8 +597,8 @@ mod tests {
 
     // 보안 리뷰 M-1: 관리자 폴더 자리에 FIFO나 장치가 있어도 필터 전 helper가 멈추지 않는다(settings·설치 확인
     // 모두 모름·false). 이것을 실패시키는 것: open_home을 평범한 open으로 되돌리거나 O_DIRECTORY와 O_NONBLOCK을
-    // 함께 빼는 것(FIFO open이 쓰는 쪽을 기다려 시간 안에 끝나지 않음). 둘 중 하나만 빼면 남은 하나가 막는다. 장치 칸(/dev/null)은 신뢰 규칙(남이 쓸 수 있음)이 따로 막으므로 이 변이를 죽이지
-    // 않는다.
+    // 함께 빼는 것(FIFO open이 쓰는 쪽을 기다려 시간 안에 끝나지 않음). 둘 중 하나만 빼면 남은 하나가 막는다.
+    // 장치 칸(/dev/null)은 신뢰 규칙(남이 쓸 수 있음)이 따로 막으므로 이 변이를 죽이지 않는다.
     #[test]
     fn homes_never_block() {
         let s = Scratch::new("block");
