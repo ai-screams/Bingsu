@@ -272,18 +272,16 @@ pub(crate) struct Languages {
 }
 
 impl Languages {
-    /// The answers of a finished collection. The builtin queries come
-    /// first in a request, so the first answer for an id is the builtin's.
+    /// The answers of a finished collection, by the asked language's id.
     pub(crate) fn from_result(c: &bingsu_core::collection::response::Completed) -> Self {
-        let mut answers: Vec<(Vec<u8>, _)> = Vec::new();
-        for l in &c.languages {
-            let Some(q) = c.language_queries.get(usize::from(l.index)) else {
-                continue;
-            };
-            if !answers.iter().any(|(id, _)| *id == q.id) {
-                answers.push((q.id.clone(), l.version.clone()));
-            }
-        }
+        let answers = c
+            .languages
+            .iter()
+            .filter_map(|l| {
+                let q = c.language_queries.get(usize::from(l.index))?;
+                Some((q.id.clone(), l.version.clone()))
+            })
+            .collect();
         Self { answers }
     }
 
@@ -1054,9 +1052,7 @@ impl Round {
             if hit {
                 return;
             }
-            let mut trial = self.grant.clone();
-            trial.probes.push(probe.clone());
-            if wire::encode(&Message::Grant(trial)).is_err() {
+            if !fits(&self.grant, &probe) {
                 self.hidden
                     .push("a builtin probe does not fit the grant frame");
                 return;
@@ -1178,6 +1174,15 @@ impl Round {
     }
 }
 
+/// Whether `grant` with `probe` added still encodes as one frame; the
+/// units were fitted first, so a probe that does not fit is left out alone.
+fn fits(grant: &Grant, probe: &wire::Probe) -> bool {
+    let mut trial = grant.clone();
+    trial.probes.push(probe.clone());
+    // Fails without it: a_probe_past_the_frame_is_left_out.
+    wire::encode(&Message::Grant(trial)).is_ok()
+}
+
 /// A builtin entry decided without running anything, at `now`.
 fn decided(p: &Planned, now: u64, status: response::Status, value: String) -> response::Entry {
     response::Entry {
@@ -1227,6 +1232,30 @@ mod tests {
             },
         )
     }
+    // 허가 프레임을 거의 채운 grant에는 probe를 더하지 않는다(그 probe만 빠지고 회차는 그대로). 이것을 실패시키는
+    // 것: fits가 인코딩 실패를 보지 않는 것.
+    #[test]
+    fn a_probe_past_the_frame_is_left_out() {
+        let probe = wire::Probe {
+            profile: bingsu_core::command::profile::NODE,
+            executable: b"/usr/bin/node".to_vec(),
+            pin: None,
+            toolchain: None,
+        };
+        let mut g = base();
+        assert!(fits(&g, &probe));
+        // The longest shell folder that still encodes: the grant is full.
+        let full = (1..wire::FRAME_MAX)
+            .rev()
+            .find(|n| {
+                g.cwd = [b"/".as_slice(), &vec![b'a'; *n]].concat();
+                wire::encode(&Message::Grant(g.clone())).is_ok()
+            })
+            .unwrap();
+        g.cwd = [b"/".as_slice(), &vec![b'a'; full]].concat();
+        assert!(!fits(&g, &probe));
+    }
+
     fn base() -> Grant {
         Grant {
             permit: Permit {

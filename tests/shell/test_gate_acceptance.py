@@ -126,7 +126,8 @@ M6_GATES = {
     "GATE-CMD-SPAWN": (
         "A round with a runnable config unit runs it; a unit with a not_run reason never runs",
         "At most one command supervisor per shell session at once, and a stopped supervisor keeps the session lock",
-        "A round whose every unit hits the cache starts no supervisor and runs nothing",
+        "A round that draws no builtin language and whose every unit hits the cache starts no supervisor and runs "
+        "nothing",
     ),
     # M6 E2: `config check --explain` and W411 on the executor's own rule.
     "GATE-EXPLAIN": (

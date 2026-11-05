@@ -307,6 +307,7 @@ pub(crate) fn plan(
 
 /// The shell's folder, canonical (D3a acceptance: rustup's override
 /// comparison uses the canonical path).
+/// Fails without it: override_follows_settings_and_cwd_is_canonical.
 pub(crate) fn canonical_cwd(cwd: &[u8]) -> Option<Vec<u8>> {
     std::fs::canonicalize(Path::new(OsStr::from_bytes(cwd)))
         .ok()
@@ -659,5 +660,48 @@ mod tests {
             &found("1.80.0"),
         );
         assert_ne!(fast.environment, other.environment);
+    }
+
+    // RUSTUP_TOOLCHAIN 오버라이드는 settings의 host로 설치 폴더를 찾고, 정규 cwd는 링크를 푼 경로다. 이것을
+    // 실패시키는 것: run_override가 settings의 host 대신 빌드 host를 쓰는 것, canonical_cwd가 받은 경로를 그대로
+    // 돌려주는 것(링크를 푼 경로가 아님), 없는 폴더에 값을 주는 것.
+    #[test]
+    fn override_follows_settings_and_cwd_is_canonical() {
+        use std::os::unix::fs::symlink;
+        if exec_path::test_skip_as_root() {
+            return;
+        }
+        let s = Scratch::new("host");
+        tree(&s);
+        let at = |p: &str| s.0.join(p);
+        file(
+            &at(".rustup/toolchains/stable-zz-test-host/bin/rustc"),
+            b"\x7fELF rustc",
+        );
+        fs::write(
+            at(".rustup/settings.toml"),
+            b"version = \"12\"\ndefault_host_triple = \"zz-test-host\"\n",
+        )
+        .unwrap();
+        let cargo = at(".cargo/bin").display().to_string();
+        let p = plan_with(
+            &s,
+            &cargo,
+            &["RUSTUP_TOOLCHAIN=stable"],
+            "rust",
+            &found("1.80.0"),
+        );
+        assert_eq!(
+            run_of(&p).0,
+            at(".rustup/toolchains/stable-zz-test-host/bin/rustc")
+                .as_os_str()
+                .as_bytes()
+        );
+        symlink(at("bin"), at("link")).unwrap();
+        assert_eq!(
+            canonical_cwd(at("link").as_os_str().as_bytes()),
+            Some(at("bin").into_os_string().into_encoded_bytes())
+        );
+        assert_eq!(canonical_cwd(at("missing").as_os_str().as_bytes()), None);
     }
 }

@@ -319,7 +319,7 @@ fn command_file(bin: &File, command: &[u8], me: u32) -> Result<Vec<u8>, Install>
             .into_encoded_bytes();
         // Fails without it: bin_links_stay_in_the_folder (a target with
         // `/`, which also covers another folder).
-        if target.is_empty() || target.contains(&b'/') {
+        if target.contains(&b'/') {
             return Err(Install::Untrusted);
         }
         name = target;
@@ -657,6 +657,7 @@ fn run_override(
         Manager::Pyenv => (b"versions", None),
         Manager::Rustup => {
             let host = match read_settings(&home, cwd, me) {
+                // Fails without it: override_follows_settings_and_cwd_is_canonical.
                 Settings::Known {
                     host: Some(host), ..
                 } => host,
