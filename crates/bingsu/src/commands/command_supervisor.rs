@@ -512,12 +512,18 @@ impl Supervisor {
         let kill = match (unit, &spawned) {
             (Some(u), Ok(_)) => Some(u.kill),
             (Some(u), Err(e)) => {
-                let clone3_missing = matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM));
+                // ENOSYS or EPERM: no clone3 here; ENOENT or EACCES: the cgroup
+                // cannot be entered (a namespace view the mount does not
+                // match, no write access to its common ancestor).
+                let clone3_missing = matches!(
+                    e.raw_os_error(),
+                    Some(libc::ENOSYS | libc::EPERM | libc::ENOENT | libc::EACCES)
+                );
                 if let Some(c) = &self.cgroup {
                     c.remove(&u.name);
                 }
                 // clone3 refused before any unit ran in a cgroup: the whole
-                // round takes the best-effort path (C3 ruling).
+                // round takes the best-effort path (C3 rulings).
                 if clone3_missing && !self.runs.iter().any(|r| r.kill.is_some()) {
                     self.cgroup = None;
                     spawned = command_process::spawn(
@@ -2048,8 +2054,9 @@ pub(crate) mod tests {
         );
     }
 
-    // 바로 끝난 대상이 남긴 setsid 손자도 그 단위가 끝날 때(relay reap) cgroup.kill로 끝난다. 이것을 실패시키는
-    // 것: reap 분기의 run.end()를 지우는 것(회차가 정상으로 끝나 손자가 남음).
+    // 바로 끝난 대상이 남긴 setsid 손자도 그 단위가 끝날 때(relay reap) cgroup.kill로 끝난다. 둘째 단위가 회차를
+    // 1초 동안 붙잡고 있으므로, 손자는 회차가 끝나기 전에 사라져야 한다. 이것을 실패시키는 것: reap 분기의
+    // run.end()를 지우는 것(손자가 회차 끝의 stop까지 남음).
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
@@ -2061,19 +2068,36 @@ pub(crate) mod tests {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
         let (path, _dir) = cell::parent("setsid-exit");
         let pidfile = std::env::temp_dir().join(format!("bingsu-gcx-{}", std::process::id()));
-        let mut g = grant(vec![unit("setsid-exit", 1_000 * MS)], 1_000 * MS);
+        let mut g = grant(
+            vec![unit("setsid-exit", 1_000 * MS), unit("sleep", 1_000 * MS)],
+            2_000 * MS,
+        );
         g.cwd = pidfile.as_os_str().as_bytes().to_vec();
-        let out = cgroup_round(g, &path);
-        assert!(matches!(out[0].reason, Reason::Exited(0)), "{out:?}");
+        let round = {
+            let path = path.clone();
+            std::thread::spawn(move || cgroup_round(g, &path))
+        };
+        let start = std::time::Instant::now();
+        while std::fs::read_to_string(&pidfile).map_or(true, |t| t.trim().is_empty())
+            && start.elapsed() < std::time::Duration::from_secs(2)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let grandchild = read_pid(&pidfile);
-        let gone = gone_within(grandchild, 1_000);
+        let gone = gone_within(grandchild, 500);
+        let during = !round.is_finished();
+        let out = round.join().unwrap();
         if !gone {
             // SAFETY: plain signal to the test's own leftover.
             unsafe { libc::kill(grandchild, libc::SIGKILL) };
         }
         let _ = std::fs::remove_file(&pidfile);
         finish(&path);
-        assert!(gone, "the exited target's setsid grandchild survived");
+        assert!(matches!(out[0].reason, Reason::Exited(0)), "{out:?}");
+        assert!(
+            gone && during,
+            "the exited target's setsid grandchild outlived its unit: {gone} {during}"
+        );
     }
 
     // 이미 있는 이름의 단위 폴더는 다시 쓰지 않는다: 그 단위는 생성 0, SpawnFailed. 이것을 실패시키는 것:
@@ -2114,7 +2138,8 @@ pub(crate) mod tests {
     // 단위가 cgroup 안에서 돈 뒤의 실패는 섞지 않고 그 단위만 SpawnFailed. 이것을 실패시키는 것: 대체 경로를
     // 지우는 것(첫 회차 단위가 SpawnFailed), 빈 폴더 제거를 지우는 것(단위 폴더가 남음), "아직 cgroup 단위
     // 없음" 조건을 지우는 것(둘째 회차의 둘째 단위가 최선 노력으로 섞여 실행됨), ENOSYS·EPERM 판별을 모든
-    // 오류로 넓히는 것(EINVAL 단위가 최선 노력으로 실행됨).
+    // 오류로 넓히는 것(EINVAL 단위가 최선 노력으로 실행됨), 판별에서 ENOENT나 EACCES를 빼는 것(그 단위가
+    // SpawnFailed).
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
@@ -2143,6 +2168,14 @@ pub(crate) mod tests {
             ),
             &path,
         );
+        let mut entered = Vec::new();
+        for errno in [libc::ENOENT, libc::EACCES] {
+            CLONE3_ERRORS.with(|q| *q.borrow_mut() = [Some(errno)].into());
+            entered.push(cgroup_round(
+                grant(vec![unit("echo", 500 * MS)], 1_000 * MS),
+                &path,
+            ));
+        }
         CLONE3_ERRORS.with(|q| *q.borrow_mut() = [Some(libc::EINVAL)].into());
         let other = cgroup_round(grant(vec![unit("echo", 500 * MS)], 1_000 * MS), &path);
         CLONE3_ERRORS.with(|q| q.borrow_mut().clear());
@@ -2154,6 +2187,10 @@ pub(crate) mod tests {
         assert_eq!(left, Vec::<String>::new());
         assert!(matches!(mixed[0].reason, Reason::Exited(0)), "{mixed:?}");
         assert!(matches!(mixed[1].reason, Reason::SpawnFailed), "{mixed:?}");
+        // A cgroup that cannot be entered (ENOENT, EACCES) is no atomic path either.
+        for out in &entered {
+            assert!(matches!(out[0].reason, Reason::Exited(0)), "{out:?}");
+        }
         // Any other clone3 error is that unit's spawn failure, not a path switch.
         assert!(matches!(other[0].reason, Reason::SpawnFailed), "{other:?}");
     }

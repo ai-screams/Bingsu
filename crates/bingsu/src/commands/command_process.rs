@@ -41,9 +41,10 @@ fn check(rc: i32) -> io::Result<()> {
 /// supervisor on a stopped mount.
 ///
 /// With `cgroup` (Linux, the atomic path) the relay starts inside that
-/// cgroup through `clone3(CLONE_INTO_CGROUP)`, so nothing it forks is ever
-/// outside it; an error with ENOSYS or EPERM means `clone3` is not
-/// available here and nothing was spawned.
+/// cgroup through `clone3(CLONE_INTO_CGROUP)`, so what it forks starts
+/// inside it too; only a descendant that cooperates stays there (one may
+/// move itself to another cgroup it can write). On any error nothing was
+/// spawned.
 pub(crate) fn spawn(
     exe: &CStr,
     args: &[Vec<u8>],
