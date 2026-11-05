@@ -1837,6 +1837,7 @@ def own_cgroup():
     return Path("/sys/fs/cgroup" + line[3:].rstrip("/"))
 
 
+# 이것을 실패시키는 것: 이 판정을 늘 False로 두는 것(privileged 셀의 명령 단계 셋이 모두 실패).
 def session_cgroup_parent():
     """Whether the warm-up left a session cgroup parent of this user under
     the own cgroup: the helper then takes the atomic path. A host that
