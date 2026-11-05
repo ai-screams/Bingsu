@@ -1860,7 +1860,33 @@ def with_command_stage_probe(lines):
     at = stat[0]
     assert '".stage-request"' in lines[at + 1] and "openat(" in lines[at + 1], lines[at + 1]
     probe = [l.replace('".stage-request"', '".command.stage"') for l in lines[at:at + 2]]
+    # A capture that already has the pair keeps it; one with only part of it,
+    # or with it anywhere else, is not this product shape.
+    # 이것을 실패시키는 것: 이미 있는 쌍 위에 또 끼워 넣는 것, 쌍의 한쪽만 있거나 다른 자리에 있는 캡처를 받는 것.
+    present = [i for i, l in enumerate(lines) if '".command.stage"' in l]
+    if present:
+        assert present == [at + 2, at + 3] and lines[at + 2:at + 4] == probe, ("command stage probe", present)
+        return lines
     return lines[:at + 2] + probe + lines[at + 2:]
+
+
+# 이것을 실패시키는 것: 재생이 이미 있는 쌍을 두 번 넣는 것(같은 결과가 아님), 쌍의 일부만 있거나 자리가 다른 캡처를
+# 받는 것.
+@pytest.mark.parametrize("shape", ["absent", "present", "half", "moved"])
+def test_command_stage_probe_replay(shape):
+    raw = (HELPER_STAGE_TRACES.parent / "helper-stage-collect.strace").read_text().splitlines()
+    replayed = with_command_stage_probe(raw)
+    assert len(replayed) == len(raw) + 2
+    at = next(i for i, l in enumerate(replayed) if '".command.stage"' in l)
+    if shape == "absent":
+        return
+    if shape == "present":
+        assert with_command_stage_probe(replayed) == replayed
+        return
+    damaged = (replayed[:at + 1] + replayed[at + 2:] if shape == "half"
+               else replayed[:at] + replayed[at + 2:] + replayed[at:at + 2])
+    with pytest.raises(AssertionError, match="command stage probe"):
+        with_command_stage_probe(damaged)
 
 
 def helper_stage_errors(lines, collector, expected, **attribution):
