@@ -361,7 +361,7 @@ fn main() {
             while start.elapsed() < Duration::from_millis(55) { std::hint::spin_loop(); }
         }
     }));
-    let deadlines=if timed {git::StageDeadlines::PRODUCT}else{git::StageDeadlines{a_ms:30_000,b_ms:30_000,c_ms:30_000,d_ms:30_000,path_ms:30_000}};
+    let deadlines=if timed {git::StageDeadlines::PRODUCT}else{git::StageDeadlines{a_ms:30_000,b_ms:30_000,c_ms:30_000,d_ms:30_000,path_ms:30_000,lang_ms:30_000}};
     let result=git::collect_with_deadlines(&request,&mut Sink,meter,access,deadlines);
     phase("end");
     line(&format!("F1_RESULT {:?} {}\n",result,start.elapsed().as_nanos()));
