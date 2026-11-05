@@ -64,19 +64,40 @@ impl Spend {
     }
 }
 
-/// A regular file at `path` (no symlink at the leaf), through the detection's
-/// one folder stack: a parent already held is not opened again.
-fn is_file(
+/// What is at `path` (the leaf never followed), through the detection's one
+/// folder stack: a parent already held is not opened again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Absent,
+    Regular,
+    /// Something by that name that is not a regular file it may read: a
+    /// symlink, a folder, a device or FIFO, one it may not look at.
+    Other,
+}
+
+fn entry(
     stats: &mut WorktreeStats,
     root: &Root,
     path: &[u8],
     access: &Access,
     meter: &mut Meter,
-) -> Result<bool, ReadError> {
+) -> Result<Entry, ReadError> {
     match stats.metadata(root, path, access, meter) {
-        Ok(st) => Ok(st.st_mode & libc::S_IFMT == libc::S_IFREG),
-        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => Ok(false),
+        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFREG => Ok(Entry::Regular),
+        Ok(_) | Err(ReadError::Denied | ReadError::Special) => Ok(Entry::Other),
+        Err(ReadError::Missing) => Ok(Entry::Absent),
         Err(error) => Err(error),
+    }
+}
+
+/// The answer for a version file that is there but cannot be read safely:
+/// the managers read the nearest file, so the search stops here with no
+/// value instead of taking one from farther up (D2 review M8).
+fn unreadable(file: u8, level: u8) -> Version {
+    Version::Refused {
+        file,
+        level,
+        digest: [0; 16],
     }
 }
 
@@ -122,7 +143,7 @@ fn find(
     for (level, folder) in levels(parts) {
         if marker.is_none() {
             for (i, name) in query.markers.iter().enumerate() {
-                if is_file(stats, root, &join(&folder, name), access, meter)? {
+                if entry(stats, root, &join(&folder, name), access, meter)? == Entry::Regular {
                     marker = Some((i as u8, level));
                     break;
                 }
@@ -131,13 +152,17 @@ fn find(
         if version.is_none() {
             for (i, file) in query.version_files.iter().enumerate() {
                 let path = join(&folder, &file.name);
-                if !is_file(stats, root, &path, access, meter)? {
-                    continue;
+                match entry(stats, root, &path, access, meter)? {
+                    Entry::Absent => continue,
+                    // Fails without it: a_nearer_unreadable_version_file_stops_the_search.
+                    Entry::Other => version = Some(unreadable(i as u8, level)),
+                    Entry::Regular => {
+                        version = Some(read_version(
+                            file, i as u8, level, root, &path, access, spend, meter,
+                        )?);
+                    }
                 }
-                version = read_version(file, i as u8, level, root, &path, access, spend, meter)?;
-                if version.is_some() {
-                    break;
-                }
+                break;
             }
         }
     }
@@ -154,17 +179,20 @@ fn read_version(
     access: &Access,
     spend: &Spend,
     meter: &mut Meter,
-) -> Result<Option<Version>, ReadError> {
+) -> Result<Version, ReadError> {
     let left = spend.bytes_left(meter);
     if left == 0 {
         return Err(ReadError::Limit);
     }
     // Opened without following the leaf, a regular file only; the bytes come
-    // from that descriptor. One that cannot be opened is absent, as before
-    // the stat (the next file is looked at).
+    // from that descriptor. The stat saw a regular file here, so one that
+    // cannot be opened now (gone, replaced by a link, refused) is this
+    // level's answer, never a reason to look farther up.
     let opened = match safe_read::resolve_nofollow(root, path, access, meter) {
         Ok(opened) => opened,
-        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => return Ok(None),
+        Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => {
+            return Ok(unreadable(i, level));
+        }
         Err(error) => return Err(error),
     };
     let cap = file.format.cap().min(left);
@@ -177,7 +205,7 @@ fn read_version(
         },
         meter,
     ) {
-        Ok(bytes) => Ok(Some(rule::version(&file.format, &bytes, i, level))),
+        Ok(bytes) => Ok(rule::version(&file.format, &bytes, i, level)),
         // The file over the format's own cap (by its size, or grown past it
         // while read): no value (C2 ruling Q4 for D1). Any other `Limit` (what
         // the request may still read, the meter's byte, allocation or call
@@ -187,11 +215,7 @@ fn read_version(
             if cap == file.format.cap()
                 && (size < 0 || size as u64 > cap || bytes(meter) - before > cap) =>
         {
-            Ok(Some(Version::Refused {
-                file: i,
-                level,
-                digest: [0; 16],
-            }))
+            Ok(unreadable(i, level))
         }
         Err(error) => Err(error),
     }

@@ -363,7 +363,60 @@ fn symlinked_files_are_not_used() {
     symlink("real/pv", repo.join(".python-version")).unwrap();
     let (results, _) = round(&request(&repo, &f.0, vec![python()]));
     assert_eq!(results[0].marker, None);
-    assert_eq!(results[0].version, Version::None);
+    // The version file is there but a link: no value from it (D2 review M8).
+    assert!(
+        matches!(
+            results[0].version,
+            Version::Refused {
+                file: 0,
+                level: 0,
+                ..
+            }
+        ),
+        "{results:?}"
+    );
+}
+
+// D2 리뷰 M8: 셸 폴더에 더 가까운 버전 파일을 안전하게 읽을 수 없으면(링크, 폴더, FIFO) 위쪽 파일의 값을 쓰지
+// 않는다. pyenv와 rustup은 가까운 파일을 읽기 때문이다. 읽을 권한이 없는 일반 파일(stat은 되고 open이 거부됨)도
+// 같다(root가 아닐 때). 이것을 실패시키는 것: Entry::Other를 건너뛰고 위로 가는 것(루트의 3.11이 Found로 나옴),
+// read_version이 open 거부를 그 언어의 오류로 올리는 것.
+#[test]
+fn a_nearer_unreadable_version_file_stops_the_search() {
+    let Some(k) = case("a_nearer_unreadable_version_file_stops_the_search", 4) else {
+        return;
+    };
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let sub = repo.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(repo.join(".python-version"), b"3.11.9\n").unwrap();
+    let near = sub.join(".python-version");
+    match k {
+        0 => symlink("../.python-version", &near).unwrap(),
+        1 => fs::create_dir(&near).unwrap(),
+        // A regular file the stat sees but the open may not read.
+        3 => {
+            // SAFETY: plain query.
+            if unsafe { libc::geteuid() } == 0 {
+                return;
+            }
+            fs::write(&near, b"3.12.1\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&near, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        _ => {
+            let c = std::ffi::CString::new(near.as_os_str().as_bytes()).unwrap();
+            // SAFETY: a terminated path, read only during the call.
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        }
+    }
+    match python_version(&sub, &f.0) {
+        Version::Refused {
+            file: 0, level: 0, ..
+        } => {}
+        other => panic!("case {k}: {other:?}"),
+    }
 }
 
 // 저장소 밖이면 shell 폴더만 본다(읽기 제한의 root가 cwd 하나다). 부모의 표시 파일은 보이지 않는다. 이것을
