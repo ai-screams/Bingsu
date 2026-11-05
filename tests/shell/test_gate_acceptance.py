@@ -114,7 +114,7 @@ M4_GATES = {
     ),
 }
 # M6 C2: the command supervisor's approval and spawn gates (plan "decisive
-# gates"). The cache clause of GATE-CMD-SPAWN joins with C4.
+# gates"); C4 adds the cache clause of GATE-CMD-SPAWN.
 M6_GATES = {
     "GATE-CMD-GRANT": (
         "The supervisor approves each unit right before its relay spawn: a live permit spawns; an expired or "
@@ -126,6 +126,7 @@ M6_GATES = {
     "GATE-CMD-SPAWN": (
         "A round with a runnable config unit runs it; a unit with a not_run reason never runs",
         "At most one command supervisor per shell session at once, and a stopped supervisor keeps the session lock",
+        "A round whose every unit hits the cache starts no supervisor and runs nothing",
     ),
 }
 GATE_IDS = M3D_GATE_IDS + tuple(M4_GATES) + tuple(M6_GATES)

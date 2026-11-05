@@ -1843,7 +1843,24 @@ def helper_stage_case(stage):
     plan = dict(meta["plan"])
     plan["stages"] = tuple(plan["stages"])
     plan["ax"] = HelperAxes(**plan["ax"])
-    return data.decode().splitlines(), meta["collector"], HelperPlan(**plan)
+    lines = data.decode().splitlines()
+    if stage == "collect":
+        lines = with_command_stage_probe(lines)
+    return lines, meta["collector"], HelperPlan(**plan)
+
+
+def with_command_stage_probe(lines):
+    """The collect capture predates the command response's stage. The GC now
+    probes `.command.stage` (stat, then open) after `.stage-request`, as the
+    live collect stage shows; replay that pair on the saved capture. This is
+    a product-shape replay, not a new live capture."""
+    import re
+    stat = [i for i, l in enumerate(lines) if re.search(r'newfstatat\(\d+<[^>]*>, "\.stage-request", .* = -1 ENOENT', l)]
+    assert len(stat) == 1, stat
+    at = stat[0]
+    assert '".stage-request"' in lines[at + 1] and "openat(" in lines[at + 1], lines[at + 1]
+    probe = [l.replace('".stage-request"', '".command.stage"') for l in lines[at:at + 2]]
+    return lines[:at + 2] + probe + lines[at + 2:]
 
 
 def helper_stage_errors(lines, collector, expected, **attribution):

@@ -724,7 +724,8 @@ def _breaker_finish_and_gc(e: dict, p: HelperPlan) -> None:
     # collection_gc::reclaim after the refresh: clock, catalog probe open,
     # runtime check, GC lock, catalog, the walk to the one store (no name
     # check on its last folder), its lock, a listing of response, previous and
-    # the lock, the two absent stage names (stat and open), catalog commit.
+    # the lock, the three absent stage names (stat and open: .response.stage,
+    # .stage-request, .command.stage), catalog commit.
     _add(e, "clock")
     _add(e, "open")
     _add(e, "check_directory")
@@ -739,7 +740,7 @@ def _breaker_finish_and_gc(e: dict, p: HelperPlan) -> None:
     _read_checked(e, p.response_bytes)
     _read_checked(e, p.previous_bytes)
     _read_checked(e, 0)
-    for _ in range(2):
+    for _ in range(3):
         _add(e, "chain_recheck_name")
         _add(e, "absent_slot")
     # The session folder: walk, its lock, a listing of the lock and record.

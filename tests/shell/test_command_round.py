@@ -108,10 +108,23 @@ def until(check, timeout=4.0, step=0.01):
     return check()
 
 
+def forget_results(session):
+    """Removes the published command responses of this session's context, so
+    the next prompt runs its units again: a unit that runs past its timeout
+    (as the tests here use to keep a target alive) is a failure the response
+    keeps for 10 s (C4)."""
+    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
+    for path in root.rglob("collections-v1/*/store/command"):
+        path.unlink()
+
+
 def ready(session, canary=None):
+    """Init and one settled round; its command results are forgotten, so a
+    test's first prompt runs its units."""
     session.init()
     session.prompt()
     session.wait_quiet()
+    forget_results(session)
     return session
 
 
@@ -567,6 +580,183 @@ def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_re
     session.wait_quiet()
 
 
+def runs(path):
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def command_response(session):
+    """The bytes of the published command response(s) of this session's context."""
+    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
+    return b"".join(p.read_bytes() for p in root.rglob("collections-v1/*/store/command"))
+
+
+def rounds(session, n):
+    for _ in range(n):
+        session.prompt()
+        session.wait_quiet(timeout=8)
+
+
+NOT_PUBLISHED = b"command round: results not published"
+
+
+def published_rounds(session):
+    """Rounds until one publishes its results; how many ran. A round whose
+    publication was deferred (the store busy or its admission past its
+    budget; the helper logs it) leaves no response, so the next prompt runs
+    the unit again, as designed (C4 ruling P1). Needs the info log."""
+    assert session.level in ("info", "debug")
+    for n in range(1, 6):
+        seen = session.log().count(NOT_PUBLISHED)
+        rounds(session, 1)
+        if session.log().count(NOT_PUBLISHED) == seen:
+            return n
+    raise AssertionError("five publications in a row were deferred")
+
+
+def counting(counter, value="v"):
+    return ["/bin/sh", "-c", f"echo x >> {counter}; echo {value}"]
+
+
+# GATE-CMD-SPAWN.3: 캐시 기간 안에는 다시 실행하지 않고 감독도 띄우지 않는다. 결과는 명령 응답에 발행된다. 이것을
+# 실패시키는 것: prepare의 적중 판정을 지우는 것(프롬프트마다 다시 실행), 발행을 지우는 것(응답이 없어 다음 회차가
+# 적중하지 못함), 모두 적중한 회차에도 감독을 띄우는 것.
+def test_cache_hit_runs_nothing(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    counter = session.base / "runs"
+    session.put(config(counting(counter, "cached-value"), "cache='30s'\n"))
+    session.level = "debug"
+    ready(session)
+    before = runs(counter)
+    ran = published_rounds(session)
+    assert runs(counter) == before + ran, (before, ran, runs(counter))
+    before += ran
+    # Each round that starts a supervisor ends with this line.
+    supervised = session.log().count(b"command round finished")
+    rounds(session, 4)
+    assert runs(counter) == before, "a unit inside its cache time ran again"
+    assert session.log().count(b"command round finished") == supervised, "a cached round started a supervisor"
+    assert b"cached-value" in command_response(session)
+
+
+# cache가 없으면 기본 0이라 회차마다 실행한다(C4 판정 P3). 이것을 실패시키는 것: 기본 캐시 기간을 0보다 크게
+# 두는 것.
+def test_no_cache_runs_every_round(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    counter = session.base / "runs"
+    session.put(config(counting(counter)))
+    ready(session)
+    before = runs(counter)
+    rounds(session, 3)
+    assert runs(counter) == before + 3, (before, runs(counter))
+
+
+# 실패(종료 0이 아님)는 10초 동안 다시 실행하지 않는다. 이것을 실패시키는 것: 실패 항목을 쓰지 않는 것, 실패를
+# cache 기간(기본 0)으로 세는 것.
+def test_failure_cached_10s(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    counter = session.base / "runs"
+    session.put(config(["/bin/sh", "-c", f"echo x >> {counter}; exit 3"]))
+    session.level = "info"
+    ready(session)
+    before = runs(counter)
+    ran = published_rounds(session)
+    first = runs(counter)
+    assert first == before + ran, (before, ran, first)
+    rounds(session, 3)
+    assert runs(counter) == first, "a failed unit ran again inside 10 s"
+
+
+# 적중은 이 셸의 원본 환경 요약값과 맞을 때만이다. 다른 KUBECONFIG로 낸 프롬프트는 다른 셸의 값을 쓰지 않고 다시
+# 실행하고, 같은 값으로 다시 내면 적중한다. 이것을 실패시키는 것: 적중 판정에서 환경 요약값 비교를 지우는 것(값이
+# 바뀌어도 실행하지 않음), env_digest에 env_allow를 넣지 않는 것. 발행이 미뤄진 회차(저장소 busy, 예산 초과)는
+# 다음 회차가 다시 실행하는 설계라, 발행된 회차까지 기다린 뒤 센다(published_rounds).
+def test_cache_hit_is_display_match(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    counter = session.base / "runs"
+    session.put(config(counting(counter), "cache='30s'\nenv_allow=['KUBECONFIG']\n"))
+    session.env["KUBECONFIG"] = "/a"
+    session.level = "info"
+    ready(session)
+    before = runs(counter)
+    ran = published_rounds(session)
+    assert runs(counter) == before + ran, (before, ran, runs(counter))
+    session.env["KUBECONFIG"] = "/b"
+    ran += published_rounds(session)
+    assert runs(counter) == before + ran, "another environment's entry was taken as a hit"
+    rounds(session, 2)
+    assert runs(counter) == before + ran, runs(counter)
+
+
+# 단위가 회차 상한(8)보다 많으면, 시도한 지 가장 오래된 것부터 고른다: 12개가 두 회차 안에 모두 실행된다. 이것을
+# 실패시키는 것: units()에 응답의 시도 시각을 넘기지 않는 것(매 회차 같은 8개).
+def test_round_robin_reaches_every_unit(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    marks = session.base / "marks"
+    marks.mkdir()
+    segments = "".join(
+        f"[segment.\"custom/u{i:02}\"]\nkind='command'\ncommand=['/usr/bin/touch', '{marks}/u{i:02}']\n"
+        for i in range(12))
+    left = ", ".join(f"'custom/u{i:02}'" for i in range(12))
+    session.put(segments + f"[layout.line2]\nleft=[{left}, 'char']\n")
+    ready(session)
+    rounds(session, 2)
+    assert sorted(p.name for p in marks.iterdir()) == [f"u{i:02}" for i in range(12)]
+
+
+# 실행 파일을 찾지 못한 단위도 시도로 남긴다(10초 실패 항목). 그래서 찾지 못하는 단위 8개가 회차 상한을 차지해도
+# 다음 회차는 뒤의 단위로 넘어간다. 이것을 실패시키는 것: 해석 실패 단위의 실패 항목을 발행하지 않는 것(units()의
+# unresolved_ids 기록이나 publish_results의 그 항목을 지우는 것: 뒤의 두 단위가 영원히 돌지 않음).
+def test_unresolved_units_do_not_hold_the_round(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    marks = session.base / "marks"
+    marks.mkdir()
+    missing = "".join(f"[segment.\"custom/m{i}\"]\nkind='command'\ncommand=['bingsu-no-such-command-{i}']\n"
+                      for i in range(8))
+    real = "".join(f"[segment.\"custom/r{i}\"]\nkind='command'\ncommand=['/usr/bin/touch', '{marks}/r{i}']\n"
+                   for i in range(2))
+    left = ", ".join([f"'custom/m{i}'" for i in range(8)] + [f"'custom/r{i}'" for i in range(2)])
+    session.put(missing + real + f"[layout.line2]\nleft=[{left}, 'char']\n")
+    ready(session)
+    rounds(session, 3)
+    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
+
+
+# relay 입력 상한(16 KiB)을 넘는 환경의 단위도 실패 항목으로 남겨 순서를 넘긴다. 이것을 실패시키는 것: units()의
+# relay 입력 상한 분기에서 실패 항목 기록을 지우는 것(뒤의 두 단위가 영원히 돌지 않음).
+def test_oversize_units_do_not_hold_the_round(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    marks = session.base / "marks"
+    marks.mkdir()
+    big = "".join(f"[segment.\"custom/b{i}\"]\nkind='command'\ncommand=['/usr/bin/true']\nenv_allow=['BINGSU_BIG']\n"
+                  for i in range(8))
+    real = "".join(f"[segment.\"custom/r{i}\"]\nkind='command'\ncommand=['/usr/bin/touch', '{marks}/r{i}']\n"
+                   for i in range(2))
+    left = ", ".join([f"'custom/b{i}'" for i in range(8)] + [f"'custom/r{i}'" for i in range(2)])
+    session.put(big + real + f"[layout.line2]\nleft=[{left}, 'char']\n")
+    session.env["BINGSU_BIG"] = "x" * (20 * 1024)
+    ready(session)
+    rounds(session, 3)
+    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
+
+
+# 명령만 있는 레이아웃(수집 없음)도 발행 뒤 GC 회수를 돌린다. 그래서 cwd를 여럿 다녀 예약이 예산을 채워도 다음
+# cwd의 발행이 된다. 이것을 실패시키는 것: helper가 명령 발행 뒤 collection_runtime을 세우지 않는 것(8번째
+# cwd부터 예약이 막혀 발행이 계속 실패).
+def test_command_only_rounds_reclaim_the_store_budget(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    # No dir or git on either line: nothing else selects a collection.
+    session.put(config(["/bin/sh", "-c", "echo v"]) + "[layout.line1]\nleft=['char']\n")
+    ready(session)
+    root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
+    for i in range(10):
+        folder = (session.base / f"cwd{i:02}").resolve()
+        folder.mkdir()
+        session.pwd = folder
+        rounds(session, 1)
+        bound = [p for p in root.rglob("collections-v1/*/store/command") if os.fsencode(folder) in p.read_bytes()]
+        assert bound, f"no command response for the folder of round {i}"
+
+
 # tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
 # 것: 표의 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것.
 def test_command_table_names_real_tests():
@@ -575,7 +765,7 @@ def test_command_table_names_real_tests():
     rows = list(csv.DictReader((ROOT / "tests/command-acceptance.tsv").read_text().splitlines(), delimiter="\t"))
     assert rows and len({r["id"] for r in rows}) == len(rows)
     for row in rows:
-        if row["stage"] not in ("C2", "C3"):
+        if row["stage"] not in ("C2", "C3", "C4"):
             assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
             continue
         path, name = row["test"].split("::")
