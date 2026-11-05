@@ -252,6 +252,7 @@ fn attaches_bytes_without_disabling_collection_on_request_budget() {
         mask: 1 << 3,
     };
     let mut request = Request {
+        languages: Vec::new(),
         request_id: bingsu_core::collection::wire::M3B_REQUEST_ID,
         binding,
         budget_ms: 50,

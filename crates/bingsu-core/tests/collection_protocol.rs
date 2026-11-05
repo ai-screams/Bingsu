@@ -32,6 +32,7 @@ fn request(max: bool) -> Request {
     let config = path(b'c');
     let state = path(b's');
     Request {
+        languages: Vec::new(),
         request_id: M3B_REQUEST_ID,
         binding: Binding {
             path_query: Default::default(),
@@ -176,14 +177,14 @@ fn frame_length_is_checked_before_allocation() {
     let mut bad = out[..80].to_vec();
     bad[..8].fill(0);
     bad[8] = 2;
-    bad[10] = 8;
+    bad[10] = 9;
     bad[11] = 1;
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].fill(0);
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC05");
+    bad[..8].copy_from_slice(b"BNGIPC06");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 5;
+    bad[8] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -334,11 +335,13 @@ fn response_budget_includes_max_binding_and_last_values() {
     let mut t = transcript(&r);
     t.accept(frame(&r, Kind::Update, &sized_update(266)))
         .unwrap();
-    t.accept(frame(&r, Kind::Update, &sized_update(65_294)))
+    // Two bytes less than before the language section (its query and
+    // result counts) that every stored record now carries.
+    t.accept(frame(&r, Kind::Update, &sized_update(65_292)))
         .unwrap();
     let previous = t.clone();
     assert_eq!(
-        t.accept(frame(&r, Kind::Update, &sized_update(65_295))),
+        t.accept(frame(&r, Kind::Update, &sized_update(65_293))),
         Err(E::Budget)
     );
     assert_eq!(t, previous);
@@ -450,7 +453,7 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     assert_eq!(d.accept(frame(&r, Kind::RequestBegin, &p)), Err(E::Feature));
     let mut bytes = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::Complete, &[]), &mut bytes).unwrap();
-    for (at, value, error) in [(10, 0, E::Kind), (10, 8, E::Kind), (11, 1, E::Flags)] {
+    for (at, value, error) in [(10, 0, E::Kind), (10, 9, E::Kind), (11, 1, E::Flags)] {
         let mut b = bytes[..n].to_vec();
         b[at] = value;
         assert_eq!(wire::decode_frame(&b), Err(error));
@@ -482,9 +485,9 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC05");
+    bad[..8].copy_from_slice(b"BNGIPC06");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 5;
+    bad[8] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -562,8 +565,8 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut bytes = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::Ready, &ready(r.binding.mask)), &mut bytes).unwrap();
-    // Mutation: accept an old or future version after the v5 schema change.
-    for v in [0u16, 1, 2, 3, 4, 6] {
+    // Mutation: accept an old or future version after the v6 schema change.
+    for v in [0u16, 1, 2, 3, 4, 5, 7] {
         let mut b = bytes[..n].to_vec();
         b[8..10].copy_from_slice(&v.to_le_bytes());
         assert_eq!(wire::decode_frame(&b), Err(E::Version));
@@ -577,7 +580,7 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(wire::decode_eof(&bytes[..n - 1]), Err(E::Truncated));
     // The pure acceptance API returns no outbound frame; failed Ready cannot
     // enable request_sent. There is no Reject kind or negotiation state.
-    for tag in [0, 8] {
+    for tag in [0, 9] {
         b = bytes[..n].to_vec();
         b[10] = tag;
         assert_eq!(wire::decode_frame(&b), Err(E::Kind));
@@ -694,8 +697,9 @@ fn large_request_is_chunked_without_reducing_path_limit() {
         Err(E::Schema)
     );
     let mut b = body.clone();
-    let end = b.len();
-    b[end - 2..].copy_from_slice(&1u16.to_le_bytes());
+    // The excludes' length field ends one byte before the language count.
+    let end = b.len() - 1;
+    b[end - 2..end].copy_from_slice(&1u16.to_le_bytes());
     assert_eq!(
         Request::decode_body(r.binding.build_id, r.request_id, &b),
         Err(E::Schema)
@@ -932,7 +936,8 @@ fn untrusted_text_is_resanitized() {
         let mut c = completed(&r, &[31, 0, 0, 0]);
         c.reason = reason;
         let mut b = c.encode_with_catalog(&CATALOG).unwrap();
-        let at = b.len() - 17;
+        // Behind the reason: count, progress, one update, language section.
+        let at = b.len() - 19;
         assert_eq!(b[at], tag);
         assert_eq!(Completed::decode_with_catalog(&b, &CATALOG), Ok(c));
         b[at] = 5;
@@ -974,9 +979,11 @@ fn untrusted_text_is_resanitized() {
         Err(E::Schema)
     );
     let mut bad = b.clone();
-    let end = bad.len();
+    // The update count and the second update sit before the two-byte
+    // (empty) language section.
+    let end = bad.len() - 2;
     bad[end - 16..end - 14].copy_from_slice(&2u16.to_le_bytes());
-    bad.extend([31, 0, 0, 0]);
+    bad.splice(end..end, [31, 0, 0, 0]);
     let body_len = (bad.len() - 64) as u32;
     bad[12..16].copy_from_slice(&body_len.to_le_bytes());
     fix_crc(&mut bad);
@@ -1023,10 +1030,10 @@ fn untrusted_text_is_resanitized() {
 // accept trailing/oversized bytes, or
 // charge only body bytes when maximum binding paths leave little wire space.
 #[test]
-fn global_excludes_v5_golden_and_limits() {
+fn global_excludes_v6_golden_and_limits() {
     let mut r = request(false);
     r.global_excludes = b".DS_Store\n".to_vec();
-    let hex = include_str!("../../../tests/golden/collection/request-v5.hex").trim();
+    let hex = include_str!("../../../tests/golden/collection/request-v6.hex").trim();
     let golden: Vec<_> = hex
         .as_bytes()
         .chunks_exact(2)
@@ -1039,13 +1046,15 @@ fn global_excludes_v5_golden_and_limits() {
     );
     let mut buffer = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::RequestEnd, &[0; 4]), &mut buffer).unwrap();
-    assert_eq!(&buffer[..12], b"BNGIPC05\x05\0\x04\0");
+    assert_eq!(&buffer[..12], b"BNGIPC06\x06\0\x04\0");
     buffer[7] = b'4';
     assert_eq!(wire::decode_frame(&buffer[..n]), Err(E::Magic));
-    buffer[7] = b'5';
-    buffer[8] = 4;
+    buffer[7] = b'6';
+    buffer[8] = 5;
     assert_eq!(wire::decode_frame(&buffer[..n]), Err(E::Version));
-    let field_at = golden.len() - 14;
+    // The excludes' length field, before 10 pattern bytes and the
+    // one-byte (empty) language section.
+    let field_at = golden.len() - 15;
     for tag in 2..=255 {
         let mut bad = golden.clone();
         bad[field_at - 1] = tag;
@@ -1082,9 +1091,10 @@ fn global_excludes_v5_golden_and_limits() {
     let mut large = request(true);
     large.global_excludes = vec![b'#'; wire::GLOBAL_EXCLUDES_MAX];
     assert_eq!(large.encode_body(), Err(E::Budget));
-    // Maximum binding + 64,920 bytes leaves exactly 512 bytes for the
-    // Begin, four chunks (with offsets), and End frames.
-    large.global_excludes.resize(64_920, b'#');
+    // Maximum binding + 64,919 bytes (and the language count byte) leaves
+    // exactly 512 bytes for the Begin, four chunks (with offsets), and End
+    // frames.
+    large.global_excludes.resize(64_919, b'#');
     let body = large.encode_body().unwrap();
     assert_eq!(body.len(), 262_144 - 512);
     let mut d = decoder(&large);
@@ -1102,10 +1112,12 @@ fn global_excludes_v5_golden_and_limits() {
     );
     large.global_excludes.push(b'#');
     assert_eq!(large.encode_body(), Err(E::Budget));
-    let field_at = body.len() - 64_920 - 4;
+    let field_at = body.len() - 1 - 64_919 - 4;
     let mut bad = body;
-    bad[field_at..field_at + 4].copy_from_slice(&64_921u32.to_le_bytes());
-    bad.push(b'#');
+    // One more excludes byte (the old language count becomes one), then a
+    // language count again: well formed, one byte past the stream bound.
+    bad[field_at..field_at + 4].copy_from_slice(&64_920u32.to_le_bytes());
+    bad.push(0);
     assert_eq!(
         Request::decode_body(large.binding.build_id, large.request_id, &bad),
         Err(E::Budget)
@@ -1121,11 +1133,11 @@ fn global_excludes_empty_knowledge_goldens() {
     for (known, hex) in [
         (
             true,
-            include_str!("../../../tests/golden/collection/request-v5-missing.hex"),
+            include_str!("../../../tests/golden/collection/request-v6-missing.hex"),
         ),
         (
             false,
-            include_str!("../../../tests/golden/collection/request-v5-unknown.hex"),
+            include_str!("../../../tests/golden/collection/request-v6-unknown.hex"),
         ),
     ] {
         let mut r = request(false);

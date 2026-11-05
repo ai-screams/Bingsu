@@ -67,6 +67,7 @@ fn collect(
             a_ms: 30_000,
             b_ms: 30_000,
             path_ms: 30_000,
+            lang_ms: bingsu_core::collection::budget::LANG_MS,
             c_ms: 30_000,
             d_ms: 30_000,
         },
@@ -113,6 +114,7 @@ impl Drop for Fixture {
 fn request(path: &Path) -> Request {
     let cwd = path.as_os_str().as_bytes().to_vec();
     Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),
@@ -1474,6 +1476,7 @@ fn injected_deadlines_apply_to_each_stage() {
                     a_ms: if a_expired { 0 } else { 30_000 },
                     b_ms: if a_expired { 30_000 } else { 0 },
                     path_ms: 30_000,
+                    lang_ms: bingsu_core::collection::budget::LANG_MS,
                     c_ms: 30_000,
                     d_ms: 30_000,
                 },

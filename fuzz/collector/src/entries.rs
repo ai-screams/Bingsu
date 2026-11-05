@@ -19,6 +19,10 @@
 //! - commit_objects: F + bytes; bit 0 clear = commit body (framed, deflated
 //!   and hashed here), set = a raw zlib stream under a non-matching id
 //! - commondir: .git file bytes + NUL + commondir file bytes
+//! - language: F + version selection file bytes; bits 0–1 pick the format
+//!   (0 one line, 1 `.tool-versions` for python, 2 `rust-toolchain.toml`,
+//!   3 `go.mod`). The worker reads at most the format's cap; larger input is
+//!   the read cap's Limit, as there.
 use crate::{
     formats,
     git::{
@@ -52,10 +56,11 @@ pub enum Target {
     MultiPackIndex,
     Gitdir,
     Commondir,
+    Language,
 }
 
 impl Target {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Index,
         Self::Pack,
         Self::Config,
@@ -66,6 +71,7 @@ impl Target {
         Self::MultiPackIndex,
         Self::Gitdir,
         Self::Commondir,
+        Self::Language,
     ];
 
     /// Equals the fuzz_targets/<name>.rs file name.
@@ -81,6 +87,7 @@ impl Target {
             Self::MultiPackIndex => "multi_pack_index",
             Self::Gitdir => "gitdir",
             Self::Commondir => "commondir",
+            Self::Language => "language",
         }
     }
 }
@@ -151,6 +158,7 @@ pub(crate) enum Prepared {
     Midx(Vec<u8>, Box<Pack>),
     Gitdir(Vec<u8>),
     Commondir(Vec<u8>, Vec<u8>),
+    Language(bingsu_core::collection::language::Format, Vec<u8>),
 }
 
 fn split_flag(data: &[u8]) -> (u8, &[u8]) {
@@ -245,11 +253,45 @@ pub(crate) fn prepare(target: Target, data: &[u8]) -> Prepared {
             Prepared::Midx(bytes, Box::new(fixture_pack()))
         }
         Target::Gitdir => Prepared::Gitdir(data.to_vec()),
+        Target::Language => Prepared::Language(language_format(flag), rest.to_vec()),
         Target::Commondir => {
             let at = data.iter().position(|b| *b == 0).unwrap_or(data.len());
             let common = data.get(at + 1..).unwrap_or_default();
             Prepared::Commondir(data[..at].to_vec(), common.to_vec())
         }
+    }
+}
+
+/// The language entry's format, from the flag byte's low two bits.
+pub(crate) fn language_format(flag: u8) -> bingsu_core::collection::language::Format {
+    use bingsu_core::collection::language::Format;
+    match flag & 3 {
+        0 => Format::Line,
+        1 => Format::ToolVersions(b"python".to_vec()),
+        2 => Format::RustToolchainToml,
+        _ => Format::GoMod,
+    }
+}
+
+/// The worker's language step on one read file: the read cap, the
+/// extraction and the grammar. Ok for a version found, Invalid for a file
+/// whose value is refused or malformed, Missing (Other) for none. Oracle: a
+/// found value always passes the grammar.
+fn language(
+    format: &bingsu_core::collection::language::Format,
+    bytes: &[u8],
+) -> Result<(), ReadError> {
+    use bingsu_core::collection::language::{self as rule, Candidate, Version};
+    if bytes.len() as u64 > format.cap() {
+        return Err(ReadError::Limit);
+    }
+    match rule::version(format, bytes, 0, 0) {
+        Version::Found { value, .. } => {
+            assert!(rule::version_ok(&value), "ungrammatical value {value:?}");
+            Ok(())
+        }
+        _ if rule::extract(format, bytes) == Candidate::Absent => Err(ReadError::Missing),
+        _ => Err(ReadError::Io(libc::EINVAL)),
     }
 }
 
@@ -438,6 +480,7 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
             assert!(git_path.starts_with(&[&target[..], b"/worktrees/"].concat()));
             Ok(())
         }
+        Prepared::Language(format, bytes) => language(format, bytes),
     }
 }
 

@@ -139,6 +139,18 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     let reason = super::git_global::attach(&mut request, &e);
                     report(&mut groups, reason.log_level(), reason.message());
                 }
+                // D1 (ruling Q1): the user-defined languages' detect_files;
+                // the built-in four are asked for by their segments (D3). After
+                // the global excludes, so queries that do not fit what the
+                // request leaves are the ones dropped, never the excludes. No
+                // test fails without this block yet: the detect_files key opens
+                // in D3, which tests it end to end with the key (ruling Q8).
+                if let Some((config, _)) = display {
+                    request.languages = collection::language::user_queries(&config.exec_units);
+                    if request.encode_body().is_err() {
+                        request.languages.clear();
+                    }
+                }
                 collection_runtime = Some(context.runtime.try_clone()?);
                 let path = e
                     .collector_exe

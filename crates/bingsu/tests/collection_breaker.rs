@@ -909,6 +909,7 @@ fn e3_verified_no_repo_and_a_only_complete_reset_but_hidden_progress_does_not() 
     };
     let f = Fixture::new();
     let request = Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),

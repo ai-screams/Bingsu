@@ -2,6 +2,8 @@
 pub mod config;
 pub mod discover;
 pub mod io;
+#[path = "../language.rs"]
+pub mod language;
 #[path = "../path_facts.rs"]
 pub mod path_facts;
 pub mod preflight;
@@ -45,7 +47,8 @@ pub fn collect_with_access(
     meter: crate::meter::Meter,
     access: crate::safe_read::Access,
 ) -> Result<(), CollectError> {
-    collect_with_deadlines(request, sink, meter, access, StageDeadlines::PRODUCT)
+    let deadlines = StageDeadlines::product(!request.languages.is_empty());
+    collect_with_deadlines(request, sink, meter, access, deadlines)
 }
 
 /// Stage allowances remain bounded by the Meter's absolute request deadline.
@@ -57,6 +60,7 @@ pub(crate) struct StageDeadlines {
     pub c_ms: u64,
     pub d_ms: u64,
     pub path_ms: u64,
+    pub lang_ms: u64,
 }
 
 impl StageDeadlines {
@@ -66,7 +70,24 @@ impl StageDeadlines {
         c_ms: bingsu_core::collection::budget::C_MS,
         d_ms: bingsu_core::collection::budget::D_MS,
         path_ms: bingsu_core::collection::budget::PATH_MS,
+        lang_ms: bingsu_core::collection::budget::LANG_MS,
     };
+
+    /// The product stages of one request. With languages asked for, the
+    /// language stage's time comes out of C (user decision U-19), so the
+    /// stages still add up to the request budget; without, nothing changes
+    /// (fails without it: product_stages_give_c_time_to_languages_only).
+    pub const fn product(languages: bool) -> Self {
+        use bingsu_core::collection::budget::{C_MS, LANG_MS};
+        if languages {
+            Self {
+                c_ms: C_MS - LANG_MS,
+                ..Self::PRODUCT
+            }
+        } else {
+            Self::PRODUCT
+        }
+    }
 }
 
 pub(crate) fn collect_with_deadlines(
@@ -80,6 +101,15 @@ pub(crate) fn collect_with_deadlines(
         git::{self, StageResult},
         wire::{Progress, Update},
     };
+    // Test builds name the C and language allowances the round got (fails
+    // without collect_with_access's product(): product_entry_gives_c_time_to_languages).
+    #[cfg(test)]
+    let mut meter = meter;
+    #[cfg(test)]
+    meter.event(&format!(
+        "stages c={} lang={}",
+        deadlines.c_ms, deadlines.lang_ms
+    ));
     let wants_git = request.binding.mask & (1 << git::SEGMENT) != 0;
     let wants_dir = request.binding.mask & (1 << 1) != 0;
     let meter = RefCell::new(meter);
@@ -163,27 +193,50 @@ pub(crate) fn collect_with_deadlines(
     match selected {
         discover::Selection::Outside(cwd, access, discovery) => {
             drop(discovery);
-            let mut meter = meter.borrow_mut();
-            meter.event("discovery_consumed");
-            // No Discovery survives into restriction. The only root is cwd.
-            meter.event("before_read_layer");
-            #[cfg(target_os = "linux")]
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+            let mut access = access;
             {
-                let mut access = access;
+                let mut meter = meter.borrow_mut();
+                meter.event("discovery_consumed");
+                // No Discovery survives into restriction. The only root is cwd.
+                meter.event("before_read_layer");
+                #[cfg(target_os = "linux")]
                 access
                     .restrict_to(&[&cwd], &mut meter)
                     .map_err(CollectError::Read)?;
             }
-            #[cfg(not(target_os = "linux"))]
-            let _ = (cwd, access);
+            // Outside a repository only the shell's own folder is looked at.
+            languages(request, &cwd, &[], &access, &meter, sink, deadlines)?;
             completion
         }
         discover::Selection::Repository(mut roots, discovery) => {
+            // The shell's folder sits `level` folders below the root (0 when
+            // the folder path is not the logical one: discovery then looks
+            // at the folder itself only).
+            let level = discovery.path_binding().1.unwrap_or(0);
             drop(discovery);
             meter.borrow_mut().event("discovery_consumed");
             roots
                 .restrict(&mut meter.borrow_mut())
                 .map_err(CollectError::Read)?;
+            let parts: Vec<&[u8]> = request
+                .binding
+                .cwd
+                .split(|b| *b == b'/')
+                .filter(|p| !p.is_empty())
+                .collect();
+            let below = &parts[parts.len().saturating_sub(level)..];
+            let worktree = std::rc::Rc::clone(&roots.worktree);
+            languages(
+                request,
+                &worktree,
+                below,
+                &roots.access,
+                &meter,
+                sink,
+                deadlines,
+            )?;
+            drop(worktree);
             if !wants_git {
                 return completion;
             }
@@ -283,6 +336,86 @@ pub(crate) fn collect_with_deadlines(
 /// guard, so an unwind there drops it. This boundary then restores the deadline
 /// on the placeholder, but cannot restore the lost counters.
 /// Abort/OOM and blocked calls are exclusively the supervisor's responsibility.
+/// The language stage (D1), in a round that asks for languages: results go
+/// out as each is known. Only the sink's own error fails the round; a file
+/// that cannot be read, a bound or the stage's time leaves languages
+/// without an answer and never takes the round's Complete away.
+#[allow(clippy::too_many_arguments, reason = "the stage's fixed inputs")]
+fn languages(
+    request: &bingsu_core::collection::wire::Request,
+    root: &crate::safe_read::Root,
+    parts: &[&[u8]],
+    access: &crate::safe_read::Access,
+    meter: &RefCell<crate::meter::Meter>,
+    sink: &mut dyn UpdateSink,
+    deadlines: StageDeadlines,
+) -> Result<(), CollectError> {
+    // Fails without it: a round without languages would take the stage's
+    // time and send nothing (git_rounds_without_languages_are_unchanged).
+    if request.languages.is_empty() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    let charged = |m: &crate::meter::Meter| {
+        m.counts
+            .iter()
+            .map(|c| {
+                c.open
+                    + c.stat
+                    + c.mount
+                    + c.filesystem
+                    + c.readlink
+                    + c.read
+                    + c.list
+                    + c.components
+                    + c.retries
+                    + c.readonly
+            })
+            .sum::<u64>()
+    };
+    #[cfg(test)]
+    let calls = charged(&meter.borrow());
+    let result = within_stage(meter, sink, deadlines.lang_ms, |sink| {
+        let mut meter = meter.borrow_mut();
+        meter.event("languages");
+        language::detect_all(
+            &request.languages,
+            root,
+            parts,
+            access,
+            &mut meter,
+            |result| {
+                sink.language(result).map_err(|error| {
+                    if crate::update_sink::is_late_language(&error) {
+                        CollectError::Read(crate::safe_read::ReadError::Deadline)
+                    } else {
+                        CollectError::Sink(error)
+                    }
+                })
+            },
+        )
+    });
+    // Fails without it: language_bound_ends_with_the_stage (B refused).
+    meter.borrow_mut().calls_limit = u64::MAX;
+    #[cfg(test)]
+    {
+        let mut meter = meter.borrow_mut();
+        let used = meter
+            .budget
+            .used(bingsu_core::collection::budget::Axis::Directories);
+        meter.event(&format!("languages directories={used}"));
+        let now = charged(&meter);
+        meter.event(&format!("languages calls={}", now - calls));
+    }
+    match result {
+        // Fails without it: a sink error would not end the round.
+        Err(error @ CollectError::Sink(_)) => Err(error),
+        // A panic inside detection: no more languages, the round goes on.
+        Err(_) => Ok(()),
+        Ok(()) => Ok(()),
+    }
+}
+
 fn within_stage<T>(
     meter: &RefCell<crate::meter::Meter>,
     sink: &mut dyn UpdateSink,

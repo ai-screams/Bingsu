@@ -1,0 +1,5 @@
+fixture	response_header	provenance
+prompt-m3d-collect-linux-1.strace.gz	BNGRES03 3	prompt-m3d-collect-trace.md
+prompt-m3d-front-silent-deadline-linux.strace.gz	BNGRES03 3	prompt-m3d-front-silent-deadline.md
+prompt-m3d-front-silent-valid-linux.strace.gz	BNGRES03 3	prompt-m3d-front-silent-deadline.md
+prompt-m3d-marker-valid-linux.strace.gz	BNGRES03 3	prompt-m3d-front-silent-deadline.md

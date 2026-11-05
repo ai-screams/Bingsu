@@ -858,9 +858,15 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
             acl_fallback.discard(fd)
 
 
+# The stored-response envelope a live capture may read: the current one only. A
+# recorded fixture (an older build's observation) names its own envelope in
+# tests/shell/fixtures/recorded-envelopes.tsv, and only portable tests pass it.
+RESPONSE_HEADERS = (b"BNGRES04\x04\x00",)
+
+
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
                                collectors=None, repository_roots=None, repository_evidence=(), platform=None,
-                               front_deadline=False):
+                               front_deadline=False, headers=RESPONSE_HEADERS):
     """`collectors` is the exact count a live capture arranged; stored traces
     leave it None and may hold at most one. With `repository_roots`, a
     collector's calls after its request are audited by assert_repository_trace
@@ -894,7 +900,7 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
                                 collector_exe=collector_exe, check_collection=True,
                                 audited_collector=int(roots[0]) if window else None, platform=platform,
-                                front_deadline=front_deadline)
+                                front_deadline=front_deadline, headers=headers)
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -904,7 +910,7 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
 
 def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
                                 collector_exe=None, check_collection=False, audited_collector=None, platform=None,
-                                front_deadline=False):
+                                front_deadline=False, headers=RESPONSE_HEADERS):
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -998,7 +1004,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     cwd = prompt_cwd(initial)
     prompt_root_io(front, boundary, exe, pinned, root, cwd)
     if check_collection and cwd is not None:
-        assert_collection_trace(front, boundary, pinned, cwd)
+        assert_collection_trace(front, boundary, pinned, cwd, headers=headers)
     # 이것을 실패시키는 것: helper 하위 트리에 새 syscall, 임의 자식/exec, 외부 네트워크를 더하는 것.
     assert all(c.name in HELPER_CALLS | {"kill"} for c in helper), [c for c in helper if c.name not in HELPER_CALLS | {"kill"}]
     # Exactly the pinned collector executable/verb, no additional argv and an
@@ -1246,7 +1252,8 @@ def judge_allowlist(cap, shape=None):
                                collectors=None if shape == "front-alarm" else cap.collectors,
                                repository_roots=cap.roots,
                                repository_evidence=() if shape else cap.evidence,
-                               platform=cap.platform, front_deadline=shape == "front-alarm")
+                               platform=cap.platform, front_deadline=shape == "front-alarm",
+                               headers=getattr(cap, "headers", RESPONSE_HEADERS))
     if cap.collectors and shape != "front-alarm":
         assert_global_inputs_exercised(cap.lines, cap.exe, cap.global_inputs, cap.global_present)
 
@@ -1376,7 +1383,7 @@ def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
     assert refused == [], refused[:5]
 
 
-def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None):
+def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None, headers=RESPONSE_HEADERS):
     """Exact C3 increment, separate from existing runtime/context C-axis calls."""
     from fsbudget.formula import collection_front_expected
     dirs, files = prompt_collection_sources(pinned, cwd)
@@ -1439,7 +1446,7 @@ def assert_collection_trace(calls, boundary, pinned, cwd, *, required=None):
                 header = ast.literal_eval("b" + args[1])
                 assert len(header) == 64, ("collection header bytes", c)
                 total = int.from_bytes(header[12:16], "little") + 64
-                valid_headers[path] = (header[:8] == b"BNGRES03" and header[8:12] == bytes([3,0,64,0])
+                valid_headers[path] = (header[:10] in headers and header[10:12] == bytes([64, 0])
                                        and header[20:] == bytes(44) and total == sizes[path] and total <= 262144)
             else:
                 assert valid_headers[path], ("collection body after invalid header", c)
@@ -2719,7 +2726,8 @@ def judge_marker_trace(cap, shape=None):
                                collector_exe=c["collector_exe"], collectors=None,
                                repository_roots=c["roots"], repository_evidence=(),
                                # 이것을 실패시키는 것: 비지 않은 stdout에서 필터·기록 쓰기를 면제하는 것.
-                               platform=tuple(c["platform"]), front_deadline=cap.record == b"")
+                               platform=tuple(c["platform"]), front_deadline=cap.record == b"",
+                               headers=getattr(cap, "headers", RESPONSE_HEADERS))
 
 
 def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):

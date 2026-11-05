@@ -48,3 +48,5 @@ collector. The reduction is the same as above.
 | -- | -- | --: |
 | Raw | `7115dc25b9b048235f4546b3bc353832ef1543679384b5ebdf00ee68ba41afa3` | 269127 / 1577 |
 | Reduced (decompressed fixture) | `7428a7a1c24de5ff5f05f0f6dcd06e5efc04aa411410b5c8ae113a6c12a3ae25` | 199237 / 1577 |
+
+Envelope: the stored responses these captures read are `BNGRES03` version 3 (before D1). The live gate takes only the current envelope; the portable tests pass the recorded one from `recorded-envelopes.tsv`.

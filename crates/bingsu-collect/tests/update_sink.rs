@@ -19,6 +19,7 @@ use update_sink::{UpdateSink, WireSink};
 
 fn request(mask: u32) -> Request {
     Request {
+        languages: Vec::new(),
         request_id: wire::M3B_REQUEST_ID,
         binding: Binding {
             build_id: BuildId([7; 32]),
@@ -370,8 +371,10 @@ fn sink_enforces_exact_frame_stream_and_storage_bytes() {
                 sink.fixture_update(&payload(65_457))
             }
             "storage" => {
-                sink.fixture_update(&payload(65_294)).unwrap();
-                sink.fixture_update(&payload(65_295))
+                // The stored record's two-byte language section comes out
+                // of the same 65,296 bytes.
+                sink.fixture_update(&payload(65_292)).unwrap();
+                sink.fixture_update(&payload(65_293))
             }
             _ => {
                 for _ in 0..3 {
@@ -448,4 +451,37 @@ fn sink_rejects_invalid_setup_without_writing() {
         assert!(WireSink::new(&r, field::BUILTIN, &ready, &mut buffer, &mut write).is_err());
         assert!(output.borrow().is_empty());
     }
+}
+
+// 보안 리뷰 S-M(D1): 단계 마감을 넘긴 언어 결과는 쓰지 않고, 스트림을 멈추지 않는다. 구별되는 오류를 돌려주고,
+// 마감을 다시 건 뒤의 Complete는 그대로 나가며 받는 쪽 transcript도 그 언어를 보지 않는다. 이것을 실패시키는 것:
+// WireSink::language의 마감 선검사를 지우는 것(send가 TimedOut으로 latch를 걸어 Complete가 실패함).
+#[test]
+fn late_language_leaves_the_stream_open() {
+    use bingsu_core::collection::language::{BUILTIN, LanguageResult, Version};
+    let mut r = request(1 << 3);
+    r.languages = vec![BUILTIN[1].query()];
+    let output = RefCell::new(Vec::new());
+    let mut write = |bytes: &[u8]| {
+        output.borrow_mut().push(bytes.to_vec());
+        Ok(())
+    };
+    let mut buffer = [0; wire::FRAME_MAX];
+    let mut sink = WireSink::new(&r, field::BUILTIN, &ready(&r), &mut buffer, &mut write).unwrap();
+    let result = LanguageResult {
+        index: 0,
+        marker: Some((0, 0)),
+        version: Version::None,
+    };
+    sink.stage_deadline(std::time::Instant::now());
+    let error = sink.language(result).unwrap_err();
+    assert!(update_sink::is_late_language(&error), "{error:?}");
+    assert!(output.borrow().is_empty());
+    sink.stage_deadline(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    sink.complete().unwrap();
+    let mut t = receiver(&r, field::BUILTIN);
+    for frame in output.borrow().iter() {
+        t.accept_bytes(frame).unwrap();
+    }
+    assert_eq!(output.borrow().len(), 1);
 }

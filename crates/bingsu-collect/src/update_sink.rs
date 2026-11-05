@@ -4,7 +4,10 @@ use std::io;
 use std::{cell::Cell, time::Instant};
 
 use bingsu_core::{
-    collection::wire::{self, Frame, Kind, Progress, Request, Transcript, Update},
+    collection::{
+        language::LanguageResult,
+        wire::{self, Frame, Kind, Progress, Request, Transcript, Update},
+    },
     field::SegmentDecl,
 };
 
@@ -16,6 +19,33 @@ pub(crate) trait UpdateSink {
     fn stage_deadline(&mut self, _deadline: Instant) {}
     fn update(&mut self, value: Update) -> io::Result<()>;
     fn progress(&mut self, value: Progress) -> io::Result<()>;
+    /// One language's detection result (D1). A sink for a request without
+    /// languages never receives one.
+    fn language(&mut self, _value: LanguageResult) -> io::Result<()> {
+        Err(io::Error::other("this sink takes no language result"))
+    }
+}
+
+/// A language result past the stage deadline: nothing was written and the
+/// response goes on (security review S-M for D1). The stage stops sending
+/// languages; later frames and Complete are unaffected.
+#[derive(Debug)]
+pub(crate) struct LateLanguage;
+
+impl std::fmt::Display for LateLanguage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("language result past the stage deadline")
+    }
+}
+
+impl std::error::Error for LateLanguage {}
+
+pub(crate) fn late_language() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, LateLanguage)
+}
+
+pub(crate) fn is_late_language(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|e| e.is::<LateLanguage>())
 }
 
 pub(crate) struct WireSink<'a> {
@@ -132,6 +162,18 @@ impl UpdateSink for WireSink<'_> {
 
     fn progress(&mut self, value: Progress) -> io::Result<()> {
         self.send(Kind::Progress, &value.encode())
+    }
+
+    fn language(&mut self, value: LanguageResult) -> io::Result<()> {
+        // Before the transcript and the latch: a late result is not sent and
+        // stops nothing. Fails without it: late_language_leaves_the_stream_open.
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(late_language());
+        }
+        self.send(Kind::Language, &value.encode())
     }
 }
 

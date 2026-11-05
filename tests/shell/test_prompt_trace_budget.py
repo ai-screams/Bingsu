@@ -17,22 +17,65 @@ COLLECT_BASE = "/home/tester/pt/test_prompt_binary_names_only_1"
 COLLECT_PIN = "/home/tester/target/release/bingsu-collect"
 
 
+def recorded_headers(fixture):
+    """The stored-response envelope a recorded fixture observed (its older
+    build), from fixtures/recorded-envelopes.tsv; the live gate never takes it."""
+    import csv
+    table = Path(__file__).with_name("fixtures") / "recorded-envelopes.tsv"
+    row, = [r for r in csv.DictReader(table.read_text().splitlines(), delimiter="\t") if r["fixture"] == fixture]
+    magic, version = row["response_header"].split()
+    return (magic.encode() + int(version).to_bytes(2, "little"),)
+
+
+COLLECT_FIXTURE = "prompt-m3d-collect-linux-1.strace.gz"
+COLLECT_HEADERS = recorded_headers(COLLECT_FIXTURE)
+
+
 def collecting_prompt():
     """A release prompt whose helper started and supervised one collecting
     collector (global-missing, warm snapshot). read/write payloads are cut to
     120 characters; provenance: fixtures/prompt-m3d-collect-trace.md."""
     import gzip
     data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(
-        "prompt-m3d-collect-linux-1.strace.gz").read_bytes())
+        COLLECT_FIXTURE).read_bytes())
     assert hashlib.sha256(data).hexdigest() == "18c030e2e135874a418bc047bc6f0dbe731f5821b2bcd9663afefbd3632c8fab"
     return data.decode().splitlines()
 
 
-def check_collecting_prompt(lines, *, collectors=1, audit=True, platform=None):
+# 이것을 실패시키는 것: live 기본 판정(RESPONSE_HEADERS)이 기록 fixture의 옛 봉투(BNGRES03)를 받는 것. 기록
+# fixture만 provenance 표의 봉투를 명시해 넘긴다(D1 판정). check_collecting_prompt의 headers에 기본값을 다시 두는
+# 것(호출마다 봉투를 밝히지 않아도 됨), headers를 위치 인자로 받는 것.
+def test_live_gate_refuses_a_recorded_envelope():
+    import inspect
+    assert budget.RESPONSE_HEADERS == (b"BNGRES04\x04\x00",)
+    headers = inspect.signature(check_collecting_prompt).parameters["headers"]
+    assert headers.default is inspect.Parameter.empty
+    assert headers.kind is inspect.Parameter.KEYWORD_ONLY
+    check_collecting_prompt(collecting_prompt(), headers=COLLECT_HEADERS)
+    with pytest.raises(AssertionError, match="collection body after invalid header"):
+        check_collecting_prompt(collecting_prompt(), headers=budget.RESPONSE_HEADERS)
+
+
+# 이것을 실패시키는 것: 표에 없는 fixture의 봉투를 시험이 지어내는 것, 표의 봉투가 그 fixture에 실제로 없는 것,
+# 표가 가리키는 provenance 문서가 없는 것.
+def test_recorded_envelope_table_matches_its_fixtures():
+    import csv, gzip
+    fixtures = Path(__file__).with_name("fixtures")
+    rows = list(csv.DictReader((fixtures / "recorded-envelopes.tsv").read_text().splitlines(), delimiter="\t"))
+    assert rows
+    for row in rows:
+        magic, version = row["response_header"].split()
+        text = gzip.decompress((fixtures / row["fixture"]).read_bytes()).decode()
+        assert f'"{magic}\\{version}\\0' in text, row
+        assert (fixtures / row["provenance"]).is_file() and row["fixture"] in (fixtures / row["provenance"]).read_text(), row
+
+
+def check_collecting_prompt(lines, *, headers, collectors=1, audit=True, platform=None):
     roots = [COLLECT_BASE + suffix for suffix in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")]
     inputs = tuple(COLLECT_BASE + suffix for suffix in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore"))
     repo = COLLECT_BASE + "/repo"
     budget.assert_prompt_trace_budget(lines, COLLECT_BASE + "/bin/bingsu", roots, global_inputs=inputs,
+                                      headers=headers,
                                       collector_exe=COLLECT_PIN, collectors=collectors,
                                       repository_roots=[repo, repo + "/.git"] if audit else None,
                                       repository_evidence=[repo + "/.git/HEAD"], platform=platform)
@@ -58,7 +101,7 @@ def insert_before(lines, pattern, extra):
 
 
 def test_collector_stack_guard_seeks_pass_on_x86_64_gnu():
-    check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"))
+    check_collecting_prompt(with_stack_guard_seeks(), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: x86_64 glibc 밖에서, 다른 fd(공유 라이브러리 fd 포함)·다른 모양으로, 표의 횟수를 넘겨,
@@ -82,7 +125,7 @@ def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
         lines = insert_before(collecting_prompt(), f"1098  close({libc}",
                               [f"1098  lseek({libc}, 0, SEEK_CUR) = 832", f"1098  lseek({libc}, 832, SEEK_SET) = 832"])
         with pytest.raises(AssertionError):
-            check_collecting_prompt(lines, platform=platform)
+            check_collecting_prompt(lines, platform=platform, headers=COLLECT_HEADERS)
         return
     if seeks == "lock":  # the inherited collection.lock fd, open at that point
         import re
@@ -90,7 +133,7 @@ def test_collector_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
                     if (m := re.match(r"1098  newfstatat\((5<[^>]*collection\.lock>)", line)))
         seeks = [f"1098  lseek({lock}, 0, SEEK_CUR) = 0"]
     with pytest.raises(AssertionError):
-        check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform)
+        check_collecting_prompt(with_stack_guard_seeks(seeks), platform=platform, headers=COLLECT_HEADERS)
 
 
 FRONT_GUARD = ["1095  lseek(3</proc/1095/maps>, 0, SEEK_CUR) = 2906",
@@ -104,7 +147,7 @@ def with_front_guard_seeks(seeks=FRONT_GUARD):
 
 
 def test_front_stack_guard_seeks_pass_on_x86_64_gnu():
-    check_collecting_prompt(with_front_guard_seeks(), platform=("x86_64", "gnu"))
+    check_collecting_prompt(with_front_guard_seeks(), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: 다른 플랫폼에서, 앞단 자기 maps 아닌 fd에서, 짝 없이 앞단 lseek을 받는 것.
@@ -116,7 +159,7 @@ def test_front_stack_guard_seeks_pass_on_x86_64_gnu():
 ], ids=["aarch64-gnu", "no-platform", "stdout-fd", "unpaired"])
 def test_front_stack_guard_seeks_are_refused_elsewhere(platform, seeks):
     with pytest.raises(AssertionError):
-        check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform)
+        check_collecting_prompt(with_front_guard_seeks(seeks), platform=platform, headers=COLLECT_HEADERS)
 
 
 def front_seeks_after_filter(lines, result="-1 EPERM (Operation not permitted)"):
@@ -135,7 +178,7 @@ def front_seeks_after_filter(lines, result="-1 EPERM (Operation not permitted)")
 @pytest.mark.parametrize("result", ["-1 EPERM (Operation not permitted)", "0"], ids=["eperm", "success"])
 def test_front_stack_guard_seeks_after_the_filter_fail(result):
     with pytest.raises(AssertionError):
-        check_collecting_prompt(front_seeks_after_filter(collecting_prompt(), result), platform=("x86_64", "gnu"))
+        check_collecting_prompt(front_seeks_after_filter(collecting_prompt(), result), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
     cap = collecting_capture(front_seeks_after_filter(collector_deadline_lines(head_open=True), result))
     cap.platform = ("x86_64", "gnu")
     assert budget.deadline_shape(cap) == "collector-deadline"
@@ -161,7 +204,7 @@ def collector_seeks_after_filter():
 # 이것을 실패시키는 것: collector가 prologue에서 연 maps fd로 필터 뒤에 seek하는 것을 받는 것.
 def test_collector_stack_guard_seeks_after_the_filter_fail():
     with pytest.raises(AssertionError, match="collector forbidden effect: lseek"):
-        check_collecting_prompt(collector_seeks_after_filter(), platform=("x86_64", "gnu"))
+        check_collecting_prompt(collector_seeks_after_filter(), platform=("x86_64", "gnu"), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: 작업 종료로 인자가 잘린 helper 경로 호출을 IndexError로 끝내거나 일부 인자로 판정하는 것.
@@ -175,18 +218,18 @@ def test_helper_path_call_cut_short_fails_closed(cut):
     cut = (f'1097  newfstatat(AT_FDCWD</>, "{COLLECT_BASE}/run-t/bingsu/.collections.catalog", '
            " <unfinished ...>") if cut == "after-path" else "1097  newfstatat(AT_FDCWD</>,  <unfinished ...>"
     with pytest.raises(AssertionError, match="cut short by its task's exit.*exited with 0"):
-        check_collecting_prompt(lines[:at] + [cut] + lines[at:])
+        check_collecting_prompt(lines[:at] + [cut] + lines[at:], headers=COLLECT_HEADERS)
 
 
 def test_collecting_prompt_passes_the_path_allowlist():
-    check_collecting_prompt(collecting_prompt())
+    check_collecting_prompt(collecting_prompt(), headers=COLLECT_HEADERS)
     # A thread's interrupted futex wait can resume under strace (seen live once).
     # 이것을 실패시키는 것: helper 경로 표가 restart_syscall의 빈 인자를 해석하려는 것.
     check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
-                                         ["1099  restart_syscall(<... resuming interrupted futex ...>) = 0"]))
+                                         ["1099  restart_syscall(<... resuming interrupted futex ...>) = 0"]), headers=COLLECT_HEADERS)
     # The supervisor's SIGKILL of its own child on a deadline is the one allowed signal.
     check_collecting_prompt(insert_after(collecting_prompt(), "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
-                                         ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0"]))
+                                         ["1099  pidfd_send_signal(33<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0"]), headers=COLLECT_HEADERS)
 
 
 # 이것을 실패시키는 것: collector 수를 정확히 보지 않는 것, 수집하는 collector를 감사 없이 통과시키는 것,
@@ -229,7 +272,7 @@ def test_collecting_prompt_rejects_mutations(damage):
         lines = insert_after(lines, "1099  waitid(P_PIDFD, 33<anon_inode:[pidfd]>",
                              ["1099  restart_syscall(<... resuming interrupted read ...>) = 0"])
     with pytest.raises(AssertionError):
-        check_collecting_prompt(lines, collectors=collectors, audit=audit)
+        check_collecting_prompt(lines, collectors=collectors, audit=audit, headers=COLLECT_HEADERS)
 
 
 # prompt 트리의 read 계열 payload만 줄였다. provenance: fixtures/prompt-e4-trace.md.
@@ -1706,7 +1749,7 @@ def collection_trace(*, absent=False, previous=False):
     if not absent:
         for i in ([3, 4] if previous else [3]):
             path = paths[i]; fd = i + 20
-            header = b"BNGRES03" + struct.pack("<HHII", 3, 64, 36, 0) + bytes(44)
+            header = b"BNGRES04" + struct.pack("<HHII", 4, 64, 36, 0) + bytes(44)
             encoded = ''.join(chr(b) if 32 <= b < 127 and b not in (34,92) else f'\\{b:03o}' for b in header)
             lines.append(f'77 read({fd}<{path}>, "{encoded}", 64) = 64')
             lines.append(f'77 read({fd}<{path}>, "' + 'a'*36 + '", 36) = 36')
@@ -2805,7 +2848,8 @@ def collecting_capture(lines):
         global_inputs=tuple(COLLECT_BASE + s for s in ("/cfg-t/git/config", "/home-t/.gitconfig", "/cfg-t/git/ignore")),
         global_present=False, collectors=1,
         pinned=[COLLECT_BASE + s for s in ("/run-t/bingsu", "/cfg-t/bingsu", "/state-t/bingsu", "/state-t/bingsu/log")],
-        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"))
+        roots=[repo, repo + "/.git"], evidence=[repo + "/.git/HEAD"], platform=("aarch64", "gnu"),
+        headers=COLLECT_HEADERS)
 
 
 def collector_deadline_lines(after_head=False, head_open=False, extra=()):
@@ -3108,7 +3152,8 @@ def stored_marker_capture(name, *, record, edit=lambda lines: lines):
     lines = edit(data.decode().splitlines())
     untimed = budget.strip_trace_times("\n".join(lines)).splitlines()
     return SimpleNamespace(trace=budget.parse_trace("\n".join(untimed)), lines=lines, untimed=untimed,
-                           context=marker_context(base), record=record, invalid=False)
+                           context=marker_context(base), record=record, invalid=False,
+                           headers=recorded_headers(fixture))
 
 
 def insert_front_open(lines, path):
@@ -3164,7 +3209,8 @@ def silent_deadline_capture(lines=None):
         assert hashlib.sha256(data).hexdigest() == "fec18b40e9f44e7ea3010ac4d28ef36984f20f439e854556edf644ab89b68a68"
         lines = data.decode().splitlines()
     return SimpleNamespace(trace=budget.parse_trace("\n".join(lines)), lines=lines, untimed=lines,
-                           context=KEEP19_CONTEXT, record=b"", invalid=True)
+                           context=KEEP19_CONTEXT, record=b"", invalid=True,
+                           headers=recorded_headers("prompt-m3d-front-silent-deadline-linux.strace.gz"))
 
 
 def keep19_with_alarm(extra=()):

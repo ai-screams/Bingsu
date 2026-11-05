@@ -1661,7 +1661,7 @@ def test_shipped_collector_ready_has_installed_limits(preparation, tmp_path):
                     chunk = os.read(child.stdout.fileno(), 104 - len(ready))
                     assert chunk, "shipped collector exited before Ready"
                     ready.extend(chunk)
-                assert ready[:8] == b"BNGIPC05" and ready[10] == 1, ready
+                assert ready[:8] == b"BNGIPC06" and ready[10] == 1, ready
                 baseline, = struct.unpack_from("<Q", ready, 96)
                 assert baseline > 0
                 if sys.platform == "linux":
@@ -2049,7 +2049,7 @@ def test_security_fuzz_job_is_pinned_and_covers_every_target():
     # The [[bin]] targets only: the [[bench]] target is not a fuzz target.
     bins = tomllib.loads((FUZZ / "Cargo.toml").read_text())["bin"]
     targets = [b["name"] for b in bins if b["name"] != "write-seeds"]
-    assert sorted(targets) == sorted(p.stem for p in (FUZZ / "fuzz_targets").glob("*.rs")) and len(targets) == 10
+    assert sorted(targets) == sorted(p.stem for p in (FUZZ / "fuzz_targets").glob("*.rs")) and len(targets) == 11
     assert_fuzz_job((ROOT / ".github/workflows/security.yml").read_text(), targets)
 
 
@@ -2080,7 +2080,7 @@ def test_security_fuzz_job_rejects_mutations(old, new):
         assert block.count(old) >= 1, old
         changed = text.split("\n  fuzz:\n")[0] + "\n  fuzz:\n" + block.replace(old, new, 1)
     targets = [p.stem for p in sorted((FUZZ / "fuzz_targets").glob("*.rs"))]
-    order = ["index", "pack", "config", "attributes", "ignore", "refs", "commit_objects", "multi_pack_index", "gitdir", "commondir"]
+    order = ["index", "pack", "config", "attributes", "ignore", "refs", "commit_objects", "multi_pack_index", "gitdir", "commondir", "language"]
     assert sorted(targets) == sorted(order)
     with pytest.raises((AssertionError, KeyError, TypeError, ValueError)):
         assert_fuzz_job(changed, order)

@@ -4,6 +4,7 @@ pub mod breaker;
 pub mod budget;
 pub mod cwd_hash;
 pub mod git;
+pub mod language;
 pub mod path_facts;
 pub mod response;
 pub mod selection;
@@ -202,6 +203,7 @@ pub fn request(
         environment: Vec::new(),
         global_excludes_known: false,
         global_excludes: Vec::new(),
+        languages: Vec::new(),
     };
     request.encode_body()?;
     Ok(Some(request))

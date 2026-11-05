@@ -29,6 +29,7 @@ fn request() -> Request {
     let mut path = vec![b'a'; 65_536];
     path[0] = b'/';
     Request {
+        languages: Vec::new(),
         request_id: M3B_REQUEST_ID,
         binding: Binding {
             path_query: Default::default(),
@@ -59,25 +60,33 @@ fn request_bytes() -> Vec<u8> {
 }
 fn completed() -> Completed {
     let r = request();
-    let mut rest = 65_294 - 266;
+    let mut c = Completed {
+        language_queries: Vec::new(),
+        languages: Vec::new(),
+        progress: Default::default(),
+        request_id: r.request_id,
+        binding: r.binding,
+        completed_at_ns: 99,
+        reason: EndReason::Deadline,
+        updates: vec![],
+    };
+    // The update fills what the stored response leaves after everything
+    // else (the language section included); 266 bytes of it are the update's
+    // own framing of 32 text fields.
+    let base = c.encode_with_catalog(&CATALOG).unwrap().len();
+    let mut rest = wire::STREAM_MAX - base - 266;
     let mut fields = vec![];
     for _ in 0..32 {
         let n = rest.min(4096);
         rest -= n;
         fields.push(Field::text(&vec![b'a'; n], 4096, WidthProfile::DEFAULT));
     }
-    Completed {
-        progress: Default::default(),
-        request_id: r.request_id,
-        binding: r.binding,
-        completed_at_ns: 99,
-        reason: EndReason::Deadline,
-        updates: vec![Update {
-            facts: None,
-            segment: 31,
-            value: Some(Value::new(b"", fields)),
-        }],
-    }
+    c.updates.push(Update {
+        facts: None,
+        segment: 31,
+        value: Some(Value::new(b"", fields)),
+    });
+    c
 }
 fn response_bytes() -> Vec<u8> {
     let b = completed().encode_with_catalog(&CATALOG).unwrap();
@@ -95,7 +104,7 @@ fn cwd(n: usize) -> Vec<u8> {
 }
 fn prefix() -> [u8; 80] {
     let mut p = [0; 80];
-    p[..8].copy_from_slice(b"BNGIPC05");
+    p[..8].copy_from_slice(b"BNGIPC06");
     p[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     p
 }

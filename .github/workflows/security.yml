@@ -101,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [index, pack, config, attributes, ignore, refs, commit_objects, multi_pack_index, gitdir, commondir]
+        target: [index, pack, config, attributes, ignore, refs, commit_objects, multi_pack_index, gitdir, commondir, language]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

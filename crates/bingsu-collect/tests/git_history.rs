@@ -1850,6 +1850,7 @@ fn request(work: &Fixture) -> bingsu_core::collection::wire::Request {
     };
     let cwd = work.0.as_os_str().as_bytes().to_vec();
     Request {
+        languages: Vec::new(),
         request_id: M3B_REQUEST_ID,
         budget_ms: 50,
         environment: vec![],
