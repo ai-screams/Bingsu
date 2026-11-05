@@ -438,6 +438,26 @@ fn refusal_of_line(line: &[u8]) -> ScriptRefusal {
     ScriptRefusal::Env
 }
 
+/// Why a refused file's first line refused it, if it did: a head
+/// `rule::head` refuses, or an interpreter that is `/usr/bin/env` under
+/// another name.
+fn script_refusal(first: &[u8]) -> Option<ScriptRefusal> {
+    match rule::head(first) {
+        Head::Native => None,
+        // Fails without it: explain_names_why_a_script_is_refused (the
+        // reason of each refused head).
+        Head::Refused => Some(head_refusal(first)),
+        Head::Script(line) => {
+            let word = Path::new(OsStr::from_bytes(line.interpreter));
+            // Fails without it: test_env_shebang_warned (`/bin/env` on
+            // merged /usr).
+            let env = std::fs::canonicalize(word)
+                .is_ok_and(|p| p.as_os_str().as_bytes() == b"/usr/bin/env");
+            env.then_some(ScriptRefusal::Env)
+        }
+    }
+}
+
 /// `lookup_open` for `config check --explain` and W411: the same search
 /// and checks, reporting why a found file is refused.
 pub fn explain(
@@ -461,46 +481,23 @@ pub fn explain(
             .collect(),
     };
     for path in candidates {
-        let (found, checked) = match resolve_checked(&path, repo, me, groups) {
+        // The decision is the executor's own (`resolve_open`); a refused
+        // file is read again only to name why.
+        match resolve_open(&path, repo, me, groups) {
             Err(Miss::Absent) => continue,
+            Ok((found, _)) => return Explained::Runs(found),
             Err(Miss::Refused) => {
+                let checked = resolve_checked(&path, repo, me, groups).ok();
+                let script = checked
+                    .as_ref()
+                    .and_then(|(_, c)| first_bytes(c).ok().flatten())
+                    .and_then(|first| script_refusal(&first));
                 return Explained::Refused {
-                    file: Some(path),
-                    script: None,
+                    file: Some(checked.map_or(path, |(found, _)| found.executable)),
+                    script,
                 };
             }
-            Ok(hit) => hit,
-        };
-        let refused = |script| Explained::Refused {
-            file: Some(found.executable.clone()),
-            script,
-        };
-        let Ok(first) = first_bytes(&checked) else {
-            return refused(None);
-        };
-        let Some(first) = first else {
-            return Explained::Runs(found);
-        };
-        return match rule::head(&first) {
-            Head::Native => Explained::Runs(found),
-            // Fails without it: explain_names_why_a_script_is_refused (the
-            // reason of each refused head).
-            Head::Refused => refused(Some(head_refusal(&first))),
-            Head::Script(line) => match interpreter(line, repo, me, groups) {
-                Ok(i) => Explained::Runs(Found {
-                    interpreter: Some(i),
-                    ..found
-                }),
-                Err(_) => {
-                    let word = Path::new(OsStr::from_bytes(line.interpreter));
-                    // Fails without it: explain_names_why_a_script_is_refused
-                    // (`/bin/env` on merged /usr).
-                    let env = std::fs::canonicalize(word)
-                        .is_ok_and(|p| p.as_os_str().as_bytes() == b"/usr/bin/env");
-                    refused(env.then_some(ScriptRefusal::Env))
-                }
-            },
-        };
+        }
     }
     Explained::Absent
 }

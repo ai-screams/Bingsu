@@ -626,3 +626,42 @@ fn explain_names_why_a_script_is_refused() {
         }
     }
 }
+
+// 셸 단위는 /bin/sh를, 상대 이름(`./tool`)은 찾지 않고 거부로, 언어 단위는 그 종류로 보인다. 이것을 실패시키는 것:
+// 셸 단위의 첫 단어를 argv에서 찾는 것(실행 파일 줄이 없음), 거부된 이름을 "찾지 못함"으로 보이는 것, 언어 단위를
+// command로 보이는 것.
+#[test]
+fn explain_shows_shell_relative_and_language_units() {
+    let e = Env::new("cli_config", "explain-kinds");
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
+    );
+    let (_, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
+    let section = |id: &str| {
+        let start = stdout
+            .find(&format!("\n{id}  "))
+            .unwrap_or_else(|| panic!("{id}: {stdout}"));
+        let rest = &stdout[start + 1..];
+        let end = rest[1..].find("\ncustom/").map_or(rest.len(), |i| i + 1);
+        rest[..end].to_owned()
+    };
+    // The file /bin/sh is (dash on Debian).
+    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+    let sh = section("custom/sh");
+    assert!(
+        sh.lines().any(|l| l.trim_start().starts_with("executable")
+            && l.trim_end().ends_with(shell.to_str().unwrap())),
+        "{sh}"
+    );
+    let rel = section("custom/rel");
+    assert!(
+        rel.lines()
+            .any(|l| l.trim_start().starts_with("executable") && l.contains("refused")),
+        "{rel}"
+    );
+    assert!(
+        section("custom/lang").starts_with("custom/lang  language"),
+        "{stdout}"
+    );
+}
