@@ -12,17 +12,20 @@ import sys
 import time
 
 import pytest
-from test_command_round import CommandSession, OTHER, SESSION, config, ready, supervisors, until
+from test_command_round import CommandSession, OTHER, config, lock_of, ready, supervisors, until
 
 atomic_cell = pytest.mark.skipif(
     sys.platform != "linux" or os.environ.get("BINGSU_CGROUP_CELL") != "priv",
     reason="needs the privileged cgroup cell (BINGSU_CGROUP_CELL=priv)")
 
 
-def parent(session=SESSION):
-    """The session's cgroup parent under this process's cgroup (the helper inherits it)."""
+def parent(cs):
+    """The session's cgroup parent under this process's cgroup (the helper inherits it): its
+    digest covers the runtime root's (dev, ino), where the session lock lives, and the session."""
     line = next(l for l in Path("/proc/self/cgroup").read_text().splitlines() if l.startswith("0::"))
-    digest = hashlib.sha256(session.encode()).digest()[:16].hex()
+    root = os.stat(cs.neutral().parent)
+    key = root.st_dev.to_bytes(8, "little") + root.st_ino.to_bytes(8, "little") + b"\0" + cs.session.encode()
+    digest = hashlib.sha256(key).digest()[:16].hex()
     return Path("/sys/fs/cgroup" + line[3:].rstrip("/")) / f"bingsu-cmd-{digest}"
 
 
@@ -66,14 +69,14 @@ def test_reclaim_after_supervisor_sigkill(tmp_path):
     os.kill(helper, signal.SIGSTOP)
     os.kill(supervisor, signal.SIGKILL)
     os.kill(helper, signal.SIGKILL)
-    leftover = units(parent())
+    leftover = units(parent(session))
     assert leftover and alive(old), "the old target must outlive its supervisor"
     pidfile.unlink()
     session.prompt()
     new = started(pidfile)
     # The reclaim ran under the lock, before this round's supervisor.
     assert new != old and not alive(old)
-    assert not set(leftover) & set(units(parent()))
+    assert not set(leftover) & set(units(parent(session)))
     session.wait_quiet(timeout=8)
 
 
@@ -90,7 +93,7 @@ def test_round_removes_its_own_cgroups(tmp_path):
     ready(session)
     session.wait_quiet(timeout=8)
     assert made.exists(), "the unit made no nested cgroup"
-    assert units(parent()) == []
+    assert units(parent(session)) == []
 
 
 # 회수는 잠금을 쥔 도우미만 한다. 살아 있는 감독의 명령은 같은 세션의 다음 프롬프트(잠금 경합)도, 다른
@@ -183,14 +186,14 @@ def test_orphan_live_descendant_reclaimed(tmp_path):
         inner.send_signal(signal.SIGSTOP)
         go.touch()
         session.wait_quiet(timeout=8)
-        stuck = units(parent())
+        stuck = units(parent(session))
         if not stuck:
             pytest.skip("BLOCKED: the descendant did not survive cgroup.kill on this kernel and FUSE")
         inner.send_signal(signal.SIGCONT)
         go.unlink()
         session.prompt()
         session.wait_quiet(timeout=8)
-        assert not set(stuck) & set(units(parent())), "the survivor's cgroup stayed after the daemon came back"
+        assert not set(stuck) & set(units(parent(session))), "the survivor's cgroup stayed after the daemon came back"
     finally:
         for d in (inner, daemon):
             d.send_signal(signal.SIGCONT)
@@ -211,3 +214,101 @@ def test_best_effort_group_kill_under_the_filter(tmp_path):
     session.wait_quiet(timeout=8)
     descendant = started(pidfile)
     assert until(lambda: not alive(descendant), timeout=2.0), "the target's descendant outlived its unit"
+
+
+def leave_a_live_unit(session, pidfile, seconds=3):
+    """Kill a running round's supervisor and helper: its unit keeps running in its cgroup."""
+    session.prompt()
+    old = started(pidfile)
+    supervisor, helper = until(lambda: supervisors())[0]
+    os.kill(helper, signal.SIGSTOP)
+    os.kill(supervisor, signal.SIGKILL)
+    os.kill(helper, signal.SIGKILL)
+    return old
+
+
+# 잠금과 cgroup 부모가 같은 정체에 묶인다: 같은 세션 값이라도 런타임 뿌리가 다른 helper는 잠금도 부모도
+# 따로라 서로의 살아 있는 단위를 회수하지 않는다. 이것을 실패시키는 것: 부모 이름 요약에서 런타임 뿌리를 빼는
+# 것(다른 잠금을 쥔 helper가 같은 부모를 회수해 살아 있는 대상을 죽임).
+@atomic_cell
+def test_runtime_roots_never_share_a_cgroup_parent(tmp_path):
+    a = CommandSession(tmp_path / "a")
+    b = CommandSession(tmp_path / "b")
+    for s in (a, b):
+        s.put(own_pid_unit(s.base / "pid", 3))
+        ready(s)
+        s.wait_quiet(timeout=8)
+        (s.base / "pid").unlink(missing_ok=True)
+    assert a.session == b.session and parent(a) != parent(b)
+    a.prompt()
+    target = started(a.base / "pid")
+    b.prompt()
+    time.sleep(0.3)
+    assert alive(target), "a helper with another runtime root reclaimed this round's live unit"
+    a.wait_quiet(timeout=8)
+    b.wait_quiet(timeout=8)
+
+
+# 회차 끝 회수는 감독의 reap을 확인했을 때만 한다. 마감까지 멈춰 있던 감독의 회차는 회수하지 않고, 그 감독이
+# 끝난 뒤 같은 세션 다음 helper가 잠금 직후 회수한다. 이것을 실패시키는 것: Round::end의 회수를 wait의 결과와
+# 무관하게 하는 것(멈춘 감독의 단위가 그 회차에 제거됨).
+@atomic_cell
+def test_round_end_reclaims_only_after_the_supervisor_is_reaped(tmp_path):
+    session = CommandSession(tmp_path)
+    pidfile = session.base / "pid"
+    session.put(own_pid_unit(pidfile, 3))
+    ready(session)
+    session.wait_quiet(timeout=8)
+    pidfile.unlink(missing_ok=True)
+    session.prompt()
+    target = started(pidfile)
+    supervisor, _ = until(lambda: [(s, p) for s, p in supervisors() if lock_of(s) is not None])[0]
+    os.kill(supervisor, signal.SIGSTOP)
+    session.wait_quiet(timeout=8)
+    assert units(parent(session)) and alive(target), "a round reclaimed without reaping its supervisor"
+    # Still stopped, it holds the session lock; once it runs again it ends
+    # its unit, and the next round's reclaim under the lock removes it.
+    os.kill(supervisor, signal.SIGCONT)
+    assert until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=3.0)
+    pidfile.unlink()
+    session.prompt()
+    started(pidfile)
+    assert not alive(target)
+    session.wait_quiet(timeout=8)
+
+
+# 회수는 잠금 바로 다음, 중립 폴더 검사 같은 조기 반환보다 앞이다. 이것을 실패시키는 것: prepare의 회수를 중립
+# 폴더 검사 뒤로 옮기는 것(모든 단위가 중립 폴더라 그 회차가 Skip::Neutral로 끝나고 잔여물이 남음).
+@atomic_cell
+def test_reclaim_runs_before_the_neutral_check(tmp_path):
+    session = CommandSession(tmp_path)
+    pidfile = session.base / "pid"
+    session.put(own_pid_unit(pidfile, 3))
+    ready(session)
+    session.wait_quiet(timeout=8)
+    pidfile.unlink(missing_ok=True)
+    old = leave_a_live_unit(session, pidfile)
+    (session.neutral() / "stray").write_text("x")
+    session.prompt()
+    assert until(lambda: not alive(old), timeout=2.0), "a round refused by its neutral folder left the leftovers"
+    session.wait_quiet(timeout=8)
+
+
+# 원자 경로의 감독은 fd 6(세션 cgroup 부모)을 close-on-exec로 쥔다. 그래서 clone3로 띄운 중계에도, 그
+# 대상에도 넘어가지 않는다(대상 {0,1,2}). 이것을 실패시키는 것: 감독 run()의 fd 6 FD_CLOEXEC 설정을 지우는 것.
+@atomic_cell
+def test_supervisor_keeps_its_cgroup_parent_from_children(tmp_path):
+    session = CommandSession(tmp_path)
+    pidfile = session.base / "pid"
+    session.put(own_pid_unit(pidfile, 3))
+    ready(session)
+    session.wait_quiet(timeout=8)
+    pidfile.unlink(missing_ok=True)
+    session.prompt()
+    target = started(pidfile)
+    supervisor, _ = until(lambda: [(s, p) for s, p in supervisors() if lock_of(s) is not None])[0]
+    flags = next(l for l in Path(f"/proc/{supervisor}/fdinfo/6").read_text().splitlines() if l.startswith("flags:"))
+    fds = sorted(int(n) for n in os.listdir(f"/proc/{target}/fd"))
+    assert int(flags.split()[1], 8) & os.O_CLOEXEC, flags
+    assert fds == [0, 1, 2], fds
+    session.wait_quiet(timeout=8)
