@@ -1504,20 +1504,31 @@ HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
 # without dir or git. The miss runs it (no cache: every round); the hit finds
 # the warm-up's result inside its cache time; not_run keeps the unit off the
 # screen. All three take the session lock and reclaim (C4 ruling Q4; the
-# security review's R-1 names both rounds with nothing to run). The helper
-# reads /proc/self/cgroup there, which the helper path rules admit under
-# /proc/self/ (C3 ruling R3: the input of the atomic path's decision, the
-# delegated cgroup subpath; 2026-11-05 lead ruling).
+# security review's R-1 names both rounds with nothing to run). Paths the
+# helper reaches in these rounds, and why:
+#   /proc/self/cgroup: the atomic path's input, the delegated cgroup subpath
+#     (C3 ruling R3); the helper path rules admit it under /proc/self/.
+#   /sys/fs/cgroup/<own>, its cgroup.procs, the session parent bingsu-cmd-*
+#     and its unit cgroups: the helper's reclaim under the session lock (C3
+#     ruling R1, CMD-CGROUP-PROCS); uname is the 5.14 check before them.
+#   /proc/self/fd, /dev/null (three opens) and chdir("/"): the supervisor
+#     spawn's fd census and its posix_spawn child before exec, as the
+#     collector spawn (miss only).
+#   /usr and /usr/bin walks and the target's header pread: exec_path's
+#     PATH and target checks (C2; miss only).
+#   the collection catalog, GC lock, store folders, collection.lock,
+#     command and .command.stage: the response store (C4 ruling P1) and the
+#     GC after publication (hit reads the response only).
 COMMAND_UNIT = "[segment.\"custom/probe\"]\nkind='command'\ncommand=['/usr/bin/true']\n"
 COMMAND_SCREEN = "[layout.line1]\nleft=['char']\n[layout.line2]\nleft=[{shown}'char']\n"
 COMMAND_PATH = "/usr/bin"
 TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\ntemplate='EDIT {char}'\n",
              "collect": "[style]\ntemplate='BASE {dir} {git} {char}'\n", "broken": "[broken"}
-# 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
-# 80 selects a variant past INDEX's chunk, with more variants after it.
 TEMPLATES["command_miss"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="'custom/probe', ")
 TEMPLATES["command_hit"] = COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="'custom/probe', ")
 TEMPLATES["command_not_run"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="")
+# 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
+# 80 selects a variant past INDEX's chunk, with more variants after it.
 TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
                              f"[layout.when.b{i:02}.style]\ntemplate='{'x' * 600} {{char}}'\n" for i in range(64))
 
@@ -1762,9 +1773,8 @@ class HelperStageFixture:
             # A unit off the screen never ran: no response, no lookup.
             responses = list((self.store / "collections-v1").glob("*/store/command"))
             assert len(responses) == int(stage != "command_not_run"), ("command responses after warm-up", responses)
-            self.response = responses[0] if responses else None
             procs = own_cgroup() / "cgroup.procs"
-            self.command = {"command_bytes": self.response.stat().st_size if responses else 0,
+            self.command = {"command_bytes": responses[0].stat().st_size if responses else 0,
                             "catalog_bytes": (Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu/.collections.catalog").stat().st_size
                             if responses else 0,
                             "cgroup_procs_bytes": len(procs.read_bytes()),
