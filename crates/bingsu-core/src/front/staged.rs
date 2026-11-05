@@ -10,7 +10,7 @@ use crate::collection::{
 };
 use crate::color::palette::Mode;
 use crate::command::response as command;
-use crate::config::compile::ExecUnit;
+use crate::config::compile::{CustomKind, ExecUnit};
 use crate::envelope::{self, Envelope, EnvelopeError};
 use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
 use crate::layout_view::FrontConfig;
@@ -479,7 +479,7 @@ impl ReadPlan {
                 s.config
                     .custom
                     .iter()
-                    .any(|c| c.kind == crate::config::compile::CustomKind::Command)
+                    .any(|c| c.kind == CustomKind::Command)
             })
     }
     fn width(&self) -> u16 {
@@ -934,7 +934,6 @@ fn command_values(
     eligible: bool,
 ) -> Vec<Option<String>> {
     use crate::command::{display, env_frame, plan::Environ};
-    use crate::config::compile::CustomKind;
     use crate::handoff::Origin;
     let Some(selected) = observed.selected.as_ref() else {
         return Vec::new();

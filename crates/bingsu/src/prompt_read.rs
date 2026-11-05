@@ -894,7 +894,8 @@ pub(crate) mod tests {
                 Some(deadline),
                 None,
             );
-            assert!(p.collections.iter().all(Option::is_some));
+            // No command response here: only the two collection copies.
+            assert!(p.collections[..2].iter().all(Option::is_some));
             // Supply only the test worker catalog, never override the entry
             // chosen by the adapter under test.
             p.plan = p.plan.with_catalog(
@@ -932,9 +933,10 @@ pub(crate) mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: cwd 길이에 따라 open 수를 늘리거나 descriptor 검증·NOFOLLOW를 빼는 것.
+    // 이것을 실패시키는 것: cwd 길이에 따라 open 수를 늘리거나 descriptor 검증·NOFOLLOW를 빼는 것, command
+    // 사본을 store 밖에서 여는 것.
     #[test]
-    fn collection_prefetch_has_five_fixed_path_opens() {
+    fn collection_prefetch_has_six_fixed_path_opens() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         for cwd in [
             b"/".to_vec(),
@@ -944,6 +946,9 @@ pub(crate) mod tests {
             let (f, b, path) = collection_fixture(&cwd);
             publish_fixture(&f, &b, 98, b"PREVIOUS");
             publish_fixture(&f, &b, 99, b"CURRENT");
+            // Prefetch takes the command copy by its size alone (C4b ruling Q1).
+            fs::write(path.join("command"), [0; 64]).unwrap();
+            fs::set_permissions(path.join("command"), fs::Permissions::from_mode(0o600)).unwrap();
             let p = fixture_prepared(&f, 100);
             let events = collection_events();
             let opens: Vec<_> = events
@@ -953,20 +958,21 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(opens.len(), 5, "{events:?}");
+            assert_eq!(opens.len(), 6, "{events:?}");
             let names = [
                 b"collections-v1".to_vec(),
                 b.components()[1].as_bytes().to_vec(),
                 b"store".to_vec(),
                 b"response".to_vec(),
                 b"previous".to_vec(),
+                b"command".to_vec(),
             ];
             for (i, (base, name, flags, fd)) in opens.iter().enumerate() {
                 assert_eq!(**name, names[i]);
                 assert!(*base >= 0 && *fd >= 0);
                 assert_eq!(*flags, if i < 3 { DIRECTORY_FLAGS } else { DATA_FLAGS });
                 if i > 0 {
-                    assert_eq!(*base, opens[if i == 4 { 2 } else { i - 1 }].3);
+                    assert_eq!(*base, opens[if i >= 4 { 2 } else { i - 1 }].3);
                 }
                 assert!(matches!(&events[i*2+1], Event::Facts(n) if n == fd));
             }

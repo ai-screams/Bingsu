@@ -70,7 +70,9 @@ fn the_prompt_path_never_reads_config() {
     for (name, text) in PROMPT_PATH {
         let text = match name {
             "front.rs" => text.replace("use crate::config::compile::CompiledConfig;", ""),
-            "front/staged.rs" => text.replace("use crate::config::compile::ExecUnit;", ""),
+            "front/staged.rs" => {
+                text.replace("use crate::config::compile::{CustomKind, ExecUnit};", "")
+            }
             "layout_view.rs" => text.replace(
                 "use crate::config::compile::{CompiledConfig, CustomKind, CustomSegment, ExecUnit, Setup};",
                 "",
