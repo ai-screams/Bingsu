@@ -466,7 +466,7 @@ fn v4_max_binding_leaves_65292_update_bytes() {
     };
     let bytes = c.encode_with_catalog(&C).unwrap();
     assert_eq!(bytes.len(), 262_144);
-    assert_eq!(&bytes[..10], b"BNGRES04\x04\0");
+    assert_eq!(&bytes[..10], b"BNGRES05\x05\0");
     assert_eq!(bytes.len() - 65_292 - 64 - 2, 196_786);
     assert_eq!(Completed::decode_with_catalog(&bytes, &C), Ok(c.clone()));
     let mut expanded = bytes;

@@ -98,8 +98,8 @@ impl Completed {
             l.put(&mut out);
         }
         let mut out = wire::checked_encoding(out, len)?;
-        out[..8].copy_from_slice(b"BNGRES04");
-        out[8..10].copy_from_slice(&4u16.to_le_bytes());
+        out[..8].copy_from_slice(b"BNGRES05");
+        out[8..10].copy_from_slice(&5u16.to_le_bytes());
         out[10..12].copy_from_slice(&(HEADER as u16).to_le_bytes());
         out[12..16].copy_from_slice(&((len - HEADER) as u32).to_le_bytes());
         let crc = snapshot::crc32c(&[&out[HEADER..]]);
@@ -211,10 +211,10 @@ pub fn declared_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if bytes.len() > STREAM_MAX {
         return Err(ProtocolError::Budget);
     }
-    if &bytes[..8] != b"BNGRES04" {
+    if &bytes[..8] != b"BNGRES05" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 4u16.to_le_bytes() {
+    if bytes[8..10] != 5u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
     if bytes[10..12] != (HEADER as u16).to_le_bytes() || bytes[20..HEADER].iter().any(|b| *b != 0) {

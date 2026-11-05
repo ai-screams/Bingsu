@@ -290,7 +290,7 @@ fn language_results_must_fit_the_query() {
 }
 
 // 저장 응답 왕복과 봉투 버전. 이것을 실패시키는 것: Completed가 언어 절을 쓰지 않는 것, decode가 검사를 건너뛰는
-// 것(질의 밖 결과를 받는 것), 옛 BNGRES03를 받는 것.
+// 것(질의 밖 결과를 받는 것), 옛 BNGRES04를 받는 것.
 #[test]
 fn stored_responses_keep_the_language_section() {
     let r = request(vec![BUILTIN[1].query(), BUILTIN[3].query()]);
@@ -306,17 +306,17 @@ fn stored_responses_keep_the_language_section() {
         [0, 1]
     );
     let bytes = c.encode_with_catalog(&CATALOG).unwrap();
-    assert_eq!(&bytes[..10], b"BNGRES04\x04\0");
+    assert_eq!(&bytes[..10], b"BNGRES05\x05\0");
     let back = Completed::decode_with_catalog(&bytes, &CATALOG).unwrap();
     assert_eq!(back, c);
     let mut old = bytes.clone();
-    old[..8].copy_from_slice(b"BNGRES03");
+    old[..8].copy_from_slice(b"BNGRES04");
     assert_eq!(
         Completed::decode_with_catalog(&old, &CATALOG),
         Err(E::Magic)
     );
     let mut old = bytes.clone();
-    old[8] = 3;
+    old[8] = 4;
     assert_eq!(
         Completed::decode_with_catalog(&old, &CATALOG),
         Err(E::Version)
@@ -326,18 +326,18 @@ fn stored_responses_keep_the_language_section() {
     assert_eq!(outside.encode_with_catalog(&CATALOG), Err(E::Schema));
 }
 
-// 옛 IPC 봉투(BNGIPC05)는 거부한다. 이것을 실패시키는 것: frame_len이 옛 magic이나 version 5를 받는 것.
+// 옛 IPC 봉투(BNGIPC06)는 거부한다. 이것을 실패시키는 것: frame_len이 옛 magic이나 version 6을 받는 것.
 #[test]
 fn old_ipc_frames_are_refused() {
     let r = request(vec![]);
     let mut out = [0; wire::FRAME_MAX];
     let n = wire::encode_frame(frame(&r, Kind::Complete, &[]), &mut out).unwrap();
-    assert_eq!(&out[..10], b"BNGIPC06\x06\0");
+    assert_eq!(&out[..10], b"BNGIPC07\x07\0");
     let mut old = out[..n].to_vec();
-    old[..8].copy_from_slice(b"BNGIPC05");
+    old[..8].copy_from_slice(b"BNGIPC06");
     assert_eq!(wire::decode_frame(&old), Err(E::Magic));
     let mut old = out[..n].to_vec();
-    old[8] = 5;
+    old[8] = 6;
     assert_eq!(wire::decode_frame(&old), Err(E::Version));
 }
 

@@ -87,10 +87,10 @@ pub fn frame_len(bytes: &[u8]) -> Result<usize, ProtocolError> {
     if total > FRAME_MAX {
         return Err(ProtocolError::Length);
     }
-    if &bytes[..8] != b"BNGIPC06" {
+    if &bytes[..8] != b"BNGIPC07" {
         return Err(ProtocolError::Magic);
     }
-    if bytes[8..10] != 6u16.to_le_bytes() {
+    if bytes[8..10] != 7u16.to_le_bytes() {
         return Err(ProtocolError::Version);
     }
     if !(1..=8).contains(&bytes[10]) {
@@ -147,8 +147,8 @@ pub fn decode_eof(bytes: &[u8]) -> Result<Frame<'_>, ProtocolError> {
 }
 pub fn encode_frame(frame: Frame<'_>, out: &mut [u8; FRAME_MAX]) -> Result<usize, ProtocolError> {
     let len = frame_size(frame)?;
-    out[..8].copy_from_slice(b"BNGIPC06");
-    out[8..10].copy_from_slice(&6u16.to_le_bytes());
+    out[..8].copy_from_slice(b"BNGIPC07");
+    out[8..10].copy_from_slice(&7u16.to_le_bytes());
     out[10] = frame.kind.tag();
     out[11] = 0;
     out[12..16].copy_from_slice(&(frame.payload.len() as u32).to_le_bytes());

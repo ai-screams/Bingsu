@@ -182,9 +182,9 @@ fn frame_length_is_checked_before_allocation() {
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].fill(0);
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC06");
+    bad[..8].copy_from_slice(b"BNGIPC07");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 6;
+    bad[8] = 7;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -485,9 +485,9 @@ fn protocol_rejects_duplicate_id_field_and_order() {
     assert_eq!(wire::decode_frame(&bad), Err(E::Length));
     bad[12..16].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(wire::decode_frame(&bad), Err(E::Magic));
-    bad[..8].copy_from_slice(b"BNGIPC06");
+    bad[..8].copy_from_slice(b"BNGIPC07");
     assert_eq!(wire::decode_frame(&bad), Err(E::Version));
-    bad[8] = 6;
+    bad[8] = 7;
     assert_eq!(wire::decode_frame(&bad), Err(E::Kind));
     bad[10] = 6;
     assert_eq!(wire::decode_frame(&bad), Err(E::Flags));
@@ -565,8 +565,8 @@ fn mixed_build_or_version_exits_without_reply() {
     assert_eq!(t.request_sent(), Err(E::Order));
     let mut bytes = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::Ready, &ready(r.binding.mask)), &mut bytes).unwrap();
-    // Mutation: accept an old or future version after the v6 schema change.
-    for v in [0u16, 1, 2, 3, 4, 5, 7] {
+    // Mutation: accept an old or future version after the v7 schema change.
+    for v in [0u16, 1, 2, 3, 4, 5, 6, 8] {
         let mut b = bytes[..n].to_vec();
         b[8..10].copy_from_slice(&v.to_le_bytes());
         assert_eq!(wire::decode_frame(&b), Err(E::Version));
@@ -1033,7 +1033,7 @@ fn untrusted_text_is_resanitized() {
 fn global_excludes_v6_golden_and_limits() {
     let mut r = request(false);
     r.global_excludes = b".DS_Store\n".to_vec();
-    let hex = include_str!("../../../tests/golden/collection/request-v6.hex").trim();
+    let hex = include_str!("../../../tests/golden/collection/request-v7.hex").trim();
     let golden: Vec<_> = hex
         .as_bytes()
         .chunks_exact(2)
@@ -1046,11 +1046,11 @@ fn global_excludes_v6_golden_and_limits() {
     );
     let mut buffer = [0; 65_536];
     let n = wire::encode_frame(frame(&r, Kind::RequestEnd, &[0; 4]), &mut buffer).unwrap();
-    assert_eq!(&buffer[..12], b"BNGIPC06\x06\0\x04\0");
+    assert_eq!(&buffer[..12], b"BNGIPC07\x07\0\x04\0");
     buffer[7] = b'4';
     assert_eq!(wire::decode_frame(&buffer[..n]), Err(E::Magic));
-    buffer[7] = b'6';
-    buffer[8] = 5;
+    buffer[7] = b'7';
+    buffer[8] = 6;
     assert_eq!(wire::decode_frame(&buffer[..n]), Err(E::Version));
     // The excludes' length field, before 10 pattern bytes and the
     // one-byte (empty) language section.
@@ -1133,11 +1133,11 @@ fn global_excludes_empty_knowledge_goldens() {
     for (known, hex) in [
         (
             true,
-            include_str!("../../../tests/golden/collection/request-v6-missing.hex"),
+            include_str!("../../../tests/golden/collection/request-v7-missing.hex"),
         ),
         (
             false,
-            include_str!("../../../tests/golden/collection/request-v6-unknown.hex"),
+            include_str!("../../../tests/golden/collection/request-v7-unknown.hex"),
         ),
     ] {
         let mut r = request(false);
