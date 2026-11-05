@@ -125,8 +125,8 @@ fn run_prompt(
         exit(0)
     }
     let rec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));
-        let staged = crate::prompt_read::prepare(&raw, deadline);
+        let environment = crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));
+        let staged = crate::prompt_read::prepare(&raw, deadline, environment);
         if front::runs_core(enter_sandbox()) {
             respond(staged())
         } else {
