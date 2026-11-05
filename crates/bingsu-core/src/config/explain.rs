@@ -30,6 +30,14 @@ pub struct Row {
     pub from: From,
 }
 
+/// One environment name a unit gets, and where it came from. There is no
+/// value field: the model never holds one (E2 review M3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvName {
+    pub name: String,
+    pub from: From,
+}
+
 /// One unit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnitView {
@@ -38,6 +46,7 @@ pub struct UnitView {
     /// `None`: it runs.
     pub not_run: Option<NotRun>,
     pub rows: Vec<Row>,
+    pub environment: Vec<EnvName>,
 }
 
 /// Why a unit does not run, in words, and the diagnostic that reports it.
@@ -75,6 +84,7 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                     .map_or(From::Default, |(_, o)| From::Source(*o))
             };
             let mut rows = Vec::new();
+            let mut environment = Vec::new();
             let kind = match &u.policy {
                 ExecPolicy::Command {
                     argv,
@@ -106,15 +116,13 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                     // unit runs, and never part of this model.
                     // Fails without it: explain_shows_origin_per_key.
                     for name in env_allow {
-                        rows.push(Row {
-                            key: "env",
-                            value: name.clone(),
+                        environment.push(EnvName {
+                            name: name.clone(),
                             from: from("env_allow"),
                         });
                     }
-                    rows.push(Row {
-                        key: "env",
-                        value: keep_names(),
+                    environment.push(EnvName {
+                        name: keep_names(),
                         from: From::KeepList,
                     });
                     "command"
@@ -126,6 +134,7 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                 kind,
                 not_run: u.not_run.clone(),
                 rows,
+                environment,
             }
         })
         .collect()
