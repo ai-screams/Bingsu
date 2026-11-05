@@ -526,7 +526,8 @@ fn receiver_checks_every_index_and_level() {
 // 따옴표 키·최상위 toolchain·점 키·따옴표 표 이름·머리 뒤 잔여·열린 문자열 거부를 지우는 것. 재리뷰 M2·M3·L5:
 // channel을 찾은 뒤에도 파일 끝까지 검증하는 것을 지우는 것(뒤의 따옴표 키·열린 문자열·두 번째 channel을 놓침),
 // 괄호를 종류 없이 세는 것(`[}`가 닫힘), 32단 중첩 상한을 지우는 것, `channel.` 거부를 지우는 것, channel 값
-// 뒤 잔여 검사(comment_or_end)를 지우는 것.
+// 뒤 잔여 검사(comment_or_end)를 지우는 것. 확인 리뷰 M: `toolchain` 표를 다시 여는 것(두 번째 `[toolchain]`,
+// `[[toolchain]]`, `[toolchain.<x>]`)을 받는 것(각 조건을 지우면 뒤 channel이나 재정의를 놓침).
 #[test]
 fn rust_toolchain_toml_knows_comments_and_strings() {
     let deep = |n: usize| {
@@ -544,7 +545,7 @@ fn rust_toolchain_toml_knows_comments_and_strings() {
         extract(&Format::RustToolchainToml, &deep(33)),
         Candidate::Malformed
     );
-    let cases: [(&[u8], Candidate<'_>); 22] = [
+    let cases: [(&[u8], Candidate<'_>); 27] = [
         (
             br#"[toolchain]
 channel = "1.80"
@@ -694,7 +695,46 @@ profile = """
             br#"[[toolchain]]
 channel = "x"
 "#,
-            Candidate::Absent,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80"
+[[toolchain]]
+channel = "1.81"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80"
+[toolchain.channel]
+x = "y"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80"
+[other]
+[toolchain]
+profile = "minimal"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain.x]
+y = 1
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80"
+[other.toolchain]
+x = 1
+"#,
+            Candidate::Value(b"1.80"),
         ),
     ];
     for (bytes, want) in cases {

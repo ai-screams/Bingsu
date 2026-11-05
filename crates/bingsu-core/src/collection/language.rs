@@ -366,6 +366,7 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
     let mut scan = TomlScan::default();
     // None at the top level; then whether the current table is `[toolchain]`.
     let mut table = None;
+    let mut toolchain_seen = false;
     // Kept until the end: what follows must still be supported syntax.
     let mut channel = None;
     for l in lines(bytes) {
@@ -386,7 +387,16 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
             if !bare_key(name) || !comment_or_end(&header[end + close.len()..]) {
                 return None;
             }
-            table = Some(name == b"toolchain" && close == b"]");
+            // One plain `[toolchain]` table: a second one, an array of
+            // tables or a subtable under that name redefines it (TOML refuses
+            // that) and could hide a second channel.
+            if name == b"toolchain" || name.starts_with(b"toolchain.") {
+                if close != b"]" || name != b"toolchain" || toolchain_seen {
+                    return None;
+                }
+                toolchain_seen = true;
+            }
+            table = Some(name == b"toolchain");
             continue;
         }
         let eq = l.iter().position(|b| *b == b'=')?;
