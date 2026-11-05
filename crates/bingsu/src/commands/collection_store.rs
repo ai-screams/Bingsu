@@ -257,6 +257,27 @@ impl CollectionStore {
         binding: &command::Binding,
         now: Clock,
     ) -> Result<Admission, StoreError> {
+        Self::admit_commands_with(context, binding, now, || {
+            collection_gc::GcBudget::default().start()
+        })
+    }
+    /// `admit_commands` whose first-time inventory counts operations only:
+    /// the native tests run in parallel, where a 20 ms clock is a race.
+    #[cfg(test)]
+    #[allow(dead_code, reason = "native collection_store integration target")]
+    pub(crate) fn fixture_commands(
+        context: &CheckedContextFd,
+        binding: &command::Binding,
+        now: Clock,
+    ) -> Result<Admission, StoreError> {
+        Self::admit_commands_with(context, binding, now, Self::fixture_inventory_meter)
+    }
+    fn admit_commands_with(
+        context: &CheckedContextFd,
+        binding: &command::Binding,
+        now: Clock,
+        start_inventory_meter: impl FnOnce() -> sys::CollectionMeter,
+    ) -> Result<Admission, StoreError> {
         // Encoding validates all raw paths and the context CRC before any mkdir.
         Response {
             binding: binding.clone(),
@@ -270,7 +291,7 @@ impl CollectionStore {
             None,
             now,
             bingsu_core::field::BUILTIN,
-            || collection_gc::GcBudget::default().start(),
+            start_inventory_meter,
             &mut |_| {},
         );
         match result {

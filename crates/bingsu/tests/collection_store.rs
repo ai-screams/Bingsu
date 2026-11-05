@@ -2975,7 +2975,7 @@ mod command_store {
     }
 
     fn admit(f: &Fixture, b: &response::Binding) -> CollectionStore {
-        match CollectionStore::admit_commands(&f.context, b, clock()).unwrap() {
+        match CollectionStore::fixture_commands(&f.context, b, clock()).unwrap() {
             commands::collection_store::Admission::Admitted(s) => s,
             commands::collection_store::Admission::Deferred(stop) => panic!("deferred: {stop:?}"),
         }
@@ -3017,7 +3017,7 @@ mod command_store {
             .publish_commands_with_hook(&b, &[entry("custom/a", 10)], &mut |at| {
                 if at == "read_again" {
                     second =
-                        Some(CollectionStore::admit_commands(&f.context, &b, clock()).unwrap());
+                        Some(CollectionStore::fixture_commands(&f.context, &b, clock()).unwrap());
                 }
             })
             .unwrap();
