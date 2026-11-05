@@ -183,11 +183,12 @@ fn concrete_names() {
 // rustup settings.toml. 이것을 실패시키는 것: 다른 표를 받는 것, 따옴표 최상위 키를 받는 것, 여러 줄 값(열린 배열,
 // 세 따옴표 문자열 두 종류)을 받는 것,
 // escape가 든 override 키를 받는 것, override가 shell 폴더의 부모를 덮는 것을 놓치는 것, 이름 앞부분만 같은 폴더
-// (`/w/re`)를 부모로 보는 것, default_host_triple을 읽지 않는 것.
+// (`/w/re`)를 부모로 보는 것, default_host_triple을 읽지 않는 것, 루트(`/`)와 끝 `/`가 붙은 override를 놓치는 것,
+// 빈 키나 따옴표 없는 override 값을 받는 것.
 #[test]
 fn settings_forms() {
     let cwd = b"/w/repo/sub";
-    let cases: [(&[u8], Settings); 13] = [
+    let cases: [(&[u8], Settings); 17] = [
         (
             b"version = \"12\"\ndefault_toolchain = \"stable-aarch64-apple-darwin\"\nprofile = \"default\"\n\n[overrides]\n",
             known(None, false),
@@ -206,6 +207,10 @@ fn settings_forms() {
         (b"[pgp_keys]\n", Settings::Unknown),
         (b"\"default_host_triple\" = \"x\"\n", Settings::Unknown),
         (b"list = [\n\"a\",\n]\n", Settings::Unknown),
+        (b"[overrides]\n\"/\" = \"nightly\"\n", known(None, true)),
+        (b"[overrides]\n\"/w/repo/\" = \"nightly\"\n", known(None, true)),
+        (b" = \"x\"\n", Settings::Unknown),
+        (b"[overrides]\n\"/other\" = nightly\n", Settings::Unknown),
         (b"a = [\nb = 1 ]\n", Settings::Unknown),
         (b"a = \"\"\"x\nb = 1 \"\"\"\n", Settings::Unknown),
         (b"a = '''x\nb = 1 '''\n", Settings::Unknown),

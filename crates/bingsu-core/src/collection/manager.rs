@@ -268,5 +268,5 @@ fn covers(folder: &[u8], cwd: &[u8]) -> bool {
     let folder = folder.strip_suffix(b"/").unwrap_or(folder);
     // Fails without the boundary: settings_forms (`/w/re` does not cover
     // `/w/repo`).
-    cwd == folder || folder.is_empty() || (cwd.starts_with(folder) && cwd[folder.len()] == b'/')
+    cwd == folder || (cwd.starts_with(folder) && cwd[folder.len()] == b'/')
 }
