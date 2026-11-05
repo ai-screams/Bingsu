@@ -23,6 +23,7 @@ use super::{
     wire::policy_digest,
 };
 use crate::{config::compile::ExecUnit, handoff::Origin, snapshot::Clock};
+use alloc::vec::Vec;
 
 /// This prompt's side of the comparison.
 pub struct Prompt<'a> {
@@ -34,12 +35,37 @@ pub struct Prompt<'a> {
     pub vars: &'a Environ<'a>,
     /// Whether the marker makes the snapshot's config units eligible.
     pub eligible: bool,
+    /// The environment digest per `env_allow` list already computed: units
+    /// that allow the same names share one digest of this shell.
+    digests: Vec<(Vec<Vec<u8>>, [u8; 32])>,
+}
+
+impl<'a> Prompt<'a> {
+    pub fn new(expected: &'a Binding, entry: Clock, vars: &'a Environ<'a>, eligible: bool) -> Self {
+        Self {
+            expected,
+            entry,
+            vars,
+            eligible,
+            digests: Vec::new(),
+        }
+    }
+
+    /// `plan::env_digest` of this shell for `env_allow`, once per list.
+    fn env_digest(&mut self, env_allow: &[Vec<u8>]) -> [u8; 32] {
+        if let Some((_, d)) = self.digests.iter().find(|(k, _)| k == env_allow) {
+            return *d;
+        }
+        let d = plan::env_digest(self.vars, env_allow);
+        self.digests.push((env_allow.to_vec(), d));
+        d
+    }
 }
 
 /// The value `unit` shows under `origin`, or `None`.
 pub fn value<'r>(
     response: &'r Response,
-    prompt: &Prompt<'_>,
+    prompt: &mut Prompt<'_>,
     unit: &ExecUnit,
     origin: Origin,
 ) -> Option<&'r str> {
@@ -61,7 +87,7 @@ pub fn value<'r>(
         && entry.pattern == [0; 32]
         && entry.completed_at < prompt.entry.now
         && entry.policy == policy
-        && entry.environment == plan::env_digest(prompt.vars, &runnable.env_allow))
+        && entry.environment == prompt.env_digest(&runnable.env_allow))
     .then_some(entry.value.as_str())
 }
 

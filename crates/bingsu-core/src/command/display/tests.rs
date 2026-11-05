@@ -96,13 +96,8 @@ mod cases {
     ) -> Option<String> {
         let expected = binding();
         let vars = Environ::parse(environ);
-        let prompt = Prompt {
-            expected: &expected,
-            entry,
-            vars: &vars,
-            eligible,
-        };
-        value(r, &prompt, u, origin).map(String::from)
+        let mut prompt = Prompt::new(&expected, entry, &vars, eligible);
+        value(r, &mut prompt, u, origin).map(String::from)
     }
 
     // 양성 대조와 표식 조건. 이것을 실패시키는 것: 설정 단위의 표시 자격 검사를 지우는 것(자격 없는 회차에도
@@ -195,6 +190,42 @@ mod cases {
                 shown(&both, &u, Origin::Builtin, true, ENV, 11).as_deref(),
                 Some("bin")
             );
+        }
+    }
+
+    // 한 프롬프트가 여러 단위를 판정할 때 환경 요약값은 같은 env_allow 목록마다 한 번 계산하고, 결과는 단위마다
+    // 따로 계산한 것과 같다. 이것을 실패시키는 것: 기억한 요약값을 목록 비교 없이 다른 목록의 단위에 쓰는 것(목록이
+    // 다른 단위가 값을 잃음). Prompt는 셸 환경 하나에 묶이므로 다른 환경의 요약값을 기억할 수 없다.
+    #[test]
+    fn one_prompt_shares_digests_only_between_equal_allow_lists() {
+        let mut units = Vec::new();
+        for (id, allow) in [
+            ("custom/a", "KUBECONFIG"),
+            ("custom/b", "LC_TIME"),
+            ("custom/c", "KUBECONFIG"),
+        ] {
+            let mut u = unit(&["kubectx"]);
+            u.id = id.into();
+            if let ExecPolicy::Command { env_allow, .. } = &mut u.policy {
+                *env_allow = vec![allow.into(), "HOME".into()];
+            }
+            units.push(u);
+        }
+        let r = Response {
+            binding: binding(),
+            entries: units.iter().map(|u| ran(u, Origin::Config, ENV)).collect(),
+        };
+        let expected = binding();
+        let vars = Environ::parse(ENV);
+        for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0]] {
+            let mut prompt = Prompt::new(&expected, clock(11), &vars, true);
+            for i in order {
+                assert_eq!(
+                    value(&r, &mut prompt, &units[i], Origin::Config),
+                    Some("prod"),
+                    "{order:?} {i}"
+                );
+            }
         }
     }
 

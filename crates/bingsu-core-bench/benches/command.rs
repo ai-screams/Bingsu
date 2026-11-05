@@ -125,18 +125,13 @@ fn full() -> Input {
 // The measured call sits behind an `#[inline(never)]` boundary (see text.rs).
 #[inline(never)]
 fn draw(input: &Input) -> Vec<Field> {
-    let response = Response::decode(&input.bytes).unwrap();
+    let response = Response::decode_shown(&input.bytes).unwrap();
     let vars = Environ::parse(&input.environ);
-    let prompt = Prompt {
-        expected: &input.binding,
-        entry: clock(),
-        vars: &vars,
-        eligible: true,
-    };
+    let mut prompt = Prompt::new(&input.binding, clock(), &vars, true);
     input
         .units
         .iter()
-        .filter_map(|u| display::value(&response, &prompt, u, Origin::Config))
+        .filter_map(|u| display::value(&response, &mut prompt, u, Origin::Config))
         .map(|v| Field::text(v.as_bytes(), CUSTOM_TEXT_CELLS, WidthProfile::DEFAULT))
         .collect()
 }

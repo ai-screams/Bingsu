@@ -584,7 +584,7 @@ impl ReadPlan {
             }
         }
         if commands {
-            self.observed.commands = match command::Response::decode(&self.collection_bytes) {
+            self.observed.commands = match command::Response::decode_shown(&self.collection_bytes) {
                 Ok(r) => Some(Box::new(r)),
                 Err(_) => None,
             };
@@ -968,12 +968,7 @@ fn command_values(
         cwd,
     };
     let vars = Environ::parse(body);
-    let prompt = display::Prompt {
-        expected: &expected,
-        entry,
-        vars: &vars,
-        eligible,
-    };
+    let mut prompt = display::Prompt::new(&expected, entry, &vars, eligible);
     for (i, segment) in custom.iter().enumerate() {
         if segment.kind != CustomKind::Command {
             continue;
@@ -986,7 +981,7 @@ fn command_values(
         else {
             continue;
         };
-        out[i] = display::value(response, &prompt, unit, Origin::Config).map(|v| v.into());
+        out[i] = display::value(response, &mut prompt, unit, Origin::Config).map(|v| v.into());
     }
     out
 }

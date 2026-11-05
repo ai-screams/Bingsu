@@ -1247,6 +1247,27 @@ mod cases {
         assert!(record(&r).contains("prod-cluster"), "{}", record(&r));
     }
 
+    // 원본 줄에 제어 문자가 든 응답도 앞단은 값만 그린다(원본 줄은 그리지 않으므로 그 글자를 검사하지 않는다).
+    // helper가 읽는 decode는 같은 파일을 거부한다. 이것을 실패시키는 것: 앞단이 helper의 decode로 읽는 것(값을
+    // 잃음).
+    #[test]
+    fn a_raw_line_the_prompt_does_not_draw_does_not_hide_the_value() {
+        let mut bytes = command_response("prod-cluster", &frame(), b"/x/project");
+        let raw = bytes
+            .windows(12)
+            .rposition(|w| w == b"prod-cluster")
+            .unwrap();
+        bytes[raw] = 0x1b;
+        let crc = crate::snapshot::crc32c(&[&bytes[command::HEADER..]]);
+        bytes[16..20].copy_from_slice(&crc);
+        assert!(command::Response::decode(&bytes).is_err());
+        let mut h = commanded("prod-cluster");
+        h.commands = Some(bytes);
+        let r = h.run(&args(), Mode::Dark);
+        assert!(record(&r).contains("prod-cluster"), "{}", record(&r));
+        assert!(!record(&r).contains("\u{1b}rod-cluster"));
+    }
+
     // 값을 낼 수 없으면 응답을 읽지 않는다: 환경 프레임이 없을 때, 그리는 command 세그먼트가 없을 때. 이것을
     // 실패시키는 것: draws_commands의 환경 조건이나 세그먼트 조건을 지우는 것(읽기가 생김).
     #[test]
