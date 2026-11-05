@@ -15,11 +15,11 @@ fn run(name: Option<&[u8]>) -> Plan {
     Plan::Done(Decision::Run(name.map(<[u8]>::to_vec)))
 }
 
-fn check(folder: &[u8], name: &[u8], value: &[u8]) -> Plan {
+fn check(folder: &[u8], value: &[u8], host: Option<&[u8]>) -> Plan {
     Plan::Check {
         folder: folder.to_vec(),
-        name: name.to_vec(),
         value: value.to_vec(),
+        host: host.map(<[u8]>::to_vec),
     }
 }
 
@@ -36,7 +36,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"1.80.0"),
             host.clone(),
-            check(b"toolchains", b"1.80.0-aarch64-apple-darwin", b"1.80.0"),
+            check(b"toolchains", b"1.80.0", Some(b"aarch64-apple-darwin")),
         ),
         (
             Manager::Rustup,
@@ -71,7 +71,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"1.80.0"),
             known(None, false),
-            check(b"toolchains", b"1.80.0-x86_64-unknown-linux-gnu", b"1.80.0"),
+            check(b"toolchains", b"1.80.0", Some(b"x86_64-unknown-linux-gnu")),
         ),
         (
             Manager::Rustup,
@@ -99,7 +99,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"3.12.1"),
             Settings::Unknown,
-            check(b"versions", b"3.12.1", b"3.12.1"),
+            check(b"versions", b"3.12.1", None),
         ),
         (
             Manager::Pyenv,
@@ -179,11 +179,12 @@ fn concrete_names() {
 // 세 따옴표 문자열 두 종류)을 받는 것,
 // escape가 든 override 키를 받는 것, override가 shell 폴더의 부모를 덮는 것을 놓치는 것, 이름 앞부분만 같은 폴더
 // (`/w/re`)를 부모로 보는 것, default_host_triple을 읽지 않는 것, 루트(`/`)와 끝 `/`가 붙은 override를 놓치는 것,
-// 빈 키나 따옴표 없는 override 값을 받는 것.
+// 빈 키나 따옴표 없는 override 값을 받는 것, 이 파일이 주는 이름(override 값, host, default_toolchain)에 버전 문법을
+// 적용하지 않는 것(경로 꼴 이름).
 #[test]
 fn settings_forms() {
     let cwd = b"/w/repo/sub";
-    let cases: [(&[u8], Settings); 17] = [
+    let cases: [(&[u8], Settings); 20] = [
         (
             b"version = \"12\"\ndefault_toolchain = \"stable-aarch64-apple-darwin\"\nprofile = \"default\"\n\n[overrides]\n",
             known(None, false),
@@ -205,6 +206,9 @@ fn settings_forms() {
         (b"[overrides]\n\"/\" = \"nightly\"\n", known(None, true)),
         (b"[overrides]\n\"/w/repo/\" = \"nightly\"\n", known(None, true)),
         (b" = \"x\"\n", Settings::Unknown),
+        (b"[overrides]\n\"/w\" = \"/opt/toolchain\"\n", Settings::Unknown),
+        (b"default_host_triple = \"a/b\"\n", Settings::Unknown),
+        (b"default_toolchain = \"../x\"\n", Settings::Unknown),
         (b"[overrides]\n\"/other\" = nightly\n", Settings::Unknown),
         (b"a = [\nb = 1 ]\n", Settings::Unknown),
         (b"a = \"\"\"x\nb = 1 \"\"\"\n", Settings::Unknown),

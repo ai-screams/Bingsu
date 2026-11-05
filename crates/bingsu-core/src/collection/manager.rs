@@ -9,7 +9,7 @@
 //! (D3). This module is the pure part: the helper gathers the facts (the
 //! shell environment, the manager's settings file, one install check) and
 //! these rules decide. Nothing here touches a file.
-use super::language::{lines, trim};
+use super::language::{lines, trim, version_ok};
 use alloc::vec::Vec;
 
 /// The managers with a resolver (U-12 R2).
@@ -99,12 +99,14 @@ pub struct Facts<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Plan {
     Done(Decision),
-    /// Open this one name below the manager's install folder (no-follow,
-    /// a directory); then [`installed`] decides on `value`, the selection.
+    /// Open `<value>` (pyenv) or `<value>-<host>` (rustup) below `folder`
+    /// in the manager's install folder (no-follow, a directory); then
+    /// [`installed`] decides on `value`. Both parts passed the version
+    /// grammar, so the name has no `/` and no `..`.
     Check {
         folder: Vec<u8>,
-        name: Vec<u8>,
         value: Vec<u8>,
+        host: Option<Vec<u8>>,
     },
 }
 
@@ -147,8 +149,8 @@ pub fn plan(f: &Facts<'_>) -> Plan {
             }
             Plan::Check {
                 folder: b"versions".to_vec(),
-                name: name.to_vec(),
                 value: name.to_vec(),
+                host: None,
             }
         }
         Manager::Rustup => {
@@ -162,8 +164,8 @@ pub fn plan(f: &Facts<'_>) -> Plan {
             };
             Plan::Check {
                 folder: b"toolchains".to_vec(),
-                name: [name, b"-", host].concat(),
                 value: name.to_vec(),
+                host: Some(host.to_vec()),
             }
         }
     }
@@ -227,7 +229,12 @@ fn parse_settings(bytes: &[u8], cwd: &[u8]) -> Option<Settings> {
         let (key, value) = (trim(&l[..eq]), trim(&l[eq + 1..]));
         if in_overrides {
             let folder = quoted(key)?;
-            quoted(value)?;
+            // A toolchain name rustup would use must pass the version
+            // grammar (D2 ruling: no path-shaped name from this file).
+            // Fails without it: settings_forms (a path override value).
+            if !version_ok(quoted(value)?) {
+                return None;
+            }
             // Fails without it: settings_forms (an override above the
             // shell's folder covers it).
             if covers(folder, cwd) {
@@ -251,8 +258,17 @@ fn parse_settings(bytes: &[u8], cwd: &[u8]) -> Option<Settings> {
         {
             return None;
         }
-        if key == b"default_host_triple" {
-            host = Some(quoted(value)?.to_vec());
+        // Names this file gives (a host triple, the default toolchain)
+        // pass the version grammar too; host triples fit its 32 bytes.
+        // Fails without it: settings_forms (a host or default with `/`).
+        if key == b"default_host_triple" || key == b"default_toolchain" {
+            let name = quoted(value)?;
+            if !version_ok(name) {
+                return None;
+            }
+            if key == b"default_host_triple" {
+                host = Some(name.to_vec());
+            }
         }
     }
     Some(Settings::Known { host, overridden })
