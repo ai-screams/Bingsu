@@ -38,7 +38,9 @@ pub(crate) trait Tree {
 /// What one reclaim did, for the helper's log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Reclaim {
-    /// Folders opened: unit folders and subtree folders.
+    /// Unit folders opened and killed (the kill pass).
+    pub kills: usize,
+    /// Units and subtree folders the cleanup pass took (its window).
     pub visits: usize,
     /// Unit folders removed.
     pub removed: usize,
@@ -73,9 +75,10 @@ impl Reclaim {
     }
 }
 
-/// Unit folders one reclaim kills: half the visit window, so their
-/// subtrees always have room and every reclaim can remove something.
-const KILL_VISITS: usize = RECLAIM_VISITS / 2;
+/// Unit folders one reclaim kills. The kill pass opens a unit folder and its
+/// `cgroup.kill` only, never a subtree, so it has its own budget: units that
+/// stay (stuck, too deep) never keep the ones after them from their kill.
+const KILL_MAX: usize = RECLAIM_VISITS;
 /// Names one reclaim reads under the parent. Names outside the unit grammar
 /// cost no visit; past this many the rest of the listing is not seen.
 const LIST_MAX: usize = 4 * RECLAIM_VISITS;
@@ -107,7 +110,7 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
     // Every unit is killed before any is checked, so their deaths overlap.
     let mut units = Vec::new();
     for name in names.into_iter().filter(|n| cgroup::is_unit_name(n)) {
-        if units.len() >= KILL_VISITS {
+        if r.kills >= KILL_MAX {
             r.capped = true;
             break;
         }
@@ -118,16 +121,25 @@ pub(crate) fn reclaim<T: Tree>(t: &mut T, parent: &mut T::Dir) -> Reclaim {
             r.failed += 1;
             continue;
         };
-        r.visits += 1;
+        r.kills += 1;
+        if over(t, end, &mut r) {
+            break;
+        }
         if t.kill(&dir).is_err() {
             r.failed += 1;
         }
         units.push((name, dir));
     }
+    // The cleanup pass has the visit window: each unit and each subtree folder.
     for (name, mut dir) in units {
+        if r.visits >= RECLAIM_VISITS {
+            r.capped = true;
+            break;
+        }
         if over(t, end, &mut r) {
             break;
         }
+        r.visits += 1;
         let mut empty = t.populated(&mut dir, 0).ok().flatten() == Some(false);
         for _ in 0..POPULATED_RETRIES {
             if empty {
@@ -219,6 +231,31 @@ fn clear<T: Tree>(
     all
 }
 
+/// A whole small file through `read(buf, offset)`, chunk after chunk until
+/// end of file. `None` past `max` bytes: a list cut there could end in a
+/// partial line that names another value, so it is not read at all.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "Linux reads cgroup.procs")
+)]
+pub(crate) fn read_bounded(
+    read: &mut dyn FnMut(&mut [u8], u64) -> io::Result<usize>,
+    max: usize,
+) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = read(&mut chunk, out.len() as u64).ok()?;
+        if n == 0 {
+            return Some(out);
+        }
+        out.extend_from_slice(&chunk[..n]);
+        if out.len() > max {
+            return None;
+        }
+    }
+}
+
 /// The cgroup file system itself (Linux).
 #[cfg(target_os = "linux")]
 pub(crate) mod fs {
@@ -249,6 +286,28 @@ pub(crate) mod fs {
                 events: None,
             }
         }
+    }
+
+    /// The mount id of an open folder (`statx` `STATX_MNT_ID`, Linux 5.8);
+    /// `None` when the kernel does not report it, which is no atomic path.
+    pub(crate) fn mount_id(fd: &File) -> Option<u64> {
+        const STATX_MNT_ID: u32 = 0x1000;
+        // struct statx: stx_mask (u32) at 0, stx_mnt_id (u64) at 0x90; 256 bytes.
+        let mut buf = [0u64; 32];
+        // SAFETY: an open descriptor, an empty NUL-terminated name with
+        // AT_EMPTY_PATH, and a writable buffer of statx's size.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_statx,
+                fd.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH,
+                STATX_MNT_ID,
+                buf.as_mut_ptr(),
+            )
+        };
+        let mask = buf[0] as u32;
+        (rc == 0 && mask & STATX_MNT_ID != 0).then_some(buf[18])
     }
 
     fn open_at(dir: &File, name: &[u8], flags: i32) -> io::Result<File> {
@@ -342,8 +401,8 @@ pub(crate) mod fs {
     /// `0::` cgroup on the cgroup v2 mount at `/sys/fs/cgroup`, which must
     /// hold this process (a cgroup namespace whose mount was not redone
     /// names another folder); and the session parent `bingsu-cmd-<digest>`
-    /// under it, made here when missing, owned by `me` and itself on cgroup
-    /// v2. On cgroup v2 from 5.14 every non-root cgroup has `cgroup.kill`,
+    /// under it, made here when missing, owned by `me` and on the same mount
+    /// as the process's own cgroup. On cgroup v2 from 5.14 every non-root cgroup has `cgroup.kill`,
     /// and the parent is never the root. `None` on any miss: the round takes
     /// the best-effort path. Called only by a helper holding the session
     /// lock, in a round with command units.
@@ -390,14 +449,18 @@ pub(crate) mod fs {
             return None;
         }
         let procs = open_at(&own, b"cgroup.procs", libc::O_RDONLY).ok()?;
-        let mut text = vec![0u8; cgroup::PROCS_MAX + 1];
-        // SAFETY: writable buffer of its length.
-        let n = unsafe { libc::pread(procs.as_raw_fd(), text.as_mut_ptr().cast(), text.len(), 0) };
-        let n = usize::try_from(n).ok()?;
-        // No test for the size bound: no cell holds a shell cgroup with
-        // 64 KiB of pids. A cut list could end in a partial line that names
-        // another pid, so a full buffer is no atomic path (fail closed).
-        if n > cgroup::PROCS_MAX || !cgroup::procs_contains(&text[..n], who.pid) {
+        let text = super::read_bounded(
+            &mut |buf, at| {
+                let at = libc::off_t::try_from(at).map_err(|_| io::Error::other("offset"))?;
+                // SAFETY: writable buffer of its length.
+                let n = unsafe {
+                    libc::pread(procs.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), at)
+                };
+                usize::try_from(n).map_err(|_| io::Error::last_os_error())
+            },
+            cgroup::PROCS_MAX,
+        )?;
+        if !cgroup::procs_contains(&text, who.pid) {
             return None;
         }
         let name = cgroup::parent_name(who.session, who.runtime);
@@ -405,7 +468,14 @@ pub(crate) mod fs {
         // A failed mkdir (read-only, not delegated) leaves nothing to open.
         let _ = sys::mkdir_at(own.as_fd(), name, 0o700);
         let parent = sys::open_dir_at_nofollow(own.as_fd(), name).ok()?;
-        if sys::fd_facts(parent.as_fd()).ok()?.uid != who.me || !cgroup2(&parent) {
+        if sys::fd_facts(parent.as_fd()).ok()?.uid != who.me {
+            return None;
+        }
+        // The parent on the same mount as the process's own cgroup (so on
+        // cgroup v2 too): a folder mounted over the name, a plain one or
+        // another session's parent, is not it.
+        let mount = mount_id(&own)?;
+        if mount_id(&parent)? != mount {
             return None;
         }
         Some(Dir::new(parent))
@@ -450,7 +520,13 @@ pub(crate) mod fs {
         }
 
         fn open(&mut self, dir: &Dir, name: &[u8]) -> io::Result<Dir> {
-            open_at(&dir.folder, name, libc::O_RDONLY | libc::O_DIRECTORY).map(Dir::new)
+            let child = open_at(&dir.folder, name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+            // A folder mounted over a name below the parent (another cgroup)
+            // is never killed or removed.
+            match (mount_id(&dir.folder), mount_id(&child)) {
+                (Some(a), Some(b)) if a == b => Ok(Dir::new(child)),
+                _ => Err(io::Error::other("cgroup folder on another mount")),
+            }
         }
 
         fn kill(&mut self, dir: &Dir) -> io::Result<()> {
@@ -705,13 +781,13 @@ pub(crate) mod tests {
         let r = reclaim(&mut wide, &mut parent);
         assert!(r.capped, "{r:?}");
         assert!(r.elapsed_ns <= RECLAIM_NS + 2 * wide.tick, "{r:?}");
-        // More units than the kill pass may take: it stops at half the window.
+        // More units than the kill pass may take: it stops at 64.
         let mut many = Fake::default();
         for i in 0..70 {
             many.add(&format!("p/{}", unit(i)));
         }
         let r = reclaim(&mut many, &mut parent);
-        assert_eq!((r.visits, r.removed), (KILL_VISITS, KILL_VISITS), "{r:?}");
+        assert_eq!((r.kills, r.removed), (KILL_MAX, KILL_MAX), "{r:?}");
         assert!(r.capped);
     }
 
@@ -772,9 +848,30 @@ pub(crate) mod tests {
         assert!(!f.log.iter().any(|l| l.contains("other")), "{:?}", f.log);
     }
 
-    // kill 단계는 방문 창의 절반까지만 써서 하위 트리 몫을 남긴다: 하위 폴더 하나씩 가진 빈 단위 64개도 한
-    // 회수에 일부가 제거된다. 이것을 실패시키는 것: KILL_VISITS를 RECLAIM_VISITS로 되돌리는 것(64개를 모두
-    // 열고 kill해 하위 폴더를 볼 방문이 없어 제거 0, 매 회수 같은 자리).
+    fn chunks(data: &'static [u8], size: usize) -> impl FnMut(&mut [u8], u64) -> io::Result<usize> {
+        move |buf, at| {
+            let at = usize::try_from(at).unwrap().min(data.len());
+            let n = data[at..].len().min(size).min(buf.len());
+            buf[..n].copy_from_slice(&data[at..at + n]);
+            Ok(n)
+        }
+    }
+
+    // cgroup.procs는 EOF까지 여러 번 읽는다(첫 청크 뒤의 pid도 찾음). 누적이 상한을 넘으면 None. 이것을
+    // 실패시키는 것: 첫 읽기 하나로 끝내는 것(둘째 청크의 4242를 놓침), 상한 검사를 지우는 것(상한을 넘는 목록을
+    // 그대로 돌려줌).
+    #[test]
+    fn read_bounded_reads_every_chunk_up_to_its_cap() {
+        let list = b"1\n2\n3\n4242\n";
+        let got = read_bounded(&mut chunks(list, 4), 64).unwrap();
+        assert!(cgroup::procs_contains(&got, 4242), "{got:?}");
+        assert_eq!(read_bounded(&mut chunks(list, 4), 8), None);
+        assert_eq!(read_bounded(&mut chunks(b"", 4), 8), Some(Vec::new()));
+    }
+
+    // kill 단계와 정리 단계의 예산이 따로라, 하위 폴더 하나씩 가진 빈 단위 64개도 한 회수에 일부가 제거된다.
+    // 이것을 실패시키는 것: kill 단계가 정리 단계의 방문 창을 쓰는 것(kill마다 visits를 늘림: 64개를 kill하면
+    // 하위 폴더를 볼 방문이 없어 제거 0), 정리 단계의 단위마다 하는 창 검사를 지우는 것(방문이 64를 넘음).
     #[test]
     fn test_reclaim_leaves_room_for_subtrees() {
         let mut f = Fake::default();
@@ -839,9 +936,9 @@ pub(crate) mod tests {
                 "tick {tick}: calls after the deadline {late:?} {r:?}"
             );
         }
-        // A stuck unit whose first read ends past the deadline is not waited on again.
+        // A stuck unit whose first read leaves less than 1 ms: no further wait.
         let mut f = Fake {
-            tick: 6_500_000,
+            tick: 4_875_000,
             ..Fake::default()
         };
         f.add(&format!("p/{}", unit(2)));
@@ -849,8 +946,42 @@ pub(crate) mod tests {
         u.populated = true;
         u.stuck = true;
         let r = reclaim(&mut f, &mut parent);
+        let left = RECLAIM_NS - f.starts[3] - f.tick;
+        assert!(left > 0 && left < 1_000_000, "first read leaves {left} ns");
         assert_eq!(f.waited, 0, "{r:?}");
         assert!(f.starts.iter().all(|&at| at < RECLAIM_NS), "{:?}", f.starts);
+        // The open ends at the deadline: no kill follows it.
+        let mut f = Fake {
+            tick: 10_000_000,
+            ..Fake::default()
+        };
+        f.add(&format!("p/{}", unit(3)));
+        let r = reclaim(&mut f, &mut parent);
+        assert!(
+            !f.log.iter().any(|l| l.starts_with("kill")),
+            "{:?} {r:?}",
+            f.log
+        );
+    }
+
+    // 제거할 수 없는 단위(깊이 제한으로 남는 트리 32개)가 앞에 있어도 뒤의 단위는 kill을 받는다: 실행 중인 고아가
+    // 끝난다. 이것을 실패시키는 것: KILL_MAX를 방문 창의 절반(32)으로 되돌리는 것(뒤의 단위가 kill되지 않음).
+    #[test]
+    fn test_reclaim_kills_past_units_that_stay() {
+        let mut f = Fake::default();
+        for i in 0..32 {
+            f.add(&format!("p/{}/a/b/c/d/e/f", unit(i)));
+        }
+        let orphan = format!("p/{}", unit(40));
+        f.add(&orphan);
+        f.get(&orphan).populated = true;
+        let mut parent = b"p".to_vec();
+        let r = reclaim(&mut f, &mut parent);
+        assert!(f.log.contains(&format!("kill {orphan}")), "{r:?}");
+        assert!(
+            !f.folders[orphan.as_bytes()].populated || f.folders[orphan.as_bytes()].dying > 0,
+            "{r:?}"
+        );
     }
 }
 
@@ -1108,8 +1239,8 @@ pub(crate) mod cell {
         println!("NS-CHILD atomic={}", got.is_some());
     }
 
-    // 부모 자리에만 일반 폴더를 bind mount하면(부모 fd가 cgroup v2가 아님) 원자 경로가 아니다. 이것을
-    // 실패시키는 것: 부모 fd의 fstatfs 확인을 지우는 것.
+    // 부모 자리에만 일반 폴더를 bind mount하면 원자 경로가 아니다. 같은 mount면 같은 cgroup v2이므로 부모 fd의
+    // mount id 비교가 이것을 맡는다. 이것을 실패시키는 것: 부모 fd의 mount id 비교를 지우는 것.
     #[test]
     #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
     fn test_capability_refuses_a_bind_mounted_parent() {
@@ -1143,6 +1274,83 @@ pub(crate) mod cell {
         std::fs::remove_dir(&path).unwrap();
         std::fs::remove_dir(&plain).unwrap();
         assert!(ok);
+    }
+
+    fn bind(from: &std::path::Path, onto: &std::path::Path) {
+        let c =
+            |p: &std::path::Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: NUL-terminated paths; a bind mount in this container only.
+        let rc = unsafe {
+            libc::mount(
+                c(from).as_ptr(),
+                c(onto).as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    fn unbind(at: &std::path::Path) {
+        let c = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: the mount made by bind().
+        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+    }
+
+    // 다른 세션의 실제 cgroup v2 부모를 내 부모 이름 자리에 bind mount하면(소유자·cgroup2 검사는 통과) 자기
+    // cgroup 폴더와 mount id가 달라 원자 경로가 아니다. 이것을 실패시키는 것: 부모 fd의 mount id 비교를 지우는 것.
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_capability_refuses_a_foreign_parent_mounted_over_its_name() {
+        if !privileged() {
+            return;
+        }
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        let session = format!("over-{}", std::process::id());
+        let mine = parent_path(&session);
+        let other = parent_path(&format!("other-session-{}", std::process::id()));
+        std::fs::create_dir(&mine).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        bind(&other, &mine);
+        let got = open_at(b"/sys/fs/cgroup", &release(), &text, &session);
+        let refused = got.is_none();
+        drop(got);
+        unbind(&mine);
+        std::fs::remove_dir(&mine).unwrap();
+        std::fs::remove_dir(&other).unwrap();
+        assert!(refused);
+    }
+
+    // 부모 아래 단위 이름 자리에 다른 cgroup을 bind mount해도 회수는 그 cgroup을 kill하거나 지우지 않는다. 이것을
+    // 실패시키는 것: Fs::open의 mount id 비교를 지우는 것(남의 cgroup의 프로세스가 죽음).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_reclaim_never_enters_a_cgroup_mounted_below() {
+        if !privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (p, mut dir) = parent("below");
+        let victim = own_cgroup().join(format!("bingsu-victim-{}", std::process::id()));
+        std::fs::create_dir(&victim).unwrap();
+        let mut sleep = Command::new("sleep").arg("60").spawn().unwrap();
+        std::fs::write(victim.join("cgroup.procs"), sleep.id().to_string()).unwrap();
+        let unit = p.join(cgroup::unit_name(9));
+        std::fs::create_dir(&unit).unwrap();
+        bind(&victim, &unit);
+        let r = reclaim(&mut Fs, &mut dir);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let survived = alive(sleep.id() as i32);
+        unbind(&unit);
+        let _ = sleep.kill();
+        let _ = sleep.wait();
+        let _ = std::fs::remove_dir(&unit);
+        let _ = std::fs::remove_dir(&p);
+        while std::fs::remove_dir(&victim).is_err() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(survived, "{r:?}");
     }
 
     // 실제 cgroupfs에서 kill → populated 0 → 후위 rmdir. 대상 프로세스는 단위 아래 깊이 2 폴더에 있다.
