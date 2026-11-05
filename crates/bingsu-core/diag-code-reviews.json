@@ -4,5 +4,11 @@
     "after": "0120cb9e3b3b54aa1fc4510aa8a53950e54a2fd6b0f3f04ae31515fbd310f34b",
     "kind": "meaning",
     "reason": "Adds E211 (shell without unsafe_shell = true), E212 (command and shell forms conflict), E213 (placeholder not a whole command element or inside shell text), W409 (unsafe_shell in use), W410 (cwd = untrusted-current) and W411 (script starts with #!/usr/bin/env). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  },
+  {
+    "before": "0120cb9e3b3b54aa1fc4510aa8a53950e54a2fd6b0f3f04ae31515fbd310f34b",
+    "after": "1151b7db18ac39c42f81595a5d224816ce79e2b2ce52c56baf29cbb0ddc6121c",
+    "kind": "meaning",
+    "reason": "W411 still means: the script a command segment would run is refused by its first line, so it will not run. It now reports every first line the executor refuses (the executor's own rule: `#!/usr/bin/env` or an interpreter that is /usr/bin/env under another name, a relative interpreter, a line over 256 bytes, a NUL), naming which in a new {reason} argument, where it named only the first case before; {id} and {path} keep their meaning and the fix is unchanged. Its number, status and severity stay; no code is reused or deprecated."
   }
 ]

@@ -138,7 +138,10 @@ folders. `bingsu config use PATH` saves which file stands in `config.toml`'s pla
 the current environment and warn that these can differ from the prompt's folders.
 
 Use `bingsu config check` to see diagnostics and folder safety details, and `bingsu config path` to see the applied
-file order. A folder whose safety cannot be confirmed can supply colors and layout only; choosing a file inside it
+file order. `bingsu config check --explain` adds, for each command and language segment, whether it runs and why
+not, its command, working folder, time limits and the names of the environment it gets, each with the file and line
+it came from, and the file it would run. Environment values are never shown. The file is looked up as from a folder
+outside any repository; a prompt inside a repository leaves out executables inside it. A folder whose safety cannot be confirmed can supply colors and layout only; choosing a file inside it
 with `config use` does not grant execution trust. Check the ownership, permissions and access lists named by the
 diagnostic before running init again. External text in diagnostics is sanitized for terminal display; path arguments
 in the hooks retain their original bytes. Displayed paths with removed control characters are not exact copies of the names.
@@ -150,7 +153,8 @@ in the hooks retain their original bytes. Displayed paths with removed control c
   and the already loaded data is merged, checked and compiled again; the remaining files are not read again.
 - Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.
   The changed value uses the caller's TOML spelling, including its quotes.
-- `config check` and `config path` have no command deadline and can wait on a stalled mount. Commands that change
+- `config check` and `config path` have no command deadline and can wait on a stalled mount; `config check` also
+  opens the executables a command segment would run, which can wait the same way. Commands that change
   settings have a three-second limit. The prompt's 50 ms and refresh work's 500 ms budgets are unchanged.
 - A deadline cannot interrupt kernel I/O in uninterruptible sleep, including hard NFS or some FUSE operations.
   macOS timer coalescing can delay alarm delivery by several milliseconds. On Linux, a blocked write during suspend
