@@ -437,13 +437,24 @@ unsafe fn exec_child(
             unsafe { spawn_failed(status) }
         }
     }
+    // A copy of the whole caller: any descriptor open there without
+    // close-on-exec (another thread's, at this instant) would cross. Every
+    // number above 3 goes, as the supervisor's own spawn does (close_rest);
+    // from here the status pipe is fd 2. close_range is in every kernel the
+    // atomic path runs on (5.9; the path needs 5.14). No test for its
+    // failure: it cannot fail on that range; it reports a spawn failure.
+    // SAFETY: closes only this child's descriptors.
+    if unsafe { libc::syscall(libc::SYS_close_range, 4u32, u32::MAX, 0u32) } != 0 {
+        // SAFETY: still the child of clone_into.
+        unsafe { spawn_failed(2) }
+    }
     // SAFETY: NUL-terminated fixed path.
     if unsafe { libc::chdir(c"/".as_ptr()) } == 0 {
         // SAFETY: NUL-terminated path and NULL-terminated arrays made before clone3.
         unsafe { libc::execve(exe.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
     }
     // SAFETY: still the child of clone_into.
-    unsafe { spawn_failed(status) }
+    unsafe { spawn_failed(2) }
 }
 
 /// # Safety
@@ -570,12 +581,22 @@ mod tests {
         while !s.child.reap().unwrap() {}
     }
 
-    // clone3 경로의 중계도 정확히 {0,1,2,3}, 빈 envp, 작업 폴더 "/". 이것을 실패시키는 것: exec_child가 마지막
-    // 이동(fd 3)을 건너뛰는 것({0,1,2}가 됨), exec_child의 chdir을 지우는 것(시험 프로세스 폴더에서 시작).
+    // clone3 경로의 중계도 정확히 {0,1,2,3}, 빈 envp, 작업 폴더 "/". 호출 쪽에 close-on-exec 없는 fd가 열려
+    // 있어도(멀티스레드 시험 하네스, 다른 스레드의 fd) 넘어가지 않는다. 이것을 실패시키는 것: exec_child가 마지막
+    // 이동(fd 3)을 건너뛰는 것({0,1,2}가 됨), exec_child의 close_range를 지우는 것(아래 상속 fd가 넘어감),
+    // exec_child의 chdir을 지우는 것(시험 프로세스 폴더에서 시작).
     #[test]
     fn test_clone3_relay_gets_exactly_four_fds() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
-        let Some(s) = clone3_sleeper() else { return };
+        // An inheritable descriptor in the caller, as another thread may hold one.
+        let (keep, _w) = pipe().unwrap();
+        // SAFETY: `keep` is open; F_DUPFD leaves the copy inheritable.
+        let open = unsafe { libc::fcntl(keep.as_raw_fd(), libc::F_DUPFD, 60) };
+        assert!(open >= 60);
+        let spawned = clone3_sleeper();
+        // SAFETY: closes the test's own duplicate once.
+        unsafe { libc::close(open) };
+        let Some(s) = spawned else { return };
         std::thread::sleep(std::time::Duration::from_millis(50));
         let seen = fds(s.child.pid);
         let environ = std::fs::read(format!("/proc/{}/environ", s.child.pid)).unwrap();
