@@ -593,9 +593,11 @@ mod tests {
         // SAFETY: `keep` is open; F_DUPFD leaves the copy inheritable.
         let open = unsafe { libc::fcntl(keep.as_raw_fd(), libc::F_DUPFD, 60) };
         assert!(open >= 60);
+        // Owned at once: a panic below still closes it before the lock goes.
+        // SAFETY: a fresh duplicate nothing else owns.
+        let open = unsafe { std::os::fd::OwnedFd::from_raw_fd(open) };
         let spawned = clone3_sleeper();
-        // SAFETY: closes the test's own duplicate once.
-        unsafe { libc::close(open) };
+        drop(open);
         let Some(s) = spawned else { return };
         std::thread::sleep(std::time::Duration::from_millis(50));
         let seen = fds(s.child.pid);
