@@ -14,6 +14,7 @@ from test_command_round import (
     CommandSession,
     _native_boot_required,  # noqa: F401 (fixture)
     command_response,
+    forget_results,
     published_rounds,
     ready,
     rounds,
@@ -120,3 +121,55 @@ def test_builtin_fast_value_is_written_once(tmp_path, _native_boot_required):
     assert again == first, "an unchanged fast value was published again"
     assert counted(shim) == 0 and counted(real) == 0, (counted(shim), counted(real))
 
+
+
+def pyenv_fast(session):
+    """pyenv's shim folder first on PATH and 3.12.1 installed and selected."""
+    root = session.base / "pyenv"
+    shim = install(root / "shims", "python3")
+    real = install(root / "versions" / "3.12.1" / "bin", "python3")
+    for folder in (root, root / "versions", root / "versions" / "3.12.1"):
+        folder.chmod(0o755)
+    (session.pwd / ".python-version").write_text("3.12.1\n")
+    session.env["PYENV_ROOT"] = str(root)
+    session.env["PATH"] = f"{shim.parent}:{session.env['PATH']}"
+    return shim, real
+
+
+# 중립 폴더가 검사를 통과하지 못하면 프로브는 돌지 않지만, 실행 없이 정한 값(빠른 경로)은 그대로 발행한다.
+# 이것을 실패시키는 것: 중립 폴더 실패 때 내장 언어를 통째로 버리는 것(빠른 값이 사라짐), 그때도 프로브를 허가에
+# 넣는 것(node가 실행됨).
+def test_builtin_fast_value_survives_a_bad_neutral_folder(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "python", "node")
+    pyenv_fast(session)
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    ready(session)
+    folder = session.neutral()
+    folder.chmod(0o700)
+    (folder / "left").write_text("x")
+    folder.chmod(0o500)
+    Path(f"{node}.runs").unlink(missing_ok=True)
+    published_rounds(session)
+    assert b"3.12.1" in command_response(session)
+    assert counted(node) == 0, counted(node)
+    assert b"neutral folder is not empty" in session.log(), session.log()
+
+
+# 무효 표식 회차에도 내장 언어 버전은 실행·발행한다(설정 유래 단위만 막힘, 계획 Review Focus). 이것을 실패시키는
+# 것: 무효 표식(허가 마감 0)이면 내장 언어를 버리는 것.
+def test_builtin_versions_survive_invalid_marker(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "node")
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    ready(session)
+    session.put("[broken")
+    assert session.run("reload").returncode == 1
+    Path(f"{node}.runs").unlink(missing_ok=True)
+    forget_results(session)
+    record = session.prompt()
+    assert b"degraded:trust-invalid" in record, record
+    session.wait_quiet(timeout=8)
+    published_rounds(session)
+    assert counted(node) >= 1, counted(node)
+    assert b"18.20.4" in command_response(session)

@@ -133,6 +133,8 @@ pub(crate) struct Round {
     publish: Publish,
     /// The builtin languages drawn this round (D3a).
     builtins: Vec<&'static Language>,
+    /// Whether probes may run: the neutral folder they run in passed.
+    probes_allowed: bool,
     /// The command response read before the round, for the probes' cache.
     current: Option<response::Response>,
     /// The plan of each probe in `grant.probes`, by index.
@@ -408,7 +410,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
                 .collect()
         })
         .unwrap_or_default();
-    let mut builtins = i.builtins.to_vec();
+    let builtins = i.builtins.to_vec();
     // A drawn builtin language spawns the supervisor even with no config
     // unit (D3a ruling Q-C (a)): whether it runs is known only once the
     // collection answered, after the marker.
@@ -462,13 +464,16 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     let scripts = Scripts::default();
     let mut runnable = runnable;
     let mut neutral_refused = 0;
+    let mut probes_allowed = true;
     if !neutral(i.runtime, i.me).map_err(|_| Skip::Failed)? {
-        let before = runnable.len() + builtins.len();
+        let before = runnable.len();
         runnable.retain(|(_, r)| r.cwd != Cwd::Neutral);
-        // Probes run in the neutral folder too.
-        builtins.clear();
         neutral_refused = before - runnable.len();
-        if runnable.is_empty() {
+        // Probes run in the neutral folder too: none runs, but a value
+        // decided without running is still published.
+        // Fails without it: test_builtin_fast_value_survives_a_bad_neutral_folder.
+        probes_allowed = false;
+        if runnable.is_empty() && builtins.is_empty() {
             return Err(Skip::Neutral);
         }
     }
@@ -535,6 +540,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             attempts,
         },
         builtins,
+        probes_allowed,
         current,
         probes: Vec::new(),
         decided: Vec::new(),
@@ -1031,6 +1037,10 @@ impl Round {
     /// Adds `probe` to the grant unless its cached result stands or it does
     /// not fit the grant frame.
     fn run_probe(&mut self, p: &Planned, probe: wire::Probe, current: Option<&response::Entry>) {
+        if !self.probes_allowed {
+            self.hidden.push(NEUTRAL_REFUSED);
+            return;
+        }
         {
             // Fails without it: test_builtin_probe_runs_once_and_is_cached.
             let hit = current.is_some_and(|e| {
