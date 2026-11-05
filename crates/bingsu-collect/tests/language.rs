@@ -425,7 +425,7 @@ fn git_rounds_without_languages_are_unchanged() {
 }
 
 // 크기 상한(C2 판정 Q4, D1): 4,096바이트를 넘는 버전 파일은 값이 없다(Refused, 요약값 0). 이것을 실패시키는
-// 것: Limit을 그 파일의 부재로 보는 것(다음 파일로 넘어가 Found).
+// 것: Limit을 그 파일의 부재로 보는 것(답이 None이 됨).
 #[test]
 fn version_file_over_its_cap_has_no_value() {
     if case("version_file_over_its_cap_has_no_value", 1).is_none() {
@@ -436,7 +436,6 @@ fn version_file_over_its_cap_has_no_value() {
     let mut body = b"3.12\n".to_vec();
     body.resize(4_097, b'#');
     fs::write(repo.join(".python-version"), &body).unwrap();
-    fs::write(repo.join(".tool-versions"), b"python 3.11\n").unwrap();
     match python_version(&repo, &f.0) {
         Version::Refused {
             file: 0, digest, ..

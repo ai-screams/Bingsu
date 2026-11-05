@@ -32,8 +32,6 @@ pub enum Format {
     /// The first line that is not empty and not a `#` comment
     /// (`.nvmrc`, `.node-version`, `.python-version`, plain `rust-toolchain`).
     Line,
-    /// asdf/mise `.tool-versions`: the first version on the line of this tool.
-    ToolVersions(Vec<u8>),
     /// `rust-toolchain.toml`: `channel = "…"` in `[toolchain]`.
     RustToolchainToml,
     /// `go.mod`: `toolchain go<version>`, else the `go` directive's version.
@@ -85,6 +83,8 @@ pub enum Version {
         digest: [u8; 16],
         value: Vec<u8>,
     },
+    /// The nearest file names a `path` toolchain: no value, not run.
+    Path { file: u8, level: u8 },
 }
 
 /// One language's answer.
@@ -97,20 +97,19 @@ pub struct LanguageResult {
     pub version: Version,
 }
 
-const fn line(name: &'static [u8]) -> (&'static [u8], u8, &'static [u8]) {
-    (name, 0, b"")
-}
-const fn tool(tool: &'static [u8]) -> (&'static [u8], u8, &'static [u8]) {
-    (b".tool-versions", 1, tool)
+const fn line(name: &'static [u8]) -> (&'static [u8], u8) {
+    (name, 0)
 }
 
 /// One built-in language: its id, markers and version files (name, format
-/// tag, `.tool-versions` tool name). Within a level the files are tried in
-/// this order; the precedence between version managers is D2's.
+/// tag). Within a level the files are tried in this order, the order the
+/// language's version manager reads them. `.tool-versions` is not read: the
+/// managers bingsu resolves (rustup, pyenv) do not read it (ruling Q3 for
+/// D2, spec revision candidate S-29).
 pub struct Builtin {
     pub id: &'static [u8],
     pub markers: &'static [&'static [u8]],
-    pub files: &'static [(&'static [u8], u8, &'static [u8])],
+    pub files: &'static [(&'static [u8], u8)],
 }
 
 /// The four built-in languages (spec section 4: Node, Python, Rust, Go).
@@ -119,7 +118,7 @@ pub const BUILTIN: [Builtin; 4] = [
     Builtin {
         id: b"node",
         markers: &[b"package.json"],
-        files: &[line(b".nvmrc"), line(b".node-version"), tool(b"nodejs")],
+        files: &[line(b".nvmrc"), line(b".node-version")],
     },
     Builtin {
         id: b"python",
@@ -129,21 +128,20 @@ pub const BUILTIN: [Builtin; 4] = [
             b"setup.cfg",
             b"requirements.txt",
         ],
-        files: &[line(b".python-version"), tool(b"python")],
+        files: &[line(b".python-version")],
     },
     Builtin {
         id: b"rust",
         markers: &[b"Cargo.toml"],
-        files: &[
-            (b"rust-toolchain.toml", 2, b""),
-            line(b"rust-toolchain"),
-            tool(b"rust"),
-        ],
+        // With both in one folder rustup reads `rust-toolchain` and warns
+        // (rustup 1.29.2, ruling Q9 for D2). Fails without this order:
+        // formats_follow_the_managers_order.
+        files: &[line(b"rust-toolchain"), (b"rust-toolchain.toml", 2)],
     },
     Builtin {
         id: b"go",
         markers: &[b"go.mod"],
-        files: &[(b"go.mod", 3, b""), tool(b"golang")],
+        files: &[(b"go.mod", 3)],
     },
 ];
 
@@ -155,19 +153,19 @@ impl Builtin {
             version_files: self
                 .files
                 .iter()
-                .map(|(name, tag, tool)| VersionFile {
+                .map(|(name, tag)| VersionFile {
                     name: name.to_vec(),
-                    format: format_from(*tag, tool).expect("fixed table"),
+                    format: format_from(*tag).expect("fixed table"),
                 })
                 .collect(),
         }
     }
 }
 
-fn format_from(tag: u8, tool: &[u8]) -> Result<Format, ProtocolError> {
+/// Tag 1 was `.tool-versions`, no longer read; it is refused.
+fn format_from(tag: u8) -> Result<Format, ProtocolError> {
     Ok(match tag {
         0 => Format::Line,
-        1 => Format::ToolVersions(tool.to_vec()),
         2 => Format::RustToolchainToml,
         3 => Format::GoMod,
         _ => return Err(ProtocolError::Schema),
@@ -177,7 +175,6 @@ fn format_from(tag: u8, tool: &[u8]) -> Result<Format, ProtocolError> {
 fn format_tag(format: &Format) -> u8 {
     match format {
         Format::Line => 0,
-        Format::ToolVersions(_) => 1,
         Format::RustToolchainToml => 2,
         Format::GoMod => 3,
     }
@@ -213,6 +210,10 @@ pub enum Candidate<'a> {
     Absent,
     Malformed,
     Value(&'a [u8]),
+    /// `rust-toolchain.toml` names a `path` toolchain (with or without a
+    /// channel): no value, and the version command is not run (spec Rust
+    /// profile row; ruling Q4 for D2).
+    Path,
 }
 
 pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -238,21 +239,6 @@ pub fn extract<'a>(format: &Format, bytes: &'a [u8]) -> Candidate<'a> {
             Some(l) => Candidate::Value(l),
             None => Candidate::Absent,
         },
-        Format::ToolVersions(tool) => {
-            for l in lines(bytes) {
-                let l = l.split(|b| *b == b'#').next().unwrap_or(l);
-                let mut words = l
-                    .split(|b| *b == b' ' || *b == b'\t')
-                    .filter(|w| !w.is_empty());
-                if words.next() == Some(tool.as_slice()) {
-                    return match words.next() {
-                        Some(v) => Candidate::Value(v),
-                        None => Candidate::Malformed,
-                    };
-                }
-            }
-            Candidate::Absent
-        }
         Format::RustToolchainToml => rust_toolchain_toml(bytes),
         Format::GoMod => go_mod(bytes),
     }
@@ -369,6 +355,7 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
     let mut toolchain_seen = false;
     // Kept until the end: what follows must still be supported syntax.
     let mut channel = None;
+    let mut path = false;
     for l in lines(bytes) {
         if scan.multi.is_some() || scan.depth > 0 {
             scan.scan(l)?;
@@ -406,7 +393,10 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
         }
         match table {
             None if key == b"toolchain" || key.starts_with(b"toolchain.") => return None,
-            Some(true) if key.starts_with(b"channel.") => return None,
+            Some(true) if key.starts_with(b"channel.") || key.starts_with(b"path.") => return None,
+            // Fails without it: formats_extract_one_candidate (`path` with
+            // and without a channel is Path).
+            Some(true) if key == b"path" => path = true,
             Some(true) if key == b"channel" => {
                 let quoted = value.strip_prefix(b"\"")?;
                 let end = quoted.iter().position(|b| *b == b'"')?;
@@ -427,9 +417,10 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
         scan.scan(value)?;
     }
     if scan.multi.is_none() && scan.depth == 0 {
-        Some(match channel {
-            Some(value) => Candidate::Value(value),
-            None => Candidate::Absent,
+        Some(match (path, channel) {
+            (true, _) => Candidate::Path,
+            (false, Some(value)) => Candidate::Value(value),
+            (false, None) => Candidate::Absent,
         })
     } else {
         None
@@ -476,6 +467,8 @@ pub fn version(format: &Format, bytes: &[u8], file: u8, level: u8) -> Version {
             digest,
             value: v.to_vec(),
         },
+        // Fails without it: path_toolchain_is_its_own_answer.
+        Candidate::Path => Version::Path { file, level },
         _ => Version::Refused {
             file,
             level,
@@ -491,13 +484,7 @@ impl LanguageQuery {
             || self.markers.len() > NAMES_MAX
             || self.version_files.len() > NAMES_MAX
             || !self.markers.iter().all(|m| name_ok(m))
-            || !self.version_files.iter().all(|f| {
-                name_ok(&f.name)
-                    && match &f.format {
-                        Format::ToolVersions(tool) => name_ok(tool) && tool.len() <= ID_MAX,
-                        _ => true,
-                    }
-            })
+            || !self.version_files.iter().all(|f| name_ok(&f.name))
         {
             return Err(ProtocolError::Schema);
         }
@@ -505,7 +492,7 @@ impl LanguageQuery {
     }
 
     fn encoded_len(&self) -> usize {
-        // id, marker count, names, file count, (name, tag, tool) each.
+        // id, marker count, names, file count, (name, tag) each.
         4 + self.id.len()
             + 1
             + self.markers.iter().map(|m| 4 + m.len()).sum::<usize>()
@@ -513,14 +500,7 @@ impl LanguageQuery {
             + self
                 .version_files
                 .iter()
-                .map(|f| {
-                    4 + f.name.len()
-                        + 1
-                        + match &f.format {
-                            Format::ToolVersions(t) => 4 + t.len(),
-                            _ => 0,
-                        }
-                })
+                .map(|f| 4 + f.name.len() + 1)
                 .sum::<usize>()
     }
 
@@ -534,9 +514,6 @@ impl LanguageQuery {
         for f in &self.version_files {
             put_bytes(out, &f.name);
             out.push(format_tag(&f.format));
-            if let Format::ToolVersions(t) = &f.format {
-                put_bytes(out, t);
-            }
         }
     }
 
@@ -557,15 +534,9 @@ impl LanguageQuery {
         let mut version_files = Vec::with_capacity(n);
         for _ in 0..n {
             let name = r.bytes(NAME_MAX, ProtocolError::Schema)?.to_vec();
-            let tag = r.u8()?;
-            let tool = if tag == 1 {
-                r.bytes(ID_MAX, ProtocolError::Schema)?
-            } else {
-                b""
-            };
             version_files.push(VersionFile {
                 name,
-                format: format_from(tag, tool)?,
+                format: format_from(r.u8()?)?,
             });
         }
         let query = Self {
@@ -654,6 +625,8 @@ impl LanguageResult {
         let ok = match &self.version {
             Version::None => true,
             Version::Refused { file, level, .. } => file_ok(*file, *level),
+            // Fails without it: receiver_checks_every_index_and_level.
+            Version::Path { file, level } => file_ok(*file, *level),
             Version::Found {
                 file, level, value, ..
             } => file_ok(*file, *level) && version_ok(value),
@@ -670,6 +643,7 @@ impl LanguageResult {
             + match &self.version {
                 Version::None => 1,
                 Version::Refused { .. } => 1 + 2 + 16,
+                Version::Path { .. } => 1 + 2,
                 Version::Found { value, .. } => 1 + 2 + 16 + 4 + value.len(),
             }
     }
@@ -706,6 +680,7 @@ impl LanguageResult {
                 out.extend_from_slice(digest);
                 put_bytes(out, value);
             }
+            Version::Path { file, level } => out.extend_from_slice(&[3, *file, *level]),
         }
     }
 
@@ -737,6 +712,10 @@ impl LanguageResult {
                     digest,
                     value,
                 }
+            }
+            3 => {
+                let [file, level] = r.array::<2>()?;
+                Version::Path { file, level }
             }
             _ => return Err(ProtocolError::Schema),
         };

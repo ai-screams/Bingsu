@@ -20,8 +20,7 @@
 //!   and hashed here), set = a raw zlib stream under a non-matching id
 //! - commondir: .git file bytes + NUL + commondir file bytes
 //! - language: F + version selection file bytes; bits 0–1 pick the format
-//!   (0 one line, 1 `.tool-versions` for python, 2 `rust-toolchain.toml`,
-//!   3 `go.mod`). The worker reads at most the format's cap; larger input is
+//!   (0 and 1 one line, 2 `rust-toolchain.toml`, 3 `go.mod`). The worker reads at most the format's cap; larger input is
 //!   the read cap's Limit, as there.
 use crate::{
     formats,
@@ -266,8 +265,7 @@ pub(crate) fn prepare(target: Target, data: &[u8]) -> Prepared {
 pub(crate) fn language_format(flag: u8) -> bingsu_core::collection::language::Format {
     use bingsu_core::collection::language::Format;
     match flag & 3 {
-        0 => Format::Line,
-        1 => Format::ToolVersions(b"python".to_vec()),
+        0 | 1 => Format::Line,
         2 => Format::RustToolchainToml,
         _ => Format::GoMod,
     }

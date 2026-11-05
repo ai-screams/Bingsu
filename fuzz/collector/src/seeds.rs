@@ -17,7 +17,7 @@
 //! - multi_pack_index: two objects aliasing one pack offset;
 //! - gitdir: a pointer to the worktree itself;
 //! - commondir: a commondir naming the linked gitdir itself;
-//! - language: a `.tool-versions` naming its tool twice (the first wins).
+//! - language: a `go.mod` naming its toolchain twice (the first wins).
 use crate::{
     entries::{self, Target, Verdict},
     formats::{self, IndexEntry, PackEntry},
@@ -139,18 +139,18 @@ fn language(seeds: &mut Vec<Seed>) {
     push(
         seeds,
         t,
-        "tool-without-version",
+        "channel-without-value",
         Truncated,
-        with_flag(1, b"python\n"),
+        with_flag(2, b"[toolchain]\nchannel = \n"),
         Invalid,
     );
     push(seeds, t, "empty-file", Truncated, with_flag(0, b""), Other);
     push(
         seeds,
         t,
-        "tool-twice",
+        "toolchain-twice",
         Cyclic,
-        with_flag(1, b"python 3.11\npython 3.10\n"),
+        with_flag(3, b"module m\ntoolchain go1.22.1\ntoolchain go1.23.0\n"),
         Ok,
     );
     push(seeds, t, "megabyte", Oversize, sized(1 << 20), Limit);
