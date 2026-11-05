@@ -9,13 +9,20 @@
 //! Nothing here runs a program. A wrong answer can only show a wrong
 //! version without running it or run the version command (D3) when it was
 //! not needed; what runs still passes the `PATH` and relay rules.
-use bingsu_core::collection::manager::{self, Decision, Facts, Manager, Plan, Selection, Settings};
+use bingsu_core::collection::{
+    language::version_ok,
+    manager::{self, Decision, Facts, Manager, Plan, Selection, Settings},
+};
 use bingsu_core::command::plan::Environ;
+use bingsu_core::fs_trust::{RefuseGroupWrite, Verdict, entry_verdict};
 use std::{
     ffi::OsStr,
     fs::File,
     io::Read,
-    os::{fd::AsFd, unix::ffi::OsStrExt},
+    os::{
+        fd::AsFd,
+        unix::{ffi::OsStrExt, fs::MetadataExt},
+    },
     path::{Component, Path, PathBuf},
 };
 
@@ -111,24 +118,33 @@ pub(crate) fn homes(vars: &Environ<'_>) -> Homes {
     }
 }
 
+/// `(st_dev, st_ino)` of a folder, following links: the environment may
+/// name a manager folder through a link, and the sanitized `PATH` holds
+/// canonical folders, so folders compare by identity, not by name.
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
 /// Which shim `folder` (the first sanitized `PATH` folder holding the
 /// command's name) is. `canonical`, when the lookup resolved the command,
 /// is its canonical file: rustup installed by a package manager links
-/// `rustc` to `rustup` elsewhere. Folders compare as given: the sanitized
-/// `PATH` holds canonical folders, and a manager folder named through a
-/// link is simply not recognized (the command then runs).
+/// `rustc` to `rustup` elsewhere.
 pub(crate) fn classify(
     command: Manager,
     folder: &Path,
     canonical: Option<&Path>,
     homes: &Homes,
 ) -> Shim {
-    // Fails without it: classify_table (pyenv shims folder).
+    let here = identity(folder);
+    let same = |candidate: &Path| here.is_some() && identity(candidate) == here;
+    // Fails without it: classify_table (pyenv shims folder, also through a
+    // link).
     if command == Manager::Pyenv
         && homes
             .pyenv
             .as_ref()
-            .is_some_and(|root| folder == root.join("shims"))
+            .is_some_and(|root| same(&root.join("shims")))
     {
         return Shim::Manager(Manager::Pyenv);
     }
@@ -137,12 +153,12 @@ pub(crate) fn classify(
         && homes
             .cargo
             .as_ref()
-            .is_some_and(|cargo| folder == cargo.join("bin"))
+            .is_some_and(|cargo| same(&cargo.join("bin")))
     {
         return Shim::Manager(Manager::Rustup);
     }
     // Fails without it: classify_table (asdf shims folder).
-    if homes.unsupported.iter().any(|shims| folder == shims) {
+    if homes.unsupported.iter().any(|shims| same(shims)) {
         return Shim::Unsupported;
     }
     // Fails without it: classify_table (a linked rustup).
@@ -156,23 +172,37 @@ pub(crate) fn classify(
     Shim::None
 }
 
-/// Opens a manager folder (the environment may name it through a link)
-/// and, below it, one name: never a link, always a folder.
-fn open_below(root: &Path, name: &OsStr) -> std::io::Result<File> {
-    let root = File::open(root)?;
-    sys::open_dir_at_nofollow(root.as_fd(), name)
+/// The helper's trust rule for one opened folder or file (D2 ruling):
+/// owned by root or `me`, nobody else can write it (group write refused,
+/// no ACL that allows writing), on a mount that enforces ownership.
+fn trusted(file: &File, me: u32) -> bool {
+    sys::fd_facts(file.as_fd())
+        .is_ok_and(|facts| entry_verdict(&facts, me, false, &mut RefuseGroupWrite) == Verdict::Safe)
 }
 
-/// rustup's settings, read from `<rustup home>/settings.toml`: never
-/// through a link, a regular file, at most `SETTINGS_MAX` bytes (a FIFO
-/// does not block the open). Anything else is `Unknown`.
-pub(crate) fn read_settings(rustup_home: &Path, cwd: &[u8]) -> Settings {
+/// A manager folder (the environment may name it through a link), only
+/// when trusted.
+fn open_home(home: &Path, me: u32) -> Option<File> {
+    let root = File::open(home).ok()?;
+    // Fails without it: owner_rules_refuse_writable_folders (home).
+    trusted(&root, me).then_some(root)
+}
+
+/// rustup's settings, read from `<rustup home>/settings.toml`: the home
+/// and the file trusted, the file never through a link, a regular file,
+/// at most `SETTINGS_MAX` bytes (a FIFO does not block the open) whose size
+/// did not change while read. Anything else is `Unknown`.
+pub(crate) fn read_settings(rustup_home: &Path, cwd: &[u8], me: u32) -> Settings {
     let read = || -> Option<Vec<u8>> {
-        let root = File::open(rustup_home).ok()?;
+        let root = open_home(rustup_home, me)?;
         let file = sys::open_file_at_nofollow(root.as_fd(), OsStr::new("settings.toml")).ok()?;
         let meta = file.metadata().ok()?;
         // Fails without it: settings_reads_only_regular_bounded_files (FIFO).
         if !meta.file_type().is_file() || meta.len() > SETTINGS_MAX {
+            return None;
+        }
+        // Fails without it: owner_rules_refuse_writable_folders (settings).
+        if !trusted(&file, me) {
             return None;
         }
         #[cfg(test)]
@@ -190,38 +220,49 @@ pub(crate) fn read_settings(rustup_home: &Path, cwd: &[u8]) -> Settings {
     }
 }
 
-/// The install check: `<manager folder>/<folder>/<name>` opened one name at
-/// a time, never through a link, as a folder. Only a grammar-checked name
-/// with no `/` is looked up.
-pub(crate) fn installed(home: &Path, folder: &[u8], name: &[u8]) -> bool {
-    // Fails without it: install_check_opens_one_folder (`../x`).
-    if !version_install_name(name) {
+/// The install check: `<home>/<folder>/<value>[-<host>]` opened one name
+/// at a time, never through a link, as folders; the home and `folder`
+/// trusted. `value` and `host` each pass the version grammar (D1), so the
+/// name has no `/` and no `..`; joined it may reach 65 bytes, which is why
+/// the parts are checked and not the whole.
+pub(crate) fn installed(
+    home: &Path,
+    folder: &[u8],
+    value: &[u8],
+    host: Option<&[u8]>,
+    me: u32,
+) -> bool {
+    // Fails without it: install_check_opens_one_folder (`../x`, a host
+    // with `/`).
+    if !version_ok(value) || !host.is_none_or(version_ok) {
         return false;
     }
-    open_below(home, OsStr::from_bytes(folder))
-        .and_then(|dir| sys::open_dir_at_nofollow(dir.as_fd(), OsStr::from_bytes(name)))
-        .is_ok()
+    let name = match host {
+        Some(host) => [value, b"-", host].concat(),
+        None => value.to_vec(),
+    };
+    let check = || -> Option<()> {
+        let root = open_home(home, me)?;
+        let dir = sys::open_dir_at_nofollow(root.as_fd(), OsStr::from_bytes(folder)).ok()?;
+        // Fails without it: owner_rules_refuse_writable_folders (toolchains).
+        if !trusted(&dir, me) {
+            return None;
+        }
+        sys::open_dir_at_nofollow(dir.as_fd(), OsStr::from_bytes(&name)).ok()?;
+        Some(())
+    };
+    check().is_some()
 }
 
-/// A planned folder name: the selection's grammar-checked value, perhaps
-/// followed by `-<host triple>` (whose own bytes are the same set).
-fn version_install_name(name: &[u8]) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && name[0].is_ascii_alphanumeric()
-        && name
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
-        && !name.windows(2).any(|w| w == b"..")
-}
-
-/// One language's decision, given what its command is.
+/// One language's decision, given what its command is. `me` is the
+/// helper's user.
 pub(crate) fn decide(
     shim: Shim,
     vars: Option<&Environ<'_>>,
     homes: &Homes,
     selection: Selection<'_>,
     cwd: &[u8],
+    me: u32,
 ) -> Option<Decision> {
     let manager = match shim {
         Shim::Manager(manager) => manager,
@@ -234,7 +275,7 @@ pub(crate) fn decide(
         Manager::Pyenv => homes.pyenv.as_deref(),
     };
     let settings = match (manager, home) {
-        (Manager::Rustup, Some(home)) => read_settings(home, cwd),
+        (Manager::Rustup, Some(home)) => read_settings(home, cwd, me),
         _ => Settings::Unknown,
     };
     let facts = Facts {
@@ -248,10 +289,11 @@ pub(crate) fn decide(
         Plan::Done(decision) => decision,
         Plan::Check {
             folder,
-            name,
             value,
+            host,
         } => {
-            let present = home.is_some_and(|home| installed(home, &folder, &name));
+            let present =
+                home.is_some_and(|home| installed(home, &folder, &value, host.as_deref(), me));
             manager::installed(&value, present)
         }
     })
@@ -326,73 +368,134 @@ mod tests {
         assert_eq!(none, Homes::default());
     }
 
-    // shim 판별 표. 이것을 실패시키는 것: pyenv shims·cargo bin·asdf shims 폴더 비교를 지우는 것, 다른 언어의
-    // 관리자 폴더를 받는 것(rustc가 pyenv shims에 있어도 pyenv가 아님), 연결된 rustup 바이너리를 놓치는 것.
+    fn me() -> u32 {
+        sys::current_uid()
+    }
+
+    fn mode(path: &Path, bits: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
+    }
+
+    // shim 판별 표. 폴더는 (dev, ino)로 비교하므로 링크로 이름 붙인 관리자 폴더도 알아본다. 이것을 실패시키는
+    // 것: pyenv shims·cargo bin·asdf shims 폴더 비교를 지우는 것, 다른 언어의 관리자 폴더를 받는 것(rustc가 pyenv
+    // shims에 있어도 pyenv가 아님), 연결된 rustup 바이너리를 놓치는 것, 이름 문자열로 비교하는 것(링크 별칭을
+    // 놓침), 둘 다 없는 폴더를 같다고 보는 것.
     #[test]
     fn classify_table() {
-        let body = environ(&["HOME=/h"]);
+        let s = Scratch::new("classify");
+        for d in [
+            ".pyenv/shims",
+            ".cargo/bin",
+            ".asdf/shims",
+            ".volta/bin",
+            "usr/bin",
+        ] {
+            fs::create_dir_all(s.0.join(d)).unwrap();
+        }
+        symlink(s.0.join(".pyenv/shims"), s.0.join("alias")).unwrap();
+        let body = environ(&[&format!("HOME={}", s.0.display())]);
         let h = homes(&Environ::parse(&body));
-        let p = Path::new;
-        let cases = [
+        let at = |d: &str| s.0.join(d);
+        let missing = PathBuf::from("/nonexistent-bingsu");
+        let lone = Homes {
+            pyenv: Some(missing.clone()),
+            ..Homes::default()
+        };
+        let cases: [(Manager, PathBuf, Option<PathBuf>, &Homes, Shim); 10] = [
             (
                 Manager::Pyenv,
-                "/h/.pyenv/shims",
+                at(".pyenv/shims"),
                 None,
+                &h,
                 Shim::Manager(Manager::Pyenv),
             ),
-            (Manager::Rustup, "/h/.pyenv/shims", None, Shim::None),
             (
-                Manager::Rustup,
-                "/h/.cargo/bin",
+                Manager::Pyenv,
+                at("alias"),
                 None,
-                Shim::Manager(Manager::Rustup),
+                &h,
+                Shim::Manager(Manager::Pyenv),
             ),
-            (Manager::Pyenv, "/h/.cargo/bin", None, Shim::None),
-            (Manager::Pyenv, "/h/.asdf/shims", None, Shim::Unsupported),
-            (Manager::Rustup, "/h/.volta/bin", None, Shim::Unsupported),
+            (Manager::Rustup, at(".pyenv/shims"), None, &h, Shim::None),
             (
                 Manager::Rustup,
-                "/opt/homebrew/bin",
-                Some(p("/opt/homebrew/Cellar/rustup/1.29.2/bin/rustup-init")),
+                at(".cargo/bin"),
+                None,
+                &h,
+                Shim::Manager(Manager::Rustup),
+            ),
+            (Manager::Pyenv, at(".cargo/bin"), None, &h, Shim::None),
+            (
+                Manager::Pyenv,
+                at(".asdf/shims"),
+                None,
+                &h,
+                Shim::Unsupported,
+            ),
+            (
+                Manager::Rustup,
+                at(".volta/bin"),
+                None,
+                &h,
+                Shim::Unsupported,
+            ),
+            (
+                Manager::Rustup,
+                at("usr/bin"),
+                Some(PathBuf::from(
+                    "/opt/homebrew/Cellar/rustup/1.29.2/bin/rustup-init",
+                )),
+                &h,
                 Shim::Manager(Manager::Rustup),
             ),
             (
                 Manager::Rustup,
-                "/usr/bin",
-                Some(p("/usr/lib/rust/bin/rustc")),
+                at("usr/bin"),
+                Some(PathBuf::from("/usr/lib/rust/bin/rustc")),
+                &h,
+                Shim::None,
+            ),
+            (
+                Manager::Pyenv,
+                missing.join("shims"),
+                None,
+                &lone,
                 Shim::None,
             ),
         ];
-        for (command, folder, canonical, want) in cases {
+        for (command, folder, canonical, homes, want) in cases {
             assert_eq!(
-                classify(command, p(folder), canonical, &h),
+                classify(command, &folder, canonical.as_deref(), homes),
                 want,
-                "{command:?} {folder}"
+                "{command:?} {}",
+                folder.display()
             );
         }
     }
 
     // settings.toml은 링크가 아닌 일반 파일을 64 KiB까지만 읽는다. FIFO는 open에서 막히지 않고 모름이 되고,
-    // stat 뒤 커진 파일도 모름이다. 이것을 실패시키는 것: 일반 파일 검사를 지우는 것(FIFO에서 읽기가 멈추거나
-    // 실패), 크기 상한을 지우는 것, stat 뒤 크기 비교를 지우는 것, 링크를 따라가는 것.
+    // stat 뒤 크기가 바뀐 파일도 모름이다. 이것을 실패시키는 것: 일반 파일 검사를 지우는 것, 크기 상한을 지우는
+    // 것, stat 뒤 크기 비교를 지우는 것, 링크를 따라가는 것.
     #[test]
     fn settings_reads_only_regular_bounded_files() {
         let s = Scratch::new("settings");
         let file = s.0.join("settings.toml");
         let good = b"default_host_triple = \"h\"\n[overrides]\n";
         fs::write(&file, good).unwrap();
+        mode(&file, 0o644);
         let known = Settings::Known {
             host: Some(b"h".to_vec()),
             overridden: false,
         };
-        assert_eq!(read_settings(&s.0, b"/w"), known);
+        assert_eq!(read_settings(&s.0, b"/w", me()), known);
         let mut big = good.to_vec();
         big.resize(SETTINGS_MAX as usize, b'\n');
         fs::write(&file, &big).unwrap();
-        assert_eq!(read_settings(&s.0, b"/w"), known);
+        assert_eq!(read_settings(&s.0, b"/w", me()), known);
         big.push(b'\n');
         fs::write(&file, &big).unwrap();
-        assert_eq!(read_settings(&s.0, b"/w"), Settings::Unknown);
+        assert_eq!(read_settings(&s.0, b"/w", me()), Settings::Unknown);
         fs::write(&file, good).unwrap();
         let grow = file.clone();
         AFTER_STAT.with(|h| {
@@ -400,62 +503,87 @@ mod tests {
                 fs::write(&grow, [&good[..], b"\n"].concat()).unwrap();
             }))
         });
-        assert_eq!(read_settings(&s.0, b"/w"), Settings::Unknown);
+        assert_eq!(read_settings(&s.0, b"/w", me()), Settings::Unknown);
         AFTER_STAT.with(|h| *h.borrow_mut() = None);
         fs::remove_file(&file).unwrap();
         let elsewhere = s.0.join("real.toml");
         fs::write(&elsewhere, good).unwrap();
         symlink(&elsewhere, &file).unwrap();
-        assert_eq!(read_settings(&s.0, b"/w"), Settings::Unknown);
+        assert_eq!(read_settings(&s.0, b"/w", me()), Settings::Unknown);
         fs::remove_file(&file).unwrap();
         sys::make_test_fifo(&file).unwrap();
-        assert_eq!(read_settings(&s.0, b"/w"), Settings::Unknown);
+        assert_eq!(read_settings(&s.0, b"/w", me()), Settings::Unknown);
     }
 
-    // 설치 확인은 관리자 폴더 아래 두 이름을 하나씩, 링크를 따르지 않고 폴더로만 연다. 이름은 문법을 통과한 것만
-    // 쓴다. 이것을 실패시키는 것: 이름 검사를 지우는 것(`..`·`/`가 든 이름으로 밖을 확인), 링크를 따르는 것,
-    // 폴더가 아닌 것을 받는 것.
+    // 설치 확인은 관리자 폴더 아래 두 이름을 하나씩, 링크를 따르지 않고 폴더로만 연다. 값과 host는 각각 D1 버전
+    // 문법을 통과해야 한다. 이것을 실패시키는 것: 값이나 host의 문법 검사를 지우는 것(`..`·`/`가 든 이름으로 밖을
+    // 확인), 링크를 따르는 것, 폴더가 아닌 것을 받는 것.
     #[test]
     fn install_check_opens_one_folder() {
         let s = Scratch::new("install");
         let home = s.0.join("home");
-        fs::create_dir_all(home.join("toolchains/1.80.0-h")).unwrap();
+        let tc = home.join("toolchains");
+        fs::create_dir_all(tc.join("1.80.0-h")).unwrap();
         fs::create_dir_all(s.0.join("outside/1.81.0-h")).unwrap();
-        symlink(
-            s.0.join("outside/1.81.0-h"),
-            home.join("toolchains/1.81.0-h"),
-        )
-        .unwrap();
-        fs::write(home.join("toolchains/1.82.0-h"), b"").unwrap();
+        symlink(s.0.join("outside/1.81.0-h"), tc.join("1.81.0-h")).unwrap();
+        fs::write(tc.join("1.82.0-h"), b"").unwrap();
         fs::create_dir_all(home.join("x")).unwrap();
-        assert!(installed(&home, b"toolchains", b"1.80.0-h"));
-        assert!(!installed(&home, b"toolchains", b"1.81.0-h"));
-        assert!(!installed(&home, b"toolchains", b"1.82.0-h"));
-        assert!(!installed(&home, b"toolchains", b"1.83.0-h"));
-        assert!(!installed(&home, b"toolchains", b"../x"));
-        assert!(!installed(&home, b"toolchains", b"1.80.0-h/."));
-        // Each rule of the name alone: the first byte, the byte set, `..`,
-        // the length and the empty name (which would index past the end).
-        fs::create_dir_all(home.join("toolchains/-x")).unwrap();
-        assert!(!installed(&home, b"toolchains", b"-x"));
-        fs::create_dir_all(home.join("toolchains/a..b")).unwrap();
-        assert!(!installed(&home, b"toolchains", b"a..b"));
-        fs::create_dir_all(home.join("toolchains/a b")).unwrap();
-        assert!(!installed(&home, b"toolchains", b"a b"));
-        let long = "a".repeat(129);
-        fs::create_dir_all(home.join("toolchains").join(&long)).unwrap();
-        assert!(!installed(&home, b"toolchains", long.as_bytes()));
-        fs::create_dir_all(home.join("toolchains").join(&long[..128])).unwrap();
-        assert!(installed(&home, b"toolchains", &long.as_bytes()[..128]));
-        assert!(!installed(&home, b"toolchains", b""));
+        fs::create_dir_all(tc.join("a/b")).unwrap();
+        let ok = |v: &[u8], h: Option<&[u8]>| installed(&home, b"toolchains", v, h, me());
+        assert!(ok(b"1.80.0", Some(b"h")));
+        assert!(!ok(b"1.81.0", Some(b"h")));
+        assert!(!ok(b"1.82.0", Some(b"h")));
+        assert!(!ok(b"1.83.0", Some(b"h")));
+        assert!(!ok(b"../x", None));
+        // A host with `/` would walk below the name: `a-..` then `x`.
+        fs::create_dir_all(tc.join("a-..").join("x")).unwrap();
+        assert!(!ok(b"a", Some(b"../x")));
+        assert!(!ok(b"a/b", None));
         let linked = s.0.join("linked");
         fs::create_dir_all(&linked).unwrap();
-        symlink(home.join("toolchains"), linked.join("toolchains")).unwrap();
-        assert!(!installed(&linked, b"toolchains", b"1.80.0-h"));
+        symlink(&tc, linked.join("toolchains")).unwrap();
+        assert!(!installed(
+            &linked,
+            b"toolchains",
+            b"1.80.0",
+            Some(b"h"),
+            me()
+        ));
+    }
+
+    // D2 판정(소유자 검사): 관리자 폴더, settings.toml, toolchains 폴더 가운데 남(그룹)이 쓸 수 있는 것이 있으면
+    // 모름이다(빠른 경로 끔). 이것을 실패시키는 것: open_home·settings·toolchains의 trusted 검사를 각각 지우는 것.
+    #[test]
+    fn owner_rules_refuse_writable_folders() {
+        let s = Scratch::new("owner");
+        let home = s.0.join("rustup");
+        fs::create_dir_all(home.join("toolchains/1.80.0-h")).unwrap();
+        fs::write(home.join("settings.toml"), b"default_host_triple = \"h\"\n").unwrap();
+        mode(&home, 0o755);
+        mode(&home.join("toolchains"), 0o755);
+        mode(&home.join("settings.toml"), 0o644);
+        let known = Settings::Known {
+            host: Some(b"h".to_vec()),
+            overridden: false,
+        };
+        let check = || installed(&home, b"toolchains", b"1.80.0", Some(b"h"), me());
+        assert_eq!(read_settings(&home, b"/w", me()), known);
+        assert!(check());
+        mode(&home, 0o775);
+        assert_eq!(read_settings(&home, b"/w", me()), Settings::Unknown);
+        assert!(!check());
+        mode(&home, 0o755);
+        mode(&home.join("settings.toml"), 0o664);
+        assert_eq!(read_settings(&home, b"/w", me()), Settings::Unknown);
+        assert!(check());
+        mode(&home.join("settings.toml"), 0o644);
+        mode(&home.join("toolchains"), 0o777);
+        assert!(!check());
+        assert_eq!(read_settings(&home, b"/w", me()), known);
     }
 
     // 빌드 triple은 이 build의 arch와 OS다(rustup 철자). 이것을 실패시키는 것: build_host의 arch나 OS 가지를
-    // 바꾸는 것(macOS에서 x86_64, Linux에서 musl/gnu 혼동은 target_env로 가른다).
+    // 바꾸는 것.
     #[test]
     fn build_host_names_this_build() {
         let host = std::str::from_utf8(BUILD_HOST).unwrap();
@@ -481,6 +609,15 @@ mod tests {
         let toolchain = format!("toolchains/1.80.0-{}", String::from_utf8_lossy(BUILD_HOST));
         fs::create_dir_all(rustup.join(toolchain)).unwrap();
         fs::write(rustup.join("settings.toml"), b"version = \"12\"\n").unwrap();
+        for p in [
+            &pyenv,
+            &pyenv.join("versions"),
+            &rustup,
+            &rustup.join("toolchains"),
+        ] {
+            mode(p, 0o755);
+        }
+        mode(&rustup.join("settings.toml"), 0o644);
         let body = environ(&[
             &format!("PYENV_ROOT={}", pyenv.display()),
             &format!("RUSTUP_HOME={}", rustup.display()),
@@ -490,20 +627,18 @@ mod tests {
         let py = Shim::Manager(Manager::Pyenv);
         let rs = Shim::Manager(Manager::Rustup);
         let v = Selection::Value;
+        let d = |shim, vars, sel| decide(shim, vars, &h, sel, b"/w", me());
         assert_eq!(
-            decide(py, Some(&vars), &h, v(b"3.12.1"), b"/w"),
+            d(py, Some(&vars), v(b"3.12.1")),
             Some(Decision::Fast(b"3.12.1".to_vec()))
         );
         assert_eq!(
-            decide(py, Some(&vars), &h, v(b"3.12.2"), b"/w"),
+            d(py, Some(&vars), v(b"3.12.2")),
             Some(Decision::Run(Some(b"3.12.2".to_vec())))
         );
+        assert_eq!(d(py, None, v(b"3.12.1")), Some(Decision::Run(None)));
         assert_eq!(
-            decide(py, None, &h, v(b"3.12.1"), b"/w"),
-            Some(Decision::Run(None))
-        );
-        assert_eq!(
-            decide(rs, Some(&vars), &h, v(b"1.80.0"), b"/w"),
+            d(rs, Some(&vars), v(b"1.80.0")),
             Some(Decision::Fast(b"1.80.0".to_vec()))
         );
         fs::write(
@@ -511,16 +646,10 @@ mod tests {
             b"[overrides]\n\"/w\" = \"nightly\"\n",
         )
         .unwrap();
+        assert_eq!(d(rs, Some(&vars), v(b"1.80.0")), Some(Decision::Run(None)));
+        assert_eq!(d(Shim::Unsupported, Some(&vars), v(b"3.12.1")), None);
         assert_eq!(
-            decide(rs, Some(&vars), &h, v(b"1.80.0"), b"/w"),
-            Some(Decision::Run(None))
-        );
-        assert_eq!(
-            decide(Shim::Unsupported, Some(&vars), &h, v(b"3.12.1"), b"/w"),
-            None
-        );
-        assert_eq!(
-            decide(Shim::None, Some(&vars), &h, v(b"3.12.1"), b"/w"),
+            d(Shim::None, Some(&vars), v(b"3.12.1")),
             Some(Decision::Run(None))
         );
     }
