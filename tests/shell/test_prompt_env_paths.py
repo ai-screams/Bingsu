@@ -1497,9 +1497,36 @@ def assert_collector_trace_budget(lines: list[str], pinned: dict, expected: dict
 # GATE-FS-HELPER.1: helper calls per publication stage of a release build.
 HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
-                 "failure-recover": ("failure-recover",)}
+                 "failure-recover": ("failure-recover",),
+                 "command_miss": ("unchanged", "command_miss"), "command_hit": ("unchanged", "command_hit"),
+                 "command_not_run": ("unchanged", "command_not_run")}
+# Command stages (M6 C4): one config unit run through the relay, on a screen
+# without dir or git. The miss runs it (no cache: every round); the hit finds
+# the warm-up's result inside its cache time; not_run keeps the unit off the
+# screen. All three take the session lock and reclaim (C4 ruling Q4; the
+# security review's R-1 names both rounds with nothing to run). Paths the
+# helper reaches in these rounds, and why:
+#   /proc/self/cgroup: the atomic path's input, the delegated cgroup subpath
+#     (C3 ruling R3); the helper path rules admit it under /proc/self/.
+#   /sys/fs/cgroup/<own>, its cgroup.procs, the session parent bingsu-cmd-*
+#     and its unit cgroups: the helper's reclaim under the session lock (C3
+#     ruling R1, CMD-CGROUP-PROCS); uname is the 5.14 check before them.
+#   /proc/self/fd, /dev/null (three opens) and chdir("/"): the supervisor
+#     spawn's fd census and its posix_spawn child before exec, as the
+#     collector spawn (miss only).
+#   /usr and /usr/bin walks and the target's header pread: exec_path's
+#     PATH and target checks (C2; miss only).
+#   the collection catalog, GC lock, store folders, collection.lock,
+#     command and .command.stage: the response store (C4 ruling P1) and the
+#     GC after publication (hit reads the response only).
+COMMAND_UNIT = "[segment.\"custom/probe\"]\nkind='command'\ncommand=['/usr/bin/true']\n"
+COMMAND_SCREEN = "[layout.line1]\nleft=['char']\n[layout.line2]\nleft=[{shown}'char']\n"
+COMMAND_PATH = "/usr/bin"
 TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\ntemplate='EDIT {char}'\n",
              "collect": "[style]\ntemplate='BASE {dir} {git} {char}'\n", "broken": "[broken"}
+TEMPLATES["command_miss"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="'custom/probe', ")
+TEMPLATES["command_hit"] = COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="'custom/probe', ")
+TEMPLATES["command_not_run"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="")
 # 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
 # 80 selects a variant past INDEX's chunk, with more variants after it.
 TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
@@ -1557,6 +1584,39 @@ def nss_reads(libc, user_uid):
         return 0, -(-at // 1024)
     nsswitch, passwd = os.stat("/etc/nsswitch.conf"), os.stat("/etc/passwd")
     return -(-nsswitch.st_size // nsswitch.st_blksize) + 1, -(-at // passwd.st_blksize)
+
+
+def passwd_seeks(libc, user_uid, data=None):
+    """musl's fclose of /etc/passwd seeks back once over the bytes its 1 KiB
+    reads took past the user's line; computed from this host's file."""
+    if libc != "musl":
+        return 0
+    data = Path("/etc/passwd").read_bytes() if data is None else data
+    at = next(m.end() for m in re.finditer(rb"(?m)^[^:\n]*:[^:\n]*:(\d+):.*$\n?", data)
+              if int(m.group(1)) == user_uid)
+    return int(min(-(-at // 1024) * 1024, len(data)) > at)
+
+
+# exec_path's LINKS_MAX: the product follows at most this many hops.
+TARGET_LINKS_MAX = 40
+
+
+def target_links(path):
+    """Symlink hops from `path` to its file, each a plain name in the same
+    folder ending at a regular file: the only shape the formula counts.
+    Anything else (another folder, `.` or `..`, a loop, a broken link, a
+    folder, more hops than the product follows) fails here."""
+    # A loop ends at the hop cap; `.` and `..` end at a folder, which the
+    # last check refuses.
+    hops, folder, name = 0, os.path.dirname(path), os.path.basename(path)
+    while os.path.islink(os.path.join(folder, name)):
+        name = os.readlink(os.path.join(folder, name))
+        assert "/" not in name, ("unreviewed target link", path, name)
+        hops += 1
+        assert hops <= TARGET_LINKS_MAX, ("too many target links", path)
+    final = os.path.join(folder, name)
+    assert os.path.isfile(final) and not os.path.islink(final), ("target is not a regular file", path, name)
+    return hops
 
 
 def context_store(runtime, config, state):
@@ -1706,7 +1766,10 @@ class HelperStageFixture:
         os.mkdir(self.env["HOME"], 0o700)
         self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, mode=0o700)
-        self.put("collect" if stage == "collect" else config, template=template)
+        command = stage.startswith("command_")
+        self.put("collect" if stage == "collect" else stage if command else config, template=template)
+        if command:
+            self.env["PATH"] = COMMAND_PATH
         self.script = self.inst.init("bash", self.env)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
@@ -1718,7 +1781,9 @@ class HelperStageFixture:
             (self.pwd / "a").write_text("x")
         # The first prompts publish and, for collect, admit and store a response
         # untraced: under strace a cold admission can exceed its 20 ms budget.
-        for _ in range(3 if stage == "collect" else 1):
+        # Command stages: the first round publishes the snapshot, the second
+        # leaves the unit's response (and the session cgroup parent).
+        for _ in range(3 if stage == "collect" else 2 if command else 1):
             self.prompt()
             wait_helpers(self.base)
         self.store = context_store(self.env["XDG_RUNTIME_DIR"], os.path.realpath(self.config),
@@ -1736,6 +1801,20 @@ class HelperStageFixture:
                                **sizes,
                                "collector_components": path_names(Path(self.collector).parent),
                                "collector_bytes": Path(self.collector).stat().st_size}
+        self.command = {}
+        if command:
+            # A unit off the screen never ran: no response, no lookup.
+            responses = list((self.store / "collections-v1").glob("*/store/command"))
+            assert len(responses) == int(stage != "command_not_run"), ("command responses after warm-up", responses)
+            procs = own_cgroup() / "cgroup.procs"
+            self.command = {"command_bytes": responses[0].stat().st_size if responses else 0,
+                            "catalog_bytes": (Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu/.collections.catalog").stat().st_size
+                            if responses else 0,
+                            "cgroup_procs_bytes": len(procs.read_bytes()),
+                            "cgroup_parent": session_cgroup_parent(
+                                self.script, Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
+                            "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin"),
+                            "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0}
         if stage == "publish":
             self.put("edited")
         elif stage == "failure-last-good":
@@ -1784,7 +1863,37 @@ class HelperStageFixture:
             state_components=path_names(state), exe_link_components=path_names(self.inst.dir),
             exe_components=path_names(real_bin().parent),
             nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
-            arch=platform.machine(), **self.collection)
+            passwd_seeks=passwd_seeks(libc, os.getuid()),
+            arch=platform.machine(), **self.collection, **self.command)
+
+
+def own_cgroup():
+    """The cgroup v2 folder of this process (the helper's, as its descendant)."""
+    line = next(l for l in Path("/proc/self/cgroup").read_text().splitlines() if l.startswith("0::"))
+    return Path("/sys/fs/cgroup" + line[3:].rstrip("/"))
+
+
+def session_cgroup_parent(script, runtime, own=None):
+    """Whether the helper takes the atomic path, decided from the host and
+    never from the traced calls. A cgroup folder this process may write to
+    (not read-only, not someone else's) delegates: the warm-up must then have
+    made this session's own parent (its exact name, owned by this user), or
+    the fixture fails; the privileged cell must delegate. Otherwise the round
+    is best effort."""
+    own = own_cgroup() if own is None else own
+    # init writes the session as a shell word (quoted or not) in the hooks.
+    session = re.search(rb"_bingsu_session:=['\"]?([0-9a-f]{32})", script)[1]
+    root = os.stat(runtime)
+    key = root.st_dev.to_bytes(8, "little") + root.st_ino.to_bytes(8, "little") + b"\0" + session
+    parent = own / f"bingsu-cmd-{hashlib.sha256(key).digest()[:16].hex()}"
+    delegated = os.access(own, os.W_OK) and not os.statvfs(own).f_flag & os.ST_RDONLY
+    # 이것을 실패시키는 것: 특권 셀에서 위임을 요구하지 않는 것, 같은 uid의 아무 bingsu-cmd-* 폴더를 이 세션의 부모로
+    # 받는 것, 위임된 셀에서 부모가 없을 때 best effort로 셈하는 것(데움 실패가 원자 경로 비용을 지움).
+    assert delegated or os.environ.get("BINGSU_CGROUP_CELL") != "priv", ("the privileged cell delegates", own)
+    if delegated:
+        assert (parent.is_dir() and not parent.is_symlink()
+                and parent.stat().st_uid == os.getuid()), ("the warm-up's session parent", parent)
+    return delegated
 
 
 def collector_exit(lines, collector):
@@ -1807,7 +1916,10 @@ def measured_helper_attribution(lines, exe, collector, helper_vocabulary=True):
     from fsbudget.attribute import collector_attribute
     _, scoped = tree(lines, exe)
     collectors = sum(is_root(line, collector) for line in scoped)
+    # The command supervisor and relay are the pinned binary's other verbs;
+    # they and the target are counted in their own roles, never the helper's.
     roles = collector_attribute(scoped, {"front": exe, "helper": exe, "collector": collector,
+                                         "supervisor": exe, "relay": exe,
                                          "collectors": collectors}, helper_vocabulary=helper_vocabulary)
     errors = [e for e in roles.errors if "(collector):" not in e]
     assert not errors, errors
@@ -1820,8 +1932,8 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
 
 
 def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
-    from fsbudget.formula import helper_stage_expected, helper_collect_expected
-    from fsbudget.gate import check, check_collect
+    from fsbudget.formula import helper_stage_expected, helper_collect_expected, helper_command_expected
+    from fsbudget.gate import check, check_collect, check_command
     if evidence is None:
         evidence = {}
     status = collector_exit(lines, collector) if stage == "collect" else None
@@ -1829,7 +1941,14 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     collectors, roles = measured_helper_attribution(lines, exe, collector)
     evidence["role_counts"] = roles.counts
     assert collectors == int(stage == "collect"), ("collector spawns", collectors)
-    if stage != "collect":
+    command_roles = {"supervisor", "relay", "command"} & set(roles.counts)
+    # 이것을 실패시키는 것: 명령 단계에서 감독·relay·대상 역할이 비는 것(그 호출이 helper에 섞임), 명령 없는
+    # 단계나 실행할 것 없는 명령 단계에 그 역할이 생기는 것.
+    assert command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss" else set()), command_roles
+    if stage == "command_miss":
+        errors = check_command(roles, helper_command_expected(plan), evidence=evidence)
+        published = False
+    elif stage != "collect":
         measured = {"helper": roles.counts.get("helper", {})}
         expected = {"helper": helper_stage_expected(plan)}
         evidence.update(phase_counts=measured, phase_expected=expected)
@@ -3225,3 +3344,101 @@ def test_shell_pipe_reaches_eof_while_helper_is_alive(tmp_path):
                 pipes.close()
     except Blocked as error:
         pytest.fail(f"BLOCKED: {error.reason}", pytrace=False)
+
+
+SESSION_SCRIPT = b": \"${_bingsu_session:=0123456789abcdef0123456789abcdef}\"\n"
+
+
+def session_parent_name(runtime):
+    root = os.stat(runtime)
+    key = (root.st_dev.to_bytes(8, "little") + root.st_ino.to_bytes(8, "little") + b"\0"
+           + b"0123456789abcdef0123456789abcdef")
+    return f"bingsu-cmd-{hashlib.sha256(key).digest()[:16].hex()}"
+
+
+# 위임된 cgroup에서는 이 세션의 정확한 부모만 원자 경로의 근거다. 이것을 실패시키는 것: 같은 uid의 다른
+# bingsu-cmd-* 폴더를 받는 것, 부모가 없는 위임 셀을 best effort로 세는 것, 특권 셀에서 위임 없음을 받는 것,
+# 쓸 수 없는 폴더나 읽기 전용 마운트를 위임으로 보는 것, 정확한 이름의 symlink를 부모로 받는 것.
+@pytest.mark.parametrize("case", ["exact", "other", "missing", "priv-undelegated", "undelegated",
+                                  "read-only", "symlink"])
+def test_session_cgroup_parent_needs_this_sessions_parent(case, tmp_path, monkeypatch):
+    own, runtime = tmp_path / "own", tmp_path / "runtime"
+    own.mkdir()
+    runtime.mkdir()
+    monkeypatch.delenv("BINGSU_CGROUP_CELL", raising=False)
+    if case == "exact":
+        (own / session_parent_name(runtime)).mkdir()
+        assert session_cgroup_parent(SESSION_SCRIPT, runtime, own) is True
+        return
+    if case == "other":
+        (own / "bingsu-cmd-00112233445566778899aabbccddeeff").mkdir()
+    if case == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        (own / session_parent_name(runtime)).symlink_to(tmp_path / "elsewhere")
+    if case == "read-only":
+        # Writable by permission bits, but on a read-only mount: not delegated.
+        flags = type("S", (), {"f_flag": os.ST_RDONLY})()
+        monkeypatch.setattr(os, "access", lambda *_: True)
+        monkeypatch.setattr(os, "statvfs", lambda *_: flags)
+        assert session_cgroup_parent(SESSION_SCRIPT, runtime, own) is False
+        return
+    if case in ("priv-undelegated", "undelegated"):
+        monkeypatch.setattr(os, "access", lambda *_: False)
+        if case == "undelegated":
+            assert session_cgroup_parent(SESSION_SCRIPT, runtime, own) is False
+            return
+        monkeypatch.setenv("BINGSU_CGROUP_CELL", "priv")
+    with pytest.raises(AssertionError):
+        session_cgroup_parent(SESSION_SCRIPT, runtime, own)
+
+
+
+# 이것을 실패시키는 것: 사용자 줄 뒤에 남은 바이트가 있을 때 seek를 0으로 보는 것, 줄이 버퍼 끝(1024·2048)이나 파일
+# 끝일 때 1로 보는 것(줄 끝 < 파일 크기로만 판정), glibc에 musl 항을 주는 것.
+def test_passwd_seeks_follow_musl_stdio():
+    root = b"root:x:0:0:root:/root:/bin/bash\n"
+    rest = b"".join(b"u%d:x:%d:%d::/h:/bin/sh\n" % (i, 1000 + i, 1000 + i) for i in range(60))
+    data = root + rest
+    assert passwd_seeks("musl", 0, data) == 1                    # root first: the rest is buffered
+    last = 1000 + 59
+    assert passwd_seeks("musl", last, data) == 0                 # the last line: nothing left
+    # A line that ends exactly where a 1 KiB read ends leaves nothing in the
+    # buffer even with data after it; one that ends inside the last, partial
+    # buffer leaves the rest of it.
+    for edge in (1024, 2048):
+        line = b"u:x:5:5:" + b"y" * (edge - len(b"u:x:5:5:") - 2) + b":\n"
+        assert len(line) == edge
+        assert passwd_seeks("musl", 5, line + b"after:x:6:6::/h:/bin/sh\n") == 0, edge
+    partial = root + b"p:x:7:7::/h:/bin/sh\n" + b"tail:x:8:8::/h:/bin/sh\n"
+    assert len(partial) < 1024
+    assert passwd_seeks("musl", 7, partial) == 1                 # ends inside the buffer, data after
+    assert passwd_seeks("gnu", 0, data) == 0
+
+
+# 이것을 실패시키는 것: 링크를 따라가지 않는 것(gnutrue 같은 대상의 hop을 0으로 셈), 다른 폴더·`.`·`..`·고리·끊어진
+# 링크·폴더로 끝나는 링크·제품 상한을 넘는 hop을 받는 것.
+def test_target_links_count_same_folder_hops(tmp_path):
+    (tmp_path / "real").write_bytes(b"x")
+    (tmp_path / "mid").symlink_to("real")
+    (tmp_path / "name").symlink_to("mid")
+    assert target_links(str(tmp_path / "real")) == 0
+    assert target_links(str(tmp_path / "name")) == 2
+    (tmp_path / "away").symlink_to(tmp_path / "real")
+    (tmp_path / "self").symlink_to("self")
+    (tmp_path / "a").symlink_to("b")
+    (tmp_path / "b").symlink_to("a")
+    (tmp_path / "dot").symlink_to(".")
+    (tmp_path / "up").symlink_to("..")
+    (tmp_path / "broken").symlink_to("missing")
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "to-folder").symlink_to("folder")
+    for shape in ("away", "self", "a", "dot", "up", "broken", "to-folder", "folder"):
+        with pytest.raises(AssertionError):
+            target_links(str(tmp_path / shape))
+    previous = "real"
+    for i in range(TARGET_LINKS_MAX + 1):
+        (tmp_path / f"h{i}").symlink_to(previous)
+        previous = f"h{i}"
+    assert target_links(str(tmp_path / f"h{TARGET_LINKS_MAX - 1}")) == TARGET_LINKS_MAX
+    with pytest.raises(AssertionError):
+        target_links(str(tmp_path / f"h{TARGET_LINKS_MAX}"))

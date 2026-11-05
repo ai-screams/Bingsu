@@ -230,3 +230,49 @@ def test_collect_partition_preserves_primitive_totals(libc):
     assert deadline["prefix"] == phases["prefix"]
     assert deadline["finish_gc"] == phases["finish_gc"]
     assert deadline["supervisor"] == PRIMITIVES["clock"]
+
+
+COMMAND = dict(command_bytes=448, catalog_bytes=548, cgroup_procs_bytes=17, cgroup_parent=True,
+               path_names=2, target_names=2)
+
+
+# 이것을 실패시키는 것: 명령 단계 검토 조건 하나를 지우는 것(명령 단계 둘, 수집과 함께, unchanged 아닌 바탕,
+# 응답 없는 hit·응답 있는 not_run, 머리보다 짧은 응답, PATH 이름 없는 miss, catalog 없는 miss, 4 KiB를 넘거나 빈 cgroup.procs).
+@pytest.mark.parametrize("change", [
+    {"stages": ("unchanged", "command_miss", "command_hit")},
+    {"stages": ("unchanged", "collect", "command_hit"), "collector_components": 4, "collector_bytes": 1_249_936,
+     "response_bytes": 516, "previous_bytes": 516, "breaker_bytes": 284},
+    {"stages": ("publish", "command_hit")},
+    {"stages": ("unchanged", "command_hit"), "command_bytes": 0},
+    {"stages": ("unchanged", "command_hit"), "command_bytes": 63},
+    {"stages": ("unchanged", "command_not_run")},
+    {"stages": ("unchanged", "command_miss"), "path_names": 0},
+    {"stages": ("unchanged", "command_miss"), "catalog_bytes": 0},
+    {"stages": ("unchanged", "command_hit"), "cgroup_procs_bytes": 4096},
+    {"stages": ("unchanged", "command_hit"), "cgroup_procs_bytes": 0},
+])
+def test_unreviewed_command_plans_are_refused(change):
+    with pytest.raises(ValueError):
+        helper_stage_expected(plan(**{"stages": ("unchanged", "command_hit"), **COMMAND, **change}))
+
+
+# 양성 대조: 검토한 세 명령 단계는 식을 낸다. not_run은 응답이 없다.
+def test_reviewed_command_plans_are_accepted():
+    for stage in ("command_miss", "command_hit"):
+        helper_stage_expected(plan(("unchanged", stage), **COMMAND))
+    helper_stage_expected(plan(("unchanged", "command_not_run"), **{**COMMAND, "command_bytes": 0}))
+
+
+
+# 이것을 실패시키는 것: 대상 링크 hop을 세지 않는 것, musl passwd seek를 더하지 않는 것, glibc에 그 항을 받는 것.
+def test_target_links_and_musl_passwd_seek_terms():
+    miss = ("unchanged", "command_miss")
+    base = helper_stage_expected(plan(miss, **COMMAND))
+    link = helper_stage_expected(plan(miss, **COMMAND, target_links=1))
+    assert {k: link[k] - base.get(k, 0) for k in link if link[k] != base.get(k, 0)} == {"fstat": 2, "readlink": 1}
+    musl = dict(libc="musl", nsswitch_reads=0)
+    base = helper_stage_expected(plan(**musl))
+    seek = helper_stage_expected(plan(**musl, passwd_seeks=1))
+    assert seek["seek"] - base["seek"] == 1
+    with pytest.raises(ValueError):
+        helper_stage_expected(plan(passwd_seeks=1))

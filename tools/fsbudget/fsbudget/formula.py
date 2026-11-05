@@ -110,7 +110,9 @@ def synthetic_helper_expected(ax: HelperAxes, co: Coeffs, changed: bool, buf: in
     return e
 
 
-HelperStage = Literal["unchanged", "publish", "collect", "failure-last-good", "failure-recover"]
+HelperStage = Literal["unchanged", "publish", "collect", "failure-last-good", "failure-recover",
+                      "command_not_run", "command_hit", "command_miss"]
+COMMAND_STAGES = ("command_not_run", "command_hit", "command_miss")
 # Linux read(2)/write(2) transfer at most MAX_RW_COUNT bytes per call. Outside
 # collection metering the release helper reads and writes each store file in
 # one call of its full length (read_exact_len, write_fd), plus one EOF read.
@@ -194,6 +196,36 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # DirectoryCursor::open on a held folder: "." open, fd stat, flag query,
     # FD_CLOEXEC; its reads are one filled read and the EOF read.
     "directory_cursor": {"openat": 1, "fstat": 1, "fd_query": 1, "fd_flags": 1, "getdents": 2},
+    # command_cgroup::fs::open_session up to the session parent's open (Linux,
+    # C3): uname (the 5.14 check, kernel_release), /proc/self/cgroup
+    # through libc::open and read to its end, the own cgroup folder through
+    # libc::open and its fstatfs, the cgroup.procs open (its preads are an
+    # axis), the parent's mkdirat and open. A best-effort host stops at that
+    # open (mkdir refused, nothing to open).
+    "cgroup_probe": {"kernel_release": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1},
+    # The opened parent: fd_facts and the mount ids of the own cgroup and the
+    # parent; then the reclaim's listing of the parent (lseek, one filled
+    # getdents64 and the EOF one).
+    "cgroup_parent": {"fstat": 3},
+    "cgroup_listing": {"seek": 1, "getdents": 2},
+    # One unit cgroup reclaimed after its round: open and both mount ids,
+    # cgroup.kill open and write, cgroup.events open and one pread, the
+    # unit's own listing, then rmdir.
+    "cgroup_unit": {"openat": 3, "fstat": 2, "write": 1, "read": 1, "seek": 1, "getdents": 2, "unlinkat": 1},
+    # command_grant::neutral: the 0500 folder's mkdirat (EEXIST once made),
+    # open and fd_facts, then its emptiness check through a cursor on a
+    # duplicate (the dup itself is the "dup" primitive).
+    "neutral": {"mkdir": 1, "openat": 1, "fstat": 2, "fd_query": 1, "fd_flags": 1, "seek": 1, "getdents": 2},
+    # command_process::spawn_supervisor's posix_spawn: the child opens
+    # /dev/null for fds 0-2 and chdir("/") before its exec.
+    "command_spawn": {"spawn": 1, "openat": 3, "cwd": 1},
+    # exec_path's no-follow walk of a folder: "/" open and fd stat, then per
+    # name an lstat, open and fd stat (`folder_name`).
+    "folder_root": {"openat": 1, "fstat": 1},
+    "folder_name": {"openat": 1, "fstat": 2},
+    # exec_path::lookup_open's target: lstat, open, statx and fd stat, and
+    # the 256-byte header pread.
+    "target_file": {"fstat": 3, "openat": 1, "read": 1},
 }
 
 # musl differs only in its libc wrappers: open(O_CLOEXEC), fopen("e"),
@@ -207,6 +239,8 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "statm": {"openat": 1, "fstat": 1, "read": 2, "fd_flags": 1},
     # musl's opendir does not stat the folder.
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
+    # libc::open(O_CLOEXEC) of /proc/self/cgroup and of the own cgroup folder.
+    "cgroup_probe": {"kernel_release": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1, "fd_flags": 2},
 }
 
 # Parent-side successful posix_spawn exec-error channel, per libc.
@@ -293,6 +327,11 @@ class HelperPlan:
     # user's line, from the host files and their st_blksize.
     nsswitch_reads: int = 0
     passwd_reads: int = 0
+    # musl only: its getpwuid reads /etc/passwd through a 1 KiB stdio buffer
+    # and fclose seeks back over the bytes it read past the user's line (one
+    # lseek SEEK_CUR when any are left; root's first line leaves most of the
+    # file). glibc's rewind is in the passwd primitive. From the host file.
+    passwd_seeks: int = 0
     # Collect stage: names of the pinned collector's folder, its size (the
     # build check reads it), and the steady store of one earlier collection:
     # catalog, current response and previous response lengths.
@@ -309,6 +348,22 @@ class HelperPlan:
     # Capture/native runner architecture, never inferred from call counts.
     # The default preserves the original aarch64 captures; live sets it.
     arch: str = "aarch64"
+    # Command stages (M6 C4, one config unit `/usr/bin/true` with
+    # PATH=/usr/bin, the shell's session): the command response the warm-up
+    # left (and the miss republishes at the same length), the cgroup.procs
+    # length of the helper's own cgroup, whether the session cgroup parent
+    # opens (the atomic path; a host that refuses its mkdir is best effort),
+    # and the names of the PATH folder and of the target's folder. The
+    # collection catalog length is `catalog_bytes`.
+    command_bytes: int = 0
+    cgroup_procs_bytes: int = 0
+    cgroup_parent: bool = False
+    path_names: int = 0
+    target_names: int = 0
+    # Symlink hops from the target's name to its file inside its folder (a
+    # runner's /usr/bin/true can be a link to gnutrue): each is an lstat that
+    # finds the link, its readlinkat and the name's lstat again.
+    target_links: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -462,10 +517,22 @@ def _check_plan(p: HelperPlan) -> None:
     if (p.arch, p.libc) not in STARTUP_PRIMITIVES:
         raise ValueError("unreviewed helper architecture/libc")
     ax = p.ax
-    base = [s for s in p.stages if s != "collect"]
+    base = [s for s in p.stages if s != "collect" and s not in COMMAND_STAGES]
+    command = [s for s in p.stages if s in COMMAND_STAGES]
     if (len(base) != 1 or base[0] not in {"unchanged", "publish", "failure-last-good", "failure-recover"}
-            or len(p.stages) != len(set(p.stages)) or not set(p.stages) <= set(HelperStage.__args__)):
-        raise ValueError("stages: one non-collect stage, optionally collect")
+            or len(p.stages) != len(set(p.stages)) or not set(p.stages) <= set(HelperStage.__args__)
+            or len(command) > 1):
+        raise ValueError("stages: one non-collect stage, optionally collect or one command stage")
+    if command and (
+            base != ["unchanged"] or "collect" in p.stages
+            or (command[0] == "command_not_run") != (p.command_bytes == 0)
+            or 0 < p.command_bytes < 64
+            or (command[0] == "command_miss" and min(p.path_names, p.target_names) < 1)
+            or (command[0] == "command_miss" and p.catalog_bytes < 64)
+            or not 0 < p.cgroup_procs_bytes < 4096):
+        # Reviewed: a revalidated snapshot, a screen without dir or git, one
+        # unit whose response the warm-up published.
+        raise ValueError("unreviewed command shape")
     if (ax.F != 1 or len(ax.B) != 1 or ax.L or ax.D or ax.E_n or ax.E_b or ax.M or ax.R != 3
             or ax.acl or ax.lock_fd_inherited):
         # Other source shapes (conf.d listings, extends, links, ACL fallbacks,
@@ -476,6 +543,8 @@ def _check_plan(p: HelperPlan) -> None:
         raise ValueError("helper fixture axes")
     if p.libc not in _LIBC or (p.libc == "musl") != (p.nsswitch_reads == 0):
         raise ValueError("libc: gnu reads nsswitch.conf, musl does not")
+    if p.passwd_seeks not in (0, int(p.libc == "musl")):
+        raise ValueError("passwd seeks: musl's fclose only, at most one")
     if p.buf != MAX_RW_COUNT or p.marker_bytes != 208 or p.sequence_bytes != 96:
         raise ValueError("store transfers are whole-file calls of fixed record sizes")
     if "collect" in p.stages and (
@@ -752,6 +821,131 @@ def _breaker_finish_and_gc(e: dict, p: HelperPlan) -> None:
     _catalog_commit(e, p.catalog_bytes)
 
 
+def _command_session(e: dict, p: HelperPlan) -> None:
+    """command_grant's session lock and session_reclaim (C3, C4 ruling Q4):
+    every round of a config with command units takes them, even with nothing
+    to run."""
+    _close_only_lock(e, create=True)
+    e["fstat"] = e.get("fstat", 0) + 1  # fd_facts of the runtime root (the parent's name)
+    _add(e, "cgroup_probe")
+    e["read"] = e.get("read", 0) + 2  # cgroup.procs: one filled pread and the EOF one
+    if p.cgroup_parent:
+        _add(e, "cgroup_parent")
+        _add(e, "cgroup_listing")  # the empty parent: nothing to reclaim
+
+
+def _command_lookup(e: dict, p: HelperPlan) -> None:
+    # collection_store::read_commands: the context clone, the three collection
+    # folders, then the response read without the lock (a cache lookup).
+    _add(e, "dup")
+    _add(e, "context_component", 3)
+    _read_checked(e, p.command_bytes)
+
+
+def _command_prefix(e: dict, p: HelperPlan, stage: str) -> None:
+    """The command round up to and including its publication: exact."""
+    if stage != "command_not_run":
+        _command_lookup(e, p)
+    _command_session(e, p)
+    if stage != "command_miss":
+        return
+    # prepare: the neutral folder, the supervisor (the lock it inherits, the
+    # cgroup parent on the atomic path, the inherited fd census, the spawn),
+    # then the round's context clone (two folders) and the runtime clone the
+    # GC uses after publication (C4a review H1).
+    _add(e, "neutral")
+    _add(e, "dup")
+    _add(e, "dup", 1 + int(p.cgroup_parent))
+    _add(e, "fd_listing")
+    _add(e, "command_spawn")
+    _add(e, "dup", 3)
+    # Round::grant -> units: the shell folder's identity (statx), the PATH
+    # folder's walk, the target folder's walk and the target.
+    e["fstat"] = e.get("fstat", 0) + 1
+    _add(e, "folder_root", 2)
+    _add(e, "folder_name", p.path_names + p.target_names)
+    _add(e, "target_file")
+    _add(e, "resolved_link", p.target_links)
+    # publish_entries -> CollectionStore::admit_commands: as collection
+    # admission, with no collection response in the store.
+    edges = 3
+    _registration_open(e, p.catalog_bytes)
+    _reserve_walk(e, p.context_components + edges)
+    _catalog_commit(e, p.catalog_bytes)
+    _add(e, "dup")
+    _add(e, "context_mkdir", edges)
+    _add(e, "open", edges)
+    _add(e, "check_directory", edges)
+    _add(e, "same_name", edges)
+    _close_only_lock(e, create=True)
+    _add(e, "metadata")
+    _catalog_commit(e, p.catalog_bytes)
+    _store_verify(e, edges)
+    _add(e, "absent_file", 2)  # response, previous
+    _store_verify(e, edges)
+    _add(e, "absent_slot", 2)  # .response.stage, .stage-request
+    # publish_commands: verify, the current response read again under the
+    # lock, the stale stage's removal, the staged merge (same length here),
+    # verify, the read file's stamp and name, the stage's check, rename.
+    _store_verify(e, edges)
+    _read_response(e, p.command_bytes)
+    _add(e, "absent_slot")
+    _metered_stage(e, p.command_bytes)
+    _store_verify(e, edges)
+    _add(e, "metadata")
+    _add(e, "same_name")
+    _staged_verify(e)
+    _add(e, "rename")
+    # Round::end on the atomic path: the reaped supervisor's one unit cgroup.
+    if p.cgroup_parent:
+        _add(e, "cgroup_listing")
+        _add(e, "cgroup_unit")
+
+
+def _command_gc(e: dict, p: HelperPlan) -> None:
+    """collection_gc::reclaim after a publishing command round, run to
+    completion over the one store: clock, catalog probe, runtime check, GC
+    lock, catalog, the walk to the store (no name check on its last folder),
+    its lock, the listing's command response and lock, the three stage
+    names, catalog commit. Its budget may stop it earlier (an upper bound)."""
+    edges = 3
+    _add(e, "clock")
+    _add(e, "open")
+    _add(e, "check_directory")
+    _close_only_lock(e, create=True)
+    _read_checked(e, p.catalog_bytes)
+    _add(e, "metadata")
+    _add(e, "dup")
+    _add(e, "collection_folder", p.context_components + edges)
+    e["fstat"] -= 1
+    _close_only_lock(e, create=False)
+    _add(e, "directory_cursor")
+    _read_checked(e, p.command_bytes)
+    _read_checked(e, 0)
+    for _ in range(3):  # .response.stage, .stage-request, .command.stage
+        _add(e, "chain_recheck_name")
+        _add(e, "absent_slot")
+    _catalog_commit(e, p.catalog_bytes)
+
+
+def helper_command_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
+    """command_miss: the prefix through the command response's install is
+    exact; the GC after it is an upper bound (its 20 ms budget)."""
+    _check_plan(plan)
+    if "command_miss" not in plan.stages:
+        raise ValueError("command_miss plan required")
+    global _primitives
+    _primitives = {**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]}
+    try:
+        prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
+        _command_prefix(prefix, plan, "command_miss")
+        gc: dict[str, int] = {}
+        _command_gc(gc, plan)
+        return {"prefix": dict(sorted(prefix.items())), "gc": dict(sorted(gc.items()))}
+    finally:
+        _primitives = PRIMITIVES
+
+
 def helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     """Full-path helper-role calls of one release refresh helper run (spec 8 stage
     table): runtime/context walks and lock, unchanged revalidation, change
@@ -803,12 +997,13 @@ def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
 
 def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     p, k = plan, plan.ax.P
-    stage = next(s for s in p.stages if s != "collect")
+    stage = next(s for s in p.stages if s != "collect" and s not in COMMAND_STAGES)
     e: dict[str, int] = {}
     _add(e, "start")
     _add(e, "stack_guard")
     _add(e, "passwd")
     e["read"] = e.get("read", 0) + p.nsswitch_reads + p.passwd_reads
+    e["seek"] = e.get("seek", 0) + p.passwd_seeks
     # build_identity::read: Resolved walk of the pinned link and its target,
     # target metadata, then revalidate_bindings over every descriptor and name.
     a, t = p.exe_link_components, p.exe_components
@@ -896,6 +1091,10 @@ def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     if "collect" in p.stages:
         _collect_prefix(e, p)
         _collect_tail(e, p)
+    for command in (s for s in p.stages if s in COMMAND_STAGES):
+        _command_prefix(e, p, command)
+        if command == "command_miss":
+            _command_gc(e, p)
     e.setdefault("fsync", 0)
     return dict(sorted(e.items()))
 

@@ -155,6 +155,8 @@ M3D_SUPPLEMENTARY["GATE-SHELL-EXTERNAL.1-empty_path"] = "M4"
 # 이것을 실패시키는 것: 파이프 끝·done·잘린 허가 행이나 not_run·잠금 유지 행을 지우고 주 행 하나로 닫는 것.
 M3D_SUPPLEMENTARY.update({"GATE-CMD-GRANT.2-pipe": "M6", "GATE-CMD-SPAWN.1-not_run": "M6",
                           "GATE-CMD-SPAWN.2-lock": "M6"})
+# 이것을 실패시키는 것: 명령 회차 단계 행(실행·캐시 적중·화면 밖 단위)을 지우고 기존 단계만으로 GATE-FS-HELPER.1을 닫는 것.
+M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run")})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
@@ -827,10 +829,12 @@ def test_profile_condition_needs_a_profile_axis():
 
 
 HELPER_STAGE_ROWS = ("GATE-FS-HELPER.1", "GATE-FS-HELPER.1-publish", "GATE-FS-HELPER.1-collect",
-                     "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover")
+                     "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover",
+                     "GATE-FS-HELPER.1-command_miss", "GATE-FS-HELPER.1-command_hit",
+                     "GATE-FS-HELPER.1-command_not_run")
 
 
-# 이것을 실패시키는 것: 다섯 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.
+# 이것을 실패시키는 것: 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.
 @pytest.mark.parametrize("row_id", HELPER_STAGE_ROWS)
 def test_every_helper_stage_row_is_required(row_id):
     table = (ROOT / TABLE).read_text()
@@ -1172,6 +1176,7 @@ def assert_command_round_home(text):
 
 
 COMMAND_CGROUP_FILE = "tests/shell/test_command_cgroup.py"
+HELPER_STAGE_NODE = "tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula"
 CGROUP_CELL_REASON = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]'
 # A skip of this one is BLOCKED and recorded (plan C3: the survivor fixture depends on kernel and FUSE).
 CGROUP_RECORDED_ONLY = {"test_orphan_live_descendant_reclaimed"}
@@ -1216,6 +1221,13 @@ def assert_command_cgroup_cells(text):
     assert f"python3 -m pytest {COMMAND_CGROUP_FILE} -q -rA" in step and "set -o pipefail" in step
     both = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
     assert both == CGROUP_BOTH_CELLS, both
+    step = block.split("      - name: Helper calls of command rounds in the cell\n")[1].split("\n      - ")[0]
+    assert step.startswith("        if: success() || failure()\n") and "set -o pipefail" in step
+    assert "${{ matrix.opts }} --cap-add SYS_PTRACE -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in step
+    assert f"python3 -m pytest {HELPER_STAGE_NODE} -k command -q -rA" in step
+    stages = set(re.findall(r"grep -Fx 'PASSED " + re.escape(HELPER_STAGE_NODE)
+                            + r"\[(\w+)\]' \"\$RUNNER_TEMP/cell-helper\.txt\"\n", step))
+    assert stages == {"command_miss", "command_hit", "command_not_run"}, stages
     step = block.split("      - name: Every atomic-path test passed (privileged cell)\n")[1].split("\n      - ")[0]
     assert step.startswith("        if: matrix.cell == 'priv'\n")
     priv = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
@@ -1229,6 +1241,10 @@ def assert_command_cgroup_cells(text):
     (" commands::command_process::tests::test_clone3_starts_inside_the_cgroup commands::", " commands::"),
     ("grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_round_removes_its_own_cgroups'", "true"),
     ("        if: matrix.cell == 'priv'\n", "        if: success() || failure()\n"),
+    ("      - name: Helper calls of command rounds in the cell\n        if: success() || failure()\n",
+     "      - name: Helper calls of command rounds in the cell\n        if: matrix.cell == 'priv'\n"),
+    ("[command_hit]' \"$RUNNER_TEMP/cell-helper.txt\"", "[command_hit]' /dev/null || true"),
+    (" -k command -q -rA", " -k command_miss -q -rA"),
 ])
 def test_command_cgroup_cells_reject_mutations(old, new):
     text = workflows()["shell.yml"]

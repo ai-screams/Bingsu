@@ -683,3 +683,127 @@ def test_rename_exchange_tracks_both_open_descriptions():
              '10 renameat2(3</>, "a", 3</>, "b", RENAME_EXCHANGE) = 0',
              '10 read(7</b>, "x", 1) = 1', '10 read(8</a>, "x", 1) = 1']
     assert not collector_attribute(lines, {**PINNED_PRODUCT, "collectors": 0}).errors
+
+
+# A command round: the helper spawns the supervisor before its filter, the
+# supervisor clone3s a relay into a cgroup with a pidfd, the relay execveats
+# the target, and the target forks a child of its own.
+COMMAND_ROUND = [
+    '10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], 0x0 /* 0 vars */) = 0',
+    '10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 11',
+    '11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1", "--width", "80"], 0x0 /* 0 vars */) = 0',
+    '11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 12',
+    '12 execve("/bin/bingsu", ["/bin/bingsu", "__command-v1"], 0x0 /* 0 vars */) = 0',
+    '12 openat(AT_FDCWD</>, "/proc/self/fd", O_RDONLY|O_DIRECTORY) = 19</proc/12/fd>',
+    '12 close(19</proc/12/fd>) = 0',
+    '11 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0',
+    '12 clone3({flags=CLONE_PIDFD|CLONE_INTO_CGROUP, pidfd=0x1, exit_signal=SIGCHLD, stack=NULL, stack_size=0, cgroup=7}'
+    ' => {pidfd=[19<anon_inode:[pidfd]>]}, 88) = 13',
+    '13 execve("/bin/bingsu", ["/bin/bingsu", "__exec-v2", "--permit-fd=3", "1", "/bin/true", "neutral", "--", "/bin/true"],'
+    ' 0x0 /* 0 vars */) = 0',
+    '12 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0',
+    '13 openat(AT_FDCWD</>, "/bin", O_RDONLY|O_PATH|O_DIRECTORY) = 3</bin>',
+    '13 execveat(3</bin>, "true", ["/bin/true"], 0x0 /* 3 vars */, AT_SYMLINK_NOFOLLOW) = 0',
+    '13 openat(AT_FDCWD</>, "/etc/hosts", O_RDONLY) = 4</etc/hosts>',
+    '13 clone(child_stack=NULL, flags=SIGCHLD) = 14',
+    '14 execve("/bin/sh", ["/bin/sh"], 0x0 /* 0 vars */) = 0',
+    '14 openat(AT_FDCWD</>, "/etc/passwd", O_RDONLY) = 5</etc/passwd>',
+    '14 +++ exited with 0 +++',
+    '13 +++ exited with 0 +++',
+    '12 waitid(P_PIDFD, 19<anon_inode:[pidfd]>, {si_signo=SIGCHLD}, WEXITED, NULL) = 0',
+    '12 close(19<anon_inode:[pidfd]>) = 0',
+    '12 +++ exited with 0 +++',
+    '11 +++ exited with 0 +++',
+    '10 +++ exited with 0 +++',
+]
+PINNED_COMMAND = {**PINNED_PRODUCT, "collectors": 0, "supervisor": "/bin/bingsu", "relay": "/bin/bingsu"}
+
+
+# 이것을 실패시키는 것: 감독·relay를 pin 실행 역할에서 빼는 것, relay의 execveat을 "command"로 바꾸지 않는 것,
+# clone3 pidfd를 감독의 fd 표에 넣지 않는 것, 대상의 생성·exec을 오류로 보는 것, 대상 호출을 helper로 세는 것.
+def test_command_round_roles_and_counts():
+    from fsbudget.attribute import collector_attribute
+    got = collector_attribute(COMMAND_ROUND, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts == {
+        "front": {"exec": 1, "spawn": 1},
+        "helper": {"exec": 1, "spawn": 1},
+        "supervisor": {"exec": 1, "spawn": 1, "openat": 1},
+        "relay": {"exec": 1, "openat": 1},
+        "command": {"exec": 2, "openat": 2, "spawn": 1},
+    }
+
+
+# 이것을 실패시키는 것: 생성 부모 검사를 감독·relay에 걸지 않는 것, 감독의 필터 뒤 생성을 받는 것,
+# relay의 생성을 받는 것, relay가 execve로(pin 없이) 대상을 띄우거나 대상을 두 번 exec하는 것을 받는 것,
+# pin이 없는 호출자(기존 gate)에서 감독 exec을 받는 것.
+@pytest.mark.parametrize("old,new,pinned", [
+    ('12 execve("/bin/bingsu", ["/bin/bingsu", "__command-v1"]', '12 execve("/bin/bingsu", ["/bin/bingsu", "__command-v1", "x"]', None),
+    ('11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 12', '10 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 12', None),
+    ('12 clone3(', '12 seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, {len=12}) = 0\n12 clone3(', None),
+    ('13 openat(AT_FDCWD</>, "/bin"', '13 clone(child_stack=NULL, flags=SIGCHLD) = 15\n13 openat(AT_FDCWD</>, "/bin"', None),
+    ('13 execveat(3</bin>, "true", ["/bin/true"], 0x0 /* 3 vars */, AT_SYMLINK_NOFOLLOW) = 0',
+     '13 execve("/bin/true", ["/bin/true"], 0x0 /* 3 vars */) = 0', None),
+    ('13 execveat(3</bin>, "true", ["/bin/true"], 0x0 /* 3 vars */, AT_SYMLINK_NOFOLLOW) = 0',
+     '13 execve("/bin/bingsu", ["/bin/bingsu", "__exec-v2", "x"], 0x0 /* 0 vars */) = 0', None),
+    ('12 close(19<anon_inode:[pidfd]>) = 0', '12 close(19<anon_inode:[pidfd]>) = 0\n12 close(19<anon_inode:[pidfd]>) = 0', None),
+    ('', '', PINNED_PRODUCT),
+])
+def test_command_round_mutations_are_refused(old, new, pinned):
+    from fsbudget.attribute import collector_attribute
+    text = '\n'.join(COMMAND_ROUND)
+    assert old in text
+    got = collector_attribute(text.replace(old, new, 1).splitlines(),
+                              {**(pinned or PINNED_COMMAND), "collectors": 0})
+    assert got.errors
+
+
+# 대상 명령은 세고 보고만 한다: 자기 seccomp 필터를 건 뒤의 fork도 오류가 아니다. 이것을 실패시키는 것: 생성
+# 규칙의 대상 예외를 지우는 것(필터 뒤 생성 오류가 남).
+def test_a_target_may_fork_after_its_own_filter():
+    from fsbudget.attribute import collector_attribute
+    lines = list(COMMAND_ROUND)
+    at = lines.index('13 clone(child_stack=NULL, flags=SIGCHLD) = 14')
+    lines.insert(at, '13 seccomp(SECCOMP_SET_MODE_FILTER, 0, {len=4}) = 0')
+    got = collector_attribute(lines, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts["command"]["spawn"] == 1
+
+
+# 대상의 loader 모양 호출은 첫 계수 호출 전까지만 제외한다. 실행 중의 같은 모양은 센다. 이것을 실패시키는 것:
+# 대상에 시작 경계를 두지 않는 것(뒤의 ld.so.cache 열기가 제외됨), 대상 exec 뒤 경계를 다시 열지 않는 것(자식
+# 셸의 loader 열기가 세어짐).
+def test_target_prologue_ends_at_its_first_counted_call():
+    from fsbudget.attribute import collector_attribute
+    lines = list(COMMAND_ROUND)
+    cache = 'openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = {fd}</etc/ld.so.cache>'
+    at = lines.index('13 openat(AT_FDCWD</>, "/etc/hosts", O_RDONLY) = 4</etc/hosts>')
+    lines[at:at] = ["13 " + cache.format(fd=5)]               # the target's own loader: excluded
+    at = lines.index('13 clone(child_stack=NULL, flags=SIGCHLD) = 14')
+    lines[at:at] = ["13 " + cache.format(fd=6),               # after its first counted call: counted
+                    '13 execve("/bin/sh", ["/bin/sh"], 0x0 /* 0 vars */) = 0',
+                    "13 " + cache.format(fd=8)]               # a new image's loader: excluded
+    at = lines.index('14 execve("/bin/sh", ["/bin/sh"], 0x0 /* 0 vars */) = 0')
+    lines[at + 1:at + 1] = ["14 " + cache.format(fd=7)]       # the forked shell's loader: excluded
+    got = collector_attribute(lines, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts["command"]["openat"] == 3, got.counts["command"]
+    assert got.excluded["loader_prologue"] == 3, got.excluded
+
+
+# 대상의 첫 계수 호출이 fork·thread여도 시작 경계가 닫히고, fork한 자식은 exec 전까지 닫힌 경계를 물려받는다. 이것을
+# 실패시키는 것: 생성 분기에서 started를 갱신하지 않는 것, 자식에게 물려주지 않는 것.
+@pytest.mark.parametrize("first", ["fork", "thread"])
+def test_target_prologue_ends_at_a_spawn_and_passes_to_its_child(first):
+    from fsbudget.attribute import collector_attribute
+    lines = list(COMMAND_ROUND)
+    cache = 'openat(AT_FDCWD</>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = {fd}</etc/ld.so.cache>'
+    at = lines.index('13 openat(AT_FDCWD</>, "/etc/hosts", O_RDONLY) = 4</etc/hosts>')
+    spawn = ('13 clone(child_stack=NULL, flags=SIGCHLD) = 16' if first == "fork" else
+             '13 clone(child_stack=0x1, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD) = 16')
+    lines[at:at] = [spawn, "13 " + cache.format(fd=5)]          # after the spawn: counted
+    if first == "fork":
+        lines[at + 2:at + 2] = ["16 " + cache.format(fd=6), "16 +++ exited with 0 +++"]  # the child: counted
+    got = collector_attribute(lines, PINNED_COMMAND)
+    assert not got.errors, got.errors
+    assert got.counts["command"]["openat"] == (4 if first == "fork" else 3), got.counts["command"]

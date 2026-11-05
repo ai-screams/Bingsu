@@ -66,6 +66,104 @@
   },
   "sha256": "29eb27e314d32d3933a715b753891f741b54473afbe1fd561b46bb3faa6b45ca"
  },
+ "command_hit": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     152
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 0,
+   "buf": 2147479552,
+   "catalog_bytes": 548,
+   "cgroup_parent": true,
+   "cgroup_procs_bytes": 7,
+   "collector_bytes": 0,
+   "collector_components": 0,
+   "command_bytes": 448,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "path_names": 2,
+   "previous_bytes": 0,
+   "response_bytes": 0,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 21316,
+   "stages": [
+    "unchanged",
+    "command_hit"
+   ],
+   "state_components": 6,
+   "target_names": 2
+  },
+  "sha256": "4eaa47e135b915ce861ad9032e4dd63d47e2d10243b4e4e6858a6055d35747ab"
+ },
+ "command_miss": {
+  "collector": "/home/tester/target/release/bingsu-collect",
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     140
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 6,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "breaker_bytes": 0,
+   "buf": 2147479552,
+   "catalog_bytes": 548,
+   "cgroup_parent": true,
+   "cgroup_procs_bytes": 7,
+   "collector_bytes": 0,
+   "collector_components": 0,
+   "command_bytes": 448,
+   "context_components": 6,
+   "exe_components": 4,
+   "exe_link_components": 5,
+   "libc": "gnu",
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "path_names": 2,
+   "previous_bytes": 0,
+   "response_bytes": 0,
+   "runtime_components": 6,
+   "sequence_bytes": 96,
+   "snapshot_bytes": 21200,
+   "stages": [
+    "unchanged",
+    "command_miss"
+   ],
+   "state_components": 6,
+   "target_names": 2
+  },
+  "sha256": "297379ab3e6b664129fee016fc361681d2a45584a625c39ed6f80c91d408af80"
+ },
  "failure-last-good": {
   "collector": "/home/tester/target/release/bingsu-collect",
   "helper": {

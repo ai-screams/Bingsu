@@ -1860,7 +1860,39 @@ def with_command_stage_probe(lines):
     at = stat[0]
     assert '".stage-request"' in lines[at + 1] and "openat(" in lines[at + 1], lines[at + 1]
     probe = [l.replace('".stage-request"', '".command.stage"') for l in lines[at:at + 2]]
+    # A capture that already has the pair keeps it; one with only part of it,
+    # or with it anywhere else, is not this product shape.
+    # 이것을 실패시키는 것: 이미 있는 쌍 위에 또 끼워 넣는 것, 쌍의 한쪽만 있거나 다른 자리에 있는 캡처를 받는 것.
+    present = [i for i, l in enumerate(lines) if '".command.stage"' in l]
+    if present:
+        assert present == [at + 2, at + 3] and lines[at + 2:at + 4] == probe, ("command stage probe", present)
+        return lines
     return lines[:at + 2] + probe + lines[at + 2:]
+
+
+# 이것을 실패시키는 것: 재생이 이미 있는 쌍을 두 번 넣는 것(같은 결과가 아님), 쌍의 일부만 있거나 자리가 다른 캡처,
+# 자리는 맞지만 호출·인자·반환이 다른 쌍을 받는 것.
+@pytest.mark.parametrize("shape", ["absent", "present", "half", "moved", "different"])
+def test_command_stage_probe_replay(shape):
+    raw = (HELPER_STAGE_TRACES.parent / "helper-stage-collect.strace").read_text().splitlines()
+    replayed = with_command_stage_probe(raw)
+    assert len(replayed) == len(raw) + 2
+    at = next(i for i, l in enumerate(replayed) if '".command.stage"' in l)
+    if shape == "absent":
+        return
+    if shape == "present":
+        assert with_command_stage_probe(replayed) == replayed
+        return
+    if shape == "different":
+        # In place, but not the probe the product makes (another result).
+        damaged = list(replayed)
+        damaged[at + 1] = damaged[at + 1].replace("ENOENT (No such file or directory)", "EACCES (Permission denied)")
+        assert damaged != replayed
+    else:
+        damaged = (replayed[:at + 1] + replayed[at + 2:] if shape == "half"
+                   else replayed[:at] + replayed[at + 2:] + replayed[at:at + 2])
+    with pytest.raises(AssertionError, match="command stage probe"):
+        with_command_stage_probe(damaged)
 
 
 def helper_stage_errors(lines, collector, expected, **attribution):
@@ -2521,9 +2553,70 @@ def test_collect_review_missing_boundary_and_umask_bypass(monkeypatch, tmp_path)
     assert not (tmp_path / "1").exists(), "product fixture should be cleaned up"
 
 
+# Command stages (M6 C4), captured on the atomic path (privileged aarch64
+# glibc container, one unit /usr/bin/true): the miss runs it through the
+# supervisor and relay and publishes; the hit finds it cached and runs nothing.
+COMMAND_STAGE_NAMES = ["command_miss", "command_hit"]
+
+
+def last_gc_fstat(lines):
+    """The miss's last GC fstat-kind call: an fd stat of the catalog stage."""
+    return max(i for i, l in enumerate(lines) if "newfstatat(" in l and ".collections.catalog.stage>" in l and " = 0" in l)
+
+
+# 이것을 실패시키는 것: 명령 회차 식이 저장한 캡처와 종류별로 정확히 맞지 않는 것(앞부분에 fstat 하나를 더하거나 뺌),
+# GC 꼬리를 정확 검사로 보는 것(예산으로 짧아진 꼬리가 실패), 꼬리의 상한을 지우는 것(GC에 호출을 더해도 통과),
+# 명령 응답 설치 경계를 잃는 것, 감독·relay·대상 역할을 helper로 세는 것.
+@pytest.mark.parametrize("stage,damage", [
+    ("command_miss", None), ("command_hit", None),
+    ("command_miss", "extra-prefix-fstat"), ("command_hit", "extra-prefix-fstat"),
+    ("command_miss", "missing-prefix-fstat"),
+    ("command_miss", "short-gc"), ("command_miss", "extra-gc-fstat"), ("command_miss", "no-install"),
+    ("command_miss", "no-install-no-gc"), ("command_miss", "uname-as-truncate"), ("command_hit", "uname-as-truncate"),
+    ("command_miss", "unpinned-supervisor")])
+def test_command_stage_traces_match_the_formula(stage, damage):
+    lines, collector, plan = helper_stage_case(stage)
+    if damage == "extra-prefix-fstat":
+        # The session lock's name check, repeated once.
+        at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "command-[0-9a-f]+\.lock", .*\) = 0$')
+        lines = lines[:at + 1] + [lines[at]] + lines[at + 1:]
+    elif damage == "missing-prefix-fstat":
+        at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "command-[0-9a-f]+\.lock", .*\) = 0$')
+        del lines[at]
+    elif damage == "short-gc":
+        del lines[last_gc_fstat(lines)]
+    elif damage == "extra-gc-fstat":
+        at = last_gc_fstat(lines)
+        lines = lines[:at + 1] + [lines[at]] + lines[at + 1:]
+    elif damage == "no-install":
+        at = first_helper_line(lines, r'renameat\(\d+<[^>]*>, "\.command\.stage", \d+<[^>]*>, "command"\) = 0$')
+        lines[at] = lines[at].replace(" = 0", " = -1 EACCES (Permission denied)")
+    elif damage == "no-install-no-gc":
+        # The install refused and no GC after it: the prefix alone is exact.
+        at = first_helper_line(lines, r'renameat\(\d+<[^>]*>, "\.command\.stage", \d+<[^>]*>, "command"\) = 0$')
+        lines[at] = lines[at].replace(" = 0", " = -1 EACCES (Permission denied)")
+        pid = lines[at].split()[0]
+        clock = next(i for i in range(at, len(lines))
+                     if lines[i].split()[0] == pid and '"/proc/sys/kernel/random/boot_id"' in lines[i])
+        # The stage keeps its name: its descriptor's close names the stage.
+        lines[at + 1:clock] = [l.replace("/store/command>", "/store/.command.stage>") for l in lines[at + 1:clock]]
+        lines = lines[:clock] + [l for l in lines[clock:] if l.split()[0] != pid or "+++ " in l]
+    elif damage == "uname-as-truncate":
+        # Another unreviewed call where the kernel release check stands.
+        at = first_helper_line(lines, r"uname\(")
+        lines[at] = lines[at].split()[0] + '  truncate("/fx/anything", 0) = 0'
+    elif damage == "unpinned-supervisor":
+        lines = [l.replace('"__command-v1"', '"__command-v9"') for l in lines]
+    if damage in (None, "short-gc"):
+        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
+        return
+    with pytest.raises(AssertionError):
+        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
 def test_collect_counted_events_preserve_all_helper_counts():
     from collections import Counter
-    for stage in STAGE_NAMES:
+    for stage in STAGE_NAMES + COMMAND_STAGE_NAMES:
         lines, collector, _ = helper_stage_case(stage)
         _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
         assert Counter(kind for _, kind in roles.helper_calls) == roles.counts["helper"]

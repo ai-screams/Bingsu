@@ -105,6 +105,8 @@ class Attribution:
     errors: list = field(default_factory=list)
     cloexec_pairs: list = field(default_factory=list)
     helper_calls: list = field(default_factory=list)
+    # Calls left out of every role, by named reason (collector_attribute).
+    excluded: dict = field(default_factory=dict)
 
 
 def attribute(calls: list[Call], rules, markers: bool) -> Attribution:
@@ -663,6 +665,16 @@ class _RepositoryProbe:
         return "unknown-fs"
 
 
+# Roles that may create processes before their filter. The command supervisor
+# spawns relays before its own filter; a target command is not gated here
+# (collector_attribute exempts it).
+SPAWN_ROLES = {"front", "helper", "supervisor"}
+# The role that must create each pinned exec (a posix_spawn child keeps its
+# parent's role until it execs).
+EXEC_PARENT = {"front": "front", "helper": "front", "collector": "helper",
+               "supervisor": "helper", "relay": "supervisor"}
+
+
 def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = False,
                         helper_vocabulary: bool = False, repository_window: bool = False) -> Attribution:
     """Product roles require a pinned exec AND its validated creation parent.
@@ -730,6 +742,10 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
     helper_calls = []
+    # Conservation (M6 ruling Q7): every call is counted in exactly one role
+    # or left out under one of these names; a path that drops a call fails.
+    excluded = defaultdict(int)
+    entered = 0
 
     def count(role, kind, call):
         counts[role][kind] += 1
@@ -748,8 +764,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     repository_probe = {}
     bootstrap_ended = set()
     requested = set()  # collectors past their first request read (repository_window)
-    started = set()  # helper processes whose loader prologue is over
-    verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1"}
+    started = set()  # helper and target processes whose loader prologue is over
+    verbs = {"front": "prompt", "helper": "__refresh-v1", "collector": "__collect-v1",
+             "supervisor": "__command-v1", "relay": "__exec-v2"}
     verbs.update(pinned.get("verbs", {}))
 
     def bad(c, reason):
@@ -782,6 +799,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 bootstrap_ended.discard(process)
                 requested.discard(process)
             continue
+        entered += 1
         if unknown_calls[process]:
             bad(c, "call after terminal unknown syscall")
         previous_calls[c.pid] = c
@@ -797,29 +815,59 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         k = (collector_bootstrap_kind(c) if role == "collector"
              else helper_kind(c) if role == "helper" and helper_vocabulary else collector_kind(c))
         if k in {"spawn", "thread"}:
-            if k == "spawn" and (role not in {"front", "helper"} or process in confined):
+            # A target command may start anything; its spawns stay "command".
+            # A target command is counted and reported only: its own filter
+            # does not make its later forks a product violation.
+            # 이것을 실패시키는 것: 감독을 생성 허용 역할에서 빼는 것(명령 회차 trace가 오류), relay를 넣는 것
+            # (relay 생성 시험이 오류를 내지 않음), 자기 필터를 건 대상의 fork를 오류로 보는 것.
+            if k == "spawn" and role != "command" and (role not in SPAWN_ROLES or process in confined):
                 bad(c, "spawn outside the pre-filter creation site")
+            # A target's fork or thread is a counted call: it ends the target's
+            # loader prologue, and a forked child keeps that ended state
+            # until its own exec.
+            # 이것을 실패시키는 것: 대상의 생성을 경계로 보지 않는 것, fork한 자식이 부모의 닫힌 경계를 물려받지
+            # 않는 것(둘 다 뒤의 ld.so.cache 열기가 제외로 빠짐).
+            if role == "command":
+                started.add(process)
             if success:
                 child = int(result)
                 roles[child] = role
                 owner[child] = process if k == "thread" else child
                 if k != "thread":
                     descriptors.start(child, process)
+                    if role == "command":
+                        started.add(child)
+                # clone3 CLONE_PIDFD installs a close-on-exec pidfd in the parent only.
+                # 이것을 실패시키는 것: 이 등록을 지우는 것(특권 셀 trace의 waitid·close가 수명 오류).
+                if pidfd := re.search(r"=> \{pidfd=\[(\d+)(?:<(.+?)>)?\]", c.args):
+                    descriptors.create(process, pidfd[1], pidfd[2], True)
             count(role, k, c)
             continue
         if k == "exec":
             if result == "0":
                 descriptors.exec(process)
                 new = None
-                for candidate in ("front", "helper", "collector"):
+                for candidate in ("front", "helper", "collector", "supervisor", "relay"):
                     path = pinned.get(candidate)
                     if path and len(args) >= 2 and args[0] == json.dumps(path):
                         prefix = '[' + json.dumps(path) + ', ' + json.dumps(verbs[candidate])
-                        if args[1].startswith(prefix + (']' if candidate == "collector" else ',')) or args[1] == prefix + ']':
+                        if (args[1].startswith(prefix + (']' if candidate in {"collector", "supervisor"} else ','))
+                                or args[1] == prefix + ']'):
                             new = candidate
                             break
-                expected_parent = {"front": "front", "helper": "front", "collector": "helper"}
-                if (new is None or role != expected_parent.get(new)
+                # The relay's one exec is the target command: whatever it names,
+                # the calls after it are the command's, counted and never the helper's.
+                # 이것을 실패시키는 것: relay 아닌 역할의 exec이나 execve로 된 대상 exec을 "command"로 받는 것
+                # (fsbudget 시험의 command 역할 사례가 오류를 내지 않음).
+                if role == "relay" and c.name == "execveat":
+                    roles[c.pid] = role = "command"
+                    count(role, "exec", c)
+                    continue
+                if role == "command":
+                    started.discard(process)  # a new image: its own loader prologue
+                    count(role, "exec", c)
+                    continue
+                if (new is None or role != EXEC_PARENT.get(new)
                         or process in seen_exec or process in confined
                         or (new == "front") != (c.pid == root)):
                     bad(c, "exec lacks pinned identity and creation parent")
@@ -840,11 +888,17 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             cloexec_pairs.append({"pid": c.pid,
                                   "open": f"{previous.name}({previous.args})", "open_ret": previous.ret,
                                   "fcntl": f"fcntl({c.args})", "fcntl_ret": c.ret})
+            excluded["collector_cloexec_pair"] += 1
             continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
-        helper_startup = not (helper_vocabulary and role == "helper") or process not in started
+        # The helper's and a target command's prologue ends at their first
+        # counted call; later loader-shaped calls are counted.
+        # 이것을 실패시키는 것: 대상의 시작 경계를 두지 않는 것(실행 중 내내 loader 모양 호출이 제외됨).
+        tracked = helper_vocabulary and role == "helper" or role == "command"
+        helper_startup = not tracked or process not in started
         if process not in confined and helper_startup and _prologue_call(c, target(c)):
+            excluded["loader_prologue"] += 1
             continue
         # x86_64 glibc's pthread_getattr_np (Rust std's main-thread stack
         # guard) seeks its own /proc/self/maps twice before any filter
@@ -858,8 +912,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         if (role == "collector" and process not in confined and guard_seeks[process] < guard_allowance
                 and stack_guard_seek(c, process, guard_seeks[process])):
             guard_seeks[process] += 1
+            excluded["stack_guard"] += 1
             continue
-        if helper_vocabulary and role == "helper" and k is not None:
+        if tracked and k is not None:
             started.add(process)
         if role == "collector":
             if c.name == "uname" and process not in confined:
@@ -870,9 +925,11 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             # 이것을 실패시키는 것: 요청 읽기 뒤의 저장소 호출을 M3b bootstrap 어휘로 다시 판정하는 것(출하 수집이
             # 늘 실패), 요청 읽기 전 호출까지 넘기는 것(bootstrap 판정이 빠짐).
             if repository_window and process in requested:
+                excluded["repository_window"] += 1
                 continue
             if repository_window and request_handoff(c.name, args):
                 requested.add(process)
+                excluded["repository_window"] += 1
                 continue
             if (args and c.name in {"write", "writev"} and args[0].split("<")[0] == "1"
                     or request_handoff(c.name, args)
@@ -903,6 +960,13 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
                 bad(c, "collector read outside the M3b bootstrap")
         if k:
             count(role, k, c)
+        else:
+            excluded["outside_vocabulary"] += 1
+    counted = sum(sum(kinds.values()) for kinds in counts.values())
+    # 이것을 실패시키는 것: 셈에도 이름 붙은 제외에도 넣지 않고 호출을 버리는 경로(continue 하나에서 제외 기록을
+    # 지우는 것).
+    if counted + sum(excluded.values()) != entered:
+        errors.append(f"conservation: {entered} calls, {counted} counted, {sum(excluded.values())} excluded")
     errors.extend(f"pid {process} (collector): incomplete stack-guard seeks"
                   for process, n in guard_seeks.items() if 0 < n < guard_allowance)
     if not seen_exec and not counts:
@@ -910,7 +974,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     required = pinned.get("collectors", 1)
     if collector_execs != required:
         errors.append(f"collector execs: measured {collector_execs}, expected {required}")
-    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs, helper_calls)
+    return Attribution({r: dict(kinds) for r, kinds in counts.items()}, errors, cloexec_pairs, helper_calls,
+                       dict(excluded))
 
 
 def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) -> None:
