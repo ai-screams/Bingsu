@@ -20,11 +20,16 @@ pub enum Manager {
 }
 
 impl Manager {
-    /// The environment variable that overrides every selection file.
-    pub const fn override_variable(self) -> &'static [u8] {
+    /// Shell variables that change this manager's choice beyond what the
+    /// rules model: the override itself and, for pyenv, where the search for
+    /// `.python-version` starts (`PYENV_DIR`) and where hooks that may change
+    /// the version name are found (`PYENV_HOOK_PATH`); see the pyenv README's
+    /// environment variable table (https://github.com/pyenv/pyenv#environment-variables).
+    /// Any of them set turns the fast path off.
+    pub const fn precedence_variables(self) -> &'static [&'static [u8]] {
         match self {
-            Self::Rustup => b"RUSTUP_TOOLCHAIN",
-            Self::Pyenv => b"PYENV_VERSION",
+            Self::Rustup => &[b"RUSTUP_TOOLCHAIN"],
+            Self::Pyenv => &[b"PYENV_VERSION", b"PYENV_DIR", b"PYENV_HOOK_PATH"],
         }
     }
 }
@@ -50,6 +55,20 @@ pub enum Selection<'a> {
 pub enum Hidden {
     /// `rust-toolchain.toml` names a `path` toolchain: neither read nor run.
     ToolchainPath,
+    /// The manager's folders failed the trust rule, or a name in them is a
+    /// link or not what it should be: neither read nor run.
+    Untrusted,
+}
+
+/// The install check's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Install {
+    Present,
+    /// Nothing by that name.
+    Absent,
+    /// A folder on the way fails the trust rule, or the name is a link or
+    /// of the wrong kind.
+    Untrusted,
 }
 
 /// What to do with one language whose command is a known manager's shim.
@@ -82,8 +101,9 @@ pub enum Settings {
 #[derive(Clone, Copy, Debug)]
 pub struct Facts<'a> {
     pub manager: Manager,
-    /// Whether the manager's override variable is set in the shell
-    /// environment; `None` when the environment did not reach the helper.
+    /// Whether any of the manager's [`Manager::precedence_variables`] is set
+    /// in the shell environment; `None` when the environment did not reach
+    /// the helper whole.
     pub override_set: Option<bool>,
     pub selection: Selection<'a>,
     /// rustup only; ignored for pyenv.
@@ -110,16 +130,34 @@ pub enum Plan {
     },
 }
 
-/// The first half of the decision: everything that needs no file.
-pub fn plan(f: &Facts<'_>) -> Plan {
+/// What can be decided before any of the manager's files is read, in this
+/// order: a path toolchain is hidden whatever else holds; an environment
+/// that did not arrive, a precedence variable set, or no usable selection
+/// runs the command. `None`: the files decide.
+pub fn early(override_set: Option<bool>, selection: Selection<'_>) -> Option<Decision> {
+    // Fails without the order: decision_table (path with no environment).
+    if selection == Selection::Path {
+        return Some(Decision::Hidden(Hidden::ToolchainPath));
+    }
     // An environment that did not arrive may hold the override.
     // Fails without it: decision_table (env unknown → run).
-    let Some(override_set) = f.override_set else {
-        return Plan::Done(Decision::Run(None));
+    let Some(override_set) = override_set else {
+        return Some(Decision::Run(None));
     };
     // Fails without it: decision_table (override set → run).
     if override_set {
-        return Plan::Done(Decision::Run(None));
+        return Some(Decision::Run(None));
+    }
+    match selection {
+        Selection::Absent | Selection::Unusable => Some(Decision::Run(None)),
+        Selection::Path | Selection::Value(_) => None,
+    }
+}
+
+/// The first half of the decision: [`early`], then the settings.
+pub fn plan(f: &Facts<'_>) -> Plan {
+    if let Some(decision) = early(f.override_set, f.selection) {
+        return Plan::Done(decision);
     }
     if f.manager == Manager::Rustup {
         match f.settings {
@@ -132,13 +170,9 @@ pub fn plan(f: &Facts<'_>) -> Plan {
             Settings::Known { .. } => {}
         }
     }
-    let name = match f.selection {
-        Selection::Absent | Selection::Unusable => {
-            return Plan::Done(Decision::Run(None));
-        }
-        // Fails without it: decision_table (path → hidden).
-        Selection::Path => return Plan::Done(Decision::Hidden(Hidden::ToolchainPath)),
-        Selection::Value(name) => name,
+    let Selection::Value(name) = f.selection else {
+        // `early` answered every other selection.
+        return Plan::Done(Decision::Run(None));
     };
     match f.manager {
         Manager::Pyenv => {
@@ -172,13 +206,18 @@ pub fn plan(f: &Facts<'_>) -> Plan {
 }
 
 /// The second half: the install check's answer for the planned name.
-/// `selected` is the selection's value.
-pub fn installed(selected: &[u8], present: bool) -> Decision {
-    // Fails without it: decision_table (missing install → run).
-    if present && concrete(selected) {
-        Decision::Fast(selected.to_vec())
-    } else {
-        Decision::Run(Some(selected.to_vec()))
+/// `selected` is the selection's value. A folder that fails the trust rule
+/// hides the value (it is neither shown nor run); a missing one runs the
+/// command, which reports what is there.
+pub fn installed(selected: &[u8], install: Install) -> Decision {
+    match install {
+        // Fails without it: install_check_decides_the_fast_path (untrusted
+        // → hidden, not run).
+        Install::Untrusted => Decision::Hidden(Hidden::Untrusted),
+        // Fails without it: install_check_decides_the_fast_path (missing
+        // install → run).
+        Install::Present if concrete(selected) => Decision::Fast(selected.to_vec()),
+        Install::Present | Install::Absent => Decision::Run(Some(selected.to_vec())),
     }
 }
 
@@ -250,28 +289,45 @@ fn parse_settings(bytes: &[u8], cwd: &[u8]) -> Option<Settings> {
         {
             return None;
         }
-        // A value spread over lines would hide the next line's meaning.
-        // Fails without it: settings_forms (open array → unknown).
-        if (value.starts_with(b"[") && !value.ends_with(b"]"))
-            || value.starts_with(b"\"\"\"")
-            || value.starts_with(b"'''")
-        {
+        // Only the value shapes rustup writes at the top: a basic string, a
+        // boolean, an integer. An inline table (`overrides = { … }`, which
+        // would hide overrides), an array, a multi-line string or anything
+        // else is a form these rules do not read.
+        // Fails without it: settings_forms (inline table, array, multi-line).
+        if quoted(value).is_none() && !plain_scalar(value) {
             return None;
         }
-        // Names this file gives (a host triple, the default toolchain)
-        // pass the version grammar too; host triples fit its 32 bytes.
-        // Fails without it: settings_forms (a host or default with `/`).
-        if key == b"default_host_triple" || key == b"default_toolchain" {
+        // Names this file gives (the host, the default toolchain) pass the
+        // version grammar too; host tuples fit its 32 bytes. rustup 1.29
+        // writes `default_host_tuple` and reads `default_host_triple` as an
+        // alias; both at once is a duplicate field rustup itself refuses
+        // (rustup 1.29.2: "could not parse settings file").
+        // Fails without it: settings_forms (a host or default with `/`, the
+        // tuple key, both keys).
+        if matches!(
+            key,
+            b"default_host_tuple" | b"default_host_triple" | b"default_toolchain"
+        ) {
             let name = quoted(value)?;
             if !version_ok(name) {
                 return None;
             }
-            if key == b"default_host_triple" {
+            if key != b"default_toolchain" {
+                if host.is_some() {
+                    return None;
+                }
                 host = Some(name.to_vec());
             }
         }
     }
     Some(Settings::Known { host, overridden })
+}
+
+/// `true`, `false` or a decimal integer.
+fn plain_scalar(value: &[u8]) -> bool {
+    value == b"true"
+        || value == b"false"
+        || (!value.is_empty() && value.iter().all(|b| b.is_ascii_digit()))
 }
 
 /// A basic string without escapes: its contents.
