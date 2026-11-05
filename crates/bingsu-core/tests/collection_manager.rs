@@ -15,10 +15,11 @@ fn run(name: Option<&[u8]>) -> Plan {
     Plan::Done(Decision::Run(name.map(<[u8]>::to_vec)))
 }
 
-fn check(folder: &[u8], name: &[u8]) -> Plan {
+fn check(folder: &[u8], name: &[u8], value: &[u8]) -> Plan {
     Plan::Check {
         folder: folder.to_vec(),
         name: name.to_vec(),
+        value: value.to_vec(),
     }
 }
 
@@ -35,7 +36,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"1.80.0"),
             host.clone(),
-            check(b"toolchains", b"1.80.0-aarch64-apple-darwin"),
+            check(b"toolchains", b"1.80.0-aarch64-apple-darwin", b"1.80.0"),
         ),
         (
             Manager::Rustup,
@@ -70,7 +71,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"1.80.0"),
             known(None, false),
-            check(b"toolchains", b"1.80.0-x86_64-unknown-linux-gnu"),
+            check(b"toolchains", b"1.80.0-x86_64-unknown-linux-gnu", b"1.80.0"),
         ),
         (
             Manager::Rustup,
@@ -98,7 +99,7 @@ fn decision_table() {
             Some(false),
             Selection::Value(b"3.12.1"),
             Settings::Unknown,
-            check(b"versions", b"3.12.1"),
+            check(b"versions", b"3.12.1", b"3.12.1"),
         ),
         (
             Manager::Pyenv,

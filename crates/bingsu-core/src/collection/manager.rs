@@ -100,10 +100,11 @@ pub struct Facts<'a> {
 pub enum Plan {
     Done(Decision),
     /// Open this one name below the manager's install folder (no-follow,
-    /// a directory); then [`installed`] decides.
+    /// a directory); then [`installed`] decides on `value`, the selection.
     Check {
         folder: Vec<u8>,
         name: Vec<u8>,
+        value: Vec<u8>,
     },
 }
 
@@ -147,6 +148,7 @@ pub fn plan(f: &Facts<'_>) -> Plan {
             Plan::Check {
                 folder: b"versions".to_vec(),
                 name: name.to_vec(),
+                value: name.to_vec(),
             }
         }
         Manager::Rustup => {
@@ -161,6 +163,7 @@ pub fn plan(f: &Facts<'_>) -> Plan {
             Plan::Check {
                 folder: b"toolchains".to_vec(),
                 name: [name, b"-", host].concat(),
+                value: name.to_vec(),
             }
         }
     }
