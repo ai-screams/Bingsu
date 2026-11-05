@@ -188,6 +188,12 @@ pub(crate) struct Context<'a> {
     /// S-M3).
     pub cwd: &'a [u8],
     pub me: u32,
+    /// macOS: xcode-select's link and the Command Line Tools folder
+    /// (`XCODE_SELECT_LINK`, `COMMAND_LINE_TOOLS`; tests give their own).
+    pub xcode_link: &'a Path,
+    pub command_line_tools: &'a Path,
+    /// Counts the shell folders made canonical (the round's debug log).
+    pub resolved: &'a std::cell::Cell<u32>,
 }
 
 /// The shell environment, when the frame held it whole: a frame with
@@ -249,10 +255,13 @@ pub(crate) fn plan(
     // rustup reads directory overrides for the canonical folder; one that
     // could not be resolved leaves the overrides unknown.
     let canonical = match shim {
-        Shim::Manager(Manager::Rustup) => match canonical_cwd(c.cwd) {
-            Some(cwd) => Some(cwd),
-            None => return hide("the shell's folder could not be resolved"),
-        },
+        Shim::Manager(Manager::Rustup) => {
+            c.resolved.set(c.resolved.get() + 1);
+            match canonical_cwd(c.cwd) {
+                Some(cwd) => Some(cwd),
+                None => return hide("the shell's folder could not be resolved"),
+            }
+        }
         _ => None,
     };
     let cwd = canonical.as_deref().unwrap_or_default();
@@ -293,8 +302,8 @@ pub(crate) fn plan(
             }
             match developer_tool(
                 &found.executable,
-                Path::new(XCODE_SELECT_LINK),
-                Path::new(COMMAND_LINE_TOOLS),
+                c.xcode_link,
+                c.command_line_tools,
                 cfg!(target_os = "macos"),
             ) {
                 Stub::Not => (found, checked, None),
@@ -378,9 +387,9 @@ pub(crate) fn plan(
 /// `python3` is among them.
 const DEVELOPER_STUBS: [&str; 1] = ["/usr/bin/python3"];
 /// The selected developer folder (`xcode-select`'s root-owned link).
-const XCODE_SELECT_LINK: &str = "/var/db/xcode_select_link";
+pub(crate) const XCODE_SELECT_LINK: &str = "/var/db/xcode_select_link";
 /// The Command Line Tools, the developer folder when none is selected.
-const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
+pub(crate) const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
 
 /// What a resolved command is with respect to the developer tool stubs.
 #[derive(Debug, PartialEq, Eq)]
@@ -559,6 +568,9 @@ mod tests {
             repo: None,
             cwd: s.0.as_os_str().as_bytes(),
             me,
+            xcode_link: &s.0.join("xcode_select_link"),
+            command_line_tools: &s.0.join("CommandLineTools"),
+            resolved: &std::cell::Cell::new(0),
         };
         plan(lang(id), v, &c, &mut groups)
     }
@@ -753,12 +765,16 @@ mod tests {
         let mut groups = SystemGroups::new(&sys::passwd_entry(sys::current_uid()).unwrap().name);
         let me = sys::current_uid();
         let folders = vec![s.0.join(".cargo/bin")];
+        let resolved = std::cell::Cell::new(0);
         let c = Context {
             vars: None,
             folders: &folders,
             repo: None,
             cwd: b"/",
             me,
+            xcode_link: Path::new(XCODE_SELECT_LINK),
+            command_line_tools: Path::new(COMMAND_LINE_TOOLS),
+            resolved: &resolved,
         };
         let p = plan(lang("rust"), &found("1.80.0"), &c, &mut groups);
         assert_eq!(
@@ -781,6 +797,17 @@ mod tests {
             p.action,
             Action::Hide("the shell's folder could not be resolved")
         );
+        assert_eq!(resolved.get(), 1);
+        // Only rustup needs the canonical folder: node with the same
+        // unresolvable folder still runs and resolves nothing (security
+        // review S-M3).
+        let bin = vec![s.0.join("bin")];
+        let c = Context { folders: &bin, ..c };
+        assert!(matches!(
+            plan(lang("node"), &Version::None, &c, &mut groups).action,
+            Action::Run(_)
+        ));
+        assert_eq!(resolved.get(), 1);
     }
 
     // 요약값: 빠른 값·숨김·실행은 서로 다른 정책이고(숨김이나 실패가 빠른 값을 막지 않음), 실행 정책은 실행 파일이
@@ -818,6 +845,16 @@ mod tests {
         set_mtime(2_000_000);
         assert_ne!(policy(), first, "mtime");
         set_mtime(1_000_000);
+        // The nanoseconds alone (D3a re-review L5).
+        fs::File::options()
+            .write(true)
+            .open(&node)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::new(1_000_000, 500_000_000))
+            .unwrap();
+        assert_ne!(policy(), first, "mtime nanoseconds");
+        set_mtime(1_000_000);
+        assert_eq!(policy(), first);
         // A new inode with the same bytes, size and mtime.
         let copy = s.0.join("bin/node.new");
         fs::copy(&node, &copy).unwrap();
@@ -929,38 +966,47 @@ mod tests {
         assert_eq!(d(stub, "link-empty", "clt"), Stub::Missing);
     }
 
-    // 이 Mac의 실제 /usr/bin을 PATH로 두면 python3 결정은 stub이 아닌 개발자 폴더의 파일을 실행하거나 숨긴다
-    // (파일을 해석만 하고 실행하지 않는다). 이것을 실패시키는 것: RunFound에서 developer_tool의 답을 무시하고 찾은
-    // stub을 그대로 쓰는 것.
+    /// A Command Line Tools folder of the test's own with its python3, so
+    /// the stub tests hold whatever this Mac has installed.
+    fn developer_fixture(s: &Scratch) -> PathBuf {
+        let real = s.0.join("CommandLineTools/usr/bin/python3");
+        file(&real, b"\x7fELF python");
+        real
+    }
+
+    // 실제 /usr/bin을 PATH로 두면(macOS의 python3 stub) 결정은 stub이 아닌 개발자 폴더의 파일을 실행한다. 개발자
+    // 폴더는 시험이 만든 fixture라 이 Mac에 도구가 있는지와 상관없다(D3a 재리뷰 L4). 이것을 실패시키는 것: RunFound에서
+    // developer_tool의 답을 무시하고 찾은 stub을 그대로 쓰는 것.
     #[cfg(target_os = "macos")]
     #[test]
     fn plan_never_runs_the_developer_stub() {
         let s = Scratch::new("stub");
-        let path = "/usr/bin".to_string();
-        let p = plan_with(&s, &path, &[], "python", &Version::None);
-        match &p.action {
-            Action::Run(probe) => assert_ne!(probe.executable, b"/usr/bin/python3".to_vec()),
-            Action::Hide(_) => {}
-            other => panic!("{other:?}"),
-        }
+        let real = developer_fixture(&s);
+        let p = plan_with(&s, "/usr/bin", &[], "python", &Version::None);
+        assert_eq!(run_of(&p), (real.as_os_str().as_bytes().to_vec(), None));
     }
 
     // 셸에 DEVELOPER_DIR이 있으면 xcode-select 선택보다 그것이 우선하므로, stub 대신 고를 파일을 모른다: 숨긴다
-    // (D3a 리뷰 M4). 환경 요약에도 그 이름이 들어간다. 이것을 실패시키는 것: DEVELOPER_DIR 검사를 지우는 것,
-    // python 언어 변수에서 DEVELOPER_DIR을 빼는 것.
+    // (D3a 리뷰 M4). 환경 요약에도 그 이름이 들어간다. 개발자 폴더는 fixture다(재리뷰 L4). 이것을 실패시키는 것:
+    // DEVELOPER_DIR 검사를 지우는 것, python 언어 변수에서 DEVELOPER_DIR을 빼는 것.
     #[cfg(target_os = "macos")]
     #[test]
     fn developer_dir_hides_the_stub() {
         let s = Scratch::new("devdir");
-        let path = "/usr/bin".to_string();
-        let plain = plan_with(&s, &path, &[], "python", &Version::None);
-        let set = plan_with(&s, &path, &["DEVELOPER_DIR=/x"], "python", &Version::None);
-        if matches!(plain.action, Action::Run(_)) {
-            assert_eq!(
-                set.action,
-                Action::Hide("DEVELOPER_DIR picks the developer tools")
-            );
-        }
+        developer_fixture(&s);
+        let plain = plan_with(&s, "/usr/bin", &[], "python", &Version::None);
+        let set = plan_with(
+            &s,
+            "/usr/bin",
+            &["DEVELOPER_DIR=/x"],
+            "python",
+            &Version::None,
+        );
+        assert!(matches!(plain.action, Action::Run(_)), "{plain:?}");
+        assert_eq!(
+            set.action,
+            Action::Hide("DEVELOPER_DIR picks the developer tools")
+        );
         assert_ne!(plain.environment, set.environment);
     }
 }

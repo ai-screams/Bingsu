@@ -211,3 +211,89 @@ def test_language_only_layout_is_collected(tmp_path, _native_boot_required):
     ready(session)
     published_rounds(session)
     assert b"18.20.4" in command_response(session)
+
+
+def git_repo(base):
+    """A repository with one commit on main, a `sub` folder and a `bin`."""
+    repo = base / "repo"
+    (repo / "sub").mkdir(parents=True)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@e"]
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(repo)], check=True)
+    (repo / "f").write_text("x\n")
+    subprocess.run([*git, "add", "f"], check=True)
+    subprocess.run([*git, "commit", "-qm", "c"], check=True)
+    return repo
+
+
+def unsettled(tmp_path, pwd_of, config_unit=False):
+    """A round whose folder facts cannot settle the repository: the
+    repository's own node is first on PATH, another node after it."""
+    session = BuiltinSession(tmp_path)
+    session.env["HOME"] = str(session.base)
+    session.level = "debug"
+    repo = git_repo(session.base)
+    session.pwd = pwd_of(session.base, repo)
+    inside = install(repo / "bin", "node")
+    outside = install(session.base / "tools", "node")
+    session.env["PATH"] = f"{inside.parent}:{outside.parent}:{session.env['PATH']}"
+    unit = ""
+    if config_unit:
+        unit = "[segment.\"custom/u\"]\nkind='command'\ncommand=['/bin/echo','u']\n"
+    drawn = "'node', 'custom/u'" if config_unit else "'node'"
+    session.put(f"{unit}[layout.line1]\nleft=[{drawn}]\n[layout.line2]\nleft=['char']\n")
+    ready(session)
+    for f in (inside, outside):
+        Path(f"{f}.runs").unlink(missing_ok=True)
+    seen = session.log().count(b"command round: PATH searched")
+    rounds(session, 3)
+    searched = session.log().count(b"command round: PATH searched") - seen
+    return session, inside, outside, searched
+
+
+def alias(base, repo):
+    link = base / "alias"
+    link.symlink_to(repo / "sub")
+    return link
+
+
+def deep(base, repo):
+    folder = repo / "sub"
+    for i in range(34):
+        folder = folder / f"d{i}"
+    folder.mkdir(parents=True)
+    return folder
+
+
+# 폴더 사실이 저장소를 확정하지 못하면(별칭 경로, 탐색 깊이 제한) 내장 언어를 정하지 않는다. 저장소 안 node도, 밖
+# node도 실행하지 않고 PATH도 걷지 않는다(D3a 재리뷰 H1, M3). 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는
+# 것(셸 폴더가 저장소를 대신해 /repo/bin/node가 실행됨), 할 일이 없는 회차에도 PATH를 걷는 것.
+@pytest.mark.parametrize("where", ["alias", "deep"])
+def test_unsettled_repository_decides_no_language(tmp_path, where, _native_boot_required):
+    session, inside, outside, searched = unsettled(tmp_path, alias if where == "alias" else deep)
+    assert counted(inside) == 0, "an executable inside the repository ran"
+    assert counted(outside) == 0, "a language was decided without a settled repository"
+    assert b"18.20.4" not in command_response(session)
+    assert searched == 0, session.log()
+
+
+# 양성 대조: 같은 회차에 설정 단위가 있으면 PATH를 걷고 그 단위는 실행된다(내장 언어는 여전히 정하지 않음).
+# 이것을 실패시키는 것: 언어를 정할 수 없을 때 설정 단위까지 버리는 것.
+def test_config_units_still_search_beside_an_unsettled_language(tmp_path, _native_boot_required):
+    session, inside, outside, searched = unsettled(tmp_path, alias, config_unit=True)
+    assert searched >= 1, session.log()
+    assert counted(inside) == 0 and counted(outside) == 0
+
+
+# git과 언어 segment를 함께 그려도 git 값이 실제 프롬프트에 보인다. 도우미 요청의 mask와 앞단이 기대하는 binding이
+# 같은 규칙에서 나오기 때문이다(D3a 재리뷰 M2). 이것을 실패시키는 것: 언어 회차의 dir 비트를 도우미 쪽에서만
+# 더하는 것(수집 응답 전체가 거부되어 git 표시가 사라짐).
+def test_git_shows_beside_a_language_segment(tmp_path, _native_boot_required):
+    session = BuiltinSession(tmp_path)
+    session.env["HOME"] = str(session.base)
+    repo = git_repo(session.base)
+    session.pwd = repo / "sub"
+    node = install(session.base / "tools", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    session.put("[layout.line1]\nleft=['git', 'node']\n[layout.line2]\nleft=['char']\n")
+    session.init()
+    session.await_text("main", timeout=8)

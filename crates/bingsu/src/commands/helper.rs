@@ -321,6 +321,22 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 for why in &done.hidden {
                     report(&mut groups, LogLevel::Info, why);
                 }
+                // What the round read (D3a re-review M3): a round with
+                // nothing to decide walks no PATH and resolves no folder.
+                if done.searched {
+                    report(
+                        &mut groups,
+                        LogLevel::DebugLog,
+                        "command round: PATH searched",
+                    );
+                }
+                for _ in 0..done.resolved {
+                    report(
+                        &mut groups,
+                        LogLevel::DebugLog,
+                        "command round: shell folder resolved for rustup",
+                    );
+                }
                 if done.unresolved > 0 {
                     report(
                         &mut groups,

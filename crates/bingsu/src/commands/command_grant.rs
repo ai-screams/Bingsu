@@ -269,9 +269,34 @@ impl Scripts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Languages {
     answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
-    /// The folder facts' repository answer (D3a review H1): `None` when the
-    /// round got no folder facts, `Some(None)` outside a repository.
-    root: Option<Option<u16>>,
+    /// What the folder facts say of the repository (D3a review H1).
+    root: Root,
+}
+
+/// The repository the folder facts found for the shell's folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Root {
+    /// No facts, or facts that could not settle it: an alias folder path,
+    /// a search cut at its depth limit. Builtin languages are not decided.
+    #[default]
+    Unknown,
+    /// Confirmed outside any repository.
+    Outside,
+    /// Inside, the root at this component of the shell's folder.
+    Repo(u16),
+}
+
+impl Root {
+    /// From one round's folder facts (re-review H1: `in_repo` unknown, or
+    /// in a repository whose root component is not known, is unknown).
+    pub(crate) fn of(facts: &bingsu_core::collection::path_facts::PathFactInput) -> Self {
+        // Fails without each: roots_stay_unknown_unless_settled.
+        match (facts.in_repo, facts.repo_component) {
+            (Some(false), _) => Self::Outside,
+            (Some(true), Some(component)) => Self::Repo(component),
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl Languages {
@@ -289,7 +314,7 @@ impl Languages {
             .updates
             .iter()
             .find_map(|u| u.facts.as_ref())
-            .map(|f| f.repo_component);
+            .map_or(Root::Unknown, Root::of);
         Self { answers, root }
     }
 
@@ -301,7 +326,12 @@ impl Languages {
     pub(crate) fn ready(&self, repo: Option<u16>) -> bool {
         // Fails without each: a_round_with_nothing_to_decide_searches_nothing,
         // and test_builtin_probe_never_runs_from_the_repository (no facts).
-        !self.answers.is_empty() && self.root == Some(repo)
+        !self.answers.is_empty()
+            && match self.root {
+                Root::Unknown => false,
+                Root::Outside => repo.is_none(),
+                Root::Repo(component) => repo == Some(component),
+            }
     }
 
     /// The answer for language `id`, if the collection gave one.
@@ -843,6 +873,10 @@ pub(crate) struct Report {
     /// Why builtin languages were hidden this round (D3 ruling Q4: the
     /// reason goes to the log, never to the prompt).
     pub hidden: Vec<&'static str>,
+    /// The round walked `PATH` (debug log; D3a re-review M3).
+    pub searched: bool,
+    /// Shell folders made canonical for rustup (debug log).
+    pub resolved: u32,
 }
 
 impl Round {
@@ -915,6 +949,7 @@ impl Round {
             report.notes = self.abandon();
             return report;
         }
+        report.searched = true;
         let Ok(found) = search(&self.environment, &self.grant.cwd, repo, me, groups) else {
             report.failed = true;
             report.notes = self.abandon();
@@ -936,7 +971,7 @@ impl Round {
         report.dropped = resolved.dropped;
         self.grant.units = resolved.units;
         if builtins {
-            self.plan_builtins(languages, &found, me, groups);
+            report.resolved = self.plan_builtins(languages, &found, me, groups);
         }
         report.hidden = std::mem::take(&mut self.hidden);
         // Fails without the probes: test_builtin_probe_runs_once_and_is_cached.
@@ -1022,25 +1057,30 @@ impl Round {
     /// running (shown or hidden), or a probe added to the grant unless its
     /// cached result stands. A language the collection did not answer
     /// (it did not run or did not finish) is left as it was.
+    /// Returns how many times the shell's folder was made canonical.
     fn plan_builtins(
         &mut self,
         languages: &Languages,
         found: &Search,
         me: u32,
         groups: &mut SystemGroups,
-    ) {
+    ) -> u32 {
         if self.builtins.is_empty() {
-            return;
+            return 0;
         }
         let environment = self.environment.clone();
         let vars = Environ::parse(&environment);
         let shell_folder = self.grant.cwd.clone();
+        let resolved = std::cell::Cell::new(0);
         let c = builtin_probe::Context {
             vars: builtin_probe::whole(&vars),
             folders: &found.folders,
             repo: found.repo,
             cwd: &shell_folder,
             me,
+            xcode_link: Path::new(builtin_probe::XCODE_SELECT_LINK),
+            command_line_tools: Path::new(builtin_probe::COMMAND_LINE_TOOLS),
+            resolved: &resolved,
         };
         let now = now_ns().unwrap_or(self.publish.clock.now);
         for language in self.builtins.clone() {
@@ -1078,6 +1118,7 @@ impl Round {
                 self.decided.push(decided(&p, now, status, value));
             }
         }
+        resolved.get()
     }
 
     /// Adds `probe` to the grant unless its cached result stands or it does
@@ -1287,6 +1328,26 @@ mod tests {
             },
         )
     }
+    // 폴더 사실이 저장소를 확정했을 때만 내장 언어를 정한다. in_repo를 모르거나(탐색 깊이 제한) 저장소 안인데 뿌리
+    // 위치를 모르면(별칭 경로) 미확정이다(D3a 재리뷰 H1). 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는 것,
+    // 뿌리 위치 없는 저장소 안을 받는 것.
+    #[test]
+    fn roots_stay_unknown_unless_settled() {
+        use bingsu_core::collection::path_facts::PathFactInput;
+        let of = |in_repo, repo_component| {
+            Root::of(&PathFactInput {
+                in_repo,
+                repo_component,
+                ..PathFactInput::default()
+            })
+        };
+        assert_eq!(of(Some(false), None), Root::Outside);
+        assert_eq!(of(Some(true), Some(1)), Root::Repo(1));
+        assert_eq!(of(None, None), Root::Unknown);
+        assert_eq!(of(Some(true), None), Root::Unknown);
+        assert_eq!(of(None, Some(1)), Root::Unknown);
+    }
+
     // 수집 답과 같은 저장소의 폴더 사실이 있을 때만 내장 언어를 정하고(D3a 리뷰 H1), 할 일이 없는 회차는 PATH를
     // 걷지 않는다(보안 리뷰 S-M3). 이것을 실패시키는 것: 폴더 사실 없이 내장 언어를 정하는 것(셸 폴더가 저장소를
     // 대신함), 다른 저장소의 사실을 받는 것, 답 없는 회차를 정하는 것, 할 일이 없어도 탐색하는 것.
@@ -1297,14 +1358,15 @@ mod tests {
             answers: vec![(b"node".to_vec(), Version::None)],
             root,
         };
-        assert!(answered(Some(None)).ready(None));
-        assert!(answered(Some(Some(2))).ready(Some(2)));
-        assert!(!answered(None).ready(None));
-        assert!(!answered(Some(Some(2))).ready(Some(3)));
+        assert!(answered(Root::Outside).ready(None));
+        assert!(!answered(Root::Outside).ready(Some(2)));
+        assert!(answered(Root::Repo(2)).ready(Some(2)));
+        assert!(!answered(Root::Unknown).ready(None));
+        assert!(!answered(Root::Repo(2)).ready(Some(3)));
         assert!(
             !Languages {
                 answers: Vec::new(),
-                root: Some(None)
+                root: Root::Outside
             }
             .ready(None)
         );
