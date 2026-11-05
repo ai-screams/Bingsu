@@ -1043,13 +1043,13 @@ fn gc_cannot_split_lock_inode_or_delete_inflight_store() {
 // 이것을 실패시키는 것: mkdir 전에 store/node/논리 bytes 상한을 검사하지 않는 것, cwd를 경로 조각으로 쓰는 것.
 #[test]
 fn store_capacity_is_reserved_before_mkdir() {
-    for (stores, nodes, bytes) in [(128, 8_192, 15_000_000), (0, 0, 0)] {
+    for (stores, nodes, bytes) in [(128, 8_192, 16_100_000), (0, 0, 0)] {
         assert!(collection_gc::capacity(stores, nodes, bytes));
     }
     for (stores, nodes, bytes) in [
-        (129, 8_192, 15_000_000),
-        (128, 8_193, 15_000_000),
-        (128, 8_192, 15_000_001),
+        (129, 8_192, 16_100_000),
+        (128, 8_193, 16_100_000),
+        (128, 8_192, 16_100_001),
     ] {
         assert!(!collection_gc::capacity(stores, nodes, bytes));
     }
@@ -1080,11 +1080,12 @@ fn store_capacity_is_reserved_before_mkdir() {
             Ok(store) => held.push(store),
             Err(StoreError::Busy) => {
                 assert!(!f.path_for(&b).exists());
-                // ⌊(15,000,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144 +
-                // 2 × command response maximum)⌋ = 6 (U-21; 7 at 10 MB before).
+                // U-21: ⌊(16,100,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144
+                // + 2 × 471,082 command response maximum)⌋ = 7, as at 10 MB before
+                // the command response.
                 assert_eq!(
                     held.len(),
-                    6,
+                    7,
                     "reserve two slots, stage, legacy request, the command response and its stage, and both catalog copies"
                 );
                 return;

@@ -574,7 +574,7 @@ fn e3_gc_inventory_counts_actual_control_bytes_and_tolerates_corrupt_records() {
 #[test]
 fn breaker_growth_is_charged_before_each_write_and_budget_is_unchanged() {
     // Mutation: omitting the pre-write catalog charge lets a second large
-    // record grow past the shared 15,000,000-byte bound (U-21).
+    // record grow past the shared 16,100,000-byte bound (U-21).
     // Mutation: rounding down undercharges every non-page-aligned record.
     for (len, expected) in [
         (0, 0),
@@ -587,45 +587,65 @@ fn breaker_growth_is_charged_before_each_write_and_budget_is_unchanged() {
     }
     let f = Fixture::new();
     let mut stores = Vec::new();
-    // As many response stores as the budget admits (U-21: 6 at 15 MB).
+    // Response stores fill the budget but leave room for large breaker
+    // records: 6 (the budget admits 7, after which 67,668 bytes are left,
+    // less than one 64 KiB-cwd record; U-21).
     for i in 0..6 {
         stores.push(response_store(&f.runtime, format!("/store-{i}").as_bytes(), 1).unwrap());
     }
-    // Sessions grow large records until the shared budget refuses one: the
-    // first refusal must be a growth (an existing record), which keeps it.
-    for i in 0..8 {
+    let begin = |session: &str, seq: u64| {
+        let mut cwd = format!("/{seq}/").into_bytes();
+        cwd.resize(65_536, b'x');
+        store::fixture_begin(
+            &f.runtime,
+            Some(session.as_bytes()),
+            Some(seq),
+            &cwd,
+            clock(seq),
+        )
+    };
+    // Large first records until the shared budget refuses one.
+    let mut sessions = Vec::new();
+    for i in 0..64 {
         let session = format!("{i:032x}");
-        for seq in 1..=3 {
-            let mut cwd = format!("/{seq}/").into_bytes();
-            cwd.resize(65_536, b'x');
-            let decision = store::fixture_begin(
-                &f.runtime,
-                Some(session.as_bytes()),
-                Some(seq),
-                &cwd,
-                clock(seq),
-            );
-            if !matches!(decision, Decision::Run(Some(_))) {
-                assert!(seq >= 2, "the first refusal was a new record, not growth");
-                assert!(matches!(decision, Decision::Run(None)));
-                let dir = f.root.join(store::ROOT).join("sessions").join(&session);
-                let record = Breaker::decode(&fs::read(dir.join(store::RECORD)).unwrap()).unwrap();
-                assert_eq!(
-                    record.used(),
-                    clock(seq - 1),
-                    "denied growth must preserve old record"
-                );
-                return;
+        // The write is charged at finish: a refused one ends the filling.
+        match begin(&session, 1) {
+            Decision::Run(Some(ticket)) => {
+                if ticket
+                    .finish(Progress::default(), EndReason::Complete, clock(1))
+                    .is_err()
+                {
+                    break;
+                }
+                sessions.push(session);
             }
-            let Decision::Run(Some(ticket)) = decision else {
-                unreachable!()
-            };
-            ticket
-                .finish(Progress::default(), EndReason::Complete, clock(seq))
-                .unwrap();
+            Decision::Run(None) => break,
+            _ => panic!("unexpected decision for session {i}"),
         }
     }
-    panic!("budget should refuse growth");
+    assert!(
+        !sessions.is_empty(),
+        "the budget left no room for one large record"
+    );
+    // Then a record's growth is refused too, and the old record stays.
+    let session = &sessions[0];
+    match begin(session, 2) {
+        Decision::Run(Some(ticket)) => assert!(
+            ticket
+                .finish(Progress::default(), EndReason::Complete, clock(2))
+                .is_err(),
+            "growth past the budget was written"
+        ),
+        Decision::Run(None) => {}
+        _ => panic!("unexpected decision for growth"),
+    }
+    let dir = f.root.join(store::ROOT).join("sessions").join(session);
+    let record = Breaker::decode(&fs::read(dir.join(store::RECORD)).unwrap()).unwrap();
+    assert_eq!(
+        record.used(),
+        clock(1),
+        "denied growth must preserve old record"
+    );
 }
 
 #[test]
@@ -663,7 +683,9 @@ fn gc_preserves_large_live_breaker_under_response_pressure() {
     // budget is full; small-record accounting must retain this protection.
     let f = Fixture::new();
     let mut stores = Vec::new();
-    // As many response stores as the budget admits (U-21: 6 at 15 MB).
+    // Response stores fill the budget but leave room for large breaker
+    // records: 6 (the budget admits 7, after which 67,668 bytes are left,
+    // less than one 64 KiB-cwd record; U-21).
     for i in 0..6 {
         stores.push(response_store(&f.runtime, format!("/store-{i}").as_bytes(), 1).unwrap());
     }

@@ -21,8 +21,8 @@ use std::{ffi::OsStr, fs::File, io, os::fd::AsFd};
 pub(crate) const MAX_STORES: u64 = 128;
 pub(crate) const MAX_NODES: u64 = 8_192;
 /// The runtime namespace's byte budget (U-21: 10 MB before the command
-/// response; 15 MB with it).
-pub(crate) const MAX_BYTES: u64 = 15_000_000;
+/// response; 16.1 MB with it, so 7 stores still fit at once).
+pub(crate) const MAX_BYTES: u64 = 16_100_000;
 pub(crate) const CATALOG_MAX: usize = 1_048_576;
 /// One store's reservation: two collection responses, their stage and the
 /// legacy request (4 × 256 KiB), and the command response and its stage
