@@ -222,7 +222,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             filter_failed = true;
             drop(supervisor.take());
             if let Some(round) = command_round.take() {
-                round.abandon();
+                let _ = round.abandon();
             }
             return Err(error.into());
         }
@@ -337,9 +337,16 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                         "command round: results rejected",
                     );
                 }
+                for note in &done.notes {
+                    report(&mut groups, LogLevel::Info, note);
+                }
                 report(&mut groups, LogLevel::DebugLog, "command round finished");
             }
-            None => round.abandon(),
+            None => {
+                for note in round.abandon() {
+                    report(&mut groups, LogLevel::Info, note);
+                }
+            }
         }
     }
     if let Some(text) = command_skip.and_then(command_grant::Skip::message) {

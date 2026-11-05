@@ -1038,9 +1038,11 @@ PTY_VERSIONS = {"min-u22": {"bash=5.1", "zsh=5.8"}, "min-d12": {"fish=3.6"}, "cu
 # finds the place that runs the other two.
 PTY_IGNORED = {"tests/shell/test_collector_no_spawn_macos.py", "tests/shell/test_collector_security.py",
                "tests/shell/test_gate_acceptance.py", "tests/shell/test_prompt_trace_budget.py",
-               "tests/shell/test_command_round.py"}
+               "tests/shell/test_command_round.py", "tests/shell/test_command_cgroup.py"}
 # The command rounds are shell-independent and need git, which the minimum images lack: they run
 # in the filter-calls release step and the macOS gate step, which assert_command_round_home pins.
+# The command cgroup file runs in its own two cells (command-cgroup), which
+# assert_command_cgroup_cells pins.
 COMMAND_ROUND_FILE = "tests/shell/test_command_round.py"
 COMMAND_ROUND_STEP = "      - name: Command rounds run through the supervisor (release)\n        if: matrix.profile == 'release'\n"
 MACOS_ONLY_ROUNDS = {"test_macos_unit_is_one_process_the_relay_execs_into",
@@ -1168,6 +1170,74 @@ def assert_command_round_home(text):
         assert chosen == names - elsewhere, (job, sorted(chosen ^ (names - elsewhere)))
 
 
+COMMAND_CGROUP_FILE = "tests/shell/test_command_cgroup.py"
+CGROUP_CELL_REASON = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]'
+# A skip of this one is BLOCKED and recorded (plan C3: the survivor fixture depends on kernel and FUSE).
+CGROUP_RECORDED_ONLY = {"test_orphan_live_descendant_reclaimed"}
+# Asserted in both cells: the best-effort path works with or without delegation.
+CGROUP_BOTH_CELLS = {"test_best_effort_group_kill_under_the_filter"}
+# The clone3 tests run everywhere and skip on a refused clone3, but fail on one
+# in the privileged cell, so that cell runs them too.
+CLONE3_CELL_TESTS = {f"commands::command_process::tests::{name}" for name in (
+    "test_clone3_relay_gets_exactly_four_fds", "test_clone3_exec_failure_is_reported", "test_clone3_waits_for_go")}
+CGROUP_CELLS = ("          - cell: plain\n            opts: \"\"\n"
+                "          - cell: priv\n            opts: --privileged --cgroupns=private\n")
+
+
+def cgroup_cell_tests():
+    """Every Rust test that runs only in the cgroup cells, as its libtest path."""
+    found = set()
+    for path in (ROOT / "crates/bingsu/src/commands").glob("*.rs"):
+        text = path.read_text().replace("\r\n", "\n")
+        for match in re.finditer(re.escape(CGROUP_CELL_REASON) + r"\n\s*fn (\w+)\(", text):
+            inner = [m[1] for m in re.finditer(r"(?m)^(?:pub\(crate\) )?mod (\w+) \{", text[:match.start()])]
+            found.add(f"commands::{path.stem}::{inner[-1]}::{match[1]}")
+    return found
+
+
+def assert_command_cgroup_cells(text):
+    # 이것을 실패시키는 것: 칸 하나를 빼거나 특권 옵션을 지우는 것, 셀 전용 Rust 시험을 실행·단언 목록에서 빼는 것,
+    # 특권 칸의 pytest PASSED 단언을 빼거나 그 단계를 두 칸 모두로 돌려 skip을 통과로 세는 것.
+    block = job_block(text, "command-cgroup")
+    assert "    name: Command cgroup cell (${{ matrix.cell }})\n" in block
+    assert CGROUP_CELLS in block and block.count("          - cell:") == 2
+    assert "continue-on-error" not in block
+    step = block.split("      - name: Rust tests in the cell\n")[1].split("\n      - ")[0]
+    assert "set -o pipefail" in step
+    run, = (line for line in step.splitlines() if " /cell --include-ignored --exact " in line)
+    assert "${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in run
+    selected = set(run.split(" --test-threads=1 ")[1].split(" | tee ")[0].split())
+    passed = set(re.findall(r"grep -Fx 'test (\S+) \.\.\. ok' ", step))
+    want = cgroup_cell_tests() | CLONE3_CELL_TESTS
+    assert selected == passed == want, sorted((selected | passed | want) - (selected & passed & want))
+    step = block.split("      - name: Command cgroup tests in the cell\n")[1].split("\n      - ")[0]
+    assert "${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in step
+    assert f"python3 -m pytest {COMMAND_CGROUP_FILE} -q -rA" in step and "set -o pipefail" in step
+    both = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
+    assert both == CGROUP_BOTH_CELLS, both
+    step = block.split("      - name: Every atomic-path test passed (privileged cell)\n")[1].split("\n      - ")[0]
+    assert step.startswith("        if: matrix.cell == 'priv'\n")
+    priv = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
+    names = set(re.findall(r"(?m)^def (test_\w+)\(", (ROOT / COMMAND_CGROUP_FILE).read_text()))
+    assert priv == names - CGROUP_RECORDED_ONLY, sorted(priv ^ (names - CGROUP_RECORDED_ONLY))
+
+
+@pytest.mark.parametrize("old,new", [
+    ("            opts: --privileged --cgroupns=private\n", "            opts: --cgroupns=private\n"),
+    ("grep -Fx 'test commands::command_supervisor::tests::test_cgroup_names_never_reused ... ok'", "true"),
+    (" commands::command_process::tests::test_clone3_starts_inside_the_cgroup commands::", " commands::"),
+    ("grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_round_removes_its_own_cgroups'", "true"),
+    ("        if: matrix.cell == 'priv'\n", "        if: success() || failure()\n"),
+])
+def test_command_cgroup_cells_reject_mutations(old, new):
+    text = workflows()["shell.yml"]
+    start, end = job_span(text, "command-cgroup")
+    block = text[start:end]
+    assert block.count(old) == 1, old
+    with pytest.raises(AssertionError):
+        assert_command_cgroup_cells(text[:start] + block.replace(old, new) + text[end:])
+
+
 def assert_pty_split(text, ignored=PTY_IGNORED):
     cells = pty_cells(text)
     names = [cell[0] for cell in cells]
@@ -1194,6 +1264,7 @@ def assert_pty_split(text, ignored=PTY_IGNORED):
         assert_pty_selection(assert_pty_steps(text, job, MACOS_CONDITIONS), MACOS_PTY_RUN, MACOS_DESELECTED, ignored)
     assert all((ROOT / path).is_file() for path in ignored), "no such file"
     assert_command_round_home(text)
+    assert_command_cgroup_cells(text)
     # The two left-out files that have no gate of their own run in required cells.
     assert [cell[0] for cell in cells if cell[1] == "min-d12"] == ["Shell PTY (min-d12)"]
     assert text.count(SHELL_FREE_STEP) == 1 and SHELL_FREE_STEP in linux

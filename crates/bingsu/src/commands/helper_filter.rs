@@ -9,13 +9,17 @@ enum Pidfds {
     /// This one (the helper's collector).
     Only(std::os::fd::RawFd),
     /// The command supervisor: exactly the pidfds of the children it holds
-    /// when it confines itself. It also may open, duplicate or receive no
-    /// descriptor afterwards, so no other process can be reached.
-    Supervisor(Vec<std::os::fd::RawFd>),
+    /// when it confines itself, and `kill(-pgid, SIGKILL)` for the process
+    /// groups of its best-effort relays. It also may open, duplicate or
+    /// receive no descriptor afterwards, so no other process can be reached.
+    Supervisor {
+        pidfds: Vec<std::os::fd::RawFd>,
+        groups: Vec<libc::pid_t>,
+    },
 }
 #[cfg(all(test, target_os = "linux"))]
 fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_filter> {
-    program_with(pid, child_pidfd.map_or(Pidfds::Denied, Pidfds::Only))
+    program_with(pid, child_pidfd.map_or(Pidfds::Denied, Pidfds::Only)).unwrap()
 }
 /// The command supervisor's filter after its last spawn: deny by default.
 /// Allowed are only the calls its loop makes (poll, read, write, waitid,
@@ -25,7 +29,16 @@ fn program(pid: u32, child_pidfd: Option<std::os::fd::RawFd>) -> Vec<libc::sock_
 /// pidfd_open, pidfd_getfd, ...) is allowed, so a held number, once closed,
 /// can never come to name another process.
 #[cfg(target_os = "linux")]
-fn supervisor_program(pid: u32, held: &[std::os::fd::RawFd]) -> Vec<libc::sock_filter> {
+fn supervisor_program(
+    pid: u32,
+    held: &[std::os::fd::RawFd],
+    groups: &[libc::pid_t],
+) -> Option<Vec<libc::sock_filter>> {
+    // Every jump distance below is a u8: past these counts it would not fit,
+    // and the filter is not built (the supervisor then ends its children).
+    if held.len() > SUPERVISOR_HELD_MAX || groups.len() > SUPERVISOR_HELD_MAX {
+        return None;
+    }
     let stmt = |code, k| libc::sock_filter {
         code,
         jt: 0,
@@ -99,8 +112,24 @@ fn supervisor_program(pid: u32, held: &[std::os::fd::RawFd]) -> Vec<libc::sock_f
     code.push(jump(pid, 0, 1));
     code.push(allow);
     code.push(deny);
+    // kill(-pgid, SIGKILL) for the relays' own groups only (best-effort
+    // path, C3 ruling R5). Only the low 32 bits are compared: the kernel
+    // reads both arguments as int. The supervisor sends it only while the
+    // relay, the group's leader, is unreaped, so the number names no other
+    // group then.
+    let g = groups.len() as u8;
+    code.push(jump(libc::SYS_kill as u32, 0, g + 6));
+    code.push(stmt(0x20, 16));
+    for (k, group) in groups.iter().take(usize::from(g)).enumerate() {
+        code.push(jump(group.wrapping_neg() as u32, g - k as u8, 0));
+    }
+    code.push(deny);
+    code.push(stmt(0x20, 24));
+    code.push(jump(libc::SIGKILL as u32, 1, 0));
+    code.push(deny);
+    code.push(allow);
     // Signals through the held pidfds only.
-    let n = u8::try_from(held.len()).unwrap_or(u8::MAX);
+    let n = held.len() as u8;
     // Not this call: on to the final deny, past ld, n compares, deny, allow.
     code.push(jump(libc::SYS_pidfd_send_signal as u32, 0, n + 3));
     code.push(stmt(0x20, 16));
@@ -110,13 +139,18 @@ fn supervisor_program(pid: u32, held: &[std::os::fd::RawFd]) -> Vec<libc::sock_f
     code.push(deny);
     code.push(allow);
     code.push(deny);
-    code
+    Some(code)
 }
 
+/// Pidfds and process groups the supervisor's filter may hold: far above a
+/// round's 12 spawns, and small enough for every jump to fit a u8.
 #[cfg(target_os = "linux")]
-fn program_with(pid: u32, pidfds: Pidfds) -> Vec<libc::sock_filter> {
-    if let Pidfds::Supervisor(held) = &pidfds {
-        return supervisor_program(pid, held);
+const SUPERVISOR_HELD_MAX: usize = 64;
+
+#[cfg(target_os = "linux")]
+fn program_with(pid: u32, pidfds: Pidfds) -> Option<Vec<libc::sock_filter>> {
+    if let Pidfds::Supervisor { pidfds, groups } = &pidfds {
+        return supervisor_program(pid, pidfds, groups);
     }
     let stmt = |code, k| libc::sock_filter {
         code,
@@ -205,7 +239,7 @@ fn program_with(pid: u32, pidfds: Pidfds) -> Vec<libc::sock_filter> {
         code.push(stmt(0x06, libc::SECCOMP_RET_ALLOW));
     }
     code.push(stmt(0x06, libc::SECCOMP_RET_ALLOW));
-    code
+    Some(code)
 }
 #[cfg(target_os = "linux")]
 pub fn install(child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
@@ -215,14 +249,24 @@ pub fn install(child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
 /// (no exec, no process creation, no `pidfd_open`, numeric signals only to
 /// itself) with signals through any pidfd it holds.
 #[cfg(target_os = "linux")]
-pub fn install_supervisor(pidfds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
-    install_with(Pidfds::Supervisor(pidfds.to_vec()))
+pub fn install_supervisor(
+    pidfds: &[std::os::fd::RawFd],
+    groups: &[libc::pid_t],
+) -> std::io::Result<()> {
+    install_with(Pidfds::Supervisor {
+        pidfds: pidfds.to_vec(),
+        groups: groups.to_vec(),
+    })
 }
 #[cfg(target_os = "linux")]
 fn install_with(pidfds: Pidfds) -> std::io::Result<()> {
     // SAFETY: own PID is captured once before TSYNC.
     let pid = unsafe { libc::getpid() } as u32;
-    let mut code = program_with(pid, pidfds);
+    let Some(mut code) = program_with(pid, pidfds) else {
+        return Err(std::io::Error::other(
+            "supervisor filter: too many children",
+        ));
+    };
     let prog = libc::sock_fprog {
         len: code.len() as u16,
         filter: code.as_mut_ptr(),
@@ -256,7 +300,10 @@ pub fn install(_child_pidfd: Option<std::os::fd::RawFd>) -> std::io::Result<()> 
     Ok(())
 }
 #[cfg(not(target_os = "linux"))]
-pub fn install_supervisor(_pidfds: &[std::os::fd::RawFd]) -> std::io::Result<()> {
+pub fn install_supervisor(
+    _pidfds: &[std::os::fd::RawFd],
+    _groups: &[libc::pid_t],
+) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -322,7 +369,14 @@ mod tests {
                 input[16 + i * 8..24 + i * 8].copy_from_slice(&value.to_ne_bytes());
             }
             evaluate_program(
-                program_with(1234, Pidfds::Supervisor(vec![7, 9, 12])),
+                program_with(
+                    1234,
+                    Pidfds::Supervisor {
+                        pidfds: vec![7, 9, 12],
+                        groups: vec![],
+                    },
+                )
+                .unwrap(),
                 input,
             )
         };
@@ -380,11 +434,89 @@ mod tests {
         );
     }
 
+    // 최선 노력 경로의 kill은 쥔 중계 그룹의 −pgid와 SIGKILL에만. 이것을 실패시키는 것: 그룹 비교를 지우는
+    // 것(다른 그룹·양수 pid 허용), SIGKILL 비교를 지우는 것(SIGTERM 허용), 그룹 블록의 건너뛰기 거리를
+    // 하나 줄이는 것(kill 아닌 호출이 이 블록으로 떨어져 pidfd 허용이 깨짐).
+    #[test]
+    fn supervisor_filter_kills_only_held_groups() {
+        let denied = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        let run = |nr: i64, args: [u64; 2]| {
+            let mut input = [0u8; 64];
+            input[..4].copy_from_slice(&(nr as u32).to_ne_bytes());
+            #[cfg(target_arch = "x86_64")]
+            let arch = 0xc000003eu32;
+            #[cfg(target_arch = "aarch64")]
+            let arch = 0xc00000b7u32;
+            input[4..8].copy_from_slice(&arch.to_ne_bytes());
+            for (i, value) in args.into_iter().enumerate() {
+                input[16 + i * 8..24 + i * 8].copy_from_slice(&value.to_ne_bytes());
+            }
+            evaluate_program(
+                program_with(
+                    1234,
+                    Pidfds::Supervisor {
+                        pidfds: vec![7],
+                        groups: vec![500, 777],
+                    },
+                )
+                .unwrap(),
+                input,
+            )
+        };
+        let neg = |p: i64| p.wrapping_neg() as u64;
+        for group in [500, 777] {
+            assert_eq!(
+                run(libc::SYS_kill, [neg(group), 9]),
+                libc::SECCOMP_RET_ALLOW
+            );
+            // The kernel reads the pid as int: a zero upper half is the same pid.
+            assert_eq!(
+                run(libc::SYS_kill, [neg(group) & 0xffff_ffff, 9]),
+                libc::SECCOMP_RET_ALLOW
+            );
+            assert_eq!(run(libc::SYS_kill, [neg(group), 15]), denied);
+            assert_eq!(run(libc::SYS_kill, [group as u64, 9]), denied);
+        }
+        assert_eq!(run(libc::SYS_kill, [neg(501), 9]), denied);
+        assert_eq!(run(libc::SYS_kill, [neg(1), 9]), denied);
+        assert_eq!(
+            run(libc::SYS_pidfd_send_signal, [7, 9]),
+            libc::SECCOMP_RET_ALLOW
+        );
+        assert_eq!(run(libc::SYS_pidfd_send_signal, [8, 9]), denied);
+        assert_eq!(run(libc::SYS_read, [3, 0]), libc::SECCOMP_RET_ALLOW);
+    }
+
+    // 점프 거리가 u8에 들어가는 개수까지만 필터를 만든다. 넘으면 설치하지 않는다(감독은 자식을 끝냄). 이것을
+    // 실패시키는 것: supervisor_program의 개수 검사를 지우는 것(넘는 집합으로도 필터를 만들거나 넘침으로 멈춤).
+    #[test]
+    fn supervisor_filter_refuses_more_than_it_can_jump() {
+        let build = |pidfds: usize, groups: usize| {
+            program_with(
+                1234,
+                Pidfds::Supervisor {
+                    pidfds: (0..pidfds as i32).map(|i| i + 10).collect(),
+                    groups: (0..groups as i32).map(|i| i + 500).collect(),
+                },
+            )
+        };
+        assert!(build(SUPERVISOR_HELD_MAX, SUPERVISOR_HELD_MAX).is_some());
+        assert!(build(SUPERVISOR_HELD_MAX + 1, 0).is_none());
+        assert!(build(0, 300).is_none());
+    }
+
     // 감독 필터의 첫 검사: 다른 AUDIT_ARCH, x32 비트, 음수 번호는 프로세스를 죽인다. 이것을 실패시키는 것:
     // arch 비교를 지우거나 KILL 대신 다음 검사로 넘기는 것, x86_64의 0x40000000 하한 검사를 지우는 것.
     #[test]
     fn supervisor_filter_kills_foreign_arch_and_x32() {
-        let program = program_with(1234, Pidfds::Supervisor(vec![7]));
+        let program = program_with(
+            1234,
+            Pidfds::Supervisor {
+                pidfds: vec![7],
+                groups: vec![],
+            },
+        )
+        .unwrap();
         let input = |nr: u32, arch: u32| {
             let mut b = [0u8; 64];
             b[..4].copy_from_slice(&nr.to_ne_bytes());

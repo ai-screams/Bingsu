@@ -39,12 +39,19 @@ fn check(rc: i32) -> io::Result<()> {
 /// write is an error and nothing is spawned. The relay enters the unit's
 /// folder itself: a chdir here would run in the spawn and hold the
 /// supervisor on a stopped mount.
+///
+/// With `cgroup` (Linux, the atomic path) the relay starts inside that
+/// cgroup through `clone3(CLONE_INTO_CGROUP)`, so what it forks starts
+/// inside it too; only a descendant that cooperates stays there (one may
+/// move itself to another cgroup it can write). On any error nothing was
+/// spawned.
 pub(crate) fn spawn(
     exe: &CStr,
     args: &[Vec<u8>],
     input: &[u8],
     expires_ns: u64,
     go: &dyn Fn() -> bool,
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
 ) -> io::Result<Spawned> {
     #[cfg(test)]
     PREPARE.with(|hook| {
@@ -66,6 +73,26 @@ pub(crate) fn spawn(
     super::collector_process::nonblocking(&status)?;
     // The supervisor's own descriptors are close-on-exec, so nothing but
     // these crosses.
+    #[cfg(target_os = "linux")]
+    if let Some(cgroup) = cgroup {
+        let child = clone_into(
+            exe,
+            args,
+            &[(&stdout_write, 1), (&status_write, 2), (&input_read, 3)],
+            Some(cgroup),
+            expires_ns,
+            go,
+        )?;
+        return Ok(Spawned {
+            child,
+            stdout,
+            status,
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cgroup;
+    // The best-effort path: the relay leads its own process group, so its
+    // reap's `killpg` reaches what the target forks without a new session.
     let (child, _) = spawn_with(
         exe,
         args,
@@ -86,7 +113,8 @@ pub(crate) fn spawn(
 
 /// The supervisor itself, from the helper (`args`: the binary and
 /// `__command-v1`): 0 to 2 `/dev/null`, then the grant pipe's read end, the
-/// result pipe's write end and the lock copy at 3, 4 and 5, in folder "/".
+/// result pipe's write end and the lock copy at 3, 4 and 5, and on the
+/// atomic path the session's cgroup parent at 6, in folder "/".
 /// Every other helper descriptor is closed.
 pub(crate) fn spawn_supervisor(
     exe: &CStr,
@@ -94,8 +122,11 @@ pub(crate) fn spawn_supervisor(
     grant: &File,
     results: &File,
     lock: &File,
+    cgroup: Option<&File>,
     expires_ns: u64,
 ) -> io::Result<OwnedChild> {
+    let mut dups = vec![(grant, 3), (results, 4), (lock, 5)];
+    dups.extend(cgroup.map(|c| (c, 6)));
     spawn_with(
         exe,
         args,
@@ -104,7 +135,7 @@ pub(crate) fn spawn_supervisor(
             (1, libc::O_WRONLY),
             (2, libc::O_WRONLY),
         ],
-        &[(grant, 3), (results, 4), (lock, 5)],
+        &dups,
         c"/",
         true,
         false,
@@ -112,6 +143,13 @@ pub(crate) fn spawn_supervisor(
         &|| true,
     )
     .map(|(child, _)| child)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// Per clone3 call, in order: an errno to fail with instead (tests only).
+    pub(crate) static CLONE3_ERRORS: std::cell::RefCell<std::collections::VecDeque<Option<i32>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
 #[cfg(test)]
@@ -126,8 +164,8 @@ thread_local! {
 /// are first moved above every target), the child starts in `cwd`. With
 /// `close_rest` (Linux) every other open descriptor is closed in the child;
 /// macOS always spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. With `own_group`
-/// (macOS, a relay) the child leads a new process group, which the
-/// supervisor ends with `killpg` (best effort: there is no cgroup).
+/// (a best-effort relay) the child leads a new process group, which its
+/// reap ends with `killpg` (OwnedChild::reap; there is no cgroup).
 #[allow(clippy::too_many_arguments, reason = "one spawn's fixed inputs")]
 fn spawn_with(
     exe: &CStr,
@@ -186,7 +224,6 @@ fn spawn_with(
         let flags = libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF;
         #[cfg(target_os = "macos")]
         let flags = flags | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
-        #[cfg(target_os = "macos")]
         let flags = if own_group {
             // SAFETY: initialized attributes; group 0 is the child's own pid.
             check(unsafe { libc::posix_spawnattr_setpgroup(&mut attr, 0) })?;
@@ -194,8 +231,6 @@ fn spawn_with(
         } else {
             flags
         };
-        #[cfg(not(target_os = "macos"))]
-        let _ = own_group;
         // SAFETY: supported child-only flags.
         check(unsafe { libc::posix_spawnattr_setflags(&mut attr, flags as libc::c_short) })?;
         for &(fd, mode) in nulls {
@@ -257,7 +292,6 @@ fn spawn_with(
             )
         })?;
         let child = OwnedChild::attach(pid, expires_ns)?;
-        #[cfg(target_os = "macos")]
         let child = if own_group {
             child.leads_group()
         } else {
@@ -270,6 +304,168 @@ fn spawn_with(
     // SAFETY: initialized attributes, no longer used.
     unsafe { libc::posix_spawnattr_destroy(&mut attr) };
     result
+}
+
+/// The relay's status code when the spawned process could not even exec
+/// the relay (`clone3` path; posix_spawn reports that itself). The relay's
+/// own codes are 120 to 123.
+#[cfg(target_os = "linux")]
+pub(crate) const SPAWN_FAILED: u8 = 124;
+
+/// `struct clone_args` up to `cgroup` (CLONE_ARGS_SIZE_VER2, Linux 5.7).
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Default)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+#[cfg(target_os = "linux")]
+const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+
+/// `clone3(CLONE_PIDFD [| CLONE_INTO_CGROUP])` with fork semantics, then in
+/// the child only `dup2`, `chdir("/")` and `execve` with an empty
+/// environment: everything they use is made before the call, and nothing
+/// in the child allocates or locks. Signals need no reset here: the relay
+/// resets every disposition and the mask itself (`relay.rs` reset_signals).
+/// `/dev/null` is descriptor 0. An exec failure writes [`SPAWN_FAILED`] to
+/// the status pipe (target 2), so it never reads as an executed target.
+#[cfg(target_os = "linux")]
+fn clone_into(
+    exe: &CStr,
+    args: &[Vec<u8>],
+    dups: &[(&File, i32)],
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    expires_ns: u64,
+    go: &dyn Fn() -> bool,
+) -> io::Result<OwnedChild> {
+    use std::os::fd::{AsRawFd as _, OwnedFd};
+    let words = args
+        .iter()
+        .map(|w| CString::new(w.as_slice()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut argv: Vec<*const libc::c_char> = words.iter().map(|w| w.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+    // SAFETY: fixed path; the descriptor is owned below.
+    let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if null < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a fresh descriptor nothing else owns.
+    let null = unsafe { OwnedFd::from_raw_fd(null) };
+    // Sources above every target, so no dup2 overwrites one.
+    let mut moves = Vec::new();
+    for (fd, target) in
+        std::iter::once((null.as_raw_fd(), 0)).chain(dups.iter().map(|(f, t)| (f.as_raw_fd(), *t)))
+    {
+        // SAFETY: duplicates a live source above every target number.
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+        if copy < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a fresh duplicate nothing else owns.
+        moves.push((unsafe { OwnedFd::from_raw_fd(copy) }, target));
+    }
+    let raw: Vec<(i32, i32)> = moves.iter().map(|(f, t)| (f.as_raw_fd(), *t)).collect();
+    let status = raw.iter().find(|m| m.1 == 2).map_or(-1, |m| m.0);
+    let mut pidfd: i32 = -1;
+    let mut a = CloneArgs {
+        flags: libc::CLONE_PIDFD as u64,
+        pidfd: std::ptr::addr_of_mut!(pidfd) as u64,
+        exit_signal: libc::SIGCHLD as u64,
+        ..CloneArgs::default()
+    };
+    if let Some(cg) = cgroup {
+        a.flags |= CLONE_INTO_CGROUP;
+        a.cgroup = cg.as_raw_fd() as u64;
+    }
+    if !go() {
+        return Err(io::Error::from(io::ErrorKind::Interrupted));
+    }
+    #[cfg(test)]
+    if let Some(errno) = CLONE3_ERRORS.with(|q| q.borrow_mut().pop_front()).flatten() {
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    // SAFETY: a valid clone_args of its size; without CLONE_VM the child is
+    // a copy and runs only async-signal-safe calls on prepared data.
+    let pid = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            std::ptr::addr_of_mut!(a),
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    if pid == 0 {
+        // SAFETY: the child of clone3; prepared arrays and descriptors.
+        unsafe { exec_child(&raw, status, exe, &argv, &envp) }
+    }
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: clone3 stored a new pidfd that nothing else owns.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
+    Ok(OwnedChild::adopt(pid as libc::pid_t, pidfd, expires_ns))
+}
+
+/// # Safety
+/// Only in the child of [`clone_into`]: no allocation, no lock.
+#[cfg(target_os = "linux")]
+unsafe fn exec_child(
+    moves: &[(i32, i32)],
+    status: i32,
+    exe: &CStr,
+    argv: &[*const libc::c_char],
+    envp: &[*const libc::c_char],
+) -> ! {
+    // No test for a dup2 failure: both numbers are open and the target is
+    // below the descriptor limit, so it cannot be made to fail; it reports a
+    // spawn failure (fail closed), the same class as the C1 fcntl branch.
+    for &(from, to) in moves {
+        // SAFETY: both numbers are open in this child.
+        if unsafe { libc::dup2(from, to) } < 0 {
+            // SAFETY: still the child of clone_into.
+            unsafe { spawn_failed(status) }
+        }
+    }
+    // A copy of the whole caller: any descriptor open there without
+    // close-on-exec (another thread's, at this instant) would cross. Every
+    // number above 3 goes, as the supervisor's own spawn does (close_rest);
+    // from here the status pipe is fd 2. close_range is in every kernel the
+    // atomic path runs on (5.9; the path needs 5.14). No test for its
+    // failure: it cannot fail on that range; it reports a spawn failure.
+    // SAFETY: closes only this child's descriptors.
+    if unsafe { libc::syscall(libc::SYS_close_range, 4u32, u32::MAX, 0u32) } != 0 {
+        // SAFETY: still the child of clone_into.
+        unsafe { spawn_failed(2) }
+    }
+    // SAFETY: NUL-terminated fixed path.
+    if unsafe { libc::chdir(c"/".as_ptr()) } == 0 {
+        // SAFETY: NUL-terminated path and NULL-terminated arrays made before clone3.
+        unsafe { libc::execve(exe.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+    }
+    // SAFETY: still the child of clone_into.
+    unsafe { spawn_failed(2) }
+}
+
+/// # Safety
+/// Only in the child of [`clone_into`].
+#[cfg(target_os = "linux")]
+unsafe fn spawn_failed(status: i32) -> ! {
+    let code = [SPAWN_FAILED];
+    // SAFETY: one byte from a live buffer to the status pipe's source copy.
+    unsafe { libc::write(status, code.as_ptr().cast(), 1) };
+    // SAFETY: ends the child without running the parent's exit handlers.
+    unsafe { libc::_exit(127) }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -305,7 +501,7 @@ mod tests {
         let (c, _d) = pipe().unwrap();
         let sleep = c"/bin/sleep";
         let args = [b"sleep".to_vec(), b"5".to_vec()];
-        let mut child = spawn_supervisor(sleep, &args, &a, &b, &c, u64::MAX).unwrap();
+        let mut child = spawn_supervisor(sleep, &args, &a, &b, &c, None, u64::MAX).unwrap();
         // The spawn is synchronous; give exec a moment to settle the table.
         std::thread::sleep(std::time::Duration::from_millis(50));
         let seen = fds(child.pid);
@@ -318,6 +514,189 @@ mod tests {
         }
         assert_eq!(seen, [0, 1, 2, 3, 4, 5]);
         assert!(environ.is_empty());
+    }
+
+    // GATE-CMD-FDS(원자 경로, C3 판정 R2): 세션 cgroup 부모가 있으면 정확히 {0..6}. 이것을 실패시키는 것:
+    // spawn_supervisor의 `dups.extend(cgroup…)`를 지우는 것({0..5}가 됨).
+    #[test]
+    fn test_supervisor_gets_seven_fds_on_the_atomic_path() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (a, b) = pipe().unwrap();
+        let (c, _d) = pipe().unwrap();
+        let (parent, _e) = pipe().unwrap();
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        let mut child =
+            spawn_supervisor(c"/bin/sleep", &args, &a, &b, &c, Some(&parent), u64::MAX).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let seen = fds(child.pid);
+        let _ = child.signal(libc::SIGKILL);
+        while !child.reap().unwrap() {}
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    fn sleeper(
+        go: &dyn Fn() -> bool,
+        cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    ) -> io::Result<Spawned> {
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        spawn(c"/bin/sleep", &args, b"input", u64::MAX, go, cgroup)
+    }
+
+    /// The clone3 path without a cgroup; `None` where clone3 is refused
+    /// (a default container's seccomp profile answers ENOSYS), except in the
+    /// privileged cell, where CI asserts these tests pass.
+    fn clone3_sleeper() -> Option<Spawned> {
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        let (input_read, input_write) = pipe().unwrap();
+        drop(input_write);
+        let (stdout, stdout_write) = pipe().unwrap();
+        let (status, status_write) = pipe().unwrap();
+        match clone_into(
+            c"/bin/sleep",
+            &args,
+            &[(&stdout_write, 1), (&status_write, 2), (&input_read, 3)],
+            None,
+            u64::MAX,
+            &|| true,
+        ) {
+            Ok(child) => Some(Spawned {
+                child,
+                stdout,
+                status,
+            }),
+            // In the privileged cell clone3 must work: a refusal there fails.
+            Err(e)
+                if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM))
+                    && !super::super::command_cgroup::cell::privileged() =>
+            {
+                eprintln!("clone3 unavailable here: {e}");
+                None
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn end(mut s: Spawned) {
+        let _ = s.child.signal(libc::SIGKILL);
+        while !s.child.reap().unwrap() {}
+    }
+
+    // clone3 경로의 중계도 정확히 {0,1,2,3}, 빈 envp, 작업 폴더 "/". 호출 쪽에 close-on-exec 없는 fd가 열려
+    // 있어도(멀티스레드 시험 하네스, 다른 스레드의 fd) 넘어가지 않는다. 이것을 실패시키는 것: exec_child가 마지막
+    // 이동(fd 3)을 건너뛰는 것({0,1,2}가 됨), exec_child의 close_range를 지우는 것(아래 상속 fd가 넘어감),
+    // exec_child의 chdir을 지우는 것(시험 프로세스 폴더에서 시작).
+    #[test]
+    fn test_clone3_relay_gets_exactly_four_fds() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        // An inheritable descriptor in the caller, as another thread may hold one.
+        let (keep, _w) = pipe().unwrap();
+        // SAFETY: `keep` is open; F_DUPFD leaves the copy inheritable.
+        let open = unsafe { libc::fcntl(keep.as_raw_fd(), libc::F_DUPFD, 60) };
+        assert!(open >= 60);
+        // Owned at once: a panic below still closes it before the lock goes.
+        // SAFETY: a fresh duplicate nothing else owns.
+        let open = unsafe { std::os::fd::OwnedFd::from_raw_fd(open) };
+        let spawned = clone3_sleeper();
+        drop(open);
+        let Some(s) = spawned else { return };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let seen = fds(s.child.pid);
+        let environ = std::fs::read(format!("/proc/{}/environ", s.child.pid)).unwrap();
+        let cwd = std::fs::read_link(format!("/proc/{}/cwd", s.child.pid)).unwrap();
+        end(s);
+        assert_eq!(seen, [0, 1, 2, 3]);
+        assert!(environ.is_empty());
+        assert_eq!(cwd, std::path::Path::new("/"));
+    }
+
+    // exec 실패는 상태 파이프의 SPAWN_FAILED 1바이트(대상 실행으로 읽히지 않음). 이것을 실패시키는 것:
+    // spawn_failed의 write를 지우는 것(바이트 없는 EOF).
+    #[test]
+    fn test_clone3_exec_failure_is_reported() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (input_read, _w) = pipe().unwrap();
+        let (_stdout, stdout_write) = pipe().unwrap();
+        let (status, status_write) = pipe().unwrap();
+        let args = [b"missing".to_vec()];
+        let child = match clone_into(
+            c"/nonexistent/bingsu-missing",
+            &args,
+            &[(&stdout_write, 1), (&status_write, 2), (&input_read, 3)],
+            None,
+            u64::MAX,
+            &|| true,
+        ) {
+            Ok(c) => c,
+            Err(e)
+                if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM))
+                    && !super::super::command_cgroup::cell::privileged() =>
+            {
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        drop(status_write);
+        let mut child = child;
+        while !child.reap().unwrap() {}
+        let mut code = Vec::new();
+        use std::io::Read;
+        (&status).read_to_end(&mut code).unwrap();
+        assert_eq!(code, [SPAWN_FAILED]);
+        assert_eq!(child.exit_code(), Some(127));
+    }
+
+    // go()가 거짓이면 clone3을 부르지 않는다. 이것을 실패시키는 것: clone_into의 go() 검사를 지우는 것
+    // (Interrupted 대신 자식이 생김).
+    #[test]
+    fn test_clone3_waits_for_go() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (input_read, _w) = pipe().unwrap();
+        let (_o, stdout_write) = pipe().unwrap();
+        let (_s, status_write) = pipe().unwrap();
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        let r = clone_into(
+            c"/bin/sleep",
+            &args,
+            &[(&stdout_write, 1), (&status_write, 2), (&input_read, 3)],
+            None,
+            u64::MAX,
+            &|| false,
+        );
+        match r {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::Interrupted),
+            Ok(mut c) => {
+                let _ = c.signal(libc::SIGKILL);
+                while !c.reap().unwrap() {}
+                panic!("spawned without go");
+            }
+        }
+    }
+
+    // 원자 경로: 중계는 처음부터 그 cgroup 안에서 시작한다. 이것을 실패시키는 것: clone_into에서
+    // CLONE_INTO_CGROUP을 빼는 것(시험 프로세스의 cgroup에서 시작).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_clone3_starts_inside_the_cgroup() {
+        if !super::super::command_cgroup::cell::privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (p, _dir) = super::super::command_cgroup::cell::parent("clone3");
+        let unit = p.join("u0000000000000001");
+        std::fs::create_dir(&unit).unwrap();
+        let cg = std::fs::File::open(&unit).unwrap();
+        use std::os::fd::AsFd;
+        let s = sleeper(&|| true, Some(cg.as_fd())).unwrap();
+        let line = std::fs::read_to_string(format!("/proc/{}/cgroup", s.child.pid)).unwrap();
+        end(s);
+        let rel = unit
+            .strip_prefix("/sys/fs/cgroup")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(line.trim_end(), format!("0::/{rel}"));
+        std::fs::remove_dir(&unit).unwrap();
+        std::fs::remove_dir(&p).unwrap();
     }
 }
 
@@ -374,6 +753,15 @@ mod timing {
     /// Spawns the real supervisor; with `early` the grant is in the pipe
     /// before the spawn. Returns (spawned at, grant written at, results).
     fn round(exe: &CStr, units: usize, early: bool) -> (u64, u64, Vec<wire::Outcome>) {
+        round_in(exe, units, early, None)
+    }
+
+    fn round_in(
+        exe: &CStr,
+        units: usize,
+        early: bool,
+        cgroup: Option<&File>,
+    ) -> (u64, u64, Vec<wire::Outcome>) {
         let (grant_read, grant_write) = pipe().unwrap();
         let (results_read, results_write) = pipe().unwrap();
         let (lock, _keep) = pipe().unwrap();
@@ -391,8 +779,16 @@ mod timing {
         }
         let args = [exe.to_bytes().to_vec(), b"__command-v1".to_vec()];
         let spawned = now();
-        let mut child =
-            spawn_supervisor(exe, &args, &grant_read, &results_write, &lock, u64::MAX).unwrap();
+        let mut child = spawn_supervisor(
+            exe,
+            &args,
+            &grant_read,
+            &results_write,
+            &lock,
+            cgroup,
+            u64::MAX,
+        )
+        .unwrap();
         drop((grant_read, results_write));
         if !early {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -467,5 +863,44 @@ mod timing {
             "approve_to_end_ns (approval -> /bin/true reaped, 8 units)",
             approve,
         );
+    }
+
+    /// C3 `cgroup_ns`: the same 8-unit round on the atomic path (unit cgroup,
+    /// clone3, cgroup.kill) and on the best-effort path, and one reclaim of
+    /// the 8 unit folders a round leaves. Privileged cell, `BINGSU_BIN`.
+    #[test]
+    #[ignore = "timing: needs BINGSU_BIN and the privileged cell"]
+    fn c3_cgroup_timings() {
+        use super::super::command_cgroup::{cell, fs, reclaim};
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        #[expect(clippy::disallowed_methods, reason = "test-only timing input")]
+        let exe = CString::new(std::env::var("BINGSU_BIN").unwrap()).unwrap();
+        let (path, _dir) = cell::parent("timing");
+        let parent = File::open(&path).unwrap();
+        let (mut atomic, mut plain, mut reclaims) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..30 {
+            let (_, _, out) = round_in(&exe, 8, true, Some(&parent));
+            assert_eq!(cell::units(&path).len(), 8, "{out:?}");
+            for o in &out {
+                assert!(matches!(o.reason, wire::Reason::Exited(0)), "{o:?}");
+                atomic.push(o.ended_at - o.approved_at);
+            }
+            let mut dir = fs::Dir::new(File::open(&path).unwrap());
+            let r = reclaim(&mut fs::Fs, &mut dir);
+            assert_eq!(r.removed, 8, "{r:?}");
+            reclaims.push(r.elapsed_ns);
+            let (_, _, out) = round(&exe, 8, true);
+            plain.extend(out.iter().map(|o| o.ended_at - o.approved_at));
+        }
+        let _ = std::fs::remove_dir(&path);
+        show(
+            "approve_to_end_ns atomic (unit cgroup, clone3, cgroup.kill)",
+            atomic,
+        );
+        show(
+            "approve_to_end_ns best effort (posix_spawn, process group)",
+            plain,
+        );
+        show("reclaim_ns (8 empty unit cgroups)", reclaims);
     }
 }

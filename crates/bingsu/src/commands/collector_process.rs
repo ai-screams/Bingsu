@@ -35,9 +35,8 @@ pub(crate) struct OwnedChild {
     pub spawn_return: Option<u64>,
     signal: SignalChild,
     expires_ns: u64,
-    /// macOS: it leads its own process group (a relay), so `reap` ends what
-    /// is left of the group first.
-    #[cfg(target_os = "macos")]
+    /// It leads its own process group (a best-effort relay), so `reap` ends
+    /// what is left of the group first.
     group: bool,
 }
 
@@ -123,6 +122,22 @@ impl OwnedChild {
         self.signal.pidfd()
     }
 
+    /// A child whose pidfd came from its own `clone3(CLONE_PIDFD)`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt(pid: libc::pid_t, pidfd: OwnedFd, expires_ns: u64) -> Self {
+        Self {
+            signal: SignalChild {
+                pidfd: Arc::new(pidfd),
+                state: Arc::default(),
+            },
+            pid,
+            expires_ns,
+            spawn_enter: None,
+            spawn_return: None,
+            group: false,
+        }
+    }
+
     pub(crate) fn attach(pid: libc::pid_t, expires_ns: u64) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -144,6 +159,7 @@ impl OwnedChild {
                 expires_ns,
                 spawn_enter: None,
                 spawn_return: None,
+                group: false,
             })
         }
         #[cfg(target_os = "macos")]
@@ -162,9 +178,8 @@ impl OwnedChild {
         }
     }
 
-    /// macOS: this child leads its own process group (spawned with
+    /// This child leads its own process group (spawned with
     /// `POSIX_SPAWN_SETPGROUP`, so its pid is the group id).
-    #[cfg(target_os = "macos")]
     pub(crate) fn leads_group(mut self) -> Self {
         self.group = true;
         self
@@ -188,10 +203,60 @@ impl OwnedChild {
         self.signal.kill_requested()
     }
 
+    /// Whether it leads its own process group (`leads_group`).
+    pub(crate) fn group(&self) -> bool {
+        self.group
+    }
+
     pub fn reap(&mut self) -> io::Result<bool> {
         let mut state = self.signal.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.reaped {
             return Ok(true);
+        }
+        // A group leader: once its exit is seen, and before the wait frees
+        // its pid (and so the group id), what is left of the group is
+        // killed; an exit not seen yet is not reaped. Every reap takes this
+        // path, the drop's too, on both platforms (no cgroup: best effort).
+        // Fails without the early return:
+        // group_exit_seen_late_is_not_reaped_before_its_group; without the
+        // killpg: a_dropped_group_leader_takes_its_group.
+        if self.group {
+            // SAFETY: zeroed writable siginfo_t; WNOWAIT leaves the zombie in place.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            #[cfg(target_os = "linux")]
+            // SAFETY: owned pidfd of our child; nothing is reaped.
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PIDFD,
+                    self.signal.pidfd.as_raw_fd() as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            #[cfg(target_os = "macos")]
+            // SAFETY: our own child; nothing is reaped.
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.signal.pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            #[cfg(test)]
+            tests::after_waitid();
+            if rc == 0 {
+                #[cfg(target_os = "linux")]
+                // SAFETY: waitid initialized the child event fields.
+                let seen = unsafe { info.si_pid() } != 0;
+                #[cfg(target_os = "macos")]
+                let seen = info.si_pid != 0;
+                if !seen {
+                    return Ok(false);
+                }
+                // SAFETY: the zombie still holds the group id.
+                unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -224,34 +289,6 @@ impl OwnedChild {
         }
         #[cfg(target_os = "macos")]
         {
-            // A group leader: once its exit is seen, and before the wait frees
-            // its pid (and so the group id), what is left of the group is
-            // killed; an exit not seen yet is not reaped. Every reap takes
-            // this path, the drop's too. Fails without the early return:
-            // group_exit_seen_late_is_not_reaped_before_its_group; without
-            // the killpg: a_dropped_group_leader_takes_its_group.
-            if self.group {
-                // SAFETY: zeroed writable siginfo_t; WNOWAIT leaves the zombie in place.
-                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-                // SAFETY: our own child; nothing is reaped.
-                let rc = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        self.signal.pid as libc::id_t,
-                        &mut info,
-                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                    )
-                };
-                #[cfg(test)]
-                tests::after_waitid();
-                if rc == 0 {
-                    if info.si_pid == 0 {
-                        return Ok(false);
-                    }
-                    // SAFETY: the zombie still holds the group id.
-                    unsafe { libc::killpg(self.signal.pid, libc::SIGKILL) };
-                }
-            }
             let mut status = 0;
             // SAFETY: sole reaper, writable status; state excludes signals and sampling.
             let rc = unsafe { libc::waitpid(self.signal.pid, &mut status, libc::WNOHANG) };
@@ -554,13 +591,10 @@ mod tests {
     use super::*;
 
     /// Runs in a group leader's `reap` right after its waitid (tests only).
-    #[cfg(target_os = "macos")]
     type Hook = Option<Box<dyn FnOnce()>>;
-    #[cfg(target_os = "macos")]
     thread_local! {
         static AFTER_WAITID: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
     }
-    #[cfg(target_os = "macos")]
     pub(super) fn after_waitid() {
         if let Some(f) = AFTER_WAITID.with(|h| h.borrow_mut().take()) {
             f();
@@ -569,7 +603,6 @@ mod tests {
 
     /// A group leader `sh` whose background `sleep` stays in its group, and
     /// that grandchild's pid. This handle is the child's only reaper.
-    #[cfg(target_os = "macos")]
     fn leader_with_grandchild() -> (OwnedChild, libc::pid_t) {
         use std::io::BufRead;
         use std::os::unix::process::CommandExt;
@@ -591,7 +624,6 @@ mod tests {
         (owned, line.trim().parse().unwrap())
     }
 
-    #[cfg(target_os = "macos")]
     fn ends(pid: libc::pid_t) -> bool {
         (0..200).any(|_| {
             // SAFETY: signal 0 only asks whether the pid exists.
@@ -606,7 +638,6 @@ mod tests {
     // C2 재리뷰 Medium: 그룹 리더의 종료를 waitid(WNOWAIT)가 보지 못했으면 reap하지 않는다. 두 호출 사이에 리더가
     // 죽으면(hook) 그 회차는 Ok(false)이고, 다음 reap이 그룹을 끝낸 뒤 회수한다. 이것을 실패시키는 것: reap의
     // `si_pid == 0`이면 돌아가는 줄을 지우는 것(waitpid가 바로 회수하고 손자가 남음).
-    #[cfg(target_os = "macos")]
     #[test]
     fn group_exit_seen_late_is_not_reaped_before_its_group() {
         let _spawn = super::super::sys::test_inherited_fd_lock();
@@ -629,7 +660,6 @@ mod tests {
 
     // C2 재리뷰 Medium: 감독이 대상의 종료를 보기 전에 끝나도(stop 뒤 drop) drop의 회수가 그룹을 끝낸다. 이것을
     // 실패시키는 것: reap의 killpg를 지우는 것, 그룹 리더 표시(leads_group)를 reap이 보지 않는 것.
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_dropped_group_leader_takes_its_group() {
         let _spawn = super::super::sys::test_inherited_fd_lock();
@@ -763,6 +793,7 @@ mod tests {
                 })),
             },
             expires_ns: 0,
+            group: false,
         };
         let first = child.signal_copy().unwrap();
         let second = child.signal_copy().unwrap();
