@@ -458,9 +458,9 @@ fn stored_languages_are_ascending_and_unique() {
 }
 
 // 보안 리뷰 M2와 Codex L6: 받는 쪽 검사의 나머지 칸. Found의 레벨 33, 표시 파일 index 9, Refused의 파일 index 9,
-// 표시 파일이 없다는 바이트(0) 뒤의 0이 아닌 index는 거부한다. 이것을 실패시키는 것: check의 file_ok에서 레벨
-// 검사를 지우는 것, 표시 파일 index 검사를 지우는 것, Refused를 검사 없이 받는 것, read의 `m == 0 && level == 0`
-// 조건을 지우는 것.
+// 표시 파일이 없다는 바이트(0) 뒤의 0이 아닌 index나 level은 거부한다. 이것을 실패시키는 것: check의 file_ok에서
+// 레벨 검사를 지우는 것, 표시 파일 index 검사를 지우는 것, Refused를 검사 없이 받는 것, read의 `m == 0`이나
+// `level == 0` 조건을 지우는 것.
 #[test]
 fn receiver_checks_every_index_and_level() {
     let r = request(vec![BUILTIN[1].query()]);
@@ -479,15 +479,23 @@ fn receiver_checks_every_index_and_level() {
             digest: [0; 16],
         },
     };
-    let mut absent = LanguageResult {
+    let absent = LanguageResult {
         index: 0,
         marker: None,
         version: Version::None,
     }
     .encode();
     assert_eq!(&absent[1..4], [0, 0, 0]);
-    absent[2] = 1;
-    let cases = [level.encode(), marker.encode(), refused.encode(), absent];
+    let (mut index, mut level_byte) = (absent.clone(), absent);
+    index[2] = 1;
+    level_byte[3] = 1;
+    let cases = [
+        level.encode(),
+        marker.encode(),
+        refused.encode(),
+        index,
+        level_byte,
+    ];
     for payload in cases {
         let mut t = transcript(&r);
         assert_eq!(
@@ -515,10 +523,82 @@ fn receiver_checks_every_index_and_level() {
 // 값 안의 가짜 표·키는 읽지 않는다. channel을 정할 수 있는데 지원하지 않는 구문은 값 없음(Malformed)이다.
 // 이것을 실패시키는 것: 표 머리 뒤 주석을 거부하는 것, 여러 줄 문자열 상태를 지우는 것(가짜 channel을 읽음),
 // 여러 줄 기본 문자열 안의 `\` 건너뛰기를 지우는 것, 괄호 깊이를 지우는 것(배열 안의 `[`를 표 머리로 읽음),
-// 따옴표 키·최상위 toolchain·점 키·따옴표 표 이름·머리 뒤 잔여·열린 문자열 거부를 지우는 것.
+// 따옴표 키·최상위 toolchain·점 키·따옴표 표 이름·머리 뒤 잔여·열린 문자열 거부를 지우는 것. 재리뷰 M2·M3·L5:
+// channel을 찾은 뒤에도 파일 끝까지 검증하는 것을 지우는 것(뒤의 따옴표 키·열린 문자열·두 번째 channel을 놓침),
+// 괄호를 종류 없이 세는 것(`[}`가 닫힘), 32단 중첩 상한을 지우는 것, `channel.` 거부를 지우는 것, channel 값
+// 뒤 잔여 검사(comment_or_end)를 지우는 것.
 #[test]
 fn rust_toolchain_toml_knows_comments_and_strings() {
-    let cases: [(&[u8], Candidate<'_>); 14] = [
+    let deep = |n: usize| {
+        let mut b = b"x = ".to_vec();
+        b.extend(vec![b'['; n]);
+        b.extend(vec![b']'; n]);
+        b.extend(b"\n[toolchain]\nchannel = \"1.80\"\n");
+        b
+    };
+    assert_eq!(
+        extract(&Format::RustToolchainToml, &deep(32)),
+        Candidate::Value(b"1.80")
+    );
+    assert_eq!(
+        extract(&Format::RustToolchainToml, &deep(33)),
+        Candidate::Malformed
+    );
+    let cases: [(&[u8], Candidate<'_>); 22] = [
+        (
+            br#"[toolchain]
+channel = "1.80"
+"channel" = "nightly"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80"
+x = "open
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80"
+channel = "1.81"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"note = [}
+[toolchain]
+channel = "1.80"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"note = {]
+[toolchain]
+channel = "1.80"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"note = { a = [1] }
+[toolchain]
+channel = "1.80"
+"#,
+            Candidate::Value(b"1.80"),
+        ),
+        (
+            br#"[toolchain]
+channel.x = "y"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+channel = "1.80" garbage
+"#,
+            Candidate::Malformed,
+        ),
         (
             br#"[toolchain] # pinned
 channel = "1.80.0" # x

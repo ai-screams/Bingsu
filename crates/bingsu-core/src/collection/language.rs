@@ -279,9 +279,14 @@ fn rust_toolchain_toml(bytes: &[u8]) -> Candidate<'_> {
 struct TomlScan {
     /// Inside a multi-line string closed by three of this quote.
     multi: Option<u8>,
-    /// Open `[` and `{` of a value spread over lines.
-    depth: u8,
+    /// Open `[` and `{` of a value spread over lines, innermost last; each
+    /// closes only with its own kind.
+    open: [u8; TOML_NESTING],
+    depth: usize,
 }
+
+/// Nesting deeper than this is malformed (no toolchain file needs it).
+const TOML_NESTING: usize = 32;
 
 impl TomlScan {
     /// One line's bytes (a value, or a whole continuation line); `None` when
@@ -307,12 +312,18 @@ impl TomlScan {
                     i += 3;
                 }
                 q @ (b'"' | b'\'') => i += string_end(&line[i + 1..], q)? + 2,
-                b'[' | b'{' => {
-                    self.depth = self.depth.checked_add(1)?;
+                b @ (b'[' | b'{') => {
+                    *self.open.get_mut(self.depth)? = b;
+                    self.depth += 1;
                     i += 1;
                 }
-                b']' | b'}' => {
-                    self.depth = self.depth.checked_sub(1)?;
+                b @ (b']' | b'}') => {
+                    let want = if b == b']' { b'[' } else { b'{' };
+                    // Fails without it: `note = [}` closes (same-kind test).
+                    if self.depth == 0 || self.open[self.depth - 1] != want {
+                        return None;
+                    }
+                    self.depth -= 1;
                     i += 1;
                 }
                 _ => i += 1,
@@ -355,6 +366,8 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
     let mut scan = TomlScan::default();
     // None at the top level; then whether the current table is `[toolchain]`.
     let mut table = None;
+    // Kept until the end: what follows must still be supported syntax.
+    let mut channel = None;
     for l in lines(bytes) {
         if scan.multi.is_some() || scan.depth > 0 {
             scan.scan(l)?;
@@ -388,17 +401,26 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
                 let quoted = value.strip_prefix(b"\"")?;
                 let end = quoted.iter().position(|b| *b == b'"')?;
                 let value = &quoted[..end];
-                if value.contains(&b'\\') || !comment_or_end(&quoted[end + 1..]) {
+                // A second channel (a duplicate key, or a second table) is
+                // not TOML either.
+                if value.contains(&b'\\')
+                    || !comment_or_end(&quoted[end + 1..])
+                    || channel.is_some()
+                {
                     return None;
                 }
-                return Some(Candidate::Value(value));
+                channel = Some(value);
+                continue;
             }
             _ => {}
         }
         scan.scan(value)?;
     }
     if scan.multi.is_none() && scan.depth == 0 {
-        Some(Candidate::Absent)
+        Some(match channel {
+            Some(value) => Candidate::Value(value),
+            None => Candidate::Absent,
+        })
     } else {
         None
     }
