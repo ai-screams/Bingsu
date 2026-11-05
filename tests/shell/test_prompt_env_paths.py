@@ -1597,14 +1597,25 @@ def passwd_seeks(libc, user_uid, data=None):
     return int(min(-(-at // 1024) * 1024, len(data)) > at)
 
 
+# exec_path's LINKS_MAX: the product follows at most this many hops.
+TARGET_LINKS_MAX = 40
+
+
 def target_links(path):
-    """Symlink hops from `path` to its file, each a relative name in the same
-    folder (the only shape the formula counts; another fails here)."""
+    """Symlink hops from `path` to its file, each a plain name in the same
+    folder ending at a regular file: the only shape the formula counts.
+    Anything else (another folder, `.` or `..`, a loop, a broken link, a
+    folder, more hops than the product follows) fails here."""
+    # A loop ends at the hop cap; `.` and `..` end at a folder, which the
+    # last check refuses.
     hops, folder, name = 0, os.path.dirname(path), os.path.basename(path)
     while os.path.islink(os.path.join(folder, name)):
         name = os.readlink(os.path.join(folder, name))
         assert "/" not in name, ("unreviewed target link", path, name)
         hops += 1
+        assert hops <= TARGET_LINKS_MAX, ("too many target links", path)
+    final = os.path.join(folder, name)
+    assert os.path.isfile(final) and not os.path.islink(final), ("target is not a regular file", path, name)
     return hops
 
 
@@ -3382,8 +3393,8 @@ def test_session_cgroup_parent_needs_this_sessions_parent(case, tmp_path, monkey
 
 
 
-# 이것을 실패시키는 것: 사용자 줄 뒤에 남은 바이트가 있을 때 seek를 0으로 보는 것, 줄이 버퍼 끝이나 파일 끝일 때 1로
-# 보는 것, glibc에 musl 항을 주는 것.
+# 이것을 실패시키는 것: 사용자 줄 뒤에 남은 바이트가 있을 때 seek를 0으로 보는 것, 줄이 버퍼 끝(1024·2048)이나 파일
+# 끝일 때 1로 보는 것(줄 끝 < 파일 크기로만 판정), glibc에 musl 항을 주는 것.
 def test_passwd_seeks_follow_musl_stdio():
     root = b"root:x:0:0:root:/root:/bin/bash\n"
     rest = b"".join(b"u%d:x:%d:%d::/h:/bin/sh\n" % (i, 1000 + i, 1000 + i) for i in range(60))
@@ -3391,10 +3402,21 @@ def test_passwd_seeks_follow_musl_stdio():
     assert passwd_seeks("musl", 0, data) == 1                    # root first: the rest is buffered
     last = 1000 + 59
     assert passwd_seeks("musl", last, data) == 0                 # the last line: nothing left
+    # A line that ends exactly where a 1 KiB read ends leaves nothing in the
+    # buffer even with data after it; one that ends inside the last, partial
+    # buffer leaves the rest of it.
+    for edge in (1024, 2048):
+        line = b"u:x:5:5:" + b"y" * (edge - len(b"u:x:5:5:") - 2) + b":\n"
+        assert len(line) == edge
+        assert passwd_seeks("musl", 5, line + b"after:x:6:6::/h:/bin/sh\n") == 0, edge
+    partial = root + b"p:x:7:7::/h:/bin/sh\n" + b"tail:x:8:8::/h:/bin/sh\n"
+    assert len(partial) < 1024
+    assert passwd_seeks("musl", 7, partial) == 1                 # ends inside the buffer, data after
     assert passwd_seeks("gnu", 0, data) == 0
 
 
-# 이것을 실패시키는 것: 링크를 따라가지 않는 것(gnutrue 같은 대상의 hop을 0으로 셈), 다른 폴더를 가리키는 링크를 받는 것.
+# 이것을 실패시키는 것: 링크를 따라가지 않는 것(gnutrue 같은 대상의 hop을 0으로 셈), 다른 폴더·`.`·`..`·고리·끊어진
+# 링크·폴더로 끝나는 링크·제품 상한을 넘는 hop을 받는 것.
 def test_target_links_count_same_folder_hops(tmp_path):
     (tmp_path / "real").write_bytes(b"x")
     (tmp_path / "mid").symlink_to("real")
@@ -3402,5 +3424,21 @@ def test_target_links_count_same_folder_hops(tmp_path):
     assert target_links(str(tmp_path / "real")) == 0
     assert target_links(str(tmp_path / "name")) == 2
     (tmp_path / "away").symlink_to(tmp_path / "real")
+    (tmp_path / "self").symlink_to("self")
+    (tmp_path / "a").symlink_to("b")
+    (tmp_path / "b").symlink_to("a")
+    (tmp_path / "dot").symlink_to(".")
+    (tmp_path / "up").symlink_to("..")
+    (tmp_path / "broken").symlink_to("missing")
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "to-folder").symlink_to("folder")
+    for shape in ("away", "self", "a", "dot", "up", "broken", "to-folder", "folder"):
+        with pytest.raises(AssertionError):
+            target_links(str(tmp_path / shape))
+    previous = "real"
+    for i in range(TARGET_LINKS_MAX + 1):
+        (tmp_path / f"h{i}").symlink_to(previous)
+        previous = f"h{i}"
+    assert target_links(str(tmp_path / f"h{TARGET_LINKS_MAX - 1}")) == TARGET_LINKS_MAX
     with pytest.raises(AssertionError):
-        target_links(str(tmp_path / "away"))
+        target_links(str(tmp_path / f"h{TARGET_LINKS_MAX}"))
