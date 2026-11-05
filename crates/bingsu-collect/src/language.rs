@@ -12,9 +12,10 @@ use bingsu_core::collection::language::{
     self as rule, DETECT_LEVELS, LanguageQuery, LanguageResult, Version,
 };
 
-/// Stat and open calls one request's detection may make (counted on the
-/// meter, so every folder opened and checked on the way counts), and bytes
-/// it may read (every byte the kernel returned, failed reads included).
+/// Stat and open calls one request's detection may make (the meter refuses
+/// the next one where it counts them, so every folder opened and checked on
+/// the way, and the stack's closing checks, count), and bytes it may read
+/// (every byte the kernel returned, failed reads included).
 pub const PROBES_MAX: u64 = 512;
 pub const BYTES_MAX: u64 = 65_536;
 
@@ -37,15 +38,10 @@ fn join(folder: &[u8], name: &[u8]) -> Vec<u8> {
     }
 }
 
-/// What one request's detection has spent, read from the meter's own
-/// counters (all phases) against their values when detection started.
+/// Bytes one request's detection has read, from the meter's own counters
+/// (all phases) against their value when detection started.
 struct Spend {
-    operations: u64,
     bytes: u64,
-}
-
-fn operations(meter: &Meter) -> u64 {
-    meter.counts.iter().map(|c| c.stat + c.open).sum()
 }
 
 fn bytes(meter: &Meter) -> u64 {
@@ -55,20 +51,8 @@ fn bytes(meter: &Meter) -> u64 {
 impl Spend {
     fn new(meter: &Meter) -> Self {
         Self {
-            operations: operations(meter),
             bytes: bytes(meter),
         }
-    }
-
-    /// Before each stat or open: the calls made so far stay under the bound.
-    /// One probe may still make up to a folder walk's calls past it.
-    fn probe(&self, meter: &Meter) -> Result<(), ReadError> {
-        // Fails without it: probe_bound_stops_further_languages,
-        // probe_bound_counts_folder_calls (with a count of probes instead).
-        if operations(meter) - self.operations >= PROBES_MAX {
-            return Err(ReadError::Limit);
-        }
-        Ok(())
     }
 
     fn bytes_left(&self, meter: &Meter) -> u64 {
@@ -83,10 +67,8 @@ fn is_file(
     root: &Root,
     path: &[u8],
     access: &Access,
-    spend: &Spend,
     meter: &mut Meter,
 ) -> Result<bool, ReadError> {
-    spend.probe(meter)?;
     match stats.metadata(root, path, access, meter) {
         Ok(st) => Ok(st.st_mode & libc::S_IFMT == libc::S_IFREG),
         Err(ReadError::Missing | ReadError::Denied | ReadError::Special) => Ok(false),
@@ -136,7 +118,7 @@ fn find(
     for (level, folder) in levels(parts) {
         if marker.is_none() {
             for (i, name) in query.markers.iter().enumerate() {
-                if is_file(stats, root, &join(&folder, name), access, spend, meter)? {
+                if is_file(stats, root, &join(&folder, name), access, meter)? {
                     marker = Some((i as u8, level));
                     break;
                 }
@@ -145,7 +127,7 @@ fn find(
         if version.is_none() {
             for (i, file) in query.version_files.iter().enumerate() {
                 let path = join(&folder, &file.name);
-                if !is_file(stats, root, &path, access, spend, meter)? {
+                if !is_file(stats, root, &path, access, meter)? {
                     continue;
                 }
                 version = read_version(file, i as u8, level, root, &path, access, spend, meter)?;
@@ -169,7 +151,6 @@ fn read_version(
     spend: &Spend,
     meter: &mut Meter,
 ) -> Result<Option<Version>, ReadError> {
-    spend.probe(meter)?;
     let left = spend.bytes_left(meter);
     if left == 0 {
         return Err(ReadError::Limit);
@@ -217,6 +198,8 @@ pub fn detect_all(
     mut send: impl FnMut(LanguageResult) -> Result<(), crate::git::CollectError>,
 ) -> Result<(), crate::git::CollectError> {
     let spend = Spend::new(meter);
+    // Restored by the stage (git::languages) on every way out, a panic too.
+    meter.calls_limit = meter.calls().saturating_add(PROBES_MAX);
     for (index, query) in queries.iter().enumerate() {
         let result = detect(index as u8, query, root, parts, access, &spend, meter)
             .and_then(|result| meter.check().map(|()| result));

@@ -229,6 +229,15 @@ fn round_with(
     (sink.languages, events)
 }
 
+fn calls(events: &[String]) -> u64 {
+    events
+        .iter()
+        .find_map(|e| e.strip_prefix("languages calls="))
+        .expect("language stage ran")
+        .parse()
+        .unwrap()
+}
+
 fn directories(events: &[String]) -> u64 {
     events
         .iter()
@@ -437,7 +446,7 @@ fn version_file_over_its_cap_has_no_value() {
 }
 
 // 한 요청의 stat·읽기 수에는 상한이 있다(PROBES_MAX). 넘으면 남은 언어는 보내지 않는다(틀린 답 대신 답 없음).
-// 이것을 실패시키는 것: Spend::probe의 상한 검사를 지우는 것(16개가 모두 온다).
+// 이것을 실패시키는 것: Meter::charge의 상한 검사를 지우는 것(16개가 모두 온다).
 #[test]
 fn probe_bound_stops_further_languages() {
     if case("probe_bound_stops_further_languages", 1).is_none() {
@@ -627,9 +636,10 @@ fn directories_stay_for_git_after_a_deep_request() {
     );
 }
 
-// 보안 리뷰 H2: 512 상한은 탐침 수가 아니라 meter가 센 stat·open 수에 건다. 20단 아래에서 표시 파일 하나짜리
-// 언어 16개는 탐침이 336개(512 미만)지만, 폴더를 열고 확인하는 호출까지 세면 상한을 넘는다. 이것을 실패시키는
-// 것: Spend가 탐침 수를 세는 것(16개가 모두 온다).
+// 보안 리뷰 H2와 재리뷰 M1: 512 상한은 meter가 stat·open을 세는 자리에서 건다. 20단 아래에서 표시 파일 하나짜리
+// 언어 16개는 탐침이 336개(512 미만)지만, 폴더를 열고 확인하는 호출까지 세면 상한을 넘는다. 언어 단계의 실제
+// 호출 수는 512를 넘지 않는다. 이것을 실패시키는 것: Meter::charge의 상한 검사를 지우는 것(16개가 모두 오고
+// 호출이 512를 넘음), Meter::calls에서 open을 빼는 것(stat만 512개 세어 실제 호출이 넘음).
 #[test]
 fn probe_bound_counts_folder_calls() {
     if case("probe_bound_counts_folder_calls", 1).is_none() {
@@ -647,6 +657,39 @@ fn probe_bound_counts_folder_calls() {
     let (results, events) = round(&request(&cwd, &f.0, vec![query; 16]));
     assert!(results.len() < 16, "{}", results.len());
     assert!(events.iter().any(|e| e == "languages_over_bound"));
+    assert!(calls(&events) <= 512, "{}", calls(&events));
+}
+
+// 재리뷰 M1: 언어 단계의 호출 상한은 그 단계에서 끝난다. 상한을 다 쓴 뒤에도 git 단계는 HEAD와 config를 읽고
+// 저장소를 연다(repository_init). 이것을 실패시키는 것: languages()가 calls_limit을 되돌리지 않는 것(git 단계의
+// 첫 호출이 거부되어 회차가 실패함).
+#[test]
+fn language_bound_ends_with_the_stage() {
+    if case("language_bound_ends_with_the_stage", 1).is_none() {
+        return;
+    }
+    let f = Fixture::new();
+    let repo = f.repo("repo");
+    let cwd = repo.join(vec!["d"; 20].join("/"));
+    fs::create_dir_all(&cwd).unwrap();
+    let query = LanguageQuery {
+        id: b"custom/none".to_vec(),
+        markers: vec![b"absent".to_vec()],
+        version_files: vec![],
+    };
+    let mut r = request(&cwd, &f.0, vec![query; 16]);
+    r.binding.mask = 1 << bingsu_core::collection::git::SEGMENT;
+    let (_, events) = round(&r);
+    let at = events
+        .iter()
+        .position(|e| e.starts_with("languages calls="))
+        .unwrap();
+    assert!(events.iter().any(|e| e == "languages_over_bound"));
+    assert!(
+        events[at..].iter().any(|e| e == "repository_init"),
+        "{:?}",
+        &events[at..]
+    );
 }
 
 // Codex M1: 실패한 읽기의 바이트도 65,536 예산에 센다. stat 뒤 `.python-version`이 커지면 읽기는 4,097바이트를

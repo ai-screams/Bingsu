@@ -355,6 +355,13 @@ fn languages(
     if request.languages.is_empty() {
         return Ok(());
     }
+    #[cfg(test)]
+    let calls = meter
+        .borrow()
+        .counts
+        .iter()
+        .map(|c| c.stat + c.open)
+        .sum::<u64>();
     let result = within_stage(meter, sink, deadlines.lang_ms, |sink| {
         let mut meter = meter.borrow_mut();
         meter.event("languages");
@@ -367,6 +374,8 @@ fn languages(
             |result| sink.language(result).map_err(CollectError::Sink),
         )
     });
+    // Fails without it: language_bound_ends_with_the_stage (B refused).
+    meter.borrow_mut().calls_limit = u64::MAX;
     #[cfg(test)]
     {
         let mut meter = meter.borrow_mut();
@@ -374,6 +383,8 @@ fn languages(
             .budget
             .used(bingsu_core::collection::budget::Axis::Directories);
         meter.event(&format!("languages directories={used}"));
+        let now = meter.counts.iter().map(|c| c.stat + c.open).sum::<u64>();
+        meter.event(&format!("languages calls={}", now - calls));
     }
     match result {
         // Fails without it: a sink error would not end the round.
