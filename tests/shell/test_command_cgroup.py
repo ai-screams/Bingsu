@@ -312,3 +312,25 @@ def test_supervisor_keeps_its_cgroup_parent_from_children(tmp_path):
     assert int(flags.split()[1], 8) & os.O_CLOEXEC, flags
     assert fds == [0, 1, 2], fds
     session.wait_quiet(timeout=8)
+
+
+# 후보가 없는 회차라도 설정에 명령 단위가 있으면 잠금 직후 회수한다(C4 판정 Q4). 감독 SIGKILL로 남은 대상은, 그
+# 단위가 화면에서 빠져(not_run) 실행할 것이 없는 다음 프롬프트에서 끝난다. 이것을 실패시키는 것: prepare의
+# 후보 없는 회차 회수를 지우는 것(남은 대상이 계속 산다). 명령 단위가 아예 없는 설정은 잠금도 회수도 하지
+# 않는다(test_command_round.py::test_round_without_units_starts_no_supervisor).
+@atomic_cell
+def test_reclaim_without_candidates(tmp_path):
+    session = CommandSession(tmp_path)
+    pidfile = session.base / "pid"
+    unit = ["/bin/sh", "-c", f"echo $$ > {pidfile}; exec sleep 3"]
+    session.put(config(unit, "timeout='3s'\n"))
+    ready(session)
+    session.wait_quiet(timeout=8)
+    pidfile.unlink(missing_ok=True)
+    old = leave_a_live_unit(session, pidfile)
+    words = ", ".join(f"'{w}'" for w in unit)
+    session.put(f"[segment.\"custom/probe\"]\nkind='command'\ncommand=[{words}]\ntimeout='3s'\n"
+                "[layout.line2]\nleft=['char']\n")
+    session.prompt()
+    assert until(lambda: not alive(old), timeout=2.0), "a round without candidates left the leftovers"
+    session.wait_quiet(timeout=8)

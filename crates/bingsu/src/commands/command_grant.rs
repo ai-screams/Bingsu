@@ -258,6 +258,30 @@ fn neutral(runtime: &File, me: u32) -> Result<bool, StoreError> {
         && sys::directory_names(dir.as_fd())?.is_empty())
 }
 
+/// Under the session lock no supervisor of the session is alive: whatever
+/// its cgroup parent holds is left over (C3 ruling R1, U-15 Q1). The
+/// parent, for the round's supervisor, and the reclaim's log lines.
+#[cfg(target_os = "linux")]
+fn session_reclaim(
+    i: &Inputs<'_>,
+    session: &[u8],
+) -> (Option<super::command_cgroup::fs::Dir>, Vec<&'static str>) {
+    let mut cgroup = sys::fd_facts(i.runtime.as_fd()).ok().and_then(|root| {
+        super::command_cgroup::fs::open_session(&super::command_cgroup::fs::Who {
+            session,
+            runtime: (root.dev, root.ino),
+            me: i.me,
+            pid: std::process::id(),
+        })
+    });
+    let mut notes = Vec::new();
+    if let Some(parent) = &mut cgroup {
+        let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
+        notes.extend(r.messages());
+    }
+    (cgroup, notes)
+}
+
 /// Decides the round and, when it has units, takes the session lock and
 /// spawns the supervisor. Only the runtime root is touched here, before the
 /// marker; the units are resolved in `Round::grant`, after it.
@@ -269,6 +293,15 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         .filter_map(|u| plan::runnable(u).map(|r| (u.id.as_str(), r)))
         .collect();
     if runnable.is_empty() {
+        // A config with command units reclaims what an earlier supervisor of
+        // the session left even when no unit runs this round (C4 ruling Q4);
+        // one without any touches nothing. A busy lock is a live supervisor.
+        #[cfg(target_os = "linux")]
+        if let (false, Some(session)) = (i.config.exec_units.is_empty(), i.session)
+            && let Ok(_lock) = close_only_lock(i.runtime, &lock_name(session), i.me, true)
+        {
+            let _ = session_reclaim(i, session);
+        }
         return Err(Skip::NoUnits);
     }
     // Another unix has no trusted relay and runs nothing. No CI target is
@@ -296,25 +329,11 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             StoreError::Busy => Skip::Busy,
             _ => Skip::Failed,
         })?;
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "Linux reclaims"))]
-    let mut notes = Vec::new();
-    // Under the lock no supervisor of this session is alive: whatever its
-    // cgroup parent holds is left over (C3 ruling R1, U-15 Q1). Right after
-    // the lock, before any other check can end the round.
+    // Right after the lock, before any other check can end the round.
     #[cfg(target_os = "linux")]
-    let mut cgroup = sys::fd_facts(i.runtime.as_fd()).ok().and_then(|root| {
-        super::command_cgroup::fs::open_session(&super::command_cgroup::fs::Who {
-            session,
-            runtime: (root.dev, root.ino),
-            me: i.me,
-            pid: std::process::id(),
-        })
-    });
-    #[cfg(target_os = "linux")]
-    if let Some(parent) = &mut cgroup {
-        let r = super::command_cgroup::reclaim(&mut super::command_cgroup::fs::Fs, parent);
-        notes.extend(r.messages());
-    }
+    let (cgroup, notes) = session_reclaim(i, session);
+    #[cfg(not(target_os = "linux"))]
+    let notes = Vec::new();
     #[cfg(target_os = "macos")]
     let scripts = Scripts::new(i.runtime, i.me, session_tag(session));
     #[cfg(not(target_os = "macos"))]
