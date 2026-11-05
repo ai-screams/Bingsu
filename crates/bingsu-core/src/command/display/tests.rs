@@ -84,11 +84,21 @@ mod cases {
         environ: &[u8],
         now: u64,
     ) -> Option<String> {
+        shown_at(r, u, origin, eligible, environ, clock(now))
+    }
+    fn shown_at(
+        r: &Response,
+        u: &ExecUnit,
+        origin: Origin,
+        eligible: bool,
+        environ: &[u8],
+        entry: Clock,
+    ) -> Option<String> {
         let expected = binding();
         let vars = Environ::parse(environ);
         let prompt = Prompt {
             expected: &expected,
-            entry: clock(now),
+            entry,
             vars: &vars,
             eligible,
         };
@@ -126,6 +136,66 @@ mod cases {
         assert_eq!(shown(&r, &u, Origin::Config, true, ENV, 11), None);
         let r = response(ran(&u, Origin::Config, ENV));
         assert_eq!(shown(&r, &u, Origin::Config, true, ENV, 10), None);
+    }
+
+    // 응답 묶음은 같고 이 프롬프트의 진입 시계만 다른 회차. 이것을 실패시키는 것: 진입 시계의 boot, kind,
+    // domain, resume 비교를 하나씩 지우는 것, eligible을 binding 동등 비교로 줄이는 것.
+    #[test]
+    fn the_same_binding_under_another_entry_clock_shows_nothing() {
+        let u = unit(&["kubectx"]);
+        let r = response(ran(&u, Origin::Config, ENV));
+        let moved: [fn(&mut Clock); 4] = [
+            |c| c.boot = [9; 16],
+            |c| c.kind = 2,
+            |c| c.domain = [9; 16],
+            |c| c.resume = 5,
+        ];
+        for (i, m) in moved.iter().enumerate() {
+            let mut c = clock(11);
+            m(&mut c);
+            assert_eq!(shown_at(&r, &u, Origin::Config, true, ENV, c), None, "{i}");
+        }
+        assert_eq!(
+            shown_at(&r, &u, Origin::Config, true, ENV, clock(11)).as_deref(),
+            Some("prod")
+        );
+    }
+
+    // 같은 id의 항목은 origin으로 가른다. 이것을 실패시키는 것: 항목 조회에서 origin 비교를 지우는 것(다른
+    // origin의 값을 그리거나, 두 origin이 함께 있을 때 앞의 것을 고름).
+    #[test]
+    fn an_entry_of_the_other_origin_is_not_this_units() {
+        let u = unit(&["kubectx"]);
+        let r = response(ran(&u, Origin::Builtin, ENV));
+        assert_eq!(shown(&r, &u, Origin::Config, true, ENV, 11), None);
+        let r = response(ran(&u, Origin::Config, ENV));
+        assert_eq!(shown(&r, &u, Origin::Builtin, true, ENV, 11), None);
+        for first in [Origin::Config, Origin::Builtin] {
+            let mut both = Response {
+                binding: binding(),
+                entries: Vec::new(),
+            };
+            for o in [
+                first,
+                if first == Origin::Config {
+                    Origin::Builtin
+                } else {
+                    Origin::Config
+                },
+            ] {
+                let mut e = ran(&u, o, ENV);
+                e.value = if o == Origin::Config { "cfg" } else { "bin" }.into();
+                both.entries.push(e);
+            }
+            assert_eq!(
+                shown(&both, &u, Origin::Config, true, ENV, 11).as_deref(),
+                Some("cfg")
+            );
+            assert_eq!(
+                shown(&both, &u, Origin::Builtin, true, ENV, 11).as_deref(),
+                Some("bin")
+            );
+        }
     }
 
     // 단위와 정책. 이것을 실패시키는 것: runnable 검사를 지우는 것(not_run 단위의 값을 그림), 정책 요약값 비교를

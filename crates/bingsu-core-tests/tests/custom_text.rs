@@ -116,30 +116,32 @@ fn empty_text_draws_nothing() {
 // 값이 없는 command 세그먼트는 칸도 구분자도 남기지 않는다: text 사이에 끼워도, 앞뒤에 두어도, 그것만 있는
 // 그룹이어도 그 세그먼트를 뺀 배치와 같다. 이것을 실패시키는 것: 값이 없는 command 칸에 자리표시 글자를 그리는
 // 것, command 세그먼트를 그리는 목록에서 빼는 것(번호가 밀려 text가 엉뚱한 칸에 감). 빈 값은 빈 text처럼 이미
-// 숨으므로 None과 Some("")는 같은 결과다.
+// 숨으므로 None과 Some("")는 같은 결과다. command id(`custom/k`)가 text id(`custom/m`, `custom/n`)보다
+// 앞에 정렬되므로, 앞단이 command 값 자리를 비우면 안 된다: command 분기의 `values.push(None)`을 지우면
+// text 값이 한 칸씩 밀린다.
 #[test]
 fn a_command_segment_without_a_value_leaves_nothing() {
     let decl = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
-                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\n\
-                [segment.\"custom/b\"]\nkind = \"text\"\ntext = \"B\"\n";
+                [segment.\"custom/m\"]\nkind = \"text\"\ntext = \"A\"\n\
+                [segment.\"custom/n\"]\nkind = \"text\"\ntext = \"B\"\n";
     for (with, without) in [
         (
-            "['custom/a', 'custom/k', 'custom/b', 'char']",
-            "['custom/a', 'custom/b', 'char']",
+            "['custom/m', 'custom/k', 'custom/n', 'char']",
+            "['custom/m', 'custom/n', 'char']",
         ),
-        ("['custom/k', 'custom/a', 'char']", "['custom/a', 'char']"),
-        ("['custom/a', 'custom/k']", "['custom/a']"),
+        ("['custom/k', 'custom/m', 'char']", "['custom/m', 'char']"),
+        ("['custom/m', 'custom/k']", "['custom/m']"),
     ] {
         let c = fixture::compile(&format!("{decl}[layout.line2]\nleft = {with}\n"));
-        assert!(c.custom.iter().any(|t| t.id == "custom/k"), "{with}");
         let base = fixture::compile(&format!("{decl}[layout.line2]\nleft = {without}\n"));
+        assert_eq!(c.custom.len(), base.custom.len() + 1, "{with}");
         for sh in SHELLS {
             assert_eq!(left(&c, sh, 80), left(&base, sh, 80), "{sh:?} {with}");
         }
     }
     let tpl = |t: &str| format!("{decl}[style]\ntemplate = \"{t}\"\n");
-    let c = fixture::compile(&tpl("{custom/a}{@group}[{custom/k}]{@end} {char}"));
-    let base = fixture::compile(&tpl("{custom/a} {char}"));
+    let c = fixture::compile(&tpl("{custom/m}{@group}[{custom/k}]{@end} {char}"));
+    let base = fixture::compile(&tpl("{custom/m} {char}"));
     for sh in SHELLS {
         assert_eq!(
             left(&c, sh, 80),
@@ -315,6 +317,24 @@ fn command_segment_is_drawn_env_stays_hidden() {
         ]
     );
     assert_eq!(drawn_later.len(), 1, "{drawn_later:?}");
+}
+
+// 꺼진 text·command 세그먼트는 "아직 그리지 않는 종류"가 아니므로 N502를 내지 않는다. 그리지 않는 종류(env)만
+// 낸다. 이것을 실패시키는 것: N502 조건에서 그리는 종류 검사를 지우는 것(꺼진 둘에도 N502).
+#[test]
+fn a_turned_off_text_or_command_segment_is_not_drawn_later() {
+    let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\nenabled = false\n\
+               [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\nenabled = false\n\
+               [segment.\"custom/e\"]\nkind = \"env\"\nvar = \"E\"\n\
+               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"char\"]\n";
+    let r = fixture::report(cfg);
+    let drawn_later: Vec<_> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == codes::CUSTOM_DRAWN_LATER)
+        .collect();
+    assert_eq!(drawn_later.len(), 1, "{drawn_later:?}");
+    assert!(r.snapshot.unwrap().custom.is_empty());
 }
 
 fn wire(c: &CompiledConfig) -> Vec<u8> {

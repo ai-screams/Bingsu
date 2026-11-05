@@ -982,7 +982,15 @@ pub fn compile(
         variants.push(compiled);
     }
     for (id, refs) in drawn(r, &banded.names) {
-        if id.starts_with("custom/") && declared(r, &id) && !texts.contains(&id.as_str()) {
+        // N502 is for a kind the prompt does not draw yet. A text or command
+        // segment missing from `texts` is turned off (`enabled = false`, or
+        // its keys came from a file that failed the safety check, which says
+        // so itself): it never starts showing after an upgrade.
+        if id.starts_with("custom/")
+            && declared(r, &id)
+            && !drawn_kind(r, &id)
+            && !texts.contains(&id.as_str())
+        {
             let place = refs
                 .first()
                 .and_then(|r| r.origin)
@@ -1126,6 +1134,14 @@ pub(crate) fn layout_verdict(
 
 /// The user segment kinds a layout draws.
 const DRAWN_KINDS: [&str; 2] = ["text", "command"];
+
+/// Whether segment `id` is declared with a kind the prompt draws.
+fn drawn_kind(r: &MTable, id: &str) -> bool {
+    matches!(
+        get(r, &["segment", id]).map(|n| &n.value),
+        Some(MValue::Table(t)) if s(t, &["kind"]).is_some_and(|k| DRAWN_KINDS.contains(&k))
+    )
+}
 
 /// Whether any `custom/…` segment is declared with a drawn kind.
 fn declares_custom(r: &MTable) -> bool {
