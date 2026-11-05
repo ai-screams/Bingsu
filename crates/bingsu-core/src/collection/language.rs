@@ -193,11 +193,13 @@ pub fn name_ok(name: &[u8]) -> bool {
 }
 
 /// The version string grammar (spec line 935): `[0-9A-Za-z._+-]`, 1–32
-/// bytes, no `..`, and not starting with `-` (C2 ruling Q3 for D1), so no
-/// value reads as an option. Control characters and `/` are outside the set.
+/// bytes, no `..`, and starting with `[0-9A-Za-z]`, so no value reads as an
+/// option, a hidden name or a bare `.` (security review M1 for D1, which
+/// replaces the earlier "not starting with `-`"). Control characters and
+/// `/` are outside the set.
 pub fn version_ok(value: &[u8]) -> bool {
     (1..=VERSION_MAX).contains(&value.len())
-        && value[0] != b'-'
+        && value[0].is_ascii_alphanumeric()
         && value
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
@@ -256,40 +258,150 @@ pub fn extract<'a>(format: &Format, bytes: &'a [u8]) -> Candidate<'a> {
     }
 }
 
-/// `channel = "<value>"` inside `[toolchain]`. Only that line form is
-/// understood: a quoted string with no escape; anything else on a `channel`
-/// line is malformed.
+/// `channel = "<value>"` in the `[toolchain]` table. The file is read as a
+/// small TOML subset, line by line, aware of strings and brackets:
+/// comments (also after a table header), single-line basic and literal
+/// strings, multi-line strings (three `"` or three `'`) and values spread
+/// over lines (arrays, inline tables), whose contents are never read as
+/// tables or keys. Anything else that could set the channel is malformed
+/// rather than guessed at: quoted or dotted keys, a quoted table name,
+/// `toolchain` set at the top level, a channel that is not a basic string
+/// without escapes, a string or bracket left open.
 fn rust_toolchain_toml(bytes: &[u8]) -> Candidate<'_> {
-    let mut inside = false;
-    for l in lines(bytes) {
-        if l.starts_with(b"[") {
-            inside = l == b"[toolchain]";
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        let Some(rest) = l.strip_prefix(b"channel") else {
-            continue;
-        };
-        let rest = trim(rest);
-        let Some(rest) = rest.strip_prefix(b"=") else {
-            continue;
-        };
-        let rest = trim(rest);
-        let Some(quoted) = rest.strip_prefix(b"\"") else {
-            return Candidate::Malformed;
-        };
-        let Some(end) = quoted.iter().position(|b| *b == b'"') else {
-            return Candidate::Malformed;
-        };
-        let (value, after) = (&quoted[..end], trim(&quoted[end + 1..]));
-        if value.contains(&b'\\') || !(after.is_empty() || after.starts_with(b"#")) {
-            return Candidate::Malformed;
-        }
-        return Candidate::Value(value);
+    match toml_channel(bytes) {
+        Some(candidate) => candidate,
+        None => Candidate::Malformed,
     }
-    Candidate::Absent
+}
+
+/// What the string- and bracket-aware scan carries from one line to the next.
+#[derive(Default)]
+struct TomlScan {
+    /// Inside a multi-line string closed by three of this quote.
+    multi: Option<u8>,
+    /// Open `[` and `{` of a value spread over lines.
+    depth: u8,
+}
+
+impl TomlScan {
+    /// One line's bytes (a value, or a whole continuation line); `None` when
+    /// a single-line string does not close or brackets do not balance.
+    fn scan(&mut self, line: &[u8]) -> Option<()> {
+        let mut i = 0;
+        while i < line.len() {
+            if let Some(q) = self.multi {
+                if line[i] == b'\\' && q == b'"' {
+                    i += 2;
+                } else if line[i..].starts_with(&[q; 3]) {
+                    self.multi = None;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            match line[i] {
+                b'#' => return Some(()),
+                q @ (b'"' | b'\'') if line[i..].starts_with(&[q; 3]) => {
+                    self.multi = Some(q);
+                    i += 3;
+                }
+                q @ (b'"' | b'\'') => i += string_end(&line[i + 1..], q)? + 2,
+                b'[' | b'{' => {
+                    self.depth = self.depth.checked_add(1)?;
+                    i += 1;
+                }
+                b']' | b'}' => {
+                    self.depth = self.depth.checked_sub(1)?;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        Some(())
+    }
+}
+
+/// Where a single-line string's closing quote is in `rest` (after the
+/// opening one); a basic string's `\` escapes the next byte.
+fn string_end(rest: &[u8], quote: u8) -> Option<usize> {
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            b'\\' if quote == b'"' => i += 2,
+            b if b == quote => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// A bare key, possibly dotted with no spaces: `a`, `a-b_c`, `a.b`.
+fn bare_key(key: &[u8]) -> bool {
+    key.split(|b| *b == b'.').all(|k| {
+        !k.is_empty()
+            && k.iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    })
+}
+
+fn comment_or_end(rest: &[u8]) -> bool {
+    let rest = trim(rest);
+    rest.is_empty() || rest.starts_with(b"#")
+}
+
+/// `None` is malformed (unsupported syntax).
+fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
+    let mut scan = TomlScan::default();
+    // None at the top level; then whether the current table is `[toolchain]`.
+    let mut table = None;
+    for l in lines(bytes) {
+        if scan.multi.is_some() || scan.depth > 0 {
+            scan.scan(l)?;
+            continue;
+        }
+        if l.is_empty() || l.starts_with(b"#") {
+            continue;
+        }
+        if let Some(header) = l.strip_prefix(b"[") {
+            let (header, close): (&[u8], &[u8]) = match header.strip_prefix(b"[") {
+                Some(array) => (array, b"]]"),
+                None => (header, b"]"),
+            };
+            let end = header.windows(close.len()).position(|w| w == close)?;
+            let name = trim(&header[..end]);
+            if !bare_key(name) || !comment_or_end(&header[end + close.len()..]) {
+                return None;
+            }
+            table = Some(name == b"toolchain" && close == b"]");
+            continue;
+        }
+        let eq = l.iter().position(|b| *b == b'=')?;
+        let (key, value) = (trim(&l[..eq]), trim(&l[eq + 1..]));
+        if !bare_key(key) {
+            return None;
+        }
+        match table {
+            None if key == b"toolchain" || key.starts_with(b"toolchain.") => return None,
+            Some(true) if key.starts_with(b"channel.") => return None,
+            Some(true) if key == b"channel" => {
+                let quoted = value.strip_prefix(b"\"")?;
+                let end = quoted.iter().position(|b| *b == b'"')?;
+                let value = &quoted[..end];
+                if value.contains(&b'\\') || !comment_or_end(&quoted[end + 1..]) {
+                    return None;
+                }
+                return Some(Candidate::Value(value));
+            }
+            _ => {}
+        }
+        scan.scan(value)?;
+    }
+    if scan.multi.is_none() && scan.depth == 0 {
+        Some(Candidate::Absent)
+    } else {
+        None
+    }
 }
 
 /// `toolchain go<version>`; without it the `go` directive's version (C2

@@ -92,6 +92,20 @@ fn clock(r: &Request) -> Clock {
     }
 }
 
+/// The fixture segment 1 with one known text field: a round's one update.
+fn update() -> Vec<u8> {
+    let mut p = 1u16.to_le_bytes().to_vec();
+    p.push(1);
+    p.extend(0u32.to_le_bytes());
+    p.extend(1u16.to_le_bytes());
+    p.extend(0u16.to_le_bytes());
+    p.extend([0, 0]);
+    p.extend(1u32.to_le_bytes());
+    p.push(b'x');
+    p.push(0);
+    p
+}
+
 fn found(index: u8, value: &[u8]) -> LanguageResult {
     LanguageResult {
         index,
@@ -105,8 +119,10 @@ fn found(index: u8, value: &[u8]) -> LanguageResult {
     }
 }
 
-// 스펙 935행의 문법과 C2 판정 Q3(D1). 이것을 실패시키는 것: 허용 글자에 `/`를 더하는 것, `..` 금지를 지우는 것,
-// 첫 글자 `-` 금지를 지우는 것, 길이 상한(32)이나 하한(1)을 지우는 것, 제어 문자를 허용 글자에 넣는 것.
+// 스펙 935행의 문법과 보안 리뷰 M1(D1, C2 판정 Q3의 "첫 글자 `-` 금지"를 대체): 첫 글자는 [0-9A-Za-z]다.
+// 이것을 실패시키는 것: 허용 글자에 `/`를 더하는 것, `..` 금지를 지우는 것, 첫 글자 검사를 `-`만 막는 쪽으로
+// 되돌리는 것(`.`, `.hidden`, `+nightly`, `_x`가 통과), 길이 상한(32)이나 하한(1)을 지우는 것, 제어 문자를 허용
+// 글자에 넣는 것.
 #[test]
 fn version_grammar_table() {
     for ok in [
@@ -124,6 +140,10 @@ fn version_grammar_table() {
         b"../x",
         b"1..2",
         b"-v",
+        b".",
+        b".hidden",
+        b"+nightly",
+        b"_x",
         b"3.12\n",
         b"3 12",
         b"\x1b[31m",
@@ -268,6 +288,7 @@ fn language_results_must_fit_the_query() {
 fn stored_responses_keep_the_language_section() {
     let r = request(vec![BUILTIN[1].query(), BUILTIN[3].query()]);
     let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Update, &update())).unwrap();
     t.accept(frame(&r, Kind::Language, &found(1, b"1.22").encode()))
         .unwrap();
     t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
@@ -367,12 +388,13 @@ fn user_queries_leave_out_bad_names() {
     assert!(queries[0].version_files.is_empty());
 }
 
-// 저장 응답의 decode도 같은 검사를 한다: 질의 밖 결과, 순서가 틀린 결과는 거부한다. 이것을 실패시키는 것:
-// decode의 languages_len 검사를 지우는 것.
+// 저장 응답의 decode도 같은 검사를 한다: 질의 밖 결과(index 1)는 거부한다. 이것을 실패시키는 것: decode의
+// languages_len 호출을 지우는 것. 순서와 중복은 stored_languages_are_ascending_and_unique가 본다.
 #[test]
 fn stored_languages_are_checked_on_decode() {
     let r = request(vec![BUILTIN[1].query()]);
     let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Update, &update())).unwrap();
     t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
         .unwrap();
     let c = t.finish(EndReason::Deadline, clock(&r)).unwrap().unwrap();
@@ -389,4 +411,236 @@ fn stored_languages_are_checked_on_decode() {
         Completed::decode_with_catalog(&bad, &CATALOG),
         Err(E::Schema)
     );
+}
+
+fn reseal(bytes: &mut [u8]) {
+    let crc = snapshot::crc32c(&[&bytes[64..]]);
+    bytes[16..20].copy_from_slice(&crc);
+}
+
+// 보안 리뷰 M2: 저장 응답의 언어 결과는 index 오름차순이고 겹치지 않는다. [1,0]과 [0,0]은 encode도 decode도
+// 거부한다. 이것을 실패시키는 것: languages_len의 순서 검사를 `>`로 바꾸는 것([0,0]이 통과), 검사를 지우는 것.
+#[test]
+fn stored_languages_are_ascending_and_unique() {
+    let r = request(vec![BUILTIN[1].query(), BUILTIN[3].query()]);
+    let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Update, &update())).unwrap();
+    t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
+        .unwrap();
+    t.accept(frame(&r, Kind::Language, &found(1, b"1.22").encode()))
+        .unwrap();
+    let c = t.finish(EndReason::Deadline, clock(&r)).unwrap().unwrap();
+    let bytes = c.encode_with_catalog(&CATALOG).unwrap();
+    // Two results of 1 index + 3 marker + 1 tag + 2 file and level + 16
+    // digest + 4 length + 4 value bytes end the file.
+    let second = bytes.len() - 31;
+    let first = second - 31;
+    assert_eq!((bytes[first], bytes[second]), (0, 1));
+    for order in [[1, 0], [0, 0]] {
+        let mut stored = c.clone();
+        stored.languages[0].index = order[0];
+        stored.languages[1].index = order[1];
+        assert_eq!(
+            stored.encode_with_catalog(&CATALOG),
+            Err(E::Schema),
+            "{order:?}"
+        );
+        let mut bad = bytes.clone();
+        bad[first] = order[0];
+        bad[second] = order[1];
+        reseal(&mut bad);
+        assert_eq!(
+            Completed::decode_with_catalog(&bad, &CATALOG),
+            Err(E::Schema),
+            "{order:?}"
+        );
+    }
+}
+
+// 보안 리뷰 M2와 Codex L6: 받는 쪽 검사의 나머지 칸. Found의 레벨 33, 표시 파일 index 9, Refused의 파일 index 9,
+// 표시 파일이 없다는 바이트(0) 뒤의 0이 아닌 index는 거부한다. 이것을 실패시키는 것: check의 file_ok에서 레벨
+// 검사를 지우는 것, 표시 파일 index 검사를 지우는 것, Refused를 검사 없이 받는 것, read의 `m == 0 && level == 0`
+// 조건을 지우는 것.
+#[test]
+fn receiver_checks_every_index_and_level() {
+    let r = request(vec![BUILTIN[1].query()]);
+    let mut level = found(0, b"3.12");
+    if let Version::Found { level: l, .. } = &mut level.version {
+        *l = 33;
+    }
+    let mut marker = found(0, b"3.12");
+    marker.marker = Some((9, 0));
+    let refused = LanguageResult {
+        index: 0,
+        marker: None,
+        version: Version::Refused {
+            file: 9,
+            level: 0,
+            digest: [0; 16],
+        },
+    };
+    let mut absent = LanguageResult {
+        index: 0,
+        marker: None,
+        version: Version::None,
+    }
+    .encode();
+    assert_eq!(&absent[1..4], [0, 0, 0]);
+    absent[2] = 1;
+    let cases = [level.encode(), marker.encode(), refused.encode(), absent];
+    for payload in cases {
+        let mut t = transcript(&r);
+        assert_eq!(
+            t.accept(frame(&r, Kind::Language, &payload)),
+            Err(E::Schema),
+            "{payload:?}"
+        );
+    }
+    // Positive control: the same shapes with valid indices are accepted.
+    let ok = LanguageResult {
+        index: 0,
+        marker: Some((3, 32)),
+        version: Version::Refused {
+            file: 1,
+            level: 32,
+            digest: [0; 16],
+        },
+    };
+    transcript(&r)
+        .accept(frame(&r, Kind::Language, &ok.encode()))
+        .unwrap();
+}
+
+// Codex M3: rust-toolchain.toml은 주석과 문자열 문맥을 안다. 표 머리 뒤 주석을 받고, 여러 줄 문자열과 여러 줄
+// 값 안의 가짜 표·키는 읽지 않는다. channel을 정할 수 있는데 지원하지 않는 구문은 값 없음(Malformed)이다.
+// 이것을 실패시키는 것: 표 머리 뒤 주석을 거부하는 것, 여러 줄 문자열 상태를 지우는 것(가짜 channel을 읽음),
+// 여러 줄 기본 문자열 안의 `\` 건너뛰기를 지우는 것, 괄호 깊이를 지우는 것(배열 안의 `[`를 표 머리로 읽음),
+// 따옴표 키·최상위 toolchain·점 키·따옴표 표 이름·머리 뒤 잔여·열린 문자열 거부를 지우는 것.
+#[test]
+fn rust_toolchain_toml_knows_comments_and_strings() {
+    let cases: [(&[u8], Candidate<'_>); 14] = [
+        (
+            br#"[toolchain] # pinned
+channel = "1.80.0" # x
+"#,
+            Candidate::Value(b"1.80.0"),
+        ),
+        (
+            br#"note = """
+[toolchain]
+channel = "fake"
+"""
+[toolchain]
+channel = "1.79"
+"#,
+            Candidate::Value(b"1.79"),
+        ),
+        (
+            br#"[toolchain]
+profile = '''
+channel = "fake"
+'''
+"#,
+            Candidate::Absent,
+        ),
+        (
+            br#"[toolchain]
+x = """a\"""
+channel = "fake"
+"""
+"#,
+            Candidate::Absent,
+        ),
+        (
+            br#"targets = [
+  ["a"],
+]
+[toolchain]
+channel = "1.80"
+"#,
+            Candidate::Value(b"1.80"),
+        ),
+        (
+            br#"[toolchain]
+components = [
+"x",
+]
+channel = "1.81"
+"#,
+            Candidate::Value(b"1.81"),
+        ),
+        (
+            br#"[toolchain]
+"channel" = "x"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"toolchain = { channel = "x" }
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"toolchain.channel = "x"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"["toolchain"]
+channel = "x"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain] x
+channel = "x"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+profile = "min
+channel = "x"
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[toolchain]
+profile = """
+"#,
+            Candidate::Malformed,
+        ),
+        (
+            br#"[[toolchain]]
+channel = "x"
+"#,
+            Candidate::Absent,
+        ),
+    ];
+    for (bytes, want) in cases {
+        assert_eq!(
+            extract(&Format::RustToolchainToml, bytes),
+            want,
+            "{:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
+// 보안 리뷰 L4: 갱신 없이 언어 결과만 있는 회차는 기록을 만들지 않는다. 그런 기록이 가장 새 기록이 되면 prompt는
+// 앞선 기록의 git 칸까지 모두 대기로 읽는다(merge가 갱신 없는 응답을 대기로 채움). 이것을 실패시키는 것: finish가
+// 언어 결과만으로 Completed를 만드는 것.
+#[test]
+fn language_results_alone_make_no_record() {
+    let r = request(vec![BUILTIN[1].query()]);
+    let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
+        .unwrap();
+    assert_eq!(t.finish(EndReason::Deadline, clock(&r)), Ok(None));
+    let mut t = transcript(&r);
+    t.accept(frame(&r, Kind::Update, &update())).unwrap();
+    t.accept(frame(&r, Kind::Language, &found(0, b"3.12").encode()))
+        .unwrap();
+    let c = t.finish(EndReason::Deadline, clock(&r)).unwrap().unwrap();
+    assert_eq!((c.updates.len(), c.languages.len()), (1, 1));
 }
