@@ -232,6 +232,8 @@ fn opened(result: std::io::Result<File>, me: u32) -> Result<File, Install> {
 /// so the settings and the install check see the same folder.
 fn open_home(home: &Path, me: u32) -> Result<File, Install> {
     use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(test)]
+    tests::HOME_OPENS.with(|n| n.set(n.get() + 1));
     // Fails without `O_DIRECTORY`: homes_never_block (the FIFO open waits
     // for a writer).
     opened(
@@ -370,14 +372,20 @@ pub(crate) fn decide(
         Manager::Pyenv => homes.pyenv.as_deref(),
     };
     let home = match path.map(|p| open_home(p, me)) {
-        Some(Ok(home)) => home,
+        Some(Ok(home)) => Some(home),
         // Fails without it: decide_reads_the_facts (an untrusted home).
         Some(Err(Install::Untrusted)) => return Some(Decision::Hidden(Hidden::Untrusted)),
+        // pyenv with no root has nothing installed: the plan goes on and its
+        // install check answers absent (H1's absent: the command runs with
+        // the selected name).
+        _ if manager == Manager::Pyenv => None,
+        // rustup with no home has no settings: overrides and the host are
+        // unknown, so no name is known to select.
         _ => return Some(Decision::Run(None)),
     };
-    let settings = match manager {
-        Manager::Rustup => read_settings(&home, cwd, me),
-        Manager::Pyenv => Settings::Unknown,
+    let settings = match (manager, &home) {
+        (Manager::Rustup, Some(home)) => read_settings(home, cwd, me),
+        _ => Settings::Unknown,
     };
     let facts = Facts {
         manager,
@@ -394,7 +402,12 @@ pub(crate) fn decide(
             host,
         } => {
             let command = (manager == Manager::Pyenv).then_some(command);
-            let install = installed(&home, &folder, &value, host.as_deref(), command, me);
+            // Fails without it: decide_reads_the_facts (a missing pyenv root
+            // runs the selected name).
+            let install = match &home {
+                Some(home) => installed(home, &folder, &value, host.as_deref(), command, me),
+                None => Install::Absent,
+            };
             manager::installed(&value, install)
         }
     })
@@ -407,6 +420,8 @@ mod tests {
 
     thread_local! {
         static AFTER_STAT: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        /// Manager folders opened, for the cases decided without a file.
+        pub(super) static HOME_OPENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
 
     pub(super) fn after_stat() {
@@ -751,7 +766,7 @@ mod tests {
 
     // 리뷰 M7: pyenv 버전은 bin/<명령>이 신뢰할 수 있는 일반 파일로 있어야 설치된 것이다(pyenv 자신이 거기서 찾는다).
     // 이것을 실패시키는 것: bin 확인을 지우는 것(명령 없는 버전을 Present로 봄), 명령 자리의 폴더를 받는 것, 쓰기
-    // 가능한 명령 파일을 받는 것.
+    // 가능한 명령 파일을 받는 것, 쓰기 가능하거나 링크인 bin 폴더를 받는 것(재리뷰 L5).
     #[test]
     fn pyenv_needs_the_command_in_the_version() {
         let s = Scratch::new("pyenv-bin");
@@ -785,6 +800,17 @@ mod tests {
         mode(&bin.join("python3"), 0o775);
         assert_eq!(check(), Install::Untrusted);
         mode(&bin.join("python3"), 0o755);
+        assert_eq!(check(), Install::Present);
+        // The bin folder itself: writable by the group, then a link.
+        mode(&bin, 0o775);
+        assert_eq!(check(), Install::Untrusted);
+        mode(&bin, 0o755);
+        let version = root.join("versions/3.12.1");
+        fs::rename(&bin, version.join("real-bin")).unwrap();
+        symlink("real-bin", &bin).unwrap();
+        assert_eq!(check(), Install::Untrusted);
+        fs::remove_file(&bin).unwrap();
+        fs::rename(version.join("real-bin"), &bin).unwrap();
         assert_eq!(check(), Install::Present);
         // rustup's leaf is checked without a command inside.
         assert_eq!(
@@ -928,8 +954,8 @@ mod tests {
             Some(Decision::Hidden(Hidden::Untrusted))
         );
         mode(&pyenv, 0o755);
-        // A manager folder that is not there: nothing to read, the command
-        // runs (it reports what it finds).
+        // A pyenv root that is not there: nothing is installed, so the command
+        // runs with the selected name (re-review M2).
         let gone = Homes {
             pyenv: Some(s.0.join("no-such-pyenv")),
             ..Homes::default()
@@ -944,12 +970,83 @@ mod tests {
                 b"/w",
                 me()
             ),
-            Some(Decision::Run(None))
+            Some(Decision::Run(Some(b"3.12.1".to_vec())))
         );
         assert_eq!(d(Shim::Unsupported, Some(&vars), v(b"3.12.1")), None);
         assert_eq!(
             d(Shim::None, Some(&vars), v(b"3.12.1")),
             Some(Decision::Run(None))
         );
+    }
+
+    // 재리뷰 L4: early()로 정해지는 다섯 경우(path, 환경 없음, override, 선택 없음, 값 없음)는 관리자 폴더를 한 번도
+    // 열지 않는다. 이것을 실패시키는 것: decide에서 early 호출을 지우는 것(홈을 연 뒤 plan이 정함).
+    #[test]
+    fn early_cases_open_no_folder() {
+        let s = Scratch::new("early");
+        let rustup = s.0.join("rustup");
+        fs::create_dir_all(&rustup).unwrap();
+        mode(&rustup, 0o755);
+        let roots = format!("RUSTUP_HOME={}", rustup.display());
+        let plain = environ(&[&roots]);
+        let over = environ(&[&roots, "RUSTUP_TOOLCHAIN=nightly"]);
+        let (plain, over) = (Environ::parse(&plain), Environ::parse(&over));
+        let h = homes(&plain);
+        let rs = Shim::Manager(Manager::Rustup);
+        let cases: [(Option<&Environ<'_>>, Selection<'_>); 5] = [
+            (Some(&plain), Selection::Path),
+            (None, Selection::Value(b"1.80.0")),
+            (Some(&over), Selection::Value(b"1.80.0")),
+            (Some(&plain), Selection::Absent),
+            (Some(&plain), Selection::Unusable),
+        ];
+        for (vars, selection) in cases {
+            HOME_OPENS.with(|n| n.set(0));
+            let got = decide(rs, vars, &h, selection, b"rustc", b"/w", me());
+            assert!(got.is_some(), "{selection:?}");
+            assert_eq!(HOME_OPENS.with(|n| n.get()), 0, "{selection:?}");
+        }
+    }
+
+    // 재리뷰 L3: settings를 읽은 뒤 설치 확인 전에 홈 경로가 다른 폴더로 바뀌어도, 설치 확인은 처음 연 fd 아래에서
+    // 한다(H2). 이것을 실패시키는 것: installed가 홈을 경로로 다시 여는 것(바뀐 빈 폴더에서 Absent → Run).
+    #[test]
+    fn the_install_check_stays_on_the_opened_home() {
+        let s = Scratch::new("swap");
+        let rustup = s.0.join("rustup");
+        let toolchain = format!("toolchains/1.80.0-{}", String::from_utf8_lossy(BUILD_HOST));
+        fs::create_dir_all(rustup.join(&toolchain)).unwrap();
+        fs::write(rustup.join("settings.toml"), b"version = \"12\"\n").unwrap();
+        for p in [
+            &rustup,
+            &rustup.join("toolchains"),
+            &rustup.join(&toolchain),
+        ] {
+            mode(p, 0o755);
+        }
+        mode(&rustup.join("settings.toml"), 0o644);
+        let body = environ(&[&format!("RUSTUP_HOME={}", rustup.display())]);
+        let vars = Environ::parse(&body);
+        let h = homes(&vars);
+        let (from, to) = (rustup.clone(), s.0.join("moved"));
+        AFTER_STAT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&from, &to).unwrap();
+                fs::create_dir(&from).unwrap();
+                mode(&from, 0o755);
+            }))
+        });
+        let got = decide(
+            Shim::Manager(Manager::Rustup),
+            Some(&vars),
+            &h,
+            Selection::Value(b"1.80.0"),
+            b"rustc",
+            b"/w",
+            me(),
+        );
+        AFTER_STAT.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(got, Some(Decision::Fast(b"1.80.0".to_vec())));
+        assert!(s.0.join("moved").join(&toolchain).is_dir());
     }
 }

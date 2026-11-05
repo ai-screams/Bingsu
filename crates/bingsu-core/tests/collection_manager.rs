@@ -206,12 +206,12 @@ fn concrete_names() {
 // escape가 든 override 키를 받는 것, override가 shell 폴더의 부모를 덮는 것을 놓치는 것, 이름 앞부분만 같은 폴더
 // (`/w/re`)를 부모로 보는 것, default_host_triple을 읽지 않는 것, 루트(`/`)와 끝 `/`가 붙은 override를 놓치는 것,
 // 빈 키나 따옴표 없는 override 값을 받는 것, 이 파일이 주는 이름(override 값, host, default_toolchain)에 버전 문법을
-// 적용하지 않는 것(경로 꼴 이름), inline table·한 줄 배열·따옴표 없는 문자열 같은 값 모양을 받는 것, rustup 1.29의
+// 적용하지 않는 것(경로 꼴 이름), `false` 값을 받지 않는 것(재리뷰 L6), inline table·한 줄 배열·따옴표 없는 문자열 같은 값 모양을 받는 것, rustup 1.29의
 // `default_host_tuple`을 읽지 않는 것, 두 host 키를 함께 받는 것(rustup 1.29.2는 이 파일을 거부함, 리뷰 M5).
 #[test]
 fn settings_forms() {
     let cwd = b"/w/repo/sub";
-    let cases: [(&[u8], Settings); 27] = [
+    let cases: [(&[u8], Settings); 28] = [
         (
             b"version = \"12\"\ndefault_toolchain = \"stable-aarch64-apple-darwin\"\nprofile = \"default\"\n\n[overrides]\n",
             known(None, false),
@@ -235,6 +235,10 @@ fn settings_forms() {
         (b"profile = minimal\n", Settings::Unknown),
         (
             b"auto_self_update = true\nversion = 12\nprofile = \"default\"\n",
+            known(None, false),
+        ),
+        (
+            b"auto_self_update = false\n",
             known(None, false),
         ),
         (
