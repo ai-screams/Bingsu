@@ -330,14 +330,17 @@ def test_record_only_cases_are_kept_but_not_judged(tmp_path):
     assert json.loads((tmp_path / "v.json").read_text())["status"] == "BLOCKED"
 
 
-# 이것을 실패시키는 것: 기록 전용 칸을 CI 판정 단계에 넘기지 않는 것(측정 칸이 FAIL로 판정됨), 측정 칸에서 빼는 것.
+# 이것을 실패시키는 것: 기록 전용 칸을 CI 판정 단계에 넘기지 않는 것(측정 칸이 FAIL로 판정됨), 측정 칸에서 빼는 것,
+# 판정하는 기존 칸(no-git, git-clean, git-dirty)을 빼거나 기록 전용으로 돌리는 것.
 def test_ci_records_the_command_time_cases_only():
     job = job_text()
     cases = re.search(r"GATE_CASES: (\S+)", job).group(1).split(",")
     record = re.search(r"GATE_RECORD_ONLY: (\S+)", job).group(1).split(",")
     commands = ["prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
                 "prompt-commands-redraw"]
-    assert record == commands and all(c in cases for c in commands)
+    judged = ["no-git", "git-clean", "git-dirty"]
+    assert record == commands and cases == judged + commands
+    assert [c for c in cases if c not in record] == judged
     assert '--record-only "$GATE_RECORD_ONLY"' in job
 
 
