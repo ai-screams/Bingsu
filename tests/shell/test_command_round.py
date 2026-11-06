@@ -331,6 +331,34 @@ def test_repository_bins_stay_out_without_a_collection(tmp_path, _native_boot_re
     assert not ran_outer.exists() and not ran_inner.exists(), ("a repository's PATH folder ran", session.log())
 
 
+# U-24 L1: 셸이 저장소 안의 링크(`docs -> 바깥 폴더`)로 들어가면 실제 폴더에는 `.git` 조상이 없지만, 셸이 준 경로의
+# 접두사인 저장소는 여전히 저장소다. 절대 경로로 PATH에 넣은 저장소 bin(direnv의 PATH_add 같은)은 돌지 않는다.
+# 이것을 실패시키는 것: 명령 회차의 조상 검사에서 셸 경로 접두사 검사를 지우는 것(실제 폴더만 보아 저장소 bin이 돈다).
+def test_a_repository_link_to_elsewhere_keeps_its_bin_out(tmp_path, _native_boot_required):
+    repo = tmp_path / "repo"
+    elsewhere = tmp_path / "elsewhere"
+    repo.mkdir(mode=0o700)
+    elsewhere.mkdir(mode=0o700)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").symlink_to(elsewhere)
+    ran, outside = tmp_path / "ran", tmp_path / "outside"
+    script(repo / "bin" / "probe-cmd", f"touch '{ran}'")
+    script(tmp_path / "other" / "bin" / "probe-out", f"touch '{outside}'")
+    session = CommandSession(tmp_path / "s")
+    session.level = "debug"
+    session.env["PATH"] = f"{repo}/bin:{tmp_path}/other/bin:" + session.env["PATH"]
+    session.put("[segment.\"custom/a\"]\nkind='command'\ncommand=['probe-cmd']\n"
+                "[segment.\"custom/b\"]\nkind='command'\ncommand=['probe-out']\n"
+                "[layout.line1]\nleft=['custom/a','custom/b','char']\n")
+    session.pwd = repo / "docs"
+    ready(session)
+    for _ in range(2):
+        session.prompt()
+    session.wait_quiet()
+    assert until(lambda: outside.exists()), ("the control unit never ran", session.log())
+    assert not ran.exists(), ("the repository's bin ran through its link", session.log())
+
+
 # J9 대체: 수집 루트가 없으면 셸 폴더가 저장소를 대신한다. 이것을 실패시키는 것: units()의 repo_id를
 # 늘 None으로 하는 것(셸 폴더 아래 bin의 실행 파일이 돈다). 양성 대조: 저장소 밖 폴더의 같은 명령은 돈다.
 def test_shell_folder_stands_for_the_repository(tmp_path, _native_boot_required):

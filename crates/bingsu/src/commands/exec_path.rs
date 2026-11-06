@@ -228,17 +228,36 @@ pub fn repo_id(root: Option<&Path>) -> Result<Option<rule::Id>, Miss> {
     Ok(Some((m.dev(), m.ino())))
 }
 
-/// The folders at and above `cwd` that hold a `.git` entry (a folder, a
-/// worktree's `.git` file, or anything else by that name), by identity:
-/// every one counts as a repository root for `sanitize` and `lookup`,
-/// nested ones included (U-24). The walk goes from "/" one name at a time
-/// on held descriptors; a link's text is walked in its place, as the kernel
-/// would, so the ancestors are those of the real folder whatever alias the
-/// shell's path is. It walks to the end whatever the depth (the shell's
-/// folder is already bounded by the envelope's length cap). A name that
-/// cannot be opened as a folder or too many links is `Refused`, never "no
-/// repository". A `.git` that cannot be checked counts as present.
+/// The folders that hold a `.git` entry (a folder, a worktree's `.git`
+/// file, or anything else by that name), by identity: every one counts as a
+/// repository root for `sanitize` and `lookup`, nested ones included
+/// (U-24). Two sets of folders are checked:
+/// - each prefix of `cwd` as the shell gave it (`/home/u/repo` for
+///   `/home/u/repo/docs`), so a shell in a repository's link to a folder
+///   elsewhere is still in that repository;
+/// - "/" and every folder above the real folder `cwd` reaches, so an alias
+///   into a repository is in it too.
+///
+/// The walk goes from "/" one name at a time on held descriptors; a link's
+/// text is walked in its place and `..` steps back to the folder before, as
+/// the kernel resolves them. It walks to the end whatever the depth (the
+/// shell's folder is already bounded by the envelope's length cap). A name
+/// that cannot be opened as a folder or too many links is `Refused`, never
+/// "no repository". A `.git` that cannot be checked counts as present. Each
+/// folder is checked once: a canonical `cwd` costs one `.git` check for "/"
+/// and one per name.
 pub fn repo_ancestors(cwd: &Path) -> Result<Vec<rule::Id>, Miss> {
+    /// A name to walk, or the end of one of `cwd`'s own names.
+    enum Step {
+        Name(OsString),
+        Prefix,
+    }
+    // Only a `.git` known to be absent leaves a folder out: one that cannot
+    // be checked counts as there, so the rule fails closed.
+    let holds_git = |folder: &File| {
+        !matches!(sys::at_stamp(folder.as_fd(), OsStr::new(".git")),
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT))
+    };
     if !cwd.is_absolute() {
         return Err(Miss::Refused);
     }
@@ -246,11 +265,32 @@ pub fn repo_ancestors(cwd: &Path) -> Result<Vec<rule::Id>, Miss> {
         sys::open_dir_at_search_nofollow(None, OsStr::new("/")).map_err(|_| Miss::Refused)?;
     let facts = sys::fd_facts(root.as_fd()).map_err(|_| Miss::Refused)?;
     let mut stack = vec![(root, (facts.dev, facts.ino))];
-    let mut todo = names(cwd);
+    let mut todo: VecDeque<Step> = names(cwd)
+        .into_iter()
+        .flat_map(|n| [Step::Name(n), Step::Prefix])
+        .collect();
+    let mut checked: Vec<rule::Id> = Vec::new();
+    let mut out: Vec<rule::Id> = Vec::new();
     let mut links = 0;
-    while let Some(name) = todo.pop_front() {
+    while let Some(step) = todo.pop_front() {
+        let Step::Name(name) = step else {
+            let (folder, id) = stack.last().expect("root");
+            if !checked.contains(id) {
+                checked.push(*id);
+                if holds_git(folder) {
+                    out.push(*id);
+                }
+            }
+            continue;
+        };
         if name == "/" {
             stack.truncate(1);
+            continue;
+        }
+        if name == ".." {
+            if stack.len() > 1 {
+                stack.pop();
+            }
             continue;
         }
         let dir = stack.last().expect("root").0.as_fd();
@@ -261,26 +301,25 @@ pub fn repo_ancestors(cwd: &Path) -> Result<Vec<rule::Id>, Miss> {
                 return Err(Miss::Refused);
             }
             let target = sys::read_link_at(dir, &name).map_err(|_| Miss::Refused)?;
-            let mut expansion = names(&target);
+            let mut expansion: VecDeque<Step> =
+                names(&target).into_iter().map(Step::Name).collect();
             expansion.append(&mut todo);
             todo = expansion;
             continue;
         }
-        // `..` opens the physical parent, as the kernel resolves it.
         let file = sys::open_dir_at_search_nofollow(Some(dir), &name).map_err(|_| Miss::Refused)?;
         let facts = sys::fd_facts(file.as_fd()).map_err(|_| Miss::Refused)?;
         stack.push((file, (facts.dev, facts.ino)));
     }
-    // Only a `.git` known to be absent leaves a folder out: one that cannot
-    // be checked counts as there, so the rule fails closed.
-    Ok(stack
-        .iter()
-        .filter(|(folder, _)| {
-            !matches!(sys::at_stamp(folder.as_fd(), OsStr::new(".git")),
-                Err(e) if e.raw_os_error() == Some(libc::ENOENT))
-        })
-        .map(|(_, id)| *id)
-        .collect())
+    for (folder, id) in &stack {
+        if !checked.contains(id) {
+            checked.push(*id);
+            if holds_git(folder) {
+                out.push(*id);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Whether the folder chain avoids every repository root in `repos`.
@@ -977,9 +1016,8 @@ mod tests {
         );
     }
 
-    // 별칭 경로: 링크로 들어간 셸 폴더는 실제 폴더의 조상으로 판정한다(절대·상대 링크, 링크 안의 `..`). 링크가
-    // 놓인 저장소는 실제 폴더의 조상이 아니다. 이것을 실패시키는 것: 링크를 따르지 않는 것, 절대 링크의 "/"에서
-    // 걸은 폴더를 버리지 않는 것(링크가 놓인 저장소가 조상으로 남음).
+    // 별칭 경로: 링크로 들어간 셸 폴더는 실제 폴더의 조상으로 판정한다(절대·상대 링크, 링크 안의 `..`). 이것을
+    // 실패시키는 것: 링크를 따르지 않는 것(실제 폴더의 조상인 저장소가 빠짐).
     #[test]
     fn repo_ancestors_follow_the_real_folder_of_an_alias() {
         use std::os::unix::fs::symlink;
@@ -997,13 +1035,75 @@ mod tests {
                 "{alias}"
             );
         }
-        // An alias inside a repository to a folder outside any: the folders
-        // the alias's own path went through are not ancestors.
-        let plain = t.join("plain");
-        folders(&plain);
-        std::fs::create_dir(t.join("x/.git")).unwrap();
-        symlink(&plain, t.join("x/out")).unwrap();
-        assert_eq!(repo_ancestors(&t.join("x/out")), Ok(vec![]));
+    }
+
+    // `.git`을 확인하지 못하는 폴더(검색 권한 없는 셸 폴더)는 저장소로 센다(U-24 L3). 이것을 실패시키는 것: 확인
+    // 오류를 "없음"으로 보는 것(열린 쪽 실패).
+    #[test]
+    fn repo_ancestors_count_a_folder_they_cannot_check() {
+        let t = scratch("scan-unchecked");
+        let cwd = t.join("shut");
+        folders(&cwd);
+        assert_eq!(repo_ancestors(&cwd), Ok(vec![]));
+        if me() == 0 {
+            return; // root searches any folder: the check never fails
+        }
+        std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let got = repo_ancestors(&cwd);
+        std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Linux opens the folder path-only (O_PATH) and then fails to check
+        // inside it; macOS's O_SEARCH open already refuses the walk.
+        if cfg!(target_os = "linux") {
+            assert_eq!(got, Ok(vec![id_of(&cwd)]));
+        } else {
+            assert_eq!(got, Err(Miss::Refused));
+        }
+    }
+
+    // 셸이 준 논리 경로의 접두사도 본다(U-24 L1): 저장소 안의 `docs -> 바깥 폴더`로 들어간 셸은 그 저장소 안이다.
+    // 이것을 실패시키는 것: 논리 경로의 접두사 검사를 지우는 것(실제 폴더의 조상만 남아 저장소가 빠짐).
+    #[test]
+    fn repo_ancestors_count_the_shells_own_path() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-logical");
+        let repo = t.join("repo");
+        let elsewhere = t.join("elsewhere");
+        folders(&repo);
+        folders(&elsewhere);
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        symlink(&elsewhere, repo.join("docs")).unwrap();
+        assert_eq!(repo_ancestors(&repo.join("docs")), Ok(vec![id_of(&repo)]));
+        assert_eq!(repo_ancestors(&elsewhere), Ok(vec![]));
+    }
+
+    // 링크 안의 `..`는 앞 폴더로 돌아간다(U-24 M1). 셸 경로에도 실제 폴더의 조상에도 없는 폴더(링크가 놓인
+    // 저장소 b)는 저장소가 아니고, `../a/../a…`로 길게 쓴 링크도 폴더를 쌓지 않는다. 이것을 실패시키는 것: `..`를
+    // 부모를 새로 여는 이름으로 걷는 것(b가 들어감), 절대 링크의 "/"에서 걸은 폴더를 버리지 않는 것.
+    #[test]
+    fn repo_ancestors_step_back_on_parent_names_in_links() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-parent");
+        let repo = t.join("repo");
+        folders(&repo.join("sub"));
+        folders(&t.join("a"));
+        folders(&t.join("b"));
+        std::fs::create_dir(t.join("b/.git")).unwrap();
+        symlink(t.join("b/l2"), t.join("a/l1")).unwrap();
+        symlink("../repo/sub", t.join("b/l2")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("a/l1")), Ok(vec![]));
+        // A link's own walk before an absolute link is dropped there: c is
+        // neither on the shell's path nor above the real folder.
+        folders(&t.join("a/c"));
+        std::fs::create_dir(t.join("a/c/.git")).unwrap();
+        symlink("c/l3", t.join("a/l4")).unwrap();
+        symlink(repo.join("sub"), t.join("a/c/l3")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("a/l4")), Ok(vec![]));
+        let long = "../b/".repeat(200) + "../repo/sub";
+        symlink(&long, t.join("b/long")).unwrap();
+        assert_eq!(
+            repo_ancestors(&t.join("b/long")),
+            Ok(vec![id_of(&t.join("b"))])
+        );
     }
 
     // 걸을 수 없는 경로와 링크 고리는 "저장소 없음"이 아니라 거부다. 깊이에는 상한이 없다(U-24 판정). 이것을
