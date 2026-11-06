@@ -5,6 +5,7 @@
 pub mod check;
 pub mod compile;
 pub mod edit;
+pub mod explain;
 pub mod keys;
 pub mod merge;
 pub mod report;

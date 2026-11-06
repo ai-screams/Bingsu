@@ -207,6 +207,17 @@ jobs:
           set -o pipefail
           cargo test -j 2 -p bingsu-collect --test startup -- --test-threads=2 | tee "$RUNNER_TEMP/startup-native.txt"
           grep -F 'test worker::tests::stage_deadline_exit_is_distinct_from_protocol_and_resource_failure ... ok' "$RUNNER_TEMP/startup-native.txt"
+      # E2: `config check --explain` and W411 on the executor's own lookup (GATE-EXPLAIN).
+      # 이것을 실패시키는 것: 설명 시험을 ignored로 바꾸거나 이 단언을 빼는 것.
+      - run: |
+          set -o pipefail
+          cargo test -j 2 -p bingsu --test cli_config -- --test-threads=2 | tee "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_never_prints_env_values ... ok' "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_shows_origin_per_key ... ok' "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_shows_not_run_reason ... ok' "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_names_why_a_script_is_refused ... ok' "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_shows_shell_relative_and_language_units ... ok' "$RUNNER_TEMP/explain-native.txt"
+          grep -Fx 'test explain_shows_limits_cwd_shell_and_the_sanitized_lookup ... ok' "$RUNNER_TEMP/explain-native.txt"
       - run: |
           set -o pipefail
           cargo test -j 2 -p bingsu --test collector_lifecycle --test collection_store --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/lifecycle-native.txt"
@@ -268,6 +279,8 @@ jobs:
           grep -Fx 'test commands::command_supervisor::tests::test_supervisor_approval_deadline_table ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test commands::command_supervisor::tests::test_no_grant_means_no_exec ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test commands::helper::grant_tests::grant_only_after_the_marker_is_installed ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test commands::config_inspect::tests::test_env_shebang_warned ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test commands::config_inspect::tests::test_check_walks_no_path_without_commands ... ok' "$RUNNER_TEMP/relay-native.txt"
       # The macOS relay (PR 10b): every relay::macos_tests case, the helper's script
       # copy checks, the probe and the process-group reap pass; none is skipped.
       # 이것을 실패시키는 것: macOS 중계 시험을 ignored로 바꾸거나 이 단언을 빼는 것.

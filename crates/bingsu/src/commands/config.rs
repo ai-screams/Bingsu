@@ -6,7 +6,7 @@ use bingsu_core::config::schema::{Which, schema};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu config <check|path|schema [--theme]|use PATH>";
+const USAGE: &str = "usage: bingsu config <check [--explain]|path|schema [--theme]|use PATH>";
 
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let [verb, rest @ ..] = args
@@ -17,6 +17,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let words: Vec<Option<&str>> = args.iter().map(|a| a.to_str()).collect();
     let which = match words.as_slice() {
         [Some("check")] => return config_inspect::check(),
+        [Some("check"), Some("--explain")] => return config_inspect::check_explain(),
         [Some("path")] => return config_inspect::path(),
         [Some("schema")] => Which::Config,
         [Some("schema"), Some("--theme")] => Which::Theme,
