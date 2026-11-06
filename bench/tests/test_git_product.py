@@ -482,21 +482,25 @@ def command_response(units):
 # command_context의 계약: 셸 hook처럼 --session을 넘기고, 32단위 칸은 2,400칸 폭으로 그리며, 응답이 모든 단위의
 # 성공 값을 담을 때까지 데우고, redraw 칸만 --redraw를 붙인다. 데운 프롬프트가 일부만 그리면 거부한다. 이것을
 # 실패시키는 것: --session·폭·--redraw를 빼는 것, 데우기가 항목 수만 보거나 상태를 보지 않는 것(실패 항목·다른 값을
-# 완료로 셈), 일부만 그린 프롬프트를 받는 것.
+# 완료로 셈), 일부만 그린 프롬프트를 받는 것. 저장된 값은 전체 값(앞부분만 발행하기 전의 base 빌드)이거나 그
+# read_prefix(이 빌드)여야 하고, 그 밖의 앞부분은 받지 않는다. 이것을 실패시키는 것: 둘 중 하나만 받는 것, 값의
+# 앞부분이면 무엇이든 받는 것.
+@pytest.mark.parametrize("stored", ["shown", "whole"])
 @pytest.mark.parametrize("case", ["prompt-commands-hit", "prompt-commands-max", "prompt-commands-redraw",
                                   "prompt-env64k-commands"])
-def test_command_context_waits_for_every_value_and_shapes_the_prompt(monkeypatch, tmp_path, case):
+def test_command_context_waits_for_every_value_and_shapes_the_prompt(monkeypatch, tmp_path, case, stored):
     monkeypatch.setattr(git.time, "sleep", lambda _: None)
     base = ["bingsu", "prompt", "--width", "80", "--pwd", "/w"]
     monkeypatch.setattr(git.M3B, "prompt_context", lambda *a, **k: (list(base), {"E": "1"}))
     _, _, values = git.command_setup(case, tmp_path / "probe")
     names = list(values)
     store = tmp_path / "ctx" / "rt" / "store"
-    # Rounds: one failure, a wrong value for each, every value but not Ok,
-    # then every value; the record draws them.
+    # Rounds: one failure, a wrong value for each, a cut shorter than the
+    # read prefix, every value but not Ok, then every value; the record draws them.
     shown = {n: git.shown_value(values[n]) for n in names}
-    rounds = [[(names[0], 1, b"")], [(n, 0, b"x") for n in names], [(n, 1, shown[n]) for n in names],
-              [(n, 0, shown[n]) for n in names]]
+    final = shown if stored == "shown" else values
+    rounds = [[(names[0], 1, b"")], [(n, 0, b"x") for n in names], [(n, 0, shown[n][:-1]) for n in names],
+              [(n, 1, final[n]) for n in names], [(n, 0, final[n]) for n in names]]
     calls = []
     def run(command, env):
         calls.append(list(command))
@@ -508,11 +512,11 @@ def test_command_context_waits_for_every_value_and_shapes_the_prompt(monkeypatch
     monkeypatch.setattr(git.M3B, "run", run)
     monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
     command, env, got, drawn = git.command_context("bingsu", tmp_path / "ctx", case)
-    assert len(calls) == 5 and drawn == len(values) and got == values
+    assert len(calls) == 6 and drawn == len(values) and got == values
     assert command[command.index("--session") + 1] == git.SESSION
     assert command[command.index("--width") + 1] == ("2400" if len(values) == 32 else "80")
     assert ("--redraw" in command) == (case == "prompt-commands-redraw")
-    assert all("--redraw" not in c for c in calls[:4])
+    assert all("--redraw" not in c for c in calls[:5])
     # A warm prompt that draws part of the units is refused.
     partial = values[names[0]][:4]
     monkeypatch.setattr(git.M3B, "run", lambda command, env: (

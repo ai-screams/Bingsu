@@ -494,6 +494,13 @@ def shown_value(value):
     return value[:end]
 
 
+def response_ready(units, values):
+    """Whether the published units are exactly `values`, each a success
+    holding the whole value or its read prefix (`shown_value`)."""
+    return set(units) == set(values) and all(
+        units[name] in ((0, value), (0, shown_value(value))) for name, value in values.items())
+
+
 def drawn_units(values, record):
     """How many units of `values` the record shows, by their marks."""
     return sum(v[:4] in record for v in values.values())
@@ -533,11 +540,13 @@ def command_context(binary, directory, case):
             raise ValueError(f"{case}: a command response exists or the prompt draws {drawn} units")
         return command, env, values, 0
     # Each prompt starts a refresh helper, which runs at most eight units a
-    # round and caches the results: wait until every unit succeeded with its value.
-    want = {name: (0, shown_value(value)) for name, value in values.items()}
+    # round and caches the results: wait until every unit succeeded with its
+    # value. A build that publishes only the part the prompt reads stores the
+    # read prefix; an older one (the base of a comparison) stores the whole
+    # value. Either is ready.
     for _ in range(400):
         result = M3B.run(command, env=env)
-        if M3B.normal_record(result) and response_units(directory) == want:
+        if M3B.normal_record(result) and response_ready(response_units(directory), values):
             break
         time.sleep(0.05)
     else:

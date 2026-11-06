@@ -687,14 +687,22 @@ mod tests {
         }
     }
 
-    // m6-P1: helper가 저장하는 값 앞부분(read_prefix)을 자른 결과는 전체를 자른 결과와 같다. 64칸까지 모든 칸 수,
-    // 두 폭 설정, 상한 근처에서 넓은 글자·결합 글자·이모지 ZWJ·국기가 걸치는 자리에서. 이것을 실패시키는 것:
-    // 앞부분을 자르기 바이트 상한(64칸 × 4)에서 끊는 것(그 자리에 걸친 grapheme이 잘려 남음), 문자 경계로 물리지
-    // 않는 것.
+    // m6-P1: helper가 저장하는 값 앞부분(read_prefix)을 자른 결과는 전체를 자른 결과와 같다. 0–64칸 모든 칸 수,
+    // 폭 설정 네 가지, 넓은 글자·결합 글자·이모지 ZWJ·국기가 상한 근처에 걸치는 자리, 그리고 한 칸 폭인데 바이트
+    // 상한(칸 × 4)을 넘는 긴 결합 클러스터에서. ASCII 앞머리 길이를 0부터 바꿔 자르기가 유니코드 꼬리 안에서
+    // 끝나게 한다. 이것을 실패시키는 것: 앞부분을 260 B보다 앞에서 끊는 것(바이트 상한 256 B에서 끊으면 걸친 긴
+    // 클러스터가 상한 안으로 줄어 `…` 대신 남고, 259 B에서 끊으면 국기가 실패한다), 문자 경계로 물리지 않는 것.
+    // 260–272 B는 결과가 같아 이 시험이 가르지 않는다(상한 −8, −12 변이는 통과). 272를 고정하는 것은
+    // command::response 시험의 길이 단언이다.
     #[test]
     fn the_read_prefix_cuts_like_the_whole_text() {
-        let p2 = WidthProfile::new(2, 2).unwrap();
-        let units: [&str; 8] = [
+        let profiles =
+            [(1, 1), (1, 2), (2, 1), (2, 2)].map(|(a, e)| WidthProfile::new(a, e).unwrap());
+        let long_mark = String::from("e") + &"\u{301}".repeat(140);
+        let short_mark = String::from("a") + &"\u{301}".repeat(30);
+        let hangul_mark = String::from("\u{AC00}") + &"\u{302}".repeat(70);
+        let zwj_chain = String::from("\u{1F468}") + &"\u{200D}\u{1F469}".repeat(20);
+        let units: [&str; 12] = [
             "a",
             "\u{AC00}",
             "e\u{301}",
@@ -703,14 +711,21 @@ mod tests {
             "\u{1112}\u{1161}\u{11AB}",
             "\u{2764}\u{FE0F}",
             "\u{1F600}",
+            &long_mark,
+            &short_mark,
+            &hangul_mark,
+            &zwj_chain,
         ];
-        for pre in 260..=280 {
+        let pres = (0..=20)
+            .chain([31, 60, 63, 64, 65, 120, 200, 240])
+            .chain(250..=280);
+        for pre in pres {
             for u in units {
-                let full = "a".repeat(pre) + &u.repeat(40);
+                let full = "a".repeat(pre) + &u.repeat(600 / u.len() + 1);
                 let prefix = Clean::read_prefix(&full, CUSTOM_TEXT_CELLS);
                 assert!(prefix.len() <= read_limit(CUSTOM_TEXT_CELLS));
-                for p in [WidthProfile::DEFAULT, p2] {
-                    for max in [0, 1, 2, 16, 63, 64] {
+                for p in profiles {
+                    for max in 0..=CUSTOM_TEXT_CELLS {
                         assert_eq!(
                             Clean::new(prefix.as_bytes(), max, p),
                             Clean::new(full.as_bytes(), max, p),
@@ -720,6 +735,14 @@ mod tests {
                 }
             }
         }
+        // 상한을 넘는 한 칸 폭 클러스터 하나: 전체도 앞부분도 `…`로 잘린다.
+        let one = String::from("e") + &"\u{301}".repeat(140);
+        let cut = Clean::new(
+            Clean::read_prefix(&one, CUSTOM_TEXT_CELLS).as_bytes(),
+            CUSTOM_TEXT_CELLS,
+            WidthProfile::DEFAULT,
+        );
+        assert_eq!(cut.as_str(), "\u{2026}");
         assert_eq!(Clean::read_prefix("short", CUSTOM_TEXT_CELLS), "short");
     }
 
