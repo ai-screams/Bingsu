@@ -18,7 +18,16 @@ pub fn is_removed(c: char) -> bool {
     if cp < 0x7F {
         return cp < 0x20;
     }
-    cp <= 0x9F || in_ranges(REMOVED_FORMAT, cp)
+    if cp <= 0x9F {
+        return true;
+    }
+    // U+2070..=U+FEFE lies between two format ranges (U+2066..=U+206F and
+    // U+FEFF) and holds CJK, kana and Hangul: kept without the search. The
+    // every-code-point test below fails if a table update puts a range here.
+    if (0x2070..=0xFEFE).contains(&cp) {
+        return false;
+    }
+    in_ranges(REMOVED_FORMAT, cp)
 }
 
 /// Index of the sorted, non-overlapping range in `table` that holds `cp`;
@@ -132,8 +141,9 @@ pub fn sanitize(input: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    // 이것을 실패시키는 것: ASCII 빠른 경로가 판정을 바꾸는 것(경계 0x1F·0x20·0x7E·0x7F를 하나 옮기거나, 0x7F
-    // 이상을 범위 검색 없이 남기는 것). 모든 code point에서 빠른 경로 이전의 식과 같아야 한다.
+    // 이것을 실패시키는 것: 빠른 경로가 판정을 바꾸는 것(ASCII 경계 0x1F·0x20·0x7E·0x7F나 지우지 않는 구간
+    // U+2070..=U+FEFE의 양 끝을 하나 옮기거나, 0x7F 이상을 범위 검색 없이 남기는 것). 모든 code point에서
+    // 빠른 경로 이전의 식과 같아야 한다.
     #[test]
     fn is_removed_equals_the_plain_rule_on_every_code_point() {
         let plain =
